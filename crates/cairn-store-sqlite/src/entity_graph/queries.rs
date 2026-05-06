@@ -754,6 +754,15 @@ impl GraphQueries {
         // independently. visible_nodes is reused for endpoint liveness.
         let (scope_clause, _) = Self::scope_match_clause(&self.allowed_scopes);
         let (prefix, _binds) = Self::cte_prefix(&self.allowed_scopes);
+        // Endpoint visibility:
+        // - Default (include_history = false): both endpoints must appear in
+        //   `visible_nodes` (active-now provenance — keeps the audit view honest
+        //   about what is reachable today).
+        // - include_history = true: relax to `live_nodes` (entity_nodes that are
+        //   not tombstoned). Authorization still comes from `scope_filtered` on
+        //   the edge's own provenance record; this prevents a future-dated edge
+        //   between otherwise-isolated nodes from being silently dropped, while
+        //   still hiding tombstoned endpoints.
         let sql = format!(
             "{prefix}
              scope_filtered AS (
@@ -768,14 +777,23 @@ impl GraphQueries {
                      AND r_active.active     = 1
                      AND r_active.tombstoned = 0
                  )
+             ),
+             live_nodes AS (
+               SELECT id FROM entity_nodes WHERE expired_at IS NULL
              )
              SELECT id, source_id, target_id, relation, confidence_score,
                     valid_at, invalid_at, created_at, expired_at,
                     tombstone_reason, source_record_id
              FROM scope_filtered
              WHERE (source_id = ? OR target_id = ?)
-               AND source_id IN (SELECT id FROM visible_nodes)
-               AND target_id IN (SELECT id FROM visible_nodes)
+               AND (
+                 (? = 1
+                   AND source_id IN (SELECT id FROM live_nodes)
+                   AND target_id IN (SELECT id FROM live_nodes))
+                 OR (? = 0
+                   AND source_id IN (SELECT id FROM visible_nodes)
+                   AND target_id IN (SELECT id FROM visible_nodes))
+               )
                AND (? = 1 OR expired_at IS NULL)
                AND (
                  ? = 1
@@ -797,6 +815,12 @@ impl GraphQueries {
         }
         binds.push(SqlValue::Text(seed.clone()));
         binds.push(SqlValue::Text(seed));
+        // include_history appears three times:
+        //   1. Selects the `live_nodes` endpoint arm (history view)
+        //   2. Negated to select the `visible_nodes` arm (`? = 0`)
+        //   3. Lifts the active-now temporal envelope on the edge itself
+        binds.push(SqlValue::Integer(i64::from(include_history)));
+        binds.push(SqlValue::Integer(i64::from(include_history)));
         binds.push(SqlValue::Integer(i64::from(include_expired)));
         binds.push(SqlValue::Integer(i64::from(include_history)));
         binds.push(SqlValue::Integer(self.now));
