@@ -509,6 +509,64 @@ impl GraphQueries {
         Ok(out)
     }
 
+    /// DFS traversal reusing BFS edges, reordered via `parent_of` (§3.3
+    /// property 5).
+    ///
+    /// Collects the same edge set as [`Self::query_bfs`] but emits nodes in
+    /// depth-first pre-order by walking the `parent_of` tree iteratively.
+    pub async fn query_dfs(
+        &self,
+        seed: String,
+        max_hops: u32,
+        node_budget: usize,
+    ) -> Result<GraphSubgraph, StoreError> {
+        let bfs = self.query_bfs(seed.clone(), max_hops, node_budget).await?;
+        // Build child map from parent_of.
+        let mut children: HashMap<String, Vec<String>> = HashMap::new();
+        for (child, edge_id) in &bfs.parent_of {
+            // Find parent for this child by inspecting the edge.
+            let edge = bfs.edges.iter().find(|e| &e.id == edge_id);
+            let Some(edge) = edge else { continue };
+            let parent = if edge.source_id == *child {
+                edge.target_id.clone()
+            } else {
+                edge.source_id.clone()
+            };
+            children.entry(parent).or_default().push(child.clone());
+        }
+        // Stable child ordering: BFS insertion order of the children themselves.
+        let bfs_order: HashMap<&str, usize> = bfs
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.id.as_str(), i))
+            .collect();
+        for kids in children.values_mut() {
+            kids.sort_by_key(|c| bfs_order.get(c.as_str()).copied().unwrap_or(usize::MAX));
+        }
+        let mut order: Vec<GraphNode> = Vec::with_capacity(bfs.nodes.len());
+        let mut stack: Vec<String> = vec![seed];
+        let mut emitted: std::collections::HashSet<String> = std::collections::HashSet::new();
+        while let Some(top) = stack.pop() {
+            if !emitted.insert(top.clone()) {
+                continue;
+            }
+            order.push(GraphNode { id: top.clone() });
+            if let Some(kids) = children.get(&top) {
+                // Reverse so the first child is processed first.
+                for k in kids.iter().rev() {
+                    stack.push(k.clone());
+                }
+            }
+        }
+        Ok(GraphSubgraph {
+            nodes: order,
+            edges: bfs.edges,
+            parent_of: bfs.parent_of,
+            depth_of: bfs.depth_of,
+        })
+    }
+
     /// Id-only entity lookup with an in-scope edge count (§2.1.0, §3.1).
     ///
     /// Returns `None` when the entity is unknown or not visible under

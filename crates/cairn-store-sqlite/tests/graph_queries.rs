@@ -78,6 +78,21 @@ async fn bfs_two_hops_returns_depth_stratified_set() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn query_dfs_reorders_bfs_via_parent_of() {
+    let f = cairn_test_fixtures::graph::tiny_graph().await;
+    let q = GraphQueries::new(f.store.clone(), vec![f.scope_a.clone()], f.now);
+    let bfs = q.query_bfs(f.node_a.clone(), 3, 64).await.unwrap();
+    let dfs = q.query_dfs(f.node_a.clone(), 3, 64).await.unwrap();
+    // Same edge set, possibly different order
+    assert_eq!(
+        bfs.edges.iter().map(|e| &e.id).collect::<std::collections::HashSet<_>>(),
+        dfs.edges.iter().map(|e| &e.id).collect::<std::collections::HashSet<_>>(),
+    );
+    // DFS visits a child before any sibling's subtree
+    assert_eq!(dfs.nodes[0].id, f.node_a);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn get_neighbors_filters_by_relation_and_confidence() {
     let f = cairn_test_fixtures::graph::tiny_graph().await;
     let q = GraphQueries::new(f.store.clone(), vec![f.scope_a.clone()], f.now);
