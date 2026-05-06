@@ -2578,3 +2578,49 @@ fn error_invalid_filter_rejects_unknown_data_key() {
         "expected unknown-key rejection, got: {err}"
     );
 }
+
+#[test]
+fn lint_response_accepts_edge_finding_fields() {
+    let json = serde_json::json!({
+        "contract": "cairn.mcp.v1",
+        "data": {
+            "summary": {
+                "total": 2,
+                "contradictions": 1,
+                "ambiguous_edges": 1,
+                "auto_resolved": 0
+            },
+            "findings": [
+                {
+                    "kind": "contradictory_edge",
+                    "severity": "warning",
+                    "entities": ["edge-a", "edge-b"],
+                    "message": "Two live edges share (source, target, relation)",
+                    "suggestion": "Run `cairn lint --fix` to keep the higher-confidence edge"
+                },
+                {
+                    "kind": "ambiguous_edge",
+                    "severity": "info",
+                    "entities": ["edge-c"],
+                    "message": "Live edge has AMBIGUOUS confidence"
+                }
+            ]
+        },
+        "operation_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "policy_trace": [],
+        "status": "committed",
+        "verb": "lint"
+    });
+
+    let response: Response = serde_json::from_value(json).unwrap();
+    let Some(ResponseData::Lint(data)) = response.data else {
+        panic!("expected lint response data");
+    };
+    assert_eq!(data.summary.total, 2);
+    assert_eq!(data.summary.ambiguous_edges, Some(1));
+    assert_eq!(data.summary.auto_resolved, Some(0));
+    assert_eq!(
+        data.findings[0].entities.as_deref(),
+        Some(&["edge-a".to_string(), "edge-b".to_string()][..])
+    );
+}

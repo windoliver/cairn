@@ -35,3 +35,17 @@ fn emits_command_builder_with_eight_subcommands_plus_two_preludes() {
     assert!(body.contains("\"status\""));
     assert!(body.contains("\"handshake\""));
 }
+
+#[test]
+fn lint_subcommand_includes_fix_flag() {
+    let files = emit_cli::emit(&doc()).unwrap();
+    let verbs = files
+        .iter()
+        .find(|f| f.path.ends_with("crates/cairn-cli/src/generated/verbs.rs"))
+        .unwrap();
+    let body = std::str::from_utf8(&verbs.bytes).unwrap();
+    assert!(
+        body.contains("clap::Arg::new(\"fix\").long(\"fix\").action(clap::ArgAction::SetTrue)"),
+        "generated lint subcommand must expose --fix: {body}"
+    );
+}

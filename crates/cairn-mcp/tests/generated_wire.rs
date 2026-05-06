@@ -18,15 +18,17 @@ fn tool(name: &str) -> &'static ToolDecl {
 }
 
 #[test]
-fn lint_advertises_write_capability_for_write_report() {
+fn lint_advertises_write_capability_for_write_modes() {
     let lint = tool("lint");
     assert_eq!(lint.auth, "read_only");
-    let ov = lint
-        .auth_overrides
-        .iter()
-        .find(|o| o.path == "write_report")
-        .unwrap_or_else(|| panic!("lint must surface write_report auth override"));
-    assert_eq!(ov.auth, "write_capability");
+    for path in ["write_report", "fix"] {
+        let ov = lint
+            .auth_overrides
+            .iter()
+            .find(|o| o.path == path)
+            .unwrap_or_else(|| panic!("lint must surface {path} auth override"));
+        assert_eq!(ov.auth, "write_capability");
+    }
 }
 
 #[test]
