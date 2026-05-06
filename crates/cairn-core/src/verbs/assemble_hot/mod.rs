@@ -7,7 +7,8 @@ pub mod segments;
 
 pub use assembler::{assemble_hot, AssembleHotError};
 pub use segments::{
-    build_segments, default_stability, AssembleHotValidationError, MAX_SEGMENTS,
+    build_segments, default_stability, validate, validate_base, validate_segments,
+    validate_with_recipe, AssembleHotValidationError, MAX_SEGMENTS,
 };
 
 use crate::config::HotMemoryRecipeStep as ConfigStep;
