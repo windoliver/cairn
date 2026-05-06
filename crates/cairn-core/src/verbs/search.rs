@@ -56,6 +56,13 @@ pub struct SearchOutcome {
     /// `candidates`. Populated iff `request.explain` was true and the
     /// `policy_trace` capability was advertised.
     pub explain: Option<Vec<ScoreExplain>>,
+    /// Hybrid-only: legs that ran in degraded mode (capability missing,
+    /// SQL error, deadline, etc.). Empty for keyword/semantic and for
+    /// fully successful hybrid runs. Surface code (CLI, MCP, SDK) may
+    /// thread this through to operators or callers; v1 verb dispatch
+    /// surfaces it here so partial-result signaling is not silently
+    /// dropped between the store and the wire surface. Issue #191.
+    pub degraded_legs: Vec<crate::search::DegradedLeg>,
 }
 
 /// Errors raised by the dispatcher.
@@ -149,7 +156,7 @@ pub async fn run(
         request.visibility_allowlist.clone()
     };
 
-    let (candidates, explain) = match request.mode {
+    let (candidates, explain, degraded_legs) = match request.mode {
         SearchMode::Keyword => {
             let args = KeywordSearchArgs {
                 query: request.query.clone(),
@@ -161,7 +168,7 @@ pub async fn run(
                 with_explain: request.explain,
             };
             let page = store.search_keyword(&args).await?;
-            (page.candidates, page.explain)
+            (page.candidates, page.explain, Vec::new())
         }
         SearchMode::Semantic => {
             let args = SemanticSearchArgs {
@@ -174,7 +181,7 @@ pub async fn run(
                 with_explain: request.explain,
             };
             let page = store.search_semantic(&args).await?;
-            (page.candidates, page.explain)
+            (page.candidates, page.explain, Vec::new())
         }
         SearchMode::Hybrid => {
             let args = HybridSearchArgs {
@@ -191,7 +198,7 @@ pub async fn run(
                 confidence_floor: 1e-3,
             };
             let page = store.search_hybrid(&args).await?;
-            (page.candidates, page.explain)
+            (page.candidates, page.explain, page.degraded_legs)
         }
     };
 
@@ -204,6 +211,7 @@ pub async fn run(
     Ok(SearchOutcome {
         candidates,
         explain,
+        degraded_legs,
     })
 }
 
