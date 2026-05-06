@@ -139,25 +139,40 @@ impl Sdk<InProcess> {
         }
     }
 
-    /// Construct an in-process SDK client wired to a real store **and** a
-    /// verified vault binding. Mirrors the CLI's vault-probe gate: the
-    /// caller must already have validated `<vault>/.cairn/vault.id` and
-    /// pass the resulting [`VaultId`].
+    /// Construct an in-process SDK client bound to a verified vault root.
     ///
-    /// Vault-sensitive verbs such as `assemble_hot` only succeed on an
-    /// SDK constructed via this method.
-    #[must_use]
+    /// Reads `<vault_root>/.cairn/vault.id`, parses it as a [`VaultId`],
+    /// and stores the result. Mirrors the CLI's vault-probe gate; the
+    /// resulting `vault_id` is non-forgeable in the sense that the caller
+    /// cannot inject an arbitrary string — they must operate against a
+    /// real bootstrapped vault. Vault-sensitive verbs (`assemble_hot`)
+    /// only succeed on an SDK constructed via this method.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdkError::InvalidArgs`] when `vault_root/.cairn/vault.id`
+    /// is missing, unreadable, or not a valid ULID.
     pub fn with_vault(
         store: Arc<dyn MemoryStore>,
         config: CairnConfig,
-        vault_id: cairn_core::domain::identity::keys::VaultId,
-    ) -> Self {
-        Self {
+        vault_root: &std::path::Path,
+    ) -> Result<Self, SdkError> {
+        let sentinel = vault_root.join(".cairn").join("vault.id");
+        let raw = std::fs::read_to_string(&sentinel).map_err(|e| SdkError::InvalidArgs {
+            reason: format!("vault binding: cannot read {} ({e})", sentinel.display()),
+        })?;
+        let vault_id =
+            cairn_core::domain::identity::keys::VaultId::parse(raw.trim()).map_err(|e| {
+                SdkError::InvalidArgs {
+                    reason: format!("vault binding: invalid vault.id ({e})"),
+                }
+            })?;
+        Ok(Self {
             _transport: InProcess,
             store: Some(store),
             config,
             vault_id: Some(vault_id),
-        }
+        })
     }
 }
 

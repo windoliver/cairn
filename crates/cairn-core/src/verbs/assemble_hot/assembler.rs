@@ -24,6 +24,17 @@ pub enum AssembleHotError {
         /// Configured `HotMemoryConfig.max_bytes`.
         max: u64,
     },
+    /// A recipe-step body loader returned an error. Real loaders (#193)
+    /// surface I/O, parse, or partial-read failures here so degraded
+    /// dependencies fail closed instead of silently emitting empty hot
+    /// memory.
+    #[error("load_step_body({step:?}): {reason}")]
+    LoadFailed {
+        /// The step that failed to load.
+        step: HotRecipeStep,
+        /// Loader-supplied reason string.
+        reason: String,
+    },
 }
 
 /// Run the hot-memory recipe and return a validated `AssembleHotData`.
@@ -31,15 +42,16 @@ pub fn assemble_hot(config: &HotMemoryConfig) -> Result<AssembleHotData, Assembl
     assemble_hot_with_loader(config, load_step_body)
 }
 
-/// Variant of [`assemble_hot`] that accepts an explicit loader. Used by
-/// tests today; once #193 lands, the real loader will be threaded in via
-/// the same hook.
+/// Variant of [`assemble_hot`] that accepts an explicit fallible loader.
+/// Used by tests today; once #193 lands, the real `SQLite` + markdown
+/// loader will be threaded in via the same hook so I/O / parse failures
+/// surface as [`AssembleHotError::LoadFailed`].
 pub fn assemble_hot_with_loader<F>(
     config: &HotMemoryConfig,
     mut loader: F,
 ) -> Result<AssembleHotData, AssembleHotError>
 where
-    F: FnMut(HotRecipeStep) -> String,
+    F: FnMut(HotRecipeStep) -> Result<String, String>,
 {
     let recipe: Vec<HotRecipeStep> = config
         .recipe
@@ -47,7 +59,11 @@ where
         .copied()
         .map(HotRecipeStep::from)
         .collect();
-    let bodies: Vec<String> = recipe.iter().copied().map(&mut loader).collect();
+    let mut bodies: Vec<String> = Vec::with_capacity(recipe.len());
+    for step in recipe.iter().copied() {
+        let body = loader(step).map_err(|reason| AssembleHotError::LoadFailed { step, reason })?;
+        bodies.push(body);
+    }
     let bodies_refs: Vec<&str> = bodies.iter().map(String::as_str).collect();
     let (prefix, segments) = build_segments(&recipe, &bodies_refs)?;
     let bytes = prefix.len() as u64;
@@ -67,11 +83,14 @@ where
     Ok(data)
 }
 
-/// Load the body for one recipe step. Stub: always `""`. The
+/// Load the body for one recipe step. Stub: always `Ok("")`. The
 /// missing-half of issue #193 replaces this single function with the real
-/// `SQLite` + markdown loader; nothing else here changes.
-fn load_step_body(_step: HotRecipeStep) -> String {
-    String::new()
+/// `SQLite` + markdown loader; nothing else here changes. The signature
+/// matches `assemble_hot_with_loader`'s `FnMut(HotRecipeStep) -> Result<String, String>`
+/// so the real loader can surface I/O / parse errors via the same hook.
+#[allow(clippy::unnecessary_wraps)]
+fn load_step_body(_step: HotRecipeStep) -> Result<String, String> {
+    Ok(String::new())
 }
 
 #[cfg(test)]
@@ -132,7 +151,7 @@ mod tests {
             max_bytes: 8,
             ..HotMemoryConfig::default()
         };
-        let err = assemble_hot_with_loader(&cfg, |_| "AAAA".to_owned()).unwrap_err();
+        let err = assemble_hot_with_loader(&cfg, |_| Ok("AAAA".to_owned())).unwrap_err();
         match err {
             AssembleHotError::BudgetExceeded { got, max } => {
                 assert_eq!(got, 24);
@@ -148,8 +167,26 @@ mod tests {
             max_bytes: 64,
             ..HotMemoryConfig::default()
         };
-        let data = assemble_hot_with_loader(&cfg, |_| "AA".to_owned()).unwrap();
+        let data = assemble_hot_with_loader(&cfg, |_| Ok("AA".to_owned())).unwrap();
         assert_eq!(data.bytes, 12);
+    }
+
+    #[test]
+    fn assemble_hot_propagates_loader_failure() {
+        // Real loaders must be able to surface I/O / parse / partial-read
+        // errors as a typed AssembleHotError variant rather than degrading
+        // silently to empty content.
+        let cfg = HotMemoryConfig::default();
+        let err = assemble_hot_with_loader(&cfg, |_| {
+            Err::<String, String>("simulated I/O failure".to_owned())
+        })
+        .unwrap_err();
+        match err {
+            AssembleHotError::LoadFailed { step: _, reason } => {
+                assert!(reason.contains("simulated I/O failure"), "reason: {reason}");
+            }
+            other => panic!("expected LoadFailed, got {other:?}"),
+        }
     }
 
     #[test]

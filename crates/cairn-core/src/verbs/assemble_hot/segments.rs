@@ -201,6 +201,16 @@ pub fn build_segments(
         });
     }
 
+    // Amplification guard: reject oversized recipes BEFORE allocating /
+    // hashing. The wire-cap check in validate_segments is a safety net;
+    // this is the producer-side defense against a malformed config.
+    if recipe.len() > MAX_SEGMENTS {
+        return Err(AssembleHotValidationError::TooManySegments {
+            got: recipe.len(),
+            max: MAX_SEGMENTS,
+        });
+    }
+
     let total: u64 = bodies.iter().map(|b| b.len() as u64).sum();
     if total > MAX_BYTES {
         return Err(AssembleHotValidationError::BytesExceedsMax {
@@ -701,17 +711,40 @@ mod tests {
 
     #[test]
     fn validate_segments_rejects_too_many() {
-        let recipe: Vec<HotRecipeStep> = vec![Purpose; 65];
-        let bodies: Vec<&str> = vec![""; 65];
-        let (prefix, segments) = build_segments(&recipe, &bodies).unwrap();
+        // build_segments now rejects > MAX_SEGMENTS up front (amplification
+        // guard), so construct the oversized AssembleHotData directly to
+        // exercise validate_segments' wire-side check.
+        let zero_hash = "0".repeat(64);
+        let segs: Vec<HotSegment> = (0..65)
+            .map(|_| HotSegment {
+                step: Purpose,
+                byte_start: 0,
+                byte_end: 0,
+                stability: Stable1h,
+                content_hash: zero_hash.clone(),
+            })
+            .collect();
         let d = AssembleHotData {
-            bytes: prefix.len() as u64,
-            prefix,
-            segments: Some(segments),
+            bytes: 0,
+            prefix: String::new(),
+            segments: Some(segs),
         };
         assert!(matches!(
             validate_segments(&d),
             Err(AssembleHotValidationError::TooManySegments { got: 65, max: 64 })
+        ));
+    }
+
+    #[test]
+    fn build_segments_rejects_too_many_recipe_steps() {
+        // Producer-side defense: oversized recipes must fail before the
+        // assembler allocates / hashes any data.
+        let recipe: Vec<HotRecipeStep> = vec![Purpose; 65];
+        let bodies: Vec<&str> = vec![""; 65];
+        let err = build_segments(&recipe, &bodies).unwrap_err();
+        assert!(matches!(
+            err,
+            AssembleHotValidationError::TooManySegments { got: 65, max: 64 }
         ));
     }
 

@@ -977,13 +977,20 @@ fn assemble_hot_with_store_but_no_vault_returns_unimplemented() {
 
 #[test]
 fn sdk_assemble_hot_returns_typed_segments() {
-    // Success path requires an explicit vault binding via `with_vault`.
+    // Success path requires `with_vault`, which reads the vault.id sentinel
+    // off disk — minting a VaultId in process is not sufficient. Write a
+    // real sentinel into a tempdir.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cairn = dir.path().join(".cairn");
+    std::fs::create_dir_all(&cairn).unwrap();
     let vault_id = cairn_core::domain::identity::keys::VaultId::mint();
+    std::fs::write(cairn.join("vault.id"), vault_id.as_str()).unwrap();
     let sdk = Sdk::with_vault(
         std::sync::Arc::new(noop_store::NoopStore),
         cairn_core::config::CairnConfig::default(),
-        vault_id,
-    );
+        dir.path(),
+    )
+    .expect("vault binding ok");
     let resp = sdk
         .assemble_hot(&AssembleHotArgs {
             budget: None,
