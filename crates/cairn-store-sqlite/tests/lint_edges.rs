@@ -236,14 +236,39 @@ fn fix_keeps_one_live_edge_and_records_wal_reason() {
         .unwrap();
     assert_eq!(live_ids, ["edge-b"]);
 
-    let reason: String = conn
+    let edge_temporal_state: Vec<(String, Option<i64>, Option<i64>)> = conn
+        .prepare("SELECT id, invalid_at, expired_at FROM entity_edges ORDER BY id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        edge_temporal_state,
+        [
+            ("edge-a".to_owned(), Some(42), None),
+            ("edge-b".to_owned(), None, None),
+            ("edge-c".to_owned(), Some(42), None),
+        ]
+    );
+
+    let wal_reason: String = conn
+        .query_row(
+            "SELECT reason FROM wal_ops WHERE operation_id = ?1",
+            ["01ARZ3NDEKTSV4RRFFQ69G5FAV"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(wal_reason, "lint:contradiction_resolution");
+
+    let replay_reason: String = conn
         .query_row(
             "SELECT reason FROM replay_ledger WHERE operation_id = ?1",
             ["01ARZ3NDEKTSV4RRFFQ69G5FAV"],
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(reason, "lint:contradiction_resolution");
+    assert_eq!(replay_reason, "lint:contradiction_resolution");
 }
 
 #[test]
