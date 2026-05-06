@@ -128,3 +128,36 @@ fn output_order_is_stable() {
     assert!(kw_idx.expect("keyword must be present") < pt_idx.expect("policy_trace must be present"),
         "wire-stable order requires search.keyword before policy_trace; got {caps:?}");
 }
+
+#[cfg(test)]
+mod remediation_tests {
+    use super::*;
+
+    #[test]
+    fn remediation_for_search_semantic_is_set() {
+        let hint = remediation_for("cairn.mcp.v1.search.semantic")
+            .expect("semantic must have a remediation hint");
+        assert!(hint.contains("local_embeddings"),
+            "remediation should mention the toggle: got {hint:?}");
+    }
+
+    #[test]
+    fn remediation_for_unknown_capability_is_none() {
+        assert!(remediation_for("not.a.real.capability").is_none());
+    }
+
+    #[test]
+    fn remediation_for_forget_session_mentions_v0_2() {
+        let hint = remediation_for("cairn.mcp.v1.forget.session")
+            .expect("forget.session must have a remediation hint");
+        assert!(hint.contains("v0.2"));
+    }
+
+    #[test]
+    fn remediation_table_has_no_empty_strings() {
+        for (cap, hint) in REMEDIATION {
+            assert!(!cap.is_empty(), "empty capability key");
+            assert!(!hint.is_empty(), "empty remediation for {cap}");
+        }
+    }
+}

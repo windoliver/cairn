@@ -30,7 +30,10 @@
 //! every v0.1 bound vault has the FTS5 virtual table. The `Sdk::new()`
 //! (no-store-no-vault) path short-circuits at rule 1 and returns `Vec::new()`.
 
+pub mod remediation;
 pub mod wiring;
+
+pub use remediation::{remediation_for, REMEDIATION};
 
 use crate::config::CapabilitySet;
 use crate::generated::common::Capabilities;
