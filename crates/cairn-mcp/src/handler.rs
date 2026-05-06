@@ -337,11 +337,11 @@ pub fn dispatch_stub(verb: &str) -> CallToolResult {
 #[cfg(test)]
 mod tests_plan_a {
     use super::*;
-    use std::sync::Arc;
     use cairn_core::config::CairnConfig;
     use cairn_core::domain::ScopeTuple;
     use cairn_core::mcp_auth::{ConfigBackedScope, McpSessionScope};
     use cairn_test_fixtures::FixtureStore;
+    use std::sync::Arc;
 
     fn principal() -> ScopeTuple {
         ScopeTuple {

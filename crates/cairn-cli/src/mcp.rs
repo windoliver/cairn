@@ -30,9 +30,11 @@ pub fn resolve_scope_components(config: &CairnConfig) -> Option<ResolvedMcpScope
         return None;
     }
     let principal = config.mcp.stdio.principal.clone()?;
-    let resolver: Arc<dyn McpSessionScope> =
-        Arc::new(ConfigBackedScope::new(principal.clone()));
-    Some(ResolvedMcpScope { resolver, principal })
+    let resolver: Arc<dyn McpSessionScope> = Arc::new(ConfigBackedScope::new(principal.clone()));
+    Some(ResolvedMcpScope {
+        resolver,
+        principal,
+    })
 }
 
 /// Path to the on-disk `SQLite` store, derived from the vault root.
@@ -53,7 +55,10 @@ pub fn run(vault_root: &Path, config: CairnConfig) -> ExitCode {
         return ExitCode::from(78);
     }
 
-    let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
         Ok(rt) => rt,
         Err(e) => {
             eprintln!("cairn mcp: failed to build tokio runtime: {e}");
@@ -65,7 +70,10 @@ pub fn run(vault_root: &Path, config: CairnConfig) -> ExitCode {
     // single_tenant=false fallback must NOT open SQLite or scan the
     // vault — pre-Plan-A `cairn mcp` deployments stay byte-identical.
     let result = match resolve_scope_components(&config) {
-        Some(ResolvedMcpScope { resolver, principal }) => {
+        Some(ResolvedMcpScope {
+            resolver,
+            principal,
+        }) => {
             let sqlite_store: Arc<cairn_store_sqlite::SqliteMemoryStore> =
                 match rt.block_on(cairn_store_sqlite::open(&store_db_path(vault_root))) {
                     Ok(s) => Arc::new(s),
@@ -110,7 +118,10 @@ mod tests {
     use cairn_core::domain::ScopeTuple;
 
     fn principal() -> ScopeTuple {
-        ScopeTuple { tenant: Some("acme".into()), ..ScopeTuple::default() }
+        ScopeTuple {
+            tenant: Some("acme".into()),
+            ..ScopeTuple::default()
+        }
     }
 
     #[test]

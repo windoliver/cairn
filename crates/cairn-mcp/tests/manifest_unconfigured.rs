@@ -55,11 +55,8 @@ fn unconfigured_stdio_lists_eight_verbs_only() {
     // regardless of scope-resolver presence.
     let scope = ConfigBackedScope::new(ScopeTuple::default());
     let dyn_s: &dyn McpSessionScope = &scope;
-    let avail = cfg.mcp_graph_tools_available(
-        Some(dyn_s),
-        McpTransport::Stdio,
-        &graph_capable_caps(),
-    );
+    let avail =
+        cfg.mcp_graph_tools_available(Some(dyn_s), McpTransport::Stdio, &graph_capable_caps());
     assert_eq!(
         avail,
         McpGraphAvailability::UnavailableSingleTenantOff,
@@ -86,11 +83,7 @@ fn opted_in_stdio_with_graphless_store_reports_no_store_capability() {
         ..graph_capable_caps()
     };
 
-    let avail = cfg.mcp_graph_tools_available(
-        Some(dyn_s),
-        McpTransport::Stdio,
-        &caps_no_graph,
-    );
+    let avail = cfg.mcp_graph_tools_available(Some(dyn_s), McpTransport::Stdio, &caps_no_graph);
     assert_eq!(avail, McpGraphAvailability::UnavailableNoStoreCapability);
 }
 
@@ -102,10 +95,6 @@ fn opted_in_stdio_without_resolver_reports_no_scope_resolver() {
         tenant: Some("acme".into()),
         ..ScopeTuple::default()
     });
-    let avail = cfg.mcp_graph_tools_available(
-        None,
-        McpTransport::Stdio,
-        &graph_capable_caps(),
-    );
+    let avail = cfg.mcp_graph_tools_available(None, McpTransport::Stdio, &graph_capable_caps());
     assert_eq!(avail, McpGraphAvailability::UnavailableNoScopeResolver);
 }

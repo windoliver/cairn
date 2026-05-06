@@ -58,9 +58,7 @@ pub enum ConfigError {
     UnresolvedEnvVar(String),
     /// `[mcp.stdio] single_tenant = true` was set but no `principal` was
     /// provided.
-    #[error(
-        "[mcp.stdio] single_tenant = true requires a `principal` scope tuple"
-    )]
+    #[error("[mcp.stdio] single_tenant = true requires a `principal` scope tuple")]
     McpStdioMissingPrincipal,
 }
 
@@ -1473,9 +1471,7 @@ rerank_topk: 20
     }
 
     use crate::contract::memory_store::MemoryStoreCapabilities;
-    use crate::mcp_auth::{
-        ConfigBackedScope, McpGraphAvailability, McpSessionScope, McpTransport,
-    };
+    use crate::mcp_auth::{ConfigBackedScope, McpGraphAvailability, McpSessionScope, McpTransport};
 
     fn store_caps_with_graph(graph: bool) -> MemoryStoreCapabilities {
         MemoryStoreCapabilities {
