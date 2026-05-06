@@ -579,7 +579,7 @@ visible_nodes AS (
             JOIN records r_active
               ON r_active.target_id = r_src.target_id
             WHERE r_src.record_id   = he.source_record_id
-              AND r_active.scope    IN (?, ?, ...)  -- :allowed_scopes
+              AND <ScopeTuple-match-clause>         -- §3.0a expansion
               AND r_active.active     = 1
               AND r_active.tombstoned = 0
           )
@@ -730,9 +730,11 @@ WHERE (e.source_id = ?1 OR e.target_id = ?1)
   AND (?3 IS NULL OR e.confidence_score >= ?3);
 ```
 
-Returned edges include the *other* node's id + name, joined against
-`visible_nodes` (so the joined node also passes the scope check —
-no name leak through the neighbor field).
+Returned edges are **id-only** for the *other* endpoint per
+§2.1.0 — no name, no summary, no joined `entity_nodes` payload.
+The endpoint id is filtered through `visible_nodes` so an
+out-of-scope neighbor id is also suppressed (the edge appears
+only when both endpoints are visible to the caller).
 
 ### 3.3 `graph.query` (BFS/DFS)
 
@@ -912,7 +914,7 @@ WITH scope_filtered AS (
       JOIN records r_active
         ON r_active.target_id = r_src.target_id
       WHERE r_src.record_id   = e.source_record_id
-        AND r_active.scope    IN (?, ?, ...)
+        AND <ScopeTuple-match-clause>         -- §3.0a expansion
         AND r_active.active     = 1
         AND r_active.tombstoned = 0
     )
@@ -1189,9 +1191,14 @@ received (including a trailing `\r` if present).
 - Forwarded bytes go to the write half of a
   `tokio::io::duplex(64 * 1024)` channel; the read half is
   handed to rmcp as its stdin.
-- Cancellation: when stdin reaches EOF the relay flushes any
-  partial buffered frame as-is, drops the duplex writer, and
-  rmcp observes EOF cleanly.
+- Cancellation: when stdin reaches EOF the relay drops the
+  duplex writer so rmcp observes EOF cleanly. Any unterminated
+  partial frame in the ring buffer (no trailing `\n` ever
+  arrived) is **discarded with a `tracing::warn!`**, never
+  forwarded — sending half a JSON object to rmcp would surface
+  shutdown noise as a malformed-frame parse error rather than
+  the clean EOF the caller expects. Only complete
+  newline-terminated frames cross into the rmcp framer.
 
 **Invariants the shim preserves:**
 
