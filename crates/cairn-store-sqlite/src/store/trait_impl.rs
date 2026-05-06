@@ -8,13 +8,15 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use cairn_core::contract::memory_store::{
-    Edge, EdgeDir, EdgeKey, HybridSearchArgs, HybridSearchPage, IndexStats, KeywordSearchArgs,
-    KeywordSearchPage, ListArgs, ListPage, MemoryStore, MemoryStoreCapabilities, RecordVersion,
-    SemanticSearchArgs, SemanticSearchPage, StoreError, TombstoneReason, UpsertOutcome,
+    Edge, EdgeDir, EdgeKey, GraphNeighborsArgs, HybridSearchArgs, HybridSearchPage, IndexStats,
+    KeywordSearchArgs, KeywordSearchPage, ListArgs, ListPage, MemoryStore, MemoryStoreCapabilities,
+    RecordVersion, SemanticSearchArgs, SemanticSearchPage, StoreError, TombstoneReason,
+    UpsertOutcome,
 };
 use cairn_core::contract::version::VersionRange;
 use cairn_core::domain::consent_timeline::ConsentModel;
 use cairn_core::domain::{MemoryRecord, RecordId, TargetId};
+use cairn_core::search::GraphCandidate;
 
 use crate::error::StoreError as ConcreteError;
 use crate::store::SqliteMemoryStore;
@@ -122,6 +124,18 @@ impl MemoryStore for SqliteMemoryStore {
             return not_initialized("search_hybrid");
         }
         self.do_search_hybrid(args).await.map_err(Into::into)
+    }
+
+    async fn search_graph_neighbors(
+        &self,
+        args: &GraphNeighborsArgs<'_>,
+    ) -> Result<Vec<GraphCandidate>, StoreError> {
+        if self.conn.is_none() {
+            return not_initialized("search_graph_neighbors");
+        }
+        self.do_search_graph_neighbors(args)
+            .await
+            .map_err(Into::into)
     }
 
     async fn index_stats(&self) -> Result<IndexStats, StoreError> {

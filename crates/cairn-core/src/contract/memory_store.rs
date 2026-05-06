@@ -871,7 +871,9 @@ pub struct GraphNeighborsArgs<'a> {
     pub confidence_min: f32,
 }
 
-/// One page of hybrid candidates.
+/// One page of hybrid candidates. Issue #191 added the `degraded_legs`
+/// vector so callers can distinguish "no results" from "results but a
+/// leg silently dropped out due to capability or SQL failure".
 #[derive(Debug, Clone, PartialEq)]
 pub struct HybridSearchPage {
     /// Candidates, sorted descending by blended `final_score`.
@@ -880,6 +882,10 @@ pub struct HybridSearchPage {
     /// when the matching args' `with_explain` was true. For the hybrid
     /// page, all fields are populated where applicable.
     pub explain: Option<Vec<ScoreExplain>>,
+    /// Legs that did not contribute results. Empty on the happy path.
+    /// Most common entry: `DegradedLeg::graph_capability_unavailable()`
+    /// when the store does not advertise `graph_search`. Issue #191.
+    pub degraded_legs: Vec<crate::search::DegradedLeg>,
 }
 
 /// A single candidate row from a search query, with the signal columns the

@@ -37,8 +37,12 @@ fn base_caps(vector: bool) -> MemoryStoreCapabilities {
         graph_edges: true,
         transactions: true,
         per_record_consent_model: true,
-
-        graph_search: false,
+        // Enabled here because every open path runs migrations 0042-0045
+        // (entity_nodes, entity_edges with bitemporal columns,
+        // entity_episodes), which is the schema surface
+        // `do_search_graph_neighbors` needs. A future phase can replace
+        // this static `true` with a runtime probe of the migration set.
+        graph_search: true,
     }
 }
 

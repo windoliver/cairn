@@ -116,6 +116,7 @@ impl MemoryStore for EmptyStore {
         Ok(HybridSearchPage {
             candidates: vec![],
             explain: None,
+            degraded_legs: vec![],
         })
     }
 }

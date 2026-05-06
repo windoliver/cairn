@@ -23,12 +23,13 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use cairn_core::contract::memory_store::{
-    HybridSearchArgs, HybridSearchPage, KeywordSearchArgs, SearchCandidate, SemanticSearchArgs,
+    GraphNeighborsArgs, HybridSearchArgs, HybridSearchPage, KeywordSearchArgs, SearchCandidate,
+    SemanticSearchArgs,
 };
 use cairn_core::domain::RecordId;
 use cairn_core::search::{
-    HybridSearchInputs, HybridSearchParams, RerankedCandidate, ScoreExplain, ScoredCandidate,
-    hybrid_search,
+    DegradationReason, DegradedLeg, GraphCandidate, GraphSource, HybridSearchInputs,
+    HybridSearchParams, RerankedCandidate, ScoreExplain, ScoredCandidate, hybrid_search,
 };
 use cairn_embeddings_local::EmbeddingModel;
 use rusqlite::types::Value as SqlVal;
@@ -104,6 +105,10 @@ impl SqliteMemoryStore {
         let kw_list = scored_from_keyword(&keyword.candidates);
         let sem_list = scored_from_semantic(&semantic.candidates);
 
+        let (graph_candidates, degraded_legs) = self
+            .run_graph_leg(args, &keyword.candidates, &semantic.candidates)
+            .await;
+
         // Build 1-based rank lookup maps for the explain block. Constructed
         // here while `kw_list` / `sem_list` are in leg-order (rank order).
         let kw_ranks: HashMap<RecordId, usize> = kw_list
@@ -134,7 +139,7 @@ impl SqliteMemoryStore {
             &HybridSearchInputs {
                 keyword: kw_list,
                 semantic: sem_list,
-                graph: Vec::new(),
+                graph: graph_candidates,
                 query_vector,
                 doc_vectors,
             },
@@ -143,7 +148,7 @@ impl SqliteMemoryStore {
                 rerank_topk: args.rerank_topk,
                 blend: args.blend,
                 skip_rerank: false,
-                confidence_floor: HybridSearchParams::default().confidence_floor,
+                confidence_floor: args.confidence_floor,
             },
         );
 
@@ -190,7 +195,61 @@ impl SqliteMemoryStore {
         Ok(HybridSearchPage {
             candidates,
             explain,
+            degraded_legs,
         })
+    }
+
+    /// Run the graph leg for [`Self::do_search_hybrid`]. Returns
+    /// `(graph_candidates, degraded_legs)`. Extracted to keep the parent
+    /// function under the workspace `clippy::too_many_lines` cap.
+    ///
+    /// Seeds = union of kw + sem ids; ranked exclusion = same set, so we
+    /// never re-promote a record that already lexically matched. The
+    /// graph leg is a soft dependency: capability-missing yields an empty
+    /// result plus `DegradedLeg::graph_capability_unavailable()`, and a
+    /// SQL failure yields empty plus `DegradedLeg::Graph` with
+    /// `SqlError` reason.
+    async fn run_graph_leg(
+        &self,
+        args: &HybridSearchArgs<'_>,
+        kw_candidates: &[SearchCandidate],
+        sem_candidates: &[SearchCandidate],
+    ) -> (Vec<GraphCandidate>, Vec<DegradedLeg>) {
+        if !self.caps.graph_search {
+            return (
+                Vec::new(),
+                vec![DegradedLeg::graph_capability_unavailable()],
+            );
+        }
+        let mut seen: HashSet<RecordId> = HashSet::new();
+        let mut seed_ids: Vec<RecordId> = Vec::new();
+        for c in kw_candidates.iter().chain(sem_candidates.iter()) {
+            if seen.insert(c.record_id.clone()) {
+                seed_ids.push(c.record_id.clone());
+            }
+        }
+        let graph_args = GraphNeighborsArgs {
+            seed_record_ids: seed_ids.clone(),
+            ranked_record_ids: seed_ids,
+            filter: args.filter,
+            auth_scope: args.auth_scope.clone(),
+            visibility_allowlist: args.visibility_allowlist.clone(),
+            limit: HYBRID_LEG_LIMIT,
+            confidence_min: 0.0,
+        };
+        match self.do_search_graph_neighbors(&graph_args).await {
+            Ok(c) => (c, Vec::new()),
+            Err(e) => {
+                tracing::warn!(error = %e, "graph leg failed; continuing without graph results");
+                (
+                    Vec::new(),
+                    vec![DegradedLeg::Graph {
+                        reason: DegradationReason::SqlError,
+                        source: GraphSource::All,
+                    }],
+                )
+            }
+        }
     }
 }
 
