@@ -6,11 +6,9 @@ pub mod raw;
 pub mod segments;
 
 pub use assembler::{assemble_hot, AssembleHotError};
-// TODO(#288 task 5): uncomment after build_segments lands.
-// pub use segments::{
-//     build_segments, default_stability, validate, validate_base, validate_segments,
-//     validate_with_recipe, AssembleHotValidationError, MAX_SEGMENTS,
-// };
+pub use segments::{
+    build_segments, default_stability, AssembleHotValidationError, MAX_SEGMENTS,
+};
 
 use crate::config::HotMemoryRecipeStep as ConfigStep;
 use crate::generated::verbs::assemble_hot::HotRecipeStep as IdlStep;
