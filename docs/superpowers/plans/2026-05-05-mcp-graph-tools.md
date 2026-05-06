@@ -1207,7 +1207,9 @@ Spec: §3.5. Bonus keyed on actual scope id, not `source_record_id`.
           f.node_a.clone(), f.node_b.clone(), f.node_c.clone(),
       ], 10).unwrap();
       // Highest score must be the S_b edge (modal is S_a).
-      assert_eq!(hits[0].edge.source_record_id.as_deref(), Some(&f.rec_b[..]));
+      // `source_record_id` lives on `SurpriseHit`, not on the inner
+      // `GraphEdge` — the public edge type is id-only by design (§3.1).
+      assert_eq!(hits[0].source_record_id.as_str(), &f.rec_b[..]);
       assert!((hits[0].score - 2.0 * hits[0].edge.confidence_score).abs() < 1e-9);
   }
   ```
@@ -1216,6 +1218,12 @@ Spec: §3.5. Bonus keyed on actual scope id, not `source_record_id`.
   ```rust
   pub struct SurpriseHit {
       pub edge: GraphEdge,
+      /// Provenance record id (the immutable `r_src` lineage from
+      /// §3.0a-bis) that this edge was authored against. Surfaced on
+      /// `SurpriseHit` rather than `GraphEdge` because the public
+      /// edge type is id-only (§3.1) and reused by other tools that
+      /// must not leak provenance.
+      pub source_record_id: String,
       pub scope_id: String,
       pub score: f64,
   }
@@ -1259,7 +1267,7 @@ Spec: §3.5. Bonus keyed on actual scope id, not `source_record_id`.
                    AND es.target_id IN {input_in}
                )
                SELECT id, source_id, target_id, relation, confidence_score,
-                      valid_at, scope_id, score
+                      valid_at, source_record_id, scope_id, score
                FROM scored
                ORDER BY score DESC, edge_id ASC
                LIMIT ?"
@@ -1287,8 +1295,9 @@ Spec: §3.5. Bonus keyed on actual scope id, not `source_record_id`.
                       target_id: row.get(2)?, relation: row.get(3)?,
                       confidence_score: row.get(4)?, valid_at: row.get(5)?,
                   },
-                  scope_id: row.get(6)?,
-                  score: row.get(7)?,
+                  source_record_id: row.get(6)?,
+                  scope_id: row.get(7)?,
+                  score: row.get(8)?,
               });
           }
           Ok(out)
@@ -1694,7 +1703,7 @@ Add a new constructor `with_store_scope_and_sqlite(store: Arc<dyn MemoryStore>, 
               self.transport,
               &caps,
           );
-          if avail != McpGraphAvailability::Available {
+          if !matches!(avail, McpGraphAvailability::Available { .. }) {
               return Err(GraphUnavailable::Gate(avail));
           }
           // Single resolver call — Err or empty -> Resolver-unavailable, never panic.
@@ -2114,15 +2123,17 @@ Spec: §5.3 EOF tail. Mirror `rmcp::JsonRpcMessageCodec::decode_eof`: if the tra
 **Files:**
 - `crates/cairn-mcp/src/lib.rs` (Modify)
 
-**API stability.** Plan A pinned `serve_stdio_with_store(store: Arc<dyn MemoryStore>, scope: Arc<dyn McpSessionScope>, config: CairnConfig, principal: ScopeTuple) -> Result<(), TransportError>`. We do **not** change that signature here. The only change is *internal*: replace the direct `rmcp::transport::io::stdio()` transport with a duplex whose read half is fed by `relay::run_relay(stdin, …)`. CLI wiring, error type, and parameter types stay byte-for-byte identical to Plan A.
+**Cross-plan signature extension.** Task 13 added an `sqlite_store: Option<Arc<SqliteMemoryStore>>` field to `CairnMcpHandler`. The handler-construction path therefore needs the concrete sqlite handle threaded in too — `with_store_and_scope` (Plan A) does not populate it, so `materialize_graph_request` would short-circuit on `sqlite_store.is_none()` even for graph-capable sessions. Plan C adds **one parameter** to `serve_stdio_with_store` and switches to the new `with_store_scope_and_sqlite` constructor introduced in Task 13. The CLI wiring (Plan A `mcp::run`) already keeps two Arc clones (`Arc<dyn MemoryStore>` for verbs, `Arc<SqliteMemoryStore>` for graph) — Plan C just threads both through.
 
-- [ ] **Write failing test.** (Relay behaviour itself is covered by Tasks 16/17/18.) Add one smoke test in `crates/cairn-mcp/tests/relay_integration.rs` that pipes a blank line followed by an `initialize` request through `serve_stdio_with_store` via a `tokio::io::duplex` and asserts the server still initializes.
+- [ ] **Write failing test.** (Relay behaviour itself is covered by Tasks 16/17/18.) Add one smoke test in `crates/cairn-mcp/tests/relay_integration.rs` that pipes a blank line followed by an `initialize` request through `serve_stdio_with_store` via a `tokio::io::duplex` and asserts the server still initializes. Also add a regression test that calls `serve_stdio_with_store` with a graph-capable store and asserts `tools/list` advertises `graph.*` (this catches the "sqlite_store unset" regression Codex flagged).
 - [ ] **Run-fail.** `cargo check -p cairn-mcp --locked && cargo nextest run -p cairn-mcp --test relay_integration`
-- [ ] **Implement.** Modify the *body* of the existing Plan A entrypoint — the signature is unchanged:
+- [ ] **Implement.** Add the concrete-sqlite param and switch constructors:
   ```rust
-  // crates/cairn-mcp/src/lib.rs — Plan A entrypoint, body modified.
+  // crates/cairn-mcp/src/lib.rs — Plan A entrypoint, body + signature
+  // modified by Plan C.
   pub async fn serve_stdio_with_store(
       store: std::sync::Arc<dyn cairn_core::contract::memory_store::MemoryStore>,
+      sqlite_store: std::sync::Arc<cairn_store_sqlite::SqliteMemoryStore>,
       scope: std::sync::Arc<dyn cairn_core::mcp_auth::McpSessionScope>,
       config: cairn_core::config::CairnConfig,
       principal: cairn_core::domain::ScopeTuple,
@@ -2135,7 +2146,9 @@ Spec: §5.3 EOF tail. Mirror `rmcp::JsonRpcMessageCodec::decode_eof`: if the tra
           }
       });
 
-      let handler = CairnMcpHandler::with_store_and_scope(store, scope, config, principal);
+      let handler = CairnMcpHandler::with_store_scope_and_sqlite(
+          store, sqlite_store, scope, config, principal,
+      );
       let stdout = tokio::io::stdout();
       let service = handler
           .serve((framer_reader, stdout))
@@ -2151,7 +2164,13 @@ Spec: §5.3 EOF tail. Mirror `rmcp::JsonRpcMessageCodec::decode_eof`: if the tra
       result.map(|_| ())
   }
   ```
-  The CLI call site from Plan A (`rt.block_on(cairn_mcp::serve_stdio_with_store(store, scope, cfg, principal))`) is unchanged; no new types (`PrincipalId`, optional scope, `anyhow::Result`) are introduced.
+  Update the CLI call site (Plan A `mcp::run`) to pass both Arc clones:
+  ```rust
+  rt.block_on(cairn_mcp::serve_stdio_with_store(
+      store, sqlite_store, resolver, config, principal,
+  ));
+  ```
+  No new types (`PrincipalId`, optional scope, `anyhow::Result`) are introduced; the error type stays `TransportError`.
 - [ ] **Run-pass.** `cargo check -p cairn-mcp --locked && cargo nextest run -p cairn-mcp --locked`
 - [ ] **Commit.**
   ```bash

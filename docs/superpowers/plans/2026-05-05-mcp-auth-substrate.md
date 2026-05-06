@@ -1540,14 +1540,56 @@ In `run_with_context` (around line 109 of the same file), after the existing cap
         // verdict. ProbeFailed / NoVault short-circuit ahead of
         // mcp_graph_tools_available so the latter never sees a
         // synthetic default capability set.
+        //
+        // **Resolver probe (split-brain guard).** When the static
+        // predicate returns Available *and* a scope resolver is
+        // wired, we also call `resolver.allowed_scopes(ctx)` here
+        // with the principal from `ResolvedMcpScope`. The MCP
+        // request path (`materialize_graph_request`, Plan C Task
+        // 13) makes the exact same call at request time. If the
+        // resolver errors or returns empty, MCP would deny the
+        // request — so reporting Available in status would lie.
+        // We downgrade to `ResolvedAvailability::ResolverEmpty`
+        // (carries the error if any) so status and MCP report the
+        // same thing.
         let avail: ResolvedAvailability = match &probe_outcome {
-            ProbeOutcome::Capabilities(caps) => ResolvedAvailability::Predicate(
-                cfg.mcp_graph_tools_available(
+            ProbeOutcome::Capabilities(caps) => {
+                let predicate = cfg.mcp_graph_tools_available(
                     scope_for_predicate,
                     cairn_core::mcp_auth::McpTransport::Stdio,
                     caps,
-                ),
-            ),
+                );
+                match (
+                    matches!(predicate, cairn_core::mcp_auth::McpGraphAvailability::Available { .. }),
+                    scope_components.as_ref(),
+                ) {
+                    (true, Some(rs)) => {
+                        // Build a synthetic auth context from the
+                        // resolver's own principal — this is exactly
+                        // what `mcp::run` will pass at request time
+                        // for the single-tenant stdio path.
+                        let ctx = cairn_core::mcp_auth::McpAuthContext {
+                            principal: &rs.principal,
+                            // Status uses a fixed sentinel request id
+                            // so the resolver cannot couple its
+                            // verdict to a per-request token.
+                            request_id: "cairn-status-probe".as_ref(),
+                        };
+                        match rs.resolver.allowed_scopes(&ctx) {
+                            Ok(v) if !v.is_empty() => {
+                                ResolvedAvailability::Predicate(predicate)
+                            }
+                            Ok(_) => ResolvedAvailability::ResolverEmpty {
+                                error: None,
+                            },
+                            Err(e) => ResolvedAvailability::ResolverEmpty {
+                                error: Some(e.to_string()),
+                            },
+                        }
+                    }
+                    _ => ResolvedAvailability::Predicate(predicate),
+                }
+            }
             ProbeOutcome::Failed { error } => {
                 ResolvedAvailability::ProbeFailed { error: error.clone() }
             }
@@ -1598,7 +1640,7 @@ The change therefore lands in three steps, in this order:
           "type": "string",
           "enum": ["single_tenant_off", "no_store_capability",
                    "no_scope_resolver", "store_open_error",
-                   "vault_not_bound"]
+                   "vault_not_bound", "resolver_empty"]
         },
         "tool_count": { "type": "integer", "minimum": 0 },
         "probe_basis": { "enum": ["full", "config_only"] },
@@ -1732,6 +1774,14 @@ enum ResolvedAvailability {
     Predicate(cairn_core::mcp_auth::McpGraphAvailability),
     ProbeFailed { error: String },
     NoVault,
+    /// The static predicate said Available, but the wired resolver
+    /// returned `Ok(empty)` or `Err(_)` for the synthetic context
+    /// the status probe constructed. MCP's request path
+    /// (`materialize_graph_request`, Plan C Task 13) deny-replies
+    /// in exactly the same case, so reporting `Available` here
+    /// would be a lie. `error` carries the resolver's error text
+    /// when available; absent for the empty-Vec case.
+    ResolverEmpty { error: Option<String> },
 }
 
 /// Open the SQLite store at `vault_root` read-only and read its
@@ -1831,6 +1881,13 @@ pub fn render_mcp_graph_line(avail: &ResolvedAvailability) -> String {
         ResolvedAvailability::NoVault => {
             "mcp.graph_tools: probe-skipped (no vault bound)".to_owned()
         }
+        ResolvedAvailability::ResolverEmpty { error: Some(e) } => {
+            format!("mcp.graph_tools: unavailable (resolver error: {e})")
+        }
+        ResolvedAvailability::ResolverEmpty { error: None } => {
+            "mcp.graph_tools: unavailable (resolver returned no allowed scopes)"
+                .to_owned()
+        }
     }
 }
 ```
@@ -1869,6 +1926,13 @@ impl McpGraphToolsStatus {
                 tool_count: None,
                 probe_basis: basis,
                 error: None,
+            },
+            ResolvedAvailability::ResolverEmpty { error } => Self {
+                state: "unavailable",
+                reason: Some("resolver_empty"),
+                tool_count: None,
+                probe_basis: basis,
+                error: error.clone(),
             },
         }
     }
