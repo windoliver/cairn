@@ -127,9 +127,14 @@ async fn run_one_step(
         return Ok(());
     }
 
-    // 2. Up to MAX_STEP_ATTEMPTS attempts with backoff.
+    // 2. Up to MAX_STEP_ATTEMPTS attempts with backoff. Note `attempt` is
+    // a per-invocation loop counter used only to schedule the backoff
+    // sleep; the durable `wal_steps.attempts` column is incremented
+    // inside `try_one_attempt` and is lifetime-cumulative across runner
+    // re-entries (so `decide_recovery` can compare it against
+    // `MAX_STEP_ATTEMPTS`).
     for attempt in 1..=MAX_STEP_ATTEMPTS {
-        match try_one_attempt(conn, op_id, step, body, attempt).await? {
+        match try_one_attempt(conn, op_id, step, body).await? {
             AttemptOutcome::Done => return Ok(()),
             AttemptOutcome::Failed if attempt < MAX_STEP_ATTEMPTS => {
                 tokio::time::sleep(backoff_for(attempt)).await;
@@ -200,7 +205,6 @@ async fn try_one_attempt(
     op_id: &OperationId,
     step: &StepDef,
     body: &Arc<dyn StepBody>,
-    attempt: u32,
 ) -> Result<AttemptOutcome, RunnerError> {
     let op = op_id.as_str().to_owned();
     let step_owned = *step;
@@ -214,15 +218,24 @@ async fn try_one_attempt(
             // PENDING, run the body. Commit on Ok; drop (rollback) on Err.
             let body_result: Result<(), StepBodyError> = {
                 let tx = c.transaction()?;
+                // `attempts` is lifetime-cumulative across runner re-entries.
+                // For a brand-new row we INSERT with `1`; on conflict we
+                // increment the existing value rather than overwriting with
+                // the per-invocation loop counter (which only counts attempts
+                // within this process). `started_at` is preserved across
+                // attempts via COALESCE so diagnostics keep the first-start
+                // timestamp. The per-invocation `attempt` parameter still
+                // drives `backoff_for(attempt)` — only its use in the
+                // `attempts` column changes here.
                 tx.execute(
                     "INSERT INTO wal_steps \
                        (operation_id, step_ord, step_kind, state, attempts, started_at) \
-                     VALUES (?1, ?2, ?3, 'PENDING', ?4, ?5) \
+                     VALUES (?1, ?2, ?3, 'PENDING', 1, ?4) \
                      ON CONFLICT(operation_id, step_ord) DO UPDATE SET \
                        state = 'PENDING', \
-                       attempts = ?4, \
-                       started_at = ?5",
-                    rusqlite::params![op, step_owned.ord, step_owned.name, attempt, now],
+                       attempts = wal_steps.attempts + 1, \
+                       started_at = COALESCE(wal_steps.started_at, ?4)",
+                    rusqlite::params![op, step_owned.ord, step_owned.name, now],
                 )?;
                 let r = body.run(&tx, &op_id_for_body, &step_owned);
                 if r.is_ok() {
@@ -251,20 +264,28 @@ async fn try_one_attempt(
                         StepBodyError::Storage(e) => format!("storage: {e}"),
                     };
                     let finished = now_ms();
+                    // Phase-1's PENDING upsert was rolled back when the
+                    // body errored, so the row may not exist yet (very first
+                    // attempt) — INSERT with `attempts = 1`. On conflict,
+                    // increment the existing value so the counter is
+                    // lifetime-cumulative. No double-counting risk: Phase 1
+                    // and Phase 2 never both commit per attempt (Phase 2
+                    // only runs when Phase 1's tx was dropped). `started_at`
+                    // is intentionally absent from the DO UPDATE list so the
+                    // original first-start timestamp survives.
                     c.execute(
                         "INSERT INTO wal_steps \
                            (operation_id, step_ord, step_kind, state, attempts, last_error, started_at, finished_at) \
-                         VALUES (?1, ?2, ?3, 'FAILED', ?4, ?5, ?6, ?7) \
+                         VALUES (?1, ?2, ?3, 'FAILED', 1, ?4, ?5, ?6) \
                          ON CONFLICT(operation_id, step_ord) DO UPDATE SET \
                            state = 'FAILED', \
-                           attempts = ?4, \
-                           last_error = ?5, \
-                           finished_at = ?7",
+                           attempts = wal_steps.attempts + 1, \
+                           last_error = ?4, \
+                           finished_at = ?6",
                         rusqlite::params![
                             op,
                             step_owned.ord,
                             step_owned.name,
-                            attempt,
                             msg,
                             now,
                             finished
