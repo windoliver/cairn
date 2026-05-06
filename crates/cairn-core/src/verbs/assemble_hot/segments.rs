@@ -148,6 +148,15 @@ pub enum AssembleHotValidationError {
         /// Hard upper bound ([`MAX_SEGMENTS`]).
         max: usize,
     },
+    /// A segment offset falls inside a multi-byte UTF-8 code point in `prefix`.
+    /// Slicing on this offset would panic, so the validator rejects up front.
+    #[error("segment {index}: offset {offset} is not a UTF-8 char boundary in prefix")]
+    NotCharBoundary {
+        /// Zero-based segment index.
+        index: usize,
+        /// The offending byte offset.
+        offset: u64,
+    },
 }
 
 /// Build (`prefix`, `segments`) from a configured recipe and parallel
@@ -267,6 +276,25 @@ pub fn validate_segments(data: &AssembleHotData) -> Result<(), AssembleHotValida
                 index: i,
                 end: s.byte_end,
                 prefix_len,
+            });
+        }
+        // UTF-8 boundary check: a hostile payload can satisfy all numeric
+        // checks above and still cut through a multibyte code point. Slicing
+        // a non-boundary index would panic in the second pass; reject here.
+        #[allow(clippy::cast_possible_truncation)]
+        let start_usize = s.byte_start as usize;
+        #[allow(clippy::cast_possible_truncation)]
+        let end_usize = s.byte_end as usize;
+        if !data.prefix.is_char_boundary(start_usize) {
+            return Err(AssembleHotValidationError::NotCharBoundary {
+                index: i,
+                offset: s.byte_start,
+            });
+        }
+        if !data.prefix.is_char_boundary(end_usize) {
+            return Err(AssembleHotValidationError::NotCharBoundary {
+                index: i,
+                offset: s.byte_end,
             });
         }
         let expected_stability = default_stability(s.step);
@@ -582,6 +610,41 @@ mod tests {
         assert!(matches!(
             validate_segments(&d),
             Err(AssembleHotValidationError::StabilityMismatch { index: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn validate_segments_rejects_not_char_boundary() {
+        // Two-byte UTF-8 char "é" (0xC3 0xA9). A hostile payload claims the
+        // first segment ends at offset 1 — the middle of the code point.
+        // Hash is set to whatever; structural pass must reject before slicing.
+        let prefix = "é".to_string();
+        let prefix_len = prefix.len() as u64; // 2
+        let s0 = HotSegment {
+            step: Purpose,
+            byte_start: 0,
+            byte_end: 1,
+            stability: Stable1h,
+            content_hash: "0".repeat(64),
+        };
+        let s1 = HotSegment {
+            step: Index,
+            byte_start: 1,
+            byte_end: prefix_len,
+            stability: Stable1h,
+            content_hash: "0".repeat(64),
+        };
+        let d = AssembleHotData {
+            bytes: prefix_len,
+            prefix,
+            segments: Some(vec![s0, s1]),
+        };
+        assert!(matches!(
+            validate_segments(&d),
+            Err(AssembleHotValidationError::NotCharBoundary {
+                index: 0,
+                offset: 1
+            })
         ));
     }
 

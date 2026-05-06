@@ -345,6 +345,12 @@ impl<T: Transport> Sdk<T> {
     /// the vault's [`HotMemoryConfig`]. No store is required — the assembler
     /// reads recipe steps from config and emits stub bodies (real source loading
     /// is tracked under #193). Validates `args` before dispatch.
+    ///
+    /// `args.budget` and `args.session_id` are validated for shape but **not yet
+    /// honored** — bodies are stubbed to `""` so the budget cannot be exceeded
+    /// and the assembler is session-agnostic. Both will be threaded through once
+    /// real loading lands (#193). The SDK emits a `tracing::debug!` event when
+    /// either field is supplied so callers can audit the drop in logs.
     pub fn assemble_hot(
         &self,
         args: &AssembleHotArgs,
@@ -352,6 +358,15 @@ impl<T: Transport> Sdk<T> {
         use cairn_core::generated::envelope::ResponseVerb;
 
         validate_assemble_hot(args)?;
+
+        if args.budget.is_some() || args.session_id.is_some() {
+            tracing::debug!(
+                budget = ?args.budget,
+                session_id = ?args.session_id,
+                "assemble_hot: budget/session_id accepted but not yet honored \
+                 (stub-body assembler; tracked under #193)"
+            );
+        }
 
         match cairn_core::verbs::assemble_hot::assemble_hot(&self.config.vault.hot_memory) {
             Ok(data) => Ok(VerbResponse {
