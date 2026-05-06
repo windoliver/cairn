@@ -1541,17 +1541,28 @@ In `run_with_context` (around line 109 of the same file), after the existing cap
         // mcp_graph_tools_available so the latter never sees a
         // synthetic default capability set.
         //
-        // **Resolver probe (split-brain guard).** When the static
-        // predicate returns Available *and* a scope resolver is
-        // wired, we also call `resolver.allowed_scopes(ctx)` here
-        // with the principal from `ResolvedMcpScope`. The MCP
-        // request path (`materialize_graph_request`, Plan C Task
-        // 13) makes the exact same call at request time. If the
-        // resolver errors or returns empty, MCP would deny the
-        // request — so reporting Available in status would lie.
-        // We downgrade to `ResolvedAvailability::ResolverEmpty`
-        // (carries the error if any) so status and MCP report the
-        // same thing.
+        // **Resolver probe (best-effort split-brain guard).** When
+        // the static predicate returns Available *and* a scope
+        // resolver is wired, we also call
+        // `resolver.allowed_scopes(ctx)` here with the principal
+        // from `ResolvedMcpScope` and a synthetic `request_id`
+        // sentinel (`"cairn-status-probe"`).
+        //
+        // **Parity scope.** This guarantees status / MCP parity
+        // **only for context-insensitive resolvers** — concretely,
+        // for `ConfigBackedScope` (Plan A Task 2), which derives
+        // its allowed scopes from the principal alone and ignores
+        // `request_id`. The `McpSessionScope` trait is deliberately
+        // generic; a future resolver MAY couple its verdict to
+        // request-time metadata not available at status time, in
+        // which case `cairn status` reports the result of the
+        // synthetic probe — not the per-request outcome MCP will
+        // actually return. The status output is therefore a
+        // deterministic snapshot of the configured surface, not a
+        // promise about every future request. Plan A's only wired
+        // resolver is `ConfigBackedScope`, so the parity claim
+        // holds today; Plan C documents this caveat in the spec
+        // before adding new resolver kinds.
         let avail: ResolvedAvailability = match &probe_outcome {
             ProbeOutcome::Capabilities(caps) => {
                 let predicate = cfg.mcp_graph_tools_available(

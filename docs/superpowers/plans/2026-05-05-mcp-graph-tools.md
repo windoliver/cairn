@@ -559,11 +559,11 @@ Spec: §2.1.0, §3.1. Returns `{ id, echoed_name: Some(input), edge_count }`. Lo
   use cairn_core::domain::graph::normalize::normalize_entity_name;
 
   impl GraphQueries {
-      pub fn get_entity_by_name(
+      pub async fn get_entity_by_name(
           &self,
-          name: &str,
-      ) -> rusqlite::Result<Option<EntityHit>> {
-          let norm = normalize_entity_name(name);
+          name: String,
+      ) -> Result<Option<EntityHit>, StoreError> {
+          let norm = normalize_entity_name(&name);
           let (prefix, _binds) = Self::cte_prefix(&self.allowed_scopes);
           let sql = format!(
               "{prefix}
@@ -574,23 +574,35 @@ Spec: §2.1.0, §3.1. Returns `{ id, echoed_name: Some(input), edge_count }`. Lo
                WHERE v.name_norm = ?
                LIMIT 1"
           );
-          let conn = self.store.read_conn()?;
-          let mut stmt = conn.prepare(&sql)?;
           let mut binds: Vec<SqlValue> = Vec::new();
           self.push_prefix_binds(&mut binds);
           binds.push(SqlValue::Text(norm));
-          let mut rows = stmt.query(params_from_iter(binds))?;
-          if let Some(row) = rows.next()? {
-              Ok(Some(EntityHit {
-                  id: row.get(0)?,
-                  // §2.1.0: echo the caller's literal input, never the
-                  // canonical row name.
-                  echoed_name: Some(name.to_string()),
-                  edge_count: row.get(1)?,
-              }))
-          } else {
-              Ok(None)
-          }
+
+          let conn = self.store.read_conn()?;
+          // Async wrap (Task 3 canonical pattern): owned binds and SQL
+          // are moved into the DB-thread closure; closure returns owned
+          // DTOs. `name` is moved in too so we can echo the caller's
+          // literal input on the way out.
+          let echoed = name.clone();
+          let hit = conn
+              .call(move |c| {
+                  let mut stmt = c.prepare(&sql)?;
+                  let mut rows = stmt.query(params_from_iter(binds))?;
+                  let result = if let Some(row) = rows.next()? {
+                      Some(EntityHit {
+                          id: row.get(0)?,
+                          // §2.1.0: echo the caller's literal input,
+                          // never the canonical row name.
+                          echoed_name: Some(echoed),
+                          edge_count: row.get(1)?,
+                      })
+                  } else {
+                      None
+                  };
+                  Ok::<_, tokio_rusqlite::Error>(result)
+              })
+              .await?;
+          Ok(hit)
       }
   }
   ```
@@ -645,12 +657,12 @@ Spec: §3.2. One-hop, id-only edges, optional `relation` / `min_confidence`.
   }
 
   impl GraphQueries {
-      pub fn get_neighbors(
+      pub async fn get_neighbors(
           &self,
-          seed: &str,
-          relation: Option<&str>,
+          seed: String,
+          relation: Option<String>,
           min_confidence: Option<f64>,
-      ) -> rusqlite::Result<Vec<GraphEdge>> {
+      ) -> Result<Vec<GraphEdge>, StoreError> {
           let (prefix, _binds) = Self::cte_prefix(&self.allowed_scopes);
           let sql = format!(
               "{prefix}
@@ -661,32 +673,38 @@ Spec: §3.2. One-hop, id-only edges, optional `relation` / `min_confidence`.
                  AND (?  IS NULL OR e.relation = ?)
                  AND (?  IS NULL OR e.confidence_score >= ?)"
           );
-          let conn = self.store.read_conn()?;
-          let mut stmt = conn.prepare(&sql)?;
           let mut binds: Vec<SqlValue> = Vec::new();
           self.push_prefix_binds(&mut binds);
-          binds.push(SqlValue::Text(seed.to_string()));
-          binds.push(SqlValue::Text(seed.to_string()));
-          let rel_param = relation.map(|s| SqlValue::Text(s.to_string()))
-              .unwrap_or(SqlValue::Null);
+          binds.push(SqlValue::Text(seed.clone()));
+          binds.push(SqlValue::Text(seed));
+          let rel_param = relation.map(SqlValue::Text).unwrap_or(SqlValue::Null);
           binds.push(rel_param.clone());
           binds.push(rel_param);
           let conf_param = min_confidence.map(SqlValue::Real)
               .unwrap_or(SqlValue::Null);
           binds.push(conf_param.clone());
           binds.push(conf_param);
-          let mut out = Vec::new();
-          let mut rows = stmt.query(params_from_iter(binds))?;
-          while let Some(row) = rows.next()? {
-              out.push(GraphEdge {
-                  id: row.get(0)?,
-                  source_id: row.get(1)?,
-                  target_id: row.get(2)?,
-                  relation: row.get(3)?,
-                  confidence_score: row.get(4)?,
-                  valid_at: row.get(5)?,
-              });
-          }
+
+          let conn = self.store.read_conn()?;
+          // Async wrap (Task 3 canonical pattern).
+          let out = conn
+              .call(move |c| {
+                  let mut stmt = c.prepare(&sql)?;
+                  let mut rows = stmt.query(params_from_iter(binds))?;
+                  let mut out = Vec::new();
+                  while let Some(row) = rows.next()? {
+                      out.push(GraphEdge {
+                          id: row.get(0)?,
+                          source_id: row.get(1)?,
+                          target_id: row.get(2)?,
+                          relation: row.get(3)?,
+                          confidence_score: row.get(4)?,
+                          valid_at: row.get(5)?,
+                      });
+                  }
+                  Ok::<_, tokio_rusqlite::Error>(out)
+              })
+              .await?;
           Ok(out)
       }
   }
@@ -741,19 +759,19 @@ Spec: §3.3 algorithm + per-wave SQL with `ROW_NUMBER()` partitioning. `IN (?,?,
   pub struct GraphNode { pub id: String }
 
   impl GraphQueries {
-      pub fn query_bfs(
+      pub async fn query_bfs(
           &self,
-          seed: &str,
+          seed: String,
           max_hops: u32,
           node_budget: usize,
-      ) -> rusqlite::Result<GraphSubgraph> {
+      ) -> Result<GraphSubgraph, StoreError> {
           let mut visited: IndexMap<String, GraphNode> = IndexMap::new();
           let mut edges:  Vec<GraphEdge> = Vec::new();
           let mut parent_of: HashMap<String, String> = HashMap::new();
           let mut depth_of:  HashMap<String, u32>    = HashMap::new();
 
           // Seed visibility check — falls through visible_nodes.
-          let Some(seed_hit) = self.get_entity_by_id(seed)? else {
+          let Some(seed_hit) = self.get_entity_by_id(seed.clone()).await? else {
               return Ok(GraphSubgraph {
                   nodes: vec![], edges: vec![],
                   parent_of, depth_of,
@@ -762,7 +780,7 @@ Spec: §3.3 algorithm + per-wave SQL with `ROW_NUMBER()` partitioning. `IN (?,?,
           visited.insert(seed_hit.id.clone(), GraphNode { id: seed_hit.id.clone() });
           depth_of.insert(seed_hit.id.clone(), 0);
 
-          let mut frontier: Vec<String> = vec![seed.to_string()];
+          let mut frontier: Vec<String> = vec![seed];
           for depth in 1..=max_hops {
               if frontier.is_empty() { break; }
               if visited.len() >= node_budget { break; }
@@ -770,8 +788,8 @@ Spec: §3.3 algorithm + per-wave SQL with `ROW_NUMBER()` partitioning. `IN (?,?,
               let visited_ids: Vec<String> =
                   visited.keys().cloned().collect();
               let wave = self.bfs_wave_sql(
-                  &frontier, &visited_ids, wave_cap,
-              )?;
+                  frontier.clone(), visited_ids, wave_cap,
+              ).await?;
               let mut next_frontier = Vec::new();
               for e in wave {
                   if visited.len() >= node_budget { break; }
@@ -795,12 +813,12 @@ Spec: §3.3 algorithm + per-wave SQL with `ROW_NUMBER()` partitioning. `IN (?,?,
           })
       }
 
-      fn bfs_wave_sql(
+      async fn bfs_wave_sql(
           &self,
-          frontier: &[String],
-          visited:  &[String],
+          frontier: Vec<String>,
+          visited:  Vec<String>,
           wave_cap: usize,
-      ) -> rusqlite::Result<Vec<GraphEdge>> {
+      ) -> Result<Vec<GraphEdge>, StoreError> {
           let (prefix, _binds) = Self::cte_prefix(&self.allowed_scopes);
           let frontier_in = Self::placeholders(frontier.len());
           let visited_filter = if visited.is_empty() {
@@ -839,34 +857,42 @@ Spec: §3.3 algorithm + per-wave SQL with `ROW_NUMBER()` partitioning. `IN (?,?,
                ORDER BY confidence_score DESC, id ASC
                LIMIT ?"
           );
-          let conn = self.store.read_conn()?;
-          let mut stmt = conn.prepare(&sql)?;
           let mut binds: Vec<SqlValue> = Vec::new();
           self.push_prefix_binds(&mut binds);
           // frontier appears 3× in SQL above
           for _ in 0..3 {
-              for f in frontier {
+              for f in &frontier {
                   binds.push(SqlValue::Text(f.clone()));
               }
           }
-          for v in visited {
+          for v in &visited {
               binds.push(SqlValue::Text(v.clone()));
           }
           binds.push(SqlValue::Integer(wave_cap as i64));
-          let mut out = Vec::new();
-          let mut rows = stmt.query(params_from_iter(binds))?;
-          // Stream — break the moment visited_len would exceed budget.
-          while let Some(row) = rows.next()? {
-              out.push(GraphEdge {
-                  id: row.get(0)?,
-                  source_id: row.get(1)?,
-                  target_id: row.get(2)?,
-                  relation: row.get(3)?,
-                  confidence_score: row.get(4)?,
-                  valid_at: row.get(5)?,
-              });
-              if out.len() >= wave_cap { break; }
-          }
+
+          let conn = self.store.read_conn()?;
+          // Async wrap (Task 3 canonical pattern). The wave_cap break
+          // moves into the closure with the rest of the row loop.
+          let out = conn
+              .call(move |c| {
+                  let mut stmt = c.prepare(&sql)?;
+                  let mut rows = stmt.query(params_from_iter(binds))?;
+                  let mut out = Vec::new();
+                  // Stream — break the moment visited_len exceeds budget.
+                  while let Some(row) = rows.next()? {
+                      out.push(GraphEdge {
+                          id: row.get(0)?,
+                          source_id: row.get(1)?,
+                          target_id: row.get(2)?,
+                          relation: row.get(3)?,
+                          confidence_score: row.get(4)?,
+                          valid_at: row.get(5)?,
+                      });
+                      if out.len() >= wave_cap { break; }
+                  }
+                  Ok::<_, tokio_rusqlite::Error>(out)
+              })
+              .await?;
           Ok(out)
       }
   }
@@ -917,13 +943,13 @@ Spec: §3.3 property 5. Reuse the BFS edge set; reorder via DFS over `parent_of`
 - [ ] **Implement.**
   ```rust
   impl GraphQueries {
-      pub fn query_dfs(
+      pub async fn query_dfs(
           &self,
-          seed: &str,
+          seed: String,
           max_hops: u32,
           node_budget: usize,
-      ) -> rusqlite::Result<GraphSubgraph> {
-          let bfs = self.query_bfs(seed, max_hops, node_budget)?;
+      ) -> Result<GraphSubgraph, StoreError> {
+          let bfs = self.query_bfs(seed.clone(), max_hops, node_budget).await?;
           // Build child map from parent_of.
           let mut children: HashMap<String, Vec<String>> = HashMap::new();
           for (child, edge_id) in &bfs.parent_of {
@@ -947,7 +973,7 @@ Spec: §3.3 property 5. Reuse the BFS edge set; reorder via DFS over `parent_of`
               kids.sort_by_key(|c| bfs_order.get(c.as_str()).copied().unwrap_or(usize::MAX));
           }
           let mut order: Vec<GraphNode> = Vec::with_capacity(bfs.nodes.len());
-          let mut stack: Vec<String> = vec![seed.to_string()];
+          let mut stack: Vec<String> = vec![seed];
           let mut emitted: std::collections::HashSet<String> =
               std::collections::HashSet::new();
           while let Some(top) = stack.pop() {
@@ -1090,12 +1116,12 @@ Spec: §3.4. Defaults match active-at-now. Scope filter unconditional. Endpoint 
   }
 
   impl GraphQueries {
-      pub fn timeline(
+      pub async fn timeline(
           &self,
-          seed: &str,
+          seed: String,
           include_history: bool,
           include_expired: bool,
-      ) -> rusqlite::Result<Vec<TimelineEntry>> {
+      ) -> Result<Vec<TimelineEntry>, StoreError> {
           // Note: we re-emit the scope_filtered CTE here rather than reusing
           // visible_edges_raw, because timeline relaxes temporal predicates
           // independently. visible_nodes is reused for endpoint liveness.
@@ -1131,37 +1157,44 @@ Spec: §3.4. Defaults match active-at-now. Scope filter unconditional. Endpoint 
                  )
                ORDER BY valid_at ASC, created_at ASC"
           );
-          let conn = self.store.read_conn()?;
-          let mut stmt = conn.prepare(&sql)?;
           let mut binds: Vec<SqlValue> = Vec::new();
           self.push_prefix_binds(&mut binds);
           // scope_filtered CTE uses one extra block of scope params.
           for tup in &self.allowed_scopes {
-              for v in tup.dimension_iter() {
+              for (_, v) in tup.dimension_iter() {
                   binds.push(match v {
                       Some(s) => SqlValue::Text(s.to_string()),
                       None    => SqlValue::Null,
                   });
               }
           }
-          binds.push(SqlValue::Text(seed.to_string()));
-          binds.push(SqlValue::Text(seed.to_string()));
+          binds.push(SqlValue::Text(seed.clone()));
+          binds.push(SqlValue::Text(seed));
           binds.push(SqlValue::Integer(if include_expired { 1 } else { 0 }));
           binds.push(SqlValue::Integer(if include_history { 1 } else { 0 }));
           binds.push(SqlValue::Integer(self.now));
           binds.push(SqlValue::Integer(self.now));
-          let mut out = Vec::new();
-          let mut rows = stmt.query(params_from_iter(binds))?;
-          while let Some(row) = rows.next()? {
-              out.push(TimelineEntry {
-                  id: row.get(0)?, source_id: row.get(1)?,
-                  target_id: row.get(2)?, relation: row.get(3)?,
-                  confidence_score: row.get(4)?, valid_at: row.get(5)?,
-                  invalid_at: row.get(6)?, created_at: row.get(7)?,
-                  expired_at: row.get(8)?, tombstone_reason: row.get(9)?,
-                  source_record_id: row.get(10)?,
-              });
-          }
+
+          let conn = self.store.read_conn()?;
+          // Async wrap (Task 3 canonical pattern).
+          let out = conn
+              .call(move |c| {
+                  let mut stmt = c.prepare(&sql)?;
+                  let mut rows = stmt.query(params_from_iter(binds))?;
+                  let mut out = Vec::new();
+                  while let Some(row) = rows.next()? {
+                      out.push(TimelineEntry {
+                          id: row.get(0)?, source_id: row.get(1)?,
+                          target_id: row.get(2)?, relation: row.get(3)?,
+                          confidence_score: row.get(4)?, valid_at: row.get(5)?,
+                          invalid_at: row.get(6)?, created_at: row.get(7)?,
+                          expired_at: row.get(8)?, tombstone_reason: row.get(9)?,
+                          source_record_id: row.get(10)?,
+                      });
+                  }
+                  Ok::<_, tokio_rusqlite::Error>(out)
+              })
+              .await?;
           Ok(out)
       }
   }
@@ -1229,11 +1262,11 @@ Spec: §3.5. Bonus keyed on actual scope id, not `source_record_id`.
   }
 
   impl GraphQueries {
-      pub fn surprising_connections(
+      pub async fn surprising_connections(
           &self,
-          input: &[String],
+          input: Vec<String>,
           limit: usize,
-      ) -> rusqlite::Result<Vec<SurpriseHit>> {
+      ) -> Result<Vec<SurpriseHit>, StoreError> {
           if input.is_empty() { return Ok(vec![]); }
           let (prefix, _binds) = Self::cte_prefix(&self.allowed_scopes);
           let input_in = Self::placeholders(input.len());
@@ -1272,11 +1305,9 @@ Spec: §3.5. Bonus keyed on actual scope id, not `source_record_id`.
                ORDER BY score DESC, edge_id ASC
                LIMIT ?"
           );
-          let conn = self.store.read_conn()?;
-          let mut stmt = conn.prepare(&sql)?;
           let mut binds: Vec<SqlValue> = Vec::new();
           self.push_prefix_binds(&mut binds);
-          let json_array = serde_json::to_string(input)
+          let json_array = serde_json::to_string(&input)
               .unwrap_or_else(|_| "[]".to_string());
           binds.push(SqlValue::Text(json_array));
           for v in input.iter() {
@@ -1286,20 +1317,29 @@ Spec: §3.5. Bonus keyed on actual scope id, not `source_record_id`.
               binds.push(SqlValue::Text(v.clone()));
           }
           binds.push(SqlValue::Integer(limit as i64));
-          let mut out = Vec::new();
-          let mut rows = stmt.query(params_from_iter(binds))?;
-          while let Some(row) = rows.next()? {
-              out.push(SurpriseHit {
-                  edge: GraphEdge {
-                      id: row.get(0)?, source_id: row.get(1)?,
-                      target_id: row.get(2)?, relation: row.get(3)?,
-                      confidence_score: row.get(4)?, valid_at: row.get(5)?,
-                  },
-                  source_record_id: row.get(6)?,
-                  scope_id: row.get(7)?,
-                  score: row.get(8)?,
-              });
-          }
+
+          let conn = self.store.read_conn()?;
+          // Async wrap (Task 3 canonical pattern).
+          let out = conn
+              .call(move |c| {
+                  let mut stmt = c.prepare(&sql)?;
+                  let mut rows = stmt.query(params_from_iter(binds))?;
+                  let mut out = Vec::new();
+                  while let Some(row) = rows.next()? {
+                      out.push(SurpriseHit {
+                          edge: GraphEdge {
+                              id: row.get(0)?, source_id: row.get(1)?,
+                              target_id: row.get(2)?, relation: row.get(3)?,
+                              confidence_score: row.get(4)?, valid_at: row.get(5)?,
+                          },
+                          source_record_id: row.get(6)?,
+                          scope_id: row.get(7)?,
+                          score: row.get(8)?,
+                      });
+                  }
+                  Ok::<_, tokio_rusqlite::Error>(out)
+              })
+              .await?;
           Ok(out)
       }
   }
@@ -1520,20 +1560,24 @@ Spec: §4.2.
       arguments: Option<Map<String, Value>>,
   ) -> CallToolResult {
       let args = arguments.unwrap_or_default();
+      // All `queries.*` methods are `async fn` returning
+      // `Result<T, StoreError>` (see Task 1 "Async execution model").
+      // Every call site below `.await`s the future before mapping
+      // errors / serializing.
       let result: Result<Value, String> = match name {
           "graph.get_entity" => match serde_json::from_value::<GetEntityArgs>(
               Value::Object(args)) {
-              Ok(GetEntityArgs::ById { id }) => queries.get_entity_by_id(&id)
+              Ok(GetEntityArgs::ById { id }) => queries.get_entity_by_id(id).await
                   .map_err(|e| e.to_string())
                   .and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string())),
-              Ok(GetEntityArgs::ByName { name }) => queries.get_entity_by_name(&name)
+              Ok(GetEntityArgs::ByName { name }) => queries.get_entity_by_name(name).await
                   .map_err(|e| e.to_string())
                   .and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string())),
               Err(e) => Err(format!("invalid args: {e}")),
           },
           "graph.get_neighbors" => match serde_json::from_value::<GetNeighborsArgs>(
               Value::Object(args)) {
-              Ok(a) => queries.get_neighbors(&a.id, a.relation.as_deref(), a.min_confidence)
+              Ok(a) => queries.get_neighbors(a.id, a.relation, a.min_confidence).await
                   .map_err(|e| e.to_string())
                   .and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string())),
               Err(e) => Err(format!("invalid args: {e}")),
@@ -1543,8 +1587,8 @@ Spec: §4.2.
               Ok(a) => {
                   let max_hops = a.max_hops.min(5);
                   let res = match a.mode {
-                      TraversalMode::Bfs => queries.query_bfs(&a.seed, max_hops, a.node_budget as usize),
-                      TraversalMode::Dfs => queries.query_dfs(&a.seed, max_hops, a.node_budget as usize),
+                      TraversalMode::Bfs => queries.query_bfs(a.seed.clone(), max_hops, a.node_budget as usize).await,
+                      TraversalMode::Dfs => queries.query_dfs(a.seed.clone(), max_hops, a.node_budget as usize).await,
                   };
                   res.map_err(|e| e.to_string())
                       .and_then(|sg| {
@@ -1561,14 +1605,14 @@ Spec: §4.2.
           },
           "graph.timeline" => match serde_json::from_value::<TimelineArgs>(
               Value::Object(args)) {
-              Ok(a) => queries.timeline(&a.id, a.include_history, a.include_expired)
+              Ok(a) => queries.timeline(a.id, a.include_history, a.include_expired).await
                   .map_err(|e| e.to_string())
                   .and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string())),
               Err(e) => Err(format!("invalid args: {e}")),
           },
           "graph.surprising_connections" => match serde_json::from_value::<SurprisingArgs>(
               Value::Object(args)) {
-              Ok(a) => queries.surprising_connections(&a.ids, a.limit as usize)
+              Ok(a) => queries.surprising_connections(a.ids, a.limit as usize).await
                   .map_err(|e| e.to_string())
                   .and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string())),
               Err(e) => Err(format!("invalid args: {e}")),
