@@ -1202,7 +1202,7 @@ pub fn run(vault_root: &Path, config: CairnConfig) -> ExitCode {
     };
 
     let store = match cairn_store_sqlite::SqliteMemoryStore::open(
-        &vault_root.join(".cairn/cairn.db"),
+        &store_db_path(vault_root),
     ) {
         Ok(s) => Arc::new(s)
             as Arc<dyn cairn_core::contract::memory_store::MemoryStore>,
@@ -1487,11 +1487,17 @@ In `run_with_context` (around line 109 of the same file), after the existing cap
         // Build the same scope-resolver components the MCP handler
         // would build from this config. Reuses the helper from
         // Task 5 so there is exactly one path that derives them.
-        let scope_components =
-            crate::mcp::resolve_scope_components(cfg).ok().flatten();
+        // resolve_scope_components returns Option<ResolvedMcpScope>
+        // (Task 5). None means single_tenant is off or principal is
+        // missing — both are valid "no resolver" outcomes for the
+        // pure predicate input below; we do not collapse them into
+        // an error.
+        let scope_components: Option<crate::mcp::ResolvedMcpScope> =
+            crate::mcp::resolve_scope_components(cfg);
         let scope_for_predicate: Option<&dyn cairn_core::mcp_auth::McpSessionScope> =
-            scope_components.as_ref().map(|(s, _principal)| {
-                std::sync::Arc::as_ref(s) as &dyn cairn_core::mcp_auth::McpSessionScope
+            scope_components.as_ref().map(|r| {
+                std::sync::Arc::as_ref(&r.resolver)
+                    as &dyn cairn_core::mcp_auth::McpSessionScope
             });
 
         // Open the real store to read its capabilities. If the open
@@ -1542,7 +1548,7 @@ In `run_with_context` (around line 109 of the same file), after the existing cap
             // suffix when the store probe could not run, so a
             // misleading `unavailable (store does not advertise
             // graph_edges)` cannot stand in for a real verdict.
-            println!("{}", render_mcp_graph_line(&avail, probe_basis));
+            println!("{}", render_mcp_graph_line(&avail));
         }
         // JSON output is handled below by extending the existing
         // status payload — NOT by emitting a second JSON document.

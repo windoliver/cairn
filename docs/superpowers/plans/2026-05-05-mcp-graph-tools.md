@@ -48,13 +48,22 @@ Read paths only. No new migration. No new contract.
 
 ---
 
-## Task 1: `GraphQueries` skeleton + scope-clause builder
+## Task 1: `GraphQueries` skeleton + scope-clause builder + missing helpers
 
 **Files:**
 - `crates/cairn-store-sqlite/src/entity_graph/queries.rs` (Create)
 - `crates/cairn-store-sqlite/src/entity_graph/mod.rs` (Modify)
+- `crates/cairn-store-sqlite/src/store/mod.rs` (Modify — add `read_conn`)
+- `crates/cairn-core/src/domain/scope.rs` (Modify — add `dimension_iter`)
 
 Spec: §2.1, §3.0a, §3.0a-bis, §3.0b. Create the struct, the per-`ScopeTuple` six-dimension match clause builder, and a placeholder-list helper. No queries yet.
+
+**Prereq helpers landed in this task** (used across Tasks 3, 4, 5, 6, 9, 10):
+
+- `SqliteMemoryStore::read_conn(&self) -> Result<&Arc<AsyncConn>, StoreError>` — thin error-mapping wrapper over the existing `raw_conn() -> Option<&Arc<AsyncConn>>` so the read path can use `?` instead of unwrapping. Mirrors the existing `require_conn(method)` shape but with a fixed read-path label.
+- `ScopeTuple::dimension_iter(&self) -> impl Iterator<Item = (&'static str, Option<&str>)>` — yields the six bind dimensions (`tenant`, `workspace`, `session_id`, `entity`, `user`, `agent`) in the same order `scope_match_clause` emits them. Same constant list, exposed as an iterator so call sites bind without duplicating the dimension order.
+
+Both helpers are intentionally tiny and stay in this task — they are not separate prereq tasks.
 
 - [ ] **Write failing test.**
   ```rust
@@ -169,7 +178,43 @@ Spec: §2.1, §3.0a, §3.0a-bis, §3.0b. Create the struct, the per-`ScopeTuple`
   // crates/cairn-store-sqlite/src/entity_graph/mod.rs
   pub mod queries;
   ```
-- [ ] **Run-pass.** `cargo nextest run -p cairn-store-sqlite --test graph_queries -- scope_clause`
+  ```rust
+  // crates/cairn-store-sqlite/src/store/mod.rs — append.
+  impl SqliteMemoryStore {
+      /// Read-path connection accessor. Returns the same `Arc<AsyncConn>`
+      /// as `raw_conn()` but maps the absent-store case to `StoreError`
+      /// so read methods can use `?` directly. Used by `GraphQueries`.
+      pub fn read_conn(&self) -> Result<&Arc<AsyncConn>, StoreError> {
+          self.require_conn("read_conn")
+      }
+  }
+  ```
+  ```rust
+  // crates/cairn-core/src/domain/scope.rs — append to `impl ScopeTuple`.
+  impl ScopeTuple {
+      /// Iterate the six bind dimensions in the canonical order used by
+      /// `GraphQueries::scope_match_clause`. Yields `(name, Option<&str>)`
+      /// so each call site can bind exactly six placeholders per tuple.
+      ///
+      /// `project` is intentionally omitted — it has no IDL filter
+      /// predicate (see field doc) and is not part of the scope-by-
+      /// provenance match clause.
+      #[must_use]
+      pub fn dimension_iter(&self) -> impl Iterator<Item = (&'static str, Option<&str>)> + '_ {
+          [
+              ("tenant", self.tenant.as_deref()),
+              ("workspace", self.workspace.as_deref()),
+              ("session_id", self.session_id.as_deref()),
+              ("entity", self.entity.as_deref()),
+              ("user", self.user.as_deref()),
+              ("agent", self.agent.as_deref()),
+          ]
+          .into_iter()
+      }
+  }
+  ```
+  Add a unit test next to the iterator confirming the order matches `scope_match_clause` (six entries, in `tenant, workspace, session_id, entity, user, agent` order).
+- [ ] **Run-pass.** `cargo nextest run -p cairn-store-sqlite --test graph_queries -- scope_clause && cargo nextest run -p cairn-core -- domain::scope::tests::dimension_iter`
 - [ ] **Commit.**
   ```bash
   git commit -m "$(cat <<'EOF'
@@ -433,7 +478,7 @@ Spec: §2.1.0 (id-only return), §3.1. Returns `{ id, edge_count }` — no `name
       }
   }
   ```
-  `ScopeTuple::dimension_iter` is assumed from Plan A. If absent, lift the closure inline (six match arms in fixed order).
+  `ScopeTuple::dimension_iter` was added in Task 1 (this plan); same fixed order as `scope_match_clause`.
 - [ ] **Run-pass.** `cargo nextest run -p cairn-store-sqlite --test graph_queries -- get_entity_by_id`
 - [ ] **Commit.**
   ```bash
@@ -1694,48 +1739,59 @@ Spec: §2.1. Same predicate as `call_tool`. `tools/list` resolves the current re
 
 Spec: §6. Plan A landed the enum and stub; this task fills in the `Available` arm.
 
+**API stability.** Plan A pinned the predicate signature as a *pure precondition* over `(scope: Option<&dyn McpSessionScope>, transport, store_caps)` — no `ctx`, no resolver call. We do **not** change that signature here. The single resolver call lives in `Handler::materialize_graph_request` (Task 13), which calls this predicate first and then resolves `allowed_scopes` exactly once. This task is a one-line flip of the Plan A fall-through.
+
 - [ ] **Write failing test.**
   ```rust
+  // crates/cairn-core/src/config/tests.rs (extends Plan A's tests)
   #[test]
   fn mcp_graph_tools_available_returns_five_when_all_conditions_hold() {
       let cfg = config_with_single_tenant_stdio();
       let store_caps = cairn_core::contract::memory_store::MemoryStoreCapabilities {
           graph_edges: true, ..Default::default()
       };
-      let scope = static_scope_resolver(vec![ScopeTuple::default()]);
-      let ctx = McpAuthContext { principal: &PrincipalId::for_test(), request_id: &Default::default() };
-      let av = cfg.mcp_graph_tools_available(&store_caps, Some(&scope), McpTransport::Stdio, &ctx);
+      let scope = StaticScope::new(vec![ScopeTuple::default()]);
+      let av = cfg.mcp_graph_tools_available(
+          Some(&scope),
+          McpTransport::Stdio,
+          &store_caps,
+      );
       assert!(matches!(av, McpGraphAvailability::Available { tool_count: 5 }));
   }
   ```
 - [ ] **Run-fail.** `cargo nextest run -p cairn-core -- mcp_graph_tools_available_returns_five`
-- [ ] **Implement.** Replace Plan A's `Available { tool_count: 0 }` stub:
+- [ ] **Implement.** Flip Plan A's fall-through (the body that today returns `UnavailableNoStoreCapability` after every precondition has already passed). The signature, the precondition order, and the early-return arms are unchanged:
   ```rust
   // crates/cairn-core/src/config/mod.rs
+  // (signature, doc, and early-return arms identical to Plan A — only the
+  //  fall-through changes)
   impl CairnConfig {
       pub fn mcp_graph_tools_available(
           &self,
-          store_caps: &MemoryStoreCapabilities,
-          scope: Option<&dyn McpSessionScope>,
-          transport: McpTransport,
-          ctx: &McpAuthContext<'_>,
-      ) -> McpGraphAvailability {
-          if transport == McpTransport::Stdio && !self.mcp.stdio.single_tenant {
-              return McpGraphAvailability::UnavailableSingleTenantOff;
-          }
-          if !store_caps.graph_edges {
-              return McpGraphAvailability::UnavailableNoStoreCapability;
-          }
-          let Some(s) = scope else {
-              return McpGraphAvailability::UnavailableNoScopeResolver;
-          };
-          match s.allowed_scopes(ctx) {
-              Ok(v) if !v.is_empty() => McpGraphAvailability::Available { tool_count: 5 },
-              _ => McpGraphAvailability::UnavailableNoScopeResolver,
+          scope: Option<&dyn crate::mcp_auth::McpSessionScope>,
+          transport: crate::mcp_auth::McpTransport,
+          store_caps: &crate::contract::memory_store::MemoryStoreCapabilities,
+      ) -> crate::mcp_auth::McpGraphAvailability {
+          use crate::mcp_auth::{McpGraphAvailability, McpTransport};
+          match transport {
+              McpTransport::Stdio => {
+                  if !self.mcp.stdio.single_tenant {
+                      return McpGraphAvailability::UnavailableSingleTenantOff;
+                  }
+                  if scope.is_none() {
+                      return McpGraphAvailability::UnavailableNoScopeResolver;
+                  }
+                  if !store_caps.graph_edges {
+                      return McpGraphAvailability::UnavailableNoStoreCapability;
+                  }
+                  // Plan C: graph tools have landed; advertise them.
+                  McpGraphAvailability::Available { tool_count: 5 }
+              }
           }
       }
   }
   ```
+  Note: the predicate intentionally does **not** call `scope.allowed_scopes(ctx)`. That resolver call would add a within-request TOCTOU between `tools/list` and `tools/call`. The single resolver call lives in `Handler::materialize_graph_request` (Task 13), which materializes the request bundle once and carries it into dispatch.
 - [ ] **Run-pass.** `cargo nextest run -p cairn-core -- mcp_graph_tools_available_returns_five`
 - [ ] **Commit.**
   ```bash
@@ -2002,31 +2058,44 @@ Spec: §5.3 EOF tail. Mirror `rmcp::JsonRpcMessageCodec::decode_eof`: if the tra
 **Files:**
 - `crates/cairn-mcp/src/lib.rs` (Modify)
 
-Plan A's `serve_stdio_with_store(store, scope, config, principal)` exists; today it hands `tokio::io::stdin()` straight to rmcp. Insert the relay between them.
+**API stability.** Plan A pinned `serve_stdio_with_store(store: Arc<dyn MemoryStore>, scope: Arc<dyn McpSessionScope>, config: CairnConfig, principal: ScopeTuple) -> Result<(), TransportError>`. We do **not** change that signature here. The only change is *internal*: replace the direct `rmcp::transport::io::stdio()` transport with a duplex whose read half is fed by `relay::run_relay(stdin, …)`. CLI wiring, error type, and parameter types stay byte-for-byte identical to Plan A.
 
-- [ ] **Write failing test.** (Already covered by Tasks 16/17/18; no new test, but add an integration smoke test that constructs the server and verifies it reads from a piped duplex.) Skip dedicated test — integration covered downstream.
-- [ ] **Run-fail.** `cargo check -p cairn-mcp --locked`
-- [ ] **Implement.**
+- [ ] **Write failing test.** (Relay behaviour itself is covered by Tasks 16/17/18.) Add one smoke test in `crates/cairn-mcp/tests/relay_integration.rs` that pipes a blank line followed by an `initialize` request through `serve_stdio_with_store` via a `tokio::io::duplex` and asserts the server still initializes.
+- [ ] **Run-fail.** `cargo check -p cairn-mcp --locked && cargo nextest run -p cairn-mcp --test relay_integration`
+- [ ] **Implement.** Modify the *body* of the existing Plan A entrypoint — the signature is unchanged:
   ```rust
+  // crates/cairn-mcp/src/lib.rs — Plan A entrypoint, body modified.
   pub async fn serve_stdio_with_store(
-      store: Arc<SqliteMemoryStore>,
-      scope: Option<Arc<dyn McpSessionScope>>,
-      config: CairnConfig,
-      principal: Option<PrincipalId>,
-  ) -> anyhow::Result<()> {
+      store: std::sync::Arc<dyn cairn_core::contract::memory_store::MemoryStore>,
+      scope: std::sync::Arc<dyn cairn_core::mcp_auth::McpSessionScope>,
+      config: cairn_core::config::CairnConfig,
+      principal: cairn_core::domain::ScopeTuple,
+  ) -> Result<(), TransportError> {
+      // Insert relay between OS stdin and rmcp. stdout is unchanged.
       let (relay_writer, framer_reader) = tokio::io::duplex(64 * 1024);
-      tokio::spawn(async move {
+      let relay_task = tokio::spawn(async move {
           if let Err(e) = relay::run_relay(tokio::io::stdin(), relay_writer).await {
-              tracing::error!(error = %e, "stdio relay terminated");
+              tracing::warn!(error = %e, "stdio relay terminated");
           }
       });
-      let server = build_server(store, scope, config, principal);
+
+      let handler = CairnMcpHandler::with_store_and_scope(store, scope, config, principal);
       let stdout = tokio::io::stdout();
-      // rmcp serve over (framer_reader, stdout)
-      rmcp::serve_server(server, (framer_reader, stdout)).await?;
-      Ok(())
+      let service = handler
+          .serve((framer_reader, stdout))
+          .await
+          .map_err(|e| TransportError::Service(e.to_string()))?;
+      let result = service
+          .waiting()
+          .await
+          .map_err(|e| TransportError::Service(e.to_string()));
+
+      relay_task.abort();
+      let _ = relay_task.await; // best-effort drain on shutdown
+      result.map(|_| ())
   }
   ```
+  The CLI call site from Plan A (`rt.block_on(cairn_mcp::serve_stdio_with_store(store, scope, cfg, principal))`) is unchanged; no new types (`PrincipalId`, optional scope, `anyhow::Result`) are introduced.
 - [ ] **Run-pass.** `cargo check -p cairn-mcp --locked && cargo nextest run -p cairn-mcp --locked`
 - [ ] **Commit.**
   ```bash
