@@ -47,9 +47,23 @@ pub(crate) fn store_db_path(vault_root: &std::path::Path) -> std::path::PathBuf 
 
 /// Run the MCP stdio server.
 ///
+/// `probe_binding` and `binding_origin` come from the CLI's vault
+/// resolver: when `probe_binding` is `true` and the opt-in
+/// `single_tenant=true` path is taken, the vault must already be
+/// bound (`.cairn/vault.id` present) before SQLite is opened —
+/// otherwise the open would silently materialize a fresh database
+/// in an unbound directory. The legacy `single_tenant=false`
+/// manifest path skips the gate to keep pre-Plan-A deployments
+/// byte-identical.
+///
 /// Exit codes: 0 success, 69 `EX_UNAVAILABLE` (transport/IO/store), 78 `EX_CONFIG`.
 #[must_use]
-pub fn run(vault_root: &Path, config: CairnConfig) -> ExitCode {
+pub fn run(
+    vault_root: &Path,
+    config: &CairnConfig,
+    probe_binding: bool,
+    binding_origin: &str,
+) -> ExitCode {
     if let Err(e) = config.validate_mcp() {
         eprintln!("cairn mcp: config error — {e}");
         return ExitCode::from(78);
@@ -69,11 +83,38 @@ pub fn run(vault_root: &Path, config: CairnConfig) -> ExitCode {
     // Compatibility invariant: opt-in branch resolves FIRST. The
     // single_tenant=false fallback must NOT open SQLite or scan the
     // vault — pre-Plan-A `cairn mcp` deployments stay byte-identical.
-    let result = match resolve_scope_components(&config) {
+    let result = match resolve_scope_components(config) {
         Some(ResolvedMcpScope {
             resolver,
             principal,
         }) => {
+            // Vault-binding gate: the graph-tools path is about to
+            // open and migrate <vault>/.cairn/cairn.db, which must
+            // not run against a directory that is not actually a
+            // bound Cairn vault. Mirrors the gate `cairn status`
+            // applies. Skipped on CwdFallback (`probe_binding =
+            // false`) — that case is treated as "no vault" rather
+            // than "wrong vault" because the resolver gave us a
+            // synthetic CWD path with no user intent behind it; the
+            // open below will surface a clearer "store init" error
+            // if the directory really is not a vault.
+            if probe_binding {
+                match crate::verbs::status::probe_vault_binding(vault_root) {
+                    crate::verbs::status::VaultBinding::Bound => {}
+                    crate::verbs::status::VaultBinding::Unbound => {
+                        eprintln!(
+                            "cairn mcp: {binding_origin} {} is not a Cairn vault \
+                             (no .cairn/vault.id) — run `cairn bootstrap` first",
+                            vault_root.display()
+                        );
+                        return ExitCode::from(78);
+                    }
+                    crate::verbs::status::VaultBinding::Invalid(reason) => {
+                        eprintln!("cairn mcp: vault binding error — {reason}");
+                        return ExitCode::from(78);
+                    }
+                }
+            }
             let sqlite_store: Arc<cairn_store_sqlite::SqliteMemoryStore> =
                 match rt.block_on(cairn_store_sqlite::open(&store_db_path(vault_root))) {
                     Ok(s) => Arc::new(s),
@@ -90,12 +131,14 @@ pub fn run(vault_root: &Path, config: CairnConfig) -> ExitCode {
                 store,
                 sqlite_store,
                 resolver,
-                config,
+                config.clone(),
                 principal,
             ))
         }
         None => {
             // No opt-in: deprecated unwired path. NO SQLite open.
+            // Vault binding intentionally not probed — this surface
+            // does not touch the filesystem.
             #[allow(deprecated)]
             {
                 rt.block_on(cairn_mcp::serve_stdio())

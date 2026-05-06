@@ -222,11 +222,25 @@ fn main() -> ExitCode {
         Some(("plugins", sub)) => run_plugins(sub),
         Some(("bootstrap", sub)) => run_bootstrap(sub),
         Some(("mcp", _sub)) => {
-            let (vault_root, config) = match resolve_vault_and_config(explicit_vault.as_deref()) {
-                Ok(v) => v,
-                Err(code) => return code,
+            let (vault_root, source, config) =
+                match resolve_vault_and_config(explicit_vault.as_deref()) {
+                    Ok(v) => v,
+                    Err(code) => return code,
+                };
+            // The binding gate only matters on the opt-in
+            // single_tenant=true path (which opens SQLite). The
+            // CwdFallback case still bypasses because there is no
+            // vault.id to probe — `mcp::run` will reject it on the
+            // graph-tools path with the same EX_CONFIG, but the
+            // legacy unwired manifest is allowed through.
+            let probe_binding = source != VaultResolutionSource::CwdFallback;
+            let binding_origin = match source {
+                VaultResolutionSource::Explicit => "--vault target",
+                VaultResolutionSource::CwdWalk => "vault discovered via cwd",
+                VaultResolutionSource::RegistryDefault => "registry default vault",
+                VaultResolutionSource::CwdFallback => "current directory",
             };
-            cairn_cli::mcp::run(&vault_root, config)
+            cairn_cli::mcp::run(&vault_root, &config, probe_binding, binding_origin)
         }
         Some(("vault", sub)) => run_vault(sub),
         Some(("skill", sub)) => run_skill(sub),
@@ -362,7 +376,14 @@ fn run_handshake(sub: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
 /// callers can return early with a typed exit code.
 fn resolve_vault_and_config(
     explicit: Option<&str>,
-) -> Result<(std::path::PathBuf, cairn_core::config::CairnConfig), ExitCode> {
+) -> Result<
+    (
+        std::path::PathBuf,
+        VaultResolutionSource,
+        cairn_core::config::CairnConfig,
+    ),
+    ExitCode,
+> {
     let (vault_root, source) = match resolve_vault_or_cwd(explicit) {
         Ok(v) => v,
         Err(e) => {
@@ -370,54 +391,13 @@ fn resolve_vault_and_config(
             return Err(ExitCode::from(78)); // EX_CONFIG
         }
     };
-    // Vault-binding gate: refuse to start the MCP server (and the
-    // SQLite open/migration that follows) against a path that is not
-    // a bound Cairn vault. Without this gate, `cairn mcp` would
-    // create or migrate a fresh database under
-    // `<dir>/.cairn/cairn.db` for any directory the operator
-    // happens to land in — single_tenant deployments would silently
-    // strand data in unbound directories that other verbs (`search`,
-    // `admin`, `flush`) then reject. Mirrors the gate `cairn status`
-    // applies before `compute_capabilities`. The bare `CwdFallback`
-    // case (no walk-up hit, no registry default, no explicit flag)
-    // still falls through to the explicit-bind error message below
-    // because the resolver returned a synthetic CWD path that almost
-    // certainly is not a vault.
-    if source != VaultResolutionSource::CwdFallback {
-        match verbs::status::probe_vault_binding(&vault_root) {
-            verbs::status::VaultBinding::Bound => {}
-            verbs::status::VaultBinding::Unbound => {
-                let origin = match source {
-                    VaultResolutionSource::Explicit => "--vault target",
-                    VaultResolutionSource::CwdWalk => "vault discovered via cwd",
-                    VaultResolutionSource::RegistryDefault => "registry default vault",
-                    VaultResolutionSource::CwdFallback => unreachable!(),
-                };
-                eprintln!(
-                    "cairn mcp: {origin} {} is not a Cairn vault \
-                     (no .cairn/vault.id) — run `cairn bootstrap` first",
-                    vault_root.display()
-                );
-                return Err(ExitCode::from(78)); // EX_CONFIG
-            }
-            verbs::status::VaultBinding::Invalid(reason) => {
-                eprintln!("cairn mcp: vault binding error — {reason}");
-                return Err(ExitCode::from(78)); // EX_CONFIG
-            }
-        }
-    } else {
-        // CwdFallback for `mcp` is a hard error: the server would
-        // otherwise materialize a vault under whatever directory the
-        // operator ran the command from. `status` tolerates this case
-        // because reporting empty capabilities is non-destructive;
-        // `mcp` cannot.
-        eprintln!(
-            "cairn mcp: no vault specified and current directory {} is not a Cairn vault \
-             (no .cairn/vault.id) — pass --vault NAME or run `cairn bootstrap` here first",
-            vault_root.display()
-        );
-        return Err(ExitCode::from(78)); // EX_CONFIG
-    }
+    // The vault-binding gate moved into `cairn_cli::mcp::run`, which
+    // applies it only on the opt-in `single_tenant=true` graph-tools
+    // path. The legacy `single_tenant=false` deployment must continue
+    // to reach the unwired manifest fallback even outside a bound
+    // vault — that surface does not open SQLite, so there is no risk
+    // of stranding data. Gating here would be a user-visible
+    // compatibility regression (round-1 review of round-10 patch).
     let config =
         match cairn_cli::config::load(&vault_root, &cairn_cli::config::CliOverrides::default()) {
             Ok(c) => c,
@@ -426,7 +406,7 @@ fn resolve_vault_and_config(
                 return Err(ExitCode::from(78)); // EX_CONFIG
             }
         };
-    Ok((vault_root, config))
+    Ok((vault_root, source, config))
 }
 
 fn run_status(sub: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
