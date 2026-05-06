@@ -280,6 +280,61 @@ No new migration required.
 
 ## 3. Query semantics
 
+### 3.0a Stable-lineage authorization predicate
+
+`records` is bitemporally versioned: `record_id` identifies a
+concrete version, `target_id` is the stable lineage key, and at
+most one row per `target_id` carries `active = 1`. A graph edge's
+`source_record_id` points at a *concrete* version that may be
+superseded by a newer in-scope version moments later in the
+normal upsert flow. Authorizing strictly on
+`r.record_id = e.source_record_id AND r.active = 1` would make
+graph reads go dark whenever the source record is replaced —
+even though the underlying fact is still authoritative.
+
+The spec therefore authorizes through **stable lineage**: an edge
+is in scope iff *some* currently-active, non-tombstoned record
+sharing the same `target_id` as `e.source_record_id` is in
+`allowed_scopes`. This is the **single shared provenance
+predicate** every CTE in this spec applies — visible_edges, the
+timeline scope_filtered CTE, surprising_connections' edge_scope,
+and every node-visibility branch.
+
+```sql
+-- AuthorizedSource(:src_record_id) — the canonical predicate.
+EXISTS (
+  SELECT 1
+  FROM records r_src
+  JOIN records r_active
+    ON r_active.target_id = r_src.target_id
+  WHERE r_src.record_id   = :src_record_id
+    AND r_active.scope    IN (?, ?, ...)   -- :allowed_scopes
+    AND r_active.active     = 1
+    AND r_active.tombstoned = 0
+)
+```
+
+A test must cover: an edge whose `source_record_id` points at a
+*superseded* (`active = 0`) record stays visible, because a newer
+version of the same `target_id` is `active = 1` and in scope.
+Tombstoning the entire `target_id` chain (no `active = 1` row
+remaining) removes the edge.
+
+### 3.0b Set-valued parameter binding
+
+The current SQLite open path (`crates/cairn-store-sqlite/src/
+open.rs`) registers `vec0` for the embedding extension but does
+**not** load the `carray` / `rarray` virtual-table extension. The
+spec therefore uses **generated `IN (?, ?, ...)` placeholders**
+for every set-valued parameter (`:allowed_scopes`, `:frontier`,
+`:visited`, `:input`), not `rarray(...)`. Re-prepared statements
+per wave are acceptable — the cost is negligible against the
+correctness gain of running on the existing connection setup.
+
+This applies to **all** SQL in this spec, not just the BFS
+frontier. Earlier `rarray(...)` mentions in shared predicates are
+read as `IN (?, ?, ...)` for implementation purposes.
+
 ### 3.0 Single shared `visible_edges` primitive
 
 Every graph read in this spec must derive from one shared
@@ -307,22 +362,24 @@ WITH visible_edges AS (
     AND e.valid_at  <= :now
     AND (e.invalid_at IS NULL OR e.invalid_at > :now)
     AND e.source_record_id IS NOT NULL
-    AND EXISTS (
-      SELECT 1 FROM records r
-      WHERE r.record_id = e.source_record_id
-        AND r.scope IN rarray(:allowed_scopes)
-        AND r.active     = 1                    -- live row
-        AND r.tombstoned = 0                    -- not deleted
+    AND EXISTS (                                  -- §3.0a
+      SELECT 1
+      FROM records r_src
+      JOIN records r_active
+        ON r_active.target_id = r_src.target_id
+      WHERE r_src.record_id   = e.source_record_id
+        AND r_active.scope    IN (?, ?, ...)      -- :allowed_scopes
+        AND r_active.active     = 1
+        AND r_active.tombstoned = 0
     )
 )
 ```
 
-The record-lifecycle predicate (`active = 1 AND tombstoned = 0`)
-is part of the scope check by definition — a tombstoned source
-record cannot continue to authorize edges sourced from it. Every
-scope EXISTS clause in this spec applies the same predicate; the
-`scope_filtered` CTE in `graph.timeline` and the modal-scope CTE
-in `graph.surprising_connections` are no exception.
+The stable-lineage predicate from §3.0a is part of the scope
+check by definition — a tombstoned target chain cannot continue
+to authorize edges sourced from it, but normal supersession of a
+single record version does not. Every scope EXISTS clause in
+this spec applies the same predicate.
 
 Likewise a derived **`visible_nodes`** primitive — a node is
 "visible" iff its provenance can be established through any
@@ -374,17 +431,20 @@ visible_nodes AS (
         -- entity_episodes columns per migration 0044:
         --   episode_id     TEXT REFERENCES records(record_id)
         --   entity_node_id TEXT REFERENCES entity_nodes(id)
-        -- Episode provenance must require the backing record to
-        -- be active and non-tombstoned, otherwise deleted source
-        -- content keeps the entity visible forever (records are
-        -- tombstoned in place, so the episode row alone is not
-        -- sufficient).
+        -- Episode provenance uses the §3.0a stable-lineage
+        -- predicate so a normal record supersession does not
+        -- transiently hide the entity. Tombstoning the entire
+        -- target chain (no active version remains in scope)
+        -- removes visibility.
         SELECT 1 FROM entity_episodes ep
-        JOIN records r ON r.record_id = ep.episode_id
+        JOIN records r_src
+          ON r_src.record_id = ep.episode_id
+        JOIN records r_active
+          ON r_active.target_id = r_src.target_id
         WHERE ep.entity_node_id = n.id
-          AND r.scope IN rarray(:allowed_scopes)
-          AND r.active     = 1                  -- live row
-          AND r.tombstoned = 0                  -- not deleted
+          AND r_active.scope    IN (?, ?, ...)
+          AND r_active.active     = 1
+          AND r_active.tombstoned = 0
       )
       OR EXISTS (
         -- Past-invalidated, non-tombstoned, NOT future-dated.
@@ -392,15 +452,26 @@ visible_nodes AS (
         -- provenance that makes a node discoverable — they are
         -- invisible to every other tool path. Tombstoned edges
         -- (expired_at IS NOT NULL) cannot resurrect deleted
-        -- entities.
+        -- entities. Authorization uses the stable-lineage
+        -- predicate (§3.0a), not the concrete record_id, so
+        -- normal record supersession cannot transiently hide
+        -- the node mid-update.
         SELECT 1 FROM entity_edges he
-        JOIN records r ON r.record_id = he.source_record_id
         WHERE (he.source_id = n.id OR he.target_id = n.id)
           AND he.expired_at IS NULL
-          AND he.valid_at  <= :now                  -- not future
+          AND he.valid_at   <= :now                 -- not future
           AND he.invalid_at IS NOT NULL
           AND he.invalid_at <= :now                 -- past-invalid
-          AND r.scope IN rarray(:allowed_scopes)
+          AND EXISTS (                              -- §3.0a
+            SELECT 1
+            FROM records r_src
+            JOIN records r_active
+              ON r_active.target_id = r_src.target_id
+            WHERE r_src.record_id   = he.source_record_id
+              AND r_active.scope    IN (?, ?, ...)  -- :allowed_scopes
+              AND r_active.active     = 1
+              AND r_active.tombstoned = 0
+          )
       )
     )
 )
@@ -698,18 +769,20 @@ relaxes it.
 
 ```sql
 WITH scope_filtered AS (
-  -- Same record-lifecycle predicate as visible_edges (§3.0).
-  -- Tombstoning or deactivating the source record removes its
-  -- edges from the timeline, exactly as it does from every other
-  -- tool — there is no audit-view exception.
+  -- Same stable-lineage predicate as visible_edges (§3.0a).
+  -- Tombstoning the target chain removes edges from the
+  -- timeline; normal record supersession does not.
   SELECT e.* FROM entity_edges e
   WHERE e.source_record_id IS NOT NULL
     AND EXISTS (
-      SELECT 1 FROM records r
-      WHERE r.record_id = e.source_record_id
-        AND r.scope IN rarray(:allowed_scopes)
-        AND r.active     = 1
-        AND r.tombstoned = 0
+      SELECT 1
+      FROM records r_src
+      JOIN records r_active
+        ON r_active.target_id = r_src.target_id
+      WHERE r_src.record_id   = e.source_record_id
+        AND r_active.scope    IN (?, ?, ...)
+        AND r_active.active     = 1
+        AND r_active.tombstoned = 0
     )
 )
 SELECT id, source_id, target_id, relation, confidence_score,
@@ -744,11 +817,18 @@ Negative tests:
    present.
 4. `expired_at IS NOT NULL` with `include_expired = false` →
    absent regardless of `include_history`.
-5. **Tombstoned source record (`r.tombstoned = 1`)** → absent
-   from the timeline regardless of any flag combination. Asserts
-   the record-lifecycle predicate is applied to the audit view.
-6. **Inactive source record (`r.active = 0`)** → absent from the
-   timeline regardless of any flag combination.
+5. **Tombstoned target chain** → absent from the timeline
+   regardless of any flag combination. Asserts the §3.0a
+   stable-lineage predicate is applied to the audit view.
+6. **Superseded record version (active = 0 on the exact
+   `source_record_id`, but a newer version of the same
+   `target_id` is `active = 1` and in scope)** → still
+   **present** in the timeline. Asserts that normal record
+   supersession does not transiently hide the edge.
+7. **Same target chain superseded *out of scope*** (active row
+   has scope outside `allowed_scopes`) → **absent**. Asserts
+   that the predicate uses the active version's scope, not the
+   superseded version's.
 
 ### 3.5 `graph.surprising_connections`
 
