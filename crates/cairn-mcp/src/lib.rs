@@ -12,6 +12,7 @@
 
 pub mod error;
 pub mod generated;
+pub mod graph_tools;
 pub mod handler;
 
 pub use error::TransportError;

@@ -37,6 +37,7 @@ pub struct GraphNode {
 }
 
 /// A surprising-connection hit: an edge scored by cross-scope bonus (§3.5).
+#[derive(Serialize)]
 pub struct SurpriseHit {
     /// The edge that was scored.
     pub edge: GraphEdge,
@@ -71,6 +72,7 @@ pub struct GraphSubgraph {
 /// `name` and `summary` are cross-scope columns and must not be echoed
 /// back from the DB. `echoed_name` carries the caller's literal input
 /// string when the `ByName` arm was used — it is never read from the DB.
+#[derive(Serialize)]
 pub struct EntityHit {
     /// The entity's canonical id.
     pub id: String,
@@ -83,6 +85,7 @@ pub struct EntityHit {
 }
 
 /// A single edge entry in the timeline view for a given seed entity (§3.4).
+#[derive(Serialize)]
 pub struct TimelineEntry {
     /// The edge's canonical id.
     pub id: String,

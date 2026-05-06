@@ -1,0 +1,295 @@
+//! Graph tool registry and dispatch for the Cairn MCP adapter (§4.1, §4.2).
+//!
+//! Exposes [`GRAPH_TOOLS`], a static slice of [`GraphToolDecl`] entries that
+//! describe the five graph tools, and [`dispatch`], which routes a tool-call
+//! by name to the appropriate [`GraphQueries`] method.
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
+
+/// A statically-declared graph tool entry: name, description, and a lazily
+/// initialised JSON-schema bytes slice (serialised schemars output).
+pub struct GraphToolDecl {
+    /// MCP tool name, e.g. `"graph.query"`.
+    pub name: &'static str,
+    /// Human-readable description sent to the host in `tools/list`.
+    pub description: &'static str,
+    /// Lazily-populated schema bytes (initialised on first call to
+    /// [`schema_of`]).
+    pub schema: &'static OnceLock<Vec<u8>>,
+    /// Zero-argument closure that produces the JSON-schema bytes.
+    pub schema_for: fn() -> Vec<u8>,
+}
+
+fn schema_bytes<T: JsonSchema>() -> Vec<u8> {
+    let s = schemars::schema_for!(T);
+    serde_json::to_vec(&s).unwrap_or_default()
+}
+
+// ----- per-tool input types -------------------------------------------------
+
+/// Input for `graph.get_entity`: look up by `id` **or** by `name`; both
+/// fields may not be present simultaneously (enforced by `deny_unknown_fields`
+/// on each variant).
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum GetEntityArgs {
+    /// Look up an entity by its canonical id.
+    ById {
+        /// Canonical entity id.
+        id: String,
+    },
+    /// Look up an entity by its display name.
+    ByName {
+        /// Display name to search for.
+        name: String,
+    },
+}
+
+/// Input for `graph.get_neighbors`.
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GetNeighborsArgs {
+    /// Source/target entity id.
+    pub id: String,
+    /// Optional relation filter.
+    #[serde(default)]
+    pub relation: Option<String>,
+    /// Optional minimum confidence threshold.
+    #[serde(default)]
+    pub min_confidence: Option<f64>,
+}
+
+/// Input for `graph.query` (BFS or DFS traversal).
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QueryGraphArgs {
+    /// Seed entity id to start traversal from.
+    pub seed: String,
+    /// Maximum hop depth (capped at 5 in dispatch).
+    #[serde(default = "default_max_hops")]
+    pub max_hops: u32,
+    /// Maximum number of nodes to visit.
+    #[serde(default = "default_node_budget")]
+    pub node_budget: u32,
+    /// Approximate token budget for serialised edges.
+    #[serde(default = "default_token_budget")]
+    pub token_budget: u32,
+    /// Traversal mode: `"bfs"` (default) or `"dfs"`.
+    #[serde(default)]
+    pub mode: TraversalMode,
+}
+
+fn default_max_hops() -> u32 {
+    3
+}
+fn default_node_budget() -> u32 {
+    64
+}
+fn default_token_budget() -> u32 {
+    8192
+}
+
+/// Traversal strategy for `graph.query`.
+#[derive(Default, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum TraversalMode {
+    /// Breadth-first search (default).
+    #[default]
+    Bfs,
+    /// Depth-first search.
+    Dfs,
+}
+
+/// Input for `graph.timeline`.
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TimelineArgs {
+    /// Entity id whose timeline to fetch.
+    pub id: String,
+    /// Include historical (superseded) edges.
+    #[serde(default)]
+    pub include_history: bool,
+    /// Include expired/tombstoned edges.
+    #[serde(default)]
+    pub include_expired: bool,
+}
+
+/// Input for `graph.surprising_connections`.
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SurprisingArgs {
+    /// Entity ids to score connections between.
+    pub ids: Vec<String>,
+    /// Maximum number of hits to return.
+    #[serde(default = "default_surprise_limit")]
+    pub limit: u32,
+}
+
+fn default_surprise_limit() -> u32 {
+    16
+}
+
+// ----- registry -------------------------------------------------------------
+
+macro_rules! tool {
+    ($name:literal, $desc:literal, $args:ty) => {{
+        static SCHEMA: OnceLock<Vec<u8>> = OnceLock::new();
+        GraphToolDecl {
+            name: $name,
+            description: $desc,
+            schema: &SCHEMA,
+            schema_for: || schema_bytes::<$args>(),
+        }
+    }};
+}
+
+/// Static registry of all five graph tools.
+pub static GRAPH_TOOLS: &[GraphToolDecl] = &[
+    tool!(
+        "graph.query",
+        "BFS/DFS from a seed entity within hop and token budget. \
+         Discovered nodes are returned id-only to avoid cross-scope name leaks.",
+        QueryGraphArgs
+    ),
+    tool!(
+        "graph.get_entity",
+        "Look up an entity by id (returns {id, edge_count}) or name \
+         (returns {id, echoed_name, edge_count}).",
+        GetEntityArgs
+    ),
+    tool!(
+        "graph.get_neighbors",
+        "Return one-hop in-scope edges incident to the given id. Optional \
+         relation and min_confidence filters.",
+        GetNeighborsArgs
+    ),
+    tool!(
+        "graph.timeline",
+        "Return all currently-visible edges for an entity ordered by valid_at. \
+         include_history and include_expired flags opt into broader windows; \
+         scope filter is unconditional.",
+        TimelineArgs
+    ),
+    tool!(
+        "graph.surprising_connections",
+        "Score in-scope edges between input entities; cross-scope (relative \
+         to the modal records.scope) gets a 2× confidence bonus.",
+        SurprisingArgs
+    ),
+];
+
+/// Return (and lazily initialise) the JSON-schema bytes for a [`GraphToolDecl`].
+#[must_use]
+pub fn schema_of(decl: &GraphToolDecl) -> &'static [u8] {
+    decl.schema.get_or_init(|| (decl.schema_for)())
+}
+
+// ----- dispatch -------------------------------------------------------------
+
+use cairn_store_sqlite::entity_graph::queries::GraphQueries;
+use rmcp::model::{CallToolResult, Content};
+use serde_json::{Map, Value};
+
+/// Route an MCP `tools/call` request to the appropriate [`GraphQueries`]
+/// method, deserialise the arguments, await the async query, and serialise
+/// the result into a [`CallToolResult`].
+///
+/// # Errors
+///
+/// This function never returns a Rust error. All failure modes (unknown tool,
+/// invalid arguments, store errors) are returned as
+/// `CallToolResult { is_error: Some(true), ... }`.
+pub async fn dispatch(
+    queries: &GraphQueries,
+    name: &str,
+    arguments: Option<Map<String, Value>>,
+) -> CallToolResult {
+    let args = arguments.unwrap_or_default();
+    let result: Result<Value, String> = match name {
+        "graph.get_entity" => {
+            match serde_json::from_value::<GetEntityArgs>(Value::Object(args)) {
+                Ok(GetEntityArgs::ById { id }) => queries
+                    .get_entity_by_id(id)
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string())),
+                Ok(GetEntityArgs::ByName { name }) => queries
+                    .get_entity_by_name(name)
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string())),
+                Err(e) => Err(format!("invalid args: {e}")),
+            }
+        }
+        "graph.get_neighbors" => {
+            match serde_json::from_value::<GetNeighborsArgs>(Value::Object(args)) {
+                Ok(a) => queries
+                    .get_neighbors(a.id, a.relation, a.min_confidence)
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string())),
+                Err(e) => Err(format!("invalid args: {e}")),
+            }
+        }
+        "graph.query" => {
+            match serde_json::from_value::<QueryGraphArgs>(Value::Object(args)) {
+                Ok(a) => {
+                    let max_hops = a.max_hops.min(5);
+                    let node_budget =
+                        usize::try_from(a.node_budget).unwrap_or(usize::MAX);
+                    let token_budget =
+                        usize::try_from(a.token_budget).unwrap_or(usize::MAX);
+                    let res = match a.mode {
+                        TraversalMode::Bfs => {
+                            queries.query_bfs(a.seed, max_hops, node_budget).await
+                        }
+                        TraversalMode::Dfs => {
+                            queries.query_dfs(a.seed, max_hops, node_budget).await
+                        }
+                    };
+                    res.map_err(|e| e.to_string()).and_then(|sg| {
+                        let trimmed =
+                            GraphQueries::truncate_to_token_budget(&sg.edges, token_budget);
+                        serde_json::to_value(serde_json::json!({
+                            "nodes": sg.nodes,
+                            "edges": trimmed,
+                        }))
+                        .map_err(|e| e.to_string())
+                    })
+                }
+                Err(e) => Err(format!("invalid args: {e}")),
+            }
+        }
+        "graph.timeline" => {
+            match serde_json::from_value::<TimelineArgs>(Value::Object(args)) {
+                Ok(a) => queries
+                    .timeline(a.id, a.include_history, a.include_expired)
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string())),
+                Err(e) => Err(format!("invalid args: {e}")),
+            }
+        }
+        "graph.surprising_connections" => {
+            match serde_json::from_value::<SurprisingArgs>(Value::Object(args)) {
+                Ok(a) => {
+                    let limit = usize::try_from(a.limit).unwrap_or(usize::MAX);
+                    queries
+                        .surprising_connections(a.ids, limit)
+                        .await
+                        .map_err(|e| e.to_string())
+                        .and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string()))
+                }
+                Err(e) => Err(format!("invalid args: {e}")),
+            }
+        }
+        _ => Err(format!("unknown graph tool: {name}")),
+    };
+
+    match result {
+        Ok(v) => CallToolResult::structured(v),
+        Err(e) => CallToolResult::error(vec![Content::text(e)]),
+    }
+}

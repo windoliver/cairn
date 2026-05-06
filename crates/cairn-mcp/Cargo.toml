@@ -12,8 +12,11 @@ description = "MCP adapter surface for the Cairn verb layer."
 
 [dependencies]
 cairn-core = { workspace = true }
+cairn-store-sqlite = { workspace = true }
 async-trait = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
+schemars = { workspace = true }
 rmcp = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
