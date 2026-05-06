@@ -7,8 +7,8 @@
 //!
 //! Task 21 adds five adversarial fixtures:
 //! - [`endpoint_tombstone_fixture`] — node B is tombstoned; edges to B hidden.
-//! - [`lineage_rescope_fixture`]    — immutable provenance: scope_a sees edge,
-//!   scope_b (active head) does not.
+//! - [`lineage_rescope_fixture`]    — immutable provenance: `scope_a` sees edge,
+//!   `scope_b` (active head) does not.
 //! - [`future_provenance_fixture`]  — edge only valid in the future.
 //! - [`episode_tombstone_fixture`]  — entity reachable only via tombstoned record.
 //! - [`scope_user_fixture`]         — user-scoped record; `user=None` must not match.
@@ -452,7 +452,7 @@ pub struct EndpointTombstoneFixture {
 
 /// Fixture: node B has `expired_at` set (entity-level tombstone).
 ///
-/// One edge connects A→B under scope_a, but B's `expired_at` is NOT NULL.
+/// One edge connects A→B under `scope_a`, but B's `expired_at` is NOT NULL.
 /// `visible_nodes` filters out expired nodes, so no edge involving B must
 /// appear in any tool's output.
 ///
@@ -548,7 +548,7 @@ pub struct LineageRescopeFixture {
     pub store: Arc<SqliteMemoryStore>,
     /// `now` timestamp.
     pub now: i64,
-    /// Original record scope; source_record_id of the edge.
+    /// Original record scope; `source_record_id` of the edge.
     pub scope_a: ScopeTuple,
     /// Active-head scope (promoted record); NOT the edge provenance.
     pub scope_b: ScopeTuple,
@@ -558,19 +558,19 @@ pub struct LineageRescopeFixture {
     pub node_b: String,
 }
 
-/// Fixture: immutable provenance — scope_a sees the edge, scope_b does not.
+/// Fixture: immutable provenance — `scope_a` sees the edge, `scope_b` does not.
 ///
 /// `r_orig` has `scope=scope_a, active=0`; the edge's `source_record_id`
 /// points to `r_orig`.  `r_new` has `scope=scope_b, active=1, tombstoned=0`
 /// and shares `target_id` with `r_orig`.
 ///
-/// scope_a query: r_src = r_orig (scope_a ✓) → r_active = r_new (active=1) → edge visible.
-/// scope_b query: r_src = r_orig (scope != scope_b) → no match → edge hidden.
+/// `scope_a` query: `r_src` = `r_orig` (`scope_a` ✓) → `r_active` = `r_new` (active=1) → edge visible.
+/// `scope_b` query: `r_src` = `r_orig` (scope != `scope_b`) → no match → edge hidden.
 ///
 /// # Panics
 ///
 /// Panics on any database error — intended for use in tests only.
-#[allow(clippy::expect_used)]
+#[allow(clippy::expect_used, clippy::similar_names)]
 pub async fn lineage_rescope_fixture() -> LineageRescopeFixture {
     use cairn_core::contract::memory_store::MemoryStore as _;
 

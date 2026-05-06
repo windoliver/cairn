@@ -400,7 +400,7 @@ async fn tools_list_via_wire(handler: CairnMcpHandler) -> Vec<String> {
     names
 }
 
-/// Cell 1 — single_tenant=false (graph tools must be absent regardless of
+/// Cell 1 — `single_tenant=false` (graph tools must be absent regardless of
 /// other conditions).
 #[tokio::test]
 async fn manifest_matrix_single_tenant_off() {
@@ -420,8 +420,8 @@ async fn manifest_matrix_single_tenant_off() {
     insta::assert_json_snapshot!("manifest_single_tenant_off", names);
 }
 
-/// Cell 2 — single_tenant=true but store does NOT advertise graph_edges
-/// (FixtureStore has graph_edges=false).
+/// Cell 2 — `single_tenant=true` but store does NOT advertise `graph_edges`
+/// (`FixtureStore` has `graph_edges=false`).
 #[tokio::test]
 async fn manifest_matrix_graph_edges_false() {
     let f = tiny_graph_async().await;
@@ -447,7 +447,7 @@ async fn manifest_matrix_graph_edges_false() {
     insta::assert_json_snapshot!("manifest_graph_edges_false", names);
 }
 
-/// Cell 3 — single_tenant=true, graph_edges=true, but no scope resolver wired
+/// Cell 3 — `single_tenant=true`, `graph_edges=true`, but no scope resolver wired
 /// (Absent). `materialize_graph_request` short-circuits on `scope.is_none()`.
 #[tokio::test]
 async fn manifest_matrix_resolver_absent() {
@@ -465,7 +465,7 @@ async fn manifest_matrix_resolver_absent() {
     insta::assert_json_snapshot!("manifest_resolver_absent", names);
 }
 
-/// Cell 4 — single_tenant=true, graph_edges=true, resolver always errors.
+/// Cell 4 — `single_tenant=true`, `graph_edges=true`, resolver always errors.
 #[tokio::test]
 async fn manifest_matrix_resolver_err() {
     let f = tiny_graph_async().await;
@@ -484,7 +484,7 @@ async fn manifest_matrix_resolver_err() {
     insta::assert_json_snapshot!("manifest_resolver_err", names);
 }
 
-/// Cell 5 — single_tenant=true, graph_edges=true, resolver returns empty Vec.
+/// Cell 5 — `single_tenant=true`, `graph_edges=true`, resolver returns empty `Vec`.
 #[tokio::test]
 async fn manifest_matrix_resolver_ok_empty() {
     let f = tiny_graph_async().await;
@@ -503,8 +503,8 @@ async fn manifest_matrix_resolver_ok_empty() {
     insta::assert_json_snapshot!("manifest_resolver_ok_empty", names);
 }
 
-/// Cell 6 — all conditions met: Stdio + single_tenant=true + graph_edges=true
-/// + resolver=OkNonEmpty.  Must advertise all five graph.* tools.
+/// Cell 6 — all conditions met: Stdio + `single_tenant=true` + `graph_edges=true`
+/// + `resolver=OkNonEmpty`.  Must advertise all five graph.* tools.
 #[tokio::test]
 async fn manifest_matrix_all_conditions_met() {
     let handler = build_handler_single_tenant_graph_capable().await;

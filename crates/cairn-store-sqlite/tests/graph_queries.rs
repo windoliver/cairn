@@ -1,7 +1,7 @@
 //! Integration tests for [`cairn_store_sqlite::entity_graph::queries::GraphQueries`].
 //!
-//! Tasks 1–10: scope-clause, CTE, BFS/DFS, get_entity, get_neighbors,
-//! timeline, surprising_connections, token-budget.
+//! Tasks 1–10: scope-clause, CTE, `BFS`/`DFS`, `get_entity`, `get_neighbors`,
+//! `timeline`, `surprising_connections`, token-budget.
 //! Task 21: five adversarial cross-tool tests for §3.0a-bis invariants.
 
 use cairn_core::domain::scope::ScopeTuple;
@@ -237,7 +237,7 @@ async fn tombstoned_endpoint_hidden_from_all_five_tools() {
 /// Lineage rescope — immutable provenance.
 ///
 /// The edge's source record has `scope=scope_a` (active=0).  The active head
-/// (`r_new`) has `scope=scope_b`.  Scope_a must see the edge; scope_b must not.
+/// (`r_new`) has `scope=scope_b`.  `Scope_a` must see the edge; `scope_b` must not.
 #[tokio::test(flavor = "current_thread")]
 async fn lineage_rescope_keys_off_immutable_provenance() {
     let f = cairn_test_fixtures::graph::lineage_rescope_fixture().await;
