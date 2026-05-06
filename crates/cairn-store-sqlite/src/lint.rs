@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use cairn_core::domain::{
     EdgeCandidate, EdgeConfidence, LintFinding, LintKind, Severity, choose_edge_keeper,
 };
-use rusqlite::Connection;
+use rusqlite::{Connection, TransactionBehavior};
 
 use crate::{StoreError, migrations::ensure_table};
 
@@ -58,7 +58,7 @@ pub fn resolve_edge_contradictions(
     ensure_table(conn, WAL_OPS_TABLE)?;
     ensure_table(conn, REPLAY_LEDGER_TABLE)?;
 
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let groups = live_edge_groups(&tx)?;
     let mut losers = Vec::new();
 
@@ -93,8 +93,8 @@ pub fn resolve_edge_contradictions(
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             (
                 operation_id,
-                "committed",
-                "lint",
+                "COMMITTED",
+                "lint_fix",
                 RESOLUTION_REASON,
                 "{}",
                 now,

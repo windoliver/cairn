@@ -252,14 +252,21 @@ fn fix_keeps_one_live_edge_and_records_wal_reason() {
         ]
     );
 
-    let wal_reason: String = conn
+    let wal_entry: (String, String, String) = conn
         .query_row(
-            "SELECT reason FROM wal_ops WHERE operation_id = ?1",
+            "SELECT state, kind, reason FROM wal_ops WHERE operation_id = ?1",
             ["01ARZ3NDEKTSV4RRFFQ69G5FAV"],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
-    assert_eq!(wal_reason, "lint:contradiction_resolution");
+    assert_eq!(
+        wal_entry,
+        (
+            "COMMITTED".to_owned(),
+            "lint_fix".to_owned(),
+            "lint:contradiction_resolution".to_owned(),
+        )
+    );
 
     let replay_reason: String = conn
         .query_row(
