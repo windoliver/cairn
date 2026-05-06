@@ -2595,6 +2595,15 @@ fn lint_response_accepts_edge_finding_fields() {
                     "kind": "contradictory_edge",
                     "severity": "warning",
                     "entities": ["edge-a", "edge-b"],
+                    "entity_id": "source-a",
+                    "relation": "depends_on",
+                    "conflict_group_id": "source-a:depends_on:target-b",
+                    "candidate_edge_ids": ["edge-a", "edge-b"],
+                    "chosen_edge_id": "edge-a",
+                    "fix_applied": true,
+                    "resolution_reason": "edge-a has higher confidence",
+                    "confidence_score": 0.92,
+                    "confidence": "EXTRACTED",
                     "message": "Two live edges share (source, target, relation)",
                     "suggestion": "Run `cairn lint --fix` to keep the higher-confidence edge"
                 },
@@ -2622,5 +2631,26 @@ fn lint_response_accepts_edge_finding_fields() {
     assert_eq!(
         data.findings[0].entities.as_deref(),
         Some(&["edge-a".to_string(), "edge-b".to_string()][..])
+    );
+    assert_eq!(data.findings[0].entity_id.as_deref(), Some("source-a"));
+    assert_eq!(data.findings[0].relation.as_deref(), Some("depends_on"));
+    assert_eq!(
+        data.findings[0].conflict_group_id.as_deref(),
+        Some("source-a:depends_on:target-b")
+    );
+    assert_eq!(
+        data.findings[0].candidate_edge_ids.as_deref(),
+        Some(&["edge-a".to_string(), "edge-b".to_string()][..])
+    );
+    assert_eq!(data.findings[0].chosen_edge_id.as_deref(), Some("edge-a"));
+    assert_eq!(data.findings[0].fix_applied, Some(true));
+    assert_eq!(
+        data.findings[0].resolution_reason.as_deref(),
+        Some("edge-a has higher confidence")
+    );
+    assert_eq!(data.findings[0].confidence_score, Some(0.92));
+    assert_eq!(
+        data.findings[0].confidence,
+        Some(cairn_core::generated::verbs::lint::LintDataFindingsConfidence::EXTRACTED)
     );
 }

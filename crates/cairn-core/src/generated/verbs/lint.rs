@@ -19,6 +19,18 @@ pub struct LintArgs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
+pub enum LintDataFindingsConfidence {
+    #[serde(rename = "AMBIGUOUS")]
+    AMBIGUOUS,
+    #[serde(rename = "INFERRED")]
+    INFERRED,
+    #[serde(rename = "EXTRACTED")]
+    EXTRACTED,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum LintDataFindingsKind {
     Contradiction,
     Orphan,
@@ -42,11 +54,29 @@ pub enum LintDataFindingsSeverity {
 #[serde(deny_unknown_fields)]
 pub struct LintDataFindings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_edge_ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chosen_edge_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<LintDataFindingsConfidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence_score: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict_group_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entities: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fix_applied: Option<bool>,
     pub kind: LintDataFindingsKind,
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub record_id: Option<crate::generated::common::Ulid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub severity: Option<LintDataFindingsSeverity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

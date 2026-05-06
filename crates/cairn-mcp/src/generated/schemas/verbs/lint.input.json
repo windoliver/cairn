@@ -23,12 +23,45 @@
           "items": {
             "additionalProperties": false,
             "properties": {
+              "candidate_edge_ids": {
+                "items": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "chosen_edge_id": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "confidence": {
+                "enum": [
+                  "AMBIGUOUS",
+                  "INFERRED",
+                  "EXTRACTED"
+                ],
+                "type": "string"
+              },
+              "confidence_score": {
+                "type": "number"
+              },
+              "conflict_group_id": {
+                "minLength": 1,
+                "type": "string"
+              },
               "entities": {
                 "items": {
                   "minLength": 1,
                   "type": "string"
                 },
                 "type": "array"
+              },
+              "entity_id": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "fix_applied": {
+                "type": "boolean"
               },
               "kind": {
                 "enum": [
@@ -48,6 +81,14 @@
               },
               "record_id": {
                 "$ref": "../common/primitives.json#/$defs/Ulid"
+              },
+              "relation": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "resolution_reason": {
+                "minLength": 1,
+                "type": "string"
               },
               "severity": {
                 "enum": [
