@@ -65,3 +65,15 @@ async fn get_entity_by_name_normalizes_and_echoes_input() {
     // echoed_name is the literal input, NOT a read of entity_nodes.name
     assert_eq!(hit.echoed_name.as_deref(), Some("Auth Service (v2)"));
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn get_neighbors_filters_by_relation_and_confidence() {
+    let f = cairn_test_fixtures::graph::tiny_graph().await;
+    let q = GraphQueries::new(f.store.clone(), vec![f.scope_a.clone()], f.now);
+    let edges = q
+        .get_neighbors(f.node_a.clone(), Some("calls".to_owned()), Some(0.7))
+        .await
+        .unwrap();
+    assert!(edges.iter().all(|e| e.relation == "calls"));
+    assert!(edges.iter().all(|e| e.confidence_score >= 0.7));
+}

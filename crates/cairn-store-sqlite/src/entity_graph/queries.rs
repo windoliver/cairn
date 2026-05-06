@@ -6,6 +6,23 @@ use std::sync::Arc;
 use crate::error::StoreError;
 use crate::store::SqliteMemoryStore;
 
+/// A single directed edge between two entities, returned by graph traversal
+/// queries. All fields are id-only per §2.1.0 — no cross-scope name columns.
+pub struct GraphEdge {
+    /// The edge's canonical id.
+    pub id: String,
+    /// The source entity id.
+    pub source_id: String,
+    /// The target entity id.
+    pub target_id: String,
+    /// The relation label (e.g. `"calls"`, `"depends_on"`).
+    pub relation: String,
+    /// Confidence score in `[0.0, 1.0]`.
+    pub confidence_score: f64,
+    /// Epoch-millisecond timestamp when the edge became valid.
+    pub valid_at: i64,
+}
+
 /// An entity returned by one of the `get_entity_*` query arms.
 ///
 /// Per §2.1.0: only `id` and an in-scope edge count are ever returned;
@@ -255,6 +272,66 @@ impl GraphQueries {
                 });
             }
         }
+    }
+
+    /// One-hop neighbor edges for `seed`, with optional relation and
+    /// confidence filters (§3.2).
+    ///
+    /// Returns every visible edge where `seed` is source or target, filtered
+    /// to `relation` when supplied and to `confidence_score >= min_confidence`
+    /// when supplied. `NULL` parameters are treated as "match all".
+    pub async fn get_neighbors(
+        &self,
+        seed: String,
+        relation: Option<String>,
+        min_confidence: Option<f64>,
+    ) -> Result<Vec<GraphEdge>, StoreError> {
+        let (prefix, _binds) = Self::cte_prefix(&self.allowed_scopes);
+        let sql = format!(
+            "{prefix}
+             neighbors AS (
+               SELECT e.id, e.source_id, e.target_id, e.relation,
+                      e.confidence_score, e.valid_at
+               FROM visible_edges e
+               WHERE (e.source_id = ? OR e.target_id = ?)
+                 AND (?  IS NULL OR e.relation = ?)
+                 AND (?  IS NULL OR e.confidence_score >= ?)
+             )
+             SELECT id, source_id, target_id, relation,
+                    confidence_score, valid_at
+             FROM neighbors"
+        );
+        let mut binds: Vec<SqlValue> = Vec::new();
+        self.push_prefix_binds(&mut binds);
+        binds.push(SqlValue::Text(seed.clone()));
+        binds.push(SqlValue::Text(seed));
+        let rel_param = relation.map_or(SqlValue::Null, SqlValue::Text);
+        binds.push(rel_param.clone());
+        binds.push(rel_param);
+        let conf_param = min_confidence.map_or(SqlValue::Null, SqlValue::Real);
+        binds.push(conf_param.clone());
+        binds.push(conf_param);
+
+        let conn = self.store.read_conn()?;
+        let out = conn
+            .call(move |c| {
+                let mut stmt = c.prepare(&sql)?;
+                let mut rows = stmt.query(params_from_iter(binds))?;
+                let mut out = Vec::new();
+                while let Some(row) = rows.next()? {
+                    out.push(GraphEdge {
+                        id: row.get(0)?,
+                        source_id: row.get(1)?,
+                        target_id: row.get(2)?,
+                        relation: row.get(3)?,
+                        confidence_score: row.get(4)?,
+                        valid_at: row.get(5)?,
+                    });
+                }
+                Ok::<_, tokio_rusqlite::Error>(out)
+            })
+            .await?;
+        Ok(out)
     }
 
     /// Id-only entity lookup with an in-scope edge count (§2.1.0, §3.1).
