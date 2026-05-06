@@ -60,15 +60,45 @@ pub(super) async fn llm_dedup(
 ) -> Result<Resolution, EntityResolutionError> {
     // The Tier-3 budget bounds wall-clock and tokens per call. Without
     // it, a wedged or mis-configured provider could block `resolve()`
-    // indefinitely (codex-review R3.3). `None` means unlimited; `bon`'s
-    // `maybe_<field>` accepts an `Option<T>` and is a no-op for `None`.
+    // indefinitely. `None` means unlimited; `bon`'s `maybe_<field>`
+    // accepts an `Option<T>` and is a no-op for `None`.
+    //
+    // R4.1: `req.budget` is advisory — a non-conforming provider can
+    // ignore it. Wall-clock containment is enforced here via
+    // `tokio::time::timeout`. Token containment still depends on the
+    // provider honouring the budget, but tokens cannot stall the
+    // process whereas wall-clock can.
+    let timeout_ms = budget.as_ref().and_then(|b| b.max_wall_ms);
     let req = CompletionRequest::builder()
         .prompt(dedup_prompt(candidate_name, &top_match.name))
         .schema(dedup_schema())
         .maybe_budget(budget)
         .build();
 
-    let out = match provider.complete(&req).await {
+    let complete_fut = provider.complete(&req);
+    let result = if let Some(ms) = timeout_ms {
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(u64::from(ms)),
+            complete_fut,
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(_elapsed) => {
+                // Treat resolver-enforced timeout the same as
+                // BudgetExceeded: a non-skippable LLM failure that
+                // surfaces typed for ops debugging. Privacy-safe — no
+                // raw payload existed yet at the timeout boundary.
+                return Err(EntityResolutionError::Llm {
+                    source: LlmError::BudgetExceeded,
+                });
+            }
+        }
+    } else {
+        complete_fut.await
+    };
+
+    let out = match result {
         Ok(o) => o,
         Err(LlmError::NotConfigured { .. } | LlmError::CapabilityMissing { .. }) => {
             return Ok(Resolution::New);
@@ -514,6 +544,66 @@ mod tests {
             );
         } else {
             panic!("expected LlmInvalidResponse");
+        }
+    }
+
+    #[tokio::test]
+    async fn timeout_fires_when_provider_ignores_budget() {
+        // Codex-review R4.1: a non-conforming provider that ignores
+        // `req.budget` could otherwise hang `resolve()` indefinitely.
+        // The resolver wraps `provider.complete()` in
+        // `tokio::time::timeout(llm_max_wall_ms)` — verify timeout
+        // surfaces as `EntityResolutionError::Llm{ source: BudgetExceeded }`.
+        struct SleepyLlm;
+
+        #[async_trait]
+        impl LLMProvider for SleepyLlm {
+            fn name(&self) -> &str {
+                "sleepy"
+            }
+            fn capabilities(&self) -> &LLMProviderCapabilities {
+                caps()
+            }
+            fn supported_contract_versions(&self) -> VersionRange {
+                versions()
+            }
+            async fn complete(
+                &self,
+                _req: &CompletionRequest,
+            ) -> Result<CompletionOutput, LlmError> {
+                // Sleep an order of magnitude past the timeout —
+                // provider ignores `req.budget` entirely. Real wall
+                // clock; test still completes in ~50 ms because the
+                // resolver's timeout fires first.
+                // Larger than any reasonable timeout so the resolver's
+                // `tokio::time::timeout` always fires first.
+                tokio::time::sleep(std::time::Duration::from_mins(1)).await;
+                Ok(CompletionOutput::Json(json!({
+                    "same": true,
+                    "confidence": 1.0,
+                    "reasoning": "should never reach"
+                })))
+            }
+        }
+
+        let provider = SleepyLlm;
+        let n = node("01HZE7JV5N0000000000000001", "AuthService");
+        let budget = Some(crate::config::ExtractBudget {
+            max_tokens: Some(256),
+            max_wall_ms: Some(50), // 50 ms timeout
+            max_turns: Some(1),
+        });
+        let err = llm_dedup(&provider, "auth_service", &n, 0.7, budget)
+            .await
+            .expect_err("invariant: timeout surfaces as EntityResolutionError::Llm");
+        match err {
+            EntityResolutionError::Llm { source } => {
+                assert!(
+                    matches!(source, LlmError::BudgetExceeded),
+                    "expected BudgetExceeded, got {source:?}"
+                );
+            }
+            other => panic!("expected Llm::BudgetExceeded, got {other:?}"),
         }
     }
 

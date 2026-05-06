@@ -1,29 +1,36 @@
 //! Tier 1 — name normalization and exact match.
 
+use unicode_normalization::UnicodeNormalization;
+
 use crate::domain::graph::{EntityId, EntityNode};
 
 /// Normalize an entity name for exact comparison.
 ///
-/// Pipeline (Unicode-aware, per issue #187 verbatim):
-/// 1. Lowercase via `char::to_lowercase` (Unicode, multi-codepoint).
-/// 2. Retain only Unicode alphanumerics (`char::is_alphanumeric`) plus
+/// Pipeline (Unicode-aware):
+/// 1. NFC normalization — collapse canonically-equivalent compositions.
+///    Without this, precomposed `é` (U+00E9) and decomposed `e` + U+0301
+///    yield different `name_norm` keys for visually identical names
+///    (codex-review R4.2).
+/// 2. Lowercase via `char::to_lowercase` (Unicode, multi-codepoint).
+/// 3. Retain only Unicode alphanumerics (`char::is_alphanumeric`) plus
 ///    ASCII whitespace (folded to a single `' '`).
-/// 3. Collapse runs of whitespace to single spaces.
-/// 4. Trim leading + trailing whitespace.
+/// 4. Collapse runs of whitespace to single spaces.
+/// 5. Trim leading + trailing whitespace.
 ///
 /// `normalize` is idempotent: `normalize(normalize(s)) == normalize(s)`
 /// (proptest in `proptests.rs`).
 ///
 /// Empty / all-punctuation / all-whitespace input yields an empty string;
-/// callers MUST treat that as "no candidate identity" — the resolver short-
-/// circuits to `Resolution::New` rather than allow an empty key to collide
-/// with another empty key (would otherwise force a false merge between
-/// e.g. `"!!!"` and `"???"`).
+/// the orchestrator returns `EntityResolutionError::EmptyNormalizedName`
+/// rather than allow an empty key to be persisted (would otherwise
+/// collide on the store's `UNIQUE(name_norm)` index).
 #[must_use]
 pub fn normalize(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut last_was_space = true; // suppresses leading whitespace
-    for c in s.chars() {
+    // NFC ensures canonical-equivalent forms compare equal; e.g.
+    // `Café` (U+00E9) and `Cafe\u{0301}` collapse to the same key.
+    for c in s.nfc() {
         if c.is_alphanumeric() {
             // `char::to_lowercase` returns an iterator (some codepoints
             // expand to multiple lowercase codepoints, e.g. German ß
@@ -120,6 +127,20 @@ mod tests {
         assert_ne!(normalize("Кириллица"), normalize("日本語"));
         assert!(!normalize("Кириллица").is_empty());
         assert!(!normalize("日本語").is_empty());
+    }
+
+    #[test]
+    fn nfc_collapses_canonical_equivalents() {
+        // Codex-review R4.2: precomposed `é` (U+00E9) and decomposed
+        // `e` + U+0301 are visually identical and must produce the
+        // same `name_norm` — otherwise Tier 1 misses and a duplicate
+        // entity is created.
+        assert_eq!(normalize("Café"), normalize("Cafe\u{0301}"));
+        // NFC also collapses Korean syllable forms.
+        assert_eq!(
+            normalize("\u{AC00}"),         // 가 (precomposed)
+            normalize("\u{1100}\u{1161}")  // ᄀ + ᅡ (jamo)
+        );
     }
 
     #[test]
