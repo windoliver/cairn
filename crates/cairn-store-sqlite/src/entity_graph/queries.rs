@@ -598,7 +598,15 @@ impl GraphQueries {
         max_hops: u32,
         node_budget: usize,
     ) -> Result<GraphSubgraph, StoreError> {
-        let bfs = self.query_bfs(seed.clone(), max_hops, node_budget).await?;
+        let bfs = self.query_bfs(seed, max_hops, node_budget).await?;
+        // Short-circuit when BFS returned an empty subgraph: that means the
+        // caller's seed was either out of scope or did not exist. We MUST
+        // NOT echo the raw request id into `nodes` — that would leak
+        // unauthorized/nonexistent seeds and diverge from BFS behavior on
+        // the same forbidden input.
+        if bfs.nodes.is_empty() {
+            return Ok(bfs);
+        }
         // Build child map from parent_of.
         let mut children: HashMap<String, Vec<String>> = HashMap::new();
         for (child, edge_id) in &bfs.parent_of {
@@ -623,7 +631,10 @@ impl GraphQueries {
             kids.sort_by_key(|c| bfs_order.get(c.as_str()).copied().unwrap_or(usize::MAX));
         }
         let mut order: Vec<GraphNode> = Vec::with_capacity(bfs.nodes.len());
-        let mut stack: Vec<String> = vec![seed];
+        // Seed the DFS stack from the BFS-authorized seed (always
+        // `bfs.nodes[0]`) instead of the caller's raw request id, so the
+        // DFS path can never surface an id that BFS already rejected.
+        let mut stack: Vec<String> = vec![bfs.nodes[0].id.clone()];
         let mut emitted: std::collections::HashSet<String> = std::collections::HashSet::new();
         while let Some(top) = stack.pop() {
             if !emitted.insert(top.clone()) {

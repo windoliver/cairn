@@ -38,6 +38,23 @@ impl SqliteMemoryStore {
         ),
     )]
     pub(crate) async fn do_upsert_entity(&self, node: &EntityNode) -> Result<EntityId, StoreError> {
+        // Reject an empty `name_norm` at the storage boundary. The shared
+        // `normalize_entity_name` helper returns `None` on
+        // punctuation/whitespace-only inputs precisely so distinct entities
+        // do not collapse onto a single empty dedup key, but `EntityNode` is
+        // a public struct with a raw `String` field — any caller that
+        // bypasses the helper could otherwise corrupt the name_norm UNIQUE
+        // index. Enforce here so the invariant lives at the write path,
+        // not call-site discipline.
+        if node.name_norm.is_empty() {
+            return Err(StoreError::SchemaDrift(
+                "entity_nodes.name_norm must not be empty — use \
+                 cairn_core::domain::graph::normalize_entity_name and \
+                 reject the None result before calling upsert_entity"
+                    .to_owned(),
+            ));
+        }
+
         let conn = self.require_conn("upsert_entity")?.clone();
 
         // Clone the small payload into the move closure.
