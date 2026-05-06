@@ -1,11 +1,14 @@
 //! End-to-end CLI snapshot for `cairn assemble_hot --json`. Pins the
-//! JSON wire shape against a real binary invocation in a tempdir vault.
+//! JSON wire shape against a real binary invocation in a bootstrapped
+//! tempdir vault.
 //!
-//! `assemble_hot` is fully wired and requires no pre-existing vault data —
-//! the stub-body assembler returns a committed envelope with six zero-length
-//! segments (the default recipe) from any working directory.
+//! The CLI fails closed on a non-vault working directory (`CwdFallback`),
+//! so the test bootstraps a real vault with `cairn_cli::vault::bootstrap`
+//! before invoking the binary.
 
 use std::process::Command;
+
+use cairn_cli::vault::{BootstrapOpts, bootstrap};
 
 fn cli() -> Command {
     Command::new(env!("CARGO_BIN_EXE_cairn"))
@@ -36,6 +39,11 @@ fn redact_operation_id(json: &str) -> String {
 #[test]
 fn cairn_assemble_hot_json_emits_segments() {
     let vault = tempfile::tempdir().expect("tempdir");
+    bootstrap(&BootstrapOpts {
+        vault_path: vault.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap vault");
 
     let output = cli()
         .current_dir(vault.path())

@@ -15,21 +15,48 @@ pub enum AssembleHotError {
     /// Segment construction or validation failed.
     #[error("segment construction: {0}")]
     Segments(#[from] AssembleHotValidationError),
+    /// The assembled prefix exceeds the vault's configured `max_bytes`
+    /// hot-memory budget.
+    #[error("hot memory exceeded budget: {got} > {max} bytes")]
+    BudgetExceeded {
+        /// Actual prefix length.
+        got: u64,
+        /// Configured `HotMemoryConfig.max_bytes`.
+        max: u64,
+    },
 }
 
 /// Run the hot-memory recipe and return a validated `AssembleHotData`.
 pub fn assemble_hot(config: &HotMemoryConfig) -> Result<AssembleHotData, AssembleHotError> {
+    assemble_hot_with_loader(config, load_step_body)
+}
+
+/// Variant of [`assemble_hot`] that accepts an explicit loader. Used by
+/// tests today; once #193 lands, the real loader will be threaded in via
+/// the same hook.
+pub fn assemble_hot_with_loader<F>(
+    config: &HotMemoryConfig,
+    mut loader: F,
+) -> Result<AssembleHotData, AssembleHotError>
+where
+    F: FnMut(HotRecipeStep) -> String,
+{
     let recipe: Vec<HotRecipeStep> = config
         .recipe
         .iter()
         .copied()
         .map(HotRecipeStep::from)
         .collect();
-    let bodies: Vec<String> = recipe.iter().copied().map(load_step_body).collect();
+    let bodies: Vec<String> = recipe.iter().copied().map(&mut loader).collect();
     let bodies_refs: Vec<&str> = bodies.iter().map(String::as_str).collect();
     let (prefix, segments) = build_segments(&recipe, &bodies_refs)?;
+    let bytes = prefix.len() as u64;
+    let max = u64::from(config.max_bytes);
+    if bytes > max {
+        return Err(AssembleHotError::BudgetExceeded { got: bytes, max });
+    }
     Ok(AssembleHotData {
-        bytes: prefix.len() as u64,
+        bytes,
         prefix,
         segments: Some(segments),
     })
@@ -68,6 +95,34 @@ mod tests {
         let data = assemble_hot(&cfg).unwrap();
         assert_eq!(data.prefix, "");
         assert_eq!(data.segments, Some(vec![]));
+    }
+
+    #[test]
+    fn assemble_hot_rejects_over_budget_recipe() {
+        // Use a non-stub loader to simulate #193's real loading path.
+        // max_bytes is 8, but each body is 4 bytes × 6 steps = 24 bytes.
+        let cfg = HotMemoryConfig {
+            max_bytes: 8,
+            ..HotMemoryConfig::default()
+        };
+        let err = assemble_hot_with_loader(&cfg, |_| "AAAA".to_owned()).unwrap_err();
+        match err {
+            AssembleHotError::BudgetExceeded { got, max } => {
+                assert_eq!(got, 24);
+                assert_eq!(max, 8);
+            }
+            other => panic!("expected BudgetExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn assemble_hot_accepts_within_budget_recipe() {
+        let cfg = HotMemoryConfig {
+            max_bytes: 64,
+            ..HotMemoryConfig::default()
+        };
+        let data = assemble_hot_with_loader(&cfg, |_| "AA".to_owned()).unwrap();
+        assert_eq!(data.bytes, 12);
     }
 
     #[test]

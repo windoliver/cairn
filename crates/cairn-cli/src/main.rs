@@ -325,9 +325,10 @@ fn run_status(sub: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
 ///
 /// Resolves the vault path and loads config so `assemble_hot` can apply
 /// the `hot_memory.recipe` and `max_bytes` budget from the active vault.
-/// Falls back to default config when no vault is found (no `.cairn/`
-/// in the walk-up path and no registry default), so an unconfigured CWD
-/// still returns a valid stub response instead of failing closed.
+/// Unlike `status`, this verb fails closed on `CwdFallback` (no walk-up
+/// hit, no registry default) — a hot-memory assembly for a non-vault
+/// directory would silently strip the caller of vault-specific context
+/// instead of surfacing the misconfiguration.
 fn run_assemble_hot(sub: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
     let (vault_root, source) = match resolve_vault_or_cwd(explicit_vault) {
         Ok(v) => v,
@@ -336,11 +337,19 @@ fn run_assemble_hot(sub: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode 
             return ExitCode::from(78); // EX_CONFIG
         }
     };
-    // Mirror `run_status`: any non-`CwdFallback` resolution source must
-    // pass the vault-binding gate. An assembly returned for a path that
-    // is not a Cairn vault would, once #193 lands real loading, be a
-    // wrong-vault hot-memory injection vector.
-    if source != VaultResolutionSource::CwdFallback {
+    if source == VaultResolutionSource::CwdFallback {
+        eprintln!(
+            "cairn assemble_hot: no Cairn vault found from cwd {} \
+             — pass --vault, run from inside a vault, or `cairn bootstrap`",
+            vault_root.display()
+        );
+        return ExitCode::from(78); // EX_CONFIG
+    }
+    // Every remaining resolution source must pass the vault-binding gate.
+    // An assembly returned for a path that is not a Cairn vault would,
+    // once #193 lands real loading, be a wrong-vault hot-memory injection
+    // vector.
+    {
         match verbs::status::probe_vault_binding(&vault_root) {
             verbs::status::VaultBinding::Bound => {}
             verbs::status::VaultBinding::Unbound => {

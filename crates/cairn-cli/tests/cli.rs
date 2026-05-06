@@ -121,7 +121,16 @@ fn simple_verb_human_mode_exits_one_with_internal() {
 fn assemble_hot_exits_zero_and_emits_committed_envelope() {
     // `assemble_hot` is wired: stub-body assembler returns a committed
     // Response with six zero-length segments (default recipe). Exit 0.
+    // The verb fails closed on a non-vault directory, so bootstrap a
+    // tempdir vault and run from inside it.
+    let dir = tempfile::tempdir().expect("tempdir");
+    cairn_cli::vault::bootstrap(&cairn_cli::vault::BootstrapOpts {
+        vault_path: dir.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap vault");
     let out = cli()
+        .current_dir(dir.path())
         .args(["assemble_hot", "--json"])
         .output()
         .expect("cairn assemble_hot --json");

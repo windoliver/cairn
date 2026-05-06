@@ -111,7 +111,15 @@ fn summarize_returns_aborted_internal() {
 fn assemble_hot_returns_committed_envelope() {
     // `assemble_hot` is wired to the stub-body assembler. The verb now exits 0
     // and returns a committed envelope with six zero-length segments (default recipe).
+    // Bootstrap a tempdir vault — the verb fails closed on a non-vault cwd.
+    let dir = tempfile::tempdir().expect("tempdir");
+    cairn_cli::vault::bootstrap(&cairn_cli::vault::BootstrapOpts {
+        vault_path: dir.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap vault");
     let out = cli()
+        .current_dir(dir.path())
         .args(["assemble_hot", "--json"])
         .output()
         .unwrap_or_else(|e| panic!("failed to run assemble_hot: {e}"));

@@ -15,6 +15,27 @@ use super::envelope::{emit_json, human_error, internal_error_response, new_opera
 pub fn run(sub: &ArgMatches, config: &CairnConfig) -> ExitCode {
     let json = sub.get_flag("json");
 
+    // Mirror the SDK reject: `--session` and `--budget` cannot be honored
+    // by the stub-body assembler, so accept-and-drop would silently lie
+    // about scoping/budgeting. Fail closed with EX_CONFIG until #193
+    // lands real loading.
+    if sub.get_one::<String>("session_id").is_some() {
+        eprintln!(
+            "cairn assemble_hot: --session is not yet honored by the \
+             stub-body assembler (tracked under #193); omit until real \
+             loading lands"
+        );
+        return ExitCode::from(78); // EX_CONFIG
+    }
+    if sub.get_one::<u32>("budget").is_some() {
+        eprintln!(
+            "cairn assemble_hot: --budget is not yet honored by the \
+             stub-body assembler (tracked under #193); omit until real \
+             loading lands"
+        );
+        return ExitCode::from(78); // EX_CONFIG
+    }
+
     match cairn_core::verbs::assemble_hot::assemble_hot(&config.vault.hot_memory) {
         Ok(data) => {
             let resp = Response {
