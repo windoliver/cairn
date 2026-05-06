@@ -13,7 +13,7 @@ use cairn_core::generated::envelope::ResponseVerb;
 use cairn_core::generated::envelope::{Response, ResponseData, ResponsePolicyTrace};
 use cairn_core::generated::verbs::ingest::IngestData;
 use cairn_core::pipeline::extraction_cache::{
-    ExtractionCacheEntry, ExtractionResult, cache_entry_path, cache_key_for_content,
+    ExtractionCacheEntry, ExtractionResult, cache_entry_path, cache_key_for_bytes,
     relative_path_for_cache,
 };
 use clap::ArgMatches;
@@ -200,9 +200,15 @@ fn collect_files(path: &Path, out: &mut Vec<PathBuf>) -> Result<(), FolderIngest
         if child.file_name().is_some_and(|name| name == ".cairn") {
             continue;
         }
-        if child.is_dir() {
+        let file_type = entry
+            .file_type()
+            .map_err(|source| FolderIngestError::ReadDir {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        if file_type.is_dir() {
             collect_files(&child, out)?;
-        } else if child.is_file() {
+        } else if file_type.is_file() {
             out.push(child);
         }
     }
@@ -217,11 +223,11 @@ fn process_folder_file(
 ) -> Result<(), FolderIngestError> {
     stats.files_processed += 1;
 
-    let body = fs::read_to_string(file).map_err(|source| FolderIngestError::ReadFile {
+    let body = fs::read(file).map_err(|source| FolderIngestError::ReadFile {
         path: file.to_path_buf(),
         source,
     })?;
-    let key = cache_key_for_content(&body, file, vault_root).map_err(FolderIngestError::Key)?;
+    let key = cache_key_for_bytes(&body, file, vault_root).map_err(FolderIngestError::Key)?;
     let cache_path = cache_entry_path(vault_root, &key);
 
     if !no_cache && lookup_cache_entry(&cache_path, &key)?.is_some() {

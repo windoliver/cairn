@@ -88,3 +88,33 @@ fn folder_ingest_no_cache_bypasses_lookup_but_writes_entry() {
         "frontmatter-only edits must keep the same cache key"
     );
 }
+
+#[test]
+fn folder_ingest_processes_binary_sidecars() {
+    let vault = tempfile::tempdir().expect("temp vault");
+    write_note(vault.path(), "body");
+    fs::write(vault.path().join("docs/blob.bin"), [0xff, 0x00, 0xfe, 0x41])
+        .expect("write binary sidecar");
+
+    let resp = run_folder_ingest(vault.path(), false);
+    assert_eq!(resp["status"], "committed");
+    assert_eq!(resp["data"]["files_processed"], 2);
+    assert_eq!(resp["data"]["cache_misses"], 2);
+    assert_eq!(resp["data"]["cache_writes"], 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn folder_ingest_skips_symlinked_directory_loops() {
+    use std::os::unix::fs::symlink;
+
+    let vault = tempfile::tempdir().expect("temp vault");
+    write_note(vault.path(), "body");
+    symlink("..", vault.path().join("docs/loop")).expect("create directory symlink loop");
+
+    let resp = run_folder_ingest(vault.path(), false);
+    assert_eq!(resp["status"], "committed");
+    assert_eq!(resp["data"]["files_processed"], 1);
+    assert_eq!(resp["data"]["cache_misses"], 1);
+    assert_eq!(resp["data"]["cache_writes"], 1);
+}

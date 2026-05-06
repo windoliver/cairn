@@ -145,6 +145,22 @@ pub fn body_for_hashing(content: &str) -> &str {
         content
             .find("\n---\n")
             .map_or(content, |i| &content[i + 5..])
+    } else if content.starts_with("---\r\n") {
+        content
+            .find("\r\n---\r\n")
+            .map_or(content, |i| &content[i + 7..])
+    } else {
+        content
+    }
+}
+
+/// Return the markdown body bytes used for cache hashing.
+#[must_use]
+pub fn body_bytes_for_hashing(content: &[u8]) -> &[u8] {
+    if content.starts_with(b"---\n") {
+        find_bytes(content, b"\n---\n").map_or(content, |i| &content[i + 5..])
+    } else if content.starts_with(b"---\r\n") {
+        find_bytes(content, b"\r\n---\r\n").map_or(content, |i| &content[i + 7..])
     } else {
         content
     }
@@ -164,15 +180,33 @@ pub fn cache_key_for_content(
     path: &Path,
     vault_root: &Path,
 ) -> Result<String, CacheKeyError> {
+    cache_key_for_bytes(content.as_bytes(), path, vault_root)
+}
+
+/// Compute the SHA-256 cache key for file bytes and a vault-relative path.
+///
+/// The hash input is `body + NUL + relative_path`, where markdown files hash
+/// only their body below YAML frontmatter. Non-markdown bytes are hashed
+/// without UTF-8 decoding so mixed vault folders can include binary sidecars.
+///
+/// # Errors
+///
+/// Returns [`CacheKeyError`] if `path` cannot be made portable relative to
+/// `vault_root`.
+pub fn cache_key_for_bytes(
+    content: &[u8],
+    path: &Path,
+    vault_root: &Path,
+) -> Result<String, CacheKeyError> {
     let relative = relative_path_for_cache(path, vault_root)?;
     let body = if is_markdown_path(path) {
-        body_for_hashing(content)
+        body_bytes_for_hashing(content)
     } else {
         content
     };
 
     let mut hasher = Sha256::new();
-    hasher.update(body.as_bytes());
+    hasher.update(body);
     hasher.update([0]);
     hasher.update(relative.as_bytes());
     Ok(hex_lower(&hasher.finalize()))
@@ -242,6 +276,12 @@ fn is_markdown_path(path: &Path) -> bool {
         .is_some_and(|ext| ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown"))
 }
 
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
 fn hex_lower(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -256,7 +296,7 @@ fn hex_lower(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use proptest::prelude::*;
-    use std::path::Path;
+    use std::path::{Component, Path};
 
     #[test]
     fn frontmatter_is_excluded_from_markdown_cache_keys() {
@@ -267,6 +307,19 @@ mod tests {
             .expect("cache key for first frontmatter variant");
         let second = cache_key_for_content("---\ntitle: Y\n---\nbody", &path, root)
             .expect("cache key for second frontmatter variant");
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn crlf_frontmatter_is_excluded_from_markdown_cache_keys() {
+        let root = Path::new("/tmp/vault");
+        let path = root.join("docs/design.md");
+
+        let first = cache_key_for_content("---\r\ntitle: X\r\n---\r\nbody", &path, root)
+            .expect("cache key for first CRLF frontmatter variant");
+        let second = cache_key_for_content("---\r\ntitle: Y\r\n---\r\nbody", &path, root)
+            .expect("cache key for second CRLF frontmatter variant");
 
         assert_eq!(first, second);
     }
@@ -329,11 +382,16 @@ mod tests {
         #[test]
         fn cache_key_is_deterministic(body in ".*", rel in "[a-zA-Z0-9_/.-]{1,80}") {
             let rel = rel.trim_start_matches('/').trim_matches('.');
+            let rel_path = Path::new(rel);
             prop_assume!(!rel.is_empty());
-            prop_assume!(!rel.contains(".."));
+            prop_assume!(!rel_path.is_absolute());
+            prop_assume!(rel_path.components().any(|c| matches!(c, Component::Normal(_))));
+            prop_assume!(rel_path
+                .components()
+                .all(|c| matches!(c, Component::Normal(_) | Component::CurDir)));
 
             let root = Path::new("/tmp/vault");
-            let path = root.join(rel);
+            let path = root.join(rel_path);
 
             let first = cache_key_for_content(&body, &path, root)
                 .expect("first deterministic cache key");
