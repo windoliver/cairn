@@ -1,5 +1,9 @@
 //! Bitemporal knowledge-graph domain types (brief §3, §4).
 
+pub mod normalize;
+
+pub use normalize::normalize_entity_name;
+
 use std::fmt;
 
 use crate::domain::record::RecordId;
