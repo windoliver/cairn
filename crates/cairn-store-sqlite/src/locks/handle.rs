@@ -127,14 +127,23 @@ impl LockHandle {
     pub async fn is_still_held(&self) -> Result<bool, LockError> {
         let acq_ulid = self.acquisition_ulid.clone();
         // `acquisition_ulid` is the per-acquisition unique identifier.
-        // ROWID alone can collide across delete/insert cycles, so we
-        // match on the ULID. Indexed via lock_holders_acquisition_ulid_idx.
+        // The `expires_at > now_ms` predicate makes this honest about
+        // lease validity — an expired-but-not-yet-GC'd row reports false,
+        // so callers using `is_still_held` as a fence (e.g. lint
+        // --fix-markdown's per-write check) get the correct answer
+        // without waiting for some later acquire's GC sweep.
         let count: i64 = self
             .conn
             .call(move |c| {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(i64::MAX, |d| {
+                        i64::try_from(d.as_millis()).unwrap_or(i64::MAX)
+                    });
                 Ok::<i64, tokio_rusqlite::Error>(c.query_row(
-                    "SELECT COUNT(*) FROM lock_holders WHERE acquisition_ulid = ?1",
-                    params![acq_ulid],
+                    "SELECT COUNT(*) FROM lock_holders \
+                      WHERE acquisition_ulid = ?1 AND expires_at > ?2",
+                    params![acq_ulid, now_ms],
                     |row| row.get(0),
                 )?)
             })

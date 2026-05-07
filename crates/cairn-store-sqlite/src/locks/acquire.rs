@@ -768,4 +768,44 @@ mod tests {
             other => panic!("expected Fenced for expired-but-not-yet-GC'd handle, got {other:?}"),
         }
     }
+
+    /// Regression for round-8 finding 1: `is_still_held()` must return
+    /// false once the lease has elapsed, even before any acquire/GC pass
+    /// deletes the row. Callers (e.g. lint --fix-markdown's per-write
+    /// fence) rely on this to fail-fast instead of continuing to commit
+    /// side-effects after TTL.
+    #[tokio::test]
+    async fn is_still_held_returns_false_after_ttl_expiry() {
+        let (_store, conn, inc) = setup().await;
+        let r = ResourceKey::vault("v_is_still");
+        let h = acquire(
+            &conn,
+            &r,
+            LockMode::Exclusive,
+            "h_x",
+            Duration::from_millis(40),
+            &inc,
+            "still_held_test",
+        )
+        .await
+        .unwrap();
+        assert!(h.is_still_held().await.unwrap(), "fresh handle is held");
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        // Row still exists in DB (no GC sweep ran), but lease has elapsed.
+        let row_count: i64 = conn
+            .call(|c| {
+                Ok::<i64, tokio_rusqlite::Error>(c.query_row(
+                    "SELECT COUNT(*) FROM lock_holders WHERE holder_id = 'h_x'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(row_count, 1, "row still in DB (proves no GC happened)");
+        assert!(
+            !h.is_still_held().await.unwrap(),
+            "TTL elapsed → is_still_held must return false"
+        );
+    }
 }
