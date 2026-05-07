@@ -490,9 +490,15 @@ pub(crate) fn embedding_provider_ready(
         EmbeddingProvider::OpenAi => {
             #[cfg(feature = "openai")]
             {
-                std::env::var("OPENAI_API_KEY")
-                    .map(|k| !k.is_empty())
-                    .unwrap_or(false)
+                // Delegate to the shared predicate in `cairn-embeddings-openai`
+                // so this site and `resolve_openai_embedder` apply identical
+                // validation:
+                //   1. API key present and non-whitespace.
+                //   2. `embedding_model` is an OpenAI native variant
+                //      (not a local candle model like `bge-small-en-v1.5`).
+                //   3. `openai` Cargo feature compiled in (this arm).
+                let key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
+                cairn_embeddings_openai::config_ready(config.search.embedding_model, key.trim())
             }
             #[cfg(not(feature = "openai"))]
             {
