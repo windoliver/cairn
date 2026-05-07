@@ -303,7 +303,23 @@ impl CairnMcpHandler {
             capabilities: cairn_core::status::advertise(&gates),
             extensions: vec![],
             pipeline_dispatch: Some(pipeline_dispatch_advertisement(&DefaultRegistry)),
-            mcp_graph_tools: None,
+            // Mirror the SDK's `Sdk::status` and CLI's no-vault path so
+            // CLI/SDK/MCP three-way parity holds. Until MCP exposes a
+            // `with_scope_and_sqlite_store` constructor that this helper
+            // can probe, every MCP status emits the same `NoVault`
+            // wire response (state: no_vault, reason: vault_not_bound,
+            // probe_basis: config_only) — the closest truthful answer
+            // when there is no bound vault to probe.
+            mcp_graph_tools: Some(cairn_core::generated::status::StatusResponseMcpGraphTools {
+                state: cairn_core::generated::status::StatusResponseMcpGraphToolsState::NoVault,
+                reason: Some(
+                    cairn_core::generated::status::StatusResponseMcpGraphToolsReason::VaultNotBound,
+                ),
+                tool_count: None,
+                probe_basis:
+                    cairn_core::generated::status::StatusResponseMcpGraphToolsProbeBasis::ConfigOnly,
+                error: None,
+            }),
         }
     }
 }
