@@ -45,8 +45,12 @@ pub enum ApplyError {
         files: usize,
     },
     /// Folder apply currently accepts only file upserts.
-    #[error("failed to apply batch {operation_id}: mutation {mutation_index} is not a file upsert")]
+    #[error(
+        "failed to apply `{path}` in batch {operation_id}: mutation {mutation_index} is not a file upsert"
+    )]
     UnsupportedMutation {
+        /// Source file attached to the unsupported mutation.
+        path: PathBuf,
         /// Operation id for the containing batch.
         operation_id: String,
         /// Index of the unsupported mutation.
@@ -164,6 +168,7 @@ pub async fn apply_batch(
     {
         let PlannedMutation::Upsert { record, .. } = mutation else {
             return Err(ApplyError::UnsupportedMutation {
+                path: file.absolute_path.clone(),
                 operation_id: operation_id.clone(),
                 mutation_index,
             });
@@ -410,5 +415,37 @@ mod tests {
 
         assert_eq!(first.records_written, 1);
         assert_eq!(second.records_written, 0);
+    }
+
+    #[tokio::test]
+    async fn unsupported_mutation_error_includes_file_context() {
+        let store = FixtureStore::new();
+        let mut batches = plan_batches(
+            Path::new("/tmp/project"),
+            vec![file("a.md", 'a')],
+            64,
+            FlushMode::Autonomous,
+        )
+        .unwrap();
+        let target = match &batches[0].plan.mutations[0] {
+            PlannedMutation::Upsert { record, .. } => record.target_id.clone(),
+            _ => panic!("fixture starts with upsert"),
+        };
+        batches[0].plan.mutations[0] = PlannedMutation::Delete {
+            target,
+            prior_version: 1,
+        };
+
+        let err = apply_batch(&store, &batches[0]).await.unwrap_err();
+
+        let message = err.to_string();
+        assert!(
+            message.contains("a.md"),
+            "error lacked file path: {message}"
+        );
+        assert!(
+            message.contains(&batches[0].plan.operation_id.0),
+            "error lacked operation id: {message}"
+        );
     }
 }
