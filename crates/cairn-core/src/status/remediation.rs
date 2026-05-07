@@ -27,6 +27,11 @@ pub const REMEDIATION: &[(&str, &str)] = &[
          an explicit override that disabled it",
     ),
     (
+        "cairn.mcp.v1.forget.record",
+        "forget.record is part of the v0.1 core surface; if you see this, \
+         the runtime is reporting a wiring fault — file a bug",
+    ),
+    (
         "cairn.mcp.v1.forget.session",
         "forget.session ships in v0.2; upgrade to a v0.2+ runtime",
     ),

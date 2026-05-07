@@ -438,8 +438,15 @@ async fn handle_search(
         }
     };
 
-    // Derive capability set the same way the SDK and CLI do.
-    let caps = config.capabilities(config.search.local_embeddings);
+    // Derive the capability set the dispatcher will fail-closed against,
+    // masked by the same store-capability signals `status_response` uses.
+    // Dispatcher gate ⊆ advertised gate ⊆ status capabilities — three
+    // views, one truth.
+    let store_caps = store.capabilities();
+    let mut caps = config.capabilities(store_caps.vector);
+    caps.keyword_search = caps.keyword_search && store_caps.fts;
+    caps.semantic_search = caps.semantic_search && store_caps.vector;
+    caps.hybrid_search = caps.hybrid_search && store_caps.fts && store_caps.vector;
 
     let limit = args.limit.map_or(10, |l| usize::try_from(l).unwrap_or(10));
     let request = cairn_core::verbs::search::SearchRequest {
