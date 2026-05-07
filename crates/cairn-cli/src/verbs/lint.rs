@@ -179,6 +179,7 @@ pub async fn fix_markdown_with_lock(
         resource.as_resource_str(),
         holder_id.clone(),
         lock.acquired_epoch(),
+        lock.acquired_at(),
         Arc::clone(&inc),
         ttl,
         cancel_rx,
@@ -278,6 +279,7 @@ async fn finalize_outcome(
             // connection-busy errors without prolonging shutdown.
             let holder_id = lock.holder_id().to_owned();
             let acquired_epoch = lock.acquired_epoch();
+            let acquired_at = lock.acquired_at();
             if let Err(first) = lock.release().await {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 if let Err(retry) = cairn_store_sqlite::locks::release_by_holder(
@@ -286,6 +288,7 @@ async fn finalize_outcome(
                     &holder_id,
                     acquired_epoch,
                     inc.as_ref(),
+                    acquired_at,
                 )
                 .await
                 {
@@ -320,11 +323,16 @@ async fn finalize_outcome(
 /// The refresh is best-effort: a transient DB error simply causes the next
 /// tick to retry. Cancellation drains the task before the surrounding flow
 /// releases the lock.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "explicit identity tuple for fencing-safe heartbeat predicate"
+)]
 fn spawn_lock_heartbeat(
     conn: Arc<tokio_rusqlite::Connection>,
     resource: String,
     holder_id: String,
     acquired_epoch: i64,
+    acquired_at: i64,
     owner_incarnation: Arc<str>,
     ttl: Duration,
     mut cancel: tokio::sync::oneshot::Receiver<()>,
@@ -355,8 +363,16 @@ fn spawn_lock_heartbeat(
                         "UPDATE lock_holders \
                             SET expires_at = ?1 \
                           WHERE resource = ?2 AND holder_id = ?3 \
-                            AND acquired_epoch = ?4 AND owner_incarnation = ?5",
-                        rusqlite::params![expires, resource, holder, acquired_epoch, inc],
+                            AND acquired_epoch = ?4 AND owner_incarnation = ?5 \
+                            AND acquired_at = ?6",
+                        rusqlite::params![
+                            expires,
+                            resource,
+                            holder,
+                            acquired_epoch,
+                            inc,
+                            acquired_at
+                        ],
                     )?;
                     Ok::<_, tokio_rusqlite::Error>(())
                 })

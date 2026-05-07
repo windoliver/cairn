@@ -625,4 +625,140 @@ mod tests {
             "stale acquirer must NOT delete live owner's holder row"
         );
     }
+
+    /// Regression for round-5 finding 1: a stale handle from a prior
+    /// shared acquisition must NOT pass `with_fencing` after the row's
+    /// TTL elapsed and a later acquirer recreated the same
+    /// `(holder_id, acquired_epoch, owner_incarnation)` tuple. The
+    /// per-acquisition `acquired_at` discriminator is what disambiguates.
+    #[tokio::test]
+    async fn stale_handle_blocked_after_holder_id_reuse() {
+        let (_store, conn, inc) = setup().await;
+        let r = ResourceKey::session("t1", "default", "shared_session");
+
+        // First shared holder: short TTL.
+        let h1 = acquire(
+            &conn,
+            &r,
+            LockMode::Shared,
+            "shared_caller",
+            Duration::from_millis(60),
+            &inc,
+            "first",
+        )
+        .await
+        .unwrap();
+        let first_epoch = h1.acquired_epoch();
+        let first_at = h1.acquired_at();
+        std::mem::forget(h1); // simulate process pause; row stays until TTL
+
+        // Wait past TTL so the row is reclaimable, then re-acquire with
+        // the SAME holder_id. Tokio's mock-clock-free sleep is enough.
+        tokio::time::sleep(Duration::from_millis(120)).await;
+
+        // Bring shared count back via a fresh shared acquire (different
+        // holder_id) so locks.epoch is forced to bump first, then the
+        // reused holder_id can rejoin.
+        let _h_other = acquire(
+            &conn,
+            &r,
+            LockMode::Shared,
+            "another_caller",
+            Duration::from_mins(1),
+            &inc,
+            "other",
+        )
+        .await
+        .unwrap();
+
+        // Sleep a millisecond so the new acquire's acquired_at differs
+        // even on fast clocks.
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        let h_reused = acquire(
+            &conn,
+            &r,
+            LockMode::Shared,
+            "shared_caller", // SAME holder_id as h1
+            Duration::from_mins(1),
+            &inc,
+            "reused",
+        )
+        .await
+        .unwrap();
+        // Either same epoch (Shared+Shared compat after first reclaim) or
+        // higher; what matters is acquired_at differs from h1.
+        assert_ne!(
+            h_reused.acquired_at(),
+            first_at,
+            "fresh acquisition must have a distinct acquired_at"
+        );
+        let _ = first_epoch; // silence unused warning under -D warnings
+
+        // The original h1 was forgotten; reconstruct the stale-handle
+        // ownership predicate by hand and verify the CAS query rejects
+        // it (no row matches the FULL identity tuple including h1's
+        // acquired_at).
+        let count: i64 = {
+            let inc_str: String = inc.to_string();
+            let r_str = r.as_resource_str();
+            conn.call(move |c| {
+                Ok::<i64, tokio_rusqlite::Error>(c.query_row(
+                    "SELECT COUNT(*) FROM lock_holders \
+                      WHERE resource = ?1 AND holder_id = ?2 \
+                        AND acquired_at = ?3 AND owner_incarnation = ?4",
+                    params![r_str, "shared_caller", first_at, inc_str],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap()
+        };
+        assert_eq!(
+            count, 0,
+            "no row matches h1's stale identity tuple — CAS will reject it"
+        );
+    }
+
+    /// Regression for round-5 finding 2: a handle whose lease elapsed
+    /// must be rejected by `with_fencing`'s CAS even before any later
+    /// `acquire()` GC sweep deletes the row.
+    #[tokio::test]
+    async fn with_fencing_rejects_expired_handle_before_gc() {
+        let (_store, conn, inc) = setup().await;
+        let r = ResourceKey::vault("v_expire");
+        let h = acquire(
+            &conn,
+            &r,
+            LockMode::Exclusive,
+            "h_expiry",
+            Duration::from_millis(40),
+            &inc,
+            "expiry_test",
+        )
+        .await
+        .unwrap();
+        // Wait past TTL but DO NOT call acquire() again — so no GC sweep.
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        // Verify the row is still in the DB (not yet GC'd).
+        let count: i64 = conn
+            .call(|c| {
+                Ok::<i64, tokio_rusqlite::Error>(c.query_row(
+                    "SELECT COUNT(*) FROM lock_holders WHERE holder_id = 'h_expiry'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(count, 1, "row still present (no GC sweep ran)");
+        // The CAS must still reject because expires_at has elapsed.
+        let err = h
+            .with_fencing(|tx| tx.query_row("SELECT 1", [], |row| row.get::<_, i64>(0)))
+            .await
+            .unwrap_err();
+        match err {
+            LockError::Fenced { .. } => {}
+            other => panic!("expected Fenced for expired-but-not-yet-GC'd handle, got {other:?}"),
+        }
+    }
 }

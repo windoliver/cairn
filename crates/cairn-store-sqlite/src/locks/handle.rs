@@ -98,16 +98,22 @@ impl LockHandle {
     pub async fn is_still_held(&self) -> Result<bool, LockError> {
         let resource = self.resource.clone();
         let holder_id = self.holder_id.clone();
+        let acquired_at = self.acquired_at;
         let acquired_epoch = self.acquired_epoch;
         let inc = self.owner_incarnation.to_string();
+        // `acquired_at` is part of the identity tuple so a stale handle
+        // cannot match a later acquisition that reused `holder_id` (e.g.
+        // shared-shared compat keeps the epoch unchanged; the per-row
+        // `acquired_at` differentiates each acquisition).
         let count: i64 = self
             .conn
             .call(move |c| {
                 Ok::<i64, tokio_rusqlite::Error>(c.query_row(
                     "SELECT COUNT(*) FROM lock_holders \
                       WHERE resource = ?1 AND holder_id = ?2 \
-                        AND acquired_epoch = ?3 AND owner_incarnation = ?4",
-                    params![resource, holder_id, acquired_epoch, inc],
+                        AND acquired_epoch = ?3 AND owner_incarnation = ?4 \
+                        AND acquired_at = ?5",
+                    params![resource, holder_id, acquired_epoch, inc, acquired_at],
                     |row| row.get(0),
                 )?)
             })
@@ -116,13 +122,22 @@ impl LockHandle {
     }
 
     /// Open a `BEGIN IMMEDIATE` transaction, run the per-holder fencing CAS
-    /// as the first statement, then invoke `f(&mut Transaction)` if both
-    /// (a) `locks.epoch == self.acquired_epoch` AND (b) the matching
-    /// `lock_holders` row still exists with the same `owner_incarnation`.
+    /// as the first statement, then invoke `f(&mut Transaction)` if all of:
+    ///   (a) `locks.epoch == self.acquired_epoch`
+    ///   (b) a `lock_holders` row exists matching the full identity tuple
+    ///       (`resource`, `holder_id`, `acquired_epoch`, `owner_incarnation`,
+    ///       `acquired_at`) — `acquired_at` is the per-acquisition
+    ///       discriminator that prevents a stale handle from aliasing a
+    ///       later acquisition that reused `holder_id`.
+    ///   (c) the matched row's `expires_at` is strictly in the future —
+    ///       a writer whose lease elapsed cannot commit even if the GC
+    ///       sweep has not yet observed the expiry.
+    ///
     /// `COMMIT` happens after `f` returns Ok; any error or panic rolls back.
     ///
     /// # Errors
-    /// - `LockError::Fenced` if the CAS fails (epoch advanced or holder GC'd).
+    /// - `LockError::Fenced` if the CAS fails (epoch advanced, holder GC'd,
+    ///   identity tuple mismatch, or lease expired).
     /// - `LockError::Db` on connection / `SQLite` failure.
     /// - Whatever `f` returns, mapped through `LockError::Db` for non-Lock
     ///   errors (callers wanting custom error types should construct their
@@ -134,8 +149,18 @@ impl LockHandle {
     {
         let resource = self.resource.clone();
         let holder_id = self.holder_id.clone();
+        let acquired_at = self.acquired_at;
         let acquired_epoch = self.acquired_epoch;
         let inc = self.owner_incarnation.to_string();
+        // Capture now_ms in Rust (millisecond precision) and bind it as a
+        // parameter. SQLite's `strftime('%s','now') * 1000` is second-aligned,
+        // which is too coarse for sub-second TTLs. Captured outside the
+        // closure is conservative for the CAS direction (an older now_ms
+        // makes the lease MORE likely to be valid, never less).
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| LockError::Clock)
+            .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))?;
 
         let outcome: Result<R, LockError> = self
             .conn
@@ -143,14 +168,26 @@ impl LockHandle {
                 let mut tx =
                     c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
                 // CAS: read group epoch + holder liveness in one statement.
+                // The EXISTS clause requires per-acquisition identity
+                // (acquired_at) AND a future expires_at, so a TTL-elapsed
+                // handle fails closed even before a later acquire() GC sweep.
                 let (group_epoch, holder_alive): (Option<i64>, i64) = tx.query_row(
                     "SELECT \
                        (SELECT epoch FROM locks WHERE resource = ?1) AS group_epoch, \
                        EXISTS (SELECT 1 FROM lock_holders \
                                 WHERE resource = ?1 AND holder_id = ?2 \
-                                  AND acquired_epoch = ?3 AND owner_incarnation = ?4) \
+                                  AND acquired_epoch = ?3 AND owner_incarnation = ?4 \
+                                  AND acquired_at = ?5 \
+                                  AND expires_at > ?6) \
                             AS holder_alive",
-                    params![resource, holder_id, acquired_epoch, inc],
+                    params![
+                        resource,
+                        holder_id,
+                        acquired_epoch,
+                        inc,
+                        acquired_at,
+                        now_ms
+                    ],
                     |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, i64>(1)?)),
                 )?;
                 let observed = group_epoch.unwrap_or(-1);
@@ -200,10 +237,20 @@ impl LockHandle {
     pub async fn release(mut self) -> Result<(), LockError> {
         let resource = self.resource.clone();
         let holder_id = self.holder_id.clone();
+        let acquired_at = self.acquired_at;
         let acquired_epoch = self.acquired_epoch;
         let inc = self.owner_incarnation.to_string();
         let conn = Arc::clone(&self.conn);
-        match release_inner(&conn, &resource, &holder_id, acquired_epoch, &inc).await {
+        match release_inner(
+            &conn,
+            &resource,
+            &holder_id,
+            acquired_epoch,
+            &inc,
+            acquired_at,
+        )
+        .await
+        {
             Ok(()) => {
                 self.released = true;
                 Ok(())
@@ -225,25 +272,43 @@ impl Drop for LockHandle {
         let conn = Arc::clone(&self.conn);
         let resource = std::mem::take(&mut self.resource);
         let holder_id = std::mem::take(&mut self.holder_id);
+        let acquired_at = self.acquired_at;
         let acquired_epoch = self.acquired_epoch;
         let inc = self.owner_incarnation.to_string();
         tokio::spawn(async move {
-            let _ = release_inner(&conn, &resource, &holder_id, acquired_epoch, &inc).await;
+            let _ = release_inner(
+                &conn,
+                &resource,
+                &holder_id,
+                acquired_epoch,
+                &inc,
+                acquired_at,
+            )
+            .await;
         });
     }
 }
 
-/// Release by `(resource, holder_id, acquired_epoch, owner_incarnation)`.
-/// Idempotent: a no-op if the row is already gone.
+/// Release by full identity tuple
+/// (`resource`, `holder_id`, `acquired_epoch`, `owner_incarnation`,
+/// `acquired_at`). Idempotent: a no-op if the row is already gone.
+///
+/// `acquired_at` is the per-acquisition discriminator that prevents
+/// deleting a later acquisition that reused `holder_id`.
 ///
 /// # Errors
 /// `LockError::Db` on connection failure.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "explicit identity tuple for fencing-safe DELETE"
+)]
 pub async fn release_by_holder(
     conn: &Arc<Connection>,
     resource: &ResourceKey,
     holder_id: &str,
     acquired_epoch: i64,
     owner_incarnation: &str,
+    acquired_at: i64,
 ) -> Result<(), LockError> {
     release_inner(
         conn,
@@ -251,6 +316,7 @@ pub async fn release_by_holder(
         holder_id,
         acquired_epoch,
         owner_incarnation,
+        acquired_at,
     )
     .await
 }
@@ -261,6 +327,7 @@ async fn release_inner(
     holder_id: &str,
     acquired_epoch: i64,
     owner_incarnation: &str,
+    acquired_at: i64,
 ) -> Result<(), LockError> {
     let resource = resource.to_owned();
     let holder_id = holder_id.to_owned();
@@ -269,8 +336,9 @@ async fn release_inner(
         c.execute(
             "DELETE FROM lock_holders \
               WHERE resource = ?1 AND holder_id = ?2 \
-                AND acquired_epoch = ?3 AND owner_incarnation = ?4",
-            params![resource, holder_id, acquired_epoch, inc],
+                AND acquired_epoch = ?3 AND owner_incarnation = ?4 \
+                AND acquired_at = ?5",
+            params![resource, holder_id, acquired_epoch, inc, acquired_at],
         )?;
         Ok::<_, tokio_rusqlite::Error>(())
     })
