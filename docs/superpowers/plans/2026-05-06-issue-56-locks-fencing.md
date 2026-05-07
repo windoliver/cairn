@@ -986,7 +986,7 @@ impl LockHandleV2 {
         let outcome: Result<R, LockError> = self
             .conn
             .call(move |c| {
-                let mut tx = c.transaction()?;
+                let mut tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
                 // CAS: read group epoch + holder liveness in one statement.
                 let (group_epoch, holder_alive): (Option<i64>, i64) = tx
                     .query_row(
