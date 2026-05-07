@@ -1166,4 +1166,3 @@ fn validate_forget(args: &ForgetArgs) -> Result<(), SdkError> {
 fn unimplemented(verb: &'static str) -> SdkError {
     store_not_wired(verb)
 }
-

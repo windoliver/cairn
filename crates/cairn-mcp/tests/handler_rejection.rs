@@ -66,11 +66,7 @@ impl MemoryStore for RejectionStubStore {
         panic!("unreachable in rejection test: list")
     }
 
-    async fn tombstone(
-        &self,
-        _id: &RecordId,
-        _reason: TombstoneReason,
-    ) -> Result<(), StoreError> {
+    async fn tombstone(&self, _id: &RecordId, _reason: TombstoneReason) -> Result<(), StoreError> {
         panic!("unreachable in rejection test: tombstone")
     }
 

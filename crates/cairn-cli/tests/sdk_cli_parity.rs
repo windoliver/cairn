@@ -42,8 +42,10 @@ impl cairn_core::contract::memory_store::MemoryStore for ParityStubStore {
     async fn upsert(
         &self,
         _r: &cairn_core::domain::record::MemoryRecord,
-    ) -> Result<cairn_core::contract::memory_store::UpsertOutcome, cairn_core::contract::memory_store::StoreError>
-    {
+    ) -> Result<
+        cairn_core::contract::memory_store::UpsertOutcome,
+        cairn_core::contract::memory_store::StoreError,
+    > {
         panic!("unreachable in parity test: upsert")
     }
 
@@ -333,10 +335,9 @@ fn status_parity_cli_vs_sdk_vs_mcp_with_fts_only_store() {
         });
     let config = cairn_core::config::CairnConfig::default();
 
-    let mut sdk = serde_json::to_value(
-        cairn_sdk::Sdk::with_store(store.clone(), config.clone()).status(),
-    )
-    .expect("sdk serialize");
+    let mut sdk =
+        serde_json::to_value(cairn_sdk::Sdk::with_store(store.clone(), config.clone()).status())
+            .expect("sdk serialize");
     let mut mcp = serde_json::to_value(
         CairnMcpHandler::with_store(store.clone(), config.clone()).status_response(),
     )
