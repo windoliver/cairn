@@ -7,6 +7,8 @@
 
 use std::sync::Arc;
 
+use std::collections::BTreeMap;
+
 use rmcp::{
     RoleServer, ServerHandler,
     model::{
@@ -269,11 +271,16 @@ impl CairnMcpHandler {
             }
         });
         let model_present = store_caps.as_ref().is_some_and(|c| c.vector);
+        // MCP handler mirrors SDK: use store's vector-index advertisement as
+        // a proxy for embedding_provider_ready. See the comment in
+        // cairn-sdk/src/transport.rs::gates() for the rationale.
+        let embedding_provider_ready = model_present;
         let gates = cairn_core::status::CapabilityGates {
             config: self.config.capabilities(model_present),
             store: store_caps,
             vault_bound: self.store.is_some(),
             model_present,
+            embedding_provider_ready,
             llm_configured: false,
             contract_phase: cairn_core::status::Phase::V0_1,
         };
@@ -296,8 +303,64 @@ impl CairnMcpHandler {
 
 impl ServerHandler for CairnMcpHandler {
     /// Return server identity and advertise tool capability.
+    ///
+    /// The Cairn status block (`capabilities[]`, `pipeline_dispatch`, etc.) is
+    /// embedded in `serverCapabilities.experimental["cairn.status"]`.
+    ///
+    /// rmcp 0.14's `ServerCapabilities` does NOT have a dedicated top-level
+    /// extension field for Cairn's status JSON — the only arbitrary-JSON slot
+    /// in `InitializeResult` is `capabilities.experimental` (a
+    /// `BTreeMap<String, serde_json::Map>`) and the `instructions` string. We
+    /// use `experimental["cairn.status"]` because:
+    ///
+    /// 1. It is typed for arbitrary JSON objects — no encoding gymnastics.
+    /// 2. The MCP spec explicitly reserves `experimental` for vendor extensions.
+    /// 3. `instructions` is a human-readable string; embedding JSON there would
+    ///    be non-standard and harder to parse for MCP clients.
+    ///
+    /// Wire shape of `experimental["cairn.status"]`:
+    /// ```json
+    /// {
+    ///   "contract": "cairn.mcp.v1",
+    ///   "server_info": { "version": "...", "build": "...", ... },
+    ///   "capabilities": ["cairn.mcp.v1.search.keyword", ...],
+    ///   "extensions": [],
+    ///   "pipeline_dispatch": { ... }
+    /// }
+    /// ```
+    ///
+    /// This makes the advertised `capabilities[]` and `pipeline_dispatch`
+    /// machine-readable to any MCP client on the actual `initialize` wire path.
+    /// The `status_response()` helper remains for unit tests that want to inspect
+    /// the block without running an MCP session.
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        // Build the status block and convert to a serde_json object so it can
+        // be inserted into `experimental`. Serialization failure here would mean
+        // the generated StatusResponse type is broken — use an empty map as a
+        // safe fallback rather than panicking in a library function.
+        let status_value = serde_json::to_value(self.build_status_response())
+            .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+        let status_map = match status_value {
+            serde_json::Value::Object(m) => m,
+            _ => serde_json::Map::new(),
+        };
+
+        // Build ServerCapabilities via the rmcp builder (required — the struct is
+        // `#[non_exhaustive]` and cannot be constructed with a struct literal from
+        // outside the crate). Start with tools + experimental, then insert the
+        // cairn.status block into the experimental map.
+        let mut caps = ServerCapabilities::builder()
+            .enable_tools()
+            .enable_experimental()
+            .build();
+        // The enable_experimental() call sets experimental to Some(BTreeMap::new()).
+        // Insert our status block. The `unwrap_or_else` is unreachable in practice
+        // (we just called enable_experimental), but avoids a panic in library code.
+        caps.experimental
+            .get_or_insert_with(BTreeMap::new)
+            .insert("cairn.status".to_owned(), status_map);
+
+        ServerInfo::new(caps)
             .with_server_info(Implementation::new("cairn", env!("CARGO_PKG_VERSION")))
     }
 
