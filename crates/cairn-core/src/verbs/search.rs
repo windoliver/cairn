@@ -430,6 +430,292 @@ mod tests {
         assert_eq!(store.calls.lock().expect("mutex").as_slice(), &["hybrid"]);
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "stub MemoryStore impl is unavoidably wide"
+    )]
+    #[tokio::test]
+    async fn hybrid_propagates_degraded_legs_through_search_outcome() {
+        use crate::search::{DegradationReason, DegradedLeg, GraphSource};
+
+        struct DegradedHybridStore;
+
+        #[async_trait::async_trait]
+        impl MemoryStore for DegradedHybridStore {
+            fn name(&self) -> &'static str {
+                "degraded"
+            }
+            fn capabilities(&self) -> &MemoryStoreCapabilities {
+                static CAPS: MemoryStoreCapabilities = MemoryStoreCapabilities {
+                    fts: true,
+                    vector: true,
+                    graph_edges: false,
+                    transactions: true,
+                    per_record_consent_model: true,
+                    graph_search: false,
+                };
+                &CAPS
+            }
+            fn supported_contract_versions(&self) -> crate::contract::version::VersionRange {
+                use crate::contract::memory_store::CONTRACT_VERSION;
+                use crate::contract::version::ContractVersion;
+                crate::contract::version::VersionRange::new(
+                    CONTRACT_VERSION,
+                    ContractVersion::new(CONTRACT_VERSION.major, CONTRACT_VERSION.minor + 1, 0),
+                )
+            }
+            async fn upsert(
+                &self,
+                _r: &crate::domain::record::MemoryRecord,
+            ) -> Result<crate::contract::memory_store::UpsertOutcome, StoreError> {
+                unimplemented!()
+            }
+            async fn get(
+                &self,
+                _id: &crate::domain::RecordId,
+            ) -> Result<Option<crate::domain::record::MemoryRecord>, StoreError> {
+                Ok(None)
+            }
+            async fn list(
+                &self,
+                _args: &crate::contract::memory_store::ListArgs,
+            ) -> Result<crate::contract::memory_store::ListPage, StoreError> {
+                unimplemented!()
+            }
+            async fn tombstone(
+                &self,
+                _id: &crate::domain::RecordId,
+                _reason: crate::contract::memory_store::TombstoneReason,
+            ) -> Result<(), StoreError> {
+                unimplemented!()
+            }
+            async fn versions(
+                &self,
+                _t: &crate::domain::TargetId,
+            ) -> Result<Vec<crate::contract::memory_store::RecordVersion>, StoreError> {
+                Ok(vec![])
+            }
+            async fn put_edge(
+                &self,
+                _e: &crate::contract::memory_store::Edge,
+            ) -> Result<(), StoreError> {
+                unimplemented!()
+            }
+            async fn remove_edge(
+                &self,
+                _k: &crate::contract::memory_store::EdgeKey,
+            ) -> Result<bool, StoreError> {
+                Ok(false)
+            }
+            async fn neighbours(
+                &self,
+                _id: &crate::domain::RecordId,
+                _d: crate::contract::memory_store::EdgeDir,
+            ) -> Result<Vec<crate::contract::memory_store::Edge>, StoreError> {
+                Ok(vec![])
+            }
+            async fn search_keyword(
+                &self,
+                _args: &KeywordSearchArgs<'_>,
+            ) -> Result<KeywordSearchPage, StoreError> {
+                Ok(KeywordSearchPage {
+                    candidates: vec![],
+                    next_cursor: None,
+                    explain: None,
+                })
+            }
+            async fn search_semantic(
+                &self,
+                _args: &SemanticSearchArgs<'_>,
+            ) -> Result<SemanticSearchPage, StoreError> {
+                Ok(SemanticSearchPage {
+                    candidates: vec![],
+                    explain: None,
+                })
+            }
+            async fn search_hybrid(
+                &self,
+                _args: &HybridSearchArgs<'_>,
+            ) -> Result<HybridSearchPage, StoreError> {
+                Ok(HybridSearchPage {
+                    candidates: vec![],
+                    explain: None,
+                    degraded_legs: vec![DegradedLeg::Graph {
+                        reason: DegradationReason::CapabilityUnavailable,
+                        source: GraphSource::All,
+                    }],
+                })
+            }
+        }
+
+        let config = CairnConfig::default();
+        let outcome = run(
+            &DegradedHybridStore,
+            &config,
+            &caps(true, true, true),
+            req(SearchMode::Hybrid),
+        )
+        .await
+        .expect("hybrid run");
+        assert_eq!(
+            outcome.degraded_legs.len(),
+            1,
+            "hybrid must propagate store's degraded_legs through SearchOutcome"
+        );
+    }
+
+    #[tokio::test]
+    async fn keyword_outcome_has_empty_degraded_legs() {
+        let store = CallRecorder {
+            calls: Mutex::new(vec![]),
+            capabilities: MemoryStoreCapabilities::default(),
+            last_hybrid: Mutex::new(None),
+        };
+        let config = CairnConfig::default();
+        let outcome = run(
+            &store,
+            &config,
+            &caps(true, false, false),
+            req(SearchMode::Keyword),
+        )
+        .await
+        .expect("ok");
+        assert!(
+            outcome.degraded_legs.is_empty(),
+            "keyword leg never reports degraded_legs"
+        );
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "stub MemoryStore impl is unavoidably wide"
+    )]
+    #[tokio::test]
+    async fn auth_scope_threaded_into_keyword_args() {
+        use std::sync::Mutex as StdMutex;
+
+        struct ScopeRecorder {
+            captured: StdMutex<Option<ScopeTuple>>,
+        }
+        #[async_trait::async_trait]
+        impl MemoryStore for ScopeRecorder {
+            fn name(&self) -> &'static str {
+                "scope-recorder"
+            }
+            fn capabilities(&self) -> &MemoryStoreCapabilities {
+                static CAPS: MemoryStoreCapabilities = MemoryStoreCapabilities {
+                    fts: true,
+                    vector: false,
+                    graph_edges: false,
+                    transactions: true,
+                    per_record_consent_model: true,
+                    graph_search: false,
+                };
+                &CAPS
+            }
+            fn supported_contract_versions(&self) -> crate::contract::version::VersionRange {
+                use crate::contract::memory_store::CONTRACT_VERSION;
+                use crate::contract::version::ContractVersion;
+                crate::contract::version::VersionRange::new(
+                    CONTRACT_VERSION,
+                    ContractVersion::new(CONTRACT_VERSION.major, CONTRACT_VERSION.minor + 1, 0),
+                )
+            }
+            async fn upsert(
+                &self,
+                _r: &crate::domain::record::MemoryRecord,
+            ) -> Result<crate::contract::memory_store::UpsertOutcome, StoreError> {
+                unimplemented!()
+            }
+            async fn get(
+                &self,
+                _id: &crate::domain::RecordId,
+            ) -> Result<Option<crate::domain::record::MemoryRecord>, StoreError> {
+                Ok(None)
+            }
+            async fn list(
+                &self,
+                _args: &crate::contract::memory_store::ListArgs,
+            ) -> Result<crate::contract::memory_store::ListPage, StoreError> {
+                unimplemented!()
+            }
+            async fn tombstone(
+                &self,
+                _id: &crate::domain::RecordId,
+                _reason: crate::contract::memory_store::TombstoneReason,
+            ) -> Result<(), StoreError> {
+                unimplemented!()
+            }
+            async fn versions(
+                &self,
+                _t: &crate::domain::TargetId,
+            ) -> Result<Vec<crate::contract::memory_store::RecordVersion>, StoreError> {
+                Ok(vec![])
+            }
+            async fn put_edge(
+                &self,
+                _e: &crate::contract::memory_store::Edge,
+            ) -> Result<(), StoreError> {
+                unimplemented!()
+            }
+            async fn remove_edge(
+                &self,
+                _k: &crate::contract::memory_store::EdgeKey,
+            ) -> Result<bool, StoreError> {
+                Ok(false)
+            }
+            async fn neighbours(
+                &self,
+                _id: &crate::domain::RecordId,
+                _d: crate::contract::memory_store::EdgeDir,
+            ) -> Result<Vec<crate::contract::memory_store::Edge>, StoreError> {
+                Ok(vec![])
+            }
+            async fn search_keyword(
+                &self,
+                args: &KeywordSearchArgs<'_>,
+            ) -> Result<KeywordSearchPage, StoreError> {
+                *self.captured.lock().expect("mutex") = Some(args.auth_scope.clone());
+                Ok(KeywordSearchPage {
+                    candidates: vec![],
+                    next_cursor: None,
+                    explain: None,
+                })
+            }
+            async fn search_semantic(
+                &self,
+                _args: &SemanticSearchArgs<'_>,
+            ) -> Result<SemanticSearchPage, StoreError> {
+                unimplemented!()
+            }
+            async fn search_hybrid(
+                &self,
+                _args: &HybridSearchArgs<'_>,
+            ) -> Result<HybridSearchPage, StoreError> {
+                unimplemented!()
+            }
+        }
+
+        let store = ScopeRecorder {
+            captured: StdMutex::new(None),
+        };
+        let mut request = req(SearchMode::Keyword);
+        request.auth_scope = ScopeTuple {
+            tenant: Some("acme".into()),
+            ..Default::default()
+        };
+        let config = CairnConfig::default();
+        run(&store, &config, &caps(true, false, false), request)
+            .await
+            .expect("ok");
+        let captured = store.captured.lock().expect("mutex").clone();
+        assert_eq!(
+            captured.expect("captured").tenant.as_deref(),
+            Some("acme"),
+            "verb dispatcher must thread request.auth_scope into the leg's args"
+        );
+    }
+
     #[tokio::test]
     async fn empty_query_rejected() {
         let store = CallRecorder {
