@@ -217,10 +217,11 @@ fn push_verb_examples(s: &mut String, verb: &VerbDef) -> Result<(), CodegenError
             if carrier.contains(&flag.name) || branch_flags.contains(&flag.name) {
                 continue;
             }
+            let optional_carrier = carrier_for_optional(&carrier, &spec, &flag.name);
             render_example(
                 &mut buf,
                 cmd,
-                &carrier,
+                &optional_carrier,
                 &prop_schemas,
                 Some(flag.name.as_str()),
             );
@@ -323,6 +324,34 @@ fn expand_branches(spec: &super::skill_compat::VariantSpec) -> Vec<BTreeSet<Stri
         }
     }
     out
+}
+
+fn carrier_for_optional(
+    carrier: &BTreeSet<String>,
+    spec: &super::skill_compat::VariantSpec,
+    optional: &str,
+) -> BTreeSet<String> {
+    const FOLDER_INGEST_OPTIONALS: &[&str] =
+        &["recursive", "include", "exclude", "mode", "batch_size"];
+    if !FOLDER_INGEST_OPTIONALS.contains(&optional) {
+        return carrier.clone();
+    }
+    if !spec
+        .one_of
+        .iter()
+        .any(|branch| branch.len() == 1 && branch.contains("folder"))
+    {
+        return carrier.clone();
+    }
+
+    let mut adjusted = carrier.clone();
+    for branch in &spec.one_of {
+        for field in branch {
+            adjusted.remove(field);
+        }
+    }
+    adjusted.insert("folder".to_owned());
+    adjusted
 }
 
 /// Render one `cairn <verb> ...` example into `buf`. `required` selects which

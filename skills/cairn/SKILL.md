@@ -56,23 +56,23 @@ cairn ingest --kind KIND --folder FOLDER
 ```
 
 ```bash
-cairn ingest --kind KIND --body BODY --recursive
+cairn ingest --kind KIND --folder FOLDER --recursive
 ```
 
 ```bash
-cairn ingest --kind KIND --body BODY --include INCLUDE
+cairn ingest --kind KIND --folder FOLDER --include INCLUDE
 ```
 
 ```bash
-cairn ingest --kind KIND --body BODY --exclude EXCLUDE
+cairn ingest --kind KIND --folder FOLDER --exclude EXCLUDE
 ```
 
 ```bash
-cairn ingest --kind KIND --body BODY --mode keyword
+cairn ingest --kind KIND --folder FOLDER --mode keyword
 ```
 
 ```bash
-cairn ingest --kind KIND --body BODY --batch-size 1
+cairn ingest --kind KIND --folder FOLDER --batch-size 1
 ```
 
 ```bash
