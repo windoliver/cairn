@@ -937,7 +937,10 @@ fn capture_trace_returns_internal_stub() {
 
 #[test]
 fn lint_returns_internal_stub() {
-    let args = LintArgs { write_report: None };
+    let args = LintArgs {
+        fix: None,
+        write_report: None,
+    };
     assert_unimplemented("lint", sdk().lint(&args));
 }
 
