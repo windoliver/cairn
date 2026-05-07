@@ -24,25 +24,29 @@ const PRAGMAS: &str = "PRAGMA journal_mode=WAL;\
      PRAGMA temp_store=MEMORY;\
      PRAGMA mmap_size=268435456;";
 
-/// Build the base capability set based on whether an embedder is present.
+/// Build the base capability set based on whether an embedder is present
+/// and whether the graph-search schema probe (run during `bootstrap`)
+/// observed every required `entity_*` table.
 ///
 /// `per_record_consent_model: true` since migration 0031 adds the
 /// per-row column and 0032 adds the timeline table — lint can rely on
 /// `list_consent_models` returning one entry per active row (Issue
 /// #253).
-fn base_caps(vector: bool) -> MemoryStoreCapabilities {
+fn base_caps(vector: bool, graph_search: bool) -> MemoryStoreCapabilities {
     MemoryStoreCapabilities {
         fts: true,
         vector,
         graph_edges: true,
         transactions: true,
         per_record_consent_model: true,
-        // Enabled here because every open path runs migrations 0042-0045
-        // (entity_nodes, entity_edges with bitemporal columns,
-        // entity_episodes), which is the schema surface
-        // `do_search_graph_neighbors` needs. A future phase can replace
-        // this static `true` with a runtime probe of the migration set.
-        graph_search: true,
+        // Set from a runtime probe of `sqlite_master` — true only when
+        // `entity_nodes`, `entity_edges`, and `entity_episodes` are all
+        // present. Migrations 0042–0045 install these in every fresh
+        // store, but the probe protects against schema skew (a partial
+        // migration application or a stripped-down fork) where advertising
+        // the cap would let hybrid search dispatch a graph leg that fails
+        // at query time with `no such table`.
+        graph_search,
     }
 }
 
@@ -66,9 +70,10 @@ fn build_store(
     incarnation: Arc<str>,
     embedder: Option<Arc<dyn EmbeddingModel>>,
     fts_column_weights: [f64; 4],
+    graph_search: bool,
 ) -> SqliteMemoryStore {
     let vector = embedder.is_some();
-    let caps = base_caps(vector);
+    let caps = base_caps(vector, graph_search);
     let cancel = embedder.as_ref().map(|_| CancellationToken::new());
 
     if let (Some(emb), Some(tok)) = (embedder.as_ref(), cancel.as_ref()) {
@@ -164,13 +169,19 @@ pub async fn open_with_embedder_and_config(
     }
     let conn = AsyncConn::open(path).await?;
     let dim = embedder.as_ref().map(|e| e.dim());
-    bootstrap(&conn, dim).await?;
+    let graph_search = bootstrap(&conn, dim).await?;
     let conn = Arc::new(conn);
     run_boot_recovery(&conn).await?;
     let incarnation = crate::locks::init_incarnation(&conn)
         .await
         .map_err(|e| StoreError::LockInit(Box::new(e)))?;
-    Ok(build_store(conn, incarnation, embedder, fts_column_weights))
+    Ok(build_store(
+        conn,
+        incarnation,
+        embedder,
+        fts_column_weights,
+        graph_search,
+    ))
 }
 
 /// In-memory store at schema head. For tests.
@@ -208,17 +219,24 @@ pub async fn open_in_memory_with_embedder_and_config(
     register_vec0();
     let conn = AsyncConn::open_in_memory().await?;
     let dim = embedder.as_ref().map(|e| e.dim());
-    bootstrap(&conn, dim).await?;
+    let graph_search = bootstrap(&conn, dim).await?;
     let conn = Arc::new(conn);
     run_boot_recovery(&conn).await?;
     let incarnation = crate::locks::init_incarnation(&conn)
         .await
         .map_err(|e| StoreError::LockInit(Box::new(e)))?;
-    Ok(build_store(conn, incarnation, embedder, fts_column_weights))
+    Ok(build_store(
+        conn,
+        incarnation,
+        embedder,
+        fts_column_weights,
+        graph_search,
+    ))
 }
 
-async fn bootstrap(conn: &AsyncConn, vec_dim: Option<usize>) -> Result<(), StoreError> {
-    conn.call(move |c| {
+async fn bootstrap(conn: &AsyncConn, vec_dim: Option<usize>) -> Result<bool, StoreError> {
+    let graph_search = conn
+        .call(move |c| -> Result<bool, tokio_rusqlite::Error> {
         c.execute_batch(PRAGMAS)?;
         // Pre-flight: read-only check that already-applied migration
         // rows agree with the compiled-in manifest. Catches a tampered
@@ -270,10 +288,34 @@ async fn bootstrap(conn: &AsyncConn, vec_dim: Option<usize>) -> Result<(), Store
         };
         verify_schema_fingerprint(c, effective_dim)
             .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
-        Ok(())
+        // Runtime probe: confirm every `entity_*` table required by the
+        // graph leg is actually present. `verify_schema_fingerprint` would
+        // already reject a tampered schema, but the explicit probe keeps
+        // the capability bit honest if a future migration removes an
+        // `entity_*` artifact, and lets the bit reflect schema state — not
+        // just "the migration manifest contained these names at compile
+        // time."
+        Ok(probe_graph_search_tables(c)?)
     })
     .await?;
-    Ok(())
+    Ok(graph_search)
+}
+
+/// Probe `sqlite_master` for the three tables `do_search_graph_neighbors`
+/// reads. Returns `true` only when all three are present as `table` rows.
+fn probe_graph_search_tables(conn: &rusqlite::Connection) -> rusqlite::Result<bool> {
+    const REQUIRED: &[&str] = &["entity_nodes", "entity_edges", "entity_episodes"];
+    for name in REQUIRED {
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
+            [name],
+            |r| r.get(0),
+        )?;
+        if count == 0 {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Drop and recreate the `record_vectors` vec0 virtual table at `dim`.

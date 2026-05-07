@@ -540,12 +540,17 @@ async fn handle_search(
     caps.hybrid_search = caps.hybrid_search && store_caps.fts && store_caps.vector;
 
     let limit = args.limit.map_or(10, |l| usize::try_from(l).unwrap_or(10));
+    // Map the IDL `args.scope` into the dispatcher's auth_scope so MCP
+    // callers narrow reads by tenant/workspace/user/agent. Without this
+    // the MCP surface ran every search with `ScopeTuple::default()` —
+    // i.e. no auth narrowing — even when the caller supplied a scope.
+    let auth_scope = scope_filter_to_tuple(args.scope.as_ref());
     let request = cairn_core::verbs::search::SearchRequest {
         query: args.query.clone(),
         mode,
         limit,
         visibility_allowlist: vec![],
-        auth_scope: cairn_core::domain::ScopeTuple::default(),
+        auth_scope,
         model_label: config.search.embedding_model.as_str().to_owned(),
         explain: args.explain.unwrap_or(false),
     };
@@ -643,6 +648,32 @@ pub fn dispatch_stub(verb: &str) -> CallToolResult {
         "cairn {verb}: not yet implemented in this P0 scaffold. \
          Verb dispatch lands in a follow-up PR; no memory operation was performed."
     ))])
+}
+
+/// Map an IDL `ScopeFilter` to a domain `ScopeTuple` so MCP callers
+/// thread real auth context into the search dispatcher.
+///
+/// Mirrors the SDK transports `scope_filter_to_tuple`. Predicates carried
+/// by `ScopeFilter` but not representable in `ScopeTuple` (`kind`,
+/// `tags`, `tier`, `record_ids`) are dropped — they are enforced by other
+/// layers (filter grammar, signed-intent gate). The seven scope dimensions
+/// threaded through are the ones `do_search_*` actually predicate on via
+/// the JSON1 scope clause.
+fn scope_filter_to_tuple(
+    sf: Option<&cairn_core::generated::common::ScopeFilter>,
+) -> cairn_core::domain::ScopeTuple {
+    let Some(sf) = sf else {
+        return cairn_core::domain::ScopeTuple::default();
+    };
+    cairn_core::domain::ScopeTuple {
+        tenant: sf.tenant.clone(),
+        workspace: sf.workspace.clone(),
+        session_id: sf.session_id.clone(),
+        entity: sf.entity.clone(),
+        user: sf.user.clone(),
+        agent: sf.agent.clone(),
+        ..cairn_core::domain::ScopeTuple::default()
+    }
 }
 
 #[cfg(test)]

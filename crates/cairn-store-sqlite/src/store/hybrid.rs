@@ -243,10 +243,25 @@ impl SqliteMemoryStore {
         // legs, but **without** `args.filter` — the user's narrowing
         // filter must not erase records from the seed pool, otherwise
         // graph rank-rescue collapses on aggressive filters.
+        //
+        // The two seed sources (keyword + semantic) run independently:
+        // a single failure on one side still allows the surviving source
+        // to seed the graph traversal, with a per-source `DegradedLeg`
+        // entry recording the partial loss. Only when BOTH sides fail
+        // does the leg short-circuit empty.
+        let mut graph_degradations: Vec<DegradedLeg> = Vec::new();
         let seed_ids = match self.fetch_graph_seed_pool(args).await {
-            Ok(ids) => ids,
-            Err(e) => {
-                tracing::warn!(error = %e, "graph seed pool failed; continuing without graph results");
+            SeedPoolOutcome::Both(ids) => ids,
+            SeedPoolOutcome::Partial { ids, lost } => {
+                tracing::warn!(source = ?lost, "graph seed source failed; continuing with surviving source");
+                graph_degradations.push(DegradedLeg::Graph {
+                    reason: DegradationReason::SqlError,
+                    source: lost,
+                });
+                ids
+            }
+            SeedPoolOutcome::None => {
+                tracing::warn!("graph seed pool failed (both sources); continuing without graph results");
                 return (
                     Vec::new(),
                     vec![DegradedLeg::Graph {
@@ -279,16 +294,14 @@ impl SqliteMemoryStore {
             confidence_min: 0.0,
         };
         match self.do_search_graph_neighbors(&graph_args).await {
-            Ok(c) => (c, Vec::new()),
+            Ok(c) => (c, graph_degradations),
             Err(e) => {
                 tracing::warn!(error = %e, "graph leg failed; continuing without graph results");
-                (
-                    Vec::new(),
-                    vec![DegradedLeg::Graph {
-                        reason: DegradationReason::SqlError,
-                        source: GraphSource::All,
-                    }],
-                )
+                graph_degradations.push(DegradedLeg::Graph {
+                    reason: DegradationReason::SqlError,
+                    source: GraphSource::All,
+                });
+                (Vec::new(), graph_degradations)
             }
         }
     }
@@ -304,10 +317,7 @@ impl SqliteMemoryStore {
     /// seed semantics, without admitting query-irrelevant rows into
     /// graph traversal (which would have happened with a query-agnostic
     /// `records` scan).
-    async fn fetch_graph_seed_pool(
-        &self,
-        args: &HybridSearchArgs<'_>,
-    ) -> Result<Vec<RecordId>, StoreError> {
+    async fn fetch_graph_seed_pool(&self, args: &HybridSearchArgs<'_>) -> SeedPoolOutcome {
         let kw_seed_args = KeywordSearchArgs {
             query: args.query.clone(),
             filter: None,
@@ -326,25 +336,82 @@ impl SqliteMemoryStore {
             model_label: args.model_label.clone(),
             with_explain: false,
         };
-        // Run the two seed queries in parallel; either failure degrades
-        // the graph leg to empty (handled by the caller).
-        let (kw_seeds, sem_seeds) = tokio::try_join!(
+        // Run the two seed queries in parallel and tolerate a single-side
+        // failure. `tokio::join!` (not `try_join!`) returns both Results
+        // independently; we union the surviving source(s) and report any
+        // loss as a per-`GraphSource` degradation entry.
+        let (kw_res, sem_res) = tokio::join!(
             self.do_search_keyword(&kw_seed_args),
             self.do_search_semantic(&sem_seed_args),
-        )?;
+        );
 
-        let mut seen: HashSet<RecordId> = HashSet::new();
-        let mut out: Vec<RecordId> = Vec::with_capacity(GRAPH_SEED_OVERFETCH);
-        for c in kw_seeds.candidates.into_iter().chain(sem_seeds.candidates) {
-            if out.len() >= GRAPH_SEED_OVERFETCH {
-                break;
+        let kw_ok = match kw_res {
+            Ok(r) => Some(r.candidates),
+            Err(e) => {
+                tracing::warn!(error = %e, "graph keyword-seed retrieval failed");
+                None
             }
-            if seen.insert(c.record_id.clone()) {
-                out.push(c.record_id);
+        };
+        let sem_ok = match sem_res {
+            Ok(r) => Some(r.candidates),
+            Err(e) => {
+                tracing::warn!(error = %e, "graph semantic-seed retrieval failed");
+                None
             }
+        };
+
+        match (kw_ok, sem_ok) {
+            (None, None) => SeedPoolOutcome::None,
+            (Some(kw), Some(sem)) => SeedPoolOutcome::Both(union_seed_ids(kw, Some(sem))),
+            (Some(kw), None) => SeedPoolOutcome::Partial {
+                ids: union_seed_ids(kw, None),
+                lost: GraphSource::AuthSemanticSeed,
+            },
+            (None, Some(sem)) => SeedPoolOutcome::Partial {
+                ids: union_seed_ids(sem, None),
+                lost: GraphSource::AuthKeywordSeed,
+            },
         }
-        Ok(out)
     }
+}
+
+/// Internal outcome of [`SqliteMemoryStore::fetch_graph_seed_pool`].
+///
+/// Carries the per-source degradation signal up to `run_graph_leg` so a
+/// single-source failure surfaces as a recall reduction, not a full leg
+/// loss.
+enum SeedPoolOutcome {
+    /// Both keyword + semantic seed retrievals succeeded.
+    Both(Vec<RecordId>),
+    /// One source survived; the other failed and is reported via `lost`.
+    Partial {
+        ids: Vec<RecordId>,
+        lost: GraphSource,
+    },
+    /// Both sources failed.
+    None,
+}
+
+/// De-duplicating union of two ordered candidate lists, capped at
+/// [`GRAPH_SEED_OVERFETCH`]. The first list is preferred for ordering
+/// (its hits enter the pool first), then the second list contributes any
+/// records the first did not surface.
+fn union_seed_ids(
+    primary: Vec<SearchCandidate>,
+    secondary: Option<Vec<SearchCandidate>>,
+) -> Vec<RecordId> {
+    let mut seen: HashSet<RecordId> = HashSet::new();
+    let mut out: Vec<RecordId> = Vec::with_capacity(GRAPH_SEED_OVERFETCH);
+    let secondary_iter = secondary.unwrap_or_default().into_iter();
+    for c in primary.into_iter().chain(secondary_iter) {
+        if out.len() >= GRAPH_SEED_OVERFETCH {
+            break;
+        }
+        if seen.insert(c.record_id.clone()) {
+            out.push(c.record_id);
+        }
+    }
+    out
 }
 
 /// Project keyword candidates into the rank-only `ScoredCandidate` list RRF
