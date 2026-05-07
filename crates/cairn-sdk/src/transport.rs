@@ -220,14 +220,25 @@ impl<T: Transport> Sdk<T> {
         });
         let model_present = store_caps.as_ref().is_some_and(|c| c.vector);
         // SDK cannot inspect the environment for cloud provider readiness
-        // (it has no access to OPENAI_API_KEY outside CLI context). Use the
-        // store's vector-index advertisement as a conservative proxy: a store
-        // only advertises `vector: true` when it was built with an embedder
-        // that could produce vectors at index-time, which implies the provider
-        // was ready at that point. CLI callers that need strict accuracy use
-        // `super::embedding_provider_ready()` in cairn-cli/src/verbs/mod.rs.
-        // This is documented in CapabilityGates::embedding_provider_ready.
-        let embedding_provider_ready = model_present;
+        // (it has no access to OPENAI_API_KEY outside CLI context). We use a
+        // two-factor proxy:
+        //   1. The store's vector-index advertisement (`model_present`) —
+        //      a store only advertises `vector: true` when it was built with
+        //      an embedder that could produce vectors at index-time.
+        //   2. `provider_model_aligned` — ensures `default_provider` and
+        //      `embedding_model` name a consistent pair. Without this check,
+        //      a config with `default_provider = openai` but
+        //      `embedding_model = bge-small-en-v1.5` would advertise
+        //      `semantic` and `hybrid`, but the ANN dispatcher would silently
+        //      return zero results because indexed `vec_model` labels never
+        //      match the OpenAI dispatcher's filter.
+        //
+        // CLI callers additionally check `OPENAI_API_KEY` presence and the
+        // `openai` Cargo feature via `embedding_provider_ready()` in
+        // `cairn-cli/src/verbs/mod.rs`. That stricter check is out of scope
+        // for the SDK (no env access here).
+        let provider_model_ok = cairn_core::config::provider_model_aligned(&self.config);
+        let embedding_provider_ready = model_present && provider_model_ok;
         cairn_core::status::CapabilityGates {
             config: self.config.capabilities(embedding_provider_ready),
             store: store_caps,
@@ -312,11 +323,15 @@ impl<T: Transport> Sdk<T> {
         // `advertised_capabilities` uses. Dispatcher gate ⊆ advertised
         // gate ⊆ status capabilities — three views, one truth.
         let store_caps = store.capabilities();
-        // Use the same conservative proxy as `gates()`: the store's vector-index
-        // advertisement implies the provider was ready at index-time. This drives
-        // `config.capabilities()` so `CapabilitySet::semantic_search` reflects
-        // cloud-provider readiness, not just local model presence.
-        let mut caps = self.config.capabilities(store_caps.vector);
+        // Mirror the same two-factor proxy as `gates()`: store vector-index
+        // advertisement AND provider/model alignment. Without the alignment
+        // check, a config with `default_provider = openai` but
+        // `embedding_model = bge-small-en-v1.5` would let the request reach
+        // the ANN dispatcher, which would return zero results because indexed
+        // `vec_model` labels never match the OpenAI dispatcher filter.
+        let provider_model_ok = cairn_core::config::provider_model_aligned(&self.config);
+        let embedding_provider_ready = store_caps.vector && provider_model_ok;
+        let mut caps = self.config.capabilities(embedding_provider_ready);
         caps.keyword_search = caps.keyword_search && store_caps.fts;
         caps.semantic_search = caps.semantic_search && store_caps.vector;
         caps.hybrid_search = caps.hybrid_search && store_caps.fts && store_caps.vector;

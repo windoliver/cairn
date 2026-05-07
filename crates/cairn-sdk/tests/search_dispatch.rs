@@ -234,3 +234,97 @@ async fn semantic_rejected_when_local_embeddings_disabled() {
         "expected CapabilityUnavailable when local_embeddings: false, got {err:?}"
     );
 }
+
+// ── Provider/model alignment tests (round-4 review Finding A) ────────────────
+//
+// A store with `vector: true` but a config whose `default_provider` and
+// `embedding_model` disagree must NOT advertise semantic/hybrid. Without
+// this gate, the dispatcher reaches the ANN leg and returns zero results
+// because the indexed `vec_model` label never matches the wrong provider's
+// filter. Tests below use a helper store with `vector: true` to isolate the
+// alignment check from model-presence gating.
+
+fn misaligned_config() -> CairnConfig {
+    use cairn_core::config::{EmbeddingModelKind, EmbeddingProvider};
+    let mut cfg = CairnConfig::default();
+    // OpenAI provider but a local candle model — classic misconfiguration.
+    cfg.search.default_provider = EmbeddingProvider::OpenAi;
+    cfg.search.embedding_model = EmbeddingModelKind::BgeSmallEnV1_5;
+    cfg
+}
+
+/// `status().capabilities` must NOT contain `search.semantic` when
+/// `default_provider = openai` but `embedding_model = bge-small-en-v1.5`.
+#[test]
+fn status_drops_semantic_for_openai_provider_with_local_model() {
+    let sdk = Sdk::with_store(Arc::new(EmptyStore), misaligned_config());
+    let caps: Vec<String> = sdk
+        .status()
+        .capabilities
+        .iter()
+        .filter_map(|c| serde_json::to_value(c).ok())
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect();
+    assert!(
+        !caps.iter().any(|c| c == "cairn.mcp.v1.search.semantic"),
+        "semantic must NOT be advertised when provider/model are misaligned; caps = {caps:?}"
+    );
+    assert!(
+        !caps.iter().any(|c| c == "cairn.mcp.v1.search.hybrid"),
+        "hybrid must NOT be advertised when provider/model are misaligned; caps = {caps:?}"
+    );
+    // Keyword should still work — it doesn't require an embedding provider.
+    assert!(
+        caps.iter().any(|c| c == "cairn.mcp.v1.search.keyword"),
+        "keyword MUST be advertised even when provider/model are misaligned; caps = {caps:?}"
+    );
+}
+
+/// `Sdk::search(semantic, …)` must return `CapabilityUnavailable` (not silently
+/// dispatch) when `default_provider = openai` + `embedding_model = bge-small-en-v1.5`.
+#[tokio::test]
+async fn search_semantic_rejected_for_misaligned_provider_model() {
+    let sdk = Sdk::with_store(Arc::new(EmptyStore), misaligned_config());
+    let args = SearchArgs {
+        citations: None,
+        cursor: None,
+        filters: None,
+        limit: Some(5),
+        mode: SearchArgsMode::Semantic,
+        query: "hello".to_owned(),
+        scope: None,
+        explain: Some(false),
+    };
+    let err = sdk
+        .search(&args)
+        .await
+        .expect_err("misaligned config must reject semantic");
+    assert!(
+        matches!(err, SdkError::CapabilityUnavailable { .. }),
+        "expected CapabilityUnavailable for misaligned provider/model, got {err:?}"
+    );
+}
+
+/// Same rejection for hybrid mode with a misaligned config.
+#[tokio::test]
+async fn search_hybrid_rejected_for_misaligned_provider_model() {
+    let sdk = Sdk::with_store(Arc::new(EmptyStore), misaligned_config());
+    let args = SearchArgs {
+        citations: None,
+        cursor: None,
+        filters: None,
+        limit: Some(5),
+        mode: SearchArgsMode::Hybrid,
+        query: "hello".to_owned(),
+        scope: None,
+        explain: Some(false),
+    };
+    let err = sdk
+        .search(&args)
+        .await
+        .expect_err("misaligned config must reject hybrid");
+    assert!(
+        matches!(err, SdkError::CapabilityUnavailable { .. }),
+        "expected CapabilityUnavailable for misaligned provider/model (hybrid), got {err:?}"
+    );
+}

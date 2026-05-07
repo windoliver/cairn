@@ -271,10 +271,17 @@ impl CairnMcpHandler {
             }
         });
         let model_present = store_caps.as_ref().is_some_and(|c| c.vector);
-        // MCP handler mirrors SDK: use store's vector-index advertisement as
-        // a proxy for embedding_provider_ready. See the comment in
-        // cairn-sdk/src/transport.rs::gates() for the rationale.
-        let embedding_provider_ready = model_present;
+        // MCP handler mirrors SDK: use a two-factor proxy for
+        // `embedding_provider_ready`:
+        //   1. Store vector-index advertisement (`model_present`).
+        //   2. Provider/model alignment (`provider_model_aligned`): if
+        //      `default_provider = openai` but `embedding_model` names a
+        //      local candle model (or vice-versa), advertising semantic/hybrid
+        //      would cause the dispatcher to return silent empty results
+        //      instead of a clean CapabilityUnavailable. Gate-closed instead.
+        // See cairn-sdk/src/transport.rs::gates() for the full rationale.
+        let provider_model_ok = cairn_core::config::provider_model_aligned(&self.config);
+        let embedding_provider_ready = model_present && provider_model_ok;
         let gates = cairn_core::status::CapabilityGates {
             config: self.config.capabilities(embedding_provider_ready),
             store: store_caps,
@@ -505,10 +512,13 @@ async fn handle_search(
     // masked by the same store-capability signals `status_response` uses.
     // Dispatcher gate ⊆ advertised gate ⊆ status capabilities — three
     // views, one truth.
-    // Use the store's vector-index as the provider-ready proxy (mirrors the
-    // `build_status_response` path above — see its comment for rationale).
+    // Mirror the same two-factor proxy as `build_status_response`: store
+    // vector-index AND provider/model alignment. See that function's comment
+    // for the full rationale.
     let store_caps = store.capabilities();
-    let mut caps = config.capabilities(store_caps.vector);
+    let provider_model_ok = cairn_core::config::provider_model_aligned(&config);
+    let embedding_provider_ready = store_caps.vector && provider_model_ok;
+    let mut caps = config.capabilities(embedding_provider_ready);
     caps.keyword_search = caps.keyword_search && store_caps.fts;
     caps.semantic_search = caps.semantic_search && store_caps.vector;
     caps.hybrid_search = caps.hybrid_search && store_caps.fts && store_caps.vector;
