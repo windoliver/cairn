@@ -23,7 +23,9 @@ pub fn build_command() -> clap::Command {
         .subcommand(verbs::with_json(verbs::with_resync(
             verbs::with_flush_modes(generated::verbs::ingest_subcommand()),
         )))
-        .subcommand(verbs::with_json(generated::verbs::search_subcommand()))
+        .subcommand(verbs::with_json(verbs::with_search_scope(
+            generated::verbs::search_subcommand(),
+        )))
         .subcommand(verbs::with_json(generated::verbs::retrieve_subcommand()))
         .subcommand(verbs::with_json(generated::verbs::summarize_subcommand()))
         .subcommand(verbs::with_json(generated::verbs::assemble_hot_subcommand()))

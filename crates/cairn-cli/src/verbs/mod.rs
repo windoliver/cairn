@@ -81,6 +81,43 @@ pub fn with_resync(cmd: clap::Command) -> clap::Command {
     )
 }
 
+/// Add `--scope-tenant`, `--scope-workspace`, `--scope-user`, `--scope-agent`
+/// flags to the `search` subcommand. Each populates the matching
+/// [`cairn_core::domain::ScopeTuple`] dimension on `SearchRequest.auth_scope`,
+/// which the verb dispatcher threads into every leg's SQL predicate.
+/// Issue #191.
+#[must_use]
+pub fn with_search_scope(cmd: clap::Command) -> clap::Command {
+    cmd.arg(
+        clap::Arg::new("scope-tenant")
+            .long("scope-tenant")
+            .value_name("TENANT")
+            .help("Narrow auth_scope.tenant on every search leg (issue #191)")
+            .action(clap::ArgAction::Set),
+    )
+    .arg(
+        clap::Arg::new("scope-workspace")
+            .long("scope-workspace")
+            .value_name("WORKSPACE")
+            .help("Narrow auth_scope.workspace on every search leg")
+            .action(clap::ArgAction::Set),
+    )
+    .arg(
+        clap::Arg::new("scope-user")
+            .long("scope-user")
+            .value_name("HMN_USER_ID")
+            .help("Narrow auth_scope.user (must be canonical `hmn:…` form)")
+            .action(clap::ArgAction::Set),
+    )
+    .arg(
+        clap::Arg::new("scope-agent")
+            .long("scope-agent")
+            .value_name("AGENT_ID")
+            .help("Narrow auth_scope.agent on every search leg")
+            .action(clap::ArgAction::Set),
+    )
+}
+
 /// Add `--dry-run`, `--human-review`, `--no-diff` to a generated subcommand.
 /// `--dry-run` and `--human-review` are mutually exclusive. Together they map
 /// onto the [`FlushMode`](cairn_core::domain::flush_plan::FlushMode) enum.

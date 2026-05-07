@@ -324,7 +324,13 @@ async fn run_async(
         },
         limit,
         visibility_allowlist: vec![],
-        auth_scope: cairn_core::domain::ScopeTuple::default(),
+        auth_scope: cairn_core::domain::ScopeTuple {
+            tenant: sub.get_one::<String>("scope-tenant").cloned(),
+            workspace: sub.get_one::<String>("scope-workspace").cloned(),
+            user: sub.get_one::<String>("scope-user").cloned(),
+            agent: sub.get_one::<String>("scope-agent").cloned(),
+            ..Default::default()
+        },
         model_label: kind.as_str().to_owned(),
         explain,
     };

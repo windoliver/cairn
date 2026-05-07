@@ -334,6 +334,165 @@ async fn keyword_empty_visibility_returns_all_visibilities() {
     );
 }
 
+// ── Graph leg direct ─────────────────────────────────────────────────────
+
+/// `search_graph_neighbors` end-to-end: insert two records linked through
+/// an entity edge, call the trait method directly with `r1` as the seed
+/// and an empty ranked list, and confirm `r2` surfaces as a graph
+/// candidate. Also verifies the contract predicates (`auth_scope`,
+/// `visibility`, `filter`, supersession) all apply to the neighbor row.
+#[allow(clippy::too_many_lines, reason = "graph fixture needs explicit setup")]
+#[tokio::test]
+async fn search_graph_neighbors_returns_connected_record() {
+    use cairn_core::contract::memory_store::{GraphNeighborsArgs, MemoryStore};
+    use cairn_core::domain::graph::{
+        EdgeConfidence, EntityEdge, EntityEdgeId, EntityId, EntityNode,
+    };
+
+    let store = cairn_store_sqlite::open_in_memory()
+        .await
+        .expect("open store");
+
+    // Two records, same scope, distinct ids.
+    let r1 = record(
+        "01HQZX9F5N0000000000000R01",
+        "01HQZX9F5N0000000000000R01",
+        ScopeTuple {
+            tenant: Some("acme".into()),
+            ..Default::default()
+        },
+        "graph rescue source body",
+    );
+    let r2 = record(
+        "01HQZX9F5N0000000000000R02",
+        "01HQZX9F5N0000000000000R02",
+        ScopeTuple {
+            tenant: Some("acme".into()),
+            ..Default::default()
+        },
+        "graph rescue target body",
+    );
+    store.upsert(&r1).await.expect("upsert r1");
+    store.upsert(&r2).await.expect("upsert r2");
+
+    // Entity graph: e1 ↔ e2, each linked to its episode record.
+    let e1_node = EntityNode {
+        id: EntityId::from("01HZE7JV5N00000000000000E1"),
+        name: "Alice".into(),
+        name_norm: "alice-graph-direct".into(),
+        summary: None,
+        created_at: 1,
+        embedding_id: None,
+    };
+    let e2_node = EntityNode {
+        id: EntityId::from("01HZE7JV5N00000000000000E2"),
+        name: "Bob".into(),
+        name_norm: "bob-graph-direct".into(),
+        summary: None,
+        created_at: 1,
+        embedding_id: None,
+    };
+    let e1 = store.upsert_entity(&e1_node).await.expect("e1");
+    let e2 = store.upsert_entity(&e2_node).await.expect("e2");
+    store
+        .link_entity_episode(&e1, &r1.id)
+        .await
+        .expect("link r1");
+    store
+        .link_entity_episode(&e2, &r2.id)
+        .await
+        .expect("link r2");
+
+    // High-confidence edge in the past so the bitemporal predicate
+    // (`valid_at <= now AND created_at <= now`) admits it.
+    let edge = EntityEdge {
+        id: EntityEdgeId::from("01HZE7JV5N00000000000000ED"),
+        source_id: e1.clone(),
+        target_id: e2.clone(),
+        relation: "knows".into(),
+        confidence: EdgeConfidence::Extracted,
+        confidence_score: 1.0,
+        valid_at: 1,
+        invalid_at: None,
+        created_at: 1,
+        source_record_id: None,
+    };
+    store.upsert_entity_edge(&edge).await.expect("edge");
+
+    // Seed = r1, no ranked exclusion → r2 must surface as the 1-hop
+    // neighbor.
+    let scope = ScopeTuple {
+        tenant: Some("acme".into()),
+        ..Default::default()
+    };
+    let result = store
+        .search_graph_neighbors(&GraphNeighborsArgs {
+            seed_record_ids: vec![r1.id.clone()],
+            ranked_record_ids: vec![],
+            filter: None,
+            auth_scope: scope.clone(),
+            visibility_allowlist: vec![MemoryVisibility::Private],
+            limit: 10,
+            confidence_min: 0.0,
+        })
+        .await
+        .expect("graph search");
+    let ids: Vec<_> = result.iter().map(|c| c.record_id.as_str()).collect();
+    assert!(
+        ids.iter().any(|id| id.ends_with("R02")),
+        "graph traversal must surface r2 from seed=r1; got {ids:?}"
+    );
+
+    // Cross-tenant scope: r2 lives in tenant=acme, but the caller asks
+    // for tenant=globex. Graph SQL must reject the neighbor.
+    let result = store
+        .search_graph_neighbors(&GraphNeighborsArgs {
+            seed_record_ids: vec![r1.id.clone()],
+            ranked_record_ids: vec![],
+            filter: None,
+            auth_scope: ScopeTuple {
+                tenant: Some("globex".into()),
+                ..Default::default()
+            },
+            visibility_allowlist: vec![MemoryVisibility::Private],
+            limit: 10,
+            confidence_min: 0.0,
+        })
+        .await
+        .expect("graph search cross-tenant");
+    assert!(
+        result.is_empty(),
+        "cross-tenant scope must yield empty graph result; got {:?}",
+        result
+            .iter()
+            .map(|c| c.record_id.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    // Ranked exclusion: include r2 in `ranked_record_ids` and confirm it
+    // is dropped from the graph result.
+    let result = store
+        .search_graph_neighbors(&GraphNeighborsArgs {
+            seed_record_ids: vec![r1.id.clone()],
+            ranked_record_ids: vec![r2.id.clone()],
+            filter: None,
+            auth_scope: scope,
+            visibility_allowlist: vec![MemoryVisibility::Private],
+            limit: 10,
+            confidence_min: 0.0,
+        })
+        .await
+        .expect("graph search ranked-exclude");
+    assert!(
+        result.is_empty(),
+        "ranked_record_ids must dedup r2 from graph result; got {:?}",
+        result
+            .iter()
+            .map(|c| c.record_id.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
 // ── Special-character values ─────────────────────────────────────────────
 
 #[tokio::test]
