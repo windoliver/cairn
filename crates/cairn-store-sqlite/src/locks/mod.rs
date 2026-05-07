@@ -1,10 +1,12 @@
 //! Lock-table acquisition for §5.6. See module-level doc once `acquire` lands.
 
+mod acquire;
 mod error;
 mod handle;
 mod incarnation;
 mod kinds;
 
+pub use acquire::acquire;
 pub use error::{
     LockError as LockErrorV2, RetryHint, default_drain_retry, default_fenced_retry,
     default_held_retry,
