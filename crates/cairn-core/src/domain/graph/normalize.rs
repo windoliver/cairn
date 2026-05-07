@@ -7,9 +7,16 @@
 //! Behaviour:
 //! - NFC unicode normalization
 //! - lowercase (Unicode-aware via `char::to_lowercase`)
-//! - strip ASCII punctuation (`char::is_ascii_punctuation`)
 //! - collapse runs of whitespace to a single ASCII space
 //! - trim leading + trailing whitespace
+//!
+//! ASCII punctuation is **preserved** in the canonical key. An earlier
+//! version stripped it, but that silently merged punctuation-significant
+//! entity names — `C++`/`C`, `node.js`/`node js`, `ACME-1`/`ACME 1` — onto
+//! the same `name_norm` row, causing irreversible graph merges at
+//! `upsert_entity` time. ByName lookup still tolerates case and whitespace
+//! variation, which is what the canonicalizer is for; treating punctuation
+//! as semantically meaningless was a correctness bug, not a feature.
 //!
 //! Pure: no I/O, no global state, no allocations beyond the return value.
 
@@ -17,12 +24,12 @@ use unicode_normalization::UnicodeNormalization;
 
 /// Canonical form used as the `entity_nodes.name_norm` dedup key.
 ///
-/// Returns `None` when the input collapses to an empty key (whitespace- or
-/// punctuation-only inputs like `""`, `"   "`, `"!!!"` would otherwise share
-/// the same empty `name_norm` and silently dedup distinct entities onto a
-/// single row at write time, or resolve a `ByName` lookup to an arbitrary
-/// existing empty-key entity at read time). All callers MUST check for
-/// `Some(_)` before binding the value as a `name_norm` parameter.
+/// Returns `None` when the input collapses to an empty key (e.g. `""` or
+/// `"   "`) — those would otherwise share the same empty `name_norm` and
+/// silently dedup distinct entities onto a single row at write time, or
+/// resolve a `ByName` lookup to an arbitrary existing empty-key entity
+/// at read time. All callers MUST check for `Some(_)` before binding
+/// the value as a `name_norm` parameter.
 ///
 /// Idempotent on the `Some` branch: if `normalize_entity_name(x) ==
 /// Some(s)` then `normalize_entity_name(&s) == Some(s)` (covered by
@@ -32,18 +39,12 @@ pub fn normalize_entity_name(input: &str) -> Option<String> {
     // 1. NFC-normalize so visually identical strings compare equal.
     let nfc: String = input.nfc().collect();
 
-    // 2. Build the output: lowercase, drop punctuation, collapse whitespace.
+    // 2. Build the output: lowercase, collapse whitespace. Punctuation is
+    //    preserved so that `C++` / `C`, `node.js` / `node js`, and
+    //    `ACME-1` / `ACME 1` stay distinct dedup keys.
     let mut out = String::with_capacity(nfc.len());
     let mut prev_was_space = true; // start true so leading WS is dropped
     for ch in nfc.chars() {
-        if ch.is_ascii_punctuation() {
-            // Treat punctuation as a soft separator: collapse to a space.
-            if !prev_was_space {
-                out.push(' ');
-                prev_was_space = true;
-            }
-            continue;
-        }
         if ch.is_whitespace() {
             if !prev_was_space {
                 out.push(' ');
@@ -78,10 +79,28 @@ mod tests {
     }
 
     #[test]
-    fn strips_punctuation_and_collapses_whitespace() {
+    fn preserves_punctuation_and_collapses_whitespace() {
         assert_eq!(
             normalize_entity_name("Auth Service (v2)").as_deref(),
-            Some("auth service v2")
+            Some("auth service (v2)")
+        );
+    }
+
+    #[test]
+    fn punctuation_significant_names_stay_distinct() {
+        // Round-2 review: `C++` and `C` are separate languages; the
+        // canonicalizer must not collapse them onto one dedup key.
+        assert_ne!(
+            normalize_entity_name("C++"),
+            normalize_entity_name("C"),
+        );
+        assert_ne!(
+            normalize_entity_name("node.js"),
+            normalize_entity_name("node js"),
+        );
+        assert_ne!(
+            normalize_entity_name("ACME-1"),
+            normalize_entity_name("ACME 1"),
         );
     }
 
@@ -106,13 +125,15 @@ mod tests {
 
     #[test]
     fn empty_canonical_key_is_rejected() {
-        // Round 4 review: empty/punctuation-only inputs MUST NOT collapse to
-        // the same dedup key — that would let unrelated entities merge at
-        // upsert time and let punctuation-only ByName lookups resolve to
-        // arbitrary rows. Caller is required to handle `None`.
+        // Empty / whitespace-only inputs MUST NOT collapse to the same
+        // dedup key — that would let unrelated entities merge at upsert
+        // time and let empty-key ByName lookups resolve to arbitrary
+        // rows. Caller is required to handle `None`.
         assert_eq!(normalize_entity_name(""), None);
         assert_eq!(normalize_entity_name("   "), None);
-        assert_eq!(normalize_entity_name("!!!"), None);
+        // Punctuation-only inputs are preserved (round-2 review): `!!!`
+        // is a distinct, valid canonical key.
+        assert_eq!(normalize_entity_name("!!!").as_deref(), Some("!!!"));
     }
 
     #[test]
@@ -135,21 +156,15 @@ mod tests {
             }
         }
 
-        /// Trailing whitespace or punctuation never affects the result —
-        /// i.e. the function is invariant under right-padding by junk.
+        /// Trailing whitespace never affects the result — i.e. the
+        /// function is invariant under right-padding by whitespace.
+        /// (Punctuation is now preserved, so it CAN affect the result;
+        /// see `punctuation_significant_names_stay_distinct`.)
         #[test]
-        fn trailing_junk_is_absorbed(s in "[A-Za-z0-9 ]{0,32}", junk in "[ \t\n!?.,;:]{0,8}") {
+        fn trailing_whitespace_is_absorbed(s in "[A-Za-z0-9 ]{0,32}", junk in "[ \t\n]{0,8}") {
             let plain = normalize_entity_name(&s);
             let padded = normalize_entity_name(&format!("{s}{junk}"));
             prop_assert_eq!(plain, padded);
-        }
-
-        /// Output never contains ASCII punctuation.
-        #[test]
-        fn output_has_no_punctuation(s in ".{0,128}") {
-            if let Some(out) = normalize_entity_name(&s) {
-                prop_assert!(!out.chars().any(|c| c.is_ascii_punctuation()));
-            }
         }
 
         /// Output never contains uppercase ASCII letters.

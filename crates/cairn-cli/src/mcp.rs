@@ -92,29 +92,32 @@ pub fn run(
             // open and migrate <vault>/.cairn/cairn.db, which must
             // not run against a directory that is not actually a
             // bound Cairn vault. Mirrors the gate `cairn status`
-            // applies. Skipped on CwdFallback (`probe_binding =
-            // false`) — that case is treated as "no vault" rather
-            // than "wrong vault" because the resolver gave us a
-            // synthetic CWD path with no user intent behind it; the
-            // open below will surface a clearer "store init" error
-            // if the directory really is not a vault.
-            if probe_binding {
-                match crate::verbs::status::probe_vault_binding(vault_root) {
-                    crate::verbs::status::VaultBinding::Bound => {}
-                    crate::verbs::status::VaultBinding::Unbound => {
-                        eprintln!(
-                            "cairn mcp: {binding_origin} {} is not a Cairn vault \
-                             (no .cairn/vault.id) — run `cairn bootstrap` first",
-                            vault_root.display()
-                        );
-                        return ExitCode::from(78);
-                    }
-                    crate::verbs::status::VaultBinding::Invalid(reason) => {
-                        eprintln!("cairn mcp: vault binding error — {reason}");
-                        return ExitCode::from(78);
-                    }
+            // applies, but on the opt-in path the gate is mandatory
+            // — even on `CwdFallback`. `cairn_store_sqlite::open` is
+            // create-and-migrate, so a `cairn mcp` invocation in a
+            // random working directory would otherwise materialize a
+            // fresh `.cairn/cairn.db` and silently fork the operator's
+            // memory state across two vaults (round-2 review). The
+            // legacy `single_tenant=false` arm above bypasses this
+            // gate because it never opens SQLite.
+            match crate::verbs::status::probe_vault_binding(vault_root) {
+                crate::verbs::status::VaultBinding::Bound => {}
+                crate::verbs::status::VaultBinding::Unbound => {
+                    eprintln!(
+                        "cairn mcp: {binding_origin} {} is not a Cairn vault \
+                         (no .cairn/vault.id) — run `cairn bootstrap` first",
+                        vault_root.display()
+                    );
+                    return ExitCode::from(78);
+                }
+                crate::verbs::status::VaultBinding::Invalid(reason) => {
+                    eprintln!("cairn mcp: vault binding error — {reason}");
+                    return ExitCode::from(78);
                 }
             }
+            // probe_binding is no longer load-bearing on the opt-in
+            // path; suppress the unused-variable warning explicitly.
+            let _ = probe_binding;
             let sqlite_store: Arc<cairn_store_sqlite::SqliteMemoryStore> =
                 match rt.block_on(cairn_store_sqlite::open(&store_db_path(vault_root))) {
                     Ok(s) => Arc::new(s),

@@ -530,7 +530,12 @@ async fn upsert_entity_round_trip_punctuation_and_unicode() {
 
     let store = cairn_store_sqlite::open_in_memory().await.expect("open");
 
-    let display = "Auth Service (v2)";
+    // Display form with multi-space runs and decomposed Unicode so that
+    // a naive `lower(display)` lookup CANNOT match the canonical
+    // `name_norm` — the helper's whitespace collapse + NFC pass is what
+    // makes the lookup load-bearing. (Punctuation is preserved by
+    // design; round-2 review.)
+    let display = "Auth  Servic\u{0065}\u{0301} (v2)";
     let node = EntityNode {
         id: EntityId::from("01HZE7JV5N0000000000000099"),
         name: display.into(),
@@ -546,7 +551,7 @@ async fn upsert_entity_round_trip_punctuation_and_unicode() {
     // `name` and probes `entity_nodes.name_norm` directly. Simulate that
     // here by recomputing from the *display* form (whitespace/punctuation
     // intact) and asserting the row is found.
-    let probe_norm = normalize_entity_name("Auth Service (v2)").expect("non-empty literal");
+    let probe_norm = normalize_entity_name(display).expect("non-empty literal");
     assert_eq!(
         probe_norm, node.name_norm,
         "helper must be deterministic across call sites"
