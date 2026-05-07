@@ -1,7 +1,8 @@
 //! `cairn ingest` handler.
 //!
 //! Parses CLI args. When source is `-`, reads body from stdin (§5.8).
-//! Returns `Internal aborted` until the store is wired (issue #9).
+//! Body/file/stdin/url ingest now runs the local filter/classify path and
+//! writes accepted records through the configured `MemoryStore`.
 //!
 //! The `--resync <path>` flag re-ingests an out-of-band edited markdown
 //! projection (brief §3.0, #43). The handler is fully implemented and
@@ -21,8 +22,9 @@
 //!
 //! [`open_for_signed_verb`]: crate::identity::guard::open_for_signed_verb
 
-use std::fs;
-use std::io::Read;
+use std::collections::BTreeMap;
+use std::fs::{self, OpenOptions};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -32,18 +34,41 @@ use cairn_core::contract::memory_store::MemoryStore;
 use cairn_core::domain::projection::{
     ConflictOutcome, MarkdownProjector, PROJECTED_STANDARD_FIELDS, ResyncError,
 };
+use cairn_core::domain::record::{Ed25519Signature, RecordId};
+use cairn_core::domain::{
+    ActorChainEntry, CaptureMode, ChainRole, EvidenceVector, Identity, IdentityKind, MemoryClass,
+    MemoryKind, MemoryRecord, MemoryVisibility, Provenance, Rfc3339Timestamp, ScopeTuple,
+    SourceFamily, TargetId,
+};
+use cairn_core::generated::common::Ulid;
 use cairn_core::generated::envelope::ResponseVerb;
-use cairn_core::generated::envelope::{Response, ResponseData, ResponsePolicyTrace};
+use cairn_core::generated::envelope::{
+    Response, ResponseData, ResponsePolicyTrace, ResponseStatus,
+};
 use cairn_core::generated::verbs::ingest::IngestData;
 use cairn_core::pipeline::extraction_cache::{
     ExtractionCacheEntry, ExtractionResult, cache_entry_path, cache_key_for_bytes,
     relative_path_for_cache,
 };
+use cairn_core::pipeline::filter::{
+    Decision, FilterInputs, VisibilityPolicy, default_visibility, fence, redact, should_memorize,
+};
+use cairn_core::policy_trace::{
+    PolicyDetail, PolicyErrorCode, PolicyGate, PolicyOutcome, PolicyTraceEntry, to_wire,
+};
 use clap::ArgMatches;
+use sha2::{Digest, Sha256};
 
 use crate::identity::{guard::refuse_if_degraded, status::ReconciliationReport};
 
-use super::envelope::{emit_json, human_error, new_operation_id, unimplemented_response};
+use super::envelope::{
+    emit_json, human_error, invalid_args_response, new_operation_id, not_found_response,
+};
+use super::status;
+
+const CLI_AUTHOR_ID: &str = "agt:cairn-cli:p0:v1";
+const CLI_SENSOR_ID: &str = "snr:local:cli:p0:v1";
+const STDIN_LIMIT_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Default)]
 struct CacheStats {
@@ -287,28 +312,12 @@ fn build_record_from_parsed(
 
 /// Run `cairn ingest`.
 #[must_use]
-pub fn run(sub: &ArgMatches) -> ExitCode {
+pub fn run(sub: &ArgMatches, vault_root: &Path) -> ExitCode {
     let json = sub.get_flag("json");
 
     // --resync <path>: re-ingest an out-of-band edited markdown projection.
     if let Some(resync_path) = sub.get_one::<std::path::PathBuf>("resync") {
-        // TODO(#46): wire vault_root from resolved vault config.
-        // For now: use CWD as vault_root placeholder.
-        let resp = unimplemented_response(ResponseVerb::Ingest);
-        if json {
-            emit_json(&resp);
-        } else {
-            human_error(
-                "ingest",
-                "Internal",
-                &format!(
-                    "store not wired in this P0 build — --resync {} requires #46",
-                    resync_path.display()
-                ),
-                &resp.operation_id,
-            );
-        }
-        return ExitCode::FAILURE;
+        return run_resync(sub, json, resync_path, vault_root);
     }
 
     // --dry-run / --human-review: build a stub FlushPlan and either print
@@ -336,12 +345,17 @@ pub fn run(sub: &ArgMatches) -> ExitCode {
         return ExitCode::from(64);
     }
 
+    let kind = match parse_kind(sub, json) {
+        Ok(kind) => kind,
+        Err(code) => return code,
+    };
+
     if let Some(folder) = sub.get_one::<PathBuf>("folder") {
-        return run_folder(sub, json, folder);
+        return run_folder(sub, json, folder, vault_root);
     }
 
     if let Some(folder) = positional_folder_source(sub) {
-        return run_folder(sub, json, &folder);
+        return run_folder(sub, json, &folder, vault_root);
     }
 
     if sub.get_flag("no_cache") {
@@ -350,55 +364,483 @@ pub fn run(sub: &ArgMatches) -> ExitCode {
     }
 
     // Resolve body: positional `source` wins if set; --body/--file/--url otherwise.
-    let _body_resolved: Option<String> = if let Some(src) = sub.get_one::<String>("source") {
-        if src == "-" {
-            let mut buf = String::new();
-            // Cap at 4 MiB to avoid unbounded allocation in the stubbed path.
-            if std::io::stdin()
-                .take(4 * 1024 * 1024)
-                .read_to_string(&mut buf)
-                .is_err()
-            {
-                let r = unimplemented_response(ResponseVerb::Ingest);
-                if json {
-                    emit_json(&r);
-                } else {
-                    human_error(
-                        "ingest",
-                        "Internal",
-                        "failed to read stdin",
-                        &r.operation_id,
-                    );
-                }
-                return ExitCode::FAILURE;
+    let resolved = match resolve_body(sub) {
+        Ok(resolved) => resolved,
+        Err(reason) => {
+            let resp = invalid_args_response(ResponseVerb::Ingest, "source", &reason);
+            if json {
+                emit_json(&resp);
+            } else {
+                human_error("ingest", "InvalidArgs", &reason, &resp.operation_id);
             }
-            Some(buf)
-        } else {
-            Some(src.clone())
+            return ExitCode::from(64);
         }
-    } else {
-        sub.get_one::<String>("body").cloned()
     };
+    if resolved.body.trim().is_empty() {
+        let resp = invalid_args_response(ResponseVerb::Ingest, "body", "must not be empty");
+        if json {
+            emit_json(&resp);
+        } else {
+            human_error(
+                "ingest",
+                "InvalidArgs",
+                "body: must not be empty",
+                &resp.operation_id,
+            );
+        }
+        return ExitCode::from(64);
+    }
 
     // §3.5 trust-boundary guard: refuse if the vault is degraded.
-    // In this P0 stub the report is always clean (no store is open); full async
-    // wiring against the resolved vault path is deferred to issue #9.
     if let Err(e) = refuse_if_degraded(&ReconciliationReport::default(), vec![]) {
         eprintln!("cairn ingest: VaultDegraded — {e}");
         return ExitCode::from(75); // EX_TEMPFAIL
     }
 
-    let resp = unimplemented_response(ResponseVerb::Ingest);
+    if let Some(exit) = require_bound_vault(json, vault_root) {
+        return exit;
+    }
+
+    run_body_ingest(sub, json, vault_root, kind, resolved)
+}
+
+struct ResolvedBody {
+    body: String,
+}
+
+fn parse_kind(sub: &ArgMatches, json: bool) -> Result<MemoryKind, ExitCode> {
+    let kind_raw = sub
+        .get_one::<String>("kind")
+        .map(String::as_str)
+        .unwrap_or_default();
+    match MemoryKind::parse(kind_raw) {
+        Ok(kind) => Ok(kind),
+        Err(e) => {
+            let reason = e.to_string();
+            let mut resp = invalid_args_response(ResponseVerb::Ingest, "kind", &reason);
+            resp.policy_trace = to_wire(&[PolicyTraceEntry::error(
+                PolicyGate::ScopeCheck,
+                PolicyErrorCode::from_static("invalid_kind"),
+            )]);
+            if json {
+                emit_json(&resp);
+            } else {
+                human_error("ingest", "InvalidArgs", &reason, &resp.operation_id);
+            }
+            Err(ExitCode::from(64))
+        }
+    }
+}
+
+fn resolve_body(sub: &ArgMatches) -> Result<ResolvedBody, String> {
+    if let Some(src) = sub.get_one::<String>("source") {
+        return if src == "-" {
+            let mut buf = String::new();
+            std::io::stdin()
+                .take(STDIN_LIMIT_BYTES)
+                .read_to_string(&mut buf)
+                .map_err(|e| format!("failed to read stdin: {e}"))?;
+            Ok(ResolvedBody { body: buf })
+        } else {
+            let path = PathBuf::from(src);
+            if path.is_file() {
+                fs::read_to_string(&path)
+                    .map(|body| ResolvedBody { body })
+                    .map_err(|e| format!("failed to read {}: {e}", path.display()))
+            } else {
+                Ok(ResolvedBody { body: src.clone() })
+            }
+        };
+    }
+    if let Some(body) = sub.get_one::<String>("body") {
+        return Ok(ResolvedBody { body: body.clone() });
+    }
+    if let Some(path) = sub.get_one::<PathBuf>("file") {
+        return fs::read_to_string(path)
+            .map(|body| ResolvedBody { body })
+            .map_err(|e| format!("failed to read {}: {e}", path.display()));
+    }
+    if let Some(url) = sub.get_one::<String>("url") {
+        return Ok(ResolvedBody { body: url.clone() });
+    }
+    Err("exactly one source is required".to_owned())
+}
+
+fn require_bound_vault(json: bool, vault_root: &Path) -> Option<ExitCode> {
+    match status::probe_vault_binding(vault_root) {
+        status::VaultBinding::Bound => None,
+        status::VaultBinding::Unbound => {
+            let msg = format!(
+                "no Cairn vault at {} — run `cairn bootstrap` first",
+                vault_root.display()
+            );
+            let resp = not_found_response(ResponseVerb::Ingest, "vault", &msg);
+            if json {
+                emit_json(&resp);
+            } else {
+                human_error("ingest", "NotFound", &msg, &resp.operation_id);
+            }
+            Some(ExitCode::from(78))
+        }
+        status::VaultBinding::Invalid(reason) => {
+            let msg = format!("vault binding error — {reason}");
+            let resp = internal_error_response(&msg);
+            if json {
+                emit_json(&resp);
+            } else {
+                human_error("ingest", "Internal", &msg, &resp.operation_id);
+            }
+            Some(ExitCode::from(78))
+        }
+    }
+}
+
+fn run_resync(sub: &ArgMatches, json: bool, resync_path: &Path, vault_root: &Path) -> ExitCode {
+    if let Some(exit) = require_bound_vault(json, vault_root) {
+        return exit;
+    }
+
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => return emit_internal(json, &format!("runtime build: {e}"), Vec::new()),
+    };
+
+    let db_path = vault_root.join(".cairn").join("cairn.db");
+    let result = rt.block_on(async {
+        let store = cairn_store_sqlite::open(&db_path).await?;
+        resync_handler(&store, resync_path, vault_root).await
+    });
+
+    match result {
+        Ok(result) => {
+            let session_id = sub
+                .get_one::<String>("session_id")
+                .cloned()
+                .unwrap_or_else(|| "resync".to_owned());
+            let resp = Response {
+                contract: "cairn.mcp.v1".to_owned(),
+                data: Some(ResponseData::Ingest(IngestData {
+                    cache_hits: None,
+                    cache_misses: None,
+                    cache_writes: None,
+                    files_processed: None,
+                    plan_ref: None,
+                    record_id: Ulid(result.target_id),
+                    session_id,
+                })),
+                error: None,
+                operation_id: new_operation_id(),
+                policy_trace: Vec::<ResponsePolicyTrace>::new(),
+                status: ResponseStatus::Committed,
+                target: None,
+                verb: ResponseVerb::Ingest,
+            };
+            if json {
+                emit_json(&resp);
+            } else if let Some(ResponseData::Ingest(data)) = resp.data.as_ref() {
+                println!(
+                    "cairn ingest --resync: committed record {}",
+                    data.record_id.0
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => emit_internal(json, &format!("{e:#}"), Vec::new()),
+    }
+}
+
+fn run_body_ingest(
+    sub: &ArgMatches,
+    json: bool,
+    vault_root: &Path,
+    kind: MemoryKind,
+    resolved: ResolvedBody,
+) -> ExitCode {
+    let ResolvedBody { body } = resolved;
+    let redacted = redact(&body);
+    let fenced = fence(&redacted.text);
+    let decision = should_memorize(&FilterInputs::new(&redacted, &fenced));
+    let visibility = default_visibility(
+        IdentityKind::Agent,
+        CaptureMode::Explicit,
+        SourceFamily::Cli,
+        &VisibilityPolicy::default(),
+    );
+    let trace = policy_trace_for_ingest(&redacted, &fenced, decision, visibility);
+    let class = default_class_for_kind(kind);
+    let session_id = sub
+        .get_one::<String>("session_id")
+        .cloned()
+        .unwrap_or_else(|| new_operation_id().0);
+    let scope = ScopeTuple {
+        session_id: Some(session_id.clone()),
+        agent: Some(CLI_AUTHOR_ID.to_owned()),
+        ..ScopeTuple::default()
+    };
+
+    if let Decision::Discard(reason) = decision {
+        let metric = IngestMetricRow::discarded(kind, class, visibility, &scope, reason.as_str());
+        if let Err(e) = append_metric(vault_root, &metric) {
+            return emit_internal(json, &format!("write metrics: {e:#}"), trace);
+        }
+        let mut resp = invalid_args_response(
+            ResponseVerb::Ingest,
+            "body",
+            &format!("discarded by filter: {}", reason.as_str()),
+        );
+        resp.policy_trace = trace;
+        if json {
+            emit_json(&resp);
+        } else {
+            human_error(
+                "ingest",
+                "InvalidArgs",
+                &format!("body discarded by filter: {}", reason.as_str()),
+                &resp.operation_id,
+            );
+        }
+        return ExitCode::from(64);
+    }
+
+    let record = match build_record(kind, class, visibility, scope.clone(), &fenced.text) {
+        Ok(record) => record,
+        Err(e) => return emit_internal(json, &format!("build record: {e:#}"), trace),
+    };
+
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => return emit_internal(json, &format!("runtime build: {e}"), trace),
+    };
+
+    let db_path = vault_root.join(".cairn").join("cairn.db");
+    let outcome = match rt.block_on(async {
+        let store = cairn_store_sqlite::open(&db_path).await?;
+        store.upsert(&record).await
+    }) {
+        Ok(outcome) => outcome,
+        Err(e) => return emit_internal(json, &format!("store upsert: {e}"), trace),
+    };
+
+    let metric = IngestMetricRow::accepted(
+        outcome.record_id.as_str(),
+        kind,
+        class,
+        visibility,
+        &scope,
+        1,
+    );
+    if let Err(e) = append_metric(vault_root, &metric) {
+        return emit_internal(json, &format!("write metrics: {e:#}"), trace);
+    }
+
+    let resp = Response {
+        contract: "cairn.mcp.v1".to_owned(),
+        data: Some(ResponseData::Ingest(IngestData {
+            cache_hits: None,
+            cache_misses: None,
+            cache_writes: None,
+            files_processed: None,
+            plan_ref: None,
+            record_id: Ulid(outcome.record_id.as_str().to_owned()),
+            session_id,
+        })),
+        error: None,
+        operation_id: new_operation_id(),
+        policy_trace: trace,
+        status: ResponseStatus::Committed,
+        target: None,
+        verb: ResponseVerb::Ingest,
+    };
+    if json {
+        emit_json(&resp);
+    } else if let Some(ResponseData::Ingest(data)) = resp.data.as_ref() {
+        println!("cairn ingest: committed record {}", data.record_id.0);
+    }
+    ExitCode::SUCCESS
+}
+
+fn policy_trace_for_ingest(
+    redacted: &cairn_core::pipeline::filter::RedactedPayload,
+    fenced: &cairn_core::pipeline::filter::FencedPayload,
+    decision: Decision,
+    visibility: MemoryVisibility,
+) -> Vec<ResponsePolicyTrace> {
+    let mut entries = vec![
+        PolicyTraceEntry::from(redacted),
+        PolicyTraceEntry::from(fenced),
+        PolicyTraceEntry::from(&decision),
+    ];
+    if matches!(decision, Decision::Proceed) {
+        entries.push(PolicyTraceEntry::new(
+            PolicyGate::VisibilityFloor,
+            PolicyOutcome::Pass,
+            PolicyDetail::VisibilityFloor(visibility),
+        ));
+        entries.push(PolicyTraceEntry::pass(PolicyGate::ScopeCheck));
+    }
+    to_wire(&entries)
+}
+
+#[derive(serde::Serialize)]
+struct IngestMetricRow<'a> {
+    event: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    record_id: Option<&'a str>,
+    kind: &'static str,
+    class: &'static str,
+    visibility: &'static str,
+    scope: &'a ScopeTuple,
+    source_family: &'static str,
+    capture_mode: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rank: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    discard_reason: Option<&'a str>,
+}
+
+impl<'a> IngestMetricRow<'a> {
+    fn accepted(
+        record_id: &'a str,
+        kind: MemoryKind,
+        class: MemoryClass,
+        visibility: MemoryVisibility,
+        scope: &'a ScopeTuple,
+        rank: u32,
+    ) -> Self {
+        Self {
+            event: "accepted",
+            record_id: Some(record_id),
+            kind: kind.as_str(),
+            class: class.as_str(),
+            visibility: visibility.as_str(),
+            scope,
+            source_family: SourceFamily::Cli.as_str(),
+            capture_mode: CaptureMode::Explicit.as_str(),
+            rank: Some(rank),
+            discard_reason: None,
+        }
+    }
+
+    fn discarded(
+        kind: MemoryKind,
+        class: MemoryClass,
+        visibility: MemoryVisibility,
+        scope: &'a ScopeTuple,
+        reason: &'a str,
+    ) -> Self {
+        Self {
+            event: "discarded",
+            record_id: None,
+            kind: kind.as_str(),
+            class: class.as_str(),
+            visibility: visibility.as_str(),
+            scope,
+            source_family: SourceFamily::Cli.as_str(),
+            capture_mode: CaptureMode::Explicit.as_str(),
+            rank: None,
+            discard_reason: Some(reason),
+        }
+    }
+}
+
+fn append_metric(vault_root: &Path, row: &IngestMetricRow<'_>) -> anyhow::Result<()> {
+    let cairn_dir = vault_root.join(".cairn");
+    fs::create_dir_all(&cairn_dir)
+        .with_context(|| format!("create metrics dir {}", cairn_dir.display()))?;
+    let metrics_path = cairn_dir.join("metrics.jsonl");
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&metrics_path)
+        .with_context(|| format!("open {}", metrics_path.display()))?;
+    serde_json::to_writer(&mut file, row).context("serialize metric row")?;
+    file.write_all(b"\n")
+        .with_context(|| format!("write {}", metrics_path.display()))?;
+    Ok(())
+}
+
+fn build_record(
+    kind: MemoryKind,
+    class: MemoryClass,
+    visibility: MemoryVisibility,
+    scope: ScopeTuple,
+    body: &str,
+) -> anyhow::Result<MemoryRecord> {
+    let id_text = new_operation_id().0;
+    let id = RecordId::parse(id_text.clone()).map_err(anyhow::Error::msg)?;
+    let target_id = TargetId::parse(id_text).map_err(anyhow::Error::msg)?;
+    let author = Identity::parse(CLI_AUTHOR_ID).map_err(anyhow::Error::msg)?;
+    let now = now_timestamp()?;
+    let source_hash = format!("sha256:{:x}", Sha256::digest(body.as_bytes()));
+    let record = MemoryRecord {
+        id,
+        target_id,
+        kind,
+        class,
+        visibility,
+        scope,
+        body: body.to_owned(),
+        provenance: Provenance {
+            source_sensor: Identity::parse(CLI_SENSOR_ID).map_err(anyhow::Error::msg)?,
+            created_at: now.clone(),
+            originating_agent_id: author.clone(),
+            source_hash,
+            consent_ref: "consent:cli:p0".to_owned(),
+            llm_id_if_any: None,
+        },
+        updated_at: now.clone(),
+        evidence: EvidenceVector::default(),
+        salience: 0.5,
+        confidence: 0.7,
+        actor_chain: vec![ActorChainEntry {
+            role: ChainRole::Author,
+            identity: author,
+            at: now,
+        }],
+        signature: Ed25519Signature::parse(format!("ed25519:{}", "0".repeat(128)))
+            .map_err(anyhow::Error::msg)?,
+        tags: Vec::new(),
+        extra_frontmatter: BTreeMap::new(),
+        consent_model: None,
+    };
+    record.validate().map_err(anyhow::Error::msg)?;
+    Ok(record)
+}
+
+fn now_timestamp() -> anyhow::Result<Rfc3339Timestamp> {
+    let raw = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    Rfc3339Timestamp::parse(raw).map_err(anyhow::Error::msg)
+}
+
+fn default_class_for_kind(kind: MemoryKind) -> MemoryClass {
+    match kind {
+        MemoryKind::Event
+        | MemoryKind::Trace
+        | MemoryKind::Reasoning
+        | MemoryKind::SensorObservation
+        | MemoryKind::UserSignal
+        | MemoryKind::Feedback => MemoryClass::Episodic,
+        MemoryKind::Workflow
+        | MemoryKind::StrategySuccess
+        | MemoryKind::StrategyFailure
+        | MemoryKind::Playbook => MemoryClass::Procedural,
+        _ => MemoryClass::Semantic,
+    }
+}
+
+fn emit_internal(json: bool, message: &str, policy_trace: Vec<ResponsePolicyTrace>) -> ExitCode {
+    let mut resp = internal_error_response(message);
+    resp.policy_trace = policy_trace;
     if json {
         emit_json(&resp);
     } else {
-        let op = resp.operation_id.clone();
-        human_error(
-            "ingest",
-            "Internal",
-            "store not wired in this P0 build",
-            &op,
-        );
+        human_error("ingest", "Internal", message, &resp.operation_id);
     }
     ExitCode::FAILURE
 }
@@ -420,8 +862,8 @@ fn positional_folder_source(sub: &ArgMatches) -> Option<PathBuf> {
     path.is_dir().then_some(path)
 }
 
-fn run_folder(sub: &ArgMatches, json: bool, folder: &Path) -> ExitCode {
-    match run_folder_inner(sub, folder) {
+fn run_folder(sub: &ArgMatches, json: bool, folder: &Path, vault_root: &Path) -> ExitCode {
+    match run_folder_inner(sub, folder, vault_root) {
         Ok(resp) => {
             if json {
                 emit_json(&resp);
@@ -449,8 +891,11 @@ fn run_folder(sub: &ArgMatches, json: bool, folder: &Path) -> ExitCode {
     }
 }
 
-fn run_folder_inner(sub: &ArgMatches, folder: &Path) -> Result<Response, FolderIngestError> {
-    let vault_root = std::env::current_dir().map_err(FolderIngestError::CurrentDir)?;
+fn run_folder_inner(
+    sub: &ArgMatches,
+    folder: &Path,
+    vault_root: &Path,
+) -> Result<Response, FolderIngestError> {
     let folder_path = if folder.is_absolute() {
         folder.to_path_buf()
     } else {
@@ -464,7 +909,7 @@ fn run_folder_inner(sub: &ArgMatches, folder: &Path) -> Result<Response, FolderI
     let no_cache = sub.get_flag("no_cache");
     let mut stats = CacheStats::default();
     for file in files {
-        process_folder_file(&vault_root, &file, no_cache, &mut stats)?;
+        process_folder_file(vault_root, &file, no_cache, &mut stats)?;
     }
 
     let operation_id = new_operation_id();
@@ -660,7 +1105,6 @@ fn internal_error_response(message: &str) -> Response {
 enum FolderIngestError {
     MissingParent(PathBuf),
     NotDirectory(PathBuf),
-    CurrentDir(std::io::Error),
     ReadDir {
         path: PathBuf,
         source: std::io::Error,
@@ -690,7 +1134,6 @@ impl std::fmt::Display for FolderIngestError {
                 write!(f, "cache path '{}' has no parent directory", path.display())
             }
             Self::NotDirectory(path) => write!(f, "'{}' is not a directory", path.display()),
-            Self::CurrentDir(source) => write!(f, "failed to resolve current directory: {source}"),
             Self::ReadDir { path, source } => {
                 write!(f, "failed to read directory '{}': {source}", path.display())
             }

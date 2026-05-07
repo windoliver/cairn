@@ -9,7 +9,9 @@ fn cli() -> Command {
 
 fn assert_aborted_internal(verb_args: &[&str]) {
     let out = {
+        let vault = tempfile::tempdir().expect("temp vault");
         let mut cmd = cli();
+        cmd.current_dir(vault.path());
         cmd.args(verb_args);
         cmd.output()
             .unwrap_or_else(|e| panic!("failed to run {verb_args:?}: {e}"))
@@ -33,8 +35,31 @@ fn assert_aborted_internal(verb_args: &[&str]) {
 }
 
 #[test]
-fn ingest_returns_aborted_internal() {
-    assert_aborted_internal(&["ingest", "--kind", "user", "--body", "hello", "--json"]);
+fn ingest_returns_committed_envelope() {
+    let vault = tempfile::tempdir().expect("temp vault");
+    cairn_cli::vault::bootstrap(&cairn_cli::vault::BootstrapOpts {
+        vault_path: vault.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap vault");
+    let out = cli()
+        .current_dir(vault.path())
+        .args(["ingest", "--kind", "user", "--body", "hello", "--json"])
+        .output()
+        .expect("cairn ingest");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "ingest should commit; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    let v: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("ingest JSON parse failed: {e}\nstdout: {stdout:?}"));
+    assert_eq!(v["contract"], "cairn.mcp.v1");
+    assert_eq!(v["status"], "committed");
+    assert!(v["data"]["record_id"].is_string());
+    assert!(v["policy_trace"].is_array());
 }
 
 #[test]
