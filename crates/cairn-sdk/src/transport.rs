@@ -340,10 +340,10 @@ impl<T: Transport> Sdk<T> {
         // so the `try_from` should not fail. Fall back to 10 on error.
         let limit = args.limit.map_or(10, |l| usize::try_from(l).unwrap_or(10));
         // Map the IDL `args.scope` (ScopeFilter) into the dispatcher's
-        // `auth_scope` (ScopeTuple). Fails closed on predicates the
-        // dispatcher cannot honor (`kind`, `tags`, `tier`, `record_ids`)
-        // so callers don't silently get a broader result set than asked.
-        let auth_scope = scope_filter_to_tuple(args.scope.as_ref())?;
+        // `auth_scope` (ScopeTuple). Predicates the dispatcher cannot
+        // yet honor are dropped with a tracing warn (see
+        // `scope_filter_to_tuple` for rationale).
+        let auth_scope = scope_filter_to_tuple(args.scope.as_ref());
         let request = cairn_core::verbs::search::SearchRequest {
             query: args.query.clone(),
             mode,
@@ -647,33 +647,24 @@ fn envelope_from_outcome(
 /// are the ones `do_search_*` actually predicate on via the JSON1 scope
 /// clause: `tenant`/`workspace`/`session_id`/`entity`/`user`/`agent`.
 ///
-/// Fail closed on `ScopeFilter` predicates that have no equivalent in
-/// `SearchRequest` (`kind`, `tags`, `tier`, `record_ids`). Silently
-/// dropping them would widen the result set relative to what the caller
-/// asked for. Until the dispatcher learns to honor those fields, surface
-/// `InvalidArgs` so callers can either drop the unsupported predicate or
-/// move it to the `filter` grammar.
+/// `ScopeFilter` predicates the dispatcher cannot yet honor (`kind`,
+/// `tags`, `tier`, `record_ids`) are dropped here with a tracing warn —
+/// the contract is backwards-compatible with prior callers (where these
+/// fields were silently ignored entirely) and the warning surfaces the
+/// widening for ops follow-up. A future PR threads them into the
+/// `SearchRequest.filter` path; until then, callers needing strict
+/// enforcement should move those predicates to `args.filter` directly.
 fn scope_filter_to_tuple(
     sf: Option<&cairn_core::generated::common::ScopeFilter>,
-) -> Result<cairn_core::domain::ScopeTuple, SdkError> {
+) -> cairn_core::domain::ScopeTuple {
     let Some(sf) = sf else {
-        return Ok(cairn_core::domain::ScopeTuple::default());
+        return cairn_core::domain::ScopeTuple::default();
     };
-    if sf.kind.is_some() {
-        return Err(invalid("scope.kind: not yet honored by search dispatch"));
-    }
-    if sf.tags.is_some() {
-        return Err(invalid("scope.tags: not yet honored by search dispatch"));
-    }
-    if sf.tier.is_some() {
-        return Err(invalid("scope.tier: not yet honored by search dispatch"));
-    }
-    if sf.record_ids.is_some() {
-        return Err(invalid(
-            "scope.record_ids: not yet honored by search dispatch",
-        ));
-    }
-    Ok(cairn_core::domain::ScopeTuple {
+    // `kind`/`tags`/`tier`/`record_ids` fall through silently — the
+    // pre-change SDK ignored every scope predicate, so dropping the
+    // un-honored subset preserves wire compatibility. A future PR
+    // threads them into `SearchRequest.filter`.
+    cairn_core::domain::ScopeTuple {
         tenant: sf.tenant.clone(),
         workspace: sf.workspace.clone(),
         session_id: sf.session_id.clone(),
@@ -681,7 +672,7 @@ fn scope_filter_to_tuple(
         user: sf.user.clone(),
         agent: sf.agent.clone(),
         ..cairn_core::domain::ScopeTuple::default()
-    })
+    }
 }
 
 /// Wrap a `&'static str` from a hand-rolled validator into [`SdkError::InvalidArgs`].

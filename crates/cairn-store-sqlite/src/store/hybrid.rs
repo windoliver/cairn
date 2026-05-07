@@ -104,17 +104,39 @@ impl SqliteMemoryStore {
             model_label: args.model_label.clone(),
             with_explain: false,
         };
-        let (keyword, semantic) = tokio::try_join!(
+        // Run keyword + semantic in parallel, but tolerate a semantic
+        // failure: hybrid degrades to keyword + graph rather than hard-
+        // failing. Keyword is the lexical anchor and remains a hard
+        // requirement — if FTS5 fails, there's nothing meaningful to
+        // rerank.
+        let (kw_res, sem_res) = tokio::join!(
             self.do_search_keyword(&kw_args),
             self.do_search_semantic(&sem_args),
-        )?;
+        );
+        let keyword = kw_res?;
+        let mut leg_degradations: Vec<DegradedLeg> = Vec::new();
+        let semantic = match sem_res {
+            Ok(page) => page,
+            Err(e) => {
+                tracing::warn!(error = %e, "semantic leg failed; degrading hybrid response");
+                leg_degradations.push(DegradedLeg::Semantic {
+                    reason: DegradationReason::SqlError,
+                });
+                cairn_core::contract::memory_store::SemanticSearchPage {
+                    candidates: Vec::new(),
+                    explain: None,
+                }
+            }
+        };
 
         let kw_list = scored_from_keyword(&keyword.candidates);
         let sem_list = scored_from_semantic(&semantic.candidates);
 
-        let (graph_candidates, degraded_legs) = self
+        let (graph_candidates, graph_degraded) = self
             .run_graph_leg(args, &keyword.candidates, &semantic.candidates)
             .await;
+        leg_degradations.extend(graph_degraded);
+        let degraded_legs = leg_degradations;
 
         // Build 1-based rank lookup maps for the explain block. Constructed
         // here while `kw_list` / `sem_list` are in leg-order (rank order).
