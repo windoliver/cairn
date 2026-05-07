@@ -219,11 +219,21 @@ impl<T: Transport> Sdk<T> {
             }
         });
         let model_present = store_caps.as_ref().is_some_and(|c| c.vector);
+        // SDK cannot inspect the environment for cloud provider readiness
+        // (it has no access to OPENAI_API_KEY outside CLI context). Use the
+        // store's vector-index advertisement as a conservative proxy: a store
+        // only advertises `vector: true` when it was built with an embedder
+        // that could produce vectors at index-time, which implies the provider
+        // was ready at that point. CLI callers that need strict accuracy use
+        // compute_embedding_provider_ready() in cairn-cli/src/verbs/status.rs.
+        // This is documented in CapabilityGates::embedding_provider_ready.
+        let embedding_provider_ready = model_present;
         cairn_core::status::CapabilityGates {
             config: self.config.capabilities(model_present),
             store: store_caps,
             vault_bound: self.store.is_some(),
             model_present,
+            embedding_provider_ready,
             llm_configured: false,
             contract_phase: cairn_core::status::Phase::V0_1,
         }

@@ -23,6 +23,10 @@ fn gates(bound: bool, model_present: bool, store: Option<StoreCaps>) -> Capabili
         store,
         vault_bound: bound,
         model_present,
+        // For unit tests, embedding_provider_ready mirrors model_present
+        // (local-provider semantics). Tests that specifically need to verify
+        // cloud-provider decoupling construct gates directly (see below).
+        embedding_provider_ready: model_present,
         llm_configured: false,
         contract_phase: Phase::V0_1,
     }
@@ -206,6 +210,7 @@ mod remediation_tests {
             }),
             vault_bound: true,
             model_present: true,
+            embedding_provider_ready: true,
             llm_configured: false,
             contract_phase: Phase::V0_1,
         };
@@ -268,18 +273,20 @@ mod prop_tests {
             any::<bool>(),
             any::<bool>(),
             any::<bool>(),
+            any::<bool>(),
             arb_phase(),
         )
-            .prop_map(
-                |(config, store, bound, model, llm, phase)| CapabilityGates {
+            .prop_map(|(config, store, bound, model, embed_ready, llm, phase)| {
+                CapabilityGates {
                     config,
                     store,
                     vault_bound: bound,
                     model_present: model,
+                    embedding_provider_ready: embed_ready,
                     llm_configured: llm,
                     contract_phase: phase,
-                },
-            )
+                }
+            })
     }
 
     // Turning a capability gate ON never removes capabilities. Catches
@@ -308,15 +315,17 @@ mod prop_tests {
             gates.vault_bound = true;
             let off = {
                 gates.model_present = false;
+                gates.embedding_provider_ready = false;
                 advertise(&gates)
             };
             let on = {
                 gates.model_present = true;
+                gates.embedding_provider_ready = true;
                 advertise(&gates)
             };
             for cap in &off {
                 prop_assert!(on.contains(cap),
-                    "model_present true must be a superset of false; lost {cap:?}");
+                    "model_present/embedding_provider_ready true must be a superset of false; lost {cap:?}");
             }
         }
 
@@ -326,6 +335,45 @@ mod prop_tests {
             prop_assert!(advertise(&gates).is_empty());
         }
     }
+}
+
+/// `embedding_provider_ready = false` suppresses semantic and hybrid even
+/// when `model_present = true` and the store has a vector index.
+///
+/// This is the concrete scenario from Finding 3 (issue #53 review):
+/// `default_provider = openai`, a stale local model file exists on disk
+/// (`model_present = true`), but `OPENAI_API_KEY` is not set in the
+/// environment → `embedding_provider_ready = false` → no semantic/hybrid.
+#[test]
+fn openai_provider_without_key_drops_semantic_and_hybrid() {
+    let store = Some(StoreCaps {
+        fts: true,
+        vector: true, // vector index present
+    });
+    let g = CapabilityGates {
+        config: cap_set_default(true, true), // semantic+hybrid on in config
+        store,
+        vault_bound: true,
+        model_present: true, // stale local model file on disk
+        // Cloud provider not ready (feature flag off or API key missing)
+        embedding_provider_ready: false,
+        llm_configured: false,
+        contract_phase: Phase::V0_1,
+    };
+    let caps = advertise(&g);
+    assert!(
+        !caps.contains(&Capabilities::CairnMcpV1SearchSemantic),
+        "semantic must not be advertised when embedding_provider_ready=false; got {caps:?}"
+    );
+    assert!(
+        !caps.contains(&Capabilities::CairnMcpV1SearchHybrid),
+        "hybrid must not be advertised when embedding_provider_ready=false; got {caps:?}"
+    );
+    // keyword is still fine — no embedding needed
+    assert!(
+        caps.contains(&Capabilities::CairnMcpV1SearchKeyword),
+        "keyword must still be advertised; got {caps:?}"
+    );
 }
 
 #[cfg(test)]

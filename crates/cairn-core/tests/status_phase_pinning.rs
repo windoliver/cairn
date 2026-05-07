@@ -30,6 +30,7 @@ fn full_gates(phase: Phase) -> CapabilityGates {
         }),
         vault_bound: true,
         model_present: true,
+        embedding_provider_ready: true,
         llm_configured: false,
         contract_phase: phase,
     }

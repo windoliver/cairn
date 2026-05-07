@@ -63,6 +63,13 @@ pub struct StoreCaps {
 }
 
 /// Inputs for the per-capability decision rules in `advertise()`.
+// Four boolean fields (vault_bound, model_present, embedding_provider_ready,
+// llm_configured) represent orthogonal binary-state runtime probes. Each bool
+// corresponds to one distinct environmental check (filesystem, provider,
+// LLM config); no enum captures the cross-product cleanly without adding N²
+// variants. The struct_excessive_bools lint is suppressed for the same reason
+// it is suppressed on CapabilitySet in config/mod.rs.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]
 pub struct CapabilityGates {
     /// Config-derived feature flags (already accounts for `local_embeddings`,
@@ -79,7 +86,39 @@ pub struct CapabilityGates {
     /// True when the configured embedding model is materialized on disk
     /// (CLI's `ModelCache::is_present`) or when the wired store advertises
     /// `vector: true`.
+    ///
+    /// For surfaces that populate [`Self::embedding_provider_ready`], this
+    /// field is redundant but kept for backward compat on callers that only
+    /// read it for the local-provider path. `advertise()` now gates semantic
+    /// and hybrid on `embedding_provider_ready` exclusively.
     pub model_present: bool,
+    /// True when the configured embedding *provider* is ready to produce
+    /// vectors end-to-end.
+    ///
+    /// Subsumes `model_present` for local providers: for a `default_provider =
+    /// local` config, this is equivalent to `model_present` (the model file
+    /// must be on disk). For cloud providers (`default_provider = openai`),
+    /// `model_present` is irrelevant — readiness requires the `openai` Cargo
+    /// feature to be compiled in AND `OPENAI_API_KEY` to be set in the
+    /// environment.
+    ///
+    /// When `false`, `semantic` and `hybrid` are NOT advertised even if the
+    /// wired store has a vector index and `model_present = true`. This
+    /// prevents a config with `default_provider = openai` + a stale local
+    /// model file from advertising semantic/hybrid and then failing at the
+    /// `OpenAI` feature gate or embedder init.
+    ///
+    /// ## Per-surface population
+    ///
+    /// - **CLI** (`cairn-cli/src/verbs/status.rs`): for `provider == local`,
+    ///   `model_present`; for `provider == openai`, `cfg!(feature = "openai")
+    ///   && env::var("OPENAI_API_KEY").is_ok()`.
+    /// - **SDK** (`cairn-sdk/src/transport.rs`): `store_caps.vector` (the store
+    ///   advertises vector support iff a compatible provider was configured at
+    ///   index-time). SDK consumers that construct with a custom embedder must
+    ///   set this field manually — the SDK cannot inspect the env.
+    /// - **MCP** (`cairn-mcp/src/handler.rs`): mirrors SDK — `store_caps.vector`.
+    pub embedding_provider_ready: bool,
     /// True when an `LLMProvider` is configured. P0 default is `false`;
     /// reserved for future `cairn.mcp.v1.llm.*` capabilities.
     pub llm_configured: bool,
@@ -113,11 +152,16 @@ pub fn advertise(gates: &CapabilityGates) -> Vec<Capabilities> {
     if cfg.keyword_search && gates.store_ok(|s| s.fts) {
         out.push(Capabilities::CairnMcpV1SearchKeyword);
     }
-    if cfg.semantic_search && gates.model_present && gates.store_ok(|s| s.vector) {
+    // Gate semantic and hybrid on `embedding_provider_ready` rather than
+    // the legacy `model_present`. For local providers the two are equivalent;
+    // for cloud providers `embedding_provider_ready` additionally requires the
+    // feature flag + API key, preventing over-advertising when a stale local
+    // model file happens to be on disk but the configured provider is OpenAI.
+    if cfg.semantic_search && gates.embedding_provider_ready && gates.store_ok(|s| s.vector) {
         out.push(Capabilities::CairnMcpV1SearchSemantic);
     }
     if cfg.hybrid_search
-        && gates.model_present
+        && gates.embedding_provider_ready
         && gates.store_ok(|s| s.fts)
         && gates.store_ok(|s| s.vector)
     {

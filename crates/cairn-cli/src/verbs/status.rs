@@ -15,7 +15,7 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use cairn_core::config::{CairnConfig, EmbeddingModelKind};
+use cairn_core::config::{CairnConfig, EmbeddingModelKind, EmbeddingProvider};
 use cairn_core::domain::identity::keys::VaultId;
 use cairn_core::generated::common::Capabilities;
 use cairn_core::generated::status::{
@@ -274,6 +274,13 @@ fn compute_capabilities(
         cache.is_present(kind)
     });
 
+    // For local providers: embedding_provider_ready == model_present.
+    // For cloud providers (OpenAI): requires the `openai` Cargo feature AND
+    // OPENAI_API_KEY to be set. A stale local model file on disk with a cloud
+    // provider configured must NOT advertise semantic/hybrid (Finding 3, #53).
+    let embedding_provider_ready =
+        compute_embedding_provider_ready(config, model_present, vault_root);
+
     cairn_core::status::advertise(&cairn_core::status::CapabilityGates {
         config: config.capabilities(model_present),
         // CLI status path stays read-only and never opens the SQLite store.
@@ -281,6 +288,7 @@ fn compute_capabilities(
         store: None,
         vault_bound: bound,
         model_present,
+        embedding_provider_ready,
         llm_configured: false,
         contract_phase: cairn_core::status::Phase::V0_1,
     })
@@ -384,15 +392,61 @@ fn probe_mcp_graph_tools(
 /// Mirrors `cairn-sdk`'s `Sdk::advertised_capabilities` derivation by
 /// passing through `cairn-core::status::advertise()`.
 fn capabilities_for_config(config: &CairnConfig, model_present: bool) -> Vec<Capabilities> {
+    let embedding_provider_ready = compute_embedding_provider_ready(config, model_present, None);
     cairn_core::status::advertise(&cairn_core::status::CapabilityGates {
         config: config.capabilities(model_present),
         store: None,
         vault_bound: true, // capability surface — used by --explain gate;
         // the gate runs only when caller is in a vault.
         model_present,
+        embedding_provider_ready,
         llm_configured: false,
         contract_phase: cairn_core::status::Phase::V0_1,
     })
+}
+
+/// Determine whether the configured embedding *provider* is ready to produce
+/// vectors end-to-end, for use in `CapabilityGates::embedding_provider_ready`.
+///
+/// - `EmbeddingProvider::Local`: equivalent to `model_present` (the local
+///   candle model file must be on disk, stat-checked via `ModelCache`).
+/// - `EmbeddingProvider::OpenAi`: requires the `openai` Cargo feature to be
+///   compiled in AND `OPENAI_API_KEY` to be set in the environment. A stale
+///   local model file on disk does not make the `OpenAI` provider ready.
+///
+/// `vault_root` is unused for cloud providers (no filesystem stat needed); it
+/// is passed to mirror `compute_capabilities`'s signature for consistency.
+fn compute_embedding_provider_ready(
+    config: &CairnConfig,
+    model_present: bool,
+    _vault_root: Option<&Path>,
+) -> bool {
+    match config.search.default_provider {
+        EmbeddingProvider::Local => {
+            // Local provider: ready iff the model file is on disk.
+            model_present
+        }
+        EmbeddingProvider::OpenAi => {
+            // Cloud provider: the `openai` feature must be compiled in AND the
+            // API key must be present in the environment. A local model file
+            // on disk is irrelevant.
+            #[cfg(feature = "openai")]
+            {
+                std::env::var("OPENAI_API_KEY")
+                    .map(|k| !k.is_empty())
+                    .unwrap_or(false)
+            }
+            #[cfg(not(feature = "openai"))]
+            {
+                // Feature not compiled in — OpenAI embedder cannot be
+                // constructed regardless of API key presence.
+                false
+            }
+        }
+        // Forward-compat: any future provider variant is treated as not ready
+        // until explicit support is added here. Fail closed per CLAUDE.md §4.6.
+        _ => false,
+    }
 }
 
 /// True if `capability` is in the current `status.capabilities` list.
