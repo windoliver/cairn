@@ -7,8 +7,67 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct Finding {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entities: Option<Vec<String>>,
+    pub kind: Kind,
+    pub message: String,
+    pub severity: Severity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggested_fix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<Target>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracking_issue: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Kind {
+    BrokenActorChain,
+    ContradictoryEdge,
+    Contradiction,
+    DataGap,
+    DeferredCheck,
+    AmbiguousEdge,
+    HotMemoryOverBudget,
+    IndexDrift,
+    MalformedRecord,
+    MissingConcept,
+    MissingProvenance,
+    Orphan,
+    ProjectionDrift,
+    ProjectionMissing,
+    Stale,
+    StaleSchema,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Severity {
+    Error,
+    Warning,
+    Info,
+}
+
+/// At most one field SHOULD be set; consumers may treat multiple as the most-specific available.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Target {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<crate::generated::common::Ulid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_id: Option<crate::generated::common::Ulid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LintArgs {
-    /// When true, resolves edge contradictions by invalidating lower-confidence live edges.
+    /// When true, resolves live bitemporal edge contradictions by invalidating lower-confidence edges.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fix: Option<bool>,
     /// When true, writes .cairn/lint-report.md.
@@ -16,93 +75,28 @@ pub struct LintArgs {
     pub write_report: Option<bool>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum LintDataFindingsConfidence {
-    #[serde(rename = "AMBIGUOUS")]
-    AMBIGUOUS,
-    #[serde(rename = "INFERRED")]
-    INFERRED,
-    #[serde(rename = "EXTRACTED")]
-    EXTRACTED,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum LintDataFindingsKind {
-    Contradiction,
-    Orphan,
-    Stale,
-    MissingConcept,
-    DataGap,
-    ContradictoryEdge,
-    AmbiguousEdge,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum LintDataFindingsSeverity {
-    Info,
-    Warning,
-    Error,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct LintDataFindings {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub candidate_edge_ids: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chosen_edge_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub confidence: Option<LintDataFindingsConfidence>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub confidence_score: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub conflict_group_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub entities: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub entity_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fix_applied: Option<bool>,
-    pub kind: LintDataFindingsKind,
-    pub message: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub record_id: Option<crate::generated::common::Ulid>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub relation: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resolution_reason: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub severity: Option<LintDataFindingsSeverity>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub suggestion: Option<String>,
+pub struct LintDataSummaryBySeverity {
+    pub error: u64,
+    pub info: u64,
+    pub warning: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LintDataSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ambiguous_edges: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_resolved: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub contradictions: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub orphans: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stale: Option<u64>,
+    pub by_kind: serde_json::Value,
+    pub by_severity: LintDataSummaryBySeverity,
     pub total: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LintData {
-    pub findings: Vec<LintDataFindings>,
+    pub findings: Vec<Finding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report_path: Option<String>,
     pub summary: LintDataSummary,

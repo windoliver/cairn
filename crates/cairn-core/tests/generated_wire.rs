@@ -202,6 +202,20 @@ fn signed_intent_rejects_malformed_operation_id() {
 }
 
 #[test]
+fn signed_intent_rejects_overflow_operation_id() {
+    let mut m = signed_intent_minimum();
+    m.insert(
+        "operation_id".into(),
+        serde_json::json!("81ARZ3NDEKTSV4RRFFQ69G5FAV"),
+    );
+    let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("ULID") || err.to_string().contains("Crockford"),
+        "expected overflow ULID rejection, got: {err}"
+    );
+}
+
+#[test]
 fn signed_intent_rejects_malformed_chain_parent_ulid() {
     let mut m = signed_intent_minimum();
     m.insert(
@@ -1455,15 +1469,20 @@ fn signed_intent_accepts_fractional_offset_datetime() {
 }
 
 #[test]
-fn signed_intent_accepts_leap_second() {
-    // RFC-3339 §5.6 allows seconds=60.
+fn signed_intent_rejects_unsupported_leap_second() {
+    // Cairn's domain timestamp parser deliberately rejects `:60` until a
+    // real leap-second-aware parser is wired in. The generated wire contract
+    // must fail closed the same way.
     let mut m = signed_intent_minimum();
     m.insert(
         "issued_at".into(),
         serde_json::json!("2026-12-31T23:59:60Z"),
     );
-    let parsed: SignedIntent = serde_json::from_value(serde_json::Value::Object(m)).unwrap();
-    assert_eq!(parsed.issued_at, "2026-12-31T23:59:60Z");
+    let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("issued_at"),
+        "expected issued_at leap-second rejection, got: {err}"
+    );
 }
 
 // ── F1 (round 7): Tagged-union variants reject cross-variant / unknown keys ──
@@ -1877,6 +1896,16 @@ fn retrieve_record_rejects_lowercase_ulid() {
     assert!(
         err.to_string().contains("ULID") || err.to_string().contains("Crockford"),
         "expected lowercase-ULID rejection, got: {err}"
+    );
+}
+
+#[test]
+fn retrieve_record_rejects_overflow_ulid_first_char() {
+    let json = serde_json::json!({"target": "record", "id": "81ARZ3NDEKTSV4RRFFQ69G5FAV"});
+    let err = serde_json::from_value::<RetrieveArgs>(json).unwrap_err();
+    assert!(
+        err.to_string().contains("ULID") || err.to_string().contains("Crockford"),
+        "expected overflow ULID rejection, got: {err}"
     );
 }
 
@@ -2350,7 +2379,7 @@ fn identity_primitive_rejects_empty_body() {
 fn identity_primitive_rejects_invalid_body_chars() {
     use cairn_core::generated::common::Identity;
     // Space is not in [A-Za-z0-9._:-].
-    let err = serde_json::from_value::<Identity>(serde_json::json!("usr:alice bob")).unwrap_err();
+    let err = serde_json::from_value::<Identity>(serde_json::json!("hmn:alice bob")).unwrap_err();
     assert!(
         err.to_string().contains("Identity"),
         "expected Identity rejection, got: {err}"
@@ -2580,14 +2609,21 @@ fn error_invalid_filter_rejects_unknown_data_key() {
 }
 
 #[test]
-fn lint_response_accepts_edge_finding_fields() {
+fn lint_response_accepts_edge_finding_kinds() {
     let json = serde_json::json!({
         "contract": "cairn.mcp.v1",
         "data": {
             "summary": {
                 "total": 2,
-                "contradictions": 1,
-                "ambiguous_edges": 1,
+                "by_severity": {
+                    "error": 0,
+                    "warning": 1,
+                    "info": 1
+                },
+                "by_kind": {
+                    "contradictory_edge": 1,
+                    "ambiguous_edge": 1
+                },
                 "auto_resolved": 0
             },
             "findings": [
@@ -2595,17 +2631,8 @@ fn lint_response_accepts_edge_finding_fields() {
                     "kind": "contradictory_edge",
                     "severity": "warning",
                     "entities": ["edge-a", "edge-b"],
-                    "entity_id": "source-a",
-                    "relation": "depends_on",
-                    "conflict_group_id": "source-a:depends_on:target-b",
-                    "candidate_edge_ids": ["edge-a", "edge-b"],
-                    "chosen_edge_id": "edge-a",
-                    "fix_applied": true,
-                    "resolution_reason": "edge-a has higher confidence",
-                    "confidence_score": 0.92,
-                    "confidence": "EXTRACTED",
                     "message": "Two live edges share (source, target, relation)",
-                    "suggestion": "Run `cairn lint --fix` to keep the higher-confidence edge"
+                    "suggested_fix": "Run `cairn lint --fix` to keep the higher-confidence edge"
                 },
                 {
                     "kind": "ambiguous_edge",
@@ -2626,31 +2653,22 @@ fn lint_response_accepts_edge_finding_fields() {
         panic!("expected lint response data");
     };
     assert_eq!(data.summary.total, 2);
-    assert_eq!(data.summary.ambiguous_edges, Some(1));
     assert_eq!(data.summary.auto_resolved, Some(0));
+    assert_eq!(data.summary.by_severity.warning, 1);
+    assert_eq!(
+        data.summary.by_kind["contradictory_edge"],
+        serde_json::Value::from(1)
+    );
+    assert_eq!(
+        data.summary.by_kind["ambiguous_edge"],
+        serde_json::Value::from(1)
+    );
     assert_eq!(
         data.findings[0].entities.as_deref(),
         Some(&["edge-a".to_string(), "edge-b".to_string()][..])
     );
-    assert_eq!(data.findings[0].entity_id.as_deref(), Some("source-a"));
-    assert_eq!(data.findings[0].relation.as_deref(), Some("depends_on"));
     assert_eq!(
-        data.findings[0].conflict_group_id.as_deref(),
-        Some("source-a:depends_on:target-b")
-    );
-    assert_eq!(
-        data.findings[0].candidate_edge_ids.as_deref(),
-        Some(&["edge-a".to_string(), "edge-b".to_string()][..])
-    );
-    assert_eq!(data.findings[0].chosen_edge_id.as_deref(), Some("edge-a"));
-    assert_eq!(data.findings[0].fix_applied, Some(true));
-    assert_eq!(
-        data.findings[0].resolution_reason.as_deref(),
-        Some("edge-a has higher confidence")
-    );
-    assert_eq!(data.findings[0].confidence_score, Some(0.92));
-    assert_eq!(
-        data.findings[0].confidence,
-        Some(cairn_core::generated::verbs::lint::LintDataFindingsConfidence::EXTRACTED)
+        data.findings[0].suggested_fix.as_deref(),
+        Some("Run `cairn lint --fix` to keep the higher-confidence edge")
     );
 }

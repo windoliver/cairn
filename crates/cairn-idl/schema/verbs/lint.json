@@ -15,7 +15,7 @@
   },
   "x-cairn-skill-triggers": {
     "positive": [
-      "use to check vault health — contradictions, orphans, stale claims, missing concept pages"
+      "use to check vault health — contradictions, orphans, stale claims, missing concept pages, malformed records, broken actor chains, schema drift, hot-memory budget, derived-index drift"
     ],
     "negative": [
       "do NOT call per turn — run on a cadence (daily / on PR)"
@@ -36,8 +36,60 @@
         "fix": {
           "type": "boolean",
           "x-cairn-auth": "write_capability",
-          "description": "When true, resolves edge contradictions by invalidating lower-confidence live edges."
+          "description": "When true, resolves live bitemporal edge contradictions by invalidating lower-confidence edges."
         }
+      }
+    },
+    "Severity": {
+      "type": "string",
+      "enum": ["error", "warning", "info"]
+    },
+    "Kind": {
+      "type": "string",
+      "enum": [
+        "broken_actor_chain",
+        "contradictory_edge",
+        "contradiction",
+        "data_gap",
+        "deferred_check",
+        "ambiguous_edge",
+        "hot_memory_over_budget",
+        "index_drift",
+        "malformed_record",
+        "missing_concept",
+        "missing_provenance",
+        "orphan",
+        "projection_drift",
+        "projection_missing",
+        "stale",
+        "stale_schema"
+      ]
+    },
+    "Target": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "At most one field SHOULD be set; consumers may treat multiple as the most-specific available.",
+      "properties": {
+        "record_id":    { "$ref": "../common/primitives.json#/$defs/Ulid" },
+        "operation_id": { "$ref": "../common/primitives.json#/$defs/Ulid" },
+        "path":         { "type": "string", "minLength": 1 }
+      }
+    },
+    "Finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "severity", "message"],
+      "properties": {
+        "kind":           { "$ref": "#/$defs/Kind" },
+        "severity":       { "$ref": "#/$defs/Severity" },
+        "message":        { "type": "string", "minLength": 1 },
+        "entities": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "suggested_fix":  { "type": "string", "minLength": 1 },
+        "target":         { "$ref": "#/$defs/Target" },
+        "tracking_issue": { "type": "integer", "minimum": 1 }
       }
     },
     "Data": {
@@ -48,52 +100,29 @@
         "summary": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["total"],
+          "required": ["total", "by_severity", "by_kind"],
           "properties": {
-            "total":          { "type": "integer", "minimum": 0 },
-            "contradictions": { "type": "integer", "minimum": 0 },
-            "orphans":        { "type": "integer", "minimum": 0 },
-            "stale":          { "type": "integer", "minimum": 0 },
-            "ambiguous_edges": { "type": "integer", "minimum": 0 },
-            "auto_resolved":   { "type": "integer", "minimum": 0 }
+            "total": { "type": "integer", "minimum": 0 },
+            "by_severity": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["error", "warning", "info"],
+              "properties": {
+                "error":   { "type": "integer", "minimum": 0 },
+                "warning": { "type": "integer", "minimum": 0 },
+                "info":    { "type": "integer", "minimum": 0 }
+              }
+            },
+            "by_kind": {
+              "type": "object",
+              "additionalProperties": { "type": "integer", "minimum": 0 }
+            },
+            "auto_resolved": { "type": "integer", "minimum": 0 }
           }
         },
         "findings": {
           "type": "array",
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["kind", "message"],
-            "properties": {
-              "kind":      { "type": "string", "enum": ["contradiction", "orphan", "stale", "missing_concept", "data_gap", "contradictory_edge", "ambiguous_edge"] },
-              "message":   { "type": "string", "minLength": 1 },
-              "record_id": { "$ref": "../common/primitives.json#/$defs/Ulid" },
-              "severity": {
-                "type": "string",
-                "enum": ["info", "warning", "error"]
-              },
-              "entities": {
-                "type": "array",
-                "items": { "type": "string", "minLength": 1 }
-              },
-              "suggestion": { "type": "string", "minLength": 1 },
-              "entity_id": { "type": "string", "minLength": 1 },
-              "relation": { "type": "string", "minLength": 1 },
-              "conflict_group_id": { "type": "string", "minLength": 1 },
-              "candidate_edge_ids": {
-                "type": "array",
-                "items": { "type": "string", "minLength": 1 }
-              },
-              "chosen_edge_id": { "type": "string", "minLength": 1 },
-              "fix_applied": { "type": "boolean" },
-              "resolution_reason": { "type": "string", "minLength": 1 },
-              "confidence_score": { "type": "number" },
-              "confidence": {
-                "type": "string",
-                "enum": ["AMBIGUOUS", "INFERRED", "EXTRACTED"]
-              }
-            }
-          }
+          "items": { "$ref": "#/$defs/Finding" }
         },
         "report_path": { "type": "string", "minLength": 1 }
       }

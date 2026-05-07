@@ -1,0 +1,14 @@
+---
+source: crates/cairn-cli/tests/lint_folders.rs
+expression: stable
+---
+---
+folder: raw
+kind: folder_index
+record_count: 1
+subfolder_count: 0
+---
+
+# raw
+
+## Records (1)

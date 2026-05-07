@@ -2,14 +2,34 @@
 #![allow(missing_docs)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use cairn_core::domain::{LintKind, Severity};
-use cairn_store_sqlite::{lint_edges, migrate, resolve_edge_contradictions};
+use cairn_core::generated::verbs::lint::{Kind, Severity};
+use cairn_store_sqlite::{lint_edges, resolve_edge_contradictions};
 use rusqlite::{Connection, params};
 
 fn conn() -> Connection {
-    let conn = Connection::open_in_memory().expect("in-memory sqlite");
-    migrate(&conn).expect("migration succeeds");
+    let conn = cairn_store_sqlite::open_in_memory_sync().expect("open in-memory store");
+    seed_nodes(&conn);
     conn
+}
+
+fn seed_nodes(conn: &Connection) {
+    conn.execute_batch(
+        "INSERT OR IGNORE INTO entity_nodes (id, name, name_norm, created_at) VALUES
+           ('A', 'A', 'a', 1),
+           ('B', 'B', 'b', 1),
+           ('AuthService', 'AuthService', 'authservice', 1),
+           ('OAuthFlow', 'OAuthFlow', 'oauthflow', 1);",
+    )
+    .expect("seed nodes");
+}
+
+fn allow_corrupt_overlaps(conn: &Connection) {
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS entity_edges_live_triple;
+         DROP TRIGGER IF EXISTS entity_edges_no_overlap_insert;
+         DROP TRIGGER IF EXISTS entity_edges_no_overlap_update;",
+    )
+    .expect("drop overlap guards for corruption fixture");
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -23,16 +43,27 @@ fn insert_edge(
     invalid_at: Option<i64>,
     expired_at: Option<i64>,
     confidence: &str,
-    score: f64,
+    score: f32,
 ) {
     conn.execute(
         "INSERT INTO entity_edges (
             id, source_id, target_id, relation, valid_at, invalid_at,
-            expired_at, confidence, confidence_score, created_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            expired_at, tombstone_reason, confidence, confidence_score,
+            created_at, body_hash
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
-            id, source, target, relation, valid_at, invalid_at, expired_at, confidence, score,
-            valid_at
+            id,
+            source,
+            target,
+            relation,
+            valid_at,
+            invalid_at,
+            expired_at,
+            expired_at.map(|_| "test tombstone"),
+            confidence,
+            score,
+            valid_at,
+            vec![id.as_bytes().first().copied().unwrap_or_default(); 32],
         ],
     )
     .expect("insert edge");
@@ -41,6 +72,7 @@ fn insert_edge(
 #[test]
 fn read_only_lint_surfaces_one_contradiction_for_two_live_edges() {
     let conn = conn();
+    allow_corrupt_overlaps(&conn);
     insert_edge(
         &conn,
         "edge-a",
@@ -71,14 +103,18 @@ fn read_only_lint_surfaces_one_contradiction_for_two_live_edges() {
     assert_eq!(report.contradictions, 1);
     assert_eq!(report.auto_resolved, 0);
     assert_eq!(report.findings.len(), 1);
-    assert_eq!(report.findings[0].kind, LintKind::ContradictoryEdge);
+    assert_eq!(report.findings[0].kind, Kind::ContradictoryEdge);
     assert_eq!(report.findings[0].severity, Severity::Warning);
-    assert_eq!(report.findings[0].entities, ["edge-a", "edge-b"]);
+    assert_eq!(
+        report.findings[0].entities.as_deref(),
+        Some(&["edge-a".to_owned(), "edge-b".to_owned()][..])
+    );
 }
 
 #[test]
 fn read_only_lint_ignores_expired_and_invalidated_edges() {
     let conn = conn();
+    allow_corrupt_overlaps(&conn);
     insert_edge(
         &conn,
         "edge-a",
@@ -142,14 +178,18 @@ fn read_only_lint_surfaces_ambiguous_live_edges_as_info() {
 
     assert_eq!(report.ambiguous_edges, 1);
     assert_eq!(report.findings.len(), 1);
-    assert_eq!(report.findings[0].kind, LintKind::AmbiguousEdge);
+    assert_eq!(report.findings[0].kind, Kind::AmbiguousEdge);
     assert_eq!(report.findings[0].severity, Severity::Info);
-    assert_eq!(report.findings[0].entities, ["edge-a"]);
+    assert_eq!(
+        report.findings[0].entities.as_deref(),
+        Some(&["edge-a".to_owned()][..])
+    );
 }
 
 #[test]
 fn read_only_lint_does_not_mutate_edges() {
     let conn = conn();
+    allow_corrupt_overlaps(&conn);
     insert_edge(
         &conn, "edge-a", "A", "B", "relates", 1, None, None, "INFERRED", 0.7,
     );
@@ -190,6 +230,7 @@ fn read_only_lint_does_not_mutate_edges() {
 #[test]
 fn fix_keeps_one_live_edge_and_records_wal_reason() {
     let mut conn = conn();
+    allow_corrupt_overlaps(&conn);
     insert_edge(
         &conn, "edge-a", "A", "B", "relates", 1, None, None, "INFERRED", 0.7,
     );
@@ -263,19 +304,19 @@ fn fix_keeps_one_live_edge_and_records_wal_reason() {
         wal_entry,
         (
             "COMMITTED".to_owned(),
-            "lint_fix".to_owned(),
+            "graph_contradict".to_owned(),
             "lint:contradiction_resolution".to_owned(),
         )
     );
 
-    let replay_reason: String = conn
+    let step_count: i64 = conn
         .query_row(
-            "SELECT reason FROM replay_ledger WHERE operation_id = ?1",
+            "SELECT COUNT(*) FROM wal_steps WHERE operation_id = ?1 AND step_kind = 'invalidate_edge'",
             ["01ARZ3NDEKTSV4RRFFQ69G5FAV"],
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(replay_reason, "lint:contradiction_resolution");
+    assert_eq!(step_count, 2);
 }
 
 #[test]

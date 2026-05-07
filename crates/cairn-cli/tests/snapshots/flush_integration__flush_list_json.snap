@@ -1,0 +1,25 @@
+---
+source: crates/cairn-cli/tests/flush_integration.rs
+expression: "String::from_utf8(out.stdout).unwrap()"
+---
+{
+  "plans": [
+    {
+      "id": "01HQZK00000000000000000030",
+      "bucket": "pending",
+      "mode": "HumanReview",
+      "mutations": 1,
+      "issued_at": "2026-05-04T12:00:00Z",
+      "status": "pending"
+    },
+    {
+      "id": "01HQZK00000000000000000031",
+      "bucket": "pending",
+      "mode": "HumanReview",
+      "mutations": 1,
+      "issued_at": "2026-05-04T12:00:00Z",
+      "status": "pending"
+    }
+  ],
+  "omitted": []
+}

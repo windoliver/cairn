@@ -9,36 +9,26 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use cairn_idl::codegen::{RunMode, RunOpts, run};
-
-#[derive(clap::Parser, Debug)]
-#[command(name = "cairn-codegen", about = "Cairn IDL → Rust + JSON codegen")]
-struct Cli {
-    /// Run in check mode — compare emitted bytes against on-disk; exit 1 on drift.
-    #[arg(long)]
-    check: bool,
-
-    /// Workspace root (defaults to the parent of `CARGO_MANIFEST_DIR`).
-    #[arg(long)]
-    out: Option<PathBuf>,
-}
+use cairn_idl::codegen::{RunMode, RunOpts, codegen_command, run};
 
 fn main() -> ExitCode {
-    use clap::Parser;
-    let cli = Cli::parse();
+    let matches = codegen_command().get_matches();
 
-    let workspace_root = cli.out.unwrap_or_else(|| {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("cairn-idl crate must have a parent (the `crates/` dir)")
-            .parent()
-            .expect("`crates/` must have a parent (the workspace root)")
-            .to_path_buf()
-    });
+    let workspace_root = matches
+        .get_one::<PathBuf>("out")
+        .cloned()
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .expect("cairn-idl crate must have a parent (the `crates/` dir)")
+                .parent()
+                .expect("`crates/` must have a parent (the workspace root)")
+                .to_path_buf()
+        });
 
     let opts = RunOpts {
         workspace_root,
-        mode: if cli.check {
+        mode: if matches.get_flag("check") {
             RunMode::Check
         } else {
             RunMode::Write
@@ -62,7 +52,7 @@ fn main() -> ExitCode {
             ExitCode::from(1)
         }
         Ok(report) => {
-            if cli.check {
+            if matches.get_flag("check") {
                 eprintln!(
                     "cairn-codegen: clean — {} file(s) match.",
                     report.files_emitted

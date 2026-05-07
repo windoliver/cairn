@@ -39,13 +39,29 @@ fn emits_command_builder_with_eight_subcommands_plus_two_preludes() {
 #[test]
 fn lint_subcommand_includes_fix_flag() {
     let files = emit_cli::emit(&doc()).unwrap();
-    let verbs = files
+    let verbs_rs = files
         .iter()
         .find(|f| f.path.ends_with("crates/cairn-cli/src/generated/verbs.rs"))
         .unwrap();
-    let body = std::str::from_utf8(&verbs.bytes).unwrap();
+    let body = std::str::from_utf8(&verbs_rs.bytes).unwrap();
     assert!(
         body.contains("clap::Arg::new(\"fix\").long(\"fix\").action(clap::ArgAction::SetTrue)"),
         "generated lint subcommand must expose --fix: {body}"
+    );
+}
+
+#[test]
+fn repeatable_positionals_emit_variadic_required_arg() {
+    let files = emit_cli::emit(&doc()).unwrap();
+    let verbs_rs = files
+        .iter()
+        .find(|f| f.path.ends_with("crates/cairn-cli/src/generated/verbs.rs"))
+        .unwrap();
+    let body = std::str::from_utf8(&verbs_rs.bytes).unwrap();
+    assert!(
+        body.contains(
+            "clap::Arg::new(\"record_ids\").help(\"One or more record ULIDs.\").required(true).num_args(1..)"
+        ),
+        "summarize record_ids positional must be required and variadic:\n{body}"
     );
 }
