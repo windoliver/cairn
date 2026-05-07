@@ -1,0 +1,60 @@
+{
+  "_provenance": {
+    "source_file": "gbrain-evals/docs/benchmarks/2026-04-23-brainbench-v0.20.0.md",
+    "gbrain_commit": "96852c0",
+    "gbrain_evals_commit": "8dab7f7",
+    "captured": "transcribed from upstream's published markdown scorecard, 2026-04-23",
+    "metrics_published_only": [
+      "p_at_5",
+      "r_at_5"
+    ],
+    "metrics_unpublished": [
+      "mrr",
+      "ndcg_at_5"
+    ],
+    "unpublished_value": 0.0,
+    "queries_total": 145
+  },
+  "adapters": {
+    "gbrain": {
+      "aggregate": {
+        "p_at_5": 0.491,
+        "r_at_5": 0.979,
+        "mrr": 0.0,
+        "ndcg_at_5": 0.0
+      },
+      "per_query": [],
+      "aggregate_n": 145
+    },
+    "vector-grep-rrf-fusion": {
+      "aggregate": {
+        "p_at_5": 0.178,
+        "r_at_5": 0.651,
+        "mrr": 0.0,
+        "ndcg_at_5": 0.0
+      },
+      "per_query": [],
+      "aggregate_n": 145
+    },
+    "grep-only": {
+      "aggregate": {
+        "p_at_5": 0.171,
+        "r_at_5": 0.624,
+        "mrr": 0.0,
+        "ndcg_at_5": 0.0
+      },
+      "per_query": [],
+      "aggregate_n": 145
+    },
+    "vector": {
+      "aggregate": {
+        "p_at_5": 0.108,
+        "r_at_5": 0.407,
+        "mrr": 0.0,
+        "ndcg_at_5": 0.0
+      },
+      "per_query": [],
+      "aggregate_n": 145
+    }
+  }
+}

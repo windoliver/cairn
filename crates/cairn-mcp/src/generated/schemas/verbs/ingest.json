@@ -17,11 +17,6 @@
           "required": [
             "url"
           ]
-        },
-        {
-          "required": [
-            "folder"
-          ]
         }
       ],
       "properties": {
@@ -30,24 +25,12 @@
           "type": "string"
         },
         "dry_run": {
-          "description": "Plan folder ingest without writing cache entries or store/WAL state.",
+          "default": false,
+          "description": "If true, produce a FlushPlan and emit it without writing to MemoryStore (brief §5.5). Mutually exclusive with human_review.",
           "type": "boolean"
-        },
-        "exclude": {
-          "description": "Folder ingest exclude patterns. CLI default: .git,node_modules,target.",
-          "items": {
-            "minLength": 1,
-            "type": "string"
-          },
-          "type": "array"
         },
         "file": {
           "description": "Path on the local filesystem.",
-          "minLength": 1,
-          "type": "string"
-        },
-        "folder": {
-          "description": "Folder to scan for offline folder ingest.",
           "minLength": 1,
           "type": "string"
         },
@@ -55,35 +38,19 @@
           "description": "Extra YAML frontmatter fields to store alongside the body.",
           "type": "object"
         },
-        "include": {
-          "description": "Folder ingest include patterns. CLI default: *.md,*.txt,*.rs,*.py,*.ts,*.js,*.go.",
-          "items": {
-            "minLength": 1,
-            "type": "string"
-          },
-          "type": "array"
+        "human_review": {
+          "default": false,
+          "description": "If true, persist a FlushPlan under .cairn/flush/pending/ for explicit `cairn flush apply` (brief §5.5). Mutually exclusive with dry_run.",
+          "type": "boolean"
         },
         "kind": {
           "description": "Memory taxonomy kind (19 possible values — see §3 taxonomy). Validated beyond JSON Schema by the classifier.",
           "minLength": 1,
           "type": "string"
         },
-        "mode": {
-          "description": "Folder ingest extraction mode. keyword is the P0 offline default.",
-          "oneOf": [
-            {
-              "const": "keyword"
-            },
-            {
-              "const": "semantic"
-            },
-            {
-              "const": "full"
-            }
-          ]
-        },
-        "recursive": {
-          "description": "Whether folder ingest recurses into child directories. CLI default: true.",
+        "no_diff": {
+          "default": false,
+          "description": "When human_review=true, skip emitting the markdown diff sidecar.",
           "type": "boolean"
         },
         "session_id": {
@@ -111,6 +78,11 @@
     "Data": {
       "additionalProperties": false,
       "properties": {
+        "plan_ref": {
+          "description": "Path under .cairn/flush/pending/ when human_review=true; absent otherwise.",
+          "minLength": 1,
+          "type": "string"
+        },
         "record_id": {
           "$ref": "../common/primitives.json#/$defs/Ulid",
           "description": "ULID of the newly stored record."
@@ -158,36 +130,6 @@
         "value_source": "string"
       },
       {
-        "long": "folder",
-        "name": "folder",
-        "value_source": "path"
-      },
-      {
-        "long": "recursive",
-        "name": "recursive",
-        "value_source": "bool"
-      },
-      {
-        "long": "include",
-        "name": "include",
-        "value_source": "list<string>"
-      },
-      {
-        "long": "exclude",
-        "name": "exclude",
-        "value_source": "list<string>"
-      },
-      {
-        "long": "mode",
-        "name": "mode",
-        "value_source": "enum(keyword,semantic,full)"
-      },
-      {
-        "long": "dry-run",
-        "name": "dry_run",
-        "value_source": "bool"
-      },
-      {
         "long": "session",
         "name": "session_id",
         "value_source": "string"
@@ -199,7 +141,12 @@
       }
     ],
     "positional": {
-      "description": "File, URL, or '-' for stdin. Mutually exclusive with --body/--file/--url/--folder.",
+      "aliases_one_of": [
+        "body",
+        "file",
+        "url"
+      ],
+      "description": "File, URL, or '-' for stdin. Mutually exclusive with --body/--file/--url.",
       "name": "source"
     }
   },

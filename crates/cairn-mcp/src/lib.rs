@@ -14,8 +14,7 @@ pub mod error;
 pub mod generated;
 pub mod handler;
 
-pub use error::McpTransportError;
-pub use error::McpTransportError as TransportError;
+pub use error::TransportError;
 pub use handler::CairnMcpHandler;
 
 use cairn_core::contract::mcp_server::{CONTRACT_VERSION, MCPServer, MCPServerCapabilities};

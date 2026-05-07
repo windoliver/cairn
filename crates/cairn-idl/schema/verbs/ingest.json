@@ -11,18 +11,13 @@
       { "name": "body",        "long": "body",        "value_source": "string" },
       { "name": "file",        "long": "file",        "value_source": "path" },
       { "name": "url",         "long": "url",         "value_source": "string" },
-      { "name": "folder",      "long": "folder",      "value_source": "path" },
-      { "name": "recursive",   "long": "recursive",   "value_source": "bool" },
-      { "name": "include",     "long": "include",     "value_source": "list<string>" },
-      { "name": "exclude",     "long": "exclude",     "value_source": "list<string>" },
-      { "name": "mode",        "long": "mode",        "value_source": "enum(keyword,semantic,full)" },
-      { "name": "dry_run",     "long": "dry-run",     "value_source": "bool" },
       { "name": "session_id",  "long": "session",     "value_source": "string" },
       { "name": "tags",        "long": "tags",        "value_source": "list<string>" }
     ],
     "positional": {
       "name": "source",
-      "description": "File, URL, or '-' for stdin. Mutually exclusive with --body/--file/--url/--folder."
+      "description": "File, URL, or '-' for stdin. Mutually exclusive with --body/--file/--url.",
+      "aliases_one_of": ["body", "file", "url"]
     }
   },
   "x-cairn-capability": null,
@@ -54,37 +49,6 @@
         "body":  { "type": "string", "minLength": 1 },
         "file":  { "type": "string", "minLength": 1, "description": "Path on the local filesystem." },
         "url":   { "type": "string", "format": "uri", "minLength": 1 },
-        "folder": {
-          "type": "string",
-          "minLength": 1,
-          "description": "Folder to scan for offline folder ingest."
-        },
-        "recursive": {
-          "type": "boolean",
-          "description": "Whether folder ingest recurses into child directories. CLI default: true."
-        },
-        "include": {
-          "type": "array",
-          "items": { "type": "string", "minLength": 1 },
-          "description": "Folder ingest include patterns. CLI default: *.md,*.txt,*.rs,*.py,*.ts,*.js,*.go."
-        },
-        "exclude": {
-          "type": "array",
-          "items": { "type": "string", "minLength": 1 },
-          "description": "Folder ingest exclude patterns. CLI default: .git,node_modules,target."
-        },
-        "mode": {
-          "oneOf": [
-            { "const": "keyword" },
-            { "const": "semantic" },
-            { "const": "full" }
-          ],
-          "description": "Folder ingest extraction mode. keyword is the P0 offline default."
-        },
-        "dry_run": {
-          "type": "boolean",
-          "description": "Plan folder ingest without writing cache entries or store/WAL state."
-        },
         "session_id": { "type": "string", "minLength": 1 },
         "tags": {
           "type": "array",
@@ -93,13 +57,27 @@
         "frontmatter": {
           "type": "object",
           "description": "Extra YAML frontmatter fields to store alongside the body."
+        },
+        "dry_run": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, produce a FlushPlan and emit it without writing to MemoryStore (brief §5.5). Mutually exclusive with human_review."
+        },
+        "human_review": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, persist a FlushPlan under .cairn/flush/pending/ for explicit `cairn flush apply` (brief §5.5). Mutually exclusive with dry_run."
+        },
+        "no_diff": {
+          "type": "boolean",
+          "default": false,
+          "description": "When human_review=true, skip emitting the markdown diff sidecar."
         }
       },
       "oneOf": [
         { "required": ["body"] },
         { "required": ["file"] },
-        { "required": ["url"] },
-        { "required": ["folder"] }
+        { "required": ["url"] }
       ]
     },
     "Data": {
@@ -108,7 +86,12 @@
       "required": ["record_id", "session_id"],
       "properties": {
         "record_id":  { "$ref": "../common/primitives.json#/$defs/Ulid", "description": "ULID of the newly stored record." },
-        "session_id": { "type": "string", "minLength": 1, "description": "Resolved session (created if absent — see §8.1)." }
+        "session_id": { "type": "string", "minLength": 1, "description": "Resolved session (created if absent — see §8.1)." },
+        "plan_ref": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Path under .cairn/flush/pending/ when human_review=true; absent otherwise."
+        }
       }
     }
   }

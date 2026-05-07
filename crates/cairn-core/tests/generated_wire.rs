@@ -243,6 +243,20 @@ fn signed_intent_rejects_malformed_operation_id() {
 }
 
 #[test]
+fn signed_intent_rejects_overflow_operation_id() {
+    let mut m = signed_intent_minimum();
+    m.insert(
+        "operation_id".into(),
+        serde_json::json!("81ARZ3NDEKTSV4RRFFQ69G5FAV"),
+    );
+    let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("ULID") || err.to_string().contains("Crockford"),
+        "expected overflow ULID rejection, got: {err}"
+    );
+}
+
+#[test]
 fn signed_intent_rejects_malformed_chain_parent_ulid() {
     let mut m = signed_intent_minimum();
     m.insert(
@@ -1496,15 +1510,20 @@ fn signed_intent_accepts_fractional_offset_datetime() {
 }
 
 #[test]
-fn signed_intent_accepts_leap_second() {
-    // RFC-3339 §5.6 allows seconds=60.
+fn signed_intent_rejects_unsupported_leap_second() {
+    // Cairn's domain timestamp parser deliberately rejects `:60` until a
+    // real leap-second-aware parser is wired in. The generated wire contract
+    // must fail closed the same way.
     let mut m = signed_intent_minimum();
     m.insert(
         "issued_at".into(),
         serde_json::json!("2026-12-31T23:59:60Z"),
     );
-    let parsed: SignedIntent = serde_json::from_value(serde_json::Value::Object(m)).unwrap();
-    assert_eq!(parsed.issued_at, "2026-12-31T23:59:60Z");
+    let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("issued_at"),
+        "expected issued_at leap-second rejection, got: {err}"
+    );
 }
 
 // ── F1 (round 7): Tagged-union variants reject cross-variant / unknown keys ──
@@ -1918,6 +1937,16 @@ fn retrieve_record_rejects_lowercase_ulid() {
     assert!(
         err.to_string().contains("ULID") || err.to_string().contains("Crockford"),
         "expected lowercase-ULID rejection, got: {err}"
+    );
+}
+
+#[test]
+fn retrieve_record_rejects_overflow_ulid_first_char() {
+    let json = serde_json::json!({"target": "record", "id": "81ARZ3NDEKTSV4RRFFQ69G5FAV"});
+    let err = serde_json::from_value::<RetrieveArgs>(json).unwrap_err();
+    assert!(
+        err.to_string().contains("ULID") || err.to_string().contains("Crockford"),
+        "expected overflow ULID rejection, got: {err}"
     );
 }
 
@@ -2391,7 +2420,7 @@ fn identity_primitive_rejects_empty_body() {
 fn identity_primitive_rejects_invalid_body_chars() {
     use cairn_core::generated::common::Identity;
     // Space is not in [A-Za-z0-9._:-].
-    let err = serde_json::from_value::<Identity>(serde_json::json!("usr:alice bob")).unwrap_err();
+    let err = serde_json::from_value::<Identity>(serde_json::json!("hmn:alice bob")).unwrap_err();
     assert!(
         err.to_string().contains("Identity"),
         "expected Identity rejection, got: {err}"
