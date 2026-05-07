@@ -30,11 +30,14 @@
 
 use cairn_core::contract::memory_store::GraphNeighborsArgs;
 use cairn_core::domain::RecordId;
+use cairn_core::domain::filter::compile_filter;
 use cairn_core::search::GraphCandidate;
 use rusqlite::types::Value as SqlVal;
 use tracing::instrument;
 
 use crate::error::StoreError;
+use crate::store::scope_predicate::build_scope_predicate;
+use crate::store::search::{SUPERSESSION_NOT_EXISTS_CLAUSE, json_to_sql};
 use crate::store::{SqliteMemoryStore, current_unix_ms};
 
 /// Hard cap on either id-list bind count to stay safely under `SQLite`'s
@@ -48,15 +51,16 @@ const GRAPH_LIMIT_MAX: usize = 1000;
 
 /// Build the bind-expanded SQL + params for the graph 1-hop traversal.
 ///
-/// Returns `(sql, params)`. Param order:
-///   1. seeds (`n_seeds` × `RecordId`)
-///   2. `as_event_ms` (`i64`) — `valid_at <= ?`
-///   3. `as_ingest_ms` (`i64`) — `created_at <= ?`
-///   4. `confidence_min` (`f64`)
-///   5. ranked exclusion list (`n_ranked` × `RecordId`)
-///   6. visibilities (`n_vis` × `String`)
-///   7. limit (`i64`)
-fn build_query(n_seeds: usize, n_ranked: usize, n_visibilities: usize) -> String {
+/// Param order is documented inline at each `?` in the assembled SQL; the
+/// caller in `do_search_graph_neighbors` pushes parameters in the same
+/// order.
+fn build_query(
+    n_seeds: usize,
+    n_ranked: usize,
+    n_visibilities: usize,
+    scope_sql: &str,
+    filter_sql: &str,
+) -> String {
     fn placeholders(n: usize) -> String {
         if n == 0 {
             // SQLite rejects empty `IN ()`; substitute an always-false literal
@@ -77,6 +81,11 @@ fn build_query(n_seeds: usize, n_ranked: usize, n_visibilities: usize) -> String
     } else {
         let vis_in = placeholders(n_visibilities);
         format!(" AND r.visibility IN ({vis_in})")
+    };
+    let filter_clause = if filter_sql.is_empty() {
+        String::new()
+    } else {
+        format!(" AND ({filter_sql})")
     };
     format!(
         "WITH seeds AS ( \
@@ -102,7 +111,8 @@ fn build_query(n_seeds: usize, n_ranked: usize, n_visibilities: usize) -> String
            JOIN records r ON r.record_id = ep.episode_id \
           WHERE n.neighbor_id NOT IN (SELECT entity_node_id FROM seeds) \
             AND r.tombstoned = 0 AND r.active = 1 \
-            AND r.record_id NOT IN ({ranked_in}){visibility_clause} \
+            AND r.record_id NOT IN ({ranked_in}){visibility_clause}{scope_sql}{filter_clause} \
+            AND {SUPERSESSION_NOT_EXISTS_CLAUSE} \
           GROUP BY r.record_id \
           ORDER BY conf DESC, r.updated_at DESC \
           LIMIT ?"
@@ -159,13 +169,36 @@ impl SqliteMemoryStore {
         let limit = args.limit.clamp(1, GRAPH_LIMIT_MAX);
         let confidence_min = f64::from(args.confidence_min.clamp(0.0, 1.0));
         let now_ms = current_unix_ms();
+        let (scope_sql, scope_params) = build_scope_predicate("r", &args.auth_scope);
+        let compiled = args.filter.map(compile_filter);
+        let filter_sql = compiled
+            .as_ref()
+            .map(|cf| cf.sql.clone())
+            .unwrap_or_default();
+        let filter_params: Vec<SqlVal> = compiled
+            .as_ref()
+            .map(|cf| cf.params.iter().map(json_to_sql).collect())
+            .unwrap_or_default();
 
         let candidates = conn
             .call(
                 move |c| -> Result<Vec<GraphCandidate>, tokio_rusqlite::Error> {
-                    let sql = build_query(seeds.len(), ranked.len(), visibilities.len());
-                    let mut params: Vec<SqlVal> =
-                        Vec::with_capacity(seeds.len() + 3 + ranked.len() + visibilities.len() + 1);
+                    let sql = build_query(
+                        seeds.len(),
+                        ranked.len(),
+                        visibilities.len(),
+                        &scope_sql,
+                        &filter_sql,
+                    );
+                    let mut params: Vec<SqlVal> = Vec::with_capacity(
+                        seeds.len()
+                            + 3
+                            + ranked.len()
+                            + visibilities.len()
+                            + scope_params.len()
+                            + filter_params.len()
+                            + 1,
+                    );
                     for s in &seeds {
                         params.push(SqlVal::Text(s.clone()));
                     }
@@ -178,6 +211,8 @@ impl SqliteMemoryStore {
                     for v in &visibilities {
                         params.push(SqlVal::Text(v.clone()));
                     }
+                    params.extend(scope_params);
+                    params.extend(filter_params);
                     #[allow(clippy::cast_possible_wrap)]
                     params.push(SqlVal::Integer(limit as i64));
 

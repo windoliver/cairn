@@ -324,6 +324,7 @@ async fn run_async(
         },
         limit,
         visibility_allowlist: vec![],
+        auth_scope: cairn_core::domain::ScopeTuple::default(),
         model_label: kind.as_str().to_owned(),
         explain,
     };

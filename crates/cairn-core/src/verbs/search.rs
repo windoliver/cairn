@@ -40,6 +40,10 @@ pub struct SearchRequest {
     pub limit: usize,
     /// Visibility allowlist; empty = no narrowing.
     pub visibility_allowlist: Vec<MemoryVisibility>,
+    /// Authorization scope tuple. Threaded into every search SQL path
+    /// (keyword, semantic, graph, graph-only hydration). Issue #191.
+    /// Use [`ScopeTuple::default`] when no narrowing is required.
+    pub auth_scope: ScopeTuple,
     /// Active embedding model label (for semantic + hybrid).
     pub model_label: String,
     /// `true` → request explain block from the store and surface it.
@@ -161,7 +165,7 @@ pub async fn run(
             let args = KeywordSearchArgs {
                 query: request.query.clone(),
                 filter: None,
-                auth_scope: ScopeTuple::default(),
+                auth_scope: request.auth_scope.clone(),
                 visibility_allowlist: visibility,
                 limit: request.limit,
                 cursor: None,
@@ -174,7 +178,7 @@ pub async fn run(
             let args = SemanticSearchArgs {
                 query: request.query.clone(),
                 filter: None,
-                auth_scope: ScopeTuple::default(),
+                auth_scope: request.auth_scope.clone(),
                 visibility_allowlist: visibility,
                 limit: request.limit,
                 model_label: request.model_label.clone(),
@@ -187,7 +191,7 @@ pub async fn run(
             let args = HybridSearchArgs {
                 query: request.query.clone(),
                 filter: None,
-                auth_scope: ScopeTuple::default(),
+                auth_scope: request.auth_scope.clone(),
                 visibility_allowlist: visibility,
                 limit: request.limit,
                 model_label: request.model_label.clone(),
@@ -343,6 +347,7 @@ mod tests {
             mode,
             limit: 10,
             visibility_allowlist: vec![],
+            auth_scope: ScopeTuple::default(),
             model_label: "MiniLM-L6-v2".to_owned(),
             explain: false,
         }

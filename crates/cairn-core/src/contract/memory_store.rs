@@ -719,18 +719,13 @@ pub struct KeywordSearchArgs<'a> {
     /// visibility) MUST go through `auth_scope` and `visibility_allowlist`
     /// — see Issue #191 for the rationale.
     pub filter: Option<ValidatedFilter<'a>>,
-    /// Authorization scope tuple — the security predicate. Carried on the
-    /// args so v1.0 contract impls can begin enforcing scope without a
-    /// further breaking change.
-    ///
-    /// **v1 enforcement status (cairn-store-sqlite 0.5):** the SQL builders
-    /// do NOT yet fold `auth_scope` into the predicate. Multi-tenant
-    /// deployments MUST narrow via `visibility_allowlist` (and/or by
-    /// composing scope into `filter`) until the JSON1-based scope
-    /// predicate lands in a follow-up issue. `auth_scope` is accepted
-    /// and validated structurally but is otherwise inert in v1. Use
-    /// [`ScopeTuple::default()`] when no narrowing is required.
-    /// Issue #191.
+    /// Authorization scope tuple — the security predicate. The store
+    /// applies it identically across this leg, the semantic leg, the
+    /// graph leg, and graph-only hydration so policy cannot drift
+    /// between retrieval paths. Use [`ScopeTuple::default()`] when no
+    /// narrowing is required; a populated tuple narrows on each
+    /// non-`None` dimension via JSON1 (`json_extract(scope, '$.tenant')
+    /// = ?`, etc.). Issue #191.
     pub auth_scope: ScopeTuple,
     /// Visibility values the caller is allowed to see; empty = no filter.
     pub visibility_allowlist: Vec<MemoryVisibility>,
@@ -844,18 +839,13 @@ pub struct HybridSearchArgs<'a> {
 /// Args for [`MemoryStore::search_graph_neighbors`] (Issue #191, spec §4.3).
 ///
 /// Authorization predicates (`auth_scope`, `visibility_allowlist`) apply to
-/// both the edge provenance record and the neighbor record; `filter` is
-/// recall-narrowing only and applies to the neighbor record. See spec
-/// §4.3 "Predicate application" for the full table.
-///
-/// **v1 seed-derivation caveat:** the orchestrator in
-/// `cairn-store-sqlite::do_search_hybrid` derives `seed_record_ids` from
-/// the already-filtered keyword/semantic candidate lists, so in practice
-/// `filter` does narrow seeding in v1. The independent auth-only seed
-/// query (which would let `filter` apply to neighbors only, per the spec)
-/// is deferred to the same follow-up that lands the `auth_scope`
-/// predicate. Callers narrowing aggressively via `filter` should expect
-/// reduced graph recall in v1.
+/// the neighbor record; `filter` is recall-narrowing only and applies to
+/// the neighbor record. The orchestrator in
+/// `cairn-store-sqlite::do_search_hybrid` runs an independent auth-only
+/// seed query so neighbors of records outside the user's narrowing
+/// `filter` remain reachable through graph traversal as long as they
+/// pass authorization. See spec §4.3 "Predicate application" for the
+/// full table.
 #[derive(Debug, Clone)]
 pub struct GraphNeighborsArgs<'a> {
     /// Record ids from auth-only seed retrieval (UNION-ed across keyword

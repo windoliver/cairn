@@ -344,6 +344,7 @@ impl<T: Transport> Sdk<T> {
             mode,
             limit,
             visibility_allowlist: vec![],
+            auth_scope: cairn_core::domain::ScopeTuple::default(),
             model_label: self.config.search.embedding_model.as_str().to_owned(),
             explain: args.explain.unwrap_or(false),
         };

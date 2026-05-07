@@ -144,6 +144,7 @@ impl SqliteMemoryStore {
         let compiled = args.filter.map(compile_filter);
         let now_ms = current_unix_ms();
         let with_explain = args.with_explain;
+        let scope = args.auth_scope.clone();
 
         let page = conn
             .call(move |c| {
@@ -154,6 +155,7 @@ impl SqliteMemoryStore {
                     cursor.as_ref(),
                     limit,
                     &weights,
+                    &scope,
                 )
                 .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
 
@@ -352,6 +354,7 @@ fn build_search_query(
     cursor: Option<&KeywordCursor>,
     limit: usize,
     fts_column_weights: &[f64; 4],
+    scope: &cairn_core::domain::ScopeTuple,
 ) -> Result<(String, Vec<SqlVal>), StoreError> {
     use std::fmt::Write as _;
 
@@ -419,6 +422,13 @@ fn build_search_query(
         }
     }
 
+    let (scope_sql, scope_params) =
+        crate::store::scope_predicate::build_scope_predicate("r", scope);
+    if !scope_sql.is_empty() {
+        sql.push_str(&scope_sql);
+        params.extend(scope_params);
+    }
+
     if let Some(filter) = compiled {
         sql.push_str(" AND (");
         sql.push_str(&filter.sql);
@@ -450,7 +460,7 @@ fn build_search_query(
 /// JSON shapes (objects, nested arrays) are not produced by the filter
 /// compiler; if one ever appears we surface NULL so the predicate fails
 /// closed instead of bypassing the filter.
-fn json_to_sql(v: &serde_json::Value) -> SqlVal {
+pub(crate) fn json_to_sql(v: &serde_json::Value) -> SqlVal {
     match v {
         serde_json::Value::String(s) => SqlVal::Text(s.clone()),
         serde_json::Value::Number(n) => {
@@ -587,11 +597,20 @@ impl SqliteMemoryStore {
             .collect();
         let compiled = args.filter.map(compile_filter);
         let now_ms = current_unix_ms();
+        let scope = args.auth_scope.clone();
         let conn = self.require_conn("search_semantic")?.clone();
 
-        let rows = run_ann_query(conn, query_bytes, visibilities, compiled, limit, now_ms)
-            .await
-            .map_err(unpack_worker_err)?;
+        let rows = run_ann_query(
+            conn,
+            query_bytes,
+            visibilities,
+            compiled,
+            limit,
+            now_ms,
+            scope,
+        )
+        .await
+        .map_err(unpack_worker_err)?;
 
         // Model filter applied in Rust — see `run_ann_query` doc for rationale.
         let model_label = args.model_label.as_str();
@@ -647,6 +666,7 @@ async fn run_ann_query(
     compiled: Option<cairn_core::domain::filter::CompiledFilter>,
     limit: usize,
     now_ms: i64,
+    scope: cairn_core::domain::ScopeTuple,
 ) -> Result<Vec<SemanticRawRow>, tokio_rusqlite::Error> {
     // Over-fetch 2× so the model post-filter still delivers `limit` results
     // in the common case where all rows share the active model.
@@ -663,6 +683,8 @@ async fn run_ann_query(
             .as_ref()
             .map(|cf| format!("AND ({})", cf.sql))
             .unwrap_or_default();
+        let (scope_sql, scope_params) =
+            crate::store::scope_predicate::build_scope_predicate("r", &scope);
 
         let sql = format!(
             "SELECT r.record_id, r.target_id, r.scope, r.kind, r.class,
@@ -680,7 +702,7 @@ async fn run_ann_query(
              JOIN   records r ON r.record_id = ann.record_id
              WHERE  r.active = 1 AND r.tombstoned = 0
                {vis_clause}
-               {filter_clause}
+               {filter_clause}{scope_sql}
              ORDER BY ann.distance ASC"
         );
 
@@ -696,6 +718,7 @@ async fn run_ann_query(
                 params.push(json_to_sql(p));
             }
         }
+        params.extend(scope_params);
 
         let mut stmt = c
             .prepare_cached(&sql)
@@ -894,9 +917,16 @@ mod tests {
         // Sanity: the production builder must keep using the constant.
         // If a future edit inlines a different predicate string, this
         // fails before the more expensive EXPLAIN check below.
-        let (sql, params) =
-            build_search_query("anything", &[], None, None, 10, &[10.0, 10.0, 5.0, 1.0])
-                .expect("build search SQL");
+        let (sql, params) = build_search_query(
+            "anything",
+            &[],
+            None,
+            None,
+            10,
+            &[10.0, 10.0, 5.0, 1.0],
+            &cairn_core::domain::ScopeTuple::default(),
+        )
+        .expect("build search SQL");
         assert!(
             sql.contains(SUPERSESSION_NOT_EXISTS_CLAUSE),
             "build_search_query must continue to emit SUPERSESSION_NOT_EXISTS_CLAUSE \
