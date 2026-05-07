@@ -23,7 +23,7 @@ use cairn_store_sqlite::{EdgeLintReport, StoreError, lint_edges, resolve_edge_co
 use clap::ArgMatches;
 use rusqlite::{Connection, OpenFlags};
 
-use super::envelope::{emit_json, human_error, new_operation_id};
+use super::envelope::{emit_json, human_error, new_operation_id, unimplemented_response};
 
 /// Sentinel error type used to thread `LockLost` through the
 /// `anyhow::Error` path of [`fix_markdown_handler_with_fence`]. Carrying
@@ -1761,8 +1761,29 @@ fn push_projection_finding(
 pub fn run(sub: &ArgMatches, vault_root: Option<&Path>) -> ExitCode {
     let json = sub.get_flag("json");
     let fix = sub.get_flag("fix");
+    let fix_markdown_flag = sub.get_flag("fix-markdown");
+    let fix_folders_flag = sub.get_flag("fix-folders");
     let write_report = sub.get_flag("write_report");
     let operation_id = new_operation_id();
+
+    if fix_markdown_flag {
+        return run_fix_markdown(json, vault_root);
+    }
+
+    if fix_folders_flag {
+        let resp = unimplemented_response(ResponseVerb::Lint);
+        if json {
+            emit_json(&resp);
+        } else {
+            human_error(
+                "lint",
+                "Internal",
+                "store not wired in this P0 build — --fix-folders requires #46",
+                &resp.operation_id,
+            );
+        }
+        return ExitCode::FAILURE;
+    }
 
     if write_report {
         emit_aborted(
@@ -1971,7 +1992,7 @@ fn usize_to_u64(value: usize) -> u64 {
 // Sequential dispatch: vault resolution, store open, lock acquire,
 // outcome match. Splitting forces every error variant through extra
 // helper signatures without making the flow easier to follow.
-#[allow(dead_code, clippy::too_many_lines)]
+#[allow(clippy::too_many_lines)]
 fn run_fix_markdown(json: bool, vault_root: Option<&Path>) -> ExitCode {
     // Mutating modes (`--fix-markdown`) MUST run against a
     // registry-resolved vault root, never the cwd fallback. Round 5
@@ -2129,7 +2150,6 @@ fn run_fix_markdown(json: bool, vault_root: Option<&Path>) -> ExitCode {
 /// Verify `.cairn/cairn.db` exists at the resolved vault root. Returns
 /// `Some(ExitCode)` to short-circuit `run_fix_markdown` with `EX_CONFIG`
 /// when the file is absent; `None` when the vault looks live.
-#[allow(dead_code)]
 fn require_existing_vault(json: bool, vault_root: &Path, db_path: &Path) -> Option<ExitCode> {
     if db_path.is_file() {
         return None;

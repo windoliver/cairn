@@ -175,6 +175,54 @@ fn lint_fix_json_resolves_lower_confidence_duplicate_edge() {
 }
 
 #[test]
+fn lint_fix_folders_json_keeps_legacy_dispatch() {
+    let vault = vault_with_contradictory_edges();
+
+    let out = cli()
+        .current_dir(vault.path())
+        .args(["lint", "--fix-folders", "--json"])
+        .output()
+        .expect("cairn lint --fix-folders --json");
+
+    assert_eq!(out.status.code(), Some(1), "exit: {:?}", out.status);
+    let json = parse_stdout_json(&out);
+    assert_eq!(json["contract"], "cairn.mcp.v1");
+    assert_eq!(json["status"], "aborted");
+    assert_eq!(json["verb"], "lint");
+    assert!(json.get("data").is_none(), "data: {:?}", json["data"]);
+    assert_eq!(json["error"]["code"], "Internal");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("store not wired")),
+        "message: {:?}",
+        json["error"]["message"]
+    );
+}
+
+#[test]
+fn lint_fix_markdown_json_keeps_legacy_dispatch() {
+    let vault = tempfile::tempdir().expect("temp vault");
+
+    let out = cli()
+        .current_dir(vault.path())
+        .args(["lint", "--fix-markdown", "--json"])
+        .output()
+        .expect("cairn lint --fix-markdown --json");
+
+    assert_eq!(out.status.code(), Some(78), "exit: {:?}", out.status);
+    let json = parse_stdout_json(&out);
+    assert_eq!(json["code"], "Internal");
+    assert!(
+        json["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("no Cairn vault")),
+        "message: {:?}",
+        json["message"]
+    );
+}
+
+#[test]
 fn lint_write_report_json_fails_closed() {
     let vault = vault_with_contradictory_edges();
 
