@@ -116,6 +116,12 @@ impl Sdk<InProcess> {
     /// Verbs that previously returned [`SdkError::Unimplemented`] now
     /// dispatch against the supplied store. The store is shared via [`Arc`]
     /// so callers can keep their own handle.
+    ///
+    /// **Note**: vault-sensitive verbs (e.g. `assemble_hot`) still return
+    /// [`SdkError::Unimplemented`] regardless of `with_store` — the SDK
+    /// has no safe way to couple a vault root to the supplied config from
+    /// this layer; that wiring lands with #193. Use the CLI for committed
+    /// `assemble_hot` until then.
     #[must_use]
     pub fn with_store(store: Arc<dyn MemoryStore>, config: CairnConfig) -> Self {
         Self {
@@ -340,11 +346,47 @@ impl<T: Transport> Sdk<T> {
     }
 
     /// `assemble_hot` — hot-memory prefix assembly (brief §8.5, §11).
+    ///
+    /// Dispatches into [`cairn_core::verbs::assemble_hot::assemble_hot`] using
+    /// the vault's [`cairn_core::config::HotMemoryConfig`]. No store is required — the assembler
+    /// reads recipe steps from config and emits stub bodies (real source loading
+    /// is tracked under #193). Validates `args` before dispatch.
+    ///
+    /// `args.budget` and `args.session_id` cannot yet be honored — bodies are
+    /// stubbed to `""` and the assembler is session-agnostic. Rather than
+    /// silently accept and drop them, the SDK rejects requests that supply
+    /// either with [`SdkError::InvalidArgs`]. Both will become real once #193
+    /// lands the loader.
+    ///
+    /// **The SDK currently always returns [`SdkError::Unimplemented`] for
+    /// `assemble_hot`.** Tying vault-binding to the [`cairn_core::config::HotMemoryConfig`]
+    /// safely requires a core-side config loader (so SDK callers cannot
+    /// accidentally pair vault A's `vault.id` with vault B's recipe), and
+    /// that loader lands with the real source-loading change in #193.
+    /// Until then the CLI is the only surface that returns committed
+    /// assemblies — it loads config from the same `vault_root` it probes,
+    /// so the binding cannot diverge.
     pub fn assemble_hot(
         &self,
         args: &AssembleHotArgs,
     ) -> Result<VerbResponse<AssembleHotData>, SdkError> {
         validate_assemble_hot(args)?;
+
+        if args.budget.is_some() {
+            return Err(invalid(
+                "assemble_hot: `budget` is not yet honored by the stub-body \
+                 assembler (tracked under #193); omit until real loading lands",
+            ));
+        }
+        if args.session_id.is_some() {
+            return Err(invalid(
+                "assemble_hot: `session_id` is not yet honored by the stub-body \
+                 assembler (tracked under #193); omit until real loading lands",
+            ));
+        }
+
+        // Always Unimplemented until #193 lands a vault-coupled config
+        // loader. The CLI verb is the canonical surface for now.
         Err(unimplemented("assemble_hot"))
     }
 

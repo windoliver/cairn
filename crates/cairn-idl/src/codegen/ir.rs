@@ -251,6 +251,12 @@ pub struct StructDef {
     /// must surface "at least one of these fields present" at deserialise
     /// time. None when no such anyOf was attached.
     pub any_of_required: Option<Vec<String>>,
+    /// When `true`, the struct carries `x-cairn-validate: true` in the IDL.
+    /// Codegen emits `#[serde(try_from = "<Name>Raw", into = "<Name>Raw")]` on
+    /// the main struct (Serialize-only derive) and a public `<Name>Raw` mirror
+    /// struct with full Serialize+Deserialize. The hand-written `TryFrom` and
+    /// `From` impls live in the consuming crate, not here.
+    pub validate: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -259,6 +265,11 @@ pub struct StructField {
     pub ty: RustType,
     pub required: bool,
     pub doc: Option<String>,
+    /// `x-cairn-reject-null: true` on the field schema — the deserializer
+    /// must distinguish field-absent from explicit JSON `null` and reject
+    /// the latter. Used to preserve tri-state semantics for optional
+    /// fields whose absence carries a different contract from `null`.
+    pub reject_null: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -496,6 +507,10 @@ fn lower_object(value: &Value, ctx: &mut Ctx) -> Result<RustType, CodegenError> 
             .and_then(Value::as_str)
             .map(String::from);
         let is_required = required.contains(key);
+        let reject_null = prop
+            .get("x-cairn-reject-null")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         fields.push(StructField {
             name: key.clone(),
             ty: if is_required {
@@ -505,6 +520,7 @@ fn lower_object(value: &Value, ctx: &mut Ctx) -> Result<RustType, CodegenError> 
             },
             required: is_required,
             doc,
+            reject_null,
         });
     }
     // Detect a sibling top-level `anyOf` whose every branch is a single-
@@ -518,6 +534,11 @@ fn lower_object(value: &Value, ctx: &mut Ctx) -> Result<RustType, CodegenError> 
         .and_then(Value::as_array)
         .and_then(|arr| extract_required_only_anyof(arr));
 
+    let validate = value
+        .get("x-cairn-validate")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
     Ok(RustType::Struct(StructDef {
         name: target_name,
         fields,
@@ -527,6 +548,7 @@ fn lower_object(value: &Value, ctx: &mut Ctx) -> Result<RustType, CodegenError> 
             .and_then(Value::as_str)
             .map(String::from),
         any_of_required,
+        validate,
     }))
 }
 

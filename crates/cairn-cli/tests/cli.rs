@@ -260,9 +260,10 @@ fn simple_verb_human_mode_exits_one_with_internal() {
     // `retrieve` and `forget` are excluded: required ArgGroup → exit 64 (usage error).
     // `search` is excluded: the dispatcher now rejects an empty query with
     //   `InvalidArgs` → exit 64 (EX_USAGE); see `search_empty_query_exits_64` below.
+    // `assemble_hot` is excluded: verb is now wired (exits 0); see
+    //   `assemble_hot_exits_zero_and_emits_committed_envelope` below.
     for args in [
         &["summarize", "01ARYZ6S41TSV4RRFFQ69G5FAV"][..],
-        &["assemble_hot"],
         &["capture_trace"],
         &["lint"],
     ] {
@@ -283,6 +284,43 @@ fn simple_verb_human_mode_exits_one_with_internal() {
             "verb {verb} stderr missing Internal error code: {stderr:?}",
         );
     }
+}
+
+#[test]
+fn assemble_hot_exits_zero_and_emits_committed_envelope() {
+    // `assemble_hot` is wired: stub-body assembler returns a committed
+    // Response with six zero-length segments (default recipe). Exit 0.
+    // The verb fails closed on a non-vault directory, so bootstrap a
+    // tempdir vault and run from inside it.
+    let dir = tempfile::tempdir().expect("tempdir");
+    cairn_cli::vault::bootstrap(&cairn_cli::vault::BootstrapOpts {
+        vault_path: dir.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap vault");
+    let out = cli()
+        .current_dir(dir.path())
+        .args(["assemble_hot", "--json"])
+        .output()
+        .expect("cairn assemble_hot --json");
+    assert!(
+        out.status.success(),
+        "assemble_hot exited non-zero: {:?}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    let v: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("expected valid JSON on stdout");
+    assert_eq!(v["contract"], "cairn.mcp.v1");
+    assert_eq!(v["status"], "committed");
+    assert_eq!(v["verb"], "assemble_hot");
+    assert!(v["data"]["segments"].is_array(), "segments must be present");
+    assert_eq!(
+        v["data"]["segments"].as_array().map(Vec::len),
+        Some(6),
+        "default recipe has 6 steps"
+    );
 }
 
 #[test]
