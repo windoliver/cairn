@@ -67,21 +67,23 @@ pub async fn acquire(
 
     let outcome = conn
         .call(move |c| {
-            // tokio_rusqlite serializes work onto a dedicated DB thread, so a
-            // timestamp captured before `conn.call` is queued can be stale by
-            // the time it lands in the INSERT. Compute now_ms / expires_at
-            // INSIDE the transaction closure so the lease window starts from
-            // the moment we actually own the SQLite write lock — preventing
-            // the next acquirer from reclaiming a fresh holder due to
-            // queueing latency. A clock failure here propagates as a typed
+            // BEGIN IMMEDIATE first — take the SQLite writer lock now,
+            // BEFORE reading the clock. Default `c.transaction()` is
+            // DEFERRED, which means any later write (`DELETE` / `INSERT`)
+            // can block waiting for the writer lock and the lease can
+            // already be expired by the time the row is inserted.
+            // Holding the writer lock makes "now" the start of the lease
+            // window deterministically.
+            let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            // Now that the writer lock is held, sample the clock. A
+            // clock failure here propagates as a typed
             // `AcquisitionOutcome::Clock` so the outer match preserves the
             // documented `LockError::Clock` (vs. stringifying through Db).
             let Ok(now_ms) = system_time_ms() else {
+                drop(tx);
                 return Ok::<AcquisitionOutcome, tokio_rusqlite::Error>(AcquisitionOutcome::Clock);
             };
             let expires_at = now_ms.saturating_add(ttl_ms);
-
-            let tx = c.transaction()?;
 
             // 0. Liveness check: confirm the caller's cached incarnation still
             //    matches the on-disk `daemon_incarnation` singleton. If a
@@ -175,10 +177,16 @@ pub async fn acquire(
                         params![resource_owned, new_epoch, now_ms],
                     )?;
                 }
+                // Mint a fresh per-acquisition ULID. Combined with
+                // ROWID (which can be reused after delete) this gives a
+                // truly unique identity that survives any future
+                // GC/insert cycle on the same row slot.
+                let acq_ulid = ulid::Ulid::new().to_string();
                 tx.execute(
                     "INSERT INTO lock_holders(resource, holder_id, mode_requested, \
-                       acquired_at, expires_at, acquired_epoch, owner_incarnation) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                       acquired_at, expires_at, acquired_epoch, owner_incarnation, \
+                       acquisition_ulid) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                     params![
                         resource_owned,
                         holder_owned,
@@ -186,36 +194,46 @@ pub async fn acquire(
                         now_ms,
                         expires_at,
                         new_epoch,
-                        inc_owned
+                        inc_owned,
+                        acq_ulid
                     ],
                 )?;
+                let rowid = tx.last_insert_rowid();
                 tx.commit()?;
                 return Ok::<AcquisitionOutcome, tokio_rusqlite::Error>(AcquisitionOutcome::Ok {
                     acquired_epoch: new_epoch,
                     acquired_at: now_ms,
+                    acquired_rowid: rowid,
+                    acquisition_ulid: acq_ulid,
                 });
             }
 
             // b) Compatible Shared+Shared. The AFTER INSERT trigger
             //    increments `locks.holder_count`; mode stays 'SHARED'.
             if current_mode.as_deref() == Some("SHARED") && mode_str == "SHARED" {
+                let acq_ulid = ulid::Ulid::new().to_string();
                 tx.execute(
                     "INSERT INTO lock_holders(resource, holder_id, mode_requested, \
-                       acquired_at, expires_at, acquired_epoch, owner_incarnation) \
-                     VALUES (?1, ?2, 'SHARED', ?3, ?4, ?5, ?6)",
+                       acquired_at, expires_at, acquired_epoch, owner_incarnation, \
+                       acquisition_ulid) \
+                     VALUES (?1, ?2, 'SHARED', ?3, ?4, ?5, ?6, ?7)",
                     params![
                         resource_owned,
                         holder_owned,
                         now_ms,
                         expires_at,
                         current_epoch,
-                        inc_owned
+                        inc_owned,
+                        acq_ulid
                     ],
                 )?;
+                let rowid = tx.last_insert_rowid();
                 tx.commit()?;
                 return Ok(AcquisitionOutcome::Ok {
                     acquired_epoch: current_epoch,
                     acquired_at: now_ms,
+                    acquired_rowid: rowid,
+                    acquisition_ulid: acq_ulid,
                 });
             }
 
@@ -252,12 +270,15 @@ pub async fn acquire(
         AcquisitionOutcome::Ok {
             acquired_epoch,
             acquired_at,
+            acquired_rowid,
+            acquisition_ulid,
         } => Ok(LockHandle::new(
             resource_str,
             holder_id.to_owned(),
             acquired_at,
             acquired_epoch,
-            Arc::clone(owner_incarnation),
+            acquired_rowid,
+            acquisition_ulid,
             Arc::clone(conn),
         )),
         AcquisitionOutcome::Clock => Err(LockError::Clock),
@@ -310,6 +331,16 @@ enum AcquisitionOutcome {
         /// so external callers see the actual acquisition timestamp, not the
         /// pre-queue value.
         acquired_at: i64,
+        /// `SQLite` ROWID of the inserted `lock_holders` row.
+        /// ROWID alone is NOT unique across acquisitions (`SQLite` reuses
+        /// the highest deleted ROWID), so `acquisition_ulid` is the
+        /// authoritative per-acquisition identity. ROWID is kept as a
+        /// useful local index for diagnostic / DB-thread fast-path uses.
+        acquired_rowid: i64,
+        /// Cryptographically unique per-acquisition identifier minted
+        /// inside the INSERT. The fence/release predicates match on
+        /// this column (PLUS rowid) to prevent ROWID-reuse collisions.
+        acquisition_ulid: String,
     },
     /// In-tx clock read failed (`SystemTime` pre-epoch). Surfaced as the
     /// typed `LockError::Clock` by the outer `match` — preserves the
@@ -626,11 +657,12 @@ mod tests {
         );
     }
 
-    /// Regression for round-5 finding 1: a stale handle from a prior
-    /// shared acquisition must NOT pass `with_fencing` after the row's
-    /// TTL elapsed and a later acquirer recreated the same
-    /// `(holder_id, acquired_epoch, owner_incarnation)` tuple. The
-    /// per-acquisition `acquired_at` discriminator is what disambiguates.
+    /// Regression: a stale handle from a prior shared acquisition must
+    /// NOT pass `with_fencing` after the row's TTL elapsed and a later
+    /// acquirer reused the same `holder_id`. The per-acquisition
+    /// `acquired_rowid` (`SQLite` ROWID) is the unique identity — distinct
+    /// rows have distinct rowids by construction, so no clock granularity
+    /// dependence is required (no `sleep` to avoid same-millisecond races).
     #[tokio::test]
     async fn stale_handle_blocked_after_holder_id_reuse() {
         let (_store, conn, inc) = setup().await;
@@ -648,74 +680,49 @@ mod tests {
         )
         .await
         .unwrap();
-        let first_epoch = h1.acquired_epoch();
-        let first_at = h1.acquired_at();
+        let first_ulid = h1.acquisition_ulid().to_owned();
         std::mem::forget(h1); // simulate process pause; row stays until TTL
 
-        // Wait past TTL so the row is reclaimable, then re-acquire with
-        // the SAME holder_id. Tokio's mock-clock-free sleep is enough.
+        // Wait past TTL so the row is reclaimable.
         tokio::time::sleep(Duration::from_millis(120)).await;
 
-        // Bring shared count back via a fresh shared acquire (different
-        // holder_id) so locks.epoch is forced to bump first, then the
-        // reused holder_id can rejoin.
-        let _h_other = acquire(
-            &conn,
-            &r,
-            LockMode::Shared,
-            "another_caller",
-            Duration::from_mins(1),
-            &inc,
-            "other",
-        )
-        .await
-        .unwrap();
-
-        // Sleep a millisecond so the new acquire's acquired_at differs
-        // even on fast clocks.
-        tokio::time::sleep(Duration::from_millis(2)).await;
+        // Re-acquire under the same holder_id (no clock-granularity sleep
+        // needed — acquisition_ulid is crypto-random per acquire, so two
+        // acquisitions never share an identifier even on the same ms).
         let h_reused = acquire(
             &conn,
             &r,
             LockMode::Shared,
-            "shared_caller", // SAME holder_id as h1
+            "shared_caller",
             Duration::from_mins(1),
             &inc,
             "reused",
         )
         .await
         .unwrap();
-        // Either same epoch (Shared+Shared compat after first reclaim) or
-        // higher; what matters is acquired_at differs from h1.
         assert_ne!(
-            h_reused.acquired_at(),
-            first_at,
-            "fresh acquisition must have a distinct acquired_at"
+            h_reused.acquisition_ulid(),
+            first_ulid,
+            "fresh acquisition must have a distinct ULID"
         );
-        let _ = first_epoch; // silence unused warning under -D warnings
 
-        // The original h1 was forgotten; reconstruct the stale-handle
-        // ownership predicate by hand and verify the CAS query rejects
-        // it (no row matches the FULL identity tuple including h1's
-        // acquired_at).
-        let count: i64 = {
-            let inc_str: String = inc.to_string();
-            let r_str = r.as_resource_str();
-            conn.call(move |c| {
+        // The original h1 was forgotten; the row at its ULID is gone
+        // (acquire's GC swept it). h1's CAS would target first_ulid
+        // and find no row → CAS fails closed.
+        let first_ulid_clone = first_ulid.clone();
+        let count: i64 = conn
+            .call(move |c| {
                 Ok::<i64, tokio_rusqlite::Error>(c.query_row(
-                    "SELECT COUNT(*) FROM lock_holders \
-                      WHERE resource = ?1 AND holder_id = ?2 \
-                        AND acquired_at = ?3 AND owner_incarnation = ?4",
-                    params![r_str, "shared_caller", first_at, inc_str],
+                    "SELECT COUNT(*) FROM lock_holders WHERE acquisition_ulid = ?1",
+                    params![first_ulid_clone],
                     |row| row.get(0),
                 )?)
             })
             .await
-            .unwrap()
-        };
+            .unwrap();
         assert_eq!(
             count, 0,
-            "no row matches h1's stale identity tuple — CAS will reject it"
+            "h1's row at first_ulid was reclaimed; new row has a distinct ULID"
         );
     }
 

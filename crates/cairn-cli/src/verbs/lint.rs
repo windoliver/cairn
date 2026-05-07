@@ -176,11 +176,7 @@ pub async fn fix_markdown_with_lock(
     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
     let heartbeat = spawn_lock_heartbeat(
         Arc::clone(&conn),
-        resource.as_resource_str(),
-        holder_id.clone(),
-        lock.acquired_epoch(),
-        lock.acquired_at(),
-        Arc::clone(&inc),
+        lock.acquisition_ulid().to_owned(),
         ttl,
         cancel_rx,
     );
@@ -251,7 +247,7 @@ pub async fn fix_markdown_with_lock(
         Err(e) => Err(e),
     };
 
-    finalize_outcome(&conn, &op_id, &resource, &inc, lock, outcome).await
+    finalize_outcome(&conn, &op_id, &resource, lock, outcome).await
 }
 
 /// Commit-or-abort the WAL op according to handler `outcome`, then
@@ -261,7 +257,6 @@ async fn finalize_outcome(
     conn: &Arc<tokio_rusqlite::Connection>,
     op_id: &str,
     resource: &cairn_store_sqlite::locks::ResourceKey,
-    inc: &Arc<str>,
     lock: cairn_store_sqlite::locks::LockHandle,
     outcome: Result<FixMarkdownResult, anyhow::Error>,
 ) -> Result<FixMarkdownResult, LintFixError> {
@@ -277,20 +272,11 @@ async fn finalize_outcome(
             // try again; if it still fails, demote to a warning and
             // count on TTL reclaim. Two attempts cover transient
             // connection-busy errors without prolonging shutdown.
-            let holder_id = lock.holder_id().to_owned();
-            let acquired_epoch = lock.acquired_epoch();
-            let acquired_at = lock.acquired_at();
+            let acq_ulid = lock.acquisition_ulid().to_owned();
             if let Err(first) = lock.release().await {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                if let Err(retry) = cairn_store_sqlite::locks::release_by_holder(
-                    conn,
-                    resource,
-                    &holder_id,
-                    acquired_epoch,
-                    inc.as_ref(),
-                    acquired_at,
-                )
-                .await
+                if let Err(retry) =
+                    cairn_store_sqlite::locks::release_by_holder(conn, &acq_ulid).await
                 {
                     tracing::warn!(
                         first_error = %first,
@@ -323,17 +309,9 @@ async fn finalize_outcome(
 /// The refresh is best-effort: a transient DB error simply causes the next
 /// tick to retry. Cancellation drains the task before the surrounding flow
 /// releases the lock.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "explicit identity tuple for fencing-safe heartbeat predicate"
-)]
 fn spawn_lock_heartbeat(
     conn: Arc<tokio_rusqlite::Connection>,
-    resource: String,
-    holder_id: String,
-    acquired_epoch: i64,
-    acquired_at: i64,
-    owner_incarnation: Arc<str>,
+    acquisition_ulid: String,
     ttl: Duration,
     mut cancel: tokio::sync::oneshot::Receiver<()>,
 ) -> tokio::task::JoinHandle<()> {
@@ -348,16 +326,13 @@ fn spawn_lock_heartbeat(
                 _ = &mut cancel => return,
                 () = tokio::time::sleep(interval) => {}
             }
-            let resource = resource.clone();
-            let holder = holder_id.clone();
-            let inc = owner_incarnation.to_string();
             // The heartbeat must NOT revive an already-expired lease.
             // Compute now_ms inside the DB call (after queueing settles)
             // and gate the UPDATE on `expires_at > now_ms`. If 0 rows
-            // are updated, the lease was lost (stalled past TTL or
-            // reclaimed) — bail out so the next tick doesn't keep
-            // pushing expires_at forward on a row that no longer
-            // semantically belongs to us.
+            // are updated, the lease was lost — bail out. `acquisition_ulid`
+            // is per-acquisition unique so we can't accidentally extend
+            // a different acquisition's row.
+            let acq = acquisition_ulid.clone();
             let updated = conn
                 .call(move |c| {
                     let now_ms = std::time::SystemTime::now()
@@ -369,19 +344,9 @@ fn spawn_lock_heartbeat(
                     let n = c.execute(
                         "UPDATE lock_holders \
                             SET expires_at = ?1 \
-                          WHERE resource = ?2 AND holder_id = ?3 \
-                            AND acquired_epoch = ?4 AND owner_incarnation = ?5 \
-                            AND acquired_at = ?6 \
-                            AND expires_at > ?7",
-                        rusqlite::params![
-                            expires,
-                            resource,
-                            holder,
-                            acquired_epoch,
-                            inc,
-                            acquired_at,
-                            now_ms
-                        ],
+                          WHERE acquisition_ulid = ?2 \
+                            AND expires_at > ?3",
+                        rusqlite::params![expires, acq, now_ms],
                     )?;
                     Ok::<usize, tokio_rusqlite::Error>(n)
                 })
