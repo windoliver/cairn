@@ -290,6 +290,50 @@
       "type": "array",
       "uniqueItems": true
     },
+    "pipeline_dispatch": {
+      "description": "Per-(source_family, tool_id) routing decisions for the Capture → Extract pipeline (issue #217). Each entry tells clients whether captured payloads flow through `squash` (lossy compaction) or `bypass` (raw bytes). Entries MUST be sorted lexicographically by (source_family, tool_id ?? \"\") for byte-stable status responses across an incarnation (brief §8.0.a). Optional and additive — not in `required[]` so a pre-#217 server's response (no field) deserializes against this schema.",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "decision": {
+            "description": "P0 routing enum — closed. 'squash_when_interactive_tty' admits InteractiveTty Terminal payloads to `squash`; everything else (including non-interactive Terminal) bypasses. Adding values is a wire-contract change (cairn.mcp.v1 → vNext), not an additive update — older clients' generated deserializers will reject unknown values.",
+            "enum": [
+              "squash_when_interactive_tty",
+              "bypass"
+            ],
+            "type": "string"
+          },
+          "source_family": {
+            "description": "Wire-form SourceFamily tag (matches CapturePayload variant).",
+            "enum": [
+              "hook",
+              "ide",
+              "terminal",
+              "clipboard",
+              "voice",
+              "screen",
+              "recording_batch",
+              "cli",
+              "mcp",
+              "proactive"
+            ],
+            "type": "string"
+          },
+          "tool_id": {
+            "description": "Optional tool identifier (e.g., 'Bash', 'Read'). Absent means the decision applies to every tool in this source_family — the P0 default.",
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_family",
+          "decision"
+        ],
+        "type": "object"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
     "server_info": {
       "additionalProperties": false,
       "properties": {

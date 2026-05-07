@@ -1,0 +1,12 @@
+---
+source: crates/cairn-mcp/tests/tool_list_snapshot.rs
+expression: "names.join(\"\\n\")"
+---
+ingest
+search
+retrieve
+summarize
+assemble_hot
+capture_trace
+lint
+forget

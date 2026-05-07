@@ -44,19 +44,20 @@ fn emits_required_and_repeatable_positionals_from_cli_metadata() {
         .find(|f| f.path.ends_with("crates/cairn-cli/src/generated/verbs.rs"))
         .unwrap();
     let body = std::str::from_utf8(&verbs_rs.bytes).unwrap();
-
     assert!(
-        body.contains(r#"Arg::new("query").help("Free-text query string.").required(true)"#),
+        body.contains("clap::Arg::new(\"query\").help(\"Free-text query string.\").required(true)"),
         "search query is required by the schema and CLI metadata"
     );
     assert!(
-        body.contains(r#"Arg::new("mode").long("mode").value_name("ENUM").value_parser(["keyword", "semantic", "hybrid"]).required(true)"#),
+        body.contains(
+            "clap::Arg::new(\"mode\").long(\"mode\").value_name(\"ENUM\").value_parser([\"keyword\", \"semantic\", \"hybrid\"]).required(true)"
+        ),
         "search mode is required by the schema"
     );
     assert!(
         body.contains(
-            r#"Arg::new("record_ids").help("One or more record ULIDs.").required(true).action(clap::ArgAction::Append).num_args(1..)"#
+            "clap::Arg::new(\"record_ids\").help(\"One or more record ULIDs.\").required(true).num_args(1..)"
         ),
-        "summarize record_ids is required and repeatable"
+        "summarize record_ids positional must be required and variadic:\n{body}"
     );
 }

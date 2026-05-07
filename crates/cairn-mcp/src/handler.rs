@@ -1,8 +1,9 @@
 //! `CairnMcpHandler` — MCP `ServerHandler` implementation.
 //!
 //! Wires the IDL-generated [`TOOLS`] constant into the `tools/list` response
-//! and routes `tools/call` through [`dispatch_stub`] while real verb dispatch
-//! is pending.
+//! and routes `tools/call` either through the real verb dispatcher (when a
+//! store is wired via [`CairnMcpHandler::with_store`]) or through
+//! [`dispatch_stub`] for verbs whose dispatch has not yet landed.
 
 use std::sync::Arc;
 
@@ -10,38 +11,72 @@ use rmcp::{
     RoleServer, ServerHandler,
     model::{
         CallToolRequestParams, CallToolResult, Content, Implementation, ListToolsResult,
-        PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool, ToolsCapability,
+        PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
     },
     service::RequestContext,
 };
+
+use cairn_core::config::CairnConfig;
+use cairn_core::contract::memory_store::MemoryStore;
 
 use crate::generated::TOOLS;
 
 /// MCP server handler for the Cairn verb layer.
 ///
-/// Implements [`rmcp::ServerHandler`]. P0 scaffold: `tools/list` is served
-/// from the IDL-generated [`TOOLS`] constant; `tools/call` returns a
-/// [`dispatch_stub`] error until real verb dispatch lands in a follow-up PR.
-#[derive(Debug, Default)]
-pub struct CairnMcpHandler;
+/// Implements [`rmcp::ServerHandler`]. When constructed with
+/// [`CairnMcpHandler::with_store`] the `search` tool dispatches through
+/// [`cairn_core::verbs::search::run`]; all other tools fall back to
+/// [`dispatch_stub`] until their real dispatch lands in a follow-up PR.
+pub struct CairnMcpHandler {
+    store: Option<Arc<dyn MemoryStore>>,
+    config: CairnConfig,
+}
+
+impl Default for CairnMcpHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Debug for CairnMcpHandler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CairnMcpHandler")
+            .field("store_wired", &self.store.is_some())
+            // config omitted: may contain sensitive keys (embedding model paths,
+            // provider credentials). Use finish_non_exhaustive to signal the
+            // omission to derive-based tooling.
+            .finish_non_exhaustive()
+    }
+}
 
 impl CairnMcpHandler {
-    /// Create a new handler instance.
+    /// Create a handler without a wired store (dispatch falls back to stub).
     #[must_use]
     pub fn new() -> Self {
-        Self
+        Self {
+            store: None,
+            config: CairnConfig::default(),
+        }
+    }
+
+    /// Create a handler wired to a real store.
+    ///
+    /// Tools that have a dispatch path use the store; everything else falls
+    /// back to the existing stub.
+    #[must_use]
+    pub fn with_store(store: Arc<dyn MemoryStore>, config: CairnConfig) -> Self {
+        Self {
+            store: Some(store),
+            config,
+        }
     }
 }
 
 impl ServerHandler for CairnMcpHandler {
     /// Return server identity and advertise tool capability.
     fn get_info(&self) -> ServerInfo {
-        let mut caps = ServerCapabilities::default();
-        caps.tools = Some(ToolsCapability { list_changed: None });
-        let mut info = ServerInfo::default();
-        info.capabilities = caps;
-        info.server_info = Implementation::new("cairn", env!("CARGO_PKG_VERSION"));
-        info
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::new("cairn", env!("CARGO_PKG_VERSION")))
     }
 
     /// Return all Cairn verbs as MCP tools.
@@ -76,8 +111,10 @@ impl ServerHandler for CairnMcpHandler {
 
     /// Dispatch a tool call.
     ///
-    /// Validates that the requested verb exists in [`TOOLS`], then delegates
-    /// to [`dispatch_stub`]. Real verb dispatch lands in a follow-up PR.
+    /// Validates that the requested verb exists in [`TOOLS`]. When the verb is
+    /// `"search"` and a store is wired, dispatches through
+    /// [`cairn_core::verbs::search::run`]. All other verbs (or `"search"` with
+    /// no store wired) fall back to [`dispatch_stub`].
     fn call_tool(
         &self,
         request: CallToolRequestParams,
@@ -86,16 +123,150 @@ impl ServerHandler for CairnMcpHandler {
     {
         let name = request.name.clone();
         let known = TOOLS.iter().any(|d| d.name == name.as_ref());
-        let result = if known {
-            dispatch_stub(&name)
-        } else {
-            CallToolResult::error(vec![Content::text(format!(
-                "cairn: unknown verb '{name}'. Available verbs: {}",
-                TOOLS.iter().map(|d| d.name).collect::<Vec<_>>().join(", ")
-            ))])
-        };
-        std::future::ready(Ok(result))
+        let store = self.store.clone();
+        let config = self.config.clone();
+        let arguments = request.arguments.clone();
+
+        async move {
+            if !known {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "cairn: unknown verb '{name}'. Available verbs: {}",
+                    TOOLS.iter().map(|d| d.name).collect::<Vec<_>>().join(", ")
+                ))]));
+            }
+
+            if name.as_ref() == "search"
+                && let Some(store) = store
+            {
+                return Ok(handle_search(store, config, arguments).await);
+            }
+
+            Ok(dispatch_stub(&name))
+        }
     }
+}
+
+/// Dispatch the `search` tool against a wired store.
+///
+/// Parses the MCP tool arguments into [`cairn_core::generated::verbs::search::SearchArgs`],
+/// derives the capability set from config, calls
+/// [`cairn_core::verbs::search::run`], and serializes the result into a
+/// [`CallToolResult`].
+async fn handle_search(
+    store: Arc<dyn MemoryStore>,
+    config: CairnConfig,
+    arguments: Option<serde_json::Map<String, serde_json::Value>>,
+) -> CallToolResult {
+    use cairn_core::generated::common::Ulid;
+    use cairn_core::generated::verbs::search::{
+        Hit, HitTrust, ScoreExplain, SearchArgs, SearchArgsMode, SearchData,
+    };
+
+    // Parse args from the MCP tool argument map.
+    let args_json = serde_json::Value::Object(arguments.unwrap_or_default());
+    let args: SearchArgs = match serde_json::from_value(args_json) {
+        Ok(a) => a,
+        Err(e) => {
+            return CallToolResult::error(vec![Content::text(format!(
+                "cairn search: invalid args: {e}"
+            ))]);
+        }
+    };
+
+    // Map IDL mode to core dispatcher mode.
+    let mode = match args.mode {
+        SearchArgsMode::Keyword => cairn_core::verbs::search::SearchMode::Keyword,
+        SearchArgsMode::Semantic => cairn_core::verbs::search::SearchMode::Semantic,
+        SearchArgsMode::Hybrid => cairn_core::verbs::search::SearchMode::Hybrid,
+        // Forward-compat: reject unknown future variants fail-closed.
+        _ => {
+            return CallToolResult::error(vec![Content::text("cairn search: unknown mode")]);
+        }
+    };
+
+    // Derive capability set the same way the SDK and CLI do.
+    let caps = config.capabilities(config.search.local_embeddings);
+
+    let limit = args.limit.map_or(10, |l| usize::try_from(l).unwrap_or(10));
+    let request = cairn_core::verbs::search::SearchRequest {
+        query: args.query.clone(),
+        mode,
+        limit,
+        visibility_allowlist: vec![],
+        model_label: config.search.embedding_model.as_str().to_owned(),
+        explain: args.explain.unwrap_or(false),
+    };
+
+    let outcome =
+        match cairn_core::verbs::search::run(store.as_ref(), &config, &caps, request).await {
+            Ok(o) => o,
+            Err(cairn_core::verbs::search::SearchError::CapabilityUnavailable { capability }) => {
+                return CallToolResult::error(vec![Content::text(format!(
+                    "cairn search: capability unavailable: {capability}"
+                ))]);
+            }
+            Err(cairn_core::verbs::search::SearchError::InvalidArgs { reason }) => {
+                return CallToolResult::error(vec![Content::text(format!(
+                    "cairn search: invalid args: {reason}"
+                ))]);
+            }
+            Err(cairn_core::verbs::search::SearchError::Store(e)) => {
+                return CallToolResult::error(vec![Content::text(format!(
+                    "cairn search: store error: {e}"
+                ))]);
+            }
+            // Forward-compat: surface unknown error variants as internal errors.
+            Err(e) => {
+                return CallToolResult::error(vec![Content::text(format!(
+                    "cairn search: internal error: {e}"
+                ))]);
+            }
+        };
+
+    let hits: Vec<Hit> = outcome
+        .candidates
+        .iter()
+        .map(|c| Hit {
+            record_id: Ulid(c.record_id.as_str().to_owned()),
+            score: c.bm25,
+            snippet: Some(c.snippet.clone()),
+            citation: None,
+            trust: HitTrust::Unknown,
+        })
+        .collect();
+
+    let score_explain = outcome.explain.map(|exps| {
+        exps.into_iter()
+            .map(|e| ScoreExplain {
+                record_id: Ulid(e.record_id.as_str().to_owned()),
+                bm25_rank: e.bm25_rank.map(|r| i64::try_from(r).unwrap_or(i64::MAX)),
+                semantic_rank: e
+                    .semantic_rank
+                    .map(|r| i64::try_from(r).unwrap_or(i64::MAX)),
+                rrf_score: e.rrf_score,
+                cosine: e.cosine,
+                final_score: e.final_score,
+            })
+            .collect()
+    });
+
+    let data = SearchData {
+        hits,
+        next_cursor: None,
+        excluded: None,
+        score_explain,
+    };
+
+    let json = match serde_json::to_string(&data) {
+        Ok(s) => s,
+        Err(e) => {
+            return CallToolResult::error(vec![Content::text(format!(
+                "cairn search: serialize error: {e}"
+            ))]);
+        }
+    };
+
+    CallToolResult::success(vec![Content::text(json)])
 }
 
 /// Stub dispatcher returned while real verb wiring is pending.

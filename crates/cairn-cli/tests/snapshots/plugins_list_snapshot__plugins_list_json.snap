@@ -1,5 +1,6 @@
 ---
 source: crates/cairn-cli/tests/plugins_list_snapshot.rs
+assertion_line: 16
 expression: json
 ---
 {
@@ -35,15 +36,16 @@ expression: json
     },
     {
       "capabilities": {
-        "fts": false,
-        "graph_edges": false,
-        "transactions": false,
+        "fts": true,
+        "graph_edges": true,
+        "per_record_consent_model": true,
+        "transactions": true,
         "vector": false
       },
       "contract": "MemoryStore",
       "contract_version_range": {
-        "max_exclusive": "0.2.0",
-        "min": "0.1.0"
+        "max_exclusive": "0.5.0",
+        "min": "0.4.0"
       },
       "name": "cairn-store-sqlite",
       "source": "bundled:cairn-store-sqlite"

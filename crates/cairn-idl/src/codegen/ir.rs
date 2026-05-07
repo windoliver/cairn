@@ -121,6 +121,11 @@ pub struct CliFlag {
     pub long: String,
     pub value_source: String,
     pub required: bool,
+    /// Optional concrete exemplar rendered into generated SKILL.md examples
+    /// for value sources that have no natural placeholder synthesis (e.g.,
+    /// `json` flags whose schema requires a structured payload). Read from
+    /// `x-cairn-cli.flags[*].cli_exemplar` in the IDL.
+    pub cli_exemplar: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -128,7 +133,15 @@ pub struct CliPositional {
     pub name: String,
     pub description: String,
     pub required: bool,
+    /// True when the positional accepts more than one value (clap
+    /// `num_args(1..)`). Currently set from the optional `repeatable` field
+    /// in `x-cairn-cli.positional`.
     pub repeatable: bool,
+    /// Schema field names this positional satisfies in a `oneOf` exclusivity
+    /// group. E.g., `cairn ingest`'s `source` positional aliases `body`,
+    /// `file`, and `url` — presence of the positional satisfies any of those
+    /// branches and conflicts with all of them.
+    pub aliases_one_of: Vec<String>,
 }
 
 /// Skill triggers extracted from `x-cairn-skill-triggers`.
@@ -706,6 +719,10 @@ pub(crate) fn parse_cli_block(value: &Value) -> Result<CliCommand, CodegenError>
                             .unwrap_or("")
                             .to_string(),
                         required: false,
+                        cli_exemplar: f
+                            .get("cli_exemplar")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
                     })
                 })
                 .collect::<Result<Vec<_>, CodegenError>>()
@@ -728,6 +745,16 @@ pub(crate) fn parse_cli_block(value: &Value) -> Result<CliCommand, CodegenError>
             .get("repeatable")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        aliases_one_of: p
+            .get("aliases_one_of")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
     });
     Ok(CliCommand {
         command,
@@ -1398,6 +1425,18 @@ fn collect_capability_overrides(
             if let Some(cap) = prop.get("x-cairn-capability").and_then(Value::as_str) {
                 out.push(CapabilityOverride {
                     path: k.clone(),
+                    capability: cap.to_string(),
+                });
+            }
+            // Boolean-level — `x-cairn-capability-when-true` on a `type: boolean`
+            // property (e.g. `search.explain`). Emits `path: "<property>=true"` so
+            // the MCP transport can gate `explain: true` without special-casing it.
+            if let Some(cap) = prop
+                .get("x-cairn-capability-when-true")
+                .and_then(Value::as_str)
+            {
+                out.push(CapabilityOverride {
+                    path: format!("{k}=true"),
                     capability: cap.to_string(),
                 });
             }

@@ -28,7 +28,7 @@ expression: json
         },
         {
           "id": "initialize_and_list_tools",
-          "reason": "core cannot exercise rmcp initialize/tools-list without depending on the adapter",
+          "reason": "transport-level MCP initialization is not exercised from cairn-core",
           "status": "pending",
           "tier": 2
         }

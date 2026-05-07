@@ -100,6 +100,7 @@ fn capabilities_for(
                     "vector": c.vector,
                     "graph_edges": c.graph_edges,
                     "transactions": c.transactions,
+                    "per_record_consent_model": c.per_record_consent_model,
                 })
             },
         ),

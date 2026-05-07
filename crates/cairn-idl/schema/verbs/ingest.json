@@ -16,7 +16,8 @@
     ],
     "positional": {
       "name": "source",
-      "description": "File, URL, or '-' for stdin. Mutually exclusive with --body/--file/--url."
+      "description": "File, URL, or '-' for stdin. Mutually exclusive with --body/--file/--url.",
+      "aliases_one_of": ["body", "file", "url"]
     }
   },
   "x-cairn-capability": null,
@@ -56,6 +57,21 @@
         "frontmatter": {
           "type": "object",
           "description": "Extra YAML frontmatter fields to store alongside the body."
+        },
+        "dry_run": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, produce a FlushPlan and emit it without writing to MemoryStore (brief §5.5). Mutually exclusive with human_review."
+        },
+        "human_review": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, persist a FlushPlan under .cairn/flush/pending/ for explicit `cairn flush apply` (brief §5.5). Mutually exclusive with dry_run."
+        },
+        "no_diff": {
+          "type": "boolean",
+          "default": false,
+          "description": "When human_review=true, skip emitting the markdown diff sidecar."
         }
       },
       "oneOf": [
@@ -70,7 +86,12 @@
       "required": ["record_id", "session_id"],
       "properties": {
         "record_id":  { "$ref": "../common/primitives.json#/$defs/Ulid", "description": "ULID of the newly stored record." },
-        "session_id": { "type": "string", "minLength": 1, "description": "Resolved session (created if absent — see §8.1)." }
+        "session_id": { "type": "string", "minLength": 1, "description": "Resolved session (created if absent — see §8.1)." },
+        "plan_ref": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Path under .cairn/flush/pending/ when human_review=true; absent otherwise."
+        }
       }
     }
   }

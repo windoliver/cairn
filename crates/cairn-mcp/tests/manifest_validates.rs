@@ -27,3 +27,17 @@ fn register_populates_registry() {
     assert!(reg.mcp_server(&name).is_some());
     assert!(reg.parsed_manifest(&name).is_some());
 }
+
+#[test]
+fn stdio_capability_advertised() {
+    use cairn_core::contract::registry::PluginRegistry;
+
+    let mut reg = PluginRegistry::new();
+    cairn_mcp::register(&mut reg).expect("registers");
+    let name = PluginName::new("cairn-mcp").expect("valid");
+    let plugin = reg.mcp_server(&name).expect("registered");
+    assert!(
+        plugin.capabilities().stdio,
+        "CairnMcpServer must advertise stdio=true"
+    );
+}

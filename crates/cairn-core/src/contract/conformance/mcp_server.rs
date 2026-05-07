@@ -119,14 +119,11 @@ fn tier1_capability_self_consistency_floor(
 }
 
 fn tier2_tool_availability() -> CaseOutcome {
-    // cairn-core cannot depend on cairn-mcp (wrong dependency direction),
-    // so this tier-2 case must remain pending until adapter-level tests can
-    // exercise MCP initialize + tools/list against the actual server.
     CaseOutcome {
         id: "initialize_and_list_tools",
         tier: Tier::Two,
         status: CaseStatus::Pending {
-            reason: "core cannot exercise rmcp initialize/tools-list without depending on the adapter",
+            reason: "transport-level MCP initialization is not exercised from cairn-core",
         },
     }
 }

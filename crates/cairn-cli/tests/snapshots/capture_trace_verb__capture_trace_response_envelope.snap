@@ -1,0 +1,8 @@
+---
+source: crates/cairn-cli/tests/capture_trace_verb.rs
+expression: value
+---
+{
+  "failed_turns": [],
+  "trace_id": "[trace_id]"
+}
