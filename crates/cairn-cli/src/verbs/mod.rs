@@ -16,6 +16,7 @@ pub mod ingest;
 pub mod lint;
 pub mod retrieve;
 pub mod search;
+pub mod signed;
 pub mod status;
 pub mod summarize;
 
