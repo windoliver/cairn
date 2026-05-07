@@ -3,6 +3,11 @@
     "Args": {
       "additionalProperties": false,
       "properties": {
+        "fix": {
+          "description": "When true, resolves live bitemporal edge contradictions by invalidating lower-confidence edges.",
+          "type": "boolean",
+          "x-cairn-auth": "write_capability"
+        },
         "write_report": {
           "description": "When true, writes .cairn/lint-report.md.",
           "type": "boolean",
@@ -27,6 +32,10 @@
         "summary": {
           "additionalProperties": false,
           "properties": {
+            "auto_resolved": {
+              "minimum": 0,
+              "type": "integer"
+            },
             "by_kind": {
               "additionalProperties": {
                 "minimum": 0,
@@ -79,6 +88,13 @@
     "Finding": {
       "additionalProperties": false,
       "properties": {
+        "entities": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": "array"
+        },
         "kind": {
           "$ref": "#/$defs/Kind"
         },
@@ -111,9 +127,11 @@
     "Kind": {
       "enum": [
         "broken_actor_chain",
+        "contradictory_edge",
         "contradiction",
         "data_gap",
         "deferred_check",
+        "ambiguous_edge",
         "hot_memory_over_budget",
         "index_drift",
         "malformed_record",

@@ -141,6 +141,7 @@ fn summarize(findings: &[Finding]) -> LintDataSummary {
         }
     }
     LintDataSummary {
+        auto_resolved: None,
         total: findings.len() as u64,
         by_severity,
         by_kind: serde_json::Value::Object(by_kind),
@@ -150,9 +151,11 @@ fn summarize(findings: &[Finding]) -> LintDataSummary {
 fn kind_key(k: Kind) -> String {
     match k {
         Kind::Contradiction => "contradiction",
+        Kind::ContradictoryEdge => "contradictory_edge",
         Kind::Orphan => "orphan",
         Kind::Stale => "stale",
         Kind::MissingConcept => "missing_concept",
+        Kind::AmbiguousEdge => "ambiguous_edge",
         Kind::DataGap => "data_gap",
         Kind::MalformedRecord => "malformed_record",
         Kind::BrokenActorChain => "broken_actor_chain",
@@ -170,6 +173,7 @@ fn kind_key(k: Kind) -> String {
 /// Construct a finding with no target / fix / tracking issue.
 pub(crate) fn finding(kind: Kind, severity: Severity, message: impl Into<String>) -> Finding {
     Finding {
+        entities: None,
         kind,
         message: message.into(),
         severity,

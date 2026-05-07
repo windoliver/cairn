@@ -14,6 +14,7 @@ pub mod consent_timeline;
 pub mod entity_graph;
 pub mod error;
 mod identity;
+pub mod lint;
 pub mod locks;
 pub mod migrations;
 pub mod open;
@@ -26,6 +27,7 @@ pub mod wal;
 
 pub use error::StoreError;
 pub use identity::SqliteIdentityRegistry;
+pub use lint::{EdgeLintReport, lint_edges, resolve_edge_contradictions};
 pub use open::{
     open, open_in_memory, open_in_memory_with_embedder, open_in_memory_with_embedder_and_config,
     open_with_embedder, open_with_embedder_and_config,

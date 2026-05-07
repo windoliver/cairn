@@ -367,6 +367,20 @@ fn ingest_with_no_source_exits_64() {
 }
 
 #[test]
+fn lint_accepts_fix_flag() {
+    let out = cli()
+        .args(["lint", "--fix", "--json"])
+        .output()
+        .expect("cairn lint --fix --json");
+    assert_ne!(
+        out.status.code(),
+        Some(64),
+        "lint --fix should parse as a verb flag; stderr: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
 fn ingest_with_conflicting_sources_exits_64() {
     // Providing both --body and --file violates the IDL exactly-one-of constraint.
     let out = cli()

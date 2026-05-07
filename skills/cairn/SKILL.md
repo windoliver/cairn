@@ -274,6 +274,10 @@ cairn lint
 cairn lint --write-report
 ```
 
+```bash
+cairn lint --fix
+```
+
 ## `cairn forget`
 
 **Use when:**

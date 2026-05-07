@@ -37,6 +37,20 @@ fn emits_command_builder_with_eight_subcommands_plus_two_preludes() {
 }
 
 #[test]
+fn lint_subcommand_includes_fix_flag() {
+    let files = emit_cli::emit(&doc()).unwrap();
+    let verbs_rs = files
+        .iter()
+        .find(|f| f.path.ends_with("crates/cairn-cli/src/generated/verbs.rs"))
+        .unwrap();
+    let body = std::str::from_utf8(&verbs_rs.bytes).unwrap();
+    assert!(
+        body.contains("clap::Arg::new(\"fix\").long(\"fix\").action(clap::ArgAction::SetTrue)"),
+        "generated lint subcommand must expose --fix: {body}"
+    );
+}
+
+#[test]
 fn emits_required_and_repeatable_positionals_from_cli_metadata() {
     let files = emit_cli::emit(&doc()).unwrap();
     let verbs_rs = files

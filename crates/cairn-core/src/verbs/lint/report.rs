@@ -83,6 +83,7 @@ mod tests {
 
     fn empty_summary() -> LintDataSummary {
         LintDataSummary {
+            auto_resolved: None,
             total: 0,
             by_severity: LintDataSummaryBySeverity {
                 error: 0,
@@ -107,6 +108,7 @@ mod tests {
     #[test]
     fn finding_with_path_target_and_fix_renders() {
         let f = Finding {
+            entities: None,
             kind: Kind::IndexDrift,
             severity: Severity::Error,
             message: "FTS5 rows (8) do not match active records (10)".to_owned(),
@@ -136,6 +138,7 @@ mod tests {
     #[test]
     fn deferred_info_finding_with_tracking_issue_renders() {
         let f = Finding {
+            entities: None,
             kind: Kind::DeferredCheck,
             severity: Severity::Info,
             message: "sensor-consent enforcement requires the receipt timeline introduced in #253"

@@ -81,6 +81,7 @@ pub fn finding_for(
         Severity::Warning
     };
     Some(Finding {
+        entities: None,
         kind,
         message,
         severity,

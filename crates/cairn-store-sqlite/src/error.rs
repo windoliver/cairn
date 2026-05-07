@@ -22,6 +22,22 @@ pub enum StoreError {
     #[error("schema drift: {0}")]
     SchemaDrift(String),
 
+    /// A required schema object is missing.
+    #[error("required schema object missing: {object}")]
+    SchemaMissing {
+        /// Missing schema object name.
+        object: &'static str,
+    },
+
+    /// An entity edge stored an unsupported confidence value.
+    #[error("invalid confidence for edge {edge_id}: {value}")]
+    InvalidConfidence {
+        /// Edge id containing the unsupported confidence.
+        edge_id: String,
+        /// Unsupported confidence value.
+        value: String,
+    },
+
     /// WAL boot recovery failed (issue #55, brief §5.6). Surfaced from
     /// every public async open path so a corrupt or unrecoverable WAL
     /// fails the open rather than serving requests against partial state.
