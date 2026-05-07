@@ -19,7 +19,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rusqlite::params;
 use tokio_rusqlite::Connection;
 
-use super::error::{LockError, default_held_retry};
+use super::error::{LockError, default_fenced_retry, default_held_retry};
 use super::handle::LockHandle;
 use super::kinds::{LockMode, ResourceKey};
 
@@ -71,9 +71,34 @@ pub async fn acquire(
         .call(move |c| {
             let tx = c.transaction()?;
 
+            // 0. Liveness check: confirm the caller's cached incarnation still
+            //    matches the on-disk `daemon_incarnation` singleton. If a
+            //    second process has opened the DB and minted a fresh
+            //    incarnation, the caller is stale — fail closed instead of
+            //    deleting the live owner's holder rows in step 1.
+            let on_disk_incarnation: Option<String> = tx
+                .query_row(
+                    "SELECT incarnation_id FROM daemon_incarnation WHERE id = 1",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .ok();
+            if on_disk_incarnation.as_deref() != Some(inc_owned.as_str()) {
+                drop(tx);
+                return Ok::<AcquisitionOutcome, tokio_rusqlite::Error>(
+                    AcquisitionOutcome::Stale {
+                        resource: resource_owned,
+                        caller_incarnation: inc_owned,
+                        on_disk_incarnation: on_disk_incarnation.unwrap_or_default(),
+                    },
+                );
+            }
+
             // 1. GC: expired OR not-current-incarnation. The AFTER DELETE
             //    trigger will decrement `locks.holder_count` and reset
-            //    `locks.mode` to 'NONE' if the count hits 0.
+            //    `locks.mode` to 'NONE' if the count hits 0. Step 0 ensures
+            //    `inc_owned` IS the on-disk current incarnation, so this
+            //    DELETE only removes truly stale rows.
             tx.execute(
                 "DELETE FROM lock_holders \
                   WHERE resource = ?1 \
@@ -229,6 +254,28 @@ pub async fn acquire(
             since_ms,
             retry: default_held_retry(),
         }),
+        AcquisitionOutcome::Stale {
+            resource,
+            caller_incarnation,
+            on_disk_incarnation,
+        } => {
+            tracing::warn!(
+                resource = %resource,
+                caller_incarnation = %caller_incarnation,
+                on_disk_incarnation = %on_disk_incarnation,
+                "lock acquire rejected: caller's cached incarnation does not match \
+                 on-disk daemon_incarnation singleton — caller is stale"
+            );
+            // Caller's cached epoch is meaningless once their incarnation is
+            // stale; report (-1, -1) sentinels so callers can distinguish the
+            // stale-incarnation case from a normal epoch-bump fence.
+            Err(LockError::Fenced {
+                resource,
+                expected_epoch: -1,
+                observed_epoch: -1,
+                retry: default_fenced_retry(),
+            })
+        }
     }
 }
 
@@ -243,6 +290,14 @@ enum AcquisitionOutcome {
         current_holder: String,
         ttl_remaining_ms: i64,
         since_ms: i64,
+    },
+    /// Caller's cached `owner_incarnation` does not match the on-disk
+    /// `daemon_incarnation` singleton — caller is a stale process. Surfaced
+    /// as `LockError::Fenced` so existing retry logic kicks in.
+    Stale {
+        resource: String,
+        caller_incarnation: String,
+        on_disk_incarnation: String,
     },
 }
 
@@ -464,5 +519,78 @@ mod tests {
             }
             other => panic!("expected Fenced, got {other:?}"),
         }
+    }
+
+    /// A caller whose cached `owner_incarnation` does not match the on-disk
+    /// `daemon_incarnation` singleton is a stale process — `acquire` must
+    /// fail closed with `LockError::Fenced` (sentinel `expected=-1, observed=-1`)
+    /// BEFORE the GC step. This protects the live owner's holders from being
+    /// deleted by a stale acquirer.
+    #[tokio::test]
+    async fn stale_caller_incarnation_is_rejected_before_gc() {
+        let (_store, conn, current_inc) = setup().await;
+        let r = ResourceKey::entity("t1", "default", "rec_protected");
+
+        // Live owner under the current (real) incarnation.
+        let _live = acquire(
+            &conn,
+            &r,
+            LockMode::Exclusive,
+            "live_owner",
+            Duration::from_mins(1),
+            &current_inc,
+            "live",
+        )
+        .await
+        .unwrap();
+
+        // Construct a synthetic stale incarnation — a ULID that was never
+        // the singleton. This simulates a process that captured an
+        // incarnation `Arc<str>`, then a different process replaced the
+        // singleton via `init_incarnation` while the first process kept
+        // its cached value.
+        let stale_inc: Arc<str> = Arc::from(ulid::Ulid::new().to_string());
+        assert_ne!(&*stale_inc, &*current_inc, "synthetic must differ");
+
+        let err = acquire(
+            &conn,
+            &r,
+            LockMode::Exclusive,
+            "stale_acquirer",
+            Duration::from_secs(2),
+            &stale_inc,
+            "stale_op",
+        )
+        .await
+        .unwrap_err();
+        match err {
+            LockError::Fenced {
+                expected_epoch,
+                observed_epoch,
+                ..
+            } => {
+                assert_eq!(expected_epoch, -1, "sentinel for stale-incarnation");
+                assert_eq!(observed_epoch, -1);
+            }
+            other => panic!("expected Fenced, got {other:?}"),
+        }
+
+        // The pre-flight check rejected before GC, so live_owner's row
+        // must still exist — proving the stale acquirer was prevented
+        // from corrupting the live owner's lease.
+        let live_count: i64 = conn
+            .call(|c| {
+                Ok::<i64, tokio_rusqlite::Error>(c.query_row(
+                    "SELECT COUNT(*) FROM lock_holders WHERE holder_id = 'live_owner'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            live_count, 1,
+            "stale acquirer must NOT delete live owner's holder row"
+        );
     }
 }

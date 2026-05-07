@@ -23,6 +23,27 @@ use super::error::LockError;
 /// Mint a new incarnation, GC stale `lock_holders` rows, and bump epoch on
 /// every affected resource. Idempotent: safe to call multiple times in tests.
 ///
+/// # P0 single-writer-process assumption
+///
+/// Per brief §5.6 and the design spec
+/// (`docs/superpowers/specs/2026-05-06-issue-56-locks-fencing-design.md`),
+/// P0 ships with **one writer process per vault**. This routine
+/// unconditionally reclaims any `lock_holders` row whose `owner_incarnation`
+/// does not match the freshly-minted ULID — there is no `boot_id` /
+/// BOOTTIME-ns liveness proof to distinguish "prior process died" from
+/// "another process is alive right now". Both collapse to "reclaim and
+/// proceed". A second concurrent open would therefore steal the first
+/// writer's locks; that is the documented P0 limitation. `acquire`'s
+/// pre-flight liveness check defends against the inverse direction (a
+/// stale process can no longer GC the live owner's holders) by reading
+/// the singleton inside its own transaction and failing closed.
+///
+/// **Deferred to P1+** (per design spec):
+/// - BOOTTIME-ns lease clock + `boot_id` column for true liveness proof.
+/// - Cross-process takeover handshake (the supervisor pattern).
+///
+/// Until those land, `cairn` is operated as a single writer per vault.
+///
 /// # Errors
 /// `LockError::Db` on connection failure.
 /// `LockError::Clock` if the system clock is before UNIX epoch.
