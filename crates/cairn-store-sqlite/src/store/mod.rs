@@ -40,6 +40,12 @@ use crate::error::StoreError;
 #[derive(Clone)]
 pub struct SqliteMemoryStore {
     pub(crate) conn: Option<Arc<AsyncConn>>,
+    /// Per-process daemon incarnation id, minted by `locks::init_incarnation`
+    /// during `open` (issue #56, brief §5.6). Threaded into `locks::acquire`
+    /// so freshly-acquired lock rows carry the current process's ULID.
+    /// `None` for the registry stub built via `Default::default` (no
+    /// connection, so no incarnation row exists).
+    pub(crate) incarnation: Option<Arc<str>>,
     /// Optional local embedding model. Presence enables `caps.vector`.
     /// Used by `do_search_semantic` (Task 7) and embed-on-write in `do_upsert` (Task 8).
     pub(crate) embedder: Option<Arc<dyn EmbeddingModel>>,
@@ -62,6 +68,7 @@ impl Default for SqliteMemoryStore {
     fn default() -> Self {
         Self {
             conn: None,
+            incarnation: None,
             embedder: None,
             caps: MemoryStoreCapabilities {
                 fts: true,
@@ -113,6 +120,13 @@ impl SqliteMemoryStore {
     #[must_use]
     pub fn raw_conn_for_admin(&self) -> Option<&Arc<AsyncConn>> {
         self.conn.as_ref()
+    }
+
+    /// Returns the daemon incarnation id used by `locks::acquire`.
+    /// `None` for the registry stub (unconnected) Store.
+    #[must_use]
+    pub fn incarnation(&self) -> Option<&Arc<str>> {
+        self.incarnation.as_ref()
     }
 }
 

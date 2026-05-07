@@ -57,6 +57,7 @@ const DEFAULT_VEC_DIM: usize = 384;
 /// provided.
 fn build_store(
     conn: Arc<AsyncConn>,
+    incarnation: Arc<str>,
     embedder: Option<Arc<dyn EmbeddingModel>>,
     fts_column_weights: [f64; 4],
 ) -> SqliteMemoryStore {
@@ -73,6 +74,7 @@ fn build_store(
 
     SqliteMemoryStore {
         conn: Some(conn),
+        incarnation: Some(incarnation),
         embedder,
         caps,
         _cancel: cancel,
@@ -159,7 +161,10 @@ pub async fn open_with_embedder_and_config(
     bootstrap(&conn, dim).await?;
     let conn = Arc::new(conn);
     run_boot_recovery(&conn).await?;
-    Ok(build_store(conn, embedder, fts_column_weights))
+    let incarnation = crate::locks::init_incarnation(&conn)
+        .await
+        .map_err(|e| StoreError::LockInit(Box::new(e)))?;
+    Ok(build_store(conn, incarnation, embedder, fts_column_weights))
 }
 
 /// In-memory store at schema head. For tests.
@@ -200,7 +205,10 @@ pub async fn open_in_memory_with_embedder_and_config(
     bootstrap(&conn, dim).await?;
     let conn = Arc::new(conn);
     run_boot_recovery(&conn).await?;
-    Ok(build_store(conn, embedder, fts_column_weights))
+    let incarnation = crate::locks::init_incarnation(&conn)
+        .await
+        .map_err(|e| StoreError::LockInit(Box::new(e)))?;
+    Ok(build_store(conn, incarnation, embedder, fts_column_weights))
 }
 
 async fn bootstrap(conn: &AsyncConn, vec_dim: Option<usize>) -> Result<(), StoreError> {
@@ -500,6 +508,23 @@ mod resize_tests {
             canon(&migration_form),
             "record_vectors_create_sql must mirror migration 0020. \
              If you changed the migration, update the helper to match.",
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::open_in_memory;
+
+    /// Smoke test for issue #56 Task 8: every successful `open_*` path must
+    /// mint and stash a daemon-incarnation id so later `locks::acquire`
+    /// calls do not fault with `LockError::NoIncarnation`.
+    #[tokio::test]
+    async fn open_populates_incarnation() {
+        let store = open_in_memory().await.expect("open_in_memory");
+        assert!(
+            store.incarnation().is_some(),
+            "open must call init_incarnation",
         );
     }
 }
