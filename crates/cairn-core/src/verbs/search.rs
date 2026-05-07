@@ -236,13 +236,14 @@ mod tests {
 
     /// Stub store that records which leg was called.
     ///
-    /// `last_hybrid` captures the `(blend, rrf_k, rerank_topk)` args from the
+    /// `last_hybrid` captures the
+    /// `(blend, rrf_k, rerank_topk, graph_confidence_min)` args from the
     /// most recent `search_hybrid` call so tests can assert config knobs
     /// flow through correctly.
     struct CallRecorder {
         calls: Mutex<Vec<&'static str>>,
         capabilities: MemoryStoreCapabilities,
-        last_hybrid: Mutex<Option<(f32, usize, usize)>>,
+        last_hybrid: Mutex<Option<(f32, usize, usize, f32)>>,
     }
 
     #[async_trait::async_trait]
@@ -318,8 +319,12 @@ mod tests {
             args: &HybridSearchArgs<'_>,
         ) -> Result<HybridSearchPage, StoreError> {
             self.calls.lock().expect("mutex").push("hybrid");
-            *self.last_hybrid.lock().expect("mutex") =
-                Some((args.blend, args.rrf_k, args.rerank_topk));
+            *self.last_hybrid.lock().expect("mutex") = Some((
+                args.blend,
+                args.rrf_k,
+                args.rerank_topk,
+                args.graph_confidence_min,
+            ));
             Ok(HybridSearchPage {
                 candidates: vec![],
                 explain: None,
@@ -785,6 +790,7 @@ mod tests {
         config.search.rerank_blend = 0.42;
         config.search.rrf_k = 99;
         config.search.rerank_topk = 33;
+        config.search.graph_confidence_min = 0.7;
         run(
             &store,
             &config,
@@ -797,6 +803,11 @@ mod tests {
         assert!((captured.0 - 0.42).abs() < 1e-6, "blend mismatch");
         assert_eq!(captured.1, 99, "rrf_k mismatch");
         assert_eq!(captured.2, 33, "rerank_topk mismatch");
+        assert!(
+            (captured.3 - 0.7).abs() < 1e-6,
+            "graph_confidence_min mismatch: got {}",
+            captured.3,
+        );
     }
 
     // M4-C: token_budget_trim is invoked — oversized candidates are trimmed.
