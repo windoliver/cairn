@@ -276,7 +276,7 @@ impl CairnMcpHandler {
         // cairn-sdk/src/transport.rs::gates() for the rationale.
         let embedding_provider_ready = model_present;
         let gates = cairn_core::status::CapabilityGates {
-            config: self.config.capabilities(model_present),
+            config: self.config.capabilities(embedding_provider_ready),
             store: store_caps,
             vault_bound: self.store.is_some(),
             model_present,
@@ -505,6 +505,8 @@ async fn handle_search(
     // masked by the same store-capability signals `status_response` uses.
     // Dispatcher gate ⊆ advertised gate ⊆ status capabilities — three
     // views, one truth.
+    // Use the store's vector-index as the provider-ready proxy (mirrors the
+    // `build_status_response` path above — see its comment for rationale).
     let store_caps = store.capabilities();
     let mut caps = config.capabilities(store_caps.vector);
     caps.keyword_search = caps.keyword_search && store_caps.fts;

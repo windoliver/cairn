@@ -731,7 +731,7 @@ pub struct ExtractBudget {
 
 /// Derived capability set, computed from `CairnConfig` (no I/O).
 ///
-/// The verb layer calls `config.capabilities(model_present)` before dispatching to
+/// The verb layer calls `config.capabilities(embedding_provider_ready)` before dispatching to
 /// gate features that require capabilities that may not be present.
 // Six orthogonal capability flags; a bitflags type would obscure the intent.
 #[allow(clippy::struct_excessive_bools)]
@@ -739,9 +739,11 @@ pub struct ExtractBudget {
 pub struct CapabilitySet {
     /// Always true at P0 (`FTS5` always present).
     pub keyword_search: bool,
-    /// True iff `search.local_embeddings` is true and embedding model files exist on disk.
+    /// True iff `search.local_embeddings` is true and the embedding provider is ready
+    /// (local: model files on disk; cloud: feature compiled in + API key set).
     pub semantic_search: bool,
-    /// True iff `search.local_embeddings` is true (hybrid uses keyword+semantic legs).
+    /// True iff `search.local_embeddings` is true and the embedding provider is ready
+    /// (hybrid uses keyword + semantic legs; both require an active embedder).
     pub hybrid_search: bool,
     /// True iff `llm.provider` is `Some`.
     pub llm_extract: bool,
@@ -853,14 +855,18 @@ impl CairnConfig {
 
     /// Derive the active capability set from this config (pure, no I/O).
     ///
-    /// `model_present` should be `true` when the configured embedding model
-    /// files exist on disk (stat-checked at startup).
+    /// `embedding_provider_ready` should be `true` when the configured embedding
+    /// provider can produce vectors end-to-end:
+    /// - For `default_provider = local`: the model files exist on disk
+    ///   (stat-checked via `ModelCache::is_present`).
+    /// - For `default_provider = openai`: the `openai` Cargo feature is compiled
+    ///   in AND `OPENAI_API_KEY` is set in the environment.
     ///
     /// The verb layer uses this to gate features before dispatch.
     #[must_use]
-    pub fn capabilities(&self, model_present: bool) -> CapabilitySet {
+    pub fn capabilities(&self, embedding_provider_ready: bool) -> CapabilitySet {
         let llm_on = self.llm.provider.is_some();
-        let semantic = self.search.local_embeddings && model_present;
+        let semantic = self.search.local_embeddings && embedding_provider_ready;
         let agent_extract = self
             .pipeline
             .extract
@@ -900,7 +906,8 @@ impl CairnConfig {
     }
 
     /// Convenience: equivalent to `capabilities(false)`.
-    /// Use when filesystem access is unavailable (e.g., pure config tests).
+    /// Use when no embedding provider is ready (e.g., pure config tests, no
+    /// model on disk, no API key in environment).
     #[must_use]
     pub fn capabilities_no_model(&self) -> CapabilitySet {
         self.capabilities(false)
@@ -1232,10 +1239,10 @@ mod tests {
     fn capabilities_llm_off_by_default() {
         let caps = CairnConfig::default().capabilities(false);
         assert!(caps.keyword_search, "keyword_search always true");
-        assert!(!caps.semantic_search, "model absent → no semantic");
+        assert!(!caps.semantic_search, "provider not ready → no semantic");
         assert!(
             !caps.hybrid_search,
-            "model absent → no hybrid: runtime resolves an embedder for hybrid \
+            "provider not ready → no hybrid: runtime resolves an embedder for hybrid \
              mode and fails closed without one (see crates/cairn-cli/src/verbs/search.rs)"
         );
         assert!(!caps.llm_extract, "no LLM → no llm_extract");
@@ -1263,11 +1270,11 @@ mod tests {
         assert!(caps.keyword_search);
         assert!(
             !caps.semantic_search,
-            "model absent → no semantic even with LLM"
+            "provider not ready → no semantic even with LLM"
         );
         assert!(
             !caps.hybrid_search,
-            "model absent → no hybrid: hybrid requires the embedder the runtime \
+            "provider not ready → no hybrid: hybrid requires the embedder the runtime \
              resolves for both legs (see crates/cairn-cli/src/verbs/search.rs)"
         );
         assert!(caps.llm_extract);
@@ -1295,7 +1302,7 @@ mod tests {
     }
 
     #[test]
-    fn semantic_on_when_local_embeddings_and_model_present() {
+    fn semantic_on_when_local_embeddings_and_provider_ready() {
         let config = CairnConfig::default();
         let caps = config.capabilities(true);
         assert!(caps.semantic_search);
@@ -1306,25 +1313,25 @@ mod tests {
     fn semantic_off_when_local_embeddings_false() {
         let mut config = CairnConfig::default();
         config.search.local_embeddings = false;
-        let caps = config.capabilities(true); // model present but opt-out
+        let caps = config.capabilities(true); // provider ready but opt-out
         assert!(!caps.semantic_search);
     }
 
     #[test]
-    fn semantic_off_when_model_absent() {
+    fn semantic_off_when_provider_not_ready() {
         let config = CairnConfig::default(); // local_embeddings: true
-        let caps = config.capabilities(false); // model not on disk
+        let caps = config.capabilities(false); // provider not ready
         assert!(!caps.semantic_search);
     }
 
     #[test]
     fn semantic_not_tied_to_llm_provider() {
         let mut config = CairnConfig::default();
-        // LLM present but model absent → semantic still false.
+        // LLM present but embedding provider not ready → semantic still false.
         config.llm.provider = Some(LlmProvider::OpenaiCompatible);
         let caps = config.capabilities(false);
         assert!(!caps.semantic_search);
-        // Model present → semantic true regardless of LLM.
+        // Embedding provider ready → semantic true regardless of LLM.
         let caps2 = config.capabilities(true);
         assert!(caps2.semantic_search);
     }

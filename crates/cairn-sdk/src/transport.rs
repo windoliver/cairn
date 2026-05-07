@@ -225,11 +225,11 @@ impl<T: Transport> Sdk<T> {
         // only advertises `vector: true` when it was built with an embedder
         // that could produce vectors at index-time, which implies the provider
         // was ready at that point. CLI callers that need strict accuracy use
-        // compute_embedding_provider_ready() in cairn-cli/src/verbs/status.rs.
+        // `super::embedding_provider_ready()` in cairn-cli/src/verbs/mod.rs.
         // This is documented in CapabilityGates::embedding_provider_ready.
         let embedding_provider_ready = model_present;
         cairn_core::status::CapabilityGates {
-            config: self.config.capabilities(model_present),
+            config: self.config.capabilities(embedding_provider_ready),
             store: store_caps,
             vault_bound: self.store.is_some(),
             model_present,
@@ -312,6 +312,10 @@ impl<T: Transport> Sdk<T> {
         // `advertised_capabilities` uses. Dispatcher gate ⊆ advertised
         // gate ⊆ status capabilities — three views, one truth.
         let store_caps = store.capabilities();
+        // Use the same conservative proxy as `gates()`: the store's vector-index
+        // advertisement implies the provider was ready at index-time. This drives
+        // `config.capabilities()` so `CapabilitySet::semantic_search` reflects
+        // cloud-provider readiness, not just local model presence.
         let mut caps = self.config.capabilities(store_caps.vector);
         caps.keyword_search = caps.keyword_search && store_caps.fts;
         caps.semantic_search = caps.semantic_search && store_caps.vector;
