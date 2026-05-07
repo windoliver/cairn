@@ -15,6 +15,9 @@ pub struct IngestArgs {
     /// Path on the local filesystem.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
+    /// Folder path to ingest recursively with the extraction cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
     /// Extra YAML frontmatter fields to store alongside the body.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frontmatter: Option<serde_json::Value>,
@@ -23,6 +26,9 @@ pub struct IngestArgs {
     pub human_review: Option<bool>,
     /// Memory taxonomy kind (19 possible values — see §3 taxonomy). Validated beyond JSON Schema by the classifier.
     pub kind: String,
+    /// Bypass extraction cache lookup for folder ingest, but still write refreshed cache entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_cache: Option<bool>,
     /// When human_review=true, skip emitting the markdown diff sidecar.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_diff: Option<bool>,
@@ -37,7 +43,7 @@ pub struct IngestArgs {
 impl IngestArgs {
     /// Enforce exactly-one-of presence across each XOR group declared in the IDL `oneOf`.
     pub fn validate(&self) -> Result<(), &'static str> {
-        if (self.body.is_some() as u8 + self.file.is_some() as u8 + self.url.is_some() as u8) != 1 { return Err("exactly one of [body, file, url] is required"); }
+        if (self.body.is_some() as u8 + self.file.is_some() as u8 + self.folder.is_some() as u8 + self.url.is_some() as u8) != 1 { return Err("exactly one of [body, file, folder, url] is required"); }
         Ok(())
     }
 }
@@ -53,6 +59,9 @@ struct RawIngestArgs {
     /// Path on the local filesystem.
     #[serde(default)]
     file: Option<String>,
+    /// Folder path to ingest recursively with the extraction cache.
+    #[serde(default)]
+    folder: Option<String>,
     /// Extra YAML frontmatter fields to store alongside the body.
     #[serde(default)]
     frontmatter: Option<serde_json::Value>,
@@ -61,6 +70,9 @@ struct RawIngestArgs {
     human_review: Option<bool>,
     /// Memory taxonomy kind (19 possible values — see §3 taxonomy). Validated beyond JSON Schema by the classifier.
     kind: String,
+    /// Bypass extraction cache lookup for folder ingest, but still write refreshed cache entries.
+    #[serde(default)]
+    no_cache: Option<bool>,
     /// When human_review=true, skip emitting the markdown diff sidecar.
     #[serde(default)]
     no_diff: Option<bool>,
@@ -75,14 +87,16 @@ struct RawIngestArgs {
 impl ::core::convert::TryFrom<RawIngestArgs> for IngestArgs {
     type Error = &'static str;
     fn try_from(raw: RawIngestArgs) -> Result<Self, Self::Error> {
-        if (raw.body.is_some() as u8 + raw.file.is_some() as u8 + raw.url.is_some() as u8) != 1 { return Err("exactly one of [body, file, url] is required"); }
+        if (raw.body.is_some() as u8 + raw.file.is_some() as u8 + raw.folder.is_some() as u8 + raw.url.is_some() as u8) != 1 { return Err("exactly one of [body, file, folder, url] is required"); }
         Ok(Self {
             body: raw.body,
             dry_run: raw.dry_run,
             file: raw.file,
+            folder: raw.folder,
             frontmatter: raw.frontmatter,
             human_review: raw.human_review,
             kind: raw.kind,
+            no_cache: raw.no_cache,
             no_diff: raw.no_diff,
             session_id: raw.session_id,
             tags: raw.tags,
@@ -102,6 +116,18 @@ impl<'de> ::serde::Deserialize<'de> for IngestArgs {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IngestData {
+    /// Folder ingest cache hits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_hits: Option<u64>,
+    /// Folder ingest cache misses or forced re-extractions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_misses: Option<u64>,
+    /// Folder ingest cache entries written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_writes: Option<u64>,
+    /// Folder ingest file count when source is --folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files_processed: Option<u64>,
     /// Path under .cairn/flush/pending/ when human_review=true; absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_ref: Option<String>,
