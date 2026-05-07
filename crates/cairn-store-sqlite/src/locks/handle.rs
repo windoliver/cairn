@@ -25,6 +25,9 @@ pub struct LockHandle {
     acquired_epoch: i64,
     owner_incarnation: Arc<str>,
     conn: Arc<Connection>,
+    /// Set when an explicit `release()` succeeds, so `Drop` becomes a no-op.
+    /// Avoids leaking the heap fields + `Arc<Connection>` via `mem::forget`.
+    released: bool,
 }
 
 impl std::fmt::Debug for LockHandle {
@@ -56,6 +59,7 @@ impl LockHandle {
             acquired_epoch,
             owner_incarnation,
             conn,
+            released: false,
         }
     }
 
@@ -180,17 +184,20 @@ impl LockHandle {
 
     /// Explicit release (idempotent). Equivalent to `drop` but reports errors.
     ///
-    /// On error, the handle is returned via `LockError`'s caller-side
-    /// recovery path: ownership is **retained** (no `mem::forget`) until
-    /// the DELETE actually succeeds. If the call returns `Err`, `Drop`
-    /// will still run when the handle is dropped, so the caller can either
-    /// retry by re-calling `release` (it's idempotent) or let TTL reclaim
-    /// the row. This protects against partial-failure lock leaks.
+    /// On success, the `released` flag short-circuits `Drop` — no retry
+    /// spawn, no resource leak. The handle's heap allocations + the
+    /// `Arc<Connection>` strong reference are reclaimed when the consumed
+    /// `self` goes out of scope at end-of-function. This is the no-leak
+    /// alternative to `mem::forget(self)`.
+    ///
+    /// On error, the flag stays `false` and `Drop` runs as a fallback,
+    /// fire-and-forgetting another DELETE attempt against the connection.
+    /// Callers see the error and can retry explicitly via `release_by_holder`
+    /// or rely on Drop + TTL reclaim.
     ///
     /// # Errors
-    /// `LockError::Db` on connection failure. On error the handle is
-    /// dropped at the end of the function (`Drop` re-attempts release).
-    pub async fn release(self) -> Result<(), LockError> {
+    /// `LockError::Db` on connection failure.
+    pub async fn release(mut self) -> Result<(), LockError> {
         let resource = self.resource.clone();
         let holder_id = self.holder_id.clone();
         let acquired_epoch = self.acquired_epoch;
@@ -198,23 +205,20 @@ impl LockHandle {
         let conn = Arc::clone(&self.conn);
         match release_inner(&conn, &resource, &holder_id, acquired_epoch, &inc).await {
             Ok(()) => {
-                // Successful DELETE — suppress Drop's fire-and-forget retry.
-                std::mem::forget(self);
+                self.released = true;
                 Ok(())
             }
-            Err(e) => {
-                // Keep the handle alive so Drop runs when `self` goes out
-                // of scope and re-attempts the DELETE. The caller sees the
-                // error and can retry explicitly via `release_by_holder` or
-                // simply rely on Drop + TTL reclaim.
-                Err(e)
-            }
+            Err(e) => Err(e),
         }
     }
 }
 
 impl Drop for LockHandle {
     fn drop(&mut self) {
+        // Explicit release already DELETED the row — nothing to retry.
+        if self.released {
+            return;
+        }
         if tokio::runtime::Handle::try_current().is_err() {
             return;
         }

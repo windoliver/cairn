@@ -73,15 +73,12 @@ pub async fn acquire(
             // INSIDE the transaction closure so the lease window starts from
             // the moment we actually own the SQLite write lock — preventing
             // the next acquirer from reclaiming a fresh holder due to
-            // queueing latency. Fail closed on clock errors via Db error so
-            // callers see a real failure, not a synthesized fence.
-            let now_ms = system_time_ms().map_err(|e| match e {
-                LockError::Clock => {
-                    tokio_rusqlite::Error::Other("system clock pre-epoch".to_string().into())
-                }
-                LockError::Db(inner) => inner,
-                other => tokio_rusqlite::Error::Other(format!("{other}").into()),
-            })?;
+            // queueing latency. A clock failure here propagates as a typed
+            // `AcquisitionOutcome::Clock` so the outer match preserves the
+            // documented `LockError::Clock` (vs. stringifying through Db).
+            let Ok(now_ms) = system_time_ms() else {
+                return Ok::<AcquisitionOutcome, tokio_rusqlite::Error>(AcquisitionOutcome::Clock);
+            };
             let expires_at = now_ms.saturating_add(ttl_ms);
 
             let tx = c.transaction()?;
@@ -263,6 +260,7 @@ pub async fn acquire(
             Arc::clone(owner_incarnation),
             Arc::clone(conn),
         )),
+        AcquisitionOutcome::Clock => Err(LockError::Clock),
         AcquisitionOutcome::Held {
             resource,
             mode,
@@ -313,6 +311,10 @@ enum AcquisitionOutcome {
         /// pre-queue value.
         acquired_at: i64,
     },
+    /// In-tx clock read failed (`SystemTime` pre-epoch). Surfaced as the
+    /// typed `LockError::Clock` by the outer `match` — preserves the
+    /// documented error contract across the closure boundary.
+    Clock,
     Held {
         resource: String,
         mode: LockMode,
