@@ -9,10 +9,10 @@ cairn.mcp.v1 verb: search
 ```text
 cairn.mcp.v1 verb: search
 
-Usage: search [OPTIONS] [query]
+Usage: search [OPTIONS] --mode <ENUM> <query>
 
 Arguments:
-  [query]
+  <query>
           Free-text query string.
 
 Options:
