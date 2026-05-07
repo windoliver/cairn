@@ -186,9 +186,10 @@ pub async fn fix_markdown_with_lock(
 
     // Fence callback invoked before every destructive write inside the
     // handler. `is_still_held` returns false once a second caller has
-    // reclaimed our holder row (acquired_at differs); we surface that as
-    // a typed error so the loop stops *before* publishing more stale
-    // files instead of overwriting a winner's newer projections.
+    // reclaimed our holder row (the `(acquired_epoch, owner_incarnation)`
+    // pair no longer matches); we surface that as a typed error so the
+    // loop stops *before* publishing more stale files instead of
+    // overwriting a winner's newer projections.
     let lock_for_fence = &lock;
     let outcome = fix_markdown_handler_with_fence(store, vault_root, move || {
         let lock = lock_for_fence;
