@@ -17,6 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::params;
 use tokio_rusqlite::Connection;
+use tracing::warn;
 
 use super::error::LockError;
 
@@ -53,53 +54,96 @@ pub async fn init_incarnation(conn: &Arc<Connection>) -> Result<Arc<str>, LockEr
     let pid = i64::from(std::process::id());
 
     let inc_for_call: Arc<str> = Arc::clone(&incarnation);
-    conn.call(move |c| {
-        let tx = c.transaction()?;
+    let inc_for_log: Arc<str> = Arc::clone(&incarnation);
+    let observed = conn
+        .call(move |c| {
+            let tx = c.transaction()?;
 
-        // 1. Upsert the singleton row. CHECK (id = 1) is enforced by 0004.
-        tx.execute(
-            "INSERT INTO daemon_incarnation (id, incarnation_id, started_at, pid) \
-             VALUES (1, ?1, ?2, ?3) \
-             ON CONFLICT(id) DO UPDATE SET \
-               incarnation_id = excluded.incarnation_id, \
-               started_at     = excluded.started_at, \
-               pid            = excluded.pid",
-            params![&*inc_for_call, started_at, pid],
-        )?;
+            // 0. Snapshot the prior singleton, if any, for diagnostic logging.
+            //    A non-empty prior incarnation means another writer process
+            //    was here before — we are about to reclaim its lock_holders
+            //    rows. P0 single-writer assumption (see fn-doc) intends this
+            //    to be a once-per-cold-start event; a warning here surfaces
+            //    multi-process misuse where the design spec defers the real
+            //    fix (BOOTTIME-ns + boot_id liveness) to P1+.
+            let prior: Option<(String, i64, i64)> = match tx.query_row(
+                "SELECT incarnation_id, started_at, pid \
+                   FROM daemon_incarnation WHERE id = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            ) {
+                Ok(t) => Some(t),
+                Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                Err(e) => return Err(e.into()),
+            };
 
-        // 2. Find resources that will lose holders, so we can bump their epoch.
-        //    Collect first; the DELETE that follows fires the count-after-delete
-        //    trigger on locks but does NOT bump epoch (epoch is brief-defined as
-        //    a reclaim signal, separate from holder_count maintenance).
-        let mut stmt = tx.prepare(
-            "SELECT DISTINCT resource FROM lock_holders \
-              WHERE owner_incarnation != ?1",
-        )?;
-        let affected: Vec<String> = stmt
-            .query_map(params![&*inc_for_call], |row| row.get::<_, String>(0))?
-            .collect::<Result<_, _>>()?;
-        drop(stmt);
-
-        // 3. GC stale holders.
-        tx.execute(
-            "DELETE FROM lock_holders WHERE owner_incarnation != ?1",
-            params![&*inc_for_call],
-        )?;
-
-        // 4. Bump epoch on every affected resource.
-        for resource in &affected {
+            // 1. Upsert the singleton row. CHECK (id = 1) is enforced by 0004.
             tx.execute(
-                "UPDATE locks SET epoch = epoch + 1, \
-                                  updated_at = strftime('%s','now') * 1000 \
-                  WHERE resource = ?1",
-                params![resource],
+                "INSERT INTO daemon_incarnation (id, incarnation_id, started_at, pid) \
+                 VALUES (1, ?1, ?2, ?3) \
+                 ON CONFLICT(id) DO UPDATE SET \
+                   incarnation_id = excluded.incarnation_id, \
+                   started_at     = excluded.started_at, \
+                   pid            = excluded.pid",
+                params![&*inc_for_call, started_at, pid],
             )?;
-        }
 
-        tx.commit()?;
-        Ok::<_, tokio_rusqlite::Error>(())
-    })
-    .await?;
+            // 2. Find resources that will lose holders, so we can bump their epoch.
+            //    Collect first; the DELETE that follows fires the count-after-delete
+            //    trigger on locks but does NOT bump epoch (epoch is brief-defined as
+            //    a reclaim signal, separate from holder_count maintenance).
+            let mut stmt = tx.prepare(
+                "SELECT DISTINCT resource FROM lock_holders \
+                  WHERE owner_incarnation != ?1",
+            )?;
+            let affected: Vec<String> = stmt
+                .query_map(params![&*inc_for_call], |row| row.get::<_, String>(0))?
+                .collect::<Result<_, _>>()?;
+            drop(stmt);
+
+            // 3. GC stale holders.
+            let gc_count = tx.execute(
+                "DELETE FROM lock_holders WHERE owner_incarnation != ?1",
+                params![&*inc_for_call],
+            )?;
+
+            // 4. Bump epoch on every affected resource.
+            for resource in &affected {
+                tx.execute(
+                    "UPDATE locks SET epoch = epoch + 1, \
+                                      updated_at = strftime('%s','now') * 1000 \
+                      WHERE resource = ?1",
+                    params![resource],
+                )?;
+            }
+
+            tx.commit()?;
+            Ok::<_, tokio_rusqlite::Error>((prior, gc_count, affected.len()))
+        })
+        .await?;
+
+    // Visibility for the P0 multi-process anti-pattern. If we just GC'd
+    // any holders, an operator running two `cairn` processes against one
+    // vault will see a clear warning instead of silent data races.
+    let (prior, gc_count, affected_count) = observed;
+    if gc_count > 0 {
+        warn!(
+            new_incarnation = %inc_for_log,
+            prior_incarnation = %prior.as_ref().map_or("<none>", |t| t.0.as_str()),
+            prior_pid = prior.as_ref().map_or(0, |t| t.2),
+            gc_count = gc_count,
+            affected_resources = affected_count,
+            "lock substrate reclaimed lock_holders rows from a different incarnation; \
+             P0 single-writer assumption violated if the prior process is still alive \
+             (design spec: BOOTTIME-ns + boot_id deferred to P1+)"
+        );
+    }
 
     Ok(incarnation)
 }
