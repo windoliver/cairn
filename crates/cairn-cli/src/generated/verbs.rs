@@ -17,7 +17,7 @@ pub fn ingest_subcommand() -> clap::Command {
         .arg(clap::Arg::new("include").long("include").value_name("STRING").action(clap::ArgAction::Append))
         .arg(clap::Arg::new("exclude").long("exclude").value_name("STRING").action(clap::ArgAction::Append))
         .arg(clap::Arg::new("mode").long("mode").value_name("ENUM").value_parser(["keyword", "semantic", "full"]))
-        .arg(clap::Arg::new("dry_run").long("dry-run").action(clap::ArgAction::SetTrue))
+        .arg(clap::Arg::new("batch_size").long("batch-size").value_name("U32").value_parser(clap::value_parser!(u32)))
         .arg(clap::Arg::new("session_id").long("session").value_name("STRING"))
         .arg(clap::Arg::new("tags").long("tags").value_name("STRING").action(clap::ArgAction::Append))
         .arg(clap::Arg::new("source").help("File, URL, or '-' for stdin. Mutually exclusive with --body/--file/--url/--folder.").required(false))

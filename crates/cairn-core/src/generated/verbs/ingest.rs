@@ -5,27 +5,54 @@
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum IngestMode {
+    Keyword,
+    Semantic,
+    Full,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct IngestArgs {
+    /// Maximum cache-miss files per FlushPlan batch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_size: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
     /// If true, produce a FlushPlan and emit it without writing to MemoryStore (brief §5.5). Mutually exclusive with human_review.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dry_run: Option<bool>,
+    /// Exclude glob patterns for folder ingest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclude: Option<Vec<String>>,
     /// Path on the local filesystem.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
+    /// Folder to scan for offline folder ingest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
     /// Extra YAML frontmatter fields to store alongside the body.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frontmatter: Option<serde_json::Value>,
     /// If true, persist a FlushPlan under .cairn/flush/pending/ for explicit `cairn flush apply` (brief §5.5). Mutually exclusive with dry_run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub human_review: Option<bool>,
+    /// Include glob patterns for folder ingest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include: Option<Vec<String>>,
     /// Memory taxonomy kind (19 possible values — see §3 taxonomy). Validated beyond JSON Schema by the classifier.
     pub kind: String,
+    /// Folder ingest extraction mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<IngestMode>,
     /// When human_review=true, skip emitting the markdown diff sidecar.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_diff: Option<bool>,
+    /// Whether folder ingest recurses into child directories. CLI default: true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recursive: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -37,7 +64,7 @@ pub struct IngestArgs {
 impl IngestArgs {
     /// Enforce exactly-one-of presence across each XOR group declared in the IDL `oneOf`.
     pub fn validate(&self) -> Result<(), &'static str> {
-        if (self.body.is_some() as u8 + self.file.is_some() as u8 + self.url.is_some() as u8) != 1 { return Err("exactly one of [body, file, url] is required"); }
+        if (self.body.is_some() as u8 + self.file.is_some() as u8 + self.folder.is_some() as u8 + self.url.is_some() as u8) != 1 { return Err("exactly one of [body, file, folder, url] is required"); }
         Ok(())
     }
 }
@@ -45,25 +72,43 @@ impl IngestArgs {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawIngestArgs {
+    /// Maximum cache-miss files per FlushPlan batch.
+    #[serde(default)]
+    batch_size: Option<i64>,
     #[serde(default)]
     body: Option<String>,
     /// If true, produce a FlushPlan and emit it without writing to MemoryStore (brief §5.5). Mutually exclusive with human_review.
     #[serde(default)]
     dry_run: Option<bool>,
+    /// Exclude glob patterns for folder ingest.
+    #[serde(default)]
+    exclude: Option<Vec<String>>,
     /// Path on the local filesystem.
     #[serde(default)]
     file: Option<String>,
+    /// Folder to scan for offline folder ingest.
+    #[serde(default)]
+    folder: Option<String>,
     /// Extra YAML frontmatter fields to store alongside the body.
     #[serde(default)]
     frontmatter: Option<serde_json::Value>,
     /// If true, persist a FlushPlan under .cairn/flush/pending/ for explicit `cairn flush apply` (brief §5.5). Mutually exclusive with dry_run.
     #[serde(default)]
     human_review: Option<bool>,
+    /// Include glob patterns for folder ingest.
+    #[serde(default)]
+    include: Option<Vec<String>>,
     /// Memory taxonomy kind (19 possible values — see §3 taxonomy). Validated beyond JSON Schema by the classifier.
     kind: String,
+    /// Folder ingest extraction mode.
+    #[serde(default)]
+    mode: Option<IngestMode>,
     /// When human_review=true, skip emitting the markdown diff sidecar.
     #[serde(default)]
     no_diff: Option<bool>,
+    /// Whether folder ingest recurses into child directories. CLI default: true.
+    #[serde(default)]
+    recursive: Option<bool>,
     #[serde(default)]
     session_id: Option<String>,
     #[serde(default)]
@@ -75,15 +120,21 @@ struct RawIngestArgs {
 impl ::core::convert::TryFrom<RawIngestArgs> for IngestArgs {
     type Error = &'static str;
     fn try_from(raw: RawIngestArgs) -> Result<Self, Self::Error> {
-        if (raw.body.is_some() as u8 + raw.file.is_some() as u8 + raw.url.is_some() as u8) != 1 { return Err("exactly one of [body, file, url] is required"); }
+        if (raw.body.is_some() as u8 + raw.file.is_some() as u8 + raw.folder.is_some() as u8 + raw.url.is_some() as u8) != 1 { return Err("exactly one of [body, file, folder, url] is required"); }
         Ok(Self {
+            batch_size: raw.batch_size,
             body: raw.body,
             dry_run: raw.dry_run,
+            exclude: raw.exclude,
             file: raw.file,
+            folder: raw.folder,
             frontmatter: raw.frontmatter,
             human_review: raw.human_review,
+            include: raw.include,
             kind: raw.kind,
+            mode: raw.mode,
             no_diff: raw.no_diff,
+            recursive: raw.recursive,
             session_id: raw.session_id,
             tags: raw.tags,
             url: raw.url,

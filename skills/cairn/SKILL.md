@@ -52,6 +52,30 @@ cairn ingest --kind KIND --url URL
 ```
 
 ```bash
+cairn ingest --kind KIND --folder FOLDER
+```
+
+```bash
+cairn ingest --kind KIND --body BODY --recursive
+```
+
+```bash
+cairn ingest --kind KIND --body BODY --include INCLUDE
+```
+
+```bash
+cairn ingest --kind KIND --body BODY --exclude EXCLUDE
+```
+
+```bash
+cairn ingest --kind KIND --body BODY --mode keyword
+```
+
+```bash
+cairn ingest --kind KIND --body BODY --batch-size 1
+```
+
+```bash
 cairn ingest --kind KIND --body BODY --session SESSION_ID
 ```
 

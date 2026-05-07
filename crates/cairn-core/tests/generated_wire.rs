@@ -96,6 +96,54 @@ fn ingest_args_rejects_folder_combined_with_body_at_deserialize() {
 }
 
 #[test]
+fn ingest_args_accepts_folder_batch_and_mode() {
+    let args: cairn_core::generated::verbs::ingest::IngestArgs =
+        serde_json::from_value(serde_json::json!({
+            "kind": "reference",
+            "folder": "docs",
+            "recursive": true,
+            "include": ["*.md", "*.java"],
+            "exclude": ["target"],
+            "mode": "keyword",
+            "dry_run": true,
+            "batch_size": 2
+        }))
+        .expect("folder args deserialize");
+
+    assert_eq!(args.kind, "reference");
+    assert_eq!(args.folder.as_deref(), Some("docs"));
+    assert_eq!(args.recursive, Some(true));
+    assert_eq!(
+        args.include.as_deref(),
+        Some(&["*.md".to_owned(), "*.java".to_owned()][..])
+    );
+    assert_eq!(args.exclude.as_deref(), Some(&["target".to_owned()][..]));
+    assert!(matches!(
+        args.mode,
+        Some(cairn_core::generated::verbs::ingest::IngestMode::Keyword)
+    ));
+    assert_eq!(args.dry_run, Some(true));
+    assert_eq!(args.batch_size, Some(2));
+}
+
+#[test]
+fn ingest_args_rejects_folder_combined_with_body() {
+    let err = serde_json::from_value::<cairn_core::generated::verbs::ingest::IngestArgs>(
+        serde_json::json!({
+            "kind": "reference",
+            "folder": "docs",
+            "body": "hello"
+        }),
+    )
+    .expect_err("folder/body XOR must reject");
+
+    assert!(
+        err.to_string().contains("oneOf") || err.to_string().contains("exactly one"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn signed_intent_rejects_missing_sequence_and_challenge_at_deserialize() {
     // Stripped-down intent missing both `sequence` and `server_challenge`.
     let mut m = signed_intent_minimum();
