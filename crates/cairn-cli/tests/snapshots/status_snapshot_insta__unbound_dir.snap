@@ -6,6 +6,11 @@ expression: v
   "capabilities": [],
   "contract": "cairn.mcp.v1",
   "extensions": [],
+  "mcp_graph_tools": {
+    "probe_basis": "config_only",
+    "reason": "vault_not_bound",
+    "state": "no_vault"
+  },
   "pipeline_dispatch": [
     {
       "decision": "bypass",

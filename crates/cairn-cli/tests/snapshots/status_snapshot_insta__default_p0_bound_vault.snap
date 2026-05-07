@@ -9,6 +9,11 @@ expression: v
   ],
   "contract": "cairn.mcp.v1",
   "extensions": [],
+  "mcp_graph_tools": {
+    "probe_basis": "full",
+    "reason": "single_tenant_off",
+    "state": "unavailable"
+  },
   "pipeline_dispatch": [
     {
       "decision": "bypass",
