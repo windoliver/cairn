@@ -11,7 +11,9 @@ use super::report::{FolderIngestSummary, render_human};
 use super::scanner::scan_folder;
 use crate::verbs::envelope::emit_json;
 
-const DEFAULT_INCLUDE: &[&str] = &["*.md", "*.txt", "*.rs", "*.py", "*.ts", "*.js", "*.go"];
+const DEFAULT_INCLUDE: &[&str] = &[
+    "*.md", "*.txt", "*.rst", "*.rs", "*.py", "*.ts", "*.js", "*.go", "*.java",
+];
 const DEFAULT_EXCLUDE: &[&str] = &[".git", "node_modules", "target"];
 
 #[derive(Debug, Clone)]
@@ -225,7 +227,7 @@ fn run_with_options(
 fn is_supported_keyword_file(path: &Path) -> bool {
     matches!(
         path.extension().and_then(|extension| extension.to_str()),
-        Some("md" | "txt" | "rst" | "rs" | "py" | "ts" | "js" | "go")
+        Some("md" | "txt" | "rst" | "rs" | "py" | "ts" | "js" | "go" | "java")
     )
 }
 

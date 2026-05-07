@@ -40,6 +40,7 @@ use super::envelope::{emit_json, human_error, unimplemented_response};
 mod apply;
 mod cache;
 mod extract;
+#[allow(dead_code, reason = "Task 6 wires --folder runtime routing")]
 mod folder;
 mod patterns;
 mod planner;

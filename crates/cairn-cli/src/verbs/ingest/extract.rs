@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::LazyLock;
 
 use regex::Regex;
 
@@ -7,6 +8,13 @@ pub struct ExtractionCounts {
     pub entities_new: u64,
     pub edges_new: u64,
 }
+
+static JAVA_DECL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?m)^\s*(?:public|private|protected|static|final|abstract|\s)*\b(class|interface|enum)\s+([A-Za-z_][A-Za-z0-9_]*)|^\s*(?:public|private|protected|static|final|synchronized|abstract|\s)+[A-Za-z_][A-Za-z0-9_<>,\[\]\s]*\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(",
+    )
+    .expect("valid Java declaration regex")
+});
 
 pub fn extract_keyword_counts(relative_path: &Path, body: &str) -> ExtractionCounts {
     match relative_path.extension().and_then(|ext| ext.to_str()) {
@@ -42,6 +50,7 @@ pub fn extract_keyword_counts(relative_path: &Path, body: &str) -> ExtractionCou
                 r"(?m)^[ \t]*package[ \t]+[A-Za-z_][A-Za-z0-9_]*",
             ],
         ),
+        Some("java") => java_counts(body),
         Some("md" | "txt" | "rst") => text_counts(body),
         _ => ExtractionCounts::default(),
     }
@@ -72,6 +81,13 @@ fn text_counts(body: &str) -> ExtractionCounts {
     ExtractionCounts {
         entities_new: heading_count + wiki_link_count + title_case_phrase_count + marker_count,
         edges_new: wiki_link_count,
+    }
+}
+
+fn java_counts(body: &str) -> ExtractionCounts {
+    ExtractionCounts {
+        entities_new: JAVA_DECL_RE.find_iter(body).count() as u64,
+        edges_new: 0,
     }
 }
 
@@ -184,6 +200,26 @@ func NewScanner() {}
 
         assert_eq!(counts.entities_new, 3);
         assert_eq!(counts.edges_new, 0);
+    }
+
+    #[test]
+    fn java_extracts_classes_interfaces_enums_and_methods() {
+        let body = r#"
+package demo;
+public class MainService {
+    public void runJob() {}
+    private static String label() { return "x"; }
+}
+interface Worker {}
+enum Mode { FAST }
+"#;
+
+        let counts = extract_keyword_counts(Path::new("src/MainService.java"), body);
+
+        assert!(
+            counts.entities_new >= 5,
+            "expected package/class/interface/enum/method entities, got {counts:?}"
+        );
     }
 
     #[test]
