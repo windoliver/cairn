@@ -42,9 +42,9 @@ pub enum LockMode {
 
 impl LockMode {
     /// Wire format used in `lock_holders.mode_requested` and the existing
-    /// 0004_locks compatibility triggers.
+    /// `0004_locks` compatibility triggers.
     #[must_use]
-    pub fn as_db_str(self) -> &'static str {
+    pub const fn as_db_str(self) -> &'static str {
         match self {
             Self::Shared => "SHARED",
             Self::Exclusive => "EXCLUSIVE",

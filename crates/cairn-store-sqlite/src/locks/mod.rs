@@ -8,6 +8,4 @@ pub use kinds::{LockMode, LockScope, ResourceKey};
 // migrate the new typed API in. Tasks 3–6 add first-class implementations;
 // Task 9 migrates the only in-tree caller and Step 8 there removes this
 // module entirely.
-pub use crate::locks_legacy::{
-    LockError, LockHandle, acquire_exclusive, release_by_holder,
-};
+pub use crate::locks_legacy::{LockError, LockHandle, acquire_exclusive, release_by_holder};
