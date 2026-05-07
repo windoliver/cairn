@@ -170,7 +170,7 @@ impl<T: Transport> Sdk<T> {
             contract: CONTRACT.to_owned(),
             server_info: StatusResponseServerInfo {
                 version: env!("CARGO_PKG_VERSION").to_owned(),
-                build: build_profile(),
+                build: cairn_core::time::build_profile().to_owned(),
                 started_at: now_rfc3339_seconds(),
                 incarnation: crate::stub::new_operation_id(),
             },
@@ -1167,10 +1167,3 @@ fn unimplemented(verb: &'static str) -> SdkError {
     store_not_wired(verb)
 }
 
-fn build_profile() -> String {
-    if cfg!(debug_assertions) {
-        "debug".to_owned()
-    } else {
-        "release".to_owned()
-    }
-}

@@ -282,9 +282,9 @@ impl CairnMcpHandler {
             contract: "cairn.mcp.v1".to_owned(),
             server_info: StatusResponseServerInfo {
                 version: env!("CARGO_PKG_VERSION").to_owned(),
-                build: build_profile(),
-                started_at: now_rfc3339_seconds(),
-                incarnation: new_operation_id(),
+                build: cairn_core::time::build_profile().to_owned(),
+                started_at: cairn_core::time::now_rfc3339_seconds(),
+                incarnation: cairn_core::time::new_operation_id(),
             },
             capabilities: cairn_core::status::advertise(&gates),
             extensions: vec![],
@@ -538,79 +538,6 @@ fn search_outcome_to_result(outcome: cairn_core::verbs::search::SearchOutcome) -
             "cairn search: serialize error: {e}"
         ))]),
     }
-}
-
-// ── date / identity helpers ─────────────────────────────────────────────────
-// Mirrors `crates/cairn-sdk/src/stub.rs` and `crates/cairn-cli/src/verbs/envelope.rs`
-// so all three surfaces produce the same RFC-3339 + ULID format.
-
-fn new_operation_id() -> cairn_core::generated::common::Ulid {
-    cairn_core::generated::common::Ulid(ulid::Ulid::new().to_string())
-}
-
-fn build_profile() -> String {
-    if cfg!(debug_assertions) {
-        "debug".to_owned()
-    } else {
-        "release".to_owned()
-    }
-}
-
-fn now_rfc3339_seconds() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let (y, mo, d, h, mi, s) = secs_to_ymdhms(secs);
-    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")
-}
-
-fn secs_to_ymdhms(mut s: u64) -> (u64, u64, u64, u64, u64, u64) {
-    let sec = s % 60;
-    s /= 60;
-    let min = s % 60;
-    s /= 60;
-    let hour = s % 24;
-    s /= 24;
-    let mut days = s;
-    let mut year = 1970u64;
-    loop {
-        let days_in_year = if is_leap(year) { 366 } else { 365 };
-        if days < days_in_year {
-            break;
-        }
-        days -= days_in_year;
-        year += 1;
-    }
-    let leap = is_leap(year);
-    let months = [
-        31u64,
-        if leap { 29 } else { 28 },
-        31,
-        30,
-        31,
-        30,
-        31,
-        31,
-        30,
-        31,
-        30,
-        31,
-    ];
-    let mut month = 1u64;
-    for &m in &months {
-        if days < m {
-            break;
-        }
-        days -= m;
-        month += 1;
-    }
-    (year, month, days + 1, hour, min, sec)
-}
-
-fn is_leap(y: u64) -> bool {
-    (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
 }
 
 /// Stub dispatcher returned while real verb wiring is pending.

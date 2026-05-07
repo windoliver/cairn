@@ -10,7 +10,7 @@ use cairn_core::generated::envelope::{
 /// Generate a fresh Crockford base32 ULID suitable for `operation_id`.
 #[must_use]
 pub fn new_operation_id() -> Ulid {
-    Ulid(ulid::Ulid::new().to_string())
+    cairn_core::time::new_operation_id()
 }
 
 /// Generate a fresh 16-byte nonce as standard base64 (24 chars with `==` padding).
