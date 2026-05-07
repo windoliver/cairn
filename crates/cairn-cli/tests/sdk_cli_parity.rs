@@ -11,6 +11,118 @@
 use std::path::Path;
 use std::process::Command;
 
+// ── Minimal stub store for wired-store parity tests ──────────────────────────
+
+/// A minimal `MemoryStore` stub used only for capability-advertisement
+/// parity tests. Implements `capabilities()` and `name()`; every other
+/// trait method is unreachable in this test path because `status_response()`
+/// and `Sdk::status()` only consult `capabilities()`.
+struct ParityStubStore {
+    caps: cairn_core::contract::memory_store::MemoryStoreCapabilities,
+}
+
+#[async_trait::async_trait]
+impl cairn_core::contract::memory_store::MemoryStore for ParityStubStore {
+    fn name(&self) -> &'static str {
+        "parity-stub"
+    }
+
+    fn capabilities(&self) -> &cairn_core::contract::memory_store::MemoryStoreCapabilities {
+        &self.caps
+    }
+
+    fn supported_contract_versions(&self) -> cairn_core::contract::version::VersionRange {
+        let v = cairn_core::contract::memory_store::CONTRACT_VERSION;
+        cairn_core::contract::version::VersionRange::new(
+            v,
+            cairn_core::contract::version::ContractVersion::new(v.major, v.minor + 1, 0),
+        )
+    }
+
+    async fn upsert(
+        &self,
+        _r: &cairn_core::domain::record::MemoryRecord,
+    ) -> Result<
+        cairn_core::contract::memory_store::UpsertOutcome,
+        cairn_core::contract::memory_store::StoreError,
+    > {
+        panic!("unreachable in parity test: upsert")
+    }
+
+    async fn get(
+        &self,
+        _id: &cairn_core::domain::RecordId,
+    ) -> Result<
+        Option<cairn_core::domain::record::MemoryRecord>,
+        cairn_core::contract::memory_store::StoreError,
+    > {
+        panic!("unreachable in parity test: get")
+    }
+
+    async fn list(
+        &self,
+        _args: &cairn_core::contract::memory_store::ListArgs,
+    ) -> Result<
+        cairn_core::contract::memory_store::ListPage,
+        cairn_core::contract::memory_store::StoreError,
+    > {
+        panic!("unreachable in parity test: list")
+    }
+
+    async fn tombstone(
+        &self,
+        _id: &cairn_core::domain::RecordId,
+        _reason: cairn_core::contract::memory_store::TombstoneReason,
+    ) -> Result<(), cairn_core::contract::memory_store::StoreError> {
+        panic!("unreachable in parity test: tombstone")
+    }
+
+    async fn versions(
+        &self,
+        _target: &cairn_core::domain::TargetId,
+    ) -> Result<
+        Vec<cairn_core::contract::memory_store::RecordVersion>,
+        cairn_core::contract::memory_store::StoreError,
+    > {
+        panic!("unreachable in parity test: versions")
+    }
+
+    async fn put_edge(
+        &self,
+        _edge: &cairn_core::contract::memory_store::Edge,
+    ) -> Result<(), cairn_core::contract::memory_store::StoreError> {
+        panic!("unreachable in parity test: put_edge")
+    }
+
+    async fn remove_edge(
+        &self,
+        _key: &cairn_core::contract::memory_store::EdgeKey,
+    ) -> Result<bool, cairn_core::contract::memory_store::StoreError> {
+        panic!("unreachable in parity test: remove_edge")
+    }
+
+    async fn neighbours(
+        &self,
+        _id: &cairn_core::domain::RecordId,
+        _dir: cairn_core::contract::memory_store::EdgeDir,
+    ) -> Result<
+        Vec<cairn_core::contract::memory_store::Edge>,
+        cairn_core::contract::memory_store::StoreError,
+    > {
+        panic!("unreachable in parity test: neighbours")
+    }
+
+    async fn search_keyword(
+        &self,
+        _args: &cairn_core::contract::memory_store::KeywordSearchArgs<'_>,
+    ) -> Result<
+        cairn_core::contract::memory_store::KeywordSearchPage,
+        cairn_core::contract::memory_store::StoreError,
+    > {
+        panic!("unreachable in parity test: search_keyword")
+    }
+}
+
 use cairn_sdk::Sdk;
 use serde_json::Value;
 
@@ -164,4 +276,101 @@ fn handshake_volatile_fields_have_expected_shape() {
             .unwrap_or_else(|| panic!("{label}: expires_at must be u64"));
         assert!(expires > 0, "{label}: expires_at must be positive epoch-ms");
     }
+}
+
+#[test]
+fn status_parity_cli_vs_sdk_vs_mcp() {
+    use cairn_mcp::CairnMcpHandler;
+
+    assert_tempdir_unbound();
+
+    let mut cli = run_json(&["status", "--json"]);
+    let mut sdk = serde_json::to_value(Sdk::new().status()).expect("sdk status serializes");
+    let mut mcp = serde_json::to_value(CairnMcpHandler::new().status_response())
+        .expect("mcp status serializes");
+
+    let volatile: &[&[&str]] = &[
+        &["server_info", "incarnation"],
+        &["server_info", "started_at"],
+    ];
+    mask(&mut cli, volatile);
+    mask(&mut sdk, volatile);
+    mask(&mut mcp, volatile);
+
+    assert_eq!(cli, sdk, "CLI and SDK status diverge");
+    assert_eq!(sdk, mcp, "SDK and MCP status diverge");
+    // Transitive: cli == mcp follows.
+}
+
+/// Three-way parity for the non-trivial case: both SDK and MCP wired to a
+/// `fts=true, vector=false` store.
+///
+/// This test catches the class of bug where MCP's capability derivation
+/// diverges from SDK's (e.g. masking `semantic` against the wrong config
+/// field instead of `store.vector`). CLI is excluded from this case because
+/// `cairn status` does not open the store — the existing empty-case test
+/// (`status_parity_cli_vs_sdk_vs_mcp`) covers CLI<->SDK byte equality.
+///
+/// Expected capability set:
+/// - `keyword`: both surfaces emit it (store.fts=true).
+/// - `policy_trace`: both emit it (config-only gate).
+/// - `semantic` / `hybrid`: both drop (store.vector=false).
+#[test]
+fn status_parity_cli_vs_sdk_vs_mcp_with_fts_only_store() {
+    use cairn_core::contract::memory_store::MemoryStoreCapabilities;
+    use cairn_mcp::CairnMcpHandler;
+    use std::sync::Arc;
+
+    assert_tempdir_unbound();
+
+    let store: Arc<dyn cairn_core::contract::memory_store::MemoryStore> =
+        Arc::new(ParityStubStore {
+            caps: MemoryStoreCapabilities {
+                fts: true,
+                vector: false,
+                graph_edges: false,
+                transactions: false,
+                per_record_consent_model: true,
+            },
+        });
+    let config = cairn_core::config::CairnConfig::default();
+
+    let mut sdk =
+        serde_json::to_value(cairn_sdk::Sdk::with_store(store.clone(), config.clone()).status())
+            .expect("sdk serialize");
+    let mut mcp = serde_json::to_value(
+        CairnMcpHandler::with_store(store.clone(), config.clone()).status_response(),
+    )
+    .expect("mcp serialize");
+
+    let volatile: &[&[&str]] = &[
+        &["server_info", "incarnation"],
+        &["server_info", "started_at"],
+    ];
+    mask(&mut sdk, volatile);
+    mask(&mut mcp, volatile);
+
+    // SDK and MCP both wired to the same fts-only store: they MUST agree.
+    assert_eq!(sdk, mcp, "SDK and MCP status diverge for fts-only store");
+
+    // The capabilities array must contain keyword + policy_trace; semantic/
+    // hybrid must be absent (vector=false drops them on both surfaces).
+    let caps = sdk["capabilities"].as_array().expect("array");
+    let cap_strings: Vec<&str> = caps.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        cap_strings.contains(&"cairn.mcp.v1.search.keyword"),
+        "keyword must advertise; got {cap_strings:?}"
+    );
+    assert!(
+        cap_strings.contains(&"cairn.mcp.v1.policy_trace"),
+        "policy_trace must advertise; got {cap_strings:?}"
+    );
+    assert!(
+        !cap_strings.contains(&"cairn.mcp.v1.search.semantic"),
+        "semantic must drop with vector=false; got {cap_strings:?}"
+    );
+    assert!(
+        !cap_strings.contains(&"cairn.mcp.v1.search.hybrid"),
+        "hybrid must drop with vector=false; got {cap_strings:?}"
+    );
 }

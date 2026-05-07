@@ -40,6 +40,12 @@ pub enum SdkError {
         capability: String,
         /// Why the capability is unavailable in this incarnation.
         reason: String,
+        /// Operator-facing remediation hint sourced from
+        /// `cairn_core::status::remediation_for`. `None` when the capability
+        /// has no registered hint — callers should omit `data.remediation`
+        /// from the wire envelope rather than emit an empty string
+        /// (the IDL declares `data.remediation` as optional with `minLength: 1`).
+        remediation: Option<String>,
         /// Operation correlation ID for log lookup.
         operation_id: Ulid,
     },

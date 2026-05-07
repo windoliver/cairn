@@ -170,7 +170,7 @@ impl<T: Transport> Sdk<T> {
             contract: CONTRACT.to_owned(),
             server_info: StatusResponseServerInfo {
                 version: env!("CARGO_PKG_VERSION").to_owned(),
-                build: build_profile(),
+                build: cairn_core::time::build_profile().to_owned(),
                 started_at: now_rfc3339_seconds(),
                 incarnation: crate::stub::new_operation_id(),
             },
@@ -206,39 +206,57 @@ impl<T: Transport> Sdk<T> {
         }
     }
 
+    /// Collect the SDK's runtime state into `CapabilityGates` for `advertise()`.
+    ///
+    /// Centralises the mapping from SDK fields to the gate inputs so that both
+    /// `advertised_capabilities` and any future caller share an identical view.
+    fn gates(&self) -> cairn_core::status::CapabilityGates {
+        let store_caps = self.store.as_ref().map(|s| {
+            let c = s.capabilities();
+            cairn_core::status::StoreCaps {
+                fts: c.fts,
+                vector: c.vector,
+            }
+        });
+        let model_present = store_caps.as_ref().is_some_and(|c| c.vector);
+        // SDK cannot inspect the environment for cloud provider readiness
+        // (it has no access to OPENAI_API_KEY outside CLI context). We use a
+        // two-factor proxy:
+        //   1. The store's vector-index advertisement (`model_present`) —
+        //      a store only advertises `vector: true` when it was built with
+        //      an embedder that could produce vectors at index-time.
+        //   2. `provider_model_aligned` — ensures `default_provider` and
+        //      `embedding_model` name a consistent pair. Without this check,
+        //      a config with `default_provider = openai` but
+        //      `embedding_model = bge-small-en-v1.5` would advertise
+        //      `semantic` and `hybrid`, but the ANN dispatcher would silently
+        //      return zero results because indexed `vec_model` labels never
+        //      match the OpenAI dispatcher's filter.
+        //
+        // CLI callers additionally check `OPENAI_API_KEY` presence and the
+        // `openai` Cargo feature via `embedding_provider_ready()` in
+        // `cairn-cli/src/verbs/mod.rs`. That stricter check is out of scope
+        // for the SDK (no env access here).
+        let provider_model_ok = cairn_core::config::provider_model_aligned(&self.config);
+        let embedding_provider_ready = model_present && provider_model_ok;
+        cairn_core::status::CapabilityGates {
+            config: self.config.capabilities(embedding_provider_ready),
+            store: store_caps,
+            vault_bound: self.store.is_some(),
+            model_present,
+            embedding_provider_ready,
+            llm_configured: false,
+            contract_phase: cairn_core::status::Phase::V0_1,
+        }
+    }
+
     /// Project the SDK's executable state into a wire-format capability list.
     ///
-    /// The single source of truth for capability advertisement; both
-    /// [`Self::status`] and [`Self::require_capability`] read from here
-    /// so they cannot drift.
+    /// Delegates to [`cairn_core::status::advertise`] — the single source of
+    /// truth for capability advertisement. Both [`Self::status`] and
+    /// [`Self::require_capability`] read from here so they cannot drift.
     fn advertised_capabilities(&self) -> Vec<Capabilities> {
-        let Some(store) = self.store.as_ref() else {
-            // No store wired → every verb returns Unimplemented. Advertising
-            // any capability here would invite clients to negotiate against
-            // a dead surface. Empty list matches the original P0 contract.
-            return vec![];
-        };
-        let store_caps = store.capabilities();
-        // Search modes require the store's FTS / vector indexes. Treat
-        // `model_present` as `store_caps.vector` — a store that exposes a
-        // vector index has the embedder + model wired (sqlite-vec only
-        // populates `record_vectors` after the embedding pipeline drains).
-        let model_present = store_caps.vector;
-        let cap_set = self.config.capabilities(model_present);
-        let mut out = Vec::new();
-        if cap_set.keyword_search && store_caps.fts {
-            out.push(Capabilities::CairnMcpV1SearchKeyword);
-        }
-        if cap_set.semantic_search && store_caps.vector {
-            out.push(Capabilities::CairnMcpV1SearchSemantic);
-        }
-        if cap_set.hybrid_search && store_caps.fts && store_caps.vector {
-            out.push(Capabilities::CairnMcpV1SearchHybrid);
-        }
-        if cap_set.policy_trace {
-            out.push(Capabilities::CairnMcpV1PolicyTrace);
-        }
-        out
+        cairn_core::status::advertise(&self.gates())
     }
 
     /// `handshake` — challenge mint (brief §8.0.a point d).
@@ -305,7 +323,15 @@ impl<T: Transport> Sdk<T> {
         // `advertised_capabilities` uses. Dispatcher gate ⊆ advertised
         // gate ⊆ status capabilities — three views, one truth.
         let store_caps = store.capabilities();
-        let mut caps = self.config.capabilities(store_caps.vector);
+        // Mirror the same two-factor proxy as `gates()`: store vector-index
+        // advertisement AND provider/model alignment. Without the alignment
+        // check, a config with `default_provider = openai` but
+        // `embedding_model = bge-small-en-v1.5` would let the request reach
+        // the ANN dispatcher, which would return zero results because indexed
+        // `vec_model` labels never match the OpenAI dispatcher filter.
+        let provider_model_ok = cairn_core::config::provider_model_aligned(&self.config);
+        let embedding_provider_ready = store_caps.vector && provider_model_ok;
+        let mut caps = self.config.capabilities(embedding_provider_ready);
         caps.keyword_search = caps.keyword_search && store_caps.fts;
         caps.semantic_search = caps.semantic_search && store_caps.vector;
         caps.hybrid_search = caps.hybrid_search && store_caps.fts && store_caps.vector;
@@ -328,6 +354,7 @@ impl<T: Transport> Sdk<T> {
                 Err(SdkError::CapabilityUnavailable {
                     capability: capability.to_owned(),
                     reason: "rejected by dispatcher".to_owned(),
+                    remediation: cairn_core::status::remediation_for(capability).map(str::to_owned),
                     operation_id: crate::stub::new_operation_id(),
                 })
             }
@@ -452,6 +479,21 @@ impl<T: Transport> Sdk<T> {
     /// consulted only config booleans and let modes through that
     /// `status` did not advertise (e.g. on a store with `vector=false`).
     fn require_capability(&self, required: Option<&'static str>) -> Result<(), SdkError> {
+        self.require_capability_with_hint(required, None)
+    }
+
+    /// Like [`Self::require_capability`] but accepts a caller-supplied
+    /// `override_hint` that replaces the generic entry from
+    /// [`cairn_core::status::remediation_for`] when `Some`.
+    ///
+    /// Use this when the call site knows the specific failure cause (e.g.
+    /// `OpenAI` key absent vs feature off vs unsupported model) so the
+    /// operator receives actionable, cause-specific advice.
+    fn require_capability_with_hint(
+        &self,
+        required: Option<&'static str>,
+        override_hint: Option<&str>,
+    ) -> Result<(), SdkError> {
         let Some(cap) = required else {
             return Ok(());
         };
@@ -466,9 +508,13 @@ impl<T: Transport> Sdk<T> {
         if is_advertised {
             Ok(())
         } else {
+            let remediation = override_hint
+                .map(str::to_owned)
+                .or_else(|| cairn_core::status::remediation_for(cap).map(str::to_owned));
             Err(SdkError::CapabilityUnavailable {
                 capability: cap.to_owned(),
                 reason: "not advertised by `status` in this incarnation".to_owned(),
+                remediation,
                 operation_id: crate::stub::new_operation_id(),
             })
         }
@@ -1166,12 +1212,4 @@ fn validate_forget(args: &ForgetArgs) -> Result<(), SdkError> {
 /// can fail fast instead of retrying.
 fn unimplemented(verb: &'static str) -> SdkError {
     store_not_wired(verb)
-}
-
-fn build_profile() -> String {
-    if cfg!(debug_assertions) {
-        "debug".to_owned()
-    } else {
-        "release".to_owned()
-    }
 }

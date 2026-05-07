@@ -335,3 +335,88 @@ fn handler_new_debug_shows_not_wired() {
         "Debug must show store_wired: false; got: {dbg}"
     );
 }
+
+// ── Provider/model alignment tests (round-4 review Finding A) ────────────────
+
+fn misaligned_config() -> CairnConfig {
+    use cairn_core::config::{EmbeddingModelKind, EmbeddingProvider};
+    let mut cfg = CairnConfig::default();
+    // OpenAI provider but a local candle model — classic misconfiguration.
+    cfg.search.default_provider = EmbeddingProvider::OpenAi;
+    cfg.search.embedding_model = EmbeddingModelKind::BgeSmallEnV1_5;
+    cfg
+}
+
+/// `status_response().capabilities` must NOT contain `search.semantic` when
+/// `default_provider = openai` but `embedding_model = bge-small-en-v1.5`.
+///
+/// Uses the `status_response()` helper to inspect the MCP status block
+/// without needing a full wire-protocol session.
+#[test]
+fn mcp_status_drops_semantic_for_openai_provider_with_local_model() {
+    let h = CairnMcpHandler::with_store(Arc::new(EmptyStore), misaligned_config());
+    let status = h.status_response();
+    let caps: Vec<String> = status
+        .capabilities
+        .iter()
+        .filter_map(|c| serde_json::to_value(c).ok())
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect();
+    assert!(
+        !caps.iter().any(|c| c == "cairn.mcp.v1.search.semantic"),
+        "semantic must NOT be advertised when provider/model are misaligned; caps = {caps:?}"
+    );
+    assert!(
+        !caps.iter().any(|c| c == "cairn.mcp.v1.search.hybrid"),
+        "hybrid must NOT be advertised when provider/model are misaligned; caps = {caps:?}"
+    );
+    // Keyword must still be advertised.
+    assert!(
+        caps.iter().any(|c| c == "cairn.mcp.v1.search.keyword"),
+        "keyword MUST be advertised even when provider/model are misaligned; caps = {caps:?}"
+    );
+}
+
+/// When the MCP `search` tool is called with `mode = semantic` and the config
+/// has a misaligned provider/model pair, the tool must return `isError = true`
+/// (capability unavailable) rather than silently dispatching.
+#[tokio::test]
+async fn mcp_search_semantic_rejected_for_misaligned_provider_model() {
+    let (server_half, client_half) = tokio::io::duplex(65_536);
+    let _server_task = tokio::spawn(async move {
+        CairnMcpHandler::with_store(Arc::new(EmptyStore), misaligned_config())
+            .serve(server_half)
+            .await
+            .expect("server init")
+            .waiting()
+            .await
+            .ok();
+    });
+
+    let (client_read, mut client_write) = tokio::io::split(client_half);
+    let mut client_reader = BufReader::new(client_read);
+
+    do_initialize(&mut client_write, &mut client_reader).await;
+
+    send_frame(
+        &mut client_write,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search","arguments":{"query":"hello","mode":"semantic","limit":5}}}"#,
+    )
+    .await;
+
+    let call_resp = recv_frame(&mut client_reader).await;
+
+    assert!(
+        call_resp.get("result").is_some(),
+        "misaligned semantic search must yield a result frame; got: {call_resp}"
+    );
+
+    let is_error = call_resp
+        .pointer("/result/isError")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    assert!(
+        is_error,
+        "misaligned provider/model must return isError=true for semantic; got: {call_resp}"
+    );
+}

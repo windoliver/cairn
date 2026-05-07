@@ -637,10 +637,14 @@ fn validate_error_envelope(err: &::serde_json::Value) -> Result<(), &'static str
         "CapabilityUnavailable" => {
             let data = obj.get("data").and_then(::serde_json::Value::as_object).ok_or("error.code=CapabilityUnavailable: data object required")?;
             for k in data.keys() {
-                if !matches!(k.as_str(), "capability") { return Err("error.code=CapabilityUnavailable: data has unknown key"); }
+                if !matches!(k.as_str(), "capability" | "remediation") { return Err("error.code=CapabilityUnavailable: data has unknown key"); }
             }
             let v = data.get("capability").and_then(::serde_json::Value::as_str).ok_or("error.code=CapabilityUnavailable: data.capability must be a capability string")?;
             if !is_known_capability(v) { return Err("error.code=CapabilityUnavailable: data.capability must be a known capability"); }
+            if let Some(v) = data.get("remediation") {
+                let v = v.as_str().ok_or("error.code=CapabilityUnavailable: data.remediation must be a string")?;
+                if v.is_empty() { return Err("error.code=CapabilityUnavailable: data.remediation must not be empty"); }
+            }
         },
         "UnknownVerb" => {
             let data = obj.get("data").and_then(::serde_json::Value::as_object).ok_or("error.code=UnknownVerb: data object required")?;

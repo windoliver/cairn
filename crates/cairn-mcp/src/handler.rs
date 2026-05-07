@@ -7,6 +7,8 @@
 
 use std::sync::Arc;
 
+use std::collections::BTreeMap;
+
 use rmcp::{
     RoleServer, ServerHandler,
     model::{
@@ -245,12 +247,143 @@ impl CairnMcpHandler {
             now_ms: chrono::Utc::now().timestamp_millis(),
         })
     }
+
+    /// Snapshot of the status response this handler advertises through MCP
+    /// `initialize`. Used by parity tests (issue #53) so the test does not
+    /// need to reach into rmcp's extension slot. Return shape is identical
+    /// to what `Sdk::status()` and `cairn status --json` produce for the
+    /// same inputs — volatile fields (`incarnation`, `started_at`) differ
+    /// per call.
+    #[must_use]
+    pub fn status_response(&self) -> cairn_core::generated::status::StatusResponse {
+        self.build_status_response()
+    }
+
+    fn build_status_response(&self) -> cairn_core::generated::status::StatusResponse {
+        use cairn_core::generated::status::{StatusResponse, StatusResponseServerInfo};
+        use cairn_core::pipeline::dispatch::{DefaultRegistry, pipeline_dispatch_advertisement};
+
+        let store_caps = self.store.as_ref().map(|s| {
+            let c = s.capabilities();
+            cairn_core::status::StoreCaps {
+                fts: c.fts,
+                vector: c.vector,
+            }
+        });
+        let model_present = store_caps.as_ref().is_some_and(|c| c.vector);
+        // MCP handler mirrors SDK: use a two-factor proxy for
+        // `embedding_provider_ready`:
+        //   1. Store vector-index advertisement (`model_present`).
+        //   2. Provider/model alignment (`provider_model_aligned`): if
+        //      `default_provider = openai` but `embedding_model` names a
+        //      local candle model (or vice-versa), advertising semantic/hybrid
+        //      would cause the dispatcher to return silent empty results
+        //      instead of a clean CapabilityUnavailable. Gate-closed instead.
+        // See cairn-sdk/src/transport.rs::gates() for the full rationale.
+        let provider_model_ok = cairn_core::config::provider_model_aligned(&self.config);
+        let embedding_provider_ready = model_present && provider_model_ok;
+        let gates = cairn_core::status::CapabilityGates {
+            config: self.config.capabilities(embedding_provider_ready),
+            store: store_caps,
+            vault_bound: self.store.is_some(),
+            model_present,
+            embedding_provider_ready,
+            llm_configured: false,
+            contract_phase: cairn_core::status::Phase::V0_1,
+        };
+
+        StatusResponse {
+            contract: "cairn.mcp.v1".to_owned(),
+            server_info: StatusResponseServerInfo {
+                version: env!("CARGO_PKG_VERSION").to_owned(),
+                build: cairn_core::time::build_profile().to_owned(),
+                started_at: cairn_core::time::now_rfc3339_seconds(),
+                incarnation: cairn_core::time::new_operation_id(),
+            },
+            capabilities: cairn_core::status::advertise(&gates),
+            extensions: vec![],
+            pipeline_dispatch: Some(pipeline_dispatch_advertisement(&DefaultRegistry)),
+            // Mirror the SDK's `Sdk::status` and CLI's no-vault path so
+            // CLI/SDK/MCP three-way parity holds. Until MCP exposes a
+            // `with_scope_and_sqlite_store` constructor that this helper
+            // can probe, every MCP status emits the same `NoVault`
+            // wire response (state: no_vault, reason: vault_not_bound,
+            // probe_basis: config_only) — the closest truthful answer
+            // when there is no bound vault to probe.
+            mcp_graph_tools: Some(cairn_core::generated::status::StatusResponseMcpGraphTools {
+                state: cairn_core::generated::status::StatusResponseMcpGraphToolsState::NoVault,
+                reason: Some(
+                    cairn_core::generated::status::StatusResponseMcpGraphToolsReason::VaultNotBound,
+                ),
+                tool_count: None,
+                probe_basis:
+                    cairn_core::generated::status::StatusResponseMcpGraphToolsProbeBasis::ConfigOnly,
+                error: None,
+            }),
+        }
+    }
 }
 
 impl ServerHandler for CairnMcpHandler {
     /// Return server identity and advertise tool capability.
+    ///
+    /// The Cairn status block (`capabilities[]`, `pipeline_dispatch`, etc.) is
+    /// embedded in `serverCapabilities.experimental["cairn.status"]`.
+    ///
+    /// rmcp 0.14's `ServerCapabilities` does NOT have a dedicated top-level
+    /// extension field for Cairn's status JSON — the only arbitrary-JSON slot
+    /// in `InitializeResult` is `capabilities.experimental` (a
+    /// `BTreeMap<String, serde_json::Map>`) and the `instructions` string. We
+    /// use `experimental["cairn.status"]` because:
+    ///
+    /// 1. It is typed for arbitrary JSON objects — no encoding gymnastics.
+    /// 2. The MCP spec explicitly reserves `experimental` for vendor extensions.
+    /// 3. `instructions` is a human-readable string; embedding JSON there would
+    ///    be non-standard and harder to parse for MCP clients.
+    ///
+    /// Wire shape of `experimental["cairn.status"]`:
+    /// ```json
+    /// {
+    ///   "contract": "cairn.mcp.v1",
+    ///   "server_info": { "version": "...", "build": "...", ... },
+    ///   "capabilities": ["cairn.mcp.v1.search.keyword", ...],
+    ///   "extensions": [],
+    ///   "pipeline_dispatch": { ... }
+    /// }
+    /// ```
+    ///
+    /// This makes the advertised `capabilities[]` and `pipeline_dispatch`
+    /// machine-readable to any MCP client on the actual `initialize` wire path.
+    /// The `status_response()` helper remains for unit tests that want to inspect
+    /// the block without running an MCP session.
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        // Build the status block and convert to a serde_json object so it can
+        // be inserted into `experimental`. Serialization failure here would mean
+        // the generated StatusResponse type is broken — use an empty map as a
+        // safe fallback rather than panicking in a library function.
+        let status_value = serde_json::to_value(self.build_status_response())
+            .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+        let status_map = match status_value {
+            serde_json::Value::Object(m) => m,
+            _ => serde_json::Map::new(),
+        };
+
+        // Build ServerCapabilities via the rmcp builder (required — the struct is
+        // `#[non_exhaustive]` and cannot be constructed with a struct literal from
+        // outside the crate). Start with tools + experimental, then insert the
+        // cairn.status block into the experimental map.
+        let mut caps = ServerCapabilities::builder()
+            .enable_tools()
+            .enable_experimental()
+            .build();
+        // The enable_experimental() call sets experimental to Some(BTreeMap::new()).
+        // Insert our status block. The `unwrap_or_else` is unreachable in practice
+        // (we just called enable_experimental), but avoids a panic in library code.
+        caps.experimental
+            .get_or_insert_with(BTreeMap::new)
+            .insert("cairn.status".to_owned(), status_map);
+
+        ServerInfo::new(caps)
             .with_server_info(Implementation::new("cairn", env!("CARGO_PKG_VERSION")))
     }
 
@@ -367,10 +500,7 @@ async fn handle_search(
     config: CairnConfig,
     arguments: Option<serde_json::Map<String, serde_json::Value>>,
 ) -> CallToolResult {
-    use cairn_core::generated::common::Ulid;
-    use cairn_core::generated::verbs::search::{
-        Hit, HitTrust, ScoreExplain, SearchArgs, SearchArgsMode, SearchData,
-    };
+    use cairn_core::generated::verbs::search::{SearchArgs, SearchArgsMode};
 
     // Parse args from the MCP tool argument map.
     let args_json = serde_json::Value::Object(arguments.unwrap_or_default());
@@ -394,8 +524,20 @@ async fn handle_search(
         }
     };
 
-    // Derive capability set the same way the SDK and CLI do.
-    let caps = config.capabilities(config.search.local_embeddings);
+    // Derive the capability set the dispatcher will fail-closed against,
+    // masked by the same store-capability signals `status_response` uses.
+    // Dispatcher gate ⊆ advertised gate ⊆ status capabilities — three
+    // views, one truth.
+    // Mirror the same two-factor proxy as `build_status_response`: store
+    // vector-index AND provider/model alignment. See that function's comment
+    // for the full rationale.
+    let store_caps = store.capabilities();
+    let provider_model_ok = cairn_core::config::provider_model_aligned(&config);
+    let embedding_provider_ready = store_caps.vector && provider_model_ok;
+    let mut caps = config.capabilities(embedding_provider_ready);
+    caps.keyword_search = caps.keyword_search && store_caps.fts;
+    caps.semantic_search = caps.semantic_search && store_caps.vector;
+    caps.hybrid_search = caps.hybrid_search && store_caps.fts && store_caps.vector;
 
     let limit = args.limit.map_or(10, |l| usize::try_from(l).unwrap_or(10));
     let request = cairn_core::verbs::search::SearchRequest {
@@ -411,9 +553,14 @@ async fn handle_search(
         match cairn_core::verbs::search::run(store.as_ref(), &config, &caps, request).await {
             Ok(o) => o,
             Err(cairn_core::verbs::search::SearchError::CapabilityUnavailable { capability }) => {
-                return CallToolResult::error(vec![Content::text(format!(
-                    "cairn search: capability unavailable: {capability}"
-                ))]);
+                let remediation = cairn_core::status::remediation_for(capability);
+                let msg = match remediation {
+                    Some(hint) => format!(
+                        "cairn search: capability unavailable: {capability}\n  hint: {hint}"
+                    ),
+                    None => format!("cairn search: capability unavailable: {capability}"),
+                };
+                return CallToolResult::error(vec![Content::text(msg)]);
             }
             Err(cairn_core::verbs::search::SearchError::InvalidArgs { reason }) => {
                 return CallToolResult::error(vec![Content::text(format!(
@@ -432,6 +579,15 @@ async fn handle_search(
                 ))]);
             }
         };
+
+    search_outcome_to_result(outcome)
+}
+
+/// Convert a successful [`cairn_core::verbs::search::SearchOutcome`] into the
+/// MCP [`CallToolResult`] shape.
+fn search_outcome_to_result(outcome: cairn_core::verbs::search::SearchOutcome) -> CallToolResult {
+    use cairn_core::generated::common::Ulid;
+    use cairn_core::generated::verbs::search::{Hit, HitTrust, ScoreExplain, SearchData};
 
     let hits: Vec<Hit> = outcome
         .candidates
@@ -467,16 +623,12 @@ async fn handle_search(
         score_explain,
     };
 
-    let json = match serde_json::to_string(&data) {
-        Ok(s) => s,
-        Err(e) => {
-            return CallToolResult::error(vec![Content::text(format!(
-                "cairn search: serialize error: {e}"
-            ))]);
-        }
-    };
-
-    CallToolResult::success(vec![Content::text(json)])
+    match serde_json::to_string(&data) {
+        Ok(s) => CallToolResult::success(vec![Content::text(s)]),
+        Err(e) => CallToolResult::error(vec![Content::text(format!(
+            "cairn search: serialize error: {e}"
+        ))]),
+    }
 }
 
 /// Stub dispatcher returned while real verb wiring is pending.

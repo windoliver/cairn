@@ -1073,6 +1073,47 @@ fn forget_rejects_unadvertised_target_with_capability_unavailable() {
     }
 }
 
+/// Verify that `Sdk::new` (no store wired → no capabilities advertised)
+/// rejects `--mode semantic` with a `CapabilityUnavailable` error that
+/// carries a non-empty `remediation` hint mentioning `local_embeddings`.
+///
+/// This pins the end-to-end wiring from Task 10:
+/// `require_capability` → `cairn_core::status::remediation_for` →
+/// `SdkError::CapabilityUnavailable { remediation: Some(...) }`.
+#[tokio::test]
+async fn sdk_search_semantic_rejects_when_no_store_with_remediation() {
+    let args = SearchArgs {
+        citations: None,
+        cursor: None,
+        explain: None,
+        filters: None,
+        limit: Some(5),
+        mode: SearchArgsMode::Semantic,
+        query: "x".to_owned(),
+        scope: None,
+    };
+    let err = sdk().search(&args).await.expect_err("must reject");
+    match err {
+        SdkError::CapabilityUnavailable {
+            capability,
+            remediation,
+            ..
+        } => {
+            assert_eq!(
+                capability, "cairn.mcp.v1.search.semantic",
+                "wrong capability id"
+            );
+            let hint = remediation
+                .expect("remediation must be populated for cairn.mcp.v1.search.semantic");
+            assert!(
+                hint.contains("local_embeddings"),
+                "remediation must mention the config toggle 'local_embeddings'; got: {hint:?}"
+            );
+        }
+        other => panic!("expected CapabilityUnavailable, got {other:?}"),
+    }
+}
+
 #[track_caller]
 fn assert_unimplemented<T: std::fmt::Debug>(verb: &'static str, result: Result<T, SdkError>) {
     let err = result.expect_err("P0 stubs must error until #9 wires the store");

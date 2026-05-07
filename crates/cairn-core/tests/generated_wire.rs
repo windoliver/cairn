@@ -2672,3 +2672,87 @@ fn lint_response_accepts_edge_finding_kinds() {
         Some("Run `cairn lint --fix` to keep the higher-confidence edge")
     );
 }
+// ── F5 (round 9 fixup): CapabilityUnavailable.remediation optional-field validation ──
+
+#[test]
+fn error_capability_unavailable_with_remediation_accepts() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("search"));
+    m.insert("status".into(), serde_json::json!("rejected"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({
+            "code": "CapabilityUnavailable",
+            "message": "semantic search not enabled",
+            "data": {
+                "capability": "cairn.mcp.v1.search.semantic",
+                "remediation": "Enable the sqlite-vec feature flag and rebuild."
+            }
+        }),
+    );
+    let _: Response = serde_json::from_value(serde_json::Value::Object(m))
+        .expect("CapabilityUnavailable with non-empty remediation should accept");
+}
+
+#[test]
+fn error_capability_unavailable_remediation_rejects_empty_string() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("search"));
+    m.insert("status".into(), serde_json::json!("rejected"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({
+            "code": "CapabilityUnavailable",
+            "message": "semantic search not enabled",
+            "data": {
+                "capability": "cairn.mcp.v1.search.semantic",
+                "remediation": ""
+            }
+        }),
+    );
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("remediation"),
+        "expected empty remediation rejection, got: {err}"
+    );
+}
+
+#[test]
+fn error_capability_unavailable_remediation_rejects_non_string() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("search"));
+    m.insert("status".into(), serde_json::json!("rejected"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({
+            "code": "CapabilityUnavailable",
+            "message": "semantic search not enabled",
+            "data": {
+                "capability": "cairn.mcp.v1.search.semantic",
+                "remediation": 42
+            }
+        }),
+    );
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("remediation"),
+        "expected non-string remediation rejection, got: {err}"
+    );
+}
+
+#[test]
+fn error_capability_unavailable_without_remediation_accepts() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("search"));
+    m.insert("status".into(), serde_json::json!("rejected"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({
+            "code": "CapabilityUnavailable",
+            "message": "semantic search not enabled",
+            "data": {"capability": "cairn.mcp.v1.search.semantic"}
+        }),
+    );
+    let _: Response = serde_json::from_value(serde_json::Value::Object(m))
+        .expect("CapabilityUnavailable without remediation (pre-#53 server) should accept");
+}

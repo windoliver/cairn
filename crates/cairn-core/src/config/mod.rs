@@ -729,9 +729,53 @@ pub struct ExtractBudget {
     pub max_turns: Option<u32>,
 }
 
+/// Check whether `config.search.default_provider` and
+/// `config.search.embedding_model` are mutually consistent.
+///
+/// This is a pure, no-I/O predicate used by the SDK and MCP surfaces (which
+/// have no access to env vars like `OPENAI_API_KEY`) to gate semantic/hybrid
+/// capability advertisement when the model selection contradicts the provider.
+///
+/// The classic misconfiguration the check catches:
+/// `default_provider = openai` but `embedding_model = bge-small-en-v1.5`
+/// — the `OpenAI` HTTP endpoint cannot serve a local candle model, so the ANN
+/// dispatcher would silently return zero results for every semantic query
+/// (rows indexed with BGE vectors have a `vec_model` label that the `OpenAI`
+/// dispatcher filter never matches).
+///
+/// Alignment rules:
+/// - `Local` provider → model must be a locally-runnable candle variant
+///   (`BgeSmallEnV1_5` or `AllMiniLmL6V2`).
+/// - `OpenAi` provider → model must be a native `OpenAI` variant
+///   (`OpenAiTextEmbedding3Small` or `OpenAiTextEmbedding3Large`).
+/// - Any future provider not yet listed here → `false` (fail-closed per
+///   CLAUDE.md §4.6). Update this function when a new provider lands.
+///
+/// The CLI's `embedding_provider_ready` additionally checks
+/// `OPENAI_API_KEY` presence and the `openai` Cargo feature flag. This
+/// function intentionally does not — those checks require I/O or feature
+/// gating that cannot be performed inside `cairn-core`.
+#[must_use]
+pub fn provider_model_aligned(config: &CairnConfig) -> bool {
+    match config.search.default_provider {
+        EmbeddingProvider::Local => matches!(
+            config.search.embedding_model,
+            EmbeddingModelKind::BgeSmallEnV1_5 | EmbeddingModelKind::AllMiniLmL6V2
+        ),
+        EmbeddingProvider::OpenAi => matches!(
+            config.search.embedding_model,
+            EmbeddingModelKind::OpenAiTextEmbedding3Small
+                | EmbeddingModelKind::OpenAiTextEmbedding3Large
+        ),
+        // Future providers: gate-closed by default until this function is updated.
+        #[allow(unreachable_patterns)]
+        _ => false,
+    }
+}
+
 /// Derived capability set, computed from `CairnConfig` (no I/O).
 ///
-/// The verb layer calls `config.capabilities(model_present)` before dispatching to
+/// The verb layer calls `config.capabilities(embedding_provider_ready)` before dispatching to
 /// gate features that require capabilities that may not be present.
 // Six orthogonal capability flags; a bitflags type would obscure the intent.
 #[allow(clippy::struct_excessive_bools)]
@@ -739,9 +783,11 @@ pub struct ExtractBudget {
 pub struct CapabilitySet {
     /// Always true at P0 (`FTS5` always present).
     pub keyword_search: bool,
-    /// True iff `search.local_embeddings` is true and embedding model files exist on disk.
+    /// True iff `search.local_embeddings` is true and the embedding provider is ready
+    /// (local: model files on disk; cloud: feature compiled in + API key set).
     pub semantic_search: bool,
-    /// True iff `search.local_embeddings` is true (hybrid uses keyword+semantic legs).
+    /// True iff `search.local_embeddings` is true and the embedding provider is ready
+    /// (hybrid uses keyword + semantic legs; both require an active embedder).
     pub hybrid_search: bool,
     /// True iff `llm.provider` is `Some`.
     pub llm_extract: bool,
@@ -853,14 +899,18 @@ impl CairnConfig {
 
     /// Derive the active capability set from this config (pure, no I/O).
     ///
-    /// `model_present` should be `true` when the configured embedding model
-    /// files exist on disk (stat-checked at startup).
+    /// `embedding_provider_ready` should be `true` when the configured embedding
+    /// provider can produce vectors end-to-end:
+    /// - For `default_provider = local`: the model files exist on disk
+    ///   (stat-checked via `ModelCache::is_present`).
+    /// - For `default_provider = openai`: the `openai` Cargo feature is compiled
+    ///   in AND `OPENAI_API_KEY` is set in the environment.
     ///
     /// The verb layer uses this to gate features before dispatch.
     #[must_use]
-    pub fn capabilities(&self, model_present: bool) -> CapabilitySet {
+    pub fn capabilities(&self, embedding_provider_ready: bool) -> CapabilitySet {
         let llm_on = self.llm.provider.is_some();
-        let semantic = self.search.local_embeddings && model_present;
+        let semantic = self.search.local_embeddings && embedding_provider_ready;
         let agent_extract = self
             .pipeline
             .extract
@@ -900,7 +950,8 @@ impl CairnConfig {
     }
 
     /// Convenience: equivalent to `capabilities(false)`.
-    /// Use when filesystem access is unavailable (e.g., pure config tests).
+    /// Use when no embedding provider is ready (e.g., pure config tests, no
+    /// model on disk, no API key in environment).
     #[must_use]
     pub fn capabilities_no_model(&self) -> CapabilitySet {
         self.capabilities(false)
@@ -1232,10 +1283,10 @@ mod tests {
     fn capabilities_llm_off_by_default() {
         let caps = CairnConfig::default().capabilities(false);
         assert!(caps.keyword_search, "keyword_search always true");
-        assert!(!caps.semantic_search, "model absent → no semantic");
+        assert!(!caps.semantic_search, "provider not ready → no semantic");
         assert!(
             !caps.hybrid_search,
-            "model absent → no hybrid: runtime resolves an embedder for hybrid \
+            "provider not ready → no hybrid: runtime resolves an embedder for hybrid \
              mode and fails closed without one (see crates/cairn-cli/src/verbs/search.rs)"
         );
         assert!(!caps.llm_extract, "no LLM → no llm_extract");
@@ -1263,11 +1314,11 @@ mod tests {
         assert!(caps.keyword_search);
         assert!(
             !caps.semantic_search,
-            "model absent → no semantic even with LLM"
+            "provider not ready → no semantic even with LLM"
         );
         assert!(
             !caps.hybrid_search,
-            "model absent → no hybrid: hybrid requires the embedder the runtime \
+            "provider not ready → no hybrid: hybrid requires the embedder the runtime \
              resolves for both legs (see crates/cairn-cli/src/verbs/search.rs)"
         );
         assert!(caps.llm_extract);
@@ -1295,7 +1346,7 @@ mod tests {
     }
 
     #[test]
-    fn semantic_on_when_local_embeddings_and_model_present() {
+    fn semantic_on_when_local_embeddings_and_provider_ready() {
         let config = CairnConfig::default();
         let caps = config.capabilities(true);
         assert!(caps.semantic_search);
@@ -1306,25 +1357,25 @@ mod tests {
     fn semantic_off_when_local_embeddings_false() {
         let mut config = CairnConfig::default();
         config.search.local_embeddings = false;
-        let caps = config.capabilities(true); // model present but opt-out
+        let caps = config.capabilities(true); // provider ready but opt-out
         assert!(!caps.semantic_search);
     }
 
     #[test]
-    fn semantic_off_when_model_absent() {
+    fn semantic_off_when_provider_not_ready() {
         let config = CairnConfig::default(); // local_embeddings: true
-        let caps = config.capabilities(false); // model not on disk
+        let caps = config.capabilities(false); // provider not ready
         assert!(!caps.semantic_search);
     }
 
     #[test]
     fn semantic_not_tied_to_llm_provider() {
         let mut config = CairnConfig::default();
-        // LLM present but model absent → semantic still false.
+        // LLM present but embedding provider not ready → semantic still false.
         config.llm.provider = Some(LlmProvider::OpenaiCompatible);
         let caps = config.capabilities(false);
         assert!(!caps.semantic_search);
-        // Model present → semantic true regardless of LLM.
+        // Embedding provider ready → semantic true regardless of LLM.
         let caps2 = config.capabilities(true);
         assert!(caps2.semantic_search);
     }
@@ -1597,5 +1648,54 @@ rerank_topk: 20
             matches!(avail, McpGraphAvailability::Available { tool_count: 5 }),
             "Plan C must emit Available{{5}} when all conditions hold; got {avail:?}",
         );
+    }
+
+    // ── provider_model_aligned tests (round-4 review Finding A) ──────────────
+
+    #[test]
+    fn provider_model_aligned_local_with_local_model_is_true() {
+        let mut cfg = CairnConfig::default();
+        cfg.search.default_provider = EmbeddingProvider::Local;
+        cfg.search.embedding_model = EmbeddingModelKind::BgeSmallEnV1_5;
+        assert!(super::provider_model_aligned(&cfg));
+
+        cfg.search.embedding_model = EmbeddingModelKind::AllMiniLmL6V2;
+        assert!(super::provider_model_aligned(&cfg));
+    }
+
+    #[test]
+    fn provider_model_aligned_local_with_openai_model_is_false() {
+        let mut cfg = CairnConfig::default();
+        cfg.search.default_provider = EmbeddingProvider::Local;
+        cfg.search.embedding_model = EmbeddingModelKind::OpenAiTextEmbedding3Small;
+        assert!(!super::provider_model_aligned(&cfg));
+
+        cfg.search.embedding_model = EmbeddingModelKind::OpenAiTextEmbedding3Large;
+        assert!(!super::provider_model_aligned(&cfg));
+    }
+
+    #[test]
+    fn provider_model_aligned_openai_with_openai_model_is_true() {
+        let mut cfg = CairnConfig::default();
+        cfg.search.default_provider = EmbeddingProvider::OpenAi;
+        cfg.search.embedding_model = EmbeddingModelKind::OpenAiTextEmbedding3Small;
+        assert!(super::provider_model_aligned(&cfg));
+
+        cfg.search.embedding_model = EmbeddingModelKind::OpenAiTextEmbedding3Large;
+        assert!(super::provider_model_aligned(&cfg));
+    }
+
+    #[test]
+    fn provider_model_aligned_openai_with_local_model_is_false() {
+        // This is the classic misconfiguration the round-4 review caught:
+        // `default_provider = openai` with a candle model. The gate must
+        // return false so SDK/MCP don't advertise semantic/hybrid.
+        let mut cfg = CairnConfig::default();
+        cfg.search.default_provider = EmbeddingProvider::OpenAi;
+        cfg.search.embedding_model = EmbeddingModelKind::BgeSmallEnV1_5;
+        assert!(!super::provider_model_aligned(&cfg));
+
+        cfg.search.embedding_model = EmbeddingModelKind::AllMiniLmL6V2;
+        assert!(!super::provider_model_aligned(&cfg));
     }
 }

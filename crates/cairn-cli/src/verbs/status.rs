@@ -267,16 +267,6 @@ fn compute_capabilities(
         return vec![];
     };
 
-    // Vault-presence gate: only advertise capabilities when there is an
-    // actual executable backend behind them. `.cairn/vault.id` is the
-    // bootstrap sentinel (brief §3.1); without it the directory is not
-    // a Cairn vault and every verb would fail at store-open. Mirrors
-    // the SDK contract: `Sdk::new` (no store) advertises nothing,
-    // `Sdk::with_store` advertises capabilities the store actually backs.
-    if !bound {
-        return vec![];
-    }
-
     let model_present = vault_root.is_some_and(|root| {
         let models_root = root.join(".cairn").join("models");
         let cache = cairn_embeddings_local::ModelCache::new(&models_root);
@@ -284,7 +274,24 @@ fn compute_capabilities(
         cache.is_present(kind)
     });
 
-    capabilities_for_config(config, model_present)
+    // For local providers: embedding_provider_ready == model_present.
+    // For cloud providers (OpenAI): requires the `openai` Cargo feature AND
+    // OPENAI_API_KEY to be set. A stale local model file on disk with a cloud
+    // provider configured must NOT advertise semantic/hybrid (Finding 3, #53).
+    let embedding_provider_ready =
+        compute_embedding_provider_ready(config, model_present, vault_root);
+
+    cairn_core::status::advertise(&cairn_core::status::CapabilityGates {
+        config: config.capabilities(embedding_provider_ready),
+        // CLI status path stays read-only and never opens the SQLite store.
+        // The bound-vault structural backstop in advertise() drives the FTS gate.
+        store: None,
+        vault_bound: bound,
+        model_present,
+        embedding_provider_ready,
+        llm_configured: false,
+        contract_phase: cairn_core::status::Phase::V0_1,
+    })
 }
 
 /// Probe MCP graph-tools availability from the given config and optional vault root.
@@ -380,42 +387,35 @@ fn probe_mcp_graph_tools(
 }
 
 /// Project a [`CairnConfig`] + model-on-disk state into the wire-format
-/// capability list, *without* the vault-presence gate. Use when probing
-/// the per-build capability surface (e.g. `--explain` gate at parse
-/// time, before any vault is resolved). Mirrors `cairn-sdk`'s
-/// `Sdk::advertised_capabilities` derivation.
+/// capability list, *without* the vault-presence gate. Used by the
+/// `--explain` capability gate at parse time, before any vault is resolved.
+/// Mirrors `cairn-sdk`'s `Sdk::advertised_capabilities` derivation by
+/// passing through `cairn-core::status::advertise()`.
 fn capabilities_for_config(config: &CairnConfig, model_present: bool) -> Vec<Capabilities> {
-    let cap_set = config.capabilities(model_present);
-    let mut out = vec![Capabilities::CairnMcpV1SearchKeyword];
-    if cap_set.semantic_search {
-        out.push(Capabilities::CairnMcpV1SearchSemantic);
-    }
-    if cap_set.hybrid_search {
-        out.push(Capabilities::CairnMcpV1SearchHybrid);
-    }
-    // policy_trace is always true at P0 (config always sets it; a future
-    // config knob could opt out). Advertise it so `--explain` is not
-    // rejected by the capability gate when a vault config is loaded.
-    if cap_set.policy_trace {
-        out.push(Capabilities::CairnMcpV1PolicyTrace);
-    }
-    // NOTE — `cairn.mcp.v1.replay.{sequence,challenge}` are deliberately
-    // NOT advertised yet, even though the substrate (migration 0046,
-    // `replay::prepare_wal_with_replay`, `mint_challenge`) ships in this
-    // PR.  Brief §15 / §8.0.a require advertised capabilities to be
-    // honored end-to-end; the signed-verb dispatch path
-    // (ingest / forget / capture_trace) does not yet route through
-    // `prepare_wal_with_replay`, so a client negotiating from the cap
-    // would believe the runtime enforces replay rejection while the
-    // production hot path does not.  The follow-up issue that wires
-    // the dispatch flips `cap_set.replay_{sequence,challenge}` to
-    // `true` and adds the two `out.push(...)` lines.
-    //
-    // Issue #52 round-2 review #2: advertising before enforcement is
-    // over-advertising.
-    let _ = cap_set.replay_sequence;
-    let _ = cap_set.replay_challenge;
-    out
+    let embedding_provider_ready = compute_embedding_provider_ready(config, model_present, None);
+    cairn_core::status::advertise(&cairn_core::status::CapabilityGates {
+        config: config.capabilities(embedding_provider_ready),
+        store: None,
+        vault_bound: true, // capability surface — used by --explain gate;
+        // the gate runs only when caller is in a vault.
+        model_present,
+        embedding_provider_ready,
+        llm_configured: false,
+        contract_phase: cairn_core::status::Phase::V0_1,
+    })
+}
+
+/// Determine whether the configured embedding *provider* is ready to produce
+/// vectors end-to-end, for use in `CapabilityGates::embedding_provider_ready`.
+///
+/// Delegates to [`super::embedding_provider_ready`], which is the shared
+/// implementation used by both this module and `search.rs`.
+fn compute_embedding_provider_ready(
+    config: &CairnConfig,
+    model_present: bool,
+    vault_root: Option<&Path>,
+) -> bool {
+    super::embedding_provider_ready(config, model_present, vault_root)
 }
 
 /// True if `capability` is in the current `status.capabilities` list.
@@ -428,16 +428,13 @@ fn capabilities_for_config(config: &CairnConfig, model_present: bool) -> Vec<Cap
 /// unconditionally sets `policy_trace: true` — see `CairnConfig::capabilities`
 /// and its tests). Semantic/hybrid search require a model on disk and are
 /// therefore absent when probed without a vault root.
+///
+/// Bypasses the vault-presence gate because this is a per-build
+/// capability probe (called at arg-parse time, before any vault is
+/// resolved). Without that bypass, `--explain` would be rejected even
+/// for users running inside a real bound vault.
 #[must_use]
 pub fn p0_capabilities_advertises(capability: &str) -> bool {
-    // Use the default config (no vault root → model not present). This
-    // conservatively excludes semantic/hybrid search while including
-    // policy_trace which the P0 config always enables.
-    //
-    // Bypasses the vault-presence gate because this is a per-build
-    // capability probe (called at arg-parse time, before any vault is
-    // resolved). Without that bypass, `--explain` would be rejected even
-    // for users running inside a real bound vault.
     let default_config = CairnConfig::default();
     capabilities_for_config(&default_config, false)
         .iter()
