@@ -5,6 +5,17 @@
 //! and test targets consume it. `expect()` with documented reasons is
 //! tolerated here per CLAUDE.md §6.2 (bins/tests).
 
+pub mod command;
 pub mod config;
+pub mod docgen;
+pub(crate) mod generated;
+pub mod identity;
+pub mod llm;
+pub mod mcp;
 pub mod plugins;
+pub mod render;
+pub mod repair;
+pub mod session_source;
+pub mod skill;
+pub mod vault;
 pub mod verbs;

@@ -294,12 +294,12 @@ fn compile_number_between() {
 
 #[test]
 fn compile_boolean_eq() {
+    // `is_static` is a physical column on `records`; the filter compiler
+    // must NOT route it through extra_frontmatter (regression: pre-fix,
+    // `is_static` queries always missed projector-written rows).
     let f = parse(serde_json::json!({"field": "is_static", "op": "eq", "value": false}));
     let compiled = compile_filter(validate_filter(&f).unwrap());
-    assert_eq!(
-        compiled.sql,
-        "json_extract(extra_frontmatter, '$.is_static') = ?"
-    );
+    assert_eq!(compiled.sql, "is_static = ?");
     assert_eq!(compiled.params, vec![serde_json::json!(false)]);
 }
 

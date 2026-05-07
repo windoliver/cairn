@@ -33,6 +33,11 @@ expression: "read(&files, \"crates/cairn-mcp/src/generated/schemas/verbs/ingest.
           "minLength": 1,
           "type": "string"
         },
+        "dry_run": {
+          "default": false,
+          "description": "If true, produce a FlushPlan and emit it without writing to MemoryStore (brief §5.5). Mutually exclusive with human_review.",
+          "type": "boolean"
+        },
         "file": {
           "description": "Path on the local filesystem.",
           "minLength": 1,
@@ -47,6 +52,11 @@ expression: "read(&files, \"crates/cairn-mcp/src/generated/schemas/verbs/ingest.
           "description": "Extra YAML frontmatter fields to store alongside the body.",
           "type": "object"
         },
+        "human_review": {
+          "default": false,
+          "description": "If true, persist a FlushPlan under .cairn/flush/pending/ for explicit `cairn flush apply` (brief §5.5). Mutually exclusive with dry_run.",
+          "type": "boolean"
+        },
         "kind": {
           "description": "Memory taxonomy kind (19 possible values — see §3 taxonomy). Validated beyond JSON Schema by the classifier.",
           "minLength": 1,
@@ -54,6 +64,11 @@ expression: "read(&files, \"crates/cairn-mcp/src/generated/schemas/verbs/ingest.
         },
         "no_cache": {
           "description": "Bypass extraction cache lookup for folder ingest, but still write refreshed cache entries.",
+          "type": "boolean"
+        },
+        "no_diff": {
+          "default": false,
+          "description": "When human_review=true, skip emitting the markdown diff sidecar.",
           "type": "boolean"
         },
         "session_id": {
@@ -100,6 +115,11 @@ expression: "read(&files, \"crates/cairn-mcp/src/generated/schemas/verbs/ingest.
           "description": "Folder ingest file count when source is --folder.",
           "minimum": 0,
           "type": "integer"
+        },
+        "plan_ref": {
+          "description": "Path under .cairn/flush/pending/ when human_review=true; absent otherwise.",
+          "minLength": 1,
+          "type": "string"
         },
         "record_id": {
           "$ref": "../common/primitives.json#/$defs/Ulid",
@@ -169,6 +189,12 @@ expression: "read(&files, \"crates/cairn-mcp/src/generated/schemas/verbs/ingest.
       }
     ],
     "positional": {
+      "aliases_one_of": [
+        "body",
+        "file",
+        "folder",
+        "url"
+      ],
       "description": "File, URL, folder, or '-' for stdin. Mutually exclusive with --body/--file/--folder/--url.",
       "name": "source"
     }

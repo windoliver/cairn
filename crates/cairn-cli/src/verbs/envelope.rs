@@ -43,6 +43,114 @@ pub fn unimplemented_response(verb: ResponseVerb) -> Response {
     }
 }
 
+/// Build an `InvalidArgs` rejected response with structured error data.
+///
+/// Use for fail-fast argument validation that occurs before dispatch
+/// (e.g. an empty `query` rejected before the store is opened). The
+/// response shape mirrors the dispatcher's `InvalidArgs` mapping so
+/// generated clients can parse a single canonical envelope rather than
+/// switching on origin. CLI callers should pair this with
+/// `ExitCode::from(64)` (`EX_USAGE`).
+#[must_use]
+pub fn invalid_args_response(verb: ResponseVerb, field: &str, reason: &str) -> Response {
+    Response {
+        contract: "cairn.mcp.v1".to_owned(),
+        data: None,
+        error: Some(serde_json::json!({
+            "code": "InvalidArgs",
+            "message": format!("invalid args: {field}: {reason}"),
+            "data": { "field": field, "reason": reason },
+        })),
+        operation_id: new_operation_id(),
+        policy_trace: Vec::<ResponsePolicyTrace>::new(),
+        status: ResponseStatus::Rejected,
+        target: None,
+        verb,
+    }
+}
+
+/// Build a `NotFound` aborted response with structured error data.
+///
+/// Use for resource-discovery failures that occur before dispatch — the
+/// canonical example is the verb's vault target not being a Cairn vault
+/// (no `.cairn/vault.id`). `target` becomes the error's `data.target`
+/// field; `message` is the human-readable explanation. CLI callers
+/// should pair this with `ExitCode::from(78)` (`EX_CONFIG`).
+///
+/// `status = Aborted` because the IDL `errors/error.json` only admits
+/// `NotFound` in the aborted family — generated clients deserialize
+/// the envelope through that constraint and reject `Rejected + NotFound`
+/// at parse time (round-7 review #1).
+#[must_use]
+pub fn not_found_response(verb: ResponseVerb, target: &str, message: &str) -> Response {
+    Response {
+        contract: "cairn.mcp.v1".to_owned(),
+        data: None,
+        error: Some(serde_json::json!({
+            "code": "NotFound",
+            "message": message,
+            "data": { "target": target },
+        })),
+        operation_id: new_operation_id(),
+        policy_trace: Vec::<ResponsePolicyTrace>::new(),
+        status: ResponseStatus::Aborted,
+        target: None,
+        verb,
+    }
+}
+
+/// Build an `Internal` aborted response with a one-line message.
+///
+/// Use for fail-closed paths whose root cause is local environment
+/// corruption (a damaged vault.id sentinel, a config that fails IDL
+/// validation, etc.) — the IDL `Internal` family is the catch-all.
+/// CLI callers should pair this with `ExitCode::from(78)` (`EX_CONFIG`)
+/// when the cause is config-level rather than transient runtime state.
+#[must_use]
+pub fn internal_error_response(verb: ResponseVerb, message: &str) -> Response {
+    Response {
+        contract: "cairn.mcp.v1".to_owned(),
+        data: None,
+        error: Some(serde_json::json!({
+            "code": "Internal",
+            "message": message,
+        })),
+        operation_id: new_operation_id(),
+        policy_trace: Vec::<ResponsePolicyTrace>::new(),
+        status: ResponseStatus::Aborted,
+        target: None,
+        verb,
+    }
+}
+
+/// Build a `CapabilityUnavailable` rejected response. `capability` must be
+/// a known capability string (validated by the envelope wire schema).
+/// CLI callers should pair this with `ExitCode::from(69)` (`EX_UNAVAILABLE`).
+///
+/// `status = Rejected` because the IDL `errors/error.json` only admits
+/// `CapabilityUnavailable` in the rejected family — generated clients
+/// deserialize the envelope through that constraint and reject
+/// `Aborted + CapabilityUnavailable` at parse time (round-9 review #1).
+#[must_use]
+pub fn capability_unavailable_response(verb: ResponseVerb, capability: &str) -> Response {
+    Response {
+        contract: "cairn.mcp.v1".to_owned(),
+        data: None,
+        error: Some(serde_json::json!({
+            "code": "CapabilityUnavailable",
+            "message": format!(
+                "this server does not advertise {capability}; the requested feature requires it"
+            ),
+            "data": { "capability": capability },
+        })),
+        operation_id: new_operation_id(),
+        policy_trace: Vec::<ResponsePolicyTrace>::new(),
+        status: ResponseStatus::Rejected,
+        target: None,
+        verb,
+    }
+}
+
 /// Serialize a value as compact JSON + newline to stdout.
 pub fn emit_json<T: serde::Serialize>(value: &T) {
     let mut out = std::io::stdout().lock();

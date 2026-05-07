@@ -1,0 +1,11 @@
+---
+source: crates/cairn-core/src/pipeline/squash.rs
+assertion_line: 4457
+expression: "run_fixture(\"real_progress_with_hyperlink.txt\",\n&SquashConfig::default().with_tty_render_enabled(true))"
+---
+done step 1
+done step 2
+done step 3
+error: failed at file.rs:42
+see log
+finished

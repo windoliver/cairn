@@ -1,0 +1,55 @@
+---
+source: crates/cairn-core/src/pipeline/squash.rs
+assertion_line: 4088
+expression: "run_fixture(\"real_git_log.txt\", &SquashConfig::default())"
+---
+fdfc276 test(squash): add E2E corner-case + invariant proptests
+8e96864 fix(squash): consume two-byte ESC controls fully without splitting UTF-8
+16ae5cd ci(pages): auto-enable GitHub Pages in configure-pages
+0a3da7b fix(squash): rewind giant-final-line cut to UTF-8 boundary
+ce06b18 fix(squash): invert bypass window priority so tail wins on small inputs
+1ec6199 chore(sdk): silence too_many_lines on table-driven ingest test
+c77f1a5 feat(store-sqlite): MemoryStore CRUD, versioning, edges, tx (#46) (#225)
+8231614 fix(squash): clamp oversize bypass windows so head and tail are disjoint
+07687d9 chore(sdk,docs): rustfmt + register cairn-sdk in docs coverage
+909e7e7 fix(squash): quarantine DCS/APC/PM/SOS and prove tail cut is safe
+b79e266 chore(sdk): unblock docs + machete CI gates
+a640148 fix(squash): refine prefix safety check and clamp blank-tail expansion
+84c58ea [codex] Add generated docs site and usage gates (#223)
+f002f2b ci(supply-chain): work around taiki-e/install-action BASH_FUNC guard
+a82bbc8 chore(merge): fix doc link + allow MIT-0 license
+5e22ba8 test(sdk,cli): cross-surface parity for status + handshake
+c0c2ca3 test(sdk): add wire round-trip + property-based corner-case sweeps
+f963bde fix(squash): bound final-line marker and exclude strips from drop count
+ef7b357 fix(squash): require ESC-free dropped prefix before preserving suffix
+271a550 feat(folder): folder sidecars, backlinks, policy inheritance (brief §3.4, #44) (#226)
+f2cf038 fix(squash): close decode-expansion OOM hole and surface UTF-8 loss
+be7725f fix(squash): preserve final-line suffix and fix mode-A drop accounting
+240c1a3 test(idl): add drift-injection e2e + tokenizer/wrapper corner sweeps
+d08ca25 fix(sdk): drop `exists` filter op — not in generated grammar
+f5ddb94 fix(squash): preserve truncated final line + accounting (#72)
+5d10a3d fix(sdk): reject ResponseVerb::Unknown on committed envelopes
+5601360 fix(idl): emit bare invocation for all-optional verbs (round-10)
+46e88b7 fix(squash): broaden truncated semantics + bypass cr_bearing (#72)
+6c21b42 fix(squash): exact line count in bypass marker (#72)
+77a3be0 fix(idl): close 3 round-9 skill-compat bypasses
+0a464dc feat(core): Filter-stage redact + fence + visibility defaults (#93) (#210)
+ef6d1a6 fix(squash): reconcile boundary docs with >= guard semantics (#72)
+61ec5ff fix(sdk): reject envelope-invalid retrieve/target combinations
+b095ae9 fix(squash): tighten oversize gate to >= boundaries (#72)
+4551356 fix(idl): fail closed on bash blocks with unparsed cairn forms (round-8)
+a7d2e04 fix(sdk): bypass status() in capability gating
+5b3d3f5 fix(squash): tighten line cap + observability for OSC drops (#72)
+c3670f3 fix(sdk): preserve retrieve.target and protocol.error.data
+78434da fix(squash): bypass stats from raw boundaries + un-ignore CI test (#72)
+1ddaa5c fix(idl): close inline-wrapper + unsupported-fence bypasses (round-7)
+1ace6f2 fix(sdk): match CLI status semantics + serialize VerbResponse as envelope
+5bb5489 fix(idl): close two skill-compat bypasses (round-6)
+d6eecae fix(squash): drop head prefix when no line boundary exists (#72)
+c22718a fix(idl): parse wrapper option syntax instead of scanning for cairn
+40c4c70 fix(squash): bypass post-trim realign + accurate accounting + reason (#72)
+1eca253 fix(sdk): reject raw non-ASCII bytes in ingest URI
+17a6cd3 fix(idl): tighten ALL_CAPS placeholder bypass on constrained fields
+dcfbe17 fix(sdk): reject whitespace/control chars in ingest URI
+cd9815b fix(squash): line-cardinality cap + drop degraded suffix (#72)
+07a32f5 fix(squash): line-align bypass tail slice + degraded suffix (#72)

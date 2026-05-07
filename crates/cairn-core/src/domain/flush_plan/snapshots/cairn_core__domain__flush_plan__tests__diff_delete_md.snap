@@ -1,0 +1,19 @@
+---
+source: crates/cairn-core/src/domain/flush_plan/mod.rs
+expression: md
+---
+# FlushPlan 01HQZK000000000000000000VP
+
+- **Mode:** `Autonomous`
+- **Issuer:** `agt:claude-code:opus-4-7:reviewer:v1`
+- **Principal:** `hmn:tafeng:v1`
+- **Issued:** 2026-05-04T12:00:00Z
+- **Expires:** 2026-05-04T12:05:00Z
+- **Reason:** `UserIngest`
+- **Mutations:** 1
+
+## Mutation 0
+
+- **Kind:** delete
+- **Target:** `01HQZX9F5N0000000000000000`
+- **Prior version:** 1

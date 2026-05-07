@@ -1,0 +1,544 @@
+//! Trigger-keyword prefilter and phrase-window builder. Spec §6.2.
+
+use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
+
+use super::super::TextSpan;
+
+/// Fixed trigger keyword set the prefilter scans for.
+const TRIGGER_KEYWORDS: &[&str] = &[
+    "remember",
+    "forget",
+    "correction",
+    "skillify",
+    "this is how",
+];
+
+/// Pre-built trigger prefilter. One instance per `RegexExtractor`.
+pub struct TriggerPrefilter {
+    ac: AhoCorasick,
+}
+
+impl Default for TriggerPrefilter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TriggerPrefilter {
+    /// Build the (case-insensitive) prefilter.
+    #[must_use]
+    pub fn new() -> Self {
+        let ac = AhoCorasickBuilder::new()
+            .ascii_case_insensitive(true)
+            .match_kind(MatchKind::LeftmostFirst)
+            .build(TRIGGER_KEYWORDS)
+            .unwrap_or_else(|e| {
+                // SAFETY: TRIGGER_KEYWORDS are static ASCII literals; build never fails.
+                panic!("invariant: static patterns build: {e}")
+            });
+        Self { ac }
+    }
+
+    /// Find every keyword occurrence whose start position is at a
+    /// sentence-start (per [`is_sentence_start`]) and not inside a
+    /// quoted span. Returns `(start, end)` byte offsets in the original
+    /// body. Capped at `MAX_PHRASE_WINDOWS` hits.
+    #[must_use]
+    pub fn scan(&self, body: &str) -> PrefilterScan {
+        self.scan_within(body, &[])
+    }
+
+    /// Like [`Self::scan`], but only counts hits whose start offset falls
+    /// inside one of `eligible_spans` toward the `MAX_PHRASE_WINDOWS` cap.
+    /// Hits outside the authorised ranges are skipped before the cap is
+    /// consulted, so a long disallowed prefix with many trigger words can
+    /// never starve later authorised hits. When `eligible_spans` is empty,
+    /// behaves identically to the unrestricted scan (full-body).
+    #[must_use]
+    pub fn scan_within(&self, body: &str, eligible_spans: &[TextSpan]) -> PrefilterScan {
+        let quote_spans = collect_quote_spans(body);
+        let mut hits: Vec<TextSpan> = Vec::new();
+        let mut first_omitted: Option<u32> = None;
+        let bytes = body.as_bytes();
+        let restricted = !eligible_spans.is_empty();
+        for m in self.ac.find_iter(body) {
+            let start = m.start();
+            let end = m.end();
+            if quote_spans
+                .iter()
+                .any(|(qs, qe)| *qs <= start && end <= *qe)
+            {
+                continue;
+            }
+            if !is_sentence_start(bytes, start) {
+                continue;
+            }
+            if restricted {
+                let start_u32 = u32::try_from(start).unwrap_or(u32::MAX);
+                let inside = eligible_spans
+                    .iter()
+                    .any(|sp| sp.start <= start_u32 && start_u32 < sp.end);
+                if !inside {
+                    continue;
+                }
+            }
+            if hits.len() >= super::super::MAX_PHRASE_WINDOWS {
+                first_omitted = Some(u32::try_from(start).unwrap_or(u32::MAX));
+                tracing::warn!(
+                    body_len = body.len(),
+                    cap = super::super::MAX_PHRASE_WINDOWS,
+                    "regex extractor: phrase-window cap reached"
+                );
+                break;
+            }
+            hits.push(TextSpan::new(
+                u32::try_from(start).unwrap_or(u32::MAX),
+                u32::try_from(end).unwrap_or(u32::MAX),
+            ));
+        }
+        PrefilterScan {
+            hits,
+            first_omitted_start: first_omitted,
+        }
+    }
+}
+
+/// Result of a single prefilter scan.
+#[derive(Debug, PartialEq, Eq)]
+pub struct PrefilterScan {
+    /// Byte spans of accepted trigger hits in the body.
+    pub hits: Vec<TextSpan>,
+    /// Byte offset where the first omitted hit began, when the scan
+    /// stopped at `MAX_PHRASE_WINDOWS`. `None` when no truncation
+    /// occurred.
+    pub first_omitted_start: Option<u32>,
+}
+
+impl PrefilterScan {
+    /// True when the scan stopped at `MAX_PHRASE_WINDOWS`.
+    #[must_use]
+    pub fn truncated(&self) -> bool {
+        self.first_omitted_start.is_some()
+    }
+}
+
+/// Whether the byte offset `pos` is at a "sentence-start" position for
+/// trigger eligibility. See spec §6.2.
+#[must_use]
+pub fn is_sentence_start(body: &[u8], pos: usize) -> bool {
+    if pos == 0 {
+        return true;
+    }
+    let mut i = pos;
+    while i > 0 && body[i - 1].is_ascii_whitespace() {
+        i -= 1;
+    }
+    if i == 0 {
+        return true;
+    }
+    // Walk back over closing delimiters (`"`, `'`, `` ` ``, `)`, `]`, `}`)
+    // so that `He said "done." forget my address` and
+    // `(...). remember that ...` correctly resolve to the period that
+    // ends the prior sentence rather than the closer.
+    while i > 0 && matches!(body[i - 1], b'"' | b'\'' | b'`' | b')' | b']' | b'}') {
+        i -= 1;
+    }
+    if i == 0 {
+        return true;
+    }
+    let prev = body[i - 1];
+    match prev {
+        b'\n' | b';' | b'?' | b'!' | b',' => true,
+        b'.' => is_period_sentence_boundary(body, i - 1),
+        _ => preceded_by_conjunction(body, i),
+    }
+}
+
+fn preceded_by_conjunction(body: &[u8], end: usize) -> bool {
+    let mut j = end;
+    while j > 0 && !body[j - 1].is_ascii_whitespace() {
+        j -= 1;
+    }
+    let word = &body[j..end];
+    ascii_eq_ignore_case(word, b"and")
+        || ascii_eq_ignore_case(word, b"but")
+        || ascii_eq_ignore_case(word, b"then")
+}
+
+fn ascii_eq_ignore_case(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b.iter())
+            .all(|(x, y)| x.eq_ignore_ascii_case(y))
+}
+
+fn is_period_sentence_boundary(body: &[u8], period_pos: usize) -> bool {
+    // Multi-period abbreviations: U.S., e.g., i.e.
+    let start = period_pos.saturating_sub(6);
+    let window = &body[start..period_pos];
+    if looks_like_abbreviation(window) {
+        return false;
+    }
+    // Single-period abbreviations like Dr., Mr., Mrs., Prof., St., vs.
+    // Take the immediately-preceding alphabetic run (up to 5 chars) and
+    // compare against an allowlist. Without this the built-in `forget`
+    // rule fires on prose like `Please contact Dr. Forget...`.
+    if is_single_period_abbreviation(body, period_pos) {
+        return false;
+    }
+    true
+}
+
+fn looks_like_abbreviation(window: &[u8]) -> bool {
+    let mut i = 0;
+    while i + 1 < window.len() {
+        if window[i] == b'.' && window[i + 1].is_ascii_alphabetic() {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Allowlist of common single-period abbreviations. ASCII only —
+/// multi-period forms (U.S., e.g., i.e.) are caught by
+/// `looks_like_abbreviation`.
+const SINGLE_PERIOD_ABBREVS: &[&[u8]] = &[
+    b"mr", b"mrs", b"ms", b"dr", b"prof", b"sr", b"jr", b"st", b"mt", b"vs", b"no", b"etc", b"inc",
+    b"ltd", b"co", b"corp", b"fig", b"vol", b"ch", b"ed", b"eds", b"pp",
+];
+
+/// True when the period at `period_pos` directly follows a known
+/// single-period abbreviation token (e.g. `Dr.`, `Mr.`, `Prof.`).
+fn is_single_period_abbreviation(body: &[u8], period_pos: usize) -> bool {
+    let mut j = period_pos;
+    while j > 0 && body[j - 1].is_ascii_alphabetic() {
+        j -= 1;
+    }
+    if j == period_pos {
+        return false;
+    }
+    let token = &body[j..period_pos];
+    SINGLE_PERIOD_ABBREVS
+        .iter()
+        .any(|abbr| ascii_eq_ignore_case(token, abbr))
+}
+
+fn collect_quote_spans(body: &str) -> Vec<(usize, usize)> {
+    let bytes = body.as_bytes();
+    let mut spans = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if matches!(b, b'"' | b'\'' | b'`') {
+            // Skip apostrophes that look like contraction or possessive
+            // markers — i.e. an alphabetic byte on each side. Without
+            // this, `don't forget John's address` would treat the
+            // apostrophes as a quote pair and silently drop `forget`.
+            if b == b'\'' && is_word_internal_apostrophe(bytes, i) {
+                i += 1;
+                continue;
+            }
+            let mut j = i + 1;
+            while j < bytes.len() && bytes[j] != b {
+                if b == b'\'' && bytes[j] == b'\'' && is_word_internal_apostrophe(bytes, j) {
+                    j += 1;
+                    continue;
+                }
+                j += 1;
+            }
+            if j < bytes.len() {
+                spans.push((i, j + 1));
+                i = j + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    spans
+}
+
+fn is_word_internal_apostrophe(bytes: &[u8], pos: usize) -> bool {
+    if pos == 0 || pos + 1 >= bytes.len() {
+        return false;
+    }
+    bytes[pos - 1].is_ascii_alphabetic() && bytes[pos + 1].is_ascii_alphabetic()
+}
+
+/// Phrase window: a slice of the body anchored at a prefilter hit, ending
+/// at the next stop (sentence boundary, semicolon, newline, next hit, or EOB).
+#[derive(Debug, PartialEq, Eq)]
+pub struct PhraseWindow {
+    /// Byte span of the window in the body.
+    pub span: TextSpan,
+}
+
+/// Build phrase windows from a prefilter scan. Each window starts at a
+/// hit and runs to the next stop. Zero-length windows are dropped.
+///
+/// When `scan.first_omitted_start` is `Some`, the last materialised
+/// window's hard stop is bounded at the first-omitted hit so the window
+/// never absorbs trigger occurrences past the cap (those occurrences are
+/// represented in the LLM eligible-span tail by the dispatcher instead).
+#[must_use]
+pub fn build_phrase_windows(body: &str, scan: &PrefilterScan) -> Vec<PhraseWindow> {
+    let bytes = body.as_bytes();
+    let hits = &scan.hits;
+    let truncation_hard_stop = scan.first_omitted_start.map(|s| s as usize);
+    // Reuse the prefilter's quote-aware span detection so window
+    // termination skips punctuation inside balanced quotes (e.g.
+    // `remember she shouted "go!"` keeps the full clause).
+    let quote_spans = collect_quote_spans(body);
+    let mut windows = Vec::with_capacity(hits.len());
+    for (i, hit) in hits.iter().enumerate() {
+        let start = hit.start as usize;
+        let next_hit_start = hits
+            .get(i + 1)
+            .map(|h| h.start as usize)
+            .or(truncation_hard_stop)
+            .unwrap_or(bytes.len());
+        let raw_stop = find_window_stop(bytes, start, next_hit_start, &quote_spans);
+        // When the window butts up against the next trigger hit (i.e.,
+        // `next_hit_start` and not a sentence boundary), trim the
+        // trailing conjunction word (`and`/`but`/`then`) plus surrounding
+        // whitespace so the matched slice does not bleed conjunction
+        // text into the rule's capture group.
+        let butts_against_next_hit = raw_stop == next_hit_start && raw_stop < bytes.len();
+        let stop = if butts_against_next_hit {
+            trim_trailing_conjunction(bytes, start, raw_stop)
+        } else {
+            raw_stop
+        };
+        if stop > start {
+            windows.push(PhraseWindow {
+                span: TextSpan::new(
+                    u32::try_from(start).unwrap_or(u32::MAX),
+                    u32::try_from(stop).unwrap_or(u32::MAX),
+                ),
+            });
+        }
+    }
+    windows
+}
+
+/// Walk back from `end` over trailing whitespace, then over a single
+/// conjunction word (`and` / `but` / `then`, case-insensitive ASCII), then
+/// over whitespace again. Returns the new end offset. If the trailing
+/// content is not a conjunction-with-leading-space, returns `end`
+/// unchanged. Never returns less than `start`.
+fn trim_trailing_conjunction(bytes: &[u8], start: usize, end: usize) -> usize {
+    let mut i = end;
+    while i > start && bytes[i - 1].is_ascii_whitespace() {
+        i -= 1;
+    }
+    let word_end = i;
+    while i > start && !bytes[i - 1].is_ascii_whitespace() {
+        i -= 1;
+    }
+    let word = &bytes[i..word_end];
+    let is_conj = ascii_eq_ignore_case(word, b"and")
+        || ascii_eq_ignore_case(word, b"but")
+        || ascii_eq_ignore_case(word, b"then");
+    if !is_conj {
+        return end;
+    }
+    // Require leading whitespace before the conjunction so we never
+    // truncate mid-token (e.g., `command` ending in `and`).
+    if i == start || !bytes[i - 1].is_ascii_whitespace() {
+        return end;
+    }
+    while i > start && bytes[i - 1].is_ascii_whitespace() {
+        i -= 1;
+    }
+    i.max(start)
+}
+
+fn find_window_stop(
+    bytes: &[u8],
+    start: usize,
+    hard_stop: usize,
+    quote_spans: &[(usize, usize)],
+) -> usize {
+    let mut i = start;
+    while i < hard_stop {
+        // Skip past any quote span that contains `i`; punctuation
+        // inside quoted substrings must not terminate the window.
+        if let Some(&(_, qe)) = quote_spans.iter().find(|(qs, qe)| *qs <= i && i < *qe) {
+            i = qe;
+            continue;
+        }
+        let b = bytes[i];
+        match b {
+            b';' | b'\n' | b'!' | b'?' => return i,
+            b'.' => {
+                let after_is_ws_or_eob = i + 1 == bytes.len() || bytes[i + 1].is_ascii_whitespace();
+                if after_is_ws_or_eob && is_period_sentence_boundary(bytes, i) {
+                    return i;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    hard_stop.min(bytes.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scan(body: &str) -> Vec<&str> {
+        let pre = TriggerPrefilter::new();
+        let scan = pre.scan(body);
+        scan.hits
+            .iter()
+            .map(|s| &body[s.start as usize..s.end as usize])
+            .collect()
+    }
+
+    #[test]
+    fn finds_remember_at_start() {
+        let hits = scan("remember that I prefer dark mode");
+        assert_eq!(hits, vec!["remember"]);
+    }
+
+    #[test]
+    fn finds_remember_after_period_with_space() {
+        let hits = scan("FYI old. remember that I prefer cash");
+        assert_eq!(hits, vec!["remember"]);
+    }
+
+    #[test]
+    fn ignores_abbreviation_period() {
+        let hits = scan("remember that I live in the U.S. and prefer cash");
+        assert_eq!(hits, vec!["remember"]);
+    }
+
+    #[test]
+    fn skips_keyword_inside_quotes() {
+        let hits = scan(r#"the user said "remember that" by mistake"#);
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn finds_after_conjunction_with_trigger() {
+        let hits = scan("forget X and remember Y");
+        assert_eq!(hits, vec!["forget", "remember"]);
+    }
+
+    #[test]
+    fn does_not_split_normal_and() {
+        let hits = scan("remember that Alice and Bob are on call");
+        assert_eq!(hits, vec!["remember"]);
+    }
+
+    #[test]
+    fn caps_at_max_phrase_windows() {
+        let body = "remember a; ".repeat(super::super::super::MAX_PHRASE_WINDOWS + 5);
+        let pre = TriggerPrefilter::new();
+        let scan = pre.scan(&body);
+        assert!(scan.truncated());
+        assert!(scan.first_omitted_start.is_some());
+        assert_eq!(scan.hits.len(), super::super::super::MAX_PHRASE_WINDOWS);
+    }
+
+    #[test]
+    fn finds_trigger_in_oversized_body() {
+        let mut body = "lorem ipsum. ".repeat(20_000);
+        body.push_str("forget my old address");
+        let hits = scan(&body);
+        assert_eq!(hits, vec!["forget"]);
+    }
+
+    #[test]
+    fn quote_aware_finds_unquoted_after_quoted() {
+        let body = r#"the user said "remember that" then forget my password"#;
+        let hits = scan(body);
+        assert_eq!(hits, vec!["forget"]);
+    }
+
+    #[test]
+    fn truncated_scan_caps_last_window_at_first_omitted_hit() {
+        // Single sentence, no semicolons/newlines/periods, with many
+        // `remember X` clauses joined by `and` (sentence-start eligible
+        // when followed by a trigger). The cap at MAX_PHRASE_WINDOWS
+        // means hit #(MAX+1) and beyond must NOT bleed into the last
+        // window; the last window must stop before them.
+        let cap = super::super::super::MAX_PHRASE_WINDOWS;
+        let mut body = String::from("remember a");
+        for _ in 1..(cap + 5) {
+            body.push_str(" and remember b");
+        }
+        let pre = TriggerPrefilter::new();
+        let scan = pre.scan(&body);
+        assert!(scan.truncated());
+        let first_omitted = scan.first_omitted_start.expect("truncated") as usize;
+        let windows = build_phrase_windows(&body, &scan);
+        let last = windows.last().expect("at least one window");
+        assert!(
+            (last.span.end as usize) <= first_omitted,
+            "last window end {} must not extend past first-omitted hit start {}",
+            last.span.end,
+            first_omitted,
+        );
+    }
+
+    #[test]
+    fn build_windows_single_hit_runs_to_eob() {
+        let body = "remember that I prefer dark mode";
+        let pre = TriggerPrefilter::new();
+        let scan = pre.scan(body);
+        let windows = build_phrase_windows(body, &scan);
+        assert_eq!(windows.len(), 1);
+        assert_eq!(
+            windows[0].span,
+            TextSpan::new(0, u32::try_from(body.len()).unwrap())
+        );
+    }
+
+    #[test]
+    fn build_windows_stops_at_exclamation() {
+        let body = "remember that I prefer tea! Also, my address changed";
+        let pre = TriggerPrefilter::new();
+        let scan = pre.scan(body);
+        let windows = build_phrase_windows(body, &scan);
+        assert_eq!(windows.len(), 1);
+        let s = &body[windows[0].span.start as usize..windows[0].span.end as usize];
+        assert_eq!(s, "remember that I prefer tea");
+    }
+
+    #[test]
+    fn build_windows_stops_at_question_mark() {
+        let body = "remember that I prefer tea? then forget my address";
+        let pre = TriggerPrefilter::new();
+        let scan = pre.scan(body);
+        let windows = build_phrase_windows(body, &scan);
+        assert!(!windows.is_empty());
+        let s = &body[windows[0].span.start as usize..windows[0].span.end as usize];
+        assert_eq!(s, "remember that I prefer tea");
+    }
+
+    #[test]
+    fn build_windows_stops_at_semicolon() {
+        let body = "remember that thing; nothing else";
+        let pre = TriggerPrefilter::new();
+        let scan = pre.scan(body);
+        let windows = build_phrase_windows(body, &scan);
+        assert_eq!(windows.len(), 1);
+        let s = &body[windows[0].span.start as usize..windows[0].span.end as usize];
+        assert_eq!(s, "remember that thing");
+    }
+
+    #[test]
+    fn build_windows_two_triggers() {
+        let body = "forget X and remember Y";
+        let pre = TriggerPrefilter::new();
+        let scan = pre.scan(body);
+        let windows = build_phrase_windows(body, &scan);
+        assert_eq!(windows.len(), 2);
+        let w0 = &body[windows[0].span.start as usize..windows[0].span.end as usize];
+        let w1 = &body[windows[1].span.start as usize..windows[1].span.end as usize];
+        assert_eq!(w0, "forget X");
+        assert_eq!(w1, "remember Y");
+    }
+}
