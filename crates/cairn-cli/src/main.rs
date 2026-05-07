@@ -210,7 +210,7 @@ fn main() -> ExitCode {
         },
         Some(("retrieve", sub)) => verbs::retrieve::run(sub),
         Some(("summarize", sub)) => verbs::summarize::run(sub),
-        Some(("assemble_hot", sub)) => verbs::assemble_hot::run(sub),
+        Some(("assemble_hot", sub)) => run_assemble_hot(sub, explicit_vault.as_deref()),
         Some(("capture_trace", sub)) => verbs::capture_trace::run(sub),
         Some(("lint", sub)) => match resolve_vault_or_cwd(explicit_vault.as_deref()) {
             Ok((vault_root, _source)) => verbs::lint::run(sub, Some(vault_root.as_path())),
@@ -406,6 +406,68 @@ fn run_status(sub: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
     // capability list (round-8 review #3).
     let require_bound = source != VaultResolutionSource::CwdFallback;
     verbs::status::run_with_context(json, Some(&vault_root), Some(&config), require_bound)
+}
+
+/// `cairn assemble_hot` dispatch.
+///
+/// Resolves the vault path and loads config so `assemble_hot` can apply
+/// the `hot_memory.recipe` and `max_bytes` budget from the active vault.
+/// Unlike `status`, this verb fails closed on `CwdFallback` (no walk-up
+/// hit, no registry default) — a hot-memory assembly for a non-vault
+/// directory would silently strip the caller of vault-specific context
+/// instead of surfacing the misconfiguration.
+fn run_assemble_hot(sub: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
+    let (vault_root, source) = match resolve_vault_or_cwd(explicit_vault) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("cairn assemble_hot: vault resolution error — {e:#}");
+            return ExitCode::from(78); // EX_CONFIG
+        }
+    };
+    if source == VaultResolutionSource::CwdFallback {
+        eprintln!(
+            "cairn assemble_hot: no Cairn vault found from cwd {} \
+             — pass --vault, run from inside a vault, or `cairn bootstrap`",
+            vault_root.display()
+        );
+        return ExitCode::from(78); // EX_CONFIG
+    }
+    // Every remaining resolution source must pass the vault-binding gate.
+    // An assembly returned for a path that is not a Cairn vault would,
+    // once #193 lands real loading, be a wrong-vault hot-memory injection
+    // vector.
+    {
+        match verbs::status::probe_vault_binding(&vault_root) {
+            verbs::status::VaultBinding::Bound => {}
+            verbs::status::VaultBinding::Unbound => {
+                let origin = match source {
+                    VaultResolutionSource::Explicit => "--vault target",
+                    VaultResolutionSource::CwdWalk => "vault discovered via cwd",
+                    VaultResolutionSource::RegistryDefault => "registry default vault",
+                    VaultResolutionSource::CwdFallback => unreachable!(),
+                };
+                eprintln!(
+                    "cairn assemble_hot: {origin} {} is not a Cairn vault \
+                     (no .cairn/vault.id) — run `cairn bootstrap` first",
+                    vault_root.display()
+                );
+                return ExitCode::from(78); // EX_CONFIG
+            }
+            verbs::status::VaultBinding::Invalid(reason) => {
+                eprintln!("cairn assemble_hot: vault binding error — {reason}");
+                return ExitCode::from(78); // EX_CONFIG
+            }
+        }
+    }
+    let config =
+        match cairn_cli::config::load(&vault_root, &cairn_cli::config::CliOverrides::default()) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("cairn assemble_hot: config error — {e:#}");
+                return ExitCode::from(78); // EX_CONFIG
+            }
+        };
+    verbs::assemble_hot::run(sub, &config)
 }
 
 fn run_admin(matches: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
