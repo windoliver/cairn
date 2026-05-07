@@ -37,6 +37,7 @@ use crate::identity::{guard::refuse_if_degraded, status::ReconciliationReport};
 
 use super::envelope::{emit_json, human_error, unimplemented_response};
 
+#[allow(dead_code, reason = "Task 6 wires folder apply through CLI routing")]
 mod apply;
 mod cache;
 mod extract;
