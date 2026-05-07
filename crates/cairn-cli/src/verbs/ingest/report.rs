@@ -25,6 +25,12 @@ pub struct FolderIngestSummary {
     pub contradictions_resolved: u64,
     /// Records written to the store.
     pub records_written: u64,
+    /// `FlushPlan` batches materialized for processed files.
+    pub plans: u64,
+    /// Requested maximum files per `FlushPlan`.
+    pub batch_size: u32,
+    /// Operation ids for materialized `FlushPlan` batches.
+    pub operation_ids: Vec<String>,
     /// Wall-clock runtime in milliseconds.
     pub elapsed_ms: u64,
     /// Whether the run avoided writing changes.
@@ -42,7 +48,7 @@ pub fn render_human(folder: &str, summary: &FolderIngestSummary) -> String {
     let elapsed_tenth = elapsed_tenths % 10;
 
     format!(
-        "Scanning {folder} ({} files)...\n  Cached  {} (no changes detected)\n  Processed {} files\n    Entities: {} new · {} merged\n    Edges:    {} new · {} contradictions resolved\n    Records:  {} written to store{}\nElapsed: {elapsed_seconds}.{elapsed_tenth}s\n",
+        "Scanning {folder} ({} files)...\n  Cached  {} (no changes detected)\n  Processed {} files\n    Entities: {} new · {} merged\n    Edges:    {} new · {} contradictions resolved\n    Records:  {} written to store{}\n    Plans:    {} batches (batch size {})\nElapsed: {elapsed_seconds}.{elapsed_tenth}s\n",
         summary.scanned,
         summary.cached,
         summary.processed,
@@ -52,6 +58,8 @@ pub fn render_human(folder: &str, summary: &FolderIngestSummary) -> String {
         summary.contradictions_resolved,
         summary.records_written,
         dry_run_suffix,
+        summary.plans,
+        summary.batch_size,
     )
 }
 
@@ -72,6 +80,9 @@ mod tests {
             edges_new: 1,
             contradictions_resolved: 0,
             records_written: 0,
+            plans: 2,
+            batch_size: 64,
+            operation_ids: vec!["01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned()],
             elapsed_ms: 2300,
             dry_run: true,
             mode: "keyword".to_string(),

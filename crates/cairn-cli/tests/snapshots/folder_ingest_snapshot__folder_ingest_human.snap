@@ -8,4 +8,5 @@ Scanning ./docs (3 files)...
     Entities: 5 new · 0 merged
     Edges:    1 new · 0 contradictions resolved
     Records:  0 written to store (dry-run)
+    Plans:    2 batches (batch size 64)
 Elapsed: 2.3s

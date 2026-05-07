@@ -22,7 +22,7 @@
 //! [`open_for_signed_verb`]: crate::identity::guard::open_for_signed_verb
 
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::Context as _;
@@ -37,17 +37,11 @@ use crate::identity::{guard::refuse_if_degraded, status::ReconciliationReport};
 
 use super::envelope::{emit_json, human_error, unimplemented_response};
 
-#[allow(dead_code, reason = "Task 6 wires folder apply through CLI routing")]
 mod apply;
 mod cache;
 mod extract;
-#[allow(dead_code, reason = "Task 6 wires --folder runtime routing")]
 mod folder;
 mod patterns;
-#[allow(
-    dead_code,
-    reason = "Task 5/6 wire planner through apply and folder routing"
-)]
 mod planner;
 pub mod report;
 mod scanner;
@@ -286,8 +280,12 @@ fn build_record_from_parsed(
 
 /// Run `cairn ingest`.
 #[must_use]
-pub fn run(sub: &ArgMatches) -> ExitCode {
+pub fn run(sub: &ArgMatches, vault_root: PathBuf) -> ExitCode {
     let json = sub.get_flag("json");
+    let has_folder = sub.get_one::<PathBuf>("folder").is_some();
+    if has_folder {
+        return folder::run(sub, vault_root);
+    }
 
     // --resync <path>: re-ingest an out-of-band edited markdown projection.
     if let Some(resync_path) = sub.get_one::<std::path::PathBuf>("resync") {

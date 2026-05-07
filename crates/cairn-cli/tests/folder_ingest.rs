@@ -20,6 +20,27 @@ fn json_stdout(out: &std::process::Output) -> Value {
 }
 
 #[test]
+fn folder_help_exposes_live_flags() {
+    let out = cli()
+        .args(["ingest", "--help"])
+        .output()
+        .expect("cairn ingest --help");
+
+    assert!(out.status.success(), "exit: {:?}", out.status);
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    for flag in [
+        "--folder",
+        "--include",
+        "--exclude",
+        "--mode",
+        "--batch-size",
+        "--dry-run",
+    ] {
+        assert!(stdout.contains(flag), "help missing {flag}:\n{stdout}");
+    }
+}
+
+#[test]
 fn folder_ingest_keyword_dry_run_json_succeeds_without_writes() {
     let dir = tempfile::tempdir().unwrap();
     write(
@@ -42,11 +63,17 @@ fn folder_ingest_keyword_dry_run_json_succeeds_without_writes() {
         .expect("cairn ingest --folder");
 
     assert_eq!(out.status.code(), Some(0), "exit: {:?}", out.status);
-    assert!(!dir.path().join(".cairn/cache").exists());
+    assert!(
+        !dir.path().join(".cairn").exists(),
+        "dry-run must not create vault state"
+    );
     let v = json_stdout(&out);
     for field in [
         "cached",
         "processed",
+        "plans",
+        "batch_size",
+        "operation_ids",
         "entities_new",
         "entities_merged",
         "edges_new",
@@ -56,7 +83,38 @@ fn folder_ingest_keyword_dry_run_json_succeeds_without_writes() {
         assert!(v.get(field).is_some(), "missing field {field}: {v}");
     }
     assert_eq!(v["processed"], 1);
+    assert_eq!(v["plans"], 1);
+    assert_eq!(v["batch_size"], 64);
+    assert_eq!(v["operation_ids"].as_array().unwrap().len(), 1);
     assert!(v["entities_new"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn batch_size_zero_exits_usage() {
+    let dir = tempfile::tempdir().unwrap();
+    write(&dir.path().join("docs/guide.md"), "# Cairn Guide\n");
+
+    let out = cli()
+        .current_dir(dir.path())
+        .args([
+            "ingest",
+            "--folder",
+            "docs",
+            "--mode",
+            "keyword",
+            "--batch-size",
+            "0",
+            "--json",
+        ])
+        .output()
+        .expect("cairn ingest --folder --batch-size 0");
+
+    assert_eq!(out.status.code(), Some(64), "exit: {:?}", out.status);
+    let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("batch-size") || stderr.contains("batch_size"),
+        "stderr missing batch-size diagnostic: {stderr:?}"
+    );
 }
 
 #[test]
@@ -127,8 +185,11 @@ fn second_non_dry_run_uses_cache() {
         .expect("first cairn ingest --folder");
     assert_eq!(first.status.code(), Some(0), "exit: {:?}", first.status);
     assert!(dir.path().join(".cairn/cache").exists());
+    assert!(dir.path().join(".cairn/cairn.db").exists());
     let first_json = json_stdout(&first);
-    assert_eq!(first_json["records_written"], 0);
+    assert_eq!(first_json["processed"], 1);
+    assert_eq!(first_json["records_written"], 1);
+    assert_eq!(first_json["plans"], 1);
 
     let second = cli()
         .current_dir(dir.path())
@@ -139,6 +200,8 @@ fn second_non_dry_run_uses_cache() {
     let v = json_stdout(&second);
     assert_eq!(v["cached"], 1);
     assert_eq!(v["processed"], 0);
+    assert_eq!(v["records_written"], 0);
+    assert_eq!(v["plans"], 0);
     assert!(v["elapsed_ms"].as_u64().unwrap() < 100);
 }
 
