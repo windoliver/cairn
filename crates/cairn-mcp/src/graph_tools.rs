@@ -229,11 +229,29 @@ pub async fn dispatch(
                 .await
                 .map_err(|e| e.to_string())
                 .and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string())),
-            Ok(GetEntityArgs::ByName { name }) => queries
-                .get_entity_by_name(name)
-                .await
-                .map_err(|e| e.to_string())
-                .and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string())),
+            Ok(GetEntityArgs::ByName { name }) => {
+                // Reject empty / whitespace-only names at the dispatch
+                // boundary: they normalize to `None` via
+                // `normalize_entity_name`, and a `null` "not found"
+                // result would otherwise mask the schema-level error
+                // the write-side `do_upsert_entity` already raises
+                // (`SchemaDrift("name normalizes to an empty key")`).
+                // Matching the two surfaces keeps clients from getting
+                // a soft-fail on read for input the write side
+                // would refuse.
+                if cairn_core::domain::graph::normalize_entity_name(&name).is_none() {
+                    Err(format!(
+                        "invalid args: name {name:?} normalizes to an empty key — \
+                         must contain at least one alphanumeric character"
+                    ))
+                } else {
+                    queries
+                        .get_entity_by_name(name)
+                        .await
+                        .map_err(|e| e.to_string())
+                        .and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string()))
+                }
+            }
             Err(e) => Err(format!("invalid args: {e}")),
         },
         "graph.get_neighbors" => {
@@ -334,5 +352,39 @@ pub async fn dispatch(
     match result {
         Ok(v) => CallToolResult::structured(v),
         Err(e) => CallToolResult::error(vec![Content::text(e)]),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test (issue-190 e2e finding): empty / whitespace-only
+    /// names must error at the dispatch boundary, not return a soft
+    /// `null` "not found". The write side (`do_upsert_entity`) already
+    /// rejects these inputs with `SchemaDrift`; reads must agree so a
+    /// caller cannot probe the graph with an empty key and silently
+    /// observe absence.
+    #[tokio::test]
+    async fn get_entity_by_name_rejects_empty_and_whitespace_names() {
+        let store = cairn_store_sqlite::open_in_memory()
+            .await
+            .expect("open in-memory store");
+        let scope = cairn_core::domain::ScopeTuple {
+            tenant: Some("acme".into()),
+            ..Default::default()
+        };
+        let queries = GraphQueries::new(std::sync::Arc::new(store), vec![scope], 0);
+
+        for bad in ["", "   ", "\t\n"] {
+            let mut args = Map::new();
+            args.insert("name".to_owned(), Value::String(bad.to_owned()));
+            let result = dispatch(&queries, "graph.get_entity", Some(args)).await;
+            assert_eq!(
+                result.is_error,
+                Some(true),
+                "name {bad:?} must produce an error result, not a `null` content"
+            );
+        }
     }
 }

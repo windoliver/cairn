@@ -748,12 +748,27 @@ impl McpGraphToolsStatus {
 /// Open the `SQLite` store at `vault_root` read-only and read its
 /// `MemoryStoreCapabilities`. Sync wrapper — `status` stays sync; no
 /// tokio runtime is built here.
+///
+/// A freshly bootstrapped vault has no `cairn.db` yet (the file is
+/// created on the first store-opening verb run). `peek_capabilities`
+/// reports that as [`StoreError::SchemaNotInitialized`]; we translate
+/// it into an empty [`MemoryStoreCapabilities`] so the predicate
+/// surfaces the post-bootstrap state as `unavailable /
+/// no_store_capability` rather than the alarming `probe_failed /
+/// store_open_error / sqlite error` an operator otherwise sees on a
+/// perfectly healthy vault (e2e finding).
 fn try_peek_store_capabilities(
     vault_root: &std::path::Path,
 ) -> Result<cairn_core::contract::memory_store::MemoryStoreCapabilities, Box<dyn std::error::Error>>
 {
     let db_path = crate::mcp::store_db_path(vault_root);
-    Ok(cairn_store_sqlite::peek_capabilities(&db_path)?)
+    match cairn_store_sqlite::peek_capabilities(&db_path) {
+        Ok(caps) => Ok(caps),
+        Err(cairn_store_sqlite::StoreError::SchemaNotInitialized) => {
+            Ok(cairn_core::contract::memory_store::MemoryStoreCapabilities::default())
+        }
+        Err(other) => Err(other.into()),
+    }
 }
 
 #[cfg(test)]

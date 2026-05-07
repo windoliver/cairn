@@ -372,10 +372,26 @@ fn read_record_vectors_dim(conn: &rusqlite::Connection) -> Result<usize, StoreEr
 /// Used only by `cairn status` for the graph-tools probe; do not reuse
 /// for runtime read paths (no connection pool, no FTS5, no extension load).
 ///
+/// A missing DB file is **not** an error: a freshly bootstrapped vault
+/// has no `cairn.db` until `cairn mcp` (or another store-opening verb)
+/// runs for the first time. Reporting `SchemaNotInitialized` for that
+/// case keeps the status surface honest — operators read
+/// `state: unavailable, reason: no_store_capability` instead of a
+/// scary `state: probe_failed, error: "sqlite error"`.
+///
 /// # Errors
-/// Returns [`StoreError::SchemaNotInitialized`] when `schema_migrations`
-/// is absent, or [`StoreError::Sqlite`] on any underlying `rusqlite` error.
+/// Returns [`StoreError::SchemaNotInitialized`] when the file does not
+/// exist or when `schema_migrations` is absent, or [`StoreError::Sqlite`]
+/// on any underlying `rusqlite` error.
 pub fn peek_capabilities(path: &Path) -> Result<MemoryStoreCapabilities, StoreError> {
+    // A missing DB file means "vault bootstrapped but never opened" —
+    // that is the normal post-bootstrap state and must not surface as
+    // a probe failure. Stat before open; rusqlite would otherwise
+    // bubble a generic "unable to open database file" sqlite error
+    // that the status surface reports as `probe_failed`.
+    if !path.exists() {
+        return Err(StoreError::SchemaNotInitialized);
+    }
     let conn = rusqlite::Connection::open_with_flags(
         path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
