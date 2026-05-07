@@ -333,7 +333,7 @@ fn explicitly_included_unsupported_files_are_warned_and_not_cached() {
 }
 
 #[test]
-fn docs_folder_keyword_dry_run_extracts_entities() {
+fn docs_folder_keyword_dry_run_extracts_entities_and_plans() {
     let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
@@ -347,6 +347,8 @@ fn docs_folder_keyword_dry_run_extracts_entities() {
             "docs",
             "--mode",
             "keyword",
+            "--batch-size",
+            "64",
             "--dry-run",
             "--json",
         ])
@@ -356,4 +358,6 @@ fn docs_folder_keyword_dry_run_extracts_entities() {
     assert_eq!(out.status.code(), Some(0), "exit: {:?}", out.status);
     let v = json_stdout(&out);
     assert!(v["entities_new"].as_u64().unwrap() > 0);
+    assert!(v["plans"].as_u64().unwrap() > 0);
+    assert_eq!(v["records_written"], 0);
 }
