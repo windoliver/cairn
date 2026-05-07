@@ -30,7 +30,7 @@ pub use identity::SqliteIdentityRegistry;
 pub use lint::{EdgeLintReport, lint_edges, resolve_edge_contradictions};
 pub use open::{
     open, open_in_memory, open_in_memory_with_embedder, open_in_memory_with_embedder_and_config,
-    open_with_embedder, open_with_embedder_and_config,
+    open_with_embedder, open_with_embedder_and_config, peek_capabilities,
 };
 #[cfg(any(test, feature = "test-helpers"))]
 pub use open::{open_in_memory_sync, open_sync};

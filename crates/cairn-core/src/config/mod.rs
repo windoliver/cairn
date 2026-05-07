@@ -1,5 +1,33 @@
 //! Typed config structs for `.cairn/config.yaml` (brief §3.1, §4.1, §5.2.a).
 
+pub mod mcp;
+pub use mcp::{McpConfig, McpStdioConfig};
+
+/// Validate `[mcp.*]` invariants beyond what serde alone enforces.
+///
+/// # Errors
+/// - [`ConfigError::McpStdioMissingPrincipal`] when
+///   `[mcp.stdio] single_tenant = true` is set without a `principal`.
+/// - [`ConfigError::McpStdioInvalidPrincipal`] when the configured principal
+///   fails [`crate::domain::ScopeTuple::validate`] — empty components,
+///   reserved characters, or the unsupported `project` dimension. The
+///   graph-tools matcher binds only the six IDL-addressable dimensions,
+///   so a `project`-bearing principal would be silently broadened at
+///   read time; we fail closed at config-load instead.
+pub fn validate_mcp_config(cfg: &McpConfig) -> Result<(), ConfigError> {
+    if cfg.stdio.single_tenant && cfg.stdio.principal.is_none() {
+        return Err(ConfigError::McpStdioMissingPrincipal);
+    }
+    if let Some(principal) = cfg.stdio.principal.as_ref() {
+        principal
+            .validate()
+            .map_err(|err| ConfigError::McpStdioInvalidPrincipal {
+                message: err.to_string(),
+            })?;
+    }
+    Ok(())
+}
+
 pub mod vault_registry;
 pub use vault_registry::{VaultEntry, VaultRegistry};
 
@@ -41,6 +69,18 @@ pub enum ConfigError {
     /// A `${VAR}` placeholder in the YAML file references an unset env var.
     #[error("unresolved env var in config: ${{{0}}}")]
     UnresolvedEnvVar(String),
+    /// `[mcp.stdio] single_tenant = true` was set but no `principal` was
+    /// provided.
+    #[error("[mcp.stdio] single_tenant = true requires a `principal` scope tuple")]
+    McpStdioMissingPrincipal,
+    /// `[mcp.stdio].principal` failed `ScopeTuple::validate` (malformed
+    /// components or unsupported dimension). The error text from the
+    /// underlying domain check is carried in `message`.
+    #[error("[mcp.stdio].principal is malformed: {message}")]
+    McpStdioInvalidPrincipal {
+        /// Stringified `DomainError::MalformedScope` body.
+        message: String,
+    },
 }
 
 /// Vault storage tier (§3.1).
@@ -403,6 +443,8 @@ pub struct CairnConfig {
     pub workflows: WorkflowsConfig,
     /// Pipeline stage configuration.
     pub pipeline: PipelineConfig,
+    /// MCP transport configuration (issue #190).
+    pub mcp: McpConfig,
 }
 
 // ── Vault ─────────────────────────────────────────────────────────────────
@@ -862,6 +904,66 @@ impl CairnConfig {
     #[must_use]
     pub fn capabilities_no_model(&self) -> CapabilitySet {
         self.capabilities(false)
+    }
+
+    /// Run cross-section invariants that serde alone cannot express.
+    ///
+    /// Currently checks:
+    /// - `[mcp.stdio] single_tenant + principal` consistency
+    ///   ([`validate_mcp_config`]).
+    ///
+    /// Existing validators (pipeline, retention, etc.) keep their own
+    /// entry points; this method composes the new MCP check without
+    /// disturbing them.
+    ///
+    /// # Errors
+    /// Returns the first [`ConfigError`] encountered.
+    pub fn validate_mcp(&self) -> Result<(), ConfigError> {
+        validate_mcp_config(&self.mcp)
+    }
+
+    /// Single shared predicate that gates `cairn status` MCP-graph reporting
+    /// and the MCP `tools/list` / `tools/call` graph-tool advertisement.
+    /// Both surfaces read the same function so they cannot drift.
+    ///
+    /// The deliberate fall-through order (most-specific reason wins) is:
+    ///
+    /// 1. `single_tenant == false` → `UnavailableSingleTenantOff`
+    /// 2. else if `scope.is_none()` → `UnavailableNoScopeResolver`
+    /// 3. else if `!store_caps.graph_edges` → `UnavailableNoStoreCapability`
+    /// 4. else → `Available { tool_count: 5 }` (Plan C: graph tools landed)
+    ///
+    /// Note: the predicate does **not** call `scope.allowed_scopes`. That
+    /// single resolver call lives in `Handler::materialize_graph_request`,
+    /// which calls this predicate first and then resolves scopes exactly once.
+    ///
+    /// The `transport` argument is currently always `Stdio` and the body
+    /// branches only on `Stdio`. Future SSE / HTTP transports add their
+    /// own branches with their own per-transport preconditions.
+    #[must_use]
+    pub fn mcp_graph_tools_available(
+        &self,
+        scope: Option<&dyn crate::mcp_auth::McpSessionScope>,
+        transport: crate::mcp_auth::McpTransport,
+        store_caps: &crate::contract::memory_store::MemoryStoreCapabilities,
+    ) -> crate::mcp_auth::McpGraphAvailability {
+        use crate::mcp_auth::{McpGraphAvailability, McpTransport};
+
+        match transport {
+            McpTransport::Stdio => {
+                if !self.mcp.stdio.single_tenant {
+                    return McpGraphAvailability::UnavailableSingleTenantOff;
+                }
+                if scope.is_none() {
+                    return McpGraphAvailability::UnavailableNoScopeResolver;
+                }
+                if !store_caps.graph_edges {
+                    return McpGraphAvailability::UnavailableNoStoreCapability;
+                }
+                // Plan C: graph tools have landed; advertise them.
+                McpGraphAvailability::Available { tool_count: 5 }
+            }
+        }
     }
 }
 
@@ -1342,6 +1444,36 @@ rerank_topk: 20
         assert_eq!(c, again);
     }
 
+    #[test]
+    fn validate_mcp_rejects_single_tenant_without_principal() {
+        let mut cfg = CairnConfig::default();
+        cfg.mcp.stdio.single_tenant = true;
+        cfg.mcp.stdio.principal = None;
+        let err = cfg.validate_mcp().unwrap_err();
+        assert!(
+            matches!(err, ConfigError::McpStdioMissingPrincipal),
+            "got: {err:?}",
+        );
+    }
+
+    #[test]
+    fn validate_mcp_accepts_single_tenant_with_principal() {
+        let mut cfg = CairnConfig::default();
+        cfg.mcp.stdio.single_tenant = true;
+        cfg.mcp.stdio.principal = Some(crate::domain::ScopeTuple {
+            tenant: Some("acme".into()),
+            ..crate::domain::ScopeTuple::default()
+        });
+        cfg.validate_mcp().expect("valid config");
+    }
+
+    #[test]
+    fn validate_mcp_accepts_default_config() {
+        // Default: single_tenant = false, principal = None — cleanly valid.
+        let cfg = CairnConfig::default();
+        cfg.validate_mcp().expect("default config is valid");
+    }
+
     proptest! {
         #[test]
         fn default_config_json_round_trip(_seed in 0u8..1) {
@@ -1352,5 +1484,118 @@ rerank_topk: 20
             let restored: CairnConfig = serde_json::from_str(&json).unwrap();
             prop_assert_eq!(original, restored);
         }
+    }
+
+    use crate::contract::memory_store::MemoryStoreCapabilities;
+    use crate::mcp_auth::{ConfigBackedScope, McpGraphAvailability, McpSessionScope, McpTransport};
+
+    fn store_caps_with_graph(graph: bool) -> MemoryStoreCapabilities {
+        MemoryStoreCapabilities {
+            fts: true,
+            vector: false,
+            graph_edges: graph,
+            transactions: true,
+            per_record_consent_model: true,
+        }
+    }
+
+    fn principal_acme() -> crate::domain::ScopeTuple {
+        crate::domain::ScopeTuple {
+            tenant: Some("acme".into()),
+            ..crate::domain::ScopeTuple::default()
+        }
+    }
+
+    #[test]
+    fn graph_tools_unavailable_when_single_tenant_off() {
+        let cfg = CairnConfig::default(); // single_tenant defaults to false
+        let scope = ConfigBackedScope::new(principal_acme());
+        let caps = store_caps_with_graph(true);
+        let s: &dyn McpSessionScope = &scope;
+        let avail = cfg.mcp_graph_tools_available(Some(s), McpTransport::Stdio, &caps);
+        assert_eq!(avail, McpGraphAvailability::UnavailableSingleTenantOff);
+    }
+
+    #[test]
+    fn graph_tools_unavailable_when_no_scope_resolver() {
+        let mut cfg = CairnConfig::default();
+        cfg.mcp.stdio.single_tenant = true;
+        cfg.mcp.stdio.principal = Some(principal_acme());
+        let caps = store_caps_with_graph(true);
+        let avail = cfg.mcp_graph_tools_available(None, McpTransport::Stdio, &caps);
+        assert_eq!(avail, McpGraphAvailability::UnavailableNoScopeResolver);
+    }
+
+    #[test]
+    fn graph_tools_unavailable_when_store_lacks_graph_capability() {
+        let mut cfg = CairnConfig::default();
+        cfg.mcp.stdio.single_tenant = true;
+        cfg.mcp.stdio.principal = Some(principal_acme());
+        let scope = ConfigBackedScope::new(principal_acme());
+        let caps = store_caps_with_graph(false);
+        let s: &dyn McpSessionScope = &scope;
+        let avail = cfg.mcp_graph_tools_available(Some(s), McpTransport::Stdio, &caps);
+        assert_eq!(avail, McpGraphAvailability::UnavailableNoStoreCapability);
+    }
+
+    /// Minimal static scope for tests — returns a fixed allowed-scope set.
+    struct StaticScope {
+        allowed: Vec<crate::domain::ScopeTuple>,
+    }
+
+    impl StaticScope {
+        fn new(allowed: Vec<crate::domain::ScopeTuple>) -> Self {
+            Self { allowed }
+        }
+    }
+
+    impl McpSessionScope for StaticScope {
+        fn allowed_scopes(
+            &self,
+            _ctx: &crate::mcp_auth::McpAuthContext<'_>,
+        ) -> Result<Vec<crate::domain::ScopeTuple>, crate::mcp_auth::ScopeResolutionError> {
+            Ok(self.allowed.clone())
+        }
+    }
+
+    fn config_with_single_tenant_stdio() -> CairnConfig {
+        let mut cfg = CairnConfig::default();
+        cfg.mcp.stdio.single_tenant = true;
+        cfg.mcp.stdio.principal = Some(principal_acme());
+        cfg
+    }
+
+    /// Plan C: with all conditions met, the predicate must return
+    /// `Available { tool_count: 5 }`.
+    #[test]
+    fn mcp_graph_tools_available_returns_five_when_all_conditions_hold() {
+        let cfg = config_with_single_tenant_stdio();
+        let store_caps = MemoryStoreCapabilities {
+            graph_edges: true,
+            ..Default::default()
+        };
+        let scope = StaticScope::new(vec![crate::domain::ScopeTuple::default()]);
+        let av = cfg.mcp_graph_tools_available(Some(&scope), McpTransport::Stdio, &store_caps);
+        assert!(
+            matches!(av, McpGraphAvailability::Available { tool_count: 5 }),
+            "Plan C: all conditions met must return Available{{5}}; got {av:?}",
+        );
+    }
+
+    /// Previously the Plan A test. Now that Plan C has landed, the same
+    /// all-conditions-hold scenario must return `Available { tool_count: 5 }`.
+    #[test]
+    fn graph_tools_available_when_all_conditions_hold() {
+        let mut cfg = CairnConfig::default();
+        cfg.mcp.stdio.single_tenant = true;
+        cfg.mcp.stdio.principal = Some(principal_acme());
+        let scope = ConfigBackedScope::new(principal_acme());
+        let caps = store_caps_with_graph(true);
+        let s: &dyn McpSessionScope = &scope;
+        let avail = cfg.mcp_graph_tools_available(Some(s), McpTransport::Stdio, &caps);
+        assert!(
+            matches!(avail, McpGraphAvailability::Available { tool_count: 5 }),
+            "Plan C must emit Available{{5}} when all conditions hold; got {avail:?}",
+        );
     }
 }

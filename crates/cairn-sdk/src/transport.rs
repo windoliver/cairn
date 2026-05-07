@@ -15,7 +15,10 @@ use cairn_core::config::CairnConfig;
 use cairn_core::contract::memory_store::MemoryStore;
 use cairn_core::generated::common::Capabilities;
 use cairn_core::generated::handshake::{HandshakeResponse, HandshakeResponseChallenge};
-use cairn_core::generated::status::{StatusResponse, StatusResponseServerInfo};
+use cairn_core::generated::status::{
+    StatusResponse, StatusResponseMcpGraphTools, StatusResponseMcpGraphToolsProbeBasis,
+    StatusResponseMcpGraphToolsReason, StatusResponseMcpGraphToolsState, StatusResponseServerInfo,
+};
 use cairn_core::generated::verbs::{
     assemble_hot::{AssembleHotArgs, AssembleHotData},
     capture_trace::{CaptureTraceArgs, CaptureTraceData},
@@ -181,6 +184,25 @@ impl<T: Transport> Sdk<T> {
             // `crates/cairn-cli/src/verbs/status.rs` for the
             // long-form note.
             pipeline_dispatch: Some(pipeline_dispatch_advertisement(&DefaultRegistry)),
+            // The SDK does not host an MCP server and cannot peek a
+            // store's schema the way `cairn status` does. The closest
+            // truthful answer is the same one the CLI emits when
+            // there is no bound vault to probe: `state: no_vault,
+            // reason: vault_not_bound, probe_basis: config_only`.
+            // Both `Sdk::new()` and `Sdk::with_store(...)` resolve to
+            // this state — the SDK has no MCP transport regardless of
+            // store binding, so a graph-tools verdict is not
+            // negotiable from this surface. Aligned with the CLI's
+            // `ResolvedAvailability::NoVault` branch in
+            // `verbs::status::McpGraphToolsStatus::from_resolved` so
+            // the `status_parity_cli_vs_sdk` test enforces equality.
+            mcp_graph_tools: Some(StatusResponseMcpGraphTools {
+                state: StatusResponseMcpGraphToolsState::NoVault,
+                reason: Some(StatusResponseMcpGraphToolsReason::VaultNotBound),
+                tool_count: None,
+                probe_basis: StatusResponseMcpGraphToolsProbeBasis::ConfigOnly,
+                error: None,
+            }),
         }
     }
 

@@ -77,6 +77,18 @@ impl Default for SqliteMemoryStore {
 }
 
 impl SqliteMemoryStore {
+    /// Read-path connection accessor. Clones the underlying
+    /// `Arc<AsyncConn>` and maps the absent-store case to
+    /// `StoreError`. Returning the cloned `Arc` (not a reference)
+    /// lets `GraphQueries` move the handle into the
+    /// `tokio_rusqlite::Connection::call(move |c| { … })` closure
+    /// without borrowing `&self`.
+    pub fn read_conn(&self) -> Result<Arc<AsyncConn>, StoreError> {
+        self.require_conn("read_conn").map(Arc::clone)
+    }
+}
+
+impl SqliteMemoryStore {
     /// Borrow the underlying `tokio_rusqlite` handle, returning a typed
     /// `not initialized` error when the store was constructed via
     /// [`Default::default`] (registry stub).

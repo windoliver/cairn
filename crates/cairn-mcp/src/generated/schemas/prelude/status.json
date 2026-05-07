@@ -290,6 +290,51 @@
       "type": "array",
       "uniqueItems": true
     },
+    "mcp_graph_tools": {
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "probe_basis": {
+          "enum": [
+            "full",
+            "config_only"
+          ],
+          "type": "string"
+        },
+        "reason": {
+          "enum": [
+            "single_tenant_off",
+            "no_store_capability",
+            "no_scope_resolver",
+            "store_open_error",
+            "vault_not_bound",
+            "resolver_empty"
+          ],
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "available",
+            "unavailable",
+            "probe_failed",
+            "no_vault"
+          ],
+          "type": "string"
+        },
+        "tool_count": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "state",
+        "probe_basis"
+      ],
+      "type": "object"
+    },
     "pipeline_dispatch": {
       "description": "Per-(source_family, tool_id) routing decisions for the Capture → Extract pipeline (issue #217). Each entry tells clients whether captured payloads flow through `squash` (lossy compaction) or `bypass` (raw bytes). Entries MUST be sorted lexicographically by (source_family, tool_id ?? \"\") for byte-stable status responses across an incarnation (brief §8.0.a). Optional and additive — not in `required[]` so a pre-#217 server's response (no field) deserializes against this schema.",
       "items": {

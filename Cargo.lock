@@ -571,12 +571,18 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "cairn-core",
+ "cairn-store-sqlite",
  "cairn-test-fixtures",
+ "chrono",
  "insta",
+ "memchr",
  "rmcp",
+ "schemars",
+ "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -619,6 +625,7 @@ dependencies = [
  "cairn-test-fixtures",
  "chrono",
  "ed25519-dalek",
+ "indexmap",
  "insta",
  "parking_lot",
  "proptest",

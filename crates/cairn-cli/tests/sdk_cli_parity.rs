@@ -77,6 +77,13 @@ fn status_parity_cli_vs_sdk() {
     let mut cli = run_json(&["status", "--json"]);
     let mut sdk = serde_json::to_value(Sdk::new().status()).expect("sdk status serializes");
 
+    // Both surfaces run from a vault-less, config-less context here
+    // (CLI is forced into the OS tempdir; `Sdk::new()` has no store).
+    // Under those conditions both surfaces must emit
+    // `mcp_graph_tools = None` — the CLI has no config to validate
+    // and the SDK has no MCP server to probe. Enforcing equality on
+    // the field catches regressions where one adapter starts
+    // synthesizing a value the other cannot.
     let volatile: &[&[&str]] = &[
         &["server_info", "incarnation"],
         &["server_info", "started_at"],

@@ -362,6 +362,93 @@ fn read_record_vectors_dim(conn: &rusqlite::Connection) -> Result<usize, StoreEr
     })
 }
 
+/// Open the `SQLite` file at `path` read-only, with no migrations run, and
+/// read just enough of the schema to derive the public
+/// [`MemoryStoreCapabilities`]. Returns a typed
+/// [`StoreError::SchemaNotInitialized`] when the expected
+/// `schema_migrations` table is absent — meaning the vault has never been
+/// opened by `cairn mcp` / `cairn ingest`.
+///
+/// Used only by `cairn status` for the graph-tools probe; do not reuse
+/// for runtime read paths (no connection pool, no FTS5, no extension load).
+///
+/// A missing DB file is **not** an error: a freshly bootstrapped vault
+/// has no `cairn.db` until `cairn mcp` (or another store-opening verb)
+/// runs for the first time. Reporting `SchemaNotInitialized` for that
+/// case keeps the status surface honest — operators read
+/// `state: unavailable, reason: no_store_capability` instead of a
+/// scary `state: probe_failed, error: "sqlite error"`.
+///
+/// # Errors
+/// Returns [`StoreError::SchemaNotInitialized`] when the file does not
+/// exist or when `schema_migrations` is absent, or [`StoreError::Sqlite`]
+/// on any underlying `rusqlite` error.
+pub fn peek_capabilities(path: &Path) -> Result<MemoryStoreCapabilities, StoreError> {
+    // A missing DB file means "vault bootstrapped but never opened" —
+    // that is the normal post-bootstrap state and must not surface as
+    // a probe failure. Stat before open; rusqlite would otherwise
+    // bubble a generic "unable to open database file" sqlite error
+    // that the status surface reports as `probe_failed`.
+    if !path.exists() {
+        return Err(StoreError::SchemaNotInitialized);
+    }
+    let conn = rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+
+    // Check whether `schema_migrations` exists — absence means the vault
+    // has never been initialized and we must not manufacture a synthetic
+    // "capabilities absent" answer.
+    let has_migrations: bool = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_schema \
+         WHERE type = 'table' AND name = 'schema_migrations'",
+        [],
+        |r| r.get::<_, i64>(0),
+    )? > 0;
+    if !has_migrations {
+        return Err(StoreError::SchemaNotInitialized);
+    }
+
+    // Derive each capability from the *actual* schema tables that back it,
+    // rather than inheriting the unconditional `base_caps(...)` defaults: an
+    // older vault with `schema_migrations` present but pre-graph migrations
+    // would otherwise advertise `graph_edges: true` even though
+    // `entity_nodes`/`entity_edges` do not exist yet. That would break the
+    // fail-closed capability contract `cairn status` reports against.
+    let table_exists = |name: &str| -> Result<bool, StoreError> {
+        Ok(conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_schema \
+             WHERE type = 'table' AND name = ?1",
+            [name],
+            |r| r.get::<_, i64>(0),
+        )? > 0)
+    };
+
+    let has_record_vectors = table_exists("record_vectors")?;
+    let has_records_fts = table_exists("records_fts")?;
+    // Graph queries (`entity_graph::queries`) unconditionally join
+    // `entity_episodes` through their shared `visible_nodes` CTE — an
+    // older vault with the original `entity_nodes` + `entity_edges`
+    // tables but missing migration 0044 would otherwise be advertised
+    // as graph-capable here and then fail at query time with
+    // `no such table: entity_episodes`. Probe the full schema
+    // dependency set so `cairn status` matches the query layer's real
+    // requirements.
+    let has_entity_graph = table_exists("entity_nodes")?
+        && table_exists("entity_edges")?
+        && table_exists("entity_episodes")?;
+    let has_consent_timeline = table_exists("consent_timeline")?;
+
+    Ok(MemoryStoreCapabilities {
+        fts: has_records_fts,
+        vector: has_record_vectors,
+        graph_edges: has_entity_graph,
+        transactions: true,
+        per_record_consent_model: has_consent_timeline,
+    })
+}
+
 /// Sync open at `path`, returning a raw `rusqlite::Connection`. For tests
 /// that drive SQL directly (drift detection, migration validation). Not
 /// part of the production API — gated behind `test-helpers` feature.

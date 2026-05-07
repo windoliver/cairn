@@ -75,4 +75,7 @@ pipeline:
         max_tokens: null
         max_wall_ms: null
         max_turns: null
+mcp:
+  stdio:
+    single_tenant: false
 ```
