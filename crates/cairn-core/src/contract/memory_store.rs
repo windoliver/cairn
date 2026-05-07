@@ -32,7 +32,6 @@ pub struct MemoryStoreCapabilities {
 /// Brief §4 row 1: P0 default is pure `SQLite` + FTS5; P1 default is the
 /// Nexus sandbox profile. Method bodies arrive in #46 once `MemoryRecord`
 /// (sub-issue #37) lands.
-#[async_trait::async_trait]
 pub trait MemoryStore: Send + Sync {
     /// Stable identifier of the registered plugin instance.
     fn name(&self) -> &str;
@@ -50,7 +49,6 @@ mod tests {
 
     struct StubStore;
 
-    #[async_trait::async_trait]
     impl MemoryStore for StubStore {
         fn name(&self) -> &'static str {
             "stub"

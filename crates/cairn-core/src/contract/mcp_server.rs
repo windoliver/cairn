@@ -33,7 +33,6 @@ pub struct MCPServerCapabilities {
 /// and extension negotiation are P1.
 // Matches brief §4 row 5 trait name; CLAUDE.md §1 says brief wins.
 #[allow(clippy::upper_case_acronyms)]
-#[async_trait::async_trait]
 pub trait MCPServer: Send + Sync {
     /// Stable identifier of the registered plugin instance.
     fn name(&self) -> &str;
@@ -51,7 +50,6 @@ mod tests {
 
     struct StubMcp;
 
-    #[async_trait::async_trait]
     impl MCPServer for StubMcp {
         fn name(&self) -> &'static str {
             "stub-mcp"

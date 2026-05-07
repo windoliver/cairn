@@ -29,7 +29,6 @@ pub struct FrontendAdapterCapabilities {
 ///
 /// Brief §4 row 7: P1 forward stub. Method surface and conformance suite
 /// ship in #113.
-#[async_trait::async_trait]
 #[doc(hidden)]
 pub trait FrontendAdapter: Send + Sync {
     /// Stable identifier of the registered plugin instance.

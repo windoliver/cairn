@@ -12,7 +12,6 @@ description = "Background workflows host (consolidate, promote, expire, evaluate
 
 [dependencies]
 cairn-core = { workspace = true }
-async-trait = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
 tracing = { workspace = true }
 

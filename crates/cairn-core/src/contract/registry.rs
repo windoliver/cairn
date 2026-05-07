@@ -577,7 +577,6 @@ mod tests {
         range: VersionRange,
     }
 
-    #[async_trait::async_trait]
     impl MemoryStore for StubStore {
         fn name(&self) -> &str {
             self.name
@@ -739,7 +738,6 @@ patch = 0
             name: &'static str,
             range: VersionRange,
         }
-        #[async_trait::async_trait]
         impl crate::contract::llm_provider::LLMProvider for StubLlm {
             fn name(&self) -> &str {
                 self.name
@@ -812,7 +810,6 @@ patch = 0
             name: &'static str,
             range: VersionRange,
         }
-        #[async_trait::async_trait]
         impl crate::contract::llm_provider::LLMProvider for StubLlm {
             fn name(&self) -> &str {
                 self.name

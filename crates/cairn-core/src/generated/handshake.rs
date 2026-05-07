@@ -21,4 +21,4 @@ pub struct HandshakeResponse {
     pub contract: String,
 }
 
-pub const SCHEMA: &[u8] = include_bytes!("../../../cairn-mcp/src/generated/schemas/prelude/handshake.json");
+pub const SCHEMA: &[u8] = include_bytes!("schemas/prelude/handshake.json");

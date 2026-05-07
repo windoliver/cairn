@@ -26,7 +26,6 @@ pub const ACCEPTED_RANGE: VersionRange =
 #[derive(Default)]
 pub struct LocalSensorIngress;
 
-#[async_trait::async_trait]
 impl SensorIngress for LocalSensorIngress {
     fn name(&self) -> &str {
         PLUGIN_NAME

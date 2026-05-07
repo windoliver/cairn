@@ -26,7 +26,6 @@ pub struct LLMProviderCapabilities {
 ///
 /// Default impl in #144: `cairn-llm-openai-compat` over `async-openai`
 /// with configurable `base_url` (`OpenAI` / `Ollama` / `vLLM` / `LiteLLM` / …).
-#[async_trait::async_trait]
 pub trait LLMProvider: Send + Sync {
     /// Stable identifier of the registered plugin instance.
     fn name(&self) -> &str;
@@ -44,7 +43,6 @@ mod tests {
 
     struct StubLlm;
 
-    #[async_trait::async_trait]
     impl LLMProvider for StubLlm {
         fn name(&self) -> &'static str {
             "stub-llm"

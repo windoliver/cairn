@@ -1,0 +1,37 @@
+{
+  "$defs": {
+    "Cursor": {
+      "description": "Opaque continuation token. Shared by every request cursor input and every response next_cursor so the pagination round-trip is validator-symmetric — a server cannot emit a cursor the next request cannot carry.",
+      "maxLength": 512,
+      "minLength": 1,
+      "type": "string"
+    },
+    "Ed25519Signature": {
+      "description": "Ed25519 signature: 64 raw bytes rendered as 128 lowercase hex chars after the `ed25519:` tag.",
+      "pattern": "^ed25519:[0-9a-f]{128}$",
+      "type": "string"
+    },
+    "Identity": {
+      "description": "AgentIdentity, HumanIdentity, or SensorIdentity. Examples: agt:claude-code:opus-4-7:reviewer:v1, usr:alice, snr:local:screen:host:v1.",
+      "minLength": 1,
+      "pattern": "^(agt|usr|snr):[A-Za-z0-9._:-]+$",
+      "type": "string"
+    },
+    "Nonce16Base64": {
+      "contentEncoding": "base64",
+      "description": "16 random bytes, base64-encoded. 22 significant chars + optional `==` padding; the 22nd significant char is constrained to [AQgw] so the trailing 4 bits are zero — this is the unique canonical encoding of exactly 16 bytes, rejecting non-canonical variants that strict decoders would refuse.",
+      "pattern": "^[A-Za-z0-9+/]{21}[AQgw](==)?$",
+      "type": "string"
+    },
+    "Ulid": {
+      "description": "Crockford base32 ULID — 26 characters, upper case, 48-bit ms timestamp + 80-bit entropy.",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+      "type": "string"
+    }
+  },
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/common/primitives.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Shared assertion-bearing primitives referenced across envelope/prelude/verb files. Keeping these in one place prevents identifier and crypto patterns from drifting between call sites.",
+  "title": "Cairn primitive types",
+  "x-cairn-contract": "cairn.mcp.v1"
+}

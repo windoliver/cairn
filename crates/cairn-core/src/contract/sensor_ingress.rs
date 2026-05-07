@@ -26,7 +26,6 @@ pub struct SensorIngressCapabilities {
 ///
 /// Brief §4 row 4: P0 is hook sensors only (#84). IDE/clipboard/screen/web
 /// are P1; Slack/email/GitHub are P2. All share this trait.
-#[async_trait::async_trait]
 pub trait SensorIngress: Send + Sync {
     /// Stable identifier of the registered plugin instance.
     fn name(&self) -> &str;
@@ -44,7 +43,6 @@ mod tests {
 
     struct StubSensor;
 
-    #[async_trait::async_trait]
     impl SensorIngress for StubSensor {
         fn name(&self) -> &'static str {
             "stub-sensor"

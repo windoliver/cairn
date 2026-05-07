@@ -26,7 +26,6 @@ pub const ACCEPTED_RANGE: VersionRange =
 #[derive(Default)]
 pub struct InProcessOrchestrator;
 
-#[async_trait::async_trait]
 impl WorkflowOrchestrator for InProcessOrchestrator {
     fn name(&self) -> &str {
         PLUGIN_NAME

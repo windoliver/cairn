@@ -23,4 +23,4 @@ pub struct AssembleHotData {
     pub prefix: String,
 }
 
-pub const ARGS_SCHEMA: &[u8] = include_bytes!("../../../../cairn-mcp/src/generated/schemas/verbs/assemble_hot.json");
+pub const ARGS_SCHEMA: &[u8] = include_bytes!("../schemas/verbs/assemble_hot.json");

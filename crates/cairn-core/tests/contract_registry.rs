@@ -14,7 +14,6 @@ mod compatible_plugin {
     #[derive(Default)]
     pub struct FakeStore;
 
-    #[async_trait::async_trait]
     impl MemoryStore for FakeStore {
         fn name(&self) -> &'static str {
             "fake-compat"
@@ -42,7 +41,6 @@ mod future_plugin {
     #[derive(Default)]
     pub struct FutureStore;
 
-    #[async_trait::async_trait]
     impl MemoryStore for FutureStore {
         fn name(&self) -> &'static str {
             "fake-future"
@@ -129,7 +127,6 @@ patch = 0
     #[derive(Default)]
     pub struct FakeStore;
 
-    #[async_trait::async_trait]
     impl MemoryStore for FakeStore {
         fn name(&self) -> &'static str {
             "fake-with-manifest"

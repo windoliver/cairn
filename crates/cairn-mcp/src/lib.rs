@@ -41,7 +41,6 @@ pub const ACCEPTED_RANGE: VersionRange =
 #[derive(Default)]
 pub struct CairnMcpServer;
 
-#[async_trait::async_trait]
 impl MCPServer for CairnMcpServer {
     fn name(&self) -> &str {
         PLUGIN_NAME

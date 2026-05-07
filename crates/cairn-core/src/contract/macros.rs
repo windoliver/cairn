@@ -40,7 +40,6 @@
 /// #[derive(Default)]
 /// struct MyStore;
 ///
-/// #[async_trait::async_trait]
 /// impl MemoryStore for MyStore {
 ///     fn name(&self) -> &str { "acme-store" }
 ///     fn capabilities(&self) -> &MemoryStoreCapabilities {
@@ -93,7 +92,6 @@
 /// #[derive(Default)]
 /// struct MyStore;
 ///
-/// #[async_trait::async_trait]
 /// impl MemoryStore for MyStore {
 ///     fn name(&self) -> &str { "acme-store" }
 ///     fn capabilities(&self) -> &MemoryStoreCapabilities {

@@ -7,6 +7,9 @@ use cairn_core::generated::envelope::{
     Response, ResponsePolicyTrace, ResponseStatus, ResponseVerb,
 };
 
+/// `sysexits.h` `EX_UNAVAILABLE`.
+pub const EX_UNAVAILABLE: u8 = 69;
+
 /// Generate a fresh Crockford base32 ULID suitable for `operation_id`.
 #[must_use]
 pub fn new_operation_id() -> Ulid {
@@ -38,6 +41,27 @@ pub fn unimplemented_response(verb: ResponseVerb) -> Response {
         operation_id: new_operation_id(),
         policy_trace: Vec::<ResponsePolicyTrace>::new(),
         status: ResponseStatus::Aborted,
+        target: None,
+        verb,
+    }
+}
+
+/// Build a `CapabilityUnavailable` rejected response for a known but disabled mode.
+#[must_use]
+pub fn capability_unavailable_response(verb: ResponseVerb, capability: &str) -> Response {
+    Response {
+        contract: "cairn.mcp.v1".to_owned(),
+        data: None,
+        error: Some(serde_json::json!({
+            "code": "CapabilityUnavailable",
+            "message": "capability is not advertised in this build",
+            "data": {
+                "capability": capability,
+            },
+        })),
+        operation_id: new_operation_id(),
+        policy_trace: Vec::<ResponsePolicyTrace>::new(),
+        status: ResponseStatus::Rejected,
         target: None,
         verb,
     }
@@ -119,6 +143,21 @@ mod tests {
         assert!(resp.target.is_none());
         let err = resp.error.expect("aborted response must have error");
         assert_eq!(err["code"], "Internal");
+        assert!(!err["message"].as_str().unwrap_or("").is_empty());
+    }
+
+    #[test]
+    fn capability_unavailable_response_fields_are_correct() {
+        let capability = "cairn.mcp.v1.search.keyword";
+        let resp = capability_unavailable_response(ResponseVerb::Search, capability);
+        assert_eq!(resp.contract, "cairn.mcp.v1");
+        assert!(matches!(resp.status, ResponseStatus::Rejected));
+        assert!(matches!(resp.verb, ResponseVerb::Search));
+        assert!(resp.data.is_none());
+        assert!(resp.target.is_none());
+        let err = resp.error.expect("rejected response must have error");
+        assert_eq!(err["code"], "CapabilityUnavailable");
+        assert_eq!(err["data"]["capability"], capability);
         assert!(!err["message"].as_str().unwrap_or("").is_empty());
     }
 }

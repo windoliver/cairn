@@ -41,7 +41,6 @@ transactions = false
 #[derive(Default)]
 struct StubStore;
 
-#[async_trait::async_trait]
 impl MemoryStore for StubStore {
     fn name(&self) -> &'static str {
         "stub-store"
@@ -113,7 +112,6 @@ extensions = false
 #[derive(Default)]
 struct StubMcpServer;
 
-#[async_trait::async_trait]
 impl MCPServer for StubMcpServer {
     fn name(&self) -> &'static str {
         "stub-mcp"
@@ -183,7 +181,6 @@ consent_aware = true
 #[derive(Default)]
 struct StubSensor;
 
-#[async_trait::async_trait]
 impl SensorIngress for StubSensor {
     fn name(&self) -> &'static str {
         "stub-sensor"
@@ -252,7 +249,6 @@ cron_schedules = false
 #[derive(Default)]
 struct StubWorkflow;
 
-#[async_trait::async_trait]
 impl WorkflowOrchestrator for StubWorkflow {
     fn name(&self) -> &'static str {
         "stub-workflow"

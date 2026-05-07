@@ -1,0 +1,956 @@
+{
+  "$defs": {
+    "Args": {
+      "additionalProperties": false,
+      "properties": {
+        "citations": {
+          "enum": [
+            "on",
+            "compact",
+            "off"
+          ],
+          "type": "string"
+        },
+        "cursor": {
+          "$ref": "../common/primitives.json#/$defs/Cursor",
+          "description": "Opaque continuation token from a prior search Data.next_cursor."
+        },
+        "filters": {
+          "$ref": "#/$defs/filter"
+        },
+        "limit": {
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "mode": {
+          "oneOf": [
+            {
+              "const": "keyword",
+              "x-cairn-capability": "cairn.mcp.v1.search.keyword"
+            },
+            {
+              "const": "semantic",
+              "x-cairn-capability": "cairn.mcp.v1.search.semantic"
+            },
+            {
+              "const": "hybrid",
+              "x-cairn-capability": "cairn.mcp.v1.search.hybrid"
+            }
+          ]
+        },
+        "query": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "scope": {
+          "$ref": "../common/scope_filter.json",
+          "description": "Optional narrowing of the already-authorized signed-intent scope. Reuses the closed scope filter grammar — unknown keys and empty values reject at schema validation so a typo cannot silently widen reads."
+        }
+      },
+      "required": [
+        "query",
+        "mode"
+      ],
+      "type": "object"
+    },
+    "Data": {
+      "additionalProperties": false,
+      "properties": {
+        "hits": {
+          "items": {
+            "$ref": "#/$defs/Hit"
+          },
+          "type": "array"
+        },
+        "next_cursor": {
+          "$ref": "../common/primitives.json#/$defs/Cursor"
+        }
+      },
+      "required": [
+        "hits"
+      ],
+      "type": "object"
+    },
+    "Hit": {
+      "additionalProperties": false,
+      "properties": {
+        "citation": {
+          "type": "string"
+        },
+        "record_id": {
+          "$ref": "../common/primitives.json#/$defs/Ulid"
+        },
+        "score": {
+          "type": "number"
+        },
+        "snippet": {
+          "type": "string"
+        },
+        "trust": {
+          "enum": [
+            "verified",
+            "unverified",
+            "unknown"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "record_id",
+        "score",
+        "trust"
+      ],
+      "type": "object"
+    },
+    "filter": {
+      "$ref": "#/$defs/filter_L8",
+      "description": "Boolean filter grammar, unrolled to depth 8 so the recursion cap is a schema assertion, not runtime-only metadata. and/or fanout capped at 32 per node.",
+      "x-cairn-max-depth": 8,
+      "x-cairn-max-fanout": 32
+    },
+    "filter_L0": {
+      "$ref": "#/$defs/filter_leaf"
+    },
+    "filter_L1": {
+      "description": "Filter at boolean depth 1: either a leaf predicate, or and/or/not composing operands at depth ≤ 0.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/filter_leaf"
+        },
+        {
+          "$ref": "#/$defs/filter_and_L1"
+        },
+        {
+          "$ref": "#/$defs/filter_or_L1"
+        },
+        {
+          "$ref": "#/$defs/filter_not_L1"
+        }
+      ]
+    },
+    "filter_L2": {
+      "description": "Filter at boolean depth 2: either a leaf predicate, or and/or/not composing operands at depth ≤ 1.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/filter_leaf"
+        },
+        {
+          "$ref": "#/$defs/filter_and_L2"
+        },
+        {
+          "$ref": "#/$defs/filter_or_L2"
+        },
+        {
+          "$ref": "#/$defs/filter_not_L2"
+        }
+      ]
+    },
+    "filter_L3": {
+      "description": "Filter at boolean depth 3: either a leaf predicate, or and/or/not composing operands at depth ≤ 2.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/filter_leaf"
+        },
+        {
+          "$ref": "#/$defs/filter_and_L3"
+        },
+        {
+          "$ref": "#/$defs/filter_or_L3"
+        },
+        {
+          "$ref": "#/$defs/filter_not_L3"
+        }
+      ]
+    },
+    "filter_L4": {
+      "description": "Filter at boolean depth 4: either a leaf predicate, or and/or/not composing operands at depth ≤ 3.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/filter_leaf"
+        },
+        {
+          "$ref": "#/$defs/filter_and_L4"
+        },
+        {
+          "$ref": "#/$defs/filter_or_L4"
+        },
+        {
+          "$ref": "#/$defs/filter_not_L4"
+        }
+      ]
+    },
+    "filter_L5": {
+      "description": "Filter at boolean depth 5: either a leaf predicate, or and/or/not composing operands at depth ≤ 4.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/filter_leaf"
+        },
+        {
+          "$ref": "#/$defs/filter_and_L5"
+        },
+        {
+          "$ref": "#/$defs/filter_or_L5"
+        },
+        {
+          "$ref": "#/$defs/filter_not_L5"
+        }
+      ]
+    },
+    "filter_L6": {
+      "description": "Filter at boolean depth 6: either a leaf predicate, or and/or/not composing operands at depth ≤ 5.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/filter_leaf"
+        },
+        {
+          "$ref": "#/$defs/filter_and_L6"
+        },
+        {
+          "$ref": "#/$defs/filter_or_L6"
+        },
+        {
+          "$ref": "#/$defs/filter_not_L6"
+        }
+      ]
+    },
+    "filter_L7": {
+      "description": "Filter at boolean depth 7: either a leaf predicate, or and/or/not composing operands at depth ≤ 6.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/filter_leaf"
+        },
+        {
+          "$ref": "#/$defs/filter_and_L7"
+        },
+        {
+          "$ref": "#/$defs/filter_or_L7"
+        },
+        {
+          "$ref": "#/$defs/filter_not_L7"
+        }
+      ]
+    },
+    "filter_L8": {
+      "description": "Filter at boolean depth 8: either a leaf predicate, or and/or/not composing operands at depth ≤ 7.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/filter_leaf"
+        },
+        {
+          "$ref": "#/$defs/filter_and_L8"
+        },
+        {
+          "$ref": "#/$defs/filter_or_L8"
+        },
+        {
+          "$ref": "#/$defs/filter_not_L8"
+        }
+      ]
+    },
+    "filter_and_L1": {
+      "additionalProperties": false,
+      "properties": {
+        "and": {
+          "items": {
+            "$ref": "#/$defs/filter_L0"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "and"
+      ],
+      "type": "object"
+    },
+    "filter_and_L2": {
+      "additionalProperties": false,
+      "properties": {
+        "and": {
+          "items": {
+            "$ref": "#/$defs/filter_L1"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "and"
+      ],
+      "type": "object"
+    },
+    "filter_and_L3": {
+      "additionalProperties": false,
+      "properties": {
+        "and": {
+          "items": {
+            "$ref": "#/$defs/filter_L2"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "and"
+      ],
+      "type": "object"
+    },
+    "filter_and_L4": {
+      "additionalProperties": false,
+      "properties": {
+        "and": {
+          "items": {
+            "$ref": "#/$defs/filter_L3"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "and"
+      ],
+      "type": "object"
+    },
+    "filter_and_L5": {
+      "additionalProperties": false,
+      "properties": {
+        "and": {
+          "items": {
+            "$ref": "#/$defs/filter_L4"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "and"
+      ],
+      "type": "object"
+    },
+    "filter_and_L6": {
+      "additionalProperties": false,
+      "properties": {
+        "and": {
+          "items": {
+            "$ref": "#/$defs/filter_L5"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "and"
+      ],
+      "type": "object"
+    },
+    "filter_and_L7": {
+      "additionalProperties": false,
+      "properties": {
+        "and": {
+          "items": {
+            "$ref": "#/$defs/filter_L6"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "and"
+      ],
+      "type": "object"
+    },
+    "filter_and_L8": {
+      "additionalProperties": false,
+      "properties": {
+        "and": {
+          "items": {
+            "$ref": "#/$defs/filter_L7"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "and"
+      ],
+      "type": "object"
+    },
+    "filter_leaf": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/filter_leaf_string"
+        },
+        {
+          "$ref": "#/$defs/filter_leaf_string_set"
+        },
+        {
+          "$ref": "#/$defs/filter_leaf_number"
+        },
+        {
+          "$ref": "#/$defs/filter_leaf_number_set"
+        },
+        {
+          "$ref": "#/$defs/filter_leaf_number_between"
+        },
+        {
+          "$ref": "#/$defs/filter_leaf_boolean"
+        },
+        {
+          "$ref": "#/$defs/filter_leaf_array_contains"
+        },
+        {
+          "$ref": "#/$defs/filter_leaf_array_contains_set"
+        },
+        {
+          "$ref": "#/$defs/filter_leaf_array_size"
+        }
+      ]
+    },
+    "filter_leaf_array_contains": {
+      "additionalProperties": false,
+      "properties": {
+        "field": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "op": {
+          "const": "array_contains"
+        },
+        "value": {
+          "oneOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "number"
+            }
+          ]
+        }
+      },
+      "required": [
+        "field",
+        "op",
+        "value"
+      ],
+      "type": "object"
+    },
+    "filter_leaf_array_contains_set": {
+      "additionalProperties": false,
+      "properties": {
+        "field": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "op": {
+          "enum": [
+            "array_contains_any",
+            "array_contains_all"
+          ],
+          "type": "string"
+        },
+        "value": {
+          "items": {
+            "oneOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "number"
+              }
+            ]
+          },
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "field",
+        "op",
+        "value"
+      ],
+      "type": "object"
+    },
+    "filter_leaf_array_size": {
+      "additionalProperties": false,
+      "properties": {
+        "field": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "op": {
+          "const": "array_size_eq"
+        },
+        "value": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "field",
+        "op",
+        "value"
+      ],
+      "type": "object"
+    },
+    "filter_leaf_boolean": {
+      "additionalProperties": false,
+      "properties": {
+        "field": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "op": {
+          "const": "eq"
+        },
+        "value": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "field",
+        "op",
+        "value"
+      ],
+      "type": "object"
+    },
+    "filter_leaf_number": {
+      "additionalProperties": false,
+      "properties": {
+        "field": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "op": {
+          "enum": [
+            "eq",
+            "neq",
+            "lt",
+            "lte",
+            "gt",
+            "gte"
+          ],
+          "type": "string"
+        },
+        "value": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "field",
+        "op",
+        "value"
+      ],
+      "type": "object"
+    },
+    "filter_leaf_number_between": {
+      "additionalProperties": false,
+      "properties": {
+        "field": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "op": {
+          "const": "between"
+        },
+        "value": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        }
+      },
+      "required": [
+        "field",
+        "op",
+        "value"
+      ],
+      "type": "object"
+    },
+    "filter_leaf_number_set": {
+      "additionalProperties": false,
+      "properties": {
+        "field": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "op": {
+          "enum": [
+            "in",
+            "nin"
+          ],
+          "type": "string"
+        },
+        "value": {
+          "items": {
+            "type": "number"
+          },
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "field",
+        "op",
+        "value"
+      ],
+      "type": "object"
+    },
+    "filter_leaf_string": {
+      "additionalProperties": false,
+      "properties": {
+        "field": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "op": {
+          "enum": [
+            "eq",
+            "neq",
+            "string_contains",
+            "string_starts_with",
+            "string_ends_with"
+          ],
+          "type": "string"
+        },
+        "value": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "field",
+        "op",
+        "value"
+      ],
+      "type": "object"
+    },
+    "filter_leaf_string_set": {
+      "additionalProperties": false,
+      "properties": {
+        "field": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "op": {
+          "enum": [
+            "in",
+            "nin"
+          ],
+          "type": "string"
+        },
+        "value": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "field",
+        "op",
+        "value"
+      ],
+      "type": "object"
+    },
+    "filter_not_L1": {
+      "additionalProperties": false,
+      "properties": {
+        "not": {
+          "$ref": "#/$defs/filter_L0"
+        }
+      },
+      "required": [
+        "not"
+      ],
+      "type": "object"
+    },
+    "filter_not_L2": {
+      "additionalProperties": false,
+      "properties": {
+        "not": {
+          "$ref": "#/$defs/filter_L1"
+        }
+      },
+      "required": [
+        "not"
+      ],
+      "type": "object"
+    },
+    "filter_not_L3": {
+      "additionalProperties": false,
+      "properties": {
+        "not": {
+          "$ref": "#/$defs/filter_L2"
+        }
+      },
+      "required": [
+        "not"
+      ],
+      "type": "object"
+    },
+    "filter_not_L4": {
+      "additionalProperties": false,
+      "properties": {
+        "not": {
+          "$ref": "#/$defs/filter_L3"
+        }
+      },
+      "required": [
+        "not"
+      ],
+      "type": "object"
+    },
+    "filter_not_L5": {
+      "additionalProperties": false,
+      "properties": {
+        "not": {
+          "$ref": "#/$defs/filter_L4"
+        }
+      },
+      "required": [
+        "not"
+      ],
+      "type": "object"
+    },
+    "filter_not_L6": {
+      "additionalProperties": false,
+      "properties": {
+        "not": {
+          "$ref": "#/$defs/filter_L5"
+        }
+      },
+      "required": [
+        "not"
+      ],
+      "type": "object"
+    },
+    "filter_not_L7": {
+      "additionalProperties": false,
+      "properties": {
+        "not": {
+          "$ref": "#/$defs/filter_L6"
+        }
+      },
+      "required": [
+        "not"
+      ],
+      "type": "object"
+    },
+    "filter_not_L8": {
+      "additionalProperties": false,
+      "properties": {
+        "not": {
+          "$ref": "#/$defs/filter_L7"
+        }
+      },
+      "required": [
+        "not"
+      ],
+      "type": "object"
+    },
+    "filter_or_L1": {
+      "additionalProperties": false,
+      "properties": {
+        "or": {
+          "items": {
+            "$ref": "#/$defs/filter_L0"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "or"
+      ],
+      "type": "object"
+    },
+    "filter_or_L2": {
+      "additionalProperties": false,
+      "properties": {
+        "or": {
+          "items": {
+            "$ref": "#/$defs/filter_L1"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "or"
+      ],
+      "type": "object"
+    },
+    "filter_or_L3": {
+      "additionalProperties": false,
+      "properties": {
+        "or": {
+          "items": {
+            "$ref": "#/$defs/filter_L2"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "or"
+      ],
+      "type": "object"
+    },
+    "filter_or_L4": {
+      "additionalProperties": false,
+      "properties": {
+        "or": {
+          "items": {
+            "$ref": "#/$defs/filter_L3"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "or"
+      ],
+      "type": "object"
+    },
+    "filter_or_L5": {
+      "additionalProperties": false,
+      "properties": {
+        "or": {
+          "items": {
+            "$ref": "#/$defs/filter_L4"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "or"
+      ],
+      "type": "object"
+    },
+    "filter_or_L6": {
+      "additionalProperties": false,
+      "properties": {
+        "or": {
+          "items": {
+            "$ref": "#/$defs/filter_L5"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "or"
+      ],
+      "type": "object"
+    },
+    "filter_or_L7": {
+      "additionalProperties": false,
+      "properties": {
+        "or": {
+          "items": {
+            "$ref": "#/$defs/filter_L6"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "or"
+      ],
+      "type": "object"
+    },
+    "filter_or_L8": {
+      "additionalProperties": false,
+      "properties": {
+        "or": {
+          "items": {
+            "$ref": "#/$defs/filter_L7"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "or"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/search.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Cairn verb: search",
+  "type": "object",
+  "x-cairn-auth": "rebac",
+  "x-cairn-capability": null,
+  "x-cairn-cli": {
+    "command": "search",
+    "flags": [
+      {
+        "long": "mode",
+        "name": "mode",
+        "value_source": "enum(keyword,semantic,hybrid)"
+      },
+      {
+        "long": "limit",
+        "name": "limit",
+        "value_source": "u32"
+      },
+      {
+        "long": "filters",
+        "name": "filters",
+        "value_source": "json"
+      },
+      {
+        "long": "citations",
+        "name": "citations",
+        "value_source": "enum(on,compact,off)"
+      },
+      {
+        "long": "cursor",
+        "name": "cursor",
+        "value_source": "string"
+      }
+    ],
+    "positional": {
+      "description": "Free-text query string.",
+      "name": "query"
+    }
+  },
+  "x-cairn-contract": "cairn.mcp.v1",
+  "x-cairn-skill-triggers": {
+    "exclusivity": "this is the canonical search surface for the active vault",
+    "negative": [
+      "do NOT use when the user just asked a computation question",
+      "do NOT use to fetch a known record id — call retrieve instead"
+    ],
+    "positive": [
+      "use when you need to recall prior memories by topic, speaker, or time",
+      "use to ground an answer in stored evidence instead of parametric guessing"
+    ]
+  },
+  "x-cairn-verb-id": "search"
+}

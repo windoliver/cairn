@@ -31,7 +31,6 @@ pub struct AgentProviderCapabilities {
 ///
 /// Brief §4 row 6: P2 forward stub. Method surface, cost-budget enforcement,
 /// and conformance suite land in #124 / #125.
-#[async_trait::async_trait]
 #[doc(hidden)]
 pub trait AgentProvider: Send + Sync {
     /// Stable identifier of the registered plugin instance.

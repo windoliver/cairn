@@ -1,11 +1,15 @@
 //! End-to-end CLI smoke tests. Invokes the built `cairn` binary and asserts
-//! the P0 stub behaviour: help succeeds, verbs fail closed with `Internal`.
+//! the P0 stub behaviour: help succeeds, unwired verbs fail closed.
 //!
 //! The CLI tree is generated from the IDL by `cairn-codegen`; the store is
-//! not wired yet (lands in #9), so every verb returns an `aborted` envelope
-//! with `code: "Internal"`. Exit-code contract (spec §5.2):
-//! - simple verb stubs (`ingest`, `search`, …) → exit 1, stderr contains
-//!   `Internal`, or `--json` → stdout contains `"status":"aborted"`.
+//! not wired yet (lands in #9), so mandatory unwired verbs return an `aborted`
+//! envelope with `code: "Internal"`. Capability-mode verbs return
+//! `CapabilityUnavailable` when the requested mode is not advertised. Exit-code
+//! contract (spec §5.2):
+//! - mandatory unwired verb stubs (`ingest`, `summarize`, …) → exit 1, stderr
+//!   contains `Internal`, or `--json` → stdout contains `"status":"aborted"`.
+//! - unavailable capability modes (`search`, `retrieve`, `forget`) → exit 69,
+//!   stderr contains `CapabilityUnavailable`.
 //! - clap usage errors (unknown flag, unknown subcommand, missing required
 //!   `ArgGroup`, bare invocation with `subcommand_required`) → 64
 //!   (`EX_USAGE`).
@@ -75,13 +79,7 @@ fn simple_verb_human_mode_exits_one_with_internal() {
     // and print "Internal" to stderr in human mode.
     // `ingest` is excluded: bare `cairn ingest` has no source → exit 64 (usage error).
     // `retrieve` and `forget` are excluded: required ArgGroup → exit 64 (usage error).
-    for verb in [
-        "search",
-        "summarize",
-        "assemble_hot",
-        "capture_trace",
-        "lint",
-    ] {
+    for verb in ["summarize", "assemble_hot", "capture_trace", "lint"] {
         let out = cli().arg(verb).output().expect("cairn <verb>");
         assert!(
             !out.status.success(),
@@ -98,6 +96,24 @@ fn simple_verb_human_mode_exits_one_with_internal() {
             "verb {verb} stderr missing Internal error code: {stderr:?}",
         );
     }
+}
+
+#[test]
+fn capability_verb_human_mode_exits_unavailable() {
+    let out = cli()
+        .args(["search", "hello", "--mode", "keyword"])
+        .output()
+        .expect("cairn search");
+    assert!(
+        !out.status.success(),
+        "search exited OK - should fail with CapabilityUnavailable"
+    );
+    assert_eq!(out.status.code(), Some(69), "exit: {:?}", out.status);
+    let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("CapabilityUnavailable"),
+        "stderr missing CapabilityUnavailable error code: {stderr:?}",
+    );
 }
 
 #[test]

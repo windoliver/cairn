@@ -25,7 +25,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use super::fmt::RustWriter;
+use super::fmt::{RustWriter, write_json_canonical};
 use super::ir::{
     Document, EnumDef, EnumVariant, PreludeDef, Prim, RecursiveEnumDef, RustType, StructDef,
     StructField, TaggedUnionDef, TaggedVariant, TypeName, UntaggedUnionDef, VerbDef, pascal_case,
@@ -49,12 +49,63 @@ pub fn emit(doc: &Document) -> Result<Vec<GeneratedFile>, CodegenError> {
     out.push(emit_verbs_mod(doc));
     for verb in &doc.verbs {
         out.push(emit_verb_file(verb, &common_names)?);
+        out.push(emit_schema_file(
+            &format!("{ROOT}/schemas/verbs/{}.json", verb.id),
+            &verb.args_schema_bytes,
+        )?);
     }
     out.push(emit_common(doc, &common_names)?);
     out.push(emit_errors(doc));
     out.push(emit_envelope(doc, &common_names)?);
     for prelude in &doc.preludes {
         out.push(emit_prelude(prelude, &common_names)?);
+        out.push(emit_schema_file(
+            &format!("{ROOT}/schemas/prelude/{}.json", prelude.id),
+            &prelude.schema_bytes,
+        )?);
+    }
+    for group in ["common", "errors", "capabilities", "extensions", "envelope"] {
+        out.extend(emit_schema_group(group)?);
+    }
+    Ok(out)
+}
+
+fn emit_schema_file(path: &str, bytes: &[u8]) -> Result<GeneratedFile, CodegenError> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|e| CodegenError::Emit(format!("schema {path} is not valid JSON: {e}")))?;
+    Ok(GeneratedFile {
+        path: PathBuf::from(path),
+        bytes: write_json_canonical(&value).into_bytes(),
+    })
+}
+
+fn emit_schema_group(group: &str) -> Result<Vec<GeneratedFile>, CodegenError> {
+    let group_dir = std::path::PathBuf::from(crate::SCHEMA_DIR).join(group);
+    let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(&group_dir)
+        .map_err(|e| {
+            CodegenError::Emit(format!(
+                "schema group {group}: read_dir {}: {e}",
+                group_dir.display()
+            ))
+        })?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("json"))
+        .collect();
+    entries.sort();
+
+    let mut out = Vec::with_capacity(entries.len());
+    for path in &entries {
+        let bytes = std::fs::read(path)
+            .map_err(|e| CodegenError::Emit(format!("read {}: {e}", path.display())))?;
+        let stem = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| CodegenError::Emit(format!("bad filename: {}", path.display())))?;
+        out.push(emit_schema_file(
+            &format!("{ROOT}/schemas/{group}/{stem}"),
+            &bytes,
+        )?);
     }
     Ok(out)
 }
@@ -206,10 +257,7 @@ fn emit_verb_file(
     w.blank();
     write_named_type(&mut w, &verb.data, &data_fallback, common_names)?;
     w.blank();
-    let schema_path = format!(
-        "../../../../cairn-mcp/src/generated/schemas/verbs/{}.json",
-        verb.id
-    );
+    let schema_path = format!("../schemas/verbs/{}.json", verb.id);
     w.line(&format!(
         "pub const ARGS_SCHEMA: &[u8] = include_bytes!(\"{schema_path}\");"
     ));
@@ -1500,10 +1548,7 @@ fn emit_prelude(
     let fallback = format!("{}Response", pascal_case(&prelude.id));
     write_named_type(&mut w, &prelude.response, &fallback, common_names)?;
     w.blank();
-    let schema_path = format!(
-        "../../../cairn-mcp/src/generated/schemas/prelude/{}.json",
-        prelude.id
-    );
+    let schema_path = format!("schemas/prelude/{}.json", prelude.id);
     w.line(&format!(
         "pub const SCHEMA: &[u8] = include_bytes!(\"{schema_path}\");"
     ));

@@ -26,7 +26,6 @@ pub struct WorkflowOrchestratorCapabilities {
 ///
 /// Brief §4 row 3: P0 default is tokio + `SQLite`-backed job table (#89).
 /// Optional Temporal adapter is a P1+ swap — same trait surface.
-#[async_trait::async_trait]
 pub trait WorkflowOrchestrator: Send + Sync {
     /// Stable identifier of the registered plugin instance.
     fn name(&self) -> &str;
@@ -44,7 +43,6 @@ mod tests {
 
     struct StubOrch;
 
-    #[async_trait::async_trait]
     impl WorkflowOrchestrator for StubOrch {
         fn name(&self) -> &'static str {
             "stub-orch"

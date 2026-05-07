@@ -291,7 +291,6 @@ mod tests {
         #[derive(Default)]
         struct BareStore;
 
-        #[async_trait::async_trait]
         impl MemoryStore for BareStore {
             fn name(&self) -> &'static str {
                 "bare-store"
@@ -340,7 +339,6 @@ mod tests {
 
         #[derive(Default)]
         struct DualStore;
-        #[async_trait::async_trait]
         impl MemoryStore for DualStore {
             fn name(&self) -> &'static str {
                 "dual-plugin"
@@ -361,7 +359,6 @@ mod tests {
 
         #[derive(Default)]
         struct DualMcp;
-        #[async_trait::async_trait]
         impl MCPServer for DualMcp {
             fn name(&self) -> &'static str {
                 "dual-plugin"

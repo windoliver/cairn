@@ -291,4 +291,4 @@ pub struct SearchData {
     pub next_cursor: Option<crate::generated::common::Cursor>,
 }
 
-pub const ARGS_SCHEMA: &[u8] = include_bytes!("../../../../cairn-mcp/src/generated/schemas/verbs/search.json");
+pub const ARGS_SCHEMA: &[u8] = include_bytes!("../schemas/verbs/search.json");

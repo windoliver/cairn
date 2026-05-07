@@ -29,7 +29,6 @@ pub const ACCEPTED_RANGE: VersionRange =
 #[derive(Default)]
 pub struct SqliteMemoryStore;
 
-#[async_trait::async_trait]
 impl MemoryStore for SqliteMemoryStore {
     fn name(&self) -> &str {
         PLUGIN_NAME
