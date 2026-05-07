@@ -348,7 +348,7 @@ impl<T: Transport> Sdk<T> {
     /// `assemble_hot` — hot-memory prefix assembly (brief §8.5, §11).
     ///
     /// Dispatches into [`cairn_core::verbs::assemble_hot::assemble_hot`] using
-    /// the vault's [`HotMemoryConfig`]. No store is required — the assembler
+    /// the vault's [`cairn_core::config::HotMemoryConfig`]. No store is required — the assembler
     /// reads recipe steps from config and emits stub bodies (real source loading
     /// is tracked under #193). Validates `args` before dispatch.
     ///
@@ -359,7 +359,7 @@ impl<T: Transport> Sdk<T> {
     /// lands the loader.
     ///
     /// **The SDK currently always returns [`SdkError::Unimplemented`] for
-    /// `assemble_hot`.** Tying vault-binding to the [`HotMemoryConfig`]
+    /// `assemble_hot`.** Tying vault-binding to the [`cairn_core::config::HotMemoryConfig`]
     /// safely requires a core-side config loader (so SDK callers cannot
     /// accidentally pair vault A's `vault.id` with vault B's recipe), and
     /// that loader lands with the real source-loading change in #193.
