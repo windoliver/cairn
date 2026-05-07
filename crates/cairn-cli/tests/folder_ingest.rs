@@ -206,6 +206,61 @@ fn second_non_dry_run_uses_cache() {
 }
 
 #[test]
+fn changed_second_batch_resumes_without_rewriting_first_batch() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["a.md", "b.md", "c.md"] {
+        write(&dir.path().join(name), &format!("# {name}\n[[Entity]]\n"));
+    }
+
+    let first = cli()
+        .current_dir(dir.path())
+        .args([
+            "ingest",
+            "--folder",
+            ".",
+            "--mode",
+            "keyword",
+            "--batch-size",
+            "2",
+            "--json",
+        ])
+        .output()
+        .expect("first folder ingest");
+    assert_eq!(first.status.code(), Some(0), "exit: {:?}", first.status);
+    let first_json = json_stdout(&first);
+    assert_eq!(first_json["plans"], 2);
+    assert_eq!(first_json["records_written"], 3);
+    let first_ops = first_json["operation_ids"].as_array().unwrap().clone();
+
+    write(
+        &dir.path().join("c.md"),
+        "# c changed\n[[Entity]]\n[[Other]]\n",
+    );
+
+    let second = cli()
+        .current_dir(dir.path())
+        .args([
+            "ingest",
+            "--folder",
+            ".",
+            "--mode",
+            "keyword",
+            "--batch-size",
+            "2",
+            "--json",
+        ])
+        .output()
+        .expect("retry folder ingest");
+    assert_eq!(second.status.code(), Some(0), "exit: {:?}", second.status);
+    let second_json = json_stdout(&second);
+    assert_eq!(second_json["cached"], 2);
+    assert_eq!(second_json["processed"], 1);
+    assert_eq!(second_json["plans"], 1);
+    assert_eq!(second_json["records_written"], 1);
+    assert_ne!(second_json["operation_ids"][0], first_ops[1]);
+}
+
+#[test]
 fn explicitly_included_unsupported_files_are_warned_and_not_cached() {
     let dir = tempfile::tempdir().unwrap();
     write(&dir.path().join("docs/image.png"), "not keyword text");
