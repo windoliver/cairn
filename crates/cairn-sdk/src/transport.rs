@@ -464,6 +464,21 @@ impl<T: Transport> Sdk<T> {
     /// consulted only config booleans and let modes through that
     /// `status` did not advertise (e.g. on a store with `vector=false`).
     fn require_capability(&self, required: Option<&'static str>) -> Result<(), SdkError> {
+        self.require_capability_with_hint(required, None)
+    }
+
+    /// Like [`Self::require_capability`] but accepts a caller-supplied
+    /// `override_hint` that replaces the generic entry from
+    /// [`cairn_core::status::remediation_for`] when `Some`.
+    ///
+    /// Use this when the call site knows the specific failure cause (e.g.
+    /// `OpenAI` key absent vs feature off vs unsupported model) so the
+    /// operator receives actionable, cause-specific advice.
+    fn require_capability_with_hint(
+        &self,
+        required: Option<&'static str>,
+        override_hint: Option<&str>,
+    ) -> Result<(), SdkError> {
         let Some(cap) = required else {
             return Ok(());
         };
@@ -478,10 +493,13 @@ impl<T: Transport> Sdk<T> {
         if is_advertised {
             Ok(())
         } else {
+            let remediation = override_hint
+                .map(str::to_owned)
+                .or_else(|| cairn_core::status::remediation_for(cap).map(str::to_owned));
             Err(SdkError::CapabilityUnavailable {
                 capability: cap.to_owned(),
                 reason: "not advertised by `status` in this incarnation".to_owned(),
-                remediation: cairn_core::status::remediation_for(cap).map(str::to_owned),
+                remediation,
                 operation_id: crate::stub::new_operation_id(),
             })
         }

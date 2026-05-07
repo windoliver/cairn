@@ -136,10 +136,36 @@ pub fn internal_error_response(verb: ResponseVerb, message: &str) -> Response {
 /// [`cairn_core::status::remediation_for`] when a hint is registered for
 /// `capability`. When no hint is registered the field is omitted (the IDL
 /// declares it optional with `minLength: 1` so an empty string is invalid).
+///
+/// Callers that know the specific cause (e.g. `OpenAI` key missing vs model
+/// mismatch) should use [`capability_unavailable_response_with_hint`] to
+/// provide a cause-specific remediation text instead of the generic table
+/// entry.
 #[must_use]
 pub fn capability_unavailable_response(verb: ResponseVerb, capability: &str) -> Response {
+    capability_unavailable_response_with_hint(verb, capability, None)
+}
+
+/// Build a `CapabilityUnavailable` rejected response with an optional
+/// caller-supplied remediation hint.
+///
+/// When `override_hint` is `Some`, it is used as `data.remediation` instead
+/// of the generic entry in [`cairn_core::status::remediation_for`]. When it
+/// is `None`, behaviour is identical to [`capability_unavailable_response`].
+///
+/// Use this variant when the call site knows the specific cause of the
+/// rejection (e.g. `OPENAI_API_KEY` absent vs. unsupported model vs.
+/// `openai` feature not compiled in) so operators receive actionable,
+/// cause-specific advice rather than generic local-model instructions.
+#[must_use]
+pub fn capability_unavailable_response_with_hint(
+    verb: ResponseVerb,
+    capability: &str,
+    override_hint: Option<&str>,
+) -> Response {
     let mut data = serde_json::json!({ "capability": capability });
-    if let Some(hint) = cairn_core::status::remediation_for(capability)
+    let hint = override_hint.or_else(|| cairn_core::status::remediation_for(capability));
+    if let Some(hint) = hint
         && let Some(obj) = data.as_object_mut()
     {
         obj.insert(
