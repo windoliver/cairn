@@ -56,6 +56,24 @@ pub enum ApplyError {
         /// Index of the unsupported mutation.
         mutation_index: usize,
     },
+    /// The mutation record no longer matches the planned file metadata.
+    #[error(
+        "failed to apply `{path}` in batch {operation_id}: mutation {mutation_index} {field} mismatch (expected {expected}, got {actual})"
+    )]
+    PlanFileRecordMismatch {
+        /// Source file attached to the mismatched mutation.
+        path: PathBuf,
+        /// Operation id for the containing batch.
+        operation_id: String,
+        /// Index of the mismatched mutation.
+        mutation_index: usize,
+        /// Record field or frontmatter key that mismatched.
+        field: &'static str,
+        /// Expected value derived from [`PlannedFile`].
+        expected: String,
+        /// Actual value found on the planned record.
+        actual: String,
+    },
     /// A store record upsert failed.
     #[error("failed to upsert record for `{path}` in batch {operation_id}: {source}")]
     RecordUpsert {
@@ -66,17 +84,6 @@ pub enum ApplyError {
         /// Underlying store error.
         #[source]
         source: StoreError,
-    },
-    /// The plan timestamp could not be converted into graph event time.
-    #[error("invalid issued_at `{issued_at}` for batch {operation_id}: {source}")]
-    InvalidIssuedAt {
-        /// Operation id for the containing batch.
-        operation_id: String,
-        /// Offending timestamp string.
-        issued_at: String,
-        /// Underlying parse error.
-        #[source]
-        source: chrono::ParseError,
     },
     /// A graph entity name normalized to the empty key.
     #[error(
@@ -173,6 +180,7 @@ pub async fn apply_batch(
                 mutation_index,
             });
         };
+        validate_record_matches_file(record, file, mutation_index, &operation_id)?;
 
         let outcome = store
             .upsert(record)
@@ -189,8 +197,8 @@ pub async fn apply_batch(
     }
 
     if store.capabilities().graph_edges {
-        let event_time_ms = plan_issued_at_ms(batch)?;
         for (file, record_id) in batch.files.iter().zip(record_ids.iter()) {
+            let event_time_ms = deterministic_graph_event_time_ms(file);
             let graph_stats =
                 apply_graph_for_file(store, file, record_id, event_time_ms, batch).await?;
             stats.entities_written += graph_stats.entities_written;
@@ -199,6 +207,61 @@ pub async fn apply_batch(
     }
 
     Ok(stats)
+}
+
+fn validate_record_matches_file(
+    record: &cairn_core::domain::MemoryRecord,
+    file: &PlannedFile,
+    mutation_index: usize,
+    operation_id: &str,
+) -> Result<(), ApplyError> {
+    let expected_cache_key = file.cache_key.clone();
+    let actual_cache_key = string_frontmatter(record, "folder_cache_key");
+    if actual_cache_key.as_deref() != Some(expected_cache_key.as_str()) {
+        return Err(ApplyError::PlanFileRecordMismatch {
+            path: file.absolute_path.clone(),
+            operation_id: operation_id.to_owned(),
+            mutation_index,
+            field: "folder_cache_key",
+            expected: expected_cache_key,
+            actual: actual_cache_key.unwrap_or_else(|| "<missing>".to_owned()),
+        });
+    }
+
+    let expected_relative_path = slash_normalized_path(&file.relative_path);
+    let actual_relative_path = string_frontmatter(record, "folder_relative_path");
+    if actual_relative_path.as_deref() != Some(expected_relative_path.as_str()) {
+        return Err(ApplyError::PlanFileRecordMismatch {
+            path: file.absolute_path.clone(),
+            operation_id: operation_id.to_owned(),
+            mutation_index,
+            field: "folder_relative_path",
+            expected: expected_relative_path,
+            actual: actual_relative_path.unwrap_or_else(|| "<missing>".to_owned()),
+        });
+    }
+
+    let expected_source_hash = format!("sha256:{}", file.body_hash);
+    if record.provenance.source_hash != expected_source_hash {
+        return Err(ApplyError::PlanFileRecordMismatch {
+            path: file.absolute_path.clone(),
+            operation_id: operation_id.to_owned(),
+            mutation_index,
+            field: "provenance.source_hash",
+            expected: expected_source_hash,
+            actual: record.provenance.source_hash.clone(),
+        });
+    }
+
+    Ok(())
+}
+
+fn string_frontmatter(record: &cairn_core::domain::MemoryRecord, key: &str) -> Option<String> {
+    record
+        .extra_frontmatter
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
 }
 
 async fn apply_graph_for_file(
@@ -327,16 +390,6 @@ fn normalized_entity_name(
     Ok(name_norm)
 }
 
-fn plan_issued_at_ms(batch: &FolderPlanBatch) -> Result<i64, ApplyError> {
-    chrono::DateTime::parse_from_rfc3339(&batch.plan.issued_at)
-        .map(|timestamp| timestamp.timestamp_millis())
-        .map_err(|source| ApplyError::InvalidIssuedAt {
-            operation_id: operation_id(batch),
-            issued_at: batch.plan.issued_at.clone(),
-            source,
-        })
-}
-
 fn deterministic_graph_ulid(cache_key: &str, parts: &[&str]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(cache_key.as_bytes());
@@ -349,6 +402,24 @@ fn deterministic_graph_ulid(cache_key: &str, parts: &[&str]) -> String {
     let mut bytes = [0_u8; 16];
     bytes.copy_from_slice(&digest[..16]);
     ulid::Ulid::from_bytes(bytes).to_string()
+}
+
+fn deterministic_graph_event_time_ms(file: &PlannedFile) -> i64 {
+    let mut hasher = Sha256::new();
+    hasher.update(file.cache_key.as_bytes());
+    hasher.update(b"\0graph-event-time");
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 8];
+    bytes.copy_from_slice(&digest[..8]);
+    let raw = u64::from_be_bytes(bytes);
+    i64::try_from(raw % 4_102_444_800_000).expect("bounded timestamp fits i64")
+}
+
+fn slash_normalized_path(path: &std::path::Path) -> String {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn operation_id(batch: &FolderPlanBatch) -> String {
@@ -447,5 +518,56 @@ mod tests {
             message.contains(&batches[0].plan.operation_id.0),
             "error lacked operation id: {message}"
         );
+    }
+
+    #[tokio::test]
+    async fn mutation_file_metadata_mismatch_rejects_before_write() {
+        let store = FixtureStore::new();
+        let mut batches = plan_batches(
+            Path::new("/tmp/project"),
+            vec![file("a.md", 'a')],
+            64,
+            FlushMode::Autonomous,
+        )
+        .unwrap();
+        batches[0].files[0].cache_key = "b".repeat(64);
+
+        let err = apply_batch(&store, &batches[0]).await.unwrap_err();
+
+        let message = err.to_string();
+        assert!(message.contains("folder_cache_key"), "{message}");
+        assert!(message.contains("a.md"), "{message}");
+        let page = store.list(&ListArgs::default()).await.unwrap();
+        assert!(page.records.is_empty());
+    }
+
+    #[tokio::test]
+    async fn sqlite_graph_replay_is_idempotent_for_regenerated_same_content() {
+        let store = cairn_store_sqlite::open_in_memory().await.unwrap();
+        let first_batches = plan_batches(
+            Path::new("/tmp/project"),
+            vec![file("a.md", 'a')],
+            64,
+            FlushMode::Autonomous,
+        )
+        .unwrap();
+        let first = apply_batch(&store, &first_batches[0]).await.unwrap();
+        assert_eq!(first.records_written, 1);
+        assert_eq!(first.edges_written, 1);
+
+        let mut second_batches = plan_batches(
+            Path::new("/tmp/project"),
+            vec![file("a.md", 'a')],
+            64,
+            FlushMode::Autonomous,
+        )
+        .unwrap();
+        second_batches[0].plan.issued_at = "2099-01-01T00:00:00Z".to_owned();
+        second_batches[0].plan.expires_at = "2099-01-01T00:05:00Z".to_owned();
+
+        let second = apply_batch(&store, &second_batches[0]).await.unwrap();
+
+        assert_eq!(second.records_written, 0);
+        assert_eq!(second.edges_written, 0);
     }
 }
