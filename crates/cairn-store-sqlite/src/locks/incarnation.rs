@@ -21,8 +21,16 @@ use tracing::warn;
 
 use super::error::LockError;
 
-/// Mint a new incarnation, GC stale `lock_holders` rows, and bump epoch on
-/// every affected resource. Idempotent: safe to call multiple times in tests.
+/// Mint a NEW incarnation, GC stale `lock_holders` rows, and bump epoch on
+/// every affected resource.
+///
+/// **Not idempotent.** Each call mints a fresh ULID, replaces the singleton,
+/// and treats every existing `lock_holders` row whose `owner_incarnation`
+/// no longer matches as stale — including rows owned by the calling process
+/// itself if a previous call seeded a different incarnation. Production
+/// callers MUST invoke this exactly once per `Store::open`. Tests that
+/// simulate a "process restart" use this property deliberately; tests that
+/// want the *current* incarnation should call `current_incarnation`.
 ///
 /// # P0 single-writer-process assumption
 ///
