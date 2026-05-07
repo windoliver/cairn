@@ -355,7 +355,7 @@ impl<T: Transport> Sdk<T> {
         };
 
         match cairn_core::verbs::search::run(store.as_ref(), &self.config, &caps, request).await {
-            Ok(outcome) => Ok(envelope_from_outcome(outcome)),
+            Ok(outcome) => Ok(envelope_from_outcome(outcome, mode)),
             Err(cairn_core::verbs::search::SearchError::CapabilityUnavailable { capability }) => {
                 Err(SdkError::CapabilityUnavailable {
                     capability: capability.to_owned(),
@@ -527,6 +527,41 @@ impl<T: Transport> Sdk<T> {
     }
 }
 
+/// Mode-appropriate ranking score for a single hit.
+///
+/// Mirrors `cairn-cli`'s `hit_score`: keyword uses BM25, semantic uses
+/// `1 - cosine_distance`, and hybrid prefers the dispatcher's
+/// authoritative `final_score` from the explain block (lockstep with
+/// candidates) — falling back to a rank-derived score when the caller
+/// did not request `--explain`. Without this, hybrid graph-only rows
+/// (which carry `bm25 = 0.0`) serialized as zero-score hits and any
+/// client thresholding on `score` would suppress them.
+fn hit_score(
+    mode: cairn_core::verbs::search::SearchMode,
+    idx: usize,
+    c: &cairn_core::contract::memory_store::SearchCandidate,
+    explain: Option<&[cairn_core::search::ScoreExplain]>,
+) -> f64 {
+    use cairn_core::verbs::search::SearchMode;
+    let raw = match mode {
+        SearchMode::Semantic => c.semantic_distance.map_or(0.0, |d| 1.0 - f64::from(d)),
+        SearchMode::Hybrid => {
+            if let Some(exps) = explain
+                && let Some(e) = exps.get(idx)
+            {
+                e.final_score
+            } else {
+                #[allow(clippy::cast_precision_loss)]
+                let rank_score = 1.0 / (1.0 + idx as f64);
+                rank_score
+            }
+        }
+        // Keyword + future variants (SearchMode is #[non_exhaustive]).
+        _ => c.bm25,
+    };
+    if raw.is_finite() { raw } else { 0.0 }
+}
+
 /// Convert a domain [`cairn_core::search::DegradedLeg`] into its IDL
 /// wire representation. Mirrors the schema variants — keep in sync with
 /// `crates/cairn-idl/schema/verbs/search.json` (`DegradedLegEntry`).
@@ -576,6 +611,7 @@ fn degraded_leg_to_idl(
 /// [`VerbResponse<SearchData>`] envelope.
 fn envelope_from_outcome(
     outcome: cairn_core::verbs::search::SearchOutcome,
+    mode: cairn_core::verbs::search::SearchMode,
 ) -> VerbResponse<SearchData> {
     use cairn_core::generated::common::Ulid;
     use cairn_core::generated::envelope::ResponseVerb;
@@ -584,9 +620,10 @@ fn envelope_from_outcome(
     let hits: Vec<Hit> = outcome
         .candidates
         .iter()
-        .map(|c| Hit {
+        .enumerate()
+        .map(|(idx, c)| Hit {
             record_id: Ulid(c.record_id.as_str().to_owned()),
-            score: c.bm25,
+            score: hit_score(mode, idx, c, outcome.explain.as_deref()),
             snippet: Some(c.snippet.clone()),
             citation: None,
             trust: HitTrust::Unknown,

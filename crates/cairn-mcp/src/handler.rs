@@ -601,9 +601,10 @@ fn search_outcome_to_result(outcome: cairn_core::verbs::search::SearchOutcome) -
     let hits: Vec<Hit> = outcome
         .candidates
         .iter()
-        .map(|c| Hit {
+        .enumerate()
+        .map(|(idx, c)| Hit {
             record_id: Ulid(c.record_id.as_str().to_owned()),
-            score: c.bm25,
+            score: hit_score(mode, idx, c, outcome.explain.as_deref()),
             snippet: Some(c.snippet.clone()),
             citation: None,
             trust: HitTrust::Unknown,
@@ -664,6 +665,39 @@ pub fn dispatch_stub(verb: &str) -> CallToolResult {
         "cairn {verb}: not yet implemented in this P0 scaffold. \
          Verb dispatch lands in a follow-up PR; no memory operation was performed."
     ))])
+}
+
+/// Mode-appropriate score for an MCP search hit.
+///
+/// Mirrors the CLI + SDK helpers: hybrid graph-only rows have
+/// `bm25 = 0.0`, so emitting that value as the wire score would
+/// suppress them in clients that threshold or sort by score.
+/// Hybrid prefers the dispatcher's `final_score` from the explain
+/// block; fall back to a rank-derived score when explain is absent.
+fn hit_score(
+    mode: cairn_core::verbs::search::SearchMode,
+    idx: usize,
+    c: &cairn_core::contract::memory_store::SearchCandidate,
+    explain: Option<&[cairn_core::search::ScoreExplain]>,
+) -> f64 {
+    use cairn_core::verbs::search::SearchMode;
+    let raw = match mode {
+        SearchMode::Semantic => c.semantic_distance.map_or(0.0, |d| 1.0 - f64::from(d)),
+        SearchMode::Hybrid => {
+            if let Some(exps) = explain
+                && let Some(e) = exps.get(idx)
+            {
+                e.final_score
+            } else {
+                #[allow(clippy::cast_precision_loss)]
+                let rank_score = 1.0 / (1.0 + idx as f64);
+                rank_score
+            }
+        }
+        // Keyword + future variants (SearchMode is #[non_exhaustive]).
+        _ => c.bm25,
+    };
+    if raw.is_finite() { raw } else { 0.0 }
 }
 
 /// Convert a domain [`cairn_core::search::DegradedLeg`] into the IDL
