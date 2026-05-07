@@ -133,6 +133,17 @@ impl MemoryStore for SqliteMemoryStore {
         if self.conn.is_none() {
             return not_initialized("search_graph_neighbors");
         }
+        // Fail closed when the runtime probe in `bootstrap` decided
+        // graph_search is unavailable (schema skew, partial migration,
+        // stripped-down fork). The hybrid leg already short-circuits
+        // through the verb-layer cap gate, but direct callers must get
+        // the same error contract instead of a downstream SQL failure.
+        if !self.caps.graph_search {
+            return Err(ConcreteError::CapabilityUnavailable {
+                what: "graph_search",
+            }
+            .into());
+        }
         self.do_search_graph_neighbors(args)
             .await
             .map_err(Into::into)

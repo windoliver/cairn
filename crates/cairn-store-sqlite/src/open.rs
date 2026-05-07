@@ -301,10 +301,31 @@ async fn bootstrap(conn: &AsyncConn, vec_dim: Option<usize>) -> Result<bool, Sto
     Ok(graph_search)
 }
 
-/// Probe `sqlite_master` for the three tables `do_search_graph_neighbors`
-/// reads. Returns `true` only when all three are present as `table` rows.
+/// Probe the schema surface `do_search_graph_neighbors` actually reads.
+///
+/// Verifies both that the three required tables exist in `sqlite_master`
+/// AND that every column the graph SQL touches can be prepared. Returns
+/// `true` only when both checks pass.
+///
+/// A bare `sqlite_master` table-name check is not enough: a partial
+/// migration or stripped-down fork could keep the table names but drop
+/// or rename a column the graph SQL relies on (e.g.
+/// `entity_edges.valid_at`, `.confidence_score`, `.source_record_id`,
+/// `entity_episodes.episode_id`). With only the table check the system
+/// would advertise `graph_search=true` and fail at request time with a
+/// downstream SQL error — defeating the point of the capability bit.
 fn probe_graph_search_tables(conn: &rusqlite::Connection) -> rusqlite::Result<bool> {
     const REQUIRED: &[&str] = &["entity_nodes", "entity_edges", "entity_episodes"];
+    // Column-shape probe: prepare an always-false query that references
+    // every column the graph SQL reads. SQLite resolves column names at
+    // prepare time, so a missing/renamed column fails at `prepare` here
+    // without executing the statement or fanning out a result set.
+    const COLUMN_PROBE: &str = "SELECT \
+        e.source_id, e.target_id, e.valid_at, e.invalid_at, e.created_at, \
+        e.expired_at, e.confidence_score, e.source_record_id, \
+        ep.entity_node_id, ep.episode_id \
+        FROM entity_edges e, entity_episodes ep \
+        WHERE 0";
     for name in REQUIRED {
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
@@ -314,6 +335,9 @@ fn probe_graph_search_tables(conn: &rusqlite::Connection) -> rusqlite::Result<bo
         if count == 0 {
             return Ok(false);
         }
+    }
+    if conn.prepare(COLUMN_PROBE).is_err() {
+        return Ok(false);
     }
     Ok(true)
 }

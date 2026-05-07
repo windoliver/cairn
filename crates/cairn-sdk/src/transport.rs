@@ -340,12 +340,10 @@ impl<T: Transport> Sdk<T> {
         // so the `try_from` should not fail. Fall back to 10 on error.
         let limit = args.limit.map_or(10, |l| usize::try_from(l).unwrap_or(10));
         // Map the IDL `args.scope` (ScopeFilter) into the dispatcher's
-        // `auth_scope` (ScopeTuple) so SDK callers actually narrow reads
-        // by tenant/workspace/user/agent instead of running unrestricted.
-        // Fail closed on un-mappable predicates (ScopeFilter carries
-        // grammar that doesn't fit ScopeTuple, e.g. `kind`/`tags`/
-        // `record_ids`) — those would silently drop on the floor today.
-        let auth_scope = scope_filter_to_tuple(args.scope.as_ref());
+        // `auth_scope` (ScopeTuple). Fails closed on predicates the
+        // dispatcher cannot honor (`kind`, `tags`, `tier`, `record_ids`)
+        // so callers don't silently get a broader result set than asked.
+        let auth_scope = scope_filter_to_tuple(args.scope.as_ref())?;
         let request = cairn_core::verbs::search::SearchRequest {
             query: args.query.clone(),
             mode,
@@ -529,6 +527,51 @@ impl<T: Transport> Sdk<T> {
     }
 }
 
+/// Convert a domain [`cairn_core::search::DegradedLeg`] into its IDL
+/// wire representation. Mirrors the schema variants — keep in sync with
+/// `crates/cairn-idl/schema/verbs/search.json` (`DegradedLegEntry`).
+fn degraded_leg_to_idl(
+    leg: &cairn_core::search::DegradedLeg,
+) -> cairn_core::generated::verbs::search::DegradedLegEntry {
+    use cairn_core::generated::verbs::search::{
+        DegradedLegEntry, DegradedLegEntryLeg, DegradedLegEntryReason, DegradedLegEntrySource,
+    };
+    use cairn_core::search::{DegradationReason, DegradedLeg, GraphSource};
+
+    let reason_to_idl = |r: DegradationReason| match r {
+        DegradationReason::CapabilityUnavailable => DegradedLegEntryReason::CapabilityUnavailable,
+        DegradationReason::DeadlineExceeded => DegradedLegEntryReason::Timeout,
+        // SqlError + WorkerPanic + future variants (DegradationReason
+        // is #[non_exhaustive]) all surface as SqlError on the wire.
+        _ => DegradedLegEntryReason::SqlError,
+    };
+    let source_to_idl = |s: GraphSource| match s {
+        GraphSource::AuthKeywordSeed => DegradedLegEntrySource::AuthKeywordSeed,
+        GraphSource::AuthSemanticSeed => DegradedLegEntrySource::AuthSemanticSeed,
+        // GraphSource::All + future variants (GraphSource is
+        // #[non_exhaustive]) collapse to All on the wire.
+        _ => DegradedLegEntrySource::All,
+    };
+    match leg {
+        DegradedLeg::Semantic { reason } => DegradedLegEntry {
+            leg: DegradedLegEntryLeg::Semantic,
+            reason: reason_to_idl(*reason),
+            source: None,
+        },
+        DegradedLeg::Graph { reason, source } => DegradedLegEntry {
+            leg: DegradedLegEntryLeg::Graph,
+            reason: reason_to_idl(*reason),
+            source: Some(source_to_idl(*source)),
+        },
+        // Forward-compat: DegradedLeg is #[non_exhaustive].
+        _ => DegradedLegEntry {
+            leg: DegradedLegEntryLeg::Graph,
+            reason: DegradedLegEntryReason::SqlError,
+            source: Some(DegradedLegEntrySource::All),
+        },
+    }
+}
+
 /// Convert a [`cairn_core::verbs::search::SearchOutcome`] into the SDK's
 /// [`VerbResponse<SearchData>`] envelope.
 fn envelope_from_outcome(
@@ -568,11 +611,24 @@ fn envelope_from_outcome(
             .collect()
     });
 
+    let degraded_legs = if outcome.degraded_legs.is_empty() {
+        None
+    } else {
+        Some(
+            outcome
+                .degraded_legs
+                .iter()
+                .map(degraded_leg_to_idl)
+                .collect(),
+        )
+    };
+
     let data = SearchData {
         hits,
         next_cursor: None,
         excluded: None,
         score_explain,
+        degraded_legs,
     };
 
     VerbResponse {
@@ -587,19 +643,37 @@ fn envelope_from_outcome(
 /// Map an IDL [`ScopeFilter`](cairn_core::generated::common::ScopeFilter)
 /// to a domain [`ScopeTuple`](cairn_core::domain::ScopeTuple) so the SDK
 /// transport propagates real auth context into search dispatch instead of
-/// the empty default tuple. Predicates carried by `ScopeFilter` but not
-/// representable in `ScopeTuple` (`kind`, `tags`, `tier`, `record_ids`)
-/// are dropped here — they're enforced by other layers (filter grammar,
-/// signed-intent gate). The seven scope dimensions threaded through are
-/// the ones `do_search_*` actually predicate on via the JSON1 scope
+/// the empty default tuple. The seven scope dimensions threaded through
+/// are the ones `do_search_*` actually predicate on via the JSON1 scope
 /// clause: `tenant`/`workspace`/`session_id`/`entity`/`user`/`agent`.
+///
+/// Fail closed on `ScopeFilter` predicates that have no equivalent in
+/// `SearchRequest` (`kind`, `tags`, `tier`, `record_ids`). Silently
+/// dropping them would widen the result set relative to what the caller
+/// asked for. Until the dispatcher learns to honor those fields, surface
+/// `InvalidArgs` so callers can either drop the unsupported predicate or
+/// move it to the `filter` grammar.
 fn scope_filter_to_tuple(
     sf: Option<&cairn_core::generated::common::ScopeFilter>,
-) -> cairn_core::domain::ScopeTuple {
+) -> Result<cairn_core::domain::ScopeTuple, SdkError> {
     let Some(sf) = sf else {
-        return cairn_core::domain::ScopeTuple::default();
+        return Ok(cairn_core::domain::ScopeTuple::default());
     };
-    cairn_core::domain::ScopeTuple {
+    if sf.kind.is_some() {
+        return Err(invalid("scope.kind: not yet honored by search dispatch"));
+    }
+    if sf.tags.is_some() {
+        return Err(invalid("scope.tags: not yet honored by search dispatch"));
+    }
+    if sf.tier.is_some() {
+        return Err(invalid("scope.tier: not yet honored by search dispatch"));
+    }
+    if sf.record_ids.is_some() {
+        return Err(invalid(
+            "scope.record_ids: not yet honored by search dispatch",
+        ));
+    }
+    Ok(cairn_core::domain::ScopeTuple {
         tenant: sf.tenant.clone(),
         workspace: sf.workspace.clone(),
         session_id: sf.session_id.clone(),
@@ -607,7 +681,7 @@ fn scope_filter_to_tuple(
         user: sf.user.clone(),
         agent: sf.agent.clone(),
         ..cairn_core::domain::ScopeTuple::default()
-    }
+    })
 }
 
 /// Wrap a `&'static str` from a hand-rolled validator into [`SdkError::InvalidArgs`].

@@ -63,6 +63,13 @@
     "Data": {
       "additionalProperties": false,
       "properties": {
+        "degraded_legs": {
+          "description": "Per-leg degradation entries when one or more search legs (semantic, graph, or graph seed sources) failed or were unavailable. Empty/absent when every requested leg contributed. Lets callers distinguish a low-recall result from a partial-failure result without inspecting server logs.",
+          "items": {
+            "$ref": "#/$defs/DegradedLegEntry"
+          },
+          "type": "array"
+        },
         "excluded": {
           "description": "Per-record exclusions; present only when args.explain is true.",
           "items": {
@@ -89,6 +96,42 @@
       },
       "required": [
         "hits"
+      ],
+      "type": "object"
+    },
+    "DegradedLegEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "leg": {
+          "description": "Which hybrid leg degraded.",
+          "enum": [
+            "semantic",
+            "graph"
+          ],
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why the leg degraded.",
+          "enum": [
+            "sql_error",
+            "capability_unavailable",
+            "timeout"
+          ],
+          "type": "string"
+        },
+        "source": {
+          "description": "Graph-leg only: which seed source was in flight when the leg degraded. Absent for non-graph legs.",
+          "enum": [
+            "all",
+            "auth_keyword_seed",
+            "auth_semantic_seed"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "leg",
+        "reason"
       ],
       "type": "object"
     },

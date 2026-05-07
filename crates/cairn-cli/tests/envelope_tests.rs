@@ -480,6 +480,7 @@ fn search_default_response_omits_excluded_field() {
         hits: Vec::new(),
         next_cursor: None,
         score_explain: None,
+        degraded_legs: None,
     };
     let json = serde_json::to_string(&data).expect("serializable");
     assert!(
@@ -505,6 +506,7 @@ fn search_with_excluded_emits_field() {
         hits: Vec::new(),
         next_cursor: None,
         score_explain: None,
+        degraded_legs: None,
     };
     let json = serde_json::to_string(&data).expect("serializable");
     assert!(

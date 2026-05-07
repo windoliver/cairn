@@ -495,6 +495,10 @@ impl ServerHandler for CairnMcpHandler {
 /// derives the capability set from config, calls
 /// [`cairn_core::verbs::search::run`], and serializes the result into a
 /// [`CallToolResult`].
+#[allow(
+    clippy::too_many_lines,
+    reason = "linear arg→request→outcome→envelope flow; splitting reduces clarity"
+)]
 async fn handle_search(
     store: Arc<dyn MemoryStore>,
     config: CairnConfig,
@@ -540,11 +544,17 @@ async fn handle_search(
     caps.hybrid_search = caps.hybrid_search && store_caps.fts && store_caps.vector;
 
     let limit = args.limit.map_or(10, |l| usize::try_from(l).unwrap_or(10));
-    // Map the IDL `args.scope` into the dispatcher's auth_scope so MCP
-    // callers narrow reads by tenant/workspace/user/agent. Without this
-    // the MCP surface ran every search with `ScopeTuple::default()` —
-    // i.e. no auth narrowing — even when the caller supplied a scope.
-    let auth_scope = scope_filter_to_tuple(args.scope.as_ref());
+    // Map the IDL `args.scope` into the dispatcher's auth_scope. Fails
+    // closed on predicates the dispatcher cannot honor so callers don't
+    // silently get a broader result set than asked.
+    let auth_scope = match scope_filter_to_tuple(args.scope.as_ref()) {
+        Ok(s) => s,
+        Err(reason) => {
+            return CallToolResult::error(vec![Content::text(format!(
+                "cairn search: invalid args: {reason}"
+            ))]);
+        }
+    };
     let request = cairn_core::verbs::search::SearchRequest {
         query: args.query.clone(),
         mode,
@@ -622,11 +632,24 @@ fn search_outcome_to_result(outcome: cairn_core::verbs::search::SearchOutcome) -
             .collect()
     });
 
+    let degraded_legs = if outcome.degraded_legs.is_empty() {
+        None
+    } else {
+        Some(
+            outcome
+                .degraded_legs
+                .iter()
+                .map(degraded_leg_to_idl)
+                .collect(),
+        )
+    };
+
     let data = SearchData {
         hits,
         next_cursor: None,
         excluded: None,
         score_explain,
+        degraded_legs,
     };
 
     match serde_json::to_string(&data) {
@@ -650,22 +673,73 @@ pub fn dispatch_stub(verb: &str) -> CallToolResult {
     ))])
 }
 
+/// Convert a domain [`cairn_core::search::DegradedLeg`] into the IDL
+/// wire representation. Mirrors the SDK transport's helper — keep in
+/// sync with `crates/cairn-idl/schema/verbs/search.json`.
+fn degraded_leg_to_idl(
+    leg: &cairn_core::search::DegradedLeg,
+) -> cairn_core::generated::verbs::search::DegradedLegEntry {
+    use cairn_core::generated::verbs::search::{
+        DegradedLegEntry, DegradedLegEntryLeg, DegradedLegEntryReason, DegradedLegEntrySource,
+    };
+    use cairn_core::search::{DegradationReason, DegradedLeg, GraphSource};
+
+    let reason_to_idl = |r: DegradationReason| match r {
+        DegradationReason::CapabilityUnavailable => DegradedLegEntryReason::CapabilityUnavailable,
+        DegradationReason::DeadlineExceeded => DegradedLegEntryReason::Timeout,
+        _ => DegradedLegEntryReason::SqlError,
+    };
+    let source_to_idl = |s: GraphSource| match s {
+        GraphSource::AuthKeywordSeed => DegradedLegEntrySource::AuthKeywordSeed,
+        GraphSource::AuthSemanticSeed => DegradedLegEntrySource::AuthSemanticSeed,
+        _ => DegradedLegEntrySource::All,
+    };
+    match leg {
+        DegradedLeg::Semantic { reason } => DegradedLegEntry {
+            leg: DegradedLegEntryLeg::Semantic,
+            reason: reason_to_idl(*reason),
+            source: None,
+        },
+        DegradedLeg::Graph { reason, source } => DegradedLegEntry {
+            leg: DegradedLegEntryLeg::Graph,
+            reason: reason_to_idl(*reason),
+            source: Some(source_to_idl(*source)),
+        },
+        _ => DegradedLegEntry {
+            leg: DegradedLegEntryLeg::Graph,
+            reason: DegradedLegEntryReason::SqlError,
+            source: Some(DegradedLegEntrySource::All),
+        },
+    }
+}
+
 /// Map an IDL `ScopeFilter` to a domain `ScopeTuple` so MCP callers
 /// thread real auth context into the search dispatcher.
 ///
-/// Mirrors the SDK transports `scope_filter_to_tuple`. Predicates carried
-/// by `ScopeFilter` but not representable in `ScopeTuple` (`kind`,
-/// `tags`, `tier`, `record_ids`) are dropped — they are enforced by other
-/// layers (filter grammar, signed-intent gate). The seven scope dimensions
-/// threaded through are the ones `do_search_*` actually predicate on via
-/// the JSON1 scope clause.
+/// Mirrors the SDK transport's `scope_filter_to_tuple`. Fails closed on
+/// `ScopeFilter` predicates the search dispatcher cannot honor (`kind`,
+/// `tags`, `tier`, `record_ids`) — silently dropping them would widen
+/// the result set relative to what the caller asked for. Returns an
+/// `Err(<reason>)` that the caller surfaces as `is_error = true`.
 fn scope_filter_to_tuple(
     sf: Option<&cairn_core::generated::common::ScopeFilter>,
-) -> cairn_core::domain::ScopeTuple {
+) -> Result<cairn_core::domain::ScopeTuple, &'static str> {
     let Some(sf) = sf else {
-        return cairn_core::domain::ScopeTuple::default();
+        return Ok(cairn_core::domain::ScopeTuple::default());
     };
-    cairn_core::domain::ScopeTuple {
+    if sf.kind.is_some() {
+        return Err("scope.kind: not yet honored by search dispatch");
+    }
+    if sf.tags.is_some() {
+        return Err("scope.tags: not yet honored by search dispatch");
+    }
+    if sf.tier.is_some() {
+        return Err("scope.tier: not yet honored by search dispatch");
+    }
+    if sf.record_ids.is_some() {
+        return Err("scope.record_ids: not yet honored by search dispatch");
+    }
+    Ok(cairn_core::domain::ScopeTuple {
         tenant: sf.tenant.clone(),
         workspace: sf.workspace.clone(),
         session_id: sf.session_id.clone(),
@@ -673,7 +747,7 @@ fn scope_filter_to_tuple(
         user: sf.user.clone(),
         agent: sf.agent.clone(),
         ..cairn_core::domain::ScopeTuple::default()
-    }
+    })
 }
 
 #[cfg(test)]
