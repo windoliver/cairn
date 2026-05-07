@@ -671,7 +671,6 @@ mod resize_tests {
     }
 }
 
-#[cfg(test)]
 mod tests {
     use super::open_in_memory;
 
@@ -684,6 +683,66 @@ mod tests {
         assert!(
             store.incarnation().is_some(),
             "open must call init_incarnation",
+        );
+    }
+}
+
+#[cfg(test)]
+mod graph_search_probe_tests {
+    use super::{probe_graph_search_tables, register_vec0};
+
+    /// Healthy migration head ⇒ probe returns true: every required
+    /// `entity_*` table is present, and the always-false column probe
+    /// statement prepares cleanly.
+    #[test]
+    fn probe_true_after_migrations_to_head() {
+        register_vec0();
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open mem");
+        crate::migrations::migrations()
+            .to_latest(&mut conn)
+            .expect("migrate");
+        assert!(
+            probe_graph_search_tables(&conn).expect("probe"),
+            "fresh head schema must satisfy graph_search probe",
+        );
+    }
+
+    /// Drop one of the required tables ⇒ probe returns false. Models a
+    /// stripped-down fork or a partial migration apply.
+    #[test]
+    fn probe_false_when_required_table_missing() {
+        register_vec0();
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open mem");
+        crate::migrations::migrations()
+            .to_latest(&mut conn)
+            .expect("migrate");
+        conn.execute_batch("DROP TABLE entity_edges")
+            .expect("drop entity_edges");
+        assert!(
+            !probe_graph_search_tables(&conn).expect("probe"),
+            "probe must report false when entity_edges is missing",
+        );
+    }
+
+    /// Drop a column the graph SQL reads ⇒ probe returns false. The
+    /// table-name check would still pass but prepare-time column
+    /// resolution fails. This is the case the round-3 column probe was
+    /// added to catch.
+    #[test]
+    fn probe_false_when_required_column_missing() {
+        register_vec0();
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open mem");
+        crate::migrations::migrations()
+            .to_latest(&mut conn)
+            .expect("migrate");
+        // SQLite ≥ 3.35 has ALTER TABLE … DROP COLUMN. Remove
+        // `confidence_score` from `entity_edges` and assert the column
+        // probe catches it.
+        conn.execute_batch("ALTER TABLE entity_edges DROP COLUMN confidence_score")
+            .expect("drop column");
+        assert!(
+            !probe_graph_search_tables(&conn).expect("probe"),
+            "probe must report false when entity_edges.confidence_score is missing",
         );
     }
 }

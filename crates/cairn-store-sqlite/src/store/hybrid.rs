@@ -68,6 +68,10 @@ impl SqliteMemoryStore {
         err,
         fields(verb = "search_hybrid", limit = args.limit, blend = args.blend),
     )]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "linear leg → rerank → hydrate pipeline; each phase named inline"
+    )]
     pub(crate) async fn do_search_hybrid(
         &self,
         args: &HybridSearchArgs<'_>,
@@ -136,7 +140,6 @@ impl SqliteMemoryStore {
             .run_graph_leg(args, &keyword.candidates, &semantic.candidates)
             .await;
         leg_degradations.extend(graph_degraded);
-        let degraded_legs = leg_degradations;
 
         // Build 1-based rank lookup maps for the explain block. Constructed
         // here while `kw_list` / `sem_list` are in leg-order (rank order).
@@ -161,7 +164,32 @@ impl SqliteMemoryStore {
         // RRF only re-ranks its own top-K, so fetching more vectors is waste.
         let combined_ids = combined_topk_ids(&kw_list, &sem_list, args.rerank_topk);
         let conn = self.require_conn("search_hybrid")?.clone();
-        let doc_vectors = fetch_doc_vectors(conn, combined_ids, args.model_label.clone()).await?;
+        // Fetch doc vectors for cosine re-rank. If `record_vectors` is
+        // unavailable (table dropped, vec0 module missing, schema skew),
+        // skip re-rank and surface a `DegradedLeg::Semantic` entry —
+        // unless one is already present from `do_search_semantic` itself
+        // (don't double-report a single failure mode).
+        let (doc_vectors, skip_rerank) = match fetch_doc_vectors(
+            conn,
+            combined_ids,
+            args.model_label.clone(),
+        )
+        .await
+        {
+            Ok(v) => (v, false),
+            Err(e) => {
+                tracing::warn!(error = %e, "fetch_doc_vectors failed; skipping cosine rerank");
+                if !leg_degradations.iter().any(|d| {
+                    matches!(d, DegradedLeg::Semantic { .. })
+                }) {
+                    leg_degradations.push(DegradedLeg::Semantic {
+                        reason: DegradationReason::SqlError,
+                    });
+                }
+                (HashMap::new(), true)
+            }
+        };
+        let degraded_legs = leg_degradations;
 
         // Run the pure-function orchestration.
         let reranked = hybrid_search(
@@ -176,7 +204,7 @@ impl SqliteMemoryStore {
                 rrf_k: args.rrf_k,
                 rerank_topk: args.rerank_topk,
                 blend: args.blend,
-                skip_rerank: false,
+                skip_rerank,
                 confidence_floor: args.confidence_floor,
             },
         );
