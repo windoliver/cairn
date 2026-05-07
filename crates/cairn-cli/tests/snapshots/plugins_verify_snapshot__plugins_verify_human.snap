@@ -7,7 +7,7 @@ cairn-mcp (MCPServer)
   tier-1 arc_pointer_stable                       ok
   tier-1 capability_self_consistency_floor        ok
   tier-1 manifest_features_match_capabilities     ok
-  tier-2 initialize_and_list_tools                pending (real impl pending)
+  tier-2 initialize_and_list_tools                pending (core cannot exercise rmcp initialize/tools-list without depending on the adapter)
 
 cairn-sensors-local (SensorIngress)
   tier-1 manifest_matches_host                    ok

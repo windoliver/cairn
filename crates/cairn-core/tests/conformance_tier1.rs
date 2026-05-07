@@ -89,6 +89,26 @@ fn tier1_cases_pass_for_well_formed_memory_store() {
     assert!(ids.contains(&"manifest_features_match_capabilities"));
 }
 
+#[test]
+fn mcp_tier2_tool_list_stays_pending_in_core() {
+    let mut reg = PluginRegistry::new();
+    let name = PluginName::new("stub-mcp").expect("valid");
+    let manifest = PluginManifest::parse_toml(MCP_MANIFEST).expect("manifest parses");
+    reg.register_mcp_server_with_manifest(name.clone(), manifest, Arc::new(StubMcpServer))
+        .expect("registers");
+
+    let outcomes = run_conformance_for_plugin(&reg, &name);
+    let tool_case = outcomes
+        .iter()
+        .find(|o| o.id == "initialize_and_list_tools")
+        .expect("tool-list case exists");
+
+    assert!(
+        matches!(tool_case.status, CaseStatus::Pending { .. }),
+        "core conformance cannot prove rmcp initialize/list_tools by capability advertisement alone"
+    );
+}
+
 const MCP_MANIFEST: &str = r#"
 name = "stub-mcp"
 contract = "MCPServer"

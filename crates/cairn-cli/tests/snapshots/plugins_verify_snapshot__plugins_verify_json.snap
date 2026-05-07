@@ -28,7 +28,7 @@ expression: json
         },
         {
           "id": "initialize_and_list_tools",
-          "reason": "real impl pending",
+          "reason": "core cannot exercise rmcp initialize/tools-list without depending on the adapter",
           "status": "pending",
           "tier": 2
         }

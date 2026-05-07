@@ -55,6 +55,20 @@ fn help_flag_lists_all_eight_verbs() {
 }
 
 #[test]
+fn mcp_subcommand_help_exits_zero() {
+    let out = cli()
+        .args(["mcp", "--help"])
+        .output()
+        .expect("cairn mcp --help");
+    assert!(out.status.success(), "exit: {:?}", out.status);
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    assert!(
+        stdout.contains("stdio"),
+        "mcp help should describe the stdio transport: {stdout:?}",
+    );
+}
+
+#[test]
 fn no_args_prints_help_and_fails_closed() {
     // Generated `command()` sets subcommand_required(true) and
     // arg_required_else_help(true), so a bare `cairn` invocation is a clap
@@ -73,16 +87,17 @@ fn no_args_prints_help_and_fails_closed() {
 fn simple_verb_human_mode_exits_one_with_internal() {
     // After dispatch wiring: verbs with no store adapter exit 1 (generic failure)
     // and print "Internal" to stderr in human mode.
-    // `ingest` is excluded: bare `cairn ingest` has no source → exit 64 (usage error).
+    // `ingest` is excluded: it has its own JSON-mode smoke test below.
     // `retrieve` and `forget` are excluded: required ArgGroup → exit 64 (usage error).
-    for verb in [
-        "search",
-        "summarize",
-        "assemble_hot",
-        "capture_trace",
-        "lint",
+    for args in [
+        &["search", "--mode", "keyword", "query"][..],
+        &["summarize", "01JXXXXXXXXXXXXXXXXXXXXXXX"][..],
+        &["assemble_hot"][..],
+        &["capture_trace", "--from", "/dev/null"][..],
+        &["lint"][..],
     ] {
-        let out = cli().arg(verb).output().expect("cairn <verb>");
+        let verb = args[0];
+        let out = cli().args(args).output().expect("cairn <verb>");
         assert!(
             !out.status.success(),
             "verb {verb} exited OK — should fail with Internal"

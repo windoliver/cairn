@@ -8,12 +8,15 @@ use thiserror::Error;
 /// errors, which stay inside the `cairn.mcp.v1` response envelope.
 #[derive(Debug, Error)]
 #[non_exhaustive]
-pub enum McpTransportError {
-    /// MCP server failed to complete the `initialize` handshake.
-    #[error("MCP stdio server failed to initialize: {0}")]
-    Initialize(String),
+pub enum TransportError {
+    /// MCP service failed to initialize or terminated abnormally.
+    #[error("MCP stdio service error: {0}")]
+    Service(String),
 
     /// IO error on the underlying stdio transport.
     #[error("stdio IO error: {0}")]
     Io(#[from] std::io::Error),
 }
+
+/// Back-compat alias for callers that imported the old concrete name.
+pub type McpTransportError = TransportError;

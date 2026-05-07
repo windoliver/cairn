@@ -39,6 +39,9 @@ expression: "&c"
   "store": {
     "kind": "sqlite"
   },
+  "search": {
+    "local_embeddings": true
+  },
   "llm": {
     "provider": "openai-compatible",
     "base_url": "http://localhost:11434/v1",

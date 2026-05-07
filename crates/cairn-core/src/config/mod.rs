@@ -239,6 +239,8 @@ pub struct CairnConfig {
     pub vault: VaultConfig,
     /// Store adapter selection.
     pub store: StoreConfig,
+    /// Search backend and embedding availability configuration.
+    pub search: SearchConfig,
     /// LLM provider configuration.
     pub llm: LlmConfig,
     /// Sensor enablement.
@@ -376,6 +378,25 @@ impl Default for StoreConfig {
     fn default() -> Self {
         Self {
             kind: StoreKind::Sqlite,
+        }
+    }
+}
+
+// ── Search ────────────────────────────────────────────────────────────────
+
+/// Search backend configuration (§3 / §8.0 search capability gate).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SearchConfig {
+    /// Whether the bundled local embedding runtime may be used for semantic and
+    /// hybrid search. Defaults to true for the P0 local-first stack.
+    pub local_embeddings: bool,
+}
+
+impl Default for SearchConfig {
+    fn default() -> Self {
+        Self {
+            local_embeddings: true,
         }
     }
 }
@@ -540,7 +561,7 @@ pub struct ExtractBudget {
 pub struct CapabilitySet {
     /// Always true at P0 (`FTS5` always present).
     pub keyword_search: bool,
-    /// True iff `llm.provider` is `Some`.
+    /// True iff local embeddings are enabled and available.
     pub semantic_search: bool,
     /// True iff `semantic_search` (requires vector embeddings).
     pub hybrid_search: bool,
@@ -642,6 +663,7 @@ impl CairnConfig {
     #[must_use]
     pub fn capabilities(&self) -> CapabilitySet {
         let llm_on = self.llm.provider.is_some();
+        let local_embeddings_on = self.search.local_embeddings;
         let agent_extract = self
             .pipeline
             .extract
@@ -651,8 +673,8 @@ impl CairnConfig {
 
         CapabilitySet {
             keyword_search: true,
-            semantic_search: llm_on,
-            hybrid_search: llm_on,
+            semantic_search: local_embeddings_on,
+            hybrid_search: local_embeddings_on,
             llm_extract: llm_on,
             agent_extract,
             graph_edges: false, // P0: sqlite always false; P1+ gates on store capability
@@ -912,6 +934,7 @@ mod tests {
         assert_eq!(config.vault.name, "my-vault");
         assert_eq!(config.vault.layout.sources, "inbox");
         assert_eq!(config.vault.layout.enabled_kinds.len(), 2);
+        assert!(config.search.local_embeddings);
         assert!(!config.sensors.ide.enabled);
     }
 
@@ -919,8 +942,8 @@ mod tests {
     fn capabilities_llm_off_by_default() {
         let caps = CairnConfig::default().capabilities();
         assert!(caps.keyword_search, "keyword_search always true");
-        assert!(!caps.semantic_search, "no LLM → no semantic");
-        assert!(!caps.hybrid_search, "no LLM → no hybrid");
+        assert!(caps.semantic_search, "local embeddings default on");
+        assert!(caps.hybrid_search, "hybrid follows local embeddings");
         assert!(!caps.llm_extract, "no LLM → no llm_extract");
         assert!(!caps.agent_extract, "default chain has no agent worker");
         assert!(!caps.graph_edges, "sqlite → no graph edges");
@@ -936,6 +959,23 @@ mod tests {
         assert!(caps.hybrid_search);
         assert!(caps.llm_extract);
         assert!(!caps.agent_extract);
+    }
+
+    #[test]
+    fn capabilities_local_embeddings_off_removes_semantic_and_hybrid() {
+        let mut config = CairnConfig::default();
+        config.search.local_embeddings = false;
+        config.llm.provider = Some(LlmProvider::OpenaiCompatible);
+
+        let caps = config.capabilities();
+
+        assert!(caps.keyword_search);
+        assert!(!caps.semantic_search);
+        assert!(!caps.hybrid_search);
+        assert!(
+            caps.llm_extract,
+            "LLM extraction remains gated by llm.provider"
+        );
     }
 
     #[test]

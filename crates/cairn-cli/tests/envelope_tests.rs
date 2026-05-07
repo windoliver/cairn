@@ -39,7 +39,7 @@ fn ingest_returns_aborted_internal() {
 
 #[test]
 fn search_returns_aborted_internal() {
-    assert_aborted_internal(&["search", "test query", "--json"]);
+    assert_aborted_internal(&["search", "--mode", "keyword", "test query", "--json"]);
 }
 
 #[test]

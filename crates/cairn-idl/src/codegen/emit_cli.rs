@@ -139,11 +139,7 @@ fn write_single_command(w: &mut RustWriter, cmd: &CliCommand) {
         w.line(&format!(".arg({})", render_flag_arg(flag)));
     }
     if let Some(pos) = &cmd.positional {
-        w.line(&format!(
-            ".arg(clap::Arg::new(\"{}\").help(\"{}\").required(false))",
-            pos.name,
-            escape_rust_str(&pos.description)
-        ));
+        w.line(&format!(".arg({})", render_positional_arg(pos)));
     }
     w.dedent();
 }
@@ -193,11 +189,7 @@ fn write_variant_command(
         if let Some(pos) = &variant.positional
             && seen.insert(pos.name.clone())
         {
-            w.line(&format!(
-                ".arg(clap::Arg::new(\"{}\").help(\"{}\").required(false))",
-                pos.name,
-                escape_rust_str(&pos.description)
-            ));
+            w.line(&format!(".arg({})", render_positional_arg(pos)));
         }
     }
 
@@ -270,6 +262,22 @@ fn render_flag_arg(flag: &CliFlag) -> String {
     }
     if let Some(action) = action {
         let _ = write!(out, ".action({action})");
+    }
+    if flag.required {
+        out.push_str(".required(true)");
+    }
+    out
+}
+
+fn render_positional_arg(pos: &super::ir::CliPositional) -> String {
+    let mut out = format!(
+        "clap::Arg::new(\"{}\").help(\"{}\").required({})",
+        pos.name,
+        escape_rust_str(&pos.description),
+        pos.required
+    );
+    if pos.repeatable {
+        out.push_str(".action(clap::ArgAction::Append).num_args(1..)");
     }
     out
 }
