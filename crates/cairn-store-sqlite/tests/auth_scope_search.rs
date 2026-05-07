@@ -528,3 +528,236 @@ async fn scope_with_special_characters_does_not_break_sql() {
     let page = store.search_keyword(&args).await.expect("keyword");
     assert_eq!(page.candidates.len(), 1);
 }
+
+// ── Graph provenance auth (round-1 fix #2) ──────────────────────────────
+//
+// The graph SQL INNER JOINs `entity_edges.source_record_id` to a `records pr`
+// alias and applies auth/visibility/active/tombstoned/supersession to `pr`
+// before allowing the edge to contribute. The next three tests verify each
+// failure mode of that gate is honored.
+
+/// Helper: build an entity-graph fixture with two records (`r1`, `r2`),
+/// two entities (`e1`, `e2`), and an edge `e1↔e2` whose provenance is
+/// set by the caller via `provenance`. Returns the open store, the seed
+/// record id, the neighbor record id, and an in-flight edge handle so
+/// the caller can mutate state (e.g. tombstone the provenance) before
+/// querying.
+async fn provenance_fixture(
+    seed_scope: ScopeTuple,
+    neighbor_scope: ScopeTuple,
+    provenance_scope: ScopeTuple,
+    provenance: Option<&str>,
+) -> (Arc<dyn MemoryStore>, RecordId, RecordId, RecordId) {
+    use cairn_core::domain::graph::{EdgeConfidence, EntityEdge, EntityEdgeId, EntityId, EntityNode};
+
+    let store = cairn_store_sqlite::open_in_memory()
+        .await
+        .expect("open store");
+    let r1 = record(
+        "01HQZX9F5N0000000000000P01",
+        "01HQZX9F5N0000000000000P01",
+        seed_scope,
+        "provenance seed body",
+    );
+    let r2 = record(
+        "01HQZX9F5N0000000000000P02",
+        "01HQZX9F5N0000000000000P02",
+        neighbor_scope,
+        "provenance neighbor body",
+    );
+    let pr = record(
+        "01HQZX9F5N0000000000000P03",
+        "01HQZX9F5N0000000000000P03",
+        provenance_scope,
+        "provenance source-of-extraction body",
+    );
+    store.upsert(&r1).await.expect("upsert r1");
+    store.upsert(&r2).await.expect("upsert r2");
+    store.upsert(&pr).await.expect("upsert pr");
+
+    let e1_node = EntityNode {
+        id: EntityId::from("01HZE7JV5N00000000000000PA"),
+        name: "Alice".into(),
+        name_norm: "alice-prov".into(),
+        summary: None,
+        created_at: 1,
+        embedding_id: None,
+    };
+    let e2_node = EntityNode {
+        id: EntityId::from("01HZE7JV5N00000000000000PB"),
+        name: "Bob".into(),
+        name_norm: "bob-prov".into(),
+        summary: None,
+        created_at: 1,
+        embedding_id: None,
+    };
+    let e1 = store.upsert_entity(&e1_node).await.expect("e1");
+    let e2 = store.upsert_entity(&e2_node).await.expect("e2");
+    store
+        .link_entity_episode(&e1, &r1.id)
+        .await
+        .expect("link r1");
+    store
+        .link_entity_episode(&e2, &r2.id)
+        .await
+        .expect("link r2");
+
+    let source_record_id = match provenance {
+        Some("seed") => Some(r1.id.clone()),
+        Some("provenance") => Some(pr.id.clone()),
+        Some("neighbor") => Some(r2.id.clone()),
+        _ => None,
+    };
+    let edge = EntityEdge {
+        id: EntityEdgeId::from("01HZE7JV5N00000000000000PE"),
+        source_id: e1,
+        target_id: e2,
+        relation: "knows".into(),
+        confidence: EdgeConfidence::Extracted,
+        confidence_score: 1.0,
+        valid_at: 1,
+        invalid_at: None,
+        created_at: 1,
+        source_record_id,
+    };
+    store.upsert_entity_edge(&edge).await.expect("edge");
+    (Arc::new(store), r1.id, r2.id, pr.id)
+}
+
+/// Edge whose provenance lives in tenant `globex` cannot pull the
+/// neighbor into a result for caller scope `acme`, even though both the
+/// seed and the neighbor are themselves in `acme`. The provenance check
+/// runs inside the `neighbors` CTE, before the edge contributes.
+#[tokio::test]
+async fn graph_neighbor_with_unauthorized_provenance_dropped() {
+    use cairn_core::contract::memory_store::GraphNeighborsArgs;
+
+    let acme = ScopeTuple {
+        tenant: Some("acme".into()),
+        ..Default::default()
+    };
+    let globex = ScopeTuple {
+        tenant: Some("globex".into()),
+        ..Default::default()
+    };
+    let (store, seed, _neighbor, _pr) =
+        provenance_fixture(acme.clone(), acme.clone(), globex, Some("provenance")).await;
+
+    let result = store
+        .search_graph_neighbors(&GraphNeighborsArgs {
+            seed_record_ids: vec![seed],
+            ranked_record_ids: vec![],
+            filter: None,
+            auth_scope: acme,
+            visibility_allowlist: vec![MemoryVisibility::Private],
+            limit: 10,
+            confidence_min: 0.0,
+        })
+        .await
+        .expect("graph search");
+    assert!(
+        result.is_empty(),
+        "edge with cross-tenant provenance must NOT pull neighbor into acme result; got {:?}",
+        result
+            .iter()
+            .map(|c| c.record_id.as_str())
+            .collect::<Vec<_>>(),
+    );
+}
+
+/// Null `source_record_id` disqualifies the edge entirely. The `INNER
+/// JOIN records pr ON pr.record_id = e.source_record_id` filters out
+/// rows with NULL provenance regardless of caller scope.
+#[tokio::test]
+async fn graph_neighbor_with_null_provenance_dropped() {
+    use cairn_core::contract::memory_store::GraphNeighborsArgs;
+
+    let acme = ScopeTuple {
+        tenant: Some("acme".into()),
+        ..Default::default()
+    };
+    let (store, seed, _neighbor, _pr) =
+        provenance_fixture(acme.clone(), acme.clone(), acme.clone(), None).await;
+
+    let result = store
+        .search_graph_neighbors(&GraphNeighborsArgs {
+            seed_record_ids: vec![seed],
+            ranked_record_ids: vec![],
+            filter: None,
+            auth_scope: acme,
+            visibility_allowlist: vec![MemoryVisibility::Private],
+            limit: 10,
+            confidence_min: 0.0,
+        })
+        .await
+        .expect("graph search");
+    assert!(
+        result.is_empty(),
+        "edge with NULL source_record_id must yield no neighbors; got {:?}",
+        result
+            .iter()
+            .map(|c| c.record_id.as_str())
+            .collect::<Vec<_>>(),
+    );
+}
+
+/// Provenance record tombstoned ⇒ `pr.tombstoned = 0` predicate fails ⇒
+/// edge cannot contribute. Even though the seed, the neighbor, and the
+/// scope all match, the dead provenance disqualifies the edge.
+#[tokio::test]
+async fn graph_neighbor_with_tombstoned_provenance_dropped() {
+    use cairn_core::contract::memory_store::{GraphNeighborsArgs, TombstoneReason};
+
+    let acme = ScopeTuple {
+        tenant: Some("acme".into()),
+        ..Default::default()
+    };
+    let (store, seed, _neighbor, pr) =
+        provenance_fixture(acme.clone(), acme.clone(), acme.clone(), Some("provenance")).await;
+
+    // Sanity: with a healthy provenance, the neighbor surfaces.
+    let healthy = store
+        .search_graph_neighbors(&GraphNeighborsArgs {
+            seed_record_ids: vec![seed.clone()],
+            ranked_record_ids: vec![],
+            filter: None,
+            auth_scope: acme.clone(),
+            visibility_allowlist: vec![MemoryVisibility::Private],
+            limit: 10,
+            confidence_min: 0.0,
+        })
+        .await
+        .expect("graph search (healthy)");
+    assert_eq!(
+        healthy.len(),
+        1,
+        "baseline: healthy provenance must surface the neighbor",
+    );
+
+    // Tombstone the provenance record. The edge must now stop contributing.
+    store
+        .tombstone(&pr, TombstoneReason::Forget)
+        .await
+        .expect("tombstone pr");
+
+    let result = store
+        .search_graph_neighbors(&GraphNeighborsArgs {
+            seed_record_ids: vec![seed],
+            ranked_record_ids: vec![],
+            filter: None,
+            auth_scope: acme,
+            visibility_allowlist: vec![MemoryVisibility::Private],
+            limit: 10,
+            confidence_min: 0.0,
+        })
+        .await
+        .expect("graph search (post-tombstone)");
+    assert!(
+        result.is_empty(),
+        "tombstoned provenance must disqualify edge; got {:?}",
+        result
+            .iter()
+            .map(|c| c.record_id.as_str())
+            .collect::<Vec<_>>(),
+    );
+}
