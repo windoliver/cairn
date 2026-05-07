@@ -1540,7 +1540,6 @@ rerank_topk: 20
     use crate::contract::memory_store::MemoryStoreCapabilities;
     use crate::mcp_auth::{ConfigBackedScope, McpGraphAvailability, McpSessionScope, McpTransport};
 
-
     fn store_caps_with_graph(graph: bool) -> MemoryStoreCapabilities {
         MemoryStoreCapabilities {
             fts: true,
