@@ -112,14 +112,20 @@ pub async fn init_incarnation(conn: &Arc<Connection>) -> Result<Arc<str>, LockEr
 pub async fn current_incarnation(conn: &Arc<Connection>) -> Result<Arc<str>, LockError> {
     let row: Option<String> = conn
         .call(|c| {
-            let result = c
-                .query_row(
-                    "SELECT incarnation_id FROM daemon_incarnation WHERE id = 1",
-                    [],
-                    |row| row.get::<_, String>(0),
-                )
-                .ok();
-            Ok::<_, tokio_rusqlite::Error>(result)
+            // Distinguish "row absent" (treated as NoIncarnation) from any
+            // other SQLite failure. Using `.ok()` here would mask schema
+            // drift / table-rename / type-coercion errors as a missing
+            // incarnation, sending callers down the retry path instead of
+            // surfacing the real fault.
+            match c.query_row(
+                "SELECT incarnation_id FROM daemon_incarnation WHERE id = 1",
+                [],
+                |row| row.get::<_, String>(0),
+            ) {
+                Ok(s) => Ok::<_, tokio_rusqlite::Error>(Some(s)),
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(e) => Err(e.into()),
+            }
         })
         .await?;
     row.map(Arc::from).ok_or(LockError::NoIncarnation)

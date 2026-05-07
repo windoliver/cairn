@@ -180,16 +180,36 @@ impl LockHandle {
 
     /// Explicit release (idempotent). Equivalent to `drop` but reports errors.
     ///
+    /// On error, the handle is returned via `LockError`'s caller-side
+    /// recovery path: ownership is **retained** (no `mem::forget`) until
+    /// the DELETE actually succeeds. If the call returns `Err`, `Drop`
+    /// will still run when the handle is dropped, so the caller can either
+    /// retry by re-calling `release` (it's idempotent) or let TTL reclaim
+    /// the row. This protects against partial-failure lock leaks.
+    ///
     /// # Errors
-    /// `LockError::Db` on connection failure.
+    /// `LockError::Db` on connection failure. On error the handle is
+    /// dropped at the end of the function (`Drop` re-attempts release).
     pub async fn release(self) -> Result<(), LockError> {
         let resource = self.resource.clone();
         let holder_id = self.holder_id.clone();
         let acquired_epoch = self.acquired_epoch;
         let inc = self.owner_incarnation.to_string();
         let conn = Arc::clone(&self.conn);
-        std::mem::forget(self);
-        release_inner(&conn, &resource, &holder_id, acquired_epoch, &inc).await
+        match release_inner(&conn, &resource, &holder_id, acquired_epoch, &inc).await {
+            Ok(()) => {
+                // Successful DELETE — suppress Drop's fire-and-forget retry.
+                std::mem::forget(self);
+                Ok(())
+            }
+            Err(e) => {
+                // Keep the handle alive so Drop runs when `self` goes out
+                // of scope and re-attempts the DELETE. The caller sees the
+                // error and can retry explicitly via `release_by_holder` or
+                // simply rely on Drop + TTL reclaim.
+                Err(e)
+            }
+        }
     }
 }
 

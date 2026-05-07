@@ -57,9 +57,7 @@ pub async fn acquire(
     operation: &str,
 ) -> Result<LockHandle, LockError> {
     let resource_str = resource.as_resource_str();
-    let now_ms = system_time_ms()?;
     let ttl_ms = i64::try_from(ttl.as_millis()).unwrap_or(i64::MAX);
-    let expires_at = now_ms.saturating_add(ttl_ms);
 
     let inc_owned = owner_incarnation.to_string();
     let holder_owned = holder_id.to_owned();
@@ -69,6 +67,23 @@ pub async fn acquire(
 
     let outcome = conn
         .call(move |c| {
+            // tokio_rusqlite serializes work onto a dedicated DB thread, so a
+            // timestamp captured before `conn.call` is queued can be stale by
+            // the time it lands in the INSERT. Compute now_ms / expires_at
+            // INSIDE the transaction closure so the lease window starts from
+            // the moment we actually own the SQLite write lock — preventing
+            // the next acquirer from reclaiming a fresh holder due to
+            // queueing latency. Fail closed on clock errors via Db error so
+            // callers see a real failure, not a synthesized fence.
+            let now_ms = system_time_ms().map_err(|e| match e {
+                LockError::Clock => {
+                    tokio_rusqlite::Error::Other("system clock pre-epoch".to_string().into())
+                }
+                LockError::Db(inner) => inner,
+                other => tokio_rusqlite::Error::Other(format!("{other}").into()),
+            })?;
+            let expires_at = now_ms.saturating_add(ttl_ms);
+
             let tx = c.transaction()?;
 
             // 0. Liveness check: confirm the caller's cached incarnation still
@@ -76,13 +91,18 @@ pub async fn acquire(
             //    second process has opened the DB and minted a fresh
             //    incarnation, the caller is stale — fail closed instead of
             //    deleting the live owner's holder rows in step 1.
-            let on_disk_incarnation: Option<String> = tx
-                .query_row(
-                    "SELECT incarnation_id FROM daemon_incarnation WHERE id = 1",
-                    [],
-                    |row| row.get::<_, String>(0),
-                )
-                .ok();
+            let on_disk_incarnation: Option<String> = match tx.query_row(
+                "SELECT incarnation_id FROM daemon_incarnation WHERE id = 1",
+                [],
+                |row| row.get::<_, String>(0),
+            ) {
+                Ok(s) => Some(s),
+                Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                // Any other SQL error (table missing, type mismatch, etc.) is
+                // a real store failure — propagate as Db so callers see the
+                // root cause instead of a synthesized stale-incarnation fence.
+                Err(e) => return Err(e.into()),
+            };
             if on_disk_incarnation.as_deref() != Some(inc_owned.as_str()) {
                 drop(tx);
                 return Ok::<AcquisitionOutcome, tokio_rusqlite::Error>(
@@ -175,6 +195,7 @@ pub async fn acquire(
                 tx.commit()?;
                 return Ok::<AcquisitionOutcome, tokio_rusqlite::Error>(AcquisitionOutcome::Ok {
                     acquired_epoch: new_epoch,
+                    acquired_at: now_ms,
                 });
             }
 
@@ -197,6 +218,7 @@ pub async fn acquire(
                 tx.commit()?;
                 return Ok(AcquisitionOutcome::Ok {
                     acquired_epoch: current_epoch,
+                    acquired_at: now_ms,
                 });
             }
 
@@ -230,10 +252,13 @@ pub async fn acquire(
         .await?;
 
     match outcome {
-        AcquisitionOutcome::Ok { acquired_epoch } => Ok(LockHandle::new(
+        AcquisitionOutcome::Ok {
+            acquired_epoch,
+            acquired_at,
+        } => Ok(LockHandle::new(
             resource_str,
             holder_id.to_owned(),
-            now_ms,
+            acquired_at,
             acquired_epoch,
             Arc::clone(owner_incarnation),
             Arc::clone(conn),
@@ -282,6 +307,11 @@ pub async fn acquire(
 enum AcquisitionOutcome {
     Ok {
         acquired_epoch: i64,
+        /// Wall-clock ms captured INSIDE the txn closure — the source of truth
+        /// for the holder's lease window. Threaded back to `LockHandle::new`
+        /// so external callers see the actual acquisition timestamp, not the
+        /// pre-queue value.
+        acquired_at: i64,
     },
     Held {
         resource: String,
