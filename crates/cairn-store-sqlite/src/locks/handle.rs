@@ -152,21 +152,27 @@ impl LockHandle {
         let acquired_at = self.acquired_at;
         let acquired_epoch = self.acquired_epoch;
         let inc = self.owner_incarnation.to_string();
-        // Capture now_ms in Rust (millisecond precision) and bind it as a
-        // parameter. SQLite's `strftime('%s','now') * 1000` is second-aligned,
-        // which is too coarse for sub-second TTLs. Captured outside the
-        // closure is conservative for the CAS direction (an older now_ms
-        // makes the lease MORE likely to be valid, never less).
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| LockError::Clock)
-            .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))?;
 
         let outcome: Result<R, LockError> = self
             .conn
             .call(move |c| {
                 let mut tx =
                     c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                // Capture `now_ms` INSIDE the closure, AFTER `BEGIN IMMEDIATE`,
+                // so queueing latency cannot bind a stale timestamp that
+                // admits an already-expired lease. SQLite's
+                // `strftime('%s','now')` is second-aligned (too coarse for
+                // sub-second TTLs), so use Rust's millisecond clock.
+                let Ok(now_ms) = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|_| ())
+                    .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+                else {
+                    drop(tx);
+                    return Ok::<Result<R, LockError>, tokio_rusqlite::Error>(Err(
+                        LockError::Clock,
+                    ));
+                };
                 // CAS: read group epoch + holder liveness in one statement.
                 // The EXISTS clause requires per-acquisition identity
                 // (acquired_at) AND a future expires_at, so a TTL-elapsed

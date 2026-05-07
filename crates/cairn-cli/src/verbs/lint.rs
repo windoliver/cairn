@@ -340,6 +340,7 @@ fn spawn_lock_heartbeat(
     // ttl/3 gives two refreshes within each TTL window so a transient
     // failure on one tick still leaves a valid renewal before expiry.
     let interval = ttl / 3;
+    let ttl_ms = i64::try_from(ttl.as_millis()).unwrap_or(i64::MAX);
     tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -347,36 +348,55 @@ fn spawn_lock_heartbeat(
                 _ = &mut cancel => return,
                 () = tokio::time::sleep(interval) => {}
             }
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(i64::MAX, |d| {
-                    i64::try_from(d.as_millis()).unwrap_or(i64::MAX)
-                });
-            let ttl_ms = i64::try_from(ttl.as_millis()).unwrap_or(i64::MAX);
-            let expires = now_ms.saturating_add(ttl_ms);
             let resource = resource.clone();
             let holder = holder_id.clone();
             let inc = owner_incarnation.to_string();
-            let _ = conn
+            // The heartbeat must NOT revive an already-expired lease.
+            // Compute now_ms inside the DB call (after queueing settles)
+            // and gate the UPDATE on `expires_at > now_ms`. If 0 rows
+            // are updated, the lease was lost (stalled past TTL or
+            // reclaimed) — bail out so the next tick doesn't keep
+            // pushing expires_at forward on a row that no longer
+            // semantically belongs to us.
+            let updated = conn
                 .call(move |c| {
-                    c.execute(
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(i64::MAX, |d| {
+                            i64::try_from(d.as_millis()).unwrap_or(i64::MAX)
+                        });
+                    let expires = now_ms.saturating_add(ttl_ms);
+                    let n = c.execute(
                         "UPDATE lock_holders \
                             SET expires_at = ?1 \
                           WHERE resource = ?2 AND holder_id = ?3 \
                             AND acquired_epoch = ?4 AND owner_incarnation = ?5 \
-                            AND acquired_at = ?6",
+                            AND acquired_at = ?6 \
+                            AND expires_at > ?7",
                         rusqlite::params![
                             expires,
                             resource,
                             holder,
                             acquired_epoch,
                             inc,
-                            acquired_at
+                            acquired_at,
+                            now_ms
                         ],
                     )?;
-                    Ok::<_, tokio_rusqlite::Error>(())
+                    Ok::<usize, tokio_rusqlite::Error>(n)
                 })
                 .await;
+            if matches!(updated, Ok(0)) {
+                // Lease lost — either expired between ticks or was
+                // reclaimed. Stop heartbeating; the surrounding flow's
+                // pre-commit fence (`is_still_held` / `with_fencing`)
+                // will surface the loss.
+                tracing::warn!(
+                    "lint --fix-markdown heartbeat: lease lost (0 rows updated); \
+                     exiting heartbeat task — caller's fence check will fail closed"
+                );
+                return;
+            }
         }
     })
 }
