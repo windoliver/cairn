@@ -48,6 +48,10 @@ cairn ingest --kind KIND --file FILE
 ```
 
 ```bash
+cairn ingest --kind KIND --folder FOLDER
+```
+
+```bash
 cairn ingest --kind KIND --url URL
 ```
 
@@ -57,6 +61,10 @@ cairn ingest --kind KIND --body BODY --session SESSION_ID
 
 ```bash
 cairn ingest --kind KIND --body BODY --tags TAGS
+```
+
+```bash
+cairn ingest --kind KIND --body BODY --no-cache
 ```
 
 ```bash

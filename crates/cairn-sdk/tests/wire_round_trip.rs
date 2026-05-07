@@ -30,6 +30,10 @@ fn ingest_response_round_trips() {
         verb: ResponseVerb::Ingest,
         target: None,
         data: IngestData {
+            cache_hits: None,
+            cache_misses: None,
+            cache_writes: None,
+            files_processed: None,
             record_id: ulid(),
             session_id: "sess-1".to_owned(),
             plan_ref: None,
@@ -86,6 +90,10 @@ fn target_on_non_retrieve_fails_round_trip() {
         verb: ResponseVerb::Ingest,
         target: Some(ResponseTarget::Record),
         data: IngestData {
+            cache_hits: None,
+            cache_misses: None,
+            cache_writes: None,
+            files_processed: None,
             record_id: ulid(),
             session_id: "s".to_owned(),
             plan_ref: None,
@@ -107,6 +115,10 @@ fn malformed_operation_id_caught_by_canonical_deserializer() {
         verb: ResponseVerb::Ingest,
         target: None,
         data: IngestData {
+            cache_hits: None,
+            cache_misses: None,
+            cache_writes: None,
+            files_processed: None,
             record_id: ulid(),
             session_id: "s".to_owned(),
             plan_ref: None,

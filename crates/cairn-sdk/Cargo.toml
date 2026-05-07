@@ -25,6 +25,7 @@ base64 = { workspace = true }
 [dev-dependencies]
 async-trait = { workspace = true }
 proptest = { workspace = true }
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }
 
 # `serde` is used through fully-qualified paths (`serde::Serialize`,

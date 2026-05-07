@@ -1446,7 +1446,8 @@ async fn tick_runs_concurrently_with_no_pending_migration() {
     use cairn_store_sqlite::consent::read_since_rowid;
     use cairn_store_sqlite::open_sync;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::time::Duration;
 
     let db_dir = tempdir().expect("db dir");
     let db_path = db_dir.path().join("cairn.db");
@@ -1466,7 +1467,10 @@ async fn tick_runs_concurrently_with_no_pending_migration() {
     }
 
     let stop = Arc::new(AtomicBool::new(false));
+    let tick_iters_seen = Arc::new(AtomicU64::new(0));
+    let read_iters_seen = Arc::new(AtomicU64::new(0));
     let stop_tick = stop.clone();
+    let tick_iters_seen_worker = tick_iters_seen.clone();
     let vault_tick = vault_path.clone();
     let db_tick = db_path.clone();
     let tick_handle = tokio::task::spawn_blocking(move || {
@@ -1478,11 +1482,13 @@ async fn tick_runs_concurrently_with_no_pending_migration() {
                 .tick(&conn)
                 .expect("tick must not surface lock errors");
             iters += 1;
+            tick_iters_seen_worker.store(iters, Ordering::Relaxed);
         }
         iters
     });
 
     let stop_read = stop.clone();
+    let read_iters_seen_worker = read_iters_seen.clone();
     let db_read = db_path.clone();
     let read_handle = tokio::task::spawn_blocking(move || {
         let conn = open_sync(&db_read).expect("read open");
@@ -1490,18 +1496,35 @@ async fn tick_runs_concurrently_with_no_pending_migration() {
         while !stop_read.load(Ordering::Relaxed) {
             let _ = read_since_rowid(&conn, 0).expect("read must not surface lock errors");
             iters += 1;
+            read_iters_seen_worker.store(iters, Ordering::Relaxed);
         }
         iters
     });
 
-    // Generous wait — `open_sync` re-applies the migration set on each
-    // task's connection (~tens of ms), then we want both loops to spin
+    // Wait for connection setup before starting the steady-state window.
+    let started = tokio::time::timeout(Duration::from_secs(10), async {
+        while tick_iters_seen.load(Ordering::Relaxed) == 0
+            || read_iters_seen.load(Ordering::Relaxed) == 0
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+
+    // Once both sides have entered their loops, keep them overlapping
     // long enough that any locking interference would surface.
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    if started.is_ok() {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
     stop.store(true, Ordering::Relaxed);
 
     let tick_iters = tick_handle.await.expect("tick task joined cleanly");
     let read_iters = read_handle.await.expect("read task joined cleanly");
+    assert!(
+        started.is_ok(),
+        "both tasks must start within the timeout \
+         (tick={tick_iters}, read={read_iters})"
+    );
     assert!(
         tick_iters > 0 && read_iters > 0,
         "both tasks must complete at least one iteration without lock errors \

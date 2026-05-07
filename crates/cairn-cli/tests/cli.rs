@@ -258,12 +258,13 @@ fn simple_verb_human_mode_exits_one_with_internal() {
     // and print "Internal" to stderr in human mode.
     // `ingest` is excluded: bare `cairn ingest` has no source → exit 64 (usage error).
     // `retrieve` and `forget` are excluded: required ArgGroup → exit 64 (usage error).
-    // `search` is excluded: the dispatcher now rejects an empty query with
-    //   `InvalidArgs` → exit 64 (EX_USAGE); see `search_empty_query_exits_64` below.
+    // `search` is excluded: missing required CLI args exit 64 (EX_USAGE);
+    // see `search_missing_query_exits_64` below.
+    // `assemble_hot` is excluded: verb is now wired (exits 0); see
+    //   `assemble_hot_exits_zero_and_emits_committed_envelope` below.
     for args in [
         &["summarize", "01ARYZ6S41TSV4RRFFQ69G5FAV"][..],
-        &["assemble_hot"],
-        &["capture_trace"],
+        &["capture_trace", "--from", "/dev/null"],
         &["lint"],
     ] {
         let verb = args[0];
@@ -286,21 +287,60 @@ fn simple_verb_human_mode_exits_one_with_internal() {
 }
 
 #[test]
-fn search_empty_query_exits_64() {
-    // `cairn search` with no query (empty string default) is now wired to the
-    // dispatcher, which rejects an empty query with `InvalidArgs` → EX_USAGE (64).
-    // This replaced the old stub behaviour (exit 1 + "Internal").
-    let out = cli().arg("search").output().expect("cairn search");
+fn assemble_hot_exits_zero_and_emits_committed_envelope() {
+    // `assemble_hot` is wired: stub-body assembler returns a committed
+    // Response with six zero-length segments (default recipe). Exit 0.
+    // The verb fails closed on a non-vault directory, so bootstrap a
+    // tempdir vault and run from inside it.
+    let dir = tempfile::tempdir().expect("tempdir");
+    cairn_cli::vault::bootstrap(&cairn_cli::vault::BootstrapOpts {
+        vault_path: dir.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap vault");
+    let out = cli()
+        .current_dir(dir.path())
+        .args(["assemble_hot", "--json"])
+        .output()
+        .expect("cairn assemble_hot --json");
+    assert!(
+        out.status.success(),
+        "assemble_hot exited non-zero: {:?}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    let v: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("expected valid JSON on stdout");
+    assert_eq!(v["contract"], "cairn.mcp.v1");
+    assert_eq!(v["status"], "committed");
+    assert_eq!(v["verb"], "assemble_hot");
+    assert!(v["data"]["segments"].is_array(), "segments must be present");
+    assert_eq!(
+        v["data"]["segments"].as_array().map(Vec::len),
+        Some(6),
+        "default recipe has 6 steps"
+    );
+}
+
+#[test]
+fn search_missing_query_exits_64() {
+    // `query` is required by the IDL schema and generated clap surface, so
+    // clap rejects the invocation before dispatch.
+    let out = cli()
+        .args(["search", "--mode", "keyword"])
+        .output()
+        .expect("cairn search --mode keyword");
     assert_eq!(
         out.status.code(),
         Some(64),
-        "search with empty query must exit 64 (EX_USAGE / InvalidArgs); got {:?}",
+        "search without query must exit 64 (EX_USAGE); got {:?}",
         out.status
     );
     let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
     assert!(
-        stderr.contains("InvalidArgs") || stderr.contains("invalid args"),
-        "stderr must surface InvalidArgs: {stderr:?}",
+        stderr.contains("required"),
+        "stderr must surface required query: {stderr:?}",
     );
 }
 
@@ -387,7 +427,7 @@ fn search_accepts_explain_flag() {
     // capability advertised, the handler fails-closed with sysexit 69
     // (covered by the next test) — but it must not be `UnknownArgument`.
     let out = cli()
-        .args(["search", "--explain", "test"])
+        .args(["search", "--mode", "keyword", "--explain", "test"])
         .output()
         .expect("cairn");
     let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
@@ -406,7 +446,7 @@ fn search_explain_is_gated_by_policy_trace_capability() {
     // Without a live vault, the search opens an empty store and returns 0 results
     // (exit 0); stderr must not mention CapabilityUnavailable.
     let out = cli()
-        .args(["search", "--explain", "test"])
+        .args(["search", "--mode", "keyword", "--explain", "test"])
         .output()
         .expect("cairn");
     let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
@@ -432,7 +472,7 @@ fn search_explain_json_does_not_emit_capability_unavailable() {
     // (success, 0 results) or 1 (Internal if the temp store can't open) —
     // never 69 (EX_UNAVAILABLE).
     let out = cli()
-        .args(["search", "--explain", "test", "--json"])
+        .args(["search", "--mode", "keyword", "--explain", "test", "--json"])
         .output()
         .expect("cairn");
     assert_ne!(

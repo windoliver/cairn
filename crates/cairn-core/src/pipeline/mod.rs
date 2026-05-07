@@ -37,6 +37,7 @@ pub mod dispatch;
 pub mod entity_resolve;
 pub mod explain;
 pub mod extract;
+pub mod extraction_cache;
 pub mod filter;
 pub mod lint;
 pub(crate) mod squash;

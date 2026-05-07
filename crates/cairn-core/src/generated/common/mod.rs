@@ -5,6 +5,22 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Strict deserializer for optional fields that must reject explicit JSON `null`.
+///
+/// Returns `Some(T)` for a present non-null value. Returns an error for an
+/// explicit `null`. The field-absent case bypasses this function entirely
+/// (handled by `#[serde(default)]`), preserving tri-state semantics.
+///
+/// # Errors
+///
+/// Returns the deserializer's error when input is `null` or otherwise invalid.
+pub fn reject_null_option<'de, T, D>(d: D) -> Result<Option<T>, D::Error>
+where T: ::serde::Deserialize<'de>, D: ::serde::Deserializer<'de> {
+    // Deserialize the value via T directly. If the wire is `null`,
+    // T's deserializer will see `null` and (for non-Option T) reject it.
+    T::deserialize(d).map(Some)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]

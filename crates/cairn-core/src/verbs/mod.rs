@@ -4,5 +4,6 @@
 //! typed input snapshot. Adapters live outside this module; bridging
 //! adapters → verb inputs is the job of `cairn-cli`.
 
+pub mod assemble_hot;
 pub mod lint;
 pub mod search;

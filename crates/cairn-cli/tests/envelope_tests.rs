@@ -56,9 +56,9 @@ fn search_keyword_json_exits_zero_with_hits() {
     let out = {
         let mut cmd = cli();
         cmd.env("CAIRN_VAULT", tmp.path());
-        cmd.args(["search", "test query", "--json"]);
+        cmd.args(["search", "--mode", "keyword", "test query", "--json"]);
         cmd.output()
-            .expect("cairn search test query --json should run")
+            .expect("cairn search --mode keyword test query --json should run")
     };
     assert_eq!(
         out.status.code(),
@@ -108,8 +108,41 @@ fn summarize_returns_aborted_internal() {
 }
 
 #[test]
-fn assemble_hot_returns_aborted_internal() {
-    assert_aborted_internal(&["assemble_hot", "--json"]);
+fn assemble_hot_returns_committed_envelope() {
+    // `assemble_hot` is wired to the stub-body assembler. The verb now exits 0
+    // and returns a committed envelope with six zero-length segments (default recipe).
+    // Bootstrap a tempdir vault — the verb fails closed on a non-vault cwd.
+    let dir = tempfile::tempdir().expect("tempdir");
+    cairn_cli::vault::bootstrap(&cairn_cli::vault::BootstrapOpts {
+        vault_path: dir.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap vault");
+    let out = cli()
+        .current_dir(dir.path())
+        .args(["assemble_hot", "--json"])
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run assemble_hot: {e}"));
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "assemble_hot should exit 0 (committed), got {:?}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    let v: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("assemble_hot JSON parse failed: {e}\nstdout: {stdout:?}"));
+    assert_eq!(v["contract"], "cairn.mcp.v1");
+    assert_eq!(v["status"], "committed");
+    assert_eq!(v["verb"], "assemble_hot");
+    assert!(
+        v["error"].is_null(),
+        "committed envelope must not have error"
+    );
+    assert!(v["data"]["segments"].is_array(), "segments must be present");
+    assert!(v["operation_id"].is_string());
+    assert!(v["policy_trace"].is_array());
 }
 
 #[test]

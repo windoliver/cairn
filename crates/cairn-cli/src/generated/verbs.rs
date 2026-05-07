@@ -8,13 +8,15 @@
 pub fn ingest_subcommand() -> clap::Command {
     clap::Command::new("ingest")
         .about("cairn.mcp.v1 verb: ingest")
-        .arg(clap::Arg::new("kind").long("kind").value_name("STRING"))
+        .arg(clap::Arg::new("kind").long("kind").value_name("STRING").required(true))
         .arg(clap::Arg::new("body").long("body").value_name("STRING"))
         .arg(clap::Arg::new("file").long("file").value_name("PATH").value_parser(clap::builder::PathBufValueParser::new()))
+        .arg(clap::Arg::new("folder").long("folder").value_name("PATH").value_parser(clap::builder::PathBufValueParser::new()))
         .arg(clap::Arg::new("url").long("url").value_name("STRING"))
         .arg(clap::Arg::new("session_id").long("session").value_name("STRING"))
         .arg(clap::Arg::new("tags").long("tags").value_name("STRING").action(clap::ArgAction::Append))
-        .arg(clap::Arg::new("source").help("File, URL, or '-' for stdin. Mutually exclusive with --body/--file/--url.").required(false))
+        .arg(clap::Arg::new("no_cache").long("no-cache").action(clap::ArgAction::SetTrue))
+        .arg(clap::Arg::new("source").help("File, URL, folder, or '-' for stdin. Mutually exclusive with --body/--file/--folder/--url.").required(false))
 }
 
 /// `cairn search` subcommand builder.
@@ -22,13 +24,13 @@ pub fn ingest_subcommand() -> clap::Command {
 pub fn search_subcommand() -> clap::Command {
     clap::Command::new("search")
         .about("cairn.mcp.v1 verb: search")
-        .arg(clap::Arg::new("mode").long("mode").value_name("ENUM").value_parser(["keyword", "semantic", "hybrid"]))
+        .arg(clap::Arg::new("mode").long("mode").value_name("ENUM").value_parser(["keyword", "semantic", "hybrid"]).required(true))
         .arg(clap::Arg::new("limit").long("limit").value_name("U32").value_parser(clap::value_parser!(u32)))
         .arg(clap::Arg::new("filters").long("filters").value_name("JSON"))
         .arg(clap::Arg::new("citations").long("citations").value_name("ENUM").value_parser(["on", "compact", "off"]))
         .arg(clap::Arg::new("cursor").long("cursor").value_name("STRING"))
         .arg(clap::Arg::new("explain").long("explain").action(clap::ArgAction::SetTrue))
-        .arg(clap::Arg::new("query").help("Free-text query string.").required(false))
+        .arg(clap::Arg::new("query").help("Free-text query string.").required(true))
 }
 
 /// `cairn retrieve` subcommand builder.
@@ -78,7 +80,7 @@ pub fn assemble_hot_subcommand() -> clap::Command {
 pub fn capture_trace_subcommand() -> clap::Command {
     clap::Command::new("capture_trace")
         .about("cairn.mcp.v1 verb: capture_trace")
-        .arg(clap::Arg::new("from").long("from").value_name("PATH").value_parser(clap::builder::PathBufValueParser::new()))
+        .arg(clap::Arg::new("from").long("from").value_name("PATH").value_parser(clap::builder::PathBufValueParser::new()).required(true))
         .arg(clap::Arg::new("session_id").long("session").value_name("STRING"))
 }
 
