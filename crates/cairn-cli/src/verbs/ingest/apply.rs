@@ -13,6 +13,7 @@ use thiserror::Error;
 use super::planner::{FolderPlanBatch, PlannedFile};
 
 const WIKI_LINK_RELATION: &str = "wiki_link";
+const FOLDER_GRAPH_EVENT_TIME_MS: i64 = 1_700_000_000_000;
 
 /// Counts returned by applying a folder ingest batch.
 #[allow(
@@ -163,25 +164,11 @@ pub async fn apply_batch(
             files: batch.files.len(),
         });
     }
+    let records = preflight_records(batch, &operation_id)?;
 
     let mut stats = ApplyStats::default();
     let mut record_ids = Vec::with_capacity(batch.files.len());
-    for (mutation_index, (mutation, file)) in batch
-        .plan
-        .mutations
-        .iter()
-        .zip(batch.files.iter())
-        .enumerate()
-    {
-        let PlannedMutation::Upsert { record, .. } = mutation else {
-            return Err(ApplyError::UnsupportedMutation {
-                path: file.absolute_path.clone(),
-                operation_id: operation_id.clone(),
-                mutation_index,
-            });
-        };
-        validate_record_matches_file(record, file, mutation_index, &operation_id)?;
-
+    for (record, file) in records.iter().zip(batch.files.iter()) {
         let outcome = store
             .upsert(record)
             .await
@@ -198,15 +185,39 @@ pub async fn apply_batch(
 
     if store.capabilities().graph_edges {
         for (file, record_id) in batch.files.iter().zip(record_ids.iter()) {
-            let event_time_ms = deterministic_graph_event_time_ms(file);
             let graph_stats =
-                apply_graph_for_file(store, file, record_id, event_time_ms, batch).await?;
+                apply_graph_for_file(store, file, record_id, FOLDER_GRAPH_EVENT_TIME_MS, batch)
+                    .await?;
             stats.entities_written += graph_stats.entities_written;
             stats.edges_written += graph_stats.edges_written;
         }
     }
 
     Ok(stats)
+}
+
+fn preflight_records<'a>(
+    batch: &'a FolderPlanBatch,
+    operation_id: &str,
+) -> Result<Vec<&'a cairn_core::domain::MemoryRecord>, ApplyError> {
+    batch
+        .plan
+        .mutations
+        .iter()
+        .zip(batch.files.iter())
+        .enumerate()
+        .map(|(mutation_index, (mutation, file))| {
+            let PlannedMutation::Upsert { record, .. } = mutation else {
+                return Err(ApplyError::UnsupportedMutation {
+                    path: file.absolute_path.clone(),
+                    operation_id: operation_id.to_owned(),
+                    mutation_index,
+                });
+            };
+            validate_record_matches_file(record, file, mutation_index, operation_id)?;
+            Ok(record.as_ref())
+        })
+        .collect()
 }
 
 fn validate_record_matches_file(
@@ -404,17 +415,6 @@ fn deterministic_graph_ulid(cache_key: &str, parts: &[&str]) -> String {
     ulid::Ulid::from_bytes(bytes).to_string()
 }
 
-fn deterministic_graph_event_time_ms(file: &PlannedFile) -> i64 {
-    let mut hasher = Sha256::new();
-    hasher.update(file.cache_key.as_bytes());
-    hasher.update(b"\0graph-event-time");
-    let digest = hasher.finalize();
-    let mut bytes = [0_u8; 8];
-    bytes.copy_from_slice(&digest[..8]);
-    let raw = u64::from_be_bytes(bytes);
-    i64::try_from(raw % 4_102_444_800_000).expect("bounded timestamp fits i64")
-}
-
 fn slash_normalized_path(path: &std::path::Path) -> String {
     path.components()
         .map(|component| component.as_os_str().to_string_lossy())
@@ -521,22 +521,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mutation_file_metadata_mismatch_rejects_before_write() {
+    async fn mutation_file_metadata_mismatch_rejects_before_any_write() {
         let store = FixtureStore::new();
         let mut batches = plan_batches(
             Path::new("/tmp/project"),
-            vec![file("a.md", 'a')],
+            vec![file("a.md", 'a'), file("b.md", 'b')],
             64,
             FlushMode::Autonomous,
         )
         .unwrap();
-        batches[0].files[0].cache_key = "b".repeat(64);
+        batches[0].files[1].cache_key = "c".repeat(64);
 
         let err = apply_batch(&store, &batches[0]).await.unwrap_err();
 
         let message = err.to_string();
         assert!(message.contains("folder_cache_key"), "{message}");
-        assert!(message.contains("a.md"), "{message}");
+        assert!(message.contains("b.md"), "{message}");
         let page = store.list(&ListArgs::default()).await.unwrap();
         assert!(page.records.is_empty());
     }
@@ -569,5 +569,33 @@ mod tests {
 
         assert_eq!(second.records_written, 0);
         assert_eq!(second.edges_written, 0);
+    }
+
+    #[tokio::test]
+    async fn sqlite_graph_changed_content_same_edge_does_not_backdate() {
+        let store = cairn_store_sqlite::open_in_memory().await.unwrap();
+        let first_batches = plan_batches(
+            Path::new("/tmp/project"),
+            vec![file("a.md", 'a')],
+            64,
+            FlushMode::Autonomous,
+        )
+        .unwrap();
+        apply_batch(&store, &first_batches[0]).await.unwrap();
+
+        let mut changed = file("a.md", 'b');
+        changed.body = "# a changed\n[[Entity]]\n".to_owned();
+        let second_batches = plan_batches(
+            Path::new("/tmp/project"),
+            vec![changed],
+            64,
+            FlushMode::Autonomous,
+        )
+        .unwrap();
+
+        let second = apply_batch(&store, &second_batches[0]).await.unwrap();
+
+        assert_eq!(second.records_written, 1);
+        assert_eq!(second.edges_written, 1);
     }
 }
