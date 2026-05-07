@@ -50,7 +50,8 @@
         "remediation": {
           "type": "string",
           "minLength": 1,
-          "description": "Free-form operator-facing hint for resolving the capability gap. Optional and additive — pre-#53 servers omit the field, newer servers populate it from the cairn-core::status::REMEDIATION map. Callers MUST NOT parse this for dispatch; the closed `capability` enum is the machine-readable signal."
+          "x-cairn-since": "v0.1.0",
+          "description": "Free-form operator-facing hint for resolving the capability gap. Optional and additive — populated by v0.1.0+ servers via cairn-core::status::REMEDIATION. Pre-v0.1.0 servers do not exist; v0.1.0 IS the first wire spec for cairn.mcp.v1, so there is no deployed peer that would reject the field. Callers MUST NOT parse this for dispatch; the closed `capability` enum is the machine-readable signal."
         }
       }
     },
