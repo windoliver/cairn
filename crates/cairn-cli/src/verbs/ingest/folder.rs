@@ -90,7 +90,7 @@ fn normalize_options(
     sub: &ArgMatches,
     vault_root: PathBuf,
 ) -> Result<FolderIngestOptions, FolderIngestError> {
-    let folder = sub
+    let requested_folder = sub
         .get_one::<PathBuf>("folder")
         .cloned()
         .ok_or_else(|| FolderIngestError::Usage("--folder is required".to_owned()))?;
@@ -110,12 +110,18 @@ fn normalize_options(
             "--human-review is not supported with --folder".to_owned(),
         ));
     }
-    if !folder.is_dir() {
+    if !requested_folder.is_dir() {
         return Err(FolderIngestError::Usage(format!(
             "folder does not exist or is not a directory: {}",
-            folder.display()
+            requested_folder.display()
         )));
     }
+    let folder = requested_folder.canonicalize().map_err(|err| {
+        FolderIngestError::Io(format!(
+            "failed to canonicalize folder {}: {err}",
+            requested_folder.display()
+        ))
+    })?;
 
     let include = parse_pattern_list(
         sub.get_many::<String>("include")

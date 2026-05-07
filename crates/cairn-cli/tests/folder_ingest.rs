@@ -90,6 +90,58 @@ fn folder_ingest_keyword_dry_run_json_succeeds_without_writes() {
 }
 
 #[test]
+fn folder_operation_ids_are_stable_for_relative_and_absolute_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        &dir.path().join("docs/guide.md"),
+        "# Cairn Guide\nSee [[Memory Store]].\n",
+    );
+    let absolute_docs = dir.path().join("docs");
+
+    let relative = cli()
+        .current_dir(dir.path())
+        .args([
+            "ingest",
+            "--folder",
+            "docs",
+            "--mode",
+            "keyword",
+            "--dry-run",
+            "--json",
+        ])
+        .output()
+        .expect("relative folder ingest");
+    assert_eq!(
+        relative.status.code(),
+        Some(0),
+        "exit: {:?}",
+        relative.status
+    );
+
+    let absolute = cli()
+        .current_dir(dir.path())
+        .arg("ingest")
+        .arg("--folder")
+        .arg(&absolute_docs)
+        .args(["--mode", "keyword", "--dry-run", "--json"])
+        .output()
+        .expect("absolute folder ingest");
+    assert_eq!(
+        absolute.status.code(),
+        Some(0),
+        "exit: {:?}",
+        absolute.status
+    );
+
+    let relative_json = json_stdout(&relative);
+    let absolute_json = json_stdout(&absolute);
+    assert_eq!(
+        relative_json["operation_ids"], absolute_json["operation_ids"],
+        "same folder must plan the same operation ids"
+    );
+}
+
+#[test]
 fn batch_size_zero_exits_usage() {
     let dir = tempfile::tempdir().unwrap();
     write(&dir.path().join("docs/guide.md"), "# Cairn Guide\n");
