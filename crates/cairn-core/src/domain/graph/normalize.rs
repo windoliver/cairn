@@ -14,7 +14,7 @@
 //! version stripped it, but that silently merged punctuation-significant
 //! entity names — `C++`/`C`, `node.js`/`node js`, `ACME-1`/`ACME 1` — onto
 //! the same `name_norm` row, causing irreversible graph merges at
-//! `upsert_entity` time. ByName lookup still tolerates case and whitespace
+//! `upsert_entity` time. `ByName` lookup still tolerates case and whitespace
 //! variation, which is what the canonicalizer is for; treating punctuation
 //! as semantically meaningless was a correctness bug, not a feature.
 //!
@@ -62,11 +62,7 @@ pub fn normalize_entity_name(input: &str) -> Option<String> {
     if out.ends_with(' ') {
         out.pop();
     }
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 #[cfg(test)]
@@ -90,10 +86,7 @@ mod tests {
     fn punctuation_significant_names_stay_distinct() {
         // Round-2 review: `C++` and `C` are separate languages; the
         // canonicalizer must not collapse them onto one dedup key.
-        assert_ne!(
-            normalize_entity_name("C++"),
-            normalize_entity_name("C"),
-        );
+        assert_ne!(normalize_entity_name("C++"), normalize_entity_name("C"),);
         assert_ne!(
             normalize_entity_name("node.js"),
             normalize_entity_name("node js"),

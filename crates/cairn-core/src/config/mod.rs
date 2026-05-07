@@ -9,11 +9,11 @@ pub use mcp::{McpConfig, McpStdioConfig};
 /// - [`ConfigError::McpStdioMissingPrincipal`] when
 ///   `[mcp.stdio] single_tenant = true` is set without a `principal`.
 /// - [`ConfigError::McpStdioInvalidPrincipal`] when the configured principal
-///   fails [`ScopeTuple::validate`] — empty components, reserved characters,
-///   or the unsupported `project` dimension. The graph-tools matcher binds
-///   only the six IDL-addressable dimensions, so a `project`-bearing
-///   principal would be silently broadened at read time; we fail closed at
-///   config-load instead.
+///   fails [`crate::domain::ScopeTuple::validate`] — empty components,
+///   reserved characters, or the unsupported `project` dimension. The
+///   graph-tools matcher binds only the six IDL-addressable dimensions,
+///   so a `project`-bearing principal would be silently broadened at
+///   read time; we fail closed at config-load instead.
 pub fn validate_mcp_config(cfg: &McpConfig) -> Result<(), ConfigError> {
     if cfg.stdio.single_tenant && cfg.stdio.principal.is_none() {
         return Err(ConfigError::McpStdioMissingPrincipal);

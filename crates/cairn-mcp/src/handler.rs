@@ -193,10 +193,7 @@ impl CairnMcpHandler {
     /// [`rmcp::service::RequestContext::id`] passed by the caller so a
     /// future context-sensitive resolver sees a real per-request token
     /// rather than a constant sentinel.
-    fn auth_context_for<'r>(
-        &'r self,
-        request_id: &'r str,
-    ) -> McpAuthContext<'r> {
+    fn auth_context_for<'r>(&'r self, request_id: &'r str) -> McpAuthContext<'r> {
         McpAuthContext::new(&self.principal, request_id)
     }
 

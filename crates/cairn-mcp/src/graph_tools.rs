@@ -216,6 +216,7 @@ use serde_json::{Map, Value};
 /// This function never returns a Rust error. All failure modes (unknown tool,
 /// invalid arguments, store errors) are returned as
 /// `CallToolResult { is_error: Some(true), ... }`.
+#[allow(clippy::too_many_lines)] // central dispatch table; splitting per-tool would scatter the schema/store wiring across helpers without untangling anything.
 pub async fn dispatch(
     queries: &GraphQueries,
     name: &str,
@@ -271,8 +272,9 @@ pub async fn dispatch(
                 // cannot drive the server to allocate an arbitrarily large
                 // traversal: the graph driver itself trusts its `node_budget`
                 // input to be already-clamped, so the cap belongs here.
-                let node_budget =
-                    usize::try_from(a.node_budget).unwrap_or(usize::MAX).min(NODE_BUDGET_CAP);
+                let node_budget = usize::try_from(a.node_budget)
+                    .unwrap_or(usize::MAX)
+                    .min(NODE_BUDGET_CAP);
                 let token_budget = usize::try_from(a.token_budget)
                     .unwrap_or(usize::MAX)
                     .min(TOKEN_BUDGET_CAP);

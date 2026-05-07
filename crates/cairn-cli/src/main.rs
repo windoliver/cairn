@@ -130,6 +130,7 @@ fn subcommand_needs_vault_guard(active_subcommand: &str) -> bool {
     )
 }
 
+#[allow(clippy::too_many_lines)] // top-level dispatch table; per-subcommand splits would scatter the verb wiring without untangling anything.
 fn main() -> ExitCode {
     let matches = match command::build_command().try_get_matches() {
         Ok(m) => m,

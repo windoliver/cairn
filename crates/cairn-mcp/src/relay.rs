@@ -3,7 +3,7 @@
 //! [`run_relay`] reads bytes from any [`AsyncRead`], splits on `\n`,
 //! drops blank lines, enforces a 16 MiB per-frame cap, and writes the
 //! surviving frames verbatim to any [`AsyncWrite`].  CRLF line endings are
-//! preserved.  At EOF, [`handle_eof_tail`] applies the same logic as
+//! preserved.  At EOF, the private `handle_eof_tail` helper applies the same logic as
 //! `rmcp::JsonRpcMessageCodec::decode_eof`: trailing bytes that parse as
 //! JSON are forwarded with a synthetic `\n`; malformed bytes are dropped
 //! with a `tracing::warn!`.

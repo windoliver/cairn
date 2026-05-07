@@ -180,8 +180,8 @@ pub fn run_with_context(
     // no config to drive the probe, synthesize the same `NoVault`
     // wire response the SDK emits — there is no MCP server to
     // negotiate against either way.
-    let mcp_graph_tools_field: Option<StatusResponseMcpGraphTools> = Some(
-        mcp_graph_avail.as_ref().map_or_else(
+    let mcp_graph_tools_field: Option<StatusResponseMcpGraphTools> =
+        Some(mcp_graph_avail.as_ref().map_or_else(
             || {
                 McpGraphToolsStatus::from_resolved(
                     &ResolvedAvailability::NoVault,
@@ -190,8 +190,7 @@ pub fn run_with_context(
                 .to_wire()
             },
             |(_, wire)| wire.clone(),
-        ),
-    );
+        ));
 
     let resp = StatusResponse {
         contract: "cairn.mcp.v1".to_owned(),
@@ -560,7 +559,7 @@ pub(crate) enum ResolvedAvailability {
     },
     /// `[mcp.*]` config did not pass `validate_mcp` — surfaced as a
     /// distinct state so misconfiguration is not silently masked as
-    /// "no resolver wired" (`cairn mcp` exits with EX_CONFIG on the
+    /// "no resolver wired" (`cairn mcp` exits with `EX_CONFIG` on the
     /// same error).
     ConfigError {
         error: String,
@@ -751,9 +750,10 @@ impl McpGraphToolsStatus {
 ///
 /// A freshly bootstrapped vault has no `cairn.db` yet (the file is
 /// created on the first store-opening verb run). `peek_capabilities`
-/// reports that as [`StoreError::SchemaNotInitialized`]; we translate
-/// it into an empty [`MemoryStoreCapabilities`] so the predicate
-/// surfaces the post-bootstrap state as `unavailable /
+/// reports that as [`cairn_store_sqlite::StoreError::SchemaNotInitialized`];
+/// we translate it into an empty
+/// [`cairn_core::contract::memory_store::MemoryStoreCapabilities`] so
+/// the predicate surfaces the post-bootstrap state as `unavailable /
 /// no_store_capability` rather than the alarming `probe_failed /
 /// store_open_error / sqlite error` an operator otherwise sees on a
 /// perfectly healthy vault (e2e finding).

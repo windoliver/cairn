@@ -50,7 +50,7 @@ pub(crate) fn store_db_path(vault_root: &std::path::Path) -> std::path::PathBuf 
 /// `probe_binding` and `binding_origin` come from the CLI's vault
 /// resolver: when `probe_binding` is `true` and the opt-in
 /// `single_tenant=true` path is taken, the vault must already be
-/// bound (`.cairn/vault.id` present) before SQLite is opened —
+/// bound (`.cairn/vault.id` present) before `SQLite` is opened —
 /// otherwise the open would silently materialize a fresh database
 /// in an unbound directory. The legacy `single_tenant=false`
 /// manifest path skips the gate to keep pre-Plan-A deployments

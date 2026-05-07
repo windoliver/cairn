@@ -772,6 +772,7 @@ impl GraphQueries {
     /// lifts the `expired_at IS NULL` predicate.
     ///
     /// Scope filter and endpoint liveness (`visible_nodes`) are always applied.
+    #[allow(clippy::too_many_lines)] // SQL CTE chain is intentionally inlined; splitting it across helpers would obscure the bind-order contract that ties the WHERE-clause placeholders to the scope_filtered/episode arms.
     pub async fn timeline(
         &self,
         seed: String,

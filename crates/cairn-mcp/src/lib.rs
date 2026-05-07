@@ -170,8 +170,7 @@ where
     // Relay: filter blank lines from `input`, write surviving frames to the
     // framer-reader half that rmcp reads from.
     let (framer_reader, relay_writer) = tokio::io::duplex(64 * 1024);
-    let mut relay_task =
-        tokio::spawn(async move { relay::run_relay(input, relay_writer).await });
+    let mut relay_task = tokio::spawn(async move { relay::run_relay(input, relay_writer).await });
 
     let handler =
         CairnMcpHandler::with_store_scope_and_sqlite(store, sqlite_store, scope, config, principal);
