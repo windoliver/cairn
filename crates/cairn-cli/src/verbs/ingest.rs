@@ -328,16 +328,7 @@ pub fn run(sub: &ArgMatches) -> ExitCode {
     }
 
     // Enforce IDL exactly-one-of: body/file/folder/url (positional `source` counts as one).
-    let has_source = sub.get_one::<String>("source").is_some();
-    let has_body = sub.get_one::<String>("body").is_some();
-    let has_file = sub.get_one::<PathBuf>("file").is_some();
-    let has_folder = sub.get_one::<PathBuf>("folder").is_some();
-    let has_url = sub.get_one::<String>("url").is_some();
-    let source_count = u8::from(has_source)
-        + u8::from(has_body)
-        + u8::from(has_file)
-        + u8::from(has_folder)
-        + u8::from(has_url);
+    let source_count = ingest_source_count(sub);
     if source_count != 1 {
         eprintln!(
             "cairn ingest: exactly one of [source, --body, --file, --folder, --url] is required (got {source_count})"
@@ -345,8 +336,12 @@ pub fn run(sub: &ArgMatches) -> ExitCode {
         return ExitCode::from(64);
     }
 
-    if has_folder {
-        return run_folder(sub, json);
+    if let Some(folder) = sub.get_one::<PathBuf>("folder") {
+        return run_folder(sub, json, folder);
+    }
+
+    if let Some(folder) = positional_folder_source(sub) {
+        return run_folder(sub, json, &folder);
     }
 
     if sub.get_flag("no_cache") {
@@ -408,8 +403,25 @@ pub fn run(sub: &ArgMatches) -> ExitCode {
     ExitCode::FAILURE
 }
 
-fn run_folder(sub: &ArgMatches, json: bool) -> ExitCode {
-    match run_folder_inner(sub) {
+fn ingest_source_count(sub: &ArgMatches) -> u8 {
+    u8::from(sub.get_one::<String>("source").is_some())
+        + u8::from(sub.get_one::<String>("body").is_some())
+        + u8::from(sub.get_one::<PathBuf>("file").is_some())
+        + u8::from(sub.get_one::<PathBuf>("folder").is_some())
+        + u8::from(sub.get_one::<String>("url").is_some())
+}
+
+fn positional_folder_source(sub: &ArgMatches) -> Option<PathBuf> {
+    let source = sub.get_one::<String>("source")?;
+    if source == "-" {
+        return None;
+    }
+    let path = PathBuf::from(source);
+    path.is_dir().then_some(path)
+}
+
+fn run_folder(sub: &ArgMatches, json: bool, folder: &Path) -> ExitCode {
+    match run_folder_inner(sub, folder) {
         Ok(resp) => {
             if json {
                 emit_json(&resp);
@@ -437,13 +449,10 @@ fn run_folder(sub: &ArgMatches, json: bool) -> ExitCode {
     }
 }
 
-fn run_folder_inner(sub: &ArgMatches) -> Result<Response, FolderIngestError> {
-    let folder = sub
-        .get_one::<PathBuf>("folder")
-        .ok_or(FolderIngestError::MissingFolder)?;
+fn run_folder_inner(sub: &ArgMatches, folder: &Path) -> Result<Response, FolderIngestError> {
     let vault_root = std::env::current_dir().map_err(FolderIngestError::CurrentDir)?;
     let folder_path = if folder.is_absolute() {
-        folder.clone()
+        folder.to_path_buf()
     } else {
         vault_root.join(folder)
     };
@@ -649,7 +658,6 @@ fn internal_error_response(message: &str) -> Response {
 
 #[derive(Debug)]
 enum FolderIngestError {
-    MissingFolder,
     MissingParent(PathBuf),
     NotDirectory(PathBuf),
     CurrentDir(std::io::Error),
@@ -678,7 +686,6 @@ enum FolderIngestError {
 impl std::fmt::Display for FolderIngestError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::MissingFolder => f.write_str("--folder is required"),
             Self::MissingParent(path) => {
                 write!(f, "cache path '{}' has no parent directory", path.display())
             }

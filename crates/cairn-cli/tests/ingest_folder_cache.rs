@@ -36,6 +36,20 @@ fn run_folder_ingest(vault: &std::path::Path, no_cache: bool) -> serde_json::Val
     serde_json::from_slice(&out.stdout).expect("stdout is JSON response")
 }
 
+fn run_positional_folder_ingest(vault: &std::path::Path) -> serde_json::Value {
+    let mut cmd = cli();
+    cmd.current_dir(vault)
+        .args(["ingest", "--kind", "reference", "docs", "--json"]);
+    let out = cmd.output().expect("run cairn ingest positional folder");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).expect("stdout is JSON response")
+}
+
 #[test]
 fn folder_ingest_writes_and_reuses_extraction_cache_entry() {
     let vault = tempfile::tempdir().expect("temp vault");
@@ -67,6 +81,18 @@ fn folder_ingest_writes_and_reuses_extraction_cache_entry() {
     assert_eq!(second["data"]["cache_hits"], 1);
     assert_eq!(second["data"]["cache_misses"], 0);
     assert_eq!(second["data"]["cache_writes"], 0);
+}
+
+#[test]
+fn positional_folder_source_runs_folder_cache_ingest() {
+    let vault = tempfile::tempdir().expect("temp vault");
+    write_note(vault.path(), "body");
+
+    let resp = run_positional_folder_ingest(vault.path());
+    assert_eq!(resp["status"], "committed");
+    assert_eq!(resp["data"]["files_processed"], 1);
+    assert_eq!(resp["data"]["cache_misses"], 1);
+    assert_eq!(resp["data"]["cache_writes"], 1);
 }
 
 #[test]
