@@ -200,6 +200,7 @@ pub async fn run(
                 rerank_topk: config.search.rerank_topk,
                 with_explain: request.explain,
                 confidence_floor: 1e-3,
+                graph_confidence_min: config.search.graph_confidence_min,
             };
             let page = store.search_hybrid(&args).await?;
             (page.candidates, page.explain, page.degraded_legs)

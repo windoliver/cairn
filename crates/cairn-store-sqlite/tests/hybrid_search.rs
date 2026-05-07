@@ -70,6 +70,7 @@ async fn hybrid_returns_results() {
         rerank_topk: 20,
         with_explain: false,
         confidence_floor: 1e-3,
+        graph_confidence_min: 0.0,
     };
     let page = store.search_hybrid(&args).await.expect("hybrid search");
     assert!(!page.candidates.is_empty(), "hybrid returned 0 results");
@@ -106,6 +107,7 @@ async fn hybrid_capability_unavailable_without_embedder() {
         rerank_topk: 20,
         with_explain: false,
         confidence_floor: 1e-3,
+        graph_confidence_min: 0.0,
     };
     let result = store.search_hybrid(&args).await;
     assert!(result.is_err(), "expected CapabilityUnavailable");

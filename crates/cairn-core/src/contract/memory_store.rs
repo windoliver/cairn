@@ -834,6 +834,12 @@ pub struct HybridSearchArgs<'a> {
     /// Floor on per-graph-candidate confidence weight in the RRF leg.
     /// Default `1e-3`. Issue #191.
     pub confidence_floor: f32,
+    /// Minimum `entity_edges.confidence_score` an edge must clear to
+    /// participate in graph expansion. Edges below this floor are
+    /// excluded inside the `neighbors` CTE before contributing to RRF
+    /// candidate generation. Plumbed from `SearchConfig.graph_confidence_min`
+    /// (default `0.3`). Issue #191 round-2 review #3.
+    pub graph_confidence_min: f32,
 }
 
 /// Args for [`MemoryStore::search_graph_neighbors`] (Issue #191, spec §4.3).
@@ -1038,6 +1044,7 @@ mod tests {
                 rerank_topk: 20,
                 with_explain: false,
                 confidence_floor: 1e-3,
+                graph_confidence_min: 0.3,
             })
             .await;
         assert!(

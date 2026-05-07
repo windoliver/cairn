@@ -341,7 +341,7 @@ impl SqliteMemoryStore {
             auth_scope: args.auth_scope.clone(),
             visibility_allowlist: args.visibility_allowlist.clone(),
             limit: HYBRID_LEG_LIMIT,
-            confidence_min: 0.0,
+            confidence_min: args.graph_confidence_min,
         };
         match self.do_search_graph_neighbors(&graph_args).await {
             Ok(c) => (c, graph_degradations),

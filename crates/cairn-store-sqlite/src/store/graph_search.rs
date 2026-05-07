@@ -102,8 +102,8 @@ fn build_query(
               JOIN records pr ON pr.record_id = e.source_record_id \
              WHERE (e.source_id IN (SELECT entity_node_id FROM seeds) \
                  OR e.target_id IN (SELECT entity_node_id FROM seeds)) \
-               AND e.invalid_at IS NULL AND e.expired_at IS NULL \
-               AND e.valid_at <= ? AND e.created_at <= ? \
+               AND e.valid_at <= ? AND (e.invalid_at IS NULL OR e.invalid_at > ?) \
+               AND e.created_at <= ? AND (e.expired_at IS NULL OR e.expired_at > ?) \
                AND e.confidence_score >= ? \
                AND pr.active = 1 AND pr.tombstoned = 0\
                {provenance_visibility_clause}{provenance_scope_sql} \
@@ -205,7 +205,7 @@ impl SqliteMemoryStore {
                     );
                     let mut params: Vec<SqlVal> = Vec::with_capacity(
                         seeds.len()
-                            + 3
+                            + 5
                             + (visibilities.len() * 2)
                             + provenance_scope_params.len()
                             + ranked.len()
@@ -216,6 +216,12 @@ impl SqliteMemoryStore {
                     for s in &seeds {
                         params.push(SqlVal::Text(s.clone()));
                     }
+                    // Bitemporal as-of: an edge is live when
+                    //   valid_at <= now AND (invalid_at IS NULL OR invalid_at > now)
+                    //   AND created_at <= now AND (expired_at IS NULL OR expired_at > now).
+                    // Same `now_ms` plugs into all four placeholders.
+                    params.push(SqlVal::Integer(now_ms));
+                    params.push(SqlVal::Integer(now_ms));
                     params.push(SqlVal::Integer(now_ms));
                     params.push(SqlVal::Integer(now_ms));
                     params.push(SqlVal::Real(confidence_min));

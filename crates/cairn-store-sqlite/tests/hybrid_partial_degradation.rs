@@ -59,6 +59,7 @@ fn hybrid_args(query: &str, model_label: &str) -> HybridSearchArgs<'static> {
         rerank_topk: 20,
         with_explain: false,
         confidence_floor: 1e-3,
+        graph_confidence_min: 0.0,
     }
 }
 
