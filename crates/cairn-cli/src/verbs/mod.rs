@@ -1,5 +1,9 @@
 //! Verb handler dispatch — one submodule per verb.
 
+use std::path::Path;
+
+use cairn_core::config::{CairnConfig, EmbeddingProvider};
+
 pub mod admin_model_fetch;
 pub mod admin_reindex;
 pub mod assemble_hot;
@@ -457,4 +461,44 @@ fn synth_now() -> String {
 
 fn synth_expires() -> String {
     "2026-05-04T00:05:00Z".to_string()
+}
+
+/// Determine whether the configured embedding *provider* is ready to produce
+/// vectors end-to-end.
+///
+/// Shared by `status::compute_capabilities` and `search::run_async` so the
+/// two call sites apply the same rule and cannot drift.
+///
+/// - [`EmbeddingProvider::Local`]: ready iff the model file is on disk
+///   (`model_present` from `ModelCache::is_present`).
+/// - [`EmbeddingProvider::OpenAi`]: ready iff the `openai` Cargo feature is
+///   compiled in AND `OPENAI_API_KEY` is set in the environment. A local
+///   model file on disk is irrelevant for a cloud provider.
+/// - Any future provider variant: `false` until explicit support is added
+///   here (fail-closed per CLAUDE.md §4.6).
+///
+/// `_vault_root` is unused for cloud providers (no filesystem stat needed); it
+/// is accepted to mirror callers' available context without them needing an
+/// adapter.
+pub(crate) fn embedding_provider_ready(
+    config: &CairnConfig,
+    model_present: bool,
+    _vault_root: Option<&Path>,
+) -> bool {
+    match config.search.default_provider {
+        EmbeddingProvider::Local => model_present,
+        EmbeddingProvider::OpenAi => {
+            #[cfg(feature = "openai")]
+            {
+                std::env::var("OPENAI_API_KEY")
+                    .map(|k| !k.is_empty())
+                    .unwrap_or(false)
+            }
+            #[cfg(not(feature = "openai"))]
+            {
+                false
+            }
+        }
+        _ => false,
+    }
 }

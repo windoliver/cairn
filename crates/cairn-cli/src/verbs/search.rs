@@ -240,7 +240,8 @@ async fn run_async(
     let kind = config.search.embedding_model;
     let mock_embedder = std::env::var("CAIRN_MOCK_EMBEDDER").as_deref() == Ok("1");
     let model_present = mock_embedder || cache.is_present(kind);
-    let caps = config.capabilities(model_present);
+    let provider_ready = super::embedding_provider_ready(&config, model_present, Some(&vault_root));
+    let caps = config.capabilities(provider_ready);
     let provider = config.search.default_provider;
 
     // CLI-side capability gate — fires BEFORE embedder resolution so an

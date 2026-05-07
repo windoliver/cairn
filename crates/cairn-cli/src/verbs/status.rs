@@ -15,7 +15,7 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use cairn_core::config::{CairnConfig, EmbeddingModelKind, EmbeddingProvider};
+use cairn_core::config::{CairnConfig, EmbeddingModelKind};
 use cairn_core::domain::identity::keys::VaultId;
 use cairn_core::generated::common::Capabilities;
 use cairn_core::generated::status::{
@@ -282,7 +282,7 @@ fn compute_capabilities(
         compute_embedding_provider_ready(config, model_present, vault_root);
 
     cairn_core::status::advertise(&cairn_core::status::CapabilityGates {
-        config: config.capabilities(model_present),
+        config: config.capabilities(embedding_provider_ready),
         // CLI status path stays read-only and never opens the SQLite store.
         // The bound-vault structural backstop in advertise() drives the FTS gate.
         store: None,
@@ -394,7 +394,7 @@ fn probe_mcp_graph_tools(
 fn capabilities_for_config(config: &CairnConfig, model_present: bool) -> Vec<Capabilities> {
     let embedding_provider_ready = compute_embedding_provider_ready(config, model_present, None);
     cairn_core::status::advertise(&cairn_core::status::CapabilityGates {
-        config: config.capabilities(model_present),
+        config: config.capabilities(embedding_provider_ready),
         store: None,
         vault_bound: true, // capability surface — used by --explain gate;
         // the gate runs only when caller is in a vault.
@@ -408,45 +408,14 @@ fn capabilities_for_config(config: &CairnConfig, model_present: bool) -> Vec<Cap
 /// Determine whether the configured embedding *provider* is ready to produce
 /// vectors end-to-end, for use in `CapabilityGates::embedding_provider_ready`.
 ///
-/// - `EmbeddingProvider::Local`: equivalent to `model_present` (the local
-///   candle model file must be on disk, stat-checked via `ModelCache`).
-/// - `EmbeddingProvider::OpenAi`: requires the `openai` Cargo feature to be
-///   compiled in AND `OPENAI_API_KEY` to be set in the environment. A stale
-///   local model file on disk does not make the `OpenAI` provider ready.
-///
-/// `vault_root` is unused for cloud providers (no filesystem stat needed); it
-/// is passed to mirror `compute_capabilities`'s signature for consistency.
+/// Delegates to [`super::embedding_provider_ready`], which is the shared
+/// implementation used by both this module and `search.rs`.
 fn compute_embedding_provider_ready(
     config: &CairnConfig,
     model_present: bool,
-    _vault_root: Option<&Path>,
+    vault_root: Option<&Path>,
 ) -> bool {
-    match config.search.default_provider {
-        EmbeddingProvider::Local => {
-            // Local provider: ready iff the model file is on disk.
-            model_present
-        }
-        EmbeddingProvider::OpenAi => {
-            // Cloud provider: the `openai` feature must be compiled in AND the
-            // API key must be present in the environment. A local model file
-            // on disk is irrelevant.
-            #[cfg(feature = "openai")]
-            {
-                std::env::var("OPENAI_API_KEY")
-                    .map(|k| !k.is_empty())
-                    .unwrap_or(false)
-            }
-            #[cfg(not(feature = "openai"))]
-            {
-                // Feature not compiled in — OpenAI embedder cannot be
-                // constructed regardless of API key presence.
-                false
-            }
-        }
-        // Forward-compat: any future provider variant is treated as not ready
-        // until explicit support is added here. Fail closed per CLAUDE.md §4.6.
-        _ => false,
-    }
+    super::embedding_provider_ready(config, model_present, vault_root)
 }
 
 /// True if `capability` is in the current `status.capabilities` list.
