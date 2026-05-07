@@ -33,6 +33,27 @@ fn ulid() -> Ulid {
     Ulid("01HZZ0000000000000000000AB".to_owned())
 }
 
+fn ingest_body_args(body: &str) -> IngestArgs {
+    IngestArgs {
+        batch_size: None,
+        body: Some(body.to_owned()),
+        dry_run: None,
+        exclude: None,
+        file: None,
+        folder: None,
+        frontmatter: None,
+        human_review: None,
+        include: None,
+        kind: "note".to_owned(),
+        mode: None,
+        no_diff: None,
+        recursive: None,
+        session_id: None,
+        tags: None,
+        url: None,
+    }
+}
+
 #[test]
 fn version_matches_status_server_info() {
     let resp = sdk().status();
@@ -211,16 +232,8 @@ fn handshake_mints_unique_nonces() {
 fn ingest_invalid_args_returns_typed_error() {
     // Violate exactly-one-of: pass body AND file.
     let args = IngestArgs {
-        body: Some("note".to_owned()),
-        dry_run: None,
         file: Some("/tmp/x".to_owned()),
-        frontmatter: None,
-        human_review: None,
-        kind: "note".to_owned(),
-        no_diff: None,
-        session_id: None,
-        tags: None,
-        url: None,
+        ..ingest_body_args("note")
     };
     let err = sdk().ingest(&args).expect_err("must reject");
     match err {
@@ -233,41 +246,19 @@ fn ingest_invalid_args_returns_typed_error() {
 
 #[test]
 fn ingest_valid_args_returns_internal_stub() {
-    let args = IngestArgs {
-        body: Some("note".to_owned()),
-        dry_run: None,
-        file: None,
-        frontmatter: None,
-        human_review: None,
-        kind: "note".to_owned(),
-        no_diff: None,
-        session_id: None,
-        tags: None,
-        url: None,
-    };
+    let args = ingest_body_args("note");
     assert_unimplemented("ingest", sdk().ingest(&args));
 }
 
 #[test]
 #[allow(clippy::too_many_lines)] // table-driven sweep — each case is a single-line builder, not real fn growth
 fn ingest_rejects_schema_minlength_violations() {
-    // The IDL `validate()` only enforces the body/file/url XOR, but the
-    // schema additionally requires non-empty body, file, url, kind,
-    // session_id, and tags[*]. Direct Rust construction must hit the same
-    // floor.
-    let bases = || IngestArgs {
-        body: Some("note".to_owned()),
-        dry_run: None,
-        file: None,
-        frontmatter: None,
-        human_review: None,
-        kind: "note".to_owned(),
-        no_diff: None,
-        session_id: None,
-        tags: None,
-        url: None,
-    };
-    let cases: [(&str, IngestArgs); 16] = [
+    // The IDL `validate()` only enforces the source XOR, but the schema
+    // additionally requires non-empty body, file, folder, url, kind,
+    // session_id, include/exclude/tags items, and a bounded batch_size.
+    // Direct Rust construction must hit the same floor.
+    let bases = || ingest_body_args("note");
+    let cases: [(&str, IngestArgs); 21] = [
         (
             "body",
             IngestArgs {
@@ -288,6 +279,42 @@ fn ingest_rejects_schema_minlength_violations() {
             IngestArgs {
                 body: None,
                 url: Some(String::new()),
+                ..bases()
+            },
+        ),
+        (
+            "folder",
+            IngestArgs {
+                body: None,
+                folder: Some(String::new()),
+                ..bases()
+            },
+        ),
+        (
+            "include",
+            IngestArgs {
+                include: Some(vec![String::new()]),
+                ..bases()
+            },
+        ),
+        (
+            "exclude",
+            IngestArgs {
+                exclude: Some(vec![String::new()]),
+                ..bases()
+            },
+        ),
+        (
+            "batch_size",
+            IngestArgs {
+                batch_size: Some(0),
+                ..bases()
+            },
+        ),
+        (
+            "batch_size",
+            IngestArgs {
+                batch_size: Some(65_536),
                 ..bases()
             },
         ),
@@ -419,13 +446,19 @@ fn ingest_accepts_well_formed_uri_schemes() {
         "cairn+vault://memo",
     ] {
         let args = IngestArgs {
+            batch_size: None,
             body: None,
             dry_run: None,
+            exclude: None,
             file: None,
+            folder: None,
             frontmatter: None,
             human_review: None,
+            include: None,
             kind: "note".to_owned(),
+            mode: None,
             no_diff: None,
+            recursive: None,
             session_id: None,
             tags: None,
             url: Some(url.to_owned()),
@@ -997,35 +1030,14 @@ fn sdk_error_code_helper_returns_typed_code() {
 
     // Unimplemented and InvalidArgs are SDK-side rejections without a wire
     // round-trip — they have no wire code.
-    let unimpl = sdk()
-        .ingest(&IngestArgs {
-            body: Some("note".to_owned()),
-            dry_run: None,
-            file: None,
-            frontmatter: None,
-            human_review: None,
-            kind: "note".to_owned(),
-            no_diff: None,
-            session_id: None,
-            tags: None,
-            url: None,
-        })
-        .expect_err("stub");
+    let unimpl = sdk().ingest(&ingest_body_args("note")).expect_err("stub");
     assert!(matches!(unimpl, SdkError::Unimplemented { .. }));
     assert_eq!(unimpl.code(), None);
 
     let invalid = sdk()
         .ingest(&IngestArgs {
-            body: Some("a".to_owned()),
-            dry_run: None,
             file: Some("b".to_owned()),
-            frontmatter: None,
-            human_review: None,
-            kind: "note".to_owned(),
-            no_diff: None,
-            session_id: None,
-            tags: None,
-            url: None,
+            ..ingest_body_args("a")
         })
         .expect_err("invalid");
     assert!(matches!(invalid, SdkError::InvalidArgs { .. }));
