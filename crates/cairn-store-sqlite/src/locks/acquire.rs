@@ -20,7 +20,7 @@ use rusqlite::params;
 use tokio_rusqlite::Connection;
 
 use super::error::{LockError, default_held_retry};
-use super::handle::LockHandleV2;
+use super::handle::LockHandle;
 use super::kinds::{LockMode, ResourceKey};
 
 /// Acquire a lock at `resource` with the requested `mode`.
@@ -55,7 +55,7 @@ pub async fn acquire(
     ttl: Duration,
     owner_incarnation: &Arc<str>,
     operation: &str,
-) -> Result<LockHandleV2, LockError> {
+) -> Result<LockHandle, LockError> {
     let resource_str = resource.as_resource_str();
     let now_ms = system_time_ms()?;
     let ttl_ms = i64::try_from(ttl.as_millis()).unwrap_or(i64::MAX);
@@ -205,7 +205,7 @@ pub async fn acquire(
         .await?;
 
     match outcome {
-        AcquisitionOutcome::Ok { acquired_epoch } => Ok(LockHandleV2::new(
+        AcquisitionOutcome::Ok { acquired_epoch } => Ok(LockHandle::new(
             resource_str,
             holder_id.to_owned(),
             now_ms,

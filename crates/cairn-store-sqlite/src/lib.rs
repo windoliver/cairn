@@ -15,7 +15,6 @@ pub mod entity_graph;
 pub mod error;
 mod identity;
 pub mod locks;
-mod locks_legacy;
 pub mod migrations;
 pub mod open;
 pub mod repair;

@@ -35,11 +35,11 @@ pub enum StoreError {
     /// going live without an incarnation id, which would later cause
     /// `locks::acquire` to return `LockError::NoIncarnation`.
     ///
-    /// The inner `LockErrorV2` is boxed so adding this variant does not
+    /// The inner `LockError` is boxed so adding this variant does not
     /// blow up the size of the `StoreError` enum (clippy's
     /// `result_large_err`).
     #[error("daemon incarnation init")]
-    LockInit(#[source] Box<crate::locks::LockErrorV2>),
+    LockInit(#[source] Box<crate::locks::LockError>),
 
     /// `ConsentEvent` failed structural validation (kind/payload mismatch,
     /// malformed hash, etc.) before insert.

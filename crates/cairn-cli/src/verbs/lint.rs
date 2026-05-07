@@ -40,12 +40,12 @@ pub enum LintFixError {
     LockLost,
     /// Lock-table error (not a simple Held conflict).
     ///
-    /// `LockErrorV2` is large (several hundred bytes for the structured
+    /// `LockError` is large (several hundred bytes for the structured
     /// `Held` / `Fenced` variants) so we box it here to keep
     /// `LintFixError` itself small — same rationale as
     /// `StoreError::LockInit`.
     #[error("lock error")]
-    Lock(#[source] Box<cairn_store_sqlite::locks::LockErrorV2>),
+    Lock(#[source] Box<cairn_store_sqlite::locks::LockError>),
     /// WAL state-machine error.
     #[error("wal error")]
     Wal(#[source] cairn_store_sqlite::wal::lint_repair::LintRepairWalError),
@@ -69,7 +69,7 @@ fn vault_id(vault_root: &Path) -> Result<String, LintFixError> {
     // the lock at all — TOCTOU-grade ambiguity on the scope key
     // is worse than no repair.
     let canonical = vault_root.canonicalize().map_err(|e| {
-        LintFixError::Lock(Box::new(cairn_store_sqlite::locks::LockErrorV2::Db(
+        LintFixError::Lock(Box::new(cairn_store_sqlite::locks::LockError::Db(
             tokio_rusqlite::Error::Other(
                 format!(
                     "vault canonicalization failed for {}: {e}",
@@ -92,13 +92,17 @@ fn vault_id(vault_root: &Path) -> Result<String, LintFixError> {
 /// - [`LintFixError::Lock`] on any other lock-table error.
 /// - [`LintFixError::Wal`] if the WAL state-machine rejects a transition.
 /// - [`LintFixError::Handler`] if `fix_markdown_handler` fails.
+// Single sequence: acquire-lock + open-WAL + fence-callbacks + finalize.
+// Splitting it for the line counter would force the lock + WAL + fence
+// trio across helper signatures without making the flow easier to follow.
+#[allow(clippy::too_many_lines)]
 pub async fn fix_markdown_with_lock(
     store: &cairn_store_sqlite::SqliteMemoryStore,
     vault_root: &Path,
     ttl: Duration,
 ) -> Result<FixMarkdownResult, LintFixError> {
     let conn = Arc::clone(store.raw_conn_for_admin().ok_or_else(|| {
-        LintFixError::Lock(Box::new(cairn_store_sqlite::locks::LockErrorV2::Db(
+        LintFixError::Lock(Box::new(cairn_store_sqlite::locks::LockError::Db(
             tokio_rusqlite::Error::Other("store not initialized".into()),
         )))
     })?);
@@ -111,12 +115,11 @@ pub async fn fix_markdown_with_lock(
     // than the legacy `acquired_at` timestamp. `Store::open` mints this in
     // Task 8; an unconnected (registry-stub) Store would surface
     // `NoIncarnation` here, mirroring the `store not initialized` branch.
-    let inc = store
-        .incarnation()
-        .cloned()
-        .ok_or_else(|| {
-            LintFixError::Lock(Box::new(cairn_store_sqlite::locks::LockErrorV2::NoIncarnation))
-        })?;
+    let inc = store.incarnation().cloned().ok_or_else(|| {
+        LintFixError::Lock(Box::new(
+            cairn_store_sqlite::locks::LockError::NoIncarnation,
+        ))
+    })?;
     let resource = cairn_store_sqlite::locks::ResourceKey::vault(&vid);
 
     let lock = match cairn_store_sqlite::locks::acquire(
@@ -131,7 +134,7 @@ pub async fn fix_markdown_with_lock(
     .await
     {
         Ok(h) => h,
-        Err(cairn_store_sqlite::locks::LockErrorV2::Held { .. }) => {
+        Err(cairn_store_sqlite::locks::LockError::Held { .. }) => {
             return Err(LintFixError::FixInProgress);
         }
         Err(e) => return Err(LintFixError::Lock(Box::new(e))),
@@ -257,7 +260,7 @@ async fn finalize_outcome(
     op_id: &str,
     resource: &cairn_store_sqlite::locks::ResourceKey,
     inc: &Arc<str>,
-    lock: cairn_store_sqlite::locks::LockHandleV2,
+    lock: cairn_store_sqlite::locks::LockHandle,
     outcome: Result<FixMarkdownResult, anyhow::Error>,
 ) -> Result<FixMarkdownResult, LintFixError> {
     match outcome {
@@ -276,7 +279,7 @@ async fn finalize_outcome(
             let acquired_epoch = lock.acquired_epoch();
             if let Err(first) = lock.release().await {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                if let Err(retry) = cairn_store_sqlite::locks::release_by_holder_v2(
+                if let Err(retry) = cairn_store_sqlite::locks::release_by_holder(
                     conn,
                     resource,
                     &holder_id,
@@ -402,9 +405,7 @@ async fn reconcile_stale_lint_repair_ops(
             Ok::<_, tokio_rusqlite::Error>(rows)
         })
         .await
-        .map_err(|e| {
-            LintFixError::Lock(Box::new(cairn_store_sqlite::locks::LockErrorV2::Db(e)))
-        })?;
+        .map_err(|e| LintFixError::Lock(Box::new(cairn_store_sqlite::locks::LockError::Db(e))))?;
 
     for (op_id, state) in stale {
         // IllegalTransition (already-terminal between SELECT and

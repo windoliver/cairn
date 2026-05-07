@@ -17,8 +17,8 @@ use super::kinds::ResourceKey;
 ///
 /// `acquired_epoch` and `owner_incarnation` are cached at acquisition; the
 /// fencing CAS run by `with_fencing` re-asserts both before any side-effect.
-#[must_use = "drop the LockHandleV2 to release; holding it idle keeps the lock"]
-pub struct LockHandleV2 {
+#[must_use = "drop the LockHandle to release; holding it idle keeps the lock"]
+pub struct LockHandle {
     resource: String,
     holder_id: String,
     acquired_at: i64,
@@ -27,9 +27,9 @@ pub struct LockHandleV2 {
     conn: Arc<Connection>,
 }
 
-impl std::fmt::Debug for LockHandleV2 {
+impl std::fmt::Debug for LockHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LockHandleV2")
+        f.debug_struct("LockHandle")
             .field("resource", &self.resource)
             .field("holder_id", &self.holder_id)
             .field("acquired_at", &self.acquired_at)
@@ -38,7 +38,7 @@ impl std::fmt::Debug for LockHandleV2 {
     }
 }
 
-impl LockHandleV2 {
+impl LockHandle {
     /// Construct directly. `pub(super)` so only `acquire.rs` can mint handles.
     #[allow(dead_code, reason = "wired by acquire.rs in Task 6")]
     pub(super) fn new(
@@ -193,7 +193,7 @@ impl LockHandleV2 {
     }
 }
 
-impl Drop for LockHandleV2 {
+impl Drop for LockHandle {
     fn drop(&mut self) {
         if tokio::runtime::Handle::try_current().is_err() {
             return;
@@ -214,7 +214,7 @@ impl Drop for LockHandleV2 {
 ///
 /// # Errors
 /// `LockError::Db` on connection failure.
-pub async fn release_by_holder_v2(
+pub async fn release_by_holder(
     conn: &Arc<Connection>,
     resource: &ResourceKey,
     holder_id: &str,
