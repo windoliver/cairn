@@ -415,7 +415,10 @@ async fn search_graph_neighbors_returns_connected_record() {
         valid_at: 1,
         invalid_at: None,
         created_at: 1,
-        source_record_id: None,
+        // Provenance: the edge "knows" was extracted from r1; the graph
+        // SQL applies auth/visibility/supersession to this provenance
+        // record before allowing the edge to contribute.
+        source_record_id: Some(r1.id.clone()),
     };
     store.upsert_entity_edge(&edge).await.expect("edge");
 

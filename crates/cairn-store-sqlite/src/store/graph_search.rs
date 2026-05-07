@@ -8,17 +8,6 @@
 //! ## Deferrals from the spec
 //!
 //! The full §5.1 SQL adds:
-//!   - `<auth_scope predicate>` against `records.scope` JSON. v1 leans on
-//!     the visibility allowlist as the primary auth boundary. The
-//!     `args.auth_scope` field is accepted and validated by the caller,
-//!     but is **not** folded into the predicate yet — multi-tenant
-//!     deployments must continue to narrow via the visibility allowlist
-//!     until a follow-up issue lands the JSON1-based scope predicate.
-//!   - Supersession (`NOT EXISTS edges_updates`). v1 relies on the
-//!     `active = 1 AND tombstoned = 0` gate, which excludes superseded
-//!     versions of a record but does not honor the latest-record
-//!     invariant when a record was superseded purely via the edges
-//!     mechanism.
 //!   - `carray` extension for bind-list expansion. v1 generates `?, ?, ?`
 //!     placeholders inline, capped at `SQLite`'s default `MAX_VARIABLE_NUMBER`
 //!     (999); seed/ranked lists are bounded by the orchestrator at 400 + 100,
@@ -58,7 +47,8 @@ fn build_query(
     n_seeds: usize,
     n_ranked: usize,
     n_visibilities: usize,
-    scope_sql: &str,
+    neighbor_scope_sql: &str,
+    provenance_scope_sql: &str,
     filter_sql: &str,
 ) -> String {
     fn placeholders(n: usize) -> String {
@@ -76,17 +66,27 @@ fn build_query(
     // keyword/semantic SQL builders. Without this guard, an empty allowlist
     // would translate to `r.visibility IN (SELECT NULL WHERE 0)` (always
     // false) and silently drop every graph candidate.
-    let visibility_clause = if n_visibilities == 0 {
-        String::new()
+    let (neighbor_visibility_clause, provenance_visibility_clause) = if n_visibilities == 0 {
+        (String::new(), String::new())
     } else {
-        let vis_in = placeholders(n_visibilities);
-        format!(" AND r.visibility IN ({vis_in})")
+        let neighbor_vis = placeholders(n_visibilities);
+        let provenance_vis = placeholders(n_visibilities);
+        (
+            format!(" AND r.visibility IN ({neighbor_vis})"),
+            format!(" AND pr.visibility IN ({provenance_vis})"),
+        )
     };
     let filter_clause = if filter_sql.is_empty() {
         String::new()
     } else {
         format!(" AND ({filter_sql})")
     };
+    // Provenance supersession clause — same shape as
+    // `SUPERSESSION_NOT_EXISTS_CLAUSE` but rewritten against the `pr`
+    // (provenance) alias so an edge whose source record was superseded
+    // contributes nothing.
+    let provenance_supersession = "NOT EXISTS ( SELECT 1 FROM edges e2 \
+        WHERE e2.kind = 'updates' AND e2.dst = pr.record_id )";
     format!(
         "WITH seeds AS ( \
             SELECT DISTINCT entity_node_id \
@@ -99,11 +99,15 @@ fn build_query(
                      THEN e.target_id ELSE e.source_id END AS neighbor_id, \
                 e.confidence_score \
               FROM entity_edges e \
+              JOIN records pr ON pr.record_id = e.source_record_id \
              WHERE (e.source_id IN (SELECT entity_node_id FROM seeds) \
                  OR e.target_id IN (SELECT entity_node_id FROM seeds)) \
                AND e.invalid_at IS NULL AND e.expired_at IS NULL \
                AND e.valid_at <= ? AND e.created_at <= ? \
                AND e.confidence_score >= ? \
+               AND pr.active = 1 AND pr.tombstoned = 0\
+               {provenance_visibility_clause}{provenance_scope_sql} \
+               AND {provenance_supersession} \
          ) \
          SELECT r.record_id, MAX(n.confidence_score) AS conf \
            FROM neighbors n \
@@ -111,7 +115,8 @@ fn build_query(
            JOIN records r ON r.record_id = ep.episode_id \
           WHERE n.neighbor_id NOT IN (SELECT entity_node_id FROM seeds) \
             AND r.tombstoned = 0 AND r.active = 1 \
-            AND r.record_id NOT IN ({ranked_in}){visibility_clause}{scope_sql}{filter_clause} \
+            AND r.record_id NOT IN ({ranked_in}){neighbor_visibility_clause}\
+            {neighbor_scope_sql}{filter_clause} \
             AND {SUPERSESSION_NOT_EXISTS_CLAUSE} \
           GROUP BY r.record_id \
           ORDER BY conf DESC, r.updated_at DESC \
@@ -135,6 +140,10 @@ impl SqliteMemoryStore {
             ranked = args.ranked_record_ids.len(),
             limit = args.limit
         ),
+    )]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "param assembly mirrors SQL structure; splitting reduces clarity"
     )]
     pub(crate) async fn do_search_graph_neighbors(
         &self,
@@ -169,7 +178,10 @@ impl SqliteMemoryStore {
         let limit = args.limit.clamp(1, GRAPH_LIMIT_MAX);
         let confidence_min = f64::from(args.confidence_min.clamp(0.0, 1.0));
         let now_ms = current_unix_ms();
-        let (scope_sql, scope_params) = build_scope_predicate("r", &args.auth_scope);
+        let (neighbor_scope_sql, neighbor_scope_params) =
+            build_scope_predicate("r", &args.auth_scope);
+        let (provenance_scope_sql, provenance_scope_params) =
+            build_scope_predicate("pr", &args.auth_scope);
         let compiled = args.filter.map(compile_filter);
         let filter_sql = compiled
             .as_ref()
@@ -187,15 +199,17 @@ impl SqliteMemoryStore {
                         seeds.len(),
                         ranked.len(),
                         visibilities.len(),
-                        &scope_sql,
+                        &neighbor_scope_sql,
+                        &provenance_scope_sql,
                         &filter_sql,
                     );
                     let mut params: Vec<SqlVal> = Vec::with_capacity(
                         seeds.len()
                             + 3
+                            + (visibilities.len() * 2)
+                            + provenance_scope_params.len()
                             + ranked.len()
-                            + visibilities.len()
-                            + scope_params.len()
+                            + neighbor_scope_params.len()
                             + filter_params.len()
                             + 1,
                     );
@@ -205,13 +219,20 @@ impl SqliteMemoryStore {
                     params.push(SqlVal::Integer(now_ms));
                     params.push(SqlVal::Integer(now_ms));
                     params.push(SqlVal::Real(confidence_min));
+                    // Provenance-side visibility + scope (applied inside the
+                    // `neighbors` CTE before edges contribute).
+                    for v in &visibilities {
+                        params.push(SqlVal::Text(v.clone()));
+                    }
+                    params.extend(provenance_scope_params);
+                    // Neighbor-side ranked dedup + visibility + scope + filter.
                     for r in &ranked {
                         params.push(SqlVal::Text(r.clone()));
                     }
                     for v in &visibilities {
                         params.push(SqlVal::Text(v.clone()));
                     }
-                    params.extend(scope_params);
+                    params.extend(neighbor_scope_params);
                     params.extend(filter_params);
                     #[allow(clippy::cast_possible_wrap)]
                     params.push(SqlVal::Integer(limit as i64));

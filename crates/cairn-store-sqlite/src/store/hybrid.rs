@@ -293,63 +293,57 @@ impl SqliteMemoryStore {
         }
     }
 
-    /// Fetch the auth-only seed pool for the graph leg. Selects up to
-    /// `GRAPH_SEED_OVERFETCH` recently-updated active records that pass
-    /// the caller's `auth_scope`, `visibility_allowlist`, and supersession
-    /// constraints — but **NOT** `args.filter`. The seed pool's whole
-    /// purpose is to surface authorized records that the narrowing filter
-    /// would have excluded from the lexical legs but that still warrant
-    /// graph traversal.
+    /// Fetch the query-aware, auth-only seed pool for the graph leg.
+    ///
+    /// Runs the **same FTS5 + ANN retrievals as the lexical legs**, but
+    /// with `filter = None` and `with_explain = false`. The result is the
+    /// union of keyword and semantic ids that match `args.query` and
+    /// pass `auth_scope` + `visibility_allowlist` + supersession — but
+    /// NOT `args.filter`. This restores the spec's "authorized records
+    /// that match the query but were narrowed out by the user filter"
+    /// seed semantics, without admitting query-irrelevant rows into
+    /// graph traversal (which would have happened with a query-agnostic
+    /// `records` scan).
     async fn fetch_graph_seed_pool(
         &self,
         args: &HybridSearchArgs<'_>,
     ) -> Result<Vec<RecordId>, StoreError> {
-        let conn = self.require_conn("fetch_graph_seed_pool")?.clone();
-        let visibilities: Vec<String> = args
-            .visibility_allowlist
-            .iter()
-            .map(|v| v.as_str().to_owned())
-            .collect();
-        let scope = args.auth_scope.clone();
+        let kw_seed_args = KeywordSearchArgs {
+            query: args.query.clone(),
+            filter: None,
+            auth_scope: args.auth_scope.clone(),
+            visibility_allowlist: args.visibility_allowlist.clone(),
+            limit: GRAPH_SEED_OVERFETCH,
+            cursor: None,
+            with_explain: false,
+        };
+        let sem_seed_args = SemanticSearchArgs {
+            query: args.query.clone(),
+            filter: None,
+            auth_scope: args.auth_scope.clone(),
+            visibility_allowlist: args.visibility_allowlist.clone(),
+            limit: GRAPH_SEED_OVERFETCH,
+            model_label: args.model_label.clone(),
+            with_explain: false,
+        };
+        // Run the two seed queries in parallel; either failure degrades
+        // the graph leg to empty (handled by the caller).
+        let (kw_seeds, sem_seeds) = tokio::try_join!(
+            self.do_search_keyword(&kw_seed_args),
+            self.do_search_semantic(&sem_seed_args),
+        )?;
 
-        let ids = conn
-            .call(move |c| -> Result<Vec<String>, tokio_rusqlite::Error> {
-                let visibility_clause = if visibilities.is_empty() {
-                    String::new()
-                } else {
-                    let vis_placeholders: String = std::iter::repeat_n("?", visibilities.len())
-                        .collect::<Vec<_>>()
-                        .join(",");
-                    format!(" AND r.visibility IN ({vis_placeholders})")
-                };
-                let (scope_sql, scope_params) =
-                    crate::store::scope_predicate::build_scope_predicate("r", &scope);
-                let sql = format!(
-                    "SELECT r.record_id FROM records r \
-                      WHERE r.active = 1 AND r.tombstoned = 0{visibility_clause}{scope_sql} \
-                        AND {} \
-                      ORDER BY r.updated_at DESC LIMIT ?",
-                    crate::store::search::SUPERSESSION_NOT_EXISTS_CLAUSE
-                );
-                let mut params: Vec<SqlVal> = visibilities.into_iter().map(SqlVal::Text).collect();
-                params.extend(scope_params);
-                #[allow(clippy::cast_possible_wrap)]
-                params.push(SqlVal::Integer(GRAPH_SEED_OVERFETCH as i64));
-                let mut stmt = c.prepare(&sql)?;
-                let rows = stmt
-                    .query_map(rusqlite::params_from_iter(params.iter()), |row| {
-                        row.get::<_, String>(0)
-                    })?
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(rows)
-            })
-            .await
-            .map_err(StoreError::from)?;
-
-        let parsed: Result<Vec<RecordId>, _> = ids.into_iter().map(RecordId::parse).collect();
-        parsed.map_err(|e| StoreError::Invariant {
-            what: format!("seed pool: invalid record_id from store: {e}"),
-        })
+        let mut seen: HashSet<RecordId> = HashSet::new();
+        let mut out: Vec<RecordId> = Vec::with_capacity(GRAPH_SEED_OVERFETCH);
+        for c in kw_seeds.candidates.into_iter().chain(sem_seeds.candidates) {
+            if out.len() >= GRAPH_SEED_OVERFETCH {
+                break;
+            }
+            if seen.insert(c.record_id.clone()) {
+                out.push(c.record_id);
+            }
+        }
+        Ok(out)
     }
 }
 
