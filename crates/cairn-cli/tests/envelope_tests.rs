@@ -86,6 +86,21 @@ fn retrieve_record_returns_capability_unavailable() {
 }
 
 #[test]
+fn retrieve_turn_returns_capability_unavailable() {
+    assert_rejected_capability_unavailable(
+        &[
+            "retrieve",
+            "--session",
+            "session-1",
+            "--turn",
+            "3",
+            "--json",
+        ],
+        "cairn.mcp.v1.retrieve.turn",
+    );
+}
+
+#[test]
 fn summarize_returns_aborted_internal() {
     assert_aborted_internal(&["summarize", "01JXXXXXXXXXXXXXXXXXXXXXXX", "--json"]);
 }

@@ -8,7 +8,9 @@ use clap::ArgMatches;
 use super::envelope::{EX_UNAVAILABLE, capability_unavailable_response, emit_json, human_error};
 
 fn requested_capability(sub: &ArgMatches) -> &'static str {
-    if sub.get_one::<String>("session_id").is_some() {
+    if sub.get_one::<u64>("turn_id").is_some() {
+        "cairn.mcp.v1.retrieve.turn"
+    } else if sub.get_one::<String>("session_id").is_some() {
         "cairn.mcp.v1.retrieve.session"
     } else if sub.get_one::<String>("path").is_some() {
         "cairn.mcp.v1.retrieve.folder"
