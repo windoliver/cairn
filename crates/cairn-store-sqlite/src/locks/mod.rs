@@ -1,12 +1,14 @@
 //! Lock-table acquisition for §5.6. See module-level doc once `acquire` lands.
 
 mod error;
+mod incarnation;
 mod kinds;
 
 pub use error::{
     LockError as LockErrorV2, RetryHint, default_drain_retry, default_fenced_retry,
     default_held_retry,
 };
+pub use incarnation::{current_incarnation, init_incarnation};
 pub use kinds::{LockMode, LockScope, ResourceKey};
 
 // Transitional re-exports — the legacy surface stays callable while we
