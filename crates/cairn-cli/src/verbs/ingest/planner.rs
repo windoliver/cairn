@@ -61,8 +61,12 @@ pub enum PlannerError {
     #[error("folder ingest planner batch_size must be greater than zero")]
     InvalidBatchSize,
     /// Body hashes must be lowercase SHA-256 hex strings.
-    #[error("invalid body hash `{hash}`: expected 64 lowercase SHA-256 hex characters")]
+    #[error(
+        "invalid body hash `{hash}` for `{path}`: expected 64 lowercase SHA-256 hex characters"
+    )]
     InvalidBodyHash {
+        /// Source path whose body hash was invalid.
+        path: PathBuf,
         /// Offending body hash.
         hash: String,
     },
@@ -75,6 +79,21 @@ pub enum PlannerError {
     /// A generated domain value failed current-main validation rules.
     #[error(transparent)]
     Domain(#[from] cairn_core::domain::DomainError),
+    /// A file could not be converted into a valid record for a batch.
+    #[error(
+        "failed to build record for `{path}` in batch {batch_index} ({operation_id}): {source}"
+    )]
+    RecordBuild {
+        /// Source path whose record could not be built.
+        path: PathBuf,
+        /// Index of the planned batch.
+        batch_index: usize,
+        /// Operation id for the containing batch.
+        operation_id: String,
+        /// Underlying planner error.
+        #[source]
+        source: Box<PlannerError>,
+    },
 }
 
 /// Build a deterministic folder-ingest operation id from folder, batch index,
@@ -112,7 +131,12 @@ pub fn plan_batches(
     }
 
     let mut batches = Vec::new();
-    for (batch_index, chunk) in files.chunks(batch_size).enumerate() {
+    let mut file_iter = files.into_iter();
+    for batch_index in 0.. {
+        let chunk = file_iter.by_ref().take(batch_size).collect::<Vec<_>>();
+        if chunk.is_empty() {
+            break;
+        }
         let mut sorted_hashes = chunk
             .iter()
             .map(|file| file.body_hash.clone())
@@ -120,19 +144,26 @@ pub fn plan_batches(
         sorted_hashes.sort();
 
         let operation_id = deterministic_operation_id(folder, batch_index, &sorted_hashes)?;
+        let operation_id_for_errors = operation_id.0.clone();
         let issued_at = now_rfc3339();
         let expires_at = expires_at_rfc3339(&issued_at)?;
         let mutations = chunk
             .iter()
             .map(|file| {
-                build_record_for_file(file, &issued_at).map(|record| PlannedMutation::Upsert {
-                    record: Box::new(record),
-                    prior_version: None,
-                })
+                build_record_for_file(file, &issued_at)
+                    .map(|record| PlannedMutation::Upsert {
+                        record: Box::new(record),
+                        prior_version: None,
+                    })
+                    .map_err(|source| PlannerError::RecordBuild {
+                        path: file.relative_path.clone(),
+                        batch_index,
+                        operation_id: operation_id_for_errors.clone(),
+                        source: Box::new(source),
+                    })
             })
             .collect::<Result<Vec<_>, PlannerError>>()?;
 
-        let batch_files = chunk.to_vec();
         let plan = FlushPlan {
             operation_id,
             issued_at,
@@ -149,10 +180,7 @@ pub fn plan_batches(
             placeholder: false,
         };
 
-        batches.push(FolderPlanBatch {
-            plan,
-            files: batch_files,
-        });
+        batches.push(FolderPlanBatch { plan, files: chunk });
     }
 
     Ok(batches)
@@ -162,7 +190,7 @@ fn build_record_for_file(
     file: &PlannedFile,
     issued_at: &str,
 ) -> Result<MemoryRecord, PlannerError> {
-    validate_body_hash(&file.body_hash)?;
+    validate_body_hash(&file.relative_path, &file.body_hash)?;
     let issued_at = Rfc3339Timestamp::parse(issued_at.to_owned())?;
     let author = folder_ingest_identity()?;
     let mut extra_frontmatter = BTreeMap::new();
@@ -235,7 +263,7 @@ fn ulid_from_digest(digest: impl AsRef<[u8]>) -> Ulid {
     Ulid(ulid::Ulid::from_bytes(bytes).to_string())
 }
 
-fn validate_body_hash(hash: &str) -> Result<(), PlannerError> {
+fn validate_body_hash(path: &Path, hash: &str) -> Result<(), PlannerError> {
     if hash.len() == 64
         && hash
             .bytes()
@@ -245,6 +273,7 @@ fn validate_body_hash(hash: &str) -> Result<(), PlannerError> {
     }
 
     Err(PlannerError::InvalidBodyHash {
+        path: path.to_path_buf(),
         hash: hash.to_owned(),
     })
 }

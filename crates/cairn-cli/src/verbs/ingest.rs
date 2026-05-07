@@ -43,6 +43,10 @@ mod extract;
 #[allow(dead_code, reason = "Task 6 wires --folder runtime routing")]
 mod folder;
 mod patterns;
+#[allow(
+    dead_code,
+    reason = "Task 5/6 wire planner through apply and folder routing"
+)]
 mod planner;
 pub mod report;
 mod scanner;
