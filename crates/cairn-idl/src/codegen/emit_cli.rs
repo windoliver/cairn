@@ -263,6 +263,9 @@ fn render_flag_arg(flag: &CliFlag) -> String {
     if let Some(action) = action {
         let _ = write!(out, ".action({action})");
     }
+    if flag.required {
+        out.push_str(".required(true)");
+    }
     // For closed `list<enum(...)>` flags, expose comma-delimited single-
     // token form in addition to repeated occurrences. We deliberately do
     // NOT delimit `list<string>` / `list<path>` because commas are valid
@@ -280,11 +283,7 @@ fn render_flag_arg(flag: &CliFlag) -> String {
 }
 
 fn render_positional_arg(pos: &CliPositional, grouped: bool) -> String {
-    let required = if pos.repeatable && !grouped {
-        "true"
-    } else {
-        "false"
-    };
+    let required = if grouped { false } else { pos.required };
     let mut out = format!(
         "clap::Arg::new(\"{}\").help(\"{}\").required({required})",
         pos.name,
@@ -395,6 +394,7 @@ mod tests {
                     name: "session_id".to_string(),
                     long: "session".to_string(),
                     value_source: "string".to_string(),
+                    required: false,
                     cli_exemplar: None,
                 }],
                 positional: None,
@@ -405,6 +405,7 @@ mod tests {
                 positional: Some(CliPositional {
                     name: "ids".to_string(),
                     description: "Many IDs".to_string(),
+                    required: false,
                     repeatable: true,
                     aliases_one_of: Vec::new(),
                 }),

@@ -9,7 +9,7 @@ cairn.mcp.v1 verb: ingest
 ```text
 cairn.mcp.v1 verb: ingest
 
-Usage: ingest [OPTIONS] [source]
+Usage: ingest [OPTIONS] --kind <STRING> [source]
 
 Arguments:
   [source]

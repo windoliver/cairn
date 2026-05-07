@@ -56,9 +56,9 @@ fn search_keyword_json_exits_zero_with_hits() {
     let out = {
         let mut cmd = cli();
         cmd.env("CAIRN_VAULT", tmp.path());
-        cmd.args(["search", "test query", "--json"]);
+        cmd.args(["search", "--mode", "keyword", "test query", "--json"]);
         cmd.output()
-            .expect("cairn search test query --json should run")
+            .expect("cairn search --mode keyword test query --json should run")
     };
     assert_eq!(
         out.status.code(),
