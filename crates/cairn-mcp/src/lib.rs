@@ -14,6 +14,7 @@ pub mod error;
 pub mod generated;
 pub mod graph_tools;
 pub mod handler;
+pub mod prelude_tools;
 pub mod relay;
 
 pub use error::TransportError;

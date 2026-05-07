@@ -181,10 +181,22 @@ impl CairnMcpHandler {
 
     /// Returns the names of all tools in the current manifest.
     ///
-    /// Plan A: always the 8-verb [`TOOLS`] slice — no `graph.*` tools.
+    /// Includes the eight IDL verbs unconditionally and the `handshake`
+    /// prelude tool when a sqlite store is wired (the prelude tool can only
+    /// honor calls when a store is available to persist the minted nonce).
+    /// Graph tools are appended dynamically by `list_tools` based on a
+    /// per-request scope probe — they are not listed here.
     #[must_use]
     pub fn listed_tool_names(&self) -> Vec<String> {
-        TOOLS.iter().map(|t| t.name.to_string()).collect()
+        let mut names: Vec<String> = TOOLS.iter().map(|t| t.name.to_string()).collect();
+        if self.sqlite_store.is_some() {
+            names.extend(
+                crate::prelude_tools::PRELUDE_TOOLS
+                    .iter()
+                    .map(|t| t.name.to_string()),
+            );
+        }
+        names
     }
 
     /// Build an auth context for the current request.
@@ -416,6 +428,21 @@ impl ServerHandler for CairnMcpHandler {
             })
             .collect();
 
+        // Prelude tools (`handshake`) — listed iff a sqlite store is wired,
+        // since the prelude needs the store to persist minted nonces. Listing
+        // an unhonorable prelude would violate brief §15 fail-closed.
+        if self.sqlite_store.is_some() {
+            for decl in crate::prelude_tools::PRELUDE_TOOLS {
+                let schema_value: serde_json::Value = serde_json::from_slice(decl.input_schema)
+                    .unwrap_or_else(|_| serde_json::json!({"type": "object", "properties": {}}));
+                let schema_obj = match schema_value {
+                    serde_json::Value::Object(m) => m,
+                    _ => serde_json::Map::new(),
+                };
+                tools.push(Tool::new(decl.name, decl.description, Arc::new(schema_obj)));
+            }
+        }
+
         let ctx = self.auth_context_for(&request_id);
         if self.materialize_graph_request(&ctx).is_ok() {
             for decl in crate::graph_tools::GRAPH_TOOLS {
@@ -454,6 +481,17 @@ impl ServerHandler for CairnMcpHandler {
         let request_id = context.id.to_string();
 
         async move {
+            // Prelude tool routing (`handshake`) — listed iff a sqlite store
+            // is wired; calls without a store fail closed inside dispatch.
+            if crate::prelude_tools::is_prelude_tool(name.as_ref()) {
+                return Ok(crate::prelude_tools::dispatch(
+                    name.as_ref(),
+                    arguments,
+                    self.sqlite_store.clone(),
+                )
+                .await);
+            }
+
             // Graph tool routing — single-pass resolution, no TOCTOU.
             if crate::graph_tools::GRAPH_TOOLS
                 .iter()

@@ -1,12 +1,12 @@
 ---
 source: crates/cairn-mcp/tests/graph_tools_manifest.rs
-assertion_line: 444
 expression: names
 ---
 [
   "assemble_hot",
   "capture_trace",
   "forget",
+  "handshake",
   "ingest",
   "lint",
   "retrieve",

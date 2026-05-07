@@ -1,6 +1,5 @@
 ---
 source: crates/cairn-mcp/tests/graph_tools_manifest.rs
-assertion_line: 546
 expression: names
 ---
 [
@@ -12,6 +11,7 @@ expression: names
   "graph.query",
   "graph.surprising_connections",
   "graph.timeline",
+  "handshake",
   "ingest",
   "lint",
   "retrieve",
