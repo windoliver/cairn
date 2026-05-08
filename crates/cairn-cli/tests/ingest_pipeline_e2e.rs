@@ -23,15 +23,6 @@ fn bootstrap_vault(vault: &Path) {
     .expect("bootstrap vault");
 }
 
-fn metric_rows(vault: &std::path::Path) -> Vec<serde_json::Value> {
-    let metrics = fs::read_to_string(vault.join(".cairn/metrics.jsonl"))
-        .expect("metrics file should be written");
-    metrics
-        .lines()
-        .map(|line| serde_json::from_str(line).expect("metric row JSON"))
-        .collect()
-}
-
 fn active_record_json(vault: &Path, record_id: &str) -> serde_json::Value {
     let conn = rusqlite::Connection::open(vault.join(".cairn/cairn.db")).expect("open db");
     let active_count: i64 = conn
@@ -54,22 +45,14 @@ fn active_record_json(vault: &Path, record_id: &str) -> serde_json::Value {
 }
 
 #[test]
-fn ingest_body_commits_record_and_writes_accepted_metric() {
+fn ingest_body_commits_record_through_signed_store() {
     let vault = tempfile::tempdir().expect("temp vault");
     bootstrap_vault(vault.path());
+    let body = "Agent chose SQLite because P0 must stay offline.";
 
     let out = cli()
         .current_dir(vault.path())
-        .args([
-            "ingest",
-            "--kind",
-            "reasoning",
-            "--session",
-            "01HQZX9F5N0000000000000000",
-            "--body",
-            "Agent chose SQLite because P0 must stay offline.",
-            "--json",
-        ])
+        .args(["ingest", "--kind", "reference", "--body", body, "--json"])
         .output()
         .expect("cairn ingest");
 
@@ -83,6 +66,12 @@ fn ingest_body_commits_record_and_writes_accepted_metric() {
     assert_eq!(response["contract"], "cairn.mcp.v1");
     assert_eq!(response["status"], "committed");
     assert!(response.get("error").is_none());
+    assert!(
+        !serde_json::to_string(&response)
+            .expect("response json")
+            .contains(body),
+        "ingest response must not echo raw body"
+    );
     assert_eq!(response["policy_trace"][0]["gate"], "presidio_redaction");
     assert_eq!(response["policy_trace"][0]["result"], "pass");
     assert_eq!(
@@ -95,36 +84,23 @@ fn ingest_body_commits_record_and_writes_accepted_metric() {
     );
     assert_eq!(response["policy_trace"][3]["gate"], "visibility_floor");
     assert_eq!(response["policy_trace"][3]["detail"], "floor:private");
-    assert_eq!(response["policy_trace"][4]["gate"], "scope_check");
     let record_id = response["data"]["record_id"]
         .as_str()
         .expect("record_id is string");
-
-    let rows = metric_rows(vault.path());
-    assert_eq!(rows.len(), 1);
-    let row = &rows[0];
-    assert_eq!(row["event"], "accepted");
-    assert_eq!(row["record_id"], record_id);
-    assert_eq!(row["kind"], "reasoning");
-    assert_eq!(row["class"], "episodic");
-    assert_eq!(row["visibility"], "private");
-    assert_eq!(row["scope"]["session_id"], "01HQZX9F5N0000000000000000");
-    assert_eq!(row["scope"]["agent"], "agt:cairn-cli:p0:v1");
-    assert_eq!(row["rank"], 1);
-    assert!(row.get("body").is_none(), "metric row must not leak body");
+    assert!(
+        !vault.path().join(".cairn/metrics.jsonl").exists(),
+        "signed ingest path should not write the legacy metrics sidecar"
+    );
 
     let record = active_record_json(vault.path(), record_id);
     assert_eq!(record["id"], record_id);
     assert_eq!(record["target_id"], record_id);
-    assert_eq!(record["kind"], "reasoning");
-    assert_eq!(record["class"], "episodic");
+    assert_eq!(record["kind"], "reference");
+    assert_eq!(record["class"], "semantic");
     assert_eq!(record["visibility"], "private");
-    assert_eq!(record["scope"]["session_id"], "01HQZX9F5N0000000000000000");
-    assert_eq!(record["scope"]["agent"], "agt:cairn-cli:p0:v1");
-    assert_eq!(
-        record["body"],
-        "Agent chose SQLite because P0 must stay offline."
-    );
+    assert_eq!(record["scope"]["agent"], "agt:cairn-cli:default:writer:v1");
+    assert_eq!(record["scope"]["entity"], "ingest");
+    assert_eq!(record["body"], body);
 }
 
 #[test]
@@ -163,7 +139,7 @@ fn ingest_rejects_invented_kind_before_store_dispatch() {
 }
 
 #[test]
-fn ingest_file_runs_pipeline_without_leaking_file_body_to_metrics() {
+fn ingest_file_runs_signed_pipeline_without_leaking_file_body() {
     let vault = tempfile::tempdir().expect("temp vault");
     bootstrap_vault(vault.path());
     let note = vault.path().join("note.md");
@@ -195,16 +171,19 @@ fn ingest_file_runs_pipeline_without_leaking_file_body_to_metrics() {
     let response = json_stdout(&out);
     assert_eq!(response["status"], "committed");
     assert_eq!(response["policy_trace"][0]["result"], "pass");
+    assert!(
+        !serde_json::to_string(&response)
+            .expect("response json")
+            .contains("Body marker"),
+        "ingest response must not leak raw file body"
+    );
     let record_id = response["data"]["record_id"]
         .as_str()
         .expect("record_id is string");
 
-    let metrics = fs::read_to_string(vault.path().join(".cairn/metrics.jsonl"))
-        .expect("metrics file should be written");
-    assert!(metrics.contains(r#""event":"accepted""#));
     assert!(
-        !metrics.contains("Body marker"),
-        "metric rows must not include raw file body"
+        !vault.path().join(".cairn/metrics.jsonl").exists(),
+        "signed ingest path should not write the legacy metrics sidecar"
     );
     let record = active_record_json(vault.path(), record_id);
     assert_eq!(record["kind"], "user");

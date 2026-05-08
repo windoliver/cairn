@@ -38,6 +38,11 @@ pub fn response_error_code(resp: &Response) -> Option<&str> {
 }
 
 /// Convert a domain verification error into a rejected response envelope.
+#[must_use]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "callers often construct DomainError inline for immediate envelope conversion"
+)]
 pub fn rejected_from_domain(verb: ResponseVerb, err: DomainError) -> Response {
     let body = envelope_error_for(&err);
     let error = serde_json::to_value(body).unwrap_or_else(|serialize_err| {
@@ -59,6 +64,7 @@ pub fn rejected_from_domain(verb: ResponseVerb, err: DomainError) -> Response {
 }
 
 /// Build an aborted response envelope for infrastructure or execution failures.
+#[must_use]
 pub fn aborted(verb: ResponseVerb, message: impl Into<String>) -> Response {
     Response {
         contract: "cairn.mcp.v1".to_owned(),
@@ -76,6 +82,7 @@ pub fn aborted(verb: ResponseVerb, message: impl Into<String>) -> Response {
 }
 
 /// Build a committed response envelope with operation data and policy traces.
+#[must_use]
 pub fn committed(
     verb: ResponseVerb,
     operation_id: Ulid,
@@ -94,6 +101,7 @@ pub fn committed(
 }
 
 /// Build a committed retrieve response envelope with the required target.
+#[must_use]
 pub fn committed_retrieve(
     operation_id: Ulid,
     data: RetrieveData,
@@ -208,6 +216,7 @@ pub async fn verify_request(
 }
 
 /// Build a request envelope for a generated verb payload and signed intent.
+#[must_use]
 pub fn request(
     verb: RequestVerb,
     args: RequestArgs,
@@ -222,6 +231,7 @@ pub fn request(
 }
 
 /// Map request verbs to their response echo verb.
+#[must_use]
 pub const fn response_verb(verb: RequestVerb) -> ResponseVerb {
     match verb {
         RequestVerb::Ingest => ResponseVerb::Ingest,

@@ -147,7 +147,7 @@ impl SqliteIdentityRegistry {
 
     /// Apply [`MIGRATION_0002`] to `conn` if the identity tables are absent.
     ///
-    /// Do not use SQLite `user_version` here: the main store migration runner
+    /// Do not use `SQLite` `user_version` here: the main store migration runner
     /// owns that counter. Identity shares the same database file, so treating
     /// `user_version >= 2` as an identity sentinel can make a store-migrated DB
     /// skip identity DDL, or make an identity-first DB skip store migrations.

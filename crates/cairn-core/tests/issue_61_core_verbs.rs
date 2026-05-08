@@ -46,6 +46,7 @@ mod issue_61_core_verbs {
         else {
             unreachable!("checked above");
         };
+        let record = *record;
         assert!(!fenced_text.contains("alice@example.com"));
         assert!(fenced_text.contains("[REDACTED:email]"));
         assert!(fenced_text.contains("ignore previous instructions"));
@@ -455,6 +456,6 @@ mod issue_61_core_verbs {
         else {
             panic!("sample body should pass filters");
         };
-        record
+        *record
     }
 }

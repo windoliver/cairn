@@ -201,11 +201,13 @@ fn record_frontmatter(record: &MemoryRecord) -> Option<serde_json::Value> {
     if record.extra_frontmatter.is_empty() {
         return None;
     }
-    Some(
-        serde_json::to_value(&record.extra_frontmatter).expect(
-            "invariant: MemoryRecord extra frontmatter is JSON values and always serializable",
-        ),
-    )
+    Some(serde_json::Value::Object(
+        record
+            .extra_frontmatter
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+    ))
 }
 
 fn wire_ulid(value: &str) -> Ulid {
@@ -227,7 +229,6 @@ fn reasoning_content(record: &MemoryRecord) -> Option<String> {
 fn turn_item_role(record: &MemoryRecord) -> TurnItemRole {
     match trace_event(record).as_deref() {
         Some("user_message") => TurnItemRole::User,
-        Some("agent_message") => TurnItemRole::Assistant,
         Some("pre_tool" | "post_tool" | "tool_output") => TurnItemRole::Tool,
         Some("stop" | "turn_summary") => TurnItemRole::System,
         _ => TurnItemRole::Assistant,
@@ -320,8 +321,7 @@ fn profile_section<'a>(
 fn profile_value(value: &serde_json::Value) -> String {
     value
         .as_str()
-        .map(str::to_owned)
-        .unwrap_or_else(|| value.to_string())
+        .map_or_else(|| value.to_string(), str::to_owned)
 }
 
 fn latest_profile_update(records: &[MemoryRecord]) -> String {
@@ -329,8 +329,9 @@ fn latest_profile_update(records: &[MemoryRecord]) -> String {
         .iter()
         .map(|record| &record.updated_at)
         .max_by(|a, b| a.cmp_chronological(b))
-        .map(|updated_at| updated_at.as_str().to_owned())
-        .unwrap_or_else(crate::time::now_rfc3339_seconds)
+        .map_or_else(crate::time::now_rfc3339_seconds, |updated_at| {
+            updated_at.as_str().to_owned()
+        })
 }
 
 fn empty_key_facts() -> KeyFacts {

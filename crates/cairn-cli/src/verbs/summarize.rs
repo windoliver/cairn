@@ -1,4 +1,8 @@
 //! `cairn summarize` handler.
+#![allow(
+    clippy::result_large_err,
+    reason = "CLI helpers return complete response envelopes for direct JSON emission"
+)]
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -28,6 +32,7 @@ use cairn_core::generated::verbs::summarize::{
     SummarizeArgs, SummarizeArgsCitations, SummarizeData,
 };
 use clap::ArgMatches;
+use sha2::Digest as _;
 
 use super::envelope::{emit_json, human_error, invalid_args_response, new_operation_id};
 
@@ -199,6 +204,10 @@ fn record_principal_matches_issuer(record: &MemoryRecord, issuer: &Identity) -> 
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "summary persistence signs, admits, writes, and traces one atomic CLI operation"
+)]
 async fn persist_summary(
     ctx: &super::signed::OpenedVerbContext,
     args: &SummarizeArgs,
@@ -233,7 +242,7 @@ async fn persist_summary(
             record,
             policy_trace,
             ..
-        }) => (record, policy_trace),
+        }) => (*record, policy_trace),
         Ok(cairn_core::verbs::ingest::PreparedIngest::Rejected { policy_trace, .. }) => {
             let mut resp = super::signed::rejected_from_domain(
                 ResponseVerb::Summarize,
@@ -543,7 +552,6 @@ fn visibility_allowlist(max: MemoryVisibility) -> Vec<MemoryVisibility> {
 
 fn intent_tier_to_visibility(tier: SignedIntentScopeTier) -> MemoryVisibility {
     match tier {
-        SignedIntentScopeTier::Private => MemoryVisibility::Private,
         SignedIntentScopeTier::Session => MemoryVisibility::Session,
         SignedIntentScopeTier::Project => MemoryVisibility::Project,
         SignedIntentScopeTier::Team => MemoryVisibility::Team,
@@ -629,31 +637,29 @@ fn response_exit_code(resp: &Response) -> ExitCode {
 }
 
 fn emit_human(resp: &Response) {
-    match (&resp.status, resp.data.as_ref()) {
-        (ResponseStatus::Committed, Some(ResponseData::Summarize(data))) => {
-            println!("{}", data.summary);
-        }
-        _ => {
-            let code = resp
-                .error
-                .as_ref()
-                .and_then(|e| e.get("code"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("Internal");
-            let message = resp
-                .error
-                .as_ref()
-                .and_then(|e| e.get("message"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("summarize failed");
-            human_error("summarize", code, message, &resp.operation_id);
-        }
+    if let (ResponseStatus::Committed, Some(ResponseData::Summarize(data))) =
+        (&resp.status, resp.data.as_ref())
+    {
+        println!("{}", data.summary);
+    } else {
+        let code = resp
+            .error
+            .as_ref()
+            .and_then(|e| e.get("code"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("Internal");
+        let message = resp
+            .error
+            .as_ref()
+            .and_then(|e| e.get("message"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("summarize failed");
+        human_error("summarize", code, message, &resp.operation_id);
     }
 }
 
 fn sha256_wire(payload: &[u8]) -> String {
     let mut hasher = sha2::Sha256::new();
-    use sha2::Digest as _;
     hasher.update(payload);
     format!("sha256:{}", hex_lower(&hasher.finalize()))
 }

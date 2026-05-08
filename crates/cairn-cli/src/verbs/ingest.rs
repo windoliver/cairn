@@ -51,6 +51,7 @@ use cairn_core::generated::envelope::{
 use cairn_core::generated::verbs::ingest::{IngestArgs, IngestData, IngestMode};
 use cairn_core::policy_trace::{PolicyErrorCode, PolicyGate, PolicyTraceEntry, to_wire};
 use clap::ArgMatches;
+use sha2::Digest as _;
 
 use crate::identity::{guard::refuse_if_degraded, status::ReconciliationReport};
 
@@ -579,6 +580,10 @@ fn emit_internal(json: bool, message: &str, policy_trace: Vec<ResponsePolicyTrac
     ExitCode::FAILURE
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "signed ingest CLI flow is guard, prepare, authorize, persist, and emit in source order"
+)]
 async fn run_async(
     sub: &ArgMatches,
     vault_root: PathBuf,
@@ -633,10 +638,11 @@ async fn run_async(
             ExitCode::from(65)
         }
         cairn_core::verbs::ingest::PreparedIngest::Proceed {
-            mut record,
+            record,
             policy_trace,
             ..
         } => {
+            let mut record = *record;
             let issuer = match Identity::parse(issuer_wire) {
                 Ok(issuer) => issuer,
                 Err(e) => {
@@ -941,7 +947,6 @@ fn ingest_args_from_matches(sub: &ArgMatches, body: String) -> IngestArgs {
 
 fn sha256_wire(payload: &[u8]) -> String {
     let mut hasher = sha2::Sha256::new();
-    use sha2::Digest as _;
     hasher.update(payload);
     format!("sha256:{}", hex_lower(&hasher.finalize()))
 }

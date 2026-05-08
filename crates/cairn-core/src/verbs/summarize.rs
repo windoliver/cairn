@@ -1,5 +1,7 @@
 //! Deterministic P0 summarize helpers for issue #61.
 
+use std::fmt::Write as _;
+
 use crate::domain::MemoryRecord;
 
 /// Render a deterministic, citation-friendly rollup over source records.
@@ -12,9 +14,9 @@ pub fn render_summary(records: &[MemoryRecord], citations: bool) -> String {
     for record in rows {
         let snippet = snippet(&record.body, 240);
         if citations {
-            out.push_str(&format!("- [{}] {snippet}\n", record.id.as_str()));
+            let _ = writeln!(&mut out, "- [{}] {snippet}", record.id.as_str());
         } else {
-            out.push_str(&format!("- {snippet}\n"));
+            let _ = writeln!(&mut out, "- {snippet}");
         }
     }
     out

@@ -1,4 +1,8 @@
 //! `cairn retrieve` handler.
+#![allow(
+    clippy::result_large_err,
+    reason = "CLI helpers return complete response envelopes for direct JSON emission"
+)]
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -24,6 +28,7 @@ use cairn_core::generated::verbs::retrieve::{
 };
 use cairn_store_sqlite::SqliteMemoryStore;
 use clap::ArgMatches;
+use sha2::Digest as _;
 
 use super::envelope::{emit_json, human_error, invalid_args_response, new_operation_id};
 
@@ -291,8 +296,8 @@ async fn retrieve_profile(
 ) -> Response {
     let mut args = scoped_list_args(auth);
     if let Some(scope) = &mut args.scope {
-        scope.user = user.clone();
-        scope.agent = agent.clone();
+        scope.user.clone_from(&user);
+        scope.agent.clone_from(&agent);
     }
     let records = match list_records(store, args).await {
         Ok(records) => records,
@@ -465,13 +470,13 @@ fn scoped_list_args_for_filter(
 ) -> Option<ListArgs> {
     let mut args = scoped_list_args(auth);
     if let Some(scope) = &mut args.scope {
-        if !merge_scope_value(&mut scope.tenant, &scope_filter.tenant) {
+        if !merge_scope_value(&mut scope.tenant, scope_filter.tenant.as_ref()) {
             return None;
         }
-        if !merge_scope_value(&mut scope.workspace, &scope_filter.workspace) {
+        if !merge_scope_value(&mut scope.workspace, scope_filter.workspace.as_ref()) {
             return None;
         }
-        if !merge_scope_value(&mut scope.entity, &scope_filter.entity) {
+        if !merge_scope_value(&mut scope.entity, scope_filter.entity.as_ref()) {
             return None;
         }
         scope.session_id.clone_from(&scope_filter.session_id);
@@ -496,8 +501,8 @@ fn scoped_list_args_for_filter(
     Some(args)
 }
 
-fn merge_scope_value(current: &mut Option<String>, requested: &Option<String>) -> bool {
-    match (current.as_deref(), requested.as_deref()) {
+fn merge_scope_value(current: &mut Option<String>, requested: Option<&String>) -> bool {
+    match (current.as_deref(), requested.map(String::as_str)) {
         (_, None) => true,
         (Some(current), Some(requested)) if current == requested => true,
         (None, Some(requested)) => {
@@ -524,7 +529,6 @@ fn visibility_allowlist(max: MemoryVisibility) -> Vec<MemoryVisibility> {
 
 fn intent_tier_to_visibility(tier: SignedIntentScopeTier) -> MemoryVisibility {
     match tier {
-        SignedIntentScopeTier::Private => MemoryVisibility::Private,
         SignedIntentScopeTier::Session => MemoryVisibility::Session,
         SignedIntentScopeTier::Project => MemoryVisibility::Project,
         SignedIntentScopeTier::Team => MemoryVisibility::Team,
@@ -595,6 +599,10 @@ fn turn_include_flags(include: Option<&[RetrieveArgsTurnInclude]>) -> (bool, boo
     (include_reasoning, include_tool_calls)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "generated retrieve CLI has five mutually exclusive target branches"
+)]
 fn retrieve_args_from_matches(sub: &ArgMatches) -> Result<RetrieveArgs, Response> {
     let value = if let Some(id) = sub.get_one::<String>("id") {
         reject_branch_args(
@@ -853,12 +861,15 @@ fn record_source_path(record: &MemoryRecord) -> Option<&str> {
 }
 
 fn scope_matches(record: &MemoryRecord, scope: &ScopeFilter) -> bool {
-    option_matches(&scope.tenant, record.scope.tenant.as_deref())
-        && option_matches(&scope.workspace, record.scope.workspace.as_deref())
-        && option_matches(&scope.entity, record.scope.entity.as_deref())
-        && option_matches(&scope.user, record.scope.user.as_deref())
-        && option_matches(&scope.agent, record.scope.agent.as_deref())
-        && option_matches(&scope.session_id, record.scope.session_id.as_deref())
+    option_matches(scope.tenant.as_ref(), record.scope.tenant.as_deref())
+        && option_matches(scope.workspace.as_ref(), record.scope.workspace.as_deref())
+        && option_matches(scope.entity.as_ref(), record.scope.entity.as_deref())
+        && option_matches(scope.user.as_ref(), record.scope.user.as_deref())
+        && option_matches(scope.agent.as_ref(), record.scope.agent.as_deref())
+        && option_matches(
+            scope.session_id.as_ref(),
+            record.scope.session_id.as_deref(),
+        )
         && scope
             .kind
             .as_ref()
@@ -876,9 +887,9 @@ fn scope_matches(record: &MemoryRecord, scope: &ScopeFilter) -> bool {
             .is_none_or(|tier| tier_matches(record.visibility.as_str(), tier))
 }
 
-fn option_matches(expected: &Option<String>, actual: Option<&str>) -> bool {
+fn option_matches(expected: Option<&String>, actual: Option<&str>) -> bool {
     expected
-        .as_deref()
+        .map(String::as_str)
         .is_none_or(|value| actual == Some(value))
 }
 
@@ -997,7 +1008,6 @@ fn emit_turn_items(items: &[TurnItem]) {
 
 fn sha256_wire(payload: &[u8]) -> String {
     let mut hasher = sha2::Sha256::new();
-    use sha2::Digest as _;
     hasher.update(payload);
     format!("sha256:{}", hex_lower(&hasher.finalize()))
 }

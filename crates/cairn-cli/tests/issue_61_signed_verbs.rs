@@ -53,7 +53,7 @@ fn live_ingest_policy_trace_is_body_free() {
         .args([
             "ingest",
             "--kind",
-            "reference",
+            "project",
             "--body",
             "alice@example.com has secret sk-test-12345678901234567890",
             "--json",
@@ -686,6 +686,165 @@ fn retrieve_session_after_capture_trace_honors_scope_and_limit() {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "single E2E test intentionally exercises the full issue-61 CLI workflow"
+)]
+fn issue_61_cli_full_workflow_round_trips_across_verbs() {
+    const SESSION_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let vault = tempfile::tempdir().expect("vault");
+    bootstrap(&BootstrapOpts {
+        vault_path: vault.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap");
+
+    let ingest = cli()
+        .current_dir(vault.path())
+        .args([
+            "ingest",
+            "--kind",
+            "project",
+            "--body",
+            "full workflow issue 61 project memory",
+            "--json",
+        ])
+        .output()
+        .expect("run ingest");
+    assert_eq!(
+        ingest.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&ingest.stderr)
+    );
+    let ingest_json: serde_json::Value = serde_json::from_slice(&ingest.stdout).expect("json");
+    assert_eq!(ingest_json["status"], "committed");
+    assert!(
+        !serde_json::to_string(&ingest_json["policy_trace"])
+            .expect("policy trace json")
+            .contains("full workflow issue 61 project memory"),
+        "policy trace must not echo the ingested body"
+    );
+    let record_id = ingest_json["data"]["record_id"]
+        .as_str()
+        .expect("record_id")
+        .to_owned();
+
+    let retrieve = cli()
+        .current_dir(vault.path())
+        .args(["retrieve", &record_id, "--json"])
+        .output()
+        .expect("run retrieve");
+    assert_eq!(
+        retrieve.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&retrieve.stderr)
+    );
+    let resp: Response = serde_json::from_slice(&retrieve.stdout).expect("retrieve response");
+    let Some(ResponseData::Retrieve(RetrieveData::Record(data))) = resp.data else {
+        panic!("retrieve must return record data");
+    };
+    assert_eq!(
+        data.body.as_deref(),
+        Some("full workflow issue 61 project memory")
+    );
+
+    let summarize = cli()
+        .current_dir(vault.path())
+        .args(["summarize", &record_id, "--persist", "--json"])
+        .output()
+        .expect("run summarize");
+    assert_eq!(
+        summarize.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&summarize.stderr)
+    );
+    let resp: Response = serde_json::from_slice(&summarize.stdout).expect("summarize response");
+    let Some(ResponseData::Summarize(data)) = resp.data else {
+        panic!("summarize must return summary data");
+    };
+    let summary_id = data.persisted_record_id.expect("persisted summary id").0;
+    assert_eq!(summary_id.len(), 26);
+    assert!(
+        data.summary
+            .contains("full workflow issue 61 project memory")
+    );
+
+    let trace_path = write_issue_61_trace_fixture(vault.path(), SESSION_ID);
+    let capture = cli()
+        .current_dir(vault.path())
+        .args([
+            "capture_trace",
+            "--from",
+            trace_path.to_str().expect("utf-8 trace path"),
+            "--json",
+        ])
+        .output()
+        .expect("run capture_trace");
+    assert_eq!(
+        capture.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&capture.stderr)
+    );
+    let resp: Response = serde_json::from_slice(&capture.stdout).expect("capture response");
+    let Some(ResponseData::CaptureTrace(data)) = resp.data else {
+        panic!("capture_trace must return trace data");
+    };
+    assert!(data.failed_turns.is_empty());
+
+    let session = cli()
+        .current_dir(vault.path())
+        .args([
+            "retrieve",
+            "--session",
+            SESSION_ID,
+            "--limit",
+            "3",
+            "--order",
+            "asc",
+            "--json",
+        ])
+        .output()
+        .expect("run retrieve session");
+    assert_eq!(
+        session.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&session.stderr)
+    );
+    let resp: Response = serde_json::from_slice(&session.stdout).expect("session response");
+    let Some(ResponseData::Retrieve(RetrieveData::Session(data))) = resp.data else {
+        panic!("retrieve session must return session data");
+    };
+    assert_eq!(data.items.len(), 3);
+    assert_eq!(
+        data.items[2].content.as_deref(),
+        Some("third trace message")
+    );
+
+    let hot = cli()
+        .current_dir(vault.path())
+        .args(["assemble_hot", "--budget", "4096", "--json"])
+        .output()
+        .expect("run assemble_hot");
+    assert_eq!(
+        hot.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&hot.stderr)
+    );
+    let hot_json: serde_json::Value = serde_json::from_slice(&hot.stdout).expect("hot json");
+    assert_eq!(hot_json["status"], "committed");
+    let prefix = hot_json["data"]["prefix"]
+        .as_str()
+        .expect("hot prefix string");
+    assert!(prefix.contains("full workflow issue 61 project memory"));
+}
+
+#[test]
 fn invalid_signature_maps_to_rejected_unauthorized() {
     let resp = rejected_from_domain(ResponseVerb::Ingest, DomainError::InvalidSignature);
     assert_eq!(resp.status, ResponseStatus::Rejected);
@@ -834,9 +993,10 @@ fn insert_session_record(vault: &Path, body: &str) -> String {
     let prepared =
         cairn_core::verbs::ingest::prepare_ingest_body(&args, "agt:cairn-cli:default:writer:v1")
             .expect("prepare session record");
-    let cairn_core::verbs::ingest::PreparedIngest::Proceed { mut record, .. } = prepared else {
+    let cairn_core::verbs::ingest::PreparedIngest::Proceed { record, .. } = prepared else {
         panic!("session fixture body should pass filters");
     };
+    let mut record = *record;
     record.scope.tenant = Some("default".to_owned());
     record.scope.workspace = Some("my-vault".to_owned());
     record.scope.entity = Some("ingest".to_owned());

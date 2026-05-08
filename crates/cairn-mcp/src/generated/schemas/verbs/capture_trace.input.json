@@ -46,9 +46,11 @@
           "type": "string"
         },
         "session_id": {
+          "minLength": 1,
           "type": "string"
         },
         "turn_id": {
+          "minLength": 1,
           "type": "string"
         }
       },

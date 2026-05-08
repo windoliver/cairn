@@ -97,7 +97,7 @@ fn write_capture_trace_event(vault: &Path, session: &str, turn: &str, body: &str
             turn_id: Some(turn.to_owned()),
             tool_id: None,
         }),
-        payload_hash: PayloadHash::parse(&format!("sha256:{}", sha256_hex(body)))
+        payload_hash: PayloadHash::parse(format!("sha256:{}", sha256_hex(body)))
             .expect("invariant: valid sha256 hash"),
         payload_ref,
         captured_at: Rfc3339Timestamp::parse("2026-05-02T00:00:01Z")

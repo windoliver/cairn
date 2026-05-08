@@ -9,7 +9,7 @@ fn migration_0002_applies_cleanly() {
 }
 
 /// Identity shares the store DB, so its migration guard must validate the
-/// identity-owned objects directly instead of trusting SQLite user_version.
+/// identity-owned objects directly instead of trusting `SQLite` `user_version`.
 #[test]
 fn migration_0002_rejects_identity_schema_drift() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -22,9 +22,8 @@ fn migration_0002_rejects_identity_schema_drift() {
         .expect("drop trigger");
     drop(conn);
 
-    let err = match cairn_store_sqlite::SqliteIdentityRegistry::open(&db) {
-        Ok(_) => panic!("schema drift must reject"),
-        Err(err) => err,
+    let Err(err) = cairn_store_sqlite::SqliteIdentityRegistry::open(&db) else {
+        panic!("schema drift must reject");
     };
     let msg = format!("{err:?}");
     assert!(
@@ -52,9 +51,8 @@ fn migration_0002_rejects_extra_identity_schema_object() {
     .expect("create extra trigger");
     drop(conn);
 
-    let err = match cairn_store_sqlite::SqliteIdentityRegistry::open(&db) {
-        Ok(_) => panic!("extra schema object must reject"),
-        Err(err) => err,
+    let Err(err) = cairn_store_sqlite::SqliteIdentityRegistry::open(&db) else {
+        panic!("extra schema object must reject");
     };
     let msg = format!("{err:?}");
     assert!(

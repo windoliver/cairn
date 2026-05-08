@@ -31,7 +31,7 @@ pub enum PreparedIngest {
         /// Redacted and prompt-injection-fenced body text.
         fenced_text: String,
         /// Valid draft record using `fenced_text` as its body.
-        record: MemoryRecord,
+        record: Box<MemoryRecord>,
         /// Body-free wire policy trace.
         policy_trace: Vec<ResponsePolicyTrace>,
     },
@@ -92,7 +92,7 @@ pub fn prepare_ingest_body(args: &IngestArgs, issuer: &str) -> Result<PreparedIn
     let record = build_record(args, raw_body, &fenced.text, issuer, visibility)?;
     Ok(PreparedIngest::Proceed {
         fenced_text: fenced.text,
-        record,
+        record: Box::new(record),
         policy_trace,
     })
 }

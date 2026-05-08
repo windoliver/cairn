@@ -1,4 +1,8 @@
 //! `cairn assemble_hot` handler.
+#![allow(
+    clippy::result_large_err,
+    reason = "CLI helpers return complete response envelopes for direct JSON emission"
+)]
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -19,6 +23,7 @@ use cairn_core::generated::envelope::{
 };
 use cairn_core::generated::verbs::assemble_hot::AssembleHotArgs;
 use clap::ArgMatches;
+use sha2::Digest as _;
 
 use super::envelope::{
     emit_json, human_error, internal_error_response, invalid_args_response, new_operation_id,
@@ -146,6 +151,10 @@ async fn run_async(args: AssembleHotArgs, vault_root: PathBuf, config: CairnConf
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "hot-memory recipe loading is a linear dispatch over configured recipe steps"
+)]
 async fn load_hot_bodies(
     store: &cairn_store_sqlite::SqliteMemoryStore,
     vault_root: &Path,
@@ -614,7 +623,6 @@ fn assemble_args_hash(args: &AssembleHotArgs) -> Result<String, Response> {
 
 fn intent_tier_to_visibility(tier: SignedIntentScopeTier) -> MemoryVisibility {
     match tier {
-        SignedIntentScopeTier::Private => MemoryVisibility::Private,
         SignedIntentScopeTier::Session => MemoryVisibility::Session,
         SignedIntentScopeTier::Project => MemoryVisibility::Project,
         SignedIntentScopeTier::Team => MemoryVisibility::Team,
@@ -726,35 +734,33 @@ fn response_exit_code(resp: &Response) -> ExitCode {
 }
 
 fn emit_human(resp: &Response) {
-    match (&resp.status, resp.data.as_ref()) {
-        (ResponseStatus::Committed, Some(ResponseData::AssembleHot(data))) => {
-            let segments = data.segments.as_ref().map_or(0, Vec::len);
-            println!(
-                "assemble_hot: {} bytes, {} segment(s) (operation_id: {})",
-                data.bytes, segments, resp.operation_id.0
-            );
-        }
-        _ => {
-            let code = resp
-                .error
-                .as_ref()
-                .and_then(|e| e.get("code"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("Internal");
-            let message = resp
-                .error
-                .as_ref()
-                .and_then(|e| e.get("message"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("assemble_hot failed");
-            human_error("assemble_hot", code, message, &resp.operation_id);
-        }
+    if let (ResponseStatus::Committed, Some(ResponseData::AssembleHot(data))) =
+        (&resp.status, resp.data.as_ref())
+    {
+        let segments = data.segments.as_ref().map_or(0, Vec::len);
+        println!(
+            "assemble_hot: {} bytes, {} segment(s) (operation_id: {})",
+            data.bytes, segments, resp.operation_id.0
+        );
+    } else {
+        let code = resp
+            .error
+            .as_ref()
+            .and_then(|e| e.get("code"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("Internal");
+        let message = resp
+            .error
+            .as_ref()
+            .and_then(|e| e.get("message"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("assemble_hot failed");
+        human_error("assemble_hot", code, message, &resp.operation_id);
     }
 }
 
 fn sha256_wire(payload: &[u8]) -> String {
     let mut hasher = sha2::Sha256::new();
-    use sha2::Digest as _;
     hasher.update(payload);
     format!("sha256:{}", hex_lower(&hasher.finalize()))
 }

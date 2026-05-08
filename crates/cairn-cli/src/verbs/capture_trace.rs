@@ -146,6 +146,10 @@ pub async fn run_handler_with_scope(
     run_handler_inner(store, vault_root, from, Some(&scope_binding)).await
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "trace import keeps validation, projection, and per-turn atomicity in one ordered transaction flow"
+)]
 async fn run_handler_inner(
     store: &SqliteMemoryStore,
     vault_root: &Path,
@@ -712,43 +716,42 @@ async fn run_async(from: PathBuf, vault_root: PathBuf, config: CairnConfig) -> R
 }
 
 fn emit_human(resp: &Response) {
-    match (&resp.status, resp.data.as_ref()) {
-        (ResponseStatus::Committed, Some(ResponseData::CaptureTrace(data))) => {
-            if data.failed_turns.is_empty() {
+    if let (ResponseStatus::Committed, Some(ResponseData::CaptureTrace(data))) =
+        (&resp.status, resp.data.as_ref())
+    {
+        if data.failed_turns.is_empty() {
+            println!(
+                "capture_trace: trace_id {} (operation_id: {})",
+                data.trace_id.0, resp.operation_id.0
+            );
+        } else {
+            println!(
+                "capture_trace: trace_id {} ({} failed turn(s), operation_id: {})",
+                data.trace_id.0,
+                data.failed_turns.len(),
+                resp.operation_id.0
+            );
+            for turn in &data.failed_turns {
                 println!(
-                    "capture_trace: trace_id {} (operation_id: {})",
-                    data.trace_id.0, resp.operation_id.0
+                    "capture_trace: failed turn session={} turn={} reason={}",
+                    turn.session_id, turn.turn_id, turn.reason
                 );
-            } else {
-                println!(
-                    "capture_trace: trace_id {} ({} failed turn(s), operation_id: {})",
-                    data.trace_id.0,
-                    data.failed_turns.len(),
-                    resp.operation_id.0
-                );
-                for turn in &data.failed_turns {
-                    println!(
-                        "capture_trace: failed turn session={} turn={} reason={}",
-                        turn.session_id, turn.turn_id, turn.reason
-                    );
-                }
             }
         }
-        _ => {
-            let code = resp
-                .error
-                .as_ref()
-                .and_then(|e| e.get("code"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("Internal");
-            let message = resp
-                .error
-                .as_ref()
-                .and_then(|e| e.get("message"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("capture_trace failed");
-            human_error("capture_trace", code, message, &resp.operation_id);
-        }
+    } else {
+        let code = resp
+            .error
+            .as_ref()
+            .and_then(|e| e.get("code"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("Internal");
+        let message = resp
+            .error
+            .as_ref()
+            .and_then(|e| e.get("message"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("capture_trace failed");
+        human_error("capture_trace", code, message, &resp.operation_id);
     }
 }
 
@@ -757,10 +760,18 @@ fn public_failed_turns(failed_turns: Vec<(String, String, String)>) -> Vec<Faile
         .into_iter()
         .map(|(session_id, turn_id, reason)| FailedTurn {
             reason: public_failed_turn_reason(&reason),
-            session_id,
-            turn_id,
+            session_id: public_failed_turn_ref(session_id),
+            turn_id: public_failed_turn_ref(turn_id),
         })
         .collect()
+}
+
+fn public_failed_turn_ref(value: String) -> String {
+    if value.is_empty() {
+        "unknown".to_owned()
+    } else {
+        value
+    }
 }
 
 fn public_failed_turn_reason(reason: &str) -> String {
@@ -793,7 +804,6 @@ fn response_exit_code(resp: &Response) -> ExitCode {
     match resp.status {
         ResponseStatus::Committed => ExitCode::SUCCESS,
         ResponseStatus::Rejected => ExitCode::from(64),
-        ResponseStatus::Aborted => ExitCode::FAILURE,
         _ => ExitCode::FAILURE,
     }
 }
