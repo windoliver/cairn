@@ -21,11 +21,6 @@ pub(crate) fn new_nonce() -> Nonce16Base64 {
     Nonce16Base64(base64::engine::general_purpose::STANDARD.encode(raw))
 }
 
-/// Current epoch milliseconds.
-pub(crate) fn now_ms() -> u64 {
-    cairn_core::time::now_ms()
-}
-
 /// Current UTC time as RFC-3339 with second precision (`YYYY-MM-DDTHH:MM:SSZ`).
 ///
 /// Delegates to [`cairn_core::time::now_rfc3339_seconds`] to match the CLI's

@@ -212,7 +212,12 @@ fn status_parity_cli_vs_sdk() {
 #[test]
 fn handshake_parity_cli_vs_sdk() {
     let mut cli = run_json(&["handshake", "--json"]);
-    let mut sdk = serde_json::to_value(Sdk::new().handshake()).expect("sdk handshake serializes");
+    let mut sdk = serde_json::to_value(
+        Sdk::new()
+            .handshake()
+            .expect("sdk handshake under normal clock must succeed"),
+    )
+    .expect("sdk handshake serializes");
 
     let volatile: &[&[&str]] = &[&["challenge", "nonce"], &["challenge", "expires_at"]];
     mask(&mut cli, volatile);
@@ -257,7 +262,12 @@ fn status_volatile_fields_have_expected_shape() {
 #[test]
 fn handshake_volatile_fields_have_expected_shape() {
     let cli = run_json(&["handshake", "--json"]);
-    let sdk = serde_json::to_value(Sdk::new().handshake()).expect("serialize");
+    let sdk = serde_json::to_value(
+        Sdk::new()
+            .handshake()
+            .expect("sdk handshake under normal clock must succeed"),
+    )
+    .expect("serialize");
     for (label, value) in [("cli", &cli), ("sdk", &sdk)] {
         let nonce = value["challenge"]["nonce"]
             .as_str()
