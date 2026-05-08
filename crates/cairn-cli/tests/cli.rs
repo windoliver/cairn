@@ -1,10 +1,12 @@
 //! End-to-end CLI smoke tests. Invokes the built `cairn` binary and asserts
-//! the current verb behaviour: wired verbs commit, unwired verbs fail closed.
+//! the P0 CLI behaviour: help succeeds, usage errors return sysexits, and
+//! wired verbs emit valid JSON envelopes.
 //!
 //! The CLI tree is generated from the IDL by `cairn-codegen`; the store is
-//! wired incrementally. Exit-code contract (spec §5.2):
-//! - unwired verb stubs → exit 1, stderr contains `Internal`, or `--json`
-//!   → stdout contains `"status":"aborted"`.
+//! Exit-code contract (spec §5.2):
+//! - committed verb paths exit 0 and emit `"status":"committed"`.
+//! - remaining simple verb stubs exit 1, stderr contains `Internal`, or
+//!   `--json` emits `"status":"aborted"`.
 //! - clap usage errors (unknown flag, unknown subcommand, missing required
 //!   `ArgGroup`, bare invocation with `subcommand_required`) → 64
 //!   (`EX_USAGE`).
@@ -344,13 +346,13 @@ fn search_missing_query_exits_64() {
 }
 
 #[test]
-fn ingest_json_mode_emits_committed_envelope() {
-    let vault = tempfile::tempdir().expect("temp vault");
+fn simple_verb_json_mode_emits_committed_ingest_envelope() {
+    let vault = tempfile::tempdir().expect("vault");
     cairn_cli::vault::bootstrap(&cairn_cli::vault::BootstrapOpts {
         vault_path: vault.path().to_path_buf(),
         force: false,
     })
-    .expect("bootstrap vault");
+    .expect("bootstrap");
     let out = cli()
         .current_dir(vault.path())
         .args(["ingest", "--kind", "user", "--body", "hi", "--json"])
@@ -359,7 +361,8 @@ fn ingest_json_mode_emits_committed_envelope() {
     assert_eq!(
         out.status.code(),
         Some(0),
-        "ingest should commit; stderr: {}",
+        "exit: {:?}; stderr={}",
+        out.status,
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8(out.stdout).expect("utf-8");
@@ -368,6 +371,7 @@ fn ingest_json_mode_emits_committed_envelope() {
     assert_eq!(v["contract"], "cairn.mcp.v1");
     assert_eq!(v["status"], "committed");
     assert!(v["data"]["record_id"].is_string());
+    assert!(v["policy_trace"].is_array());
 }
 
 #[test]

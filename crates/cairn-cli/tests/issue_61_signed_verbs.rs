@@ -1,5 +1,8 @@
 //! Integration coverage for issue #61 signed verb response helpers.
 
+use std::process::Command;
+
+use cairn_cli::vault::{BootstrapOpts, bootstrap};
 use cairn_cli::verbs::signed::{
     aborted, committed, committed_retrieve, rejected_from_domain, response_error_code,
 };
@@ -10,6 +13,131 @@ use cairn_core::generated::envelope::{
 };
 use cairn_core::generated::verbs::ingest::IngestData;
 use cairn_core::generated::verbs::retrieve::DataRecord;
+use rusqlite::Connection;
+
+fn cli() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_cairn"))
+}
+
+#[test]
+fn ingest_body_commits_record_and_policy_trace() {
+    let vault = tempfile::tempdir().expect("vault");
+    bootstrap(&BootstrapOpts {
+        vault_path: vault.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap");
+    let out = cli()
+        .current_dir(vault.path())
+        .args([
+            "ingest",
+            "--kind",
+            "reference",
+            "--body",
+            "remember alice@example.com as project contact",
+            "--json",
+        ])
+        .output()
+        .expect("run ingest");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(json["status"], "committed");
+    assert!(json["data"]["record_id"].as_str().is_some());
+    assert!(json["policy_trace"].as_array().expect("trace").len() >= 4);
+}
+
+#[test]
+fn rejected_secret_ingest_does_not_auto_provision_default_issuer() {
+    let vault = tempfile::tempdir().expect("vault");
+    bootstrap(&BootstrapOpts {
+        vault_path: vault.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap");
+    let out = cli()
+        .current_dir(vault.path())
+        .args([
+            "ingest",
+            "--kind",
+            "reference",
+            "--body",
+            "api_key = sk-test-12345678901234567890",
+            "--json",
+        ])
+        .output()
+        .expect("run ingest");
+    assert_eq!(
+        out.status.code(),
+        Some(65),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(json["status"], "rejected");
+
+    let conn = Connection::open(vault.path().join(".cairn/cairn.db")).expect("open db");
+    let identities: i64 = conn
+        .query_row("SELECT COUNT(*) FROM identities", [], |r| r.get(0))
+        .expect("identity count");
+    let vault_meta: i64 = conn
+        .query_row("SELECT COUNT(*) FROM vault_meta", [], |r| r.get(0))
+        .expect("vault_meta count");
+    let records: i64 = conn
+        .query_row("SELECT COUNT(*) FROM records", [], |r| r.get(0))
+        .expect("records count");
+    let wal_ops: i64 = conn
+        .query_row("SELECT COUNT(*) FROM wal_ops", [], |r| r.get(0))
+        .expect("wal_ops count");
+    assert_eq!(identities, 0);
+    assert_eq!(vault_meta, 0);
+    assert_eq!(records, 0);
+    assert_eq!(wal_ops, 0);
+}
+
+#[test]
+fn session_scoped_body_ingest_rejects_before_opening_store() {
+    let vault = tempfile::tempdir().expect("vault");
+    bootstrap(&BootstrapOpts {
+        vault_path: vault.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap");
+    let db_path = vault.path().join(".cairn/cairn.db");
+    assert!(!db_path.exists(), "bootstrap should not create store DB");
+
+    let out = cli()
+        .current_dir(vault.path())
+        .args([
+            "ingest",
+            "--kind",
+            "reference",
+            "--body",
+            "remember this for a session",
+            "--session",
+            "s1",
+            "--json",
+        ])
+        .output()
+        .expect("run ingest");
+    assert_eq!(
+        out.status.code(),
+        Some(64),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(json["status"], "rejected");
+    assert_eq!(json["error"]["code"], "InvalidArgs");
+    assert!(
+        !db_path.exists(),
+        "session reject must happen before DB open"
+    );
+}
 
 #[test]
 fn invalid_signature_maps_to_rejected_unauthorized() {

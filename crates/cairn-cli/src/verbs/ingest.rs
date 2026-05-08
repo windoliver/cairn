@@ -22,37 +22,35 @@
 //!
 //! [`open_for_signed_verb`]: crate::identity::guard::open_for_signed_verb
 
-use std::collections::BTreeMap;
-use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
+use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context as _;
+use cairn_core::contract::identity_registry::IdentityVisibility;
 use cairn_core::contract::memory_store::MemoryStore;
+use cairn_core::domain::canonical::{
+    canonical_bytes_signed_intent, canonical_bytes_signed_payload,
+};
+use cairn_core::domain::identity::{
+    keys::{IdentityRevision, SecretHandle},
+    provision::ProvisionInput,
+};
 use cairn_core::domain::projection::{
     ConflictOutcome, MarkdownProjector, PROJECTED_STANDARD_FIELDS, ResyncError,
 };
-use cairn_core::domain::record::{Ed25519Signature, RecordId};
-use cairn_core::domain::{
-    ActorChainEntry, CaptureMode, ChainRole, EvidenceVector, Identity, IdentityKind, MemoryClass,
-    MemoryKind, MemoryRecord, MemoryVisibility, Provenance, Rfc3339Timestamp, ScopeTuple,
-    SourceFamily, TargetId,
-};
-use cairn_core::generated::common::Ulid;
+use cairn_core::domain::{Identity, MemoryKind, SignedAdmission, WalActionKind};
+use cairn_core::generated::common::{Ed25519Signature, Nonce16Base64, Ulid};
 use cairn_core::generated::envelope::ResponseVerb;
 use cairn_core::generated::envelope::{
-    Response, ResponseData, ResponsePolicyTrace, ResponseStatus,
+    RequestArgs, RequestVerb, Response, ResponseData, ResponsePolicyTrace, ResponseStatus,
+    SignedIntent, SignedIntentScope, SignedIntentScopeTier,
 };
-use cairn_core::generated::verbs::ingest::IngestData;
-use cairn_core::pipeline::filter::{
-    Decision, FilterInputs, VisibilityPolicy, default_visibility, fence, redact, should_memorize,
-};
-use cairn_core::policy_trace::{
-    PolicyDetail, PolicyErrorCode, PolicyGate, PolicyOutcome, PolicyTraceEntry, to_wire,
-};
+use cairn_core::generated::verbs::ingest::{IngestArgs, IngestData, IngestMode};
+use cairn_core::policy_trace::{PolicyErrorCode, PolicyGate, PolicyTraceEntry, to_wire};
 use clap::ArgMatches;
-use sha2::{Digest, Sha256};
 
 use crate::identity::{guard::refuse_if_degraded, status::ReconciliationReport};
 
@@ -61,8 +59,10 @@ use super::envelope::{
 };
 use super::status;
 
-const CLI_AUTHOR_ID: &str = "agt:cairn-cli:p0:v1";
-const CLI_SENSOR_ID: &str = "snr:local:cli:p0:v1";
+const DEFAULT_INGEST_ISSUER: &str = "agt:cairn-cli:default:writer:v1";
+const DEFAULT_TENANT: &str = "default";
+const INGEST_ENTITY: &str = "ingest";
+const INGEST_CHALLENGE_TTL_MS: i64 = 5 * 60 * 1_000;
 const STDIN_LIMIT_BYTES: u64 = 4 * 1024 * 1024;
 
 mod apply;
@@ -308,28 +308,22 @@ fn build_record_from_parsed(
 
 /// Run `cairn ingest`.
 #[must_use]
-pub fn run(sub: &ArgMatches, vault_root: &Path) -> ExitCode {
+pub fn run(
+    sub: &ArgMatches,
+    vault_root: PathBuf,
+    config: cairn_core::config::CairnConfig,
+) -> ExitCode {
     let json = sub.get_flag("json");
     if let Some(requested_folder) = sub.get_one::<PathBuf>("folder") {
-        return folder::run(
-            sub,
-            vault_root.to_path_buf(),
-            requested_folder.as_path(),
-            false,
-        );
+        return folder::run(sub, vault_root.clone(), requested_folder.as_path(), false);
     }
     if let Some(requested_folder) = positional_folder_source(sub) {
-        return folder::run(
-            sub,
-            vault_root.to_path_buf(),
-            requested_folder.as_path(),
-            true,
-        );
+        return folder::run(sub, vault_root.clone(), requested_folder.as_path(), true);
     }
 
     // --resync <path>: re-ingest an out-of-band edited markdown projection.
     if let Some(resync_path) = sub.get_one::<std::path::PathBuf>("resync") {
-        return run_resync(sub, json, resync_path, vault_root);
+        return run_resync(sub, json, resync_path, vault_root.as_path());
     }
 
     // --dry-run / --human-review: build a stub FlushPlan and either print
@@ -362,7 +356,7 @@ pub fn run(sub: &ArgMatches, vault_root: &Path) -> ExitCode {
         return ExitCode::from(64);
     }
 
-    let kind = match parse_kind(sub, json) {
+    let _kind = match parse_kind(sub, json) {
         Ok(kind) => kind,
         Err(code) => return code,
     };
@@ -401,11 +395,29 @@ pub fn run(sub: &ArgMatches, vault_root: &Path) -> ExitCode {
         return ExitCode::from(75); // EX_TEMPFAIL
     }
 
-    if let Some(exit) = require_bound_vault(json, vault_root) {
+    if let Some(exit) = require_bound_vault(json, vault_root.as_path()) {
         return exit;
     }
 
-    run_body_ingest(sub, json, vault_root, kind, resolved)
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            let resp = super::envelope::internal_error_response(
+                ResponseVerb::Ingest,
+                &format!("runtime build: {e}"),
+            );
+            if json {
+                emit_json(&resp);
+            } else {
+                human_error("ingest", "Internal", &format!("{e}"), &resp.operation_id);
+            }
+            return ExitCode::FAILURE;
+        }
+    };
+    rt.block_on(run_async(sub, vault_root, config, json, resolved.body))
 }
 
 struct ResolvedBody {
@@ -556,288 +568,6 @@ fn run_resync(sub: &ArgMatches, json: bool, resync_path: &Path, vault_root: &Pat
     }
 }
 
-fn run_body_ingest(
-    sub: &ArgMatches,
-    json: bool,
-    vault_root: &Path,
-    kind: MemoryKind,
-    resolved: ResolvedBody,
-) -> ExitCode {
-    let ResolvedBody { body } = resolved;
-    let redacted = redact(&body);
-    let fenced = fence(&redacted.text);
-    let decision = should_memorize(&FilterInputs::new(&redacted, &fenced));
-    let visibility = default_visibility(
-        IdentityKind::Agent,
-        CaptureMode::Explicit,
-        SourceFamily::Cli,
-        &VisibilityPolicy::default(),
-    );
-    let trace = policy_trace_for_ingest(&redacted, &fenced, decision, visibility);
-    let class = default_class_for_kind(kind);
-    let session_id = sub
-        .get_one::<String>("session_id")
-        .cloned()
-        .unwrap_or_else(|| new_operation_id().0);
-    let scope = ScopeTuple {
-        session_id: Some(session_id.clone()),
-        agent: Some(CLI_AUTHOR_ID.to_owned()),
-        ..ScopeTuple::default()
-    };
-
-    if let Decision::Discard(reason) = decision {
-        let metric = IngestMetricRow::discarded(kind, class, visibility, &scope, reason.as_str());
-        if let Err(e) = append_metric(vault_root, &metric) {
-            return emit_internal(json, &format!("write metrics: {e:#}"), trace);
-        }
-        let mut resp = invalid_args_response(
-            ResponseVerb::Ingest,
-            "body",
-            &format!("discarded by filter: {}", reason.as_str()),
-        );
-        resp.policy_trace = trace;
-        if json {
-            emit_json(&resp);
-        } else {
-            human_error(
-                "ingest",
-                "InvalidArgs",
-                &format!("body discarded by filter: {}", reason.as_str()),
-                &resp.operation_id,
-            );
-        }
-        return ExitCode::from(64);
-    }
-
-    let record = match build_record(kind, class, visibility, scope.clone(), &fenced.text) {
-        Ok(record) => record,
-        Err(e) => return emit_internal(json, &format!("build record: {e:#}"), trace),
-    };
-
-    let rt = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(rt) => rt,
-        Err(e) => return emit_internal(json, &format!("runtime build: {e}"), trace),
-    };
-
-    let db_path = vault_root.join(".cairn").join("cairn.db");
-    let outcome = match rt.block_on(async {
-        let store = cairn_store_sqlite::open(&db_path).await?;
-        store.upsert(&record).await
-    }) {
-        Ok(outcome) => outcome,
-        Err(e) => return emit_internal(json, &format!("store upsert: {e}"), trace),
-    };
-
-    let metric = IngestMetricRow::accepted(
-        outcome.record_id.as_str(),
-        kind,
-        class,
-        visibility,
-        &scope,
-        1,
-    );
-    if let Err(e) = append_metric(vault_root, &metric) {
-        return emit_internal(json, &format!("write metrics: {e:#}"), trace);
-    }
-
-    let resp = Response {
-        contract: "cairn.mcp.v1".to_owned(),
-        data: Some(ResponseData::Ingest(IngestData {
-            cache_hits: None,
-            cache_misses: None,
-            cache_writes: None,
-            files_processed: None,
-            plan_ref: None,
-            record_id: Ulid(outcome.record_id.as_str().to_owned()),
-            session_id,
-        })),
-        error: None,
-        operation_id: new_operation_id(),
-        policy_trace: trace,
-        status: ResponseStatus::Committed,
-        target: None,
-        verb: ResponseVerb::Ingest,
-    };
-    if json {
-        emit_json(&resp);
-    } else if let Some(ResponseData::Ingest(data)) = resp.data.as_ref() {
-        println!("cairn ingest: committed record {}", data.record_id.0);
-    }
-    ExitCode::SUCCESS
-}
-
-fn policy_trace_for_ingest(
-    redacted: &cairn_core::pipeline::filter::RedactedPayload,
-    fenced: &cairn_core::pipeline::filter::FencedPayload,
-    decision: Decision,
-    visibility: MemoryVisibility,
-) -> Vec<ResponsePolicyTrace> {
-    let mut entries = vec![
-        PolicyTraceEntry::from(redacted),
-        PolicyTraceEntry::from(fenced),
-        PolicyTraceEntry::from(&decision),
-    ];
-    if matches!(decision, Decision::Proceed) {
-        entries.push(PolicyTraceEntry::new(
-            PolicyGate::VisibilityFloor,
-            PolicyOutcome::Pass,
-            PolicyDetail::VisibilityFloor(visibility),
-        ));
-        entries.push(PolicyTraceEntry::pass(PolicyGate::ScopeCheck));
-    }
-    to_wire(&entries)
-}
-
-#[derive(serde::Serialize)]
-struct IngestMetricRow<'a> {
-    event: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    record_id: Option<&'a str>,
-    kind: &'static str,
-    class: &'static str,
-    visibility: &'static str,
-    scope: &'a ScopeTuple,
-    source_family: &'static str,
-    capture_mode: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    rank: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    discard_reason: Option<&'a str>,
-}
-
-impl<'a> IngestMetricRow<'a> {
-    fn accepted(
-        record_id: &'a str,
-        kind: MemoryKind,
-        class: MemoryClass,
-        visibility: MemoryVisibility,
-        scope: &'a ScopeTuple,
-        rank: u32,
-    ) -> Self {
-        Self {
-            event: "accepted",
-            record_id: Some(record_id),
-            kind: kind.as_str(),
-            class: class.as_str(),
-            visibility: visibility.as_str(),
-            scope,
-            source_family: SourceFamily::Cli.as_str(),
-            capture_mode: CaptureMode::Explicit.as_str(),
-            rank: Some(rank),
-            discard_reason: None,
-        }
-    }
-
-    fn discarded(
-        kind: MemoryKind,
-        class: MemoryClass,
-        visibility: MemoryVisibility,
-        scope: &'a ScopeTuple,
-        reason: &'a str,
-    ) -> Self {
-        Self {
-            event: "discarded",
-            record_id: None,
-            kind: kind.as_str(),
-            class: class.as_str(),
-            visibility: visibility.as_str(),
-            scope,
-            source_family: SourceFamily::Cli.as_str(),
-            capture_mode: CaptureMode::Explicit.as_str(),
-            rank: None,
-            discard_reason: Some(reason),
-        }
-    }
-}
-
-fn append_metric(vault_root: &Path, row: &IngestMetricRow<'_>) -> anyhow::Result<()> {
-    let cairn_dir = vault_root.join(".cairn");
-    fs::create_dir_all(&cairn_dir)
-        .with_context(|| format!("create metrics dir {}", cairn_dir.display()))?;
-    let metrics_path = cairn_dir.join("metrics.jsonl");
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&metrics_path)
-        .with_context(|| format!("open {}", metrics_path.display()))?;
-    serde_json::to_writer(&mut file, row).context("serialize metric row")?;
-    file.write_all(b"\n")
-        .with_context(|| format!("write {}", metrics_path.display()))?;
-    Ok(())
-}
-
-fn build_record(
-    kind: MemoryKind,
-    class: MemoryClass,
-    visibility: MemoryVisibility,
-    scope: ScopeTuple,
-    body: &str,
-) -> anyhow::Result<MemoryRecord> {
-    let id_text = new_operation_id().0;
-    let id = RecordId::parse(id_text.clone()).map_err(anyhow::Error::msg)?;
-    let target_id = TargetId::parse(id_text).map_err(anyhow::Error::msg)?;
-    let author = Identity::parse(CLI_AUTHOR_ID).map_err(anyhow::Error::msg)?;
-    let now = now_timestamp()?;
-    let source_hash = format!("sha256:{:x}", Sha256::digest(body.as_bytes()));
-    let record = MemoryRecord {
-        id,
-        target_id,
-        kind,
-        class,
-        visibility,
-        scope,
-        body: body.to_owned(),
-        provenance: Provenance {
-            source_sensor: Identity::parse(CLI_SENSOR_ID).map_err(anyhow::Error::msg)?,
-            created_at: now.clone(),
-            originating_agent_id: author.clone(),
-            source_hash,
-            consent_ref: "consent:cli:p0".to_owned(),
-            llm_id_if_any: None,
-        },
-        updated_at: now.clone(),
-        evidence: EvidenceVector::default(),
-        salience: 0.5,
-        confidence: 0.7,
-        actor_chain: vec![ActorChainEntry {
-            role: ChainRole::Author,
-            identity: author,
-            at: now,
-        }],
-        signature: Ed25519Signature::parse(format!("ed25519:{}", "0".repeat(128)))
-            .map_err(anyhow::Error::msg)?,
-        tags: Vec::new(),
-        extra_frontmatter: BTreeMap::new(),
-        consent_model: None,
-    };
-    record.validate().map_err(anyhow::Error::msg)?;
-    Ok(record)
-}
-
-fn now_timestamp() -> anyhow::Result<Rfc3339Timestamp> {
-    let raw = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    Rfc3339Timestamp::parse(raw).map_err(anyhow::Error::msg)
-}
-
-fn default_class_for_kind(kind: MemoryKind) -> MemoryClass {
-    match kind {
-        MemoryKind::Event
-        | MemoryKind::Trace
-        | MemoryKind::Reasoning
-        | MemoryKind::SensorObservation
-        | MemoryKind::UserSignal
-        | MemoryKind::Feedback => MemoryClass::Episodic,
-        MemoryKind::Workflow
-        | MemoryKind::StrategySuccess
-        | MemoryKind::StrategyFailure
-        | MemoryKind::Playbook => MemoryClass::Procedural,
-        _ => MemoryClass::Semantic,
-    }
-}
-
 fn emit_internal(json: bool, message: &str, policy_trace: Vec<ResponsePolicyTrace>) -> ExitCode {
     let mut resp = internal_error_response(message);
     resp.policy_trace = policy_trace;
@@ -847,6 +577,390 @@ fn emit_internal(json: bool, message: &str, policy_trace: Vec<ResponsePolicyTrac
         human_error("ingest", "Internal", message, &resp.operation_id);
     }
     ExitCode::FAILURE
+}
+
+async fn run_async(
+    sub: &ArgMatches,
+    vault_root: PathBuf,
+    config: cairn_core::config::CairnConfig,
+    json: bool,
+    body: String,
+) -> ExitCode {
+    let args = ingest_args_from_matches(sub, body);
+    if args.session_id.is_some() {
+        let reason = "`--session` ingest is not supported until signed intents carry a session scope dimension";
+        let resp = super::envelope::invalid_args_response(ResponseVerb::Ingest, "session", reason);
+        if json {
+            emit_json(&resp);
+        } else {
+            human_error("ingest", "InvalidArgs", reason, &resp.operation_id);
+        }
+        return ExitCode::from(64);
+    }
+    let ctx = match super::signed::open_context(ResponseVerb::Ingest, &vault_root, config).await {
+        Ok(ctx) => ctx,
+        Err(resp) => {
+            if json {
+                emit_json(&resp);
+            }
+            return ExitCode::from(78);
+        }
+    };
+    let issuer_wire =
+        std::env::var("CAIRN_ISSUER").unwrap_or_else(|_| DEFAULT_INGEST_ISSUER.to_owned());
+    let prepared = match cairn_core::verbs::ingest::prepare_ingest_body(&args, &issuer_wire) {
+        Ok(p) => p,
+        Err(e) => {
+            let resp = super::signed::rejected_from_domain(ResponseVerb::Ingest, e);
+            if json {
+                emit_json(&resp);
+            }
+            return ExitCode::from(64);
+        }
+    };
+    match prepared {
+        cairn_core::verbs::ingest::PreparedIngest::Rejected { policy_trace, .. } => {
+            let mut resp = super::signed::rejected_from_domain(
+                ResponseVerb::Ingest,
+                cairn_core::domain::DomainError::Unauthorized {
+                    message: "ingest rejected by filter".to_owned(),
+                },
+            );
+            resp.policy_trace = policy_trace;
+            if json {
+                emit_json(&resp);
+            }
+            ExitCode::from(65)
+        }
+        cairn_core::verbs::ingest::PreparedIngest::Proceed {
+            mut record,
+            policy_trace,
+            ..
+        } => {
+            let issuer = match Identity::parse(issuer_wire) {
+                Ok(issuer) => issuer,
+                Err(e) => {
+                    let resp = super::signed::rejected_from_domain(ResponseVerb::Ingest, e);
+                    if json {
+                        emit_json(&resp);
+                    }
+                    return ExitCode::from(64);
+                }
+            };
+            if let Err(resp) = ensure_ingest_issuer(&ctx, &issuer).await {
+                if json {
+                    emit_json(&resp);
+                }
+                return response_exit_code(&resp);
+            }
+            bind_record_scope_to_ingest_context(&mut record, &ctx);
+            let record_id = cairn_core::generated::common::Ulid(record.id.as_str().to_owned());
+            let session_id = args
+                .session_id
+                .clone()
+                .unwrap_or_else(|| DEFAULT_TENANT.to_owned());
+            let op = new_operation_id();
+            let payload = match canonical_bytes_signed_payload(&record) {
+                Ok(payload) => payload,
+                Err(e) => {
+                    let resp = super::signed::rejected_from_domain(ResponseVerb::Ingest, e);
+                    if json {
+                        emit_json(&resp);
+                    }
+                    return ExitCode::from(64);
+                }
+            };
+            let admission =
+                match signed_ingest_admission(&ctx, &issuer, op.clone(), &args, &record, &payload)
+                    .await
+                {
+                    Ok(admission) => admission,
+                    Err(resp) => {
+                        if json {
+                            emit_json(&resp);
+                        }
+                        return response_exit_code(&resp);
+                    }
+                };
+            let result = ctx
+                .store
+                .with_tx(move |tx| {
+                    tx.prepare_wal_with_replay(&admission).map_err(|e| {
+                        cairn_store_sqlite::StoreError::Invariant {
+                            what: format!("wal admission: {e}"),
+                        }
+                    })?;
+                    tx.upsert(&record)?;
+                    tx.commit_prepared_wal(&admission)?;
+                    Ok::<_, cairn_store_sqlite::StoreError>(())
+                })
+                .await;
+            match result {
+                Ok(()) => {
+                    let data = IngestData {
+                        cache_hits: None,
+                        cache_misses: None,
+                        cache_writes: None,
+                        files_processed: None,
+                        plan_ref: None,
+                        record_id,
+                        session_id,
+                    };
+                    let resp = super::signed::committed(
+                        ResponseVerb::Ingest,
+                        op,
+                        ResponseData::Ingest(data),
+                        policy_trace,
+                    );
+                    if json {
+                        emit_json(&resp);
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    let resp =
+                        super::signed::aborted(ResponseVerb::Ingest, format!("store upsert: {e}"));
+                    if json {
+                        emit_json(&resp);
+                    }
+                    ExitCode::FAILURE
+                }
+            }
+        }
+    }
+}
+
+fn bind_record_scope_to_ingest_context(
+    record: &mut cairn_core::domain::record::MemoryRecord,
+    ctx: &super::signed::OpenedVerbContext,
+) {
+    record.scope.tenant = Some(DEFAULT_TENANT.to_owned());
+    record.scope.workspace = Some(ctx.config.vault.name.clone());
+    record.scope.entity = Some(INGEST_ENTITY.to_owned());
+}
+
+fn response_exit_code(resp: &Response) -> ExitCode {
+    match resp.status {
+        cairn_core::generated::envelope::ResponseStatus::Rejected => ExitCode::from(64),
+        cairn_core::generated::envelope::ResponseStatus::Aborted => ExitCode::from(78),
+        cairn_core::generated::envelope::ResponseStatus::Committed => ExitCode::SUCCESS,
+        _ => ExitCode::FAILURE,
+    }
+}
+
+async fn ensure_ingest_issuer(
+    ctx: &super::signed::OpenedVerbContext,
+    issuer: &Identity,
+) -> Result<(), Response> {
+    let existing = ctx
+        .identity
+        .registry
+        .get_identity(issuer, IdentityVisibility::Operational)
+        .await
+        .map_err(|e| {
+            super::signed::aborted(ResponseVerb::Ingest, format!("identity lookup: {e}"))
+        })?;
+    if existing.is_some() {
+        return Ok(());
+    }
+    if issuer.as_str() != DEFAULT_INGEST_ISSUER {
+        return Err(super::signed::rejected_from_domain(
+            ResponseVerb::Ingest,
+            cairn_core::domain::DomainError::Unauthorized {
+                message: format!("issuer {issuer} is not active in this vault"),
+            },
+        ));
+    }
+
+    let mut rng = rand_core::OsRng;
+    let input = ProvisionInput {
+        vault_id: ctx.identity.vault_id.clone(),
+        id: issuer.clone(),
+        kind: issuer.kind(),
+        revision: IdentityRevision::FIRST,
+    };
+    ctx.identity
+        .provision(issuer.kind(), input, &mut rng)
+        .await
+        .map_err(|e| {
+            super::signed::aborted(
+                ResponseVerb::Ingest,
+                format!("default issuer provision: {e}"),
+            )
+        })?;
+    Ok(())
+}
+
+async fn signed_ingest_admission(
+    ctx: &super::signed::OpenedVerbContext,
+    issuer: &Identity,
+    operation_id: cairn_core::generated::common::Ulid,
+    args: &IngestArgs,
+    record: &cairn_core::domain::record::MemoryRecord,
+    payload: &[u8],
+) -> Result<SignedAdmission, Response> {
+    let active = ctx
+        .identity
+        .registry
+        .get_identity(issuer, IdentityVisibility::Operational)
+        .await
+        .map_err(|e| super::signed::aborted(ResponseVerb::Ingest, format!("identity lookup: {e}")))?
+        .ok_or_else(|| {
+            super::signed::rejected_from_domain(
+                ResponseVerb::Ingest,
+                cairn_core::domain::DomainError::Unauthorized {
+                    message: format!("issuer {issuer} is not active in this vault"),
+                },
+            )
+        })?;
+    let handle = SecretHandle::for_identity(
+        ctx.identity.vault_id.clone(),
+        issuer.clone(),
+        active.current_key_version,
+    );
+    let signing_key = ctx
+        .identity
+        .keystore
+        .load_signing_key(&handle)
+        .await
+        .map_err(|e| {
+            super::signed::aborted(ResponseVerb::Ingest, format!("issuer key load: {e}"))
+        })?;
+    let challenge = mint_ingest_challenge(ctx, issuer).await?;
+    let mut intent = unsigned_ingest_intent(
+        issuer,
+        active.current_key_version.as_u32(),
+        operation_id,
+        ctx.config.vault.name.clone(),
+        challenge,
+        payload,
+    );
+    let intent_bytes = canonical_bytes_signed_intent(&intent)
+        .map_err(|e| super::signed::rejected_from_domain(ResponseVerb::Ingest, e))?;
+    intent.signature = Ed25519Signature(format!(
+        "ed25519:{}",
+        hex_lower(&signing_key.sign(&intent_bytes).to_bytes())
+    ));
+    let request = super::signed::request(
+        RequestVerb::Ingest,
+        RequestArgs::Ingest(args.clone()),
+        intent,
+    );
+    let verified = super::signed::verify_request(ctx, request).await?;
+    record
+        .validate_against_intent(&verified)
+        .map_err(|e| super::signed::rejected_from_domain(ResponseVerb::Ingest, e))?;
+    SignedAdmission::new(verified, WalActionKind::Upsert, None, payload)
+        .map_err(|e| super::signed::aborted(ResponseVerb::Ingest, format!("signed admission: {e}")))
+}
+
+async fn mint_ingest_challenge(
+    ctx: &super::signed::OpenedVerbContext,
+    issuer: &Identity,
+) -> Result<Nonce16Base64, Response> {
+    let issuer = issuer.as_str().to_owned();
+    let now_ms = unix_time_millis_i64();
+    let minted = ctx
+        .store
+        .with_tx(move |tx| tx.mint_challenge(&issuer, now_ms, INGEST_CHALLENGE_TTL_MS))
+        .await
+        .map_err(|e| {
+            super::signed::aborted(ResponseVerb::Ingest, format!("challenge mint: {e}"))
+        })?;
+    Ok(Nonce16Base64(minted.nonce_b64))
+}
+
+fn unsigned_ingest_intent(
+    issuer: &Identity,
+    key_version: u32,
+    operation_id: cairn_core::generated::common::Ulid,
+    workspace: String,
+    server_challenge: Nonce16Base64,
+    payload: &[u8],
+) -> SignedIntent {
+    let issued_at = chrono::Utc::now();
+    let expires_at = issued_at + chrono::Duration::minutes(5);
+    SignedIntent {
+        chain_parents: vec![],
+        expires_at: expires_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        issued_at: issued_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        issuer: cairn_core::generated::common::Identity(issuer.as_str().to_owned()),
+        key_version: i64::from(key_version),
+        nonce: super::envelope::new_nonce(),
+        operation_id,
+        scope: SignedIntentScope {
+            tenant: DEFAULT_TENANT.to_owned(),
+            workspace,
+            entity: INGEST_ENTITY.to_owned(),
+            tier: SignedIntentScopeTier::Project,
+        },
+        sequence: None,
+        server_challenge: Some(server_challenge),
+        signature: Ed25519Signature(format!("ed25519:{}", "0".repeat(128))),
+        target_hash: sha256_wire(payload),
+    }
+}
+
+fn ingest_args_from_matches(sub: &ArgMatches, body: String) -> IngestArgs {
+    IngestArgs {
+        batch_size: sub.get_one::<u32>("batch_size").map(|v| i64::from(*v)),
+        body: Some(body),
+        dry_run: Some(sub.get_flag("dry-run")).filter(|b| *b),
+        exclude: sub
+            .get_many::<String>("exclude")
+            .map(|vals| vals.cloned().collect()),
+        file: None,
+        folder: None,
+        frontmatter: None,
+        human_review: Some(sub.get_flag("human-review")).filter(|b| *b),
+        include: sub
+            .get_many::<String>("include")
+            .map(|vals| vals.cloned().collect()),
+        kind: sub
+            .get_one::<String>("kind")
+            .cloned()
+            .unwrap_or_else(|| "reference".to_owned()),
+        mode: sub
+            .get_one::<String>("mode")
+            .and_then(|mode| match mode.as_str() {
+                "keyword" => Some(IngestMode::Keyword),
+                "semantic" => Some(IngestMode::Semantic),
+                "full" => Some(IngestMode::Full),
+                _ => None,
+            }),
+        no_cache: Some(sub.get_flag("no_cache")).filter(|b| *b),
+        no_diff: Some(sub.get_flag("no-diff")).filter(|b| *b),
+        recursive: Some(sub.get_flag("recursive")).filter(|b| *b),
+        session_id: sub.get_one::<String>("session_id").cloned(),
+        tags: sub
+            .get_many::<String>("tags")
+            .map(|vals| vals.cloned().collect()),
+        url: None,
+    }
+}
+
+fn sha256_wire(payload: &[u8]) -> String {
+    let mut hasher = sha2::Sha256::new();
+    use sha2::Digest as _;
+    hasher.update(payload);
+    format!("sha256:{}", hex_lower(&hasher.finalize()))
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
+
+fn unix_time_millis_i64() -> i64 {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    i64::try_from(millis).unwrap_or(i64::MAX)
 }
 
 fn ingest_source_count(sub: &ArgMatches) -> u8 {

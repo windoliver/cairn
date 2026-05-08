@@ -198,12 +198,9 @@ fn main() -> ExitCode {
     }
 
     match matches.subcommand() {
-        Some(("ingest", sub)) => match resolve_vault_or_cwd(explicit_vault.as_deref()) {
-            Ok((vault_root, _source)) => verbs::ingest::run(sub, &vault_root),
-            Err(e) => {
-                eprintln!("cairn ingest: vault resolution error — {e:#}");
-                ExitCode::from(78) // EX_CONFIG
-            }
+        Some(("ingest", sub)) => match resolve_vault_and_config(explicit_vault.as_deref()) {
+            Ok((vault_root, _source, config)) => verbs::ingest::run(sub, vault_root, config),
+            Err(code) => code,
         },
         Some(("search", sub)) => match resolve_vault_or_cwd(explicit_vault.as_deref()) {
             // search has its own internal vault-binding gate, so the
