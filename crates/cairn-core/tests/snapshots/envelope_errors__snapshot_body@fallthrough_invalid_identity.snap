@@ -1,0 +1,12 @@
+---
+source: crates/cairn-core/tests/envelope_errors.rs
+expression: body
+---
+{
+  "code": "InvalidArgs",
+  "message": "identity: bad prefix",
+  "data": {
+    "field": "envelope",
+    "reason": "identity: bad prefix"
+  }
+}

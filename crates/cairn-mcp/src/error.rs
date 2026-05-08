@@ -1,19 +1,26 @@
-//! Transport-level errors for the MCP stdio adapter.
+//! Transport-level error type for the cairn-mcp stdio server.
+//!
+//! Distinct from cairn domain errors, which surface as
+//! `CallToolResult { is_error: true }` inside the MCP protocol.
 
-use thiserror::Error;
+use std::io;
 
-/// Transport-level errors for the Cairn MCP stdio adapter.
+/// Errors owned by the stdio transport layer.
 ///
-/// Separates wire/IO failures (this type) from Cairn typed operation
-/// errors, which stay inside the `cairn.mcp.v1` response envelope.
-#[derive(Debug, Error)]
+/// These are failures in the MCP framing / lifecycle, not cairn verb failures.
+/// Verb errors surface as `CallToolResult { is_error: true }`.
+#[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum TransportError {
-    /// MCP service failed to initialize or terminated abnormally.
-    #[error("MCP stdio service error: {0}")]
+    /// stdio I/O failure (read EOF, broken pipe, etc.).
+    #[error("stdio I/O error: {0}")]
+    Io(#[from] io::Error),
+
+    /// rmcp service failed to start or was shut down abnormally.
+    #[error("MCP service error: {0}")]
     Service(String),
 
-    /// IO error on the underlying stdio transport.
-    #[error("stdio IO error: {0}")]
-    Io(#[from] std::io::Error),
+    /// A single newline-delimited frame exceeded the 16 MiB relay cap.
+    #[error("frame exceeded 16 MiB relay cap without newline")]
+    FrameTooLarge,
 }

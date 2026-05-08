@@ -282,6 +282,30 @@ fn emit_common(
     w.line("use serde::{Deserialize, Serialize};");
     w.blank();
 
+    // Strict tri-state helper for fields annotated `x-cairn-reject-null: true`.
+    // Distinguishes field-absent (default → `None`) from explicit JSON `null`
+    // (rejected) from a real value (deserialized to `Some(_)`). Used to
+    // preserve tri-state semantics for optional fields whose absence carries
+    // a different contract from `null`.
+    w.line("/// Strict deserializer for optional fields that must reject explicit JSON `null`.");
+    w.line("///");
+    w.line("/// Returns `Some(T)` for a present non-null value. Returns an error for an");
+    w.line("/// explicit `null`. The field-absent case bypasses this function entirely");
+    w.line("/// (handled by `#[serde(default)]`), preserving tri-state semantics.");
+    w.line("///");
+    w.line("/// # Errors");
+    w.line("///");
+    w.line("/// Returns the deserializer's error when input is `null` or otherwise invalid.");
+    w.line("pub fn reject_null_option<'de, T, D>(d: D) -> Result<Option<T>, D::Error>");
+    w.line("where T: ::serde::Deserialize<'de>, D: ::serde::Deserializer<'de> {");
+    w.indent();
+    w.line("// Deserialize the value via T directly. If the wire is `null`,");
+    w.line("// T's deserializer will see `null` and (for non-Option T) reject it.");
+    w.line("T::deserialize(d).map(Some)");
+    w.dedent();
+    w.line("}");
+    w.blank();
+
     // BTreeMap iterates in sorted key order — deterministic.
     for (name, ty) in &doc.common {
         emit_common_entry(&mut w, name, ty, common_names)?;
@@ -410,12 +434,20 @@ fn write_pattern_newtype_deserialize(w: &mut RustWriter, name: &str) {
     match name {
         "Ulid" => {
             // Crockford base32, 26 chars, alphabet [0-9A-HJKMNP-TV-Z].
+            // ULID is a 128-bit value; 26 base32 chars can encode 130 bits, so
+            // the first character is capped at 7 to reject overflow values.
             // Error messages keep the uppercase "ULID" tag so callers
             // grepping for the IDL primitive name see a consistent token
             // across every call site (SignedIntent's bespoke check uses the
             // same wording — see write_signed_intent_extra_checks).
             w.line("if s.len() != 26 { return Err(::serde::de::Error::custom(\"ULID: must be 26 chars\")); }");
-            w.line("if !s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'A'..=b'H' | b'J' | b'K' | b'M' | b'N' | b'P'..=b'T' | b'V'..=b'Z')) {");
+            w.line("let bytes = s.as_bytes();");
+            w.line("if !matches!(bytes[0], b'0'..=b'7') {");
+            w.indent();
+            w.line("return Err(::serde::de::Error::custom(\"ULID: first char must be 0..=7 to fit 128-bit ULID\"));");
+            w.dedent();
+            w.line("}");
+            w.line("if !bytes[1..].iter().all(|b| matches!(b, b'0'..=b'9' | b'A'..=b'H' | b'J' | b'K' | b'M' | b'N' | b'P'..=b'T' | b'V'..=b'Z')) {");
             w.indent();
             w.line("return Err(::serde::de::Error::custom(\"ULID: must be Crockford base32 (uppercase, no I/L/O/U)\"));");
             w.dedent();
@@ -474,13 +506,13 @@ fn write_pattern_newtype_deserialize(w: &mut RustWriter, name: &str) {
             w.line("}");
         }
         "Identity" => {
-            // ^(agt|usr|snr):[A-Za-z0-9._:-]+$ — mirrors `is_identity`.
+            // ^(agt|hmn|snr):[A-Za-z0-9._:-]+$ — mirrors `is_identity`.
             w.line("let tail = if let Some(t) = s.strip_prefix(\"agt:\") { t }");
-            w.line("    else if let Some(t) = s.strip_prefix(\"usr:\") { t }");
+            w.line("    else if let Some(t) = s.strip_prefix(\"hmn:\") { t }");
             w.line("    else if let Some(t) = s.strip_prefix(\"snr:\") { t }");
             w.line("    else {");
             w.indent();
-            w.line("return Err(::serde::de::Error::custom(\"Identity: must start with one of [agt:, usr:, snr:]\"));");
+            w.line("return Err(::serde::de::Error::custom(\"Identity: must start with one of [agt:, hmn:, snr:]\"));");
             w.dedent();
             w.line("};");
             w.line("if tail.is_empty() {");
@@ -716,10 +748,11 @@ fn write_error_envelope_validator(w: &mut RustWriter, doc: &Document) {
         &[("reason", FieldShape::NonEmptyString)],
         &[("path", FieldShape::NonEmptyString)],
     );
-    write_error_data_arm(
+    write_error_data_arm_with_optional(
         w,
         "CapabilityUnavailable",
         &[("capability", FieldShape::Capability)],
+        &[("remediation", FieldShape::NonEmptyString)],
     );
     write_error_data_arm(w, "UnknownVerb", &[("verb", FieldShape::NonEmptyString)]);
     write_error_data_arm(
@@ -1664,6 +1697,32 @@ fn write_struct(
     if let Some(doc) = &s.doc {
         write_doc(w, doc);
     }
+    // `x-cairn-validate: true` — the consuming crate provides hand-written
+    // `TryFrom<<Name>Raw>` and `From<<Name>> for <Name>Raw` impls. Codegen
+    // emits a public `<Name>Raw` mirror struct (Serialize + Deserialize) and
+    // wires the main struct to it via `#[serde(try_from / into)]`.
+    if s.validate {
+        let raw_name = format!("{}Raw", s.name.0);
+        // `Deserialize` must be in the derive list so serde generates the impl
+        // that routes through `TryFrom<{raw_name}>` (triggered by `try_from`).
+        w.line("#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]");
+        w.line(&format!(
+            "#[serde(try_from = \"{raw_name}\", into = \"{raw_name}\")]"
+        ));
+        if s.deny_unknown_fields {
+            w.line("#[serde(deny_unknown_fields)]");
+        }
+        w.line(&format!("pub struct {} {{", s.name.0));
+        w.indent();
+        for field in &s.fields {
+            write_field(w, field, &s.name.0, common, true);
+        }
+        w.dedent();
+        w.line("}");
+        w.blank();
+        write_validate_raw_mirror(w, s, common);
+        return Ok(());
+    }
     // When the struct carries a presence-of-anyOf constraint OR is on the
     // bespoke-validators allow-list, derive only Serialize on the public type
     // and hand-roll Deserialize via a private Raw companion so the constraint
@@ -1803,6 +1862,28 @@ fn write_struct_raw_companion(w: &mut RustWriter, s: &StructDef, common: &BTreeS
     w.line("}");
 }
 
+/// Emit the public `<Name>Raw` mirror struct for a struct marked with
+/// `x-cairn-validate: true`. The mirror has the same public fields and per-field
+/// serde attrs as the main struct but derives both `Serialize` and `Deserialize`.
+/// The consuming crate must provide `TryFrom<<Name>Raw> for <Name>` and
+/// `From<<Name>> for <Name>Raw` — codegen does NOT emit those impls here.
+fn write_validate_raw_mirror(w: &mut RustWriter, s: &StructDef, common: &BTreeSet<String>) {
+    let raw_name = format!("{}Raw", s.name.0);
+    w.line("#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]");
+    if s.deny_unknown_fields {
+        w.line("#[serde(deny_unknown_fields)]");
+    }
+    w.line(&format!("pub struct {raw_name} {{"));
+    w.indent();
+    for field in &s.fields {
+        // Emit with public qualifier and full serde attrs (serializing = true)
+        // so the Raw mirror is symmetric with the main struct's field layout.
+        write_field(w, field, &s.name.0, common, true);
+    }
+    w.dedent();
+    w.line("}");
+}
+
 fn write_field(
     w: &mut RustWriter,
     field: &StructField,
@@ -1835,7 +1916,21 @@ fn write_field_inner(
         None
     };
     if matches!(field.ty, RustType::Optional(_)) {
-        if serializing {
+        if field.reject_null {
+            // Tri-state: distinguish field-absent (default → None) from
+            // explicit JSON `null` (rejected) from `[...]`/`{...}`/etc.
+            // The helper is provided by the consuming crate at
+            // `crate::generated::common::reject_null_option`.
+            if serializing {
+                w.line(
+                    "#[serde(default, deserialize_with = \"crate::generated::common::reject_null_option\", skip_serializing_if = \"Option::is_none\")]",
+                );
+            } else {
+                w.line(
+                    "#[serde(default, deserialize_with = \"crate::generated::common::reject_null_option\")]",
+                );
+            }
+        } else if serializing {
             w.line("#[serde(default, skip_serializing_if = \"Option::is_none\")]");
         } else {
             w.line("#[serde(default)]");
@@ -2614,8 +2709,8 @@ fn write_retrieve_data_extra_checks(w: &mut RustWriter, type_name: &str) {
 ///   (`^ed25519:[0-9a-f]{128}$`).
 /// * `target_hash`: `sha256:` prefix + 64 lowercase hex chars
 ///   (`^sha256:[0-9a-f]{64}$`).
-/// * `issuer`: identity prefix (`agt:`/`usr:`/`snr:`) + non-empty body in
-///   the alphabet `[A-Za-z0-9._:-]+` (`^(agt|usr|snr):[A-Za-z0-9._:-]+$`).
+/// * `issuer`: identity prefix (`agt:`/`hmn:`/`snr:`) + non-empty body in
+///   the alphabet `[A-Za-z0-9._:-]+` (`^(agt|hmn|snr):[A-Za-z0-9._:-]+$`).
 /// * `scope.tenant`/`workspace`/`entity`: `minLength: 1`.
 /// * `issued_at`/`expires_at`: minimal RFC-3339 date-time shape — `len >= 20`,
 ///   ASCII-only, `-` at positions 4/7, `T` at 10, `:` at 13/16, second-pair
@@ -2665,7 +2760,7 @@ fn write_signed_intent_extra_checks(w: &mut RustWriter) {
     // SHA-256 target_hash prefix + 64 lowercase hex chars.
     w.line("if !is_sha256_target_hash(&raw.target_hash) { return Err(\"target_hash: must be \\\"sha256:\\\" + 64 lowercase hex chars\"); }");
     // Identity prefix on issuer.
-    w.line("if !is_identity(&raw.issuer.0) { return Err(\"issuer: must start with one of [agt:, usr:, snr:] followed by a non-empty body in [A-Za-z0-9._:-]\"); }");
+    w.line("if !is_identity(&raw.issuer.0) { return Err(\"issuer: must start with one of [agt:, hmn:, snr:] followed by a non-empty body in [A-Za-z0-9._:-]\"); }");
     // Scope inner string fields — minLength: 1 per IDL.
     w.line("if raw.scope.tenant.is_empty() { return Err(\"scope.tenant: must not be empty\"); }");
     w.line(
@@ -2683,12 +2778,15 @@ fn write_signed_intent_extra_checks(w: &mut RustWriter) {
 /// hand-rolled byte-level checks so we don't have to pull `regex` into
 /// `cairn-core`. Emitted once at module scope.
 fn write_ulid_shape_helper(w: &mut RustWriter) {
-    w.line("/// Return true iff `s` is a valid Crockford base32 ULID — exactly 26 chars");
-    w.line("/// from the alphabet `0123456789ABCDEFGHJKMNPQRSTVWXYZ` (no I, L, O, U).");
+    w.line("/// Return true iff `s` is a valid 128-bit Crockford base32 ULID — exactly 26");
+    w.line("/// chars, first char `0..=7`, then the alphabet");
+    w.line("/// `0123456789ABCDEFGHJKMNPQRSTVWXYZ` (no I, L, O, U).");
     w.line("fn is_ulid_shape(s: &str) -> bool {");
     w.indent();
     w.line("if s.len() != 26 { return false; }");
-    w.line("s.bytes().all(|b| matches!(b,");
+    w.line("let bytes = s.as_bytes();");
+    w.line("if !matches!(bytes[0], b'0'..=b'7') { return false; }");
+    w.line("bytes[1..].iter().all(|b| matches!(b,");
     w.indent();
     w.line("b'0'..=b'9' | b'A'..=b'H' | b'J' | b'K' | b'M' | b'N' | b'P'..=b'T' | b'V'..=b'Z'");
     w.dedent();
@@ -2742,13 +2840,13 @@ fn write_ulid_shape_helper(w: &mut RustWriter) {
     w.dedent();
     w.line("}");
     w.blank();
-    // Identity: ^(agt|usr|snr):[A-Za-z0-9._:-]+$
-    w.line("/// Return true iff `s` starts with `agt:`, `usr:`, or `snr:` followed by a");
+    // Identity: ^(agt|hmn|snr):[A-Za-z0-9._:-]+$
+    w.line("/// Return true iff `s` starts with `agt:`, `hmn:`, or `snr:` followed by a");
     w.line("/// non-empty body in `[A-Za-z0-9._:-]`.");
     w.line("fn is_identity(s: &str) -> bool {");
     w.indent();
     w.line("let tail = if let Some(t) = s.strip_prefix(\"agt:\") { t }");
-    w.line("    else if let Some(t) = s.strip_prefix(\"usr:\") { t }");
+    w.line("    else if let Some(t) = s.strip_prefix(\"hmn:\") { t }");
     w.line("    else if let Some(t) = s.strip_prefix(\"snr:\") { t }");
     w.line("    else { return false; };");
     w.line("if tail.is_empty() { return false; }");
@@ -2766,15 +2864,16 @@ fn write_ulid_shape_helper(w: &mut RustWriter) {
     // obviously-out-of-range values (month=99, hour=25, offset=+99:99) are
     // rejected at the wire boundary. Day-of-month is calendar-aware —
     // 30-/31-day months and leap-year February resolve here, including the
-    // 100/400-year leap-year rule. Leap-second `60` is accepted on any day
-    // (a true leap-second table belongs to a dedicated parser; the IDL
-    // doesn't carry that data). We avoid pulling chrono into cairn-core.
+    // 100/400-year leap-year rule. Leap-second `60` is rejected to match
+    // cairn-core's domain timestamp parser until a dedicated parser can
+    // validate real leap-second instants. We avoid pulling chrono into
+    // cairn-core.
     w.line("/// Return true iff `s` is an RFC-3339 date-time:");
     w.line("/// `YYYY-MM-DDTHH:MM:SS(.fraction)?(Z|+HH:MM|-HH:MM)`. ASCII-only,");
     w.line("/// length >= 20, separators at fixed positions, digits everywhere else,");
     w.line("/// and each numeric field within its RFC-3339 range:");
     w.line("/// month 01-12, day 01-(28|29|30|31) per the calendar, hour 00-23,");
-    w.line("/// minute 00-59, second 00-60 (leap second), offset hour 00-23,");
+    w.line("/// minute 00-59, second 00-59 (leap seconds unsupported), offset hour 00-23,");
     w.line("/// offset minute 00-59. Day-of-month is calendar-aware — Feb 29 is");
     w.line("/// accepted only in leap years (`(year % 4 == 0 && year % 100 != 0)");
     w.line("/// || year % 400 == 0`).");
@@ -2796,9 +2895,7 @@ fn write_ulid_shape_helper(w: &mut RustWriter) {
     w.line("if !(1..=12).contains(&month) { return false; }");
     w.line("let day = two_digit(8);");
     w.line("if day < 1 { return false; }");
-    // Calendar-aware month-length check. Leap-second 60 still permitted on
-    // any timestamp (RFC-3339 §5.6); calendar correctness here is
-    // independent of leap-second handling.
+    // Calendar-aware month-length check.
     w.line("let max_day: u32 = match month {");
     w.indent();
     w.line("1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,");
@@ -2818,8 +2915,8 @@ fn write_ulid_shape_helper(w: &mut RustWriter) {
     w.line("let minute = two_digit(14);");
     w.line("if minute > 59 { return false; }");
     w.line("let second = two_digit(17);");
-    w.line("// RFC-3339 §5.6 permits 60 for leap seconds.");
-    w.line("if second > 60 { return false; }");
+    w.line("// Cairn rejects `:60` until a real leap-second-aware parser is wired in.");
+    w.line("if second > 59 { return false; }");
     w.line("// Optional fractional seconds + mandatory offset (Z or ±HH:MM).");
     w.line("let mut idx = 19;");
     w.line("if idx < b.len() && b[idx] == b'.' {");

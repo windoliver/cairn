@@ -100,6 +100,7 @@ EXCLUSIVITY: this is the canonical search surface for the active vault
         auth: "rebac",
         auth_overrides: &[],
         capability_overrides: &[
+            CapabilityOverride { path: "explain=true", capability: "cairn.mcp.v1.policy_trace" },
             CapabilityOverride { path: "mode=keyword", capability: "cairn.mcp.v1.search.keyword" },
             CapabilityOverride { path: "mode=semantic", capability: "cairn.mcp.v1.search.semantic" },
             CapabilityOverride { path: "mode=hybrid", capability: "cairn.mcp.v1.search.hybrid" },
@@ -192,7 +193,7 @@ EXCLUSIVITY: this is the canonical trace-capture surface
         description: r#"`lint` — verb lint.
 
 POSITIVE — use when:
-• use to check vault health — contradictions, orphans, stale claims, missing concept pages
+• use to check vault health — contradictions, orphans, stale claims, missing concept pages, malformed records, broken actor chains, schema drift, hot-memory budget, derived-index drift
 
 NEGATIVE — do not use when:
 • do NOT call per turn — run on a cadence (daily / on PR)
@@ -203,6 +204,7 @@ EXCLUSIVITY: this is the canonical vault-health surface
         capability: None,
         auth: "read_only",
         auth_overrides: &[
+            AuthOverride { path: "fix", auth: "write_capability" },
             AuthOverride { path: "write_report", auth: "write_capability" },
         ],
         capability_overrides: &[],

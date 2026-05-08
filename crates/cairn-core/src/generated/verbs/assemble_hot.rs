@@ -5,6 +5,40 @@
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum HotRecipeStep {
+    Purpose,
+    Index,
+    PinnedFeedback,
+    TopSalienceProject,
+    ActivePlaybook,
+    RecentUserSignal,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HotSegment {
+    pub byte_end: u64,
+    pub byte_start: u64,
+    /// Lowercase hex SHA-256 of prefix[byte_start..byte_end].as_bytes(). Wrappers in non-UTF-8 string-typed languages (JS/Java UTF-16) MUST encode prefix to UTF-8 bytes before slicing — naïve String.slice() uses code units and will corrupt non-ASCII segments.
+    pub content_hash: String,
+    pub stability: SegmentStability,
+    pub step: HotRecipeStep,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum SegmentStability {
+    #[serde(rename = "stable_1h")]
+    Stable1h,
+    #[serde(rename = "stable_5m")]
+    Stable5m,
+    Volatile,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AssembleHotArgs {
@@ -16,11 +50,26 @@ pub struct AssembleHotArgs {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "AssembleHotDataRaw", into = "AssembleHotDataRaw")]
 #[serde(deny_unknown_fields)]
 pub struct AssembleHotData {
     pub bytes: u64,
     /// Assembled hot-memory text ready to inject into the agent prompt. May be empty when no hot-memory is available.
     pub prefix: String,
+    /// Recipe-step segments covering [0, bytes) contiguously, in declaration order. Three-state contract: (1) FIELD ABSENT ON THE WIRE — legacy cairn.mcp.v1 producer that predates this feature; consumers MUST treat prefix as opaque. (2) "segments": [] — new producer ran with NO recipe configured; the producer explicitly opts into the new contract but had nothing to emit. REQUIRED INVARIANT: prefix == "" AND bytes == 0. (3) "segments": [...] — new producer with a configured recipe; len() mirrors HotMemoryConfig.recipe.len() 1:1, including N zero-length entries when the recipe ran with no content. The Rust binding distinguishes (1) from (2) via Option<Vec<HotSegment>> (None vs Some(vec![])); JSON-only consumers distinguish them by field presence. NOTE: there is intentionally NO default: [] here — schema-aware tooling that materialized defaults would rewrite legacy-absent into canonical-empty and trip the EmptySegmentsRequiresEmptyPrefix invariant. Forward-compat depends on absence staying absence.
+    #[serde(default, deserialize_with = "crate::generated::common::reject_null_option", skip_serializing_if = "Option::is_none")]
+    pub segments: Option<Vec<HotSegment>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssembleHotDataRaw {
+    pub bytes: u64,
+    /// Assembled hot-memory text ready to inject into the agent prompt. May be empty when no hot-memory is available.
+    pub prefix: String,
+    /// Recipe-step segments covering [0, bytes) contiguously, in declaration order. Three-state contract: (1) FIELD ABSENT ON THE WIRE — legacy cairn.mcp.v1 producer that predates this feature; consumers MUST treat prefix as opaque. (2) "segments": [] — new producer ran with NO recipe configured; the producer explicitly opts into the new contract but had nothing to emit. REQUIRED INVARIANT: prefix == "" AND bytes == 0. (3) "segments": [...] — new producer with a configured recipe; len() mirrors HotMemoryConfig.recipe.len() 1:1, including N zero-length entries when the recipe ran with no content. The Rust binding distinguishes (1) from (2) via Option<Vec<HotSegment>> (None vs Some(vec![])); JSON-only consumers distinguish them by field presence. NOTE: there is intentionally NO default: [] here — schema-aware tooling that materialized defaults would rewrite legacy-absent into canonical-empty and trip the EmptySegmentsRequiresEmptyPrefix invariant. Forward-compat depends on absence staying absence.
+    #[serde(default, deserialize_with = "crate::generated::common::reject_null_option", skip_serializing_if = "Option::is_none")]
+    pub segments: Option<Vec<HotSegment>>,
 }
 
 pub const ARGS_SCHEMA: &[u8] = include_bytes!("../schemas/verbs/assemble_hot.json");

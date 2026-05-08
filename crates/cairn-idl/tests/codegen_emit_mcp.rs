@@ -263,6 +263,31 @@ fn tool_decl_input_schema_points_at_input_file() {
 }
 
 #[test]
+fn search_capability_overrides_include_explain_true() {
+    // `x-cairn-capability-when-true` on `search.explain` must propagate into
+    // the generated ToolDecl so the MCP transport can gate `explain: true`
+    // without special-casing it in transport code.
+    let files = emit_mcp::emit(&doc()).unwrap();
+    let mod_rs = files
+        .iter()
+        .find(|f| f.path.ends_with("crates/cairn-mcp/src/generated/mod.rs"))
+        .unwrap();
+    let body = std::str::from_utf8(&mod_rs.bytes).unwrap();
+    assert!(
+        body.contains("\"explain=true\""),
+        "search ToolDecl must include capability_override for explain=true; mod.rs snippet:\n{}",
+        body.lines()
+            .filter(|l| l.contains("explain") || l.contains("capability_override"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    assert!(
+        body.contains("cairn.mcp.v1.policy_trace"),
+        "explain=true capability must be cairn.mcp.v1.policy_trace"
+    );
+}
+
+#[test]
 fn verb_schema_carries_full_idl_file_with_local_defs() {
     // Per-verb schema should be the full source file so `#/$defs/...` refs
     // inside Args/Data resolve against the same JSON document.

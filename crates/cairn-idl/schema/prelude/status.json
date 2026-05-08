@@ -8,6 +8,24 @@
   "required": ["contract", "server_info", "capabilities", "extensions"],
   "properties": {
     "contract": { "const": "cairn.mcp.v1" },
+    "mcp_graph_tools": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "probe_basis"],
+      "properties": {
+        "state": { "type": "string", "enum": ["available", "unavailable",
+                            "probe_failed", "no_vault"] },
+        "reason": {
+          "type": "string",
+          "enum": ["single_tenant_off", "no_store_capability",
+                   "no_scope_resolver", "store_open_error",
+                   "vault_not_bound", "resolver_empty"]
+        },
+        "tool_count": { "type": "integer", "minimum": 0 },
+        "probe_basis": { "type": "string", "enum": ["full", "config_only"] },
+        "error": { "type": "string", "minLength": 1 }
+      }
+    },
     "server_info": {
       "type": "object",
       "additionalProperties": false,
@@ -31,6 +49,33 @@
       "type": "array",
       "uniqueItems": true,
       "items": { "$ref": "../extensions/registry.json#/$defs/namespace" }
+    },
+    "pipeline_dispatch": {
+      "type": "array",
+      "uniqueItems": true,
+      "description": "Per-(source_family, tool_id) routing decisions for the Capture → Extract pipeline (issue #217). Each entry tells clients whether captured payloads flow through `squash` (lossy compaction) or `bypass` (raw bytes). Entries MUST be sorted lexicographically by (source_family, tool_id ?? \"\") for byte-stable status responses across an incarnation (brief §8.0.a). Optional and additive — not in `required[]` so a pre-#217 server's response (no field) deserializes against this schema.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source_family", "decision"],
+        "properties": {
+          "source_family": {
+            "type": "string",
+            "enum": ["hook", "ide", "terminal", "clipboard", "voice", "screen", "recording_batch", "cli", "mcp", "proactive"],
+            "description": "Wire-form SourceFamily tag (matches CapturePayload variant)."
+          },
+          "tool_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Optional tool identifier (e.g., 'Bash', 'Read'). Absent means the decision applies to every tool in this source_family — the P0 default."
+          },
+          "decision": {
+            "type": "string",
+            "enum": ["squash_when_interactive_tty", "bypass"],
+            "description": "P0 routing enum — closed. 'squash_when_interactive_tty' admits InteractiveTty Terminal payloads to `squash`; everything else (including non-interactive Terminal) bypasses. Adding values is a wire-contract change (cairn.mcp.v1 → vNext), not an additive update — older clients' generated deserializers will reject unknown values."
+          }
+        }
+      }
     }
   },
   "allOf": [

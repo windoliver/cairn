@@ -29,6 +29,7 @@ pub struct FrontendAdapterCapabilities {
 ///
 /// Brief §4 row 7: P1 forward stub. Method surface and conformance suite
 /// ship in #113.
+#[async_trait::async_trait]
 #[doc(hidden)]
 pub trait FrontendAdapter: Send + Sync {
     /// Stable identifier of the registered plugin instance.
@@ -39,4 +40,17 @@ pub trait FrontendAdapter: Send + Sync {
 
     /// Range of `FrontendAdapter::CONTRACT_VERSION` values this impl accepts.
     fn supported_contract_versions(&self) -> VersionRange;
+}
+
+/// Static identity descriptor for a [`FrontendAdapter`] plugin (§4.1).
+///
+/// Carries the two associated consts the `register_plugin_with!` macro checks
+/// before construction. See [`MemoryStorePlugin`](crate::contract::MemoryStorePlugin)
+/// for the design rationale.
+#[doc(hidden)]
+pub trait FrontendAdapterPlugin: FrontendAdapter + Sized {
+    /// Stable plugin name, checked statically before construction (§4.1).
+    const NAME: &'static str;
+    /// Version range checked statically before construction (§4.1).
+    const SUPPORTED_VERSIONS: VersionRange;
 }

@@ -1,0 +1,6 @@
+---
+source: crates/cairn-store-sqlite/tests/capabilities_unchanged.rs
+assertion_line: 23
+expression: snapshot
+---
+fts=true vector=false graph_edges=true transactions=true

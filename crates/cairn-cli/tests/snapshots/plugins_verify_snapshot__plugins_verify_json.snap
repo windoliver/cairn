@@ -28,7 +28,8 @@ expression: json
         },
         {
           "id": "initialize_and_list_tools",
-          "status": "ok",
+          "reason": "transport-level MCP initialization is not exercised from cairn-core",
+          "status": "pending",
           "tier": 2
         }
       ],
@@ -146,7 +147,7 @@ expression: json
   ],
   "summary": {
     "failed": 0,
-    "ok": 17,
-    "pending": 5
+    "ok": 16,
+    "pending": 6
   }
 }

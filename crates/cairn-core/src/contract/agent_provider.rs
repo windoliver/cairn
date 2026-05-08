@@ -31,6 +31,7 @@ pub struct AgentProviderCapabilities {
 ///
 /// Brief §4 row 6: P2 forward stub. Method surface, cost-budget enforcement,
 /// and conformance suite land in #124 / #125.
+#[async_trait::async_trait]
 #[doc(hidden)]
 pub trait AgentProvider: Send + Sync {
     /// Stable identifier of the registered plugin instance.
@@ -41,4 +42,17 @@ pub trait AgentProvider: Send + Sync {
 
     /// Range of `AgentProvider::CONTRACT_VERSION` values this impl accepts.
     fn supported_contract_versions(&self) -> VersionRange;
+}
+
+/// Static identity descriptor for an [`AgentProvider`] plugin (§4.1).
+///
+/// Carries the two associated consts the `register_plugin_with!` macro checks
+/// before construction. See [`MemoryStorePlugin`](crate::contract::MemoryStorePlugin)
+/// for the design rationale.
+#[doc(hidden)]
+pub trait AgentProviderPlugin: AgentProvider + Sized {
+    /// Stable plugin name, checked statically before construction (§4.1).
+    const NAME: &'static str;
+    /// Version range checked statically before construction (§4.1).
+    const SUPPORTED_VERSIONS: VersionRange;
 }

@@ -1,0 +1,12 @@
+---
+source: crates/cairn-core/tests/envelope_errors.rs
+expression: body
+---
+{
+  "code": "RevokedKey",
+  "message": "issuer key not Active for hmn:tafeng@v1: state=Revoked",
+  "data": {
+    "issuer": "hmn:tafeng",
+    "key_version": 1
+  }
+}
