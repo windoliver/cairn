@@ -5,5 +5,6 @@
 //! adapters → verb inputs is the job of `cairn-cli`.
 
 pub mod assemble_hot;
+pub mod ingest;
 pub mod lint;
 pub mod search;
