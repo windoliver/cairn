@@ -83,6 +83,16 @@ cargo nextest run -p cairn-core --locked \
 
 Expected: PASS. These tests explicitly cover `crates/cairn-core/tests/status_phase_pinning.rs` and `crates/cairn-core/tests/usr_prefix_banned.rs`; nextest does not select those integration-test binaries by filename when only broad substring filters are used.
 
+- [ ] **Step 1c: Run the full `envelope_errors` integration-test binary**
+
+```bash
+CARGO_HOME=/tmp/codex-issue7-task1-cargo-home \
+CARGO_TARGET_DIR=/tmp/codex-issue7-task1-target \
+cargo nextest run -p cairn-core --locked -E 'binary(envelope_errors)'
+```
+
+Expected: PASS. The broad Step 1 filter selects only `fallthrough_invalid_identity`; this command runs every snapshot test in `crates/cairn-core/tests/envelope_errors.rs`.
+
 - [ ] **Step 2: If this command fails, stop execution and switch to `superpowers:systematic-debugging`**
 
 Record the exact failing test names and failure messages. Do not edit production code until a failing test is understood and can be reproduced by a narrower command.
