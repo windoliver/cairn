@@ -37,11 +37,11 @@
 - Verify: `crates/cairn-mcp/tests/init_status_parity.rs`
 - Verify: `crates/cairn-sdk/tests/surface.rs`
 
-Use an isolated Cargo cache and target directory for execution so unrelated worktrees cannot hold the shared package-cache lock:
+Use an isolated Cargo cache and target directory for execution so unrelated worktrees cannot hold the shared package-cache lock. Each task uses its own `/tmp/codex-issue7-taskN-*` paths so worker verification cannot contend with other tasks:
 
 ```bash
-export CARGO_HOME=/tmp/codex-issue7-cargo-home
-export CARGO_TARGET_DIR=/tmp/codex-issue7-target
+export CARGO_HOME=/tmp/codex-issue7-taskN-cargo-home
+export CARGO_TARGET_DIR=/tmp/codex-issue7-taskN-target
 ```
 
 Do not commit changes under `/tmp`; these paths are execution scratch space only.
@@ -61,8 +61,8 @@ Do not commit changes under `/tmp`; these paths are execution scratch space only
 - [ ] **Step 1: Run core verifier/status/identity tests**
 
 ```bash
-CARGO_HOME=/tmp/codex-issue7-cargo-home \
-CARGO_TARGET_DIR=/tmp/codex-issue7-target \
+CARGO_HOME=/tmp/codex-issue7-task1-cargo-home \
+CARGO_TARGET_DIR=/tmp/codex-issue7-task1-target \
 cargo nextest run -p cairn-core --locked verifier status identity envelope_errors usr_prefix_banned
 ```
 
@@ -71,8 +71,8 @@ Expected: PASS. These tests cover signed envelope validation, identity prefix co
 - [ ] **Step 1b: Run integration-test binaries whose names do not match the broad filters**
 
 ```bash
-CARGO_HOME=/tmp/codex-issue7-cargo-home \
-CARGO_TARGET_DIR=/tmp/codex-issue7-target \
+CARGO_HOME=/tmp/codex-issue7-task1-cargo-home \
+CARGO_TARGET_DIR=/tmp/codex-issue7-task1-target \
 cargo nextest run -p cairn-core --locked \
   forget_session_pinned_to_v0_2_phase \
   forget_scope_pinned_to_v0_3_phase \
@@ -92,8 +92,8 @@ Record the exact failing test names and failure messages. Do not edit production
 Example command shape for a verifier failure:
 
 ```bash
-CARGO_HOME=/tmp/codex-issue7-cargo-home \
-CARGO_TARGET_DIR=/tmp/codex-issue7-target \
+CARGO_HOME=/tmp/codex-issue7-task1-cargo-home \
+CARGO_TARGET_DIR=/tmp/codex-issue7-task1-target \
 cargo nextest run -p cairn-core --locked rejects_tampered_signature
 ```
 
@@ -114,8 +114,8 @@ Expected: PASS after the targeted fix.
 - [ ] **Step 1: Run replay and pre-write rejection tests**
 
 ```bash
-CARGO_HOME=/tmp/codex-issue7-cargo-home \
-CARGO_TARGET_DIR=/tmp/codex-issue7-target \
+CARGO_HOME=/tmp/codex-issue7-task2-cargo-home \
+CARGO_TARGET_DIR=/tmp/codex-issue7-task2-target \
 cargo nextest run -p cairn-store-sqlite --locked replay envelope_blocks_wal
 ```
 
@@ -126,16 +126,16 @@ Expected: PASS. These tests cover duplicate `operation_id` / nonce rejection, se
 Run the smallest matching filter:
 
 ```bash
-CARGO_HOME=/tmp/codex-issue7-cargo-home \
-CARGO_TARGET_DIR=/tmp/codex-issue7-target \
+CARGO_HOME=/tmp/codex-issue7-task2-cargo-home \
+CARGO_TARGET_DIR=/tmp/codex-issue7-task2-target \
 cargo nextest run -p cairn-store-sqlite --locked duplicate_operation_id_rejected_as_replay
 ```
 
 or:
 
 ```bash
-CARGO_HOME=/tmp/codex-issue7-cargo-home \
-CARGO_TARGET_DIR=/tmp/codex-issue7-target \
+CARGO_HOME=/tmp/codex-issue7-task2-cargo-home \
+CARGO_TARGET_DIR=/tmp/codex-issue7-task2-target \
 cargo nextest run -p cairn-store-sqlite --locked challenge_mode_single_use
 ```
 
@@ -166,8 +166,8 @@ Expected: PASS.
 - [ ] **Step 1: Run CLI prelude and status tests**
 
 ```bash
-CARGO_HOME=/tmp/codex-issue7-cargo-home \
-CARGO_TARGET_DIR=/tmp/codex-issue7-target \
+CARGO_HOME=/tmp/codex-issue7-task3-cargo-home \
+CARGO_TARGET_DIR=/tmp/codex-issue7-task3-target \
 cargo nextest run -p cairn-cli --locked handshake status sdk_cli_parity
 ```
 
@@ -176,8 +176,8 @@ Expected: PASS. This covers fresh CLI handshake nonces, CLI/SDK shape parity, st
 - [ ] **Step 2: Run MCP prelude/status tests**
 
 ```bash
-CARGO_HOME=/tmp/codex-issue7-cargo-home \
-CARGO_TARGET_DIR=/tmp/codex-issue7-target \
+CARGO_HOME=/tmp/codex-issue7-task3-cargo-home \
+CARGO_TARGET_DIR=/tmp/codex-issue7-task3-target \
 cargo nextest run -p cairn-mcp --locked handshake init_status
 ```
 
@@ -186,8 +186,8 @@ Expected: PASS. This covers MCP initialize/status parity and handshake tool capa
 - [ ] **Step 3: Run SDK surface tests for handshake and capability fail-closed behavior**
 
 ```bash
-CARGO_HOME=/tmp/codex-issue7-cargo-home \
-CARGO_TARGET_DIR=/tmp/codex-issue7-target \
+CARGO_HOME=/tmp/codex-issue7-task3-cargo-home \
+CARGO_TARGET_DIR=/tmp/codex-issue7-task3-target \
 cargo nextest run -p cairn-sdk --locked handshake CapabilityUnavailable status
 ```
 
@@ -214,8 +214,8 @@ Patch `crates/cairn-cli/src/verbs/handshake.rs` for CLI-only failure, `crates/ca
 - [ ] **Step 1: Run codegen drift check**
 
 ```bash
-CARGO_HOME=/tmp/codex-issue7-cargo-home \
-CARGO_TARGET_DIR=/tmp/codex-issue7-target \
+CARGO_HOME=/tmp/codex-issue7-task4-cargo-home \
+CARGO_TARGET_DIR=/tmp/codex-issue7-task4-target \
 cargo run -p cairn-idl --bin cairn-codegen --locked -- --check
 ```
 
@@ -234,8 +234,8 @@ Expected: PASS. `cairn-core` must not depend on adapter crates.
 For codegen drift, run:
 
 ```bash
-CARGO_HOME=/tmp/codex-issue7-cargo-home \
-CARGO_TARGET_DIR=/tmp/codex-issue7-target \
+CARGO_HOME=/tmp/codex-issue7-task4-cargo-home \
+CARGO_TARGET_DIR=/tmp/codex-issue7-task4-target \
 cargo run -p cairn-idl --bin cairn-codegen --locked --
 ```
 
@@ -251,8 +251,8 @@ Then inspect `git diff` and keep only generated changes that correspond to inten
 - [ ] **Step 1: Run formatting check**
 
 ```bash
-CARGO_HOME=/tmp/codex-issue7-cargo-home \
-CARGO_TARGET_DIR=/tmp/codex-issue7-target \
+CARGO_HOME=/tmp/codex-issue7-task5-cargo-home \
+CARGO_TARGET_DIR=/tmp/codex-issue7-task5-target \
 cargo fmt --all --check
 ```
 
@@ -263,8 +263,8 @@ Expected: PASS.
 If no code changed after Tasks 1-4, run:
 
 ```bash
-CARGO_HOME=/tmp/codex-issue7-cargo-home \
-CARGO_TARGET_DIR=/tmp/codex-issue7-target \
+CARGO_HOME=/tmp/codex-issue7-task5-cargo-home \
+CARGO_TARGET_DIR=/tmp/codex-issue7-task5-target \
 cargo clippy -p cairn-core -p cairn-store-sqlite -p cairn-cli -p cairn-mcp -p cairn-sdk --all-targets --locked -- -D warnings
 ```
 
@@ -275,8 +275,8 @@ If code changed in other crates, include those crates in the `-p` list before ru
 - [ ] **Step 3: Run cargo check for touched crates**
 
 ```bash
-CARGO_HOME=/tmp/codex-issue7-cargo-home \
-CARGO_TARGET_DIR=/tmp/codex-issue7-target \
+CARGO_HOME=/tmp/codex-issue7-task5-cargo-home \
+CARGO_TARGET_DIR=/tmp/codex-issue7-task5-target \
 cargo check -p cairn-core -p cairn-store-sqlite -p cairn-cli -p cairn-mcp -p cairn-sdk --all-targets --locked
 ```
 
@@ -285,8 +285,8 @@ Expected: PASS.
 - [ ] **Step 4: Run doctests for touched crates**
 
 ```bash
-CARGO_HOME=/tmp/codex-issue7-cargo-home \
-CARGO_TARGET_DIR=/tmp/codex-issue7-target \
+CARGO_HOME=/tmp/codex-issue7-task5-cargo-home \
+CARGO_TARGET_DIR=/tmp/codex-issue7-task5-target \
 cargo test --doc -p cairn-core -p cairn-store-sqlite -p cairn-cli -p cairn-mcp -p cairn-sdk --locked
 ```
 
