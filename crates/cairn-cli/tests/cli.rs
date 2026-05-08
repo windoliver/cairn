@@ -1,11 +1,10 @@
 //! End-to-end CLI smoke tests. Invokes the built `cairn` binary and asserts
-//! the P0 stub behaviour: help succeeds, verbs fail closed with `Internal`.
+//! the current verb behaviour: wired verbs commit, unwired verbs fail closed.
 //!
 //! The CLI tree is generated from the IDL by `cairn-codegen`; the store is
-//! not wired yet (lands in #9), so every verb returns an `aborted` envelope
-//! with `code: "Internal"`. Exit-code contract (spec §5.2):
-//! - simple verb stubs (`ingest`, `search`, …) → exit 1, stderr contains
-//!   `Internal`, or `--json` → stdout contains `"status":"aborted"`.
+//! wired incrementally. Exit-code contract (spec §5.2):
+//! - unwired verb stubs → exit 1, stderr contains `Internal`, or `--json`
+//!   → stdout contains `"status":"aborted"`.
 //! - clap usage errors (unknown flag, unknown subcommand, missing required
 //!   `ArgGroup`, bare invocation with `subcommand_required`) → 64
 //!   (`EX_USAGE`).
@@ -345,18 +344,30 @@ fn search_missing_query_exits_64() {
 }
 
 #[test]
-fn simple_verb_json_mode_emits_aborted_internal_envelope() {
+fn ingest_json_mode_emits_committed_envelope() {
+    let vault = tempfile::tempdir().expect("temp vault");
+    cairn_cli::vault::bootstrap(&cairn_cli::vault::BootstrapOpts {
+        vault_path: vault.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap vault");
     let out = cli()
+        .current_dir(vault.path())
         .args(["ingest", "--kind", "user", "--body", "hi", "--json"])
         .output()
         .expect("cairn ingest --json");
-    assert_eq!(out.status.code(), Some(1), "exit: {:?}", out.status);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "ingest should commit; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8(out.stdout).expect("utf-8");
     let v: serde_json::Value =
         serde_json::from_str(stdout.trim()).expect("expected valid JSON on stdout");
     assert_eq!(v["contract"], "cairn.mcp.v1");
-    assert_eq!(v["status"], "aborted");
-    assert_eq!(v["error"]["code"], "Internal");
+    assert_eq!(v["status"], "committed");
+    assert!(v["data"]["record_id"].is_string());
 }
 
 #[test]

@@ -199,7 +199,7 @@ fn main() -> ExitCode {
 
     match matches.subcommand() {
         Some(("ingest", sub)) => match resolve_vault_or_cwd(explicit_vault.as_deref()) {
-            Ok((vault_root, _source)) => verbs::ingest::run(sub, vault_root),
+            Ok((vault_root, _source)) => verbs::ingest::run(sub, &vault_root),
             Err(e) => {
                 eprintln!("cairn ingest: vault resolution error — {e:#}");
                 ExitCode::from(78) // EX_CONFIG

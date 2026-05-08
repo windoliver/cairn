@@ -47,8 +47,13 @@ pub enum LintFixError {
     #[error("lint.lock_lost")]
     LockLost,
     /// Lock-table error (not a simple Held conflict).
+    ///
+    /// `LockError` is large (several hundred bytes for the structured
+    /// `Held` / `Fenced` variants) so we box it here to keep
+    /// `LintFixError` itself small — same rationale as
+    /// `StoreError::LockInit`.
     #[error("lock error")]
-    Lock(#[source] cairn_store_sqlite::locks::LockError),
+    Lock(#[source] Box<cairn_store_sqlite::locks::LockError>),
     /// WAL state-machine error.
     #[error("wal error")]
     Wal(#[source] cairn_store_sqlite::wal::lint_repair::LintRepairWalError),
@@ -72,7 +77,7 @@ fn vault_id(vault_root: &Path) -> Result<String, LintFixError> {
     // the lock at all — TOCTOU-grade ambiguity on the scope key
     // is worse than no repair.
     let canonical = vault_root.canonicalize().map_err(|e| {
-        LintFixError::Lock(cairn_store_sqlite::locks::LockError::Db(
+        LintFixError::Lock(Box::new(cairn_store_sqlite::locks::LockError::Db(
             tokio_rusqlite::Error::Other(
                 format!(
                     "vault canonicalization failed for {}: {e}",
@@ -80,7 +85,7 @@ fn vault_id(vault_root: &Path) -> Result<String, LintFixError> {
                 )
                 .into(),
             ),
-        ))
+        )))
     })?;
     Ok(cairn_core::domain::projection::body_hash(
         &canonical.to_string_lossy(),
@@ -95,26 +100,44 @@ fn vault_id(vault_root: &Path) -> Result<String, LintFixError> {
 /// - [`LintFixError::Lock`] on any other lock-table error.
 /// - [`LintFixError::Wal`] if the WAL state-machine rejects a transition.
 /// - [`LintFixError::Handler`] if `fix_markdown_handler` fails.
+// Single sequence: acquire-lock + open-WAL + fence-callbacks + finalize.
+// Splitting it for the line counter would force the lock + WAL + fence
+// trio across helper signatures without making the flow easier to follow.
+#[allow(clippy::too_many_lines)]
 pub async fn fix_markdown_with_lock(
     store: &cairn_store_sqlite::SqliteMemoryStore,
     vault_root: &Path,
     ttl: Duration,
 ) -> Result<FixMarkdownResult, LintFixError> {
     let conn = Arc::clone(store.raw_conn_for_admin().ok_or_else(|| {
-        LintFixError::Lock(cairn_store_sqlite::locks::LockError::Db(
+        LintFixError::Lock(Box::new(cairn_store_sqlite::locks::LockError::Db(
             tokio_rusqlite::Error::Other("store not initialized".into()),
-        ))
+        )))
     })?);
     let vid = vault_id(vault_root)?;
     // Use a ULID for the holder id — unique per process+call, no uuid dep needed.
     let holder_id = format!("pid={}-{}", std::process::id(), ulid::Ulid::new());
 
-    let lock = match cairn_store_sqlite::locks::acquire_exclusive(
+    // The typed `acquire` takes the daemon incarnation Arc so the per-holder
+    // fencing CAS can match on `(acquired_epoch, owner_incarnation)` rather
+    // than the legacy `acquired_at` timestamp. `Store::open` mints this in
+    // Task 8; an unconnected (registry-stub) Store would surface
+    // `NoIncarnation` here, mirroring the `store not initialized` branch.
+    let inc = store.incarnation().cloned().ok_or_else(|| {
+        LintFixError::Lock(Box::new(
+            cairn_store_sqlite::locks::LockError::NoIncarnation,
+        ))
+    })?;
+    let resource = cairn_store_sqlite::locks::ResourceKey::vault(&vid);
+
+    let lock = match cairn_store_sqlite::locks::acquire(
         &conn,
-        "lint_repair",
-        &vid,
+        &resource,
+        cairn_store_sqlite::locks::LockMode::Exclusive,
         &holder_id,
         ttl,
+        &inc,
+        "lint --fix-markdown",
     )
     .await
     {
@@ -122,7 +145,7 @@ pub async fn fix_markdown_with_lock(
         Err(cairn_store_sqlite::locks::LockError::Held { .. }) => {
             return Err(LintFixError::FixInProgress);
         }
-        Err(e) => return Err(LintFixError::Lock(e)),
+        Err(e) => return Err(LintFixError::Lock(Box::new(e))),
     };
 
     // Holding the exclusive repair lock means no other repair is in
@@ -161,18 +184,17 @@ pub async fn fix_markdown_with_lock(
     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
     let heartbeat = spawn_lock_heartbeat(
         Arc::clone(&conn),
-        format!("lint_repair:{vid}"),
-        holder_id.clone(),
-        lock.acquired_at(),
+        lock.acquisition_ulid().to_owned(),
         ttl,
         cancel_rx,
     );
 
     // Fence callback invoked before every destructive write inside the
     // handler. `is_still_held` returns false once a second caller has
-    // reclaimed our holder row (acquired_at differs); we surface that as
-    // a typed error so the loop stops *before* publishing more stale
-    // files instead of overwriting a winner's newer projections.
+    // reclaimed our holder row (the `(acquired_epoch, owner_incarnation)`
+    // pair no longer matches); we surface that as a typed error so the
+    // loop stops *before* publishing more stale files instead of
+    // overwriting a winner's newer projections.
     let lock_for_fence = &lock;
     let outcome = fix_markdown_handler_with_fence(store, vault_root, move || {
         let lock = lock_for_fence;
@@ -199,7 +221,10 @@ pub async fn fix_markdown_with_lock(
     // before WAL commit. The handler's per-write fence catches the
     // common case; this catches the no-write run plus any window after
     // the last write.
-    let still_ours = lock.is_still_held().await.map_err(LintFixError::Lock)?;
+    let still_ours = lock
+        .is_still_held()
+        .await
+        .map_err(|e| LintFixError::Lock(Box::new(e)))?;
     if !still_ours {
         let _ = cairn_store_sqlite::wal::lint_repair::abort(
             &conn,
@@ -230,7 +255,7 @@ pub async fn fix_markdown_with_lock(
         Err(e) => Err(e),
     };
 
-    finalize_outcome(&conn, &op_id, lock, outcome).await
+    finalize_outcome(&conn, &op_id, &resource, lock, outcome).await
 }
 
 /// Commit-or-abort the WAL op according to handler `outcome`, then
@@ -239,6 +264,7 @@ pub async fn fix_markdown_with_lock(
 async fn finalize_outcome(
     conn: &Arc<tokio_rusqlite::Connection>,
     op_id: &str,
+    resource: &cairn_store_sqlite::locks::ResourceKey,
     lock: cairn_store_sqlite::locks::LockHandle,
     outcome: Result<FixMarkdownResult, anyhow::Error>,
 ) -> Result<FixMarkdownResult, LintFixError> {
@@ -254,18 +280,11 @@ async fn finalize_outcome(
             // try again; if it still fails, demote to a warning and
             // count on TTL reclaim. Two attempts cover transient
             // connection-busy errors without prolonging shutdown.
-            let resource = lock.resource().to_owned();
-            let holder_id = lock.holder_id().to_owned();
-            let acquired_at = lock.acquired_at();
+            let acq_ulid = lock.acquisition_ulid().to_owned();
             if let Err(first) = lock.release().await {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                if let Err(retry) = cairn_store_sqlite::locks::release_by_holder(
-                    conn,
-                    &resource,
-                    &holder_id,
-                    acquired_at,
-                )
-                .await
+                if let Err(retry) =
+                    cairn_store_sqlite::locks::release_by_holder(conn, &acq_ulid).await
                 {
                     tracing::warn!(
                         first_error = %first,
@@ -288,26 +307,26 @@ async fn finalize_outcome(
 }
 
 /// Spawn a tokio task that refreshes `lock_holders.expires_at` for the
-/// `(resource, holder_id, acquired_at)` row every `ttl / 3` until
-/// cancellation. The `acquired_at` predicate is the fencing token: once a
-/// second caller has reclaimed the row, our renewals stop matching and
-/// drop on the floor instead of resurrecting a row that no longer belongs
-/// to us.
+/// `(resource, holder_id, acquired_epoch, owner_incarnation)` row every
+/// `ttl / 3` until cancellation. The `(acquired_epoch, owner_incarnation)`
+/// predicate is the fencing token: once a second caller has reclaimed the
+/// row (which bumps `locks.epoch` and inserts a new holder row), our
+/// renewals stop matching and drop on the floor instead of resurrecting a
+/// row that no longer belongs to us.
 ///
 /// The refresh is best-effort: a transient DB error simply causes the next
 /// tick to retry. Cancellation drains the task before the surrounding flow
 /// releases the lock.
 fn spawn_lock_heartbeat(
     conn: Arc<tokio_rusqlite::Connection>,
-    resource: String,
-    holder_id: String,
-    acquired_at: i64,
+    acquisition_ulid: String,
     ttl: Duration,
     mut cancel: tokio::sync::oneshot::Receiver<()>,
 ) -> tokio::task::JoinHandle<()> {
     // ttl/3 gives two refreshes within each TTL window so a transient
     // failure on one tick still leaves a valid renewal before expiry.
     let interval = ttl / 3;
+    let ttl_ms = i64::try_from(ttl.as_millis()).unwrap_or(i64::MAX);
     tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -315,27 +334,42 @@ fn spawn_lock_heartbeat(
                 _ = &mut cancel => return,
                 () = tokio::time::sleep(interval) => {}
             }
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(i64::MAX, |d| {
-                    i64::try_from(d.as_millis()).unwrap_or(i64::MAX)
-                });
-            let ttl_ms = i64::try_from(ttl.as_millis()).unwrap_or(i64::MAX);
-            let expires = now_ms.saturating_add(ttl_ms);
-            let resource = resource.clone();
-            let holder = holder_id.clone();
-            let _ = conn
+            // The heartbeat must NOT revive an already-expired lease.
+            // Compute now_ms inside the DB call (after queueing settles)
+            // and gate the UPDATE on `expires_at > now_ms`. If 0 rows
+            // are updated, the lease was lost — bail out. `acquisition_ulid`
+            // is per-acquisition unique so we can't accidentally extend
+            // a different acquisition's row.
+            let acq = acquisition_ulid.clone();
+            let updated = conn
                 .call(move |c| {
-                    c.execute(
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(i64::MAX, |d| {
+                            i64::try_from(d.as_millis()).unwrap_or(i64::MAX)
+                        });
+                    let expires = now_ms.saturating_add(ttl_ms);
+                    let n = c.execute(
                         "UPDATE lock_holders \
                             SET expires_at = ?1 \
-                          WHERE resource = ?2 AND holder_id = ?3 \
-                            AND acquired_at = ?4",
-                        rusqlite::params![expires, resource, holder, acquired_at],
+                          WHERE acquisition_ulid = ?2 \
+                            AND expires_at > ?3",
+                        rusqlite::params![expires, acq, now_ms],
                     )?;
-                    Ok::<_, tokio_rusqlite::Error>(())
+                    Ok::<usize, tokio_rusqlite::Error>(n)
                 })
                 .await;
+            if matches!(updated, Ok(0)) {
+                // Lease lost — either expired between ticks or was
+                // reclaimed. Stop heartbeating; the surrounding flow's
+                // pre-commit fence (`is_still_held` / `with_fencing`)
+                // will surface the loss.
+                tracing::warn!(
+                    "lint --fix-markdown heartbeat: lease lost (0 rows updated); \
+                     exiting heartbeat task — caller's fence check will fail closed"
+                );
+                return;
+            }
         }
     })
 }
@@ -381,7 +415,7 @@ async fn reconcile_stale_lint_repair_ops(
             Ok::<_, tokio_rusqlite::Error>(rows)
         })
         .await
-        .map_err(|e| LintFixError::Lock(cairn_store_sqlite::locks::LockError::Db(e)))?;
+        .map_err(|e| LintFixError::Lock(Box::new(cairn_store_sqlite::locks::LockError::Db(e))))?;
 
     for (op_id, state) in stale {
         // IllegalTransition (already-terminal between SELECT and

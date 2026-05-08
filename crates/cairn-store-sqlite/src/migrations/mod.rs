@@ -84,6 +84,13 @@ const M0048_CONSENT_JOURNAL_REPAIR_AUDIT: &str =
 // Issue #52 — renumbered from 0046 → 0047 → 0048 → 0049 across three
 // main merges as #258 / #254 / #267 each took the next slot.
 const M0049_REPLAY_CHALLENGE_MODE: &str = include_str!("sql/0049_replay_challenge_mode.sql");
+// Issue #56 — epoch fencing + daemon_incarnation wiring (brief §5.6).
+const M0050_LOCKS_V2: &str = include_str!("sql/0050_locks_v2.sql");
+// Issue #56 round-7 fix — per-acquisition `acquisition_ulid` column.
+const M0051_LOCK_ACQUISITION_ULID: &str = include_str!("sql/0051_lock_acquisition_ulid.sql");
+// Issue #56 round-10 fix — UNIQUE constraint + sentinel-rejection trigger.
+const M0052_LOCK_ACQUISITION_ULID_UNIQUE: &str =
+    include_str!("sql/0052_lock_acquisition_ulid_unique.sql");
 
 /// Canonical SQL for migration 0020 (`workflow_jobs`). Re-exported so
 /// downstream crates (notably `cairn-workflows`, which hashes the
@@ -223,6 +230,17 @@ pub(crate) const MIGRATION_SOURCES: &[(i64, &str, &str)] = &[
         "0049_replay_challenge_mode",
         M0049_REPLAY_CHALLENGE_MODE,
     ),
+    (50, "0050_locks_v2", M0050_LOCKS_V2),
+    (
+        51,
+        "0051_lock_acquisition_ulid",
+        M0051_LOCK_ACQUISITION_ULID,
+    ),
+    (
+        52,
+        "0052_lock_acquisition_ulid_unique",
+        M0052_LOCK_ACQUISITION_ULID_UNIQUE,
+    ),
 ];
 
 /// All migrations, in order. Returns a fresh `Migrations` set on every call
@@ -273,5 +291,8 @@ pub fn migrations() -> Migrations<'static> {
         M::up(M0047_WAL_LINT_REPAIR),
         M::up(M0048_CONSENT_JOURNAL_REPAIR_AUDIT),
         M::up(M0049_REPLAY_CHALLENGE_MODE),
+        M::up(M0050_LOCKS_V2),
+        M::up(M0051_LOCK_ACQUISITION_ULID),
+        M::up(M0052_LOCK_ACQUISITION_ULID_UNIQUE),
     ])
 }

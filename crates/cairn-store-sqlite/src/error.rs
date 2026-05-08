@@ -44,6 +44,19 @@ pub enum StoreError {
     #[error("wal recovery")]
     Recovery(#[from] crate::wal::RecoveryError),
 
+    /// Daemon-incarnation initialization failed (issue #56, brief §5.6).
+    /// Raised from every public async open path when
+    /// `locks::init_incarnation` cannot mint or read back the per-process
+    /// ULID after migrations. Failing the open here prevents a Store from
+    /// going live without an incarnation id, which would later cause
+    /// `locks::acquire` to return `LockError::NoIncarnation`.
+    ///
+    /// The inner `LockError` is boxed so adding this variant does not
+    /// blow up the size of the `StoreError` enum (clippy's
+    /// `result_large_err`).
+    #[error("daemon incarnation init")]
+    LockInit(#[source] Box<crate::locks::LockError>),
+
     /// `ConsentEvent` failed structural validation (kind/payload mismatch,
     /// malformed hash, etc.) before insert.
     #[error("invalid consent event: {0}")]
