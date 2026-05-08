@@ -366,10 +366,13 @@
     },
     "DataProfile": {
       "additionalProperties": false,
+      "description": "Typed AutoUserProfile (brief §7.1) split into permanent traits (`static`, `is_static = 1`) and current state (`dynamic`, `is_static = 0`). Each half carries `summary`, `historical_summary`, and structured `key_facts`; every fact line records its source-record evidence so record-level forget propagates back to the profile. P0 plain-SQLite aggregation; richer rolling-summary regeneration is P1. Wire field names match the brief's `{static, dynamic, updated_at}` notation; the Rust binding emits them via the `r#static` raw identifier.",
       "properties": {
-        "profile": {
-          "description": "Free-form profile payload — typed in a later increment once the profile taxonomy lands.",
-          "type": "object"
+        "dynamic": {
+          "$ref": "#/$defs/ProfileHalf"
+        },
+        "static": {
+          "$ref": "#/$defs/ProfileHalf"
         },
         "subject": {
           "additionalProperties": false,
@@ -396,11 +399,20 @@
             }
           },
           "type": "object"
+        },
+        "updated_at": {
+          "description": "RFC3339 timestamp of the most recent contributing source record. Equals the synthesizer clock when the profile is empty. Validator accept set matches `cairn_core::domain::Rfc3339Timestamp::parse` (excluding leap-seconds), so any wire-accepted value also parses domain-side without a second gauntlet.",
+          "format": "date-time",
+          "maxLength": 64,
+          "minLength": 20,
+          "type": "string"
         }
       },
       "required": [
         "subject",
-        "profile"
+        "static",
+        "dynamic",
+        "updated_at"
       ],
       "type": "object"
     },
@@ -495,6 +507,117 @@
         "session_id",
         "turn_id",
         "turn"
+      ],
+      "type": "object"
+    },
+    "KeyFacts": {
+      "additionalProperties": false,
+      "description": "Seven structured fact buckets (brief §7.1). Each bucket is an array of ProfileLine — empty arrays are valid and required so a consumer can rely on every key being present.",
+      "properties": {
+        "addressed_issues": {
+          "items": {
+            "$ref": "#/$defs/ProfileLine"
+          },
+          "type": "array"
+        },
+        "current_issues": {
+          "items": {
+            "$ref": "#/$defs/ProfileLine"
+          },
+          "type": "array"
+        },
+        "devices": {
+          "items": {
+            "$ref": "#/$defs/ProfileLine"
+          },
+          "type": "array"
+        },
+        "known_entities": {
+          "items": {
+            "$ref": "#/$defs/ProfileLine"
+          },
+          "type": "array"
+        },
+        "preferences": {
+          "items": {
+            "$ref": "#/$defs/ProfileLine"
+          },
+          "type": "array"
+        },
+        "recurring_issues": {
+          "items": {
+            "$ref": "#/$defs/ProfileLine"
+          },
+          "type": "array"
+        },
+        "software": {
+          "items": {
+            "$ref": "#/$defs/ProfileLine"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "devices",
+        "software",
+        "preferences",
+        "current_issues",
+        "addressed_issues",
+        "recurring_issues",
+        "known_entities"
+      ],
+      "type": "object"
+    },
+    "ProfileHalf": {
+      "additionalProperties": false,
+      "description": "One half of an AutoUserProfile (brief §7.1). `summary` and `historical_summary` are the rolling DreamWorkflow narratives — they remain empty strings at P0 and are populated by the P1 ConsolidationWorkflow. `key_facts` is the P0 deliverable: structured per-facet ProfileLine arrays.",
+      "properties": {
+        "historical_summary": {
+          "type": "string"
+        },
+        "key_facts": {
+          "$ref": "#/$defs/KeyFacts"
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "summary",
+        "historical_summary",
+        "key_facts"
+      ],
+      "type": "object"
+    },
+    "ProfileLine": {
+      "additionalProperties": false,
+      "description": "One profile fact with its evidence trail. `evidence` is the list of source records that contributed; record-level forget removes them from the input set, so re-synthesizing the profile drops the line.",
+      "properties": {
+        "confidence": {
+          "description": "Confidence in [0, 1]. Records with confidence < 0.3 (ConfidenceBand::Uncertain) are excluded from the profile.",
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
+        "evidence": {
+          "description": "Source-record ULIDs whose bodies contributed to this line. Always non-empty.",
+          "items": {
+            "$ref": "../common/primitives.json#/$defs/Ulid"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "value": {
+          "description": "Canonical short statement of the fact (e.g., 'prefers terse explanations', 'M2 MacBook Pro').",
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "value",
+        "confidence",
+        "evidence"
       ],
       "type": "object"
     },

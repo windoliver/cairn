@@ -40,6 +40,7 @@ pub mod extract;
 pub mod extraction_cache;
 pub mod filter;
 pub mod lint;
+pub mod profile;
 pub(crate) mod squash;
 pub mod turn;
 
