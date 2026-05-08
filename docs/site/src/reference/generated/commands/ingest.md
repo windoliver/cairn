@@ -9,7 +9,7 @@ cairn.mcp.v1 verb: ingest
 ```text
 cairn.mcp.v1 verb: ingest
 
-Usage: ingest [OPTIONS] --kind <STRING> [source]
+Usage: ingest [OPTIONS] [source]
 
 Arguments:
   [source]
@@ -29,6 +29,21 @@ Options:
 
 
       --url <STRING>
+
+
+      --recursive
+
+
+      --include <STRING>
+
+
+      --exclude <STRING>
+
+
+      --mode <ENUM>
+          [possible values: keyword, semantic, full]
+
+      --batch-size <U32>
 
 
       --session <STRING>
