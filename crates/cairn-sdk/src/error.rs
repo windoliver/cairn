@@ -68,6 +68,19 @@ pub enum SdkError {
         operation_id: Ulid,
     },
 
+    /// Wall-clock fault — the host's system clock could not produce a
+    /// trustworthy `now_ms`. Returned by clock-sensitive surfaces (e.g.
+    /// `handshake`) so SDK callers fail closed in parity with the CLI's
+    /// `EX_UNAVAILABLE` exit and the MCP `CallToolResult::error` surface
+    /// (round-3 review #2).
+    #[error("clock unavailable: {reason}")]
+    ClockUnavailable {
+        /// Underlying [`cairn_core::time::ClockError`] cause as a string.
+        reason: String,
+        /// Operation correlation ID for log lookup.
+        operation_id: Ulid,
+    },
+
     /// Wire-level protocol error from the verb handler.
     ///
     /// The `code` is the closed [`ErrorCode`] enum lowered from the IDL,
@@ -105,6 +118,7 @@ impl SdkError {
             Self::InvalidArgs { .. } => None,
             Self::CapabilityUnavailable { operation_id, .. }
             | Self::Unimplemented { operation_id, .. }
+            | Self::ClockUnavailable { operation_id, .. }
             | Self::Protocol { operation_id, .. } => Some(operation_id),
         }
     }
@@ -115,7 +129,9 @@ impl SdkError {
     #[must_use]
     pub fn code(&self) -> Option<ErrorCode> {
         match self {
-            Self::InvalidArgs { .. } | Self::Unimplemented { .. } => None,
+            Self::InvalidArgs { .. }
+            | Self::Unimplemented { .. }
+            | Self::ClockUnavailable { .. } => None,
             Self::CapabilityUnavailable { .. } => Some(ErrorCode::CapabilityUnavailable),
             Self::Protocol { code, .. } => Some(*code),
         }

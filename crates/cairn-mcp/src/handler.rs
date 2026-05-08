@@ -181,10 +181,28 @@ impl CairnMcpHandler {
 
     /// Returns the names of all tools in the current manifest.
     ///
-    /// Plan A: always the 8-verb [`TOOLS`] slice — no `graph.*` tools.
+    /// Includes the eight IDL verbs unconditionally and the `handshake`
+    /// prelude tool when (a) a sqlite store is wired AND (b)
+    /// [`cairn_core::status::wiring::REPLAY_CHALLENGE_WIRED`] is `true`.
+    /// While the wiring flag is `false`, no signed-mutation path consumes
+    /// the persisted nonce, so listing `handshake` would let clients mint
+    /// rows they cannot redeem (brief §15 fail-closed; round-1 review #1).
+    /// Graph tools are appended dynamically by `list_tools` based on a
+    /// per-request scope probe — they are not listed here.
     #[must_use]
     pub fn listed_tool_names(&self) -> Vec<String> {
-        TOOLS.iter().map(|t| t.name.to_string()).collect()
+        let mut names: Vec<String> = TOOLS.iter().map(|t| t.name.to_string()).collect();
+        if crate::prelude_tools::is_enabled(
+            self.sqlite_store.is_some(),
+            cairn_core::status::wiring::REPLAY_CHALLENGE_WIRED,
+        ) {
+            names.extend(
+                crate::prelude_tools::PRELUDE_TOOLS
+                    .iter()
+                    .map(|t| t.name.to_string()),
+            );
+        }
+        names
     }
 
     /// Build an auth context for the current request.
@@ -292,6 +310,27 @@ impl CairnMcpHandler {
             contract_phase: cairn_core::status::Phase::V0_1,
         };
 
+        // Post-filter replay capabilities to keep status advertisement and
+        // `handshake` tool exposure in lockstep at the MCP boundary
+        // (round-2 review #3). `cairn-core::status::advertise` does not
+        // know about MCP's concrete sqlite handle; without this filter a
+        // `with_store(...)` handler would advertise
+        // `cairn.mcp.v1.replay.{sequence,challenge}` once the wiring
+        // flag flips, even though `tools/list` would still omit
+        // `handshake` (the prelude needs the sqlite handle to mint
+        // nonces). Brief §15 fail-closed: capability advertisement
+        // tracks the runtime that can actually honor it.
+        let mut capabilities = cairn_core::status::advertise(&gates);
+        if self.sqlite_store.is_none() {
+            capabilities.retain(|c| {
+                !matches!(
+                    c,
+                    cairn_core::generated::common::Capabilities::CairnMcpV1ReplayChallenge
+                        | cairn_core::generated::common::Capabilities::CairnMcpV1ReplaySequence
+                )
+            });
+        }
+
         StatusResponse {
             contract: "cairn.mcp.v1".to_owned(),
             server_info: StatusResponseServerInfo {
@@ -300,7 +339,7 @@ impl CairnMcpHandler {
                 started_at: cairn_core::time::now_rfc3339_seconds(),
                 incarnation: cairn_core::time::new_operation_id(),
             },
-            capabilities: cairn_core::status::advertise(&gates),
+            capabilities,
             extensions: vec![],
             pipeline_dispatch: Some(pipeline_dispatch_advertisement(&DefaultRegistry)),
             // Mirror the SDK's `Sdk::status` and CLI's no-vault path so
@@ -416,6 +455,26 @@ impl ServerHandler for CairnMcpHandler {
             })
             .collect();
 
+        // Prelude tools (`handshake`) — listed iff a sqlite store is wired
+        // AND the replay-challenge wiring flag is on. The latter pins the
+        // honest-on-wire posture: while no signed-verb path consumes the
+        // persisted nonce, advertising `handshake` would invite clients to
+        // accumulate dead rows. Round-1 review #1 / brief §15.
+        if crate::prelude_tools::is_enabled(
+            self.sqlite_store.is_some(),
+            cairn_core::status::wiring::REPLAY_CHALLENGE_WIRED,
+        ) {
+            for decl in crate::prelude_tools::PRELUDE_TOOLS {
+                let schema_value: serde_json::Value = serde_json::from_slice(decl.input_schema)
+                    .unwrap_or_else(|_| serde_json::json!({"type": "object", "properties": {}}));
+                let schema_obj = match schema_value {
+                    serde_json::Value::Object(m) => m,
+                    _ => serde_json::Map::new(),
+                };
+                tools.push(Tool::new(decl.name, decl.description, Arc::new(schema_obj)));
+            }
+        }
+
         let ctx = self.auth_context_for(&request_id);
         if self.materialize_graph_request(&ctx).is_ok() {
             for decl in crate::graph_tools::GRAPH_TOOLS {
@@ -454,6 +513,25 @@ impl ServerHandler for CairnMcpHandler {
         let request_id = context.id.to_string();
 
         async move {
+            // Prelude tool routing (`handshake`) — accept the call iff
+            // (a) the tool name is in PRELUDE_TOOLS, AND
+            // (b) a sqlite store is wired, AND
+            // (c) `REPLAY_CHALLENGE_WIRED` is true (read at dispatch time
+            //     so a future PR that flips the flag does not need to
+            //     touch this branch).
+            // The wired/unwired gate lives inside `prelude_tools::dispatch`
+            // so production and direct unit-test entry points share one
+            // implementation.
+            if crate::prelude_tools::is_prelude_tool(name.as_ref()) {
+                return Ok(crate::prelude_tools::dispatch(
+                    name.as_ref(),
+                    arguments,
+                    self.sqlite_store.clone(),
+                    cairn_core::status::wiring::REPLAY_CHALLENGE_WIRED,
+                )
+                .await);
+            }
+
             // Graph tool routing — single-pass resolution, no TOCTOU.
             if crate::graph_tools::GRAPH_TOOLS
                 .iter()
@@ -820,6 +898,38 @@ mod tests_plan_a {
             assert!(
                 !tool.starts_with("graph."),
                 "Plan A must not list graph.* tools, got `{tool}`"
+            );
+        }
+    }
+
+    /// Round-2 review #3: status advertisement and `handshake` tool
+    /// exposure must agree on `replay.{sequence,challenge}`. A handler
+    /// constructed without a sqlite store cannot mint or redeem
+    /// challenges, so the status block MUST NOT advertise either
+    /// replay capability — even when (in the future) the wiring const
+    /// flips to `true`.
+    #[test]
+    fn replay_capabilities_filtered_when_no_sqlite_store() {
+        let store: Arc<dyn cairn_core::contract::memory_store::MemoryStore> =
+            Arc::new(FixtureStore::default());
+        let scope: Arc<dyn McpSessionScope> = Arc::new(ConfigBackedScope::new(principal()));
+        let mut cfg = CairnConfig::default();
+        cfg.mcp.stdio.single_tenant = true;
+        cfg.mcp.stdio.principal = Some(principal());
+        // `with_store_and_scope` deliberately does NOT wire a sqlite handle,
+        // so the post-filter inside `build_status_response` must drop both
+        // replay capabilities. The check holds regardless of the current
+        // value of `REPLAY_CHALLENGE_WIRED` / `REPLAY_SEQUENCE_WIRED`.
+        let handler = CairnMcpHandler::with_store_and_scope(store, scope, cfg, principal());
+        let status = handler.status_response();
+        for cap in &status.capabilities {
+            assert!(
+                !matches!(
+                    cap,
+                    cairn_core::generated::common::Capabilities::CairnMcpV1ReplayChallenge
+                        | cairn_core::generated::common::Capabilities::CairnMcpV1ReplaySequence
+                ),
+                "replay.{{sequence,challenge}} must not appear in status without a sqlite store; got: {cap:?}"
             );
         }
     }

@@ -115,7 +115,13 @@ impl StoreTx<'_> {
     /// expired challenge, an envelope missing both modes, or admission
     /// past the signed `expires_at`).
     pub fn prepare_wal_with_replay(&self, admission: &SignedAdmission) -> Result<(), ReplayError> {
-        let now_ms = current_unix_ms();
+        // Round-3 review #1: replay enforcement runs against `now_ms`.
+        // Saturating clocks would either admit expired intents/challenges
+        // (`now = 0` < every real expiry) or reject every admit
+        // (`now = i64::MAX` >= every real expiry). Surface a typed
+        // `ClockFault` instead and let the verb layer reject up the
+        // stack.
+        let now_ms = cairn_core::time::checked_now_ms()?;
         let inputs = WalPrepareInputs {
             kind: admission.kind().as_db_str(),
             plan_ref: admission.plan_ref(),

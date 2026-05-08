@@ -18,10 +18,10 @@
 
 use std::path::Path;
 use std::process::ExitCode;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use cairn_core::generated::common::Nonce16Base64;
 use cairn_core::generated::handshake::{HandshakeResponse, HandshakeResponseChallenge};
+use cairn_core::time::checked_now_ms;
 
 use super::envelope::{emit_json, new_nonce};
 
@@ -47,7 +47,17 @@ pub fn run(json: bool) -> ExitCode {
 /// warning to stderr.
 #[must_use]
 pub fn run_with_context(json: bool, vault_root: Option<&Path>, issuer: Option<&str>) -> ExitCode {
-    let now_ms = unix_now_ms();
+    // Fail closed on a degraded clock: minting a persisted challenge with a
+    // saturated `now_ms` would either purge every live row in
+    // `outstanding_challenges` (overflow case → cutoff at `i64::MAX`) or
+    // emit a 1970-era `expires_at` (pre-epoch case). Round-2 review #2.
+    let now_ms = match checked_now_ms() {
+        Ok(ms) => ms,
+        Err(e) => {
+            eprintln!("cairn handshake: clock error — {e}");
+            return ExitCode::from(69); // EX_UNAVAILABLE
+        }
+    };
 
     if let (Some(root), Some(issuer)) = (vault_root, issuer) {
         return mint_persisted(json, root, issuer, now_ms);
@@ -172,11 +182,4 @@ fn print_human(resp: &HandshakeResponse, persisted: bool) {
             resp.challenge.expires_at
         );
     }
-}
-
-fn unix_now_ms() -> i64 {
-    let dur = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    i64::try_from(dur.as_millis()).unwrap_or(i64::MAX)
 }

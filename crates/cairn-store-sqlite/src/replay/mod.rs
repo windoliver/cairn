@@ -135,6 +135,15 @@ pub enum ReplayError {
     /// invariant string).
     #[error("sqlite error during replay consume")]
     Sqlite(#[from] rusqlite::Error),
+
+    /// Admission clock could not produce a trustworthy `now_ms`. Routed
+    /// through [`cairn_core::time::checked_now_ms`] so the replay-window
+    /// gate fails closed on a degraded host instead of admitting an
+    /// expired intent / challenge as fresh (`now_ms` saturating to `0`)
+    /// or rejecting every admit (`now_ms` saturating to `i64::MAX`).
+    /// Round-3 review #1.
+    #[error("admission clock unavailable")]
+    ClockFault(#[from] cairn_core::time::ClockError),
 }
 
 /// Transaction order for `prepare_wal_with_replay` writes.

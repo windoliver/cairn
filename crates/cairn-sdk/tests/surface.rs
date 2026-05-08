@@ -207,8 +207,12 @@ fn status_envelope_serializes_to_canonical_shape() {
 #[test]
 fn handshake_mints_unique_nonces() {
     let s = sdk();
-    let a = s.handshake();
-    let b = s.handshake();
+    let a = s
+        .handshake()
+        .expect("handshake under normal clock must succeed");
+    let b = s
+        .handshake()
+        .expect("handshake under normal clock must succeed");
     assert_eq!(a.contract, "cairn.mcp.v1");
     assert_ne!(a.challenge.nonce.0, b.challenge.nonce.0);
     assert_eq!(a.challenge.nonce.0.len(), 24);

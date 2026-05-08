@@ -1,6 +1,5 @@
 ---
 source: crates/cairn-mcp/tests/graph_tools_manifest.rs
-assertion_line: 513
 expression: names
 ---
 [

@@ -31,7 +31,7 @@ use cairn_core::generated::verbs::{
 };
 use cairn_core::pipeline::dispatch::{DefaultRegistry, pipeline_dispatch_advertisement};
 
-use crate::stub::{new_nonce, now_ms, now_rfc3339_seconds, store_not_wired};
+use crate::stub::{new_nonce, now_rfc3339_seconds, store_not_wired};
 use crate::{CONTRACT, SdkError, VerbResponse};
 
 /// Marker trait for transport implementations.
@@ -264,16 +264,32 @@ impl<T: Transport> Sdk<T> {
     /// P0 caveat: the issued nonce is ephemeral and is not persisted. Same
     /// caveat as `cairn handshake` — challenge-mode signed intents will be
     /// rejected until the store lands.
-    #[must_use]
-    pub fn handshake(&self) -> HandshakeResponse {
-        const CHALLENGE_TTL_MS: u64 = 60_000;
-        HandshakeResponse {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdkError::ClockUnavailable`] when the host wall clock is
+    /// degraded (pre-epoch or i64-ms overflow). The CLI / MCP handshake
+    /// surfaces fail closed under the same condition; the SDK matches
+    /// (round-3 review #2). The CSPRNG-driven nonce itself is fine — only
+    /// the `expires_at` math depends on a trustworthy clock, and a wrong
+    /// value here would either mint a never-expiring challenge or one
+    /// stamped at the epoch.
+    pub fn handshake(&self) -> Result<HandshakeResponse, SdkError> {
+        const CHALLENGE_TTL_MS: i64 = 60_000;
+        let now_ms =
+            cairn_core::time::checked_now_ms().map_err(|e| SdkError::ClockUnavailable {
+                reason: e.to_string(),
+                operation_id: crate::stub::new_operation_id(),
+            })?;
+        let expires_at_ms = now_ms.saturating_add(CHALLENGE_TTL_MS);
+        let expires_at = u64::try_from(expires_at_ms).unwrap_or(0);
+        Ok(HandshakeResponse {
             contract: CONTRACT.to_owned(),
             challenge: HandshakeResponseChallenge {
                 nonce: new_nonce(),
-                expires_at: now_ms() + CHALLENGE_TTL_MS,
+                expires_at,
             },
-        }
+        })
     }
 
     /// `ingest` — accept new memory (brief §8.1).
