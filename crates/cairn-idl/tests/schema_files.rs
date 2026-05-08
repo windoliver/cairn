@@ -632,7 +632,10 @@ fn every_typed_field_asserts_bounds_or_is_allowlisted() {
         // would force callers to invent placeholder text every time
         // the narratives haven't been generated yet, defeating the
         // P0/P1 split.
-        ("verbs/retrieve.json", "/$defs/ProfileHalf/properties/summary"),
+        (
+            "verbs/retrieve.json",
+            "/$defs/ProfileHalf/properties/summary",
+        ),
         (
             "verbs/retrieve.json",
             "/$defs/ProfileHalf/properties/historical_summary",

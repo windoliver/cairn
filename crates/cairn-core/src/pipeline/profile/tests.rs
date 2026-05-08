@@ -397,3 +397,286 @@ fn deterministic_ordering_within_facet() {
         vec!["alpha org", "mid org", "zebra org"]
     );
 }
+
+// ── Confidence-range boundary checks ─────────────────────────────────
+//
+// `MemoryRecord.validate` clamps confidence to `[0.0, 1.0]` upstream;
+// the synthesizer re-checks at the trust boundary because the
+// generated `ProfileLine` deserializer emits the same `[0.0, 1.0]`
+// validator. A confidence of `1.5` slipping through here would produce
+// a `DataProfile` that deserializes-to-error in its own
+// schema round-trip.
+
+#[test]
+fn admits_confidence_at_lower_bound() {
+    let records = vec![rec(
+        '0',
+        true,
+        0.0_f32,
+        KeyFactFacet::Preferences,
+        "zero confidence",
+        "2026-04-22T14:00:00Z",
+    )];
+    // 0.0 is below the Uncertain floor — should be dropped.
+    let profile =
+        synthesize(&records, &user_subject(), &ts("2026-04-22T14:00:01Z")).expect("synthesize");
+    assert!(profile.static_section.key_facts.preferences.is_empty());
+}
+
+#[test]
+fn admits_confidence_at_upper_bound() {
+    let records = vec![rec(
+        '0',
+        true,
+        1.0_f32,
+        KeyFactFacet::Preferences,
+        "max confidence",
+        "2026-04-22T14:00:00Z",
+    )];
+    let profile =
+        synthesize(&records, &user_subject(), &ts("2026-04-22T14:00:01Z")).expect("synthesize");
+    let line = &profile.static_section.key_facts.preferences[0];
+    assert!((line.confidence - 1.0_f64).abs() < f64::EPSILON);
+}
+
+#[test]
+fn excludes_confidence_above_one() {
+    // Out-of-range input — must not produce un-serializable output.
+    let records = vec![rec(
+        '0',
+        true,
+        1.5_f32,
+        KeyFactFacet::Preferences,
+        "broken extractor",
+        "2026-04-22T14:00:00Z",
+    )];
+    let profile =
+        synthesize(&records, &user_subject(), &ts("2026-04-22T14:00:01Z")).expect("synthesize");
+    assert!(profile.static_section.key_facts.preferences.is_empty());
+}
+
+#[test]
+fn excludes_negative_confidence() {
+    let records = vec![rec(
+        '0',
+        true,
+        -0.5_f32,
+        KeyFactFacet::Preferences,
+        "broken extractor",
+        "2026-04-22T14:00:00Z",
+    )];
+    let profile =
+        synthesize(&records, &user_subject(), &ts("2026-04-22T14:00:01Z")).expect("synthesize");
+    assert!(profile.static_section.key_facts.preferences.is_empty());
+}
+
+// ── IDL deserializer negative tests ──────────────────────────────────
+//
+// Direct exercise of the codegen-emitted `ProfileLine` TryFrom path —
+// guards the validator we hand-rolled in
+// `cairn-idl::codegen::emit_sdk::write_retrieve_data_extra_checks`.
+// Without these the codegen could regress (drop the validator) and
+// only failing wire-compat snapshots elsewhere would catch it.
+
+#[test]
+fn profile_line_deserialize_rejects_empty_value() {
+    let json = r#"{"value":"","confidence":0.5,"evidence":["00000000000000000000000000"]}"#;
+    let err = serde_json::from_str::<crate::generated::verbs::retrieve::ProfileLine>(json)
+        .expect_err("empty value must reject");
+    assert!(err.to_string().contains("value"), "{err}");
+}
+
+#[test]
+fn profile_line_deserialize_rejects_confidence_above_one() {
+    let json = r#"{"value":"x","confidence":1.5,"evidence":["00000000000000000000000000"]}"#;
+    let err = serde_json::from_str::<crate::generated::verbs::retrieve::ProfileLine>(json)
+        .expect_err("confidence > 1 must reject");
+    assert!(err.to_string().contains("confidence"), "{err}");
+}
+
+#[test]
+fn profile_line_deserialize_rejects_empty_evidence() {
+    let json = r#"{"value":"x","confidence":0.5,"evidence":[]}"#;
+    let err = serde_json::from_str::<crate::generated::verbs::retrieve::ProfileLine>(json)
+        .expect_err("empty evidence must reject");
+    assert!(err.to_string().contains("evidence"), "{err}");
+}
+
+#[test]
+fn profile_line_deserialize_rejects_duplicate_evidence() {
+    let json = r#"{"value":"x","confidence":0.5,"evidence":["00000000000000000000000000","00000000000000000000000000"]}"#;
+    let err = serde_json::from_str::<crate::generated::verbs::retrieve::ProfileLine>(json)
+        .expect_err("duplicate evidence must reject");
+    assert!(err.to_string().contains("evidence"), "{err}");
+}
+
+#[test]
+fn data_profile_subject_deserialize_rejects_neither_user_nor_agent() {
+    let json = r#"{
+        "subject": {},
+        "static_section": {"summary":"","historical_summary":"","key_facts":{"devices":[],"software":[],"preferences":[],"current_issues":[],"addressed_issues":[],"recurring_issues":[],"known_entities":[]}},
+        "dynamic_section": {"summary":"","historical_summary":"","key_facts":{"devices":[],"software":[],"preferences":[],"current_issues":[],"addressed_issues":[],"recurring_issues":[],"known_entities":[]}},
+        "updated_at": "2026-04-22T14:00:00Z"
+    }"#;
+    serde_json::from_str::<crate::generated::verbs::retrieve::DataProfile>(json)
+        .expect_err("subject without user or agent must reject");
+}
+
+// ── Performance sanity ───────────────────────────────────────────────
+//
+// Synthesizer is O(n) over input + O(b log b) per facet bucket where
+// `b` is the bucket cardinality. For 10K records spread across 7 facets
+// the BTreeMap insert/walk dominates and stays well under 100ms on
+// commodity hardware. This test guards against an accidental
+// regression to O(n²) (e.g., a future "merge across facets" refactor).
+
+#[test]
+fn synthesizes_ten_thousand_records_under_budget() {
+    let mut records: Vec<ProfileSourceRecord> = Vec::with_capacity(10_000);
+    let facets = [
+        KeyFactFacet::Devices,
+        KeyFactFacet::Software,
+        KeyFactFacet::Preferences,
+        KeyFactFacet::CurrentIssues,
+        KeyFactFacet::AddressedIssues,
+        KeyFactFacet::RecurringIssues,
+        KeyFactFacet::KnownEntities,
+    ];
+    // Crockford base32, no I/L/O/U.
+    let alphabet: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    for i in 0..10_000_u64 {
+        // ULID first char must be 0..=7 (top 5 bits zero in a 128-bit
+        // ULID). Mix `i` into a 25-char suffix using a 64-bit Weyl
+        // sequence so we don't shift past the type's width.
+        let mut s = String::with_capacity(26);
+        s.push(char::from(b'0' + u8::try_from(i % 8).expect("0..8")));
+        let mut state = i.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1);
+        for _ in 0..25 {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            let idx = (state >> 33) as usize % alphabet.len();
+            s.push(alphabet[idx] as char);
+        }
+        let Ok(record_id) = RecordId::parse(&s) else {
+            // Crockford alphabet is closed under our index map, so this
+            // path is unreachable — keep the guard rather than panic.
+            continue;
+        };
+        records.push(ProfileSourceRecord {
+            record_id,
+            is_static: i % 2 == 0,
+            confidence: 0.5,
+            // `i` is bounded < 10_000 so the cast is lossless.
+            facet: facets[usize::try_from(i).expect("i < 10000") % facets.len()],
+            // Limit value cardinality so the merge step exercises the
+            // BTreeMap collision path; otherwise every line is unique
+            // and we'd only stress the linear scan.
+            value: format!("fact-{}", i % 256),
+            updated_at: ts("2026-04-22T14:00:00Z"),
+        });
+    }
+    assert!(
+        records.len() >= 9_000,
+        "ULID generator dropped too many: got {}",
+        records.len()
+    );
+
+    let start = std::time::Instant::now();
+    let profile =
+        synthesize(&records, &user_subject(), &ts("2026-04-22T14:00:01Z")).expect("synthesize");
+    let elapsed = start.elapsed();
+
+    // Generous bound: synthesizes in ~5–15ms locally; CI can be 5×
+    // slower under load. 200ms keeps us well clear of an O(n²)
+    // regression (which would push 10K records into seconds).
+    assert!(
+        elapsed < std::time::Duration::from_millis(200),
+        "synthesizer over budget: {elapsed:?}"
+    );
+
+    // Sanity: output is non-empty and every line is wire-valid.
+    let json = serde_json::to_string(&profile).expect("serialize");
+    let back: crate::generated::verbs::retrieve::DataProfile =
+        serde_json::from_str(&json).expect("deserialize round-trip");
+    assert_eq!(back, profile);
+}
+
+// ── Property: order-invariance ───────────────────────────────────────
+//
+// `synthesize` is documented as "same inputs always produce the same
+// profile" — the forget-propagation contract leans on that. Permuting
+// the input slice must not change the output. This is the strongest
+// claim a property test can make about a pure aggregation function;
+// without it the brief's "byte-identical wire output across calls"
+// guarantee (§8.0.a) cannot hold.
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig {
+        cases: 64,
+        ..proptest::prelude::ProptestConfig::default()
+    })]
+
+    #[test]
+    fn output_invariant_under_input_permutation(
+        seed in 0u64..1_000_000,
+        len in 1usize..32,
+    ) {
+        // Build a deterministic batch from the seed so failures are
+        // reproducible without proptest's own minimizer.
+        let facets = [
+            KeyFactFacet::Devices,
+            KeyFactFacet::Software,
+            KeyFactFacet::Preferences,
+            KeyFactFacet::CurrentIssues,
+            KeyFactFacet::AddressedIssues,
+            KeyFactFacet::RecurringIssues,
+            KeyFactFacet::KnownEntities,
+        ];
+        let mut records: Vec<ProfileSourceRecord> = Vec::with_capacity(len);
+        for i in 0..len {
+            let mix = seed
+                .wrapping_add(u64::try_from(i).expect("len < 32"))
+                .wrapping_mul(2_654_435_761);
+            let first = char::from(b'0' + u8::try_from(mix % 8).expect("0..8"));
+            // 26-char ULID: leading 0..=7 char + 25-char Crockford suffix
+            // derived from `mix`. Forming a hex tail then padding keeps
+            // the alphabet legal for the ULID parser (all hex digits are
+            // in the Crockford set).
+            let id = format!("{first}{:0>25X}", mix % (1u64 << 25));
+            let Ok(record_id) = RecordId::parse(&id) else {
+                continue;
+            };
+            // Confidence ∈ [0.3, 1.0] so admission isn't probabilistic.
+            // (mix >> 8) % 700 fits in u16 — divide as u32 before
+            // converting to f32 to avoid precision warnings.
+            let bucket = u16::try_from((mix >> 8) % 700).expect("< 700");
+            let conf = 0.3_f32 + f32::from(bucket) / 1000.0_f32;
+            records.push(ProfileSourceRecord {
+                record_id,
+                is_static: (mix >> 16) & 1 == 0,
+                confidence: conf,
+                facet: facets[usize::try_from(mix >> 24).expect("u64 fits usize on 64-bit") % facets.len()],
+                value: format!("v-{}", mix % 8),
+                updated_at: ts("2026-04-22T14:00:00Z"),
+            });
+        }
+        if records.is_empty() {
+            return Ok(());
+        }
+
+        let mut shuffled = records.clone();
+        // Deterministic Fisher-Yates using the seed.
+        let mut s = seed;
+        for i in (1..shuffled.len()).rev() {
+            s = s.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            let j = usize::try_from(s).expect("u64 fits usize on 64-bit") % (i + 1);
+            shuffled.swap(i, j);
+        }
+
+        let now = ts("2026-04-22T14:00:01Z");
+        let a = synthesize(&records,  &user_subject(), &now).expect("synthesize a");
+        let b = synthesize(&shuffled, &user_subject(), &now).expect("synthesize b");
+        proptest::prop_assert_eq!(a, b);
+    }
+}

@@ -63,6 +63,33 @@ pub enum SynthesizeError {
 /// Returns [`SynthesizeError::EmptySubject`] when neither `user` nor
 /// `agent` is set, or [`SynthesizeError::BlankSubjectField`] when a set
 /// field is empty.
+///
+/// # Example
+///
+/// ```
+/// use cairn_core::domain::{RecordId, Rfc3339Timestamp};
+/// use cairn_core::pipeline::profile::{
+///     synthesize, KeyFactFacet, ProfileSourceRecord, ProfileSubject,
+/// };
+///
+/// let records = vec![ProfileSourceRecord {
+///     record_id: RecordId::parse("01HQZX9F5N0000000000000000").unwrap(),
+///     is_static: true,
+///     confidence: 0.9,
+///     facet: KeyFactFacet::Preferences,
+///     value: "prefers terse explanations".to_owned(),
+///     updated_at: Rfc3339Timestamp::parse("2026-04-22T14:00:00Z").unwrap(),
+/// }];
+/// let subject = ProfileSubject {
+///     user: Some("hmn:alice".to_owned()),
+///     agent: None,
+/// };
+/// let now = Rfc3339Timestamp::parse("2026-04-22T14:00:01Z").unwrap();
+///
+/// let profile = synthesize(&records, &subject, &now).unwrap();
+/// assert_eq!(profile.static_section.key_facts.preferences.len(), 1);
+/// assert_eq!(profile.updated_at, "2026-04-22T14:00:00Z");
+/// ```
 pub fn synthesize(
     records: &[ProfileSourceRecord],
     subject: &ProfileSubject,
@@ -103,7 +130,14 @@ pub fn synthesize(
 }
 
 fn is_admissible(r: &ProfileSourceRecord) -> bool {
-    if r.confidence.is_nan() {
+    // NaN, < 0.0, > 1.0 are all out-of-contract: `MemoryRecord.validate`
+    // already rejects them upstream, but we re-check at the trust
+    // boundary. Without this gate a confidence of `1.5` would slip into
+    // the output and the generated `ProfileLine` deserializer (codegen
+    // emits `(0.0..=1.0).contains(&raw.confidence)`) would reject the
+    // wire round-trip, leaving the synthesizer producing data its own
+    // schema rejects.
+    if !(0.0..=1.0).contains(&r.confidence) || r.confidence.is_nan() {
         return false;
     }
     if r.confidence < CONFIDENCE_FLOOR {
