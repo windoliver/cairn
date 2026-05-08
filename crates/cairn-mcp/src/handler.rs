@@ -310,6 +310,27 @@ impl CairnMcpHandler {
             contract_phase: cairn_core::status::Phase::V0_1,
         };
 
+        // Post-filter replay capabilities to keep status advertisement and
+        // `handshake` tool exposure in lockstep at the MCP boundary
+        // (round-2 review #3). `cairn-core::status::advertise` does not
+        // know about MCP's concrete sqlite handle; without this filter a
+        // `with_store(...)` handler would advertise
+        // `cairn.mcp.v1.replay.{sequence,challenge}` once the wiring
+        // flag flips, even though `tools/list` would still omit
+        // `handshake` (the prelude needs the sqlite handle to mint
+        // nonces). Brief §15 fail-closed: capability advertisement
+        // tracks the runtime that can actually honor it.
+        let mut capabilities = cairn_core::status::advertise(&gates);
+        if self.sqlite_store.is_none() {
+            capabilities.retain(|c| {
+                !matches!(
+                    c,
+                    cairn_core::generated::common::Capabilities::CairnMcpV1ReplayChallenge
+                        | cairn_core::generated::common::Capabilities::CairnMcpV1ReplaySequence
+                )
+            });
+        }
+
         StatusResponse {
             contract: "cairn.mcp.v1".to_owned(),
             server_info: StatusResponseServerInfo {
@@ -318,7 +339,7 @@ impl CairnMcpHandler {
                 started_at: cairn_core::time::now_rfc3339_seconds(),
                 incarnation: cairn_core::time::new_operation_id(),
             },
-            capabilities: cairn_core::status::advertise(&gates),
+            capabilities,
             extensions: vec![],
             pipeline_dispatch: Some(pipeline_dispatch_advertisement(&DefaultRegistry)),
             // Mirror the SDK's `Sdk::status` and CLI's no-vault path so
@@ -748,6 +769,38 @@ mod tests_plan_a {
             assert!(
                 !tool.starts_with("graph."),
                 "Plan A must not list graph.* tools, got `{tool}`"
+            );
+        }
+    }
+
+    /// Round-2 review #3: status advertisement and `handshake` tool
+    /// exposure must agree on `replay.{sequence,challenge}`. A handler
+    /// constructed without a sqlite store cannot mint or redeem
+    /// challenges, so the status block MUST NOT advertise either
+    /// replay capability — even when (in the future) the wiring const
+    /// flips to `true`.
+    #[test]
+    fn replay_capabilities_filtered_when_no_sqlite_store() {
+        let store: Arc<dyn cairn_core::contract::memory_store::MemoryStore> =
+            Arc::new(FixtureStore::default());
+        let scope: Arc<dyn McpSessionScope> = Arc::new(ConfigBackedScope::new(principal()));
+        let mut cfg = CairnConfig::default();
+        cfg.mcp.stdio.single_tenant = true;
+        cfg.mcp.stdio.principal = Some(principal());
+        // `with_store_and_scope` deliberately does NOT wire a sqlite handle,
+        // so the post-filter inside `build_status_response` must drop both
+        // replay capabilities. The check holds regardless of the current
+        // value of `REPLAY_CHALLENGE_WIRED` / `REPLAY_SEQUENCE_WIRED`.
+        let handler = CairnMcpHandler::with_store_and_scope(store, scope, cfg, principal());
+        let status = handler.status_response();
+        for cap in &status.capabilities {
+            assert!(
+                !matches!(
+                    cap,
+                    cairn_core::generated::common::Capabilities::CairnMcpV1ReplayChallenge
+                        | cairn_core::generated::common::Capabilities::CairnMcpV1ReplaySequence
+                ),
+                "replay.{{sequence,challenge}} must not appear in status without a sqlite store; got: {cap:?}"
             );
         }
     }

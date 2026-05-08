@@ -165,11 +165,11 @@ async fn handshake(
     // `outstanding_challenges` (saturated-future cutoff in the purge
     // step) or mint a never-expiring challenge — both replay-correctness
     // failures. Round-1 review #2.
-    let now_ms = match unix_now_ms() {
+    let now_ms = match cairn_core::time::checked_now_ms() {
         Ok(ms) => ms,
-        Err(reason) => {
+        Err(e) => {
             return CallToolResult::error(vec![Content::text(format!(
-                "cairn handshake: clock error — {reason}"
+                "cairn handshake: clock error — {e}"
             ))]);
         }
     };
@@ -205,12 +205,4 @@ async fn handshake(
             "cairn handshake: serialize error: {e}"
         ))]),
     }
-}
-
-fn unix_now_ms() -> Result<i64, &'static str> {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let dur = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| "wall clock is before UNIX_EPOCH")?;
-    i64::try_from(dur.as_millis()).map_err(|_| "wall clock overflows i64-ms")
 }

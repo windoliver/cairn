@@ -26,7 +26,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tempfile::TempDir;
@@ -77,7 +77,7 @@ mcp:\n  \
 #[test]
 fn cairn_mcp_subprocess_advertises_handshake_per_wiring_flag() {
     let vault = synth_vault("e2e-cli");
-    let child = Command::new(cli_bin())
+    let mut child = Command::new(cli_bin())
         .args(["--vault"])
         .arg(vault.path())
         .arg("mcp")
@@ -88,46 +88,44 @@ fn cairn_mcp_subprocess_advertises_handshake_per_wiring_flag() {
         .spawn()
         .expect("spawn cairn mcp");
 
-    // Watchdog: kill the child after a wall-clock deadline so a
-    // regression in the CLI subcommand surfaces as a panic rather than a
-    // hung CI job. Cancellation is signalled via `done_rx` so the
-    // happy-path test does not pay the deadline as wall-clock.
-    let child_slot: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(Some(child)));
-    let killer = child_slot.clone();
-    let (done_tx, done_rx) = mpsc::channel::<()>();
-    let watchdog = std::thread::spawn(move || {
-        // `recv_timeout(60s)` returns Err on the deadline → kill the
-        // child to force-unblock the main thread; returns Ok if the
-        // main thread sent on `done_tx` first, in which case the
-        // child has already exited cleanly.
-        if done_rx.recv_timeout(Duration::from_mins(1)).is_err()
-            && let Some(mut c) = killer.lock().expect("lock").take()
-        {
-            let _ = c.kill();
-            let _ = c.wait();
+    // Run the protocol with the child borrowed mutably; never moves the
+    // handle out of the test scope so the post-protocol shutdown wait
+    // below always has something to kill on deadline (round-2 review #1).
+    run_protocol(&mut child);
+
+    // Bounded shutdown wait. The child should exit a beat after stdin
+    // EOF (relay drain + rmcp service teardown); poll `try_wait` so a
+    // shutdown regression times out as a panic rather than wedging the
+    // CI job.
+    let deadline = Instant::now() + SHUTDOWN_DEADLINE;
+    let timed_out = loop {
+        match child.try_wait() {
+            // Either exited cleanly (Some) or the wait itself failed
+            // (Err) — both are terminal.
+            Ok(Some(_)) | Err(_) => break false,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break true;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
         }
-    });
-
-    run_protocol(&child_slot);
-
-    // Tear down: wait for the child to exit on its own (relay drain +
-    // stdin EOF), then signal the watchdog. If the wait blocks, the
-    // 60-second deadline still fires.
-    if let Some(mut c) = child_slot.lock().expect("lock").take() {
-        let _ = c.wait();
-    }
-    let _ = done_tx.send(());
-    let _ = watchdog.join();
+    };
     drop(vault);
+    assert!(
+        !timed_out,
+        "cairn mcp did not exit within {SHUTDOWN_DEADLINE:?} after stdin EOF"
+    );
 }
 
-fn run_protocol(child_slot: &Arc<Mutex<Option<Child>>>) {
-    let mut guard = child_slot.lock().expect("lock");
-    let child = guard.as_mut().expect("child");
+const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(15);
+
+fn run_protocol(child: &mut Child) {
     let mut stdin = child.stdin.take().expect("child stdin");
     let stdout = child.stdout.take().expect("child stdout");
     let stderr = child.stderr.take().expect("child stderr");
-    drop(guard);
 
     let (tx_out, rx_out) = mpsc::channel::<Value>();
     let _stdout_thread = std::thread::spawn(move || {

@@ -104,6 +104,43 @@ pub fn now_ms() -> u64 {
         .unwrap_or(u64::MAX) // saturate on overflow at year 584554051223
 }
 
+/// Reason `checked_now_ms` could not produce a valid `i64` epoch-ms value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum ClockError {
+    /// Wall clock is set before the Unix epoch — `SystemTime::duration_since`
+    /// returned a negative duration.
+    #[error("wall clock is before UNIX_EPOCH")]
+    BeforeUnixEpoch,
+    /// Wall-clock duration in milliseconds does not fit in `i64`. Real
+    /// hardware will not hit this until the year 292M; we still fail closed
+    /// rather than saturate.
+    #[error("wall clock overflows i64 milliseconds")]
+    OverflowI64Ms,
+}
+
+/// Current Unix epoch time in milliseconds, fail-closed.
+///
+/// Unlike [`now_ms`], this returns a `Result` so callers that depend on a
+/// trustworthy wall clock (challenge minting, replay-window enforcement) can
+/// reject a degraded host instead of saturating into a value that breaks
+/// invariants downstream. The `i64` return type matches the `SQLite`
+/// `INTEGER` shape used in `outstanding_challenges.expires_at`.
+///
+/// # Errors
+///
+/// - [`ClockError::BeforeUnixEpoch`] when the system clock is set to a time
+///   before 1970-01-01 UTC.
+/// - [`ClockError::OverflowI64Ms`] when the duration since `UNIX_EPOCH`
+///   exceeds `i64::MAX` milliseconds (year ~292,277,026,596).
+pub fn checked_now_ms() -> Result<i64, ClockError> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let dur = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| ClockError::BeforeUnixEpoch)?;
+    i64::try_from(dur.as_millis()).map_err(|_| ClockError::OverflowI64Ms)
+}
+
 /// Build profile (`"debug"` or `"release"`) for status `server_info.build`.
 #[must_use]
 pub fn build_profile() -> &'static str {
@@ -206,5 +243,26 @@ mod tests {
     fn build_profile_is_debug_or_release() {
         let p = build_profile();
         assert!(p == "debug" || p == "release");
+    }
+
+    /// `checked_now_ms` must succeed under a normal clock — anything else is
+    /// a host-environment fault we want surfaced (round-2 review #2).
+    #[test]
+    fn checked_now_ms_succeeds_on_normal_clock() {
+        let ms = checked_now_ms().expect("clock should be valid in CI");
+        assert!(ms > 1_700_000_000_000, "must be post-2024; got {ms}");
+    }
+
+    /// Round-2 review #2 regression baseline. We cannot synthesize a
+    /// pre-epoch instant without unsafe time-mocking, so this only
+    /// asserts the error type variants exist and Display correctly. The
+    /// behavioral guarantee is encoded by the implementation's explicit
+    /// `Err(...)` returns.
+    #[test]
+    fn clock_error_displays_for_each_variant() {
+        let s = ClockError::BeforeUnixEpoch.to_string();
+        assert!(s.contains("UNIX_EPOCH"), "got: {s}");
+        let s = ClockError::OverflowI64Ms.to_string();
+        assert!(s.contains("overflows"), "got: {s}");
     }
 }
