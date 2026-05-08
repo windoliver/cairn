@@ -678,6 +678,7 @@ mod resize_tests {
     }
 }
 
+#[cfg(test)]
 mod tests {
     use super::open_in_memory;
 
