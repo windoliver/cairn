@@ -540,7 +540,7 @@ fn run_assemble_hot(sub: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode 
                 return ExitCode::from(78); // EX_CONFIG
             }
         };
-    verbs::assemble_hot::run(sub, &config)
+    verbs::assemble_hot::run(sub, vault_root, config)
 }
 
 fn run_admin(matches: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {

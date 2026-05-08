@@ -2,9 +2,11 @@
 
 use cairn_core::domain::{DomainError, MemoryKind};
 use cairn_core::generated::envelope::RetrieveData;
+use cairn_core::generated::verbs::assemble_hot::HotRecipeStep;
 use cairn_core::generated::verbs::ingest::IngestArgs;
 use cairn_core::generated::verbs::retrieve::TurnItemRole;
 use cairn_core::pipeline::filter::Decision;
+use cairn_core::verbs::assemble_hot::loader::{read_vault_markdown_file, trim_bodies_to_budget};
 use cairn_core::verbs::ingest::{PreparedIngest, prepare_ingest_body};
 use cairn_core::verbs::retrieve::{profile_data, record_data, turn_data_with_options};
 use cairn_core::verbs::summarize::render_summary;
@@ -301,6 +303,108 @@ mod issue_61_core_verbs {
         assert_eq!(first, second);
         assert!(first.contains("Alpha detail"));
         assert!(first.contains("Beta detail"));
+    }
+
+    #[test]
+    fn hot_trim_never_splits_utf8() {
+        let recipe = vec![HotRecipeStep::Purpose, HotRecipeStep::RecentUserSignal];
+        let bodies = vec!["purpose ".to_owned(), "cafe ééé".to_owned()];
+        let trimmed = trim_bodies_to_budget(&recipe, bodies, 13);
+        let joined = trimmed.join("");
+
+        assert!(joined.is_char_boundary(joined.len()));
+        assert!(joined.len() <= 13);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hot_source_loader_rejects_symlinked_markdown() {
+        let unique = format!(
+            "cairn-hot-loader-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(&unique);
+        let outside = std::env::temp_dir().join(format!("{unique}-outside.md"));
+        std::fs::create_dir_all(&root).expect("create temp vault root");
+        std::fs::write(&outside, "outside secret").expect("write outside file");
+        std::os::unix::fs::symlink(&outside, root.join("purpose.md")).expect("create symlink");
+
+        let err = read_vault_markdown_file(&root, std::path::Path::new("purpose.md"), 1024)
+            .expect_err("symlinked source should be rejected");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        let _ = std::fs::remove_file(root.join("purpose.md"));
+        let _ = std::fs::remove_file(outside);
+        let _ = std::fs::remove_dir(root);
+    }
+
+    #[test]
+    fn hot_source_loader_caps_oversized_markdown() {
+        let unique = format!(
+            "cairn-hot-loader-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(&unique);
+        std::fs::create_dir_all(&root).expect("create temp vault root");
+        std::fs::write(root.join("purpose.md"), "12345").expect("write oversized source");
+
+        let body = read_vault_markdown_file(&root, std::path::Path::new("purpose.md"), 4)
+            .expect("oversized source should be capped");
+
+        assert_eq!(body, "1234");
+        let _ = std::fs::remove_file(root.join("purpose.md"));
+        let _ = std::fs::remove_dir(root);
+    }
+
+    #[test]
+    fn hot_source_loader_cap_preserves_utf8_boundary() {
+        let unique = format!(
+            "cairn-hot-loader-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(&unique);
+        std::fs::create_dir_all(&root).expect("create temp vault root");
+        std::fs::write(root.join("purpose.md"), "ééé").expect("write utf-8 source");
+
+        let body = read_vault_markdown_file(&root, std::path::Path::new("purpose.md"), 3)
+            .expect("source should be capped on a UTF-8 boundary");
+
+        assert_eq!(body, "é");
+        let _ = std::fs::remove_file(root.join("purpose.md"));
+        let _ = std::fs::remove_dir(root);
+    }
+
+    #[test]
+    fn hot_source_loader_rejects_directory_source() {
+        let unique = format!(
+            "cairn-hot-loader-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(&unique);
+        std::fs::create_dir_all(root.join("purpose.md")).expect("create directory source");
+
+        let err = read_vault_markdown_file(&root, std::path::Path::new("purpose.md"), 1024)
+            .expect_err("directory source should be rejected");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        let _ = std::fs::remove_dir(root.join("purpose.md"));
+        let _ = std::fs::remove_dir(root);
     }
 
     fn sample_core_record(

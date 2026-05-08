@@ -13,12 +13,35 @@
 //! - bundled `plugin.toml` parse failure → 78 (`EX_CONFIG`); registry
 //!   rejection → 69 (`EX_UNAVAILABLE`).
 
+use std::path::Path;
 use std::process::Command;
 
 /// Path to the built CLI binary. Cargo sets `CARGO_BIN_EXE_<name>` for every
 /// binary in the current crate at test-compile time.
 fn cli() -> Command {
     Command::new(env!("CARGO_BIN_EXE_cairn"))
+}
+
+fn seed_default_identity(vault: &Path) {
+    let out = cli()
+        .current_dir(vault)
+        .args([
+            "ingest",
+            "--kind",
+            "reference",
+            "--body",
+            "identity seed",
+            "--json",
+        ])
+        .output()
+        .expect("seed default identity");
+    assert!(
+        out.status.success(),
+        "identity seed failed: {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 fn seed_consent_journal_vault(seed_sql: &str) -> tempfile::TempDir {
@@ -255,8 +278,8 @@ fn no_args_prints_help_and_fails_closed() {
 
 #[test]
 fn assemble_hot_exits_zero_and_emits_committed_envelope() {
-    // `assemble_hot` is wired: stub-body assembler returns a committed
-    // Response with six zero-length segments (default recipe). Exit 0.
+    // `assemble_hot` is wired to real hot-memory sources and returns a
+    // committed Response with six segments for the default recipe. Exit 0.
     // The verb fails closed on a non-vault directory, so bootstrap a
     // tempdir vault and run from inside it.
     let dir = tempfile::tempdir().expect("tempdir");
@@ -265,6 +288,7 @@ fn assemble_hot_exits_zero_and_emits_committed_envelope() {
         force: false,
     })
     .expect("bootstrap vault");
+    seed_default_identity(dir.path());
     let out = cli()
         .current_dir(dir.path())
         .args(["assemble_hot", "--json"])

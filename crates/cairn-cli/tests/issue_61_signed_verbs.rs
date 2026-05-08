@@ -28,6 +28,42 @@ fn cli() -> Command {
     Command::new(env!("CARGO_BIN_EXE_cairn"))
 }
 
+fn assert_policy_trace_body_free(value: &serde_json::Value) {
+    let trace = value["policy_trace"]
+        .as_array()
+        .expect("policy_trace array");
+    for entry in trace {
+        let text = serde_json::to_string(entry).expect("trace entry json");
+        assert!(!text.contains("alice@example.com"));
+        assert!(!text.contains("sk-test"));
+        assert!(!text.contains("secret"));
+    }
+}
+
+#[test]
+fn live_ingest_policy_trace_is_body_free() {
+    let vault = tempfile::tempdir().expect("vault");
+    bootstrap(&BootstrapOpts {
+        vault_path: vault.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap");
+    let out = cli()
+        .current_dir(vault.path())
+        .args([
+            "ingest",
+            "--kind",
+            "reference",
+            "--body",
+            "alice@example.com has secret sk-test-12345678901234567890",
+            "--json",
+        ])
+        .output()
+        .expect("run ingest");
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_policy_trace_body_free(&json);
+}
+
 #[test]
 fn ingest_body_commits_record_and_policy_trace() {
     let vault = tempfile::tempdir().expect("vault");

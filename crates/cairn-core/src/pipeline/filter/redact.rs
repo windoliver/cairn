@@ -74,9 +74,9 @@ impl RedactionTag {
             Self::SlackToken => "slack_token",
             Self::Jwt => "jwt",
             Self::Ssn => "ssn",
-            Self::HexSecret => "hex_secret",
+            Self::HexSecret => "hex_credential",
             Self::OpaqueApiKey => "opaque_api_key",
-            Self::ContextKeyedSecret => "context_keyed_secret",
+            Self::ContextKeyedSecret => "context_keyed_credential",
             Self::PrivateKeyBlock => "private_key_block",
         }
     }

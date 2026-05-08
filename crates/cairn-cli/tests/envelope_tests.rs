@@ -15,6 +15,28 @@ fn cli() -> Command {
     Command::new(env!("CARGO_BIN_EXE_cairn"))
 }
 
+fn seed_default_identity(vault: &Path) {
+    let out = cli()
+        .current_dir(vault)
+        .args([
+            "ingest",
+            "--kind",
+            "reference",
+            "--body",
+            "identity seed",
+            "--json",
+        ])
+        .output()
+        .expect("seed default identity");
+    assert!(
+        out.status.success(),
+        "identity seed failed: {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 fn assert_aborted_internal(verb_args: &[&str]) {
     let out = {
         let vault = tempfile::tempdir().expect("temp vault");
@@ -326,8 +348,8 @@ fn summarize_returns_committed_envelope() {
 
 #[test]
 fn assemble_hot_returns_committed_envelope() {
-    // `assemble_hot` is wired to the stub-body assembler. The verb now exits 0
-    // and returns a committed envelope with six zero-length segments (default recipe).
+    // `assemble_hot` is wired to real hot-memory sources. The verb exits 0
+    // and returns a committed envelope with six segments (default recipe).
     // Bootstrap a tempdir vault — the verb fails closed on a non-vault cwd.
     let dir = tempfile::tempdir().expect("tempdir");
     cairn_cli::vault::bootstrap(&cairn_cli::vault::BootstrapOpts {
@@ -335,6 +357,7 @@ fn assemble_hot_returns_committed_envelope() {
         force: false,
     })
     .expect("bootstrap vault");
+    seed_default_identity(dir.path());
     let out = cli()
         .current_dir(dir.path())
         .args(["assemble_hot", "--json"])
