@@ -2,10 +2,11 @@
 //! segment markers. Brief §5, §7, §8.0.f. Issue #288.
 
 pub mod assembler;
+pub mod loader;
 pub mod raw;
 pub mod segments;
 
-pub use assembler::{AssembleHotError, assemble_hot};
+pub use assembler::{AssembleHotError, assemble_hot, assemble_hot_from_bodies};
 pub use segments::{
     AssembleHotValidationError, MAX_SEGMENTS, build_segments, default_stability, validate,
     validate_base, validate_segments, validate_with_recipe,

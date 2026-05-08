@@ -817,6 +817,72 @@ async fn capture_trace_single_turn_persists_and_summarizes() {
     clippy::expect_used,
     reason = "test: panics surface broken invariants immediately"
 )]
+async fn capture_trace_blocks_secret_body_before_persisting_turn() {
+    let vault = tempfile::tempdir().expect("tempdir");
+    let store = open_test_store_in_memory().await;
+    let jsonl_path = vault.path().join("trace.jsonl");
+    let session = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let turn = "turn-secret";
+    let event_id = "01ARZ3NDEKTSV4RRFFQ69G5FAM";
+    let body = "api_key = sk-test-12345678901234567890";
+    let payload_ref = write_source(vault.path(), &format!("{event_id}.txt"), body);
+    let event = make_event(
+        event_id,
+        "UserPromptSubmit",
+        session,
+        turn,
+        "2026-05-02T00:00:01Z",
+        None,
+        &payload_ref,
+        &sha256_hex(body),
+    );
+
+    let mut f = std::fs::File::create(&jsonl_path).expect("create JSONL file");
+    let line = serde_json::to_string(&event).expect("serialize event");
+    writeln!(f, "{line}").expect("write JSONL line");
+
+    let resp = run_handler(&store, vault.path(), &jsonl_path)
+        .await
+        .expect("run_handler should return Ok when a turn is privacy-blocked");
+
+    assert_eq!(
+        resp.failed_turns.len(),
+        1,
+        "secret turn should be rejected exactly once: {:?}",
+        resp.failed_turns
+    );
+    assert_eq!(resp.failed_turns[0].0, session);
+    assert_eq!(resp.failed_turns[0].1, turn);
+    assert!(
+        resp.failed_turns[0].2.contains("privacy filter"),
+        "failure should identify the pre-persist filter: {:?}",
+        resp.failed_turns[0]
+    );
+
+    let session_id = SessionId::parse(session).expect("valid session_id");
+    store
+        .with_tx(move |tx| {
+            let rows = tx.list_trace_events(&session_id, turn)?;
+            assert_eq!(
+                rows.len(),
+                0,
+                "privacy-blocked turn must not persist partial trace rows"
+            );
+            assert!(
+                !tx.turn_summary_exists(&session_id, turn)?,
+                "privacy-blocked turn must not create a summary"
+            );
+            Ok(())
+        })
+        .await
+        .expect("store query should succeed");
+}
+
+#[tokio::test]
+#[allow(
+    clippy::expect_used,
+    reason = "test: panics surface broken invariants immediately"
+)]
 async fn in_batch_post_before_pre_resolves_parent() {
     let vault = tempfile::tempdir().expect("tempdir");
     let store = open_test_store_in_memory().await;

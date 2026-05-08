@@ -1,37 +1,40 @@
 //! Verify that every verb returns a valid cairn.mcp.v1 JSON envelope.
 //! These tests invoke the compiled binary and will pass after Task 7 wires dispatch.
 
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use cairn_core::domain::{
+    ActorChainEntry, CaptureEvent, CaptureEventId, CaptureMode, CapturePayload, CaptureRefs,
+    ChainRole, Identity, PayloadHash, Rfc3339Timestamp, SourceFamily,
+};
+use sha2::{Digest as _, Sha256};
 
 fn cli() -> Command {
     Command::new(env!("CARGO_BIN_EXE_cairn"))
 }
 
-fn assert_aborted_internal(verb_args: &[&str]) {
-    let out = {
-        let vault = tempfile::tempdir().expect("temp vault");
-        let mut cmd = cli();
-        cmd.current_dir(vault.path());
-        cmd.args(verb_args);
-        cmd.output()
-            .unwrap_or_else(|e| panic!("failed to run {verb_args:?}: {e}"))
-    };
-    // Aborted → exit 1 (generic failure)
-    assert_eq!(
-        out.status.code(),
-        Some(1),
-        "verb {verb_args:?} should exit 1 (Internal aborted), got {:?}",
-        out.status
+fn seed_default_identity(vault: &Path) {
+    let out = cli()
+        .current_dir(vault)
+        .args([
+            "ingest",
+            "--kind",
+            "reference",
+            "--body",
+            "identity seed",
+            "--json",
+        ])
+        .output()
+        .expect("seed default identity");
+    assert!(
+        out.status.success(),
+        "identity seed failed: {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
     );
-    let stdout = String::from_utf8(out.stdout).expect("utf-8");
-    let v: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
-        panic!("verb {verb_args:?} JSON parse failed: {e}\nstdout: {stdout:?}")
-    });
-    assert_eq!(v["contract"], "cairn.mcp.v1", "verb {verb_args:?}");
-    assert_eq!(v["status"], "aborted", "verb {verb_args:?}");
-    assert_eq!(v["error"]["code"], "Internal", "verb {verb_args:?}");
-    assert!(v["operation_id"].is_string(), "verb {verb_args:?}");
-    assert!(v["policy_trace"].is_array(), "verb {verb_args:?}");
 }
 
 fn assert_rejected_capability_unavailable(verb_args: &[&str], capability: &str) {
@@ -65,23 +68,72 @@ fn assert_rejected_capability_unavailable(verb_args: &[&str], capability: &str) 
     assert!(v["policy_trace"].is_array(), "verb {verb_args:?}");
 }
 
+fn sha256_hex(text: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(text.as_bytes());
+    format!("{:x}", h.finalize())
+}
+
+fn write_capture_trace_event(vault: &Path, session: &str, turn: &str, body: &str) -> PathBuf {
+    let event_id = "01ARZ3NDEKTSV4RRFFQ69G5FAM";
+    let sources = vault.join("sources").join("hook");
+    std::fs::create_dir_all(&sources).expect("create sources/hook");
+    let payload_ref = format!("sources/hook/{event_id}.txt");
+    std::fs::write(vault.join(&payload_ref), body).expect("write source body");
+
+    let sensor =
+        Identity::parse("snr:local:hook:cc-session:v1").expect("invariant: valid sensor id");
+    let event = CaptureEvent {
+        event_id: CaptureEventId::parse(event_id).expect("invariant: valid ULID"),
+        sensor_id: sensor.clone(),
+        capture_mode: CaptureMode::Auto,
+        actor_chain: vec![ActorChainEntry {
+            role: ChainRole::Author,
+            identity: sensor,
+            at: Rfc3339Timestamp::parse("2026-05-02T00:00:01Z").expect("invariant: valid RFC-3339"),
+        }],
+        refs: Some(CaptureRefs {
+            session_id: Some(session.to_owned()),
+            turn_id: Some(turn.to_owned()),
+            tool_id: None,
+        }),
+        payload_hash: PayloadHash::parse(format!("sha256:{}", sha256_hex(body)))
+            .expect("invariant: valid sha256 hash"),
+        payload_ref,
+        captured_at: Rfc3339Timestamp::parse("2026-05-02T00:00:01Z")
+            .expect("invariant: valid RFC-3339"),
+        payload: CapturePayload::Hook {
+            hook_name: "UserPromptSubmit".to_owned(),
+            tool_name: None,
+        },
+        source_family: SourceFamily::Hook,
+    };
+
+    let trace_path = vault.join("trace.jsonl");
+    let mut f = std::fs::File::create(&trace_path).expect("create trace JSONL");
+    let line = serde_json::to_string(&event).expect("serialize event");
+    writeln!(f, "{line}").expect("write trace JSONL");
+    trace_path
+}
+
 #[test]
 fn ingest_returns_committed_envelope() {
-    let vault = tempfile::tempdir().expect("temp vault");
+    let dir = tempfile::tempdir().expect("tempdir");
     cairn_cli::vault::bootstrap(&cairn_cli::vault::BootstrapOpts {
-        vault_path: vault.path().to_path_buf(),
+        vault_path: dir.path().to_path_buf(),
         force: false,
     })
     .expect("bootstrap vault");
     let out = cli()
-        .current_dir(vault.path())
+        .current_dir(dir.path())
         .args(["ingest", "--kind", "user", "--body", "hello", "--json"])
         .output()
-        .expect("cairn ingest");
+        .expect("cairn ingest --json");
     assert_eq!(
         out.status.code(),
         Some(0),
-        "ingest should commit; stderr: {}",
+        "ingest should exit 0 (committed), got {:?}\nstderr: {}",
+        out.status,
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8(out.stdout).expect("utf-8");
@@ -89,7 +141,10 @@ fn ingest_returns_committed_envelope() {
         .unwrap_or_else(|e| panic!("ingest JSON parse failed: {e}\nstdout: {stdout:?}"));
     assert_eq!(v["contract"], "cairn.mcp.v1");
     assert_eq!(v["status"], "committed");
+    assert_eq!(v["verb"], "ingest");
+    assert!(v["error"].is_null());
     assert!(v["data"]["record_id"].is_string());
+    assert!(v["operation_id"].is_string());
     assert!(v["policy_trace"].is_array());
 }
 
@@ -154,37 +209,120 @@ fn search_keyword_json_exits_zero_with_hits() {
 }
 
 #[test]
-fn retrieve_record_returns_capability_unavailable() {
-    assert_rejected_capability_unavailable(
-        &["retrieve", "01JXXXXXXXXXXXXXXXXXXXXXXX", "--json"],
-        "cairn.mcp.v1.retrieve.record",
-    );
-}
-
-#[test]
-fn retrieve_turn_returns_capability_unavailable() {
-    assert_rejected_capability_unavailable(
-        &[
-            "retrieve",
-            "--session",
-            "session-1",
-            "--turn",
-            "3",
+fn retrieve_record_missing_returns_committed_empty_record_envelope() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    cairn_cli::vault::bootstrap(&cairn_cli::vault::BootstrapOpts {
+        vault_path: dir.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap vault");
+    let seed = cli()
+        .current_dir(dir.path())
+        .args([
+            "ingest",
+            "--kind",
+            "reference",
+            "--body",
+            "seed default issuer",
             "--json",
-        ],
-        "cairn.mcp.v1.retrieve.turn",
+        ])
+        .output()
+        .expect("seed issuer");
+    assert_eq!(
+        seed.status.code(),
+        Some(0),
+        "seed ingest failed: {}",
+        String::from_utf8_lossy(&seed.stderr)
     );
+    let record_id = "01HQZX9F5N0000000000000000";
+    let out = cli()
+        .current_dir(dir.path())
+        .args(["retrieve", record_id, "--json"])
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run retrieve: {e}"));
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "authorized missing record should commit an empty retrieve shape, got {:?}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    let v: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("retrieve JSON parse failed: {e}\nstdout: {stdout:?}"));
+    assert_eq!(v["contract"], "cairn.mcp.v1");
+    assert_eq!(v["status"], "committed");
+    assert_eq!(v["verb"], "retrieve");
+    assert_eq!(v["target"], "record");
+    assert_eq!(v["data"]["record_id"], record_id);
+    assert_eq!(v["data"]["kind"], "unknown");
+    assert!(v["data"].get("body").is_none());
+    assert!(v["operation_id"].is_string());
+    assert!(v["policy_trace"].is_array());
 }
 
 #[test]
-fn summarize_returns_aborted_internal() {
-    assert_aborted_internal(&["summarize", "01JXXXXXXXXXXXXXXXXXXXXXXX", "--json"]);
+fn summarize_returns_committed_envelope() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    cairn_cli::vault::bootstrap(&cairn_cli::vault::BootstrapOpts {
+        vault_path: dir.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap vault");
+    let seed = cli()
+        .current_dir(dir.path())
+        .args([
+            "ingest",
+            "--kind",
+            "reference",
+            "--body",
+            "summarize envelope body",
+            "--json",
+        ])
+        .output()
+        .expect("seed record");
+    assert_eq!(
+        seed.status.code(),
+        Some(0),
+        "seed ingest failed: {}",
+        String::from_utf8_lossy(&seed.stderr)
+    );
+    let seed_json: serde_json::Value = serde_json::from_slice(&seed.stdout).expect("seed json");
+    let record_id = seed_json["data"]["record_id"].as_str().expect("record_id");
+
+    let out = cli()
+        .current_dir(dir.path())
+        .args(["summarize", record_id, "--json"])
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run summarize: {e}"));
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "summarize should exit 0 (committed), got {:?}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    let v: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("summarize JSON parse failed: {e}\nstdout: {stdout:?}"));
+    assert_eq!(v["contract"], "cairn.mcp.v1");
+    assert_eq!(v["status"], "committed");
+    assert_eq!(v["verb"], "summarize");
+    assert!(v["error"].is_null());
+    assert!(
+        v["data"]["summary"]
+            .as_str()
+            .expect("summary")
+            .contains("summarize envelope body")
+    );
+    assert!(v["operation_id"].is_string());
+    assert!(v["policy_trace"].is_array());
 }
 
 #[test]
 fn assemble_hot_returns_committed_envelope() {
-    // `assemble_hot` is wired to the stub-body assembler. The verb now exits 0
-    // and returns a committed envelope with six zero-length segments (default recipe).
+    // `assemble_hot` is wired to real hot-memory sources. The verb exits 0
+    // and returns a committed envelope with six segments (default recipe).
     // Bootstrap a tempdir vault — the verb fails closed on a non-vault cwd.
     let dir = tempfile::tempdir().expect("tempdir");
     cairn_cli::vault::bootstrap(&cairn_cli::vault::BootstrapOpts {
@@ -192,6 +330,7 @@ fn assemble_hot_returns_committed_envelope() {
         force: false,
     })
     .expect("bootstrap vault");
+    seed_default_identity(dir.path());
     let out = cli()
         .current_dir(dir.path())
         .args(["assemble_hot", "--json"])
@@ -220,8 +359,185 @@ fn assemble_hot_returns_committed_envelope() {
 }
 
 #[test]
-fn capture_trace_returns_aborted_internal() {
-    assert_aborted_internal(&["capture_trace", "--from", "/dev/null", "--json"]);
+fn capture_trace_returns_committed_envelope() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    cairn_cli::vault::bootstrap(&cairn_cli::vault::BootstrapOpts {
+        vault_path: dir.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap vault");
+    let trace_path = dir.path().join("empty-trace.jsonl");
+    std::fs::write(&trace_path, "").expect("write empty trace file");
+    let out = cli()
+        .current_dir(dir.path())
+        .args([
+            "capture_trace",
+            "--from",
+            trace_path.to_str().expect("utf-8 trace path"),
+            "--json",
+        ])
+        .output()
+        .expect("cairn capture_trace --json");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "capture_trace should exit 0 (committed), got {:?}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    let v: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("capture_trace JSON parse failed: {e}\nstdout: {stdout:?}"));
+    assert_eq!(v["contract"], "cairn.mcp.v1");
+    assert_eq!(v["status"], "committed");
+    assert_eq!(v["verb"], "capture_trace");
+    assert!(v["error"].is_null());
+    assert!(v["data"]["trace_id"].is_string());
+    assert_eq!(v["data"]["failed_turns"].as_array().map(Vec::len), Some(0));
+    assert!(v["operation_id"].is_string());
+    assert!(v["policy_trace"].is_array());
+}
+
+#[test]
+fn capture_trace_committed_envelope_exposes_failed_turns() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    cairn_cli::vault::bootstrap(&cairn_cli::vault::BootstrapOpts {
+        vault_path: dir.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap vault");
+    let session = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let turn = "turn-secret";
+    let trace_path = write_capture_trace_event(
+        dir.path(),
+        session,
+        turn,
+        "api_key = sk-test-12345678901234567890",
+    );
+    let out = cli()
+        .current_dir(dir.path())
+        .args([
+            "capture_trace",
+            "--from",
+            trace_path.to_str().expect("utf-8 trace path"),
+            "--json",
+        ])
+        .output()
+        .expect("cairn capture_trace --json");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "capture_trace should commit the import operation while surfacing failed turns; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    let v: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("capture_trace JSON parse failed: {e}\nstdout: {stdout:?}"));
+    assert_eq!(v["status"], "committed");
+    let failed = v["data"]["failed_turns"]
+        .as_array()
+        .expect("failed_turns array");
+    assert_eq!(failed.len(), 1, "expected one failed turn: {failed:?}");
+    assert_eq!(failed[0]["session_id"], session);
+    assert_eq!(failed[0]["turn_id"], turn);
+    assert!(
+        failed[0]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("pii_blocked")),
+        "reason should carry the stable filter code: {:?}",
+        failed[0]["reason"]
+    );
+    assert!(
+        !stdout.contains("sk-test"),
+        "public envelope must not echo secret body bytes: {stdout}"
+    );
+    assert!(
+        v["policy_trace"]
+            .as_array()
+            .is_some_and(|entries| !entries.is_empty()),
+        "privacy-blocked import should include body-free policy trace entries"
+    );
+}
+
+#[test]
+fn capture_trace_human_mode_reports_partial_failures() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    cairn_cli::vault::bootstrap(&cairn_cli::vault::BootstrapOpts {
+        vault_path: dir.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap vault");
+    let trace_path = write_capture_trace_event(
+        dir.path(),
+        "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "turn-secret",
+        "api_key = sk-test-12345678901234567890",
+    );
+    let out = cli()
+        .current_dir(dir.path())
+        .args([
+            "capture_trace",
+            "--from",
+            trace_path.to_str().expect("utf-8 trace path"),
+        ])
+        .output()
+        .expect("cairn capture_trace");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "capture_trace human mode should commit while surfacing failed turns; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    assert!(
+        stdout.contains("1 failed turn(s)"),
+        "human output must report partial failures: {stdout}"
+    );
+    assert!(
+        stdout.contains("privacy_filter:pii_blocked"),
+        "human output should include sanitized stable reason: {stdout}"
+    );
+    assert!(
+        !stdout.contains("sk-test"),
+        "human output must not echo secret body bytes: {stdout}"
+    );
+}
+
+#[test]
+fn capture_trace_rejects_session_arg_until_scoped_import_supported() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    cairn_cli::vault::bootstrap(&cairn_cli::vault::BootstrapOpts {
+        vault_path: dir.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap vault");
+    let trace_path = dir.path().join("empty-trace.jsonl");
+    std::fs::write(&trace_path, "").expect("write empty trace file");
+    let out = cli()
+        .current_dir(dir.path())
+        .args([
+            "capture_trace",
+            "--from",
+            trace_path.to_str().expect("utf-8 trace path"),
+            "--session",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "--json",
+        ])
+        .output()
+        .expect("cairn capture_trace --session --json");
+    assert_eq!(
+        out.status.code(),
+        Some(64),
+        "unsupported --session must fail closed; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+        panic!("capture_trace --session JSON parse failed: {e}\nstdout: {stdout:?}")
+    });
+    assert_eq!(v["status"], "rejected");
+    assert_eq!(v["error"]["code"], "InvalidArgs");
+    assert_eq!(v["error"]["data"]["field"], "session_id");
 }
 
 #[test]

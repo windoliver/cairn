@@ -13,6 +13,7 @@
 mod queries;
 mod wal;
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -20,6 +21,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use parking_lot::Mutex;
 use rusqlite::Connection;
+use sha2::{Digest, Sha256};
 
 use cairn_core::contract::identity_registry::{
     IdentityRegistry, IdentityVisibility, PurgeAcknowledgement, PurgeReason, RegistryError,
@@ -45,6 +47,31 @@ use queries::{
 
 /// Compiled-in `0002_identity.sql` migration DDL.
 const MIGRATION_0002: &str = include_str!("../../migrations/0002_identity.sql");
+const IDENTITY_SCHEMA_OBJECTS: [(&str, &str); 15] = [
+    ("table", "identities"),
+    ("table", "identity_keys"),
+    ("index", "idx_identity_keys_identity"),
+    ("table", "vault_meta"),
+    ("trigger", "vault_meta_no_update"),
+    ("trigger", "vault_meta_no_delete"),
+    ("table", "identity_receipts"),
+    ("index", "idx_identity_receipts_target"),
+    ("index", "idx_identity_receipts_signer"),
+    ("index", "idx_identity_receipts_pending_eviction"),
+    ("index", "idx_identity_receipts_pending_key_disable"),
+    ("table", "pending_rotations"),
+    ("index", "idx_pending_rotations_identity"),
+    ("table", "identity_wal"),
+    ("index", "idx_identity_wal_target"),
+];
+const IDENTITY_TABLE_NAMES: [&str; 6] = [
+    "identities",
+    "identity_keys",
+    "vault_meta",
+    "identity_receipts",
+    "pending_rotations",
+    "identity_wal",
+];
 
 /// Convert a [`DomainError`] into a [`RegistryError::Backend`] boxed error.
 ///
@@ -118,23 +145,20 @@ impl SqliteIdentityRegistry {
         Ok(())
     }
 
-    /// Apply [`MIGRATION_0002`] to `conn` if it has not already been applied.
+    /// Apply [`MIGRATION_0002`] to `conn` if the identity tables are absent.
     ///
-    /// Uses the `SQLite` `user_version` pragma as a cheap schema-version guard
-    /// so that opening an already-migrated database is idempotent. The version
-    /// is set to `2` after the migration commits.
+    /// Do not use `SQLite` `user_version` here: the main store migration runner
+    /// owns that counter. Identity shares the same database file, so treating
+    /// `user_version >= 2` as an identity sentinel can make a store-migrated DB
+    /// skip identity DDL, or make an identity-first DB skip store migrations.
     fn run_migrations(conn: &Connection) -> Result<(), RegistryError> {
-        let version: i64 = conn
-            .query_row("PRAGMA user_version", [], |r| r.get(0))
-            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
-        if version >= 2 {
-            // Migration already applied — skip to avoid "table already exists".
-            return Ok(());
+        let existing = identity_schema_objects(conn)?;
+        if existing.is_empty() {
+            conn.execute_batch(MIGRATION_0002)
+                .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+            return verify_identity_schema(conn);
         }
-        conn.execute_batch(MIGRATION_0002)
-            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
-        conn.execute_batch("PRAGMA user_version = 2")
-            .map_err(|e| RegistryError::Backend(Box::new(e)))
+        verify_identity_schema(conn)
     }
 
     /// Return a locked [`Connection`] guard for use in integration tests that
@@ -147,6 +171,125 @@ impl SqliteIdentityRegistry {
     pub fn test_connection(&self) -> parking_lot::MutexGuard<'_, Connection> {
         self.conn.lock()
     }
+}
+
+fn verify_identity_schema(conn: &Connection) -> Result<(), RegistryError> {
+    let objects = identity_schema_objects(conn)?;
+    let expected: BTreeSet<(String, String)> = IDENTITY_SCHEMA_OBJECTS
+        .iter()
+        .map(|(ty, name)| ((*ty).to_owned(), (*name).to_owned()))
+        .collect();
+    let actual: BTreeSet<(String, String)> = objects.keys().cloned().collect();
+    let missing: Vec<_> = expected.difference(&actual).collect();
+    let extra: Vec<_> = actual.difference(&expected).collect();
+    if !missing.is_empty() || !extra.is_empty() {
+        return Err(RegistryError::Backend(
+            format!("identity schema mismatch: missing={missing:?} extra={extra:?}").into(),
+        ));
+    }
+    let actual_digest = identity_ddl_digest(&objects);
+    let expected_digest = expected_identity_ddl_digest()?;
+    if actual_digest != expected_digest {
+        return Err(RegistryError::Backend(
+            format!(
+                "identity schema DDL digest mismatch: on-disk {actual_digest} vs expected {expected_digest}"
+            )
+            .into(),
+        ));
+    }
+    Ok(())
+}
+
+fn expected_identity_ddl_digest() -> Result<String, RegistryError> {
+    let conn = Connection::open_in_memory().map_err(|e| RegistryError::Backend(Box::new(e)))?;
+    conn.execute_batch(MIGRATION_0002)
+        .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+    let objects = identity_schema_objects(&conn)?;
+    Ok(identity_ddl_digest(&objects))
+}
+
+fn identity_schema_objects(
+    conn: &Connection,
+) -> Result<BTreeMap<(String, String), String>, RegistryError> {
+    let expected_names: BTreeSet<&str> = IDENTITY_SCHEMA_OBJECTS
+        .iter()
+        .map(|(_, name)| *name)
+        .collect();
+    let identity_tables: BTreeSet<&str> = IDENTITY_TABLE_NAMES.into_iter().collect();
+    let mut stmt = conn
+        .prepare(
+            "SELECT type, name, tbl_name, sql FROM sqlite_schema \
+             WHERE name NOT LIKE 'sqlite_%' \
+               AND type IN ('table', 'index', 'trigger') \
+               AND sql IS NOT NULL",
+        )
+        .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+    let mut objects = BTreeMap::new();
+    for row in rows {
+        let (ty, name, tbl_name, sql) = row.map_err(|e| RegistryError::Backend(Box::new(e)))?;
+        if expected_names.contains(name.as_str())
+            || identity_tables.contains(tbl_name.as_str())
+            || is_identity_namespace_table(&ty, &name)
+        {
+            objects.insert((ty, name), sql);
+        }
+    }
+    Ok(objects)
+}
+
+fn is_identity_namespace_table(ty: &str, name: &str) -> bool {
+    ty == "table"
+        && (name.starts_with("identity_")
+            || name.starts_with("identities_")
+            || name.starts_with("vault_meta")
+            || name.starts_with("pending_rotations"))
+}
+
+fn identity_ddl_digest(objects: &BTreeMap<(String, String), String>) -> String {
+    let mut digest = Sha256::new();
+    for ((ty, name), sql) in objects {
+        digest.update(ty.as_bytes());
+        digest.update(b"|");
+        digest.update(name.as_bytes());
+        digest.update(b"|");
+        digest.update(canonicalize_ddl(sql).as_bytes());
+        digest.update(b"\n");
+    }
+    let bytes = digest.finalize();
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
+
+fn canonicalize_ddl(sql: &str) -> String {
+    let mut out = String::with_capacity(sql.len());
+    let mut last_was_ws = true;
+    for c in sql.chars() {
+        if c.is_whitespace() {
+            if !last_was_ws {
+                out.push(' ');
+                last_was_ws = true;
+            }
+        } else {
+            out.push(c);
+            last_was_ws = false;
+        }
+    }
+    out.trim().to_owned()
 }
 
 // ── Private helpers for get_first_bind_state ─────────────────────────────────

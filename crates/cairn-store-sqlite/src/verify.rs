@@ -255,6 +255,28 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("trigger", "consent_journal_repair_audit_no_delete"),
 ];
 
+/// Identity registry objects share `cairn.db` but are owned by
+/// [`crate::identity::SqliteIdentityRegistry`]'s embedded migration. The
+/// store fingerprint verifies the record-store schema only, so these are
+/// allowed sidecar objects rather than drift.
+const IDENTITY_SCHEMA_OBJECTS: &[&str] = &[
+    "identities",
+    "identity_keys",
+    "idx_identity_keys_identity",
+    "vault_meta",
+    "vault_meta_no_update",
+    "vault_meta_no_delete",
+    "identity_receipts",
+    "idx_identity_receipts_target",
+    "idx_identity_receipts_signer",
+    "idx_identity_receipts_pending_eviction",
+    "idx_identity_receipts_pending_key_disable",
+    "pending_rotations",
+    "idx_pending_rotations_identity",
+    "identity_wal",
+    "idx_identity_wal_target",
+];
+
 fn hash_hex(content: &str) -> String {
     let digest = Sha256::digest(content.as_bytes());
     let mut s = String::with_capacity(digest.len() * 2);
@@ -544,6 +566,9 @@ pub(crate) fn verify_schema_fingerprint(
         std::collections::BTreeMap::new();
     for row in rows {
         let (ty, name, sql) = row?;
+        if is_identity_schema_object(&name) {
+            continue;
+        }
         by_name.insert((ty.clone(), name.clone()), sql);
         on_disk_names.insert((ty, name));
     }
@@ -656,6 +681,9 @@ fn expected_ddl_digest(vec_dim: Option<usize>) -> Result<String, StoreError> {
     })?;
     for row in rows {
         let (ty, name, sql) = row?;
+        if is_identity_schema_object(&name) {
+            continue;
+        }
         by_name.insert((ty, name), sql);
     }
     let mut digest = Sha256::new();
@@ -668,4 +696,8 @@ fn expected_ddl_digest(vec_dim: Option<usize>) -> Result<String, StoreError> {
         digest.update(b"\n");
     }
     Ok(finalize_hex(digest))
+}
+
+fn is_identity_schema_object(name: &str) -> bool {
+    IDENTITY_SCHEMA_OBJECTS.contains(&name)
 }

@@ -134,6 +134,35 @@ impl StoreTx<'_> {
         )
     }
 
+    /// Transition the prepared WAL row for an admitted envelope to
+    /// `COMMITTED`.
+    ///
+    /// Call this in the same transaction as the mutation authorized by
+    /// [`Self::prepare_wal_with_replay`]. If the transition fails, the
+    /// caller's transaction should return `Err` so both the mutation and
+    /// prepared WAL row roll back together.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Sqlite`] for SQL failures or
+    /// [`StoreError::Invariant`] when the row was not in `PREPARED`.
+    pub fn commit_prepared_wal(&self, admission: &SignedAdmission) -> Result<(), StoreError> {
+        let op_id = &admission.intent().as_inner().operation_id.0;
+        let now_ms = current_unix_ms();
+        let rows = self.tx.execute(
+            "UPDATE wal_ops \
+                SET state = 'COMMITTED', updated_at = ?2 \
+              WHERE operation_id = ?1 AND state = 'PREPARED'",
+            params![op_id, now_ms],
+        )?;
+        if rows != 1 {
+            return Err(StoreError::Invariant {
+                what: format!("prepared WAL op {op_id} could not be committed"),
+            });
+        }
+        Ok(())
+    }
+
     /// In-crate test-only escape hatch: admit a raw, unverified
     /// `SignedIntent` through the replay ledger. **Not part of any
     /// production surface** — `pub(crate)` so even an external crate

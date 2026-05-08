@@ -1,22 +1,47 @@
 //! End-to-end CLI smoke tests. Invokes the built `cairn` binary and asserts
-//! the current verb behaviour: wired verbs commit, unwired verbs fail closed.
+//! the P0 CLI behaviour: help succeeds, usage errors return sysexits, and
+//! wired verbs emit valid JSON envelopes.
 //!
 //! The CLI tree is generated from the IDL by `cairn-codegen`; the store is
-//! wired incrementally. Exit-code contract (spec §5.2):
-//! - unwired verb stubs → exit 1, stderr contains `Internal`, or `--json`
-//!   → stdout contains `"status":"aborted"`.
+//! Exit-code contract (spec §5.2):
+//! - committed verb paths exit 0 and emit `"status":"committed"`.
+//! - remaining simple verb stubs exit 1, stderr contains `Internal`, or
+//!   `--json` emits `"status":"aborted"`.
 //! - clap usage errors (unknown flag, unknown subcommand, missing required
 //!   `ArgGroup`, bare invocation with `subcommand_required`) → 64
 //!   (`EX_USAGE`).
 //! - bundled `plugin.toml` parse failure → 78 (`EX_CONFIG`); registry
 //!   rejection → 69 (`EX_UNAVAILABLE`).
 
+use std::path::Path;
 use std::process::Command;
 
 /// Path to the built CLI binary. Cargo sets `CARGO_BIN_EXE_<name>` for every
 /// binary in the current crate at test-compile time.
 fn cli() -> Command {
     Command::new(env!("CARGO_BIN_EXE_cairn"))
+}
+
+fn seed_default_identity(vault: &Path) {
+    let out = cli()
+        .current_dir(vault)
+        .args([
+            "ingest",
+            "--kind",
+            "reference",
+            "--body",
+            "identity seed",
+            "--json",
+        ])
+        .output()
+        .expect("seed default identity");
+    assert!(
+        out.status.success(),
+        "identity seed failed: {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 fn seed_consent_journal_vault(seed_sql: &str) -> tempfile::TempDir {
@@ -252,43 +277,9 @@ fn no_args_prints_help_and_fails_closed() {
 }
 
 #[test]
-fn simple_verb_human_mode_exits_one_with_internal() {
-    // After dispatch wiring: verbs with no store adapter exit 1 (generic failure)
-    // and print "Internal" to stderr in human mode.
-    // `ingest` is excluded: bare `cairn ingest` has no source → exit 64 (usage error).
-    // `retrieve` and `forget` are excluded: required ArgGroup → exit 64 (usage error).
-    // `search` is excluded: missing required CLI args exit 64 (EX_USAGE);
-    // see `search_missing_query_exits_64` below.
-    // `assemble_hot` is excluded: verb is now wired (exits 0); see
-    //   `assemble_hot_exits_zero_and_emits_committed_envelope` below.
-    for args in [
-        &["summarize", "01ARYZ6S41TSV4RRFFQ69G5FAV"][..],
-        &["capture_trace", "--from", "/dev/null"],
-        &["lint"],
-    ] {
-        let verb = args[0];
-        let out = cli().args(args).output().expect("cairn <verb>");
-        assert!(
-            !out.status.success(),
-            "verb {verb} exited OK — should fail with Internal"
-        );
-        assert_eq!(
-            out.status.code(),
-            Some(1),
-            "verb {verb} wrong exit code (want 1)"
-        );
-        let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
-        assert!(
-            stderr.contains("Internal"),
-            "verb {verb} stderr missing Internal error code: {stderr:?}",
-        );
-    }
-}
-
-#[test]
 fn assemble_hot_exits_zero_and_emits_committed_envelope() {
-    // `assemble_hot` is wired: stub-body assembler returns a committed
-    // Response with six zero-length segments (default recipe). Exit 0.
+    // `assemble_hot` is wired to real hot-memory sources and returns a
+    // committed Response with six segments for the default recipe. Exit 0.
     // The verb fails closed on a non-vault directory, so bootstrap a
     // tempdir vault and run from inside it.
     let dir = tempfile::tempdir().expect("tempdir");
@@ -297,6 +288,7 @@ fn assemble_hot_exits_zero_and_emits_committed_envelope() {
         force: false,
     })
     .expect("bootstrap vault");
+    seed_default_identity(dir.path());
     let out = cli()
         .current_dir(dir.path())
         .args(["assemble_hot", "--json"])
@@ -344,13 +336,13 @@ fn search_missing_query_exits_64() {
 }
 
 #[test]
-fn ingest_json_mode_emits_committed_envelope() {
-    let vault = tempfile::tempdir().expect("temp vault");
+fn simple_verb_json_mode_emits_committed_ingest_envelope() {
+    let vault = tempfile::tempdir().expect("vault");
     cairn_cli::vault::bootstrap(&cairn_cli::vault::BootstrapOpts {
         vault_path: vault.path().to_path_buf(),
         force: false,
     })
-    .expect("bootstrap vault");
+    .expect("bootstrap");
     let out = cli()
         .current_dir(vault.path())
         .args(["ingest", "--kind", "user", "--body", "hi", "--json"])
@@ -359,7 +351,8 @@ fn ingest_json_mode_emits_committed_envelope() {
     assert_eq!(
         out.status.code(),
         Some(0),
-        "ingest should commit; stderr: {}",
+        "exit: {:?}; stderr={}",
+        out.status,
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8(out.stdout).expect("utf-8");
@@ -368,6 +361,7 @@ fn ingest_json_mode_emits_committed_envelope() {
     assert_eq!(v["contract"], "cairn.mcp.v1");
     assert_eq!(v["status"], "committed");
     assert!(v["data"]["record_id"].is_string());
+    assert!(v["policy_trace"].is_array());
 }
 
 #[test]

@@ -198,12 +198,9 @@ fn main() -> ExitCode {
     }
 
     match matches.subcommand() {
-        Some(("ingest", sub)) => match resolve_vault_or_cwd(explicit_vault.as_deref()) {
-            Ok((vault_root, _source)) => verbs::ingest::run(sub, &vault_root),
-            Err(e) => {
-                eprintln!("cairn ingest: vault resolution error — {e:#}");
-                ExitCode::from(78) // EX_CONFIG
-            }
+        Some(("ingest", sub)) => match resolve_vault_and_config(explicit_vault.as_deref()) {
+            Ok((vault_root, _source, config)) => verbs::ingest::run(sub, vault_root, config),
+            Err(code) => code,
         },
         Some(("search", sub)) => match resolve_vault_or_cwd(explicit_vault.as_deref()) {
             // search has its own internal vault-binding gate, so the
@@ -215,10 +212,19 @@ fn main() -> ExitCode {
                 ExitCode::from(78) // EX_CONFIG
             }
         },
-        Some(("retrieve", sub)) => verbs::retrieve::run(sub),
-        Some(("summarize", sub)) => verbs::summarize::run(sub),
+        Some(("retrieve", sub)) => match resolve_vault_and_config(explicit_vault.as_deref()) {
+            Ok((vault_root, _source, config)) => verbs::retrieve::run(sub, vault_root, config),
+            Err(code) => code,
+        },
+        Some(("summarize", sub)) => match resolve_vault_and_config(explicit_vault.as_deref()) {
+            Ok((vault_root, _source, config)) => verbs::summarize::run(sub, vault_root, config),
+            Err(code) => code,
+        },
         Some(("assemble_hot", sub)) => run_assemble_hot(sub, explicit_vault.as_deref()),
-        Some(("capture_trace", sub)) => verbs::capture_trace::run(sub),
+        Some(("capture_trace", sub)) => match resolve_vault_and_config(explicit_vault.as_deref()) {
+            Ok((vault_root, _source, config)) => verbs::capture_trace::run(sub, vault_root, config),
+            Err(code) => code,
+        },
         Some(("lint", sub)) => match resolve_vault_or_cwd(explicit_vault.as_deref()) {
             Ok((vault_root, _source)) => verbs::lint::run(sub, Some(vault_root.as_path())),
             Err(_) => verbs::lint::run(sub, None),
@@ -534,7 +540,7 @@ fn run_assemble_hot(sub: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode 
                 return ExitCode::from(78); // EX_CONFIG
             }
         };
-    verbs::assemble_hot::run(sub, &config)
+    verbs::assemble_hot::run(sub, vault_root, config)
 }
 
 fn run_admin(matches: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {

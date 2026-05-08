@@ -4,7 +4,9 @@
 //! the missing-half of issue #193 — that PR replaces `load_step_body`
 //! and changes nothing else.
 
-use super::segments::{AssembleHotValidationError, build_segments, validate};
+use super::segments::{
+    AssembleHotValidationError, MAX_SEGMENTS, build_segments, validate, validate_with_recipe,
+};
 use crate::config::HotMemoryConfig;
 use crate::generated::verbs::assemble_hot::{AssembleHotData, HotRecipeStep};
 
@@ -53,6 +55,7 @@ pub fn assemble_hot_with_loader<F>(
 where
     F: FnMut(HotRecipeStep) -> Result<String, String>,
 {
+    validate_config_recipe_len(config)?;
     let recipe: Vec<HotRecipeStep> = config
         .recipe
         .iter()
@@ -81,6 +84,45 @@ where
     // before they reach the wire.
     validate(&data)?;
     Ok(data)
+}
+
+/// Assemble hot memory from preloaded recipe bodies, trimming to the configured budget.
+pub fn assemble_hot_from_bodies(
+    config: &HotMemoryConfig,
+    bodies: Vec<String>,
+    budget_override: Option<u64>,
+) -> Result<AssembleHotData, AssembleHotError> {
+    validate_config_recipe_len(config)?;
+    let recipe: Vec<HotRecipeStep> = config
+        .recipe
+        .iter()
+        .copied()
+        .map(HotRecipeStep::from)
+        .collect();
+    let max = budget_override
+        .unwrap_or_else(|| u64::from(config.max_bytes))
+        .min(u64::from(config.max_bytes));
+    let trimmed = super::loader::trim_bodies_to_budget(&recipe, bodies, max);
+    let refs: Vec<&str> = trimmed.iter().map(String::as_str).collect();
+    let (prefix, segments) = build_segments(&recipe, &refs)?;
+    let data = AssembleHotData {
+        bytes: prefix.len() as u64,
+        prefix,
+        segments: Some(segments),
+    };
+    validate_with_recipe(&data, &recipe)?;
+    Ok(data)
+}
+
+fn validate_config_recipe_len(config: &HotMemoryConfig) -> Result<(), AssembleHotError> {
+    if config.recipe.len() > MAX_SEGMENTS {
+        return Err(AssembleHotValidationError::TooManySegments {
+            got: config.recipe.len(),
+            max: MAX_SEGMENTS,
+        }
+        .into());
+    }
+    Ok(())
 }
 
 /// Load the body for one recipe step. Stub: always `Ok("")`. The
@@ -132,6 +174,52 @@ mod tests {
             recipe: vec![HotMemoryRecipeStep::Purpose; 65],
         };
         let err = assemble_hot(&cfg).unwrap_err();
+        match err {
+            AssembleHotError::Segments(
+                super::super::segments::AssembleHotValidationError::TooManySegments { got, max },
+            ) => {
+                assert_eq!(got, 65);
+                assert_eq!(max, 64);
+            }
+            other => panic!("expected TooManySegments, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn assemble_hot_rejects_over_max_segments_before_loading() {
+        use crate::config::HotMemoryRecipeStep;
+        let cfg = HotMemoryConfig {
+            max_bytes: 4_194_304,
+            recipe: vec![HotMemoryRecipeStep::Purpose; 65],
+        };
+        let mut calls = 0_u32;
+        let err = assemble_hot_with_loader(&cfg, |_| {
+            calls += 1;
+            Ok(String::new())
+        })
+        .unwrap_err();
+
+        assert_eq!(calls, 0, "loader must not run for oversized recipes");
+        match err {
+            AssembleHotError::Segments(
+                super::super::segments::AssembleHotValidationError::TooManySegments { got, max },
+            ) => {
+                assert_eq!(got, 65);
+                assert_eq!(max, 64);
+            }
+            other => panic!("expected TooManySegments, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn assemble_hot_from_bodies_rejects_over_max_segments_before_trimming() {
+        use crate::config::HotMemoryRecipeStep;
+        let cfg = HotMemoryConfig {
+            max_bytes: 4_194_304,
+            recipe: vec![HotMemoryRecipeStep::Purpose; 65],
+        };
+        let err = assemble_hot_from_bodies(&cfg, Vec::new(), Some(1)).unwrap_err();
+
         match err {
             AssembleHotError::Segments(
                 super::super::segments::AssembleHotValidationError::TooManySegments { got, max },
