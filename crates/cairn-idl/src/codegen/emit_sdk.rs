@@ -1765,7 +1765,13 @@ fn write_struct(
 fn struct_has_extra_validators(name: &str) -> bool {
     matches!(
         name,
-        "SearchArgs" | "DataRecord" | "DataSession" | "DataTurn" | "DataFolder" | "RecordRef"
+        "SearchArgs"
+            | "DataRecord"
+            | "DataSession"
+            | "DataTurn"
+            | "DataFolder"
+            | "RecordRef"
+            | "ProfileLine"
     )
 }
 
@@ -1826,7 +1832,7 @@ fn write_struct_raw_companion(w: &mut RustWriter, s: &StructDef, common: &BTreeS
     // helper dispatches by struct name.
     if matches!(
         s.name.0.as_str(),
-        "DataRecord" | "DataSession" | "DataTurn" | "DataFolder" | "RecordRef"
+        "DataRecord" | "DataSession" | "DataTurn" | "DataFolder" | "RecordRef" | "ProfileLine"
     ) {
         write_retrieve_data_extra_checks(w, &s.name.0);
     }
@@ -2638,6 +2644,8 @@ fn write_search_args_extra_checks(w: &mut RustWriter) {
 ///   `minimum: 0` is structural; nothing to enforce.)
 /// * `DataFolder.path`: minLength 1; `DataFolder.depth`: maximum 16.
 /// * `RecordRef.kind`: minLength 1.
+/// * `ProfileLine.value`: minLength 1; `ProfileLine.confidence`: in `[0, 1]`;
+///   `ProfileLine.evidence`: minItems 1, uniqueItems (brief §7.1).
 ///
 /// The generic IR strips these constraints during lowering, so without the
 /// hand-rolled check `DataFolder { depth: 999, path: "" }` and
@@ -2675,6 +2683,32 @@ fn write_retrieve_data_extra_checks(w: &mut RustWriter, type_name: &str) {
         "RecordRef" => {
             // RecordRef.kind: minLength 1.
             w.line("if raw.kind.is_empty() { return Err(\"kind: must not be empty\"); }");
+        }
+        "ProfileLine" => {
+            // ProfileLine.value: minLength 1.
+            w.line("if raw.value.is_empty() { return Err(\"value: must not be empty\"); }");
+            // ProfileLine.confidence: bounded [0.0, 1.0]; reject NaN.
+            w.line("if !(0.0..=1.0).contains(&raw.confidence) || raw.confidence.is_nan() {");
+            w.indent();
+            w.line("return Err(\"confidence: must be in [0, 1]\");");
+            w.dedent();
+            w.line("}");
+            // ProfileLine.evidence: minItems 1, uniqueItems on the inner ULID
+            // string. Mirrors the chain_parents uniqueness check in
+            // `write_signed_intent_extra_checks` to keep cairn-core regex-free.
+            w.line(
+                "if raw.evidence.is_empty() { return Err(\"evidence: must contain at least 1 item\"); }",
+            );
+            w.line("{");
+            w.indent();
+            w.line("let mut seen = ::std::collections::BTreeSet::new();");
+            w.line("for ulid in &raw.evidence {");
+            w.indent();
+            w.line("if !seen.insert(ulid.0.clone()) { return Err(\"evidence: must be unique\"); }");
+            w.dedent();
+            w.line("}");
+            w.dedent();
+            w.line("}");
         }
         _ => {
             // Unreachable — the dispatch in write_struct_raw_companion gates

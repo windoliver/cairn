@@ -83,12 +83,15 @@ impl<'de> ::serde::Deserialize<'de> for DataProfileSubject {
     }
 }
 
+/// Typed AutoUserProfile (brief §7.1) split into permanent traits (`static_section`, `is_static = 1`) and current state (`dynamic_section`, `is_static = 0`). Each half carries `summary`, `historical_summary`, and structured `key_facts`; every fact line records its source-record evidence so record-level forget propagates back to the profile. P0 plain-SQLite aggregation; richer rolling-summary regeneration is P1.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DataProfile {
-    /// Free-form profile payload — typed in a later increment once the profile taxonomy lands.
-    pub profile: serde_json::Value,
+    pub dynamic_section: ProfileHalf,
+    pub static_section: ProfileHalf,
     pub subject: DataProfileSubject,
+    /// RFC3339 timestamp of the most recent contributing source record. Equals the synthesizer clock when the profile is empty.
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -215,6 +218,81 @@ impl<'de> ::serde::Deserialize<'de> for DataTurn {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where D: ::serde::Deserializer<'de> {
         let raw = RawDataTurn::deserialize(deserializer)?;
+        Self::try_from(raw).map_err(::serde::de::Error::custom)
+    }
+}
+
+/// Seven structured fact buckets (brief §7.1). Each bucket is an array of ProfileLine — empty arrays are valid and required so a consumer can rely on every key being present.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeyFacts {
+    pub addressed_issues: Vec<ProfileLine>,
+    pub current_issues: Vec<ProfileLine>,
+    pub devices: Vec<ProfileLine>,
+    pub known_entities: Vec<ProfileLine>,
+    pub preferences: Vec<ProfileLine>,
+    pub recurring_issues: Vec<ProfileLine>,
+    pub software: Vec<ProfileLine>,
+}
+
+/// One half of an AutoUserProfile (brief §7.1). `summary` and `historical_summary` are the rolling DreamWorkflow narratives — they remain empty strings at P0 and are populated by the P1 ConsolidationWorkflow. `key_facts` is the P0 deliverable: structured per-facet ProfileLine arrays.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileHalf {
+    pub historical_summary: String,
+    pub key_facts: KeyFacts,
+    pub summary: String,
+}
+
+/// One profile fact with its evidence trail. `evidence` is the list of source records that contributed; record-level forget removes them from the input set, so re-synthesizing the profile drops the line.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileLine {
+    /// Confidence in [0, 1]. Records with confidence < 0.3 (ConfidenceBand::Uncertain) are excluded from the profile.
+    pub confidence: f64,
+    /// Source-record ULIDs whose bodies contributed to this line. Always non-empty.
+    pub evidence: Vec<crate::generated::common::Ulid>,
+    /// Canonical short statement of the fact (e.g., 'prefers terse explanations', 'M2 MacBook Pro').
+    pub value: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawProfileLine {
+    /// Confidence in [0, 1]. Records with confidence < 0.3 (ConfidenceBand::Uncertain) are excluded from the profile.
+    confidence: f64,
+    /// Source-record ULIDs whose bodies contributed to this line. Always non-empty.
+    evidence: Vec<crate::generated::common::Ulid>,
+    /// Canonical short statement of the fact (e.g., 'prefers terse explanations', 'M2 MacBook Pro').
+    value: String,
+}
+
+impl ::core::convert::TryFrom<RawProfileLine> for ProfileLine {
+    type Error = &'static str;
+    fn try_from(raw: RawProfileLine) -> Result<Self, Self::Error> {
+        if raw.value.is_empty() { return Err("value: must not be empty"); }
+        if !(0.0..=1.0).contains(&raw.confidence) || raw.confidence.is_nan() {
+            return Err("confidence: must be in [0, 1]");
+        }
+        if raw.evidence.is_empty() { return Err("evidence: must contain at least 1 item"); }
+        {
+            let mut seen = ::std::collections::BTreeSet::new();
+            for ulid in &raw.evidence {
+                if !seen.insert(ulid.0.clone()) { return Err("evidence: must be unique"); }
+            }
+        }
+        Ok(Self {
+            confidence: raw.confidence,
+            evidence: raw.evidence,
+            value: raw.value,
+        })
+    }
+}
+
+impl<'de> ::serde::Deserialize<'de> for ProfileLine {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: ::serde::Deserializer<'de> {
+        let raw = RawProfileLine::deserialize(deserializer)?;
         Self::try_from(raw).map_err(::serde::de::Error::custom)
     }
 }
