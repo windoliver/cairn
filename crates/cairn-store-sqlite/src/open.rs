@@ -237,67 +237,68 @@ pub async fn open_in_memory_with_embedder_and_config(
 async fn bootstrap(conn: &AsyncConn, vec_dim: Option<usize>) -> Result<bool, StoreError> {
     let graph_search = conn
         .call(move |c| -> Result<bool, tokio_rusqlite::Error> {
-        c.execute_batch(PRAGMAS)?;
-        // Pre-flight: read-only check that already-applied migration
-        // rows agree with the compiled-in manifest. Catches a tampered
-        // `schema_migrations.sql_hash` on a pre-head DB BEFORE
-        // `to_latest` happily appends the next migration to an
-        // untrusted store.
-        preflight_migration_history(c).map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
-        migrations()
-            .to_latest(c)
-            .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
-        // Verify migration history BEFORE any schema mutation. If the
-        // on-disk DB has tampered or stale `schema_migrations.sql_hash`
-        // rows we must reject it untouched — otherwise a mismatched
-        // DB plus a different-dimension embedder would commit a
-        // DROP/CREATE on `record_vectors` and only then refuse the
-        // open, leaving a partially-mutated, untrusted store on disk.
-        verify_migration_history(c).map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
-        // Compare the requested dim to whatever is already on disk —
-        // not to `DEFAULT_VEC_DIM`. A persistent store previously
-        // bootstrapped at 1536 must be re-pointed at 384 if the next
-        // open uses a 384-dim embedder (and vice versa); skipping the
-        // resize on `dim == DEFAULT_VEC_DIM` would leave the table at
-        // 1536, then `verify_schema_fingerprint` fails because the
-        // expected DDL was hashed at 384.
-        let mut resized = false;
-        if let Some(dim) = vec_dim {
-            let current = read_record_vectors_dim(c)
+            c.execute_batch(PRAGMAS)?;
+            // Pre-flight: read-only check that already-applied migration
+            // rows agree with the compiled-in manifest. Catches a tampered
+            // `schema_migrations.sql_hash` on a pre-head DB BEFORE
+            // `to_latest` happily appends the next migration to an
+            // untrusted store.
+            preflight_migration_history(c)
                 .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
-            if current != dim {
-                resize_record_vectors(c, dim)
+            migrations()
+                .to_latest(c)
+                .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
+            // Verify migration history BEFORE any schema mutation. If the
+            // on-disk DB has tampered or stale `schema_migrations.sql_hash`
+            // rows we must reject it untouched — otherwise a mismatched
+            // DB plus a different-dimension embedder would commit a
+            // DROP/CREATE on `record_vectors` and only then refuse the
+            // open, leaving a partially-mutated, untrusted store on disk.
+            verify_migration_history(c).map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
+            // Compare the requested dim to whatever is already on disk —
+            // not to `DEFAULT_VEC_DIM`. A persistent store previously
+            // bootstrapped at 1536 must be re-pointed at 384 if the next
+            // open uses a 384-dim embedder (and vice versa); skipping the
+            // resize on `dim == DEFAULT_VEC_DIM` would leave the table at
+            // 1536, then `verify_schema_fingerprint` fails because the
+            // expected DDL was hashed at 384.
+            let mut resized = false;
+            if let Some(dim) = vec_dim {
+                let current = read_record_vectors_dim(c)
                     .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
-                resized = true;
+                if current != dim {
+                    resize_record_vectors(c, dim)
+                        .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
+                    resized = true;
+                }
             }
-        }
-        // Choose the form used to compute the expected DDL digest.
-        // - `None`: pristine migration form (no resize ever ran on this DB).
-        // - `Some(d)`: recreated form at dim `d` (this open resized, OR a
-        //   prior open did and we're observing its recreated table).
-        // The on-disk DDL string differs between the two forms (comments
-        // and whitespace from migration 0020 vs the bare CREATE we emit
-        // in `resize_record_vectors`), so the digest path must mirror
-        // whichever form is actually present.
-        let on_disk_dim =
-            read_record_vectors_dim(c).map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
-        let effective_dim = if resized || on_disk_dim != DEFAULT_VEC_DIM {
-            Some(on_disk_dim)
-        } else {
-            None
-        };
-        verify_schema_fingerprint(c, effective_dim)
-            .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
-        // Runtime probe: confirm every `entity_*` table required by the
-        // graph leg is actually present. `verify_schema_fingerprint` would
-        // already reject a tampered schema, but the explicit probe keeps
-        // the capability bit honest if a future migration removes an
-        // `entity_*` artifact, and lets the bit reflect schema state — not
-        // just "the migration manifest contained these names at compile
-        // time."
-        Ok(probe_graph_search_tables(c)?)
-    })
-    .await?;
+            // Choose the form used to compute the expected DDL digest.
+            // - `None`: pristine migration form (no resize ever ran on this DB).
+            // - `Some(d)`: recreated form at dim `d` (this open resized, OR a
+            //   prior open did and we're observing its recreated table).
+            // The on-disk DDL string differs between the two forms (comments
+            // and whitespace from migration 0020 vs the bare CREATE we emit
+            // in `resize_record_vectors`), so the digest path must mirror
+            // whichever form is actually present.
+            let on_disk_dim = read_record_vectors_dim(c)
+                .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
+            let effective_dim = if resized || on_disk_dim != DEFAULT_VEC_DIM {
+                Some(on_disk_dim)
+            } else {
+                None
+            };
+            verify_schema_fingerprint(c, effective_dim)
+                .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
+            // Runtime probe: confirm every `entity_*` table required by the
+            // graph leg is actually present. `verify_schema_fingerprint` would
+            // already reject a tampered schema, but the explicit probe keeps
+            // the capability bit honest if a future migration removes an
+            // `entity_*` artifact, and lets the bit reflect schema state — not
+            // just "the migration manifest contained these names at compile
+            // time."
+            Ok(probe_graph_search_tables(c)?)
+        })
+        .await?;
     Ok(graph_search)
 }
 

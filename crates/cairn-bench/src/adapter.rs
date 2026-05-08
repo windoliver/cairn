@@ -471,7 +471,7 @@ impl Adapter for HybridAdapter<'_> {
             rerank_topk: self.rerank_topk,
             with_explain: false,
             confidence_floor: 1e-3,
-                graph_confidence_min: 0.3,
+            graph_confidence_min: 0.3,
         };
         let page = self
             .store

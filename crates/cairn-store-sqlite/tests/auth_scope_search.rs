@@ -549,7 +549,9 @@ async fn provenance_fixture(
     provenance_scope: ScopeTuple,
     provenance: Option<&str>,
 ) -> (Arc<dyn MemoryStore>, RecordId, RecordId, RecordId) {
-    use cairn_core::domain::graph::{EdgeConfidence, EntityEdge, EntityEdgeId, EntityId, EntityNode};
+    use cairn_core::domain::graph::{
+        EdgeConfidence, EntityEdge, EntityEdgeId, EntityId, EntityNode,
+    };
 
     let store = cairn_store_sqlite::open_in_memory()
         .await

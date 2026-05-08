@@ -55,6 +55,7 @@
 ///             graph_edges: false,
 ///             transactions: false,
 ///             per_record_consent_model: false,
+///             graph_search: false,
 ///         };
 ///         &CAPS
 ///     }
@@ -78,7 +79,7 @@
 ///     const NAME: &'static str = "acme-store";
 ///     const SUPPORTED_VERSIONS: VersionRange = VersionRange::new(
 ///         ContractVersion::new(0, 1, 0),
-///         ContractVersion::new(0, 5, 0),
+///         ContractVersion::new(0, 6, 0),
 ///     );
 /// }
 ///
@@ -113,7 +114,7 @@
 ///
 /// [contract_version_range.max_exclusive]
 /// major = 0
-/// minor = 5
+/// minor = 6
 /// patch = 0
 /// "#;
 ///
@@ -130,6 +131,7 @@
 ///             graph_edges: false,
 ///             transactions: false,
 ///             per_record_consent_model: false,
+///             graph_search: false,
 ///         };
 ///         &CAPS
 ///     }
@@ -153,7 +155,7 @@
 ///     const NAME: &'static str = "acme-store";
 ///     const SUPPORTED_VERSIONS: VersionRange = VersionRange::new(
 ///         ContractVersion::new(0, 1, 0),
-///         ContractVersion::new(0, 5, 0),
+///         ContractVersion::new(0, 6, 0),
 ///     );
 /// }
 ///
@@ -408,7 +410,7 @@ macro_rules! __register_plugin_with_manifest_helper {
 ///     fn name(&self) -> &str { Self::NAME }
 ///     fn capabilities(&self) -> &MemoryStoreCapabilities {
 ///         static CAPS: MemoryStoreCapabilities = MemoryStoreCapabilities {
-///             fts: false, vector: false, graph_edges: false, transactions: false, per_record_consent_model: false,
+///             fts: false, vector: false, graph_edges: false, transactions: false, per_record_consent_model: false, graph_search: false,
 ///         };
 ///         &CAPS
 ///     }
@@ -432,7 +434,7 @@ macro_rules! __register_plugin_with_manifest_helper {
 ///     const NAME: &'static str = "config-store";
 ///     const SUPPORTED_VERSIONS: VersionRange = VersionRange::new(
 ///         ContractVersion::new(0, 1, 0),
-///         ContractVersion::new(0, 5, 0),
+///         ContractVersion::new(0, 6, 0),
 ///     );
 /// }
 ///

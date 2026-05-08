@@ -169,26 +169,22 @@ impl SqliteMemoryStore {
         // skip re-rank and surface a `DegradedLeg::Semantic` entry —
         // unless one is already present from `do_search_semantic` itself
         // (don't double-report a single failure mode).
-        let (doc_vectors, skip_rerank) = match fetch_doc_vectors(
-            conn,
-            combined_ids,
-            args.model_label.clone(),
-        )
-        .await
-        {
-            Ok(v) => (v, false),
-            Err(e) => {
-                tracing::warn!(error = %e, "fetch_doc_vectors failed; skipping cosine rerank");
-                if !leg_degradations.iter().any(|d| {
-                    matches!(d, DegradedLeg::Semantic { .. })
-                }) {
-                    leg_degradations.push(DegradedLeg::Semantic {
-                        reason: DegradationReason::SqlError,
-                    });
+        let (doc_vectors, skip_rerank) =
+            match fetch_doc_vectors(conn, combined_ids, args.model_label.clone()).await {
+                Ok(v) => (v, false),
+                Err(e) => {
+                    tracing::warn!(error = %e, "fetch_doc_vectors failed; skipping cosine rerank");
+                    if !leg_degradations
+                        .iter()
+                        .any(|d| matches!(d, DegradedLeg::Semantic { .. }))
+                    {
+                        leg_degradations.push(DegradedLeg::Semantic {
+                            reason: DegradationReason::SqlError,
+                        });
+                    }
+                    (HashMap::new(), true)
                 }
-                (HashMap::new(), true)
-            }
-        };
+            };
         let degraded_legs = leg_degradations;
 
         // Run the pure-function orchestration.
@@ -311,7 +307,9 @@ impl SqliteMemoryStore {
                 ids
             }
             SeedPoolOutcome::None => {
-                tracing::warn!("graph seed pool failed (both sources); continuing without graph results");
+                tracing::warn!(
+                    "graph seed pool failed (both sources); continuing without graph results"
+                );
                 return (
                     Vec::new(),
                     vec![DegradedLeg::Graph {

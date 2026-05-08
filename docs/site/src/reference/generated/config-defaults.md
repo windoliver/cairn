@@ -53,6 +53,7 @@ search:
   rrf_k: 60
   rerank_topk: 20
   max_snippet_chars_per_page: 8000
+  graph_confidence_min: 0.3
 sensors:
   hooks:
     enabled: true
