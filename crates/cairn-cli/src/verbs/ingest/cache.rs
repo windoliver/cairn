@@ -10,6 +10,14 @@ pub struct CacheEntry {
     pub cache_key: String,
     pub entities_new: u64,
     pub edges_new: u64,
+    #[serde(default)]
+    pub entity_count: u64,
+    #[serde(default)]
+    pub edge_count: u64,
+    #[serde(default)]
+    pub nodes: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub edges: Vec<serde_json::Value>,
 }
 
 pub fn body_for_cache(path: &Path, body: &str) -> String {
@@ -109,6 +117,10 @@ mod tests {
             cache_key: cache_key(Path::new("docs/page.md"), "# Body\n"),
             entities_new: 2,
             edges_new: 3,
+            entity_count: 0,
+            edge_count: 0,
+            nodes: Vec::new(),
+            edges: Vec::new(),
         };
 
         write_cache_entry(dir.path(), &entry).unwrap();

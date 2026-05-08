@@ -12,8 +12,16 @@ use cairn_core::domain::folder::{
     FolderPolicy, aggregate_folders, materialize_backlinks, parse_policy, project_index,
 };
 use cairn_core::domain::projection::MarkdownProjector;
-use cairn_core::generated::envelope::ResponseVerb;
+use cairn_core::generated::common::Ulid;
+use cairn_core::generated::envelope::{
+    Response, ResponseData, ResponsePolicyTrace, ResponseStatus, ResponseVerb,
+};
+use cairn_core::generated::verbs::lint::{
+    Finding, Kind, LintData, LintDataSummary, LintDataSummaryBySeverity, Severity,
+};
+use cairn_store_sqlite::{EdgeLintReport, StoreError, lint_edges, resolve_edge_contradictions};
 use clap::ArgMatches;
+use rusqlite::{Connection, OpenFlags};
 
 use super::envelope::{emit_json, human_error, new_operation_id, unimplemented_response};
 
@@ -1322,6 +1330,7 @@ async fn prefetch_author_states(
 /// (`total`, `by_severity.info`, `by_kind["deferred_check"]`) consistent.
 fn push_index_stats_skipped(data: &mut cairn_core::generated::verbs::lint::LintData) {
     let f = cairn_core::generated::verbs::lint::Finding {
+        entities: None,
         kind: cairn_core::generated::verbs::lint::Kind::DeferredCheck,
         message: "store adapter does not implement index_stats; §6.7 index_drift skipped"
             .to_owned(),
@@ -1415,6 +1424,7 @@ fn push_signature_verification_deferred(
     record_count: usize,
 ) {
     let f = cairn_core::generated::verbs::lint::Finding {
+        entities: None,
         kind: cairn_core::generated::verbs::lint::Kind::DeferredCheck,
         message: format!(
             "§6.2 ran chain-shape + lifecycle classification across {record_count} record(s); record.signature was NOT cryptographically verified and target_hash was NOT recomputed at P0 — a clean verdict means shape + author state pass, not that the at-rest body or signature is unforgeable"
@@ -1481,6 +1491,7 @@ fn push_sensor_author_unverified(
     count: usize,
 ) {
     let f = cairn_core::generated::verbs::lint::Finding {
+        entities: None,
         kind: cairn_core::generated::verbs::lint::Kind::DeferredCheck,
         message: format!(
             "{count} sensor-authored sensor_observation record(s) bypassed the §6.2 author-lifecycle classification on shape-equality (kind == sensor_observation && author == provenance.source_sensor); cryptographic binding of the sensor identity to its at-rest signature is P1+"
@@ -1557,6 +1568,7 @@ fn push_registry_unavailable(
                 record_id: Some(cairn_core::generated::common::Ulid(rid.as_str().to_owned())),
             });
     let f = cairn_core::generated::verbs::lint::Finding {
+        entities: None,
         kind: cairn_core::generated::verbs::lint::Kind::DeferredCheck,
         message: format!(
             "IdentityRegistry lookup failed{id_label}; §6.2 author-lifecycle classification deferred for records authored by this identity (synthetic MissingFromRegistry suppressed to avoid masking the real cause){affected_label}: {err}"
@@ -1748,23 +1760,17 @@ fn push_projection_finding(
 #[must_use]
 pub fn run(sub: &ArgMatches, vault_root: Option<&Path>) -> ExitCode {
     let json = sub.get_flag("json");
+    let fix = sub.get_flag("fix");
     let fix_markdown_flag = sub.get_flag("fix-markdown");
     let fix_folders_flag = sub.get_flag("fix-folders");
-
-    // The `--fix` umbrella was deliberately removed from the public CLI
-    // surface in this build: shipping a flag that always returns
-    // `EX_CONFIG` is a worse user contract than not advertising the
-    // flag at all. It will return when every sub-mode (`--fix-folders`
-    // tracked under #46) is wired and can run as a single composite.
+    let write_report = sub.get_flag("write_report");
+    let operation_id = new_operation_id();
 
     if fix_markdown_flag {
         return run_fix_markdown(json, vault_root);
     }
 
     if fix_folders_flag {
-        // fix_folders does not have a lock in #254. Keep the existing
-        // unimplemented branch until #46 wires full store dispatch.
-        // TODO(#46): call fix_folders_handler without a lint-repair lock.
         let resp = unimplemented_response(ResponseVerb::Lint);
         if json {
             emit_json(&resp);
@@ -1779,31 +1785,202 @@ pub fn run(sub: &ArgMatches, vault_root: Option<&Path>) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    // Plain `cairn lint` (no --fix-* flag) intentionally fails
-    // closed in this build. The full `cairn_core::verbs::lint::
-    // run_checks` pipeline needs a wired identity registry plus
-    // config that issue #9 will land. Shipping a partial
-    // drift-only survey under the canonical `lint` verb would be
-    // worse than returning Internal: a green exit from a partial
-    // check creates false confidence in CI when non-projection
-    // invariants are silently ignored. Drop the unresolved-vault
-    // suggestion from the message: the diagnostic must be the
-    // standard "store not wired" envelope so existing JSON-shape
-    // tests (`lint --json` returning `cairn.mcp.v1`) keep
-    // passing.
-    let _ = vault_root;
-    let resp = unimplemented_response(ResponseVerb::Lint);
-    if json {
-        emit_json(&resp);
-    } else {
-        human_error(
-            "lint",
-            "Internal",
-            "store not wired in this P0 build",
-            &resp.operation_id,
+    if write_report {
+        emit_aborted(
+            json,
+            operation_id,
+            "lint --write-report is not wired in this CLI path",
         );
+        return ExitCode::FAILURE;
     }
-    ExitCode::FAILURE
+
+    match run_edge_lint(fix, vault_root, &operation_id) {
+        Ok(report) => {
+            let has_blocking_findings = report.findings.iter().any(has_warning_or_error);
+            let data = lint_data(report);
+            let response = committed_response(operation_id, data);
+            if json {
+                emit_json(&response);
+            } else if let Some(ResponseData::Lint(data)) = response.data.as_ref() {
+                emit_human(data, &response.operation_id);
+            }
+
+            if has_blocking_findings && !fix {
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        Err(err) => {
+            emit_aborted(json, operation_id, &err.to_string());
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_edge_lint(
+    fix: bool,
+    vault_root: Option<&Path>,
+    operation_id: &Ulid,
+) -> Result<EdgeLintReport, StoreError> {
+    let root = vault_root.map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    let db_path = root.join(".cairn").join("cairn.db");
+
+    if fix {
+        let mut conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        lint_edges(&conn)?;
+        resolve_edge_contradictions(
+            &mut conn,
+            chrono::Utc::now().timestamp_millis(),
+            &operation_id.0,
+        )
+    } else {
+        let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        lint_edges(&conn)
+    }
+}
+
+fn committed_response(operation_id: Ulid, data: LintData) -> Response {
+    Response {
+        contract: "cairn.mcp.v1".to_owned(),
+        data: Some(ResponseData::Lint(data)),
+        error: None,
+        operation_id,
+        policy_trace: Vec::<ResponsePolicyTrace>::new(),
+        status: ResponseStatus::Committed,
+        target: None,
+        verb: ResponseVerb::Lint,
+    }
+}
+
+fn aborted_response(operation_id: Ulid, message: &str) -> Response {
+    Response {
+        contract: "cairn.mcp.v1".to_owned(),
+        data: None,
+        error: Some(serde_json::json!({
+            "code": "Internal",
+            "message": message,
+        })),
+        operation_id,
+        policy_trace: Vec::<ResponsePolicyTrace>::new(),
+        status: ResponseStatus::Aborted,
+        target: None,
+        verb: ResponseVerb::Lint,
+    }
+}
+
+fn lint_data(report: EdgeLintReport) -> LintData {
+    let total = usize_to_u64(report.findings.len());
+    let summary = edge_summary(&report.findings, total, report.auto_resolved);
+    LintData {
+        findings: report.findings,
+        report_path: None,
+        summary,
+    }
+}
+
+fn edge_summary(findings: &[Finding], total: u64, auto_resolved: u64) -> LintDataSummary {
+    let mut by_severity = LintDataSummaryBySeverity {
+        error: 0,
+        warning: 0,
+        info: 0,
+    };
+    let mut by_kind = serde_json::Map::new();
+
+    for finding in findings {
+        match finding.severity {
+            Severity::Error => by_severity.error += 1,
+            Severity::Info => by_severity.info += 1,
+            _ => by_severity.warning += 1,
+        }
+        let key = kind_key(finding.kind);
+        let entry = by_kind
+            .entry(key)
+            .or_insert_with(|| serde_json::Value::Number(0.into()));
+        if let Some(n) = entry.as_u64() {
+            *entry = serde_json::Value::Number((n + 1).into());
+        }
+    }
+
+    LintDataSummary {
+        auto_resolved: Some(auto_resolved),
+        by_kind: serde_json::Value::Object(by_kind),
+        by_severity,
+        total,
+    }
+}
+
+fn emit_aborted(json: bool, operation_id: Ulid, message: &str) {
+    let response = aborted_response(operation_id, message);
+    if json {
+        emit_json(&response);
+    } else {
+        human_error("lint", "Internal", message, &response.operation_id);
+    }
+}
+
+fn has_warning_or_error(finding: &Finding) -> bool {
+    matches!(finding.severity, Severity::Warning | Severity::Error)
+}
+
+fn emit_human(data: &LintData, operation_id: &Ulid) {
+    println!("cairn lint: committed (operation_id: {})", operation_id.0);
+    println!(
+        "summary: total={} contradictions={} ambiguous_edges={} auto_resolved={}",
+        data.summary.total,
+        summary_count(data, "contradictory_edge"),
+        summary_count(data, "ambiguous_edge"),
+        data.summary.auto_resolved.unwrap_or(0),
+    );
+
+    for finding in &data.findings {
+        println!("{}: {}", severity_key(finding.severity), finding.message);
+    }
+}
+
+fn kind_key(kind: Kind) -> String {
+    match kind {
+        Kind::ContradictoryEdge => "contradictory_edge",
+        Kind::AmbiguousEdge => "ambiguous_edge",
+        Kind::Contradiction => "contradiction",
+        Kind::Orphan => "orphan",
+        Kind::Stale => "stale",
+        Kind::MissingConcept => "missing_concept",
+        Kind::DataGap => "data_gap",
+        Kind::MalformedRecord => "malformed_record",
+        Kind::BrokenActorChain => "broken_actor_chain",
+        Kind::MissingProvenance => "missing_provenance",
+        Kind::StaleSchema => "stale_schema",
+        Kind::HotMemoryOverBudget => "hot_memory_over_budget",
+        Kind::IndexDrift => "index_drift",
+        Kind::DeferredCheck => "deferred_check",
+        Kind::ProjectionDrift => "projection_drift",
+        Kind::ProjectionMissing => "projection_missing",
+        _ => "unknown",
+    }
+    .to_owned()
+}
+
+fn severity_key(severity: Severity) -> &'static str {
+    match severity {
+        Severity::Error => "error",
+        Severity::Warning => "warning",
+        Severity::Info => "info",
+        _ => "unknown",
+    }
+}
+
+fn summary_count(data: &LintData, kind: &str) -> u64 {
+    data.summary
+        .by_kind
+        .as_object()
+        .and_then(|by_kind| by_kind.get(kind))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0)
+}
+
+fn usize_to_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
 }
 
 /// Dispatch `--fix-markdown`: open the store, acquire the lint-repair lock,
@@ -2265,6 +2442,7 @@ mod tests {
         let mut data = cairn_core::generated::verbs::lint::LintData {
             findings: Vec::new(),
             summary: cairn_core::generated::verbs::lint::LintDataSummary {
+                auto_resolved: None,
                 total: 0,
                 by_severity: cairn_core::generated::verbs::lint::LintDataSummaryBySeverity {
                     error: 0,

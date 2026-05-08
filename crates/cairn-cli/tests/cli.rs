@@ -258,13 +258,13 @@ fn simple_verb_human_mode_exits_one_with_internal() {
     // and print "Internal" to stderr in human mode.
     // `ingest` is excluded: bare `cairn ingest` has no source → exit 64 (usage error).
     // `retrieve` and `forget` are excluded: required ArgGroup → exit 64 (usage error).
-    // `search` is excluded: the dispatcher now rejects an empty query with
-    //   `InvalidArgs` → exit 64 (EX_USAGE); see `search_empty_query_exits_64` below.
+    // `search` is excluded: missing required CLI args exit 64 (EX_USAGE);
+    // see `search_missing_query_exits_64` below.
     // `assemble_hot` is excluded: verb is now wired (exits 0); see
     //   `assemble_hot_exits_zero_and_emits_committed_envelope` below.
     for args in [
         &["summarize", "01ARYZ6S41TSV4RRFFQ69G5FAV"][..],
-        &["capture_trace"],
+        &["capture_trace", "--from", "/dev/null"],
         &["lint"],
     ] {
         let verb = args[0];
@@ -324,21 +324,23 @@ fn assemble_hot_exits_zero_and_emits_committed_envelope() {
 }
 
 #[test]
-fn search_empty_query_exits_64() {
-    // `cairn search` with no query (empty string default) is now wired to the
-    // dispatcher, which rejects an empty query with `InvalidArgs` → EX_USAGE (64).
-    // This replaced the old stub behaviour (exit 1 + "Internal").
-    let out = cli().arg("search").output().expect("cairn search");
+fn search_missing_query_exits_64() {
+    // `query` is required by the IDL schema and generated clap surface, so
+    // clap rejects the invocation before dispatch.
+    let out = cli()
+        .args(["search", "--mode", "keyword"])
+        .output()
+        .expect("cairn search --mode keyword");
     assert_eq!(
         out.status.code(),
         Some(64),
-        "search with empty query must exit 64 (EX_USAGE / InvalidArgs); got {:?}",
+        "search without query must exit 64 (EX_USAGE); got {:?}",
         out.status
     );
     let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
     assert!(
-        stderr.contains("InvalidArgs") || stderr.contains("invalid args"),
-        "stderr must surface InvalidArgs: {stderr:?}",
+        stderr.contains("required"),
+        "stderr must surface required query: {stderr:?}",
     );
 }
 
@@ -362,6 +364,20 @@ fn ingest_with_no_source_exits_64() {
     // Bare `cairn ingest` (no body/file/url/source) must fail with usage error, not Internal.
     let out = cli().arg("ingest").output().expect("cairn ingest");
     assert_eq!(out.status.code(), Some(64), "exit: {:?}", out.status);
+}
+
+#[test]
+fn lint_accepts_fix_flag() {
+    let out = cli()
+        .args(["lint", "--fix", "--json"])
+        .output()
+        .expect("cairn lint --fix --json");
+    assert_ne!(
+        out.status.code(),
+        Some(64),
+        "lint --fix should parse as a verb flag; stderr: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 #[test]
@@ -411,7 +427,7 @@ fn search_accepts_explain_flag() {
     // capability advertised, the handler fails-closed with sysexit 69
     // (covered by the next test) — but it must not be `UnknownArgument`.
     let out = cli()
-        .args(["search", "--explain", "test"])
+        .args(["search", "--mode", "keyword", "--explain", "test"])
         .output()
         .expect("cairn");
     let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
@@ -430,7 +446,7 @@ fn search_explain_is_gated_by_policy_trace_capability() {
     // Without a live vault, the search opens an empty store and returns 0 results
     // (exit 0); stderr must not mention CapabilityUnavailable.
     let out = cli()
-        .args(["search", "--explain", "test"])
+        .args(["search", "--mode", "keyword", "--explain", "test"])
         .output()
         .expect("cairn");
     let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
@@ -456,7 +472,7 @@ fn search_explain_json_does_not_emit_capability_unavailable() {
     // (success, 0 results) or 1 (Internal if the temp store can't open) —
     // never 69 (EX_UNAVAILABLE).
     let out = cli()
-        .args(["search", "--explain", "test", "--json"])
+        .args(["search", "--mode", "keyword", "--explain", "test", "--json"])
         .output()
         .expect("cairn");
     assert_ne!(

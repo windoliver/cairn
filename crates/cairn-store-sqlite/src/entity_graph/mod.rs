@@ -4,6 +4,8 @@
 //! `wal_steps` schema (migration 0002, widened in 0031) using the helpers
 //! in [`wal`]. Spec: `docs/superpowers/specs/2026-05-02-issue-186-bitemporal-kg-schema-design.md`.
 
+/// Read-only graph-traversal query helpers (issue #190).
+pub mod queries;
 pub mod wal;
 
 mod edge;
@@ -21,7 +23,7 @@ use crate::error::StoreError;
 /// payload survives JSON round-tripping by callers that don't tolerate
 /// raw bytes. The schema is stable across the substrate; bumping it is
 /// a brief-level change.
-pub(super) const ENTITY_EDGE_PRE_IMAGE_JSON: &str = "json_object(\
+pub(crate) const ENTITY_EDGE_PRE_IMAGE_JSON: &str = "json_object(\
     'id', id, \
     'source_id', source_id, \
     'target_id', target_id, \

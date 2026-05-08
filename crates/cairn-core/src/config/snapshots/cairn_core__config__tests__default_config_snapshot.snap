@@ -94,5 +94,10 @@ expression: json
         }
       ]
     }
+  },
+  "mcp": {
+    "stdio": {
+      "single_tenant": false
+    }
   }
 }

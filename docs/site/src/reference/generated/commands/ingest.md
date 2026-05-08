@@ -9,11 +9,11 @@ cairn.mcp.v1 verb: ingest
 ```text
 cairn.mcp.v1 verb: ingest
 
-Usage: ingest [OPTIONS] [source]
+Usage: ingest [OPTIONS] --kind <STRING> [source]
 
 Arguments:
   [source]
-          File, URL, or '-' for stdin. Mutually exclusive with --body/--file/--url.
+          File, URL, folder, or '-' for stdin. Mutually exclusive with --body/--file/--folder/--url.
 
 Options:
       --kind <STRING>
@@ -25,6 +25,9 @@ Options:
       --file <PATH>
 
 
+      --folder <PATH>
+
+
       --url <STRING>
 
 
@@ -32,6 +35,9 @@ Options:
 
 
       --tags <STRING>
+
+
+      --no-cache
 
 
       --dry-run

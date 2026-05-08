@@ -391,13 +391,13 @@ fn wal_helper_writes_op_and_steps_in_one_tx() {
 #[tokio::test]
 async fn upsert_entity_inserts_new_returns_supplied_id() {
     use cairn_core::contract::memory_store::MemoryStore;
-    use cairn_core::domain::graph::{EntityId, EntityNode};
+    use cairn_core::domain::graph::{EntityId, EntityNode, normalize_entity_name};
 
     let store = cairn_store_sqlite::open_in_memory().await.expect("open");
     let node = EntityNode {
         id: EntityId::from("01HZE7JV5N0000000000000010"),
         name: "Alice".into(),
-        name_norm: "alice".into(),
+        name_norm: normalize_entity_name("Alice").expect("non-empty literal"),
         summary: Some("eng".into()),
         created_at: 1,
         embedding_id: None,
@@ -409,13 +409,13 @@ async fn upsert_entity_inserts_new_returns_supplied_id() {
 #[tokio::test]
 async fn upsert_entity_dedup_returns_existing_id() {
     use cairn_core::contract::memory_store::MemoryStore;
-    use cairn_core::domain::graph::{EntityId, EntityNode};
+    use cairn_core::domain::graph::{EntityId, EntityNode, normalize_entity_name};
 
     let store = cairn_store_sqlite::open_in_memory().await.expect("open");
     let first = EntityNode {
         id: EntityId::from("01HZE7JV5N0000000000000020"),
         name: "Alice".into(),
-        name_norm: "alice".into(),
+        name_norm: normalize_entity_name("Alice").expect("non-empty literal"),
         summary: None,
         created_at: 1,
         embedding_id: None,
@@ -425,7 +425,7 @@ async fn upsert_entity_dedup_returns_existing_id() {
     let dup = EntityNode {
         id: EntityId::from("01HZE7JV5N0000000000000021"),
         name: "ALICE".into(),
-        name_norm: "alice".into(),
+        name_norm: normalize_entity_name("ALICE").expect("non-empty literal"),
         summary: Some("changed".into()),
         created_at: 2,
         embedding_id: None,
@@ -442,7 +442,7 @@ async fn upsert_entity_dedup_returns_existing_id() {
 #[tokio::test]
 async fn link_entity_episode_idempotent_returns_true_then_false() {
     use cairn_core::contract::memory_store::MemoryStore;
-    use cairn_core::domain::graph::{EntityId, EntityNode};
+    use cairn_core::domain::graph::{EntityId, EntityNode, normalize_entity_name};
     use cairn_core::domain::record::RecordId;
 
     let store = cairn_store_sqlite::open_in_memory().await.expect("open");
@@ -451,7 +451,7 @@ async fn link_entity_episode_idempotent_returns_true_then_false() {
     let node = EntityNode {
         id: EntityId::from("01HZE7JV5N0000000000000030"),
         name: "Alice".into(),
-        name_norm: "alice-link".into(),
+        name_norm: normalize_entity_name("alice link").expect("non-empty literal"),
         summary: None,
         created_at: 1,
         embedding_id: None,
@@ -501,11 +501,11 @@ async fn seed_two_entities(
     cairn_core::domain::graph::EntityId,
 ) {
     use cairn_core::contract::memory_store::MemoryStore;
-    use cairn_core::domain::graph::{EntityId, EntityNode};
+    use cairn_core::domain::graph::{EntityId, EntityNode, normalize_entity_name};
     let n1 = EntityNode {
         id: EntityId::from(format!("01HZE7JV5N00000000000000{suffix}A").as_str()),
         name: "Alice".into(),
-        name_norm: format!("alice-{suffix}"),
+        name_norm: normalize_entity_name(&format!("alice {suffix}")).expect("non-empty literal"),
         summary: None,
         created_at: 1,
         embedding_id: None,
@@ -513,7 +513,7 @@ async fn seed_two_entities(
     let n2 = EntityNode {
         id: EntityId::from(format!("01HZE7JV5N00000000000000{suffix}B").as_str()),
         name: "Acme".into(),
-        name_norm: format!("acme-{suffix}"),
+        name_norm: normalize_entity_name(&format!("acme {suffix}")).expect("non-empty literal"),
         summary: None,
         created_at: 1,
         embedding_id: None,
@@ -521,6 +521,82 @@ async fn seed_two_entities(
     let id1 = store.upsert_entity(&n1).await.expect("n1");
     let id2 = store.upsert_entity(&n2).await.expect("n2");
     (id1, id2)
+}
+
+#[tokio::test]
+async fn upsert_entity_round_trip_punctuation_and_unicode() {
+    use cairn_core::contract::memory_store::MemoryStore;
+    use cairn_core::domain::graph::{EntityId, EntityNode, normalize_entity_name};
+
+    let store = cairn_store_sqlite::open_in_memory().await.expect("open");
+
+    // Display form with multi-space runs and decomposed Unicode so that
+    // a naive `lower(display)` lookup CANNOT match the canonical
+    // `name_norm` — the helper's whitespace collapse + NFC pass is what
+    // makes the lookup load-bearing. (Punctuation is preserved by
+    // design; round-2 review.)
+    let display = "Auth  Servic\u{0065}\u{0301} (v2)";
+    let node = EntityNode {
+        id: EntityId::from("01HZE7JV5N0000000000000099"),
+        name: display.into(),
+        name_norm: normalize_entity_name(display).expect("non-empty display"),
+        summary: None,
+        created_at: 1,
+        embedding_id: None,
+    };
+
+    let inserted_id = store.upsert_entity(&node).await.expect("insert");
+
+    // The §3.1 ByName arm computes `name_norm` from the user-provided
+    // `name` and probes `entity_nodes.name_norm` directly. Simulate that
+    // here by recomputing from the *display* form (whitespace/punctuation
+    // intact) and asserting the row is found.
+    let probe_norm = normalize_entity_name(display).expect("non-empty literal");
+    assert_eq!(
+        probe_norm, node.name_norm,
+        "helper must be deterministic across call sites"
+    );
+
+    let conn = store.raw_conn().expect("conn present after open_in_memory");
+    let probe_norm_clone = probe_norm.clone();
+    let found_id: String = conn
+        .call(move |c| {
+            let id: String = c.query_row(
+                "SELECT id FROM entity_nodes WHERE name_norm = ?1",
+                rusqlite::params![&probe_norm_clone],
+                |r| r.get(0),
+            )?;
+            Ok(id)
+        })
+        .await
+        .expect("lookup");
+
+    assert_eq!(found_id, inserted_id.as_str());
+
+    // A naive `lower()` lookup would NOT find this row — assert that.
+    let conn = store.raw_conn().expect("conn present after open_in_memory");
+    let display_owned = display.to_owned();
+    let found_lower: Option<String> = conn
+        .call(move |c| {
+            let res = c
+                .query_row(
+                    "SELECT id FROM entity_nodes WHERE name_norm = lower(?1)",
+                    rusqlite::params![&display_owned],
+                    |r| r.get::<_, String>(0),
+                )
+                .map(Some)
+                .or_else(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                    other => Err(other),
+                })?;
+            Ok(res)
+        })
+        .await
+        .expect("naive-lower probe");
+    assert!(
+        found_lower.is_none(),
+        "naive lower() must NOT find the row — proves the helper is load-bearing",
+    );
 }
 
 #[tokio::test]

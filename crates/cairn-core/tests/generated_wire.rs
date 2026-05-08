@@ -2696,3 +2696,152 @@ fn error_invalid_filter_rejects_unknown_data_key() {
         "expected unknown-key rejection, got: {err}"
     );
 }
+
+#[test]
+fn lint_response_accepts_edge_finding_kinds() {
+    let json = serde_json::json!({
+        "contract": "cairn.mcp.v1",
+        "data": {
+            "summary": {
+                "total": 2,
+                "by_severity": {
+                    "error": 0,
+                    "warning": 1,
+                    "info": 1
+                },
+                "by_kind": {
+                    "contradictory_edge": 1,
+                    "ambiguous_edge": 1
+                },
+                "auto_resolved": 0
+            },
+            "findings": [
+                {
+                    "kind": "contradictory_edge",
+                    "severity": "warning",
+                    "entities": ["edge-a", "edge-b"],
+                    "message": "Two live edges share (source, target, relation)",
+                    "suggested_fix": "Run `cairn lint --fix` to keep the higher-confidence edge"
+                },
+                {
+                    "kind": "ambiguous_edge",
+                    "severity": "info",
+                    "entities": ["edge-c"],
+                    "message": "Live edge has AMBIGUOUS confidence"
+                }
+            ]
+        },
+        "operation_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "policy_trace": [],
+        "status": "committed",
+        "verb": "lint"
+    });
+
+    let response: Response = serde_json::from_value(json).unwrap();
+    let Some(ResponseData::Lint(data)) = response.data else {
+        panic!("expected lint response data");
+    };
+    assert_eq!(data.summary.total, 2);
+    assert_eq!(data.summary.auto_resolved, Some(0));
+    assert_eq!(data.summary.by_severity.warning, 1);
+    assert_eq!(
+        data.summary.by_kind["contradictory_edge"],
+        serde_json::Value::from(1)
+    );
+    assert_eq!(
+        data.summary.by_kind["ambiguous_edge"],
+        serde_json::Value::from(1)
+    );
+    assert_eq!(
+        data.findings[0].entities.as_deref(),
+        Some(&["edge-a".to_string(), "edge-b".to_string()][..])
+    );
+    assert_eq!(
+        data.findings[0].suggested_fix.as_deref(),
+        Some("Run `cairn lint --fix` to keep the higher-confidence edge")
+    );
+}
+// ── F5 (round 9 fixup): CapabilityUnavailable.remediation optional-field validation ──
+
+#[test]
+fn error_capability_unavailable_with_remediation_accepts() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("search"));
+    m.insert("status".into(), serde_json::json!("rejected"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({
+            "code": "CapabilityUnavailable",
+            "message": "semantic search not enabled",
+            "data": {
+                "capability": "cairn.mcp.v1.search.semantic",
+                "remediation": "Enable the sqlite-vec feature flag and rebuild."
+            }
+        }),
+    );
+    let _: Response = serde_json::from_value(serde_json::Value::Object(m))
+        .expect("CapabilityUnavailable with non-empty remediation should accept");
+}
+
+#[test]
+fn error_capability_unavailable_remediation_rejects_empty_string() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("search"));
+    m.insert("status".into(), serde_json::json!("rejected"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({
+            "code": "CapabilityUnavailable",
+            "message": "semantic search not enabled",
+            "data": {
+                "capability": "cairn.mcp.v1.search.semantic",
+                "remediation": ""
+            }
+        }),
+    );
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("remediation"),
+        "expected empty remediation rejection, got: {err}"
+    );
+}
+
+#[test]
+fn error_capability_unavailable_remediation_rejects_non_string() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("search"));
+    m.insert("status".into(), serde_json::json!("rejected"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({
+            "code": "CapabilityUnavailable",
+            "message": "semantic search not enabled",
+            "data": {
+                "capability": "cairn.mcp.v1.search.semantic",
+                "remediation": 42
+            }
+        }),
+    );
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("remediation"),
+        "expected non-string remediation rejection, got: {err}"
+    );
+}
+
+#[test]
+fn error_capability_unavailable_without_remediation_accepts() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("search"));
+    m.insert("status".into(), serde_json::json!("rejected"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({
+            "code": "CapabilityUnavailable",
+            "message": "semantic search not enabled",
+            "data": {"capability": "cairn.mcp.v1.search.semantic"}
+        }),
+    );
+    let _: Response = serde_json::from_value(serde_json::Value::Object(m))
+        .expect("CapabilityUnavailable without remediation (pre-#53 server) should accept");
+}

@@ -67,6 +67,48 @@ fn handler_get_info_advertises_tools() {
     assert_eq!(info.server_info.name, "cairn");
 }
 
+/// `get_info()` must embed the Cairn status block in `experimental["cairn.status"]`
+/// so MCP clients can read `capabilities[]` and `pipeline_dispatch` from the actual
+/// `initialize` wire response — not just from the internal `status_response()` helper
+/// (Finding 1, issue #53 review).
+#[test]
+fn handler_get_info_experimental_carries_cairn_status() {
+    use rmcp::ServerHandler as _;
+    let h = CairnMcpHandler::new();
+    let info = h.get_info();
+
+    let experimental = info.capabilities.experimental.as_ref();
+    assert!(
+        experimental.is_some(),
+        "get_info() must populate experimental capabilities"
+    );
+    let cairn_status = experimental.and_then(|m| m.get("cairn.status"));
+    assert!(
+        cairn_status.is_some(),
+        "experimental must contain 'cairn.status' block"
+    );
+    let contract = cairn_status
+        .and_then(|m| m.get("contract"))
+        .and_then(|v| v.as_str());
+    assert_eq!(
+        contract,
+        Some("cairn.mcp.v1"),
+        "cairn.status.contract must be 'cairn.mcp.v1'; got: {cairn_status:?}"
+    );
+    // capabilities array must be present
+    assert!(
+        cairn_status.and_then(|m| m.get("capabilities")).is_some(),
+        "cairn.status must include 'capabilities' key"
+    );
+    // pipeline_dispatch must be present (non-null for unbound handler)
+    assert!(
+        cairn_status
+            .and_then(|m| m.get("pipeline_dispatch"))
+            .is_some(),
+        "cairn.status must include 'pipeline_dispatch' key"
+    );
+}
+
 #[test]
 fn list_tools_returns_eight_verbs() {
     // TOOLS has 8 entries (one per verb).  The conversion logic in
@@ -230,6 +272,60 @@ async fn wire_initialize_advertises_tools_capability() {
     assert!(
         tools_cap.is_some(),
         "initialize response must advertise tools capability; got: {init_resp}"
+    );
+}
+
+/// Verify the `initialize` response carries the Cairn status block in
+/// `experimental["cairn.status"]` (Finding 1 — issue #53 review).
+///
+/// MCP clients can read `capabilities[]` and `pipeline_dispatch` directly from
+/// the `initialize` wire response. The status block is embedded as a JSON object
+/// under `serverCapabilities.experimental["cairn.status"]`.
+#[tokio::test]
+async fn wire_initialize_experimental_carries_cairn_status() {
+    use rmcp::ServiceExt as _;
+
+    let (server_half, client_half) = tokio::io::duplex(65_536);
+    let _server_task = tokio::spawn(async move {
+        CairnMcpHandler::new()
+            .serve(server_half)
+            .await
+            .expect("server init")
+            .waiting()
+            .await
+            .ok();
+    });
+
+    let (client_read, mut client_write) = tokio::io::split(client_half);
+    let mut client_reader = BufReader::new(client_read);
+
+    let init_resp = do_initialize(&mut client_write, &mut client_reader).await;
+
+    // The experimental slot must exist and contain our cairn.status block.
+    let experimental = init_resp.pointer("/result/capabilities/experimental");
+    assert!(
+        experimental.is_some(),
+        "initialize must include experimental capabilities; got: {init_resp}"
+    );
+    let cairn_status = init_resp.pointer("/result/capabilities/experimental/cairn.status");
+    assert!(
+        cairn_status.is_some(),
+        "experimental must contain 'cairn.status' block; got: {init_resp}"
+    );
+    // The contract field must be present and correct.
+    let contract = cairn_status
+        .and_then(|s| s.get("contract"))
+        .and_then(|v| v.as_str());
+    assert_eq!(
+        contract,
+        Some("cairn.mcp.v1"),
+        "cairn.status.contract must be 'cairn.mcp.v1'; got: {cairn_status:?}"
+    );
+    // The capabilities array must be present (may be empty for an unbound vault).
+    let caps = cairn_status.and_then(|s| s.get("capabilities"));
+    assert!(
+        caps.is_some(),
+        "cairn.status must include a capabilities array; got: {cairn_status:?}"
     );
 }
 

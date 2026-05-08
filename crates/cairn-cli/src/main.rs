@@ -130,6 +130,7 @@ fn subcommand_needs_vault_guard(active_subcommand: &str) -> bool {
     )
 }
 
+#[allow(clippy::too_many_lines)] // top-level dispatch table; per-subcommand splits would scatter the verb wiring without untangling anything.
 fn main() -> ExitCode {
     let matches = match command::build_command().try_get_matches() {
         Ok(m) => m,
@@ -227,7 +228,27 @@ fn main() -> ExitCode {
         Some(("handshake", sub)) => run_handshake(sub, explicit_vault.as_deref()),
         Some(("plugins", sub)) => run_plugins(sub),
         Some(("bootstrap", sub)) => run_bootstrap(sub),
-        Some(("mcp", _sub)) => cairn_cli::mcp::run(),
+        Some(("mcp", _sub)) => {
+            let (vault_root, source, config) =
+                match resolve_vault_and_config(explicit_vault.as_deref()) {
+                    Ok(v) => v,
+                    Err(code) => return code,
+                };
+            // The binding gate only matters on the opt-in
+            // single_tenant=true path (which opens SQLite). The
+            // CwdFallback case still bypasses because there is no
+            // vault.id to probe — `mcp::run` will reject it on the
+            // graph-tools path with the same EX_CONFIG, but the
+            // legacy unwired manifest is allowed through.
+            let probe_binding = source != VaultResolutionSource::CwdFallback;
+            let binding_origin = match source {
+                VaultResolutionSource::Explicit => "--vault target",
+                VaultResolutionSource::CwdWalk => "vault discovered via cwd",
+                VaultResolutionSource::RegistryDefault => "registry default vault",
+                VaultResolutionSource::CwdFallback => "current directory",
+            };
+            cairn_cli::mcp::run(&vault_root, &config, probe_binding, binding_origin)
+        }
         Some(("vault", sub)) => run_vault(sub),
         Some(("skill", sub)) => run_skill(sub),
         Some(("admin", sub)) => run_admin(sub, explicit_vault.as_deref()),
@@ -355,6 +376,46 @@ fn run_handshake(sub: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
 /// validation. Fail closed with `EX_CONFIG` so clients do not
 /// negotiate capabilities derived from a config the runtime would
 /// also reject.
+/// Resolve vault path and load config, returning both on success.
+///
+/// Used by subcommands that need a `(PathBuf, CairnConfig)` pair (e.g. `mcp`,
+/// `status`). Returns `Err(exit_code)` on any resolution or config error so
+/// callers can return early with a typed exit code.
+fn resolve_vault_and_config(
+    explicit: Option<&str>,
+) -> Result<
+    (
+        std::path::PathBuf,
+        VaultResolutionSource,
+        cairn_core::config::CairnConfig,
+    ),
+    ExitCode,
+> {
+    let (vault_root, source) = match resolve_vault_or_cwd(explicit) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("cairn mcp: vault resolution error — {e:#}");
+            return Err(ExitCode::from(78)); // EX_CONFIG
+        }
+    };
+    // The vault-binding gate moved into `cairn_cli::mcp::run`, which
+    // applies it only on the opt-in `single_tenant=true` graph-tools
+    // path. The legacy `single_tenant=false` deployment must continue
+    // to reach the unwired manifest fallback even outside a bound
+    // vault — that surface does not open SQLite, so there is no risk
+    // of stranding data. Gating here would be a user-visible
+    // compatibility regression (round-1 review of round-10 patch).
+    let config =
+        match cairn_cli::config::load(&vault_root, &cairn_cli::config::CliOverrides::default()) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("cairn mcp: config error — {e:#}");
+                return Err(ExitCode::from(78)); // EX_CONFIG
+            }
+        };
+    Ok((vault_root, source, config))
+}
+
 fn run_status(sub: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
     let json = sub.get_flag("json");
     let (vault_root, source) = match resolve_vault_or_cwd(explicit_vault) {

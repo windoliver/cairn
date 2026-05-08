@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Finding {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entities: Option<Vec<String>>,
     pub kind: Kind,
     pub message: String,
     pub severity: Severity,
@@ -24,9 +26,11 @@ pub struct Finding {
 #[non_exhaustive]
 pub enum Kind {
     BrokenActorChain,
+    ContradictoryEdge,
     Contradiction,
     DataGap,
     DeferredCheck,
+    AmbiguousEdge,
     HotMemoryOverBudget,
     IndexDrift,
     MalformedRecord,
@@ -63,6 +67,9 @@ pub struct Target {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LintArgs {
+    /// When true, resolves live bitemporal edge contradictions by invalidating lower-confidence edges.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fix: Option<bool>,
     /// When true, writes .cairn/lint-report.md.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub write_report: Option<bool>,
@@ -79,6 +86,8 @@ pub struct LintDataSummaryBySeverity {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LintDataSummary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_resolved: Option<u64>,
     pub by_kind: serde_json::Value,
     pub by_severity: LintDataSummaryBySeverity,
     pub total: u64,

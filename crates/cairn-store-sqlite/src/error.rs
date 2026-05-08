@@ -22,6 +22,22 @@ pub enum StoreError {
     #[error("schema drift: {0}")]
     SchemaDrift(String),
 
+    /// A required schema object is missing.
+    #[error("required schema object missing: {object}")]
+    SchemaMissing {
+        /// Missing schema object name.
+        object: &'static str,
+    },
+
+    /// An entity edge stored an unsupported confidence value.
+    #[error("invalid confidence for edge {edge_id}: {value}")]
+    InvalidConfidence {
+        /// Edge id containing the unsupported confidence.
+        edge_id: String,
+        /// Unsupported confidence value.
+        value: String,
+    },
+
     /// WAL boot recovery failed (issue #55, brief §5.6). Surfaced from
     /// every public async open path so a corrupt or unrecoverable WAL
     /// fails the open rather than serving requests against partial state.
@@ -182,6 +198,13 @@ pub enum StoreError {
         /// Human-readable description of the violated invariant.
         reason: String,
     },
+
+    /// The `schema_migrations` table is absent from the database — the
+    /// vault has never been opened by `cairn mcp` / `cairn ingest` and
+    /// no migrations have been applied. Callers should surface this as
+    /// a "not yet initialized" state rather than a capability negation.
+    #[error("schema not initialized: schema_migrations table absent")]
+    SchemaNotInitialized,
 
     /// Two distinct record ids share the same `trace.capture_event_id`.
     /// This should not happen under the documented projector contract

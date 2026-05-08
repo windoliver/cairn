@@ -120,6 +120,7 @@ pub struct CliFlag {
     pub name: String,
     pub long: String,
     pub value_source: String,
+    pub required: bool,
     /// Optional concrete exemplar rendered into generated SKILL.md examples
     /// for value sources that have no natural placeholder synthesis (e.g.,
     /// `json` flags whose schema requires a structured payload). Read from
@@ -131,6 +132,7 @@ pub struct CliFlag {
 pub struct CliPositional {
     pub name: String,
     pub description: String,
+    pub required: bool,
     /// True when the positional accepts more than one value (clap
     /// `num_args(1..)`). Currently set from the optional `repeatable` field
     /// in `x-cairn-cli.positional`.
@@ -738,6 +740,7 @@ pub(crate) fn parse_cli_block(value: &Value) -> Result<CliCommand, CodegenError>
                             .and_then(Value::as_str)
                             .unwrap_or("")
                             .to_string(),
+                        required: false,
                         cli_exemplar: f
                             .get("cli_exemplar")
                             .and_then(Value::as_str)
@@ -759,6 +762,7 @@ pub(crate) fn parse_cli_block(value: &Value) -> Result<CliCommand, CodegenError>
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string(),
+        required: false,
         repeatable: p
             .get("repeatable")
             .and_then(Value::as_bool)
@@ -1248,7 +1252,7 @@ fn build_verb(file: &RawFile) -> Result<VerbDef, CodegenError> {
         }
     }
 
-    let cli = build_cli_shape(&file.value, &args)?;
+    let cli = build_cli_shape(&file.value, args_schema, &args)?;
     let skill = parse_skill_block(&file.value);
     let capability = file
         .value
@@ -1526,7 +1530,11 @@ fn collect_ref_names(ty: &RustType, out: &mut std::collections::BTreeSet<String>
 /// When `args` is a [`RustType::TaggedUnion`] the shape is built from per-variant
 /// `x-cairn-cli` blocks (the top-level `x-cairn-cli` is ignored for tagged-union
 /// verbs). Otherwise the top-level block is used.
-fn build_cli_shape(verb_value: &Value, args: &RustType) -> Result<CliShape, CodegenError> {
+fn build_cli_shape(
+    verb_value: &Value,
+    args_schema: &Value,
+    args: &RustType,
+) -> Result<CliShape, CodegenError> {
     if let RustType::TaggedUnion(t) = args {
         let mut variants = Vec::with_capacity(t.variants.len());
         for v in &t.variants {
@@ -1540,7 +1548,25 @@ fn build_cli_shape(verb_value: &Value, args: &RustType) -> Result<CliShape, Code
     let block = verb_value
         .get("x-cairn-cli")
         .ok_or_else(|| CodegenError::Ir("verb missing top-level x-cairn-cli".to_string()))?;
-    Ok(CliShape::Single(parse_cli_block(block)?))
+    let mut command = parse_cli_block(block)?;
+    apply_cli_requiredness(&mut command, args_schema);
+    Ok(CliShape::Single(command))
+}
+
+fn apply_cli_requiredness(command: &mut CliCommand, args_schema: &Value) {
+    let Some(required) = args_schema.get("required").and_then(Value::as_array) else {
+        return;
+    };
+    for flag in &mut command.flags {
+        flag.required = required
+            .iter()
+            .any(|item| item.as_str() == Some(flag.name.as_str()));
+    }
+    if let Some(positional) = &mut command.positional {
+        positional.required = required
+            .iter()
+            .any(|item| item.as_str() == Some(positional.name.as_str()));
+    }
 }
 
 /// Extract `x-cairn-skill-triggers` from a verb file into a [`SkillBlock`].

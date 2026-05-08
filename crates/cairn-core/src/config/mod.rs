@@ -1,5 +1,33 @@
 //! Typed config structs for `.cairn/config.yaml` (brief §3.1, §4.1, §5.2.a).
 
+pub mod mcp;
+pub use mcp::{McpConfig, McpStdioConfig};
+
+/// Validate `[mcp.*]` invariants beyond what serde alone enforces.
+///
+/// # Errors
+/// - [`ConfigError::McpStdioMissingPrincipal`] when
+///   `[mcp.stdio] single_tenant = true` is set without a `principal`.
+/// - [`ConfigError::McpStdioInvalidPrincipal`] when the configured principal
+///   fails [`crate::domain::ScopeTuple::validate`] — empty components,
+///   reserved characters, or the unsupported `project` dimension. The
+///   graph-tools matcher binds only the six IDL-addressable dimensions,
+///   so a `project`-bearing principal would be silently broadened at
+///   read time; we fail closed at config-load instead.
+pub fn validate_mcp_config(cfg: &McpConfig) -> Result<(), ConfigError> {
+    if cfg.stdio.single_tenant && cfg.stdio.principal.is_none() {
+        return Err(ConfigError::McpStdioMissingPrincipal);
+    }
+    if let Some(principal) = cfg.stdio.principal.as_ref() {
+        principal
+            .validate()
+            .map_err(|err| ConfigError::McpStdioInvalidPrincipal {
+                message: err.to_string(),
+            })?;
+    }
+    Ok(())
+}
+
 pub mod vault_registry;
 pub use vault_registry::{VaultEntry, VaultRegistry};
 
@@ -41,6 +69,18 @@ pub enum ConfigError {
     /// A `${VAR}` placeholder in the YAML file references an unset env var.
     #[error("unresolved env var in config: ${{{0}}}")]
     UnresolvedEnvVar(String),
+    /// `[mcp.stdio] single_tenant = true` was set but no `principal` was
+    /// provided.
+    #[error("[mcp.stdio] single_tenant = true requires a `principal` scope tuple")]
+    McpStdioMissingPrincipal,
+    /// `[mcp.stdio].principal` failed `ScopeTuple::validate` (malformed
+    /// components or unsupported dimension). The error text from the
+    /// underlying domain check is carried in `message`.
+    #[error("[mcp.stdio].principal is malformed: {message}")]
+    McpStdioInvalidPrincipal {
+        /// Stringified `DomainError::MalformedScope` body.
+        message: String,
+    },
 }
 
 /// Vault storage tier (§3.1).
@@ -403,6 +443,8 @@ pub struct CairnConfig {
     pub workflows: WorkflowsConfig,
     /// Pipeline stage configuration.
     pub pipeline: PipelineConfig,
+    /// MCP transport configuration (issue #190).
+    pub mcp: McpConfig,
 }
 
 // ── Vault ─────────────────────────────────────────────────────────────────
@@ -687,9 +729,53 @@ pub struct ExtractBudget {
     pub max_turns: Option<u32>,
 }
 
+/// Check whether `config.search.default_provider` and
+/// `config.search.embedding_model` are mutually consistent.
+///
+/// This is a pure, no-I/O predicate used by the SDK and MCP surfaces (which
+/// have no access to env vars like `OPENAI_API_KEY`) to gate semantic/hybrid
+/// capability advertisement when the model selection contradicts the provider.
+///
+/// The classic misconfiguration the check catches:
+/// `default_provider = openai` but `embedding_model = bge-small-en-v1.5`
+/// — the `OpenAI` HTTP endpoint cannot serve a local candle model, so the ANN
+/// dispatcher would silently return zero results for every semantic query
+/// (rows indexed with BGE vectors have a `vec_model` label that the `OpenAI`
+/// dispatcher filter never matches).
+///
+/// Alignment rules:
+/// - `Local` provider → model must be a locally-runnable candle variant
+///   (`BgeSmallEnV1_5` or `AllMiniLmL6V2`).
+/// - `OpenAi` provider → model must be a native `OpenAI` variant
+///   (`OpenAiTextEmbedding3Small` or `OpenAiTextEmbedding3Large`).
+/// - Any future provider not yet listed here → `false` (fail-closed per
+///   CLAUDE.md §4.6). Update this function when a new provider lands.
+///
+/// The CLI's `embedding_provider_ready` additionally checks
+/// `OPENAI_API_KEY` presence and the `openai` Cargo feature flag. This
+/// function intentionally does not — those checks require I/O or feature
+/// gating that cannot be performed inside `cairn-core`.
+#[must_use]
+pub fn provider_model_aligned(config: &CairnConfig) -> bool {
+    match config.search.default_provider {
+        EmbeddingProvider::Local => matches!(
+            config.search.embedding_model,
+            EmbeddingModelKind::BgeSmallEnV1_5 | EmbeddingModelKind::AllMiniLmL6V2
+        ),
+        EmbeddingProvider::OpenAi => matches!(
+            config.search.embedding_model,
+            EmbeddingModelKind::OpenAiTextEmbedding3Small
+                | EmbeddingModelKind::OpenAiTextEmbedding3Large
+        ),
+        // Future providers: gate-closed by default until this function is updated.
+        #[allow(unreachable_patterns)]
+        _ => false,
+    }
+}
+
 /// Derived capability set, computed from `CairnConfig` (no I/O).
 ///
-/// The verb layer calls `config.capabilities(model_present)` before dispatching to
+/// The verb layer calls `config.capabilities(embedding_provider_ready)` before dispatching to
 /// gate features that require capabilities that may not be present.
 // Six orthogonal capability flags; a bitflags type would obscure the intent.
 #[allow(clippy::struct_excessive_bools)]
@@ -697,9 +783,11 @@ pub struct ExtractBudget {
 pub struct CapabilitySet {
     /// Always true at P0 (`FTS5` always present).
     pub keyword_search: bool,
-    /// True iff `search.local_embeddings` is true and embedding model files exist on disk.
+    /// True iff `search.local_embeddings` is true and the embedding provider is ready
+    /// (local: model files on disk; cloud: feature compiled in + API key set).
     pub semantic_search: bool,
-    /// True iff `search.local_embeddings` is true (hybrid uses keyword+semantic legs).
+    /// True iff `search.local_embeddings` is true and the embedding provider is ready
+    /// (hybrid uses keyword + semantic legs; both require an active embedder).
     pub hybrid_search: bool,
     /// True iff `llm.provider` is `Some`.
     pub llm_extract: bool,
@@ -811,14 +899,18 @@ impl CairnConfig {
 
     /// Derive the active capability set from this config (pure, no I/O).
     ///
-    /// `model_present` should be `true` when the configured embedding model
-    /// files exist on disk (stat-checked at startup).
+    /// `embedding_provider_ready` should be `true` when the configured embedding
+    /// provider can produce vectors end-to-end:
+    /// - For `default_provider = local`: the model files exist on disk
+    ///   (stat-checked via `ModelCache::is_present`).
+    /// - For `default_provider = openai`: the `openai` Cargo feature is compiled
+    ///   in AND `OPENAI_API_KEY` is set in the environment.
     ///
     /// The verb layer uses this to gate features before dispatch.
     #[must_use]
-    pub fn capabilities(&self, model_present: bool) -> CapabilitySet {
+    pub fn capabilities(&self, embedding_provider_ready: bool) -> CapabilitySet {
         let llm_on = self.llm.provider.is_some();
-        let semantic = self.search.local_embeddings && model_present;
+        let semantic = self.search.local_embeddings && embedding_provider_ready;
         let agent_extract = self
             .pipeline
             .extract
@@ -858,10 +950,71 @@ impl CairnConfig {
     }
 
     /// Convenience: equivalent to `capabilities(false)`.
-    /// Use when filesystem access is unavailable (e.g., pure config tests).
+    /// Use when no embedding provider is ready (e.g., pure config tests, no
+    /// model on disk, no API key in environment).
     #[must_use]
     pub fn capabilities_no_model(&self) -> CapabilitySet {
         self.capabilities(false)
+    }
+
+    /// Run cross-section invariants that serde alone cannot express.
+    ///
+    /// Currently checks:
+    /// - `[mcp.stdio] single_tenant + principal` consistency
+    ///   ([`validate_mcp_config`]).
+    ///
+    /// Existing validators (pipeline, retention, etc.) keep their own
+    /// entry points; this method composes the new MCP check without
+    /// disturbing them.
+    ///
+    /// # Errors
+    /// Returns the first [`ConfigError`] encountered.
+    pub fn validate_mcp(&self) -> Result<(), ConfigError> {
+        validate_mcp_config(&self.mcp)
+    }
+
+    /// Single shared predicate that gates `cairn status` MCP-graph reporting
+    /// and the MCP `tools/list` / `tools/call` graph-tool advertisement.
+    /// Both surfaces read the same function so they cannot drift.
+    ///
+    /// The deliberate fall-through order (most-specific reason wins) is:
+    ///
+    /// 1. `single_tenant == false` → `UnavailableSingleTenantOff`
+    /// 2. else if `scope.is_none()` → `UnavailableNoScopeResolver`
+    /// 3. else if `!store_caps.graph_edges` → `UnavailableNoStoreCapability`
+    /// 4. else → `Available { tool_count: 5 }` (Plan C: graph tools landed)
+    ///
+    /// Note: the predicate does **not** call `scope.allowed_scopes`. That
+    /// single resolver call lives in `Handler::materialize_graph_request`,
+    /// which calls this predicate first and then resolves scopes exactly once.
+    ///
+    /// The `transport` argument is currently always `Stdio` and the body
+    /// branches only on `Stdio`. Future SSE / HTTP transports add their
+    /// own branches with their own per-transport preconditions.
+    #[must_use]
+    pub fn mcp_graph_tools_available(
+        &self,
+        scope: Option<&dyn crate::mcp_auth::McpSessionScope>,
+        transport: crate::mcp_auth::McpTransport,
+        store_caps: &crate::contract::memory_store::MemoryStoreCapabilities,
+    ) -> crate::mcp_auth::McpGraphAvailability {
+        use crate::mcp_auth::{McpGraphAvailability, McpTransport};
+
+        match transport {
+            McpTransport::Stdio => {
+                if !self.mcp.stdio.single_tenant {
+                    return McpGraphAvailability::UnavailableSingleTenantOff;
+                }
+                if scope.is_none() {
+                    return McpGraphAvailability::UnavailableNoScopeResolver;
+                }
+                if !store_caps.graph_edges {
+                    return McpGraphAvailability::UnavailableNoStoreCapability;
+                }
+                // Plan C: graph tools have landed; advertise them.
+                McpGraphAvailability::Available { tool_count: 5 }
+            }
+        }
     }
 }
 
@@ -1130,10 +1283,10 @@ mod tests {
     fn capabilities_llm_off_by_default() {
         let caps = CairnConfig::default().capabilities(false);
         assert!(caps.keyword_search, "keyword_search always true");
-        assert!(!caps.semantic_search, "model absent → no semantic");
+        assert!(!caps.semantic_search, "provider not ready → no semantic");
         assert!(
             !caps.hybrid_search,
-            "model absent → no hybrid: runtime resolves an embedder for hybrid \
+            "provider not ready → no hybrid: runtime resolves an embedder for hybrid \
              mode and fails closed without one (see crates/cairn-cli/src/verbs/search.rs)"
         );
         assert!(!caps.llm_extract, "no LLM → no llm_extract");
@@ -1161,11 +1314,11 @@ mod tests {
         assert!(caps.keyword_search);
         assert!(
             !caps.semantic_search,
-            "model absent → no semantic even with LLM"
+            "provider not ready → no semantic even with LLM"
         );
         assert!(
             !caps.hybrid_search,
-            "model absent → no hybrid: hybrid requires the embedder the runtime \
+            "provider not ready → no hybrid: hybrid requires the embedder the runtime \
              resolves for both legs (see crates/cairn-cli/src/verbs/search.rs)"
         );
         assert!(caps.llm_extract);
@@ -1193,7 +1346,7 @@ mod tests {
     }
 
     #[test]
-    fn semantic_on_when_local_embeddings_and_model_present() {
+    fn semantic_on_when_local_embeddings_and_provider_ready() {
         let config = CairnConfig::default();
         let caps = config.capabilities(true);
         assert!(caps.semantic_search);
@@ -1204,25 +1357,25 @@ mod tests {
     fn semantic_off_when_local_embeddings_false() {
         let mut config = CairnConfig::default();
         config.search.local_embeddings = false;
-        let caps = config.capabilities(true); // model present but opt-out
+        let caps = config.capabilities(true); // provider ready but opt-out
         assert!(!caps.semantic_search);
     }
 
     #[test]
-    fn semantic_off_when_model_absent() {
+    fn semantic_off_when_provider_not_ready() {
         let config = CairnConfig::default(); // local_embeddings: true
-        let caps = config.capabilities(false); // model not on disk
+        let caps = config.capabilities(false); // provider not ready
         assert!(!caps.semantic_search);
     }
 
     #[test]
     fn semantic_not_tied_to_llm_provider() {
         let mut config = CairnConfig::default();
-        // LLM present but model absent → semantic still false.
+        // LLM present but embedding provider not ready → semantic still false.
         config.llm.provider = Some(LlmProvider::OpenaiCompatible);
         let caps = config.capabilities(false);
         assert!(!caps.semantic_search);
-        // Model present → semantic true regardless of LLM.
+        // Embedding provider ready → semantic true regardless of LLM.
         let caps2 = config.capabilities(true);
         assert!(caps2.semantic_search);
     }
@@ -1342,6 +1495,36 @@ rerank_topk: 20
         assert_eq!(c, again);
     }
 
+    #[test]
+    fn validate_mcp_rejects_single_tenant_without_principal() {
+        let mut cfg = CairnConfig::default();
+        cfg.mcp.stdio.single_tenant = true;
+        cfg.mcp.stdio.principal = None;
+        let err = cfg.validate_mcp().unwrap_err();
+        assert!(
+            matches!(err, ConfigError::McpStdioMissingPrincipal),
+            "got: {err:?}",
+        );
+    }
+
+    #[test]
+    fn validate_mcp_accepts_single_tenant_with_principal() {
+        let mut cfg = CairnConfig::default();
+        cfg.mcp.stdio.single_tenant = true;
+        cfg.mcp.stdio.principal = Some(crate::domain::ScopeTuple {
+            tenant: Some("acme".into()),
+            ..crate::domain::ScopeTuple::default()
+        });
+        cfg.validate_mcp().expect("valid config");
+    }
+
+    #[test]
+    fn validate_mcp_accepts_default_config() {
+        // Default: single_tenant = false, principal = None — cleanly valid.
+        let cfg = CairnConfig::default();
+        cfg.validate_mcp().expect("default config is valid");
+    }
+
     proptest! {
         #[test]
         fn default_config_json_round_trip(_seed in 0u8..1) {
@@ -1352,5 +1535,167 @@ rerank_topk: 20
             let restored: CairnConfig = serde_json::from_str(&json).unwrap();
             prop_assert_eq!(original, restored);
         }
+    }
+
+    use crate::contract::memory_store::MemoryStoreCapabilities;
+    use crate::mcp_auth::{ConfigBackedScope, McpGraphAvailability, McpSessionScope, McpTransport};
+
+    fn store_caps_with_graph(graph: bool) -> MemoryStoreCapabilities {
+        MemoryStoreCapabilities {
+            fts: true,
+            vector: false,
+            graph_edges: graph,
+            transactions: true,
+            per_record_consent_model: true,
+        }
+    }
+
+    fn principal_acme() -> crate::domain::ScopeTuple {
+        crate::domain::ScopeTuple {
+            tenant: Some("acme".into()),
+            ..crate::domain::ScopeTuple::default()
+        }
+    }
+
+    #[test]
+    fn graph_tools_unavailable_when_single_tenant_off() {
+        let cfg = CairnConfig::default(); // single_tenant defaults to false
+        let scope = ConfigBackedScope::new(principal_acme());
+        let caps = store_caps_with_graph(true);
+        let s: &dyn McpSessionScope = &scope;
+        let avail = cfg.mcp_graph_tools_available(Some(s), McpTransport::Stdio, &caps);
+        assert_eq!(avail, McpGraphAvailability::UnavailableSingleTenantOff);
+    }
+
+    #[test]
+    fn graph_tools_unavailable_when_no_scope_resolver() {
+        let mut cfg = CairnConfig::default();
+        cfg.mcp.stdio.single_tenant = true;
+        cfg.mcp.stdio.principal = Some(principal_acme());
+        let caps = store_caps_with_graph(true);
+        let avail = cfg.mcp_graph_tools_available(None, McpTransport::Stdio, &caps);
+        assert_eq!(avail, McpGraphAvailability::UnavailableNoScopeResolver);
+    }
+
+    #[test]
+    fn graph_tools_unavailable_when_store_lacks_graph_capability() {
+        let mut cfg = CairnConfig::default();
+        cfg.mcp.stdio.single_tenant = true;
+        cfg.mcp.stdio.principal = Some(principal_acme());
+        let scope = ConfigBackedScope::new(principal_acme());
+        let caps = store_caps_with_graph(false);
+        let s: &dyn McpSessionScope = &scope;
+        let avail = cfg.mcp_graph_tools_available(Some(s), McpTransport::Stdio, &caps);
+        assert_eq!(avail, McpGraphAvailability::UnavailableNoStoreCapability);
+    }
+
+    /// Minimal static scope for tests — returns a fixed allowed-scope set.
+    struct StaticScope {
+        allowed: Vec<crate::domain::ScopeTuple>,
+    }
+
+    impl StaticScope {
+        fn new(allowed: Vec<crate::domain::ScopeTuple>) -> Self {
+            Self { allowed }
+        }
+    }
+
+    impl McpSessionScope for StaticScope {
+        fn allowed_scopes(
+            &self,
+            _ctx: &crate::mcp_auth::McpAuthContext<'_>,
+        ) -> Result<Vec<crate::domain::ScopeTuple>, crate::mcp_auth::ScopeResolutionError> {
+            Ok(self.allowed.clone())
+        }
+    }
+
+    fn config_with_single_tenant_stdio() -> CairnConfig {
+        let mut cfg = CairnConfig::default();
+        cfg.mcp.stdio.single_tenant = true;
+        cfg.mcp.stdio.principal = Some(principal_acme());
+        cfg
+    }
+
+    /// Plan C: with all conditions met, the predicate must return
+    /// `Available { tool_count: 5 }`.
+    #[test]
+    fn mcp_graph_tools_available_returns_five_when_all_conditions_hold() {
+        let cfg = config_with_single_tenant_stdio();
+        let store_caps = MemoryStoreCapabilities {
+            graph_edges: true,
+            ..Default::default()
+        };
+        let scope = StaticScope::new(vec![crate::domain::ScopeTuple::default()]);
+        let av = cfg.mcp_graph_tools_available(Some(&scope), McpTransport::Stdio, &store_caps);
+        assert!(
+            matches!(av, McpGraphAvailability::Available { tool_count: 5 }),
+            "Plan C: all conditions met must return Available{{5}}; got {av:?}",
+        );
+    }
+
+    /// Previously the Plan A test. Now that Plan C has landed, the same
+    /// all-conditions-hold scenario must return `Available { tool_count: 5 }`.
+    #[test]
+    fn graph_tools_available_when_all_conditions_hold() {
+        let mut cfg = CairnConfig::default();
+        cfg.mcp.stdio.single_tenant = true;
+        cfg.mcp.stdio.principal = Some(principal_acme());
+        let scope = ConfigBackedScope::new(principal_acme());
+        let caps = store_caps_with_graph(true);
+        let s: &dyn McpSessionScope = &scope;
+        let avail = cfg.mcp_graph_tools_available(Some(s), McpTransport::Stdio, &caps);
+        assert!(
+            matches!(avail, McpGraphAvailability::Available { tool_count: 5 }),
+            "Plan C must emit Available{{5}} when all conditions hold; got {avail:?}",
+        );
+    }
+
+    // ── provider_model_aligned tests (round-4 review Finding A) ──────────────
+
+    #[test]
+    fn provider_model_aligned_local_with_local_model_is_true() {
+        let mut cfg = CairnConfig::default();
+        cfg.search.default_provider = EmbeddingProvider::Local;
+        cfg.search.embedding_model = EmbeddingModelKind::BgeSmallEnV1_5;
+        assert!(super::provider_model_aligned(&cfg));
+
+        cfg.search.embedding_model = EmbeddingModelKind::AllMiniLmL6V2;
+        assert!(super::provider_model_aligned(&cfg));
+    }
+
+    #[test]
+    fn provider_model_aligned_local_with_openai_model_is_false() {
+        let mut cfg = CairnConfig::default();
+        cfg.search.default_provider = EmbeddingProvider::Local;
+        cfg.search.embedding_model = EmbeddingModelKind::OpenAiTextEmbedding3Small;
+        assert!(!super::provider_model_aligned(&cfg));
+
+        cfg.search.embedding_model = EmbeddingModelKind::OpenAiTextEmbedding3Large;
+        assert!(!super::provider_model_aligned(&cfg));
+    }
+
+    #[test]
+    fn provider_model_aligned_openai_with_openai_model_is_true() {
+        let mut cfg = CairnConfig::default();
+        cfg.search.default_provider = EmbeddingProvider::OpenAi;
+        cfg.search.embedding_model = EmbeddingModelKind::OpenAiTextEmbedding3Small;
+        assert!(super::provider_model_aligned(&cfg));
+
+        cfg.search.embedding_model = EmbeddingModelKind::OpenAiTextEmbedding3Large;
+        assert!(super::provider_model_aligned(&cfg));
+    }
+
+    #[test]
+    fn provider_model_aligned_openai_with_local_model_is_false() {
+        // This is the classic misconfiguration the round-4 review caught:
+        // `default_provider = openai` with a candle model. The gate must
+        // return false so SDK/MCP don't advertise semantic/hybrid.
+        let mut cfg = CairnConfig::default();
+        cfg.search.default_provider = EmbeddingProvider::OpenAi;
+        cfg.search.embedding_model = EmbeddingModelKind::BgeSmallEnV1_5;
+        assert!(!super::provider_model_aligned(&cfg));
+
+        cfg.search.embedding_model = EmbeddingModelKind::AllMiniLmL6V2;
+        assert!(!super::provider_model_aligned(&cfg));
     }
 }

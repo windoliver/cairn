@@ -30,7 +30,7 @@ pub struct IngestArgs {
     /// Path on the local filesystem.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
-    /// Folder to scan for offline folder ingest.
+    /// Folder path to ingest recursively with the extraction cache.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folder: Option<String>,
     /// Extra YAML frontmatter fields to store alongside the body.
@@ -47,6 +47,9 @@ pub struct IngestArgs {
     /// Folder ingest extraction mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<IngestMode>,
+    /// Bypass extraction cache lookup for folder ingest, but still write refreshed cache entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_cache: Option<bool>,
     /// When human_review=true, skip emitting the markdown diff sidecar.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_diff: Option<bool>,
@@ -86,7 +89,7 @@ struct RawIngestArgs {
     /// Path on the local filesystem.
     #[serde(default)]
     file: Option<String>,
-    /// Folder to scan for offline folder ingest.
+    /// Folder path to ingest recursively with the extraction cache.
     #[serde(default)]
     folder: Option<String>,
     /// Extra YAML frontmatter fields to store alongside the body.
@@ -103,6 +106,9 @@ struct RawIngestArgs {
     /// Folder ingest extraction mode.
     #[serde(default)]
     mode: Option<IngestMode>,
+    /// Bypass extraction cache lookup for folder ingest, but still write refreshed cache entries.
+    #[serde(default)]
+    no_cache: Option<bool>,
     /// When human_review=true, skip emitting the markdown diff sidecar.
     #[serde(default)]
     no_diff: Option<bool>,
@@ -133,6 +139,7 @@ impl ::core::convert::TryFrom<RawIngestArgs> for IngestArgs {
             include: raw.include,
             kind: raw.kind,
             mode: raw.mode,
+            no_cache: raw.no_cache,
             no_diff: raw.no_diff,
             recursive: raw.recursive,
             session_id: raw.session_id,
@@ -153,6 +160,18 @@ impl<'de> ::serde::Deserialize<'de> for IngestArgs {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IngestData {
+    /// Folder ingest cache hits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_hits: Option<u64>,
+    /// Folder ingest cache misses or forced re-extractions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_misses: Option<u64>,
+    /// Folder ingest cache entries written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_writes: Option<u64>,
+    /// Folder ingest file count when source is --folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files_processed: Option<u64>,
     /// Path under .cairn/flush/pending/ when human_review=true; absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_ref: Option<String>,

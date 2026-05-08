@@ -15,6 +15,9 @@ Options:
       --write-report
 
 
+      --fix
+
+
       --fix-folders
           Regenerate folder _index.md sidecars and backlinks for every non-empty folder (brief §3.4,
           #44)

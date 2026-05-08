@@ -15,12 +15,12 @@
         },
         {
           "required": [
-            "url"
+            "folder"
           ]
         },
         {
           "required": [
-            "folder"
+            "url"
           ]
         }
       ],
@@ -55,7 +55,7 @@
           "type": "string"
         },
         "folder": {
-          "description": "Folder to scan for offline folder ingest.",
+          "description": "Folder path to ingest recursively with the extraction cache.",
           "minLength": 1,
           "type": "string"
         },
@@ -97,6 +97,10 @@
             }
           ]
         },
+        "no_cache": {
+          "description": "Bypass extraction cache lookup for folder ingest, but still write refreshed cache entries.",
+          "type": "boolean"
+        },
         "no_diff": {
           "default": false,
           "description": "When human_review=true, skip emitting the markdown diff sidecar.",
@@ -132,6 +136,26 @@
     "Data": {
       "additionalProperties": false,
       "properties": {
+        "cache_hits": {
+          "description": "Folder ingest cache hits.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cache_misses": {
+          "description": "Folder ingest cache misses or forced re-extractions.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cache_writes": {
+          "description": "Folder ingest cache entries written.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "files_processed": {
+          "description": "Folder ingest file count when source is --folder.",
+          "minimum": 0,
+          "type": "integer"
+        },
         "plan_ref": {
           "description": "Path under .cairn/flush/pending/ when human_review=true; absent otherwise.",
           "minLength": 1,

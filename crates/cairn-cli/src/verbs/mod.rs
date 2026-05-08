@@ -1,5 +1,9 @@
 //! Verb handler dispatch — one submodule per verb.
 
+use std::path::Path;
+
+use cairn_core::config::{CairnConfig, EmbeddingProvider};
+
 pub mod admin_model_fetch;
 pub mod admin_reindex;
 pub mod assemble_hot;
@@ -28,6 +32,13 @@ pub fn with_json(cmd: clap::Command) -> clap::Command {
             .action(clap::ArgAction::SetTrue)
             .help("Emit machine-readable JSON response envelope to stdout"),
     )
+}
+
+/// Adjust generated `ingest` CLI requirements that are enforced in the
+/// handler because folder ingest does not need a taxonomy kind.
+#[must_use]
+pub fn with_ingest_runtime_overrides(cmd: clap::Command) -> clap::Command {
+    cmd.mut_arg("kind", |arg| arg.required(false))
 }
 
 /// Add `--fix-markdown` flag to the `lint` subcommand.
@@ -457,4 +468,50 @@ fn synth_now() -> String {
 
 fn synth_expires() -> String {
     "2026-05-04T00:05:00Z".to_string()
+}
+
+/// Determine whether the configured embedding *provider* is ready to produce
+/// vectors end-to-end.
+///
+/// Shared by `status::compute_capabilities` and `search::run_async` so the
+/// two call sites apply the same rule and cannot drift.
+///
+/// - [`EmbeddingProvider::Local`]: ready iff the model file is on disk
+///   (`model_present` from `ModelCache::is_present`).
+/// - [`EmbeddingProvider::OpenAi`]: ready iff the `openai` Cargo feature is
+///   compiled in AND `OPENAI_API_KEY` is set in the environment. A local
+///   model file on disk is irrelevant for a cloud provider.
+/// - Any future provider variant: `false` until explicit support is added
+///   here (fail-closed per CLAUDE.md §4.6).
+///
+/// `_vault_root` is unused for cloud providers (no filesystem stat needed); it
+/// is accepted to mirror callers' available context without them needing an
+/// adapter.
+pub(crate) fn embedding_provider_ready(
+    config: &CairnConfig,
+    model_present: bool,
+    _vault_root: Option<&Path>,
+) -> bool {
+    match config.search.default_provider {
+        EmbeddingProvider::Local => model_present,
+        EmbeddingProvider::OpenAi => {
+            #[cfg(feature = "openai")]
+            {
+                // Delegate to the shared predicate in `cairn-embeddings-openai`
+                // so this site and `resolve_openai_embedder` apply identical
+                // validation:
+                //   1. API key present and non-whitespace.
+                //   2. `embedding_model` is an OpenAI native variant
+                //      (not a local candle model like `bge-small-en-v1.5`).
+                //   3. `openai` Cargo feature compiled in (this arm).
+                let key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
+                cairn_embeddings_openai::config_ready(config.search.embedding_model, key.trim())
+            }
+            #[cfg(not(feature = "openai"))]
+            {
+                false
+            }
+        }
+        _ => false,
+    }
 }

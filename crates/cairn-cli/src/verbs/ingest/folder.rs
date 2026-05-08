@@ -14,7 +14,7 @@ use super::patterns::{GlobPattern, PatternError, parse_pattern_list};
 use super::planner::{FolderPlanBatch, PlannedFile, plan_batches};
 use super::report::{FolderIngestSummary, render_human};
 use super::scanner::{ScanEntry, ScanResult, scan_folder};
-use crate::verbs::envelope::emit_json;
+use crate::verbs::envelope::{emit_json, new_operation_id};
 
 const DEFAULT_INCLUDE: &[&str] = &[
     "*.md", "*.txt", "*.rst", "*.rs", "*.py", "*.ts", "*.js", "*.go", "*.java",
@@ -31,6 +31,7 @@ pub struct FolderIngestOptions {
     pub mode: IngestMode,
     pub dry_run: bool,
     pub batch_size: u32,
+    pub no_cache: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,17 +48,22 @@ enum FolderIngestError {
     Io(String),
 }
 
-pub fn run(sub: &ArgMatches, vault_root: PathBuf) -> ExitCode {
+pub fn run(
+    sub: &ArgMatches,
+    vault_root: PathBuf,
+    requested_folder: &Path,
+    source_is_folder: bool,
+) -> ExitCode {
     let json = sub.get_flag("json");
-    match normalize_options(sub, vault_root).and_then(|options| run_with_options(&options)) {
+    let display_folder = requested_folder.display().to_string();
+    match normalize_options(sub, vault_root, requested_folder, source_is_folder)
+        .and_then(|options| run_with_options(&options))
+    {
         Ok(summary) => {
             if json {
-                emit_json(&summary);
+                emit_json(&json_summary(&summary));
             } else {
-                let folder = sub
-                    .get_one::<PathBuf>("folder")
-                    .map_or_else(String::new, |path| path.display().to_string());
-                print!("{}", render_human(&folder, &summary));
+                print!("{}", render_human(&display_folder, &summary));
             }
             ExitCode::SUCCESS
         }
@@ -89,15 +95,13 @@ pub fn run(sub: &ArgMatches, vault_root: PathBuf) -> ExitCode {
 fn normalize_options(
     sub: &ArgMatches,
     vault_root: PathBuf,
+    requested_folder: &Path,
+    source_is_folder: bool,
 ) -> Result<FolderIngestOptions, FolderIngestError> {
-    let requested_folder = sub
-        .get_one::<PathBuf>("folder")
-        .cloned()
-        .ok_or_else(|| FolderIngestError::Usage("--folder is required".to_owned()))?;
     let has_body = sub.get_one::<String>("body").is_some();
     let has_file = sub.get_one::<PathBuf>("file").is_some();
     let has_url = sub.get_one::<String>("url").is_some();
-    let has_source = sub.get_one::<String>("source").is_some();
+    let has_source = sub.get_one::<String>("source").is_some() && !source_is_folder;
     let source_conflicts =
         u8::from(has_body) + u8::from(has_file) + u8::from(has_url) + u8::from(has_source);
     if source_conflicts != 0 {
@@ -162,6 +166,7 @@ fn normalize_options(
         mode,
         dry_run: sub.get_flag("dry-run"),
         batch_size,
+        no_cache: sub.get_flag("no_cache"),
     })
 }
 
@@ -178,7 +183,13 @@ fn run_with_options(
     let scan = scan_options(options)?;
     let cache_root = options.vault_root.join(".cairn/cache");
     let mut summary = summary_for_scan(options, &scan);
-    let planned_files = collect_planned_files(scan.entries, &cache_root, &mut summary)?;
+    let planned_files = collect_planned_files(
+        scan.entries,
+        &cache_root,
+        &options.vault_root,
+        options.no_cache,
+        &mut summary,
+    )?;
     let batches = build_batches(options, planned_files)?;
     summary.plans = batches.len() as u64;
     summary.operation_ids = batches
@@ -233,11 +244,17 @@ fn summary_for_scan(options: &FolderIngestOptions, scan: &ScanResult) -> FolderI
 fn collect_planned_files(
     entries: Vec<ScanEntry>,
     cache_root: &Path,
+    vault_root: &Path,
+    no_cache: bool,
     summary: &mut FolderIngestSummary,
 ) -> Result<Vec<PlannedFile>, FolderIngestError> {
     let mut planned_files = Vec::new();
     for entry in entries {
-        if !is_supported_keyword_file(&entry.relative_path) {
+        let relative_path = entry
+            .absolute_path
+            .strip_prefix(vault_root)
+            .map_or_else(|_| entry.relative_path.clone(), Path::to_path_buf);
+        if !is_supported_keyword_file(&relative_path) {
             summary.warnings = summary.warnings.saturating_add(1);
             summary.skipped = summary.skipped.saturating_add(1);
             continue;
@@ -256,30 +273,31 @@ fn collect_planned_files(
                 )));
             }
         };
-        let body_for_hash = body_for_cache(&entry.relative_path, &body);
-        let key = cache_key(&entry.relative_path, &body_for_hash);
-        if read_cache_entry(cache_root, &key)
-            .map_err(|err| {
-                FolderIngestError::Io(format!(
-                    "failed to read folder ingest cache for {}: {err}",
-                    entry.relative_path.display()
-                ))
-            })?
-            .is_some()
+        let body_for_hash = body_for_cache(&relative_path, &body);
+        let key = cache_key(&relative_path, &body_for_hash);
+        if !no_cache
+            && read_cache_entry(cache_root, &key)
+                .map_err(|err| {
+                    FolderIngestError::Io(format!(
+                        "failed to read folder ingest cache for {}: {err}",
+                        entry.relative_path.display()
+                    ))
+                })?
+                .is_some()
         {
             summary.cached = summary.cached.saturating_add(1);
             continue;
         }
 
-        let counts = extract_keyword_counts(&entry.relative_path, &body);
+        let counts = extract_keyword_counts(&relative_path, &body);
         let body_hash = body_sha256(&body_for_hash);
-        let (entities, wiki_edges) = extract_keyword_graph(&entry.relative_path, &body);
+        let (entities, wiki_edges) = extract_keyword_graph(&relative_path, &body);
         summary.processed = summary.processed.saturating_add(1);
         summary.entities_new = summary.entities_new.saturating_add(counts.entities_new);
         summary.edges_new = summary.edges_new.saturating_add(counts.edges_new);
         planned_files.push(PlannedFile {
             absolute_path: entry.absolute_path,
-            relative_path: entry.relative_path,
+            relative_path,
             body,
             body_hash,
             cache_key: key,
@@ -289,6 +307,35 @@ fn collect_planned_files(
         });
     }
     Ok(planned_files)
+}
+
+fn json_summary(summary: &FolderIngestSummary) -> serde_json::Value {
+    let mut value =
+        serde_json::to_value(summary).expect("FolderIngestSummary serialization should not fail");
+    let cache_writes = if summary.dry_run {
+        0
+    } else {
+        summary.processed
+    };
+    if let Some(object) = value.as_object_mut() {
+        object.insert("status".to_owned(), serde_json::json!("committed"));
+        object.insert(
+            "data".to_owned(),
+            serde_json::json!({
+                "record_id": summary
+                    .operation_ids
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| new_operation_id().0),
+                "session_id": "folder",
+                "files_processed": summary.cached.saturating_add(summary.processed),
+                "cache_hits": summary.cached,
+                "cache_misses": summary.processed,
+                "cache_writes": cache_writes,
+            }),
+        );
+    }
+    value
 }
 
 fn build_batches(
@@ -357,12 +404,22 @@ fn write_batch_cache_entries(
     batch: &FolderPlanBatch,
 ) -> Result<(), FolderIngestError> {
     for file in &batch.files {
+        let source_node = serde_json::json!({
+            "id": format!("source:{}", file.cache_key),
+            "kind": "source_document",
+            "source_path": normalize_path(&file.relative_path),
+            "content_length_bytes": file.body.len(),
+        });
         let cache_entry = CacheEntry {
             version: 1,
             relative_path: normalize_path(&file.relative_path),
             cache_key: file.cache_key.clone(),
             entities_new: file.counts.entities_new,
             edges_new: file.counts.edges_new,
+            entity_count: 1,
+            edge_count: 0,
+            nodes: vec![source_node],
+            edges: Vec::new(),
         };
         write_cache_entry(cache_root, &cache_entry).map_err(|err| {
             FolderIngestError::Io(format!(

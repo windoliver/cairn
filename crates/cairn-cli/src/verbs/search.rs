@@ -17,8 +17,9 @@ use cairn_embeddings_local::EmbeddingModel;
 use clap::ArgMatches;
 
 use super::envelope::{
-    capability_unavailable_response, emit_json, human_error, internal_error_response,
-    invalid_args_response, new_operation_id, not_found_response, unimplemented_response,
+    capability_unavailable_response, capability_unavailable_response_with_hint, emit_json,
+    human_error, internal_error_response, invalid_args_response, new_operation_id,
+    not_found_response, unimplemented_response,
 };
 use super::status;
 
@@ -64,6 +65,9 @@ pub fn run(sub: &ArgMatches, vault_root: std::path::PathBuf) -> ExitCode {
                 &format!("--explain requires {EXPLAIN_CAPABILITY}, which is not advertised"),
                 &resp.operation_id,
             );
+            if let Some(hint) = cairn_core::status::remediation_for(EXPLAIN_CAPABILITY) {
+                eprintln!("  hint: {hint}");
+            }
         }
         return ExitCode::from(69); // EX_UNAVAILABLE
     }
@@ -237,7 +241,8 @@ async fn run_async(
     let kind = config.search.embedding_model;
     let mock_embedder = std::env::var("CAIRN_MOCK_EMBEDDER").as_deref() == Ok("1");
     let model_present = mock_embedder || cache.is_present(kind);
-    let caps = config.capabilities(model_present);
+    let provider_ready = super::embedding_provider_ready(&config, model_present, Some(&vault_root));
+    let caps = config.capabilities(provider_ready);
     let provider = config.search.default_provider;
 
     // CLI-side capability gate — fires BEFORE embedder resolution so an
@@ -265,6 +270,9 @@ async fn run_async(
                 &format!("capability unavailable: {capability}"),
                 &resp.operation_id,
             );
+            if let Some(hint) = cairn_core::status::remediation_for(capability) {
+                eprintln!("  hint: {hint}");
+            }
         }
         return ExitCode::from(69); // EX_UNAVAILABLE
     }
@@ -333,6 +341,9 @@ async fn run_async(
                     &format!("capability unavailable: {capability}"),
                     &resp.operation_id,
                 );
+                if let Some(hint) = cairn_core::status::remediation_for(capability) {
+                    eprintln!("  hint: {hint}");
+                }
             }
             ExitCode::from(69) // EX_UNAVAILABLE
         }
@@ -597,8 +608,18 @@ fn openai_feature_gate(provider: EmbeddingProvider, json: bool) -> Option<ExitCo
         // capability identifier is the same as the dispatcher's gate
         // for `openai` so generated clients can route the failure off
         // a single capability id.
-        let resp =
-            capability_unavailable_response(ResponseVerb::Search, "cairn.mcp.v1.search.semantic");
+        //
+        // Provide a cause-specific hint so the operator knows to rebuild
+        // with `--features openai` rather than following the generic
+        // local-model advice from `remediation_for`.
+        const OPENAI_CAP: &str = "cairn.mcp.v1.search.semantic";
+        const FEATURE_HINT: &str =
+            "rebuild with `cargo build --features openai` to enable the OpenAI embedding provider";
+        let resp = capability_unavailable_response_with_hint(
+            ResponseVerb::Search,
+            OPENAI_CAP,
+            Some(FEATURE_HINT),
+        );
         if json {
             emit_json(&resp);
         } else {
@@ -609,6 +630,7 @@ fn openai_feature_gate(provider: EmbeddingProvider, json: bool) -> Option<ExitCo
                  rebuild cairn-cli with `--features openai`",
                 &resp.operation_id,
             );
+            eprintln!("  hint: {FEATURE_HINT}");
         }
         Some(ExitCode::from(69)) // EX_UNAVAILABLE
     }
@@ -625,10 +647,19 @@ fn openai_feature_gate(provider: EmbeddingProvider, json: bool) -> Option<ExitCo
 ///   clients can route off `error.data.capability`.
 /// - `Internal` → aborted envelope, code `Internal`, used for local
 ///   environment failures (model load error, unknown provider).
+///
+/// The optional `hint` field on `CapabilityUnavailable` carries a
+/// cause-specific remediation string. When `Some`, it overrides the
+/// generic entry in `cairn_core::status::remediation_for` so operators
+/// get actionable, cause-specific advice (e.g. "set `OPENAI_API_KEY`"
+/// rather than "run cairn embed download").
 enum EmbedderInitError {
     CapabilityUnavailable {
         capability: &'static str,
         msg: String,
+        /// Cause-specific remediation hint; overrides the generic table entry
+        /// when present.
+        hint: Option<&'static str>,
     },
     Internal {
         msg: String,
@@ -638,12 +669,25 @@ enum EmbedderInitError {
 impl EmbedderInitError {
     fn emit(self, json: bool) -> ExitCode {
         match self {
-            EmbedderInitError::CapabilityUnavailable { capability, msg } => {
-                let resp = capability_unavailable_response(ResponseVerb::Search, capability);
+            EmbedderInitError::CapabilityUnavailable {
+                capability,
+                msg,
+                hint,
+            } => {
+                let resp = capability_unavailable_response_with_hint(
+                    ResponseVerb::Search,
+                    capability,
+                    hint,
+                );
                 if json {
                     emit_json(&resp);
                 } else {
                     human_error("search", "CapabilityUnavailable", &msg, &resp.operation_id);
+                    let display_hint =
+                        hint.or_else(|| cairn_core::status::remediation_for(capability));
+                    if let Some(h) = display_hint {
+                        eprintln!("  hint: {h}");
+                    }
                 }
                 ExitCode::from(69)
             }
@@ -709,13 +753,29 @@ async fn resolve_local_embedder(
 fn resolve_openai_embedder(
     kind: cairn_core::config::EmbeddingModelKind,
 ) -> Result<Arc<dyn EmbeddingModel>, EmbedderInitError> {
-    use cairn_embeddings_openai::OpenAiEmbedder;
-    let embedder =
-        OpenAiEmbedder::from_env(kind).map_err(|e| EmbedderInitError::CapabilityUnavailable {
-            capability: "cairn.mcp.v1.search.semantic",
-            msg: format!("OpenAI embedder init: {e}"),
-        })?;
-    Ok(Arc::new(embedder))
+    use cairn_embeddings_openai::{OpenAiEmbedder, OpenAiEmbeddingError};
+    OpenAiEmbedder::from_env(kind)
+        .map(|e| -> Arc<dyn EmbeddingModel> { Arc::new(e) })
+        .map_err(|e| {
+            // Produce cause-specific remediation hints so the operator
+            // gets actionable advice rather than generic local-model text.
+            const CAP: &str = "cairn.mcp.v1.search.semantic";
+            let hint: Option<&'static str> = match &e {
+                OpenAiEmbeddingError::MissingKey => {
+                    Some("set OPENAI_API_KEY in the environment to enable OpenAI embeddings")
+                }
+                OpenAiEmbeddingError::Network(msg) if msg.contains("cannot serve") => Some(
+                    "set search.embedding_model to an OpenAI text-embedding-3 model \
+                         (e.g. `openai-text-embedding-3-small`) in .cairn/config.yaml",
+                ),
+                _ => None,
+            };
+            EmbedderInitError::CapabilityUnavailable {
+                capability: CAP,
+                msg: format!("OpenAI embedder init: {e}"),
+                hint,
+            }
+        })
 }
 
 #[cfg(not(feature = "openai"))]
@@ -728,6 +788,9 @@ fn resolve_openai_embedder(
     Err(EmbedderInitError::CapabilityUnavailable {
         capability: "cairn.mcp.v1.search.semantic",
         msg: "openai feature not compiled in; rebuild with `--features openai`".to_owned(),
+        hint: Some(
+            "rebuild with `cargo build --features openai` to enable the OpenAI embedding provider",
+        ),
     })
 }
 

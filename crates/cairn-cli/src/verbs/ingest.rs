@@ -282,9 +282,11 @@ fn build_record_from_parsed(
 #[must_use]
 pub fn run(sub: &ArgMatches, vault_root: PathBuf) -> ExitCode {
     let json = sub.get_flag("json");
-    let has_folder = sub.get_one::<PathBuf>("folder").is_some();
-    if has_folder {
-        return folder::run(sub, vault_root);
+    if let Some(requested_folder) = sub.get_one::<PathBuf>("folder") {
+        return folder::run(sub, vault_root, requested_folder.as_path(), false);
+    }
+    if let Some(requested_folder) = positional_folder_source(sub) {
+        return folder::run(sub, vault_root, requested_folder.as_path(), true);
     }
 
     // --resync <path>: re-ingest an out-of-band edited markdown projection.
@@ -324,16 +326,16 @@ pub fn run(sub: &ArgMatches, vault_root: PathBuf) -> ExitCode {
         return crate::verbs::ingest_plan_stub(sub, mode, no_diff, json);
     }
 
-    // Enforce IDL exactly-one-of: body/file/url (positional `source` counts as one).
-    let has_source = sub.get_one::<String>("source").is_some();
-    let has_body = sub.get_one::<String>("body").is_some();
-    let has_file = sub.get_one::<std::path::PathBuf>("file").is_some();
-    let has_url = sub.get_one::<String>("url").is_some();
-    let source_count =
-        u8::from(has_source) + u8::from(has_body) + u8::from(has_file) + u8::from(has_url);
+    if sub.get_flag("no_cache") {
+        eprintln!("cairn ingest: --no-cache is only valid with --folder");
+        return ExitCode::from(64);
+    }
+
+    // Enforce IDL exactly-one-of: body/file/folder/url (positional `source` counts as one).
+    let source_count = ingest_source_count(sub);
     if source_count != 1 {
         eprintln!(
-            "cairn ingest: exactly one of [source, --body, --file, --url] is required (got {source_count})"
+            "cairn ingest: exactly one of [source, --body, --file, --folder, --url] is required (got {source_count})"
         );
         return ExitCode::from(64);
     }
@@ -390,6 +392,23 @@ pub fn run(sub: &ArgMatches, vault_root: PathBuf) -> ExitCode {
         );
     }
     ExitCode::FAILURE
+}
+
+fn ingest_source_count(sub: &ArgMatches) -> u8 {
+    u8::from(sub.get_one::<String>("source").is_some())
+        + u8::from(sub.get_one::<String>("body").is_some())
+        + u8::from(sub.get_one::<PathBuf>("file").is_some())
+        + u8::from(sub.get_one::<PathBuf>("folder").is_some())
+        + u8::from(sub.get_one::<String>("url").is_some())
+}
+
+fn positional_folder_source(sub: &ArgMatches) -> Option<PathBuf> {
+    let source = sub.get_one::<String>("source")?;
+    if source == "-" {
+        return None;
+    }
+    let path = PathBuf::from(source);
+    path.is_dir().then_some(path)
 }
 
 #[cfg(test)]

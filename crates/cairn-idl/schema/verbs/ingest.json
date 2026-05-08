@@ -10,20 +10,21 @@
       { "name": "kind",        "long": "kind",        "value_source": "string" },
       { "name": "body",        "long": "body",        "value_source": "string" },
       { "name": "file",        "long": "file",        "value_source": "path" },
-      { "name": "url",         "long": "url",         "value_source": "string" },
       { "name": "folder",      "long": "folder",      "value_source": "path" },
+      { "name": "url",         "long": "url",         "value_source": "string" },
       { "name": "recursive",   "long": "recursive",   "value_source": "bool" },
       { "name": "include",     "long": "include",     "value_source": "list<string>" },
       { "name": "exclude",     "long": "exclude",     "value_source": "list<string>" },
       { "name": "mode",        "long": "mode",        "value_source": "enum(keyword,semantic,full)" },
       { "name": "batch_size",  "long": "batch-size",  "value_source": "u32" },
       { "name": "session_id",  "long": "session",     "value_source": "string" },
-      { "name": "tags",        "long": "tags",        "value_source": "list<string>" }
+      { "name": "tags",        "long": "tags",        "value_source": "list<string>" },
+      { "name": "no_cache",    "long": "no-cache",    "value_source": "bool" }
     ],
     "positional": {
       "name": "source",
-      "description": "File, URL, or '-' for stdin. Mutually exclusive with --body/--file/--url/--folder.",
-      "aliases_one_of": ["body", "file", "url", "folder"]
+      "description": "File, URL, folder, or '-' for stdin. Mutually exclusive with --body/--file/--folder/--url.",
+      "aliases_one_of": ["body", "file", "folder", "url"]
     }
   },
   "x-cairn-capability": null,
@@ -54,12 +55,12 @@
         },
         "body":  { "type": "string", "minLength": 1 },
         "file":  { "type": "string", "minLength": 1, "description": "Path on the local filesystem." },
-        "url":   { "type": "string", "format": "uri", "minLength": 1 },
         "folder": {
           "type": "string",
           "minLength": 1,
-          "description": "Folder to scan for offline folder ingest."
+          "description": "Folder path to ingest recursively with the extraction cache."
         },
+        "url":   { "type": "string", "format": "uri", "minLength": 1 },
         "recursive": {
           "type": "boolean",
           "default": true,
@@ -97,6 +98,10 @@
           "type": "array",
           "items": { "type": "string", "minLength": 1 }
         },
+        "no_cache": {
+          "type": "boolean",
+          "description": "Bypass extraction cache lookup for folder ingest, but still write refreshed cache entries."
+        },
         "frontmatter": {
           "type": "object",
           "description": "Extra YAML frontmatter fields to store alongside the body."
@@ -120,8 +125,8 @@
       "oneOf": [
         { "required": ["body"] },
         { "required": ["file"] },
-        { "required": ["url"] },
-        { "required": ["folder"] }
+        { "required": ["folder"] },
+        { "required": ["url"] }
       ]
     },
     "IngestMode": {
@@ -139,7 +144,11 @@
           "type": "string",
           "minLength": 1,
           "description": "Path under .cairn/flush/pending/ when human_review=true; absent otherwise."
-        }
+        },
+        "files_processed": { "type": "integer", "minimum": 0, "description": "Folder ingest file count when source is --folder." },
+        "cache_hits": { "type": "integer", "minimum": 0, "description": "Folder ingest cache hits." },
+        "cache_misses": { "type": "integer", "minimum": 0, "description": "Folder ingest cache misses or forced re-extractions." },
+        "cache_writes": { "type": "integer", "minimum": 0, "description": "Folder ingest cache entries written." }
       }
     }
   }

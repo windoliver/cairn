@@ -46,6 +46,7 @@ fn ingest_body_args(body: &str) -> IngestArgs {
         include: None,
         kind: "note".to_owned(),
         mode: None,
+        no_cache: None,
         no_diff: None,
         recursive: None,
         session_id: None,
@@ -93,6 +94,10 @@ fn verb_response_serializes_as_canonical_envelope() {
         verb: ResponseVerb::Ingest,
         target: None,
         data: IngestData {
+            cache_hits: None,
+            cache_misses: None,
+            cache_writes: None,
+            files_processed: None,
             record_id: ulid(),
             session_id: "sess-1".to_owned(),
             plan_ref: None,
@@ -139,6 +144,10 @@ fn verb_response_rejects_envelope_invalid_target_combinations() {
         verb: ResponseVerb::Ingest,
         target: Some(ResponseTarget::Record),
         data: IngestData {
+            cache_hits: None,
+            cache_misses: None,
+            cache_writes: None,
+            files_processed: None,
             record_id: ulid(),
             session_id: "s".to_owned(),
             plan_ref: None,
@@ -457,6 +466,7 @@ fn ingest_accepts_well_formed_uri_schemes() {
             include: None,
             kind: "note".to_owned(),
             mode: None,
+            no_cache: None,
             no_diff: None,
             recursive: None,
             session_id: None,
@@ -1015,7 +1025,10 @@ fn capture_trace_returns_internal_stub() {
 
 #[test]
 fn lint_returns_internal_stub() {
-    let args = LintArgs { write_report: None };
+    let args = LintArgs {
+        fix: None,
+        write_report: None,
+    };
     assert_unimplemented("lint", sdk().lint(&args));
 }
 

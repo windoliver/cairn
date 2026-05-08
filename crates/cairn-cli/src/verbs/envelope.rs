@@ -10,7 +10,7 @@ use cairn_core::generated::envelope::{
 /// Generate a fresh Crockford base32 ULID suitable for `operation_id`.
 #[must_use]
 pub fn new_operation_id() -> Ulid {
-    Ulid(ulid::Ulid::new().to_string())
+    cairn_core::time::new_operation_id()
 }
 
 /// Generate a fresh 16-byte nonce as standard base64 (24 chars with `==` padding).
@@ -131,8 +131,48 @@ pub fn internal_error_response(verb: ResponseVerb, message: &str) -> Response {
 /// `CapabilityUnavailable` in the rejected family — generated clients
 /// deserialize the envelope through that constraint and reject
 /// `Aborted + CapabilityUnavailable` at parse time (round-9 review #1).
+///
+/// The `data.remediation` field is populated automatically from
+/// [`cairn_core::status::remediation_for`] when a hint is registered for
+/// `capability`. When no hint is registered the field is omitted (the IDL
+/// declares it optional with `minLength: 1` so an empty string is invalid).
+///
+/// Callers that know the specific cause (e.g. `OpenAI` key missing vs model
+/// mismatch) should use [`capability_unavailable_response_with_hint`] to
+/// provide a cause-specific remediation text instead of the generic table
+/// entry.
 #[must_use]
 pub fn capability_unavailable_response(verb: ResponseVerb, capability: &str) -> Response {
+    capability_unavailable_response_with_hint(verb, capability, None)
+}
+
+/// Build a `CapabilityUnavailable` rejected response with an optional
+/// caller-supplied remediation hint.
+///
+/// When `override_hint` is `Some`, it is used as `data.remediation` instead
+/// of the generic entry in [`cairn_core::status::remediation_for`]. When it
+/// is `None`, behaviour is identical to [`capability_unavailable_response`].
+///
+/// Use this variant when the call site knows the specific cause of the
+/// rejection (e.g. `OPENAI_API_KEY` absent vs. unsupported model vs.
+/// `openai` feature not compiled in) so operators receive actionable,
+/// cause-specific advice rather than generic local-model instructions.
+#[must_use]
+pub fn capability_unavailable_response_with_hint(
+    verb: ResponseVerb,
+    capability: &str,
+    override_hint: Option<&str>,
+) -> Response {
+    let mut data = serde_json::json!({ "capability": capability });
+    let hint = override_hint.or_else(|| cairn_core::status::remediation_for(capability));
+    if let Some(hint) = hint
+        && let Some(obj) = data.as_object_mut()
+    {
+        obj.insert(
+            "remediation".to_owned(),
+            serde_json::Value::String(hint.to_owned()),
+        );
+    }
     Response {
         contract: "cairn.mcp.v1".to_owned(),
         data: None,
@@ -141,7 +181,7 @@ pub fn capability_unavailable_response(verb: ResponseVerb, capability: &str) -> 
             "message": format!(
                 "this server does not advertise {capability}; the requested feature requires it"
             ),
-            "data": { "capability": capability },
+            "data": data,
         })),
         operation_id: new_operation_id(),
         policy_trace: Vec::<ResponsePolicyTrace>::new(),

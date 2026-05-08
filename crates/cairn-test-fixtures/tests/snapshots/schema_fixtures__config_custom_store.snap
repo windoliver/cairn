@@ -99,5 +99,10 @@ expression: "&c"
         }
       ]
     }
+  },
+  "mcp": {
+    "stdio": {
+      "single_tenant": false
+    }
   }
 }

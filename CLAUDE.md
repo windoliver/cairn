@@ -85,6 +85,14 @@ in review — call it out explicitly if an issue requires it.
    WAL state machine (§5.6 of the brief). No direct DB mutations.
 6. **Fail closed on capability.** If a mode isn't advertised in `status`, the
    verb rejects with `CapabilityUnavailable`. Never silently downgrade.
+   - Capability advertisement decisions live in **`cairn-core::status::advertise`**
+     (issue #53). All four surfaces (CLI, MCP, SDK, skill) read from this one
+     function. Adding a new capability is a row in that table; flipping it on
+     is a `wiring::*_WIRED` constant change in the issue that lands the
+     dispatch path.
+   - Remediation hints for `CapabilityUnavailable.data.remediation` come from
+     `cairn-core::status::REMEDIATION` — keep the table in sync when the
+     advertise table grows.
 7. **`#![forbid(unsafe_code)]`** is workspace-level. Do not add `unsafe`.
 8. **No `unwrap()` / `expect()` in `cairn-core`** (deny-linted). Return
    typed errors. `expect("reason")` is tolerated in bins/tests only, and the

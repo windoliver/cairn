@@ -9,7 +9,7 @@ cairn.mcp.v1 verb: capture_trace
 ```text
 cairn.mcp.v1 verb: capture_trace
 
-Usage: capture_trace [OPTIONS]
+Usage: capture_trace [OPTIONS] --from <PATH>
 
 Options:
       --from <PATH>

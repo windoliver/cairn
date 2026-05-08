@@ -8,6 +8,24 @@
   "required": ["contract", "server_info", "capabilities", "extensions"],
   "properties": {
     "contract": { "const": "cairn.mcp.v1" },
+    "mcp_graph_tools": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "probe_basis"],
+      "properties": {
+        "state": { "type": "string", "enum": ["available", "unavailable",
+                            "probe_failed", "no_vault"] },
+        "reason": {
+          "type": "string",
+          "enum": ["single_tenant_off", "no_store_capability",
+                   "no_scope_resolver", "store_open_error",
+                   "vault_not_bound", "resolver_empty"]
+        },
+        "tool_count": { "type": "integer", "minimum": 0 },
+        "probe_basis": { "type": "string", "enum": ["full", "config_only"] },
+        "error": { "type": "string", "minLength": 1 }
+      }
+    },
     "server_info": {
       "type": "object",
       "additionalProperties": false,

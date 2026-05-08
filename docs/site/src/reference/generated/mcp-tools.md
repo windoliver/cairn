@@ -12,5 +12,5 @@ Generated from `cairn_mcp::generated::TOOLS`.
 | `summarize` | `rebac` | `-` | auth `persist` -> `write_capability` | `summarize` — verb summarize. |
 | `assemble_hot` | `rebac` | `-` | - | `assemble_hot` — verb assemble_hot. |
 | `capture_trace` | `signed_chain` | `-` | - | `capture_trace` — verb capture_trace. |
-| `lint` | `read_only` | `-` | auth `write_report` -> `write_capability` | `lint` — verb lint. |
+| `lint` | `read_only` | `-` | auth `fix` -> `write_capability`<br>auth `write_report` -> `write_capability` | `lint` — verb lint. |
 | `forget` | `forget_capability` | `-` | cap `mode=record` -> `cairn.mcp.v1.forget.record`<br>cap `mode=session` -> `cairn.mcp.v1.forget.session`<br>cap `mode=scope` -> `cairn.mcp.v1.forget.scope` | `forget` — verb forget. |

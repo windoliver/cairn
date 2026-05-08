@@ -758,9 +758,9 @@ mod cli_vault_flag {
                 "CAIRN_REGISTRY",
                 reg_dir.path().join("vaults.toml").to_str().unwrap(),
             )
-            .args(["--vault", "nosuchvault", "search"])
+            .args(["--vault", "nosuchvault", "search", "--mode", "keyword", "q"])
             .output()
-            .expect("cairn --vault nosuchvault search");
+            .expect("cairn --vault nosuchvault search --mode keyword q");
         assert_eq!(
             out.status.code(),
             Some(78),
