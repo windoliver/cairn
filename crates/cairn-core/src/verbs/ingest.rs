@@ -58,6 +58,18 @@ pub fn prepare_ingest_body(args: &IngestArgs, issuer: &str) -> Result<PreparedIn
     };
     let decision = should_memorize(&inputs);
 
+    let filter_trace = [
+        PolicyTraceEntry::from(&redacted),
+        PolicyTraceEntry::from(&fenced),
+        PolicyTraceEntry::from(&decision),
+    ];
+    if matches!(decision, Decision::Discard(_)) {
+        return Ok(PreparedIngest::Rejected {
+            decision,
+            policy_trace: to_wire(&filter_trace),
+        });
+    }
+
     let issuer = Identity::parse(issuer)?;
     let visibility = default_visibility(
         issuer.kind(),
@@ -66,22 +78,15 @@ pub fn prepare_ingest_body(args: &IngestArgs, issuer: &str) -> Result<PreparedIn
         &VisibilityPolicy::default(),
     );
     let policy_trace = to_wire(&[
-        PolicyTraceEntry::from(&redacted),
-        PolicyTraceEntry::from(&fenced),
-        PolicyTraceEntry::from(&decision),
+        filter_trace[0].clone(),
+        filter_trace[1].clone(),
+        filter_trace[2].clone(),
         PolicyTraceEntry::new(
             PolicyGate::VisibilityFloor,
             PolicyOutcome::Pass,
             PolicyDetail::VisibilityFloor(visibility),
         ),
     ]);
-
-    if matches!(decision, Decision::Discard(_)) {
-        return Ok(PreparedIngest::Rejected {
-            decision,
-            policy_trace,
-        });
-    }
 
     let record = build_record(args, raw_body, &fenced.text, issuer, visibility)?;
     Ok(PreparedIngest::Proceed {
