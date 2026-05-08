@@ -1,8 +1,21 @@
 //! Wire-protocol tests for the `handshake` MCP prelude tool (issue #65,
 //! brief §8.0.a).
 //!
-//! These tests drive a real `CairnMcpHandler` over a `tokio::io::duplex`
-//! transport, exercising the same code path a real MCP client would.
+//! Coverage matrix:
+//!  - **Wire-level** (`tokio::io::duplex` driving a real `CairnMcpHandler`)
+//!    tests assert the production posture against the actual
+//!    [`cairn_core::status::wiring::REPLAY_CHALLENGE_WIRED`] constant.
+//!    While that flag is `false`, `handshake` MUST be absent from
+//!    `tools/list` and any direct call MUST return a
+//!    `CapabilityUnavailable` error (round-1 review #1, brief §15
+//!    fail-closed).
+//!  - **Direct-dispatch** tests bypass the production gate by calling
+//!    [`cairn_mcp::prelude_tools::dispatch`] with
+//!    `replay_challenge_wired = true`, exercising the mint /
+//!    persistence path so the implementation stays covered while the
+//!    wire-level posture stays gated. When a follow-up flips
+//!    `REPLAY_CHALLENGE_WIRED` to `true`, the wire-level tests
+//!    automatically start asserting the wired behavior.
 //!
 //! Integration-test files are not public API; doc comments are not required.
 #![allow(missing_docs)]
@@ -83,9 +96,19 @@ async fn build_handler_wired() -> (CairnMcpHandler, Arc<cairn_store_sqlite::Sqli
     )
 }
 
-/// `tools/list` advertises `handshake` when a sqlite store is wired.
+// ── Wire-level (production-posture) tests ──────────────────────────────────
+//
+// These read the live `REPLAY_CHALLENGE_WIRED` flag and branch on it. While
+// the flag is `false` (current state) they pin the gated posture; when a
+// follow-up flips the flag they automatically start asserting the wired
+// posture. No test is left dormant — failure to keep both branches
+// passing means a regression.
+
+/// `tools/list` must reflect the live wiring flag. While
+/// `REPLAY_CHALLENGE_WIRED` is `false`, `handshake` is absent even when a
+/// sqlite store is wired (round-1 review #1).
 #[tokio::test]
-async fn handshake_tool_listed_when_sqlite_store_wired() {
+async fn handshake_listing_follows_replay_challenge_wiring() {
     let (handler, _store) = build_handler_wired().await;
     let (server_half, client_half) = tokio::io::duplex(65_536);
     let _server_task = tokio::spawn(async move {
@@ -115,14 +138,21 @@ async fn handshake_tool_listed_when_sqlite_store_wired() {
         .iter()
         .filter_map(|t| t.get("name").and_then(serde_json::Value::as_str))
         .collect();
-    assert!(
-        names.contains(&"handshake"),
-        "tools/list must include handshake; got: {names:?}"
-    );
+    if cairn_core::status::wiring::REPLAY_CHALLENGE_WIRED {
+        assert!(
+            names.contains(&"handshake"),
+            "REPLAY_CHALLENGE_WIRED=true must list handshake; got: {names:?}"
+        );
+    } else {
+        assert!(
+            !names.contains(&"handshake"),
+            "REPLAY_CHALLENGE_WIRED=false must hide handshake; got: {names:?}"
+        );
+    }
 }
 
-/// `tools/list` omits `handshake` when no sqlite store is wired —
-/// brief §15 fail-closed.
+/// `tools/list` omits `handshake` when no sqlite store is wired,
+/// regardless of the wiring flag — both gates are required.
 #[tokio::test]
 async fn handshake_tool_absent_when_no_sqlite_store() {
     let handler = CairnMcpHandler::new();
@@ -160,149 +190,18 @@ async fn handshake_tool_absent_when_no_sqlite_store() {
     );
 }
 
-/// Two consecutive `handshake` calls must return distinct nonces (brief
-/// §8.0.a invariant d).
+/// A direct `tools/call name=handshake` over the wire path must return an
+/// MCP error-in-result that names the held-back capability when
+/// `REPLAY_CHALLENGE_WIRED` is `false`. Belt-and-suspenders against
+/// clients that ignore the `tools/list` gate and dispatch by name.
 #[tokio::test]
-async fn handshake_returns_distinct_nonces_per_call() {
-    let (handler, _store) = build_handler_wired().await;
-    let (server_half, client_half) = tokio::io::duplex(65_536);
-    let _server_task = tokio::spawn(async move {
-        handler
-            .serve(server_half)
-            .await
-            .expect("server init")
-            .waiting()
-            .await
-            .ok();
-    });
-
-    let (client_read, mut client_write) = tokio::io::split(client_half);
-    let mut client_reader = BufReader::new(client_read);
-    do_initialize(&mut client_write, &mut client_reader).await;
-
-    let mut nonces = Vec::new();
-    for id in 2..=3 {
-        send_frame(
-            &mut client_write,
-            &format!(
-                r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"handshake","arguments":{{"issuer":"hmn:tester"}}}}}}"#
-            ),
-        )
-        .await;
-        let resp = recv_frame(&mut client_reader).await;
-        let text = resp
-            .pointer("/result/content/0/text")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_else(|| panic!("missing content text in response: {resp}"));
-        let payload: serde_json::Value =
-            serde_json::from_str(text).expect("handshake content must be valid JSON");
-        let nonce = payload
-            .pointer("/challenge/nonce")
-            .and_then(serde_json::Value::as_str)
-            .expect("response must carry challenge.nonce")
-            .to_owned();
-        nonces.push(nonce);
+async fn handshake_call_returns_capability_unavailable_when_replay_unwired() {
+    if cairn_core::status::wiring::REPLAY_CHALLENGE_WIRED {
+        // The flag has flipped; this test no longer applies. Sibling
+        // direct-dispatch tests cover the wired path.
+        return;
     }
-
-    assert_eq!(nonces.len(), 2);
-    assert_ne!(
-        nonces[0], nonces[1],
-        "two back-to-back handshake calls must return distinct nonces"
-    );
-}
-
-/// `handshake` with a wired sqlite store persists the nonce to
-/// `outstanding_challenges` keyed by issuer (brief §4.2 — nonce is
-/// redeemable by the next signed envelope from the same issuer).
-#[tokio::test]
-async fn handshake_persists_nonce_to_outstanding_challenges() {
-    let (handler, store) = build_handler_wired().await;
-    let (server_half, client_half) = tokio::io::duplex(65_536);
-    let _server_task = tokio::spawn(async move {
-        handler
-            .serve(server_half)
-            .await
-            .expect("server init")
-            .waiting()
-            .await
-            .ok();
-    });
-
-    let (client_read, mut client_write) = tokio::io::split(client_half);
-    let mut client_reader = BufReader::new(client_read);
-    do_initialize(&mut client_write, &mut client_reader).await;
-
-    send_frame(
-        &mut client_write,
-        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"handshake","arguments":{"issuer":"hmn:tafeng"}}}"#,
-    )
-    .await;
-    let resp = recv_frame(&mut client_reader).await;
-    let text = resp
-        .pointer("/result/content/0/text")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_else(|| panic!("missing content text in response: {resp}"));
-    let _payload: serde_json::Value =
-        serde_json::from_str(text).expect("handshake response must be valid JSON");
-
-    // Purge all rows with `now_ms = i64::MAX` (every row is past-expiry
-    // relative to the cutoff) and assert exactly one row was deleted —
-    // confirming the handshake call inserted a single outstanding challenge.
-    // This avoids depending on crate-private SQL helpers from an
-    // integration-test target.
-    let purged = store
-        .with_tx(move |tx| tx.purge_expired_challenges(i64::MAX))
-        .await
-        .expect("purge outstanding challenges");
-
-    assert_eq!(
-        purged, 1,
-        "handshake must persist exactly one outstanding challenge for the issuer"
-    );
-}
-
-/// `handshake` without an `issuer` argument fails closed with a structured
-/// invalid-args error (single-use challenges must be keyed by an identity).
-#[tokio::test]
-async fn handshake_without_issuer_returns_invalid_args() {
     let (handler, _store) = build_handler_wired().await;
-    let (server_half, client_half) = tokio::io::duplex(65_536);
-    let _server_task = tokio::spawn(async move {
-        handler
-            .serve(server_half)
-            .await
-            .expect("server init")
-            .waiting()
-            .await
-            .ok();
-    });
-
-    let (client_read, mut client_write) = tokio::io::split(client_half);
-    let mut client_reader = BufReader::new(client_read);
-    do_initialize(&mut client_write, &mut client_reader).await;
-
-    send_frame(
-        &mut client_write,
-        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"handshake","arguments":{}}}"#,
-    )
-    .await;
-    let resp = recv_frame(&mut client_reader).await;
-    let is_error = resp
-        .pointer("/result/isError")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
-    assert!(
-        is_error,
-        "handshake without issuer must return isError=true; got: {resp}"
-    );
-}
-
-/// `handshake` on an unwired handler returns capability-unavailable when the
-/// tool is somehow invoked anyway (e.g. a client that ignores `tools/list`
-/// and dispatches by name). Belt-and-suspenders against the listing gate.
-#[tokio::test]
-async fn handshake_unwired_handler_returns_capability_unavailable() {
-    let handler = CairnMcpHandler::new();
     let (server_half, client_half) = tokio::io::duplex(65_536);
     let _server_task = tokio::spawn(async move {
         handler
@@ -334,10 +233,165 @@ async fn handshake_unwired_handler_returns_capability_unavailable() {
         .unwrap_or("");
     assert!(
         is_error,
-        "unwired handshake call must return isError=true; got: {resp}"
+        "gated handshake call must return isError=true; got: {resp}"
     );
     assert!(
-        text.contains("capability unavailable"),
-        "error text should mention capability unavailability; got: {text}"
+        text.contains("cairn.mcp.v1.replay.challenge"),
+        "error text must name the held-back capability; got: {text}"
+    );
+}
+
+// ── Direct-dispatch (implementation-coverage) tests ────────────────────────
+//
+// These call `prelude_tools::dispatch` directly with
+// `replay_challenge_wired = true` so the mint / persistence / argument
+// validation paths stay covered while the wire-level gate is closed. They
+// do not use rmcp transports — argument validation, store interaction,
+// and result shape are pure functions of the dispatch helper.
+
+/// Two back-to-back `dispatch` invocations must return distinct nonces
+/// (brief §8.0.a invariant d).
+#[tokio::test]
+async fn dispatch_returns_distinct_nonces_per_call() {
+    let (_handler, store) = build_handler_wired().await;
+    let mut args = serde_json::Map::new();
+    args.insert(
+        "issuer".into(),
+        serde_json::Value::String("hmn:tester".into()),
+    );
+
+    let mut nonces: Vec<String> = Vec::with_capacity(2);
+    for _ in 0..2 {
+        let result = cairn_mcp::prelude_tools::dispatch(
+            "handshake",
+            Some(args.clone()),
+            Some(store.clone()),
+            true,
+        )
+        .await;
+        assert!(
+            !result.is_error.unwrap_or(false),
+            "dispatch with replay_challenge_wired=true must succeed; got: {result:?}"
+        );
+        let text = result
+            .content
+            .first()
+            .and_then(|c| match &**c {
+                rmcp::model::RawContent::Text(t) => Some(t.text.clone()),
+                _ => None,
+            })
+            .expect("text content");
+        let payload: serde_json::Value =
+            serde_json::from_str(&text).expect("handshake content must be valid JSON");
+        assert_eq!(
+            payload
+                .pointer("/contract")
+                .and_then(serde_json::Value::as_str),
+            Some("cairn.mcp.v1")
+        );
+        let nonce = payload
+            .pointer("/challenge/nonce")
+            .and_then(serde_json::Value::as_str)
+            .expect("response must carry challenge.nonce")
+            .to_owned();
+        nonces.push(nonce);
+    }
+    assert_ne!(
+        nonces[0], nonces[1],
+        "two back-to-back handshake calls must return distinct nonces"
+    );
+}
+
+/// `dispatch` persists exactly one row to `outstanding_challenges` per
+/// successful call (brief §4.2 — nonce is redeemable by the next signed
+/// envelope from the same issuer).
+#[tokio::test]
+async fn dispatch_persists_nonce_to_outstanding_challenges() {
+    let (_handler, store) = build_handler_wired().await;
+    let mut args = serde_json::Map::new();
+    args.insert(
+        "issuer".into(),
+        serde_json::Value::String("hmn:tafeng".into()),
+    );
+
+    let result =
+        cairn_mcp::prelude_tools::dispatch("handshake", Some(args), Some(store.clone()), true)
+            .await;
+    assert!(
+        !result.is_error.unwrap_or(false),
+        "dispatch with replay_challenge_wired=true must succeed; got: {result:?}"
+    );
+
+    // Purge with `now_ms = i64::MAX` deletes every row regardless of TTL —
+    // the count of rows deleted is the count minted by the dispatch above.
+    let purged = store
+        .with_tx(move |tx| tx.purge_expired_challenges(i64::MAX))
+        .await
+        .expect("purge outstanding challenges");
+
+    assert_eq!(
+        purged, 1,
+        "dispatch must persist exactly one outstanding challenge for the issuer"
+    );
+}
+
+/// `dispatch` with no `issuer` argument fails closed with a structured
+/// invalid-args error.
+#[tokio::test]
+async fn dispatch_without_issuer_returns_invalid_args() {
+    let (_handler, store) = build_handler_wired().await;
+    let result = cairn_mcp::prelude_tools::dispatch(
+        "handshake",
+        Some(serde_json::Map::new()),
+        Some(store.clone()),
+        true,
+    )
+    .await;
+    assert_eq!(
+        result.is_error,
+        Some(true),
+        "missing issuer must return isError=true"
+    );
+}
+
+/// `dispatch` without a wired sqlite store fails closed even when
+/// `replay_challenge_wired = true` — the persistence step requires a
+/// store handle.
+#[tokio::test]
+async fn dispatch_without_sqlite_store_returns_capability_unavailable() {
+    let mut args = serde_json::Map::new();
+    args.insert("issuer".into(), serde_json::Value::String("hmn:x".into()));
+    let result = cairn_mcp::prelude_tools::dispatch("handshake", Some(args), None, true).await;
+    assert_eq!(
+        result.is_error,
+        Some(true),
+        "no sqlite store must return isError=true"
+    );
+}
+
+/// `dispatch` with `replay_challenge_wired = false` returns
+/// capability-unavailable for the held-back replay-challenge capability.
+/// Pins the central gate without depending on the `REPLAY_CHALLENGE_WIRED`
+/// const's current value.
+#[tokio::test]
+async fn dispatch_returns_capability_unavailable_when_flag_false() {
+    let (_handler, store) = build_handler_wired().await;
+    let mut args = serde_json::Map::new();
+    args.insert("issuer".into(), serde_json::Value::String("hmn:x".into()));
+    let result =
+        cairn_mcp::prelude_tools::dispatch("handshake", Some(args), Some(store.clone()), false)
+            .await;
+    assert_eq!(result.is_error, Some(true));
+    let text = result
+        .content
+        .first()
+        .and_then(|c| match &**c {
+            rmcp::model::RawContent::Text(t) => Some(t.text.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    assert!(
+        text.contains("cairn.mcp.v1.replay.challenge"),
+        "error text must name the held-back capability; got: {text}"
     );
 }

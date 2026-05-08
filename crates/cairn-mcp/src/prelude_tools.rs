@@ -18,6 +18,19 @@
 //! without a sqlite store therefore omit `handshake` from `tools/list` —
 //! brief §15 fail-closed: never advertise a capability that cannot be
 //! honored end-to-end.
+//!
+//! `handshake` is additionally gated on
+//! [`cairn_core::status::wiring::REPLAY_CHALLENGE_WIRED`]. While that flag is
+//! `false`, no signed-mutation path routes through `prepare_wal_with_replay`
+//! to consume a persisted nonce — minting one would let clients accumulate
+//! rows they cannot redeem through any shipped MCP verb, contradicting the
+//! `cairn.mcp.v1.replay.challenge` capability still held back from
+//! `status.capabilities`. The CLI's `cairn handshake --issuer` mirrors this
+//! posture by emitting a stderr warning; MCP clients are programs that
+//! cannot read the warning, so we fail closed at the protocol surface
+//! instead. When the signed-verb wiring lands and the flag flips, this
+//! tool unblocks automatically — tests read the flag at runtime so they
+//! follow the gate.
 
 use std::sync::Arc;
 
@@ -70,16 +83,50 @@ pub fn is_prelude_tool(name: &str) -> bool {
     PRELUDE_TOOLS.iter().any(|d| d.name == name)
 }
 
+/// `true` iff the prelude tools should appear in `tools/list` and accept
+/// `tools/call` for the given runtime state. Currently equivalent to
+/// "sqlite store is wired AND `REPLAY_CHALLENGE_WIRED == true`" — both
+/// conditions are required end-to-end because the persisted nonce is
+/// only useful once a signed-verb path can redeem it via
+/// `prepare_wal_with_replay` (brief §15 fail-closed).
+///
+/// Callers pass the runtime wiring flag explicitly so unit tests can
+/// drive the dispatch path against a forced `true` value while the
+/// production path keeps the real const.
+#[must_use]
+pub fn is_enabled(sqlite_store_wired: bool, replay_challenge_wired: bool) -> bool {
+    sqlite_store_wired && replay_challenge_wired
+}
+
+fn capability_unavailable_replay_challenge() -> CallToolResult {
+    const CAP: &str = "cairn.mcp.v1.replay.challenge";
+    let mut text = format!("cairn handshake: capability unavailable: {CAP}");
+    if let Some(hint) = cairn_core::status::remediation_for(CAP) {
+        text.push_str("\n  hint: ");
+        text.push_str(hint);
+    }
+    CallToolResult::error(vec![Content::text(text)])
+}
+
 /// Dispatch a `tools/call` request whose tool name is in [`PRELUDE_TOOLS`].
 ///
 /// Returns `CallToolResult` (with `is_error` set) for routing /
 /// argument failures so the rmcp transport surfaces the failure as an
 /// MCP error-in-result rather than a JSON-RPC error frame.
+///
+/// `replay_challenge_wired` is the runtime view of
+/// [`cairn_core::status::wiring::REPLAY_CHALLENGE_WIRED`]; production
+/// callers pass that const, tests pass `true` to drive the
+/// implementation directly.
 pub async fn dispatch(
     name: &str,
     arguments: Option<serde_json::Map<String, serde_json::Value>>,
     sqlite_store: Option<Arc<SqliteMemoryStore>>,
+    replay_challenge_wired: bool,
 ) -> CallToolResult {
+    if !replay_challenge_wired {
+        return capability_unavailable_replay_challenge();
+    }
     if name == "handshake" {
         return handshake(arguments, sqlite_store).await;
     }
@@ -112,7 +159,20 @@ async fn handshake(
         }
     };
 
-    let now_ms = unix_now_ms();
+    // Fail closed on a degraded clock (pre-1970 wall clock or a duration
+    // that does not fit in i64-ms). The CSPRNG-driven nonce is fine, but
+    // a bogus `now_ms` would either drop every live row in
+    // `outstanding_challenges` (saturated-future cutoff in the purge
+    // step) or mint a never-expiring challenge — both replay-correctness
+    // failures. Round-1 review #2.
+    let now_ms = match unix_now_ms() {
+        Ok(ms) => ms,
+        Err(reason) => {
+            return CallToolResult::error(vec![Content::text(format!(
+                "cairn handshake: clock error — {reason}"
+            ))]);
+        }
+    };
     let issuer_for_tx = issuer.clone();
     let mint_outcome = store
         .with_tx(move |tx| tx.mint_challenge(&issuer_for_tx, now_ms, CHALLENGE_TTL_MS))
@@ -147,11 +207,10 @@ async fn handshake(
     }
 }
 
-fn unix_now_ms() -> i64 {
+fn unix_now_ms() -> Result<i64, &'static str> {
     use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
+    let dur = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|d| i64::try_from(d.as_millis()).ok())
-        .unwrap_or(i64::MAX)
+        .map_err(|_| "wall clock is before UNIX_EPOCH")?;
+    i64::try_from(dur.as_millis()).map_err(|_| "wall clock overflows i64-ms")
 }

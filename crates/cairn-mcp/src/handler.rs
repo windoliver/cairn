@@ -182,14 +182,20 @@ impl CairnMcpHandler {
     /// Returns the names of all tools in the current manifest.
     ///
     /// Includes the eight IDL verbs unconditionally and the `handshake`
-    /// prelude tool when a sqlite store is wired (the prelude tool can only
-    /// honor calls when a store is available to persist the minted nonce).
+    /// prelude tool when (a) a sqlite store is wired AND (b)
+    /// [`cairn_core::status::wiring::REPLAY_CHALLENGE_WIRED`] is `true`.
+    /// While the wiring flag is `false`, no signed-mutation path consumes
+    /// the persisted nonce, so listing `handshake` would let clients mint
+    /// rows they cannot redeem (brief §15 fail-closed; round-1 review #1).
     /// Graph tools are appended dynamically by `list_tools` based on a
     /// per-request scope probe — they are not listed here.
     #[must_use]
     pub fn listed_tool_names(&self) -> Vec<String> {
         let mut names: Vec<String> = TOOLS.iter().map(|t| t.name.to_string()).collect();
-        if self.sqlite_store.is_some() {
+        if crate::prelude_tools::is_enabled(
+            self.sqlite_store.is_some(),
+            cairn_core::status::wiring::REPLAY_CHALLENGE_WIRED,
+        ) {
             names.extend(
                 crate::prelude_tools::PRELUDE_TOOLS
                     .iter()
@@ -428,10 +434,15 @@ impl ServerHandler for CairnMcpHandler {
             })
             .collect();
 
-        // Prelude tools (`handshake`) — listed iff a sqlite store is wired,
-        // since the prelude needs the store to persist minted nonces. Listing
-        // an unhonorable prelude would violate brief §15 fail-closed.
-        if self.sqlite_store.is_some() {
+        // Prelude tools (`handshake`) — listed iff a sqlite store is wired
+        // AND the replay-challenge wiring flag is on. The latter pins the
+        // honest-on-wire posture: while no signed-verb path consumes the
+        // persisted nonce, advertising `handshake` would invite clients to
+        // accumulate dead rows. Round-1 review #1 / brief §15.
+        if crate::prelude_tools::is_enabled(
+            self.sqlite_store.is_some(),
+            cairn_core::status::wiring::REPLAY_CHALLENGE_WIRED,
+        ) {
             for decl in crate::prelude_tools::PRELUDE_TOOLS {
                 let schema_value: serde_json::Value = serde_json::from_slice(decl.input_schema)
                     .unwrap_or_else(|_| serde_json::json!({"type": "object", "properties": {}}));
@@ -481,13 +492,21 @@ impl ServerHandler for CairnMcpHandler {
         let request_id = context.id.to_string();
 
         async move {
-            // Prelude tool routing (`handshake`) — listed iff a sqlite store
-            // is wired; calls without a store fail closed inside dispatch.
+            // Prelude tool routing (`handshake`) — accept the call iff
+            // (a) the tool name is in PRELUDE_TOOLS, AND
+            // (b) a sqlite store is wired, AND
+            // (c) `REPLAY_CHALLENGE_WIRED` is true (read at dispatch time
+            //     so a future PR that flips the flag does not need to
+            //     touch this branch).
+            // The wired/unwired gate lives inside `prelude_tools::dispatch`
+            // so production and direct unit-test entry points share one
+            // implementation.
             if crate::prelude_tools::is_prelude_tool(name.as_ref()) {
                 return Ok(crate::prelude_tools::dispatch(
                     name.as_ref(),
                     arguments,
                     self.sqlite_store.clone(),
+                    cairn_core::status::wiring::REPLAY_CHALLENGE_WIRED,
                 )
                 .await);
             }
