@@ -42,8 +42,10 @@ pub enum SynthesizeError {
     /// the synthesizer's output validator-symmetric with the schema.
     #[error("profile subject must specify at least one of `user` or `agent`")]
     EmptySubject,
-    /// Subject string was set but empty (post-trim). The IDL constrains
-    /// both fields to `minLength: 1`.
+    /// Subject string was set but empty. The IDL constrains both
+    /// fields to `minLength: 1`. Whitespace-only strings are not
+    /// trimmed at this layer — the caller is expected to normalize
+    /// before passing.
     #[error("profile subject `{field}` must not be empty")]
     BlankSubjectField {
         /// Which subject field was blank — `user` or `agent`.
