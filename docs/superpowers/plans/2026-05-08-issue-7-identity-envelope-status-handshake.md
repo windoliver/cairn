@@ -68,6 +68,21 @@ cargo nextest run -p cairn-core --locked verifier status identity envelope_error
 
 Expected: PASS. These tests cover signed envelope validation, identity prefix correctness, status decision rules, phase pinning, and wire error mapping.
 
+- [ ] **Step 1b: Run integration-test binaries whose names do not match the broad filters**
+
+```bash
+CARGO_HOME=/tmp/codex-issue7-cargo-home \
+CARGO_TARGET_DIR=/tmp/codex-issue7-target \
+cargo nextest run -p cairn-core --locked \
+  forget_session_pinned_to_v0_2_phase \
+  forget_scope_pinned_to_v0_3_phase \
+  replay_capabilities_held_back_at_every_phase \
+  retrieve_capabilities_held_back_at_every_phase \
+  no_usr_colon_in_workspace_rust_sources
+```
+
+Expected: PASS. These tests explicitly cover `crates/cairn-core/tests/status_phase_pinning.rs` and `crates/cairn-core/tests/usr_prefix_banned.rs`; nextest does not select those integration-test binaries by filename when only broad substring filters are used.
+
 - [ ] **Step 2: If this command fails, stop execution and switch to `superpowers:systematic-debugging`**
 
 Record the exact failing test names and failure messages. Do not edit production code until a failing test is understood and can be reproduced by a narrower command.
