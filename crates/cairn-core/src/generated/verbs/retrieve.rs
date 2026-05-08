@@ -124,10 +124,19 @@ impl ::core::convert::TryFrom<RawDataProfile> for DataProfile {
             if !bytes[..4].iter().all(u8::is_ascii_digit) || bytes[4] != b'-' || !bytes[5..7].iter().all(u8::is_ascii_digit) || bytes[7] != b'-' || !bytes[8..10].iter().all(u8::is_ascii_digit) {
                 return Err("updated_at: date must be YYYY-MM-DD");
             }
+            let yyyy: u16 = (u16::from(bytes[0] - b'0')) * 1000 + (u16::from(bytes[1] - b'0')) * 100 + (u16::from(bytes[2] - b'0')) * 10 + u16::from(bytes[3] - b'0');
             let mm = (bytes[5] - b'0') * 10 + (bytes[6] - b'0');
             let dd = (bytes[8] - b'0') * 10 + (bytes[9] - b'0');
             if !(1..=12).contains(&mm) { return Err("updated_at: month out of range"); }
-            if !(1..=31).contains(&dd) { return Err("updated_at: day out of range"); }
+            let leap = yyyy.is_multiple_of(4) && (!yyyy.is_multiple_of(100) || yyyy.is_multiple_of(400));
+            let max_day: u8 = match mm {
+                1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+                4 | 6 | 9 | 11 => 30,
+                2 if leap => 29,
+                2 => 28,
+                _ => 0,
+            };
+            if dd < 1 || dd > max_day { return Err("updated_at: day out of range for month"); }
             if !matches!(bytes[10], b'T' | b't') { return Err("updated_at: expected `T` between date and time"); }
             if !bytes[11..13].iter().all(u8::is_ascii_digit) || bytes[13] != b':' || !bytes[14..16].iter().all(u8::is_ascii_digit) || bytes[16] != b':' || !bytes[17..19].iter().all(u8::is_ascii_digit) {
                 return Err("updated_at: time must be HH:MM:SS");
@@ -144,6 +153,7 @@ impl ::core::convert::TryFrom<RawDataProfile> for DataProfile {
                 let frac_start = idx;
                 while idx < bytes.len() && bytes[idx].is_ascii_digit() { idx += 1; }
                 if idx == frac_start { return Err("updated_at: fractional must have >=1 digit after `.`"); }
+                if idx - frac_start > 9 { return Err("updated_at: fractional must be <= 9 digits (ns precision)"); }
             }
             if idx < bytes.len() && matches!(bytes[idx], b'Z' | b'z') { idx += 1; }
             else if idx + 6 == bytes.len() && matches!(bytes[idx], b'+' | b'-') {

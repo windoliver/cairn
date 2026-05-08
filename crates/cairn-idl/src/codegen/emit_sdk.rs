@@ -2771,12 +2771,35 @@ fn write_retrieve_data_extra_checks(w: &mut RustWriter, type_name: &str) {
             w.line("return Err(\"updated_at: date must be YYYY-MM-DD\");");
             w.dedent();
             w.line("}");
+            // u16 year — 4-digit YYYY fits comfortably; the inline
+            // multiplications below stay under u16::MAX.
+            w.line(
+                "let yyyy: u16 = (u16::from(bytes[0] - b'0')) * 1000 + (u16::from(bytes[1] - b'0')) * 100 + (u16::from(bytes[2] - b'0')) * 10 + u16::from(bytes[3] - b'0');",
+            );
             w.line("let mm = (bytes[5] - b'0') * 10 + (bytes[6] - b'0');");
             w.line("let dd = (bytes[8] - b'0') * 10 + (bytes[9] - b'0');");
             w.line(
                 "if !(1..=12).contains(&mm) { return Err(\"updated_at: month out of range\"); }",
             );
-            w.line("if !(1..=31).contains(&dd) { return Err(\"updated_at: day out of range\"); }");
+            // Per-month max-day. Inlined Gregorian rule with leap-year
+            // correction for February — same logic as
+            // `cairn_core::domain::timestamp::days_in_month` so a value
+            // accepted here always parses domain-side.
+            w.line(
+                "let leap = yyyy.is_multiple_of(4) && (!yyyy.is_multiple_of(100) || yyyy.is_multiple_of(400));",
+            );
+            w.line("let max_day: u8 = match mm {");
+            w.indent();
+            w.line("1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,");
+            w.line("4 | 6 | 9 | 11 => 30,");
+            w.line("2 if leap => 29,");
+            w.line("2 => 28,");
+            w.line("_ => 0,");
+            w.dedent();
+            w.line("};");
+            w.line(
+                "if dd < 1 || dd > max_day { return Err(\"updated_at: day out of range for month\"); }",
+            );
             // Date/time separator (case-insensitive `T`).
             w.line(
                 "if !matches!(bytes[10], b'T' | b't') { return Err(\"updated_at: expected `T` between date and time\"); }",
@@ -2796,6 +2819,8 @@ fn write_retrieve_data_extra_checks(w: &mut RustWriter, type_name: &str) {
             w.line("if mi > 59 { return Err(\"updated_at: minute out of range\"); }");
             w.line("if ss > 59 { return Err(\"updated_at: second out of range\"); }");
             // Trailing fractional + zone — same shape as the domain parser.
+            // Cap at 9 digits (nanosecond precision); higher precision
+            // would silently truncate during chronological comparison.
             w.line("let mut idx = 19usize;");
             w.line("if idx < bytes.len() && bytes[idx] == b'.' {");
             w.indent();
@@ -2804,6 +2829,9 @@ fn write_retrieve_data_extra_checks(w: &mut RustWriter, type_name: &str) {
             w.line("while idx < bytes.len() && bytes[idx].is_ascii_digit() { idx += 1; }");
             w.line(
                 "if idx == frac_start { return Err(\"updated_at: fractional must have >=1 digit after `.`\"); }",
+            );
+            w.line(
+                "if idx - frac_start > 9 { return Err(\"updated_at: fractional must be <= 9 digits (ns precision)\"); }",
             );
             w.dedent();
             w.line("}");

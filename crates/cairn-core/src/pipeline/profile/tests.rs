@@ -663,12 +663,20 @@ fn data_profile_updated_at_validator_agrees_with_domain_parser_on_corpus() {
         ("2026-04-22T14:00:00+00:00", true),
         ("2026-04-22T14:00:00-05:30", true),
         ("2026-04-22t14:00:00z", true),
+        ("2026-04-22T14:00:00.123456789Z", true), // exactly 9 fractional digits (ns)
+        ("2024-02-29T00:00:00Z", true),           // leap-year Feb 29
+        ("2000-02-29T00:00:00Z", true),           // 2000 is leap (400-rule)
         // Rejected by both.
         ("not a date", false),
-        ("2026-04-22T14:00:00", false),       // no zone
-        ("2026-13-01T00:00:00Z", false),      // bad month
-        ("2026-04-22T24:00:00Z", false),      // bad hour
-        ("2026-04-22T14:00:00+24:00", false), // bad offset
+        ("2026-04-22T14:00:00", false),             // no zone
+        ("2026-13-01T00:00:00Z", false),            // bad month
+        ("2026-04-22T24:00:00Z", false),            // bad hour
+        ("2026-04-22T14:00:00+24:00", false),       // bad offset
+        ("2026-02-30T00:00:00Z", false),            // Feb 30: invalid for any year
+        ("2026-04-31T00:00:00Z", false),            // Apr 31: 30-day month
+        ("2026-02-29T00:00:00Z", false),            // 2026 not leap
+        ("2100-02-29T00:00:00Z", false),            // 2100 not leap (century non-400)
+        ("2026-04-22T14:00:00.1234567890Z", false), // 10 fractional digits > ns
     ];
     for (ts, expected) in corpus {
         let domain_ok = crate::domain::Rfc3339Timestamp::parse(ts).is_ok();
