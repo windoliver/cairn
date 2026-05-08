@@ -88,6 +88,9 @@ const M0049_REPLAY_CHALLENGE_MODE: &str = include_str!("sql/0049_replay_challeng
 const M0050_LOCKS_V2: &str = include_str!("sql/0050_locks_v2.sql");
 // Issue #56 round-7 fix — per-acquisition `acquisition_ulid` column.
 const M0051_LOCK_ACQUISITION_ULID: &str = include_str!("sql/0051_lock_acquisition_ulid.sql");
+// Issue #56 round-10 fix — UNIQUE constraint + sentinel-rejection trigger.
+const M0052_LOCK_ACQUISITION_ULID_UNIQUE: &str =
+    include_str!("sql/0052_lock_acquisition_ulid_unique.sql");
 
 /// Canonical SQL for migration 0020 (`workflow_jobs`). Re-exported so
 /// downstream crates (notably `cairn-workflows`, which hashes the
@@ -233,6 +236,11 @@ pub(crate) const MIGRATION_SOURCES: &[(i64, &str, &str)] = &[
         "0051_lock_acquisition_ulid",
         M0051_LOCK_ACQUISITION_ULID,
     ),
+    (
+        52,
+        "0052_lock_acquisition_ulid_unique",
+        M0052_LOCK_ACQUISITION_ULID_UNIQUE,
+    ),
 ];
 
 /// All migrations, in order. Returns a fresh `Migrations` set on every call
@@ -285,5 +293,6 @@ pub fn migrations() -> Migrations<'static> {
         M::up(M0049_REPLAY_CHALLENGE_MODE),
         M::up(M0050_LOCKS_V2),
         M::up(M0051_LOCK_ACQUISITION_ULID),
+        M::up(M0052_LOCK_ACQUISITION_ULID_UNIQUE),
     ])
 }

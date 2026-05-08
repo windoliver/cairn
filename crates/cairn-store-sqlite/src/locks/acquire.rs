@@ -19,7 +19,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rusqlite::params;
 use tokio_rusqlite::Connection;
 
-use super::error::{LockError, default_fenced_retry, default_held_retry};
+use super::error::{LockError, default_held_retry};
 use super::handle::LockHandle;
 use super::kinds::{LockMode, ResourceKey};
 
@@ -310,15 +310,12 @@ pub async fn acquire(
                 "lock acquire rejected: caller's cached incarnation does not match \
                  on-disk daemon_incarnation singleton — caller is stale"
             );
-            // Caller's cached epoch is meaningless once their incarnation is
-            // stale; report (-1, -1) sentinels so callers can distinguish the
-            // stale-incarnation case from a normal epoch-bump fence.
-            Err(LockError::Fenced {
-                resource,
-                expected_epoch: -1,
-                observed_epoch: -1,
-                retry: default_fenced_retry(),
-            })
+            // Stale incarnation is NOT recoverable by retrying acquire on
+            // the same Store — the cached `Arc<str>` won't change without
+            // a fresh `Store::open`. Surface as `NoIncarnation` (terminal,
+            // no retry hint) so callers fail-fast instead of spinning on
+            // BackoffJitter forever.
+            Err(LockError::NoIncarnation)
         }
     }
 }
@@ -626,16 +623,12 @@ mod tests {
         )
         .await
         .unwrap_err();
+        // Stale incarnation surfaces as the terminal `NoIncarnation`
+        // (not the retryable `Fenced`) so callers fail fast instead of
+        // looping on a backoff that can never succeed without reopening.
         match err {
-            LockError::Fenced {
-                expected_epoch,
-                observed_epoch,
-                ..
-            } => {
-                assert_eq!(expected_epoch, -1, "sentinel for stale-incarnation");
-                assert_eq!(observed_epoch, -1);
-            }
-            other => panic!("expected Fenced, got {other:?}"),
+            LockError::NoIncarnation => {}
+            other => panic!("expected NoIncarnation, got {other:?}"),
         }
 
         // The pre-flight check rejected before GC, so live_owner's row

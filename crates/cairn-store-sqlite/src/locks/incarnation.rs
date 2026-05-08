@@ -230,10 +230,14 @@ mod tests {
                  VALUES ('vault:test', 'NONE', 0, 0, 5)",
                 [],
             )?;
+            // Migration 0052 added a UNIQUE-non-sentinel constraint on
+            // acquisition_ulid; provide a real ULID-shaped value here.
             tx.execute(
                 "INSERT INTO lock_holders(resource, holder_id, mode_requested, \
-                   acquired_at, expires_at, acquired_epoch, owner_incarnation) \
-                 VALUES ('vault:test', 'holder_a', 'EXCLUSIVE', 0, 9999999999999, 5, ?1)",
+                   acquired_at, expires_at, acquired_epoch, owner_incarnation, \
+                   acquisition_ulid) \
+                 VALUES ('vault:test', 'holder_a', 'EXCLUSIVE', 0, 9999999999999, 5, ?1, \
+                         '01TEST_INCARNATION_HOLDER_A___')",
                 params![inc1_str],
             )?;
             tx.commit()?;
