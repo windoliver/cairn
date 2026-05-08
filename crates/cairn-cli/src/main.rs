@@ -212,7 +212,10 @@ fn main() -> ExitCode {
                 ExitCode::from(78) // EX_CONFIG
             }
         },
-        Some(("retrieve", sub)) => verbs::retrieve::run(sub),
+        Some(("retrieve", sub)) => match resolve_vault_and_config(explicit_vault.as_deref()) {
+            Ok((vault_root, _source, config)) => verbs::retrieve::run(sub, vault_root, config),
+            Err(code) => code,
+        },
         Some(("summarize", sub)) => verbs::summarize::run(sub),
         Some(("assemble_hot", sub)) => run_assemble_hot(sub, explicit_vault.as_deref()),
         Some(("capture_trace", sub)) => match resolve_vault_and_config(explicit_vault.as_deref()) {

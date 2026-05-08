@@ -214,26 +214,56 @@ fn search_keyword_json_exits_zero_with_hits() {
 }
 
 #[test]
-fn retrieve_record_returns_capability_unavailable() {
-    assert_rejected_capability_unavailable(
-        &["retrieve", "01JXXXXXXXXXXXXXXXXXXXXXXX", "--json"],
-        "cairn.mcp.v1.retrieve.record",
-    );
-}
-
-#[test]
-fn retrieve_turn_returns_capability_unavailable() {
-    assert_rejected_capability_unavailable(
-        &[
-            "retrieve",
-            "--session",
-            "session-1",
-            "--turn",
-            "3",
+fn retrieve_record_missing_returns_committed_empty_record_envelope() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    cairn_cli::vault::bootstrap(&cairn_cli::vault::BootstrapOpts {
+        vault_path: dir.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap vault");
+    let seed = cli()
+        .current_dir(dir.path())
+        .args([
+            "ingest",
+            "--kind",
+            "reference",
+            "--body",
+            "seed default issuer",
             "--json",
-        ],
-        "cairn.mcp.v1.retrieve.turn",
+        ])
+        .output()
+        .expect("seed issuer");
+    assert_eq!(
+        seed.status.code(),
+        Some(0),
+        "seed ingest failed: {}",
+        String::from_utf8_lossy(&seed.stderr)
     );
+    let record_id = "01HQZX9F5N0000000000000000";
+    let out = cli()
+        .current_dir(dir.path())
+        .args(["retrieve", record_id, "--json"])
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run retrieve: {e}"));
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "authorized missing record should commit an empty retrieve shape, got {:?}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    let v: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("retrieve JSON parse failed: {e}\nstdout: {stdout:?}"));
+    assert_eq!(v["contract"], "cairn.mcp.v1");
+    assert_eq!(v["status"], "committed");
+    assert_eq!(v["verb"], "retrieve");
+    assert_eq!(v["target"], "record");
+    assert_eq!(v["data"]["record_id"], record_id);
+    assert_eq!(v["data"]["kind"], "unknown");
+    assert!(v["data"].get("body").is_none());
+    assert!(v["operation_id"].is_string());
+    assert!(v["policy_trace"].is_array());
 }
 
 #[test]

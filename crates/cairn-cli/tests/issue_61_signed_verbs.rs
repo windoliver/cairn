@@ -1,19 +1,26 @@
 //! Integration coverage for issue #61 signed verb response helpers.
 
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use cairn_cli::vault::{BootstrapOpts, bootstrap};
 use cairn_cli::verbs::signed::{
     aborted, committed, committed_retrieve, rejected_from_domain, response_error_code,
 };
-use cairn_core::domain::DomainError;
+use cairn_core::domain::{
+    ActorChainEntry, CaptureEvent, CaptureEventId, CaptureMode, CapturePayload, CaptureRefs,
+    ChainRole, DomainError, Identity, PayloadHash, Rfc3339Timestamp, SourceFamily,
+};
 use cairn_core::generated::common::Ulid;
 use cairn_core::generated::envelope::{
-    Response, ResponseData, ResponseStatus, ResponseVerb, RetrieveData,
+    Response, ResponseData, ResponsePolicyTraceResult, ResponseStatus, ResponseTarget,
+    ResponseVerb, RetrieveData,
 };
 use cairn_core::generated::verbs::ingest::IngestData;
 use cairn_core::generated::verbs::retrieve::DataRecord;
 use rusqlite::Connection;
+use sha2::{Digest as _, Sha256};
 
 fn cli() -> Command {
     Command::new(env!("CARGO_BIN_EXE_cairn"))
@@ -140,6 +147,239 @@ fn session_scoped_body_ingest_rejects_before_opening_store() {
 }
 
 #[test]
+fn retrieve_record_json_commits_typed_record_target() {
+    let vault = tempfile::tempdir().expect("vault");
+    bootstrap(&BootstrapOpts {
+        vault_path: vault.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap");
+
+    let ingest = cli()
+        .current_dir(vault.path())
+        .args([
+            "ingest",
+            "--kind",
+            "reference",
+            "--body",
+            "retrievable issue 61 cli body",
+            "--json",
+        ])
+        .output()
+        .expect("run ingest");
+    assert_eq!(
+        ingest.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&ingest.stderr)
+    );
+    let ingest_json: serde_json::Value = serde_json::from_slice(&ingest.stdout).expect("json");
+    let record_id = ingest_json["data"]["record_id"]
+        .as_str()
+        .expect("record_id")
+        .to_owned();
+
+    let retrieve = cli()
+        .current_dir(vault.path())
+        .args(["retrieve", &record_id, "--json"])
+        .output()
+        .expect("run retrieve");
+    assert_eq!(
+        retrieve.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&retrieve.stderr)
+    );
+    let resp: Response = serde_json::from_slice(&retrieve.stdout).expect("response");
+    assert_eq!(resp.status, ResponseStatus::Committed);
+    assert_eq!(resp.verb, ResponseVerb::Retrieve);
+    assert_eq!(resp.target, Some(ResponseTarget::Record));
+    assert!(resp.policy_trace.iter().any(|entry| {
+        entry.gate == "read.visibility" && entry.result == ResponsePolicyTraceResult::Pass
+    }));
+    let Some(ResponseData::Retrieve(RetrieveData::Record(data))) = resp.data else {
+        panic!("retrieve record must return typed record data");
+    };
+    assert_eq!(data.record_id.0, record_id);
+    assert_eq!(data.kind, "reference");
+    assert_eq!(data.body.as_deref(), Some("retrievable issue 61 cli body"));
+}
+
+#[test]
+fn retrieve_record_rejects_incompatible_include_before_opening_store() {
+    let vault = tempfile::tempdir().expect("vault");
+    bootstrap(&BootstrapOpts {
+        vault_path: vault.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap");
+    let db_path = vault.path().join(".cairn/cairn.db");
+    assert!(!db_path.exists(), "bootstrap should not create store DB");
+
+    let retrieve = cli()
+        .current_dir(vault.path())
+        .args([
+            "retrieve",
+            "01HQZX9F5N0000000000000000",
+            "--include",
+            "reasoning",
+            "--json",
+        ])
+        .output()
+        .expect("run retrieve");
+    assert_eq!(
+        retrieve.status.code(),
+        Some(64),
+        "stderr={}",
+        String::from_utf8_lossy(&retrieve.stderr)
+    );
+    let resp: Response = serde_json::from_slice(&retrieve.stdout).expect("response");
+    assert_eq!(resp.status, ResponseStatus::Rejected);
+    assert_eq!(response_error_code(&resp), Some("InvalidArgs"));
+    assert!(!db_path.exists(), "arg reject must happen before DB open");
+}
+
+#[test]
+fn retrieve_record_rejects_unknown_issuer_before_returning_data() {
+    let vault = tempfile::tempdir().expect("vault");
+    bootstrap(&BootstrapOpts {
+        vault_path: vault.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap");
+    let record_id = ingest_reference(vault.path(), "issuer-gated retrieve body");
+
+    let retrieve = cli()
+        .current_dir(vault.path())
+        .env("CAIRN_ISSUER", "agt:cairn-cli:missing:reader:v1")
+        .args(["retrieve", &record_id, "--json"])
+        .output()
+        .expect("run retrieve");
+    assert_eq!(
+        retrieve.status.code(),
+        Some(64),
+        "stderr={}",
+        String::from_utf8_lossy(&retrieve.stderr)
+    );
+    let resp: Response = serde_json::from_slice(&retrieve.stdout).expect("response");
+    assert_eq!(resp.status, ResponseStatus::Rejected);
+    assert_eq!(resp.verb, ResponseVerb::Retrieve);
+    assert!(resp.data.is_none());
+    assert_eq!(response_error_code(&resp), Some("Unauthorized"));
+}
+
+#[test]
+fn retrieve_scope_excludes_rows_outside_requested_scope() {
+    let vault = tempfile::tempdir().expect("vault");
+    bootstrap(&BootstrapOpts {
+        vault_path: vault.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap");
+    let record_id = ingest_reference(vault.path(), "scoped retrieve body");
+
+    let in_scope = cli()
+        .current_dir(vault.path())
+        .args(["retrieve", "--scope", r#"{"entity":"ingest"}"#, "--json"])
+        .output()
+        .expect("run retrieve scope");
+    assert_eq!(
+        in_scope.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&in_scope.stderr)
+    );
+    let resp: Response = serde_json::from_slice(&in_scope.stdout).expect("response");
+    assert_eq!(resp.status, ResponseStatus::Committed);
+    assert_eq!(resp.target, Some(ResponseTarget::Scope));
+    let Some(ResponseData::Retrieve(RetrieveData::Scope(data))) = resp.data else {
+        panic!("retrieve scope must return scope data");
+    };
+    assert!(data.items.iter().any(|item| item.record_id.0 == record_id));
+
+    let out_of_scope = cli()
+        .current_dir(vault.path())
+        .args(["retrieve", "--scope", r#"{"entity":"other"}"#, "--json"])
+        .output()
+        .expect("run retrieve scope");
+    assert_eq!(
+        out_of_scope.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out_of_scope.stderr)
+    );
+    let resp: Response = serde_json::from_slice(&out_of_scope.stdout).expect("response");
+    let Some(ResponseData::Retrieve(RetrieveData::Scope(data))) = resp.data else {
+        panic!("retrieve scope must return scope data");
+    };
+    assert!(data.items.is_empty());
+}
+
+#[test]
+fn retrieve_session_after_capture_trace_honors_scope_and_limit() {
+    const SESSION_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let vault = tempfile::tempdir().expect("vault");
+    bootstrap(&BootstrapOpts {
+        vault_path: vault.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap");
+    let _ = ingest_reference(vault.path(), "seed default issuer before retrieve");
+    let trace_path = write_issue_61_trace_fixture(vault.path(), SESSION_ID);
+
+    let capture = cli()
+        .current_dir(vault.path())
+        .args([
+            "capture_trace",
+            "--from",
+            trace_path.to_str().expect("utf-8 trace path"),
+            "--json",
+        ])
+        .output()
+        .expect("run capture_trace");
+    assert_eq!(
+        capture.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&capture.stderr)
+    );
+
+    let retrieve = cli()
+        .current_dir(vault.path())
+        .args([
+            "retrieve",
+            "--session",
+            SESSION_ID,
+            "--limit",
+            "2",
+            "--order",
+            "asc",
+            "--json",
+        ])
+        .output()
+        .expect("run retrieve session");
+    assert_eq!(
+        retrieve.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&retrieve.stderr)
+    );
+    let resp: Response = serde_json::from_slice(&retrieve.stdout).expect("response");
+    let Some(ResponseData::Retrieve(RetrieveData::Session(data))) = resp.data else {
+        panic!("retrieve session must return session data");
+    };
+    assert_eq!(data.items.len(), 2);
+    assert_eq!(
+        data.items[0].content.as_deref(),
+        Some("first trace message")
+    );
+    assert_eq!(
+        data.items[1].content.as_deref(),
+        Some("second trace message")
+    );
+}
+
+#[test]
 fn invalid_signature_maps_to_rejected_unauthorized() {
     let resp = rejected_from_domain(ResponseVerb::Ingest, DomainError::InvalidSignature);
     assert_eq!(resp.status, ResponseStatus::Rejected);
@@ -244,4 +484,113 @@ fn assert_response_round_trips(resp: &Response) {
 
 fn fixed_ulid() -> Ulid {
     Ulid("01HQZX9F5N0000000000000000".to_owned())
+}
+
+fn ingest_reference(vault: &Path, body: &str) -> String {
+    let ingest = cli()
+        .current_dir(vault)
+        .args(["ingest", "--kind", "reference", "--body", body, "--json"])
+        .output()
+        .expect("run ingest");
+    assert_eq!(
+        ingest.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&ingest.stderr)
+    );
+    let ingest_json: serde_json::Value = serde_json::from_slice(&ingest.stdout).expect("json");
+    ingest_json["data"]["record_id"]
+        .as_str()
+        .expect("record_id")
+        .to_owned()
+}
+
+fn write_issue_61_trace_fixture(vault: &Path, session_id: &str) -> PathBuf {
+    let events = [
+        (
+            "01ARZ3NDEKTSV4RRFFQ69G5FAA",
+            "first trace message",
+            "2026-05-02T00:00:01Z",
+        ),
+        (
+            "01ARZ3NDEKTSV4RRFFQ69G5FAB",
+            "second trace message",
+            "2026-05-02T00:00:02Z",
+        ),
+        (
+            "01ARZ3NDEKTSV4RRFFQ69G5FAC",
+            "third trace message",
+            "2026-05-02T00:00:03Z",
+        ),
+    ];
+    let trace_path = vault.join("issue-61-trace.jsonl");
+    let mut jsonl = std::fs::File::create(&trace_path).expect("create trace jsonl");
+    for (event_id, body, timestamp) in events {
+        let payload_ref = write_trace_source(vault, event_id, body);
+        let event = capture_trace_event(
+            event_id,
+            session_id,
+            "turn-limit",
+            timestamp,
+            &payload_ref,
+            body,
+        );
+        writeln!(
+            jsonl,
+            "{}",
+            serde_json::to_string(&event).expect("event json")
+        )
+        .expect("write trace event");
+    }
+    trace_path
+}
+
+fn write_trace_source(vault: &Path, event_id: &str, body: &str) -> String {
+    let dir = vault.join("sources").join("hook");
+    std::fs::create_dir_all(&dir).expect("create sources/hook");
+    let filename = format!("{event_id}.txt");
+    std::fs::write(dir.join(&filename), body).expect("write trace source");
+    format!("sources/hook/{filename}")
+}
+
+fn capture_trace_event(
+    event_id: &str,
+    session_id: &str,
+    turn_id: &str,
+    timestamp: &str,
+    payload_ref: &str,
+    body: &str,
+) -> CaptureEvent {
+    let sensor =
+        Identity::parse("snr:local:hook:cc-session:v1").expect("invariant: valid sensor id");
+    CaptureEvent {
+        event_id: CaptureEventId::parse(event_id).expect("invariant: valid ULID"),
+        sensor_id: sensor.clone(),
+        capture_mode: CaptureMode::Auto,
+        actor_chain: vec![ActorChainEntry {
+            role: ChainRole::Author,
+            identity: sensor,
+            at: Rfc3339Timestamp::parse(timestamp).expect("invariant: valid RFC-3339"),
+        }],
+        refs: Some(CaptureRefs {
+            session_id: Some(session_id.to_owned()),
+            turn_id: Some(turn_id.to_owned()),
+            tool_id: None,
+        }),
+        payload_hash: PayloadHash::parse(format!("sha256:{}", sha256_hex(body)))
+            .expect("invariant: valid payload hash"),
+        payload_ref: payload_ref.to_owned(),
+        captured_at: Rfc3339Timestamp::parse(timestamp).expect("invariant: valid RFC-3339"),
+        payload: CapturePayload::Hook {
+            hook_name: "UserPromptSubmit".to_owned(),
+            tool_name: None,
+        },
+        source_family: SourceFamily::Hook,
+    }
+}
+
+fn sha256_hex(text: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(text.as_bytes());
+    format!("{:x}", hasher.finalize())
 }

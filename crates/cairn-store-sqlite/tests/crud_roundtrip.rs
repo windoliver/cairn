@@ -8,7 +8,7 @@
 //! - `versions` exposes the full per-target history including superseded rows.
 
 use cairn_core::contract::memory_store::{ListArgs, MemoryStore};
-use cairn_core::domain::MemoryRecord;
+use cairn_core::domain::{MemoryRecord, ScopeTuple};
 use cairn_store_sqlite::open_in_memory;
 
 fn base() -> MemoryRecord {
@@ -63,6 +63,66 @@ async fn list_returns_inserted_records_newest_first() {
         .await
         .expect("list");
     assert_eq!(page.records.len(), 2);
+}
+
+#[tokio::test]
+async fn list_filters_by_scope_and_visibility_in_store_query() {
+    let store = open_in_memory().await.expect("open");
+    let mut in_scope = base();
+    in_scope.id = cairn_core::domain::RecordId::parse("01HQZX9F5N0000000000000010").expect("valid");
+    in_scope.target_id =
+        cairn_core::domain::TargetId::parse("01HQZX9F5N0000000000000010").expect("valid");
+    in_scope.scope = ScopeTuple {
+        tenant: Some("default".to_owned()),
+        workspace: Some("test-vault".to_owned()),
+        entity: Some("ingest".to_owned()),
+        ..ScopeTuple::default()
+    };
+    in_scope.visibility = cairn_core::domain::MemoryVisibility::Private;
+
+    let mut wrong_scope = base();
+    wrong_scope.id =
+        cairn_core::domain::RecordId::parse("01HQZX9F5N0000000000000011").expect("valid");
+    wrong_scope.target_id =
+        cairn_core::domain::TargetId::parse("01HQZX9F5N0000000000000011").expect("valid");
+    wrong_scope.scope = ScopeTuple {
+        tenant: Some("other".to_owned()),
+        workspace: Some("test-vault".to_owned()),
+        entity: Some("ingest".to_owned()),
+        ..ScopeTuple::default()
+    };
+    wrong_scope.visibility = cairn_core::domain::MemoryVisibility::Private;
+
+    let mut wrong_visibility = base();
+    wrong_visibility.id =
+        cairn_core::domain::RecordId::parse("01HQZX9F5N0000000000000012").expect("valid");
+    wrong_visibility.target_id =
+        cairn_core::domain::TargetId::parse("01HQZX9F5N0000000000000012").expect("valid");
+    wrong_visibility.scope = in_scope.scope.clone();
+    wrong_visibility.visibility = cairn_core::domain::MemoryVisibility::Public;
+
+    store.upsert(&in_scope).await.expect("upsert in_scope");
+    store
+        .upsert(&wrong_scope)
+        .await
+        .expect("upsert wrong_scope");
+    store
+        .upsert(&wrong_visibility)
+        .await
+        .expect("upsert wrong_visibility");
+
+    let page = store
+        .list(&ListArgs {
+            scope: Some(in_scope.scope.clone()),
+            visibility_allowlist: vec![cairn_core::domain::MemoryVisibility::Private],
+            limit: 10,
+            ..ListArgs::default()
+        })
+        .await
+        .expect("list");
+
+    assert_eq!(page.records.len(), 1);
+    assert_eq!(page.records[0].id, in_scope.id);
 }
 
 #[tokio::test]

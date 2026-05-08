@@ -28,7 +28,7 @@ use anyhow::Context as _;
 use cairn_core::config::CairnConfig;
 use cairn_core::domain::capture::CaptureEvent;
 use cairn_core::domain::trace::{TraceEvent, TraceLink};
-use cairn_core::domain::{CaptureEventId, SessionId};
+use cairn_core::domain::{CaptureEventId, ScopeTuple, SessionId};
 use cairn_core::generated::common::Ulid as WireUlid;
 use cairn_core::generated::envelope::{
     Response, ResponseData, ResponsePolicyTrace, ResponseStatus, ResponseVerb,
@@ -50,6 +50,9 @@ use ulid::Ulid;
 use crate::identity::{guard::refuse_if_degraded, status::ReconciliationReport};
 
 use super::envelope::{emit_json, human_error, invalid_args_response, new_operation_id};
+
+const DEFAULT_TENANT: &str = "default";
+const CAPTURE_TRACE_ENTITY: &str = "ingest";
 
 /// Result returned by [`run_handler`] on success.
 #[derive(Debug, serde::Serialize)]
@@ -129,6 +132,25 @@ pub async fn run_handler(
     store: &SqliteMemoryStore,
     vault_root: &Path,
     from: &Path,
+) -> anyhow::Result<CaptureTraceResponse> {
+    run_handler_inner(store, vault_root, from, None).await
+}
+
+/// Persist a JSONL batch while binding projected rows to a verified vault scope.
+pub async fn run_handler_with_scope(
+    store: &SqliteMemoryStore,
+    vault_root: &Path,
+    from: &Path,
+    scope_binding: ScopeTuple,
+) -> anyhow::Result<CaptureTraceResponse> {
+    run_handler_inner(store, vault_root, from, Some(&scope_binding)).await
+}
+
+async fn run_handler_inner(
+    store: &SqliteMemoryStore,
+    vault_root: &Path,
+    from: &Path,
+    scope_binding: Option<&ScopeTuple>,
 ) -> anyhow::Result<CaptureTraceResponse> {
     // §3.5 trust-boundary guard.
     refuse_if_degraded(&ReconciliationReport::default(), vec![])
@@ -378,7 +400,7 @@ pub async fn run_handler(
             // `for` iteration scope.
             let resolved = ResolvedBody::from_trace_hook(&text);
 
-            let record = match project(event, classified, &resolved, &link) {
+            let mut record = match project(event, classified, &resolved, &link) {
                 Ok(r) => r,
                 Err(e) => {
                     failed_turns.push((
@@ -390,6 +412,9 @@ pub async fn run_handler(
                     break;
                 }
             };
+            if let Some(scope_binding) = scope_binding {
+                bind_record_scope(&mut record, scope_binding);
+            }
             policy_trace_entries.push(PolicyTraceEntry::pass(PolicyGate::VisibilityFloor));
 
             if needs_store_lookup {
@@ -502,6 +527,27 @@ pub async fn run_handler(
         failed_turns,
         policy_trace: to_wire(&policy_trace_entries),
     })
+}
+
+fn bind_record_scope(record: &mut cairn_core::domain::MemoryRecord, scope_binding: &ScopeTuple) {
+    if let Some(value) = &scope_binding.tenant {
+        record.scope.tenant = Some(value.clone());
+    }
+    if let Some(value) = &scope_binding.workspace {
+        record.scope.workspace = Some(value.clone());
+    }
+    if let Some(value) = &scope_binding.project {
+        record.scope.project = Some(value.clone());
+    }
+    if let Some(value) = &scope_binding.entity {
+        record.scope.entity = Some(value.clone());
+    }
+    if let Some(value) = &scope_binding.user {
+        record.scope.user = Some(value.clone());
+    }
+    if let Some(value) = &scope_binding.agent {
+        record.scope.agent = Some(value.clone());
+    }
 }
 
 /// Read the payload bytes referenced by `event.payload_ref` from disk
@@ -641,7 +687,13 @@ async fn run_async(from: PathBuf, vault_root: PathBuf, config: CairnConfig) -> R
             Ok(ctx) => ctx,
             Err(resp) => return resp,
         };
-    match run_handler(&ctx.store, &ctx.vault_root, &from).await {
+    let scope_binding = ScopeTuple {
+        tenant: Some(DEFAULT_TENANT.to_owned()),
+        workspace: Some(ctx.config.vault.name.clone()),
+        entity: Some(CAPTURE_TRACE_ENTITY.to_owned()),
+        ..ScopeTuple::default()
+    };
+    match run_handler_with_scope(&ctx.store, &ctx.vault_root, &from, scope_binding).await {
         Ok(result) => {
             let failed_turns = public_failed_turns(result.failed_turns);
             let data = CaptureTraceData {

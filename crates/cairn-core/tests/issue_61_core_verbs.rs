@@ -1,9 +1,12 @@
 //! Core ingest verb regression tests for issue 61.
 
 use cairn_core::domain::{DomainError, MemoryKind};
+use cairn_core::generated::envelope::RetrieveData;
 use cairn_core::generated::verbs::ingest::IngestArgs;
+use cairn_core::generated::verbs::retrieve::TurnItemRole;
 use cairn_core::pipeline::filter::Decision;
 use cairn_core::verbs::ingest::{PreparedIngest, prepare_ingest_body};
+use cairn_core::verbs::retrieve::{profile_data, record_data, turn_data_with_options};
 
 mod issue_61_core_verbs {
     use super::*;
@@ -135,5 +138,174 @@ mod issue_61_core_verbs {
         args.body = None;
         let err = prepare_ingest_body(&args, "agt:test:writer:v1").unwrap_err();
         assert!(matches!(err, DomainError::MalformedCapture { .. }));
+    }
+
+    #[test]
+    fn retrieve_record_data_uses_generated_shape() {
+        let record = sample_core_record(
+            "retrievable issue 61 body",
+            serde_json::json!({"source": "retrieve-test"}),
+        );
+
+        let data = record_data(&record);
+        let RetrieveData::Record(record_data) = data else {
+            panic!("record_data must return RetrieveData::Record");
+        };
+
+        assert_eq!(record_data.record_id.0, record.id.as_str());
+        assert_eq!(record_data.kind, "reference");
+        assert_eq!(
+            record_data.body.as_deref(),
+            Some("retrievable issue 61 body")
+        );
+        assert_eq!(
+            record_data.frontmatter,
+            Some(serde_json::json!({"source": "retrieve-test"}))
+        );
+    }
+
+    #[test]
+    fn retrieve_turn_include_flags_control_optional_fields() {
+        let mut record = sample_core_record(
+            "reasoning and tool call body",
+            serde_json::json!({"source": "retrieve-test"}),
+        );
+        record.kind = MemoryKind::Reasoning;
+        record
+            .extra_frontmatter
+            .insert("trace_event".to_owned(), serde_json::json!("pre_tool"));
+        record.extra_frontmatter.insert(
+            "trace".to_owned(),
+            serde_json::json!({
+                "turn_id": "turn-include",
+                "tool_call_id": "call-include"
+            }),
+        );
+
+        let no_include = turn_data_with_options(
+            "session-include".to_owned(),
+            "turn-include".to_owned(),
+            &[record.clone()],
+            false,
+            false,
+        );
+        let RetrieveData::Turn(no_include) = no_include else {
+            panic!("expected turn data");
+        };
+        assert_eq!(no_include.turn[0].role, TurnItemRole::Tool);
+        assert_eq!(no_include.turn[0].content, None);
+        assert_eq!(no_include.turn[0].reasoning, None);
+        assert_eq!(no_include.turn[0].tool_calls, None);
+
+        let with_include = turn_data_with_options(
+            "session-include".to_owned(),
+            "turn-include".to_owned(),
+            &[record],
+            true,
+            true,
+        );
+        let RetrieveData::Turn(with_include) = with_include else {
+            panic!("expected turn data");
+        };
+        assert_eq!(
+            with_include.turn[0].content.as_deref(),
+            Some("reasoning and tool call body")
+        );
+        assert_eq!(
+            with_include.turn[0].reasoning.as_deref(),
+            Some("reasoning and tool call body")
+        );
+        assert_eq!(
+            with_include.turn[0]
+                .tool_calls
+                .as_ref()
+                .and_then(|calls| calls
+                    .first()
+                    .and_then(|call| call.get("tool_call_id"))
+                    .and_then(serde_json::Value::as_str)),
+            Some("call-include")
+        );
+    }
+
+    #[test]
+    fn retrieve_profile_synthesizes_static_and_dynamic_sections() {
+        let mut static_record = sample_core_record(
+            "profile static body",
+            serde_json::json!({
+                "profile_static": {
+                    "timezone": "America/Los_Angeles"
+                }
+            }),
+        );
+        static_record.scope.user = Some("hmn:alice".to_owned());
+        let mut dynamic_record = sample_core_record(
+            "profile dynamic body",
+            serde_json::json!({
+                "profile": {
+                    "dynamic": {
+                        "current_project": "cairn"
+                    }
+                }
+            }),
+        );
+        dynamic_record.scope.user = Some("hmn:alice".to_owned());
+        let mut older_static_record = sample_core_record(
+            "older profile static body",
+            serde_json::json!({
+                "profile_static": {
+                    "timezone": "UTC"
+                }
+            }),
+        );
+        older_static_record.scope.user = Some("hmn:alice".to_owned());
+
+        let data = profile_data(
+            Some("hmn:alice".to_owned()),
+            None,
+            &[static_record, dynamic_record, older_static_record],
+        );
+        let RetrieveData::Profile(profile) = data else {
+            panic!("expected profile data");
+        };
+        assert_eq!(profile.subject.user.as_deref(), Some("hmn:alice"));
+        assert_eq!(
+            profile.r#static.key_facts.preferences[0].value,
+            "timezone: America/Los_Angeles"
+        );
+        assert_eq!(
+            profile.dynamic.key_facts.current_issues[0].value,
+            "current_project: cairn"
+        );
+        assert_eq!(profile.r#static.key_facts.preferences[0].evidence.len(), 1);
+        assert_eq!(
+            profile.dynamic.key_facts.current_issues[0].evidence.len(),
+            1
+        );
+    }
+
+    fn sample_core_record(
+        body: &str,
+        frontmatter: serde_json::Value,
+    ) -> cairn_core::domain::MemoryRecord {
+        let args = IngestArgs {
+            body: Some(body.to_owned()),
+            dry_run: None,
+            file: None,
+            folder: None,
+            frontmatter: Some(frontmatter),
+            human_review: None,
+            kind: "reference".to_owned(),
+            no_cache: None,
+            no_diff: None,
+            session_id: None,
+            tags: None,
+            url: None,
+        };
+        let PreparedIngest::Proceed { record, .. } =
+            prepare_ingest_body(&args, "agt:test:writer:v1").expect("prepare record")
+        else {
+            panic!("sample body should pass filters");
+        };
+        record
     }
 }
