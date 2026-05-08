@@ -193,6 +193,16 @@ cargo nextest run -p cairn-cli --locked handshake status sdk_cli_parity
 
 Expected: PASS. This covers fresh CLI handshake nonces, CLI/SDK shape parity, status snapshots, and status capability stability.
 
+- [ ] **Step 1b: Run CLI status snapshot target explicitly**
+
+```bash
+CARGO_HOME=/tmp/codex-issue7-task3-cargo-home \
+CARGO_TARGET_DIR=/tmp/codex-issue7-task3-target \
+cargo nextest run -p cairn-cli --locked --test status_snapshot_insta
+```
+
+Expected: PASS. The broad Step 1 filters exercise CLI prelude/status paths, but this command ensures every insta snapshot case in `crates/cairn-cli/tests/status_snapshot_insta.rs` runs.
+
 - [ ] **Step 2: Run MCP prelude/status tests**
 
 ```bash
@@ -203,6 +213,16 @@ cargo nextest run -p cairn-mcp --locked handshake init_status
 
 Expected: PASS. This covers MCP initialize/status parity and handshake tool capability gating.
 
+- [ ] **Step 2b: Run MCP handshake/status target binaries explicitly**
+
+```bash
+CARGO_HOME=/tmp/codex-issue7-task3-cargo-home \
+CARGO_TARGET_DIR=/tmp/codex-issue7-task3-target \
+cargo nextest run -p cairn-mcp --locked --test handshake_tool --test init_status_parity
+```
+
+Expected: PASS. This command runs the complete `handshake_tool` and `init_status_parity` integration-test binaries.
+
 - [ ] **Step 3: Run SDK surface tests for handshake and capability fail-closed behavior**
 
 ```bash
@@ -212,6 +232,16 @@ cargo nextest run -p cairn-sdk --locked handshake CapabilityUnavailable status
 ```
 
 Expected: PASS. This covers SDK fresh handshake nonces, capability rejection paths, and SDK status output.
+
+- [ ] **Step 3b: Run SDK surface and search dispatch target binaries explicitly**
+
+```bash
+CARGO_HOME=/tmp/codex-issue7-task3-cargo-home \
+CARGO_TARGET_DIR=/tmp/codex-issue7-task3-target \
+cargo nextest run -p cairn-sdk --locked --test surface --test search_dispatch
+```
+
+Expected: PASS. This command runs the complete SDK surface and search-dispatch integration-test binaries named in the file list.
 
 - [ ] **Step 4: If status parity fails, patch the single source of truth first**
 
