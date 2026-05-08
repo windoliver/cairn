@@ -872,9 +872,11 @@ fn validate_uri(s: &str) -> Result<(), SdkError> {
 
 /// Mirrors the full `ingest` JSON Schema: the IDL `validate()` covers the
 /// exactly-one-of XOR; the schema additionally pins `minLength: 1` on `body`,
-/// `file`, `url`, `kind`, `session_id`, and every `tags[*]`, and `format: uri`
-/// on `url`. The generated `TryFrom<RawIngestArgs>` only enforces the XOR,
-/// so direct Rust construction would otherwise sail past these constraints.
+/// `file`, `folder`, `url`, `kind`, `session_id`, every `include[*]`,
+/// every `exclude[*]`, and every `tags[*]`; `format: uri` on `url`; and
+/// `batch_size` in `[1, 65535]`. The generated `TryFrom<RawIngestArgs>` only
+/// enforces the XOR, so direct Rust construction would otherwise sail past
+/// these constraints.
 fn validate_ingest(args: &IngestArgs) -> Result<(), SdkError> {
     args.validate().map_err(invalid)?;
     // Brief §5.5 — `dry_run` and `human_review` are mutually exclusive.
@@ -896,8 +898,32 @@ fn validate_ingest(args: &IngestArgs) -> Result<(), SdkError> {
     {
         return Err(invalid("file: must not be empty"));
     }
+    if let Some(folder) = &args.folder
+        && folder.is_empty()
+    {
+        return Err(invalid("folder: must not be empty"));
+    }
     if let Some(url) = &args.url {
         validate_uri(url)?;
+    }
+    if let Some(include) = &args.include {
+        for pattern in include {
+            if pattern.is_empty() {
+                return Err(invalid("include[*]: must not be empty"));
+            }
+        }
+    }
+    if let Some(exclude) = &args.exclude {
+        for pattern in exclude {
+            if pattern.is_empty() {
+                return Err(invalid("exclude[*]: must not be empty"));
+            }
+        }
+    }
+    if let Some(batch_size) = args.batch_size
+        && !(1..=65_535).contains(&batch_size)
+    {
+        return Err(invalid("batch_size: must be in [1, 65535]"));
     }
     if let Some(fm) = &args.frontmatter
         && !fm.is_object()

@@ -12,6 +12,11 @@
       { "name": "file",        "long": "file",        "value_source": "path" },
       { "name": "folder",      "long": "folder",      "value_source": "path" },
       { "name": "url",         "long": "url",         "value_source": "string" },
+      { "name": "recursive",   "long": "recursive",   "value_source": "bool" },
+      { "name": "include",     "long": "include",     "value_source": "list<string>" },
+      { "name": "exclude",     "long": "exclude",     "value_source": "list<string>" },
+      { "name": "mode",        "long": "mode",        "value_source": "enum(keyword,semantic,full)" },
+      { "name": "batch_size",  "long": "batch-size",  "value_source": "u32" },
       { "name": "session_id",  "long": "session",     "value_source": "string" },
       { "name": "tags",        "long": "tags",        "value_source": "list<string>" },
       { "name": "no_cache",    "long": "no-cache",    "value_source": "bool" }
@@ -50,8 +55,44 @@
         },
         "body":  { "type": "string", "minLength": 1 },
         "file":  { "type": "string", "minLength": 1, "description": "Path on the local filesystem." },
-        "folder": { "type": "string", "minLength": 1, "description": "Folder path to ingest recursively with the extraction cache." },
+        "folder": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Folder path to ingest recursively with the extraction cache."
+        },
         "url":   { "type": "string", "format": "uri", "minLength": 1 },
+        "recursive": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether folder ingest recurses into child directories. CLI default: true."
+        },
+        "include": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Include glob patterns for folder ingest."
+        },
+        "exclude": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Exclude glob patterns for folder ingest."
+        },
+        "mode": {
+          "$ref": "#/$defs/IngestMode",
+          "oneOf": [
+            { "const": "keyword" },
+            { "const": "semantic" },
+            { "const": "full" }
+          ],
+          "default": "keyword",
+          "description": "Folder ingest extraction mode."
+        },
+        "batch_size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 64,
+          "description": "Maximum cache-miss files per FlushPlan batch."
+        },
         "session_id": { "type": "string", "minLength": 1 },
         "tags": {
           "type": "array",
@@ -87,6 +128,10 @@
         { "required": ["folder"] },
         { "required": ["url"] }
       ]
+    },
+    "IngestMode": {
+      "type": "string",
+      "enum": ["keyword", "semantic", "full"]
     },
     "Data": {
       "type": "object",

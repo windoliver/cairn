@@ -123,7 +123,7 @@ fn folder_ingest_no_cache_bypasses_lookup_but_writes_entry() {
 }
 
 #[test]
-fn folder_ingest_processes_binary_sidecars() {
+fn folder_ingest_skips_binary_sidecars_in_keyword_mode() {
     let vault = tempfile::tempdir().expect("temp vault");
     write_note(vault.path(), "body");
     fs::write(vault.path().join("docs/blob.bin"), [0xff, 0x00, 0xfe, 0x41])
@@ -131,9 +131,11 @@ fn folder_ingest_processes_binary_sidecars() {
 
     let resp = run_folder_ingest(vault.path(), false);
     assert_eq!(resp["status"], "committed");
-    assert_eq!(resp["data"]["files_processed"], 2);
-    assert_eq!(resp["data"]["cache_misses"], 2);
-    assert_eq!(resp["data"]["cache_writes"], 2);
+    assert_eq!(resp["data"]["files_processed"], 1);
+    assert_eq!(resp["data"]["cache_misses"], 1);
+    assert_eq!(resp["data"]["cache_writes"], 1);
+    assert_eq!(resp["skipped"], 1);
+    assert_eq!(resp["warnings"], 0);
 }
 
 #[cfg(unix)]

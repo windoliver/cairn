@@ -34,6 +34,13 @@ pub fn with_json(cmd: clap::Command) -> clap::Command {
     )
 }
 
+/// Adjust generated `ingest` CLI requirements that are enforced in the
+/// handler because folder ingest does not need a taxonomy kind.
+#[must_use]
+pub fn with_ingest_runtime_overrides(cmd: clap::Command) -> clap::Command {
+    cmd.mut_arg("kind", |arg| arg.required(false))
+}
+
 /// Add `--fix-markdown` flag to the `lint` subcommand.
 ///
 /// Augments the generated subcommand builder without touching generated files,
