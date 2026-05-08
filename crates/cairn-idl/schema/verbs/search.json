@@ -144,6 +144,33 @@
           "type": "array",
           "description": "Optional per-candidate score-component explanations. Present only when args.explain is true (which itself requires the cairn.mcp.v1.policy_trace capability).",
           "items": { "$ref": "#/$defs/ScoreExplain" }
+        },
+        "degraded_legs": {
+          "type": "array",
+          "description": "Per-leg degradation entries when one or more search legs (semantic, graph, or graph seed sources) failed or were unavailable. Empty/absent when every requested leg contributed. Lets callers distinguish a low-recall result from a partial-failure result without inspecting server logs.",
+          "items": { "$ref": "#/$defs/DegradedLegEntry" }
+        }
+      }
+    },
+    "DegradedLegEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["leg", "reason"],
+      "properties": {
+        "leg": {
+          "type": "string",
+          "enum": ["semantic", "graph"],
+          "description": "Which hybrid leg degraded."
+        },
+        "reason": {
+          "type": "string",
+          "enum": ["sql_error", "capability_unavailable", "timeout"],
+          "description": "Why the leg degraded."
+        },
+        "source": {
+          "type": "string",
+          "enum": ["all", "auth_keyword_seed", "auth_semantic_seed"],
+          "description": "Graph-leg only: which seed source was in flight when the leg degraded. Absent for non-graph legs."
         }
       }
     },

@@ -13,6 +13,7 @@ use crate::config::{CairnConfig, CapabilitySet};
 use crate::contract::memory_store::{
     HybridSearchArgs, KeywordSearchArgs, MemoryStore, SearchCandidate, SemanticSearchArgs,
 };
+use crate::domain::ScopeTuple;
 use crate::domain::taxonomy::MemoryVisibility;
 use crate::search::{ScoreExplain, token_budget_trim};
 
@@ -39,6 +40,10 @@ pub struct SearchRequest {
     pub limit: usize,
     /// Visibility allowlist; empty = no narrowing.
     pub visibility_allowlist: Vec<MemoryVisibility>,
+    /// Authorization scope tuple. Threaded into every search SQL path
+    /// (keyword, semantic, graph, graph-only hydration). Issue #191.
+    /// Use [`ScopeTuple::default`] when no narrowing is required.
+    pub auth_scope: ScopeTuple,
     /// Active embedding model label (for semantic + hybrid).
     pub model_label: String,
     /// `true` → request explain block from the store and surface it.
@@ -55,6 +60,13 @@ pub struct SearchOutcome {
     /// `candidates`. Populated iff `request.explain` was true and the
     /// `policy_trace` capability was advertised.
     pub explain: Option<Vec<ScoreExplain>>,
+    /// Hybrid-only: legs that ran in degraded mode (capability missing,
+    /// SQL error, deadline, etc.). Empty for keyword/semantic and for
+    /// fully successful hybrid runs. Surface code (CLI, MCP, SDK) may
+    /// thread this through to operators or callers; v1 verb dispatch
+    /// surfaces it here so partial-result signaling is not silently
+    /// dropped between the store and the wire surface. Issue #191.
+    pub degraded_legs: Vec<crate::search::DegradedLeg>,
 }
 
 /// Errors raised by the dispatcher.
@@ -148,35 +160,38 @@ pub async fn run(
         request.visibility_allowlist.clone()
     };
 
-    let (candidates, explain) = match request.mode {
+    let (candidates, explain, degraded_legs) = match request.mode {
         SearchMode::Keyword => {
             let args = KeywordSearchArgs {
                 query: request.query.clone(),
                 filter: None,
+                auth_scope: request.auth_scope.clone(),
                 visibility_allowlist: visibility,
                 limit: request.limit,
                 cursor: None,
                 with_explain: request.explain,
             };
             let page = store.search_keyword(&args).await?;
-            (page.candidates, page.explain)
+            (page.candidates, page.explain, Vec::new())
         }
         SearchMode::Semantic => {
             let args = SemanticSearchArgs {
                 query: request.query.clone(),
                 filter: None,
+                auth_scope: request.auth_scope.clone(),
                 visibility_allowlist: visibility,
                 limit: request.limit,
                 model_label: request.model_label.clone(),
                 with_explain: request.explain,
             };
             let page = store.search_semantic(&args).await?;
-            (page.candidates, page.explain)
+            (page.candidates, page.explain, Vec::new())
         }
         SearchMode::Hybrid => {
             let args = HybridSearchArgs {
                 query: request.query.clone(),
                 filter: None,
+                auth_scope: request.auth_scope.clone(),
                 visibility_allowlist: visibility,
                 limit: request.limit,
                 model_label: request.model_label.clone(),
@@ -184,9 +199,11 @@ pub async fn run(
                 rrf_k: config.search.rrf_k,
                 rerank_topk: config.search.rerank_topk,
                 with_explain: request.explain,
+                confidence_floor: 1e-3,
+                graph_confidence_min: config.search.graph_confidence_min,
             };
             let page = store.search_hybrid(&args).await?;
-            (page.candidates, page.explain)
+            (page.candidates, page.explain, page.degraded_legs)
         }
     };
 
@@ -199,6 +216,7 @@ pub async fn run(
     Ok(SearchOutcome {
         candidates,
         explain,
+        degraded_legs,
     })
 }
 
@@ -218,13 +236,14 @@ mod tests {
 
     /// Stub store that records which leg was called.
     ///
-    /// `last_hybrid` captures the `(blend, rrf_k, rerank_topk)` args from the
+    /// `last_hybrid` captures the
+    /// `(blend, rrf_k, rerank_topk, graph_confidence_min)` args from the
     /// most recent `search_hybrid` call so tests can assert config knobs
     /// flow through correctly.
     struct CallRecorder {
         calls: Mutex<Vec<&'static str>>,
         capabilities: MemoryStoreCapabilities,
-        last_hybrid: Mutex<Option<(f32, usize, usize)>>,
+        last_hybrid: Mutex<Option<(f32, usize, usize, f32)>>,
     }
 
     #[async_trait::async_trait]
@@ -300,11 +319,16 @@ mod tests {
             args: &HybridSearchArgs<'_>,
         ) -> Result<HybridSearchPage, StoreError> {
             self.calls.lock().expect("mutex").push("hybrid");
-            *self.last_hybrid.lock().expect("mutex") =
-                Some((args.blend, args.rrf_k, args.rerank_topk));
+            *self.last_hybrid.lock().expect("mutex") = Some((
+                args.blend,
+                args.rrf_k,
+                args.rerank_topk,
+                args.graph_confidence_min,
+            ));
             Ok(HybridSearchPage {
                 candidates: vec![],
                 explain: None,
+                degraded_legs: vec![],
             })
         }
     }
@@ -329,6 +353,7 @@ mod tests {
             mode,
             limit: 10,
             visibility_allowlist: vec![],
+            auth_scope: ScopeTuple::default(),
             model_label: "MiniLM-L6-v2".to_owned(),
             explain: false,
         }
@@ -344,6 +369,7 @@ mod tests {
                 graph_edges: false,
                 transactions: true,
                 per_record_consent_model: true,
+                graph_search: false,
             },
             last_hybrid: Mutex::new(None),
         };
@@ -394,6 +420,7 @@ mod tests {
                 graph_edges: false,
                 transactions: true,
                 per_record_consent_model: true,
+                graph_search: false,
             },
             last_hybrid: Mutex::new(None),
         };
@@ -407,6 +434,292 @@ mod tests {
         .await
         .expect("ok");
         assert_eq!(store.calls.lock().expect("mutex").as_slice(), &["hybrid"]);
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "stub MemoryStore impl is unavoidably wide"
+    )]
+    #[tokio::test]
+    async fn hybrid_propagates_degraded_legs_through_search_outcome() {
+        use crate::search::{DegradationReason, DegradedLeg, GraphSource};
+
+        struct DegradedHybridStore;
+
+        #[async_trait::async_trait]
+        impl MemoryStore for DegradedHybridStore {
+            fn name(&self) -> &'static str {
+                "degraded"
+            }
+            fn capabilities(&self) -> &MemoryStoreCapabilities {
+                static CAPS: MemoryStoreCapabilities = MemoryStoreCapabilities {
+                    fts: true,
+                    vector: true,
+                    graph_edges: false,
+                    transactions: true,
+                    per_record_consent_model: true,
+                    graph_search: false,
+                };
+                &CAPS
+            }
+            fn supported_contract_versions(&self) -> crate::contract::version::VersionRange {
+                use crate::contract::memory_store::CONTRACT_VERSION;
+                use crate::contract::version::ContractVersion;
+                crate::contract::version::VersionRange::new(
+                    CONTRACT_VERSION,
+                    ContractVersion::new(CONTRACT_VERSION.major, CONTRACT_VERSION.minor + 1, 0),
+                )
+            }
+            async fn upsert(
+                &self,
+                _r: &crate::domain::record::MemoryRecord,
+            ) -> Result<crate::contract::memory_store::UpsertOutcome, StoreError> {
+                unimplemented!()
+            }
+            async fn get(
+                &self,
+                _id: &crate::domain::RecordId,
+            ) -> Result<Option<crate::domain::record::MemoryRecord>, StoreError> {
+                Ok(None)
+            }
+            async fn list(
+                &self,
+                _args: &crate::contract::memory_store::ListArgs,
+            ) -> Result<crate::contract::memory_store::ListPage, StoreError> {
+                unimplemented!()
+            }
+            async fn tombstone(
+                &self,
+                _id: &crate::domain::RecordId,
+                _reason: crate::contract::memory_store::TombstoneReason,
+            ) -> Result<(), StoreError> {
+                unimplemented!()
+            }
+            async fn versions(
+                &self,
+                _t: &crate::domain::TargetId,
+            ) -> Result<Vec<crate::contract::memory_store::RecordVersion>, StoreError> {
+                Ok(vec![])
+            }
+            async fn put_edge(
+                &self,
+                _e: &crate::contract::memory_store::Edge,
+            ) -> Result<(), StoreError> {
+                unimplemented!()
+            }
+            async fn remove_edge(
+                &self,
+                _k: &crate::contract::memory_store::EdgeKey,
+            ) -> Result<bool, StoreError> {
+                Ok(false)
+            }
+            async fn neighbours(
+                &self,
+                _id: &crate::domain::RecordId,
+                _d: crate::contract::memory_store::EdgeDir,
+            ) -> Result<Vec<crate::contract::memory_store::Edge>, StoreError> {
+                Ok(vec![])
+            }
+            async fn search_keyword(
+                &self,
+                _args: &KeywordSearchArgs<'_>,
+            ) -> Result<KeywordSearchPage, StoreError> {
+                Ok(KeywordSearchPage {
+                    candidates: vec![],
+                    next_cursor: None,
+                    explain: None,
+                })
+            }
+            async fn search_semantic(
+                &self,
+                _args: &SemanticSearchArgs<'_>,
+            ) -> Result<SemanticSearchPage, StoreError> {
+                Ok(SemanticSearchPage {
+                    candidates: vec![],
+                    explain: None,
+                })
+            }
+            async fn search_hybrid(
+                &self,
+                _args: &HybridSearchArgs<'_>,
+            ) -> Result<HybridSearchPage, StoreError> {
+                Ok(HybridSearchPage {
+                    candidates: vec![],
+                    explain: None,
+                    degraded_legs: vec![DegradedLeg::Graph {
+                        reason: DegradationReason::CapabilityUnavailable,
+                        source: GraphSource::All,
+                    }],
+                })
+            }
+        }
+
+        let config = CairnConfig::default();
+        let outcome = run(
+            &DegradedHybridStore,
+            &config,
+            &caps(true, true, true),
+            req(SearchMode::Hybrid),
+        )
+        .await
+        .expect("hybrid run");
+        assert_eq!(
+            outcome.degraded_legs.len(),
+            1,
+            "hybrid must propagate store's degraded_legs through SearchOutcome"
+        );
+    }
+
+    #[tokio::test]
+    async fn keyword_outcome_has_empty_degraded_legs() {
+        let store = CallRecorder {
+            calls: Mutex::new(vec![]),
+            capabilities: MemoryStoreCapabilities::default(),
+            last_hybrid: Mutex::new(None),
+        };
+        let config = CairnConfig::default();
+        let outcome = run(
+            &store,
+            &config,
+            &caps(true, false, false),
+            req(SearchMode::Keyword),
+        )
+        .await
+        .expect("ok");
+        assert!(
+            outcome.degraded_legs.is_empty(),
+            "keyword leg never reports degraded_legs"
+        );
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "stub MemoryStore impl is unavoidably wide"
+    )]
+    #[tokio::test]
+    async fn auth_scope_threaded_into_keyword_args() {
+        use std::sync::Mutex as StdMutex;
+
+        struct ScopeRecorder {
+            captured: StdMutex<Option<ScopeTuple>>,
+        }
+        #[async_trait::async_trait]
+        impl MemoryStore for ScopeRecorder {
+            fn name(&self) -> &'static str {
+                "scope-recorder"
+            }
+            fn capabilities(&self) -> &MemoryStoreCapabilities {
+                static CAPS: MemoryStoreCapabilities = MemoryStoreCapabilities {
+                    fts: true,
+                    vector: false,
+                    graph_edges: false,
+                    transactions: true,
+                    per_record_consent_model: true,
+                    graph_search: false,
+                };
+                &CAPS
+            }
+            fn supported_contract_versions(&self) -> crate::contract::version::VersionRange {
+                use crate::contract::memory_store::CONTRACT_VERSION;
+                use crate::contract::version::ContractVersion;
+                crate::contract::version::VersionRange::new(
+                    CONTRACT_VERSION,
+                    ContractVersion::new(CONTRACT_VERSION.major, CONTRACT_VERSION.minor + 1, 0),
+                )
+            }
+            async fn upsert(
+                &self,
+                _r: &crate::domain::record::MemoryRecord,
+            ) -> Result<crate::contract::memory_store::UpsertOutcome, StoreError> {
+                unimplemented!()
+            }
+            async fn get(
+                &self,
+                _id: &crate::domain::RecordId,
+            ) -> Result<Option<crate::domain::record::MemoryRecord>, StoreError> {
+                Ok(None)
+            }
+            async fn list(
+                &self,
+                _args: &crate::contract::memory_store::ListArgs,
+            ) -> Result<crate::contract::memory_store::ListPage, StoreError> {
+                unimplemented!()
+            }
+            async fn tombstone(
+                &self,
+                _id: &crate::domain::RecordId,
+                _reason: crate::contract::memory_store::TombstoneReason,
+            ) -> Result<(), StoreError> {
+                unimplemented!()
+            }
+            async fn versions(
+                &self,
+                _t: &crate::domain::TargetId,
+            ) -> Result<Vec<crate::contract::memory_store::RecordVersion>, StoreError> {
+                Ok(vec![])
+            }
+            async fn put_edge(
+                &self,
+                _e: &crate::contract::memory_store::Edge,
+            ) -> Result<(), StoreError> {
+                unimplemented!()
+            }
+            async fn remove_edge(
+                &self,
+                _k: &crate::contract::memory_store::EdgeKey,
+            ) -> Result<bool, StoreError> {
+                Ok(false)
+            }
+            async fn neighbours(
+                &self,
+                _id: &crate::domain::RecordId,
+                _d: crate::contract::memory_store::EdgeDir,
+            ) -> Result<Vec<crate::contract::memory_store::Edge>, StoreError> {
+                Ok(vec![])
+            }
+            async fn search_keyword(
+                &self,
+                args: &KeywordSearchArgs<'_>,
+            ) -> Result<KeywordSearchPage, StoreError> {
+                *self.captured.lock().expect("mutex") = Some(args.auth_scope.clone());
+                Ok(KeywordSearchPage {
+                    candidates: vec![],
+                    next_cursor: None,
+                    explain: None,
+                })
+            }
+            async fn search_semantic(
+                &self,
+                _args: &SemanticSearchArgs<'_>,
+            ) -> Result<SemanticSearchPage, StoreError> {
+                unimplemented!()
+            }
+            async fn search_hybrid(
+                &self,
+                _args: &HybridSearchArgs<'_>,
+            ) -> Result<HybridSearchPage, StoreError> {
+                unimplemented!()
+            }
+        }
+
+        let store = ScopeRecorder {
+            captured: StdMutex::new(None),
+        };
+        let mut request = req(SearchMode::Keyword);
+        request.auth_scope = ScopeTuple {
+            tenant: Some("acme".into()),
+            ..Default::default()
+        };
+        let config = CairnConfig::default();
+        run(&store, &config, &caps(true, false, false), request)
+            .await
+            .expect("ok");
+        let captured = store.captured.lock().expect("mutex").clone();
+        assert_eq!(
+            captured.expect("captured").tenant.as_deref(),
+            Some("acme"),
+            "verb dispatcher must thread request.auth_scope into the leg's args"
+        );
     }
 
     #[tokio::test]
@@ -436,6 +749,7 @@ mod tests {
                 graph_edges: false,
                 transactions: true,
                 per_record_consent_model: true,
+                graph_search: false,
             },
             last_hybrid: Mutex::new(None),
         };
@@ -468,6 +782,7 @@ mod tests {
                 graph_edges: false,
                 transactions: true,
                 per_record_consent_model: true,
+                graph_search: false,
             },
             last_hybrid: Mutex::new(None),
         };
@@ -475,6 +790,7 @@ mod tests {
         config.search.rerank_blend = 0.42;
         config.search.rrf_k = 99;
         config.search.rerank_topk = 33;
+        config.search.graph_confidence_min = 0.7;
         run(
             &store,
             &config,
@@ -487,6 +803,11 @@ mod tests {
         assert!((captured.0 - 0.42).abs() < 1e-6, "blend mismatch");
         assert_eq!(captured.1, 99, "rrf_k mismatch");
         assert_eq!(captured.2, 33, "rerank_topk mismatch");
+        assert!(
+            (captured.3 - 0.7).abs() < 1e-6,
+            "graph_confidence_min mismatch: got {}",
+            captured.3,
+        );
     }
 
     // M4-C: token_budget_trim is invoked — oversized candidates are trimmed.
@@ -533,6 +854,7 @@ mod tests {
                     graph_edges: false,
                     transactions: true,
                     per_record_consent_model: true,
+                    graph_search: false,
                 };
                 &CAPS
             }

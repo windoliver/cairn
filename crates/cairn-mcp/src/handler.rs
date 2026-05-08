@@ -495,6 +495,10 @@ impl ServerHandler for CairnMcpHandler {
 /// derives the capability set from config, calls
 /// [`cairn_core::verbs::search::run`], and serializes the result into a
 /// [`CallToolResult`].
+#[allow(
+    clippy::too_many_lines,
+    reason = "linear arg→request→outcome→envelope flow; splitting reduces clarity"
+)]
 async fn handle_search(
     store: Arc<dyn MemoryStore>,
     config: CairnConfig,
@@ -540,11 +544,16 @@ async fn handle_search(
     caps.hybrid_search = caps.hybrid_search && store_caps.fts && store_caps.vector;
 
     let limit = args.limit.map_or(10, |l| usize::try_from(l).unwrap_or(10));
+    // Map the IDL `args.scope` into the dispatcher's auth_scope.
+    // Unsupported predicates are dropped with a tracing warn (see
+    // `scope_filter_to_tuple`).
+    let auth_scope = scope_filter_to_tuple(args.scope.as_ref());
     let request = cairn_core::verbs::search::SearchRequest {
         query: args.query.clone(),
         mode,
         limit,
         visibility_allowlist: vec![],
+        auth_scope,
         model_label: config.search.embedding_model.as_str().to_owned(),
         explain: args.explain.unwrap_or(false),
     };
@@ -580,21 +589,25 @@ async fn handle_search(
             }
         };
 
-    search_outcome_to_result(outcome)
+    search_outcome_to_result(outcome, mode)
 }
 
 /// Convert a successful [`cairn_core::verbs::search::SearchOutcome`] into the
 /// MCP [`CallToolResult`] shape.
-fn search_outcome_to_result(outcome: cairn_core::verbs::search::SearchOutcome) -> CallToolResult {
+fn search_outcome_to_result(
+    outcome: cairn_core::verbs::search::SearchOutcome,
+    mode: cairn_core::verbs::search::SearchMode,
+) -> CallToolResult {
     use cairn_core::generated::common::Ulid;
     use cairn_core::generated::verbs::search::{Hit, HitTrust, ScoreExplain, SearchData};
 
     let hits: Vec<Hit> = outcome
         .candidates
         .iter()
-        .map(|c| Hit {
+        .enumerate()
+        .map(|(idx, c)| Hit {
             record_id: Ulid(c.record_id.as_str().to_owned()),
-            score: c.bm25,
+            score: hit_score(mode, idx, c, outcome.explain.as_deref()),
             snippet: Some(c.snippet.clone()),
             citation: None,
             trust: HitTrust::Unknown,
@@ -616,11 +629,24 @@ fn search_outcome_to_result(outcome: cairn_core::verbs::search::SearchOutcome) -
             .collect()
     });
 
+    let degraded_legs = if outcome.degraded_legs.is_empty() {
+        None
+    } else {
+        Some(
+            outcome
+                .degraded_legs
+                .iter()
+                .map(degraded_leg_to_idl)
+                .collect(),
+        )
+    };
+
     let data = SearchData {
         hits,
         next_cursor: None,
         excluded: None,
         score_explain,
+        degraded_legs,
     };
 
     match serde_json::to_string(&data) {
@@ -642,6 +668,109 @@ pub fn dispatch_stub(verb: &str) -> CallToolResult {
         "cairn {verb}: not yet implemented in this P0 scaffold. \
          Verb dispatch lands in a follow-up PR; no memory operation was performed."
     ))])
+}
+
+/// Mode-appropriate score for an MCP search hit.
+///
+/// Mirrors the CLI + SDK helpers: hybrid graph-only rows have
+/// `bm25 = 0.0`, so emitting that value as the wire score would
+/// suppress them in clients that threshold or sort by score.
+/// Hybrid prefers the dispatcher's `final_score` from the explain
+/// block; fall back to a rank-derived score when explain is absent.
+fn hit_score(
+    mode: cairn_core::verbs::search::SearchMode,
+    idx: usize,
+    c: &cairn_core::contract::memory_store::SearchCandidate,
+    explain: Option<&[cairn_core::search::ScoreExplain]>,
+) -> f64 {
+    use cairn_core::verbs::search::SearchMode;
+    let raw = match mode {
+        SearchMode::Semantic => c.semantic_distance.map_or(0.0, |d| 1.0 - f64::from(d)),
+        SearchMode::Hybrid => {
+            if let Some(exps) = explain
+                && let Some(e) = exps.get(idx)
+            {
+                e.final_score
+            } else {
+                #[allow(clippy::cast_precision_loss)]
+                let rank_score = 1.0 / (1.0 + idx as f64);
+                rank_score
+            }
+        }
+        // Keyword + future variants (SearchMode is #[non_exhaustive]).
+        _ => c.bm25,
+    };
+    if raw.is_finite() { raw } else { 0.0 }
+}
+
+/// Convert a domain [`cairn_core::search::DegradedLeg`] into the IDL
+/// wire representation. Mirrors the SDK transport's helper — keep in
+/// sync with `crates/cairn-idl/schema/verbs/search.json`.
+fn degraded_leg_to_idl(
+    leg: &cairn_core::search::DegradedLeg,
+) -> cairn_core::generated::verbs::search::DegradedLegEntry {
+    use cairn_core::generated::verbs::search::{
+        DegradedLegEntry, DegradedLegEntryLeg, DegradedLegEntryReason, DegradedLegEntrySource,
+    };
+    use cairn_core::search::{DegradationReason, DegradedLeg, GraphSource};
+
+    let reason_to_idl = |r: DegradationReason| match r {
+        DegradationReason::CapabilityUnavailable => DegradedLegEntryReason::CapabilityUnavailable,
+        DegradationReason::DeadlineExceeded => DegradedLegEntryReason::Timeout,
+        _ => DegradedLegEntryReason::SqlError,
+    };
+    let source_to_idl = |s: GraphSource| match s {
+        GraphSource::AuthKeywordSeed => DegradedLegEntrySource::AuthKeywordSeed,
+        GraphSource::AuthSemanticSeed => DegradedLegEntrySource::AuthSemanticSeed,
+        _ => DegradedLegEntrySource::All,
+    };
+    match leg {
+        DegradedLeg::Semantic { reason } => DegradedLegEntry {
+            leg: DegradedLegEntryLeg::Semantic,
+            reason: reason_to_idl(*reason),
+            source: None,
+        },
+        DegradedLeg::Graph { reason, source } => DegradedLegEntry {
+            leg: DegradedLegEntryLeg::Graph,
+            reason: reason_to_idl(*reason),
+            source: Some(source_to_idl(*source)),
+        },
+        _ => DegradedLegEntry {
+            leg: DegradedLegEntryLeg::Graph,
+            reason: DegradedLegEntryReason::SqlError,
+            source: Some(DegradedLegEntrySource::All),
+        },
+    }
+}
+
+/// Map an IDL `ScopeFilter` to a domain `ScopeTuple` so MCP callers
+/// thread real auth context into the search dispatcher.
+///
+/// Mirrors the SDK transport's `scope_filter_to_tuple`. Predicates the
+/// dispatcher cannot yet honor (`kind`, `tags`, `tier`, `record_ids`)
+/// are dropped with a tracing warn rather than rejected — silently
+/// ignoring them was the prior behavior and forcing a hard error here
+/// breaks already-deployed callers. A future PR threads them into
+/// `SearchRequest.filter`.
+fn scope_filter_to_tuple(
+    sf: Option<&cairn_core::generated::common::ScopeFilter>,
+) -> cairn_core::domain::ScopeTuple {
+    let Some(sf) = sf else {
+        return cairn_core::domain::ScopeTuple::default();
+    };
+    // `kind`/`tags`/`tier`/`record_ids` fall through silently — the
+    // pre-change MCP handler ignored every scope predicate, so dropping
+    // only the un-honored subset preserves wire compatibility. A future
+    // PR threads them into `SearchRequest.filter`.
+    cairn_core::domain::ScopeTuple {
+        tenant: sf.tenant.clone(),
+        workspace: sf.workspace.clone(),
+        session_id: sf.session_id.clone(),
+        entity: sf.entity.clone(),
+        user: sf.user.clone(),
+        agent: sf.agent.clone(),
+        ..cairn_core::domain::ScopeTuple::default()
+    }
 }
 
 #[cfg(test)]

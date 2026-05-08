@@ -45,6 +45,7 @@ async fn hybrid_returns_results() {
         .search_semantic(&SemanticSearchArgs {
             query: "alice".into(),
             filter: None,
+            auth_scope: cairn_core::domain::ScopeTuple::default(),
             visibility_allowlist: vec![MemoryVisibility::Private],
             limit: 5,
             model_label: kind.as_str().to_owned(),
@@ -60,6 +61,7 @@ async fn hybrid_returns_results() {
     let args = HybridSearchArgs {
         query: "alice".into(),
         filter: None,
+        auth_scope: cairn_core::domain::ScopeTuple::default(),
         visibility_allowlist: vec![MemoryVisibility::Private],
         limit: 5,
         model_label: kind.as_str().to_owned(),
@@ -67,6 +69,8 @@ async fn hybrid_returns_results() {
         rrf_k: 60,
         rerank_topk: 20,
         with_explain: false,
+        confidence_floor: 1e-3,
+        graph_confidence_min: 0.0,
     };
     let page = store.search_hybrid(&args).await.expect("hybrid search");
     assert!(!page.candidates.is_empty(), "hybrid returned 0 results");
@@ -94,6 +98,7 @@ async fn hybrid_capability_unavailable_without_embedder() {
     let args = HybridSearchArgs {
         query: "anything".into(),
         filter: None,
+        auth_scope: cairn_core::domain::ScopeTuple::default(),
         visibility_allowlist: vec![MemoryVisibility::Private],
         limit: 5,
         model_label: EmbeddingModelKind::default().as_str().to_owned(),
@@ -101,6 +106,8 @@ async fn hybrid_capability_unavailable_without_embedder() {
         rrf_k: 60,
         rerank_topk: 20,
         with_explain: false,
+        confidence_floor: 1e-3,
+        graph_confidence_min: 0.0,
     };
     let result = store.search_hybrid(&args).await;
     assert!(result.is_err(), "expected CapabilityUnavailable");

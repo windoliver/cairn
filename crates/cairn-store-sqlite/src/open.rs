@@ -24,19 +24,29 @@ const PRAGMAS: &str = "PRAGMA journal_mode=WAL;\
      PRAGMA temp_store=MEMORY;\
      PRAGMA mmap_size=268435456;";
 
-/// Build the base capability set based on whether an embedder is present.
+/// Build the base capability set based on whether an embedder is present
+/// and whether the graph-search schema probe (run during `bootstrap`)
+/// observed every required `entity_*` table.
 ///
 /// `per_record_consent_model: true` since migration 0031 adds the
 /// per-row column and 0032 adds the timeline table — lint can rely on
 /// `list_consent_models` returning one entry per active row (Issue
 /// #253).
-fn base_caps(vector: bool) -> MemoryStoreCapabilities {
+fn base_caps(vector: bool, graph_search: bool) -> MemoryStoreCapabilities {
     MemoryStoreCapabilities {
         fts: true,
         vector,
         graph_edges: true,
         transactions: true,
         per_record_consent_model: true,
+        // Set from a runtime probe of `sqlite_master` — true only when
+        // `entity_nodes`, `entity_edges`, and `entity_episodes` are all
+        // present. Migrations 0042–0045 install these in every fresh
+        // store, but the probe protects against schema skew (a partial
+        // migration application or a stripped-down fork) where advertising
+        // the cap would let hybrid search dispatch a graph leg that fails
+        // at query time with `no such table`.
+        graph_search,
     }
 }
 
@@ -60,9 +70,10 @@ fn build_store(
     incarnation: Arc<str>,
     embedder: Option<Arc<dyn EmbeddingModel>>,
     fts_column_weights: [f64; 4],
+    graph_search: bool,
 ) -> SqliteMemoryStore {
     let vector = embedder.is_some();
-    let caps = base_caps(vector);
+    let caps = base_caps(vector, graph_search);
     let cancel = embedder.as_ref().map(|_| CancellationToken::new());
 
     if let (Some(emb), Some(tok)) = (embedder.as_ref(), cancel.as_ref()) {
@@ -158,13 +169,19 @@ pub async fn open_with_embedder_and_config(
     }
     let conn = AsyncConn::open(path).await?;
     let dim = embedder.as_ref().map(|e| e.dim());
-    bootstrap(&conn, dim).await?;
+    let graph_search = bootstrap(&conn, dim).await?;
     let conn = Arc::new(conn);
     run_boot_recovery(&conn).await?;
     let incarnation = crate::locks::init_incarnation(&conn)
         .await
         .map_err(|e| StoreError::LockInit(Box::new(e)))?;
-    Ok(build_store(conn, incarnation, embedder, fts_column_weights))
+    Ok(build_store(
+        conn,
+        incarnation,
+        embedder,
+        fts_column_weights,
+        graph_search,
+    ))
 }
 
 /// In-memory store at schema head. For tests.
@@ -202,72 +219,128 @@ pub async fn open_in_memory_with_embedder_and_config(
     register_vec0();
     let conn = AsyncConn::open_in_memory().await?;
     let dim = embedder.as_ref().map(|e| e.dim());
-    bootstrap(&conn, dim).await?;
+    let graph_search = bootstrap(&conn, dim).await?;
     let conn = Arc::new(conn);
     run_boot_recovery(&conn).await?;
     let incarnation = crate::locks::init_incarnation(&conn)
         .await
         .map_err(|e| StoreError::LockInit(Box::new(e)))?;
-    Ok(build_store(conn, incarnation, embedder, fts_column_weights))
+    Ok(build_store(
+        conn,
+        incarnation,
+        embedder,
+        fts_column_weights,
+        graph_search,
+    ))
 }
 
-async fn bootstrap(conn: &AsyncConn, vec_dim: Option<usize>) -> Result<(), StoreError> {
-    conn.call(move |c| {
-        c.execute_batch(PRAGMAS)?;
-        // Pre-flight: read-only check that already-applied migration
-        // rows agree with the compiled-in manifest. Catches a tampered
-        // `schema_migrations.sql_hash` on a pre-head DB BEFORE
-        // `to_latest` happily appends the next migration to an
-        // untrusted store.
-        preflight_migration_history(c).map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
-        migrations()
-            .to_latest(c)
-            .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
-        // Verify migration history BEFORE any schema mutation. If the
-        // on-disk DB has tampered or stale `schema_migrations.sql_hash`
-        // rows we must reject it untouched — otherwise a mismatched
-        // DB plus a different-dimension embedder would commit a
-        // DROP/CREATE on `record_vectors` and only then refuse the
-        // open, leaving a partially-mutated, untrusted store on disk.
-        verify_migration_history(c).map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
-        // Compare the requested dim to whatever is already on disk —
-        // not to `DEFAULT_VEC_DIM`. A persistent store previously
-        // bootstrapped at 1536 must be re-pointed at 384 if the next
-        // open uses a 384-dim embedder (and vice versa); skipping the
-        // resize on `dim == DEFAULT_VEC_DIM` would leave the table at
-        // 1536, then `verify_schema_fingerprint` fails because the
-        // expected DDL was hashed at 384.
-        let mut resized = false;
-        if let Some(dim) = vec_dim {
-            let current = read_record_vectors_dim(c)
+async fn bootstrap(conn: &AsyncConn, vec_dim: Option<usize>) -> Result<bool, StoreError> {
+    let graph_search = conn
+        .call(move |c| -> Result<bool, tokio_rusqlite::Error> {
+            c.execute_batch(PRAGMAS)?;
+            // Pre-flight: read-only check that already-applied migration
+            // rows agree with the compiled-in manifest. Catches a tampered
+            // `schema_migrations.sql_hash` on a pre-head DB BEFORE
+            // `to_latest` happily appends the next migration to an
+            // untrusted store.
+            preflight_migration_history(c)
                 .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
-            if current != dim {
-                resize_record_vectors(c, dim)
+            migrations()
+                .to_latest(c)
+                .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
+            // Verify migration history BEFORE any schema mutation. If the
+            // on-disk DB has tampered or stale `schema_migrations.sql_hash`
+            // rows we must reject it untouched — otherwise a mismatched
+            // DB plus a different-dimension embedder would commit a
+            // DROP/CREATE on `record_vectors` and only then refuse the
+            // open, leaving a partially-mutated, untrusted store on disk.
+            verify_migration_history(c).map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
+            // Compare the requested dim to whatever is already on disk —
+            // not to `DEFAULT_VEC_DIM`. A persistent store previously
+            // bootstrapped at 1536 must be re-pointed at 384 if the next
+            // open uses a 384-dim embedder (and vice versa); skipping the
+            // resize on `dim == DEFAULT_VEC_DIM` would leave the table at
+            // 1536, then `verify_schema_fingerprint` fails because the
+            // expected DDL was hashed at 384.
+            let mut resized = false;
+            if let Some(dim) = vec_dim {
+                let current = read_record_vectors_dim(c)
                     .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
-                resized = true;
+                if current != dim {
+                    resize_record_vectors(c, dim)
+                        .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
+                    resized = true;
+                }
             }
+            // Choose the form used to compute the expected DDL digest.
+            // - `None`: pristine migration form (no resize ever ran on this DB).
+            // - `Some(d)`: recreated form at dim `d` (this open resized, OR a
+            //   prior open did and we're observing its recreated table).
+            // The on-disk DDL string differs between the two forms (comments
+            // and whitespace from migration 0020 vs the bare CREATE we emit
+            // in `resize_record_vectors`), so the digest path must mirror
+            // whichever form is actually present.
+            let on_disk_dim = read_record_vectors_dim(c)
+                .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
+            let effective_dim = if resized || on_disk_dim != DEFAULT_VEC_DIM {
+                Some(on_disk_dim)
+            } else {
+                None
+            };
+            verify_schema_fingerprint(c, effective_dim)
+                .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
+            // Runtime probe: confirm every `entity_*` table required by the
+            // graph leg is actually present. `verify_schema_fingerprint` would
+            // already reject a tampered schema, but the explicit probe keeps
+            // the capability bit honest if a future migration removes an
+            // `entity_*` artifact, and lets the bit reflect schema state — not
+            // just "the migration manifest contained these names at compile
+            // time."
+            Ok(probe_graph_search_tables(c)?)
+        })
+        .await?;
+    Ok(graph_search)
+}
+
+/// Probe the schema surface `do_search_graph_neighbors` actually reads.
+///
+/// Verifies both that the three required tables exist in `sqlite_master`
+/// AND that every column the graph SQL touches can be prepared. Returns
+/// `true` only when both checks pass.
+///
+/// A bare `sqlite_master` table-name check is not enough: a partial
+/// migration or stripped-down fork could keep the table names but drop
+/// or rename a column the graph SQL relies on (e.g.
+/// `entity_edges.valid_at`, `.confidence_score`, `.source_record_id`,
+/// `entity_episodes.episode_id`). With only the table check the system
+/// would advertise `graph_search=true` and fail at request time with a
+/// downstream SQL error — defeating the point of the capability bit.
+fn probe_graph_search_tables(conn: &rusqlite::Connection) -> rusqlite::Result<bool> {
+    const REQUIRED: &[&str] = &["entity_nodes", "entity_edges", "entity_episodes"];
+    // Column-shape probe: prepare an always-false query that references
+    // every column the graph SQL reads. SQLite resolves column names at
+    // prepare time, so a missing/renamed column fails at `prepare` here
+    // without executing the statement or fanning out a result set.
+    const COLUMN_PROBE: &str = "SELECT \
+        e.source_id, e.target_id, e.valid_at, e.invalid_at, e.created_at, \
+        e.expired_at, e.confidence_score, e.source_record_id, \
+        ep.entity_node_id, ep.episode_id \
+        FROM entity_edges e, entity_episodes ep \
+        WHERE 0";
+    for name in REQUIRED {
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
+            [name],
+            |r| r.get(0),
+        )?;
+        if count == 0 {
+            return Ok(false);
         }
-        // Choose the form used to compute the expected DDL digest.
-        // - `None`: pristine migration form (no resize ever ran on this DB).
-        // - `Some(d)`: recreated form at dim `d` (this open resized, OR a
-        //   prior open did and we're observing its recreated table).
-        // The on-disk DDL string differs between the two forms (comments
-        // and whitespace from migration 0020 vs the bare CREATE we emit
-        // in `resize_record_vectors`), so the digest path must mirror
-        // whichever form is actually present.
-        let on_disk_dim =
-            read_record_vectors_dim(c).map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
-        let effective_dim = if resized || on_disk_dim != DEFAULT_VEC_DIM {
-            Some(on_disk_dim)
-        } else {
-            None
-        };
-        verify_schema_fingerprint(c, effective_dim)
-            .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
-        Ok(())
-    })
-    .await?;
-    Ok(())
+    }
+    if conn.prepare(COLUMN_PROBE).is_err() {
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 /// Drop and recreate the `record_vectors` vec0 virtual table at `dim`.
@@ -454,6 +527,12 @@ pub fn peek_capabilities(path: &Path) -> Result<MemoryStoreCapabilities, StoreEr
         graph_edges: has_entity_graph,
         transactions: true,
         per_record_consent_model: has_consent_timeline,
+        // Graph search needs the same `entity_*` triple as `graph_edges`;
+        // `bootstrap` runs a richer column-shape probe before advertising
+        // the cap from the async open path, but the read-only sync probe
+        // can rely on table presence — a partial migration would surface
+        // as `false` here and prompt re-migration.
+        graph_search: has_entity_graph,
     })
 }
 
@@ -612,6 +691,66 @@ mod tests {
         assert!(
             store.incarnation().is_some(),
             "open must call init_incarnation",
+        );
+    }
+}
+
+#[cfg(test)]
+mod graph_search_probe_tests {
+    use super::{probe_graph_search_tables, register_vec0};
+
+    /// Healthy migration head ⇒ probe returns true: every required
+    /// `entity_*` table is present, and the always-false column probe
+    /// statement prepares cleanly.
+    #[test]
+    fn probe_true_after_migrations_to_head() {
+        register_vec0();
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open mem");
+        crate::migrations::migrations()
+            .to_latest(&mut conn)
+            .expect("migrate");
+        assert!(
+            probe_graph_search_tables(&conn).expect("probe"),
+            "fresh head schema must satisfy graph_search probe",
+        );
+    }
+
+    /// Drop one of the required tables ⇒ probe returns false. Models a
+    /// stripped-down fork or a partial migration apply.
+    #[test]
+    fn probe_false_when_required_table_missing() {
+        register_vec0();
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open mem");
+        crate::migrations::migrations()
+            .to_latest(&mut conn)
+            .expect("migrate");
+        conn.execute_batch("DROP TABLE entity_edges")
+            .expect("drop entity_edges");
+        assert!(
+            !probe_graph_search_tables(&conn).expect("probe"),
+            "probe must report false when entity_edges is missing",
+        );
+    }
+
+    /// Drop a column the graph SQL reads ⇒ probe returns false. The
+    /// table-name check would still pass but prepare-time column
+    /// resolution fails. This is the case the round-3 column probe was
+    /// added to catch.
+    #[test]
+    fn probe_false_when_required_column_missing() {
+        register_vec0();
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open mem");
+        crate::migrations::migrations()
+            .to_latest(&mut conn)
+            .expect("migrate");
+        // SQLite ≥ 3.35 has ALTER TABLE … DROP COLUMN. Remove
+        // `confidence_score` from `entity_edges` and assert the column
+        // probe catches it.
+        conn.execute_batch("ALTER TABLE entity_edges DROP COLUMN confidence_score")
+            .expect("drop column");
+        assert!(
+            !probe_graph_search_tables(&conn).expect("probe"),
+            "probe must report false when entity_edges.confidence_score is missing",
         );
     }
 }

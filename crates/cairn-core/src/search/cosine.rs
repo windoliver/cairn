@@ -98,6 +98,91 @@ pub fn cosine_rerank<S: BuildHasher>(
     out
 }
 
+/// Where a candidate originated, for [`cosine_rerank_tagged`].
+///
+/// `Lexical` candidates have a doc vector and the cosine term blends into
+/// the final score. `GraphOnly` candidates surfaced via 1-hop entity-graph
+/// expansion only — there is no lexical match and the cosine term is
+/// dropped (rather than substituted by a neutral 0.5, which would bias
+/// graph-only candidates upward in the cosine-only blend).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CandidateOrigin {
+    /// Surfaced by the keyword and/or semantic leg; has a doc vector.
+    Lexical,
+    /// Surfaced only by the graph leg; no lexical match.
+    GraphOnly,
+}
+
+/// One [`RrfCandidate`] tagged with its origin for [`cosine_rerank_tagged`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct OriginTaggedCandidate {
+    /// The fused candidate.
+    pub inner: RrfCandidate,
+    /// Whether this candidate has a doc vector eligible for cosine.
+    pub origin: CandidateOrigin,
+}
+
+/// Origin-aware variant of [`cosine_rerank`].
+///
+/// For [`CandidateOrigin::Lexical`] candidates the formula is
+/// `blend * rrf_norm + (1 - blend) * cos_norm` where
+/// `cos_norm = (cosine_raw + 1) / 2` puts cosine in `[0, 1]` so it is
+/// commensurable with `rrf_norm`. For [`CandidateOrigin::GraphOnly`] the
+/// cosine term is dropped: `final = blend * rrf_norm`. This is symmetric
+/// — both origins use the same `blend` factor — and prevents graph-only
+/// candidates from inheriting an undue cosine boost that they did not
+/// earn lexically.
+///
+/// Returns descending by `final_score`, ties broken by record id.
+#[must_use]
+pub fn cosine_rerank_tagged<S: BuildHasher>(
+    candidates: &[OriginTaggedCandidate],
+    doc_vectors: &HashMap<RecordId, Vec<f32>, S>,
+    query_vector: &[f32],
+    blend: f32,
+) -> Vec<RerankedCandidate> {
+    let blend = f64::from(blend.clamp(0.0, 1.0));
+    let max_rrf = candidates
+        .iter()
+        .map(|c| c.inner.rrf_score)
+        .fold(0.0_f64, f64::max);
+
+    let mut out: Vec<RerankedCandidate> = candidates
+        .iter()
+        .map(|tc| {
+            let rrf_norm = if max_rrf < f64::EPSILON {
+                0.0
+            } else {
+                tc.inner.rrf_score / max_rrf
+            };
+            let raw_cos = doc_vectors
+                .get(&tc.inner.record_id)
+                .map(|v| cosine_similarity(query_vector, v));
+            let (final_score, cosine) = match tc.origin {
+                CandidateOrigin::Lexical => {
+                    let cos_norm = raw_cos.map_or(0.5, |c| f64::midpoint(c, 1.0));
+                    (blend * rrf_norm + (1.0 - blend) * cos_norm, raw_cos)
+                }
+                CandidateOrigin::GraphOnly => (blend * rrf_norm, None),
+            };
+            RerankedCandidate {
+                record_id: tc.inner.record_id.clone(),
+                rrf_score: tc.inner.rrf_score,
+                cosine,
+                final_score,
+            }
+        })
+        .collect();
+
+    out.sort_by(|a, b| {
+        b.final_score
+            .partial_cmp(&a.final_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.record_id.as_str().cmp(b.record_id.as_str()))
+    });
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,6 +300,77 @@ mod tests {
         // 0.7 * (1.0 / 1.0) + 0.3 * 0.0 = 0.70
         // Tolerance is f32-grade (see `rerank_blend_default_balances_signals`).
         assert!((out[0].final_score - 0.70).abs() < 1e-6);
+    }
+
+    #[test]
+    fn graph_only_ties_lexical_at_cosine_minus_one_equal_rrf() {
+        // Lexical doc has cosine_raw = -1 → cos_norm = 0; graph-only drops
+        // cosine. With equal RRF and same blend, both should produce the
+        // same final_score = blend * rrf_norm.
+        let mut docs: HashMap<RecordId, Vec<f32>> = HashMap::new();
+        docs.insert(rid("0A"), vec![0.0_f32, 1.0]);
+        let cands = vec![
+            OriginTaggedCandidate {
+                inner: RrfCandidate {
+                    record_id: rid("0A"),
+                    rrf_score: 0.5,
+                },
+                origin: CandidateOrigin::Lexical,
+            },
+            OriginTaggedCandidate {
+                inner: RrfCandidate {
+                    record_id: rid("0B"),
+                    rrf_score: 0.5,
+                },
+                origin: CandidateOrigin::GraphOnly,
+            },
+        ];
+        let q = vec![0.0_f32, -1.0];
+        let out = cosine_rerank_tagged(&cands, &docs, &q, 0.7);
+        assert!(
+            (out[0].final_score - out[1].final_score).abs() < 1e-9,
+            "lexical-cos-(-1) must tie graph-only"
+        );
+    }
+
+    #[test]
+    fn graph_only_loses_to_strong_lexical_at_equal_rrf() {
+        let mut docs: HashMap<RecordId, Vec<f32>> = HashMap::new();
+        docs.insert(rid("0A"), vec![1.0_f32, 0.0]);
+        let cands = vec![
+            OriginTaggedCandidate {
+                inner: RrfCandidate {
+                    record_id: rid("0A"),
+                    rrf_score: 0.5,
+                },
+                origin: CandidateOrigin::Lexical,
+            },
+            OriginTaggedCandidate {
+                inner: RrfCandidate {
+                    record_id: rid("0B"),
+                    rrf_score: 0.5,
+                },
+                origin: CandidateOrigin::GraphOnly,
+            },
+        ];
+        let q = vec![1.0_f32, 0.0];
+        let out = cosine_rerank_tagged(&cands, &docs, &q, 0.7);
+        assert_eq!(out[0].record_id, rid("0A"));
+    }
+
+    #[test]
+    fn graph_only_cosine_field_is_none() {
+        let docs: HashMap<RecordId, Vec<f32>> = HashMap::new();
+        let cands = vec![OriginTaggedCandidate {
+            inner: RrfCandidate {
+                record_id: rid("0A"),
+                rrf_score: 1.0,
+            },
+            origin: CandidateOrigin::GraphOnly,
+        }];
+        let q = vec![1.0_f32, 0.0];
+        let out = cosine_rerank_tagged(&cands, &docs, &q, 0.7);
+        assert!(out[0].cosine.is_none());
     }
 
     #[test]

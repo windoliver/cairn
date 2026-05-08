@@ -952,6 +952,7 @@ mod mcp_graph_tests {
             graph_edges: g,
             transactions: true,
             per_record_consent_model: true,
+            graph_search: g,
         }
     }
 

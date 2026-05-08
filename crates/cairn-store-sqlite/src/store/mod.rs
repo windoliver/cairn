@@ -1,11 +1,13 @@
 //! `SqliteMemoryStore` impl modules.
 
 pub(crate) mod edges;
+pub(crate) mod graph_search;
 pub(crate) mod hybrid;
 pub(crate) mod projection;
 pub(crate) mod read;
 pub(crate) mod reindex;
 pub(crate) mod reindex_from_db;
+pub(crate) mod scope_predicate;
 pub(crate) mod search;
 pub mod sessions;
 pub(crate) mod tombstone;
@@ -76,6 +78,8 @@ impl Default for SqliteMemoryStore {
                 graph_edges: true,
                 transactions: true,
                 per_record_consent_model: true,
+
+                graph_search: false,
             },
             _cancel: None,
             fts_column_weights: [10.0, 10.0, 5.0, 1.0],

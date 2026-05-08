@@ -22,7 +22,17 @@ use crate::search::ScoreExplain;
 /// `RecordVersion.schema_version` landed for the §6.4 stale-schema
 /// lint — adding required public fields is a struct-construction
 /// break, so the handshake range shifts to `[0.4.0, 0.5.0)`.
-pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 4, 0);
+/// Bumped 0.4 → 0.5 in #191 when `auth_scope: ScopeTuple` landed as
+/// a required public field on `KeywordSearchArgs`, `SemanticSearchArgs`,
+/// `HybridSearchArgs`, and the new `GraphNeighborsArgs`. Promoting
+/// `auth_scope` out of the user `filter` is the structural break:
+/// authorization now flows through a dedicated field that applies
+/// identically to lexical legs, graph traversal, and graph hydration,
+/// while `filter` keeps its narrowing-only role. The companion
+/// `MemoryStoreCapabilities::graph_search` flag and the
+/// `search_graph_neighbors` trait method (default impl returns
+/// `CapabilityUnavailable`) ship in the same bump.
+pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 5, 0);
 
 /// Errors raised by `MemoryStore` implementations. Adapters define their
 /// own concrete type (e.g. `cairn_store_sqlite::StoreError`); this is the
@@ -36,7 +46,7 @@ pub type StoreError = Box<dyn std::error::Error + Send + Sync + 'static>;
 ///
 /// Cairn queries this before dispatching ANN-, FTS-, or graph-using verbs;
 /// missing capability → `CapabilityUnavailable` (brief §4.1).
-// Four capability flags mirror the four distinct store dimensions; a state
+// Five capability flags mirror the five distinct store dimensions; a state
 // machine would add indirection with no gain here.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -56,6 +66,14 @@ pub struct MemoryStoreCapabilities {
     /// `list_consent_models` is the authoritative read path and any
     /// active record missing from its result is corruption.
     pub per_record_consent_model: bool,
+    /// Whether `search_graph_neighbors` (1-hop entity-graph expansion) is
+    /// supported. Issue #191. `false` means the hybrid orchestrator skips
+    /// the graph leg with a [`crate::search::DegradedLeg::Graph`] entry
+    /// in the response; `true` means the adapter has all of the
+    /// `entity_edges` / `entity_episodes` / `records` columns the §5.1
+    /// SQL needs (probed at startup) and `carray` / `interrupt`
+    /// extensions are loaded.
+    pub graph_search: bool,
 }
 
 /// A `MemoryRecord` at a specific store version.
@@ -287,6 +305,33 @@ pub trait MemoryStore: Send + Sync {
     ) -> Result<HybridSearchPage, StoreError> {
         let _ = args;
         Err(String::from("capability unavailable: vector").into())
+    }
+
+    /// 1-hop entity-graph neighborhood expansion (Issue #191).
+    ///
+    /// Returns records whose entities are 1-hop neighbors of the seed set
+    /// in the bitemporal entity graph, with edge confidence preserved as
+    /// the RRF weight via `GraphCandidate::edge_confidence_score`. The
+    /// orchestrator uses this as the third leg of hybrid search; see spec
+    /// §5.1 for the SQL.
+    ///
+    /// `args.auth_scope` and `args.visibility_allowlist` are applied to
+    /// BOTH the edge provenance record and the neighbor record;
+    /// `args.filter` is applied only to the neighbor (recall narrowing).
+    ///
+    /// Returns `CapabilityUnavailable` when
+    /// `capabilities().graph_search` is `false`. The default impl returns
+    /// `CapabilityUnavailable` so adapters that don't ship the §8 capability
+    /// probe compile without boilerplate.
+    ///
+    /// # Errors
+    /// Default impl returns `"capability unavailable: graph_search"`.
+    async fn search_graph_neighbors(
+        &self,
+        args: &GraphNeighborsArgs<'_>,
+    ) -> Result<Vec<crate::search::GraphCandidate>, StoreError> {
+        let _ = args;
+        Err("capability unavailable: graph_search".into())
     }
 
     // ── Lint support (#96) ────────────────────────────────────────────────────
@@ -669,10 +714,19 @@ pub struct KeywordSearchArgs<'a> {
     /// FTS error variant on `StoreError`.
     pub query: String,
     /// Pre-validated filter tree from
-    /// [`crate::domain::filter::validate_filter`]. Callers fold scope-tuple
-    /// narrowing into this tree (or rely on the `visibility_allowlist`)
-    /// before invoking the store — see [`MemoryStore::search_keyword`].
+    /// [`crate::domain::filter::validate_filter`]. Recall-narrowing only
+    /// (kind/class/tags/timestamps). Authorization predicates (scope,
+    /// visibility) MUST go through `auth_scope` and `visibility_allowlist`
+    /// — see Issue #191 for the rationale.
     pub filter: Option<ValidatedFilter<'a>>,
+    /// Authorization scope tuple — the security predicate. The store
+    /// applies it identically across this leg, the semantic leg, the
+    /// graph leg, and graph-only hydration so policy cannot drift
+    /// between retrieval paths. Use [`ScopeTuple::default()`] when no
+    /// narrowing is required; a populated tuple narrows on each
+    /// non-`None` dimension via JSON1 (`json_extract(scope, '$.tenant')
+    /// = ?`, etc.). Issue #191.
+    pub auth_scope: ScopeTuple,
     /// Visibility values the caller is allowed to see; empty = no filter.
     pub visibility_allowlist: Vec<MemoryVisibility>,
     /// Maximum number of candidates to return in this page.
@@ -719,6 +773,8 @@ pub struct SemanticSearchArgs<'a> {
     pub query: String,
     /// Pre-validated filter tree. Same semantics as in [`KeywordSearchArgs`].
     pub filter: Option<ValidatedFilter<'a>>,
+    /// Authorization scope tuple — see [`KeywordSearchArgs::auth_scope`].
+    pub auth_scope: ScopeTuple,
     /// Visibility values the caller is allowed to see; empty = no filter.
     pub visibility_allowlist: Vec<MemoryVisibility>,
     /// Number of nearest neighbours to return (top-K).
@@ -758,6 +814,8 @@ pub struct HybridSearchArgs<'a> {
     /// [`crate::domain::filter::validate_filter`]. Same semantics as in
     /// [`KeywordSearchArgs`].
     pub filter: Option<ValidatedFilter<'a>>,
+    /// Authorization scope tuple — see [`KeywordSearchArgs::auth_scope`].
+    pub auth_scope: ScopeTuple,
     /// Visibility values the caller is allowed to see; empty = no filter.
     pub visibility_allowlist: Vec<MemoryVisibility>,
     /// Number of results.
@@ -773,9 +831,60 @@ pub struct HybridSearchArgs<'a> {
     /// When true, the store populates the page's `explain` block. See
     /// [`KeywordSearchArgs::with_explain`].
     pub with_explain: bool,
+    /// Floor on per-graph-candidate confidence weight in the RRF leg.
+    /// Default `1e-3`. Issue #191.
+    pub confidence_floor: f32,
+    /// Minimum `entity_edges.confidence_score` an edge must clear to
+    /// participate in graph expansion. Edges below this floor are
+    /// excluded inside the `neighbors` CTE before contributing to RRF
+    /// candidate generation. Plumbed from `SearchConfig.graph_confidence_min`
+    /// (default `0.3`). Issue #191 round-2 review #3.
+    pub graph_confidence_min: f32,
 }
 
-/// One page of hybrid candidates.
+/// Args for [`MemoryStore::search_graph_neighbors`] (Issue #191, spec §4.3).
+///
+/// Authorization predicates (`auth_scope`, `visibility_allowlist`) apply to
+/// the neighbor record; `filter` is recall-narrowing only and applies to
+/// the neighbor record. The orchestrator in
+/// `cairn-store-sqlite::do_search_hybrid` runs an independent auth-only
+/// seed query so neighbors of records outside the user's narrowing
+/// `filter` remain reachable through graph traversal as long as they
+/// pass authorization. See spec §4.3 "Predicate application" for the
+/// full table.
+#[derive(Debug, Clone)]
+pub struct GraphNeighborsArgs<'a> {
+    /// Record ids from auth-only seed retrieval (UNION-ed across keyword
+    /// and semantic legs), up to `2 * GRAPH_SEED_OVERFETCH = 400`.
+    /// Seeds the graph traversal; an empty list yields an empty result.
+    pub seed_record_ids: Vec<RecordId>,
+    /// Record ids actually fused into RRF (top of each filtered lexical
+    /// leg, UNION-ed, ≤ 100). Used as the dedup set in step 4 of §5.1 —
+    /// graph results exclude these so RRF cannot double-count, but seeds
+    /// not in this list (overfetched rank 51-200 records) remain
+    /// eligible for rank-rescue via graph evidence.
+    pub ranked_record_ids: Vec<RecordId>,
+    /// Pre-validated user-narrowing filter. Applied **only** to the
+    /// returned neighbor record. User narrowing must not erase
+    /// otherwise-authorized edges based on where the edge was observed.
+    pub filter: Option<ValidatedFilter<'a>>,
+    /// Authorization scope tuple — applied to BOTH provenance and
+    /// neighbor. See [`KeywordSearchArgs::auth_scope`].
+    pub auth_scope: ScopeTuple,
+    /// Visibility values the caller is allowed to see. Applied to BOTH
+    /// the neighbor record and the edge provenance record.
+    pub visibility_allowlist: Vec<MemoryVisibility>,
+    /// Max candidates returned. Equals `HYBRID_LEG_LIMIT` from the
+    /// orchestrator.
+    pub limit: usize,
+    /// `confidence_score` floor applied SQL-side to the edge step.
+    /// Edges below this threshold are excluded entirely.
+    pub confidence_min: f32,
+}
+
+/// One page of hybrid candidates. Issue #191 added the `degraded_legs`
+/// vector so callers can distinguish "no results" from "results but a
+/// leg silently dropped out due to capability or SQL failure".
 #[derive(Debug, Clone, PartialEq)]
 pub struct HybridSearchPage {
     /// Candidates, sorted descending by blended `final_score`.
@@ -784,6 +893,10 @@ pub struct HybridSearchPage {
     /// when the matching args' `with_explain` was true. For the hybrid
     /// page, all fields are populated where applicable.
     pub explain: Option<Vec<ScoreExplain>>,
+    /// Legs that did not contribute results. Empty on the happy path.
+    /// Most common entry: `DegradedLeg::graph_capability_unavailable()`
+    /// when the store does not advertise `graph_search`. Issue #191.
+    pub degraded_legs: Vec<crate::search::DegradedLeg>,
 }
 
 /// A single candidate row from a search query, with the signal columns the
@@ -840,6 +953,7 @@ mod tests {
                 graph_edges: false,
                 transactions: true,
                 per_record_consent_model: false,
+                graph_search: false,
             };
             &CAPS
         }
@@ -884,7 +998,7 @@ mod tests {
     impl MemoryStorePlugin for StubStore {
         const NAME: &'static str = "stub";
         const SUPPORTED_VERSIONS: VersionRange =
-            VersionRange::new(ContractVersion::new(0, 4, 0), ContractVersion::new(0, 5, 0));
+            VersionRange::new(ContractVersion::new(0, 5, 0), ContractVersion::new(0, 6, 0));
     }
 
     #[tokio::test]
@@ -906,6 +1020,7 @@ mod tests {
             .search_semantic(&SemanticSearchArgs {
                 query: "test".into(),
                 filter: None,
+                auth_scope: ScopeTuple::default(),
                 visibility_allowlist: vec![],
                 limit: 10,
                 model_label: "bge-small-en-v1.5".into(),
@@ -920,6 +1035,7 @@ mod tests {
             .search_hybrid(&HybridSearchArgs {
                 query: "test".into(),
                 filter: None,
+                auth_scope: ScopeTuple::default(),
                 visibility_allowlist: vec![],
                 limit: 10,
                 model_label: "bge-small-en-v1.5".into(),
@@ -927,6 +1043,8 @@ mod tests {
                 rrf_k: 60,
                 rerank_topk: 20,
                 with_explain: false,
+                confidence_floor: 1e-3,
+                graph_confidence_min: 0.3,
             })
             .await;
         assert!(
@@ -1014,15 +1132,11 @@ mod tests {
         assert!(err.to_string().contains("bitemporal_graph"));
     }
 
-    /// `CONTRACT_VERSION` for the `MemoryStore` trait is locked to 0.4.0.
-    /// 0.3 hosted the additive-co-evolution chain (#253 consent-model
-    /// gate, #186 bitemporal-KG methods, #49 search explain plumbing,
-    /// all default-initializable). #258 bumped to 0.4 because adding
-    /// the required `schema_version: Option<SchemaVersion>` fields to
-    /// public `StoredRecord` / `RecordVersion` is a struct-construction
-    /// break — handshake range shifted to `[0.4.0, 0.5.0)`.
+    /// `CONTRACT_VERSION` for the `MemoryStore` trait is locked to 0.5.0.
+    /// #258 bumped 0.3→0.4 (per-row `schema_version`). #191 bumped 0.4→0.5
+    /// (`auth_scope`, `graph_search` capability + trait method).
     #[test]
-    fn contract_version_locked_to_0_4_0() {
-        assert_eq!(CONTRACT_VERSION, ContractVersion::new(0, 4, 0));
+    fn contract_version_locked_to_0_5_0() {
+        assert_eq!(CONTRACT_VERSION, ContractVersion::new(0, 5, 0));
     }
 }

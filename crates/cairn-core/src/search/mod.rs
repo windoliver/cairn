@@ -4,13 +4,22 @@
 //! return scored output. The store adapters orchestrate the data fetching.
 
 mod cosine;
+mod degraded;
 mod explain;
+mod graph;
 mod orchestrator;
 mod rrf;
 mod trim;
 
-pub use cosine::{RerankedCandidate, cosine_rerank, cosine_similarity};
+pub use cosine::{
+    CandidateOrigin, OriginTaggedCandidate, RerankedCandidate, cosine_rerank, cosine_rerank_tagged,
+    cosine_similarity,
+};
+pub use degraded::{DegradationReason, DegradedLeg, GraphSource};
 pub use explain::ScoreExplain;
+pub use graph::GraphCandidate;
 pub use orchestrator::{HybridSearchInputs, HybridSearchParams, hybrid_search};
-pub use rrf::{RrfCandidate, ScoredCandidate, rrf_fusion};
+pub use rrf::{
+    Leg, RankedCandidate, RrfCandidate, ScoredCandidate, rrf_fusion, rrf_fusion_weighted,
+};
 pub use trim::token_budget_trim;

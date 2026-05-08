@@ -17,13 +17,25 @@ use tempfile::TempDir;
 pub struct RecordSpec {
     /// Body indexed by FTS5 + embedded.
     pub body: String,
+    /// Optional scope override; `None` keeps `sample_record`'s default scope.
+    pub scope: Option<cairn_core::domain::ScopeTuple>,
 }
 
 impl RecordSpec {
     /// Construct from a body string.
     #[must_use]
     pub fn from_body(body: impl Into<String>) -> Self {
-        Self { body: body.into() }
+        Self {
+            body: body.into(),
+            scope: None,
+        }
+    }
+
+    /// Override the scope on this spec.
+    #[must_use]
+    pub fn with_scope(mut self, scope: cairn_core::domain::ScopeTuple) -> Self {
+        self.scope = Some(scope);
+        self
     }
 }
 
@@ -75,6 +87,9 @@ pub async fn build_hybrid_test_vault(records: &[RecordSpec]) -> HybridTestVault 
         r.id = RecordId::parse(id_str.clone()).expect("seed id");
         r.target_id = TargetId::parse(id_str).expect("seed target");
         spec.body.clone_into(&mut r.body);
+        if let Some(scope) = &spec.scope {
+            r.scope = scope.clone();
+        }
         store.upsert(&r).await.expect("upsert");
     }
 

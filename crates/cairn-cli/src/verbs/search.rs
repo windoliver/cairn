@@ -324,6 +324,13 @@ async fn run_async(
         },
         limit,
         visibility_allowlist: vec![],
+        auth_scope: cairn_core::domain::ScopeTuple {
+            tenant: sub.get_one::<String>("scope-tenant").cloned(),
+            workspace: sub.get_one::<String>("scope-workspace").cloned(),
+            user: sub.get_one::<String>("scope-user").cloned(),
+            agent: sub.get_one::<String>("scope-agent").cloned(),
+            ..Default::default()
+        },
         model_label: kind.as_str().to_owned(),
         explain,
     };
@@ -486,11 +493,24 @@ fn outcome_envelope(
             .collect()
     });
 
+    let degraded_legs = if outcome.degraded_legs.is_empty() {
+        None
+    } else {
+        Some(
+            outcome
+                .degraded_legs
+                .iter()
+                .map(degraded_leg_to_idl)
+                .collect(),
+        )
+    };
+
     let data = SearchData {
         hits,
         next_cursor: None,
         excluded: None,
         score_explain,
+        degraded_legs,
     };
 
     Response {
@@ -502,6 +522,46 @@ fn outcome_envelope(
         status: ResponseStatus::Committed,
         target: None,
         verb: ResponseVerb::Search,
+    }
+}
+
+/// Convert a domain [`cairn_core::search::DegradedLeg`] into the IDL
+/// wire form. Mirrors the SDK + MCP helpers — keep in sync with
+/// `crates/cairn-idl/schema/verbs/search.json` (`DegradedLegEntry`).
+fn degraded_leg_to_idl(
+    leg: &cairn_core::search::DegradedLeg,
+) -> cairn_core::generated::verbs::search::DegradedLegEntry {
+    use cairn_core::generated::verbs::search::{
+        DegradedLegEntry, DegradedLegEntryLeg, DegradedLegEntryReason, DegradedLegEntrySource,
+    };
+    use cairn_core::search::{DegradationReason, DegradedLeg, GraphSource};
+
+    let reason_to_idl = |r: DegradationReason| match r {
+        DegradationReason::CapabilityUnavailable => DegradedLegEntryReason::CapabilityUnavailable,
+        DegradationReason::DeadlineExceeded => DegradedLegEntryReason::Timeout,
+        _ => DegradedLegEntryReason::SqlError,
+    };
+    let source_to_idl = |s: GraphSource| match s {
+        GraphSource::AuthKeywordSeed => DegradedLegEntrySource::AuthKeywordSeed,
+        GraphSource::AuthSemanticSeed => DegradedLegEntrySource::AuthSemanticSeed,
+        _ => DegradedLegEntrySource::All,
+    };
+    match leg {
+        DegradedLeg::Semantic { reason } => DegradedLegEntry {
+            leg: DegradedLegEntryLeg::Semantic,
+            reason: reason_to_idl(*reason),
+            source: None,
+        },
+        DegradedLeg::Graph { reason, source } => DegradedLegEntry {
+            leg: DegradedLegEntryLeg::Graph,
+            reason: reason_to_idl(*reason),
+            source: Some(source_to_idl(*source)),
+        },
+        _ => DegradedLegEntry {
+            leg: DegradedLegEntryLeg::Graph,
+            reason: DegradedLegEntryReason::SqlError,
+            source: Some(DegradedLegEntrySource::All),
+        },
     }
 }
 

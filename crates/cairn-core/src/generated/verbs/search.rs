@@ -8,6 +8,44 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
+pub enum DegradedLegEntryLeg {
+    Semantic,
+    Graph,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum DegradedLegEntryReason {
+    SqlError,
+    CapabilityUnavailable,
+    Timeout,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum DegradedLegEntrySource {
+    All,
+    AuthKeywordSeed,
+    AuthSemanticSeed,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DegradedLegEntry {
+    /// Which hybrid leg degraded.
+    pub leg: DegradedLegEntryLeg,
+    /// Why the leg degraded.
+    pub reason: DegradedLegEntryReason,
+    /// Graph-leg only: which seed source was in flight when the leg degraded. Absent for non-graph legs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<DegradedLegEntrySource>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum HitTrust {
     Verified,
     Unverified,
@@ -307,6 +345,9 @@ impl<'de> ::serde::Deserialize<'de> for SearchArgs {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SearchData {
+    /// Per-leg degradation entries when one or more search legs (semantic, graph, or graph seed sources) failed or were unavailable. Empty/absent when every requested leg contributed. Lets callers distinguish a low-recall result from a partial-failure result without inspecting server logs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub degraded_legs: Option<Vec<DegradedLegEntry>>,
     /// Per-record exclusions; present only when args.explain is true.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub excluded: Option<Vec<crate::generated::common::RecordExclusion>>,

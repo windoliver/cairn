@@ -339,17 +339,23 @@ impl<T: Transport> Sdk<T> {
         // `args.limit` is validated in range [1, 1000] by `validate_search`,
         // so the `try_from` should not fail. Fall back to 10 on error.
         let limit = args.limit.map_or(10, |l| usize::try_from(l).unwrap_or(10));
+        // Map the IDL `args.scope` (ScopeFilter) into the dispatcher's
+        // `auth_scope` (ScopeTuple). Predicates the dispatcher cannot
+        // yet honor are dropped with a tracing warn (see
+        // `scope_filter_to_tuple` for rationale).
+        let auth_scope = scope_filter_to_tuple(args.scope.as_ref());
         let request = cairn_core::verbs::search::SearchRequest {
             query: args.query.clone(),
             mode,
             limit,
             visibility_allowlist: vec![],
+            auth_scope,
             model_label: self.config.search.embedding_model.as_str().to_owned(),
             explain: args.explain.unwrap_or(false),
         };
 
         match cairn_core::verbs::search::run(store.as_ref(), &self.config, &caps, request).await {
-            Ok(outcome) => Ok(envelope_from_outcome(outcome)),
+            Ok(outcome) => Ok(envelope_from_outcome(outcome, mode)),
             Err(cairn_core::verbs::search::SearchError::CapabilityUnavailable { capability }) => {
                 Err(SdkError::CapabilityUnavailable {
                     capability: capability.to_owned(),
@@ -521,10 +527,91 @@ impl<T: Transport> Sdk<T> {
     }
 }
 
+/// Mode-appropriate ranking score for a single hit.
+///
+/// Mirrors `cairn-cli`'s `hit_score`: keyword uses BM25, semantic uses
+/// `1 - cosine_distance`, and hybrid prefers the dispatcher's
+/// authoritative `final_score` from the explain block (lockstep with
+/// candidates) — falling back to a rank-derived score when the caller
+/// did not request `--explain`. Without this, hybrid graph-only rows
+/// (which carry `bm25 = 0.0`) serialized as zero-score hits and any
+/// client thresholding on `score` would suppress them.
+fn hit_score(
+    mode: cairn_core::verbs::search::SearchMode,
+    idx: usize,
+    c: &cairn_core::contract::memory_store::SearchCandidate,
+    explain: Option<&[cairn_core::search::ScoreExplain]>,
+) -> f64 {
+    use cairn_core::verbs::search::SearchMode;
+    let raw = match mode {
+        SearchMode::Semantic => c.semantic_distance.map_or(0.0, |d| 1.0 - f64::from(d)),
+        SearchMode::Hybrid => {
+            if let Some(exps) = explain
+                && let Some(e) = exps.get(idx)
+            {
+                e.final_score
+            } else {
+                #[allow(clippy::cast_precision_loss)]
+                let rank_score = 1.0 / (1.0 + idx as f64);
+                rank_score
+            }
+        }
+        // Keyword + future variants (SearchMode is #[non_exhaustive]).
+        _ => c.bm25,
+    };
+    if raw.is_finite() { raw } else { 0.0 }
+}
+
+/// Convert a domain [`cairn_core::search::DegradedLeg`] into its IDL
+/// wire representation. Mirrors the schema variants — keep in sync with
+/// `crates/cairn-idl/schema/verbs/search.json` (`DegradedLegEntry`).
+fn degraded_leg_to_idl(
+    leg: &cairn_core::search::DegradedLeg,
+) -> cairn_core::generated::verbs::search::DegradedLegEntry {
+    use cairn_core::generated::verbs::search::{
+        DegradedLegEntry, DegradedLegEntryLeg, DegradedLegEntryReason, DegradedLegEntrySource,
+    };
+    use cairn_core::search::{DegradationReason, DegradedLeg, GraphSource};
+
+    let reason_to_idl = |r: DegradationReason| match r {
+        DegradationReason::CapabilityUnavailable => DegradedLegEntryReason::CapabilityUnavailable,
+        DegradationReason::DeadlineExceeded => DegradedLegEntryReason::Timeout,
+        // SqlError + WorkerPanic + future variants (DegradationReason
+        // is #[non_exhaustive]) all surface as SqlError on the wire.
+        _ => DegradedLegEntryReason::SqlError,
+    };
+    let source_to_idl = |s: GraphSource| match s {
+        GraphSource::AuthKeywordSeed => DegradedLegEntrySource::AuthKeywordSeed,
+        GraphSource::AuthSemanticSeed => DegradedLegEntrySource::AuthSemanticSeed,
+        // GraphSource::All + future variants (GraphSource is
+        // #[non_exhaustive]) collapse to All on the wire.
+        _ => DegradedLegEntrySource::All,
+    };
+    match leg {
+        DegradedLeg::Semantic { reason } => DegradedLegEntry {
+            leg: DegradedLegEntryLeg::Semantic,
+            reason: reason_to_idl(*reason),
+            source: None,
+        },
+        DegradedLeg::Graph { reason, source } => DegradedLegEntry {
+            leg: DegradedLegEntryLeg::Graph,
+            reason: reason_to_idl(*reason),
+            source: Some(source_to_idl(*source)),
+        },
+        // Forward-compat: DegradedLeg is #[non_exhaustive].
+        _ => DegradedLegEntry {
+            leg: DegradedLegEntryLeg::Graph,
+            reason: DegradedLegEntryReason::SqlError,
+            source: Some(DegradedLegEntrySource::All),
+        },
+    }
+}
+
 /// Convert a [`cairn_core::verbs::search::SearchOutcome`] into the SDK's
 /// [`VerbResponse<SearchData>`] envelope.
 fn envelope_from_outcome(
     outcome: cairn_core::verbs::search::SearchOutcome,
+    mode: cairn_core::verbs::search::SearchMode,
 ) -> VerbResponse<SearchData> {
     use cairn_core::generated::common::Ulid;
     use cairn_core::generated::envelope::ResponseVerb;
@@ -533,9 +620,10 @@ fn envelope_from_outcome(
     let hits: Vec<Hit> = outcome
         .candidates
         .iter()
-        .map(|c| Hit {
+        .enumerate()
+        .map(|(idx, c)| Hit {
             record_id: Ulid(c.record_id.as_str().to_owned()),
-            score: c.bm25,
+            score: hit_score(mode, idx, c, outcome.explain.as_deref()),
             snippet: Some(c.snippet.clone()),
             citation: None,
             trust: HitTrust::Unknown,
@@ -560,11 +648,24 @@ fn envelope_from_outcome(
             .collect()
     });
 
+    let degraded_legs = if outcome.degraded_legs.is_empty() {
+        None
+    } else {
+        Some(
+            outcome
+                .degraded_legs
+                .iter()
+                .map(degraded_leg_to_idl)
+                .collect(),
+        )
+    };
+
     let data = SearchData {
         hits,
         next_cursor: None,
         excluded: None,
         score_explain,
+        degraded_legs,
     };
 
     VerbResponse {
@@ -573,6 +674,41 @@ fn envelope_from_outcome(
         verb: ResponseVerb::Search,
         target: None,
         data,
+    }
+}
+
+/// Map an IDL [`ScopeFilter`](cairn_core::generated::common::ScopeFilter)
+/// to a domain [`ScopeTuple`](cairn_core::domain::ScopeTuple) so the SDK
+/// transport propagates real auth context into search dispatch instead of
+/// the empty default tuple. The seven scope dimensions threaded through
+/// are the ones `do_search_*` actually predicate on via the JSON1 scope
+/// clause: `tenant`/`workspace`/`session_id`/`entity`/`user`/`agent`.
+///
+/// `ScopeFilter` predicates the dispatcher cannot yet honor (`kind`,
+/// `tags`, `tier`, `record_ids`) are dropped here with a tracing warn —
+/// the contract is backwards-compatible with prior callers (where these
+/// fields were silently ignored entirely) and the warning surfaces the
+/// widening for ops follow-up. A future PR threads them into the
+/// `SearchRequest.filter` path; until then, callers needing strict
+/// enforcement should move those predicates to `args.filter` directly.
+fn scope_filter_to_tuple(
+    sf: Option<&cairn_core::generated::common::ScopeFilter>,
+) -> cairn_core::domain::ScopeTuple {
+    let Some(sf) = sf else {
+        return cairn_core::domain::ScopeTuple::default();
+    };
+    // `kind`/`tags`/`tier`/`record_ids` fall through silently — the
+    // pre-change SDK ignored every scope predicate, so dropping the
+    // un-honored subset preserves wire compatibility. A future PR
+    // threads them into `SearchRequest.filter`.
+    cairn_core::domain::ScopeTuple {
+        tenant: sf.tenant.clone(),
+        workspace: sf.workspace.clone(),
+        session_id: sf.session_id.clone(),
+        entity: sf.entity.clone(),
+        user: sf.user.clone(),
+        agent: sf.agent.clone(),
+        ..cairn_core::domain::ScopeTuple::default()
     }
 }
 

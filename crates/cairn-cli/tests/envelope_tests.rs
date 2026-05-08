@@ -480,6 +480,7 @@ fn search_default_response_omits_excluded_field() {
         hits: Vec::new(),
         next_cursor: None,
         score_explain: None,
+        degraded_legs: None,
     };
     let json = serde_json::to_string(&data).expect("serializable");
     assert!(
@@ -505,10 +506,78 @@ fn search_with_excluded_emits_field() {
         hits: Vec::new(),
         next_cursor: None,
         score_explain: None,
+        degraded_legs: None,
     };
     let json = serde_json::to_string(&data).expect("serializable");
     assert!(
         json.contains("\"excluded\""),
         "excluded must appear when set; got {json}"
     );
+}
+
+#[test]
+fn search_without_degraded_legs_omits_field() {
+    use cairn_core::generated::verbs::search::SearchData;
+
+    // `degraded_legs: None` (a healthy hybrid result) must not emit
+    // the field. Keeps the wire shape stable for callers that only
+    // read it under partial-failure conditions.
+    let data = SearchData {
+        excluded: None,
+        hits: Vec::new(),
+        next_cursor: None,
+        score_explain: None,
+        degraded_legs: None,
+    };
+    let json = serde_json::to_string(&data).expect("serializable");
+    assert!(
+        !json.contains("\"degraded_legs\""),
+        "healthy SearchData must not emit degraded_legs; got {json}"
+    );
+}
+
+#[test]
+fn search_with_degraded_legs_emits_full_entry() {
+    use cairn_core::generated::verbs::search::{
+        DegradedLegEntry, DegradedLegEntryLeg, DegradedLegEntryReason, DegradedLegEntrySource,
+        SearchData,
+    };
+
+    // A hybrid response with a per-source graph-leg failure must
+    // serialize the full `{leg, reason, source}` shape so callers can
+    // attribute the partial-recall to the right seed source.
+    let data = SearchData {
+        excluded: None,
+        hits: Vec::new(),
+        next_cursor: None,
+        score_explain: None,
+        degraded_legs: Some(vec![
+            DegradedLegEntry {
+                leg: DegradedLegEntryLeg::Semantic,
+                reason: DegradedLegEntryReason::SqlError,
+                source: None,
+            },
+            DegradedLegEntry {
+                leg: DegradedLegEntryLeg::Graph,
+                reason: DegradedLegEntryReason::CapabilityUnavailable,
+                source: Some(DegradedLegEntrySource::AuthSemanticSeed),
+            },
+        ]),
+    };
+    let json = serde_json::to_string(&data).expect("serializable");
+    let v: serde_json::Value = serde_json::from_str(&json).expect("roundtrip");
+    let arr = v["degraded_legs"]
+        .as_array()
+        .expect("degraded_legs is an array");
+    assert_eq!(arr.len(), 2);
+    assert_eq!(arr[0]["leg"], "semantic");
+    assert_eq!(arr[0]["reason"], "sql_error");
+    assert!(
+        arr[0].get("source").is_none() || arr[0]["source"].is_null(),
+        "semantic leg must omit `source`; got {}",
+        arr[0],
+    );
+    assert_eq!(arr[1]["leg"], "graph");
+    assert_eq!(arr[1]["reason"], "capability_unavailable");
+    assert_eq!(arr[1]["source"], "auth_semantic_seed");
 }

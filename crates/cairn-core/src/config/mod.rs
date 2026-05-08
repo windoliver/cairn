@@ -401,6 +401,19 @@ pub struct SearchConfig {
     /// after candidate ranking + dedup. Char-count proxy for token budget;
     /// token-accurate trimming is P1 (see issue #49). Default `8000`.
     pub max_snippet_chars_per_page: usize,
+    /// Minimum entity-edge confidence score (`entity_edges.confidence_score`)
+    /// for the hybrid graph leg to admit an edge. Edges below this floor are
+    /// excluded from graph expansion entirely so weak/ambiguous evidence does
+    /// not dominate hybrid recall. Default `0.3` — matches `EdgeConfidence`'s
+    /// `Extracted` floor while excluding clearly unreliable links.
+    /// Range `[0.0, 1.0]`; values outside that range still parse but the
+    /// store clamps before use.
+    #[serde(default = "default_graph_confidence_min")]
+    pub graph_confidence_min: f32,
+}
+
+fn default_graph_confidence_min() -> f32 {
+    0.3
 }
 
 impl Default for SearchConfig {
@@ -415,6 +428,7 @@ impl Default for SearchConfig {
             rrf_k: 60,
             rerank_topk: 20,
             max_snippet_chars_per_page: 8000,
+            graph_confidence_min: default_graph_confidence_min(),
         }
     }
 }
@@ -1547,6 +1561,7 @@ rerank_topk: 20
             graph_edges: graph,
             transactions: true,
             per_record_consent_model: true,
+            graph_search: graph,
         }
     }
 
