@@ -7,6 +7,14 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct FailedTurn {
+    pub reason: String,
+    pub session_id: String,
+    pub turn_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CaptureTraceArgs {
     /// Path to the trace log or transcript file.
     pub from: String,
@@ -17,6 +25,8 @@ pub struct CaptureTraceArgs {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CaptureTraceData {
+    /// Per-turn failures that were skipped while other turns in the trace import committed.
+    pub failed_turns: Vec<FailedTurn>,
     pub trace_id: crate::generated::common::Ulid,
 }
 

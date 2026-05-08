@@ -4,5 +4,71 @@ expression: value
 ---
 {
   "failed_turns": [],
+  "policy_trace": [
+    {
+      "gate": "presidio_redaction",
+      "result": "pass"
+    },
+    {
+      "gate": "prompt_injection_fence",
+      "result": "pass"
+    },
+    {
+      "gate": "filter_should_memorize",
+      "result": "pass"
+    },
+    {
+      "gate": "visibility_floor",
+      "result": "pass"
+    },
+    {
+      "gate": "presidio_redaction",
+      "result": "pass"
+    },
+    {
+      "gate": "prompt_injection_fence",
+      "result": "pass"
+    },
+    {
+      "gate": "filter_should_memorize",
+      "result": "pass"
+    },
+    {
+      "gate": "visibility_floor",
+      "result": "pass"
+    },
+    {
+      "gate": "presidio_redaction",
+      "result": "pass"
+    },
+    {
+      "gate": "prompt_injection_fence",
+      "result": "pass"
+    },
+    {
+      "gate": "filter_should_memorize",
+      "result": "pass"
+    },
+    {
+      "gate": "visibility_floor",
+      "result": "pass"
+    },
+    {
+      "gate": "presidio_redaction",
+      "result": "pass"
+    },
+    {
+      "gate": "prompt_injection_fence",
+      "result": "pass"
+    },
+    {
+      "gate": "filter_should_memorize",
+      "result": "pass"
+    },
+    {
+      "gate": "visibility_floor",
+      "result": "pass"
+    }
+  ],
   "trace_id": "[trace_id]"
 }

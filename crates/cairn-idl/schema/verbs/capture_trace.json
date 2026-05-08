@@ -36,9 +36,24 @@
     "Data": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["trace_id"],
+      "required": ["trace_id", "failed_turns"],
       "properties": {
-        "trace_id": { "$ref": "../common/primitives.json#/$defs/Ulid" }
+        "trace_id": { "$ref": "../common/primitives.json#/$defs/Ulid" },
+        "failed_turns": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/FailedTurn" },
+          "description": "Per-turn failures that were skipped while other turns in the trace import committed."
+        }
+      }
+    },
+    "FailedTurn": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id", "turn_id", "reason"],
+      "properties": {
+        "session_id": { "type": "string" },
+        "turn_id": { "type": "string" },
+        "reason": { "type": "string", "minLength": 1 }
       }
     }
   }

@@ -215,7 +215,10 @@ fn main() -> ExitCode {
         Some(("retrieve", sub)) => verbs::retrieve::run(sub),
         Some(("summarize", sub)) => verbs::summarize::run(sub),
         Some(("assemble_hot", sub)) => run_assemble_hot(sub, explicit_vault.as_deref()),
-        Some(("capture_trace", sub)) => verbs::capture_trace::run(sub),
+        Some(("capture_trace", sub)) => match resolve_vault_and_config(explicit_vault.as_deref()) {
+            Ok((vault_root, _source, config)) => verbs::capture_trace::run(sub, vault_root, config),
+            Err(code) => code,
+        },
         Some(("lint", sub)) => match resolve_vault_or_cwd(explicit_vault.as_deref()) {
             Ok((vault_root, _source)) => verbs::lint::run(sub, Some(vault_root.as_path())),
             Err(_) => verbs::lint::run(sub, None),

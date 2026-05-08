@@ -261,13 +261,9 @@ fn simple_verb_human_mode_exits_one_with_internal() {
     // `retrieve` and `forget` are excluded: required ArgGroup → exit 64 (usage error).
     // `search` is excluded: missing required CLI args exit 64 (EX_USAGE);
     // see `search_missing_query_exits_64` below.
-    // `assemble_hot` is excluded: verb is now wired (exits 0); see
-    //   `assemble_hot_exits_zero_and_emits_committed_envelope` below.
-    for args in [
-        &["summarize", "01ARYZ6S41TSV4RRFFQ69G5FAV"][..],
-        &["capture_trace", "--from", "/dev/null"],
-        &["lint"],
-    ] {
+    // `assemble_hot`, `capture_trace`, and `lint` are excluded: those verbs
+    // are now wired and have dedicated committed-envelope tests.
+    for args in [&["summarize", "01ARYZ6S41TSV4RRFFQ69G5FAV"][..]] {
         let verb = args[0];
         let out = cli().args(args).output().expect("cairn <verb>");
         assert!(
