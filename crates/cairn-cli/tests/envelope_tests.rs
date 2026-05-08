@@ -37,33 +37,6 @@ fn seed_default_identity(vault: &Path) {
     );
 }
 
-fn assert_aborted_internal(verb_args: &[&str]) {
-    let out = {
-        let vault = tempfile::tempdir().expect("temp vault");
-        let mut cmd = cli();
-        cmd.current_dir(vault.path());
-        cmd.args(verb_args);
-        cmd.output()
-            .unwrap_or_else(|e| panic!("failed to run {verb_args:?}: {e}"))
-    };
-    // Aborted → exit 1 (generic failure)
-    assert_eq!(
-        out.status.code(),
-        Some(1),
-        "verb {verb_args:?} should exit 1 (Internal aborted), got {:?}",
-        out.status
-    );
-    let stdout = String::from_utf8(out.stdout).expect("utf-8");
-    let v: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
-        panic!("verb {verb_args:?} JSON parse failed: {e}\nstdout: {stdout:?}")
-    });
-    assert_eq!(v["contract"], "cairn.mcp.v1", "verb {verb_args:?}");
-    assert_eq!(v["status"], "aborted", "verb {verb_args:?}");
-    assert_eq!(v["error"]["code"], "Internal", "verb {verb_args:?}");
-    assert!(v["operation_id"].is_string(), "verb {verb_args:?}");
-    assert!(v["policy_trace"].is_array(), "verb {verb_args:?}");
-}
-
 fn assert_rejected_capability_unavailable(verb_args: &[&str], capability: &str) {
     let out = {
         let mut cmd = cli();

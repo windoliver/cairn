@@ -1,8 +1,8 @@
 # Design — issue #61 core verb implementation
 
-**Status:** Approved (brainstorm 2026-05-07).  
-**Issue:** [#61](https://github.com/windoliver/cairn/issues/61).  
-**Parent epic:** [#9](https://github.com/windoliver/cairn/issues/9).  
+**Status:** Approved (brainstorm 2026-05-07).
+**Issue:** [#61](https://github.com/windoliver/cairn/issues/61).
+**Parent epic:** [#9](https://github.com/windoliver/cairn/issues/9).
 **Brief refs:** §5 write/read pipeline, §5.5 FlushPlan, §5.6 WAL, §7 hot memory, §8.0 core verbs, §8.0.b common envelope, §8.0.c retrieve variants, §14 privacy/consent.
 
 ## 1. Goal

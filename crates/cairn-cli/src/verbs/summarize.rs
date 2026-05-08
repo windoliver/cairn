@@ -206,17 +206,22 @@ async fn persist_summary(
     data: &mut SummarizeData,
 ) -> Result<Vec<ResponsePolicyTrace>, Response> {
     let ingest_args = IngestArgs {
+        batch_size: None,
         body: Some(data.summary.clone()),
         dry_run: None,
+        exclude: None,
         file: None,
         folder: None,
         frontmatter: Some(serde_json::json!({
             "summary_sources": args.record_ids.iter().map(|id| id.0.clone()).collect::<Vec<_>>()
         })),
         human_review: None,
+        include: None,
         kind: args.kind.clone().unwrap_or_else(|| "reference".to_owned()),
+        mode: None,
         no_cache: None,
         no_diff: None,
+        recursive: None,
         session_id: None,
         tags: Some(vec!["summary".to_owned()]),
         url: None,

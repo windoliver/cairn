@@ -813,15 +813,20 @@ fn ingest_reference(vault: &Path, body: &str) -> String {
 
 fn insert_session_record(vault: &Path, body: &str) -> String {
     let args = cairn_core::generated::verbs::ingest::IngestArgs {
+        batch_size: None,
         body: Some(body.to_owned()),
         dry_run: None,
+        exclude: None,
         file: None,
         folder: None,
         frontmatter: None,
         human_review: None,
+        include: None,
         kind: "reference".to_owned(),
+        mode: None,
         no_cache: None,
         no_diff: None,
+        recursive: None,
         session_id: None,
         tags: None,
         url: None,
