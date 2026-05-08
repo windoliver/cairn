@@ -2741,46 +2741,95 @@ fn write_retrieve_data_extra_checks(w: &mut RustWriter, type_name: &str) {
             // DataProfile.updated_at: RFC3339 `date-time` with minLength 20
             // Mirrors `cairn_core::domain::Rfc3339Timestamp::parse`'s
             // accept set so a domain-valid timestamp can always
-            // round-trip through the wire deserializer; full range
-            // validation (month 1-12, day-of-month, hour 0-23, etc.)
-            // happens at the verb layer where the domain parser runs.
-            // Asymmetry here would let a domain-valid value fail
-            // deserialize through the response envelope.
-            w.line("if raw.updated_at.len() < 20 {");
-            w.indent();
-            w.line("return Err(\"updated_at: must be RFC3339 date-time with at least 20 chars\");");
-            w.dedent();
-            w.line("}");
+            // round-trip through the wire deserializer, AND so the
+            // typed `DataProfile.updated_at` field can be parsed back
+            // into a `Rfc3339Timestamp` without a second validation
+            // gauntlet. The codegen layer cannot depend on
+            // `cairn-core::domain`, so the rules are duplicated here;
+            // the test suite cross-checks the two implementations.
+            //
+            // Caps `len` at 64 (max reasonable RFC3339 form is around
+            // 35 chars: `YYYY-MM-DDTHH:MM:SS.fffffffff+HH:MM`); any
+            // longer string would imply pathological fractional digits
+            // and just allocate memory.
+            w.line(
+                "if !(20..=64).contains(&raw.updated_at.len()) { return Err(\"updated_at: RFC3339 date-time must be 20..=64 chars\"); }",
+            );
             w.line("if !raw.updated_at.is_ascii() {");
             w.indent();
             w.line("return Err(\"updated_at: RFC3339 date-time must be ASCII\");");
             w.dedent();
             w.line("}");
-            // Structural anchor checks. Note: `T` and `Z` are
-            // case-insensitive per RFC3339 §5.6 and the domain parser
-            // accepts both — match that here.
             w.line("{");
             w.indent();
             w.line("let bytes = raw.updated_at.as_bytes();");
+            // Date: YYYY-MM-DD digits + ranges.
             w.line(
-                "if bytes[4] != b'-' || bytes[7] != b'-' || !matches!(bytes[10], b'T' | b't') || bytes[13] != b':' || bytes[16] != b':' {",
+                "if !bytes[..4].iter().all(u8::is_ascii_digit) || bytes[4] != b'-' || !bytes[5..7].iter().all(u8::is_ascii_digit) || bytes[7] != b'-' || !bytes[8..10].iter().all(u8::is_ascii_digit) {",
             );
             w.indent();
+            w.line("return Err(\"updated_at: date must be YYYY-MM-DD\");");
+            w.dedent();
+            w.line("}");
+            w.line("let mm = (bytes[5] - b'0') * 10 + (bytes[6] - b'0');");
+            w.line("let dd = (bytes[8] - b'0') * 10 + (bytes[9] - b'0');");
             w.line(
-                "return Err(\"updated_at: RFC3339 date-time anchors must be `-`/`T`/`:` at positions 4/7/10/13/16\");",
+                "if !(1..=12).contains(&mm) { return Err(\"updated_at: month out of range\"); }",
+            );
+            w.line("if !(1..=31).contains(&dd) { return Err(\"updated_at: day out of range\"); }");
+            // Date/time separator (case-insensitive `T`).
+            w.line(
+                "if !matches!(bytes[10], b'T' | b't') { return Err(\"updated_at: expected `T` between date and time\"); }",
+            );
+            // Time: HH:MM:SS digits + ranges.
+            w.line(
+                "if !bytes[11..13].iter().all(u8::is_ascii_digit) || bytes[13] != b':' || !bytes[14..16].iter().all(u8::is_ascii_digit) || bytes[16] != b':' || !bytes[17..19].iter().all(u8::is_ascii_digit) {",
+            );
+            w.indent();
+            w.line("return Err(\"updated_at: time must be HH:MM:SS\");");
+            w.dedent();
+            w.line("}");
+            w.line("let hh = (bytes[11] - b'0') * 10 + (bytes[12] - b'0');");
+            w.line("let mi = (bytes[14] - b'0') * 10 + (bytes[15] - b'0');");
+            w.line("let ss = (bytes[17] - b'0') * 10 + (bytes[18] - b'0');");
+            w.line("if hh > 23 { return Err(\"updated_at: hour out of range\"); }");
+            w.line("if mi > 59 { return Err(\"updated_at: minute out of range\"); }");
+            w.line("if ss > 59 { return Err(\"updated_at: second out of range\"); }");
+            // Trailing fractional + zone — same shape as the domain parser.
+            w.line("let mut idx = 19usize;");
+            w.line("if idx < bytes.len() && bytes[idx] == b'.' {");
+            w.indent();
+            w.line("idx += 1;");
+            w.line("let frac_start = idx;");
+            w.line("while idx < bytes.len() && bytes[idx].is_ascii_digit() { idx += 1; }");
+            w.line(
+                "if idx == frac_start { return Err(\"updated_at: fractional must have >=1 digit after `.`\"); }",
             );
             w.dedent();
             w.line("}");
-            w.line("let last = bytes[bytes.len() - 1];");
+            // Zone: `Z`/`z` or `+/-HH:MM` with digit + range checks.
+            w.line("if idx < bytes.len() && matches!(bytes[idx], b'Z' | b'z') { idx += 1; }");
+            w.line("else if idx + 6 == bytes.len() && matches!(bytes[idx], b'+' | b'-') {");
+            w.indent();
+            w.line("let off = &bytes[idx + 1..];");
             w.line(
-                "if !matches!(last, b'Z' | b'z') && !matches!(bytes.get(bytes.len() - 6), Some(b'+' | b'-')) {",
+                "if !off[..2].iter().all(u8::is_ascii_digit) || off[2] != b':' || !off[3..5].iter().all(u8::is_ascii_digit) {",
             );
             w.indent();
-            w.line(
-                "return Err(\"updated_at: RFC3339 date-time must end with `Z` or `+/-HH:MM` offset\");",
-            );
+            w.line("return Err(\"updated_at: offset must be `+/-HH:MM` digits\");");
             w.dedent();
             w.line("}");
+            w.line("let oh = (off[0] - b'0') * 10 + (off[1] - b'0');");
+            w.line("let om = (off[3] - b'0') * 10 + (off[4] - b'0');");
+            w.line("if oh > 23 { return Err(\"updated_at: offset hour out of range\"); }");
+            w.line("if om > 59 { return Err(\"updated_at: offset minute out of range\"); }");
+            w.line("idx = bytes.len();");
+            w.dedent();
+            w.line("}");
+            w.line("else { return Err(\"updated_at: must end with `Z` or `+/-HH:MM` offset\"); }");
+            w.line(
+                "if idx != bytes.len() { return Err(\"updated_at: trailing data after zone\"); }",
+            );
             w.dedent();
             w.line("}");
         }

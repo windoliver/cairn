@@ -599,6 +599,103 @@ fn synthesize_round_trips_lowercase_t_z_timestamp() {
 }
 
 #[test]
+fn data_profile_deserialize_rejects_oversized_updated_at() {
+    // Pathological fractional: 100 digits. Without a maxLength cap the
+    // String is allocated then dropped; with the cap (`len <= 64`) it's
+    // rejected at the validator boundary.
+    let big_frac: String = "1".repeat(100);
+    let json = format!(
+        r#"{{
+        "subject": {{"user": "hmn:alice"}},
+        "static": {{"summary":"","historical_summary":"","key_facts":{{"devices":[],"software":[],"preferences":[],"current_issues":[],"addressed_issues":[],"recurring_issues":[],"known_entities":[]}}}},
+        "dynamic": {{"summary":"","historical_summary":"","key_facts":{{"devices":[],"software":[],"preferences":[],"current_issues":[],"addressed_issues":[],"recurring_issues":[],"known_entities":[]}}}},
+        "updated_at": "2026-04-22T14:00:00.{big_frac}Z"
+    }}"#
+    );
+    let err = serde_json::from_str::<crate::generated::verbs::retrieve::DataProfile>(&json)
+        .expect_err("oversized updated_at must reject");
+    assert!(err.to_string().contains("updated_at"), "{err}");
+}
+
+#[test]
+fn data_profile_deserialize_rejects_out_of_range_components() {
+    // Each example targets one component in `Rfc3339Timestamp::parse`'s
+    // range table so any future drift is caught field-by-field.
+    let cases = [
+        ("2026-13-01T00:00:00Z", "month"),
+        ("2026-04-32T00:00:00Z", "day"),
+        ("2026-04-22T24:00:00Z", "hour"),
+        ("2026-04-22T00:60:00Z", "minute"),
+        ("2026-04-22T00:00:60Z", "second"),
+        ("2026-04-22T00:00:00+24:00", "offset hour"),
+        ("2026-04-22T00:00:00+00:60", "offset minute"),
+        ("2026-04-22T14:00:00+ab:cd", "offset"),
+    ];
+    for (ts, label) in cases {
+        let json = format!(
+            r#"{{
+            "subject": {{"user": "hmn:alice"}},
+            "static": {{"summary":"","historical_summary":"","key_facts":{{"devices":[],"software":[],"preferences":[],"current_issues":[],"addressed_issues":[],"recurring_issues":[],"known_entities":[]}}}},
+            "dynamic": {{"summary":"","historical_summary":"","key_facts":{{"devices":[],"software":[],"preferences":[],"current_issues":[],"addressed_issues":[],"recurring_issues":[],"known_entities":[]}}}},
+            "updated_at": "{ts}"
+        }}"#
+        );
+        let err = serde_json::from_str::<crate::generated::verbs::retrieve::DataProfile>(&json)
+            .err()
+            .unwrap_or_else(|| panic!("`{ts}` ({label}) parsed but should have rejected"));
+        assert!(
+            err.to_string().contains("updated_at"),
+            "expected updated_at error, got: {err} (case: {label})"
+        );
+    }
+}
+
+#[test]
+fn data_profile_updated_at_validator_agrees_with_domain_parser_on_corpus() {
+    // Cross-check: the wire validator and the domain parser must
+    // converge on the same accept/reject decision for a corpus of
+    // edge-case timestamps. Without this, a future codegen edit can
+    // silently drift the two and break the response-envelope round-trip.
+    let corpus = [
+        // Accepted by both.
+        ("2026-04-22T14:00:00Z", true),
+        ("2026-04-22T14:00:00.000Z", true),
+        ("2026-04-22T14:00:00+00:00", true),
+        ("2026-04-22T14:00:00-05:30", true),
+        ("2026-04-22t14:00:00z", true),
+        // Rejected by both.
+        ("not a date", false),
+        ("2026-04-22T14:00:00", false),       // no zone
+        ("2026-13-01T00:00:00Z", false),      // bad month
+        ("2026-04-22T24:00:00Z", false),      // bad hour
+        ("2026-04-22T14:00:00+24:00", false), // bad offset
+    ];
+    for (ts, expected) in corpus {
+        let domain_ok = crate::domain::Rfc3339Timestamp::parse(ts).is_ok();
+        let wire_ok = serde_json::from_str::<crate::generated::verbs::retrieve::DataProfile>(
+            &format!(
+                r#"{{
+                "subject": {{"user": "hmn:alice"}},
+                "static": {{"summary":"","historical_summary":"","key_facts":{{"devices":[],"software":[],"preferences":[],"current_issues":[],"addressed_issues":[],"recurring_issues":[],"known_entities":[]}}}},
+                "dynamic": {{"summary":"","historical_summary":"","key_facts":{{"devices":[],"software":[],"preferences":[],"current_issues":[],"addressed_issues":[],"recurring_issues":[],"known_entities":[]}}}},
+                "updated_at": "{ts}"
+            }}"#
+            ),
+        )
+        .is_ok();
+        assert_eq!(
+            domain_ok, expected,
+            "domain parser disagreed with corpus expectation for `{ts}`"
+        );
+        assert_eq!(
+            wire_ok, expected,
+            "wire validator disagreed with corpus expectation for `{ts}`"
+        );
+        assert_eq!(domain_ok, wire_ok, "wire/domain divergence for `{ts}`");
+    }
+}
+
+#[test]
 fn data_profile_deserialize_accepts_well_formed_updated_at() {
     let json = r#"{
         "subject": {"user": "hmn:alice"},

@@ -216,7 +216,8 @@
           "type": "string",
           "format": "date-time",
           "minLength": 20,
-          "description": "RFC3339 timestamp of the most recent contributing source record. Equals the synthesizer clock when the profile is empty."
+          "maxLength": 64,
+          "description": "RFC3339 timestamp of the most recent contributing source record. Equals the synthesizer clock when the profile is empty. Validator accept set matches `cairn_core::domain::Rfc3339Timestamp::parse` (excluding leap-seconds), so any wire-accepted value also parses domain-side without a second gauntlet."
         }
       }
     },

@@ -97,7 +97,7 @@ pub struct DataProfile {
     #[serde(rename = "static")]
     pub r#static: ProfileHalf,
     pub subject: DataProfileSubject,
-    /// RFC3339 timestamp of the most recent contributing source record. Equals the synthesizer clock when the profile is empty.
+    /// RFC3339 timestamp of the most recent contributing source record. Equals the synthesizer clock when the profile is empty. Validator accept set matches `cairn_core::domain::Rfc3339Timestamp::parse` (excluding leap-seconds), so any wire-accepted value also parses domain-side without a second gauntlet.
     pub updated_at: String,
 }
 
@@ -108,28 +108,57 @@ struct RawDataProfile {
     #[serde(rename = "static")]
     r#static: ProfileHalf,
     subject: DataProfileSubject,
-    /// RFC3339 timestamp of the most recent contributing source record. Equals the synthesizer clock when the profile is empty.
+    /// RFC3339 timestamp of the most recent contributing source record. Equals the synthesizer clock when the profile is empty. Validator accept set matches `cairn_core::domain::Rfc3339Timestamp::parse` (excluding leap-seconds), so any wire-accepted value also parses domain-side without a second gauntlet.
     updated_at: String,
 }
 
 impl ::core::convert::TryFrom<RawDataProfile> for DataProfile {
     type Error = &'static str;
     fn try_from(raw: RawDataProfile) -> Result<Self, Self::Error> {
-        if raw.updated_at.len() < 20 {
-            return Err("updated_at: must be RFC3339 date-time with at least 20 chars");
-        }
+        if !(20..=64).contains(&raw.updated_at.len()) { return Err("updated_at: RFC3339 date-time must be 20..=64 chars"); }
         if !raw.updated_at.is_ascii() {
             return Err("updated_at: RFC3339 date-time must be ASCII");
         }
         {
             let bytes = raw.updated_at.as_bytes();
-            if bytes[4] != b'-' || bytes[7] != b'-' || !matches!(bytes[10], b'T' | b't') || bytes[13] != b':' || bytes[16] != b':' {
-                return Err("updated_at: RFC3339 date-time anchors must be `-`/`T`/`:` at positions 4/7/10/13/16");
+            if !bytes[..4].iter().all(u8::is_ascii_digit) || bytes[4] != b'-' || !bytes[5..7].iter().all(u8::is_ascii_digit) || bytes[7] != b'-' || !bytes[8..10].iter().all(u8::is_ascii_digit) {
+                return Err("updated_at: date must be YYYY-MM-DD");
             }
-            let last = bytes[bytes.len() - 1];
-            if !matches!(last, b'Z' | b'z') && !matches!(bytes.get(bytes.len() - 6), Some(b'+' | b'-')) {
-                return Err("updated_at: RFC3339 date-time must end with `Z` or `+/-HH:MM` offset");
+            let mm = (bytes[5] - b'0') * 10 + (bytes[6] - b'0');
+            let dd = (bytes[8] - b'0') * 10 + (bytes[9] - b'0');
+            if !(1..=12).contains(&mm) { return Err("updated_at: month out of range"); }
+            if !(1..=31).contains(&dd) { return Err("updated_at: day out of range"); }
+            if !matches!(bytes[10], b'T' | b't') { return Err("updated_at: expected `T` between date and time"); }
+            if !bytes[11..13].iter().all(u8::is_ascii_digit) || bytes[13] != b':' || !bytes[14..16].iter().all(u8::is_ascii_digit) || bytes[16] != b':' || !bytes[17..19].iter().all(u8::is_ascii_digit) {
+                return Err("updated_at: time must be HH:MM:SS");
             }
+            let hh = (bytes[11] - b'0') * 10 + (bytes[12] - b'0');
+            let mi = (bytes[14] - b'0') * 10 + (bytes[15] - b'0');
+            let ss = (bytes[17] - b'0') * 10 + (bytes[18] - b'0');
+            if hh > 23 { return Err("updated_at: hour out of range"); }
+            if mi > 59 { return Err("updated_at: minute out of range"); }
+            if ss > 59 { return Err("updated_at: second out of range"); }
+            let mut idx = 19usize;
+            if idx < bytes.len() && bytes[idx] == b'.' {
+                idx += 1;
+                let frac_start = idx;
+                while idx < bytes.len() && bytes[idx].is_ascii_digit() { idx += 1; }
+                if idx == frac_start { return Err("updated_at: fractional must have >=1 digit after `.`"); }
+            }
+            if idx < bytes.len() && matches!(bytes[idx], b'Z' | b'z') { idx += 1; }
+            else if idx + 6 == bytes.len() && matches!(bytes[idx], b'+' | b'-') {
+                let off = &bytes[idx + 1..];
+                if !off[..2].iter().all(u8::is_ascii_digit) || off[2] != b':' || !off[3..5].iter().all(u8::is_ascii_digit) {
+                    return Err("updated_at: offset must be `+/-HH:MM` digits");
+                }
+                let oh = (off[0] - b'0') * 10 + (off[1] - b'0');
+                let om = (off[3] - b'0') * 10 + (off[4] - b'0');
+                if oh > 23 { return Err("updated_at: offset hour out of range"); }
+                if om > 59 { return Err("updated_at: offset minute out of range"); }
+                idx = bytes.len();
+            }
+            else { return Err("updated_at: must end with `Z` or `+/-HH:MM` offset"); }
+            if idx != bytes.len() { return Err("updated_at: trailing data after zone"); }
         }
         Ok(Self {
             dynamic: raw.dynamic,
