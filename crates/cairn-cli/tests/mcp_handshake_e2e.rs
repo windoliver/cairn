@@ -101,9 +101,12 @@ fn recv_frame(
 }
 
 #[test]
-#[allow(clippy::too_many_lines, reason = "wire-protocol e2e — keeping the full \
-   subprocess setup, frame send/recv, list+call, and post-mortem persistence \
-   probe in one function makes the failure trace single-shot")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "wire-protocol e2e — keeping the full \
+    subprocess setup, frame send/recv, list+call, and post-mortem persistence \
+    probe in one function makes the failure trace single-shot"
+)]
 fn cairn_mcp_subprocess_advertises_and_persists_handshake() {
     let vault = bootstrap_vault();
     enable_single_tenant(vault.path(), "e2e-cli");
