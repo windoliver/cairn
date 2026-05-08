@@ -46,6 +46,7 @@ pub enum PreparedIngest {
 
 /// Prepare an explicit CLI ingest body for the later store write path.
 pub fn prepare_ingest_body(args: &IngestArgs, issuer: &str) -> Result<PreparedIngest, DomainError> {
+    validate_body_only_args(args)?;
     let raw_body = args.body.as_deref().unwrap_or_default();
 
     let redacted = redact(raw_body);
@@ -94,6 +95,20 @@ pub fn prepare_ingest_body(args: &IngestArgs, issuer: &str) -> Result<PreparedIn
         record,
         policy_trace,
     })
+}
+
+fn validate_body_only_args(args: &IngestArgs) -> Result<(), DomainError> {
+    if args.body.is_none() {
+        return Err(DomainError::MalformedCapture {
+            message: "prepare_ingest_body requires args.body; file, folder, and url sources are handled by adapters before this helper".to_owned(),
+        });
+    }
+    if args.file.is_some() || args.folder.is_some() || args.url.is_some() {
+        return Err(DomainError::MalformedCapture {
+            message: "prepare_ingest_body accepts body-only ingest args; file, folder, and url must be resolved before calling this helper".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn is_secret_tag(tag: RedactionTag) -> bool {
