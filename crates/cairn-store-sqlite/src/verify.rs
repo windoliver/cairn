@@ -92,6 +92,12 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("trigger", "reader_fence_state_transition"),
     ("trigger", "reader_fence_identity_immutable"),
     ("trigger", "reader_fence_no_direct_delete"),
+    // 0050_locks_v2 — view added; column additions are not separate sqlite_schema rows
+    ("view", "reader_fence_pending_count"),
+    // 0051 + 0052_lock_acquisition_ulid — UNIQUE per-acquisition id +
+    // sentinel-rejection trigger.
+    ("index", "lock_holders_acquisition_ulid_idx"),
+    ("trigger", "lock_holders_reject_sentinel_ulid"),
     // 0005_consent
     ("table", "consent_journal"),
     ("index", "consent_journal_subject_scope_idx"),

@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use cairn_core::contract::memory_store::{ListArgs, MemoryStore as _};
 use cairn_core::domain::projection::{MarkdownProjector, body_hash};
-use cairn_store_sqlite::locks::acquire_exclusive;
+use cairn_store_sqlite::locks::{LockMode, ResourceKey, acquire};
 
 #[tokio::test]
 async fn ttl_expired_lock_is_reclaimed_by_next_acquire() {
@@ -19,14 +19,21 @@ async fn ttl_expired_lock_is_reclaimed_by_next_acquire() {
             .raw_conn_for_admin()
             .expect("store has a live connection"),
     );
+    let inc = store
+        .incarnation()
+        .cloned()
+        .expect("open mints incarnation");
+    let resource = ResourceKey::vault("v");
 
     // "Crashed" holder: short TTL, then forget the handle (no Drop release fires).
-    let h = acquire_exclusive(
+    let h = acquire(
         &conn,
-        "lint_repair",
-        "v",
+        &resource,
+        LockMode::Exclusive,
         "crashed",
         Duration::from_millis(50),
+        &inc,
+        "first",
     )
     .await
     .expect("first acquire");
@@ -37,9 +44,17 @@ async fn ttl_expired_lock_is_reclaimed_by_next_acquire() {
     // may take longer than a bare milliseconds sleep due to scheduler jitter.
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let _h2 = acquire_exclusive(&conn, "lint_repair", "v", "next", Duration::from_mins(1))
-        .await
-        .expect("reclaim after TTL expiry");
+    let _h2 = acquire(
+        &conn,
+        &resource,
+        LockMode::Exclusive,
+        "next",
+        Duration::from_mins(1),
+        &inc,
+        "reclaim",
+    )
+    .await
+    .expect("reclaim after TTL expiry");
 }
 
 #[tokio::test]
