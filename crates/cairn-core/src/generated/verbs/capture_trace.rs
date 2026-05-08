@@ -20,4 +20,4 @@ pub struct CaptureTraceData {
     pub trace_id: crate::generated::common::Ulid,
 }
 
-pub const ARGS_SCHEMA: &[u8] = include_bytes!("../../../../cairn-mcp/src/generated/schemas/verbs/capture_trace.json");
+pub const ARGS_SCHEMA: &[u8] = include_bytes!("../schemas/verbs/capture_trace.json");

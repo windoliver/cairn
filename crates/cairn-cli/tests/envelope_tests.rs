@@ -34,6 +34,37 @@ fn assert_aborted_internal(verb_args: &[&str]) {
     assert!(v["policy_trace"].is_array(), "verb {verb_args:?}");
 }
 
+fn assert_rejected_capability_unavailable(verb_args: &[&str], capability: &str) {
+    let out = {
+        let mut cmd = cli();
+        cmd.args(verb_args);
+        cmd.output()
+            .unwrap_or_else(|e| panic!("failed to run {verb_args:?}: {e}"))
+    };
+    assert_eq!(
+        out.status.code(),
+        Some(69),
+        "verb {verb_args:?} should exit 69 (CapabilityUnavailable), got {:?}",
+        out.status
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+        panic!("verb {verb_args:?} JSON parse failed: {e}\nstdout: {stdout:?}")
+    });
+    assert_eq!(v["contract"], "cairn.mcp.v1", "verb {verb_args:?}");
+    assert_eq!(v["status"], "rejected", "verb {verb_args:?}");
+    assert_eq!(
+        v["error"]["code"], "CapabilityUnavailable",
+        "verb {verb_args:?}"
+    );
+    assert_eq!(
+        v["error"]["data"]["capability"], capability,
+        "verb {verb_args:?}"
+    );
+    assert!(v["operation_id"].is_string(), "verb {verb_args:?}");
+    assert!(v["policy_trace"].is_array(), "verb {verb_args:?}");
+}
+
 #[test]
 fn ingest_returns_committed_envelope() {
     let vault = tempfile::tempdir().expect("temp vault");
@@ -123,8 +154,26 @@ fn search_keyword_json_exits_zero_with_hits() {
 }
 
 #[test]
-fn retrieve_record_returns_aborted_internal() {
-    assert_aborted_internal(&["retrieve", "01JXXXXXXXXXXXXXXXXXXXXXXX", "--json"]);
+fn retrieve_record_returns_capability_unavailable() {
+    assert_rejected_capability_unavailable(
+        &["retrieve", "01JXXXXXXXXXXXXXXXXXXXXXXX", "--json"],
+        "cairn.mcp.v1.retrieve.record",
+    );
+}
+
+#[test]
+fn retrieve_turn_returns_capability_unavailable() {
+    assert_rejected_capability_unavailable(
+        &[
+            "retrieve",
+            "--session",
+            "session-1",
+            "--turn",
+            "3",
+            "--json",
+        ],
+        "cairn.mcp.v1.retrieve.turn",
+    );
 }
 
 #[test]
@@ -176,8 +225,11 @@ fn capture_trace_returns_aborted_internal() {
 }
 
 #[test]
-fn forget_record_returns_aborted_internal() {
-    assert_aborted_internal(&["forget", "--record", "01JXXXXXXXXXXXXXXXXXXXXXXX", "--json"]);
+fn forget_record_returns_capability_unavailable() {
+    assert_rejected_capability_unavailable(
+        &["forget", "--record", "01JXXXXXXXXXXXXXXXXXXXXXXX", "--json"],
+        "cairn.mcp.v1.forget.record",
+    );
 }
 
 #[test]

@@ -108,4 +108,4 @@ pub struct StatusResponse {
     pub server_info: StatusResponseServerInfo,
 }
 
-pub const SCHEMA: &[u8] = include_bytes!("../../../cairn-mcp/src/generated/schemas/prelude/status.json");
+pub const SCHEMA: &[u8] = include_bytes!("schemas/prelude/status.json");
