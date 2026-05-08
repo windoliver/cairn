@@ -131,6 +131,16 @@ cargo nextest run -p cairn-store-sqlite --locked replay envelope_blocks_wal
 
 Expected: PASS. These tests cover duplicate `operation_id` / nonce rejection, sequence strict advance, out-of-order rejection without state advance, single-use challenge consumption, TTL rejection, concurrency behavior, and verifier rejection before mutable identity WAL writes.
 
+- [ ] **Step 1b: Run the pre-write rejection integration-test binary**
+
+```bash
+CARGO_HOME=/tmp/codex-issue7-task2-cargo-home \
+CARGO_TARGET_DIR=/tmp/codex-issue7-task2-target \
+cargo nextest run -p cairn-store-sqlite --locked --test envelope_blocks_wal
+```
+
+Expected: PASS. The broad Step 1 filter selects replay-related tests but does not select every test in `crates/cairn-store-sqlite/tests/envelope_blocks_wal.rs`; this command runs the verifier-rejection-before-write tests directly.
+
 - [ ] **Step 2: If replay admission fails, isolate the mode**
 
 Run the smallest matching filter:
