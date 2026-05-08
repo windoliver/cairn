@@ -9,3 +9,4 @@ pub mod ingest;
 pub mod lint;
 pub mod retrieve;
 pub mod search;
+pub mod summarize;

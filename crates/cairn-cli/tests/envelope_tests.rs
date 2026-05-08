@@ -267,8 +267,61 @@ fn retrieve_record_missing_returns_committed_empty_record_envelope() {
 }
 
 #[test]
-fn summarize_returns_aborted_internal() {
-    assert_aborted_internal(&["summarize", "01JXXXXXXXXXXXXXXXXXXXXXXX", "--json"]);
+fn summarize_returns_committed_envelope() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    cairn_cli::vault::bootstrap(&cairn_cli::vault::BootstrapOpts {
+        vault_path: dir.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap vault");
+    let seed = cli()
+        .current_dir(dir.path())
+        .args([
+            "ingest",
+            "--kind",
+            "reference",
+            "--body",
+            "summarize envelope body",
+            "--json",
+        ])
+        .output()
+        .expect("seed record");
+    assert_eq!(
+        seed.status.code(),
+        Some(0),
+        "seed ingest failed: {}",
+        String::from_utf8_lossy(&seed.stderr)
+    );
+    let seed_json: serde_json::Value = serde_json::from_slice(&seed.stdout).expect("seed json");
+    let record_id = seed_json["data"]["record_id"].as_str().expect("record_id");
+
+    let out = cli()
+        .current_dir(dir.path())
+        .args(["summarize", record_id, "--json"])
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run summarize: {e}"));
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "summarize should exit 0 (committed), got {:?}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    let v: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("summarize JSON parse failed: {e}\nstdout: {stdout:?}"));
+    assert_eq!(v["contract"], "cairn.mcp.v1");
+    assert_eq!(v["status"], "committed");
+    assert_eq!(v["verb"], "summarize");
+    assert!(v["error"].is_null());
+    assert!(
+        v["data"]["summary"]
+            .as_str()
+            .expect("summary")
+            .contains("summarize envelope body")
+    );
+    assert!(v["operation_id"].is_string());
+    assert!(v["policy_trace"].is_array());
 }
 
 #[test]

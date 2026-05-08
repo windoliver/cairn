@@ -7,6 +7,7 @@ use cairn_core::generated::verbs::retrieve::TurnItemRole;
 use cairn_core::pipeline::filter::Decision;
 use cairn_core::verbs::ingest::{PreparedIngest, prepare_ingest_body};
 use cairn_core::verbs::retrieve::{profile_data, record_data, turn_data_with_options};
+use cairn_core::verbs::summarize::render_summary;
 
 mod issue_61_core_verbs {
     use super::*;
@@ -281,6 +282,25 @@ mod issue_61_core_verbs {
             profile.dynamic.key_facts.current_issues[0].evidence.len(),
             1
         );
+    }
+
+    #[test]
+    fn summarize_rollup_is_deterministic() {
+        let a = sample_core_record(
+            "Alpha detail for the project",
+            serde_json::json!({"source": "summary-test"}),
+        );
+        let b = sample_core_record(
+            "Beta detail for the project",
+            serde_json::json!({"source": "summary-test"}),
+        );
+
+        let first = render_summary(&[b.clone(), a.clone()], true);
+        let second = render_summary(&[a, b], true);
+
+        assert_eq!(first, second);
+        assert!(first.contains("Alpha detail"));
+        assert!(first.contains("Beta detail"));
     }
 
     fn sample_core_record(

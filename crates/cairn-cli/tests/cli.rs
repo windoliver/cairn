@@ -254,36 +254,6 @@ fn no_args_prints_help_and_fails_closed() {
 }
 
 #[test]
-fn simple_verb_human_mode_exits_one_with_internal() {
-    // After dispatch wiring: verbs with no store adapter exit 1 (generic failure)
-    // and print "Internal" to stderr in human mode.
-    // `ingest` is excluded: bare `cairn ingest` has no source → exit 64 (usage error).
-    // `retrieve` and `forget` are excluded: required ArgGroup → exit 64 (usage error).
-    // `search` is excluded: missing required CLI args exit 64 (EX_USAGE);
-    // see `search_missing_query_exits_64` below.
-    // `assemble_hot`, `capture_trace`, and `lint` are excluded: those verbs
-    // are now wired and have dedicated committed-envelope tests.
-    for args in [&["summarize", "01ARYZ6S41TSV4RRFFQ69G5FAV"][..]] {
-        let verb = args[0];
-        let out = cli().args(args).output().expect("cairn <verb>");
-        assert!(
-            !out.status.success(),
-            "verb {verb} exited OK — should fail with Internal"
-        );
-        assert_eq!(
-            out.status.code(),
-            Some(1),
-            "verb {verb} wrong exit code (want 1)"
-        );
-        let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
-        assert!(
-            stderr.contains("Internal"),
-            "verb {verb} stderr missing Internal error code: {stderr:?}",
-        );
-    }
-}
-
-#[test]
 fn assemble_hot_exits_zero_and_emits_committed_envelope() {
     // `assemble_hot` is wired: stub-body assembler returns a committed
     // Response with six zero-length segments (default recipe). Exit 0.

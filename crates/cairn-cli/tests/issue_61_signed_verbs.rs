@@ -8,9 +8,11 @@ use cairn_cli::vault::{BootstrapOpts, bootstrap};
 use cairn_cli::verbs::signed::{
     aborted, committed, committed_retrieve, rejected_from_domain, response_error_code,
 };
+use cairn_core::contract::memory_store::MemoryStore;
 use cairn_core::domain::{
     ActorChainEntry, CaptureEvent, CaptureEventId, CaptureMode, CapturePayload, CaptureRefs,
-    ChainRole, DomainError, Identity, PayloadHash, Rfc3339Timestamp, SourceFamily,
+    ChainRole, DomainError, Identity, MemoryVisibility, PayloadHash, Rfc3339Timestamp,
+    SourceFamily,
 };
 use cairn_core::generated::common::Ulid;
 use cairn_core::generated::envelope::{
@@ -203,6 +205,274 @@ fn retrieve_record_json_commits_typed_record_target() {
     assert_eq!(data.record_id.0, record_id);
     assert_eq!(data.kind, "reference");
     assert_eq!(data.body.as_deref(), Some("retrievable issue 61 cli body"));
+}
+
+#[test]
+fn summarize_json_commits_authorized_rollup() {
+    let vault = tempfile::tempdir().expect("vault");
+    bootstrap(&BootstrapOpts {
+        vault_path: vault.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap");
+    let alpha = ingest_reference(vault.path(), "Alpha detail for the project");
+    let beta = ingest_reference(vault.path(), "Beta detail for the project");
+
+    let summarize = cli()
+        .current_dir(vault.path())
+        .args(["summarize", &beta, &alpha, "--citations", "off", "--json"])
+        .output()
+        .expect("run summarize");
+    assert_eq!(
+        summarize.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&summarize.stderr)
+    );
+    let resp: Response = serde_json::from_slice(&summarize.stdout).expect("response");
+    assert_eq!(resp.status, ResponseStatus::Committed);
+    assert_eq!(resp.verb, ResponseVerb::Summarize);
+    assert!(resp.policy_trace.iter().any(|entry| {
+        entry.gate == "read.visibility" && entry.result == ResponsePolicyTraceResult::Pass
+    }));
+    let Some(ResponseData::Summarize(data)) = resp.data else {
+        panic!("summarize must return summary data");
+    };
+    assert!(data.summary.contains("Alpha detail for the project"));
+    assert!(data.summary.contains("Beta detail for the project"));
+    assert!(
+        !data.summary.contains(&alpha),
+        "citations=off should omit source record ids"
+    );
+}
+
+#[test]
+fn summarize_persist_writes_summary_record() {
+    let vault = tempfile::tempdir().expect("vault");
+    bootstrap(&BootstrapOpts {
+        vault_path: vault.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap");
+    let alpha = ingest_reference(vault.path(), "Alpha persisted summary detail");
+    let beta = ingest_reference(vault.path(), "Beta persisted summary detail");
+
+    let summarize = cli()
+        .current_dir(vault.path())
+        .args(["summarize", &alpha, &beta, "--persist", "--json"])
+        .output()
+        .expect("run summarize");
+    assert_eq!(
+        summarize.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&summarize.stderr)
+    );
+    let resp: Response = serde_json::from_slice(&summarize.stdout).expect("response");
+    assert_eq!(resp.status, ResponseStatus::Committed);
+    assert!(resp.policy_trace.iter().any(|entry| {
+        entry.gate == "write.wal" && entry.result == ResponsePolicyTraceResult::Pass
+    }));
+    assert!(resp.policy_trace.iter().any(|entry| {
+        entry.gate == "write.consent" && entry.result == ResponsePolicyTraceResult::Pass
+    }));
+    let Some(ResponseData::Summarize(data)) = resp.data else {
+        panic!("summarize must return summary data");
+    };
+    let persisted = data
+        .persisted_record_id
+        .as_ref()
+        .expect("persisted record id")
+        .0
+        .clone();
+
+    let retrieve = cli()
+        .current_dir(vault.path())
+        .args(["retrieve", &persisted, "--json"])
+        .output()
+        .expect("retrieve persisted summary");
+    assert_eq!(
+        retrieve.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&retrieve.stderr)
+    );
+    let resp: Response = serde_json::from_slice(&retrieve.stdout).expect("response");
+    let Some(ResponseData::Retrieve(RetrieveData::Record(data))) = resp.data else {
+        panic!("retrieve must return persisted summary record");
+    };
+    let body = data.body.expect("summary body");
+    assert!(body.contains("Alpha persisted summary detail"));
+    assert!(body.contains("Beta persisted summary detail"));
+    let source_ids = data
+        .frontmatter
+        .as_ref()
+        .and_then(|frontmatter| frontmatter.get("summary_sources"))
+        .and_then(serde_json::Value::as_array)
+        .expect("summary source ids");
+    assert!(source_ids.iter().any(|id| id.as_str() == Some(&alpha)));
+    assert!(source_ids.iter().any(|id| id.as_str() == Some(&beta)));
+}
+
+#[test]
+fn summarize_rejects_unknown_issuer_before_returning_data() {
+    let vault = tempfile::tempdir().expect("vault");
+    bootstrap(&BootstrapOpts {
+        vault_path: vault.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap");
+    let record_id = ingest_reference(vault.path(), "issuer-gated summarize body");
+
+    let summarize = cli()
+        .current_dir(vault.path())
+        .env("CAIRN_ISSUER", "agt:cairn-cli:missing:reader:v1")
+        .args(["summarize", &record_id, "--json"])
+        .output()
+        .expect("run summarize");
+    assert_eq!(
+        summarize.status.code(),
+        Some(64),
+        "stderr={}",
+        String::from_utf8_lossy(&summarize.stderr)
+    );
+    let resp: Response = serde_json::from_slice(&summarize.stdout).expect("response");
+    assert_eq!(resp.status, ResponseStatus::Rejected);
+    assert_eq!(resp.verb, ResponseVerb::Summarize);
+    assert!(resp.data.is_none());
+    assert_eq!(response_error_code(&resp), Some("Unauthorized"));
+}
+
+#[test]
+fn summarize_rejects_private_record_from_other_active_issuer() {
+    let vault = tempfile::tempdir().expect("vault");
+    bootstrap(&BootstrapOpts {
+        vault_path: vault.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap");
+    let record_id = ingest_reference(vault.path(), "private summarize source body");
+    let other_issuer = provision_agent(vault.path(), "cairn-cli:other:reader");
+
+    let summarize = cli()
+        .current_dir(vault.path())
+        .env("CAIRN_ISSUER", other_issuer)
+        .args(["summarize", &record_id, "--json"])
+        .output()
+        .expect("run summarize");
+    assert_eq!(
+        summarize.status.code(),
+        Some(64),
+        "stderr={}",
+        String::from_utf8_lossy(&summarize.stderr)
+    );
+    let resp: Response = serde_json::from_slice(&summarize.stdout).expect("response");
+    assert_eq!(resp.status, ResponseStatus::Rejected);
+    assert_eq!(resp.verb, ResponseVerb::Summarize);
+    assert!(resp.data.is_none());
+    assert_eq!(response_error_code(&resp), Some("InvalidArgs"));
+    assert!(resp.policy_trace.iter().any(|entry| {
+        entry.gate == "read.scope" && entry.result == ResponsePolicyTraceResult::Pass
+    }));
+}
+
+#[test]
+fn summarize_rejects_session_record_without_session_authorization() {
+    let vault = tempfile::tempdir().expect("vault");
+    bootstrap(&BootstrapOpts {
+        vault_path: vault.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap");
+    let _ = ingest_reference(vault.path(), "seed default issuer");
+    let record_id = insert_session_record(vault.path(), "session-only summarize source body");
+
+    let summarize = cli()
+        .current_dir(vault.path())
+        .args(["summarize", &record_id, "--json"])
+        .output()
+        .expect("run summarize");
+    assert_eq!(
+        summarize.status.code(),
+        Some(64),
+        "stderr={}",
+        String::from_utf8_lossy(&summarize.stderr)
+    );
+    let resp: Response = serde_json::from_slice(&summarize.stdout).expect("response");
+    assert_eq!(resp.status, ResponseStatus::Rejected);
+    assert_eq!(resp.verb, ResponseVerb::Summarize);
+    assert!(resp.data.is_none());
+    assert_eq!(response_error_code(&resp), Some("InvalidArgs"));
+    assert!(resp.policy_trace.iter().any(|entry| {
+        entry.gate == "read.scope" && entry.result == ResponsePolicyTraceResult::Pass
+    }));
+}
+
+#[test]
+fn summarize_rejects_missing_authorized_source_record() {
+    let vault = tempfile::tempdir().expect("vault");
+    bootstrap(&BootstrapOpts {
+        vault_path: vault.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap");
+    let record_id = ingest_reference(vault.path(), "summarize source body");
+    let missing = "01HQZX9F5N0000000000000000";
+
+    let summarize = cli()
+        .current_dir(vault.path())
+        .args(["summarize", &record_id, missing, "--json"])
+        .output()
+        .expect("run summarize");
+    assert_eq!(
+        summarize.status.code(),
+        Some(64),
+        "stderr={}",
+        String::from_utf8_lossy(&summarize.stderr)
+    );
+    let resp: Response = serde_json::from_slice(&summarize.stdout).expect("response");
+    assert_eq!(resp.status, ResponseStatus::Rejected);
+    assert_eq!(resp.verb, ResponseVerb::Summarize);
+    assert!(resp.data.is_none());
+    assert_eq!(response_error_code(&resp), Some("InvalidArgs"));
+    assert!(resp.policy_trace.iter().any(|entry| {
+        entry.gate == "read.scope" && entry.result == ResponsePolicyTraceResult::Pass
+    }));
+}
+
+#[test]
+fn summarize_persist_reject_keeps_source_read_trace() {
+    let vault = tempfile::tempdir().expect("vault");
+    bootstrap(&BootstrapOpts {
+        vault_path: vault.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap");
+    let record_id = ingest_reference(vault.path(), "summarize invalid-kind source body");
+
+    let summarize = cli()
+        .current_dir(vault.path())
+        .args([
+            "summarize",
+            &record_id,
+            "--persist",
+            "--kind",
+            "not_a_kind",
+            "--json",
+        ])
+        .output()
+        .expect("run summarize");
+    assert_eq!(
+        summarize.status.code(),
+        Some(64),
+        "stderr={}",
+        String::from_utf8_lossy(&summarize.stderr)
+    );
+    let resp: Response = serde_json::from_slice(&summarize.stdout).expect("response");
+    assert_eq!(resp.status, ResponseStatus::Rejected);
+    assert!(resp.policy_trace.iter().any(|entry| {
+        entry.gate == "read.scope" && entry.result == ResponsePolicyTraceResult::Pass
+    }));
 }
 
 #[test]
@@ -502,6 +772,66 @@ fn ingest_reference(vault: &Path, body: &str) -> String {
     ingest_json["data"]["record_id"]
         .as_str()
         .expect("record_id")
+        .to_owned()
+}
+
+fn insert_session_record(vault: &Path, body: &str) -> String {
+    let args = cairn_core::generated::verbs::ingest::IngestArgs {
+        body: Some(body.to_owned()),
+        dry_run: None,
+        file: None,
+        folder: None,
+        frontmatter: None,
+        human_review: None,
+        kind: "reference".to_owned(),
+        no_cache: None,
+        no_diff: None,
+        session_id: None,
+        tags: None,
+        url: None,
+    };
+    let prepared =
+        cairn_core::verbs::ingest::prepare_ingest_body(&args, "agt:cairn-cli:default:writer:v1")
+            .expect("prepare session record");
+    let cairn_core::verbs::ingest::PreparedIngest::Proceed { mut record, .. } = prepared else {
+        panic!("session fixture body should pass filters");
+    };
+    record.scope.tenant = Some("default".to_owned());
+    record.scope.workspace = Some("my-vault".to_owned());
+    record.scope.entity = Some("ingest".to_owned());
+    record.scope.session_id = Some("01ARZ3NDEKTSV4RRFFQ69G5FAS".to_owned());
+    record.visibility = MemoryVisibility::Session;
+    let record_id = record.id.as_str().to_owned();
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    rt.block_on(async {
+        let store = cairn_store_sqlite::open(vault.join(".cairn/cairn.db"))
+            .await
+            .expect("open store");
+        store.upsert(&record).await.expect("upsert session record");
+    });
+    record_id
+}
+
+fn provision_agent(vault: &Path, slug: &str) -> String {
+    let provision = cli()
+        .current_dir(vault)
+        .args(["identity", "provision", "agent", slug, "--json"])
+        .output()
+        .expect("provision agent");
+    assert_eq!(
+        provision.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&provision.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&provision.stdout).expect("json");
+    json["provisioned"]
+        .as_str()
+        .expect("provisioned identity")
         .to_owned()
 }
 

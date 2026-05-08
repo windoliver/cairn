@@ -216,7 +216,10 @@ fn main() -> ExitCode {
             Ok((vault_root, _source, config)) => verbs::retrieve::run(sub, vault_root, config),
             Err(code) => code,
         },
-        Some(("summarize", sub)) => verbs::summarize::run(sub),
+        Some(("summarize", sub)) => match resolve_vault_and_config(explicit_vault.as_deref()) {
+            Ok((vault_root, _source, config)) => verbs::summarize::run(sub, vault_root, config),
+            Err(code) => code,
+        },
         Some(("assemble_hot", sub)) => run_assemble_hot(sub, explicit_vault.as_deref()),
         Some(("capture_trace", sub)) => match resolve_vault_and_config(explicit_vault.as_deref()) {
             Ok((vault_root, _source, config)) => verbs::capture_trace::run(sub, vault_root, config),
