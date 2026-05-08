@@ -18,7 +18,17 @@ use clap::ArgMatches;
 
 use crate::identity::{guard::refuse_if_degraded, status::ReconciliationReport};
 
-use super::envelope::{emit_json, human_error, unimplemented_response};
+use super::envelope::{EX_UNAVAILABLE, capability_unavailable_response, emit_json, human_error};
+
+fn requested_capability(sub: &ArgMatches) -> &'static str {
+    if sub.get_one::<String>("session_id").is_some() {
+        "cairn.mcp.v1.forget.session"
+    } else if sub.get_one::<String>("scope").is_some() {
+        "cairn.mcp.v1.forget.scope"
+    } else {
+        "cairn.mcp.v1.forget.record"
+    }
+}
 
 /// Run `cairn forget`.
 #[must_use]
@@ -48,16 +58,17 @@ pub fn run(sub: &ArgMatches) -> ExitCode {
         return ExitCode::from(75); // EX_TEMPFAIL
     }
 
-    let resp = unimplemented_response(ResponseVerb::Forget);
+    let capability = requested_capability(sub);
+    let resp = capability_unavailable_response(ResponseVerb::Forget, capability);
     if json {
         emit_json(&resp);
     } else {
         human_error(
             "forget",
-            "Internal",
-            "store not wired in this P0 build",
+            "CapabilityUnavailable",
+            "capability is not advertised in this build",
             &resp.operation_id,
         );
     }
-    ExitCode::FAILURE
+    ExitCode::from(EX_UNAVAILABLE)
 }

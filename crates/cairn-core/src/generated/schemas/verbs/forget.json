@@ -1,0 +1,196 @@
+{
+  "$defs": {
+    "Args": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ArgsRecord"
+        },
+        {
+          "$ref": "#/$defs/ArgsSession"
+        },
+        {
+          "$ref": "#/$defs/ArgsScope"
+        }
+      ],
+      "x-cairn-discriminator": "mode"
+    },
+    "ArgsRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "dry_run": {
+          "default": false,
+          "description": "If true, produce a FlushPlan and emit it without writing to MemoryStore (brief §5.5). Mutually exclusive with human_review.",
+          "type": "boolean"
+        },
+        "human_review": {
+          "default": false,
+          "description": "If true, persist a FlushPlan under .cairn/flush/pending/ for explicit `cairn flush apply` (brief §5.5). Mutually exclusive with dry_run.",
+          "type": "boolean"
+        },
+        "mode": {
+          "const": "record"
+        },
+        "no_diff": {
+          "default": false,
+          "description": "When human_review=true, skip emitting the markdown diff sidecar.",
+          "type": "boolean"
+        },
+        "record_id": {
+          "$ref": "../common/primitives.json#/$defs/Ulid"
+        }
+      },
+      "required": [
+        "mode",
+        "record_id"
+      ],
+      "type": "object",
+      "x-cairn-capability": "cairn.mcp.v1.forget.record",
+      "x-cairn-cli": {
+        "command": "forget",
+        "flags": [
+          {
+            "long": "record",
+            "name": "record_id",
+            "value_source": "string"
+          }
+        ]
+      },
+      "x-cairn-since": "v0.1"
+    },
+    "ArgsScope": {
+      "additionalProperties": false,
+      "properties": {
+        "dry_run": {
+          "default": false,
+          "description": "If true, produce a FlushPlan and emit it without writing to MemoryStore (brief §5.5). Mutually exclusive with human_review.",
+          "type": "boolean"
+        },
+        "human_review": {
+          "default": false,
+          "description": "If true, persist a FlushPlan under .cairn/flush/pending/ for explicit `cairn flush apply` (brief §5.5). Mutually exclusive with dry_run.",
+          "type": "boolean"
+        },
+        "mode": {
+          "const": "scope"
+        },
+        "no_diff": {
+          "default": false,
+          "description": "When human_review=true, skip emitting the markdown diff sidecar.",
+          "type": "boolean"
+        },
+        "scope": {
+          "$ref": "../common/scope_filter.json"
+        }
+      },
+      "required": [
+        "mode",
+        "scope"
+      ],
+      "type": "object",
+      "x-cairn-capability": "cairn.mcp.v1.forget.scope",
+      "x-cairn-cli": {
+        "command": "forget",
+        "flags": [
+          {
+            "cli_exemplar": "{\"user\":\"u\"}",
+            "long": "scope",
+            "name": "scope",
+            "value_source": "json"
+          }
+        ]
+      },
+      "x-cairn-since": "v0.3"
+    },
+    "ArgsSession": {
+      "additionalProperties": false,
+      "properties": {
+        "dry_run": {
+          "default": false,
+          "description": "If true, produce a FlushPlan and emit it without writing to MemoryStore (brief §5.5). Mutually exclusive with human_review.",
+          "type": "boolean"
+        },
+        "human_review": {
+          "default": false,
+          "description": "If true, persist a FlushPlan under .cairn/flush/pending/ for explicit `cairn flush apply` (brief §5.5). Mutually exclusive with dry_run.",
+          "type": "boolean"
+        },
+        "mode": {
+          "const": "session"
+        },
+        "no_diff": {
+          "default": false,
+          "description": "When human_review=true, skip emitting the markdown diff sidecar.",
+          "type": "boolean"
+        },
+        "session_id": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "mode",
+        "session_id"
+      ],
+      "type": "object",
+      "x-cairn-capability": "cairn.mcp.v1.forget.session",
+      "x-cairn-cli": {
+        "command": "forget",
+        "flags": [
+          {
+            "long": "session",
+            "name": "session_id",
+            "value_source": "string"
+          }
+        ]
+      },
+      "x-cairn-since": "v0.2"
+    },
+    "Data": {
+      "additionalProperties": false,
+      "properties": {
+        "deleted_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "plan_ref": {
+          "description": "Path under .cairn/flush/pending/ when human_review=true; absent otherwise.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "tombstones": {
+          "items": {
+            "$ref": "../common/primitives.json#/$defs/Ulid"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "deleted_count"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/forget.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Cairn verb: forget",
+  "type": "object",
+  "x-cairn-auth": "forget_capability",
+  "x-cairn-capability": null,
+  "x-cairn-cli": {
+    "command": "forget",
+    "note": "top-level CLI shape; per-mode flags are defined on each $defs.Args* sub-type"
+  },
+  "x-cairn-contract": "cairn.mcp.v1",
+  "x-cairn-skill-triggers": {
+    "exclusivity": "this is the single delete surface — there is no other delete path",
+    "negative": [
+      "do NOT use to 'mark as resolved' — that belongs to an ingest with kind:feedback",
+      "do NOT use on a draft the user wants to edit — that belongs to ingest with version bump"
+    ],
+    "positive": [
+      "use when the user asks to delete or forget a specific record / session / scope",
+      "use as part of a compliance-driven forget-me flow"
+    ]
+  },
+  "x-cairn-verb-id": "forget"
+}

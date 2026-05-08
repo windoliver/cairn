@@ -7,6 +7,9 @@ use cairn_core::generated::envelope::{
     Response, ResponsePolicyTrace, ResponseStatus, ResponseVerb,
 };
 
+/// `sysexits.h` `EX_UNAVAILABLE`.
+pub const EX_UNAVAILABLE: u8 = 69;
+
 /// Generate a fresh Crockford base32 ULID suitable for `operation_id`.
 #[must_use]
 pub fn new_operation_id() -> Ulid {

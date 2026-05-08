@@ -559,4 +559,4 @@ impl RetrieveArgs {
 
 pub type RetrieveData = serde_json::Value;
 
-pub const ARGS_SCHEMA: &[u8] = include_bytes!("../../../../cairn-mcp/src/generated/schemas/verbs/retrieve.json");
+pub const ARGS_SCHEMA: &[u8] = include_bytes!("../schemas/verbs/retrieve.json");

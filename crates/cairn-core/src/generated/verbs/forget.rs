@@ -185,4 +185,4 @@ pub struct ForgetData {
     pub tombstones: Option<Vec<crate::generated::common::Ulid>>,
 }
 
-pub const ARGS_SCHEMA: &[u8] = include_bytes!("../../../../cairn-mcp/src/generated/schemas/verbs/forget.json");
+pub const ARGS_SCHEMA: &[u8] = include_bytes!("../schemas/verbs/forget.json");
