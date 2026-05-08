@@ -331,6 +331,7 @@ fn status_parity_cli_vs_sdk_vs_mcp_with_fts_only_store() {
                 graph_edges: false,
                 transactions: false,
                 per_record_consent_model: true,
+                graph_search: false,
             },
         });
     let config = cairn_core::config::CairnConfig::default();

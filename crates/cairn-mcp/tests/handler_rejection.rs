@@ -43,6 +43,7 @@ impl MemoryStore for RejectionStubStore {
             graph_edges: false,
             transactions: false,
             per_record_consent_model: true,
+            graph_search: false,
         };
         &CAPS
     }

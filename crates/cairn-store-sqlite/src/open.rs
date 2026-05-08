@@ -526,6 +526,12 @@ pub fn peek_capabilities(path: &Path) -> Result<MemoryStoreCapabilities, StoreEr
         graph_edges: has_entity_graph,
         transactions: true,
         per_record_consent_model: has_consent_timeline,
+        // Graph search needs the same `entity_*` triple as `graph_edges`;
+        // `bootstrap` runs a richer column-shape probe before advertising
+        // the cap from the async open path, but the read-only sync probe
+        // can rely on table presence — a partial migration would surface
+        // as `false` here and prompt re-migration.
+        graph_search: has_entity_graph,
     })
 }
 

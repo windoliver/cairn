@@ -1160,6 +1160,7 @@ mod noop_store {
                 graph_edges: false,
                 transactions: false,
                 per_record_consent_model: false,
+                graph_search: false,
             };
             &CAPS
         }

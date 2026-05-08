@@ -1561,6 +1561,7 @@ rerank_topk: 20
             graph_edges: graph,
             transactions: true,
             per_record_consent_model: true,
+            graph_search: graph,
         }
     }
 
