@@ -9,7 +9,7 @@
 //!   `caller_filters_tombstoned_before_synthesize` doc-test); the
 //!   synthesizer's contract is "trust the projection".
 //! - **Dynamic facts can expire without deleting static prefs** —
-//!   `dynamic_records_disappearing_does_not_touch_static_section`.
+//!   `dynamic_records_disappearing_does_not_touch_static_half`.
 //! - **Subject validation** — `errors_when_subject_empty`,
 //!   `errors_when_subject_field_blank`.
 
@@ -87,20 +87,20 @@ fn materializes_static_and_dynamic_split() {
     let profile = synthesize(&records, &user_subject(), &now).expect("synthesize");
 
     assert_eq!(profile.subject.user.as_deref(), Some("hmn:alice"));
-    assert_eq!(profile.static_section.key_facts.preferences.len(), 1);
-    assert_eq!(profile.static_section.key_facts.devices.len(), 1);
-    assert!(profile.static_section.key_facts.current_issues.is_empty());
-    assert_eq!(profile.dynamic_section.key_facts.current_issues.len(), 1);
-    assert!(profile.dynamic_section.key_facts.preferences.is_empty());
+    assert_eq!(profile.r#static.key_facts.preferences.len(), 1);
+    assert_eq!(profile.r#static.key_facts.devices.len(), 1);
+    assert!(profile.r#static.key_facts.current_issues.is_empty());
+    assert_eq!(profile.dynamic.key_facts.current_issues.len(), 1);
+    assert!(profile.dynamic.key_facts.preferences.is_empty());
 
     // updated_at is the latest of the contributing records, not `now`.
     assert_eq!(profile.updated_at, "2026-04-22T14:10:00Z");
 
     // P0 narrative bodies are stub-empty per brief §7.1.
-    assert_eq!(profile.static_section.summary, "");
-    assert_eq!(profile.static_section.historical_summary, "");
-    assert_eq!(profile.dynamic_section.summary, "");
-    assert_eq!(profile.dynamic_section.historical_summary, "");
+    assert_eq!(profile.r#static.summary, "");
+    assert_eq!(profile.r#static.historical_summary, "");
+    assert_eq!(profile.dynamic.summary, "");
+    assert_eq!(profile.dynamic.historical_summary, "");
 }
 
 #[test]
@@ -116,7 +116,7 @@ fn evidence_lists_source_record_ids() {
     let profile =
         synthesize(&records, &user_subject(), &ts("2026-04-22T14:00:01Z")).expect("synthesize");
 
-    let line = &profile.static_section.key_facts.preferences[0];
+    let line = &profile.r#static.key_facts.preferences[0];
     assert_eq!(line.value, "prefers terse explanations");
     assert!((line.confidence - 0.95).abs() < 1e-6);
     assert_eq!(line.evidence, vec![Ulid(rid('3').as_str().to_owned())]);
@@ -154,11 +154,11 @@ fn merges_duplicate_value_with_max_confidence_and_union_evidence() {
     let profile =
         synthesize(&records, &user_subject(), &ts("2026-04-22T14:02:01Z")).expect("synthesize");
 
-    let prefs = &profile.static_section.key_facts.preferences;
+    let prefs = &profile.r#static.key_facts.preferences;
     assert_eq!(prefs.len(), 1);
     assert!((prefs[0].confidence - 0.85).abs() < 1e-6);
     assert_eq!(prefs[0].evidence.len(), 2);
-    assert_eq!(profile.static_section.key_facts.software.len(), 1);
+    assert_eq!(profile.r#static.key_facts.software.len(), 1);
 }
 
 #[test]
@@ -184,7 +184,7 @@ fn excludes_uncertain_band() {
     let profile =
         synthesize(&records, &user_subject(), &ts("2026-04-22T14:00:01Z")).expect("synthesize");
 
-    let prefs = &profile.static_section.key_facts.preferences;
+    let prefs = &profile.r#static.key_facts.preferences;
     // 0.29 was filtered (< 0.3); 0.3 stays (>= 0.3 admits the line).
     assert_eq!(prefs.len(), 1);
     assert_eq!(prefs[0].value, "boundary trait");
@@ -202,7 +202,7 @@ fn excludes_nan_confidence() {
     )];
     let profile =
         synthesize(&records, &user_subject(), &ts("2026-04-22T14:00:01Z")).expect("synthesize");
-    assert!(profile.static_section.key_facts.preferences.is_empty());
+    assert!(profile.r#static.key_facts.preferences.is_empty());
 }
 
 #[test]
@@ -217,7 +217,7 @@ fn excludes_blank_value() {
     )];
     let profile =
         synthesize(&records, &user_subject(), &ts("2026-04-22T14:00:01Z")).expect("synthesize");
-    assert!(profile.static_section.key_facts.preferences.is_empty());
+    assert!(profile.r#static.key_facts.preferences.is_empty());
 }
 
 #[test]
@@ -248,16 +248,16 @@ fn forget_drops_line_when_evidence_removed() {
         &ts("2026-04-22T14:06:00Z"),
     )
     .expect("synthesize");
-    assert_eq!(before.static_section.key_facts.preferences.len(), 1);
+    assert_eq!(before.r#static.key_facts.preferences.len(), 1);
 
     let after = synthesize(&[device], &user_subject(), &ts("2026-04-22T14:06:00Z"))
         .expect("re-synthesize after forget");
-    assert!(after.static_section.key_facts.preferences.is_empty());
-    assert_eq!(after.static_section.key_facts.devices.len(), 1);
+    assert!(after.r#static.key_facts.preferences.is_empty());
+    assert_eq!(after.r#static.key_facts.devices.len(), 1);
 }
 
 #[test]
-fn dynamic_records_disappearing_does_not_touch_static_section() {
+fn dynamic_records_disappearing_does_not_touch_static_half() {
     // Brief §7.1: "Dynamic facts can expire without deleting stable user
     // preferences." Static records survive when only dynamic ones are
     // pruned.
@@ -284,26 +284,14 @@ fn dynamic_records_disappearing_does_not_touch_static_section() {
         &ts("2026-04-22T14:06:00Z"),
     )
     .expect("synthesize");
-    assert_eq!(
-        with_dynamic.dynamic_section.key_facts.current_issues.len(),
-        1
-    );
-    assert_eq!(with_dynamic.static_section.key_facts.preferences.len(), 1);
+    assert_eq!(with_dynamic.dynamic.key_facts.current_issues.len(), 1);
+    assert_eq!(with_dynamic.r#static.key_facts.preferences.len(), 1);
 
     // Expirer drops the dynamic fact only.
     let without_dynamic = synthesize(&[pref], &user_subject(), &ts("2026-04-22T14:10:00Z"))
         .expect("synthesize after expiration");
-    assert!(
-        without_dynamic
-            .dynamic_section
-            .key_facts
-            .current_issues
-            .is_empty()
-    );
-    assert_eq!(
-        without_dynamic.static_section.key_facts.preferences.len(),
-        1
-    );
+    assert!(without_dynamic.dynamic.key_facts.current_issues.is_empty());
+    assert_eq!(without_dynamic.r#static.key_facts.preferences.len(), 1);
 }
 
 #[test]
@@ -331,8 +319,8 @@ fn empty_input_returns_empty_profile_with_now_timestamp() {
     let now = ts("2026-04-22T14:00:00Z");
     let profile = synthesize(&[], &user_subject(), &now).expect("synthesize");
     assert_eq!(profile.updated_at, "2026-04-22T14:00:00Z");
-    assert!(profile.static_section.key_facts.preferences.is_empty());
-    assert!(profile.dynamic_section.key_facts.current_issues.is_empty());
+    assert!(profile.r#static.key_facts.preferences.is_empty());
+    assert!(profile.dynamic.key_facts.current_issues.is_empty());
 }
 
 #[test]
@@ -388,7 +376,7 @@ fn deterministic_ordering_within_facet() {
     ];
     let profile =
         synthesize(&records, &user_subject(), &ts("2026-04-22T14:00:01Z")).expect("synthesize");
-    let entities = &profile.static_section.key_facts.known_entities;
+    let entities = &profile.r#static.key_facts.known_entities;
     assert_eq!(
         entities
             .iter()
@@ -420,7 +408,7 @@ fn admits_confidence_at_lower_bound() {
     // 0.0 is below the Uncertain floor — should be dropped.
     let profile =
         synthesize(&records, &user_subject(), &ts("2026-04-22T14:00:01Z")).expect("synthesize");
-    assert!(profile.static_section.key_facts.preferences.is_empty());
+    assert!(profile.r#static.key_facts.preferences.is_empty());
 }
 
 #[test]
@@ -435,7 +423,7 @@ fn admits_confidence_at_upper_bound() {
     )];
     let profile =
         synthesize(&records, &user_subject(), &ts("2026-04-22T14:00:01Z")).expect("synthesize");
-    let line = &profile.static_section.key_facts.preferences[0];
+    let line = &profile.r#static.key_facts.preferences[0];
     assert!((line.confidence - 1.0_f64).abs() < f64::EPSILON);
 }
 
@@ -452,7 +440,7 @@ fn excludes_confidence_above_one() {
     )];
     let profile =
         synthesize(&records, &user_subject(), &ts("2026-04-22T14:00:01Z")).expect("synthesize");
-    assert!(profile.static_section.key_facts.preferences.is_empty());
+    assert!(profile.r#static.key_facts.preferences.is_empty());
 }
 
 #[test]
@@ -467,7 +455,7 @@ fn excludes_negative_confidence() {
     )];
     let profile =
         synthesize(&records, &user_subject(), &ts("2026-04-22T14:00:01Z")).expect("synthesize");
-    assert!(profile.static_section.key_facts.preferences.is_empty());
+    assert!(profile.r#static.key_facts.preferences.is_empty());
 }
 
 // ── IDL deserializer negative tests ──────────────────────────────────
@@ -514,12 +502,163 @@ fn profile_line_deserialize_rejects_duplicate_evidence() {
 fn data_profile_subject_deserialize_rejects_neither_user_nor_agent() {
     let json = r#"{
         "subject": {},
-        "static_section": {"summary":"","historical_summary":"","key_facts":{"devices":[],"software":[],"preferences":[],"current_issues":[],"addressed_issues":[],"recurring_issues":[],"known_entities":[]}},
-        "dynamic_section": {"summary":"","historical_summary":"","key_facts":{"devices":[],"software":[],"preferences":[],"current_issues":[],"addressed_issues":[],"recurring_issues":[],"known_entities":[]}},
+        "static": {"summary":"","historical_summary":"","key_facts":{"devices":[],"software":[],"preferences":[],"current_issues":[],"addressed_issues":[],"recurring_issues":[],"known_entities":[]}},
+        "dynamic": {"summary":"","historical_summary":"","key_facts":{"devices":[],"software":[],"preferences":[],"current_issues":[],"addressed_issues":[],"recurring_issues":[],"known_entities":[]}},
         "updated_at": "2026-04-22T14:00:00Z"
     }"#;
     serde_json::from_str::<crate::generated::verbs::retrieve::DataProfile>(json)
         .expect_err("subject without user or agent must reject");
+}
+
+#[test]
+fn data_profile_subject_deserialize_rejects_empty_user_string() {
+    // Codex review caught this: the IDL says `minLength: 1` on
+    // `subject.user`, but the only `anyOf` check would let `{"user": ""}`
+    // through. The codegen-emitted DataProfileSubject TryFrom is what
+    // closes that hole.
+    let err = serde_json::from_str::<crate::generated::verbs::retrieve::DataProfileSubject>(
+        r#"{"user": ""}"#,
+    )
+    .expect_err("empty user must reject");
+    assert!(err.to_string().contains("user"), "{err}");
+}
+
+#[test]
+fn data_profile_subject_deserialize_rejects_empty_agent_string() {
+    let err = serde_json::from_str::<crate::generated::verbs::retrieve::DataProfileSubject>(
+        r#"{"agent": ""}"#,
+    )
+    .expect_err("empty agent must reject");
+    assert!(err.to_string().contains("agent"), "{err}");
+}
+
+#[test]
+fn data_profile_deserialize_rejects_short_updated_at() {
+    // RFC3339 minLength: 20. `2026-04-22Z` is too short — would be
+    // silently accepted before this PR.
+    let json = r#"{
+        "subject": {"user": "hmn:alice"},
+        "static": {"summary":"","historical_summary":"","key_facts":{"devices":[],"software":[],"preferences":[],"current_issues":[],"addressed_issues":[],"recurring_issues":[],"known_entities":[]}},
+        "dynamic": {"summary":"","historical_summary":"","key_facts":{"devices":[],"software":[],"preferences":[],"current_issues":[],"addressed_issues":[],"recurring_issues":[],"known_entities":[]}},
+        "updated_at": "2026-04-22Z"
+    }"#;
+    let err = serde_json::from_str::<crate::generated::verbs::retrieve::DataProfile>(json)
+        .expect_err("short updated_at must reject");
+    assert!(err.to_string().contains("updated_at"), "{err}");
+}
+
+#[test]
+fn data_profile_deserialize_rejects_malformed_updated_at_anchors() {
+    let json = r#"{
+        "subject": {"user": "hmn:alice"},
+        "static": {"summary":"","historical_summary":"","key_facts":{"devices":[],"software":[],"preferences":[],"current_issues":[],"addressed_issues":[],"recurring_issues":[],"known_entities":[]}},
+        "dynamic": {"summary":"","historical_summary":"","key_facts":{"devices":[],"software":[],"preferences":[],"current_issues":[],"addressed_issues":[],"recurring_issues":[],"known_entities":[]}},
+        "updated_at": "2026/04/22T14:00:00Z"
+    }"#;
+    let err = serde_json::from_str::<crate::generated::verbs::retrieve::DataProfile>(json)
+        .expect_err("`/` anchors must reject");
+    assert!(err.to_string().contains("updated_at"), "{err}");
+}
+
+#[test]
+fn data_profile_deserialize_accepts_lowercase_t_and_z() {
+    // RFC3339 §5.6 says `T` and `Z` are case-insensitive, and the
+    // domain `Rfc3339Timestamp::parse` accepts lowercase. The wire
+    // validator must match — otherwise the synthesizer's output for a
+    // lowercase-input timestamp would round-trip-fail.
+    let json = r#"{
+        "subject": {"user": "hmn:alice"},
+        "static": {"summary":"","historical_summary":"","key_facts":{"devices":[],"software":[],"preferences":[],"current_issues":[],"addressed_issues":[],"recurring_issues":[],"known_entities":[]}},
+        "dynamic": {"summary":"","historical_summary":"","key_facts":{"devices":[],"software":[],"preferences":[],"current_issues":[],"addressed_issues":[],"recurring_issues":[],"known_entities":[]}},
+        "updated_at": "2026-04-22t14:00:00z"
+    }"#;
+    let p = serde_json::from_str::<crate::generated::verbs::retrieve::DataProfile>(json)
+        .expect("lowercase t/z must parse");
+    assert_eq!(p.updated_at, "2026-04-22t14:00:00z");
+}
+
+#[test]
+fn synthesize_round_trips_lowercase_t_z_timestamp() {
+    // End-to-end check that a lowercase RFC3339 timestamp accepted by
+    // the domain parser also survives the synthesizer → JSON →
+    // generated DataProfile deserializer round-trip.
+    let records = vec![ProfileSourceRecord {
+        record_id: rid('0'),
+        is_static: true,
+        confidence: 0.9,
+        facet: KeyFactFacet::Preferences,
+        value: "lowercase-t".to_owned(),
+        updated_at: ts("2026-04-22t14:00:00z"),
+    }];
+    let now = ts("2026-04-22t14:00:01z");
+    let p = synthesize(&records, &user_subject(), &now).expect("synthesize");
+    let json = serde_json::to_string(&p).expect("serialize");
+    let back: crate::generated::verbs::retrieve::DataProfile =
+        serde_json::from_str(&json).expect("deserialize round-trip with lowercase t/z");
+    assert_eq!(back, p);
+}
+
+#[test]
+fn data_profile_deserialize_accepts_well_formed_updated_at() {
+    let json = r#"{
+        "subject": {"user": "hmn:alice"},
+        "static": {"summary":"","historical_summary":"","key_facts":{"devices":[],"software":[],"preferences":[],"current_issues":[],"addressed_issues":[],"recurring_issues":[],"known_entities":[]}},
+        "dynamic": {"summary":"","historical_summary":"","key_facts":{"devices":[],"software":[],"preferences":[],"current_issues":[],"addressed_issues":[],"recurring_issues":[],"known_entities":[]}},
+        "updated_at": "2026-04-22T14:00:00+00:00"
+    }"#;
+    let p = serde_json::from_str::<crate::generated::verbs::retrieve::DataProfile>(json)
+        .expect("well-formed updated_at must parse");
+    assert_eq!(p.updated_at, "2026-04-22T14:00:00+00:00");
+}
+
+#[test]
+fn updated_at_picks_chronologically_latest_irrespective_of_input_order() {
+    // Codex review: the proptest's permutation invariance was vacuous
+    // for `updated_at` because every record carried the same timestamp.
+    // This test pins the latest-timestamp picker explicitly.
+    let early = rec(
+        '0',
+        true,
+        0.9,
+        KeyFactFacet::Preferences,
+        "early",
+        "2026-04-22T14:00:00Z",
+    );
+    let late = rec(
+        '1',
+        true,
+        0.9,
+        KeyFactFacet::Preferences,
+        "late",
+        "2026-04-22T15:00:00Z",
+    );
+    let mid = rec(
+        '2',
+        true,
+        0.9,
+        KeyFactFacet::Preferences,
+        "mid",
+        "2026-04-22T14:30:00Z",
+    );
+    let now = ts("2026-04-22T16:00:00Z");
+
+    for permutation in [
+        vec![early.clone(), late.clone(), mid.clone()],
+        vec![late.clone(), early.clone(), mid.clone()],
+        vec![mid.clone(), late.clone(), early.clone()],
+        vec![late.clone(), mid.clone(), early.clone()],
+    ] {
+        let p = synthesize(&permutation, &user_subject(), &now).expect("synthesize");
+        assert_eq!(
+            p.updated_at,
+            "2026-04-22T15:00:00Z",
+            "permutation: {:?}",
+            permutation
+                .iter()
+                .map(|r| r.value.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
 }
 
 // ── Performance sanity ───────────────────────────────────────────────
@@ -652,13 +791,20 @@ proptest::proptest! {
             // converting to f32 to avoid precision warnings.
             let bucket = u16::try_from((mix >> 8) % 700).expect("< 700");
             let conf = 0.3_f32 + f32::from(bucket) / 1000.0_f32;
+            // Vary timestamps so the proptest also covers the
+            // `updated_at = max(contributing.updated_at)` rule. Without
+            // this, a regression where the synthesizer kept the *last*
+            // record's timestamp instead of the chronologically latest
+            // would still pass the permutation invariance check.
+            let minute = u8::try_from((mix >> 32) % 60).expect("< 60");
+            let updated_at = ts(&format!("2026-04-22T14:{minute:02}:00Z"));
             records.push(ProfileSourceRecord {
                 record_id,
                 is_static: (mix >> 16) & 1 == 0,
                 confidence: conf,
                 facet: facets[usize::try_from(mix >> 24).expect("u64 fits usize on 64-bit") % facets.len()],
                 value: format!("v-{}", mix % 8),
-                updated_at: ts("2026-04-22T14:00:00Z"),
+                updated_at,
             });
         }
         if records.is_empty() {

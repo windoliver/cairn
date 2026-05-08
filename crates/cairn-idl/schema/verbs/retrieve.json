@@ -195,8 +195,8 @@
     "DataProfile": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["subject", "static_section", "dynamic_section", "updated_at"],
-      "description": "Typed AutoUserProfile (brief §7.1) split into permanent traits (`static_section`, `is_static = 1`) and current state (`dynamic_section`, `is_static = 0`). Each half carries `summary`, `historical_summary`, and structured `key_facts`; every fact line records its source-record evidence so record-level forget propagates back to the profile. P0 plain-SQLite aggregation; richer rolling-summary regeneration is P1.",
+      "required": ["subject", "static", "dynamic", "updated_at"],
+      "description": "Typed AutoUserProfile (brief §7.1) split into permanent traits (`static`, `is_static = 1`) and current state (`dynamic`, `is_static = 0`). Each half carries `summary`, `historical_summary`, and structured `key_facts`; every fact line records its source-record evidence so record-level forget propagates back to the profile. P0 plain-SQLite aggregation; richer rolling-summary regeneration is P1. Wire field names match the brief's `{static, dynamic, updated_at}` notation; the Rust binding emits them via the `r#static` raw identifier.",
       "properties": {
         "subject": {
           "type": "object",
@@ -210,8 +210,8 @@
             { "required": ["agent"] }
           ]
         },
-        "static_section":  { "$ref": "#/$defs/ProfileHalf" },
-        "dynamic_section": { "$ref": "#/$defs/ProfileHalf" },
+        "static":  { "$ref": "#/$defs/ProfileHalf" },
+        "dynamic": { "$ref": "#/$defs/ProfileHalf" },
         "updated_at": {
           "type": "string",
           "format": "date-time",

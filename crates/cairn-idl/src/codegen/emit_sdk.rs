@@ -1772,6 +1772,8 @@ fn struct_has_extra_validators(name: &str) -> bool {
             | "DataFolder"
             | "RecordRef"
             | "ProfileLine"
+            | "DataProfile"
+            | "DataProfileSubject"
     )
 }
 
@@ -1832,7 +1834,14 @@ fn write_struct_raw_companion(w: &mut RustWriter, s: &StructDef, common: &BTreeS
     // helper dispatches by struct name.
     if matches!(
         s.name.0.as_str(),
-        "DataRecord" | "DataSession" | "DataTurn" | "DataFolder" | "RecordRef" | "ProfileLine"
+        "DataRecord"
+            | "DataSession"
+            | "DataTurn"
+            | "DataFolder"
+            | "RecordRef"
+            | "ProfileLine"
+            | "DataProfile"
+            | "DataProfileSubject"
     ) {
         write_retrieve_data_extra_checks(w, &s.name.0);
     }
@@ -2705,6 +2714,71 @@ fn write_retrieve_data_extra_checks(w: &mut RustWriter, type_name: &str) {
             w.line("for ulid in &raw.evidence {");
             w.indent();
             w.line("if !seen.insert(ulid.0.clone()) { return Err(\"evidence: must be unique\"); }");
+            w.dedent();
+            w.line("}");
+            w.dedent();
+            w.line("}");
+        }
+        "DataProfileSubject" => {
+            // DataProfileSubject.user / .agent: minLength 1 when present.
+            // The IR carries the `anyOf` presence rule (already emitted as
+            // `at least one of [user, agent] is required`), but strips the
+            // string `minLength: 1`. Without these checks, `{"user": ""}`
+            // deserializes despite the schema, and the synthesizer's
+            // `BlankSubjectField` error becomes unreachable from the wire.
+            w.line("if let Some(s) = &raw.user {");
+            w.indent();
+            w.line("if s.is_empty() { return Err(\"user: must not be empty\"); }");
+            w.dedent();
+            w.line("}");
+            w.line("if let Some(s) = &raw.agent {");
+            w.indent();
+            w.line("if s.is_empty() { return Err(\"agent: must not be empty\"); }");
+            w.dedent();
+            w.line("}");
+        }
+        "DataProfile" => {
+            // DataProfile.updated_at: RFC3339 `date-time` with minLength 20
+            // Mirrors `cairn_core::domain::Rfc3339Timestamp::parse`'s
+            // accept set so a domain-valid timestamp can always
+            // round-trip through the wire deserializer; full range
+            // validation (month 1-12, day-of-month, hour 0-23, etc.)
+            // happens at the verb layer where the domain parser runs.
+            // Asymmetry here would let a domain-valid value fail
+            // deserialize through the response envelope.
+            w.line("if raw.updated_at.len() < 20 {");
+            w.indent();
+            w.line("return Err(\"updated_at: must be RFC3339 date-time with at least 20 chars\");");
+            w.dedent();
+            w.line("}");
+            w.line("if !raw.updated_at.is_ascii() {");
+            w.indent();
+            w.line("return Err(\"updated_at: RFC3339 date-time must be ASCII\");");
+            w.dedent();
+            w.line("}");
+            // Structural anchor checks. Note: `T` and `Z` are
+            // case-insensitive per RFC3339 §5.6 and the domain parser
+            // accepts both — match that here.
+            w.line("{");
+            w.indent();
+            w.line("let bytes = raw.updated_at.as_bytes();");
+            w.line(
+                "if bytes[4] != b'-' || bytes[7] != b'-' || !matches!(bytes[10], b'T' | b't') || bytes[13] != b':' || bytes[16] != b':' {",
+            );
+            w.indent();
+            w.line(
+                "return Err(\"updated_at: RFC3339 date-time anchors must be `-`/`T`/`:` at positions 4/7/10/13/16\");",
+            );
+            w.dedent();
+            w.line("}");
+            w.line("let last = bytes[bytes.len() - 1];");
+            w.line(
+                "if !matches!(last, b'Z' | b'z') && !matches!(bytes.get(bytes.len() - 6), Some(b'+' | b'-')) {",
+            );
+            w.indent();
+            w.line(
+                "return Err(\"updated_at: RFC3339 date-time must end with `Z` or `+/-HH:MM` offset\");",
+            );
             w.dedent();
             w.line("}");
             w.dedent();

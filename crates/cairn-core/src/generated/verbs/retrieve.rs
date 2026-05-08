@@ -68,6 +68,12 @@ impl ::core::convert::TryFrom<RawDataProfileSubject> for DataProfileSubject {
     type Error = &'static str;
     fn try_from(raw: RawDataProfileSubject) -> Result<Self, Self::Error> {
         if !(raw.user.is_some() || raw.agent.is_some()) { return Err("at least one of [user, agent] is required"); }
+        if let Some(s) = &raw.user {
+            if s.is_empty() { return Err("user: must not be empty"); }
+        }
+        if let Some(s) = &raw.agent {
+            if s.is_empty() { return Err("agent: must not be empty"); }
+        }
         Ok(Self {
             agent: raw.agent,
             user: raw.user,
@@ -83,15 +89,63 @@ impl<'de> ::serde::Deserialize<'de> for DataProfileSubject {
     }
 }
 
-/// Typed AutoUserProfile (brief §7.1) split into permanent traits (`static_section`, `is_static = 1`) and current state (`dynamic_section`, `is_static = 0`). Each half carries `summary`, `historical_summary`, and structured `key_facts`; every fact line records its source-record evidence so record-level forget propagates back to the profile. P0 plain-SQLite aggregation; richer rolling-summary regeneration is P1.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Typed AutoUserProfile (brief §7.1) split into permanent traits (`static`, `is_static = 1`) and current state (`dynamic`, `is_static = 0`). Each half carries `summary`, `historical_summary`, and structured `key_facts`; every fact line records its source-record evidence so record-level forget propagates back to the profile. P0 plain-SQLite aggregation; richer rolling-summary regeneration is P1. Wire field names match the brief's `{static, dynamic, updated_at}` notation; the Rust binding emits them via the `r#static` raw identifier.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DataProfile {
-    pub dynamic_section: ProfileHalf,
-    pub static_section: ProfileHalf,
+    pub dynamic: ProfileHalf,
+    #[serde(rename = "static")]
+    pub r#static: ProfileHalf,
     pub subject: DataProfileSubject,
     /// RFC3339 timestamp of the most recent contributing source record. Equals the synthesizer clock when the profile is empty.
     pub updated_at: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDataProfile {
+    dynamic: ProfileHalf,
+    #[serde(rename = "static")]
+    r#static: ProfileHalf,
+    subject: DataProfileSubject,
+    /// RFC3339 timestamp of the most recent contributing source record. Equals the synthesizer clock when the profile is empty.
+    updated_at: String,
+}
+
+impl ::core::convert::TryFrom<RawDataProfile> for DataProfile {
+    type Error = &'static str;
+    fn try_from(raw: RawDataProfile) -> Result<Self, Self::Error> {
+        if raw.updated_at.len() < 20 {
+            return Err("updated_at: must be RFC3339 date-time with at least 20 chars");
+        }
+        if !raw.updated_at.is_ascii() {
+            return Err("updated_at: RFC3339 date-time must be ASCII");
+        }
+        {
+            let bytes = raw.updated_at.as_bytes();
+            if bytes[4] != b'-' || bytes[7] != b'-' || !matches!(bytes[10], b'T' | b't') || bytes[13] != b':' || bytes[16] != b':' {
+                return Err("updated_at: RFC3339 date-time anchors must be `-`/`T`/`:` at positions 4/7/10/13/16");
+            }
+            let last = bytes[bytes.len() - 1];
+            if !matches!(last, b'Z' | b'z') && !matches!(bytes.get(bytes.len() - 6), Some(b'+' | b'-')) {
+                return Err("updated_at: RFC3339 date-time must end with `Z` or `+/-HH:MM` offset");
+            }
+        }
+        Ok(Self {
+            dynamic: raw.dynamic,
+            r#static: raw.r#static,
+            subject: raw.subject,
+            updated_at: raw.updated_at,
+        })
+    }
+}
+
+impl<'de> ::serde::Deserialize<'de> for DataProfile {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: ::serde::Deserializer<'de> {
+        let raw = RawDataProfile::deserialize(deserializer)?;
+        Self::try_from(raw).map_err(::serde::de::Error::custom)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

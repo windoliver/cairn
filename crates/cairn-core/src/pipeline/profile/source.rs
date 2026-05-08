@@ -55,7 +55,8 @@ pub struct ProfileSourceRecord {
     /// is built from these.
     pub record_id: RecordId,
     /// Static-vs-dynamic split per brief §3.0 / §7.1: records with
-    /// `is_static = 1` feed `static_section`; the rest feed `dynamic_section`.
+    /// `is_static = 1` feed the `static` half of the profile; the rest
+    /// feed the `dynamic` half.
     pub is_static: bool,
     /// Confidence scalar in `[0.0, 1.0]`. Records with confidence
     /// `< 0.3` (`ConfidenceBand::Uncertain`) are dropped before the

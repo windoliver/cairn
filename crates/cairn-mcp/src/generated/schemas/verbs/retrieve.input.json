@@ -366,12 +366,12 @@
     },
     "DataProfile": {
       "additionalProperties": false,
-      "description": "Typed AutoUserProfile (brief §7.1) split into permanent traits (`static_section`, `is_static = 1`) and current state (`dynamic_section`, `is_static = 0`). Each half carries `summary`, `historical_summary`, and structured `key_facts`; every fact line records its source-record evidence so record-level forget propagates back to the profile. P0 plain-SQLite aggregation; richer rolling-summary regeneration is P1.",
+      "description": "Typed AutoUserProfile (brief §7.1) split into permanent traits (`static`, `is_static = 1`) and current state (`dynamic`, `is_static = 0`). Each half carries `summary`, `historical_summary`, and structured `key_facts`; every fact line records its source-record evidence so record-level forget propagates back to the profile. P0 plain-SQLite aggregation; richer rolling-summary regeneration is P1. Wire field names match the brief's `{static, dynamic, updated_at}` notation; the Rust binding emits them via the `r#static` raw identifier.",
       "properties": {
-        "dynamic_section": {
+        "dynamic": {
           "$ref": "#/$defs/ProfileHalf"
         },
-        "static_section": {
+        "static": {
           "$ref": "#/$defs/ProfileHalf"
         },
         "subject": {
@@ -409,8 +409,8 @@
       },
       "required": [
         "subject",
-        "static_section",
-        "dynamic_section",
+        "static",
+        "dynamic",
         "updated_at"
       ],
       "type": "object"

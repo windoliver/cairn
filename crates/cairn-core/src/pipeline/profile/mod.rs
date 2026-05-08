@@ -22,10 +22,10 @@
 //!
 //! ## P0 vs P1
 //!
-//! Per brief §7.1, only the structural split (`static_section` /
-//! `dynamic_section`) and the `key_facts` aggregation are P0; the rolling
-//! `summary` / `historical_summary` narratives are produced by
-//! `DreamWorkflow` and remain empty strings here at P0.
+//! Per brief §7.1, only the structural split (the `static` / `dynamic`
+//! halves) and the `key_facts` aggregation are P0; the rolling `summary`
+//! / `historical_summary` narratives are produced by `DreamWorkflow` and
+//! remain empty strings here at P0.
 
 mod source;
 mod synthesize;

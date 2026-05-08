@@ -87,7 +87,7 @@ pub enum SynthesizeError {
 /// let now = Rfc3339Timestamp::parse("2026-04-22T14:00:01Z").unwrap();
 ///
 /// let profile = synthesize(&records, &subject, &now).unwrap();
-/// assert_eq!(profile.static_section.key_facts.preferences.len(), 1);
+/// assert_eq!(profile.r#static.key_facts.preferences.len(), 1);
 /// assert_eq!(profile.updated_at, "2026-04-22T14:00:00Z");
 /// ```
 pub fn synthesize(
@@ -123,8 +123,8 @@ pub fn synthesize(
 
     Ok(DataProfile {
         subject: subject_out,
-        static_section: build_half(&static_records),
-        dynamic_section: build_half(&dynamic_records),
+        r#static: build_half(&static_records),
+        dynamic: build_half(&dynamic_records),
         updated_at,
     })
 }
