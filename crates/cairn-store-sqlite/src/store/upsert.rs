@@ -474,8 +474,10 @@ fn next_version(prior_version: i64) -> Result<u32, StoreError> {
     })
 }
 
-/// Project + insert one new version row. The caller is responsible for
-/// having deactivated any prior active row in the same transaction.
+/// Project + insert one new version row. Inactive inserts are pre-activation
+/// COW staging rows, so they stay tombstoned until activation clears the flag.
+/// The caller is responsible for having deactivated any prior active row in
+/// the same transaction.
 fn insert_row_with_active(
     tx: &Transaction<'_>,
     record: &MemoryRecord,
@@ -490,8 +492,10 @@ fn insert_row_with_active(
     // silently-downgraded `legacy_event` rewrite. This mirrors the
     // strict parse in `upsert_in_tx` for prior rows.
     let _: cairn_core::domain::consent_timeline::ConsentModel = parse_consent_model(consent_model)?;
-    let mut row =
-        ProjectedRow::from_record(record, version, now_ms, now_ms, body_hash, active, false)?;
+    let tombstoned = !active;
+    let mut row = ProjectedRow::from_record(
+        record, version, now_ms, now_ms, body_hash, active, tombstoned,
+    )?;
     // Caller-supplied consent_model overrides the Phase-A default in
     // `from_record` so supersession preserves the prior row's value.
     row.consent_model = match consent_model {
@@ -585,13 +589,14 @@ fn validate_existing_staged_row(
             other => Err(other),
         })?;
     let expected_active = if active { 1 } else { 0 };
+    let expected_tombstoned = if active { 0 } else { 1 };
     match existing {
         Some((existing_target, existing_version, existing_hash, existing_active, tombstoned))
             if existing_target == target_id
                 && existing_version == i64::from(version)
                 && existing_hash == body_hash.as_str()
                 && existing_active == expected_active
-                && tombstoned == 0 =>
+                && tombstoned == expected_tombstoned =>
         {
             Ok(())
         }
@@ -601,7 +606,8 @@ fn validate_existing_staged_row(
                     "record_id conflict while staging upsert: record_id={record_id} \
                      existing target_id={existing_target} version={existing_version} \
                      body_hash={existing_hash} active={existing_active} tombstoned={tombstoned}; \
-                     planned target_id={target_id} version={version} body_hash={} active={expected_active}",
+                     planned target_id={target_id} version={version} body_hash={} \
+                     active={expected_active} tombstoned={expected_tombstoned}",
                     body_hash.as_str()
                 ),
             })
@@ -1015,10 +1021,41 @@ mod tests {
 
 #[cfg(test)]
 mod cow_tests {
-    use cairn_core::domain::record::tests_export::sample_record;
+    use std::sync::Arc;
 
-    use crate::open_in_memory;
+    use cairn_core::config::EmbeddingModelKind;
+    use cairn_core::contract::memory_store::{
+        KeywordSearchArgs, ListArgs, MemoryStore, SemanticSearchArgs,
+    };
+    use cairn_core::domain::record::tests_export::sample_record;
+    use cairn_embeddings_local::{EmbeddingModel, MockEmbedder};
+
     use crate::store::upsert::{activate_upsert_in_tx, plan_upsert_in_tx, stage_upsert_cow_in_tx};
+    use crate::{open_in_memory, open_in_memory_with_embedder};
+
+    fn keyword_args(query: &str) -> KeywordSearchArgs<'static> {
+        KeywordSearchArgs {
+            query: query.to_owned(),
+            filter: None,
+            auth_scope: cairn_core::domain::ScopeTuple::default(),
+            visibility_allowlist: vec![],
+            limit: 10,
+            cursor: None,
+            with_explain: false,
+        }
+    }
+
+    fn semantic_args(query: &str, model: EmbeddingModelKind) -> SemanticSearchArgs<'static> {
+        SemanticSearchArgs {
+            query: query.to_owned(),
+            filter: None,
+            auth_scope: cairn_core::domain::ScopeTuple::default(),
+            visibility_allowlist: vec![],
+            limit: 10,
+            model_label: model.as_str().to_owned(),
+            with_explain: false,
+        }
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn cow_stage_inserts_inactive_row() {
@@ -1032,12 +1069,13 @@ mod cow_tests {
                 .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
             stage_upsert_cow_in_tx(&tx, &record, &plan)
                 .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
-            let active: i64 = tx.query_row(
-                "SELECT active FROM records WHERE record_id = ?1",
+            let (active, tombstoned): (i64, i64) = tx.query_row(
+                "SELECT active, tombstoned FROM records WHERE record_id = ?1",
                 rusqlite::params![plan.outcome_record_id.as_str()],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )?;
             assert_eq!(active, 0);
+            assert_eq!(tombstoned, 1);
             tx.rollback()?;
             Ok::<_, tokio_rusqlite::Error>(())
         })
@@ -1071,6 +1109,92 @@ mod cow_tests {
         })
         .await
         .expect("cow replay");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cow_staged_supersession_is_hidden_until_activation() {
+        let model = EmbeddingModelKind::BgeSmallEnV1_5;
+        let embedder: Arc<dyn EmbeddingModel> = Arc::new(MockEmbedder::new(model));
+        let store = open_in_memory_with_embedder(Some(Arc::clone(&embedder)))
+            .await
+            .expect("open");
+
+        let mut record = sample_record();
+        record.body = "olderactiveonly baseline body".to_owned();
+        let active = store.upsert(&record).await.expect("seed active row");
+
+        let mut staged = record.clone();
+        staged.body = "freshstagedtoken body staged before activation".to_owned();
+        let staged_vector: Vec<u8> = embedder
+            .embed_document(&staged.body)
+            .expect("embed staged body")
+            .iter()
+            .flat_map(|&f| f.to_le_bytes())
+            .collect();
+        let model_label = model.as_str().to_owned();
+
+        let conn = store.require_conn("test").expect("connected").clone();
+        let staged_id = conn
+            .call(move |c| {
+                let tx = c.transaction()?;
+                let plan = plan_upsert_in_tx(&tx, &staged)
+                    .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
+                stage_upsert_cow_in_tx(&tx, &staged, &plan)
+                    .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
+                tx.execute(
+                    "INSERT INTO record_vectors(record_id, embedding, model) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![plan.outcome_record_id.as_str(), staged_vector, model_label,],
+                )?;
+                let staged_id = plan.outcome_record_id.clone();
+                tx.commit()?;
+                Ok::<_, tokio_rusqlite::Error>(staged_id)
+            })
+            .await
+            .expect("stage supersession without activation");
+
+        assert!(
+            store
+                .get(&active.record_id)
+                .await
+                .expect("get active")
+                .is_some(),
+            "the previously active row must remain readable",
+        );
+        assert!(
+            store.get(&staged_id).await.expect("get staged").is_none(),
+            "a COW row staged by WAL must remain hidden until primary.activate runs",
+        );
+
+        let listed = store
+            .list(&ListArgs {
+                limit: 10,
+                ..ListArgs::default()
+            })
+            .await
+            .expect("list");
+        assert_eq!(listed.records.len(), 1);
+        assert_eq!(listed.records[0].id, active.record_id);
+
+        let keyword_page = store
+            .search_keyword(&keyword_args("freshstagedtoken"))
+            .await
+            .expect("keyword search");
+        assert!(
+            keyword_page.candidates.is_empty(),
+            "keyword search must not expose a staged COW row",
+        );
+
+        let semantic_page = store
+            .search_semantic(&semantic_args("freshstagedtoken", model))
+            .await
+            .expect("semantic search");
+        assert!(
+            semantic_page
+                .candidates
+                .iter()
+                .all(|candidate| candidate.record_id != staged_id),
+            "semantic search must not expose a staged COW row",
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
