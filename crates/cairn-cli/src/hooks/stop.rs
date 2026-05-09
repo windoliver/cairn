@@ -20,15 +20,15 @@ struct TraceArtifact {
 pub(super) fn run(
     vault_path: &Path,
     operation_id: Ulid,
-    payload: Value,
+    payload: &Value,
 ) -> Result<HookArtifacts, HookError> {
-    let session_id = require_string(&payload, "session_id")?;
+    let session_id = require_string(payload, "session_id")?;
     let trace_id = crate::verbs::envelope::new_operation_id();
     let artifact = TraceArtifact {
         operation_id: operation_id.clone(),
         hook: "Stop",
         session_id: session_id.clone(),
-        event: payload_object(&payload),
+        event: payload_object(payload),
     };
     let written = artifact::write_json(vault_path, ArtifactKind::Trace, Some(trace_id), &artifact)?;
     let job_id =

@@ -20,9 +20,9 @@ struct HotArtifact {
 pub(super) fn run(
     vault_path: &Path,
     operation_id: Ulid,
-    payload: Value,
+    payload: &Value,
 ) -> Result<HookArtifacts, HookError> {
-    let session_id = require_string(&payload, "session_id")?;
+    let session_id = require_string(payload, "session_id")?;
     let artifact = HotArtifact {
         operation_id: operation_id.clone(),
         session_id,

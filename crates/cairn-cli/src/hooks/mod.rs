@@ -95,6 +95,7 @@ pub struct HookResult {
 }
 
 /// Lightweight synchronous routing hints for harness integrations.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Serialize)]
 pub struct HookRoutingHints {
     /// Prompt was durably captured as a trace event.
@@ -261,13 +262,13 @@ pub fn run(matches: &ArgMatches) -> ExitCode {
     };
 
     let outcome = match hook {
-        HookName::SessionStart => session_start::run(&vault_path, operation_id.clone(), payload),
+        HookName::SessionStart => session_start::run(&vault_path, operation_id.clone(), &payload),
         HookName::UserPromptSubmit => {
-            user_prompt_submit::run(&vault_path, operation_id.clone(), payload)
+            user_prompt_submit::run(&vault_path, operation_id.clone(), &payload)
         }
-        HookName::PreToolUse => pre_tool_use::run(&vault_path, operation_id.clone(), payload),
-        HookName::PostToolUse => post_tool_use::run(&vault_path, operation_id.clone(), payload),
-        HookName::Stop => stop::run(&vault_path, operation_id.clone(), payload),
+        HookName::PreToolUse => pre_tool_use::run(&vault_path, operation_id.clone(), &payload),
+        HookName::PostToolUse => post_tool_use::run(&vault_path, operation_id.clone(), &payload),
+        HookName::Stop => stop::run(&vault_path, operation_id.clone(), &payload),
     };
 
     match outcome {

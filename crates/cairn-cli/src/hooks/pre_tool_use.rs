@@ -22,11 +22,11 @@ struct TraceArtifact {
 pub(super) fn run(
     vault_path: &Path,
     operation_id: Ulid,
-    payload: Value,
+    payload: &Value,
 ) -> Result<HookArtifacts, HookError> {
-    let session_id = require_string(&payload, "session_id")?;
-    let tool_call_id = require_string(&payload, "tool_call_id")?;
-    let tool_name = require_string(&payload, "tool_name")?;
+    let session_id = require_string(payload, "session_id")?;
+    let tool_call_id = require_string(payload, "tool_call_id")?;
+    let tool_name = require_string(payload, "tool_name")?;
     let trace_id = crate::verbs::envelope::new_operation_id();
     let artifact = TraceArtifact {
         operation_id,
@@ -34,7 +34,7 @@ pub(super) fn run(
         session_id,
         tool_call_id,
         tool_name,
-        event: payload_object(&payload),
+        event: payload_object(payload),
     };
     let written = artifact::write_json(vault_path, ArtifactKind::Trace, Some(trace_id), &artifact)?;
     Ok(HookArtifacts {
