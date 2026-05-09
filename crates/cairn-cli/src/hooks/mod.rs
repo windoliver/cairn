@@ -14,6 +14,12 @@ use serde_json::Value;
 
 use crate::verbs::envelope::{emit_json, new_operation_id};
 
+mod artifact;
+mod post_tool_use;
+mod pre_tool_use;
+mod session_start;
+mod user_prompt_submit;
+
 /// Canonical v0.1 harness lifecycle hook names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum HookName {
@@ -92,6 +98,12 @@ pub struct HookArtifacts {
     /// Post-turn work request ids enqueued by the hook.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub queued_jobs: Vec<Ulid>,
+}
+
+impl HookArtifacts {
+    fn is_empty(&self) -> bool {
+        self.trace_id.is_none() && self.hot_path.is_none() && self.queued_jobs.is_empty()
+    }
 }
 
 /// Typed hook error body emitted in JSON and human output.
@@ -203,11 +215,28 @@ pub fn run(matches: &ArgMatches) -> ExitCode {
         }
     };
 
-    if let Err(err) = load_payload(matches) {
-        return emit_failure(hook, operation_id, err, json, 1);
-    }
+    let payload = match load_payload(matches) {
+        Ok(payload) => payload,
+        Err(err) => return emit_failure(hook, operation_id, err, json, 1),
+    };
+    let vault_path = matches
+        .get_one::<PathBuf>("vault-path")
+        .map_or_else(|| PathBuf::from("."), Clone::clone);
 
-    emit_success(hook, operation_id, json)
+    let outcome = match hook {
+        HookName::SessionStart => session_start::run(&vault_path, operation_id.clone(), payload),
+        HookName::UserPromptSubmit => {
+            user_prompt_submit::run(&vault_path, operation_id.clone(), payload)
+        }
+        HookName::PreToolUse => pre_tool_use::run(&vault_path, operation_id.clone(), payload),
+        HookName::PostToolUse => post_tool_use::run(&vault_path, operation_id.clone(), payload),
+        HookName::Stop => Ok(HookArtifacts::default()),
+    };
+
+    match outcome {
+        Ok(artifacts) => emit_success(hook, operation_id, artifacts, json),
+        Err(err) => emit_failure(hook, operation_id, err, json, 1),
+    }
 }
 
 fn load_payload(matches: &ArgMatches) -> Result<Value, HookError> {
@@ -255,12 +284,22 @@ pub fn payload_object(payload: &Value) -> serde_json::Map<String, Value> {
     payload.as_object().cloned().unwrap_or_default()
 }
 
-fn emit_success(hook: HookName, operation_id: Ulid, json: bool) -> ExitCode {
+fn emit_success(
+    hook: HookName,
+    operation_id: Ulid,
+    artifacts: HookArtifacts,
+    json: bool,
+) -> ExitCode {
+    let artifacts = if artifacts.is_empty() {
+        None
+    } else {
+        Some(artifacts)
+    };
     let result = HookResult {
         ok: true,
         hook,
         operation_id,
-        artifacts: None,
+        artifacts,
         error: None,
     };
     if json {
