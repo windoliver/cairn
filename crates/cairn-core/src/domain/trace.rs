@@ -28,6 +28,8 @@ pub enum TraceEvent {
     PostTool,
     /// The raw output returned by a tool invocation.
     ToolOutput,
+    /// Captured immediately before a harness compacts its rolling context.
+    PreCompact,
     /// The agent stop / end-of-turn event.
     Stop,
     /// A summarising record written at the end of a turn.
@@ -200,6 +202,10 @@ mod tests {
             "\"user_message\""
         );
         assert_eq!(
+            serde_json::to_string(&TraceEvent::PreCompact).unwrap(),
+            "\"pre_compact\""
+        );
+        assert_eq!(
             serde_json::from_str::<TraceEvent>("\"turn_summary\"").unwrap(),
             TraceEvent::TurnSummary
         );
@@ -243,6 +249,13 @@ mod tests {
         let mut l = link_template();
         l.tool_call_id = Some("call_abc".into());
         l.validate(TraceEvent::PreTool).expect("valid");
+    }
+
+    #[test]
+    fn pre_compact_link_is_valid() {
+        link_template()
+            .validate(TraceEvent::PreCompact)
+            .expect("valid");
     }
 
     #[test]

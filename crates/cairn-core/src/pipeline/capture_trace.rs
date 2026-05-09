@@ -229,9 +229,8 @@ pub fn project_with_blocks(
 }
 
 /// Persist a `PreCompact` hook snapshot through the existing trace-record
-/// path. Until a dedicated `TraceEvent::PreCompact` lands, this uses the
-/// same storage shape as a `Stop` boundary so snapshot persistence is
-/// concrete and fail-closed without widening the public trace taxonomy.
+/// path while preserving its distinct lifecycle boundary in the stored
+/// `trace_event` field.
 pub fn project_pre_compact_snapshot(
     event: &CaptureEvent,
     resolved_body: &ResolvedBody<'_>,
@@ -242,7 +241,7 @@ pub fn project_pre_compact_snapshot(
         _ => return Err(TraceProjectError::Unclassifiable),
     }
 
-    project(event, TraceEvent::Stop, resolved_body, link)
+    project(event, TraceEvent::PreCompact, resolved_body, link)
 }
 
 /// Build a [`Provenance`] from a [`CaptureEvent`].
@@ -519,7 +518,10 @@ mod tests {
         let record = project_pre_compact_snapshot(&event, &resolved, &link).unwrap();
         assert_eq!(record.kind, MemoryKind::Trace);
         assert_eq!(record.body, "before compact");
-        assert_eq!(record.extra_frontmatter.get("trace_event").unwrap(), "stop");
+        assert_eq!(
+            record.extra_frontmatter.get("trace_event").unwrap(),
+            "pre_compact"
+        );
     }
 
     #[test]
