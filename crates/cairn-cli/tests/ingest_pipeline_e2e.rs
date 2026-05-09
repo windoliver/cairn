@@ -4,6 +4,11 @@
 
 use std::{fs, path::Path, process::Command};
 
+use cairn_core::{
+    contract::memory_store::StoredRecord,
+    domain::{MemoryRecord, projection::MarkdownProjector},
+};
+
 fn cli() -> Command {
     Command::new(env!("CARGO_BIN_EXE_cairn"))
 }
@@ -51,6 +56,43 @@ fn active_record_json(vault: &Path, record_id: &str) -> serde_json::Value {
         )
         .expect("record_json for committed record");
     serde_json::from_str(&record_json).expect("record_json parses")
+}
+
+fn active_stored_record_by_target(vault: &Path, target_id: &str) -> StoredRecord {
+    let conn = rusqlite::Connection::open(vault.join(".cairn/cairn.db")).expect("open db");
+    let (record_json, version): (String, i64) = conn
+        .query_row(
+            "SELECT record_json, version FROM records \
+             WHERE target_id = ?1 AND active = 1 AND tombstoned = 0",
+            [target_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("active record for target");
+    let record: MemoryRecord = serde_json::from_str(&record_json).expect("record_json parses");
+    StoredRecord {
+        record,
+        version: u32::try_from(version).expect("version fits u32"),
+        schema_version: None,
+    }
+}
+
+fn keyword_search_hits(vault: &Path, query: &str) -> Vec<serde_json::Value> {
+    let out = cli()
+        .current_dir(vault)
+        .args(["search", query, "--mode", "keyword", "--json"])
+        .output()
+        .expect("cairn search");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "keyword search should succeed; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let response = json_stdout(&out);
+    response["data"]["hits"]
+        .as_array()
+        .expect("hits array")
+        .clone()
 }
 
 #[test]
@@ -212,4 +254,166 @@ fn ingest_file_runs_pipeline_without_leaking_file_body_to_metrics() {
         record["body"],
         "User prefers compact updates. Body marker should stay out of metrics."
     );
+}
+
+#[test]
+fn ingest_resync_updates_record_through_cow_wal_and_searches_active_body() {
+    let vault = tempfile::tempdir().expect("temp vault");
+    bootstrap_vault(vault.path());
+
+    let initial_body = "Agent should remember preupdatewalmarker as a CLI resync COW WAL marker.";
+    let updated_body = "Agent should remember postupdatewalmarker as a CLI resync COW WAL marker.";
+
+    let ingest_out = cli()
+        .current_dir(vault.path())
+        .args([
+            "ingest",
+            "--kind",
+            "reasoning",
+            "--session",
+            "01HQZX9F5N0000000000000001",
+            "--body",
+            initial_body,
+            "--json",
+        ])
+        .output()
+        .expect("cairn ingest");
+
+    assert_eq!(
+        ingest_out.status.code(),
+        Some(0),
+        "initial ingest should commit; stderr: {}",
+        String::from_utf8_lossy(&ingest_out.stderr)
+    );
+    let ingest_response = json_stdout(&ingest_out);
+    assert_eq!(ingest_response["status"], "committed");
+    let target_id = ingest_response["data"]["record_id"]
+        .as_str()
+        .expect("record_id is string");
+
+    let stored_v1 = active_stored_record_by_target(vault.path(), target_id);
+    assert_eq!(stored_v1.version, 1);
+    assert_eq!(stored_v1.record.body, initial_body);
+
+    let projected = MarkdownProjector.project(&stored_v1);
+    let projected_path = vault.path().join(&projected.path);
+    fs::create_dir_all(projected_path.parent().expect("projected parent"))
+        .expect("create projected parent");
+    let edited_projection = projected.content.replace(initial_body, updated_body);
+    assert_ne!(
+        edited_projection, projected.content,
+        "projection edit must change the markdown body"
+    );
+    fs::write(&projected_path, edited_projection).expect("write projected markdown");
+
+    let resync_out = cli()
+        .current_dir(vault.path())
+        .args([
+            "ingest",
+            "--resync",
+            projected_path.to_str().expect("utf-8 projection path"),
+            "--json",
+        ])
+        .output()
+        .expect("cairn ingest --resync");
+
+    assert_eq!(
+        resync_out.status.code(),
+        Some(0),
+        "resync should commit; stderr: {}",
+        String::from_utf8_lossy(&resync_out.stderr)
+    );
+    let resync_response = json_stdout(&resync_out);
+    assert_eq!(resync_response["status"], "committed");
+    assert_eq!(resync_response["data"]["record_id"], target_id);
+
+    let conn = rusqlite::Connection::open(vault.path().join(".cairn/cairn.db")).expect("open db");
+    let active_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM records WHERE active = 1 AND tombstoned = 0",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count active records");
+    assert_eq!(active_count, 1, "resync should leave one visible record");
+
+    let target_row_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM records WHERE target_id = ?1",
+            [target_id],
+            |row| row.get(0),
+        )
+        .expect("count target rows");
+    assert_eq!(target_row_count, 2, "resync should keep v1 and create v2");
+
+    let (active_record_id, active_version, active_body, active_cow_staged): (
+        String,
+        i64,
+        String,
+        i64,
+    ) = conn
+        .query_row(
+            "SELECT record_id, version, body, cow_staged FROM records \
+             WHERE target_id = ?1 AND active = 1 AND tombstoned = 0",
+            [target_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("active row");
+    assert_ne!(
+        active_record_id, target_id,
+        "content-changing resync should mint a new version row"
+    );
+    assert_eq!(active_version, 2);
+    assert_eq!(active_body, updated_body);
+    assert_eq!(active_cow_staged, 0, "activated row must not stay staged");
+
+    let staged_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM records WHERE target_id = ?1 AND cow_staged = 1",
+            [target_id],
+            |row| row.get(0),
+        )
+        .expect("count staged rows");
+    assert_eq!(staged_count, 0, "committed resync must drain COW staging");
+
+    let committed_upserts: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM wal_ops WHERE kind = 'upsert' AND state = 'COMMITTED'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("committed upsert wal ops");
+    assert_eq!(committed_upserts, 2);
+
+    let done_upsert_steps: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM wal_steps ws \
+              JOIN wal_ops wo ON wo.operation_id = ws.operation_id \
+             WHERE wo.kind = 'upsert' AND ws.state = 'DONE'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("done upsert wal steps");
+    assert_eq!(done_upsert_steps, 12);
+
+    let payload_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM wal_payloads wp \
+              JOIN wal_ops wo ON wo.operation_id = wp.operation_id \
+             WHERE wo.kind = 'upsert'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("upsert wal payloads");
+    assert_eq!(payload_count, 2);
+
+    let old_hits = keyword_search_hits(vault.path(), "preupdatewalmarker");
+    assert!(
+        old_hits.is_empty(),
+        "inactive v1 body must not be searchable"
+    );
+
+    let new_hits = keyword_search_hits(vault.path(), "postupdatewalmarker");
+    assert_eq!(new_hits.len(), 1);
+    assert_eq!(new_hits[0]["record_id"], active_record_id);
 }
