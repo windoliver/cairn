@@ -105,8 +105,40 @@ pub(super) fn write_json<T: Serialize>(
             "restore write access to the vault path and retry the same hook command",
         )
     })?;
+    sync_directory(&dir)?;
     Ok(ArtifactWrite {
         id,
         path: final_path,
     })
+}
+
+fn sync_directory(dir: &Path) -> Result<(), HookError> {
+    #[cfg(unix)]
+    {
+        let dir_file = std::fs::File::open(dir).map_err(|err| {
+            HookError::internal(
+                format!(
+                    "failed to open hook artifact directory `{}` for sync: {err}",
+                    dir.display()
+                ),
+                "restore durable storage for the vault path and retry the same hook command",
+            )
+        })?;
+        dir_file.sync_all().map_err(|err| {
+            HookError::internal(
+                format!(
+                    "failed to sync hook artifact directory `{}`: {err}",
+                    dir.display()
+                ),
+                "restore durable storage for the vault path and retry the same hook command",
+            )
+        })?;
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+    }
+
+    Ok(())
 }
