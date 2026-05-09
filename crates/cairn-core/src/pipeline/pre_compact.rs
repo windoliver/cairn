@@ -1,6 +1,9 @@
 //! Typed core models and pure budget math for the future pre-compaction hook.
 
+use crate::config::HotMemoryConfig;
 use crate::domain::SessionId;
+use crate::generated::verbs::assemble_hot::AssembleHotData;
+use crate::verbs::assemble_hot::assembler::AssembleHotError;
 
 /// Input snapshot for a pre-compaction render attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,6 +29,21 @@ pub struct PreCompactOutput {
     pub budget_bytes: u64,
     /// Recipe identifier used to render the output.
     pub recipe: String,
+}
+
+/// Failure modes for pre-compaction orchestration.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum PreCompactError {
+    /// Hot-memory assembly failed before a snapshot could be persisted.
+    #[error("assemble_hot: {0}")]
+    AssembleHot(#[from] AssembleHotError),
+    /// Persisting the pre-compaction snapshot failed, so the hook rejects.
+    #[error("snapshot: {reason}")]
+    Snapshot {
+        /// Store or persistence layer failure detail.
+        reason: String,
+    },
 }
 
 /// Compute the reinjection budget from the compaction target and safety ratio.
@@ -76,9 +94,56 @@ fn floor_decimal_product(compaction_target: u32, ratio: f64) -> u64 {
     }
 }
 
+/// Run the fail-closed pre-compaction flow: budgeted assembly first, then
+/// snapshot persistence, returning reinjection metadata only on success.
+pub fn run_pre_compact<AH, SNAP>(
+    event: PreCompactEvent,
+    cfg: &HotMemoryConfig,
+    mut assemble_hot: AH,
+    mut snapshot: SNAP,
+) -> Result<PreCompactOutput, PreCompactError>
+where
+    AH: FnMut(u64) -> Result<AssembleHotData, AssembleHotError>,
+    SNAP: FnMut(&PreCompactEvent) -> Result<(), String>,
+{
+    let budget = compute_budget(
+        event.compaction_target,
+        cfg.max_bytes,
+        cfg.pre_compact_safety_ratio,
+    );
+    let data = assemble_hot(budget)?;
+    snapshot(&event).map_err(|reason| PreCompactError::Snapshot { reason })?;
+
+    Ok(PreCompactOutput {
+        reinjection_text: data.prefix,
+        output_bytes: data.bytes,
+        budget_bytes: budget,
+        recipe: cfg.pre_compact_recipe.clone(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::compute_budget;
+    use std::cell::RefCell;
+
+    use super::{PreCompactEvent, compute_budget, run_pre_compact};
+    use crate::config::HotMemoryConfig;
+    use crate::domain::SessionId;
+    use crate::generated::verbs::assemble_hot::AssembleHotData;
+
+    fn sample_event() -> PreCompactEvent {
+        PreCompactEvent {
+            session_id: SessionId::parse("sess_01jv3e0h5n7d9c1m2p4q6r8s0t")
+                .expect("valid session id"),
+            token_count_before: 12_000,
+            compaction_target: 8_000,
+            last_user_turn_index: 42,
+        }
+    }
+
+    fn sample_cfg() -> HotMemoryConfig {
+        HotMemoryConfig::default()
+    }
 
     #[test]
     fn computes_budget_from_target_and_ratio() {
@@ -108,5 +173,53 @@ mod tests {
     fn does_not_overcount_ratio_just_below_integer_boundary() {
         let budget = compute_budget(1, 1_000, 0.999_999_999_999_999_9);
         assert_eq!(budget, 0);
+    }
+
+    #[test]
+    fn pre_compact_runs_assemble_hot_and_snapshot_in_order() {
+        let calls = RefCell::new(Vec::new());
+
+        let out = run_pre_compact(
+            sample_event(),
+            &sample_cfg(),
+            |_| {
+                calls.borrow_mut().push("assemble_hot");
+                Ok(AssembleHotData {
+                    bytes: 4,
+                    prefix: "MEM".into(),
+                    segments: Some(vec![]),
+                })
+            },
+            |_| {
+                calls.borrow_mut().push("snapshot");
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(*calls.borrow(), vec!["assemble_hot", "snapshot"]);
+        assert_eq!(out.reinjection_text, "MEM");
+        assert_eq!(out.output_bytes, 4);
+        assert_eq!(out.budget_bytes, 2_400);
+        assert_eq!(out.recipe, "handoff");
+    }
+
+    #[test]
+    fn pre_compact_snapshot_failure_rejects_hook() {
+        let err = run_pre_compact(
+            sample_event(),
+            &sample_cfg(),
+            |_| {
+                Ok(AssembleHotData {
+                    bytes: 4,
+                    prefix: "MEM".into(),
+                    segments: Some(vec![]),
+                })
+            },
+            |_| Err("disk full".to_owned()),
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("snapshot"));
     }
 }

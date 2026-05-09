@@ -44,6 +44,18 @@ pub fn assemble_hot(config: &HotMemoryConfig) -> Result<AssembleHotData, Assembl
     assemble_hot_with_loader(config, load_step_body)
 }
 
+/// Render hot memory using a narrower byte budget than the config default.
+/// This keeps `assemble_hot` itself a pure renderer while callers such as
+/// pre-compaction can supply a fail-closed budget cap.
+pub fn assemble_hot_with_budget(
+    config: &HotMemoryConfig,
+    budget: u64,
+) -> Result<AssembleHotData, AssembleHotError> {
+    let mut budgeted = config.clone();
+    budgeted.max_bytes = budget.min(u64::from(u32::MAX)) as u32;
+    assemble_hot(&budgeted)
+}
+
 /// Variant of [`assemble_hot`] that accepts an explicit fallible loader.
 /// Used by tests today; once #193 lands, the real `SQLite` + markdown
 /// loader will be threaded in via the same hook so I/O / parse failures
