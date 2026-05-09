@@ -1,11 +1,12 @@
 //! Record WAL step bodies.
 
+use cairn_core::domain::RecordId;
 use cairn_core::wal::{OperationId, StepDef};
 use rusqlite::{Transaction, params};
 
 use crate::record_wal::locks::RecordLocks;
 use crate::record_wal::payload::{ExpirePayload, StoredEmbedOutcome, UpsertPayload};
-use crate::store::upsert::upsert_in_tx;
+use crate::store::upsert::upsert_in_tx_with_record_id;
 use crate::wal::runner::{StepBody, StepBodyError};
 
 pub(crate) enum RecordStepPayload {
@@ -41,8 +42,11 @@ impl StepBody for RecordStepBody {
 
         match (&self.payload, step.name) {
             (RecordStepPayload::Upsert(payload), "primary.upsert_cow") => {
-                let outcome = upsert_in_tx(tx, &payload.record)
-                    .map_err(|e| StepBodyError::Failed(e.to_string()))?;
+                let planned_record_id = RecordId::parse(payload.planned.outcome_record_id.clone())
+                    .map_err(|e| StepBodyError::Failed(format!("planned record_id: {e}")))?;
+                let outcome =
+                    upsert_in_tx_with_record_id(tx, &payload.record, Some(&planned_record_id))
+                        .map_err(|e| StepBodyError::Failed(e.to_string()))?;
                 apply_embed_outcome(tx, outcome.record_id.as_str(), &payload.embed)
                     .map_err(StepBodyError::Storage)?;
                 Ok(())

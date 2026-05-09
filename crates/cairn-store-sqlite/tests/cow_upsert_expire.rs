@@ -90,3 +90,52 @@ async fn upsert_commits_wal_operation_and_all_steps() {
     .await
     .expect("wal rows");
 }
+
+#[tokio::test]
+async fn body_changing_upsert_uses_same_record_id_in_outcome_row_and_payload() {
+    let store = open_in_memory().await.expect("open");
+    let mut record = sample();
+    store.upsert(&record).await.expect("initial upsert");
+
+    record.body = "changed body for deterministic wal plan".to_owned();
+    let out = store.upsert(&record).await.expect("body-changing upsert");
+    assert_eq!(out.version, 2);
+    assert!(out.content_changed);
+
+    let target = record.target_id.as_str().to_owned();
+    let returned_id = out.record_id.as_str().to_owned();
+    let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
+    conn.call(move |c| {
+        let active_record_id: String = c.query_row(
+            "SELECT record_id FROM records WHERE target_id = ?1 AND active = 1",
+            params![target],
+            |row| row.get(0),
+        )?;
+
+        let payload_json: String = c.query_row(
+            "SELECT wp.payload_json \
+               FROM wal_payloads wp \
+               JOIN wal_ops wo ON wo.operation_id = wp.operation_id \
+              WHERE wo.kind = 'upsert' \
+              ORDER BY wo.issued_seq DESC \
+              LIMIT 1",
+            [],
+            |row| row.get(0),
+        )?;
+        let payload: serde_json::Value = serde_json::from_str(&payload_json)
+            .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
+        let planned_record_id = payload
+            .get("planned")
+            .and_then(|planned| planned.get("outcome_record_id"))
+            .and_then(serde_json::Value::as_str)
+            .expect("planned outcome_record_id")
+            .to_owned();
+
+        assert_eq!(active_record_id, returned_id);
+        assert_eq!(planned_record_id, returned_id);
+
+        Ok::<_, tokio_rusqlite::Error>(())
+    })
+    .await
+    .expect("id assertions");
+}

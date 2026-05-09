@@ -66,6 +66,12 @@ impl From<EmbedOutcome> for crate::record_wal::payload::StoredEmbedOutcome {
 /// does not silently revert to `'legacy_event'` on the next rewrite.
 type PriorActive = (String, i64, String, String);
 
+pub(crate) struct UpsertPlan {
+    pub(crate) outcome: UpsertOutcome,
+    pub(crate) prior_record_id: Option<String>,
+    pub(crate) consent_model: String,
+}
+
 impl SqliteMemoryStore {
     /// Inherent upsert implementation; the trait method [`MemoryStore::upsert`]
     /// guards `self.conn` then delegates here.
@@ -155,6 +161,32 @@ pub(crate) fn upsert_in_tx(
     tx: &mut Transaction<'_>,
     record: &MemoryRecord,
 ) -> Result<UpsertOutcome, StoreError> {
+    upsert_in_tx_with_record_id(tx, record, None)
+}
+
+pub(crate) fn plan_upsert_in_tx(
+    tx: &mut Transaction<'_>,
+    record: &MemoryRecord,
+) -> Result<UpsertPlan, StoreError> {
+    let prior = read_active(tx, record.target_id.as_str())?;
+    let prior_record_id = prior.as_ref().map(|(prior_id, _, _, _)| prior_id.clone());
+    let consent_model = prior.as_ref().map_or_else(
+        || "legacy_event".to_owned(),
+        |(_, _, _, model)| model.clone(),
+    );
+    let outcome = upsert_in_tx(tx, record)?;
+    Ok(UpsertPlan {
+        outcome,
+        prior_record_id,
+        consent_model,
+    })
+}
+
+pub(crate) fn upsert_in_tx_with_record_id(
+    tx: &mut Transaction<'_>,
+    record: &MemoryRecord,
+    planned_new_record_id: Option<&RecordId>,
+) -> Result<UpsertOutcome, StoreError> {
     // Structural gate at the write boundary: malformed records (empty body,
     // out-of-range scalars, missing scope.user, broken actor chain) are
     // rejected before any row is touched. Both callers (`do_upsert` and
@@ -206,12 +238,15 @@ pub(crate) fn upsert_in_tx(
         )?;
         let next_version = next_version(*prior_version)?;
         let prior_hash = body_hash_from_str(prior_hash_str)?;
+        let new_record_id = planned_new_record_id
+            .cloned()
+            .map_or_else(mint_record_id, Ok)?;
         // Inherit prior consent_model — only the privileged transition
         // API (Phase-B / #255) can change it.
         (
             next_version,
             Some(prior_hash),
-            Some(mint_record_id()?),
+            Some(new_record_id),
             prior_consent_model.clone(),
         )
     } else {

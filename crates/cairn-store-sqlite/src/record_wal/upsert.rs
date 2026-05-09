@@ -14,7 +14,7 @@ use crate::record_wal::payload::{
 };
 use crate::record_wal::steps::RecordStepBody;
 use crate::store::SqliteMemoryStore;
-use crate::store::upsert::upsert_in_tx;
+use crate::store::upsert::plan_upsert_in_tx;
 use crate::wal::runner::{self, StepBody};
 
 pub(crate) async fn apply_upsert(
@@ -43,17 +43,17 @@ pub(crate) async fn apply_upsert(
     let planned = conn
         .call(move |c| {
             let mut tx = c.transaction()?;
-            let out = upsert_in_tx(&mut tx, &record_for_plan)
+            let plan = plan_upsert_in_tx(&mut tx, &record_for_plan)
                 .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
             tx.rollback()?;
             Ok::<_, tokio_rusqlite::Error>(PlannedUpsert {
-                outcome_record_id: out.record_id.as_str().to_owned(),
-                target_id: out.target_id.as_str().to_owned(),
-                version: out.version,
-                content_changed: out.content_changed,
-                prior_record_id: None,
-                prior_hash: out.prior_hash.map(|h| h.to_string()),
-                consent_model: "legacy_event".to_owned(),
+                outcome_record_id: plan.outcome.record_id.as_str().to_owned(),
+                target_id: plan.outcome.target_id.as_str().to_owned(),
+                version: plan.outcome.version,
+                content_changed: plan.outcome.content_changed,
+                prior_record_id: plan.prior_record_id,
+                prior_hash: plan.outcome.prior_hash.map(|h| h.to_string()),
+                consent_model: plan.consent_model,
             })
         })
         .await?;
