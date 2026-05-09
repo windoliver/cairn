@@ -40,6 +40,148 @@ fn run_hook_with_payload(
     parse_stdout_json(out)
 }
 
+fn run_hook_with_payload_file(
+    name: &str,
+    payload: &str,
+    vault: &tempfile::TempDir,
+) -> serde_json::Value {
+    let payload_dir = vault.path().join("payloads");
+    std::fs::create_dir_all(&payload_dir).expect("payload dir");
+    let payload_path = payload_dir.join(format!("{name}.json"));
+    std::fs::write(&payload_path, payload)
+        .unwrap_or_else(|err| panic!("write payload file {}: {err}", payload_path.display()));
+    let out = cli()
+        .args([
+            "hook",
+            name,
+            "--vault-path",
+            vault.path().to_str().expect("utf-8 vault path"),
+            "--payload-file",
+            payload_path.to_str().expect("utf-8 payload path"),
+            "--json",
+        ])
+        .output()
+        .unwrap_or_else(|err| panic!("cairn hook {name} --payload-file: {err}"));
+    assert!(out.status.success(), "{name} exit: {:?}", out.status);
+    parse_stdout_json(out)
+}
+
+fn trace_artifact(vault: &tempfile::TempDir, result: &serde_json::Value) -> serde_json::Value {
+    let trace_id = result["artifacts"]["trace_id"].as_str().expect("trace_id");
+    read_json_file(
+        &vault
+            .path()
+            .join(".cairn/hooks/traces")
+            .join(format!("{trace_id}.json")),
+    )
+}
+
+fn assert_session_hot_artifact(
+    vault: &tempfile::TempDir,
+    result: &serde_json::Value,
+    session: &str,
+) {
+    assert_eq!(result["ok"], true);
+    let hot_path = result["artifacts"]["hot_path"].as_str().expect("hot path");
+    let hot = read_json_file(&vault.path().join(hot_path));
+    assert_eq!(hot["operation_id"], result["operation_id"]);
+    assert_eq!(hot["session_id"], session);
+    assert_eq!(hot["prefix"], "");
+}
+
+fn assert_prompt_trace(vault: &tempfile::TempDir, result: &serde_json::Value, session: &str) {
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["routing_hints"]["capture_prompt"], true);
+    assert_eq!(result["routing_hints"]["memory_write_suggested"], true);
+    assert_eq!(result["routing_hints"]["forget_suggested"], true);
+    assert_eq!(result["routing_hints"]["search_suggested"], true);
+    let trace = trace_artifact(vault, result);
+    assert_eq!(trace["operation_id"], result["operation_id"]);
+    assert_eq!(trace["hook"], "UserPromptSubmit");
+    assert_eq!(trace["session_id"], session);
+    assert_eq!(
+        trace["event"]["prompt"],
+        "remember to search before you forget stale notes",
+    );
+}
+
+fn assert_pre_tool_trace(vault: &tempfile::TempDir, result: &serde_json::Value, session: &str) {
+    assert_eq!(result["ok"], true);
+    assert!(result.get("routing_hints").is_none());
+    let trace = trace_artifact(vault, result);
+    assert_eq!(trace["operation_id"], result["operation_id"]);
+    assert_eq!(trace["hook"], "PreToolUse");
+    assert_eq!(trace["session_id"], session);
+    assert_eq!(trace["tool_call_id"], "call-e2e");
+    assert_eq!(trace["tool_name"], "shell");
+    assert_eq!(trace["event"]["input_preview"], "cargo test");
+}
+
+fn assert_post_tool_trace(vault: &tempfile::TempDir, result: &serde_json::Value, session: &str) {
+    assert_eq!(result["ok"], true);
+    let trace = trace_artifact(vault, result);
+    assert_eq!(trace["operation_id"], result["operation_id"]);
+    assert_eq!(trace["hook"], "PostToolUse");
+    assert_eq!(trace["session_id"], session);
+    assert_eq!(trace["tool_call_id"], "call-e2e");
+    assert_eq!(trace["tool_name"], "shell");
+    assert_eq!(trace["status"], "ok");
+    assert_eq!(trace["event"]["exit_code"], 0);
+}
+
+fn assert_stop_artifacts(vault: &tempfile::TempDir, result: &serde_json::Value, session: &str) {
+    assert_eq!(result["ok"], true);
+    let trace = trace_artifact(vault, result);
+    assert_eq!(trace["operation_id"], result["operation_id"]);
+    assert_eq!(trace["hook"], "Stop");
+    assert_eq!(trace["session_id"], session);
+    let job_id = result["artifacts"]["queued_jobs"][0]
+        .as_str()
+        .expect("queued job id");
+    let queue = read_json_file(
+        &vault
+            .path()
+            .join(".cairn/hooks/queue")
+            .join(format!("{job_id}.json")),
+    );
+    assert_eq!(queue["operation_id"], result["operation_id"]);
+    assert_eq!(queue["job_id"], job_id);
+    assert_eq!(queue["session_id"], session);
+    assert_eq!(queue["trace_id"], result["artifacts"]["trace_id"]);
+    assert_eq!(queue["kind"], "post_turn");
+    assert_eq!(queue["status"], "pending");
+}
+
+fn assert_lifecycle_artifact_counts(vault: &tempfile::TempDir) {
+    assert_eq!(
+        std::fs::read_dir(vault.path().join(".cairn/hooks/traces"))
+            .expect("trace dir")
+            .count(),
+        4,
+    );
+    assert_eq!(
+        std::fs::read_dir(vault.path().join(".cairn/hooks/queue"))
+            .expect("queue dir")
+            .count(),
+        1,
+    );
+}
+
+#[test]
+fn top_level_help_lists_hook_subcommand() {
+    let out = cli().arg("--help").output().expect("cairn --help");
+    assert!(out.status.success(), "exit: {:?}", out.status);
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    assert!(
+        stdout.contains("hook"),
+        "top-level help missing hook: {stdout}"
+    );
+    assert!(
+        stdout.contains("Run a Cairn harness lifecycle hook"),
+        "top-level help missing hook description: {stdout}",
+    );
+}
+
 #[test]
 fn hook_help_lists_canonical_five_hooks() {
     let out = cli()
@@ -136,6 +278,26 @@ fn non_object_payload_emits_typed_invalid_args_error() {
             .is_some_and(|guidance| guidance.contains("retry")),
         "retry guidance missing retry instruction: {v}",
     );
+}
+
+#[test]
+fn payload_and_payload_file_conflict_at_cli_boundary() {
+    let vault = tempfile::tempdir().expect("temp vault");
+    let payload_path = vault.path().join("payload.json");
+    std::fs::write(&payload_path, r#"{"session_id":"sess-1"}"#).expect("payload file");
+    let out = cli()
+        .args([
+            "hook",
+            "SessionStart",
+            "--payload",
+            r#"{"session_id":"sess-1"}"#,
+            "--payload-file",
+            payload_path.to_str().expect("utf-8 payload path"),
+            "--json",
+        ])
+        .output()
+        .expect("cairn hook payload conflict");
+    assert_eq!(out.status.code(), Some(64), "exit: {:?}", out.status);
 }
 
 #[test]
@@ -359,6 +521,51 @@ fn full_hook_lifecycle_writes_expected_artifacts() {
         .expect("queue dir")
         .count();
     assert_eq!(queue_count, 1, "Stop enqueues exactly one post-turn job");
+}
+
+#[test]
+fn full_hook_lifecycle_via_payload_files_round_trips_artifact_contents() {
+    let vault = tempfile::tempdir().expect("temp vault");
+    let session = "sess-e2e";
+
+    let session_start = run_hook_with_payload_file(
+        "SessionStart",
+        &format!(r#"{{"session_id":"{session}"}}"#),
+        &vault,
+    );
+    assert_session_hot_artifact(&vault, &session_start, session);
+
+    let prompt = run_hook_with_payload_file(
+        "UserPromptSubmit",
+        &format!(
+            r#"{{"session_id":"{session}","prompt":"remember to search before you forget stale notes"}}"#
+        ),
+        &vault,
+    );
+    assert_prompt_trace(&vault, &prompt, session);
+
+    let pre = run_hook_with_payload_file(
+        "PreToolUse",
+        &format!(
+            r#"{{"session_id":"{session}","tool_call_id":"call-e2e","tool_name":"shell","input_preview":"cargo test"}}"#
+        ),
+        &vault,
+    );
+    assert_pre_tool_trace(&vault, &pre, session);
+
+    let post = run_hook_with_payload_file(
+        "PostToolUse",
+        &format!(
+            r#"{{"session_id":"{session}","tool_call_id":"call-e2e","tool_name":"shell","status":"ok","exit_code":0}}"#
+        ),
+        &vault,
+    );
+    assert_post_tool_trace(&vault, &post, session);
+
+    let stop =
+        run_hook_with_payload_file("Stop", &format!(r#"{{"session_id":"{session}"}}"#), &vault);
+    assert_stop_artifacts(&vault, &stop, session);
+    assert_lifecycle_artifact_counts(&vault);
 }
 
 #[test]
