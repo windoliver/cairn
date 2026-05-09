@@ -111,8 +111,49 @@ fn assert_keyword_search_matches_advertised_capability(vault_path: &str) {
     );
 }
 
-fn assert_unadvertised_capabilities_fail_closed(vault_path: &str) {
-    for (args, capability) in [
+fn assert_sensitive_verb_rejection(out: &Output, args: &[&str], verb: &str, capability: &str) {
+    let rejected: Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("rejection envelope must be JSON: {e}"));
+    assert_eq!(
+        rejected["contract"], "cairn.mcp.v1",
+        "cairn {args:?} must reject with an IDL envelope: {rejected}"
+    );
+    assert_eq!(rejected["status"], "rejected");
+    assert_eq!(rejected["verb"], verb);
+    assert!(
+        rejected["data"].is_null(),
+        "rejected {verb} must not return record data: {rejected}"
+    );
+
+    match rejected["error"]["code"].as_str() {
+        Some("CapabilityUnavailable") => {
+            assert_eq!(
+                out.status.code(),
+                Some(69),
+                "CapabilityUnavailable must use EX_UNAVAILABLE\nstderr: {}\nstdout: {}",
+                String::from_utf8_lossy(&out.stderr),
+                String::from_utf8_lossy(&out.stdout)
+            );
+            assert_eq!(rejected["error"]["data"]["capability"], capability);
+        }
+        Some("Unauthorized") => {
+            assert_eq!(
+                out.status.code(),
+                Some(77),
+                "Unauthorized must use EX_NOPERM\nstderr: {}\nstdout: {}",
+                String::from_utf8_lossy(&out.stderr),
+                String::from_utf8_lossy(&out.stdout)
+            );
+            assert_eq!(rejected["error"]["data"]["required"], "authentication");
+        }
+        other => panic!(
+            "cairn {args:?} must fail closed with CapabilityUnavailable or Unauthorized, got {other:?}: {rejected}"
+        ),
+    }
+}
+
+fn assert_unadvertised_sensitive_verbs_fail_closed(vault_path: &str) {
+    for (args, verb, capability) in [
         (
             vec![
                 "--vault",
@@ -121,6 +162,7 @@ fn assert_unadvertised_capabilities_fail_closed(vault_path: &str) {
                 "01JXXXXXXXXXXXXXXXXXXXXXXX",
                 "--json",
             ],
+            "retrieve",
             "cairn.mcp.v1.retrieve.record",
         ),
         (
@@ -132,22 +174,12 @@ fn assert_unadvertised_capabilities_fail_closed(vault_path: &str) {
                 "01JXXXXXXXXXXXXXXXXXXXXXXX",
                 "--json",
             ],
+            "forget",
             "cairn.mcp.v1.forget.record",
         ),
     ] {
         let out = run(&args);
-        assert_eq!(
-            out.status.code(),
-            Some(69),
-            "cairn {args:?} must fail closed with CapabilityUnavailable\nstderr: {}\nstdout: {}",
-            String::from_utf8_lossy(&out.stderr),
-            String::from_utf8_lossy(&out.stdout)
-        );
-        let rejected: Value = serde_json::from_slice(&out.stdout)
-            .unwrap_or_else(|e| panic!("rejection envelope must be JSON: {e}"));
-        assert_eq!(rejected["status"], "rejected");
-        assert_eq!(rejected["error"]["code"], "CapabilityUnavailable");
-        assert_eq!(rejected["error"]["data"]["capability"], capability);
+        assert_sensitive_verb_rejection(&out, &args, verb, capability);
     }
 }
 
@@ -206,6 +238,6 @@ fn issue7_cli_bound_vault_prelude_and_capabilities_are_end_to_end_consistent() {
 
     assert_status_capabilities_are_deterministic(vault_path);
     assert_keyword_search_matches_advertised_capability(vault_path);
-    assert_unadvertised_capabilities_fail_closed(vault_path);
+    assert_unadvertised_sensitive_verbs_fail_closed(vault_path);
     assert_persisted_handshakes_are_fresh(vault.path(), vault_path);
 }
