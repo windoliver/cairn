@@ -905,6 +905,7 @@ fn assemble_hot_rejects_oversized_budget_with_invalid_args() {
     let args = AssembleHotArgs {
         budget: Some(4_194_305),
         session_id: None,
+        explain: None,
     };
     match sdk().assemble_hot(&args).expect_err("must reject") {
         SdkError::InvalidArgs { reason } => assert!(reason.contains("budget"), "reason: {reason}"),
@@ -971,6 +972,7 @@ fn assemble_hot_rejects_any_budget_until_loader_lands() {
     let args = AssembleHotArgs {
         budget: Some(1024),
         session_id: None,
+        explain: None,
     };
     match sdk().assemble_hot(&args).expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
@@ -986,6 +988,7 @@ fn assemble_hot_rejects_any_session_id_until_loader_lands() {
     let args = AssembleHotArgs {
         budget: None,
         session_id: Some("01J0000000000000000000000A".to_owned()),
+        explain: None,
     };
     match sdk().assemble_hot(&args).expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
@@ -1006,6 +1009,7 @@ fn assemble_hot_returns_unimplemented_in_sdk() {
     let args = AssembleHotArgs {
         budget: None,
         session_id: None,
+        explain: None,
     };
     assert_unimplemented("assemble_hot", sdk().assemble_hot(&args));
 

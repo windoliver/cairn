@@ -17,6 +17,7 @@ impl TryFrom<AssembleHotDataRaw> for AssembleHotData {
             bytes: raw.bytes,
             prefix: raw.prefix,
             segments: raw.segments,
+            debug: raw.debug,
         };
         validate_base(&data)?;
         validate_segments(&data)?;
@@ -30,6 +31,7 @@ impl From<AssembleHotData> for AssembleHotDataRaw {
             bytes: data.bytes,
             prefix: data.prefix,
             segments: data.segments,
+            debug: data.debug,
         }
     }
 }

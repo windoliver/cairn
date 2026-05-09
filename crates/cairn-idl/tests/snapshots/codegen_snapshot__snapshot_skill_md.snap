@@ -258,6 +258,10 @@ cairn assemble_hot --session SESSION_ID
 cairn assemble_hot --budget 0
 ```
 
+```bash
+cairn assemble_hot --explain
+```
+
 ## `cairn capture_trace`
 
 **Use when:**

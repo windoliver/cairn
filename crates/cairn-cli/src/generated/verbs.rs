@@ -78,6 +78,7 @@ pub fn assemble_hot_subcommand() -> clap::Command {
         .about("cairn.mcp.v1 verb: assemble_hot")
         .arg(clap::Arg::new("session_id").long("session").value_name("STRING"))
         .arg(clap::Arg::new("budget").long("budget").value_name("U32").value_parser(clap::value_parser!(u32)))
+        .arg(clap::Arg::new("explain").long("explain").action(clap::ArgAction::SetTrue))
 }
 
 /// `cairn capture_trace` subcommand builder.

@@ -137,12 +137,38 @@ async fn run_async(args: AssembleHotArgs, vault_root: PathBuf, config: CairnConf
         loaded.bodies,
         Some(budget),
     ) {
-        Ok(data) => super::signed::committed(
-            ResponseVerb::AssembleHot,
-            auth.operation_id,
-            ResponseData::AssembleHot(data),
-            policy_trace,
-        ),
+        Ok(mut data) => {
+            // `--explain` (Args.explain) layers a typed per-step debug
+            // trace on top of the assembled prefix. The trace runs the
+            // pure source modules + admissibility predicate over the
+            // same per-kind candidate sets the CLI just queried; the
+            // prefix bytes themselves still come from the auth-aware
+            // loader above. Bodies and trace use the same record set,
+            // but the source modules' top-K caps may differ slightly
+            // from the loader's byte-trim heuristic — acceptable for
+            // a debug surface.
+            if args.explain.unwrap_or(false) {
+                match build_explain_debug(
+                    &ctx.store,
+                    &ctx.vault_root,
+                    &ctx.config,
+                    &auth,
+                    args.session_id.as_deref(),
+                    budget,
+                )
+                .await
+                {
+                    Ok(debug) => data.debug = Some(debug),
+                    Err(resp) => return merge_policy_trace(policy_trace, resp),
+                }
+            }
+            super::signed::committed(
+                ResponseVerb::AssembleHot,
+                auth.operation_id,
+                ResponseData::AssembleHot(data),
+                policy_trace,
+            )
+        }
         Err(e) => {
             let resp =
                 super::signed::aborted(ResponseVerb::AssembleHot, format!("assemble_hot: {e}"));
@@ -305,6 +331,135 @@ fn truncate_body_to_budget(body: &mut String, budget: u64) {
         end = end.saturating_sub(1);
     }
     body.truncate(end);
+}
+
+/// Build the `--explain` debug payload by re-running the pure source
+/// modules (`assemble_hot_with_inputs`) over the same per-kind record
+/// set the loader queried. The payload contains per-step
+/// inclusion + redacted exclusion traces; the prefix bytes returned
+/// to the caller still come from the auth-aware loader above.
+async fn build_explain_debug(
+    store: &cairn_store_sqlite::SqliteMemoryStore,
+    vault_root: &Path,
+    config: &CairnConfig,
+    auth: &ReadAuthorization,
+    session_id: Option<&str>,
+    budget: u64,
+) -> Result<cairn_core::generated::verbs::assemble_hot::HotMemoryDebug, Response> {
+    use cairn_core::verbs::assemble_hot::loader::read_vault_markdown_file;
+    use cairn_core::verbs::assemble_hot::{HotMemoryInputs, assemble_hot_with_inputs};
+
+    let pinned_records = load_records_for_kinds(
+        store,
+        &[MemoryKind::User, MemoryKind::Feedback],
+        auth,
+        None,
+        64,
+    )
+    .await?;
+    let project_records =
+        load_records_for_kinds(store, &[MemoryKind::Project], auth, None, 64).await?;
+    let playbook_records =
+        load_records_for_kinds(store, &[MemoryKind::Playbook], auth, None, 64).await?;
+    let signal_records =
+        load_records_for_kinds(store, &[MemoryKind::UserSignal], auth, session_id, 64).await?;
+
+    let purpose_md = read_vault_markdown_file(vault_root, Path::new("purpose.md"), budget)
+        .or_else(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                Ok(String::new())
+            } else {
+                Err(e)
+            }
+        })
+        .map_err(|e| {
+            internal_error_response(
+                ResponseVerb::AssembleHot,
+                &format!("explain read purpose.md: {e}"),
+            )
+        })?;
+    let index_md = read_vault_markdown_file(vault_root, Path::new("index.md"), budget)
+        .or_else(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                Ok(String::new())
+            } else {
+                Err(e)
+            }
+        })
+        .map_err(|e| {
+            internal_error_response(
+                ResponseVerb::AssembleHot,
+                &format!("explain read index.md: {e}"),
+            )
+        })?;
+
+    let pinned_refs: Vec<&MemoryRecord> = pinned_records.iter().collect();
+    let project_refs: Vec<&MemoryRecord> = project_records.iter().collect();
+    let playbook_refs: Vec<&MemoryRecord> = playbook_records.iter().collect();
+    let signal_refs: Vec<&MemoryRecord> = signal_records.iter().collect();
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    #[allow(
+        clippy::cast_possible_wrap,
+        reason = "unix seconds fit in i64 for all practical dates"
+    )]
+    let secs_i64 = now_secs as i64;
+    let now = cairn_core::domain::Rfc3339Timestamp::from_unix_secs(secs_i64).unwrap_or_else(|_| {
+        cairn_core::domain::Rfc3339Timestamp::parse("1970-01-01T00:00:00Z").expect("epoch literal")
+    });
+
+    let auth_vis = effective_explain_visibility(auth.max_visibility);
+    let inputs = HotMemoryInputs {
+        purpose_md: &purpose_md,
+        index_md: &index_md,
+        pinned_candidates: &pinned_refs,
+        project_candidates: &project_refs,
+        playbook_candidates: &playbook_refs,
+        user_signal_candidates: &signal_refs,
+        now,
+        scope: auth.scope.clone(),
+        authorized_visibility: &auth_vis,
+        include_debug: true,
+    };
+
+    let mut explain_cfg = config.vault.hot_memory.clone();
+    if let Ok(b) = u32::try_from(budget) {
+        explain_cfg.max_bytes = b.min(explain_cfg.max_bytes);
+    }
+
+    match assemble_hot_with_inputs(&inputs, &explain_cfg) {
+        Ok(data) => {
+            Ok(data
+                .debug
+                .unwrap_or(cairn_core::generated::verbs::assemble_hot::HotMemoryDebug {
+                    steps: Vec::new(),
+                }))
+        }
+        Err(e) => Err(internal_error_response(
+            ResponseVerb::AssembleHot,
+            &format!("explain assemble: {e}"),
+        )),
+    }
+}
+
+/// Visibility tiers admitted to the explain trace. Mirrors the tiers
+/// `load_records_for_kinds` will populate (Project / Private / Session)
+/// — never broader than `auth.max_visibility`.
+fn effective_explain_visibility(max: MemoryVisibility) -> Vec<MemoryVisibility> {
+    let cap = effective_read_visibility(max);
+    [
+        MemoryVisibility::Private,
+        MemoryVisibility::Session,
+        MemoryVisibility::Project,
+        MemoryVisibility::Team,
+        MemoryVisibility::Org,
+        MemoryVisibility::Public,
+    ]
+    .into_iter()
+    .filter(|v| *v <= cap)
+    .collect()
 }
 
 async fn load_records_for_kinds(
@@ -708,6 +863,11 @@ fn assemble_args_from_matches(sub: &ArgMatches) -> Result<AssembleHotArgs, Respo
         "session_id",
         sub.get_one::<String>("session_id").cloned(),
     );
+    if sub.get_flag("explain")
+        && let Some(obj) = value.as_object_mut()
+    {
+        obj.insert("explain".to_owned(), serde_json::Value::Bool(true));
+    }
     serde_json::from_value(value)
         .map_err(|e| invalid_args_response(ResponseVerb::AssembleHot, "args", &e.to_string()))
 }
