@@ -31,7 +31,8 @@ pub struct PreCompactOutput {
 /// Compute the reinjection budget from the compaction target and safety ratio.
 #[must_use]
 pub fn compute_budget(compaction_target: u32, max_bytes: u32, ratio: f64) -> u64 {
-    let hinted = (f64::from(compaction_target) * ratio).floor() as u64;
+    let product = f64::from(compaction_target) * ratio;
+    let hinted = (product + f64::EPSILON * product.abs().max(1.0)).floor() as u64;
     hinted.min(u64::from(max_bytes))
 }
 
@@ -55,5 +56,11 @@ mod tests {
     fn zero_target_yields_zero_budget() {
         let budget = compute_budget(0, 25_600, 0.30);
         assert_eq!(budget, 0);
+    }
+
+    #[test]
+    fn avoids_undercount_from_valid_floating_point_ratio() {
+        let budget = compute_budget(50, 1_000, 0.58);
+        assert_eq!(budget, 29);
     }
 }
