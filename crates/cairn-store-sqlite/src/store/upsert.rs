@@ -314,7 +314,7 @@ pub(crate) fn activate_upsert_in_tx(
         ],
     )?;
     let activated = tx.execute(
-        "UPDATE records SET active = 1, tombstoned = 0, updated_at = ?1 \
+        "UPDATE records SET active = 1, tombstoned = 0, cow_staged = 0, updated_at = ?1 \
           WHERE record_id = ?2 AND target_id = ?3 AND version = ?4",
         params![
             now_ms,
@@ -475,9 +475,9 @@ fn next_version(prior_version: i64) -> Result<u32, StoreError> {
 }
 
 /// Project + insert one new version row. Inactive inserts are pre-activation
-/// COW staging rows, so they stay tombstoned until activation clears the flag.
-/// The caller is responsible for having deactivated any prior active row in
-/// the same transaction.
+/// COW staging rows, so they carry `cow_staged = 1` until activation clears
+/// the internal marker. The caller is responsible for having deactivated any
+/// prior active row in the same transaction.
 fn insert_row_with_active(
     tx: &Transaction<'_>,
     record: &MemoryRecord,
@@ -492,10 +492,9 @@ fn insert_row_with_active(
     // silently-downgraded `legacy_event` rewrite. This mirrors the
     // strict parse in `upsert_in_tx` for prior rows.
     let _: cairn_core::domain::consent_timeline::ConsentModel = parse_consent_model(consent_model)?;
-    let tombstoned = !active;
-    let mut row = ProjectedRow::from_record(
-        record, version, now_ms, now_ms, body_hash, active, tombstoned,
-    )?;
+    let cow_staged = !active;
+    let mut row =
+        ProjectedRow::from_record(record, version, now_ms, now_ms, body_hash, active, false)?;
     // Caller-supplied consent_model overrides the Phase-A default in
     // `from_record` so supersession preserves the prior row's value.
     row.consent_model = match consent_model {
@@ -513,12 +512,12 @@ fn insert_row_with_active(
         "INSERT OR IGNORE INTO records ( \
             record_id, target_id, version, path, kind, class, visibility, \
             scope, actor_chain, body, body_hash, created_at, updated_at, \
-            active, tombstoned, is_static, record_json, confidence, \
+            active, tombstoned, cow_staged, is_static, record_json, confidence, \
             salience, target_id_explicit, tags_json, consent_model, \
             schema_version_major, schema_version_minor \
          ) VALUES ( \
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, \
-            ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24 \
+            ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25 \
          )",
         params![
             row.record_id,
@@ -536,6 +535,7 @@ fn insert_row_with_active(
             row.updated_at,
             row.active,
             row.tombstoned,
+            cow_staged,
             row.is_static,
             row.record_json,
             row.confidence,
@@ -570,7 +570,7 @@ fn validate_existing_staged_row(
 ) -> Result<(), StoreError> {
     let existing = tx
         .query_row(
-            "SELECT target_id, version, body_hash, active, tombstoned \
+            "SELECT target_id, version, body_hash, active, tombstoned, cow_staged \
                FROM records WHERE record_id = ?1",
             params![record_id],
             |row| {
@@ -580,6 +580,7 @@ fn validate_existing_staged_row(
                     row.get::<_, String>(2)?,
                     row.get::<_, i64>(3)?,
                     row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
                 ))
             },
         )
@@ -589,29 +590,44 @@ fn validate_existing_staged_row(
             other => Err(other),
         })?;
     let expected_active = if active { 1 } else { 0 };
-    let expected_tombstoned = if active { 0 } else { 1 };
+    let expected_tombstoned = 0;
+    let expected_cow_staged = if active { 0 } else { 1 };
     match existing {
-        Some((existing_target, existing_version, existing_hash, existing_active, tombstoned))
-            if existing_target == target_id
-                && existing_version == i64::from(version)
-                && existing_hash == body_hash.as_str()
-                && existing_active == expected_active
-                && tombstoned == expected_tombstoned =>
+        Some((
+            existing_target,
+            existing_version,
+            existing_hash,
+            existing_active,
+            tombstoned,
+            cow_staged,
+        )) if existing_target == target_id
+            && existing_version == i64::from(version)
+            && existing_hash == body_hash.as_str()
+            && existing_active == expected_active
+            && tombstoned == expected_tombstoned
+            && cow_staged == expected_cow_staged =>
         {
             Ok(())
         }
-        Some((existing_target, existing_version, existing_hash, existing_active, tombstoned)) => {
-            Err(StoreError::Invariant {
-                what: format!(
-                    "record_id conflict while staging upsert: record_id={record_id} \
+        Some((
+            existing_target,
+            existing_version,
+            existing_hash,
+            existing_active,
+            tombstoned,
+            cow_staged,
+        )) => Err(StoreError::Invariant {
+            what: format!(
+                "record_id conflict while staging upsert: record_id={record_id} \
                      existing target_id={existing_target} version={existing_version} \
-                     body_hash={existing_hash} active={existing_active} tombstoned={tombstoned}; \
+                     body_hash={existing_hash} active={existing_active} tombstoned={tombstoned} \
+                     cow_staged={cow_staged}; \
                      planned target_id={target_id} version={version} body_hash={} \
-                     active={expected_active} tombstoned={expected_tombstoned}",
-                    body_hash.as_str()
-                ),
-            })
-        }
+                     active={expected_active} tombstoned={expected_tombstoned} \
+                     cow_staged={expected_cow_staged}",
+                body_hash.as_str()
+            ),
+        }),
         None => Err(StoreError::Invariant {
             what: format!("staged upsert insert ignored without existing record_id={record_id}"),
         }),
@@ -1069,13 +1085,14 @@ mod cow_tests {
                 .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
             stage_upsert_cow_in_tx(&tx, &record, &plan)
                 .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
-            let (active, tombstoned): (i64, i64) = tx.query_row(
-                "SELECT active, tombstoned FROM records WHERE record_id = ?1",
+            let (active, tombstoned, cow_staged): (i64, i64, i64) = tx.query_row(
+                "SELECT active, tombstoned, cow_staged FROM records WHERE record_id = ?1",
                 rusqlite::params![plan.outcome_record_id.as_str()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )?;
             assert_eq!(active, 0);
-            assert_eq!(tombstoned, 1);
+            assert_eq!(tombstoned, 0);
+            assert_eq!(cow_staged, 1);
             tx.rollback()?;
             Ok::<_, tokio_rusqlite::Error>(())
         })
@@ -1174,6 +1191,10 @@ mod cow_tests {
             .expect("list");
         assert_eq!(listed.records.len(), 1);
         assert_eq!(listed.records[0].id, active.record_id);
+
+        let versions = store.versions(&record.target_id).await.expect("versions");
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].record_id, active.record_id);
 
         let keyword_page = store
             .search_keyword(&keyword_args("freshstagedtoken"))

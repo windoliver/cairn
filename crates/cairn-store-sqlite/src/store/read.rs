@@ -41,8 +41,9 @@ impl SqliteMemoryStore {
     /// Inherent `get` implementation; the trait method
     /// [`MemoryStore::get`] guards `self.conn` then delegates here.
     ///
-    /// Tombstoned rows are filtered at the SQL boundary (`tombstoned = 0`)
-    /// so callers see `Ok(None)` for both missing and soft-deleted rows.
+    /// Tombstoned and internal COW staging rows are filtered at the SQL
+    /// boundary so callers see `Ok(None)` for missing, soft-deleted, and
+    /// not-yet-activated rows.
     ///
     /// [`MemoryStore::get`]: cairn_core::contract::memory_store::MemoryStore::get
     ///
@@ -65,7 +66,7 @@ impl SqliteMemoryStore {
                 let row: Option<(String, String)> = c
                     .query_row(
                         "SELECT record_json, consent_model FROM records \
-                          WHERE record_id = ?1 AND tombstoned = 0",
+                          WHERE record_id = ?1 AND tombstoned = 0 AND cow_staged = 0",
                         params![key],
                         |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
                     )
@@ -194,9 +195,10 @@ impl SqliteMemoryStore {
     /// Inherent `versions` implementation; the trait method
     /// [`MemoryStore::versions`] guards `self.conn` then delegates here.
     ///
-    /// Returns the full per-target history ordered `version ASC` (oldest
-    /// first). Includes both active and inactive rows AND tombstoned rows;
-    /// the contract requires audit-grade visibility for the lifecycle
+    /// Returns the committed per-target history ordered `version ASC` (oldest
+    /// first). Includes both active and inactive rows AND tombstoned rows,
+    /// but excludes internal COW staging rows until activation commits them;
+    /// the contract requires audit-grade visibility for committed lifecycle
     /// workflows (brief §10).
     ///
     /// [`MemoryStore::versions`]: cairn_core::contract::memory_store::MemoryStore::versions
@@ -226,7 +228,9 @@ impl SqliteMemoryStore {
                     "SELECT record_id, target_id, version, created_at, updated_at, \
                             active, tombstoned, tombstone_reason, body_hash, \
                             schema_version_major, schema_version_minor \
-                       FROM records WHERE target_id = ?1 ORDER BY version ASC",
+                       FROM records \
+                      WHERE target_id = ?1 AND cow_staged = 0 \
+                      ORDER BY version ASC",
                 )?;
                 let rows = stmt
                     .query_map(params![key], |row| {
@@ -449,7 +453,7 @@ fn build_list_query(
 ) -> Result<(String, Vec<rusqlite::types::Value>), StoreError> {
     let mut sql = String::from(
         "SELECT record_json, updated_at, record_id, consent_model FROM records \
-          WHERE active = 1 AND tombstoned = 0",
+          WHERE active = 1 AND tombstoned = 0 AND cow_staged = 0",
     );
     let mut p: Vec<rusqlite::types::Value> = Vec::new();
     if let Some(k) = kind {
