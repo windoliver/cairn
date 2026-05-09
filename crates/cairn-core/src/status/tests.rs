@@ -131,12 +131,23 @@ fn replay_capabilities_held_back() {
 }
 
 #[test]
-fn pre_compact_capability_held_back_until_wiring_flips() {
+fn pre_compact_capability_tracks_wiring_constant() {
     let g = gates(true, true, None);
     let caps = advertise(&g);
     assert!(
-        !caps.contains(&Capabilities::CairnMcpV1SensorsPreCompact),
-        "sensors.pre_compact advertised before runtime wired"
+        caps.contains(&Capabilities::CairnMcpV1SensorsPreCompact)
+            == wiring::SENSORS_PRE_COMPACT_WIRED,
+        "sensors.pre_compact advertisement drifted from wiring constant"
+    );
+}
+
+#[test]
+fn pre_compact_capability_advertised_when_wired() {
+    let g = gates(true, true, None);
+    let caps = advertise(&g);
+    assert!(
+        caps.contains(&Capabilities::CairnMcpV1SensorsPreCompact),
+        "sensors.pre_compact should be advertised once runtime wiring lands"
     );
 }
 
@@ -231,7 +242,13 @@ mod remediation_tests {
                 .expect("cap serializes to string");
             // search.keyword and policy_trace are universally available; their
             // remediation is "should not happen" — None is acceptable.
-            if cap_str == "cairn.mcp.v1.search.keyword" || cap_str == "cairn.mcp.v1.policy_trace" {
+            // sensors.pre_compact is hook-advertisement only for now; there is
+            // no CapabilityUnavailable remediation path until a gated verb
+            // consumes it.
+            if cap_str == "cairn.mcp.v1.search.keyword"
+                || cap_str == "cairn.mcp.v1.policy_trace"
+                || cap_str == "cairn.mcp.v1.sensors.pre_compact"
+            {
                 continue;
             }
             assert!(

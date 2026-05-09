@@ -34,6 +34,9 @@ pub const RETRIEVE_SCOPE_WIRED: bool = false;
 /// `retrieve --profile` dispatch path.
 pub const RETRIEVE_PROFILE_WIRED: bool = false;
 
+/// `PreCompact` sensor capture + status advertisement path (issue #310).
+pub const SENSORS_PRE_COMPACT_WIRED: bool = true;
+
 /// Sequence-mode replay rejection routed through every signed-verb path
 /// (`prepare_wal_with_replay` integration; held back per
 /// `crates/cairn-cli/src/verbs/status.rs` round-2 review #2).

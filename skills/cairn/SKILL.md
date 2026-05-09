@@ -268,6 +268,10 @@ cairn summarize --citations on 01H8XGJWBWBAQ4N1NQK1A8X9YZ 01H8XGJWBWBAQ4N1NQK1A8
 
 **Exclusivity:** this is the canonical hot-prefix surface
 
+**Pre-compaction reinjection path:**
+- before a harness compacts context, call `cairn assemble_hot --session SESSION_ID --budget BUDGET --json`
+- if the harness emits a `PreCompact` hook, splice the returned text into the post-compaction prefix before continuing, then persist the snapshot through `cairn capture_trace`
+
 **Example:**
 
 ```bash
@@ -391,4 +395,3 @@ Every command supports `--json` for machine-readable output. Parse stdout as JSO
 
 - `cairn handshake --json` — fresh per-call challenge mint.
 - `cairn status --json` — deterministic capability discovery (cacheable, no side effects).
-
