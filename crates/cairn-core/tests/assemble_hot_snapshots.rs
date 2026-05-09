@@ -28,6 +28,7 @@ fn assemble_hot_data_canonical_json() {
         bytes: prefix.len() as u64,
         prefix,
         segments: Some(segments),
+        debug: None,
     };
     let json = serde_json::to_string_pretty(&data).unwrap();
     insta::assert_snapshot!(json);

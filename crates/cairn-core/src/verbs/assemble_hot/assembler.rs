@@ -78,6 +78,7 @@ where
         bytes,
         prefix,
         segments: Some(segments),
+        debug: None,
     };
     // Run the same trust-boundary validator a deserializer would apply.
     // Catches contract-violating outputs (e.g. recipe.len() > MAX_SEGMENTS)
@@ -109,6 +110,7 @@ pub fn assemble_hot_from_bodies(
         bytes: prefix.len() as u64,
         prefix,
         segments: Some(segments),
+        debug: None,
     };
     validate_with_recipe(&data, &recipe)?;
     Ok(data)
@@ -123,6 +125,159 @@ fn validate_config_recipe_len(config: &HotMemoryConfig) -> Result<(), AssembleHo
         .into());
     }
     Ok(())
+}
+
+/// Assemble hot memory from a typed `HotMemoryInputs` projection
+/// (issue #82). Walks `config.recipe`, dispatches each step to its
+/// source-specific `select`, glues the bodies via [`build_segments`],
+/// validates the wire shape, and (when `inputs.include_debug` is true)
+/// emits a per-step inclusion / exclusion trace on
+/// `AssembleHotData.debug`.
+///
+/// Distinct from [`assemble_hot_from_bodies`]: this entry point lets
+/// callers express the per-step ranking + admissibility logic via the
+/// `sources::*` modules instead of pre-loading bodies, which is the
+/// path the CLI uses when `--explain` is requested.
+///
+/// # Errors
+///
+/// Returns [`AssembleHotError::Segments`] if the assembled segments
+/// violate the wire contract; [`AssembleHotError::BudgetExceeded`] if
+/// the byte total exceeds `config.max_bytes`.
+pub fn assemble_hot_with_inputs(
+    inputs: &super::inputs::HotMemoryInputs<'_>,
+    config: &HotMemoryConfig,
+) -> Result<AssembleHotData, AssembleHotError> {
+    use crate::generated::verbs::assemble_hot::{HotMemoryDebug, HotStepTrace};
+
+    validate_config_recipe_len(config)?;
+    let recipe: Vec<HotRecipeStep> = config
+        .recipe
+        .iter()
+        .copied()
+        .map(HotRecipeStep::from)
+        .collect();
+
+    let mut bodies: Vec<String> = Vec::with_capacity(recipe.len());
+    let mut traces: Vec<HotStepTrace> = Vec::with_capacity(recipe.len());
+
+    for step in recipe.iter().copied() {
+        let segment = inputs_run_step(step, inputs);
+        if inputs.include_debug {
+            traces.push(inputs_to_step_trace(step, &segment));
+        }
+        bodies.push(segment.body);
+    }
+
+    let bodies_refs: Vec<&str> = bodies.iter().map(String::as_str).collect();
+    let (prefix, segments) = build_segments(&recipe, &bodies_refs)?;
+
+    let bytes = prefix.len() as u64;
+    let max = u64::from(config.max_bytes);
+    if bytes > max {
+        return Err(AssembleHotError::BudgetExceeded { got: bytes, max });
+    }
+
+    let debug = if inputs.include_debug {
+        Some(HotMemoryDebug { steps: traces })
+    } else {
+        None
+    };
+
+    let data = AssembleHotData {
+        bytes,
+        prefix,
+        segments: Some(segments),
+        debug,
+    };
+    validate(&data)?;
+    Ok(data)
+}
+
+fn inputs_run_step(
+    step: HotRecipeStep,
+    inputs: &super::inputs::HotMemoryInputs<'_>,
+) -> super::inclusion::LoadedSegment {
+    match step {
+        HotRecipeStep::Purpose => super::sources::purpose::select(inputs),
+        HotRecipeStep::Index => super::sources::index::select(inputs),
+        HotRecipeStep::PinnedFeedback => super::sources::pinned::select(inputs),
+        HotRecipeStep::TopSalienceProject => super::sources::project::select(inputs),
+        HotRecipeStep::ActivePlaybook => super::sources::playbook::select(inputs),
+        HotRecipeStep::RecentUserSignal => super::sources::user_signal::select(inputs),
+    }
+}
+
+fn inputs_to_step_trace(
+    step: HotRecipeStep,
+    segment: &super::inclusion::LoadedSegment,
+) -> crate::generated::verbs::assemble_hot::HotStepTrace {
+    use crate::generated::verbs::assemble_hot::{HotExclusion, HotStepTrace};
+
+    // Authorization-related exclusions (`OutOfScope`, `VisibilityDenied`,
+    // `ForgottenScope`) MUST NOT appear on the wire trace. The
+    // candidate slot can legitimately contain records the caller is not
+    // allowed to see — the assembler's `admit()` predicate is the trust
+    // boundary, and emitting their record_id on `data.debug` would turn
+    // `--explain` into an enumeration channel.
+    let safe_excluded: Vec<HotExclusion> = segment
+        .excluded
+        .iter()
+        .filter(|t| !inputs_is_auth_redacted(t.reason))
+        .map(inputs_to_exclusion)
+        .collect();
+    HotStepTrace {
+        step,
+        included: segment.included.iter().map(inputs_to_inclusion).collect(),
+        excluded: safe_excluded,
+    }
+}
+
+const fn inputs_is_auth_redacted(reason: super::inclusion::ExclusionReason) -> bool {
+    use super::inclusion::ExclusionReason;
+    matches!(
+        reason,
+        ExclusionReason::OutOfScope
+            | ExclusionReason::VisibilityDenied
+            | ExclusionReason::ForgottenScope
+    )
+}
+
+fn inputs_to_inclusion(
+    trace: &super::inclusion::InclusionTrace,
+) -> crate::generated::verbs::assemble_hot::HotInclusion {
+    crate::generated::verbs::assemble_hot::HotInclusion {
+        record_id: trace.record_id.as_str().to_owned(),
+        score: trace.score,
+        note: trace.note.to_owned(),
+    }
+}
+
+fn inputs_to_exclusion(
+    trace: &super::inclusion::ExclusionTrace,
+) -> crate::generated::verbs::assemble_hot::HotExclusion {
+    crate::generated::verbs::assemble_hot::HotExclusion {
+        record_id: trace.record_id.as_str().to_owned(),
+        reason: inputs_to_wire_reason(trace.reason),
+    }
+}
+
+fn inputs_to_wire_reason(
+    reason: super::inclusion::ExclusionReason,
+) -> crate::generated::verbs::assemble_hot::HotExclusionReason {
+    use super::inclusion::ExclusionReason;
+    use crate::generated::verbs::assemble_hot::HotExclusionReason;
+    match reason {
+        ExclusionReason::Tombstoned => HotExclusionReason::Tombstoned,
+        ExclusionReason::ForgottenScope => HotExclusionReason::ForgottenScope,
+        ExclusionReason::BelowConfidenceFloor => HotExclusionReason::BelowConfidenceFloor,
+        ExclusionReason::OutOfScope => HotExclusionReason::OutOfScope,
+        ExclusionReason::VisibilityDenied => HotExclusionReason::VisibilityDenied,
+        ExclusionReason::OutsideRecencyWindow => HotExclusionReason::OutsideRecencyWindow,
+        ExclusionReason::BeyondTopK => HotExclusionReason::BeyondTopK,
+        ExclusionReason::NotPinned => HotExclusionReason::NotPinned,
+        ExclusionReason::EmptyBody => HotExclusionReason::EmptyBody,
+    }
 }
 
 /// Load the body for one recipe step. Stub: always `Ok("")`. The

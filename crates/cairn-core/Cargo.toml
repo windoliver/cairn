@@ -70,6 +70,11 @@ rand_core = { workspace = true }
 rand = { workspace = true }
 rstest = { workspace = true }
 tracing-test = "0.2"
+# Self-dep activates the `test-fixtures` feature for integration tests
+# under `tests/`. Cargo's `[dev-dependencies]` is the standard hook for
+# turning a library feature on for tests without leaking it into the
+# default-feature production build.
+cairn-core = { workspace = true, features = ["test-fixtures"] }
 
 [[bin]]
 name = "filter_smoke"

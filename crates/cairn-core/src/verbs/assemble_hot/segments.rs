@@ -524,6 +524,7 @@ mod tests {
             bytes: prefix.len() as u64,
             prefix,
             segments: Some(segments),
+            debug: None,
         }
     }
 
@@ -548,6 +549,7 @@ mod tests {
             bytes: 0,
             prefix: String::new(),
             segments: Some(vec![]),
+            debug: None,
         };
         assert!(validate_segments(&d).is_ok());
     }
@@ -558,6 +560,7 @@ mod tests {
             bytes: 3,
             prefix: "abc".into(),
             segments: Some(vec![]),
+            debug: None,
         };
         assert!(matches!(
             validate_segments(&d),
@@ -576,6 +579,7 @@ mod tests {
             bytes: 0,
             prefix: String::new(),
             segments: None,
+            debug: None,
         };
         assert!(validate_segments(&d).is_ok());
     }
@@ -664,6 +668,7 @@ mod tests {
             bytes: MAX_BYTES + 1,
             prefix: String::new(),
             segments: None,
+            debug: None,
         };
         assert!(matches!(
             validate_base(&d),
@@ -699,6 +704,7 @@ mod tests {
             bytes: prefix_len,
             prefix,
             segments: Some(vec![s0, s1]),
+            debug: None,
         };
         assert!(matches!(
             validate_segments(&d),
@@ -728,6 +734,7 @@ mod tests {
             bytes: 0,
             prefix: String::new(),
             segments: Some(segs),
+            debug: None,
         };
         assert!(matches!(
             validate_segments(&d),
@@ -776,6 +783,7 @@ mod tests {
             bytes: 0,
             prefix: String::new(),
             segments: None,
+            debug: None,
         };
         assert!(matches!(
             validate_with_recipe(&d, &[]),
@@ -792,6 +800,7 @@ mod tests {
             bytes: prefix.len() as u64,
             prefix,
             segments: Some(segments),
+            debug: None,
         };
         validate(&d).unwrap();
         validate_with_recipe(&d, &recipe).unwrap();
