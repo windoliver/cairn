@@ -78,7 +78,7 @@ pub(crate) async fn apply_upsert(
         save_payload(
             &tx,
             &op_for_issue,
-            &RecordWalPayload::Upsert(payload_for_body),
+            &RecordWalPayload::Upsert(Box::new(payload_for_body)),
         )
         .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
         tx.commit()?;

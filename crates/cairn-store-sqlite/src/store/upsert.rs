@@ -589,9 +589,9 @@ fn validate_existing_staged_row(
             rusqlite::Error::QueryReturnedNoRows => Ok(None),
             other => Err(other),
         })?;
-    let expected_active = if active { 1 } else { 0 };
+    let expected_active = i64::from(active);
     let expected_tombstoned = 0;
-    let expected_cow_staged = if active { 0 } else { 1 };
+    let expected_cow_staged = i64::from(!active);
     match existing {
         Some((
             existing_target,

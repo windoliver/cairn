@@ -94,6 +94,7 @@ async fn upsert_commits_wal_operation_and_all_steps() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn prepared_expire_recovers_with_persisted_scope() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join("cairn.sqlite");
@@ -284,6 +285,7 @@ async fn prepared_upsert_recovers_from_persisted_payload() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn partial_upsert_after_primary_cow_is_hidden_until_recovery_activation() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join("cairn.sqlite");

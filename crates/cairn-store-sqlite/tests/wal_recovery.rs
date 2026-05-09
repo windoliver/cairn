@@ -434,7 +434,7 @@ async fn recovery_rejects_payload_variant_that_disagrees_with_wal_kind() {
     let record = cairn_core::domain::record::tests_export::sample_record();
     let payload = cairn_store_sqlite::record_wal::payload::UpsertPayload::new_for_test(record);
     let payload_json = serde_json::to_string(
-        &cairn_store_sqlite::record_wal::payload::RecordWalPayload::Upsert(payload),
+        &cairn_store_sqlite::record_wal::payload::RecordWalPayload::Upsert(Box::new(payload)),
     )
     .expect("payload json");
     seed_payload_json(&conn, "op-kind-mismatch", WalKind::Expire, payload_json).await;

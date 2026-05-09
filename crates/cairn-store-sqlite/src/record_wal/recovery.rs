@@ -37,7 +37,6 @@ impl StepBodyRegistry for RecordWalRegistry {
     ) -> Result<Option<Arc<dyn StepBody>>, RecoveryError> {
         match kind {
             WalKind::Upsert | WalKind::Expire => {}
-            WalKind::ForgetRecord => return Ok(None),
             _ => return Ok(None),
         }
 
@@ -61,7 +60,7 @@ impl StepBodyRegistry for RecordWalRegistry {
                 )
                 .await
                 .map_err(|e| RecoveryError::Invariant(format!("recovery lock failed: {e}")))?;
-                Ok(Some(Arc::new(RecordStepBody::new_upsert(payload, locks))))
+                Ok(Some(Arc::new(RecordStepBody::new_upsert(*payload, locks))))
             }
             (WalKind::Expire, RecordWalPayload::Expire(payload)) => {
                 let locks = acquire_for_record(
@@ -74,7 +73,7 @@ impl StepBodyRegistry for RecordWalRegistry {
                 )
                 .await
                 .map_err(|e| RecoveryError::Invariant(format!("recovery lock failed: {e}")))?;
-                Ok(Some(Arc::new(RecordStepBody::new_expire(payload, locks))))
+                Ok(Some(Arc::new(RecordStepBody::new_expire(*payload, locks))))
             }
             (WalKind::Upsert, RecordWalPayload::Expire(_)) => Err(RecoveryError::Invariant(
                 "record wal payload variant expire does not match wal kind upsert".to_owned(),

@@ -50,7 +50,7 @@ pub(crate) async fn apply_expire(
         save_payload(
             &tx,
             &op_for_issue,
-            &RecordWalPayload::Expire(payload_for_body),
+            &RecordWalPayload::Expire(Box::new(payload_for_body)),
         )
         .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
         tx.commit()?;

@@ -8,8 +8,8 @@ use crate::record_wal::payload::{ExpirePayload, StoredEmbedOutcome, UpsertPayloa
 use crate::wal::runner::{StepBody, StepBodyError};
 
 pub(crate) enum RecordStepPayload {
-    Upsert(UpsertPayload),
-    Expire(ExpirePayload),
+    Upsert(Box<UpsertPayload>),
+    Expire(Box<ExpirePayload>),
 }
 
 pub(crate) struct RecordStepBody {
@@ -21,7 +21,7 @@ impl RecordStepBody {
     #[must_use]
     pub(crate) fn new_upsert(payload: UpsertPayload, locks: RecordLocks) -> Self {
         Self {
-            payload: RecordStepPayload::Upsert(payload),
+            payload: RecordStepPayload::Upsert(Box::new(payload)),
             locks,
         }
     }
@@ -29,7 +29,7 @@ impl RecordStepBody {
     #[must_use]
     pub(crate) fn new_expire(payload: ExpirePayload, locks: RecordLocks) -> Self {
         Self {
-            payload: RecordStepPayload::Expire(payload),
+            payload: RecordStepPayload::Expire(Box::new(payload)),
             locks,
         }
     }
@@ -65,7 +65,8 @@ impl StepBody for RecordStepBody {
                 upsert_fts(tx, &payload.planned.outcome_record_id)
             }
             (RecordStepPayload::Upsert(payload), "edges.upsert") => {
-                upsert_edges(tx, &payload.planned.outcome_record_id)
+                upsert_edges(tx, &payload.planned.outcome_record_id);
+                Ok(())
             }
             (RecordStepPayload::Upsert(payload), "primary.activate") => {
                 let plan = payload
@@ -84,8 +85,7 @@ impl StepBody for RecordStepBody {
             (RecordStepPayload::Expire(payload), "vector.drain") => drain_vectors(tx, payload),
             (RecordStepPayload::Expire(payload), "fts.drain") => drain_fts(tx, payload),
             (RecordStepPayload::Expire(payload), "edges.drain") => drain_edges(tx, payload),
-            (RecordStepPayload::Upsert(_), _) => Ok(()),
-            (RecordStepPayload::Expire(_), _) => Ok(()),
+            (RecordStepPayload::Upsert(_) | RecordStepPayload::Expire(_), _) => Ok(()),
         }
     }
 }
@@ -201,9 +201,7 @@ fn upsert_vector(
     Ok(())
 }
 
-fn upsert_edges(_tx: &Transaction<'_>, _record_id: &str) -> Result<(), StepBodyError> {
-    Ok(())
-}
+fn upsert_edges(_tx: &Transaction<'_>, _record_id: &str) {}
 
 fn mark_expired(tx: &Transaction<'_>, payload: &ExpirePayload) -> Result<(), StepBodyError> {
     tx.execute(

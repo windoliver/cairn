@@ -11,8 +11,8 @@ use crate::store::current_unix_ms;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RecordWalPayload {
-    Upsert(UpsertPayload),
-    Expire(ExpirePayload),
+    Upsert(Box<UpsertPayload>),
+    Expire(Box<ExpirePayload>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -147,7 +147,11 @@ pub fn save_upsert_payload_for_test(
     let op = OperationId::parse(op_id.to_owned()).map_err(|e| StoreError::Invariant {
         what: format!("invalid test op id: {e}"),
     })?;
-    save_payload(conn, &op, &RecordWalPayload::Upsert(payload.clone()))
+    save_payload(
+        conn,
+        &op,
+        &RecordWalPayload::Upsert(Box::new(payload.clone())),
+    )
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
@@ -159,7 +163,7 @@ pub fn load_upsert_payload_for_test(
         what: format!("invalid test op id: {e}"),
     })?;
     match load_payload(conn, &op)? {
-        RecordWalPayload::Upsert(payload) => Ok(payload),
+        RecordWalPayload::Upsert(payload) => Ok(*payload),
         RecordWalPayload::Expire(_) => Err(StoreError::Invariant {
             what: "expected upsert payload, found expire payload".to_owned(),
         }),

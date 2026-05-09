@@ -18,6 +18,7 @@ impl RecordLocks {
         Self { handles }
     }
 
+    #[allow(clippy::result_large_err)]
     pub(crate) fn assert_live_in_tx(
         &self,
         tx: &rusqlite::Transaction<'_>,
@@ -90,12 +91,16 @@ mod tests {
     #[test]
     fn target_lineage_resource_is_stable_and_scope_independent() {
         let target = TargetId::parse("01HQZX9F5N0000000000000000").expect("valid target id");
-        let mut scope_a = ScopeTuple::default();
-        scope_a.tenant = Some("tenant-a".to_owned());
-        scope_a.workspace = Some("workspace-a".to_owned());
-        let mut scope_b = ScopeTuple::default();
-        scope_b.tenant = Some("tenant-b".to_owned());
-        scope_b.workspace = Some("workspace-b".to_owned());
+        let scope_a = ScopeTuple {
+            tenant: Some("tenant-a".to_owned()),
+            workspace: Some("workspace-a".to_owned()),
+            ..ScopeTuple::default()
+        };
+        let scope_b = ScopeTuple {
+            tenant: Some("tenant-b".to_owned()),
+            workspace: Some("workspace-b".to_owned()),
+            ..ScopeTuple::default()
+        };
 
         let resource_a = record_lock_resources(&scope_a, &target)
             .into_iter()

@@ -257,6 +257,7 @@ fn ingest_file_runs_pipeline_without_leaking_file_body_to_metrics() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn ingest_resync_updates_record_through_cow_wal_and_searches_active_body() {
     let vault = tempfile::tempdir().expect("temp vault");
     bootstrap_vault(vault.path());

@@ -253,7 +253,8 @@ impl LockHandle {
     /// - `LockError::Fenced` if the acquisition row expired, was reclaimed,
     ///   or the resource epoch changed.
     /// - `LockError::Clock` if system time is before Unix epoch.
-    /// - `LockError::Db` for SQLite failures.
+    /// - `LockError::Db` for `SQLite` failures.
+    #[allow(clippy::result_large_err)]
     pub fn assert_live_in_tx(&self, tx: &rusqlite::Transaction<'_>) -> Result<(), LockError> {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
