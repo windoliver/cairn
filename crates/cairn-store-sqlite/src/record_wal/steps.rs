@@ -208,8 +208,12 @@ fn upsert_edges(_tx: &Transaction<'_>, _record_id: &str) -> Result<(), StepBodyE
 fn mark_expired(tx: &Transaction<'_>, payload: &ExpirePayload) -> Result<(), StepBodyError> {
     tx.execute(
         "UPDATE records \
-            SET active = 0, tombstoned = 1, tombstone_reason = 'expire', updated_at = ?1 \
-          WHERE target_id = ?2",
+            SET active = 0, \
+                tombstoned = 1, \
+                tombstone_reason = COALESCE(tombstone_reason, 'expire'), \
+                updated_at = ?1 \
+          WHERE target_id = ?2 \
+            AND NOT (active = 0 AND tombstoned = 1 AND tombstone_reason IS NOT NULL)",
         params![crate::store::current_unix_ms(), payload.target_id.as_str()],
     )
     .map_err(StepBodyError::Storage)?;

@@ -304,6 +304,24 @@ async fn expire_retires_target_without_hard_delete() {
 }
 
 #[tokio::test]
+async fn expire_preserves_existing_tombstone_reason() {
+    let store = open_in_memory().await.expect("open");
+    let r = sample();
+    let out = store.upsert(&r).await.expect("upsert");
+
+    store
+        .tombstone(&out.record_id, TombstoneReason::Forget)
+        .await
+        .expect("forget tombstone");
+    store.expire(&r.target_id).await.expect("expire");
+
+    let versions = store.versions(&r.target_id).await.expect("versions");
+    assert_eq!(versions.len(), 1);
+    assert!(versions[0].tombstoned);
+    assert_eq!(versions[0].tombstone_reason, Some(TombstoneReason::Forget));
+}
+
+#[tokio::test]
 async fn upsert_after_expire_creates_next_visible_version() {
     let store = open_in_memory().await.expect("open");
     let r = sample();
