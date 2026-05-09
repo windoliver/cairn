@@ -499,9 +499,7 @@ async fn expired_record_is_excluded_from_keyword_search() {
     let store = open_in_memory().await.expect("open");
     let mut r = sample();
     r.body = "body with needle before expire".to_owned();
-    store.upsert(&r).await.expect("upsert");
-
-    store.expire(&r.target_id).await.expect("expire");
+    let out = store.upsert(&r).await.expect("upsert");
 
     let page = store
         .search_keyword(&KeywordSearchArgs {
@@ -514,7 +512,24 @@ async fn expired_record_is_excluded_from_keyword_search() {
             with_explain: false,
         })
         .await
-        .expect("keyword search");
+        .expect("keyword search before expire");
+    assert_eq!(page.candidates.len(), 1);
+    assert_eq!(page.candidates[0].record_id, out.record_id);
+    assert_eq!(page.candidates[0].target_id, r.target_id);
+
+    store.expire(&r.target_id).await.expect("expire");
+    let page = store
+        .search_keyword(&KeywordSearchArgs {
+            query: "needle".into(),
+            filter: None,
+            auth_scope: r.scope.clone(),
+            visibility_allowlist: vec![r.visibility],
+            limit: 10,
+            cursor: None,
+            with_explain: false,
+        })
+        .await
+        .expect("keyword search after expire");
     assert!(page.candidates.is_empty());
 }
 
