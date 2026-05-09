@@ -8,9 +8,10 @@
 use std::io::Write;
 use std::process::ExitCode;
 
-use cairn_cli::{command, identity, plugins, repair, verbs};
+use cairn_cli::{command, hooks, identity, plugins, repair, verbs};
 use cairn_core::contract::registry::PluginError;
 use clap::ArgMatches;
+
 fn registry_store() -> anyhow::Result<cairn_cli::vault::VaultRegistryStore> {
     let path = if let Ok(p) = std::env::var("CAIRN_REGISTRY") {
         std::path::PathBuf::from(p)
@@ -126,6 +127,7 @@ fn subcommand_needs_vault_guard(active_subcommand: &str) -> bool {
             | "llm"
             | "identity"
             | "flush"
+            | "hook"
             | "repair"
     )
 }
@@ -230,6 +232,7 @@ fn main() -> ExitCode {
             Err(_) => verbs::lint::run(sub, None),
         },
         Some(("forget", sub)) => verbs::forget::run(sub),
+        Some(("hook", sub)) => hooks::run(sub),
         Some(("status", sub)) => run_status(sub, explicit_vault.as_deref()),
         Some(("handshake", sub)) => run_handshake(sub, explicit_vault.as_deref()),
         Some(("plugins", sub)) => run_plugins(sub),

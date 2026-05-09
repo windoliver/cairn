@@ -1,8 +1,8 @@
 # Folder Ingest Live Issue Design
 
-**Date:** 2026-05-07  
-**Issue:** [#188 - `cairn ingest --folder <path>` folder scanning and knowledge-base builder](https://github.com/windoliver/cairn/issues/188)  
-**Status:** Draft for review  
+**Date:** 2026-05-07
+**Issue:** [#188 - `cairn ingest --folder <path>` folder scanning and knowledge-base builder](https://github.com/windoliver/cairn/issues/188)
+**Status:** Draft for review
 **Supersedes:** `docs/superpowers/specs/2026-05-06-folder-ingest-design.md` for live issue completion
 
 ---

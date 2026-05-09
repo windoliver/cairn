@@ -20,6 +20,7 @@ Commands:
   capture_trace  cairn.mcp.v1 verb: capture_trace
   lint           cairn.mcp.v1 verb: lint
   forget         cairn.mcp.v1 verb: forget
+  hook           Run a Cairn harness lifecycle hook
   handshake      cairn.mcp.v1 prelude: handshake
   status         cairn.mcp.v1 prelude: status
   plugins        Manage and inspect bundled plugins
@@ -56,6 +57,7 @@ Options:
 - [`cairn capture_trace`](commands/capture_trace.md) - cairn.mcp.v1 verb: capture_trace
 - [`cairn lint`](commands/lint.md) - cairn.mcp.v1 verb: lint
 - [`cairn forget`](commands/forget.md) - cairn.mcp.v1 verb: forget
+- [`cairn hook`](commands/hook.md) - Run a Cairn harness lifecycle hook
 - [`cairn handshake`](commands/handshake.md) - cairn.mcp.v1 prelude: handshake
 - [`cairn status`](commands/status.md) - cairn.mcp.v1 prelude: status
 - [`cairn plugins`](commands/plugins.md) - Manage and inspect bundled plugins
