@@ -131,6 +131,16 @@ fn replay_capabilities_held_back() {
 }
 
 #[test]
+fn pre_compact_capability_held_back_until_wiring_flips() {
+    let g = gates(true, true, None);
+    let caps = advertise(&g);
+    assert!(
+        !caps.contains(&Capabilities::CairnMcpV1SensorsPreCompact),
+        "sensors.pre_compact advertised before runtime wired"
+    );
+}
+
+#[test]
 fn output_order_is_stable() {
     let g = gates(true, true, None);
     let caps = advertise(&g);
@@ -391,6 +401,7 @@ mod exhaustiveness {
             Capabilities::CairnMcpV1SearchSemantic => "search.semantic",
             Capabilities::CairnMcpV1SearchHybrid => "search.hybrid",
             Capabilities::CairnMcpV1PolicyTrace => "policy_trace",
+            Capabilities::CairnMcpV1SensorsPreCompact => "sensors.pre_compact",
             Capabilities::CairnMcpV1ForgetRecord => "forget.record",
             Capabilities::CairnMcpV1ForgetSession => "forget.session",
             Capabilities::CairnMcpV1ForgetScope => "forget.scope",
@@ -426,6 +437,7 @@ mod exhaustiveness {
             Capabilities::CairnMcpV1SearchSemantic,
             Capabilities::CairnMcpV1SearchHybrid,
             Capabilities::CairnMcpV1PolicyTrace,
+            Capabilities::CairnMcpV1SensorsPreCompact,
             Capabilities::CairnMcpV1ForgetRecord,
             Capabilities::CairnMcpV1ForgetSession,
             Capabilities::CairnMcpV1ForgetScope,

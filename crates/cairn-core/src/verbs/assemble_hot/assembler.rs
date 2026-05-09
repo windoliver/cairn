@@ -327,6 +327,7 @@ mod tests {
         let cfg = HotMemoryConfig {
             max_bytes: 4_194_304,
             recipe: vec![HotMemoryRecipeStep::Purpose; 65],
+            ..HotMemoryConfig::default()
         };
         let err = assemble_hot(&cfg).unwrap_err();
         match err {

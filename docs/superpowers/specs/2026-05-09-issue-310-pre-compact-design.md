@@ -34,7 +34,7 @@ Add a dedicated `PreCompact` orchestration path that sits above `assemble_hot` a
 - `SensorEvent::PreCompact` becomes a typed core event carrying `session_id`, `token_count_before`, `compaction_target`, and `last_user_turn_index`.
 - A new hook orchestrator handles the event, computes the reinjection budget, invokes `assemble_hot` with the configured pre-compaction recipe override, persists the transcript snapshot, emits telemetry, and returns a structured response to the harness.
 - `assemble_hot` remains the text renderer for hot memory. It does not gain responsibility for transcript writes or sensor sequencing.
-- Capability advertisement gains an explicit `pre_compact` bit so harnesses can negotiate support safely.
+- Capability advertisement gains the explicit flat capability string `cairn.mcp.v1.sensors.pre_compact` so harnesses can negotiate support safely.
 
 This keeps the boundaries clean: config owns policy, `assemble_hot` owns assembly, and the `PreCompact` path owns lifecycle sequencing and fail-closed behavior.
 
@@ -101,7 +101,7 @@ The existing `hot_memory.recipe` remains the default session-start recipe. `pre_
 
 The `PreCompact` path runs in this order:
 
-1. Validate that the runtime advertises `sensors.pre_compact`.
+1. Validate that the runtime advertises `cairn.mcp.v1.sensors.pre_compact`.
 2. Compute the reinjection budget from `compaction_target` and `pre_compact_safety_ratio`, capped by `hot_memory.max_bytes`.
 3. Resolve the `pre_compact_recipe` and invoke `assemble_hot` with the event `session_id` and computed budget.
 4. Persist the pre-compaction transcript snapshot to the existing trace storage path.
@@ -123,7 +123,7 @@ Partial success is forbidden. Returning reinjection text while silently dropping
 
 ## 9. Capability and status
 
-Expose `status.capabilities.sensors.pre_compact = true` only when the full path is wired end-to-end:
+Expose `cairn.mcp.v1.sensors.pre_compact` in `status.capabilities` only when the full path is wired end-to-end:
 
 - typed `PreCompact` event surface exists
 - config fields are recognized
@@ -164,7 +164,7 @@ Implementation must follow TDD and cover three layers.
 ### 11.3 Integration / snapshot tests
 
 - A `PreCompact` event with budget `8000` produces reinjection output no larger than `2400` bytes under the default ratio.
-- Status advertisement includes `sensors.pre_compact` only when the path is fully wired.
+- Status advertisement includes `cairn.mcp.v1.sensors.pre_compact` only when the path is fully wired.
 - Telemetry for a successful run includes `session_id`, `budget`, `output_bytes`, and `recipe`.
 
 ## 12. File-level decomposition
@@ -175,7 +175,7 @@ The implementation should split responsibilities along these lines:
 - `crates/cairn-core/src/config/` for `pre_compact_recipe` and `pre_compact_safety_ratio`.
 - `crates/cairn-core/src/verbs/assemble_hot/` for budget-aware pre-compaction assembly entrypoints, without adding transcript write side effects to the assembler itself.
 - `crates/cairn-core/src/pipeline/capture_trace.rs` and `crates/cairn-cli/src/verbs/capture_trace.rs` for sequencing `assemble_hot`, snapshot persistence, and telemetry around hook-triggered trace capture.
-- `crates/cairn-core/src/status/`, `crates/cairn-cli/src/verbs/status.rs`, and matching SDK / MCP status surfaces for `status.capabilities.sensors.pre_compact`.
+- `crates/cairn-core/src/status/`, `crates/cairn-cli/src/verbs/status.rs`, and matching SDK / MCP status surfaces for the `cairn.mcp.v1.sensors.pre_compact` entry in `status.capabilities`.
 
 ## 13. Alternatives considered
 
