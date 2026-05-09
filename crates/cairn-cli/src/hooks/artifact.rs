@@ -12,6 +12,7 @@ use crate::verbs::envelope::new_operation_id;
 #[derive(Debug, Clone, Copy)]
 pub(super) enum ArtifactKind {
     Hot,
+    Queue,
     Trace,
 }
 
@@ -19,6 +20,7 @@ impl ArtifactKind {
     const fn dir_name(self) -> &'static str {
         match self {
             Self::Hot => "hot",
+            Self::Queue => "queue",
             Self::Trace => "traces",
         }
     }

@@ -214,3 +214,74 @@ fn missing_required_trace_field_returns_invalid_args() {
         "retry guidance missing retry instruction: {v}",
     );
 }
+
+#[test]
+fn stop_writes_trace_and_queue_artifacts() {
+    let vault = tempfile::tempdir().expect("temp vault");
+    let out = cli()
+        .args([
+            "hook",
+            "Stop",
+            "--vault-path",
+            vault.path().to_str().expect("utf-8 path"),
+            "--payload",
+            r#"{"session_id":"sess-1"}"#,
+            "--json",
+        ])
+        .output()
+        .expect("cairn hook Stop");
+    assert!(out.status.success(), "exit: {:?}", out.status);
+    let v = parse_stdout_json(out);
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["hook"], "Stop");
+    let trace_id = v["artifacts"]["trace_id"].as_str().expect("trace_id");
+    let job_id = v["artifacts"]["queued_jobs"][0]
+        .as_str()
+        .expect("queued job id");
+    assert!(
+        vault
+            .path()
+            .join(".cairn/hooks/traces")
+            .join(format!("{trace_id}.json"))
+            .exists()
+    );
+    assert!(
+        vault
+            .path()
+            .join(".cairn/hooks/queue")
+            .join(format!("{job_id}.json"))
+            .exists()
+    );
+}
+
+#[test]
+fn stop_queue_failure_returns_retry_guidance() {
+    let vault = tempfile::tempdir().expect("temp vault");
+    let hooks_dir = vault.path().join(".cairn/hooks");
+    std::fs::create_dir_all(&hooks_dir).expect("hooks dir");
+    std::fs::write(hooks_dir.join("queue"), b"not a directory").expect("queue blocker");
+    let out = cli()
+        .args([
+            "hook",
+            "Stop",
+            "--vault-path",
+            vault.path().to_str().expect("utf-8 path"),
+            "--payload",
+            r#"{"session_id":"sess-1"}"#,
+            "--json",
+        ])
+        .output()
+        .expect("cairn hook Stop");
+    assert_eq!(out.status.code(), Some(1), "exit: {:?}", out.status);
+    let v = parse_stdout_json(out);
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["hook"], "Stop");
+    assert_eq!(v["error"]["code"], "Internal");
+    assert!(v["operation_id"].is_string());
+    assert!(
+        v["error"]["retry_guidance"]
+            .as_str()
+            .unwrap_or("")
+            .contains("retry cairn hook Stop")
+    );
+}

@@ -17,7 +17,9 @@ use crate::verbs::envelope::{emit_json, new_operation_id};
 mod artifact;
 mod post_tool_use;
 mod pre_tool_use;
+mod queue;
 mod session_start;
+mod stop;
 mod user_prompt_submit;
 
 /// Canonical v0.1 harness lifecycle hook names.
@@ -230,7 +232,7 @@ pub fn run(matches: &ArgMatches) -> ExitCode {
         }
         HookName::PreToolUse => pre_tool_use::run(&vault_path, operation_id.clone(), payload),
         HookName::PostToolUse => post_tool_use::run(&vault_path, operation_id.clone(), payload),
-        HookName::Stop => Ok(HookArtifacts::default()),
+        HookName::Stop => stop::run(&vault_path, operation_id.clone(), payload),
     };
 
     match outcome {
