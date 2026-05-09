@@ -74,14 +74,22 @@ impl StepBody for SyntheticBody {
 struct OneKindRegistry {
     kind: WalKind,
     body: Arc<dyn StepBody>,
+    requested_ops: parking_lot::Mutex<Vec<String>>,
 }
 
+#[async_trait::async_trait]
 impl StepBodyRegistry for OneKindRegistry {
-    fn body_for(&self, kind: WalKind) -> Option<Arc<dyn StepBody>> {
+    async fn body_for(
+        &self,
+        _conn: &Arc<Connection>,
+        kind: WalKind,
+        op_id: &OperationId,
+    ) -> Result<Option<Arc<dyn StepBody>>, cairn_store_sqlite::wal::RecoveryError> {
+        self.requested_ops.lock().push(op_id.as_str().to_owned());
         if kind == self.kind {
-            Some(Arc::clone(&self.body))
+            Ok(Some(Arc::clone(&self.body)))
         } else {
-            None
+            Ok(None)
         }
     }
 }
@@ -214,6 +222,7 @@ fn upsert_with_body(body: Arc<dyn StepBody>) -> RecoveryConfig {
         bodies: Box::new(OneKindRegistry {
             kind: WalKind::Upsert,
             body,
+            requested_ops: parking_lot::Mutex::new(Vec::new()),
         }),
     }
 }

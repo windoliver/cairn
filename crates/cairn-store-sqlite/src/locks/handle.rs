@@ -244,6 +244,46 @@ impl LockHandle {
         outcome
     }
 
+    /// Assert this lock is still live inside an existing transaction.
+    ///
+    /// Step bodies use this when the WAL runner already opened the
+    /// transaction that will contain the side effect and `wal_steps` update.
+    ///
+    /// # Errors
+    /// - `LockError::Fenced` if the acquisition row expired, was reclaimed,
+    ///   or the resource epoch changed.
+    /// - `LockError::Clock` if system time is before Unix epoch.
+    /// - `LockError::Db` for SQLite failures.
+    pub fn assert_live_in_tx(&self, tx: &rusqlite::Transaction<'_>) -> Result<(), LockError> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| LockError::Clock)
+            .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))?;
+
+        let (group_epoch, holder_alive): (Option<i64>, i64) = tx
+            .query_row(
+                "SELECT \
+                   (SELECT epoch FROM locks WHERE resource = ?1) AS group_epoch, \
+                   EXISTS (SELECT 1 FROM lock_holders \
+                            WHERE acquisition_ulid = ?2 AND expires_at > ?3) \
+                        AS holder_alive",
+                params![self.resource, self.acquisition_ulid, now_ms],
+                |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .map_err(|e| LockError::Db(tokio_rusqlite::Error::Rusqlite(e)))?;
+
+        let observed = group_epoch.unwrap_or(-1);
+        if observed != self.acquired_epoch || holder_alive == 0 {
+            return Err(LockError::Fenced {
+                resource: self.resource.clone(),
+                expected_epoch: self.acquired_epoch,
+                observed_epoch: observed,
+                retry: default_fenced_retry(),
+            });
+        }
+        Ok(())
+    }
+
     /// Explicit release (idempotent). Equivalent to `drop` but reports errors.
     ///
     /// On success, the `released` flag short-circuits `Drop` — no retry
