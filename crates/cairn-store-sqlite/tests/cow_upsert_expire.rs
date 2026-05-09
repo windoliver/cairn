@@ -495,6 +495,61 @@ async fn expire_retires_target_without_hard_delete() {
 }
 
 #[tokio::test]
+async fn expired_record_is_excluded_from_keyword_search() {
+    let store = open_in_memory().await.expect("open");
+    let mut r = sample();
+    r.body = "body with needle before expire".to_owned();
+    store.upsert(&r).await.expect("upsert");
+
+    store.expire(&r.target_id).await.expect("expire");
+
+    let page = store
+        .search_keyword(&KeywordSearchArgs {
+            query: "needle".into(),
+            filter: None,
+            auth_scope: r.scope.clone(),
+            visibility_allowlist: vec![r.visibility],
+            limit: 10,
+            cursor: None,
+            with_explain: false,
+        })
+        .await
+        .expect("keyword search");
+    assert!(page.candidates.is_empty());
+}
+
+#[tokio::test]
+async fn expire_commits_wal_operation_and_all_steps() {
+    let store = open_in_memory().await.expect("open");
+    let r = sample();
+    store.upsert(&r).await.expect("upsert");
+    store.expire(&r.target_id).await.expect("expire");
+
+    let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
+    conn.call(|c| {
+        let state: String = c.query_row(
+            "SELECT state FROM wal_ops WHERE kind = 'expire'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(state, "COMMITTED");
+
+        let done_count: i64 = c.query_row(
+            "SELECT COUNT(*) FROM wal_steps ws \
+              JOIN wal_ops wo ON wo.operation_id = ws.operation_id \
+             WHERE wo.kind = 'expire' AND ws.state = 'DONE'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(done_count, 5);
+
+        Ok::<_, tokio_rusqlite::Error>(())
+    })
+    .await
+    .expect("expire wal rows");
+}
+
+#[tokio::test]
 async fn expire_preserves_existing_tombstone_reason() {
     let store = open_in_memory().await.expect("open");
     let r = sample();
