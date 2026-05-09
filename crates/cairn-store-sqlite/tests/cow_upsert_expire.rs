@@ -139,3 +139,67 @@ async fn body_changing_upsert_uses_same_record_id_in_outcome_row_and_payload() {
     .await
     .expect("id assertions");
 }
+
+#[tokio::test]
+async fn upsert_stages_inactive_row_before_activation() {
+    let store = open_in_memory().await.expect("open");
+    let r = sample();
+    store.upsert(&r).await.expect("initial upsert");
+
+    let mut r2 = r.clone();
+    r2.body = "changed body for cow staging".to_owned();
+
+    let out = store.upsert(&r2).await.expect("second upsert");
+    assert_eq!(out.version, 2);
+
+    let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
+    let rows: Vec<(String, i64, i64)> = conn
+        .call(move |c| {
+            let mut stmt = c.prepare(
+                "SELECT record_id, active, tombstoned FROM records \
+                 WHERE target_id = ?1 ORDER BY version",
+            )?;
+            let rows = stmt
+                .query_map(params![r.target_id.as_str()], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok::<_, tokio_rusqlite::Error>(rows)
+        })
+        .await
+        .expect("records");
+
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].1, 0, "prior version inactive after activation");
+    assert_eq!(rows[1].1, 1, "new version active after activation");
+    assert_eq!(rows[0].2, 0, "superseded row is not tombstoned");
+    assert_eq!(rows[1].2, 0, "new row is visible");
+}
+
+#[tokio::test]
+async fn upsert_snapshot_stage_records_pre_image_blob() {
+    let store = open_in_memory().await.expect("open");
+    let r = sample();
+    store.upsert(&r).await.expect("upsert");
+
+    let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
+    conn.call(|c| {
+        let count: i64 = c.query_row(
+            "SELECT COUNT(*) FROM wal_steps ws \
+              JOIN wal_ops wo ON wo.operation_id = ws.operation_id \
+             WHERE wo.kind = 'upsert' \
+               AND ws.step_kind = 'snapshot.stage' \
+               AND ws.pre_image IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(count, 1);
+        Ok::<_, tokio_rusqlite::Error>(())
+    })
+    .await
+    .expect("snapshot stage");
+}

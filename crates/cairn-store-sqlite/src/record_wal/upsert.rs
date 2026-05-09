@@ -42,17 +42,17 @@ pub(crate) async fn apply_upsert(
     let record_for_payload = record.clone();
     let planned = conn
         .call(move |c| {
-            let mut tx = c.transaction()?;
-            let plan = plan_upsert_in_tx(&mut tx, &record_for_plan)
+            let tx = c.transaction()?;
+            let plan = plan_upsert_in_tx(&tx, &record_for_plan)
                 .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
             tx.rollback()?;
             Ok::<_, tokio_rusqlite::Error>(PlannedUpsert {
-                outcome_record_id: plan.outcome.record_id.as_str().to_owned(),
-                target_id: plan.outcome.target_id.as_str().to_owned(),
-                version: plan.outcome.version,
-                content_changed: plan.outcome.content_changed,
+                outcome_record_id: plan.outcome_record_id.as_str().to_owned(),
+                target_id: plan.target_id.as_str().to_owned(),
+                version: plan.version,
+                content_changed: plan.content_changed,
                 prior_record_id: plan.prior_record_id,
-                prior_hash: plan.outcome.prior_hash.map(|h| h.to_string()),
+                prior_hash: plan.prior_hash.map(|h| h.to_string()),
                 consent_model: plan.consent_model,
             })
         })

@@ -21,7 +21,7 @@
 use std::sync::Arc;
 
 use cairn_core::contract::memory_store::UpsertOutcome;
-use cairn_core::domain::{BodyHash, MemoryRecord, RecordId};
+use cairn_core::domain::{BodyHash, MemoryRecord, RecordId, TargetId};
 use rusqlite::{Transaction, params};
 use tracing::instrument;
 
@@ -64,11 +64,16 @@ impl From<EmbedOutcome> for crate::record_wal::payload::StoredEmbedOutcome {
 /// `records_active_target_idx`). `consent_model` is preserved across
 /// supersession so a row stamped `'receipt_timeline'` by Phase-B (#255)
 /// does not silently revert to `'legacy_event'` on the next rewrite.
-type PriorActive = (String, i64, String, String);
+pub(crate) type PriorActive = (String, i64, String, String);
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UpsertPlan {
-    pub(crate) outcome: UpsertOutcome,
+    pub(crate) outcome_record_id: RecordId,
+    pub(crate) target_id: TargetId,
+    pub(crate) version: u32,
+    pub(crate) content_changed: bool,
     pub(crate) prior_record_id: Option<String>,
+    pub(crate) prior_hash: Option<BodyHash>,
     pub(crate) consent_model: String,
 }
 
@@ -161,134 +166,139 @@ pub(crate) fn upsert_in_tx(
     tx: &mut Transaction<'_>,
     record: &MemoryRecord,
 ) -> Result<UpsertOutcome, StoreError> {
-    upsert_in_tx_with_record_id(tx, record, None)
-}
-
-pub(crate) fn plan_upsert_in_tx(
-    tx: &mut Transaction<'_>,
-    record: &MemoryRecord,
-) -> Result<UpsertPlan, StoreError> {
-    let prior = read_active(tx, record.target_id.as_str())?;
-    let prior_record_id = prior.as_ref().map(|(prior_id, _, _, _)| prior_id.clone());
-    let consent_model = prior.as_ref().map_or_else(
-        || "legacy_event".to_owned(),
-        |(_, _, _, model)| model.clone(),
-    );
-    let outcome = upsert_in_tx(tx, record)?;
-    Ok(UpsertPlan {
-        outcome,
-        prior_record_id,
-        consent_model,
+    let plan = plan_upsert_in_tx(tx, record)?;
+    stage_upsert_cow_in_tx(tx, record, &plan)?;
+    activate_upsert_in_tx(tx, &plan)?;
+    Ok(UpsertOutcome {
+        record_id: plan.outcome_record_id,
+        target_id: plan.target_id,
+        version: plan.version,
+        content_changed: plan.content_changed,
+        prior_hash: plan.prior_hash,
     })
 }
 
-pub(crate) fn upsert_in_tx_with_record_id(
-    tx: &mut Transaction<'_>,
+pub(crate) fn plan_upsert_in_tx(
+    tx: &Transaction<'_>,
     record: &MemoryRecord,
-    planned_new_record_id: Option<&RecordId>,
-) -> Result<UpsertOutcome, StoreError> {
-    // Structural gate at the write boundary: malformed records (empty body,
-    // out-of-range scalars, missing scope.user, broken actor chain) are
-    // rejected before any row is touched. Both callers (`do_upsert` and
-    // `StoreTx::upsert`) also validate up front to surface the error
-    // without the `tokio_rusqlite::Error::Other` wrapping; this inner
-    // call is the belt-and-braces invariant.
+) -> Result<UpsertPlan, StoreError> {
     record.validate()?;
     let body_hash = BodyHash::compute(&record.body);
     let prior = read_active(tx, record.target_id.as_str())?;
-    let now_ms = current_unix_ms();
-
-    // Consent model resolution (Issue #253):
-    //   On supersession: inherit the prior row's value.
-    //   On fresh insert: default to 'legacy_event'.
-    //
-    // `record.consent_model` is intentionally **ignored on write** —
-    // it is excluded from the signed record bytes (`#[serde(skip)]`),
-    // so accepting it here would let any caller flip §6.5 enforcement
-    // by re-submitting the same signed record with a different model.
-    // Round 9: trust-boundary bypass. Phase-B (#255) introduces a
-    // separate privileged transition API that derives the new model
-    // from trusted consent-timeline state inside the same transaction
-    // as the timeline append.
     if let Some((prior_id, prior_version, prior_hash_str, prior_consent_model)) = prior.as_ref() {
-        // Strictly parse the prior row's consent_model — schema drift,
-        // manual SQL repair, or other corruption must fail closed
-        // rather than ride forward.
         let _: cairn_core::domain::consent_timeline::ConsentModel =
             parse_consent_model(prior_consent_model)?;
         let prior_hash = body_hash_from_str(prior_hash_str)?;
         if prior_hash == body_hash {
-            reproject_in_place(tx, record, prior_id, *prior_version, &body_hash, now_ms)?;
-            return idempotent_outcome(record, prior_id, *prior_version, prior_hash);
+            let prior_record_id =
+                RecordId::parse(prior_id.clone()).map_err(|e| StoreError::Invariant {
+                    what: format!("invalid prior record_id `{prior_id}`: {e}"),
+                })?;
+            return Ok(UpsertPlan {
+                outcome_record_id: prior_record_id,
+                target_id: record.target_id.clone(),
+                version: u32::try_from(*prior_version).map_err(|_| StoreError::Invariant {
+                    what: format!("prior version overflows u32: {prior_version}"),
+                })?,
+                content_changed: false,
+                prior_record_id: Some(prior_id.clone()),
+                prior_hash: Some(prior_hash),
+                consent_model: prior_consent_model.clone(),
+            });
         }
+
+        return Ok(UpsertPlan {
+            outcome_record_id: mint_record_id()?,
+            target_id: record.target_id.clone(),
+            version: next_version(*prior_version)?,
+            content_changed: true,
+            prior_record_id: Some(prior_id.clone()),
+            prior_hash: Some(prior_hash),
+            consent_model: prior_consent_model.clone(),
+        });
     }
 
-    let (version, prior_hash, new_record_id, consent_model_to_persist) = if let Some((
-        prior_id,
-        prior_version,
-        prior_hash_str,
-        prior_consent_model,
-    )) = prior.as_ref()
-    {
-        // Body changed: deactivate prior + mint a fresh PK for the new row.
-        tx.execute(
-            "UPDATE records SET active = 0, updated_at = ?1 \
-              WHERE record_id = ?2",
-            params![now_ms, prior_id],
-        )?;
-        let next_version = next_version(*prior_version)?;
-        let prior_hash = body_hash_from_str(prior_hash_str)?;
-        let new_record_id = planned_new_record_id
-            .cloned()
-            .map_or_else(mint_record_id, Ok)?;
-        // Inherit prior consent_model — only the privileged transition
-        // API (Phase-B / #255) can change it.
-        (
-            next_version,
-            Some(prior_hash),
-            Some(new_record_id),
-            prior_consent_model.clone(),
-        )
-    } else {
-        // Fresh insert: always 'legacy_event' until #255's transition
-        // API stamps a different value via a dedicated path.
-        (1u32, None, None, "legacy_event".to_owned())
-    };
-
-    // `record_id` is the version-row PK; supersession requires a fresh one.
-    // The contract docstring on `UpsertOutcome.record_id` ("produced (or
-    // re-used)") explicitly permits the store to synthesize. The first
-    // version of a `target_id` keeps the caller-provided id (matches
-    // `target_id == id` for fresh records, brief §3).
-    //
-    // `consent_model` deliberately does NOT enter `record_json`
-    // (`#[serde(skip)]` on `MemoryRecord::consent_model`): the field
-    // carries store-side authorization metadata, not signed payload.
-    // Persisting it inside the canonical bytes would invalidate any
-    // signature computed before #253 landed. The hot column is the
-    // sole on-disk authority; reads re-hydrate the field from the
-    // column after JSON deserialize.
-    let mut row_record = record.clone();
-    if let Some(ref synthesized) = new_record_id {
-        row_record.id = synthesized.clone();
-    }
-    insert_row(
-        tx,
-        &row_record,
-        version,
-        now_ms,
-        &body_hash,
-        &consent_model_to_persist,
+    let max_version: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM records WHERE target_id = ?1",
+        params![record.target_id.as_str()],
+        |row| row.get(0),
     )?;
-
-    let outcome_id = new_record_id.unwrap_or_else(|| record.id.clone());
-    Ok(UpsertOutcome {
-        record_id: outcome_id,
+    let version = next_version(max_version)?;
+    let outcome_record_id = if max_version == 0 {
+        record.id.clone()
+    } else {
+        mint_record_id()?
+    };
+    Ok(UpsertPlan {
+        outcome_record_id,
         target_id: record.target_id.clone(),
         version,
         content_changed: true,
-        prior_hash,
+        prior_record_id: None,
+        prior_hash: None,
+        consent_model: "legacy_event".to_owned(),
     })
+}
+
+pub(crate) fn stage_upsert_cow_in_tx(
+    tx: &Transaction<'_>,
+    record: &MemoryRecord,
+    plan: &UpsertPlan,
+) -> Result<(), StoreError> {
+    record.validate()?;
+    let body_hash = BodyHash::compute(&record.body);
+    let now_ms = current_unix_ms();
+
+    if !plan.content_changed {
+        if let Some(prior_id) = plan.prior_record_id.as_deref() {
+            reproject_in_place(
+                tx,
+                record,
+                prior_id,
+                i64::from(plan.version),
+                &body_hash,
+                now_ms,
+            )?;
+        }
+        return Ok(());
+    }
+
+    let mut row_record = record.clone();
+    row_record.id = plan.outcome_record_id.clone();
+    insert_row_with_active(
+        tx,
+        &row_record,
+        plan.version,
+        now_ms,
+        &body_hash,
+        &plan.consent_model,
+        false,
+    )
+}
+
+pub(crate) fn activate_upsert_in_tx(
+    tx: &Transaction<'_>,
+    plan: &UpsertPlan,
+) -> Result<(), StoreError> {
+    if !plan.content_changed {
+        return Ok(());
+    }
+    let now_ms = current_unix_ms();
+    tx.execute(
+        "UPDATE records SET active = 0, updated_at = ?1 \
+          WHERE target_id = ?2 AND active = 1 AND record_id != ?3",
+        params![
+            now_ms,
+            plan.target_id.as_str(),
+            plan.outcome_record_id.as_str()
+        ],
+    )?;
+    tx.execute(
+        "UPDATE records SET active = 1, tombstoned = 0, updated_at = ?1 \
+          WHERE record_id = ?2",
+        params![now_ms, plan.outcome_record_id.as_str()],
+    )?;
+    Ok(())
 }
 
 /// Idempotent re-ingest helper: re-project the row under the current
@@ -391,30 +401,6 @@ fn read_active(tx: &Transaction<'_>, target_id: &str) -> Result<Option<PriorActi
     Ok(row)
 }
 
-/// Build the [`UpsertOutcome`] for the idempotent (no-op) branch. Echoes
-/// the row's actual `record_id` (which may differ from `record.id` if a
-/// prior supersession synthesized a new id).
-fn idempotent_outcome(
-    record: &MemoryRecord,
-    prior_id: &str,
-    prior_version: i64,
-    prior_hash: BodyHash,
-) -> Result<UpsertOutcome, StoreError> {
-    let version = u32::try_from(prior_version).map_err(|_| StoreError::Invariant {
-        what: format!("prior version overflows u32: {prior_version}"),
-    })?;
-    let row_id = RecordId::parse(prior_id.to_owned()).map_err(|e| StoreError::Invariant {
-        what: format!("invalid record_id `{prior_id}`: {e}"),
-    })?;
-    Ok(UpsertOutcome {
-        record_id: row_id,
-        target_id: record.target_id.clone(),
-        version,
-        content_changed: false,
-        prior_hash: Some(prior_hash),
-    })
-}
-
 /// Parse a stored `consent_model` string against the closed enum,
 /// rejecting anything else as `StoreError::Invariant`. Used on both
 /// the prior-row read path and the about-to-write path so schema drift
@@ -455,13 +441,14 @@ fn next_version(prior_version: i64) -> Result<u32, StoreError> {
 
 /// Project + insert one new version row. The caller is responsible for
 /// having deactivated any prior active row in the same transaction.
-fn insert_row(
+fn insert_row_with_active(
     tx: &Transaction<'_>,
     record: &MemoryRecord,
     version: u32,
     now_ms: i64,
     body_hash: &BodyHash,
     consent_model: &str,
+    active: bool,
 ) -> Result<(), StoreError> {
     // Reject anything outside the closed enum *before* projecting, so
     // schema drift / manual SQL corruption cannot ride forward into a
@@ -469,7 +456,7 @@ fn insert_row(
     // strict parse in `upsert_in_tx` for prior rows.
     let _: cairn_core::domain::consent_timeline::ConsentModel = parse_consent_model(consent_model)?;
     let mut row =
-        ProjectedRow::from_record(record, version, now_ms, now_ms, body_hash, true, false)?;
+        ProjectedRow::from_record(record, version, now_ms, now_ms, body_hash, active, false)?;
     // Caller-supplied consent_model overrides the Phase-A default in
     // `from_record` so supersession preserves the prior row's value.
     row.consent_model = match consent_model {
@@ -493,7 +480,9 @@ fn insert_row(
          ) VALUES ( \
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, \
             ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24 \
-         )",
+         ) \
+         ON CONFLICT(record_id) DO UPDATE SET \
+            updated_at = excluded.updated_at",
         params![
             row.record_id,
             row.target_id,
@@ -922,5 +911,65 @@ mod tests {
             ),
             "idempotent re-ingest must backfill NULL legacy stamp to current",
         );
+    }
+}
+
+#[cfg(test)]
+mod cow_tests {
+    use cairn_core::domain::record::tests_export::sample_record;
+
+    use crate::open_in_memory;
+    use crate::store::upsert::{activate_upsert_in_tx, plan_upsert_in_tx, stage_upsert_cow_in_tx};
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cow_stage_inserts_inactive_row() {
+        let store = open_in_memory().await.expect("open");
+        let conn = store.require_conn("test").expect("connected").clone();
+        let record = sample_record();
+
+        conn.call(move |c| {
+            let tx = c.transaction()?;
+            let plan = plan_upsert_in_tx(&tx, &record)
+                .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
+            stage_upsert_cow_in_tx(&tx, &record, &plan)
+                .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
+            let active: i64 = tx.query_row(
+                "SELECT active FROM records WHERE record_id = ?1",
+                rusqlite::params![plan.outcome_record_id.as_str()],
+                |row| row.get(0),
+            )?;
+            assert_eq!(active, 0);
+            tx.rollback()?;
+            Ok::<_, tokio_rusqlite::Error>(())
+        })
+        .await
+        .expect("cow stage");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cow_activate_flips_active_pointer_in_one_transaction() {
+        let store = open_in_memory().await.expect("open");
+        let conn = store.require_conn("test").expect("connected").clone();
+        let record = sample_record();
+
+        conn.call(move |c| {
+            let tx = c.transaction()?;
+            let plan = plan_upsert_in_tx(&tx, &record)
+                .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
+            stage_upsert_cow_in_tx(&tx, &record, &plan)
+                .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
+            activate_upsert_in_tx(&tx, &plan)
+                .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
+            let active: i64 = tx.query_row(
+                "SELECT active FROM records WHERE record_id = ?1",
+                rusqlite::params![plan.outcome_record_id.as_str()],
+                |row| row.get(0),
+            )?;
+            assert_eq!(active, 1);
+            tx.rollback()?;
+            Ok::<_, tokio_rusqlite::Error>(())
+        })
+        .await
+        .expect("cow activate");
     }
 }

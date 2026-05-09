@@ -1,6 +1,6 @@
 //! Durable JSON payloads for record WAL operations.
 
-use cairn_core::domain::{MemoryRecord, TargetId};
+use cairn_core::domain::{BodyHash, MemoryRecord, RecordId, TargetId};
 use cairn_core::wal::{OperationId, WalKind};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -31,6 +31,35 @@ pub struct PlannedUpsert {
     pub prior_record_id: Option<String>,
     pub prior_hash: Option<String>,
     pub consent_model: String,
+}
+
+impl PlannedUpsert {
+    pub(crate) fn to_store_plan(&self) -> Result<crate::store::upsert::UpsertPlan, StoreError> {
+        Ok(crate::store::upsert::UpsertPlan {
+            outcome_record_id: RecordId::parse(self.outcome_record_id.clone()).map_err(|e| {
+                StoreError::Invariant {
+                    what: format!("planned record id invalid: {e}"),
+                }
+            })?,
+            target_id: TargetId::parse(self.target_id.clone()).map_err(|e| {
+                StoreError::Invariant {
+                    what: format!("planned target id invalid: {e}"),
+                }
+            })?,
+            version: self.version,
+            content_changed: self.content_changed,
+            prior_record_id: self.prior_record_id.clone(),
+            prior_hash: self
+                .prior_hash
+                .as_ref()
+                .map(BodyHash::parse)
+                .transpose()
+                .map_err(|e| StoreError::Invariant {
+                    what: format!("planned prior hash invalid: {e}"),
+                })?,
+            consent_model: self.consent_model.clone(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
