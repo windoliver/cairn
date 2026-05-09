@@ -203,3 +203,44 @@ async fn upsert_snapshot_stage_records_pre_image_blob() {
     .await
     .expect("snapshot stage");
 }
+
+#[tokio::test]
+async fn upsert_rejects_fresh_target_that_reuses_existing_record_id() {
+    let store = open_in_memory().await.expect("open");
+    let existing = sample();
+    store.upsert(&existing).await.expect("initial upsert");
+
+    let mut colliding = existing.clone();
+    colliding.target_id = TargetId::parse("01HQZX9F5N0000000000000001").expect("valid target id");
+    colliding.body = "different target but same record id".to_owned();
+
+    store
+        .upsert(&colliding)
+        .await
+        .expect_err("record_id collision across targets must fail");
+
+    let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
+    let new_target = colliding.target_id.as_str().to_owned();
+    let old_target = existing.target_id.as_str().to_owned();
+    conn.call(move |c| {
+        let new_active: i64 = c.query_row(
+            "SELECT COUNT(*) FROM records WHERE target_id = ?1 AND active = 1",
+            params![new_target],
+            |row| row.get(0),
+        )?;
+        assert_eq!(
+            new_active, 0,
+            "failed collision must not create an active row for the new target"
+        );
+
+        let old_active: i64 = c.query_row(
+            "SELECT COUNT(*) FROM records WHERE target_id = ?1 AND active = 1",
+            params![old_target],
+            |row| row.get(0),
+        )?;
+        assert_eq!(old_active, 1, "original target remains active");
+        Ok::<_, tokio_rusqlite::Error>(())
+    })
+    .await
+    .expect("records");
+}

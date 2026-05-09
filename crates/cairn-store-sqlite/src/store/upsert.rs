@@ -284,6 +284,26 @@ pub(crate) fn activate_upsert_in_tx(
         return Ok(());
     }
     let now_ms = current_unix_ms();
+    let staged_count: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM records \
+          WHERE record_id = ?1 AND target_id = ?2 AND version = ?3",
+        params![
+            plan.outcome_record_id.as_str(),
+            plan.target_id.as_str(),
+            i64::from(plan.version),
+        ],
+        |row| row.get(0),
+    )?;
+    if staged_count != 1 {
+        return Err(StoreError::Invariant {
+            what: format!(
+                "planned upsert row missing before activation: record_id={} target_id={} version={}",
+                plan.outcome_record_id.as_str(),
+                plan.target_id.as_str(),
+                plan.version
+            ),
+        });
+    }
     tx.execute(
         "UPDATE records SET active = 0, updated_at = ?1 \
           WHERE target_id = ?2 AND active = 1 AND record_id != ?3",
@@ -293,11 +313,26 @@ pub(crate) fn activate_upsert_in_tx(
             plan.outcome_record_id.as_str()
         ],
     )?;
-    tx.execute(
+    let activated = tx.execute(
         "UPDATE records SET active = 1, tombstoned = 0, updated_at = ?1 \
-          WHERE record_id = ?2",
-        params![now_ms, plan.outcome_record_id.as_str()],
+          WHERE record_id = ?2 AND target_id = ?3 AND version = ?4",
+        params![
+            now_ms,
+            plan.outcome_record_id.as_str(),
+            plan.target_id.as_str(),
+            i64::from(plan.version),
+        ],
     )?;
+    if activated != 1 {
+        return Err(StoreError::Invariant {
+            what: format!(
+                "planned upsert activation affected {activated} rows for record_id={} target_id={} version={}",
+                plan.outcome_record_id.as_str(),
+                plan.target_id.as_str(),
+                plan.version
+            ),
+        });
+    }
     Ok(())
 }
 
@@ -470,8 +505,8 @@ fn insert_row_with_active(
             });
         }
     };
-    tx.execute(
-        "INSERT INTO records ( \
+    let inserted = tx.execute(
+        "INSERT OR IGNORE INTO records ( \
             record_id, target_id, version, path, kind, class, visibility, \
             scope, actor_chain, body, body_hash, created_at, updated_at, \
             active, tombstoned, is_static, record_json, confidence, \
@@ -480,9 +515,7 @@ fn insert_row_with_active(
          ) VALUES ( \
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, \
             ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24 \
-         ) \
-         ON CONFLICT(record_id) DO UPDATE SET \
-            updated_at = excluded.updated_at",
+         )",
         params![
             row.record_id,
             row.target_id,
@@ -510,7 +543,73 @@ fn insert_row_with_active(
             row.schema_version_minor,
         ],
     )?;
+    if inserted == 0 {
+        validate_existing_staged_row(
+            tx,
+            &row.record_id,
+            &row.target_id,
+            version,
+            body_hash,
+            active,
+        )?;
+    }
     Ok(())
+}
+
+fn validate_existing_staged_row(
+    tx: &Transaction<'_>,
+    record_id: &str,
+    target_id: &str,
+    version: u32,
+    body_hash: &BodyHash,
+    active: bool,
+) -> Result<(), StoreError> {
+    let existing = tx
+        .query_row(
+            "SELECT target_id, version, body_hash, active, tombstoned \
+               FROM records WHERE record_id = ?1",
+            params![record_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            },
+        )
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(other),
+        })?;
+    let expected_active = if active { 1 } else { 0 };
+    match existing {
+        Some((existing_target, existing_version, existing_hash, existing_active, tombstoned))
+            if existing_target == target_id
+                && existing_version == i64::from(version)
+                && existing_hash == body_hash.as_str()
+                && existing_active == expected_active
+                && tombstoned == 0 =>
+        {
+            Ok(())
+        }
+        Some((existing_target, existing_version, existing_hash, existing_active, tombstoned)) => {
+            Err(StoreError::Invariant {
+                what: format!(
+                    "record_id conflict while staging upsert: record_id={record_id} \
+                     existing target_id={existing_target} version={existing_version} \
+                     body_hash={existing_hash} active={existing_active} tombstoned={tombstoned}; \
+                     planned target_id={target_id} version={version} body_hash={} active={expected_active}",
+                    body_hash.as_str()
+                ),
+            })
+        }
+        None => Err(StoreError::Invariant {
+            what: format!("staged upsert insert ignored without existing record_id={record_id}"),
+        }),
+    }
 }
 
 /// Mint a fresh ULID as a [`RecordId`]. Used by the body-changed branch of
@@ -944,6 +1043,34 @@ mod cow_tests {
         })
         .await
         .expect("cow stage");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cow_stage_allows_replay_of_same_inactive_row() {
+        let store = open_in_memory().await.expect("open");
+        let conn = store.require_conn("test").expect("connected").clone();
+        let record = sample_record();
+
+        conn.call(move |c| {
+            let tx = c.transaction()?;
+            let plan = plan_upsert_in_tx(&tx, &record)
+                .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
+            stage_upsert_cow_in_tx(&tx, &record, &plan)
+                .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
+            stage_upsert_cow_in_tx(&tx, &record, &plan)
+                .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
+            let (count, active): (i64, i64) = tx.query_row(
+                "SELECT COUNT(*), COALESCE(MAX(active), 0) FROM records WHERE record_id = ?1",
+                rusqlite::params![plan.outcome_record_id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            assert_eq!(count, 1);
+            assert_eq!(active, 0);
+            tx.rollback()?;
+            Ok::<_, tokio_rusqlite::Error>(())
+        })
+        .await
+        .expect("cow replay");
     }
 
     #[tokio::test(flavor = "current_thread")]
