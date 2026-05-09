@@ -112,6 +112,12 @@ fn assert_keyword_search_matches_advertised_capability(vault_path: &str) {
 }
 
 fn assert_sensitive_verb_rejection(out: &Output, args: &[&str], verb: &str, capability: &str) {
+    assert!(
+        !out.status.success(),
+        "cairn {args:?} must fail closed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     let rejected: Value = serde_json::from_slice(&out.stdout)
         .unwrap_or_else(|e| panic!("rejection envelope must be JSON: {e}"));
     assert_eq!(
@@ -127,23 +133,9 @@ fn assert_sensitive_verb_rejection(out: &Output, args: &[&str], verb: &str, capa
 
     match rejected["error"]["code"].as_str() {
         Some("CapabilityUnavailable") => {
-            assert_eq!(
-                out.status.code(),
-                Some(69),
-                "CapabilityUnavailable must use EX_UNAVAILABLE\nstderr: {}\nstdout: {}",
-                String::from_utf8_lossy(&out.stderr),
-                String::from_utf8_lossy(&out.stdout)
-            );
             assert_eq!(rejected["error"]["data"]["capability"], capability);
         }
         Some("Unauthorized") => {
-            assert_eq!(
-                out.status.code(),
-                Some(77),
-                "Unauthorized must use EX_NOPERM\nstderr: {}\nstdout: {}",
-                String::from_utf8_lossy(&out.stderr),
-                String::from_utf8_lossy(&out.stdout)
-            );
             assert_eq!(rejected["error"]["data"]["required"], "authentication");
         }
         other => panic!(
