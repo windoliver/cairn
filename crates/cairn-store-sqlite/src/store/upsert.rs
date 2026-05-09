@@ -509,7 +509,7 @@ fn insert_row_with_active(
         }
     };
     let inserted = tx.execute(
-        "INSERT OR IGNORE INTO records ( \
+        "INSERT INTO records ( \
             record_id, target_id, version, path, kind, class, visibility, \
             scope, actor_chain, body, body_hash, created_at, updated_at, \
             active, tombstoned, cow_staged, is_static, record_json, confidence, \
@@ -518,7 +518,7 @@ fn insert_row_with_active(
          ) VALUES ( \
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, \
             ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25 \
-         )",
+         ) ON CONFLICT(record_id) DO NOTHING",
         params![
             row.record_id,
             row.target_id,
