@@ -1,0 +1,17 @@
+---
+source: crates/cairn-core/src/verbs/lint/report.rs
+assertion_line: 108
+expression: s
+---
+# Lint report
+
+- total: 1
+- error: 1
+- warning: 0
+- info: 0
+
+## findings
+
+- **ERROR** [IndexDrift] FTS5 rows (8) do not match active records (10)
+  - fix: rebuild the FTS5 mirror
+  - path: records_fts

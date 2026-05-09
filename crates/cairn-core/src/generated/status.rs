@@ -5,6 +5,85 @@
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatusResponseMcpGraphToolsProbeBasis {
+    Full,
+    ConfigOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatusResponseMcpGraphToolsReason {
+    SingleTenantOff,
+    NoStoreCapability,
+    NoScopeResolver,
+    StoreOpenError,
+    VaultNotBound,
+    ResolverEmpty,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatusResponseMcpGraphToolsState {
+    Available,
+    Unavailable,
+    ProbeFailed,
+    NoVault,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusResponseMcpGraphTools {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub probe_basis: StatusResponseMcpGraphToolsProbeBasis,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<StatusResponseMcpGraphToolsReason>,
+    pub state: StatusResponseMcpGraphToolsState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_count: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatusResponsePipelineDispatchDecision {
+    SquashWhenInteractiveTty,
+    Bypass,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatusResponsePipelineDispatchSourceFamily {
+    Hook,
+    Ide,
+    Terminal,
+    Clipboard,
+    Voice,
+    Screen,
+    RecordingBatch,
+    Cli,
+    Mcp,
+    Proactive,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusResponsePipelineDispatch {
+    /// P0 routing enum — closed. 'squash_when_interactive_tty' admits InteractiveTty Terminal payloads to `squash`; everything else (including non-interactive Terminal) bypasses. Adding values is a wire-contract change (cairn.mcp.v1 → vNext), not an additive update — older clients' generated deserializers will reject unknown values.
+    pub decision: StatusResponsePipelineDispatchDecision,
+    /// Wire-form SourceFamily tag (matches CapturePayload variant).
+    pub source_family: StatusResponsePipelineDispatchSourceFamily,
+    /// Optional tool identifier (e.g., 'Bash', 'Read'). Absent means the decision applies to every tool in this source_family — the P0 default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_id: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StatusResponseServerInfo {
@@ -21,7 +100,12 @@ pub struct StatusResponse {
     pub capabilities: Vec<crate::generated::common::Capabilities>,
     pub contract: String,
     pub extensions: Vec<crate::generated::common::Namespace>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_graph_tools: Option<StatusResponseMcpGraphTools>,
+    /// Per-(source_family, tool_id) routing decisions for the Capture → Extract pipeline (issue #217). Each entry tells clients whether captured payloads flow through `squash` (lossy compaction) or `bypass` (raw bytes). Entries MUST be sorted lexicographically by (source_family, tool_id ?? "") for byte-stable status responses across an incarnation (brief §8.0.a). Optional and additive — not in `required[]` so a pre-#217 server's response (no field) deserializes against this schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline_dispatch: Option<Vec<StatusResponsePipelineDispatch>>,
     pub server_info: StatusResponseServerInfo,
 }
 
-pub const SCHEMA: &[u8] = include_bytes!("../../../cairn-mcp/src/generated/schemas/prelude/status.json");
+pub const SCHEMA: &[u8] = include_bytes!("schemas/prelude/status.json");

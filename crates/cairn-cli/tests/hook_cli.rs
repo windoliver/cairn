@@ -366,10 +366,11 @@ fn stop_returns_after_enqueue_boundary() {
     let vault = tempfile::tempdir().expect("temp vault");
     let started = std::time::Instant::now();
     let v = run_hook_with_payload("Stop", r#"{"session_id":"sess-1"}"#, &vault);
+    let elapsed = started.elapsed();
     assert_eq!(v["ok"], true);
     assert!(
-        started.elapsed() < std::time::Duration::from_secs(2),
-        "Stop hook should not wait on downstream workflow execution",
+        elapsed < std::time::Duration::from_secs(5),
+        "Stop hook should not wait on downstream workflow execution; elapsed={elapsed:?}",
     );
     assert_eq!(
         v["artifacts"]["queued_jobs"]

@@ -1,0 +1,122 @@
+{
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/common/scope_filter.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "anyOf": [
+    {
+      "required": [
+        "user"
+      ]
+    },
+    {
+      "required": [
+        "agent"
+      ]
+    },
+    {
+      "required": [
+        "tenant"
+      ]
+    },
+    {
+      "required": [
+        "workspace"
+      ]
+    },
+    {
+      "required": [
+        "entity"
+      ]
+    },
+    {
+      "required": [
+        "tier"
+      ]
+    },
+    {
+      "required": [
+        "session_id"
+      ]
+    },
+    {
+      "required": [
+        "kind"
+      ]
+    },
+    {
+      "required": [
+        "tags"
+      ]
+    },
+    {
+      "required": [
+        "record_ids"
+      ]
+    }
+  ],
+  "description": "Shared narrowing grammar used by search.scope, retrieve.ArgsScope, and forget.ArgsScope. At least one recognized predicate MUST be present. Covers every signed-intent scope dimension (tenant/workspace/entity/tier) plus identity (user/agent), session, kind, tags, and record-ids so scoped reads and deletes can narrow across the same dimensions the signed intent was authorized against. Value types are constrained per-key so empty strings, empty arrays, and null payloads all reject at schema validation — preventing unbounded reads or deletes. Unknown keys are rejected.",
+  "properties": {
+    "agent": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "entity": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "kind": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "record_ids": {
+      "items": {
+        "$ref": "./primitives.json#/$defs/Ulid"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "session_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "tags": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "tenant": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "tier": {
+      "description": "Matches the tier enum in signed_intent.scope so callers can echo the signed-intent tier in scoped reads/deletes.",
+      "enum": [
+        "private",
+        "session",
+        "project",
+        "team",
+        "org",
+        "public"
+      ],
+      "type": "string"
+    },
+    "user": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "workspace": {
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "title": "Cairn scope filter",
+  "type": "object",
+  "x-cairn-contract": "cairn.mcp.v1"
+}

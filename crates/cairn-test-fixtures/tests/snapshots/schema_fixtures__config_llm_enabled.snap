@@ -1,5 +1,6 @@
 ---
 source: crates/cairn-test-fixtures/tests/schema_fixtures.rs
+assertion_line: 103
 expression: "&c"
 ---
 {
@@ -44,6 +45,23 @@ expression: "&c"
     "base_url": "http://localhost:11434/v1",
     "model": "${CAIRN_MODEL}",
     "api_key": "${OPENAI_API_KEY}"
+  },
+  "search": {
+    "local_embeddings": true,
+    "embedding_model": "bge-small-en-v1.5",
+    "default_mode": "hybrid",
+    "default_provider": "local",
+    "rerank_blend": 0.7,
+    "fts_column_weights": [
+      10.0,
+      10.0,
+      5.0,
+      1.0
+    ],
+    "rrf_k": 60,
+    "rerank_topk": 20,
+    "max_snippet_chars_per_page": 8000,
+    "graph_confidence_min": 0.3
   },
   "sensors": {
     "hooks": {
@@ -90,6 +108,11 @@ expression: "&c"
           }
         }
       ]
+    }
+  },
+  "mcp": {
+    "stdio": {
+      "single_tenant": false
     }
   }
 }

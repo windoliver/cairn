@@ -1,0 +1,36 @@
+[package]
+name = "cairn-llm-openai-compat"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+description = "OpenAI-compatible LLMProvider adapter for Cairn (ADR 0001)."
+
+[features]
+## Exposes test-only constructors (e.g. `with_capabilities`). Semver-exempt.
+testing = []
+
+[dependencies]
+cairn-core   = { workspace = true }
+async-openai = { workspace = true }
+reqwest      = { workspace = true }
+futures-util = { workspace = true }
+jsonschema   = { workspace = true }
+serde_json   = { workspace = true }
+tokio        = { workspace = true }
+async-trait  = { workspace = true }
+tracing      = { workspace = true }
+
+[dev-dependencies]
+wiremock                 = { workspace = true }
+tokio                    = { workspace = true, features = ["rt", "macros"] }
+insta                    = { workspace = true }
+cairn-test-fixtures      = { workspace = true }
+cairn-llm-openai-compat  = { path = ".", features = ["testing"] }
+
+[lints]
+workspace = true

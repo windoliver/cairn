@@ -2371,13 +2371,23 @@ Cairn exposes one set of eight verbs through four surfaces. **The CLI is the gro
 | Verb | CLI | MCP | SDK (Rust) |
 |------|-----|-----|------------|
 | 1 | `cairn ingest --kind user --body "..."` | `{verb:"ingest", args:{kind,body,...}}` | `cairn::ingest(IngestArgs {...})` |
-| 2 | `cairn search "query" [--mode semantic]` | `{verb:"search", args:{...}}` | `cairn::search(SearchArgs {...})` |
+| 2 | `cairn search "query" [--mode keyword\|semantic\|hybrid]` | `{verb:"search", args:{...}}` | `cairn::search(SearchArgs {...})` |
 | 3 | `cairn retrieve <record-id>`<br>`cairn retrieve --session <id> [--limit K --order desc --rehydrate]`<br>`cairn retrieve --session <id> --turn <n> [--include tool_calls,reasoning]`<br>`cairn retrieve --folder <path>`<br>`cairn retrieve --scope <expr>`<br>`cairn retrieve --profile [--user <id>] [--agent <id>]` | `{verb:"retrieve", args: RetrieveArgs}` (discriminated union — see §8.0.c) | `cairn::retrieve(RetrieveArgs::{Record,Session,Turn,Folder,Scope,Profile}{…})` |
 | 4 | `cairn summarize <record-ids...> [--persist]` | `{verb:"summarize", args:{...}}` | `cairn::summarize(SumArgs {...})` |
 | 5 | `cairn assemble_hot [--session <id>]` | `{verb:"assemble_hot", args:{...}}` | `cairn::assemble_hot(...)` |
 | 6 | `cairn capture_trace --from <file>` | `{verb:"capture_trace", args:{...}}` | `cairn::capture_trace(...)` |
 | 7 | `cairn lint [--write-report]` | `{verb:"lint", args:{...}}` | `cairn::lint(LintArgs {...})` |
 | 8 | `cairn forget --record <id> \| --session <id>` | `{verb:"forget", args:{mode,...}}` | `cairn::forget(ForgetArgs {...})` |
+
+**Search verb flags (CLI / MCP `args` keys):**
+
+| Flag             | Type                                | Default                          | Notes                                                                                               |
+|------------------|-------------------------------------|----------------------------------|-----------------------------------------------------------------------------------------------------|
+| `--mode`         | `keyword \| semantic \| hybrid`     | `hybrid` (else `keyword`)        | Capability-gated. `semantic` / `hybrid` require `cairn.mcp.v1.search.semantic` / `.hybrid`; absence yields `CapabilityUnavailable` (sysexit 69). |
+| `--rerank-blend` | `f32` ∈ [0.0, 1.0]                  | from `search.rerank_blend` (0.7) | Used when `--mode hybrid`. Blends `α·normalize(rrf) + (1−α)·cos`; pure cosine at 0.0, pure RRF at 1.0. |
+| `--embed`        | `local \| openai`                   | from `search.default_provider`   | OpenAI requires the `openai` Cargo feature compiled into `cairn-cli` and `OPENAI_API_KEY` set; otherwise yields `CapabilityUnavailable`. |
+
+`hybrid` runs FTS5 BM25 + sqlite-vec ANN in parallel via `tokio::try_join!`, fuses with reciprocal-rank fusion (default `rrf_k=60`), then re-ranks the top `rerank_topk` (default `20`) with cosine similarity blended at `--rerank-blend`. Field-weighted BM25 (`kind`, `class`, `scope`, `body` at `[10.0, 10.0, 5.0, 1.0]`) is configured via `search.fts_column_weights`.
 
 **What lives where in the binary:**
 

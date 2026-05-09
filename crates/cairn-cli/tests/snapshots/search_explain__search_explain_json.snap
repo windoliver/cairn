@@ -1,0 +1,5 @@
+---
+source: crates/cairn-cli/tests/search_explain.rs
+expression: redact_operation_id(&stdout)
+---
+{"contract":"cairn.mcp.v1","data":{"hits":[{"record_id":"01HQZX9F5N0000000000000000","score":0.70338837845307,"snippet":"rust offers <mark>memory</mark> <mark>safety</mark> without garbage collection","trust":"unknown"},{"record_id":"01HQZX9F5N0000000000000001","score":0.3774342902386593,"snippet":"","trust":"unknown"},{"record_id":"01HQZX9F5N0000000000000002","score":0.3403831481501672,"snippet":"","trust":"unknown"}],"score_explain":[{"bm25_rank":1,"cosine":0.011294634131187984,"final_score":0.70338837845307,"record_id":"01HQZX9F5N0000000000000000","rrf_score":0.03252247488101534,"semantic_rank":2},{"cosine":0.08196255605076175,"final_score":0.3774342902386593,"record_id":"01HQZX9F5N0000000000000001","rrf_score":0.01639344262295082,"semantic_rank":1},{"cosine":-0.0042030969635388415,"final_score":0.3403831481501672,"record_id":"01HQZX9F5N0000000000000002","rrf_score":0.015873015873015872,"semantic_rank":3}]},"operation_id":"01XXXXXXXXXXXXXXXXXXXXXXXX","policy_trace":[],"status":"committed","verb":"search"}
