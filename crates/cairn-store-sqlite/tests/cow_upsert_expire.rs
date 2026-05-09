@@ -7,7 +7,8 @@ use std::sync::Arc;
 use cairn_core::contract::memory_store::{
     KeywordSearchArgs, ListArgs, MemoryStore, TombstoneReason,
 };
-use cairn_core::domain::{MemoryRecord, ScopeTuple, TargetId};
+use cairn_core::contract::version::SchemaVersion;
+use cairn_core::domain::{BodyHash, MemoryRecord, ScopeTuple, TargetId};
 use cairn_core::wal::WalKind;
 use cairn_store_sqlite::{open, open_in_memory};
 use rusqlite::params;
@@ -276,6 +277,162 @@ async fn prepared_upsert_recovers_from_persisted_payload() {
             |row| row.get(0),
         )?;
         assert_eq!(done_steps, 6);
+        Ok::<_, tokio_rusqlite::Error>(())
+    })
+    .await
+    .expect("recovery wal state");
+}
+
+#[tokio::test]
+async fn partial_upsert_after_primary_cow_is_hidden_until_recovery_activation() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("cairn.sqlite");
+    let op_id = "op-partial-upsert-activation-recovery";
+    let record = sample();
+    let record_id = record.id.clone();
+    let target_id = record.target_id.clone();
+
+    {
+        let store = open(&path).await.expect("open #1");
+        let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
+        let payload =
+            cairn_store_sqlite::record_wal::payload::UpsertPayload::new_for_test(record.clone());
+        let staged = record.clone();
+
+        conn.call(move |c| {
+            c.execute(
+                "INSERT INTO wal_ops \
+                   (operation_id, issued_seq, kind, state, envelope, issuer, \
+                    target_hash, scope_json, expires_at, signature, issued_at, updated_at) \
+                 VALUES (?1, 1, 'upsert', 'ISSUED', '{}', 'issuer', ?2, '{}', 0, 'sig', 1, 1)",
+                params![op_id, staged.target_id.as_str()],
+            )?;
+            c.execute(
+                "UPDATE wal_ops SET state = 'PREPARED', updated_at = 2 \
+                 WHERE operation_id = ?1",
+                params![op_id],
+            )?;
+            cairn_store_sqlite::record_wal::payload::save_upsert_payload_for_test(
+                c, op_id, &payload,
+            )
+            .expect("save upsert payload");
+
+            let body_hash = BodyHash::compute(&staged.body);
+            let record_json = serde_json::to_string(&staged)
+                .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
+            let scope_json = serde_json::to_string(&staged.scope)
+                .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
+            let actor_chain_json = serde_json::to_string(&staged.actor_chain)
+                .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
+            let tags_json = serde_json::to_string(&staged.tags)
+                .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
+            let schema = SchemaVersion::current();
+            c.execute(
+                "INSERT INTO records ( \
+                    record_id, target_id, version, path, kind, class, visibility, \
+                    scope, actor_chain, body, body_hash, created_at, updated_at, \
+                    active, tombstoned, is_static, record_json, confidence, salience, \
+                    target_id_explicit, tags_json, consent_model, schema_version_major, \
+                    schema_version_minor, cow_staged \
+                 ) VALUES ( \
+                    ?1, ?2, 1, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1000, 1000, \
+                    0, 0, 0, ?11, ?12, ?13, ?14, ?15, 'legacy_event', ?16, ?17, 1 \
+                 )",
+                params![
+                    staged.id.as_str(),
+                    staged.target_id.as_str(),
+                    format!("vault/{}.md", staged.id.as_str()),
+                    staged.kind.as_str(),
+                    staged.class.as_str(),
+                    staged.visibility.as_str(),
+                    scope_json,
+                    actor_chain_json,
+                    staged.body,
+                    body_hash.as_str(),
+                    record_json,
+                    f64::from(staged.confidence),
+                    f64::from(staged.salience),
+                    staged.target_id.as_str(),
+                    tags_json,
+                    i64::from(schema.major),
+                    i64::from(schema.minor),
+                ],
+            )?;
+            c.execute(
+                "INSERT INTO wal_steps \
+                   (operation_id, step_ord, step_kind, state, attempts, started_at, finished_at) \
+                 VALUES \
+                   (?1, 0, 'snapshot.stage', 'DONE', 1, 2, 3), \
+                   (?1, 1, 'primary.upsert_cow', 'DONE', 1, 3, 4)",
+                params![op_id],
+            )?;
+            Ok::<_, tokio_rusqlite::Error>(())
+        })
+        .await
+        .expect("seed partial upsert");
+
+        assert!(
+            store.get(&record_id).await.expect("get staged").is_none(),
+            "staged row must stay hidden before recovery activation"
+        );
+        assert!(
+            store
+                .versions(&target_id)
+                .await
+                .expect("versions staged")
+                .is_empty(),
+            "staged row must not appear in committed history"
+        );
+        assert!(
+            store
+                .list(&ListArgs {
+                    limit: 10,
+                    ..ListArgs::default()
+                })
+                .await
+                .expect("list staged")
+                .records
+                .is_empty(),
+            "staged row must not appear in list"
+        );
+    }
+
+    let store = open(&path).await.expect("open #2 recovers partial upsert");
+    let recovered = store
+        .get(&record_id)
+        .await
+        .expect("get recovered")
+        .expect("record recovered");
+    assert_eq!(recovered.body, record.body);
+
+    let versions = store
+        .versions(&target_id)
+        .await
+        .expect("versions recovered");
+    assert_eq!(versions.len(), 1);
+    assert_eq!(versions[0].record_id, record_id);
+    assert!(versions[0].active);
+    assert!(!versions[0].tombstoned);
+
+    let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
+    conn.call(move |c| {
+        let state: String = c.query_row(
+            "SELECT state FROM wal_ops WHERE operation_id = ?1",
+            params![op_id],
+            |row| row.get(0),
+        )?;
+        assert_eq!(state, "COMMITTED");
+        let (done_steps, cow_staged, active): (i64, i64, i64) = c.query_row(
+            "SELECT \
+                (SELECT COUNT(*) FROM wal_steps WHERE operation_id = ?1 AND state = 'DONE'), \
+                (SELECT cow_staged FROM records WHERE record_id = ?2), \
+                (SELECT active FROM records WHERE record_id = ?2)",
+            params![op_id, record_id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!(done_steps, 6);
+        assert_eq!(cow_staged, 0);
+        assert_eq!(active, 1);
         Ok::<_, tokio_rusqlite::Error>(())
     })
     .await
