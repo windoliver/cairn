@@ -47,7 +47,7 @@ pub trait StepBody: Send + Sync {
     /// schedule a retry (up to [`MAX_STEP_ATTEMPTS`]).
     fn run(
         &self,
-        tx: &Transaction<'_>,
+        tx: &mut Transaction<'_>,
         op_id: &OperationId,
         step: &StepDef,
     ) -> Result<(), StepBodyError>;
@@ -217,7 +217,7 @@ async fn try_one_attempt(
             // Phase 1: open a transaction, upsert the wal_steps row to
             // PENDING, run the body. Commit on Ok; drop (rollback) on Err.
             let body_result: Result<(), StepBodyError> = {
-                let tx = c.transaction()?;
+                let mut tx = c.transaction()?;
                 // `attempts` is lifetime-cumulative across runner re-entries.
                 // For a brand-new row we INSERT with `1`; on conflict we
                 // increment the existing value rather than overwriting with
@@ -237,7 +237,7 @@ async fn try_one_attempt(
                        started_at = COALESCE(wal_steps.started_at, ?4)",
                     rusqlite::params![op, step_owned.ord, step_owned.name, now],
                 )?;
-                let r = body.run(&tx, &op_id_for_body, &step_owned);
+                let r = body.run(&mut tx, &op_id_for_body, &step_owned);
                 if r.is_ok() {
                     let finished = now_ms();
                     tx.execute(

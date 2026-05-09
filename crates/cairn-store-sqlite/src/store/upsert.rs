@@ -30,7 +30,7 @@ use crate::store::projection::{ProjectedRow, body_hash_from_str};
 use crate::store::{SqliteMemoryStore, current_unix_ms};
 
 /// Outcome of the pre-transaction embedding step.
-enum EmbedOutcome {
+pub(crate) enum EmbedOutcome {
     /// Embedding computed successfully. Contains LE bytes + model label.
     Succeeded {
         vector: Vec<u8>,
@@ -40,6 +40,22 @@ enum EmbedOutcome {
     Failed { error: String },
     /// No embedder configured; skip vector entirely.
     Skipped,
+}
+
+impl From<EmbedOutcome> for crate::record_wal::payload::StoredEmbedOutcome {
+    fn from(value: EmbedOutcome) -> Self {
+        match value {
+            EmbedOutcome::Succeeded {
+                vector,
+                model_label,
+            } => Self::Succeeded {
+                vector,
+                model_label,
+            },
+            EmbedOutcome::Failed { error } => Self::Failed { error },
+            EmbedOutcome::Skipped => Self::Skipped,
+        }
+    }
 }
 
 /// Active-row tuple as read out of the `records` table:
@@ -83,7 +99,6 @@ impl SqliteMemoryStore {
         // typed `StoreError::InvalidRecord` rather than getting wrapped in
         // `StoreError::Worker(Other(_))` by the `tokio_rusqlite` worker.
         record.validate()?;
-        let conn = self.require_conn("upsert")?.clone();
 
         // 1. Compute embedding outside the SQL transaction (CPU-bound, may be slow).
         //    This keeps the transaction short and avoids holding DB locks during
@@ -121,61 +136,8 @@ impl SqliteMemoryStore {
             EmbedOutcome::Skipped
         };
 
-        let record = record.clone();
-        let outcome = conn
-            .call(move |c| {
-                let mut tx = c.transaction()?;
-                let upsert_outcome = upsert_in_tx(&mut tx, &record)
-                    .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
-
-                let rid = upsert_outcome.record_id.as_str();
-                let now_secs = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
-
-                match &embed_outcome {
-                    EmbedOutcome::Succeeded {
-                        vector,
-                        model_label,
-                    } => {
-                        // sqlite-vec vec0 virtual tables do not support UPSERT syntax.
-                        // Use DELETE + INSERT to replace an existing row atomically.
-                        tx.execute(
-                            "DELETE FROM record_vectors WHERE record_id = ?",
-                            params![rid],
-                        )?;
-                        tx.execute(
-                            "INSERT INTO record_vectors(record_id, embedding, model) \
-                               VALUES (?, ?, ?)",
-                            params![rid, vector, model_label],
-                        )?;
-                        // Clear any pending entry (no-op if none exists).
-                        tx.execute(
-                            "DELETE FROM pending_embeddings WHERE record_id = ?",
-                            params![rid],
-                        )?;
-                    }
-                    EmbedOutcome::Failed { error } => {
-                        tx.execute(
-                            "INSERT INTO pending_embeddings \
-                                 (record_id, reason, attempt_count, last_error, enqueued_at) \
-                               VALUES (?, 'embed_failed', 0, ?, ?) \
-                               ON CONFLICT(record_id) DO UPDATE \
-                                 SET attempt_count   = attempt_count + 1, \
-                                     last_error      = excluded.last_error, \
-                                     last_attempt_at = ?",
-                            params![rid, error, now_secs, now_secs],
-                        )?;
-                    }
-                    EmbedOutcome::Skipped => {}
-                }
-
-                tx.commit()?;
-                Ok::<_, tokio_rusqlite::Error>(upsert_outcome)
-            })
-            .await?;
-
-        Ok(outcome)
+        let payload_embed = crate::record_wal::payload::StoredEmbedOutcome::from(embed_outcome);
+        crate::record_wal::apply_upsert(self, record, payload_embed).await
     }
 }
 

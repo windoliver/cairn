@@ -55,7 +55,7 @@ impl StepBody for SyntheticBody {
     #[allow(clippy::match_same_arms)]
     fn run(
         &self,
-        _tx: &Transaction<'_>,
+        _tx: &mut Transaction<'_>,
         _op_id: &OperationId,
         step: &cairn_core::wal::StepDef,
     ) -> Result<(), StepBodyError> {
