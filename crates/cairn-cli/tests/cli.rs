@@ -46,6 +46,7 @@ fn help_flag_lists_all_eight_verbs() {
         "capture_trace",
         "lint",
         "forget",
+        "hook",
     ] {
         assert!(
             stdout.contains(verb),

@@ -32,6 +32,7 @@ fn build_command() -> clap::Command {
         ))
         .subcommand(verbs::with_json(generated::verbs::lint_subcommand()))
         .subcommand(verbs::with_json(generated::verbs::forget_subcommand()))
+        .subcommand(cairn_cli::hooks::command())
         // Protocol preludes.
         .subcommand(verbs::with_json(generated::prelude::handshake_subcommand()))
         .subcommand(verbs::with_json(generated::prelude::status_subcommand()))
@@ -107,6 +108,7 @@ fn main() -> ExitCode {
         Some(("capture_trace", sub)) => verbs::capture_trace::run(sub),
         Some(("lint", sub)) => verbs::lint::run(sub),
         Some(("forget", sub)) => verbs::forget::run(sub),
+        Some(("hook", sub)) => cairn_cli::hooks::run(sub),
         Some(("status", sub)) => verbs::status::run(sub.get_flag("json")),
         Some(("handshake", sub)) => verbs::handshake::run(sub.get_flag("json")),
         Some(("plugins", sub)) => run_plugins(sub),
