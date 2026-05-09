@@ -68,3 +68,36 @@ async fn wal_payloads_requires_existing_operation() {
     .await
     .expect("foreign-key assertion");
 }
+
+#[tokio::test]
+async fn wal_payloads_kind_must_match_parent_operation() {
+    let store = open_in_memory().await.expect("open in-memory store");
+    let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
+
+    conn.call(|c| {
+        c.execute(
+            "INSERT INTO wal_ops \
+               (operation_id, issued_seq, kind, state, envelope, issuer, \
+                target_hash, scope_json, expires_at, signature, issued_at, updated_at) \
+             VALUES ('op-expire-payload', 1, ?1, 'ISSUED', '{}', 'issuer', 'target', '{}', 0, 'sig', 1, 1)",
+            params![WalKind::Expire.as_str()],
+        )?;
+
+        let err = c
+            .execute(
+                "INSERT INTO wal_payloads(operation_id, kind, payload_json, created_at) \
+                 VALUES ('op-expire-payload', 'upsert', '{}', 1)",
+                [],
+            )
+            .expect_err("trigger rejects payload kind mismatch");
+        assert!(
+            err.to_string()
+                .contains("wal_payloads.kind must match wal_ops.kind"),
+            "unexpected mismatch error: {err}"
+        );
+
+        Ok::<_, tokio_rusqlite::Error>(())
+    })
+    .await
+    .expect("kind-match assertion");
+}

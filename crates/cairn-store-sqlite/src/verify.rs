@@ -100,6 +100,7 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("trigger", "lock_holders_reject_sentinel_ulid"),
     // 0053_wal_payloads
     ("table", "wal_payloads"),
+    ("trigger", "wal_payloads_kind_matches_wal"),
     ("trigger", "wal_payloads_immutable"),
     ("trigger", "wal_payloads_no_delete"),
     // 0005_consent

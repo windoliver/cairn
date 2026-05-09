@@ -9,6 +9,19 @@ CREATE TABLE wal_payloads (
   created_at   INTEGER NOT NULL
 );
 
+CREATE TRIGGER wal_payloads_kind_matches_wal
+  BEFORE INSERT ON wal_payloads
+  FOR EACH ROW
+  WHEN EXISTS (
+    SELECT 1
+      FROM wal_ops
+     WHERE operation_id = NEW.operation_id
+       AND kind IS NOT NEW.kind
+  )
+BEGIN
+  SELECT RAISE(ABORT, 'wal_payloads.kind must match wal_ops.kind');
+END;
+
 CREATE TRIGGER wal_payloads_immutable
   BEFORE UPDATE ON wal_payloads
   FOR EACH ROW
