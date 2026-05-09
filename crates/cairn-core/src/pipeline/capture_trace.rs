@@ -228,6 +228,23 @@ pub fn project_with_blocks(
     })
 }
 
+/// Persist a `PreCompact` hook snapshot through the existing trace-record
+/// path. Until a dedicated `TraceEvent::PreCompact` lands, this uses the
+/// same storage shape as a `Stop` boundary so snapshot persistence is
+/// concrete and fail-closed without widening the public trace taxonomy.
+pub fn project_pre_compact_snapshot(
+    event: &CaptureEvent,
+    resolved_body: &ResolvedBody<'_>,
+    link: &TraceLink,
+) -> Result<MemoryRecord, TraceProjectError> {
+    match &event.payload {
+        CapturePayload::Hook { hook_name, .. } if hook_name == "PreCompact" => {}
+        _ => return Err(TraceProjectError::Unclassifiable),
+    }
+
+    project(event, TraceEvent::Stop, resolved_body, link)
+}
+
 /// Build a [`Provenance`] from a [`CaptureEvent`].
 ///
 /// - `source_sensor` = `event.sensor_id` (always a `snr:` identity on a
@@ -482,6 +499,27 @@ mod tests {
     #[test]
     fn classifies_stop() {
         assert_eq!(classify(&mk_hook_event("Stop")).unwrap(), TraceEvent::Stop);
+    }
+
+    #[test]
+    fn projects_pre_compact_snapshot_through_trace_path() {
+        let event = mk_hook_event("PreCompact");
+        let resolved = body::for_test("before compact");
+        let link = TraceLink {
+            session_id: SessionId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+                .expect("invariant: valid ULID"),
+            turn_id: "turn-1".into(),
+            sequence: 7,
+            capture_event_id: event.event_id.clone(),
+            parent_event_id: None,
+            tool_call_id: None,
+            member_event_ids: Vec::new(),
+        };
+
+        let record = project_pre_compact_snapshot(&event, &resolved, &link).unwrap();
+        assert_eq!(record.kind, MemoryKind::Trace);
+        assert_eq!(record.body, "before compact");
+        assert_eq!(record.extra_frontmatter.get("trace_event").unwrap(), "stop");
     }
 
     #[test]

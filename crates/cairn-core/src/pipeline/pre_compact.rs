@@ -3,7 +3,7 @@
 use crate::config::HotMemoryConfig;
 use crate::domain::SessionId;
 use crate::generated::verbs::assemble_hot::AssembleHotData;
-use crate::verbs::assemble_hot::assembler::AssembleHotError;
+use crate::verbs::assemble_hot::assembler::{AssembleHotError, assemble_hot_with_budget};
 
 /// Input snapshot for a pre-compaction render attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,23 +96,21 @@ fn floor_decimal_product(compaction_target: u32, ratio: f64) -> u64 {
 
 /// Run the fail-closed pre-compaction flow: budgeted assembly first, then
 /// snapshot persistence, returning reinjection metadata only on success.
-pub fn run_pre_compact<AH, SNAP>(
+pub fn run_pre_compact<SNAP>(
     event: PreCompactEvent,
     cfg: &HotMemoryConfig,
-    mut assemble_hot: AH,
     mut snapshot: SNAP,
 ) -> Result<PreCompactOutput, PreCompactError>
 where
-    AH: FnMut(u64) -> Result<AssembleHotData, AssembleHotError>,
-    SNAP: FnMut(&PreCompactEvent) -> Result<(), String>,
+    SNAP: FnMut(&PreCompactEvent, &AssembleHotData) -> Result<(), String>,
 {
     let budget = compute_budget(
         event.compaction_target,
         cfg.max_bytes,
         cfg.pre_compact_safety_ratio,
     );
-    let data = assemble_hot(budget)?;
-    snapshot(&event).map_err(|reason| PreCompactError::Snapshot { reason })?;
+    let data = assemble_hot_with_budget(cfg, budget)?;
+    snapshot(&event, &data).map_err(|reason| PreCompactError::Snapshot { reason })?;
 
     Ok(PreCompactOutput {
         reinjection_text: data.prefix,
@@ -124,12 +122,11 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
 
-    use super::{PreCompactEvent, compute_budget, run_pre_compact};
-    use crate::config::HotMemoryConfig;
+    use super::{PreCompactError, PreCompactEvent, compute_budget, run_pre_compact};
+    use crate::config::{HotMemoryConfig, HotMemoryRecipeStep};
     use crate::domain::SessionId;
-    use crate::generated::verbs::assemble_hot::AssembleHotData;
 
     fn sample_event() -> PreCompactEvent {
         PreCompactEvent {
@@ -176,48 +173,49 @@ mod tests {
     }
 
     #[test]
-    fn pre_compact_runs_assemble_hot_and_snapshot_in_order() {
+    fn pre_compact_runs_snapshot_after_real_assembly_and_returns_metadata() {
         let calls = RefCell::new(Vec::new());
 
-        let out = run_pre_compact(
-            sample_event(),
-            &sample_cfg(),
-            |_| {
-                calls.borrow_mut().push("assemble_hot");
-                Ok(AssembleHotData {
-                    bytes: 4,
-                    prefix: "MEM".into(),
-                    segments: Some(vec![]),
-                })
-            },
-            |_| {
-                calls.borrow_mut().push("snapshot");
-                Ok(())
-            },
-        )
+        let event = sample_event();
+        let out = run_pre_compact(event.clone(), &sample_cfg(), |snap_event, assembled| {
+            calls.borrow_mut().push(format!(
+                "snapshot:{}:{}:{}",
+                snap_event.last_user_turn_index, assembled.bytes, assembled.prefix
+            ));
+            Ok(())
+        })
         .unwrap();
 
-        assert_eq!(*calls.borrow(), vec!["assemble_hot", "snapshot"]);
-        assert_eq!(out.reinjection_text, "MEM");
-        assert_eq!(out.output_bytes, 4);
+        assert_eq!(*calls.borrow(), vec!["snapshot:42:0:"]);
+        assert_eq!(out.reinjection_text, "");
+        assert_eq!(out.output_bytes, 0);
         assert_eq!(out.budget_bytes, 2_400);
         assert_eq!(out.recipe, "handoff");
     }
 
     #[test]
+    fn pre_compact_assemble_failure_prevents_snapshot() {
+        let snapshot_called = Cell::new(false);
+        let mut cfg = sample_cfg();
+        cfg.recipe = vec![HotMemoryRecipeStep::Purpose; 65];
+
+        let err = run_pre_compact(sample_event(), &cfg, |_, _| {
+            snapshot_called.set(true);
+            Ok(())
+        })
+        .unwrap_err();
+
+        assert!(!snapshot_called.get());
+        assert!(matches!(err, PreCompactError::AssembleHot(_)));
+    }
+
+    #[test]
     fn pre_compact_snapshot_failure_rejects_hook() {
-        let err = run_pre_compact(
-            sample_event(),
-            &sample_cfg(),
-            |_| {
-                Ok(AssembleHotData {
-                    bytes: 4,
-                    prefix: "MEM".into(),
-                    segments: Some(vec![]),
-                })
-            },
-            |_| Err("disk full".to_owned()),
-        )
+        let err = run_pre_compact(sample_event(), &sample_cfg(), |_, assembled| {
+            assert_eq!(assembled.bytes, 0);
+            assert_eq!(assembled.prefix, "");
+            Err("disk full".to_owned())
+        })
         .unwrap_err();
 
         assert!(err.to_string().contains("snapshot"));
