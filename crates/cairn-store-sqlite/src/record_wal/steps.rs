@@ -25,6 +25,14 @@ impl RecordStepBody {
             locks,
         }
     }
+
+    #[must_use]
+    pub(crate) fn new_expire(payload: ExpirePayload, locks: RecordLocks) -> Self {
+        Self {
+            payload: RecordStepPayload::Expire(payload),
+            locks,
+        }
+    }
 }
 
 impl StepBody for RecordStepBody {
@@ -67,6 +75,15 @@ impl StepBody for RecordStepBody {
                 crate::store::upsert::activate_upsert_in_tx(tx, &plan)
                     .map_err(|e| StepBodyError::Failed(e.to_string()))
             }
+            (RecordStepPayload::Expire(payload), "snapshot.stage") => {
+                stage_snapshot(tx, op_id, step, payload.target_id.as_str())
+            }
+            (RecordStepPayload::Expire(payload), "primary.mark_expired") => {
+                mark_expired(tx, payload)
+            }
+            (RecordStepPayload::Expire(payload), "vector.drain") => drain_vectors(tx, payload),
+            (RecordStepPayload::Expire(payload), "fts.drain") => drain_fts(tx, payload),
+            (RecordStepPayload::Expire(payload), "edges.drain") => drain_edges(tx, payload),
             (RecordStepPayload::Upsert(_), _) => Ok(()),
             (RecordStepPayload::Expire(_), _) => Ok(()),
         }
@@ -185,6 +202,63 @@ fn upsert_vector(
 }
 
 fn upsert_edges(_tx: &Transaction<'_>, _record_id: &str) -> Result<(), StepBodyError> {
+    Ok(())
+}
+
+fn mark_expired(tx: &Transaction<'_>, payload: &ExpirePayload) -> Result<(), StepBodyError> {
+    tx.execute(
+        "UPDATE records \
+            SET active = 0, tombstoned = 1, tombstone_reason = 'expire', updated_at = ?1 \
+          WHERE target_id = ?2",
+        params![crate::store::current_unix_ms(), payload.target_id.as_str()],
+    )
+    .map_err(StepBodyError::Storage)?;
+    Ok(())
+}
+
+fn drain_vectors(tx: &Transaction<'_>, payload: &ExpirePayload) -> Result<(), StepBodyError> {
+    tx.execute(
+        "DELETE FROM record_vectors \
+          WHERE record_id IN (SELECT record_id FROM records WHERE target_id = ?1)",
+        params![payload.target_id.as_str()],
+    )
+    .map_err(StepBodyError::Storage)?;
+    tx.execute(
+        "DELETE FROM pending_embeddings \
+          WHERE record_id IN (SELECT record_id FROM records WHERE target_id = ?1)",
+        params![payload.target_id.as_str()],
+    )
+    .map_err(StepBodyError::Storage)?;
+    Ok(())
+}
+
+fn drain_fts(tx: &Transaction<'_>, payload: &ExpirePayload) -> Result<(), StepBodyError> {
+    let rowids = {
+        let mut stmt = tx
+            .prepare("SELECT rowid FROM records WHERE target_id = ?1")
+            .map_err(StepBodyError::Storage)?;
+        stmt.query_map(params![payload.target_id.as_str()], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map_err(StepBodyError::Storage)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(StepBodyError::Storage)?
+    };
+    for rowid in rowids {
+        tx.execute("DELETE FROM records_fts WHERE rowid = ?1", params![rowid])
+            .map_err(StepBodyError::Storage)?;
+    }
+    Ok(())
+}
+
+fn drain_edges(tx: &Transaction<'_>, payload: &ExpirePayload) -> Result<(), StepBodyError> {
+    tx.execute(
+        "DELETE FROM edges \
+          WHERE src IN (SELECT record_id FROM records WHERE target_id = ?1) \
+             OR dst IN (SELECT record_id FROM records WHERE target_id = ?1)",
+        params![payload.target_id.as_str()],
+    )
+    .map_err(StepBodyError::Storage)?;
     Ok(())
 }
 

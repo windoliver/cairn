@@ -267,3 +267,62 @@ async fn repeated_upsert_steps_do_not_duplicate_derived_rows() {
     .await
     .expect("derived counts");
 }
+
+#[tokio::test]
+async fn expire_retires_target_without_hard_delete() {
+    let store = open_in_memory().await.expect("open");
+    let r = sample();
+    let out = store.upsert(&r).await.expect("upsert");
+
+    store.expire(&r.target_id).await.expect("expire");
+
+    assert!(store.get(&out.record_id).await.expect("get").is_none());
+    assert!(
+        store
+            .list(&ListArgs::default())
+            .await
+            .expect("list")
+            .records
+            .is_empty()
+    );
+
+    let versions = store.versions(&r.target_id).await.expect("versions");
+    assert_eq!(versions.len(), 1);
+    assert!(!versions[0].active);
+    assert!(versions[0].tombstoned);
+    assert_eq!(versions[0].tombstone_reason, Some(TombstoneReason::Expire));
+
+    let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
+    let row_count: i64 = conn
+        .call(|c| {
+            c.query_row("SELECT COUNT(*) FROM records", [], |row| row.get(0))
+                .map_err(Into::into)
+        })
+        .await
+        .expect("record count");
+    assert_eq!(row_count, 1, "expire must not hard-delete records");
+}
+
+#[tokio::test]
+async fn upsert_after_expire_creates_next_visible_version() {
+    let store = open_in_memory().await.expect("open");
+    let r = sample();
+    store.upsert(&r).await.expect("upsert");
+    store.expire(&r.target_id).await.expect("expire");
+
+    let mut replacement = r.clone();
+    replacement.body = "replacement after expire".to_owned();
+    let out = store
+        .upsert(&replacement)
+        .await
+        .expect("replacement upsert");
+
+    assert_eq!(out.version, 2);
+    assert!(store.get(&out.record_id).await.expect("get").is_some());
+
+    let versions = store.versions(&r.target_id).await.expect("versions");
+    assert_eq!(versions.len(), 2);
+    assert!(versions[0].tombstoned);
+    assert!(!versions[1].tombstoned);
+    assert!(versions[1].active);
+}
