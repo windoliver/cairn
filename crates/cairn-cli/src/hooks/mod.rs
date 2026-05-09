@@ -59,14 +59,17 @@ impl HookName {
         }
     }
 
-    fn from_clap_name(value: &str) -> Self {
+    fn parse(value: &str) -> Result<Self, HookError> {
         match value {
-            "SessionStart" => Self::SessionStart,
-            "UserPromptSubmit" => Self::UserPromptSubmit,
-            "PreToolUse" => Self::PreToolUse,
-            "PostToolUse" => Self::PostToolUse,
-            "Stop" => Self::Stop,
-            _ => unreachable!("clap value_parser restricts hook names to HookName::ALL"),
+            "SessionStart" => Ok(Self::SessionStart),
+            "UserPromptSubmit" => Ok(Self::UserPromptSubmit),
+            "PreToolUse" => Ok(Self::PreToolUse),
+            "PostToolUse" => Ok(Self::PostToolUse),
+            "Stop" => Ok(Self::Stop),
+            other => Err(HookError::invalid_args(format!(
+                "unknown hook `{other}`; expected one of {}",
+                Self::ALL.join(", ")
+            ))),
         }
     }
 }
@@ -77,15 +80,31 @@ pub struct HookResult {
     /// Whether the hook completed its synchronous boundary.
     pub ok: bool,
     /// Hook that was executed.
-    pub hook: HookName,
+    pub hook: String,
     /// Operation identifier for retry and support correlation.
     pub operation_id: Ulid,
     /// Artifacts produced by a successful hook.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifacts: Option<HookArtifacts>,
+    /// Routing hints produced by prompt-submission hooks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub routing_hints: Option<HookRoutingHints>,
     /// Typed error details on failure.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<HookErrorBody>,
+}
+
+/// Lightweight synchronous routing hints for harness integrations.
+#[derive(Debug, Serialize)]
+pub struct HookRoutingHints {
+    /// Prompt was durably captured as a trace event.
+    pub capture_prompt: bool,
+    /// Prompt appears to ask Cairn to write or retain memory.
+    pub memory_write_suggested: bool,
+    /// Prompt appears to ask Cairn to forget existing memory.
+    pub forget_suggested: bool,
+    /// Prompt appears to benefit from memory search or recall.
+    pub search_suggested: bool,
 }
 
 /// Artifact identifiers produced by hook execution.
@@ -149,6 +168,13 @@ impl HookError {
         }
     }
 
+    fn with_retry_guidance(self, retry_guidance: impl Into<String>) -> Self {
+        Self {
+            retry_guidance: retry_guidance.into(),
+            ..self
+        }
+    }
+
     fn into_body(self) -> HookErrorBody {
         HookErrorBody {
             code: self.code.as_str(),
@@ -165,9 +191,10 @@ pub fn command() -> clap::Command {
         .about("Run a Cairn harness lifecycle hook")
         .arg(
             clap::Arg::new("name")
-                .help("Hook name")
+                .help("Hook name: SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop")
                 .required(true)
-                .value_parser(HookName::ALL),
+                .value_name("NAME")
+                .value_parser(clap::builder::NonEmptyStringValueParser::new()),
         )
         .arg(
             clap::Arg::new("payload")
@@ -205,10 +232,13 @@ pub fn run(matches: &ArgMatches) -> ExitCode {
     let json = matches.get_flag("json");
     let operation_id = new_operation_id();
     let hook = match matches.get_one::<String>("name").map(String::as_str) {
-        Some(name) => HookName::from_clap_name(name),
+        Some(name) => match HookName::parse(name) {
+            Ok(hook) => hook,
+            Err(err) => return emit_failure(name, operation_id, err, json, 64),
+        },
         None => {
             return emit_failure(
-                HookName::Stop,
+                "unknown",
                 operation_id,
                 HookError::invalid_args("hook name is required"),
                 json,
@@ -219,11 +249,16 @@ pub fn run(matches: &ArgMatches) -> ExitCode {
 
     let payload = match load_payload(matches) {
         Ok(payload) => payload,
-        Err(err) => return emit_failure(hook, operation_id, err, json, 1),
+        Err(err) => return emit_failure(hook.as_str(), operation_id, err, json, 1),
     };
     let vault_path = matches
         .get_one::<PathBuf>("vault-path")
         .map_or_else(|| PathBuf::from("."), Clone::clone);
+    let routing_hints = if hook == HookName::UserPromptSubmit {
+        Some(user_prompt_submit::routing_hints(&payload))
+    } else {
+        None
+    };
 
     let outcome = match hook {
         HookName::SessionStart => session_start::run(&vault_path, operation_id.clone(), payload),
@@ -236,8 +271,8 @@ pub fn run(matches: &ArgMatches) -> ExitCode {
     };
 
     match outcome {
-        Ok(artifacts) => emit_success(hook, operation_id, artifacts, json),
-        Err(err) => emit_failure(hook, operation_id, err, json, 1),
+        Ok(artifacts) => emit_success(hook, operation_id, artifacts, routing_hints, json),
+        Err(err) => emit_failure(hook.as_str(), operation_id, err, json, 1),
     }
 }
 
@@ -290,6 +325,7 @@ fn emit_success(
     hook: HookName,
     operation_id: Ulid,
     artifacts: HookArtifacts,
+    routing_hints: Option<HookRoutingHints>,
     json: bool,
 ) -> ExitCode {
     let artifacts = if artifacts.is_empty() {
@@ -299,9 +335,10 @@ fn emit_success(
     };
     let result = HookResult {
         ok: true,
-        hook,
+        hook: hook.as_str().to_owned(),
         operation_id,
         artifacts,
+        routing_hints,
         error: None,
     };
     if json {
@@ -316,18 +353,13 @@ fn emit_success(
     ExitCode::SUCCESS
 }
 
-fn emit_failure(
-    hook: HookName,
-    operation_id: Ulid,
-    err: HookError,
-    json: bool,
-    code: u8,
-) -> ExitCode {
+fn emit_failure(hook: &str, operation_id: Ulid, err: HookError, json: bool, code: u8) -> ExitCode {
     let result = HookResult {
         ok: false,
-        hook,
+        hook: hook.to_owned(),
         operation_id,
         artifacts: None,
+        routing_hints: None,
         error: Some(err.into_body()),
     };
     if json {
@@ -335,11 +367,7 @@ fn emit_failure(
     } else if let Some(error) = &result.error {
         eprintln!(
             "cairn hook {}: {} - {} (operation_id: {}; retry: {})",
-            hook.as_str(),
-            error.code,
-            error.message,
-            result.operation_id.0,
-            error.retry_guidance
+            hook, error.code, error.message, result.operation_id.0, error.retry_guidance
         );
     }
     ExitCode::from(code)

@@ -36,8 +36,7 @@ pub(super) fn enqueue_post_turn(
     artifact::write_json(vault_path, ArtifactKind::Queue, Some(job_id), &artifact)
         .map(|written| written.id)
         .map_err(|err| {
-            HookError::internal(
-                format!("{err:?}"),
+            err.with_retry_guidance(
                 "retry cairn hook Stop for the same session after restoring queue write access",
             )
         })

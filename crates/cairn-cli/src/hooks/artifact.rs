@@ -42,15 +42,7 @@ pub(super) fn write_json<T: Serialize>(
         .join(".cairn")
         .join("hooks")
         .join(kind.dir_name());
-    std::fs::create_dir_all(&dir).map_err(|err| {
-        HookError::internal(
-            format!(
-                "failed to create hook artifact directory `{}`: {err}",
-                dir.display()
-            ),
-            "restore write access to the vault path and retry the same hook command",
-        )
-    })?;
+    create_dir_all_synced(&dir)?;
 
     let final_path = dir.join(format!("{}.json", id.0));
     let tmp_path = dir.join(format!(".{}.tmp", id.0));
@@ -110,6 +102,37 @@ pub(super) fn write_json<T: Serialize>(
         id,
         path: final_path,
     })
+}
+
+fn create_dir_all_synced(dir: &Path) -> Result<(), HookError> {
+    let mut missing = Vec::new();
+    let mut cursor = Some(dir);
+    while let Some(path) = cursor {
+        if path.exists() {
+            break;
+        }
+        missing.push(path.to_path_buf());
+        cursor = path.parent();
+    }
+
+    std::fs::create_dir_all(dir).map_err(|err| {
+        HookError::internal(
+            format!(
+                "failed to create hook artifact directory `{}`: {err}",
+                dir.display()
+            ),
+            "restore write access to the vault path and retry the same hook command",
+        )
+    })?;
+
+    // Persist newly-created directory entries before relying on artifacts below them.
+    for created in missing.iter().rev() {
+        if let Some(parent) = created.parent() {
+            sync_directory(parent)?;
+        }
+    }
+
+    Ok(())
 }
 
 fn sync_directory(dir: &Path) -> Result<(), HookError> {

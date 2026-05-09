@@ -66,6 +66,17 @@ fn precompact_is_not_a_canonical_hook() {
         .output()
         .expect("cairn hook PreCompact");
     assert_eq!(out.status.code(), Some(64), "exit: {:?}", out.status);
+    let v = parse_stdout_json(out);
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["hook"], "PreCompact");
+    assert!(v["operation_id"].as_str().is_some());
+    assert_eq!(v["error"]["code"], "InvalidArgs");
+    assert!(
+        v["error"]["retry_guidance"]
+            .as_str()
+            .is_some_and(|guidance| guidance.contains("retry")),
+        "retry guidance missing retry instruction: {v}",
+    );
 }
 
 #[test]
@@ -75,6 +86,11 @@ fn unknown_hook_name_exits_usage_64() {
         .output()
         .expect("cairn hook unknown");
     assert_eq!(out.status.code(), Some(64), "exit: {:?}", out.status);
+    let v = parse_stdout_json(out);
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["hook"], "DefinitelyNotAHook");
+    assert!(v["operation_id"].as_str().is_some());
+    assert_eq!(v["error"]["code"], "InvalidArgs");
 }
 
 #[test]
@@ -147,6 +163,8 @@ fn user_prompt_submit_writes_trace_artifact() {
     assert_eq!(trace["hook"], "UserPromptSubmit");
     assert_eq!(trace["session_id"], "sess-1");
     assert_eq!(trace["event"]["prompt"], "remember this");
+    assert_eq!(v["routing_hints"]["capture_prompt"], true);
+    assert_eq!(v["routing_hints"]["memory_write_suggested"], true);
 }
 
 #[test]

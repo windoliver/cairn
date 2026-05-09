@@ -7,7 +7,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use super::artifact::{self, ArtifactKind};
-use super::{HookArtifacts, HookError, payload_object, require_string};
+use super::{HookArtifacts, HookError, HookRoutingHints, payload_object, require_string};
 
 #[derive(Serialize)]
 struct TraceArtifact {
@@ -37,4 +37,34 @@ pub(super) fn run(
         hot_path: None,
         queued_jobs: Vec::new(),
     })
+}
+
+pub(super) fn routing_hints(payload: &Value) -> HookRoutingHints {
+    let prompt = payload
+        .get("prompt")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    HookRoutingHints {
+        capture_prompt: true,
+        memory_write_suggested: contains_any(
+            &prompt,
+            &["remember", "save", "note that", "keep track", "prefer"],
+        ),
+        forget_suggested: contains_any(&prompt, &["forget", "delete", "remove"]),
+        search_suggested: contains_any(
+            &prompt,
+            &[
+                "what do you know",
+                "search",
+                "find",
+                "recall",
+                "remember when",
+            ],
+        ),
+    }
+}
+
+fn contains_any(haystack: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| haystack.contains(needle))
 }
