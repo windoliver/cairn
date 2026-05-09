@@ -12,6 +12,13 @@ fn parse_stdout_json(out: std::process::Output) -> serde_json::Value {
     serde_json::from_str(stdout.trim()).expect("expected valid JSON on stdout")
 }
 
+fn read_json_file(path: &std::path::Path) -> serde_json::Value {
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|err| panic!("read JSON file {}: {err}", path.display()));
+    serde_json::from_str(&text)
+        .unwrap_or_else(|err| panic!("parse JSON file {}: {err}", path.display()))
+}
+
 fn run_hook_with_payload(
     name: &str,
     payload: &str,
@@ -135,6 +142,11 @@ fn user_prompt_submit_writes_trace_artifact() {
         "missing trace artifact at {}",
         trace_path.display(),
     );
+    let trace = read_json_file(&trace_path);
+    assert_eq!(trace["operation_id"], v["operation_id"]);
+    assert_eq!(trace["hook"], "UserPromptSubmit");
+    assert_eq!(trace["session_id"], "sess-1");
+    assert_eq!(trace["event"]["prompt"], "remember this");
 }
 
 #[test]
@@ -238,20 +250,27 @@ fn stop_writes_trace_and_queue_artifacts() {
     let job_id = v["artifacts"]["queued_jobs"][0]
         .as_str()
         .expect("queued job id");
-    assert!(
-        vault
-            .path()
-            .join(".cairn/hooks/traces")
-            .join(format!("{trace_id}.json"))
-            .exists()
-    );
-    assert!(
-        vault
-            .path()
-            .join(".cairn/hooks/queue")
-            .join(format!("{job_id}.json"))
-            .exists()
-    );
+    let trace_path = vault
+        .path()
+        .join(".cairn/hooks/traces")
+        .join(format!("{trace_id}.json"));
+    let queue_path = vault
+        .path()
+        .join(".cairn/hooks/queue")
+        .join(format!("{job_id}.json"));
+    assert!(trace_path.exists());
+    assert!(queue_path.exists());
+    let trace = read_json_file(&trace_path);
+    let queue = read_json_file(&queue_path);
+    assert_eq!(trace["operation_id"], v["operation_id"]);
+    assert_eq!(trace["hook"], "Stop");
+    assert_eq!(trace["session_id"], "sess-1");
+    assert_eq!(queue["operation_id"], v["operation_id"]);
+    assert_eq!(queue["job_id"], job_id);
+    assert_eq!(queue["session_id"], "sess-1");
+    assert_eq!(queue["trace_id"], trace_id);
+    assert_eq!(queue["kind"], "post_turn");
+    assert_eq!(queue["status"], "pending");
 }
 
 #[test]
@@ -283,5 +302,90 @@ fn stop_queue_failure_returns_retry_guidance() {
             .as_str()
             .unwrap_or("")
             .contains("retry cairn hook Stop")
+    );
+}
+
+#[test]
+fn full_hook_lifecycle_writes_expected_artifacts() {
+    let vault = tempfile::tempdir().expect("temp vault");
+    let session = r#""sess-1""#;
+    let cases = [
+        ("SessionStart", format!(r#"{{"session_id":{session}}}"#)),
+        (
+            "UserPromptSubmit",
+            format!(r#"{{"session_id":{session},"prompt":"hello"}}"#),
+        ),
+        (
+            "PreToolUse",
+            format!(r#"{{"session_id":{session},"tool_call_id":"call-1","tool_name":"shell"}}"#),
+        ),
+        (
+            "PostToolUse",
+            format!(
+                r#"{{"session_id":{session},"tool_call_id":"call-1","tool_name":"shell","status":"ok"}}"#
+            ),
+        ),
+        ("Stop", format!(r#"{{"session_id":{session}}}"#)),
+    ];
+    for (hook, payload) in cases {
+        let v = run_hook_with_payload(hook, &payload, &vault);
+        assert_eq!(v["ok"], true, "{hook} did not succeed: {v}");
+    }
+    let trace_dir = vault.path().join(".cairn/hooks/traces");
+    let trace_count = std::fs::read_dir(trace_dir).expect("trace dir").count();
+    assert_eq!(
+        trace_count, 4,
+        "prompt, pre-tool, post-tool, and stop traces"
+    );
+    let queue_count = std::fs::read_dir(vault.path().join(".cairn/hooks/queue"))
+        .expect("queue dir")
+        .count();
+    assert_eq!(queue_count, 1, "Stop enqueues exactly one post-turn job");
+}
+
+#[test]
+fn stop_returns_after_enqueue_boundary() {
+    let vault = tempfile::tempdir().expect("temp vault");
+    let started = std::time::Instant::now();
+    let v = run_hook_with_payload("Stop", r#"{"session_id":"sess-1"}"#, &vault);
+    assert_eq!(v["ok"], true);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "Stop hook should not wait on downstream workflow execution",
+    );
+    assert_eq!(
+        v["artifacts"]["queued_jobs"]
+            .as_array()
+            .expect("queued jobs")
+            .len(),
+        1,
+    );
+}
+
+#[test]
+fn trace_write_failure_returns_operation_id_and_retry_guidance() {
+    let blocked_vault = tempfile::NamedTempFile::new().expect("vault blocker");
+    let out = cli()
+        .args([
+            "hook",
+            "UserPromptSubmit",
+            "--vault-path",
+            blocked_vault.path().to_str().expect("utf-8 path"),
+            "--payload",
+            r#"{"session_id":"sess-1","prompt":"hello"}"#,
+            "--json",
+        ])
+        .output()
+        .expect("cairn hook trace failure");
+    assert_eq!(out.status.code(), Some(1), "exit: {:?}", out.status);
+    let v = parse_stdout_json(out);
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["error"]["code"], "Internal");
+    assert!(v["operation_id"].is_string());
+    assert!(
+        v["error"]["retry_guidance"]
+            .as_str()
+            .unwrap_or("")
+            .contains("retry"),
     );
 }
