@@ -173,10 +173,9 @@ fn upsert_vector(
                      (record_id, reason, attempt_count, last_error, enqueued_at) \
                    VALUES (?, 'embed_failed', 0, ?, ?) \
                    ON CONFLICT(record_id) DO UPDATE \
-                     SET attempt_count   = attempt_count + 1, \
-                         last_error      = excluded.last_error, \
-                         last_attempt_at = ?",
-                params![record_id, error, now_secs, now_secs],
+                     SET last_error  = excluded.last_error, \
+                         enqueued_at = COALESCE(pending_embeddings.enqueued_at, excluded.enqueued_at)",
+                params![record_id, error, now_secs],
             )
             .map_err(StepBodyError::Storage)?;
         }
@@ -193,4 +192,38 @@ fn now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_vector_upsert_replay_does_not_increment_attempt_count() {
+        let mut conn = crate::open::open_in_memory_sync().expect("open");
+        let tx = conn.transaction().expect("tx");
+        let record = cairn_core::domain::record::tests_export::sample_record();
+        let plan = crate::store::upsert::plan_upsert_in_tx(&tx, &record).expect("plan");
+        crate::store::upsert::stage_upsert_cow_in_tx(&tx, &record, &plan).expect("stage");
+
+        let failed = StoredEmbedOutcome::Failed {
+            error: "embed unavailable".to_owned(),
+        };
+        upsert_vector(&tx, plan.outcome_record_id.as_str(), &failed).expect("first vector upsert");
+        upsert_vector(&tx, plan.outcome_record_id.as_str(), &failed)
+            .expect("replayed vector upsert");
+
+        let row: (i64, String, Option<i64>) = tx
+            .query_row(
+                "SELECT attempt_count, last_error, last_attempt_at \
+                 FROM pending_embeddings WHERE record_id = ?1",
+                params![plan.outcome_record_id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("pending row");
+
+        assert_eq!(row.0, 0);
+        assert_eq!(row.1, "embed unavailable");
+        assert_eq!(row.2, None);
+    }
 }
