@@ -51,17 +51,14 @@ impl HookName {
         }
     }
 
-    fn parse(value: &str) -> Result<Self, HookError> {
+    fn from_clap_name(value: &str) -> Self {
         match value {
-            "SessionStart" => Ok(Self::SessionStart),
-            "UserPromptSubmit" => Ok(Self::UserPromptSubmit),
-            "PreToolUse" => Ok(Self::PreToolUse),
-            "PostToolUse" => Ok(Self::PostToolUse),
-            "Stop" => Ok(Self::Stop),
-            other => Err(HookError::invalid_args(format!(
-                "unknown hook `{other}`; expected one of {}",
-                Self::ALL.join(", ")
-            ))),
+            "SessionStart" => Self::SessionStart,
+            "UserPromptSubmit" => Self::UserPromptSubmit,
+            "PreToolUse" => Self::PreToolUse,
+            "PostToolUse" => Self::PostToolUse,
+            "Stop" => Self::Stop,
+            _ => unreachable!("clap value_parser restricts hook names to HookName::ALL"),
         }
     }
 }
@@ -194,10 +191,7 @@ pub fn run(matches: &ArgMatches) -> ExitCode {
     let json = matches.get_flag("json");
     let operation_id = new_operation_id();
     let hook = match matches.get_one::<String>("name").map(String::as_str) {
-        Some(name) => match HookName::parse(name) {
-            Ok(hook) => hook,
-            Err(err) => return emit_failure(HookName::Stop, operation_id, err, json, 64),
-        },
+        Some(name) => HookName::from_clap_name(name),
         None => {
             return emit_failure(
                 HookName::Stop,

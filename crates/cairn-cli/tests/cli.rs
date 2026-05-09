@@ -33,7 +33,7 @@ fn prints_version_with_flag() {
 }
 
 #[test]
-fn help_flag_lists_all_eight_verbs() {
+fn help_flag_lists_core_commands() {
     let out = cli().arg("--help").output().expect("cairn --help");
     assert!(out.status.success(), "exit: {:?}", out.status);
     let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
