@@ -48,10 +48,16 @@ impl StepBody for RecordStepBody {
                     .to_store_plan()
                     .map_err(|e| StepBodyError::Failed(e.to_string()))?;
                 crate::store::upsert::stage_upsert_cow_in_tx(tx, &payload.record, &plan)
-                    .map_err(|e| StepBodyError::Failed(e.to_string()))?;
-                apply_embed_outcome(tx, plan.outcome_record_id.as_str(), &payload.embed)
-                    .map_err(StepBodyError::Storage)?;
-                Ok(())
+                    .map_err(|e| StepBodyError::Failed(e.to_string()))
+            }
+            (RecordStepPayload::Upsert(payload), "vector.upsert") => {
+                upsert_vector(tx, &payload.planned.outcome_record_id, &payload.embed)
+            }
+            (RecordStepPayload::Upsert(payload), "fts.upsert") => {
+                upsert_fts(tx, &payload.planned.outcome_record_id)
+            }
+            (RecordStepPayload::Upsert(payload), "edges.upsert") => {
+                upsert_edges(tx, &payload.planned.outcome_record_id)
             }
             (RecordStepPayload::Upsert(payload), "primary.activate") => {
                 let plan = payload
@@ -105,11 +111,37 @@ fn stage_snapshot(
     Ok(())
 }
 
-fn apply_embed_outcome(
+fn upsert_fts(tx: &Transaction<'_>, record_id: &str) -> Result<(), StepBodyError> {
+    let row: (i64, String, String, String, String) = tx
+        .query_row(
+            "SELECT rowid, kind, class, scope, body FROM records WHERE record_id = ?1",
+            params![record_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            },
+        )
+        .map_err(StepBodyError::Storage)?;
+    tx.execute("DELETE FROM records_fts WHERE rowid = ?1", params![row.0])
+        .map_err(StepBodyError::Storage)?;
+    tx.execute(
+        "INSERT INTO records_fts(rowid, kind, class, scope, body) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![row.0, row.1, row.2, row.3, row.4],
+    )
+    .map_err(StepBodyError::Storage)?;
+    Ok(())
+}
+
+fn upsert_vector(
     tx: &Transaction<'_>,
     record_id: &str,
     embed: &StoredEmbedOutcome,
-) -> Result<(), rusqlite::Error> {
+) -> Result<(), StepBodyError> {
     match embed {
         StoredEmbedOutcome::Succeeded {
             vector,
@@ -120,16 +152,19 @@ fn apply_embed_outcome(
             tx.execute(
                 "DELETE FROM record_vectors WHERE record_id = ?",
                 params![record_id],
-            )?;
+            )
+            .map_err(StepBodyError::Storage)?;
             tx.execute(
                 "INSERT INTO record_vectors(record_id, embedding, model) \
                    VALUES (?, ?, ?)",
                 params![record_id, vector, model_label],
-            )?;
+            )
+            .map_err(StepBodyError::Storage)?;
             tx.execute(
                 "DELETE FROM pending_embeddings WHERE record_id = ?",
                 params![record_id],
-            )?;
+            )
+            .map_err(StepBodyError::Storage)?;
         }
         StoredEmbedOutcome::Failed { error } => {
             let now_secs = now_secs();
@@ -142,10 +177,15 @@ fn apply_embed_outcome(
                          last_error      = excluded.last_error, \
                          last_attempt_at = ?",
                 params![record_id, error, now_secs, now_secs],
-            )?;
+            )
+            .map_err(StepBodyError::Storage)?;
         }
         StoredEmbedOutcome::Skipped => {}
     }
+    Ok(())
+}
+
+fn upsert_edges(_tx: &Transaction<'_>, _record_id: &str) -> Result<(), StepBodyError> {
     Ok(())
 }
 

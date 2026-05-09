@@ -244,3 +244,26 @@ async fn upsert_rejects_fresh_target_that_reuses_existing_record_id() {
     .await
     .expect("records");
 }
+
+#[tokio::test]
+async fn repeated_upsert_steps_do_not_duplicate_derived_rows() {
+    let store = open_in_memory().await.expect("open");
+    let r = sample();
+    store.upsert(&r).await.expect("upsert");
+    store.upsert(&r).await.expect("idempotent upsert");
+
+    let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
+    conn.call(move |c| {
+        let fts_rows: i64 =
+            c.query_row("SELECT COUNT(*) FROM records_fts", [], |row| row.get(0))?;
+        let active_records: i64 = c.query_row(
+            "SELECT COUNT(*) FROM records WHERE active = 1 AND tombstoned = 0",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(fts_rows, active_records);
+        Ok::<_, tokio_rusqlite::Error>(())
+    })
+    .await
+    .expect("derived counts");
+}
