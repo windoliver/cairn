@@ -1,6 +1,6 @@
 //! Durable JSON payloads for record WAL operations.
 
-use cairn_core::domain::{BodyHash, MemoryRecord, RecordId, TargetId};
+use cairn_core::domain::{BodyHash, MemoryRecord, RecordId, ScopeTuple, TargetId};
 use cairn_core::wal::{OperationId, WalKind};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -79,6 +79,8 @@ pub enum StoredEmbedOutcome {
 pub struct ExpirePayload {
     pub target_id: TargetId,
     pub reason: String,
+    #[serde(default)]
+    pub scope: ScopeTuple,
 }
 
 pub(crate) fn save_payload(

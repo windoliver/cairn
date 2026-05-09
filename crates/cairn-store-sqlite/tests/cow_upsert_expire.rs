@@ -7,7 +7,7 @@ use std::sync::Arc;
 use cairn_core::contract::memory_store::{
     KeywordSearchArgs, ListArgs, MemoryStore, TombstoneReason,
 };
-use cairn_core::domain::{MemoryRecord, TargetId};
+use cairn_core::domain::{MemoryRecord, ScopeTuple, TargetId};
 use cairn_core::wal::WalKind;
 use cairn_store_sqlite::{open, open_in_memory};
 use rusqlite::params;
@@ -90,6 +90,127 @@ async fn upsert_commits_wal_operation_and_all_steps() {
     })
     .await
     .expect("wal rows");
+}
+
+#[tokio::test]
+async fn prepared_expire_recovers_with_persisted_scope() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("cairn.sqlite");
+    let op_id = "op-prepared-expire-scope-recovery";
+    let mut record = sample();
+    record.scope = ScopeTuple {
+        tenant: Some("tenant-review".to_owned()),
+        workspace: Some("workspace-review".to_owned()),
+        session_id: Some("session-review".to_owned()),
+        user: Some("hmn:tafeng".to_owned()),
+        ..ScopeTuple::default()
+    };
+    let target = record.target_id.clone();
+
+    {
+        let store = open(&path).await.expect("open #1");
+        store.upsert(&record).await.expect("seed record");
+        let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
+        let payload_json = serde_json::json!({
+            "type": "expire",
+            "target_id": target.as_str(),
+            "reason": "expire",
+            "scope": record.scope,
+        })
+        .to_string();
+        let target_for_seed = target.clone();
+        let entity_resource = format!(
+            "entity:tenant-review:workspace-review:{}",
+            target_for_seed.as_str()
+        );
+        let session_resource = "session:tenant-review:workspace-review:session-review".to_owned();
+
+        conn.call(move |c| {
+            c.execute(
+                "DELETE FROM lock_holders WHERE resource IN (?1, ?2)",
+                params![entity_resource, session_resource],
+            )?;
+            c.execute(
+                "DELETE FROM locks WHERE resource IN (?1, ?2)",
+                params![entity_resource, session_resource],
+            )?;
+            c.execute(
+                "INSERT INTO wal_ops \
+                   (operation_id, issued_seq, kind, state, envelope, issuer, \
+                    target_hash, scope_json, expires_at, signature, issued_at, updated_at) \
+                 VALUES (?1, 100, 'expire', 'ISSUED', '{}', 'issuer', ?2, '{}', 0, 'sig', 1, 1)",
+                params![op_id, target_for_seed.as_str()],
+            )?;
+            c.execute(
+                "UPDATE wal_ops SET state = 'PREPARED', updated_at = 2 \
+                 WHERE operation_id = ?1",
+                params![op_id],
+            )?;
+            c.execute(
+                "INSERT INTO wal_payloads(operation_id, kind, payload_json, created_at) \
+                 VALUES (?1, 'expire', ?2, 1)",
+                params![op_id, payload_json],
+            )?;
+            c.execute(
+                "UPDATE records SET scope = '{}' WHERE target_id = ?1",
+                params![target_for_seed.as_str()],
+            )?;
+            Ok::<_, tokio_rusqlite::Error>(())
+        })
+        .await
+        .expect("seed prepared expire");
+    }
+
+    let store = open(&path).await.expect("open #2");
+    assert!(
+        store
+            .list(&ListArgs::default())
+            .await
+            .expect("list")
+            .records
+            .is_empty()
+    );
+
+    let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
+    let target_id = target.as_str().to_owned();
+    conn.call(move |c| {
+        let payload_json: String = c.query_row(
+            "SELECT payload_json FROM wal_payloads WHERE operation_id = ?1",
+            params![op_id],
+            |row| row.get(0),
+        )?;
+        let payload: serde_json::Value = serde_json::from_str(&payload_json)
+            .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
+        assert_eq!(
+            payload
+                .get("scope")
+                .and_then(|scope| scope.get("tenant"))
+                .and_then(serde_json::Value::as_str),
+            Some("tenant-review")
+        );
+
+        let entity_resource = format!("entity:tenant-review:workspace-review:{target_id}");
+        let session_resource = "session:tenant-review:workspace-review:session-review";
+        let non_default_lock_rows: i64 = c.query_row(
+            "SELECT COUNT(*) FROM locks WHERE resource IN (?1, ?2)",
+            params![entity_resource, session_resource],
+            |row| row.get(0),
+        )?;
+        assert_eq!(
+            non_default_lock_rows, 2,
+            "recovery must reacquire locks from durable expire scope"
+        );
+
+        let state: String = c.query_row(
+            "SELECT state FROM wal_ops WHERE operation_id = ?1",
+            params![op_id],
+            |row| row.get(0),
+        )?;
+        assert_eq!(state, "COMMITTED");
+        Ok::<_, tokio_rusqlite::Error>(())
+    })
+    .await
+    .expect("expire recovery assertions");
 }
 
 #[tokio::test]

@@ -38,6 +38,7 @@ pub(crate) async fn apply_expire(
     let payload = ExpirePayload {
         target_id: target.clone(),
         reason: "expire".to_owned(),
+        scope: scope.clone(),
     };
     let payload_for_body = payload.clone();
     let op_for_issue = op_id.clone();

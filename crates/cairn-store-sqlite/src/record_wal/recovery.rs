@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use cairn_core::domain::ScopeTuple;
 use cairn_core::wal::{OperationId, WalKind};
 use tokio_rusqlite::Connection;
 
@@ -50,8 +49,8 @@ impl StepBodyRegistry for RecordWalRegistry {
             .await
             .map_err(RecoveryError::Storage)?;
 
-        match payload {
-            RecordWalPayload::Upsert(payload) => {
+        match (kind, payload) {
+            (WalKind::Upsert, RecordWalPayload::Upsert(payload)) => {
                 let locks = acquire_for_record(
                     conn,
                     &payload.record.scope,
@@ -64,11 +63,10 @@ impl StepBodyRegistry for RecordWalRegistry {
                 .map_err(|e| RecoveryError::Invariant(format!("recovery lock failed: {e}")))?;
                 Ok(Some(Arc::new(RecordStepBody::new_upsert(payload, locks))))
             }
-            RecordWalPayload::Expire(payload) => {
-                let scope = ScopeTuple::default();
+            (WalKind::Expire, RecordWalPayload::Expire(payload)) => {
                 let locks = acquire_for_record(
                     conn,
-                    &scope,
+                    &payload.scope,
                     &payload.target_id,
                     &self.incarnation,
                     op_id.as_str(),
@@ -78,6 +76,13 @@ impl StepBodyRegistry for RecordWalRegistry {
                 .map_err(|e| RecoveryError::Invariant(format!("recovery lock failed: {e}")))?;
                 Ok(Some(Arc::new(RecordStepBody::new_expire(payload, locks))))
             }
+            (WalKind::Upsert, RecordWalPayload::Expire(_)) => Err(RecoveryError::Invariant(
+                "record wal payload variant expire does not match wal kind upsert".to_owned(),
+            )),
+            (WalKind::Expire, RecordWalPayload::Upsert(_)) => Err(RecoveryError::Invariant(
+                "record wal payload variant upsert does not match wal kind expire".to_owned(),
+            )),
+            _ => Ok(None),
         }
     }
 }
