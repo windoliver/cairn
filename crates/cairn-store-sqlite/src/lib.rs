@@ -18,6 +18,7 @@ pub mod lint;
 pub mod locks;
 pub mod migrations;
 pub mod open;
+pub mod record_wal;
 pub mod repair;
 pub mod replay;
 pub mod store;
