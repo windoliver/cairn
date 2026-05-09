@@ -8,7 +8,8 @@ use cairn_core::contract::memory_store::{
     KeywordSearchArgs, ListArgs, MemoryStore, TombstoneReason,
 };
 use cairn_core::domain::{MemoryRecord, TargetId};
-use cairn_store_sqlite::open_in_memory;
+use cairn_core::wal::WalKind;
+use cairn_store_sqlite::{open, open_in_memory};
 use rusqlite::params;
 
 fn sample() -> MemoryRecord {
@@ -89,6 +90,75 @@ async fn upsert_commits_wal_operation_and_all_steps() {
     })
     .await
     .expect("wal rows");
+}
+
+#[tokio::test]
+async fn prepared_upsert_recovers_from_persisted_payload() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("cairn.sqlite");
+    let op_id = "op-prepared-upsert-recovery";
+    let record = sample();
+    let record_id = record.id.clone();
+
+    {
+        let store = open(&path).await.expect("open #1");
+        let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
+        let payload =
+            cairn_store_sqlite::record_wal::payload::UpsertPayload::new_for_test(record.clone());
+        let kind = WalKind::Upsert.as_str().to_owned();
+
+        conn.call(move |c| {
+            c.execute(
+                "INSERT INTO wal_ops \
+                   (operation_id, issued_seq, kind, state, envelope, issuer, \
+                    target_hash, scope_json, expires_at, signature, issued_at, updated_at) \
+                 VALUES (?1, 1, ?2, 'ISSUED', '{}', 'issuer', ?3, '{}', 0, 'sig', 1, 1)",
+                params![op_id, kind, record.target_id.as_str()],
+            )?;
+            c.execute(
+                "UPDATE wal_ops SET state = 'PREPARED', updated_at = 2 \
+                 WHERE operation_id = ?1",
+                params![op_id],
+            )?;
+            cairn_store_sqlite::record_wal::payload::save_upsert_payload_for_test(
+                c, op_id, &payload,
+            )
+            .expect("save upsert payload");
+            Ok::<_, tokio_rusqlite::Error>(())
+        })
+        .await
+        .expect("seed prepared upsert");
+    }
+
+    let store = open(&path).await.expect("open #2");
+    let recovered = store
+        .get(&record_id)
+        .await
+        .expect("get recovered")
+        .expect("record recovered");
+    assert_eq!(recovered.body, record.body);
+
+    let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
+    let op = op_id.to_owned();
+    conn.call(move |c| {
+        let state: String = c.query_row(
+            "SELECT state FROM wal_ops WHERE operation_id = ?1",
+            params![op],
+            |row| row.get(0),
+        )?;
+        assert_eq!(state, "COMMITTED");
+
+        let done_steps: i64 = c.query_row(
+            "SELECT COUNT(*) FROM wal_steps \
+             WHERE operation_id = ?1 AND state = 'DONE'",
+            params![op],
+            |row| row.get(0),
+        )?;
+        assert_eq!(done_steps, 6);
+        Ok::<_, tokio_rusqlite::Error>(())
+    })
+    .await
+    .expect("recovery wal state");
 }
 
 #[tokio::test]
