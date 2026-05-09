@@ -31,9 +31,49 @@ pub struct PreCompactOutput {
 /// Compute the reinjection budget from the compaction target and safety ratio.
 #[must_use]
 pub fn compute_budget(compaction_target: u32, max_bytes: u32, ratio: f64) -> u64 {
-    let product = f64::from(compaction_target) * ratio;
-    let hinted = (product + f64::EPSILON * product.abs().max(1.0)).floor() as u64;
+    if compaction_target == 0 || !ratio.is_finite() || ratio <= 0.0 {
+        return 0;
+    }
+
+    let hinted = floor_decimal_product(compaction_target, ratio);
     hinted.min(u64::from(max_bytes))
+}
+
+fn floor_decimal_product(compaction_target: u32, ratio: f64) -> u64 {
+    let rendered = ratio.to_string();
+    let (significand, exponent) = rendered
+        .split_once(['e', 'E'])
+        .map_or((rendered.as_str(), 0_i32), |(sig, exp)| {
+            (sig, exp.parse::<i32>().unwrap_or(0))
+        });
+
+    let (whole, fractional) = significand
+        .split_once('.')
+        .map_or((significand, ""), |(whole, fractional)| (whole, fractional));
+    let digits = format!("{whole}{fractional}");
+    let numerator = digits.parse::<u128>().unwrap_or(0);
+    let scale = exponent - i32::try_from(fractional.len()).unwrap_or(i32::MAX);
+    let target = u128::from(compaction_target);
+
+    if scale >= 0 {
+        let shift = u32::try_from(scale).unwrap_or(u32::MAX);
+        match 10_u128.checked_pow(shift) {
+            Some(multiplier) => target
+                .saturating_mul(numerator)
+                .saturating_mul(multiplier)
+                .try_into()
+                .unwrap_or(u64::MAX),
+            None => u64::MAX,
+        }
+    } else {
+        let shift = scale.unsigned_abs();
+        match 10_u128.checked_pow(shift) {
+            Some(divisor) => (target.saturating_mul(numerator) / divisor)
+                .try_into()
+                .unwrap_or(u64::MAX),
+            None => 0,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -62,5 +102,11 @@ mod tests {
     fn avoids_undercount_from_valid_floating_point_ratio() {
         let budget = compute_budget(50, 1_000, 0.58);
         assert_eq!(budget, 29);
+    }
+
+    #[test]
+    fn does_not_overcount_ratio_just_below_integer_boundary() {
+        let budget = compute_budget(1, 1_000, 0.999_999_999_999_999_9);
+        assert_eq!(budget, 0);
     }
 }
