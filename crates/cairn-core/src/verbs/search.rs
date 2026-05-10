@@ -13,8 +13,13 @@ use crate::config::{CairnConfig, CapabilitySet};
 use crate::contract::memory_store::{
     HybridSearchArgs, KeywordSearchArgs, MemoryStore, SearchCandidate, SemanticSearchArgs,
 };
-use crate::domain::ScopeTuple;
+use crate::domain::filter::validate_filter;
+use crate::domain::record::MemoryRecord;
 use crate::domain::taxonomy::MemoryVisibility;
+use crate::domain::{BodyHash, ScopeTuple};
+use crate::generated::verbs::search::SearchArgsFilters;
+use crate::pipeline::explain::{Candidate as ExplainCandidate, ExplainConfig, explain_filter};
+use crate::policy_trace::{PolicyDetail, PolicyGate, PolicyOutcome, PolicyTraceEntry};
 use crate::search::{ScoreExplain, token_budget_trim};
 
 /// Mode requested by the caller.
@@ -46,6 +51,8 @@ pub struct SearchRequest {
     pub auth_scope: ScopeTuple,
     /// Active embedding model label (for semantic + hybrid).
     pub model_label: String,
+    /// Optional recall-narrowing metadata filter.
+    pub filter: Option<SearchArgsFilters>,
     /// `true` → request explain block from the store and surface it.
     /// Caller must have already verified the `policy_trace` capability.
     pub explain: bool,
@@ -60,6 +67,11 @@ pub struct SearchOutcome {
     /// `candidates`. Populated iff `request.explain` was true and the
     /// `policy_trace` capability was advertised.
     pub explain: Option<Vec<ScoreExplain>>,
+    /// Policy gates evaluated for the read.
+    pub policy_trace: Vec<PolicyTraceEntry>,
+    /// Tier-2 read-filter exclusions, populated only when `request.explain`
+    /// is true.
+    pub excluded: Option<Vec<crate::policy_trace::RecordExclusion>>,
     /// Hybrid-only: legs that ran in degraded mode (capability missing,
     /// SQL error, deadline, etc.). Empty for keyword/semantic and for
     /// fully successful hybrid runs. Surface code (CLI, MCP, SDK) may
@@ -85,6 +97,12 @@ pub enum SearchError {
         /// Human-readable reason.
         reason: String,
     },
+    /// Filter JSON parsed but failed the allowlist/operator validator.
+    #[error("invalid filter: {reason}")]
+    InvalidFilter {
+        /// Human-readable reason.
+        reason: String,
+    },
     /// Store impl raised an error.
     ///
     /// The wrapped `StoreError` is `Box<dyn Error + Send + Sync>` (see
@@ -98,6 +116,8 @@ pub enum SearchError {
 }
 
 const POLICY_TRACE_CAP: &str = "cairn.mcp.v1.policy_trace";
+const EXPLAIN_FILTER_STALENESS_THRESHOLD_DAYS: u32 = 30;
+const SECONDS_PER_DAY: i64 = 86_400;
 
 /// Fail-closed capability gate for `request.mode`.
 fn gate_mode(mode: SearchMode, caps: &CapabilitySet) -> Result<(), SearchError> {
@@ -118,9 +138,12 @@ fn gate_mode(mode: SearchMode, caps: &CapabilitySet) -> Result<(), SearchError> 
 /// Order of operations:
 /// 1. Mode capability gate (fail closed).
 /// 2. `--explain` capability gate (`policy_trace`).
-/// 3. Build mode-specific `*SearchArgs` with `with_explain` set.
-/// 4. Dispatch to `store.search_*`.
-/// 5. Trim candidates + explain in lockstep using
+/// 3. Validate the optional recall-narrowing filter.
+/// 4. Build mode-specific `*SearchArgs` with `with_explain` set.
+/// 5. Dispatch to `store.search_*`.
+/// 6. Apply Tier-2 read filters, preserving per-record exclusions for
+///    `--explain`.
+/// 7. Trim candidates + explain in lockstep using
 ///    `config.search.max_snippet_chars_per_page`.
 ///
 /// # Errors
@@ -128,6 +151,7 @@ fn gate_mode(mode: SearchMode, caps: &CapabilitySet) -> Result<(), SearchError> 
 /// - [`SearchError::CapabilityUnavailable`] for missing mode or
 ///   `policy_trace` capability.
 /// - [`SearchError::InvalidArgs`] when the query is empty.
+/// - [`SearchError::InvalidFilter`] when `request.filter` fails validation.
 /// - [`SearchError::Store`] propagated from the store impl.
 pub async fn run(
     store: &dyn MemoryStore,
@@ -146,6 +170,14 @@ pub async fn run(
             capability: POLICY_TRACE_CAP,
         });
     }
+    let validated_filter = request
+        .filter
+        .as_ref()
+        .map(validate_filter)
+        .transpose()
+        .map_err(|e| SearchError::InvalidFilter {
+            reason: e.to_string(),
+        })?;
 
     let visibility = if request.visibility_allowlist.is_empty() {
         vec![
@@ -164,7 +196,7 @@ pub async fn run(
         SearchMode::Keyword => {
             let args = KeywordSearchArgs {
                 query: request.query.clone(),
-                filter: None,
+                filter: validated_filter,
                 auth_scope: request.auth_scope.clone(),
                 visibility_allowlist: visibility,
                 limit: request.limit,
@@ -177,7 +209,7 @@ pub async fn run(
         SearchMode::Semantic => {
             let args = SemanticSearchArgs {
                 query: request.query.clone(),
-                filter: None,
+                filter: validated_filter,
                 auth_scope: request.auth_scope.clone(),
                 visibility_allowlist: visibility,
                 limit: request.limit,
@@ -190,7 +222,7 @@ pub async fn run(
         SearchMode::Hybrid => {
             let args = HybridSearchArgs {
                 query: request.query.clone(),
-                filter: None,
+                filter: validated_filter,
                 auth_scope: request.auth_scope.clone(),
                 visibility_allowlist: visibility,
                 limit: request.limit,
@@ -207,6 +239,11 @@ pub async fn run(
         }
     };
 
+    let (candidates, explain, read_filter_exclusions) =
+        apply_read_filter(request.mode, candidates, explain);
+    let policy_trace = search_policy_trace(&read_filter_exclusions);
+    let excluded = request.explain.then_some(read_filter_exclusions);
+
     let (candidates, explain) = token_budget_trim(
         candidates,
         explain,
@@ -216,8 +253,147 @@ pub async fn run(
     Ok(SearchOutcome {
         candidates,
         explain,
+        policy_trace,
+        excluded,
         degraded_legs,
     })
+}
+
+fn search_policy_trace(
+    read_filter_exclusions: &[crate::policy_trace::RecordExclusion],
+) -> Vec<PolicyTraceEntry> {
+    let read_filter_outcome = if read_filter_exclusions.is_empty() {
+        PolicyOutcome::Pass
+    } else {
+        PolicyOutcome::Deny
+    };
+    vec![
+        PolicyTraceEntry::pass(PolicyGate::SearchScope),
+        PolicyTraceEntry::pass(PolicyGate::SearchCapability),
+        PolicyTraceEntry::new(
+            PolicyGate::SearchReadFilter,
+            read_filter_outcome,
+            PolicyDetail::None,
+        ),
+    ]
+}
+
+fn apply_read_filter(
+    mode: SearchMode,
+    candidates: Vec<SearchCandidate>,
+    explain: Option<Vec<ScoreExplain>>,
+) -> (
+    Vec<SearchCandidate>,
+    Option<Vec<ScoreExplain>>,
+    Vec<crate::policy_trace::RecordExclusion>,
+) {
+    let mut projected = Vec::with_capacity(candidates.len());
+    for (idx, candidate) in candidates.iter().enumerate() {
+        if let Some(explain_candidate) = explain_candidate(mode, idx, candidate, explain.as_deref())
+        {
+            projected.push((idx, explain_candidate));
+        }
+    }
+
+    if projected.is_empty() {
+        return (candidates, explain, Vec::new());
+    }
+
+    let cfg = ExplainConfig {
+        staleness_threshold_days: EXPLAIN_FILTER_STALENESS_THRESHOLD_DAYS,
+    };
+    let (kept, excluded) = explain_filter(
+        projected
+            .iter()
+            .map(|(_, candidate)| candidate.clone())
+            .collect(),
+        cfg,
+    );
+    if excluded.is_empty() {
+        return (candidates, explain, excluded);
+    }
+
+    let kept_targets = kept
+        .iter()
+        .map(|candidate| candidate.target_id().to_string())
+        .collect::<std::collections::HashSet<_>>();
+    let mut keep_by_index = vec![true; candidates.len()];
+    for (idx, candidate) in &projected {
+        keep_by_index[*idx] = kept_targets.contains(&candidate.target_id().to_string());
+    }
+
+    let filtered_candidates = candidates
+        .into_iter()
+        .enumerate()
+        .filter_map(|(idx, candidate)| keep_by_index[idx].then_some(candidate))
+        .collect();
+    let filtered_explain = explain.map(|entries| {
+        entries
+            .into_iter()
+            .enumerate()
+            .filter_map(|(idx, entry)| {
+                keep_by_index
+                    .get(idx)
+                    .copied()
+                    .unwrap_or(true)
+                    .then_some(entry)
+            })
+            .collect()
+    });
+
+    (filtered_candidates, filtered_explain, excluded)
+}
+
+fn explain_candidate(
+    mode: SearchMode,
+    idx: usize,
+    candidate: &SearchCandidate,
+    explain: Option<&[ScoreExplain]>,
+) -> Option<ExplainCandidate> {
+    let record = serde_json::from_str::<MemoryRecord>(&candidate.record_json).ok()?;
+    Some(ExplainCandidate::from_scope_filter(
+        candidate.target_id.clone(),
+        age_days(candidate.staleness_seconds),
+        relevance_score(mode, idx, candidate, explain),
+        BodyHash::compute(&record.body).to_string(),
+    ))
+}
+
+fn age_days(staleness_seconds: i64) -> u32 {
+    let days = staleness_seconds.max(0) / SECONDS_PER_DAY;
+    u32::try_from(days).unwrap_or(u32::MAX)
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    reason = "read-filter ranking consumes f32 and clamps non-finite values"
+)]
+fn relevance_score(
+    mode: SearchMode,
+    idx: usize,
+    candidate: &SearchCandidate,
+    explain: Option<&[ScoreExplain]>,
+) -> f32 {
+    let score = match mode {
+        SearchMode::Keyword => -candidate.bm25,
+        SearchMode::Semantic => candidate
+            .semantic_distance
+            .map_or(0.0, |distance| -f64::from(distance)),
+        SearchMode::Hybrid => explain
+            .and_then(|entries| entries.get(idx))
+            .map_or_else(|| fallback_rank_score(idx), |entry| entry.final_score),
+    };
+    if score.is_finite() {
+        score.clamp(f64::from(f32::MIN), f64::from(f32::MAX)) as f32
+    } else {
+        0.0
+    }
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn fallback_rank_score(idx: usize) -> f64 {
+    1.0 / (1.0 + idx as f64)
 }
 
 #[cfg(test)]
@@ -355,6 +531,7 @@ mod tests {
             visibility_allowlist: vec![],
             auth_scope: ScopeTuple::default(),
             model_label: "MiniLM-L6-v2".to_owned(),
+            filter: None,
             explain: false,
         }
     }

@@ -645,6 +645,7 @@ async fn handle_search(
         visibility_allowlist: vec![],
         auth_scope,
         model_label: config.search.embedding_model.as_str().to_owned(),
+        filter: args.filters.clone(),
         explain: args.explain.unwrap_or(false),
     };
 
@@ -664,6 +665,11 @@ async fn handle_search(
             Err(cairn_core::verbs::search::SearchError::InvalidArgs { reason }) => {
                 return CallToolResult::error(vec![Content::text(format!(
                     "cairn search: invalid args: {reason}"
+                ))]);
+            }
+            Err(cairn_core::verbs::search::SearchError::InvalidFilter { reason }) => {
+                return CallToolResult::error(vec![Content::text(format!(
+                    "cairn search: invalid filter: {reason}"
                 ))]);
             }
             Err(cairn_core::verbs::search::SearchError::Store(e)) => {
@@ -690,6 +696,7 @@ fn search_outcome_to_result(
 ) -> CallToolResult {
     use cairn_core::generated::common::Ulid;
     use cairn_core::generated::verbs::search::{Hit, HitTrust, ScoreExplain, SearchData};
+    use cairn_core::policy_trace::to_wire_exclusions;
 
     let hits: Vec<Hit> = outcome
         .candidates
@@ -734,7 +741,7 @@ fn search_outcome_to_result(
     let data = SearchData {
         hits,
         next_cursor: None,
-        excluded: None,
+        excluded: outcome.excluded.map(|items| to_wire_exclusions(&items)),
         score_explain,
         degraded_legs,
     };

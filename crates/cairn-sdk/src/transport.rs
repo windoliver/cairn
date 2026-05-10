@@ -375,6 +375,7 @@ impl<T: Transport> Sdk<T> {
             visibility_allowlist: vec![],
             auth_scope,
             model_label: self.config.search.embedding_model.as_str().to_owned(),
+            filter: args.filters.clone(),
             explain: args.explain.unwrap_or(false),
         };
 
@@ -390,6 +391,14 @@ impl<T: Transport> Sdk<T> {
             }
             Err(cairn_core::verbs::search::SearchError::InvalidArgs { reason }) => {
                 Err(SdkError::InvalidArgs { reason })
+            }
+            Err(cairn_core::verbs::search::SearchError::InvalidFilter { reason }) => {
+                Err(SdkError::Protocol {
+                    code: crate::error::ErrorCode::InvalidFilter,
+                    message: format!("invalid filter: {reason}"),
+                    data: Some(serde_json::json!({ "reason": reason })),
+                    operation_id: crate::stub::new_operation_id(),
+                })
             }
             Err(cairn_core::verbs::search::SearchError::Store(e)) => Err(SdkError::Protocol {
                 code: crate::error::ErrorCode::Internal,
@@ -640,6 +649,7 @@ fn envelope_from_outcome(
     use cairn_core::generated::common::Ulid;
     use cairn_core::generated::envelope::ResponseVerb;
     use cairn_core::generated::verbs::search::{Hit, HitTrust, ScoreExplain, SearchData};
+    use cairn_core::policy_trace::{to_wire, to_wire_exclusions};
 
     let hits: Vec<Hit> = outcome
         .candidates
@@ -687,14 +697,14 @@ fn envelope_from_outcome(
     let data = SearchData {
         hits,
         next_cursor: None,
-        excluded: None,
+        excluded: outcome.excluded.map(|items| to_wire_exclusions(&items)),
         score_explain,
         degraded_legs,
     };
 
     VerbResponse {
         operation_id: crate::stub::new_operation_id(),
-        policy_trace: vec![],
+        policy_trace: to_wire(&outcome.policy_trace),
         verb: ResponseVerb::Search,
         target: None,
         data,
