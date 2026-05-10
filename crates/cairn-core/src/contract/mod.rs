@@ -23,6 +23,7 @@ pub mod agent_provider;
 pub mod conformance;
 pub mod consent_lookup;
 pub mod frontend_adapter;
+pub mod hot_prefix_cache;
 pub mod identity_registry;
 pub mod job_store;
 pub mod keystore;
@@ -48,6 +49,7 @@ pub use version::{ContractVersion, VersionRange};
 pub use agent_provider::{AgentProvider, AgentProviderCapabilities, AgentProviderPlugin};
 pub use consent_lookup::{ConsentLookup, ConsentLookupError};
 pub use frontend_adapter::{FrontendAdapter, FrontendAdapterCapabilities, FrontendAdapterPlugin};
+pub use hot_prefix_cache::{CacheError, CachedPrefix, HotPrefixCache};
 pub use identity_registry::{
     IdentityRegistry, IdentityVisibility, MaintenanceMode, PurgeAcknowledgement, PurgeReason,
     RegistryError,
