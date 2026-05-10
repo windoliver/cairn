@@ -291,6 +291,7 @@ fn compute_capabilities(
         embedding_provider_ready,
         llm_configured: false,
         contract_phase: cairn_core::status::Phase::V0_1,
+        surface: cairn_core::status::Surface::Cli,
     })
 }
 
@@ -402,6 +403,7 @@ fn capabilities_for_config(config: &CairnConfig, model_present: bool) -> Vec<Cap
         embedding_provider_ready,
         llm_configured: false,
         contract_phase: cairn_core::status::Phase::V0_1,
+        surface: cairn_core::status::Surface::Cli,
     })
 }
 

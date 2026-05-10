@@ -11,10 +11,13 @@
 //! `forget --record <ulid>` is wired end-to-end through
 //! [`cairn_store_sqlite::SqliteMemoryStore::forget_record`] (issue #58 — the
 //! engine work landed first; CLI dispatch followed). The actor is taken from
-//! `CAIRN_ISSUER` (or [`DEFAULT_FORGET_ISSUER`] when unset). The local CLI
-//! path bypasses signed-intent verification — the operator has direct
-//! filesystem access to the vault, so a `SignedIntent` admission would not
-//! strengthen the trust boundary; #9 will revisit for cross-host invocations.
+//! `CAIRN_ISSUER` (or [`DEFAULT_FORGET_ISSUER`] when unset) and resolved
+//! against the vault's identity registry before any WAL state is written;
+//! unregistered issuers are rejected with `Unauthorized` and exit
+//! `EX_NOPERM=77`. The local CLI path bypasses signed-intent verification —
+//! the operator has direct filesystem access to the vault, so a
+//! `SignedIntent` admission would not strengthen the trust boundary; #9 will
+//! revisit for cross-host invocations.
 //!
 //! `forget --session` and `forget --scope` still return `CapabilityUnavailable`
 //! until the v0.2 / v0.3 runtime lands.
@@ -23,13 +26,16 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use cairn_core::config::CairnConfig;
+use cairn_core::contract::identity_registry::IdentityVisibility;
 use cairn_core::contract::memory_store::MemoryStore;
-use cairn_core::domain::{Identity, TargetId};
-use cairn_core::generated::envelope::{ResponseData, ResponseVerb};
+use cairn_core::domain::identity::{keys::IdentityRevision, provision::ProvisionInput};
+use cairn_core::domain::{DomainError, Identity, TargetId};
+use cairn_core::generated::envelope::{Response, ResponseData, ResponseVerb};
 use cairn_core::generated::verbs::forget::ForgetData;
 use clap::ArgMatches;
 
 use crate::identity::{guard::refuse_if_degraded, status::ReconciliationReport};
+use crate::llm::EX_NOPERM;
 
 use super::envelope::{
     EX_UNAVAILABLE, capability_unavailable_response, emit_json, human_error, invalid_args_response,
@@ -194,6 +200,34 @@ async fn run_async_record(
         }
     };
 
+    // Resolve the actor against the durable identity registry BEFORE
+    // writing the destructive WAL op. Without this gate any string a
+    // shell happens to set in `CAIRN_ISSUER` would land verbatim as
+    // `consent_journal.actor` for an unrecoverable delete. The local
+    // CLI path still bypasses signed-intent verification (operator has
+    // filesystem access to the vault), but a registered issuer is a
+    // strictly stronger gate than "any env-var string."
+    if let Err(resp) = ensure_forget_issuer(&ctx, &actor).await {
+        if json {
+            emit_json(&resp);
+        } else {
+            let code = super::signed::response_error_code(&resp).unwrap_or("Unauthorized");
+            let message = resp
+                .error
+                .as_ref()
+                .and_then(|e| e.get("message"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("issuer not registered");
+            human_error("forget", code, message, &resp.operation_id);
+        }
+        // EX_NOPERM=77 for Rejected/Unauthorized; EX_CONFIG=78 for
+        // backend-side aborts (registry lookup error / provision error).
+        return match resp.status {
+            cairn_core::generated::envelope::ResponseStatus::Aborted => ExitCode::from(78),
+            _ => ExitCode::from(EX_NOPERM),
+        };
+    }
+
     let receipt = match ctx.store.forget_record(&target, &actor).await {
         Ok(r) => r,
         Err(e) => {
@@ -219,9 +253,16 @@ async fn run_async_record(
     // ULIDs here without changing the contract surface. Set tombstones
     // to None — the deleted_count and committed status already prove
     // the operation took effect.
-    let _ = receipt; // explicitly drop the body-free receipt
+    //
+    // `deleted_count` is the live-version count captured engine-side
+    // before locks were taken. Idempotent re-forgets and forgets
+    // against never-existing target ids report `0` here (status still
+    // `committed` — the WAL op did execute, idempotently, per
+    // brief §5.6). Operators reading `deleted_count: 0` get the signal
+    // they need to debug stale IDs / typos / repeat forgets without
+    // us promoting the no-op into a hard failure.
     let data = ForgetData {
-        deleted_count: 1,
+        deleted_count: receipt.deleted_count,
         plan_ref: None,
         tombstones: None,
     };
@@ -237,6 +278,66 @@ async fn run_async_record(
         println!("cairn forget: committed deletion of target {raw_id}");
     }
     ExitCode::SUCCESS
+}
+
+/// Reject the forget call when the actor is not registered in the
+/// vault's identity registry.
+///
+/// Mirrors `ingest::ensure_ingest_issuer`: when the operator's
+/// `CAIRN_ISSUER` is the default ([`DEFAULT_FORGET_ISSUER`]), the helper
+/// auto-provisions it on first use — operators with vault filesystem
+/// access can already write any record they like, so requiring an
+/// explicit handshake step before the very first `forget` would be
+/// CLI-unfriendly noise. Custom `CAIRN_ISSUER` values that are not in
+/// the registry are rejected with `Unauthorized` and the CLI exits
+/// `EX_NOPERM=77`. Brief §14: the registered issuer is what lands in
+/// `consent_journal.actor` for the destructive op.
+async fn ensure_forget_issuer(
+    ctx: &super::signed::OpenedVerbContext,
+    issuer: &Identity,
+) -> Result<(), Response> {
+    let existing = ctx
+        .identity
+        .registry
+        .get_identity(issuer, IdentityVisibility::Operational)
+        .await
+        .map_err(|e| {
+            super::signed::aborted(ResponseVerb::Forget, format!("identity lookup: {e}"))
+        })?;
+    if existing.is_some() {
+        return Ok(());
+    }
+    if issuer.as_str() != DEFAULT_FORGET_ISSUER {
+        return Err(super::signed::rejected_from_domain(
+            ResponseVerb::Forget,
+            DomainError::Unauthorized {
+                message: format!(
+                    "issuer {issuer} is not active in this vault — \
+                     run `cairn handshake --issuer {issuer}` to register it before forgetting"
+                ),
+            },
+        ));
+    }
+
+    // Auto-provision the default forget issuer on first use. Mirrors
+    // `ingest::ensure_ingest_issuer`'s default-only auto-provision.
+    let mut rng = rand_core::OsRng;
+    let input = ProvisionInput {
+        vault_id: ctx.identity.vault_id.clone(),
+        id: issuer.clone(),
+        kind: issuer.kind(),
+        revision: IdentityRevision::FIRST,
+    };
+    ctx.identity
+        .provision(issuer.kind(), input, &mut rng)
+        .await
+        .map_err(|e| {
+            super::signed::aborted(
+                ResponseVerb::Forget,
+                format!("default issuer provision: {e}"),
+            )
+        })?;
+    Ok(())
 }
 
 fn require_bound_vault(json: bool, vault_root: &std::path::Path) -> Option<ExitCode> {
