@@ -71,7 +71,7 @@ impl HotPrefixCache for SqliteHotPrefixCache {
                     Ok((class, watermark))
                 })?;
                 let mut wm = SourceWatermarks::default();
-                let mut seen = [false; 6];
+                let mut seen = [false; 8];
                 for row in rows {
                     let (class, watermark) = row?;
                     let Some(c) = SourceClass::parse(&class) else {
@@ -111,7 +111,7 @@ impl HotPrefixCache for SqliteHotPrefixCache {
             .call(move |c| {
                 let mut stmt = c.prepare(
                     "SELECT prefix, segments_json, bytes, watermarks_json, \
-                     assembled_at_ms, assembly_latency_ms \
+                     assembled_at_ms, assembly_latency_ms, fs_fingerprint \
                      FROM hot_prefix_cache \
                      WHERE agent_id = ?1 AND recipe_hash = ?2",
                 )?;
@@ -123,6 +123,7 @@ impl HotPrefixCache for SqliteHotPrefixCache {
                         let watermarks_json: String = r.get(3)?;
                         let assembled_at_ms: i64 = r.get(4)?;
                         let assembly_latency_ms: i64 = r.get(5)?;
+                        let fs_fingerprint: String = r.get(6)?;
                         Ok((
                             prefix,
                             segments_json,
@@ -130,6 +131,7 @@ impl HotPrefixCache for SqliteHotPrefixCache {
                             watermarks_json,
                             assembled_at_ms,
                             assembly_latency_ms,
+                            fs_fingerprint,
                         ))
                     })
                     .map(Some)
@@ -138,7 +140,7 @@ impl HotPrefixCache for SqliteHotPrefixCache {
                         other => Err(other),
                     })?;
 
-                let Some((prefix, seg_json, bytes, wm_json, at, lat)) = row else {
+                let Some((prefix, seg_json, bytes, wm_json, at, lat, fs_fp)) = row else {
                     return Ok(Ok(None));
                 };
                 let segments: Vec<HotSegment> = match serde_json::from_str(&seg_json) {
@@ -164,6 +166,7 @@ impl HotPrefixCache for SqliteHotPrefixCache {
                     watermarks,
                     assembled_at_ms: at,
                     assembly_latency_ms: u64::try_from(lat).unwrap_or(0),
+                    fs_fingerprint: fs_fp,
                 })))
             })
             .await;
@@ -194,13 +197,14 @@ impl HotPrefixCache for SqliteHotPrefixCache {
         let bytes = i64::try_from(entry.bytes).unwrap_or(i64::MAX);
         let assembled_at_ms = entry.assembled_at_ms;
         let assembly_latency_ms = i64::try_from(entry.assembly_latency_ms).unwrap_or(i64::MAX);
+        let fs_fingerprint = entry.fs_fingerprint.clone();
         let conn = Arc::clone(&self.conn);
         conn.call(move |c| {
             c.execute(
                 "INSERT OR REPLACE INTO hot_prefix_cache \
                  (agent_id, recipe_hash, prefix, segments_json, bytes, \
-                  watermarks_json, assembled_at_ms, assembly_latency_ms) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                  watermarks_json, assembled_at_ms, assembly_latency_ms, fs_fingerprint) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 rusqlite::params![
                     agent_id,
                     recipe_hash,
@@ -210,6 +214,7 @@ impl HotPrefixCache for SqliteHotPrefixCache {
                     watermarks_json,
                     assembled_at_ms,
                     assembly_latency_ms,
+                    fs_fingerprint,
                 ],
             )?;
             Ok::<_, tokio_rusqlite::Error>(())
@@ -264,10 +269,12 @@ fn class_index(c: SourceClass) -> usize {
     match c {
         SourceClass::ProfileEvidence => 0,
         SourceClass::Pinned => 1,
-        SourceClass::PurposeIndex => 2,
-        SourceClass::Summaries => 3,
-        SourceClass::Playbooks => 4,
-        SourceClass::Policy => 5,
+        SourceClass::Projects => 2,
+        SourceClass::UserSignals => 3,
+        SourceClass::PurposeIndex => 4,
+        SourceClass::Summaries => 5,
+        SourceClass::Playbooks => 6,
+        SourceClass::Policy => 7,
         // Forward-compat: `SourceClass` is #[non_exhaustive]; unknown
         // variants are skipped by the caller rather than panicking.
         _ => usize::MAX,
@@ -279,6 +286,8 @@ fn set_field(wm: &mut SourceWatermarks, c: SourceClass, v: u64) {
     match c {
         SourceClass::ProfileEvidence => wm.profile_evidence = v,
         SourceClass::Pinned => wm.pinned = v,
+        SourceClass::Projects => wm.projects = v,
+        SourceClass::UserSignals => wm.user_signals = v,
         SourceClass::PurposeIndex => wm.purpose_index = v,
         SourceClass::Summaries => wm.summaries = v,
         SourceClass::Playbooks => wm.playbooks = v,

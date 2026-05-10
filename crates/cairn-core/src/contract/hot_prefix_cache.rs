@@ -24,6 +24,12 @@ pub struct CachedPrefix {
     pub assembled_at_ms: i64,
     /// Latency observed during the original cache-miss assembly.
     pub assembly_latency_ms: u64,
+    /// Hash of (mtime, size) for filesystem-backed hot-memory sources
+    /// (purpose.md, index.md, .cairn/config.yaml). Recomputed on hit
+    /// and compared field-wise; mismatch forces reassembly. Empty
+    /// string when the caller didn't supply a vault root.
+    /// See codex review round 1 finding 2.
+    pub fs_fingerprint: String,
 }
 
 /// Errors a cache backend may surface.
@@ -39,7 +45,7 @@ pub enum CacheError {
         /// Why the row is unparseable.
         reason: String,
     },
-    /// `hot_source_watermarks` returned fewer than the expected six rows.
+    /// `hot_source_watermarks` returned fewer rows than the expected eight.
     #[error("watermark schema mismatch: missing class {class:?}")]
     WatermarkSchemaMismatch {
         /// Which class was missing.

@@ -3,9 +3,9 @@
 //! The hot-memory prefix is invalidated by a watermark counter per
 //! source class. Every record-mutating write classifies the touched
 //! record(s) and bumps the matching counter(s) inside the same `SQLite`
-//! transaction. Cache rows snapshot all six watermarks at assembly
-//! time; a later cache read is a hit only when every field still
-//! matches the live counter.
+//! transaction. Cache rows snapshot every watermark at assembly time;
+//! a later cache read is a hit only when every field still matches the
+//! live counter.
 
 use smallvec::SmallVec;
 
@@ -18,11 +18,18 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum SourceClass {
-    /// `user`, `feedback`, `entity`, `strategy` records that feed
+    /// `user`, `feedback`, `entity`, `strategy_*` records that feed
     /// `AutoUserProfile` (§7.1).
     ProfileEvidence,
-    /// Records with `pinned = true`.
+    /// Records with `pinned = true` (any kind). Read by the
+    /// `pinned_feedback` recipe step.
     Pinned,
+    /// `project` records. Read by the `top_salience_project` recipe step
+    /// regardless of pin status — see §7 of the brief.
+    Projects,
+    /// `user_signal` records. Read by the `recent_user_signal` recipe
+    /// step.
+    UserSignals,
     /// Vault-root `purpose.md` and `index.md`.
     PurposeIndex,
     /// `_summary.md` files at any folder depth.
@@ -35,9 +42,11 @@ pub enum SourceClass {
 
 impl SourceClass {
     /// All variants in stable iteration order.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 8] = [
         Self::ProfileEvidence,
         Self::Pinned,
+        Self::Projects,
+        Self::UserSignals,
         Self::PurposeIndex,
         Self::Summaries,
         Self::Playbooks,
@@ -50,6 +59,8 @@ impl SourceClass {
         match self {
             Self::ProfileEvidence => "profile_evidence",
             Self::Pinned => "pinned",
+            Self::Projects => "projects",
+            Self::UserSignals => "user_signals",
             Self::PurposeIndex => "purpose_index",
             Self::Summaries => "summaries",
             Self::Playbooks => "playbooks",
@@ -63,6 +74,8 @@ impl SourceClass {
         match raw {
             "profile_evidence" => Some(Self::ProfileEvidence),
             "pinned" => Some(Self::Pinned),
+            "projects" => Some(Self::Projects),
+            "user_signals" => Some(Self::UserSignals),
             "purpose_index" => Some(Self::PurposeIndex),
             "summaries" => Some(Self::Summaries),
             "playbooks" => Some(Self::Playbooks),
@@ -79,6 +92,12 @@ pub struct SourceWatermarks {
     pub profile_evidence: u64,
     /// Counter for [`SourceClass::Pinned`] mutations.
     pub pinned: u64,
+    /// Counter for [`SourceClass::Projects`] mutations.
+    #[serde(default)]
+    pub projects: u64,
+    /// Counter for [`SourceClass::UserSignals`] mutations.
+    #[serde(default)]
+    pub user_signals: u64,
     /// Counter for [`SourceClass::PurposeIndex`] mutations.
     pub purpose_index: u64,
     /// Counter for [`SourceClass::Summaries`] mutations.
@@ -101,6 +120,8 @@ impl SourceWatermarks {
         match class {
             SourceClass::ProfileEvidence => self.profile_evidence += 1,
             SourceClass::Pinned => self.pinned += 1,
+            SourceClass::Projects => self.projects += 1,
+            SourceClass::UserSignals => self.user_signals += 1,
             SourceClass::PurposeIndex => self.purpose_index += 1,
             SourceClass::Summaries => self.summaries += 1,
             SourceClass::Playbooks => self.playbooks += 1,
@@ -130,8 +151,19 @@ pub fn classify_record(r: &MemoryRecord) -> SmallVec<[SourceClass; 2]> {
                 out.push(SourceClass::Pinned);
             }
         }
-        MemoryKind::Project if pinned => out.push(SourceClass::Pinned),
+        MemoryKind::Project => {
+            // Read by the `top_salience_project` recipe step regardless
+            // of pin status. Pin status only matters for `pinned_feedback`
+            // (which selects user/feedback), but a pinned Project still
+            // bumps `Pinned` defensively in case a future recipe step
+            // selects pinned-anything.
+            out.push(SourceClass::Projects);
+            if pinned {
+                out.push(SourceClass::Pinned);
+            }
+        }
         MemoryKind::Playbook => out.push(SourceClass::Playbooks),
+        MemoryKind::UserSignal => out.push(SourceClass::UserSignals),
         _ => {}
     }
     out
@@ -183,15 +215,18 @@ mod tests {
     }
 
     #[test]
-    fn classify_project_pinned_emits_only_pinned() {
+    fn classify_project_pinned_emits_projects_and_pinned() {
         let classes = classify_record(&rec(MemoryKind::Project, true));
-        assert_eq!(classes.into_vec(), vec![SourceClass::Pinned]);
+        assert_eq!(
+            classes.into_vec(),
+            vec![SourceClass::Projects, SourceClass::Pinned]
+        );
     }
 
     #[test]
-    fn classify_project_unpinned_emits_nothing() {
+    fn classify_project_unpinned_emits_projects() {
         let classes = classify_record(&rec(MemoryKind::Project, false));
-        assert!(classes.is_empty());
+        assert_eq!(classes.into_vec(), vec![SourceClass::Projects]);
     }
 
     #[test]
@@ -201,8 +236,14 @@ mod tests {
     }
 
     #[test]
+    fn classify_user_signal_emits_user_signals() {
+        let classes = classify_record(&rec(MemoryKind::UserSignal, false));
+        assert_eq!(classes.into_vec(), vec![SourceClass::UserSignals]);
+    }
+
+    #[test]
     fn classify_unrelated_kind_emits_nothing() {
-        // `Reference` is not a profile-evidence or playbook kind.
+        // `Reference` is not classified by any hot-memory recipe step.
         let classes = classify_record(&rec(MemoryKind::Reference, false));
         assert!(classes.is_empty());
     }
@@ -227,8 +268,8 @@ mod tests {
     }
 
     #[test]
-    fn source_class_all_returns_six_classes() {
-        assert_eq!(SourceClass::ALL.len(), 6);
+    fn source_class_all_returns_eight_classes() {
+        assert_eq!(SourceClass::ALL.len(), 8);
     }
 
     #[test]

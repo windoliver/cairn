@@ -1919,7 +1919,7 @@ pub fn run(sub: &ArgMatches, vault_root: Option<&Path>) -> ExitCode {
 
     match outcome {
         Ok(result) => emit_merged(result.data),
-        Err(_store_err) => {
+        Err(store_err) => {
             // `cairn_store_sqlite::open` rejected the vault (e.g. schema
             // fingerprint mismatch on a manually-modified DB). Degrade
             // gracefully: run the edge-only pass so contradiction findings
@@ -1928,21 +1928,43 @@ pub fn run(sub: &ArgMatches, vault_root: Option<&Path>) -> ExitCode {
             // is a store concern; the lint verb should not abort on
             // validator disagreements that the user could resolve with
             // `cairn lint --fix`.
-            let empty_data = cairn_core::generated::verbs::lint::LintData {
-                findings: Vec::new(),
+            //
+            // Codex review round 1 finding 5: do NOT silently emit empty
+            // findings. Surface the store failure as a `DeferredCheck`
+            // Error so operators see explicitly that vault-level checks
+            // (including the hot-memory walker) did not run.
+            let store_err_msg = store_err.to_string();
+            let deferred = cairn_core::generated::verbs::lint::Finding {
+                entities: None,
+                kind: cairn_core::generated::verbs::lint::Kind::DeferredCheck,
+                message: format!(
+                    "lint vault-level checks did not run: store open failed ({store_err_msg}); \
+                     edge-integrity pass is the only coverage in this response"
+                ),
+                severity: cairn_core::generated::verbs::lint::Severity::Error,
+                suggested_fix: Some(
+                    "inspect .cairn/cairn.db schema state; try `cairn lint --fix` to repair \
+                     WAL edge contradictions, then re-run `cairn lint`"
+                        .to_owned(),
+                ),
+                target: None,
+                tracking_issue: Some(83),
+            };
+            let degraded_data = cairn_core::generated::verbs::lint::LintData {
+                findings: vec![deferred],
                 report_path: None,
                 summary: cairn_core::generated::verbs::lint::LintDataSummary {
                     auto_resolved: Some(0),
                     by_kind: serde_json::Value::Object(serde_json::Map::new()),
                     by_severity: LintDataSummaryBySeverity {
-                        error: 0,
+                        error: 1,
                         warning: 0,
                         info: 0,
                     },
-                    total: 0,
+                    total: 1,
                 },
             };
-            emit_merged(empty_data)
+            emit_merged(degraded_data)
         }
     }
 }
@@ -2401,8 +2423,10 @@ mod tests {
             })
             .count();
         assert_eq!(
-            info_count, 2,
-            "expect §6.3 deferred-info finding + §6.2 signature-verification-deferred advisory"
+            info_count, 4,
+            "expect §6.3 deferred-info finding + §6.2 signature-verification-deferred advisory \
+             + hot_memory walker's store-backed-deferred + missing_summary-dormant advisories \
+             (codex review round 1 findings 3+4)"
         );
         assert!(
             result.has_error,

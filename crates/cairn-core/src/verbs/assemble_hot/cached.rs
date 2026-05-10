@@ -1,6 +1,9 @@
 //! Cache-aware hot-prefix assembly. See issue #83 / spec §5.3.
 
+use std::path::Path;
 use std::time::Instant;
+
+use sha2::{Digest, Sha256};
 
 use crate::config::HotMemoryConfig;
 use crate::contract::hot_prefix_cache::{CachedPrefix, HotPrefixCache};
@@ -10,6 +13,51 @@ use crate::domain::hot_prefix::SourceWatermarks;
 use crate::domain::metrics::MetricEvent;
 use crate::generated::verbs::assemble_hot::AssembleHotData;
 use crate::verbs::assemble_hot::assembler::{AssembleHotError, assemble_hot_from_bodies};
+
+/// Relative paths whose `(mtime_ns, size)` go into the cache's
+/// `fs_fingerprint`. Edits to these files invalidate cached prefixes
+/// even when they bypass any Cairn write hook. See codex review round 1
+/// finding 2.
+const FS_FINGERPRINT_PATHS: &[&str] = &["purpose.md", "index.md", ".cairn/config.yaml"];
+
+/// Compute `(mtime_ns, size)` hash for filesystem-backed hot-memory
+/// sources. Returns an empty string when `vault_root` is `None` — the
+/// fingerprint check is then a no-op (cache hit relies solely on
+/// watermarks).
+#[must_use]
+pub fn compute_fs_fingerprint(vault_root: Option<&Path>) -> String {
+    let Some(root) = vault_root else {
+        return String::new();
+    };
+    let mut hasher = Sha256::new();
+    for rel in FS_FINGERPRINT_PATHS {
+        hasher.update(rel.as_bytes());
+        hasher.update(b"\x00");
+        let path = root.join(rel);
+        match std::fs::metadata(&path) {
+            Ok(meta) => {
+                // Absence and presence must produce different fingerprints.
+                hasher.update(b"\x01");
+                if let Ok(mtime) = meta.modified()
+                    && let Ok(d) = mtime.duration_since(std::time::UNIX_EPOCH)
+                {
+                    hasher.update(d.as_nanos().to_le_bytes());
+                }
+                hasher.update(meta.len().to_le_bytes());
+            }
+            Err(_) => {
+                hasher.update(b"\x00"); // absent marker
+            }
+        }
+    }
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(digest.len() * 2);
+    for b in digest {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
 
 /// Errors `cached_assemble` may surface.
 #[derive(Debug, thiserror::Error)]
@@ -23,7 +71,6 @@ pub enum CachedAssembleError {
 /// Stable hash over the canonical JSON encoding of the recipe.
 #[must_use]
 pub fn recipe_hash_canonical(recipe: &[crate::config::HotMemoryRecipeStep]) -> String {
-    use sha2::{Digest, Sha256};
     let bytes = serde_json::to_vec(recipe).unwrap_or_default();
     let mut h = Sha256::new();
     h.update(&bytes);
@@ -44,10 +91,20 @@ fn hex_lower(bytes: &[u8]) -> String {
 /// `budget_override` caps the assembled output size. When `None`, uses
 /// `config.max_bytes`. On cache hit, if the cached entry exceeds the
 /// effective budget, the entry is treated as a miss (option b).
+///
+/// `vault_root` enables the filesystem fingerprint check: edits to
+/// `purpose.md`, `index.md`, or `.cairn/config.yaml` invalidate cached
+/// prefixes regardless of watermarks. Pass `None` to skip the check
+/// (tests, store-only recipes).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "verb entry point; all args required"
+)]
 pub async fn cached_assemble(
     config: &HotMemoryConfig,
     agent: &Identity,
     vault_id: &str,
+    vault_root: Option<&Path>,
     cache: &dyn HotPrefixCache,
     metrics: &dyn MetricsSink,
     budget_override: Option<u64>,
@@ -56,6 +113,7 @@ pub async fn cached_assemble(
     let recipe_hash = recipe_hash_canonical(&config.recipe);
     let started = Instant::now();
     let effective_budget = budget_override.unwrap_or_else(|| u64::from(config.max_bytes));
+    let fs_fingerprint_now = compute_fs_fingerprint(vault_root);
 
     // Read live watermarks; failure → bypass cache, still assemble + emit.
     let wm_now: SourceWatermarks = match cache.current_watermarks().await {
@@ -81,8 +139,10 @@ pub async fn cached_assemble(
     // Cache lookup; non-corrupt errors bypass the cache for this call.
     let cache_get = cache.get(agent, &recipe_hash).await;
     if let Ok(Some(entry)) = &cache_get {
-        // Treat as miss if cached entry exceeds the effective budget (option b).
-        if entry.watermarks.matches(&wm_now) && entry.bytes <= effective_budget {
+        // Treat as miss if cached entry exceeds the effective budget (option b)
+        // OR if the filesystem fingerprint has changed since the entry was put.
+        let fp_matches = entry.fs_fingerprint == fs_fingerprint_now;
+        if entry.watermarks.matches(&wm_now) && entry.bytes <= effective_budget && fp_matches {
             let latency_ms = elapsed_ms(started);
             emit_event(
                 metrics,
@@ -114,6 +174,7 @@ pub async fn cached_assemble(
         watermarks: wm_now,
         assembled_at_ms: now_ms(),
         assembly_latency_ms: latency_ms,
+        fs_fingerprint: fs_fingerprint_now,
     };
     if let Err(e) = cache.put(agent, &recipe_hash, &entry).await {
         tracing::warn!(error = %e, "hot-prefix cache: put failed");
@@ -306,8 +367,9 @@ mod tests {
             watermarks: SourceWatermarks::default(),
             assembled_at_ms: 0,
             assembly_latency_ms: 1,
+            fs_fingerprint: String::new(),
         });
-        let data = cached_assemble(&cfg, &agent(), "v1", &cache, &metrics, None, || {
+        let data = cached_assemble(&cfg, &agent(), "v1", None, &cache, &metrics, None, || {
             panic!("loader must not run on cache hit")
         })
         .await
@@ -325,9 +387,16 @@ mod tests {
         let metrics = CapturingMetricsSink::new();
         let cfg = config();
         let recipe_len = cfg.recipe.len();
-        let data = cached_assemble(&cfg, &agent(), "v1", &cache, &metrics, None, move || {
-            Ok(vec![String::new(); recipe_len])
-        })
+        let data = cached_assemble(
+            &cfg,
+            &agent(),
+            "v1",
+            None,
+            &cache,
+            &metrics,
+            None,
+            move || Ok(vec![String::new(); recipe_len]),
+        )
         .await
         .expect("assemble");
         assert_eq!(data.bytes, data.prefix.len() as u64);
@@ -351,12 +420,20 @@ mod tests {
             watermarks: stale,
             assembled_at_ms: 0,
             assembly_latency_ms: 0,
+            fs_fingerprint: String::new(),
         });
         let cfg = config();
         let recipe_len = cfg.recipe.len();
-        let data = cached_assemble(&cfg, &agent(), "v1", &cache, &metrics, None, move || {
-            Ok(vec![String::new(); recipe_len])
-        })
+        let data = cached_assemble(
+            &cfg,
+            &agent(),
+            "v1",
+            None,
+            &cache,
+            &metrics,
+            None,
+            move || Ok(vec![String::new(); recipe_len]),
+        )
         .await
         .expect("assemble");
         assert_ne!(data.prefix, "stale");
@@ -372,9 +449,16 @@ mod tests {
         let metrics = CapturingMetricsSink::new();
         let cfg = config();
         let recipe_len = cfg.recipe.len();
-        let data = cached_assemble(&cfg, &agent(), "v1", &cache, &metrics, None, move || {
-            Ok(vec![String::new(); recipe_len])
-        })
+        let data = cached_assemble(
+            &cfg,
+            &agent(),
+            "v1",
+            None,
+            &cache,
+            &metrics,
+            None,
+            move || Ok(vec![String::new(); recipe_len]),
+        )
         .await
         .expect("assemble");
         assert_eq!(data.bytes, data.prefix.len() as u64);
@@ -387,9 +471,16 @@ mod tests {
         let metrics = CapturingMetricsSink::new();
         let cfg = config();
         let recipe_len = cfg.recipe.len();
-        let _ = cached_assemble(&cfg, &agent(), "v1", &cache, &metrics, None, move || {
-            Ok(vec![String::new(); recipe_len])
-        })
+        let _ = cached_assemble(
+            &cfg,
+            &agent(),
+            "v1",
+            None,
+            &cache,
+            &metrics,
+            None,
+            move || Ok(vec![String::new(); recipe_len]),
+        )
         .await
         .expect("verb survives put failure");
     }
@@ -411,9 +502,16 @@ mod tests {
         let cache = MockCache::default();
         let cfg = config();
         let recipe_len = cfg.recipe.len();
-        let _ = cached_assemble(&cfg, &agent(), "v1", &cache, &BrokenSink, None, move || {
-            Ok(vec![String::new(); recipe_len])
-        })
+        let _ = cached_assemble(
+            &cfg,
+            &agent(),
+            "v1",
+            None,
+            &cache,
+            &BrokenSink,
+            None,
+            move || Ok(vec![String::new(); recipe_len]),
+        )
         .await
         .expect("verb survives sink failure");
     }

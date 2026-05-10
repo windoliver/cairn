@@ -42,17 +42,31 @@ pub fn run(inputs: &LintInputs<'_>) -> Vec<Finding> {
                 ));
             }
         }
+
+        // Codex review round 1 finding 3: the sync loader (cairn-cli's
+        // `lint_step_body_sync`) returns empty bodies for store-backed
+        // recipe steps (`pinned_feedback`, `top_salience_project`,
+        // `active_playbook`, `recent_user_signal`). Oversized store-
+        // backed content cannot trigger `HotMemoryOverBudget` from the
+        // lint path. Emit a DeferredCheck so the coverage gap is loud.
+        findings.push(deferred_store_backed_walker_finding());
     }
 
     // 2. broken_source_link
     findings.extend(super::hot_memory_walker::broken_source_links(inputs));
 
-    // 3. missing_summary — folders come from config (or empty list when
-    // the schema doesn't yet expose `summary_folders`).
+    // 3. missing_summary — folders come from config (currently dormant:
+    // `HotMemoryConfig.summary_folders` is not yet in the schema).
+    // Codex review round 1 finding 4: emit a DeferredCheck so the
+    // missing wiring is visible from `cairn lint --json`, not silent.
     let folders: Vec<String> = summary_folders_from_config(inputs);
-    findings.extend(super::hot_memory_walker::missing_summaries(
-        inputs, &folders,
-    ));
+    if folders.is_empty() {
+        findings.push(deferred_missing_summary_finding());
+    } else {
+        findings.extend(super::hot_memory_walker::missing_summaries(
+            inputs, &folders,
+        ));
+    }
 
     // 4. stale_profile_line — only when an AutoUserProfile body is in records.
     if let Some(body) = profile_body_from_records(inputs.records) {
@@ -78,6 +92,43 @@ fn over_budget_finding(got: u64, max: u64) -> Finding {
         format!("hot prefix {got} bytes exceeds {max} bytes budget"),
     );
     f.target = Some(target_path(".cairn/config.yaml"));
+    f.tracking_issue = Some(TRACKING_ISSUE);
+    f
+}
+
+/// Build a `DeferredCheck` Info finding documenting that the lint
+/// walker's body loader cannot read store-backed recipe steps
+/// synchronously. Without this, an oversized `Project` / `UserSignal` /
+/// `Playbook` / pinned record body could push the prefix over budget at
+/// runtime while `cairn lint --json` reports a clean walker.
+fn deferred_store_backed_walker_finding() -> Finding {
+    let mut f = finding(
+        Kind::DeferredCheck,
+        Severity::Info,
+        "hot_memory walker measures filesystem-backed recipe steps only; \
+         store-backed steps (pinned_feedback, top_salience_project, \
+         active_playbook, recent_user_signal) are not weighed and may \
+         push the runtime prefix over budget undetected by `cairn lint`"
+            .to_owned(),
+    );
+    f.tracking_issue = Some(TRACKING_ISSUE);
+    f
+}
+
+/// Build a `DeferredCheck` Info finding when the summary-folder list
+/// is empty (the schema hasn't surfaced `hot_memory.summary_folders`
+/// yet). Documents that the `MissingSummary` check is dormant from the
+/// integrated walker.
+fn deferred_missing_summary_finding() -> Finding {
+    let mut f = finding(
+        Kind::DeferredCheck,
+        Severity::Info,
+        "missing_summary check is dormant: hot_memory.summary_folders \
+         is not yet in CairnConfig. Direct callers of \
+         `hot_memory_walker::missing_summaries` (e.g. CI scripts) can \
+         still surface this finding by passing a folder list."
+            .to_owned(),
+    );
     f.tracking_issue = Some(TRACKING_ISSUE);
     f
 }

@@ -47,6 +47,7 @@ async fn put_then_get_round_trips() {
         watermarks: SourceWatermarks::default(),
         assembled_at_ms: 1,
         assembly_latency_ms: 0,
+        fs_fingerprint: String::new(),
     };
     cache.put(&agent(), "h1", &entry).await.expect("put");
     let got = cache.get(&agent(), "h1").await.expect("get").expect("Some");
@@ -109,6 +110,7 @@ async fn bump_invalidates_cached_row() {
         watermarks: SourceWatermarks::default(),
         assembled_at_ms: 1,
         assembly_latency_ms: 0,
+        fs_fingerprint: String::new(),
     };
     cache.put(&agent(), "h", &entry).await.expect("put");
     cache

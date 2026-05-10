@@ -292,7 +292,15 @@ pub(crate) fn upsert_in_tx(
     //
     // Only the content-changed path bumps — idempotent re-ingest (same body
     // hash) does not alter downstream visibility, so the cache remains valid.
-    bump_hot_prefix_watermarks(tx, record)?;
+    //
+    // On supersession (`prior` was Some), additionally bump every class:
+    // the prior row's kind/pin state may have classified into different
+    // classes (e.g. a pinned Project being replaced by an unpinned Reference),
+    // and without reading the prior record JSON we cannot compute the
+    // exact prior classification cheaply. Pessimistic bump-all preserves
+    // correctness; the cost is one extra reassembly per supersession,
+    // which is rare in steady state. See codex review round 1 finding 1.
+    bump_hot_prefix_watermarks(tx, record, prior.is_some())?;
 
     Ok(UpsertOutcome {
         record_id: outcome_id,
@@ -550,12 +558,25 @@ fn insert_row(
 fn bump_hot_prefix_watermarks(
     tx: &Transaction<'_>,
     record: &MemoryRecord,
+    is_supersession: bool,
 ) -> Result<(), StoreError> {
+    let now_ms = current_unix_ms();
+    if is_supersession {
+        // Pessimistic bump-all: prior row's classification is unknown
+        // at this layer without re-deserializing record_json. Bump every
+        // class so any cache snapshot taken before this write is forced
+        // to reassemble. See codex review round 1 finding 1.
+        tx.execute(
+            "UPDATE hot_source_watermarks SET watermark = watermark + 1, \
+             updated_at_ms = ?1",
+            params![now_ms],
+        )?;
+        return Ok(());
+    }
     let classes = cairn_core::domain::hot_prefix::classify_record(record);
     if classes.is_empty() {
         return Ok(());
     }
-    let now_ms = current_unix_ms();
     let placeholders = (0..classes.len())
         .map(|i| format!("?{}", i + 2))
         .collect::<Vec<_>>()

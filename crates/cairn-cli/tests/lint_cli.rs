@@ -125,8 +125,15 @@ fn lint_json_reports_contradiction_without_mutating_live_edges() {
         json.get("error")
     );
     assert_eq!(json["data"]["summary"]["by_kind"]["contradictory_edge"], 1);
+    // The test vault was migrated directly via `migrations().to_latest()`
+    // without a vault.id / config / projection — `cairn_store_sqlite::open`
+    // rejects it, so the binary's lint dispatch falls into the degraded
+    // `Err(store_err)` branch which (since codex review round 1 finding 5)
+    // emits a `DeferredCheck` Error documenting that vault-level checks
+    // did not run. Edge-integrity findings are merged on top.
+    assert_eq!(json["data"]["summary"]["by_kind"]["deferred_check"], 1);
     assert_eq!(json["data"]["summary"]["auto_resolved"], 0);
-    assert_eq!(json["data"]["summary"]["total"], 1);
+    assert_eq!(json["data"]["summary"]["total"], 2);
     let findings = json["data"]["findings"].as_array().expect("findings array");
     let edge_finding = findings
         .iter()
@@ -137,6 +144,11 @@ fn lint_json_reports_contradiction_without_mutating_live_edges() {
         edge_finding["entities"],
         serde_json::json!(["edge-a", "edge-b"])
     );
+    let deferred = findings
+        .iter()
+        .find(|f| f["kind"] == "deferred_check")
+        .expect("deferred_check finding documenting store-open failure");
+    assert_eq!(deferred["severity"], "error");
     assert_eq!(live_edge_ids(&vault), ["edge-a", "edge-b"]);
 }
 
