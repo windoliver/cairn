@@ -13,6 +13,7 @@ pub mod consent;
 pub mod consent_timeline;
 pub mod entity_graph;
 pub mod error;
+pub mod hot_prefix;
 mod identity;
 pub mod lint;
 pub mod locks;
@@ -26,6 +27,7 @@ mod verify;
 pub mod wal;
 
 pub use error::StoreError;
+pub use hot_prefix::SqliteHotPrefixCache;
 pub use identity::SqliteIdentityRegistry;
 pub use lint::{EdgeLintReport, lint_edges, resolve_edge_contradictions};
 pub use open::{
