@@ -38,7 +38,10 @@ use crate::search::ScoreExplain;
 /// downstream adapter that does not provide its own implementation —
 /// the default impl returns `"capability unavailable: forget_record"`
 /// so trait-object consumers compile, but the trait surface itself
-/// has grown.
+/// has grown. Co-evolved within 0.6 in the #58 forget-receipt-fidelity
+/// follow-up by adding `ForgetReceipt::deleted_count` and marking
+/// `ForgetReceipt` `#[non_exhaustive]` with a [`ForgetReceipt::new`]
+/// constructor — additive, gated by `non_exhaustive`, no version bump.
 pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 6, 0);
 
 /// Errors raised by `MemoryStore` implementations. Adapters define their
@@ -576,10 +579,16 @@ impl TombstoneReason {
 /// Outcome of a `forget_record` call (brief §14 forget-receipt allowlist).
 ///
 /// Body-free by construction: only the salted target hash, the WAL op id,
-/// and the purge timestamp survive. The corresponding row in
-/// `consent_journal` carries the same `target_id_hash` and `op_id` so
-/// audits can join the two without exposing forgotten content.
+/// the purge timestamp, and the count of active rows that were
+/// tombstoned survive. The corresponding row in `consent_journal` carries
+/// the same `target_id_hash` and `op_id` so audits can join the two
+/// without exposing forgotten content.
+///
+/// `#[non_exhaustive]` so adding new audit-allowlisted fields (e.g. a
+/// post-Phase-B integrity hash) is a non-breaking change for downstream
+/// trait implementors. Use [`ForgetReceipt::new`] to construct.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ForgetReceipt {
     /// `sha256:<hex>` of the forgotten `target_id`.
     pub target_id_hash: String,
@@ -590,6 +599,33 @@ pub struct ForgetReceipt {
     /// here is the bounded duration of `wal.purge_pre_images` (step 6)
     /// and `snapshot.purge` (step 7) — single-digit ms in P0.
     pub purged_at: i64,
+    /// Number of active record rows that were live for `target_id` at
+    /// the moment the forget was admitted. Captured via
+    /// `SELECT COUNT(*) FROM records WHERE target_id = ?1 AND active = 1`
+    /// before any locks are taken so an idempotent re-forget reports `0`
+    /// (the rows are already tombstoned + purged) while the first forget
+    /// reports the live-version count. Operators reading `deleted_count: 0`
+    /// in the response envelope get the signal they need to debug stale
+    /// IDs / typos / repeat forgets without polluting it as a hard error
+    /// — the WAL op did execute, idempotently (brief §5.6).
+    pub deleted_count: u64,
+}
+
+impl ForgetReceipt {
+    /// Construct a [`ForgetReceipt`].
+    ///
+    /// Provided so adapter crates outside `cairn-core` can build the struct
+    /// despite the `#[non_exhaustive]` attribute. Mirrors the [`IndexStats`]
+    /// constructor pattern.
+    #[must_use]
+    pub fn new(target_id_hash: String, op_id: String, purged_at: i64, deleted_count: u64) -> Self {
+        Self {
+            target_id_hash,
+            op_id,
+            purged_at,
+            deleted_count,
+        }
+    }
 }
 
 /// Outcome of an `upsert` call. `content_changed = false` indicates the

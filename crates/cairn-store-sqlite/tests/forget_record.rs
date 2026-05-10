@@ -1,9 +1,10 @@
 //! Issue #58: record-level forget through body-bearing WAL.
 //!
-//! Engine-level integration coverage. The CLI/MCP/SDK dispatch wiring
-//! and the `wiring::FORGET_RECORD_WIRED` constant flip are deferred
-//! to issue #9; these tests call `SqliteMemoryStore::forget_record`
-//! directly to exercise the WAL apply path end-to-end.
+//! Engine-level integration coverage. The CLI dispatch wiring and the
+//! `wiring::FORGET_RECORD_WIRED_CLI` constant flip landed in #58; SDK and
+//! MCP wiring (`FORGET_RECORD_WIRED_SDK` / `_MCP`) are deferred to #9.
+//! These tests call `SqliteMemoryStore::forget_record` directly to
+//! exercise the WAL apply path end-to-end.
 
 #![allow(missing_docs)]
 
