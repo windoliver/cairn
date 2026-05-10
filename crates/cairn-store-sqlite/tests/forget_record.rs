@@ -130,7 +130,7 @@ async fn assert_forget_purged_surfaces(
 async fn seed_upsert_pre_image_leak(
     conn: &Arc<tokio_rusqlite::Connection>,
     record: &MemoryRecord,
-) -> String {
+) -> (String, i64) {
     let record_id = record.id.as_str().to_owned();
     let target_id = record.target_id.as_str().to_owned();
     let body = record.body.clone();
@@ -150,17 +150,20 @@ async fn seed_upsert_pre_image_leak(
         })
         .to_string()
         .into_bytes();
+        let step_ord = c.query_row(
+            "SELECT MIN(step_ord) FROM wal_steps WHERE operation_id = ?1",
+            params![upsert_op],
+            |row| row.get::<_, i64>(0),
+        )?;
         let changed = c.execute(
             "UPDATE wal_steps \
                 SET pre_image = ?1 \
               WHERE operation_id = ?2 \
-                AND step_ord = ( \
-                    SELECT MIN(step_ord) FROM wal_steps WHERE operation_id = ?2 \
-                )",
-            params![leaked_pre_image, upsert_op],
+                AND step_ord = ?3",
+            params![leaked_pre_image, upsert_op, step_ord],
         )?;
         assert_eq!(changed, 1, "test should seed one upsert pre_image leak");
-        Ok::<_, tokio_rusqlite::Error>(upsert_op)
+        Ok::<_, tokio_rusqlite::Error>((upsert_op, step_ord))
     })
     .await
     .expect("seed leaking pre_image")
@@ -170,6 +173,7 @@ async fn assert_forget_scrubbed_prior_wal_and_kept_body_free_payload(
     conn: &Arc<tokio_rusqlite::Connection>,
     record: &MemoryRecord,
     upsert_op: String,
+    seeded_step_ord: i64,
     forget_op: &OperationId,
 ) {
     let record_id = record.id.as_str().to_owned();
@@ -206,16 +210,31 @@ async fn assert_forget_scrubbed_prior_wal_and_kept_body_free_payload(
             );
         }
 
-        let purged_stubs: i64 = c.query_row(
-            "SELECT COUNT(*) \
+        let (payload_type, payload_purged_by): (String, String) = c.query_row(
+            "SELECT json_extract(payload_json, '$.type'), \
+                    json_extract(payload_json, '$.purged_by') \
                FROM wal_payloads \
               WHERE operation_id = ?1 \
                 AND kind = 'purged' \
                 AND json_extract(payload_json, '$.type') = 'purged'",
             params![upsert_op],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
-        assert!(purged_stubs > 0, "at least one purged stub should remain");
+        assert_eq!(payload_type, "purged");
+        assert_eq!(payload_purged_by, forget_op);
+
+        let (pre_image_type, pre_image_purged_by): (String, String) = c.query_row(
+            "SELECT json_extract(CAST(pre_image AS TEXT), '$.type'), \
+                    json_extract(CAST(pre_image AS TEXT), '$.purged_by') \
+               FROM wal_steps \
+              WHERE operation_id = ?1 \
+                AND step_ord = ?2 \
+                AND pre_image IS NOT NULL",
+            params![upsert_op, seeded_step_ord],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(pre_image_type, "purged");
+        assert_eq!(pre_image_purged_by, forget_op);
 
         let (forget_kind, forget_type, forget_json): (String, String, String) = c.query_row(
             "SELECT kind, json_extract(payload_json, '$.type'), payload_json \
@@ -519,7 +538,7 @@ async fn forget_record_scrubs_body_bearing_wal_payloads_and_pre_images() {
     store.upsert(&record).await.expect("upsert");
 
     let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
-    let upsert_op = seed_upsert_pre_image_leak(&conn, &record).await;
+    let (upsert_op, seeded_step_ord) = seed_upsert_pre_image_leak(&conn, &record).await;
 
     let outcome = store
         .forget_record(&record.id)
@@ -532,6 +551,7 @@ async fn forget_record_scrubs_body_bearing_wal_payloads_and_pre_images() {
         &conn,
         &record,
         upsert_op,
+        seeded_step_ord,
         &outcome.operation_id,
     )
     .await;
