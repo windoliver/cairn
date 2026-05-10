@@ -74,9 +74,9 @@ fn assemble_hot_writes_one_metrics_line_per_call() {
     // Second call → cache hit → 2 lines, last line cache_hit: true.
     assemble_hot(dir.path());
     let content2 = std::fs::read_to_string(&metrics_path).expect("read metrics #2");
-    let lines: Vec<&str> = content2.lines().collect();
-    assert_eq!(lines.len(), 2, "after 2 calls");
-    let line2: serde_json::Value = serde_json::from_str(lines[1]).expect("parse #2");
+    let all_lines: Vec<&str> = content2.lines().collect();
+    assert_eq!(all_lines.len(), 2, "after 2 calls");
+    let line2: serde_json::Value = serde_json::from_str(all_lines[1]).expect("parse #2");
     assert_eq!(line2["event"], "hot_prefix_assembled");
     assert_eq!(
         line2["cache_hit"], true,

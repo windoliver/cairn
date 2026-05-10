@@ -64,6 +64,22 @@ pub struct LintInputs<'a> {
     /// wired one — the §6.5 check downgrades to a no-op so `lint` stays
     /// useful in fixture-only / pre-#253 contexts.
     pub consent_lookup: Option<&'a (dyn ConsentLookup + 'a)>,
+    /// Vault root for filesystem-backed lint checks (broken source
+    /// links, missing summaries). `None` falls those checks back to
+    /// no-ops so fixture-only tests of unrelated checks remain green.
+    pub vault_root: Option<&'a std::path::Path>,
+    /// Loads step bodies for the dry-run hot-memory walker. `None`
+    /// keeps the over-budget check on the canary path.
+    pub hot_body_loader: Option<
+        &'a (
+                dyn Fn(
+            crate::generated::verbs::assemble_hot::HotRecipeStep,
+        ) -> Result<String, String>
+                    + Send
+                    + Sync
+                    + 'a
+            ),
+    >,
 }
 
 impl std::fmt::Debug for LintInputs<'_> {
@@ -75,6 +91,8 @@ impl std::fmt::Debug for LintInputs<'_> {
             .field("author_states", &self.author_states.len())
             .field("unresolvable_authors", &self.unresolvable_authors.len())
             .field("consent_lookup", &self.consent_lookup.is_some())
+            .field("vault_root", &self.vault_root)
+            .field("hot_body_loader", &self.hot_body_loader.is_some())
             .finish()
     }
 }
@@ -237,6 +255,8 @@ mod tests {
             author_states: crate::verbs::lint::empty_author_states(),
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: None,
+            vault_root: None,
+            hot_body_loader: None,
         };
         let data = run_checks(&inputs).await;
         // Empty records: consent (#253) is wired but has nothing to
@@ -302,6 +322,8 @@ mod tests {
             author_states: crate::verbs::lint::empty_author_states(),
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: None,
+            vault_root: None,
+            hot_body_loader: None,
         };
         let inputs_rev = LintInputs {
             records: &reversed,
@@ -310,6 +332,8 @@ mod tests {
             author_states: crate::verbs::lint::empty_author_states(),
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: None,
+            vault_root: None,
+            hot_body_loader: None,
         };
 
         let fwd = canonicalize(&run_checks(&inputs_fwd).await.findings);
@@ -341,6 +365,8 @@ mod tests {
             author_states: crate::verbs::lint::empty_author_states(),
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: None,
+            vault_root: None,
+            hot_body_loader: None,
         };
         let data = run_checks(&inputs).await;
         assert_eq!(data.summary.total, data.findings.len() as u64);

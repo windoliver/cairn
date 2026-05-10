@@ -1112,6 +1112,7 @@ pub struct LintHandlerResult {
 ///
 /// Returns an error if the store cannot be queried or if writing the
 /// report fails.
+#[allow(clippy::too_many_lines)] // dispatcher wires multiple subsystems; extraction deferred
 pub async fn lint_handler(
     store: &dyn cairn_core::contract::memory_store::MemoryStore,
     identity_registry: &dyn cairn_core::contract::identity_registry::IdentityRegistry,
@@ -1192,6 +1193,8 @@ pub async fn lint_handler(
         author_states: &author_states,
         unresolvable_authors: &unresolvable_authors,
         consent_lookup,
+        vault_root: None,
+        hot_body_loader: None,
     };
     let mut data = run_checks(&inputs).await;
 
