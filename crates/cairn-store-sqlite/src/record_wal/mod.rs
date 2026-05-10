@@ -10,6 +10,7 @@
 pub mod payload;
 
 pub(crate) mod expire;
+pub(crate) mod forget;
 pub(crate) mod locks;
 pub(crate) mod ops;
 pub(crate) mod recovery;
@@ -17,5 +18,6 @@ pub(crate) mod steps;
 pub(crate) mod upsert;
 
 pub(crate) use expire::apply_expire;
+pub(crate) use forget::apply_forget_record;
 pub use recovery::RecordWalRegistry;
 pub(crate) use upsert::apply_upsert;
