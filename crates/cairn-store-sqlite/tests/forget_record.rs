@@ -7,6 +7,8 @@
 
 #![allow(missing_docs)]
 
+use std::sync::Arc;
+
 use cairn_core::contract::memory_store::{ForgetReceipt, KeywordSearchArgs, ListArgs, MemoryStore};
 use cairn_core::domain::{Identity, MemoryRecord};
 use cairn_store_sqlite::open_in_memory;
@@ -99,4 +101,48 @@ async fn forget_record_removes_content_from_every_reader() {
     );
     assert!(receipt.op_id.starts_with("forget_record-"));
     assert!(receipt.purged_at > 0);
+}
+
+// ── Task 9 ─────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn forget_record_is_idempotent_under_repeat() {
+    let store = open_in_memory().await.expect("open");
+    let record = sample();
+    let target = record.target_id.clone();
+
+    store.upsert(&record).await.expect("upsert");
+
+    let r1 = store
+        .forget_record(&target, &alice())
+        .await
+        .expect("first forget");
+
+    // Second call against the already-forgotten target. Records table is
+    // empty, but the WAL apply path should still succeed: tombstone +
+    // drains + purge are all no-ops, snapshot.purge stays no-op, and the
+    // receipt comes back with the same target_id_hash.
+    let r2 = store
+        .forget_record(&target, &alice())
+        .await
+        .expect("second forget");
+
+    assert_eq!(r1.target_id_hash, r2.target_id_hash);
+    assert_ne!(r1.op_id, r2.op_id, "every call mints a fresh op_id");
+
+    // Verify two COMMITTED forget_record ops landed in wal_ops.
+    let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
+    let count: i64 = conn
+        .call(|c| {
+            c.query_row(
+                "SELECT COUNT(*) FROM wal_ops \
+                  WHERE kind = 'forget_record' AND state = 'COMMITTED'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))
+        })
+        .await
+        .expect("wal count");
+    assert_eq!(count, 2, "both forget calls reach COMMITTED");
 }
