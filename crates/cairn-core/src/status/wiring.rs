@@ -8,7 +8,11 @@
 //! propagates to every surface.
 
 /// `forget --record` end-to-end dispatch path is wired (issue family #54+).
-pub const FORGET_RECORD_WIRED: bool = false;
+///
+/// Flipped to `true` once `cairn forget --record <id>` was wired through
+/// `SqliteMemoryStore::forget_record` in the CLI (issue #58 dispatch
+/// extension; the engine landed earlier in #58).
+pub const FORGET_RECORD_WIRED: bool = true;
 
 /// `forget --session` (v0.2+ runtime).
 pub const FORGET_SESSION_WIRED: bool = false;
