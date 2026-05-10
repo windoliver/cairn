@@ -57,6 +57,23 @@ pub fn with_fix_markdown(cmd: clap::Command) -> clap::Command {
     )
 }
 
+/// Add `--plan <ULID>` flag to the `lint` subcommand. Lints the named pending
+/// FlushPlan instead of running the live-store edge linter — surfaces issues
+/// (e.g. rename target collisions) before `flush apply` runs.
+#[must_use]
+pub fn with_lint_plan(cmd: clap::Command) -> clap::Command {
+    cmd.arg(
+        clap::Arg::new("plan")
+            .long("plan")
+            .value_name("ULID")
+            .action(clap::ArgAction::Set)
+            .help(
+                "Lint the pending FlushPlan with this id (issue #289 — surfaces \
+                 rename target collisions before apply)",
+            ),
+    )
+}
+
 /// Add `--fix-folders` flag to the `lint` subcommand.
 ///
 /// Augments the generated subcommand builder without touching generated

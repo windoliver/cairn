@@ -1260,6 +1260,123 @@ fn flush_apply_rename_rejects_live_destination_collision() {
 }
 
 #[test]
+fn lint_plan_flags_live_rename_target_collision() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01JTS6R4J7000000000000000H";
+    let source = sample_record(7);
+    let dest = sample_record(8);
+
+    let (rt, store) = open_store(vault.path());
+    rt.block_on(store.upsert(&source)).expect("seed source");
+    rt.block_on(store.upsert(&dest)).expect("seed dest");
+
+    write_real_pending_plan(
+        vault.path(),
+        id,
+        vec![PlannedMutation::Rename {
+            record_id: source.target_id.clone(),
+            new_id: dest.target_id.clone(),
+        }],
+    );
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let out = std::process::Command::new(bin)
+        .args(["lint", "--plan", id])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    assert_eq!(
+        out.status.code(),
+        Some(65),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("rename target collision (live)")
+            && stderr.contains(dest.target_id.as_str()),
+        "expected live rename collision finding; got stderr: {stderr}"
+    );
+}
+
+#[test]
+fn lint_plan_flags_intra_plan_rename_collision() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01JTS6R4J7000000000000000J";
+    let dup_target = TargetId::parse("01JTS6R4J7000000000000000K").unwrap();
+
+    write_real_pending_plan(
+        vault.path(),
+        id,
+        vec![
+            PlannedMutation::Rename {
+                record_id: TargetId::parse("01JTS6R4J70000000000000020").unwrap(),
+                new_id: dup_target.clone(),
+            },
+            PlannedMutation::Rename {
+                record_id: TargetId::parse("01JTS6R4J70000000000000021").unwrap(),
+                new_id: dup_target.clone(),
+            },
+        ],
+    );
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let out = std::process::Command::new(bin)
+        .args(["lint", "--plan", id])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    assert_eq!(
+        out.status.code(),
+        Some(65),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("rename target collision (intra-plan)"),
+        "expected intra-plan rename collision finding; got stderr: {stderr}"
+    );
+}
+
+#[test]
+fn lint_plan_clean_plan_exits_zero() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01JTS6R4J7000000000000000N";
+    let source = sample_record(9);
+    let new_target = TargetId::parse("01JTS6R4J7000000000000000P").unwrap();
+
+    let (rt, store) = open_store(vault.path());
+    rt.block_on(store.upsert(&source)).expect("seed source");
+
+    write_real_pending_plan(
+        vault.path(),
+        id,
+        vec![PlannedMutation::Rename {
+            record_id: source.target_id.clone(),
+            new_id: new_target,
+        }],
+    );
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let out = std::process::Command::new(bin)
+        .args(["lint", "--plan", id])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("clean"),
+        "expected `clean` marker; got stdout: {stdout}"
+    );
+}
+
+#[test]
 fn flush_apply_rename_rewrites_inbound_edges_to_new_active_record() {
     let vault = tempfile::tempdir().unwrap();
     let id = "01JTS6R4J7000000000000000F";
