@@ -56,7 +56,7 @@ mod compatible_plugin {
             &CAPS
         }
         fn supported_contract_versions(&self) -> VersionRange {
-            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 6, 0))
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 7, 0))
         }
         async fn upsert(&self, _r: &MemoryRecord) -> Result<UpsertOutcome, StoreError> {
             Err("stub: upsert not implemented".into())
@@ -96,7 +96,7 @@ mod compatible_plugin {
     impl MemoryStorePlugin for FakeStore {
         const NAME: &'static str = "fake-compat";
         const SUPPORTED_VERSIONS: VersionRange =
-            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 6, 0));
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 7, 0));
     }
 
     register_plugin!(MemoryStore, FakeStore, "fake-compat");
@@ -232,7 +232,7 @@ patch = 0
 
 [contract_version_range.max_exclusive]
 major = 0
-minor = 6
+minor = 7
 patch = 0
 "#;
 
@@ -257,7 +257,7 @@ patch = 0
             &CAPS
         }
         fn supported_contract_versions(&self) -> VersionRange {
-            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 6, 0))
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 7, 0))
         }
         async fn upsert(&self, _r: &MemoryRecord) -> Result<UpsertOutcome, StoreError> {
             Err("stub: upsert not implemented".into())
@@ -297,7 +297,7 @@ patch = 0
     impl MemoryStorePlugin for FakeStore {
         const NAME: &'static str = "fake-with-manifest";
         const SUPPORTED_VERSIONS: VersionRange =
-            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 6, 0));
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 7, 0));
     }
 
     register_plugin!(MemoryStore, FakeStore, "fake-with-manifest", MANIFEST_TOML);
@@ -458,7 +458,7 @@ mod config_driven_plugin {
     impl MemoryStorePlugin for PathStore {
         const NAME: &'static str = "path-store";
         const SUPPORTED_VERSIONS: VersionRange =
-            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 6, 0));
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 7, 0));
     }
 
     register_plugin_with!(
@@ -533,7 +533,7 @@ mod name_mismatch_plugin {
     impl MemoryStorePlugin for BadNameStore {
         const NAME: &'static str = "actual-name";
         const SUPPORTED_VERSIONS: VersionRange =
-            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 6, 0));
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 7, 0));
     }
 
     // NAME const = "actual-name" but macro literal = "wrong-name"
@@ -875,7 +875,7 @@ mod factory_error_plugin {
     impl MemoryStorePlugin for FailingStore {
         const NAME: &'static str = "failing-store";
         const SUPPORTED_VERSIONS: VersionRange =
-            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 6, 0));
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 7, 0));
     }
 
     register_plugin_with!(

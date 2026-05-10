@@ -52,7 +52,7 @@ pub const PLUGIN_NAME: &str = "cairn-store-sqlite";
 /// Plugin capability manifest TOML (parsed at registration time).
 pub const MANIFEST_TOML: &str = include_str!("../plugin.toml");
 
-/// Contract-version range this crate accepts (`[0.4.0, 0.5.0)`). Shared
+/// Contract-version range this crate accepts (`[0.5.0, 0.7.0)`). Shared
 /// by the trait impl and the compile-time guard below so the manifest
 /// range and the trait surface derive from one binding. Lower bound
 /// raised to 0.3.0 in #253 (`per_record_consent_model`), and to 0.4.0
@@ -60,9 +60,11 @@ pub const MANIFEST_TOML: &str = include_str!("../plugin.toml");
 /// `RecordVersion` — adding required public fields is a struct-
 /// construction break). Raised to 0.5.0 in #191 (`auth_scope` on
 /// `*SearchArgs`, `MemoryStoreCapabilities::graph_search`,
-/// `search_graph_neighbors` trait method).
+/// `search_graph_neighbors` trait method). Upper bound widened to
+/// 0.7.0 in #58 (`MemoryStore::forget_record` trait method bumped
+/// host `CONTRACT_VERSION` to 0.6.0).
 pub const ACCEPTED_RANGE: VersionRange =
-    VersionRange::new(ContractVersion::new(0, 5, 0), ContractVersion::new(0, 6, 0));
+    VersionRange::new(ContractVersion::new(0, 5, 0), ContractVersion::new(0, 7, 0));
 
 // Compile-time guard: this crate's accepted range must include the host
 // CONTRACT_VERSION. If we ever bump CONTRACT_VERSION without bumping the

@@ -44,7 +44,7 @@ expression: json
       },
       "contract": "MemoryStore",
       "contract_version_range": {
-        "max_exclusive": "0.6.0",
+        "max_exclusive": "0.7.0",
         "min": "0.5.0"
       },
       "name": "cairn-store-sqlite",

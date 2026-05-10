@@ -655,15 +655,15 @@ mod tests {
     impl MemoryStorePlugin for StubStore {
         const NAME: &'static str = "stub-store";
         const SUPPORTED_VERSIONS: VersionRange =
-            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 6, 0));
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 7, 0));
     }
 
     fn compatible() -> VersionRange {
-        VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 6, 0))
+        VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 7, 0))
     }
 
     fn incompatible() -> VersionRange {
-        VersionRange::new(ContractVersion::new(0, 6, 0), ContractVersion::new(0, 7, 0))
+        VersionRange::new(ContractVersion::new(0, 7, 0), ContractVersion::new(0, 8, 0))
     }
 
     #[test]
@@ -765,7 +765,7 @@ patch = 0
 
 [contract_version_range.max_exclusive]
 major = 0
-minor = 6
+minor = 7
 patch = 0
 "#
     }
