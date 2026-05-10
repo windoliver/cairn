@@ -262,10 +262,11 @@ mod tests {
         // Empty records: consent (#253) is wired but has nothing to
         // classify, actor_chain (#256) the same, schema (#258) is
         // live. hot_memory (#259 / #83) is now a real walker — with
-        // no hot_body_loader wired and no vault_root, it emits zero
-        // findings (the deferred-step canary Warning is gone).
-        // Provenance (#257) remains a stub → 1 DeferredCheck finding
-        // (1 Info only; the canary Warning is no more).
+        // no hot_body_loader wired and no vault_root, it still emits
+        // ONE DeferredCheck Info advisory documenting the dormant
+        // missing_summary check (codex review round 1 finding 4).
+        // Provenance (#257) remains a stub → 1 DeferredCheck Info.
+        // Total: 2 Info findings, no warnings/errors.
         assert_eq!(data.summary.total, data.findings.len() as u64);
         assert_eq!(data.summary.by_severity.error, 0);
         assert_eq!(data.summary.by_severity.warning, 0);
@@ -274,9 +275,9 @@ mod tests {
                 .iter()
                 .filter(|f| matches!(f.kind, Kind::DeferredCheck))
                 .count(),
-            1
+            2
         );
-        assert_eq!(data.summary.by_severity.info, 1);
+        assert_eq!(data.summary.by_severity.info, 2);
     }
 
     #[tokio::test]
@@ -378,9 +379,10 @@ mod tests {
         // host both stamp at `SchemaVersion::current()` so `compare`
         // returns `Same` and no finding fires. hot_memory (#259 / #83)
         // is the real walker now — with no hot_body_loader wired and
-        // no vault_root, it emits zero findings (the deferred-step
-        // canary Warning is gone). Provenance (#257) remains a stub →
-        // 1 DeferredCheck finding (1 Info only), 1 Error.
+        // no vault_root, it emits ONE DeferredCheck Info for the
+        // dormant missing_summary check (codex round 1 finding 4).
+        // Provenance (#257) remains a stub → 1 DeferredCheck Info, 1
+        // Error. Total: 2 Info + 1 Error.
         assert_eq!(data.summary.by_severity.error, 1);
         assert_eq!(data.summary.by_severity.warning, 0);
         assert_eq!(
@@ -388,8 +390,8 @@ mod tests {
                 .iter()
                 .filter(|f| matches!(f.kind, Kind::DeferredCheck))
                 .count(),
-            1
+            2
         );
-        assert_eq!(data.summary.by_severity.info, 1);
+        assert_eq!(data.summary.by_severity.info, 2);
     }
 }

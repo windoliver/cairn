@@ -191,10 +191,19 @@ mod tests {
             hot_body_loader: Some(&loader),
         };
         let findings = run(&inputs);
+        // Post codex round-1 fix: with a loader wired the walker emits
+        // two DeferredCheck Info advisories — one for store-backed
+        // recipe steps the sync loader can't read, one for the dormant
+        // missing_summary check. Neither indicates a problem; assert
+        // that nothing more severe fires.
+        let nondeferred: Vec<Kind> = findings
+            .iter()
+            .filter(|f| !matches!(f.kind, Kind::DeferredCheck))
+            .map(|f| f.kind)
+            .collect();
         assert!(
-            findings.is_empty(),
-            "clean recipe must emit no hot_memory findings; got {:?}",
-            findings.iter().map(|f| f.kind).collect::<Vec<_>>()
+            nondeferred.is_empty(),
+            "clean recipe must emit no non-deferred hot_memory findings; got {nondeferred:?}"
         );
     }
 
@@ -232,9 +241,13 @@ mod tests {
     }
 
     #[test]
-    fn walker_without_loader_emits_no_walker_findings() {
-        // No loader → no assembler call → no over-budget finding (and
-        // no DeferredCheck warnings either; the canary is gone).
+    fn walker_without_loader_emits_only_missing_summary_advisory() {
+        // No loader → assembler not invoked → no over-budget finding
+        // and no store-backed-deferred advisory. No vault_root →
+        // broken_source_links is empty. No records → stale_profile_lines
+        // is empty. But missing_summary always runs (and currently always
+        // dormant because HotMemoryConfig.summary_folders isn't in the
+        // schema), so a single DeferredCheck Info finding is expected.
         let cfg = CairnConfig::default();
         let inputs = LintInputs {
             records: &[],
@@ -247,13 +260,14 @@ mod tests {
             hot_body_loader: None,
         };
         let findings = run(&inputs);
-        // No vault_root → broken_source_links / missing_summaries are
-        // empty; no records → stale_profile_lines is empty; no loader
-        // → walker is empty. Net: zero findings.
+        let kinds: Vec<Kind> = findings.iter().map(|f| f.kind).collect();
+        assert_eq!(findings.len(), 1, "expected exactly 1 finding; got {kinds:?}");
+        assert!(matches!(findings[0].kind, Kind::DeferredCheck));
+        assert!(matches!(findings[0].severity, Severity::Info));
         assert!(
-            findings.is_empty(),
-            "expected no findings; got {:?}",
-            findings.iter().map(|f| f.kind).collect::<Vec<_>>()
+            findings[0].message.contains("missing_summary"),
+            "expected missing_summary advisory; got {:?}",
+            findings[0].message
         );
     }
 }
