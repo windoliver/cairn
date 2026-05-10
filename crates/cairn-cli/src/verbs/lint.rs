@@ -1823,27 +1823,78 @@ pub fn run(sub: &ArgMatches, vault_root: Option<&Path>) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    if write_report {
-        emit_aborted(
-            json,
-            operation_id,
-            "lint --write-report is not wired in this CLI path",
-        );
-        return ExitCode::FAILURE;
+    // --fix resolves WAL edge contradictions via raw rusqlite (no store
+    // migration path); keep that path unchanged.
+    if fix {
+        match run_edge_lint(true, vault_root, &operation_id) {
+            Ok(report) => {
+                let has_blocking_findings = report.findings.iter().any(has_warning_or_error);
+                let data = lint_data(report);
+                let response = committed_response(operation_id, data);
+                if json {
+                    emit_json(&response);
+                } else if let Some(ResponseData::Lint(data)) = response.data.as_ref() {
+                    emit_human(data, &response.operation_id);
+                }
+                if has_blocking_findings {
+                    return ExitCode::FAILURE;
+                }
+                return ExitCode::SUCCESS;
+            }
+            Err(err) => {
+                emit_aborted(json, operation_id, &err.to_string());
+                return ExitCode::FAILURE;
+            }
+        }
     }
 
-    match run_edge_lint(fix, vault_root, &operation_id) {
-        Ok(report) => {
-            let has_blocking_findings = report.findings.iter().any(has_warning_or_error);
-            let data = lint_data(report);
-            let response = committed_response(operation_id, data);
+    // Default (read-only) path: dispatch through lint_handler so the
+    // hot-memory walker (BrokenSourceLink, MissingSummary,
+    // StaleProfileLine) and all other vault-level checks run.
+    let vault_root = vault_root.map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    let db_path = vault_root.join(".cairn").join("cairn.db");
+
+    if let Some(exit) = require_existing_vault(json, &vault_root, &db_path) {
+        return exit;
+    }
+
+    let config = match crate::config::load(&vault_root, &crate::config::CliOverrides::default()) {
+        Ok(c) => c,
+        Err(e) => {
+            emit_aborted(json, operation_id, &format!("config: {e:#}"));
+            return ExitCode::from(78); // EX_CONFIG
+        }
+    };
+
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            emit_aborted(json, operation_id, &format!("tokio init: {e}"));
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let outcome = rt.block_on(async {
+        let store = cairn_store_sqlite::open(&db_path)
+            .await
+            .map_err(|e| anyhow::anyhow!("open store: {e}"))?;
+        let registry = cairn_store_sqlite::SqliteIdentityRegistry::open(&db_path)
+            .map_err(|e| anyhow::anyhow!("open registry: {e}"))?;
+        lint_handler(&store, &registry, None, &config, write_report, &vault_root).await
+    });
+
+    match outcome {
+        Ok(result) => {
+            let response = committed_response(operation_id, result.data);
             if json {
                 emit_json(&response);
             } else if let Some(ResponseData::Lint(data)) = response.data.as_ref() {
                 emit_human(data, &response.operation_id);
             }
-
-            if has_blocking_findings && !fix {
+            if result.has_error {
                 ExitCode::FAILURE
             } else {
                 ExitCode::SUCCESS

@@ -3,8 +3,9 @@
 //!
 //! Tests call `lint_handler` directly (the CLI-crate library boundary),
 //! following the same pattern as `lint_drift.rs`. The `cairn lint` binary
-//! invokes `run_edge_lint` (SQLite edge linting only); hot-memory checks
-//! live in `lint_handler`, which is the surface these tests pin.
+//! also routes the default (read-only) path through `lint_handler` as of
+//! the wiring fix in Task 28; `run_edge_lint` is now only invoked for
+//! `cairn lint --fix` (WAL edge contradiction resolution).
 
 // Integration test files are not public API; doc-comments are not required.
 #![allow(missing_docs)]
