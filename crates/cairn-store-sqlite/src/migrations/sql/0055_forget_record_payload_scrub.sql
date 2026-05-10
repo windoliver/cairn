@@ -41,8 +41,10 @@ CREATE TRIGGER wal_payloads_scrub_only
   FOR EACH ROW
   WHEN NEW.operation_id IS NOT OLD.operation_id
     OR NEW.created_at IS NOT OLD.created_at
+    OR OLD.kind = 'purged'
     OR NEW.kind <> 'purged'
-    OR json_extract(NEW.payload_json, '$.type') <> 'purged'
+    OR json_type(NEW.payload_json, '$.type') IS NOT 'text'
+    OR json_extract(NEW.payload_json, '$.type') IS NOT 'purged'
 BEGIN
   SELECT RAISE(ABORT, 'wal_payloads updates are limited to purged scrub stubs');
 END;

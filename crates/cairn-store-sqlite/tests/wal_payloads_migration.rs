@@ -9,7 +9,7 @@ use cairn_store_sqlite::open_in_memory;
 use rusqlite::params;
 
 #[tokio::test]
-async fn wal_payloads_table_is_present_and_immutable() {
+async fn wal_payloads_table_is_present_and_rejects_non_scrub_updates() {
     let store = open_in_memory().await.expect("open in-memory store");
     let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
 
@@ -134,6 +134,17 @@ async fn wal_payloads_accepts_forget_record_and_only_scrub_updates() {
             "non-scrub payload updates must still be blocked"
         );
 
+        let missing_type_scrub = c.execute(
+            "UPDATE wal_payloads \
+                SET kind = 'purged', payload_json = '{}' \
+              WHERE operation_id = 'forget-record-payload'",
+            [],
+        );
+        assert!(
+            missing_type_scrub.is_err(),
+            "scrub updates must require a purged payload type"
+        );
+
         c.execute(
             "UPDATE wal_payloads \
                 SET kind = 'purged', \
@@ -147,6 +158,18 @@ async fn wal_payloads_accepts_forget_record_and_only_scrub_updates() {
             |row| row.get(0),
         )?;
         assert_eq!(kind, "purged");
+
+        let second_scrub = c.execute(
+            "UPDATE wal_payloads \
+                SET kind = 'purged', \
+                    payload_json = '{\"type\":\"purged\",\"target_hash\":\"hash:00000000000000000000000000000000\",\"purged_by\":\"forget-record-payload\",\"purged_at\":2}' \
+              WHERE operation_id = 'forget-record-payload'",
+            [],
+        );
+        assert!(
+            second_scrub.is_err(),
+            "purged payload rows must not be scrubbed again"
+        );
 
         let delete = c.execute(
             "DELETE FROM wal_payloads WHERE operation_id = 'forget-record-payload'",
