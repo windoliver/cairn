@@ -96,6 +96,9 @@ fn floor_decimal_product(compaction_target: u32, ratio: f64) -> u64 {
 
 /// Run the fail-closed pre-compaction flow: budgeted assembly first, then
 /// snapshot persistence, returning reinjection metadata only on success.
+///
+/// Emits a `sensor.pre_compact` span carrying `session_id`, `recipe`,
+/// `budget`, and `output_bytes` so harnesses can audit each fire-and-splice.
 pub fn run_pre_compact<SNAP>(
     event: &PreCompactEvent,
     cfg: &HotMemoryConfig,
@@ -104,13 +107,31 @@ pub fn run_pre_compact<SNAP>(
 where
     SNAP: FnMut(&PreCompactEvent, &AssembleHotData) -> Result<(), String>,
 {
+    let span = tracing::info_span!(
+        "sensor.pre_compact",
+        session_id = %event.session_id,
+        recipe = %cfg.pre_compact_recipe,
+        budget = tracing::field::Empty,
+        output_bytes = tracing::field::Empty,
+    );
+    let _enter = span.enter();
     let budget = compute_budget(
         event.compaction_target,
         cfg.max_bytes,
         cfg.pre_compact_safety_ratio,
     );
+    span.record("budget", budget);
     let data = assemble_hot_with_budget(cfg, budget)?;
+    span.record("output_bytes", data.bytes);
     snapshot(event, &data).map_err(|reason| PreCompactError::Snapshot { reason })?;
+
+    tracing::info!(
+        session_id = %event.session_id,
+        recipe = %cfg.pre_compact_recipe,
+        budget,
+        output_bytes = data.bytes,
+        "sensor.pre_compact: reinjection rendered",
+    );
 
     Ok(PreCompactOutput {
         reinjection_text: data.prefix,
@@ -207,6 +228,36 @@ mod tests {
 
         assert!(!snapshot_called.get());
         assert!(matches!(err, PreCompactError::AssembleHot(_)));
+    }
+
+    #[test]
+    fn pre_compact_output_bytes_stay_within_safety_ratio_for_8000_target() {
+        // Issue #310 acceptance: a pre_compact event whose harness target is
+        // 8 000 tokens must yield reinjection bytes inside the 0.30-ratio
+        // budget (≤ 2 400 bytes), regardless of recipe content.
+        let out = run_pre_compact(&sample_event(), &sample_cfg(), |_, _| Ok(())).unwrap();
+
+        assert_eq!(out.budget_bytes, 2_400);
+        assert!(
+            out.output_bytes <= 2_400,
+            "output {} bytes exceeded the 2_400-byte safety budget",
+            out.output_bytes,
+        );
+        assert!(out.reinjection_text.len() as u64 <= out.budget_bytes);
+    }
+
+    #[tracing_test::traced_test]
+    #[test]
+    fn pre_compact_emits_sensor_span_with_required_fields() {
+        // Issue #310 acceptance: a `sensor.pre_compact` span must carry
+        // session_id, recipe, budget, and output_bytes for harness audit.
+        let out = run_pre_compact(&sample_event(), &sample_cfg(), |_, _| Ok(())).unwrap();
+
+        assert!(logs_contain("sensor.pre_compact"));
+        assert!(logs_contain("session_id=sess_01jv3e0h5n7d9c1m2p4q6r8s0t"));
+        assert!(logs_contain("recipe=handoff"));
+        assert!(logs_contain(&format!("budget={}", out.budget_bytes)));
+        assert!(logs_contain(&format!("output_bytes={}", out.output_bytes)));
     }
 
     #[test]
