@@ -344,15 +344,23 @@ fn now_secs() -> i64 {
 /// The `UPDATE` itself is idempotent — re-running over already-tombstoned
 /// rows is a no-op.
 ///
-/// **No-op forgets do not append a consent receipt.** When the in-txn
-/// count observes zero live rows (idempotent re-forget after the
-/// records were already purged), the helper records `deleted_count = 0`
-/// in the cell and returns without writing to `consent_journal`. The
-/// authoritative receipt is the one the *original* forget wrote with
-/// the real scope/tier; appending another receipt with the post-purge
+/// **Truly-purged forgets do not append a consent receipt.** When the
+/// in-txn `SELECT COUNT(*)` observes zero rows for the target (records
+/// table holds nothing), the helper records `deleted_count = 0` and
+/// returns without writing to `consent_journal`. The authoritative
+/// receipt is the one the original forget wrote with the real
+/// scope/tier; appending another receipt with the post-purge
 /// `ScopeTuple::default()` + `MemoryVisibility::Private` defaults
-/// would dilute the audit trail and misclassify a previously
-/// team/org/public scoped record. Round-5 review (Codex).
+/// would dilute the audit trail. Round-5 review (Codex).
+///
+/// **Already-expired targets DO get a receipt.** A target whose rows
+/// exist but are `active = 0` (e.g. previously expired by the
+/// expiration workflow) still has body-bearing data on disk. Phase B
+/// will purge those rows; the receipt records WHO authorized the
+/// destructive op. The scope/tier comes from `load_scope_and_tier`'s
+/// `ORDER BY version DESC` which reads the latest row regardless of
+/// active status, so the receipt preserves the original tier even
+/// when no live row exists. Round-6 review (Codex).
 fn mark_tombstone_and_emit_receipt(
     tx: &Transaction<'_>,
     op_id: &OperationId,
@@ -364,14 +372,20 @@ fn mark_tombstone_and_emit_receipt(
 
     let now_ms = crate::store::current_unix_ms();
 
-    // Capture the live-version count INSIDE the Phase A transaction so
-    // two concurrent forgets cannot both report deleted_count=1. The
-    // record-WAL locks serialize the SELECT against the matching
-    // tombstone UPDATE on the same target — the second forget runs
-    // after the first has already flipped active=0 and reads 0.
+    // In-txn counts under the record-WAL lock: `live_count` populates
+    // `ForgetReceipt::deleted_count` (the count THIS op tombstoned);
+    // `total_rows` discriminates "truly already purged" (no receipt)
+    // from "rows present but inactive" (receipt with original tier).
     let live_count: i64 = tx
         .query_row(
             "SELECT COUNT(*) FROM records WHERE target_id = ?1 AND active = 1",
+            params![payload.target_id.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(StepBodyError::Storage)?;
+    let total_rows: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM records WHERE target_id = ?1",
             params![payload.target_id.as_str()],
             |row| row.get(0),
         )
@@ -392,9 +406,10 @@ fn mark_tombstone_and_emit_receipt(
     )
     .map_err(StepBodyError::Storage)?;
 
-    // No-op forget (records already purged): skip the receipt.
-    // See doc comment above for the audit-invariant rationale.
-    if live_count_u64 == 0 {
+    // Truly already-purged target: no rows exist. Skip the receipt
+    // (the original forget wrote the authoritative one). See doc
+    // comment above for the audit-invariant rationale.
+    if total_rows == 0 {
         return Ok(());
     }
 

@@ -580,9 +580,22 @@ impl TombstoneReason {
 ///
 /// Body-free by construction: only the salted target hash, the WAL op id,
 /// the purge timestamp, and the count of active rows that were
-/// tombstoned survive. The corresponding row in `consent_journal` carries
-/// the same `target_id_hash` and `op_id` so audits can join the two
-/// without exposing forgotten content.
+/// tombstoned survive.
+///
+/// **Consent-journal join contract.** When the forget op had something
+/// to destroy (any record rows existed for the target at admission
+/// time, including already-expired ones), the corresponding row in
+/// `consent_journal` carries the same `target_id_hash` and `op_id` so
+/// audits can join the two without exposing forgotten content. When
+/// the target had NO rows at all (truly already-purged idempotent
+/// re-forget), the receipt still returns with a fresh `op_id` and
+/// `deleted_count = 0`, but no consent row is appended — the
+/// authoritative receipt is the one the original destructive forget
+/// wrote, and adding a no-rows duplicate would dilute the audit
+/// trail with `ScopeTuple::default()` + `MemoryVisibility::Private`
+/// post-purge defaults. Round-6 review (Codex). Auditors join via
+/// `query_by_op(receipt.op_id)` and treat zero rows as the "already
+/// purged" marker.
 ///
 /// `#[non_exhaustive]` so adding new audit-allowlisted fields (e.g. a
 /// post-Phase-B integrity hash) is a non-breaking change for downstream

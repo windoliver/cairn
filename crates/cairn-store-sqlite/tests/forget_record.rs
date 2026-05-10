@@ -637,3 +637,89 @@ async fn repeat_forget_after_purge_does_not_dilute_consent_audit_trail() {
          Got payload: {payload_json}"
     );
 }
+
+// ── Round 6 review: expire-then-forget preserves audit receipt ─────────
+
+#[tokio::test]
+async fn forget_after_expire_writes_receipt_with_original_tier() {
+    use cairn_core::domain::taxonomy::MemoryVisibility;
+
+    // Round-6 review (Codex): the no-op-skip predicate must NOT fire on
+    // already-expired targets. An expired record has `active = 0` rows
+    // present (live_count = 0) but body bytes still on disk; the
+    // forget op WILL purge them in Phase B and therefore MUST record
+    // the actor/scope/tier in consent_journal.
+    //
+    // The fix uses `total_rows == 0` (not `live_count == 0`) as the
+    // skip predicate so this case writes a receipt with the original
+    // Org tier — `load_scope_and_tier`'s `ORDER BY version DESC`
+    // reads inactive rows too.
+    let store = open_in_memory().await.expect("open");
+    let mut record = sample();
+    record.visibility = MemoryVisibility::Org;
+    let target = record.target_id.clone();
+    store.upsert(&record).await.expect("upsert");
+
+    // Soft-expire the record: rows remain with active=0, tombstoned=1,
+    // tombstone_reason='expire' (no body purge yet).
+    store.expire(&target).await.expect("expire");
+
+    let receipt = store
+        .forget_record(&target, &alice())
+        .await
+        .expect("forget after expire");
+    assert_eq!(
+        receipt.deleted_count, 0,
+        "no live rows at admission — but rows existed, so forget still purges"
+    );
+
+    // The expire-then-forget op MUST have written a consent receipt
+    // (the destructive Phase B purge needs an audited actor).
+    let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
+    let receipt_op_id = receipt.op_id.clone();
+    let row: Option<String> = conn
+        .call(move |c| {
+            let result: Result<String, rusqlite::Error> = c.query_row(
+                "SELECT payload_json FROM consent_journal \
+                  WHERE kind = 'forget_intent' AND op_id = ?1",
+                rusqlite::params![receipt_op_id],
+                |row| row.get(0),
+            );
+            match result {
+                Ok(s) => Ok(Some(s)),
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(e) => Err(tokio_rusqlite::Error::Other(Box::new(e))),
+            }
+        })
+        .await
+        .expect("query consent");
+    let payload_json = row.expect(
+        "expire-then-forget MUST append a ForgetIntent receipt — \
+         the no-op skip predicate must use `total_rows == 0`, not \
+         `live_count == 0`",
+    );
+    assert!(
+        payload_json.contains("\"scope_tier\":\"org\""),
+        "receipt must preserve the original Org visibility (read from \
+         the inactive row via load_scope_and_tier ORDER BY version DESC). \
+         Got: {payload_json}"
+    );
+
+    // Records table physically empty after Phase B.
+    let target_str = target.as_str().to_owned();
+    let row_count: i64 = conn
+        .call(move |c| {
+            c.query_row(
+                "SELECT COUNT(*) FROM records WHERE target_id = ?1",
+                rusqlite::params![target_str],
+                |row| row.get(0),
+            )
+            .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))
+        })
+        .await
+        .expect("count");
+    assert_eq!(
+        row_count, 0,
+        "Phase B primary.purge ran for the expired target"
+    );
+}
