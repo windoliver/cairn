@@ -167,20 +167,6 @@ async fn run_async(args: AssembleHotArgs, vault_root: PathBuf, config: CairnConf
             "assemble_hot recipe exceeds max segment count",
         );
     }
-    let loaded = match load_hot_bodies(
-        &ctx.store,
-        &ctx.vault_root,
-        &ctx.config,
-        &auth,
-        args.session_id.as_deref(),
-        budget,
-    )
-    .await
-    {
-        Ok(loaded) => loaded,
-        Err(resp) => return merge_policy_trace(read_policy_trace(&auth, 0, &[]), resp),
-    };
-    let policy_trace = read_policy_trace(&auth, loaded.files, &loaded.records);
 
     // Open cache + metrics sink. Both failures degrade gracefully:
     // on cache open failure, fall back to direct assembly (no caching
@@ -203,6 +189,33 @@ async fn run_async(args: AssembleHotArgs, vault_root: PathBuf, config: CairnConf
             }
         };
 
+    // Codex review round 3 finding 1: capture (watermarks, fs_fingerprint)
+    // BEFORE load_hot_bodies. cached_assemble compares this pre-load
+    // snapshot to its own post-assembly snapshot; any mutation that
+    // commits during body loading or assembly is detected and the put
+    // is skipped to avoid poisoning the cache.
+    let pre_load = cairn_core::verbs::assemble_hot::cached::pre_load_snapshot(
+        cache.as_ref(),
+        Some(&ctx.vault_root),
+    )
+    .await
+    .ok();
+
+    let loaded = match load_hot_bodies(
+        &ctx.store,
+        &ctx.vault_root,
+        &ctx.config,
+        &auth,
+        args.session_id.as_deref(),
+        budget,
+    )
+    .await
+    {
+        Ok(loaded) => loaded,
+        Err(resp) => return merge_policy_trace(read_policy_trace(&auth, 0, &[]), resp),
+    };
+    let policy_trace = read_policy_trace(&auth, loaded.files, &loaded.records);
+
     let vault_id = std::fs::read_to_string(ctx.vault_root.join(".cairn/vault.id"))
         .unwrap_or_default()
         .trim()
@@ -220,6 +233,7 @@ async fn run_async(args: AssembleHotArgs, vault_root: PathBuf, config: CairnConf
         &vault_id,
         Some(&ctx.vault_root),
         args.session_id.as_deref(),
+        pre_load.as_ref(),
         cache.as_ref(),
         metrics.as_ref(),
         Some(budget),

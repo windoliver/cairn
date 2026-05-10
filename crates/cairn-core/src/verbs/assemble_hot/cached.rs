@@ -20,11 +20,15 @@ use crate::verbs::assemble_hot::assembler::{AssembleHotError, assemble_hot_from_
 /// round 2 finding 4.
 const FS_FINGERPRINT_PATHS: &[&str] = &["purpose.md", "index.md", ".cairn/config.yaml"];
 
-/// Per-file size cap when hashing fingerprint contents. The hot-memory
-/// sources are small markdown / yaml configs; reading more than this
-/// is a sign of misconfiguration. Bounded to keep the cost negligible
-/// even when the fingerprint is recomputed on every `cached_assemble`.
-const FS_FINGERPRINT_MAX_BYTES: u64 = 1024 * 1024; // 1 MiB
+/// Per-file size cap when hashing fingerprint contents. Matches the
+/// assembler's absolute hard cap (`segments::MAX_BYTES`, 4 MiB) so any
+/// byte that can affect assembly contributes to the fingerprint.
+///
+/// Codex review round 3 finding 2: prior cap was 1 MiB, but the
+/// assembler supports prefixes up to 4 MiB. Edits past 1 MiB in
+/// `purpose.md` / `index.md` / `config.yaml` could change the
+/// assembled prefix while leaving the fingerprint unchanged.
+const FS_FINGERPRINT_MAX_BYTES: u64 = 4 * 1024 * 1024; // 4 MiB
 
 /// Compute a content-hash fingerprint for filesystem-backed hot-memory
 /// sources. Returns an empty string when `vault_root` is `None` — the
@@ -46,9 +50,16 @@ pub fn compute_fs_fingerprint(vault_root: Option<&Path>) -> String {
         hasher.update(rel.as_bytes());
         hasher.update(b"\x00");
         let path = root.join(rel);
+        // Include the file's full size (from metadata, unbounded) AND
+        // the capped bytes. Codex round 3 finding 2: two files sharing
+        // the first cap bytes but with different total sizes must
+        // produce different fingerprints — total-size separation makes
+        // beyond-cap edits visible as a fingerprint change.
+        let full_size: Option<u64> = std::fs::metadata(&path).ok().map(|m| m.len());
         match read_capped(&path, FS_FINGERPRINT_MAX_BYTES) {
             Ok(Some(bytes)) => {
                 hasher.update(b"\x01");
+                hasher.update(full_size.unwrap_or(0).to_le_bytes());
                 hasher.update((bytes.len() as u64).to_le_bytes());
                 hasher.update(&bytes);
             }
@@ -148,6 +159,39 @@ fn hex_lower(bytes: &[u8]) -> String {
     out
 }
 
+/// Snapshot of `(watermarks, fs_fingerprint)` captured BEFORE the
+/// caller loaded its bodies. Used by [`cached_assemble`] to detect
+/// mutations that committed between body-load and assembly so the
+/// resulting prefix is not poisoned into the cache.
+///
+/// Codex review round 3 finding 1: without a pre-load snapshot, a
+/// mutation that commits between the caller's body-load and
+/// `cached_assemble`'s first watermark read would write a cache row
+/// whose `watermarks` match the post-mutation state even though the
+/// bodies are pre-mutation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreLoadSnapshot {
+    /// Watermarks observed before the caller loaded bodies.
+    pub watermarks: SourceWatermarks,
+    /// FS fingerprint observed before the caller loaded bodies.
+    pub fs_fingerprint: String,
+}
+
+/// Take a pre-load snapshot for [`cached_assemble`]. Callers must
+/// invoke this BEFORE the body-loading step that the closure will
+/// return, then pass the result to `cached_assemble`.
+pub async fn pre_load_snapshot(
+    cache: &dyn HotPrefixCache,
+    vault_root: Option<&Path>,
+) -> Result<PreLoadSnapshot, crate::contract::hot_prefix_cache::CacheError> {
+    let watermarks = cache.current_watermarks().await?;
+    let fs_fingerprint = compute_fs_fingerprint(vault_root);
+    Ok(PreLoadSnapshot {
+        watermarks,
+        fs_fingerprint,
+    })
+}
+
 /// Cache-aware `assemble_hot`. See module docs.
 ///
 /// `budget_override` caps the assembled output size. When `None`, uses
@@ -162,6 +206,14 @@ fn hex_lower(bytes: &[u8]) -> String {
 /// `session_id` is mixed into the cache key (codex review round 2
 /// finding 1) so session-filtered recipe steps (`recent_user_signal`)
 /// cannot leak across sessions.
+///
+/// `pre_load` is the `(watermarks, fs_fingerprint)` snapshot captured
+/// by the caller BEFORE loading bodies (codex review round 3 finding
+/// 1). On miss, `cached_assemble` re-reads both AFTER assembly; if
+/// either diverges from `pre_load`, the put is skipped so a mutation
+/// that commits between body-load and assembly cannot poison the
+/// cache. Pass `None` to skip the pre-load comparison (the prior
+/// behaviour: only post-snapshot drift is detected).
 #[allow(
     clippy::too_many_arguments,
     reason = "verb entry point; all args required"
@@ -172,6 +224,7 @@ pub async fn cached_assemble(
     vault_id: &str,
     vault_root: Option<&Path>,
     session_id: Option<&str>,
+    pre_load: Option<&PreLoadSnapshot>,
     cache: &dyn HotPrefixCache,
     metrics: &dyn MetricsSink,
     budget_override: Option<u64>,
@@ -234,15 +287,28 @@ pub async fn cached_assemble(
     let data = assemble_hot_from_bodies(config, bodies, budget_override)?;
     let latency_ms = elapsed_ms(started);
 
-    // Codex review round 2 finding 3: bodies were loaded by the caller
-    // BEFORE this function's watermark snapshot. A record mutation
-    // committing in that window would leave us with a prefix assembled
-    // from stale bodies but tagged with fresh watermarks — a poisoned
-    // cache row. Re-read watermarks AND fingerprint; if either has
-    // advanced, skip the cache.put so we don't poison the cache.
+    // Codex review round 2 finding 3 + round 3 finding 1: bodies were
+    // loaded by the caller BEFORE this function's watermark snapshot.
+    // A record mutation committing in that window would leave us with
+    // a prefix assembled from stale bodies but tagged with fresh
+    // watermarks — a poisoned cache row.
+    //
+    // Two defenses:
+    // 1. Re-read watermarks + fingerprint AFTER assembly and compare
+    //    to the snapshot we took ENTERING cached_assemble. Catches a
+    //    mutation that committed during assembly.
+    // 2. If the caller supplied a `pre_load` snapshot (captured BEFORE
+    //    body loading), require post-assembly state to match THAT too.
+    //    Catches a mutation that committed between caller's body-load
+    //    and our internal snapshot.
     let wm_after = cache.current_watermarks().await.ok();
     let fp_after = compute_fs_fingerprint(vault_root);
-    let snapshot_stable = wm_after.is_some_and(|wm| wm == wm_now) && fp_after == fs_fingerprint_now;
+    let post_matches_entry =
+        wm_after.is_some_and(|wm| wm == wm_now) && fp_after == fs_fingerprint_now;
+    let post_matches_preload = pre_load.is_none_or(|pre| {
+        wm_after.is_some_and(|wm| wm == pre.watermarks) && fp_after == pre.fs_fingerprint
+    });
+    let snapshot_stable = post_matches_entry && post_matches_preload;
 
     let entry = CachedPrefix {
         prefix: data.prefix.as_bytes().to_vec(),
@@ -458,6 +524,7 @@ mod tests {
             "v1",
             None,
             None,
+            None,
             &cache,
             &metrics,
             None,
@@ -482,6 +549,7 @@ mod tests {
             &cfg,
             &agent(),
             "v1",
+            None,
             None,
             None,
             &cache,
@@ -522,6 +590,7 @@ mod tests {
             "v1",
             None,
             None,
+            None,
             &cache,
             &metrics,
             None,
@@ -548,6 +617,7 @@ mod tests {
             "v1",
             None,
             None,
+            None,
             &cache,
             &metrics,
             None,
@@ -569,6 +639,7 @@ mod tests {
             &cfg,
             &agent(),
             "v1",
+            None,
             None,
             None,
             &cache,
@@ -601,6 +672,7 @@ mod tests {
             &cfg,
             &agent(),
             "v1",
+            None,
             None,
             None,
             &cache,
