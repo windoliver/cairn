@@ -304,8 +304,25 @@ async fn ensure_forget_issuer(
         .map_err(|e| {
             super::signed::aborted(ResponseVerb::Forget, format!("identity lookup: {e}"))
         })?;
-    if existing.is_some() {
-        return Ok(());
+    if let Some(record) = existing {
+        // §3.10 / §3.5: only `Active` identities can author a destructive
+        // op. `Operational` visibility includes `Revoked`, `RevokePending`,
+        // `Pending`, etc. — checking presence alone would let a revoked
+        // CAIRN_ISSUER land as `consent_journal.actor`, defeating the
+        // signed-tombstone audit posture.
+        if record.provisioning_state.can_sign() {
+            return Ok(());
+        }
+        return Err(super::signed::rejected_from_domain(
+            ResponseVerb::Forget,
+            DomainError::Unauthorized {
+                message: format!(
+                    "issuer {issuer} is registered but not Active \
+                     (state: {:?}); only Active issuers may forget",
+                    record.provisioning_state
+                ),
+            },
+        ));
     }
     if issuer.as_str() != DEFAULT_FORGET_ISSUER {
         return Err(super::signed::rejected_from_domain(
