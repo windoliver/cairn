@@ -463,6 +463,18 @@ fn mark_tombstone_and_emit_receipt(
                 payload.target_id.as_str()
             ))
         })?;
+    // Round-9 review (Codex): semantic validation. JSON-syntactic
+    // success is not enough — `{}` deserializes fine but is an invalid
+    // domain value (no IDL-addressable dimension). Reject corrupt
+    // domain shapes too; otherwise schema drift could let an
+    // irreversible forget commit a receipt with the original
+    // tenant/session/entity erased.
+    in_txn_scope.validate().map_err(|e| {
+        StepBodyError::Failed(format!(
+            "records.scope failed domain validation for target {}: {e}",
+            payload.target_id.as_str()
+        ))
+    })?;
     let in_txn_tier =
         cairn_core::domain::MemoryVisibility::parse(&in_txn_visibility).map_err(|e| {
             StepBodyError::Failed(format!(
@@ -899,6 +911,62 @@ mod tests {
             other => {
                 panic!("expected StepBodyError::Failed for unparseable visibility, got {other:?}")
             }
+        }
+    }
+
+    /// Round-9 review (Codex): the parse step accepts any JSON that
+    /// deserializes to `ScopeTuple`, but `{}` and `{"tenant":""}` etc.
+    /// are syntactically valid yet domain-invalid (no IDL-addressable
+    /// dimension; empty value). Without `ScopeTuple::validate()`,
+    /// schema drift could let an irreversible forget commit with a
+    /// receipt that lost the original scope. Pin the validation gate.
+    #[test]
+    fn mark_tombstone_fails_closed_on_invalid_scope_shape() {
+        use std::sync::atomic::AtomicU64;
+
+        use cairn_core::domain::Identity;
+        use cairn_core::domain::taxonomy::MemoryVisibility;
+        use cairn_core::wal::{OperationId, WalKind};
+
+        use crate::record_wal::ops::new_operation_id;
+        use crate::record_wal::payload::ForgetPayload;
+
+        let mut conn = crate::open::open_in_memory_sync().expect("open");
+        let record = cairn_core::domain::record::tests_export::sample_record();
+
+        let tx = conn.transaction().expect("tx upsert");
+        let plan = crate::store::upsert::plan_upsert_in_tx(&tx, &record).expect("plan");
+        crate::store::upsert::stage_upsert_cow_in_tx(&tx, &record, &plan).expect("stage");
+        crate::store::upsert::activate_upsert_in_tx(&tx, &plan).expect("activate");
+        // Stomp scope with valid JSON but invalid domain shape: `{}`
+        // deserializes to ScopeTuple::default() which has zero
+        // IDL-addressable dimensions → ScopeTuple::validate() rejects.
+        tx.execute(
+            "UPDATE records SET scope = '{}' WHERE target_id = ?1",
+            params![record.target_id.as_str()],
+        )
+        .expect("stomp scope");
+        tx.commit().expect("commit");
+
+        let payload = ForgetPayload {
+            target_id: record.target_id.clone(),
+            scope: record.scope.clone(),
+            reason_code: "user_command".to_owned(),
+            actor: Identity::parse("hmn:test:v1").expect("identity"),
+            scope_tier: MemoryVisibility::Private,
+        };
+        let op_id: OperationId = new_operation_id(WalKind::ForgetRecord).expect("op id");
+        let cell = AtomicU64::new(0);
+        let tx = conn.transaction().expect("tx forget");
+        let result = mark_tombstone_and_emit_receipt(&tx, &op_id, &payload, &cell);
+        match result {
+            Err(StepBodyError::Failed(msg)) => {
+                assert!(
+                    msg.contains("scope") && msg.contains("domain validation"),
+                    "error must name scope + domain validation; got: {msg}"
+                );
+            }
+            other => panic!("expected StepBodyError::Failed for invalid scope, got {other:?}"),
         }
     }
 }
