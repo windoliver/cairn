@@ -231,7 +231,10 @@ fn main() -> ExitCode {
             Ok((vault_root, _source)) => verbs::lint::run(sub, Some(vault_root.as_path())),
             Err(_) => verbs::lint::run(sub, None),
         },
-        Some(("forget", sub)) => verbs::forget::run(sub),
+        Some(("forget", sub)) => match resolve_vault_and_config(explicit_vault.as_deref()) {
+            Ok((vault_root, _source, config)) => verbs::forget::run(sub, vault_root, config),
+            Err(code) => code,
+        },
         Some(("hook", sub)) => hooks::run(sub),
         Some(("status", sub)) => run_status(sub, explicit_vault.as_deref()),
         Some(("handshake", sub)) => run_handshake(sub, explicit_vault.as_deref()),

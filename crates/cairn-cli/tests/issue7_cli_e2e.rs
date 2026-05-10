@@ -93,8 +93,8 @@ fn assert_status_capabilities_are_deterministic(vault_path: &str) {
         "retrieve.record must not be advertised until runtime can honor it: {caps_one:?}"
     );
     assert!(
-        !caps_one.contains(&"cairn.mcp.v1.forget.record".to_owned()),
-        "forget.record must not be advertised until runtime can honor it: {caps_one:?}"
+        caps_one.contains(&"cairn.mcp.v1.forget.record".to_owned()),
+        "forget.record must be advertised once runtime can honor it: {caps_one:?}"
     );
 }
 
@@ -145,34 +145,15 @@ fn assert_sensitive_verb_rejection(out: &Output, args: &[&str], verb: &str, capa
 }
 
 fn assert_unadvertised_sensitive_verbs_fail_closed(vault_path: &str) {
-    for (args, verb, capability) in [
-        (
-            vec![
-                "--vault",
-                vault_path,
-                "retrieve",
-                "01JXXXXXXXXXXXXXXXXXXXXXXX",
-                "--json",
-            ],
-            "retrieve",
-            "cairn.mcp.v1.retrieve.record",
-        ),
-        (
-            vec![
-                "--vault",
-                vault_path,
-                "forget",
-                "--record",
-                "01JXXXXXXXXXXXXXXXXXXXXXXX",
-                "--json",
-            ],
-            "forget",
-            "cairn.mcp.v1.forget.record",
-        ),
-    ] {
-        let out = run(&args);
-        assert_sensitive_verb_rejection(&out, &args, verb, capability);
-    }
+    let args = vec![
+        "--vault",
+        vault_path,
+        "retrieve",
+        "01JXXXXXXXXXXXXXXXXXXXXXXX",
+        "--json",
+    ];
+    let out = run(&args);
+    assert_sensitive_verb_rejection(&out, &args, "retrieve", "cairn.mcp.v1.retrieve.record");
 }
 
 fn assert_persisted_handshakes_are_fresh(vault: &Path, vault_path: &str) {

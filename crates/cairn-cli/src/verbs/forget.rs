@@ -3,22 +3,22 @@
 //! # Trust boundary (spec §3.5)
 //!
 //! `forget` is an issuer-dependent verb: it produces a signed tombstone record
-//! once the store is wired (#9).  The guard call below enforces the
-//! `VaultDegraded → EX_TEMPFAIL=75` contract even in the stub path.
-//!
-//! **Deferred**: full async wiring (calling [`open_for_signed_verb`] against the
-//! resolved vault path) is deferred to issue #9 when this verb becomes async.
-//!
-//! [`open_for_signed_verb`]: crate::identity::guard::open_for_signed_verb
+//! through the signed-verb context before mutating the selected vault store.
 
+use std::path::PathBuf;
 use std::process::ExitCode;
 
+use cairn_core::config::CairnConfig;
+use cairn_core::domain::RecordId;
+use cairn_core::generated::common::Ulid;
 use cairn_core::generated::envelope::ResponseVerb;
+use cairn_core::generated::envelope::{Response, ResponseData, ResponseStatus};
+use cairn_core::generated::verbs::forget::ForgetData;
 use clap::ArgMatches;
 
-use crate::identity::{guard::refuse_if_degraded, status::ReconciliationReport};
-
-use super::envelope::{EX_UNAVAILABLE, capability_unavailable_response, emit_json, human_error};
+use super::envelope::{
+    EX_UNAVAILABLE, capability_unavailable_response, emit_json, human_error, not_found_response,
+};
 
 fn requested_capability(sub: &ArgMatches) -> &'static str {
     if sub.get_one::<String>("session_id").is_some() {
@@ -32,7 +32,7 @@ fn requested_capability(sub: &ArgMatches) -> &'static str {
 
 /// Run `cairn forget`.
 #[must_use]
-pub fn run(sub: &ArgMatches) -> ExitCode {
+pub fn run(sub: &ArgMatches, vault_root: PathBuf, config: CairnConfig) -> ExitCode {
     let json = sub.get_flag("json");
 
     let dry_run = sub.get_flag("dry-run");
@@ -50,12 +50,22 @@ pub fn run(sub: &ArgMatches) -> ExitCode {
         return crate::verbs::ingest_plan_stub(sub, mode, no_diff, json);
     }
 
-    // §3.5 trust-boundary guard: refuse if the vault is degraded.
-    // In this P0 stub the report is always clean (no store is open); full async
-    // wiring against the resolved vault path is deferred to issue #9.
-    if let Err(e) = refuse_if_degraded(&ReconciliationReport::default(), vec![]) {
-        eprintln!("cairn forget: VaultDegraded — {e}");
-        return ExitCode::from(75); // EX_TEMPFAIL
+    if let Some(record_id) = sub.get_one::<String>("record_id") {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                let resp =
+                    super::signed::aborted(ResponseVerb::Forget, format!("runtime build: {e}"));
+                emit_response(&resp, json, record_id);
+                return ExitCode::FAILURE;
+            }
+        };
+        let resp = rt.block_on(run_record(record_id.clone(), vault_root, config));
+        emit_response(&resp, json, record_id);
+        return response_exit_code(&resp);
     }
 
     let capability = requested_capability(sub);
@@ -71,4 +81,85 @@ pub fn run(sub: &ArgMatches) -> ExitCode {
         );
     }
     ExitCode::from(EX_UNAVAILABLE)
+}
+
+async fn run_record(record_id_raw: String, vault_root: PathBuf, config: CairnConfig) -> Response {
+    let record_id = match RecordId::parse(record_id_raw.clone()) {
+        Ok(record_id) => record_id,
+        Err(e) => return super::signed::rejected_from_domain(ResponseVerb::Forget, e),
+    };
+    let ctx = match super::signed::open_context(ResponseVerb::Forget, &vault_root, config).await {
+        Ok(ctx) => ctx,
+        Err(resp) => return resp,
+    };
+    match ctx.store.forget_record(&record_id).await {
+        Ok(outcome) => {
+            let data = ForgetData {
+                deleted_count: outcome.deleted_count,
+                plan_ref: None,
+                tombstones: Some(
+                    outcome
+                        .tombstones
+                        .into_iter()
+                        .map(|id| Ulid(id.as_str().to_owned()))
+                        .collect(),
+                ),
+            };
+            super::signed::committed(
+                ResponseVerb::Forget,
+                super::envelope::new_operation_id(),
+                ResponseData::Forget(data),
+                Vec::new(),
+            )
+        }
+        Err(cairn_store_sqlite::StoreError::NotFound { id }) => not_found_response(
+            ResponseVerb::Forget,
+            "record",
+            &format!("record not found: {id}"),
+        ),
+        Err(e) => super::signed::aborted(ResponseVerb::Forget, format!("store forget: {e}")),
+    }
+}
+
+fn emit_response(resp: &Response, json: bool, requested_record_id: &str) {
+    if json {
+        emit_json(resp);
+        return;
+    }
+    match resp.status {
+        ResponseStatus::Committed => {
+            if let Some(ResponseData::Forget(data)) = resp.data.as_ref() {
+                println!(
+                    "cairn forget: committed record {requested_record_id} (deleted {})",
+                    data.deleted_count
+                );
+            } else {
+                println!("cairn forget: committed record {requested_record_id}");
+            }
+        }
+        ResponseStatus::Rejected | ResponseStatus::Aborted => {
+            let code = super::signed::response_error_code(resp).unwrap_or("Internal");
+            let message = resp
+                .error
+                .as_ref()
+                .and_then(|e| e.get("message"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("forget failed");
+            human_error("forget", code, message, &resp.operation_id);
+        }
+        _ => human_error(
+            "forget",
+            "Internal",
+            "unknown response status",
+            &resp.operation_id,
+        ),
+    }
+}
+
+fn response_exit_code(resp: &Response) -> ExitCode {
+    match resp.status {
+        ResponseStatus::Committed => ExitCode::SUCCESS,
+        ResponseStatus::Rejected => ExitCode::from(64),
+        _ => ExitCode::FAILURE,
+    }
 }
