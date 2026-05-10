@@ -1,6 +1,7 @@
 //! Public `forget_record` apply through record WAL.
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use cairn_core::contract::memory_store::ForgetReceipt;
 use cairn_core::domain::taxonomy::MemoryVisibility;
@@ -27,15 +28,6 @@ pub(crate) async fn apply_forget_record(
         what: "forget_record requires daemon incarnation".to_owned(),
     })?;
     let op_id = new_operation_id(WalKind::ForgetRecord)?;
-
-    // Capture the live-version count BEFORE acquiring locks so an
-    // idempotent re-forget reports `deleted_count = 0` (rows already
-    // tombstoned + purged) while the first call reports the active
-    // row count. Operators reading `deleted_count: 0` get the signal
-    // they need to debug stale IDs / typos without us conflating it
-    // with a hard failure — the WAL op still executes, idempotently
-    // (brief §5.6 row 2). See `ForgetReceipt::deleted_count`.
-    let deleted_count = count_active_rows(&conn, target).await?;
 
     let (scope, scope_tier) = load_scope_and_tier(&conn, target).await?;
 
@@ -82,8 +74,17 @@ pub(crate) async fn apply_forget_record(
     })
     .await?;
 
-    let body: Arc<dyn StepBody> = Arc::new(RecordStepBody::new_forget(payload, locks));
+    // Build the step body and stash a handle to its in-txn deleted-count
+    // cell BEFORE handing the body to the runner. The cell is written by
+    // `mark_tombstone_and_emit_receipt` inside the Phase A transaction
+    // (under the record-WAL locks), so two concurrent forgets cannot both
+    // observe the target as live — the second runs after the first has
+    // already flipped active=0 and reads 0.
+    let step_body = RecordStepBody::new_forget(payload, locks);
+    let deleted_count_cell = step_body.deleted_count_handle();
+    let body: Arc<dyn StepBody> = Arc::new(step_body);
     runner::run_from(&conn, graph_for(WalKind::ForgetRecord), &op_id, 0, body).await?;
+    let deleted_count = deleted_count_cell.load(Ordering::SeqCst);
 
     let purged_at = crate::store::current_unix_ms();
     let op_for_finalize = op_id.clone();
@@ -104,27 +105,6 @@ pub(crate) async fn apply_forget_record(
         purged_at,
         deleted_count,
     ))
-}
-
-/// Read the count of active record rows for `target` without taking
-/// the record-WAL locks. Called before `acquire_for_record` so an
-/// idempotent re-forget — where every row is already tombstoned —
-/// reports `0` rather than the historical version count.
-async fn count_active_rows(
-    conn: &Arc<tokio_rusqlite::Connection>,
-    target: &TargetId,
-) -> Result<u64, StoreError> {
-    let target_id = target.as_str().to_owned();
-    Ok(conn
-        .call(move |c| {
-            let count: i64 = c.query_row(
-                "SELECT COUNT(*) FROM records WHERE target_id = ?1 AND active = 1",
-                rusqlite::params![target_id],
-                |row| row.get(0),
-            )?;
-            Ok(u64::try_from(count).unwrap_or(0))
-        })
-        .await?)
 }
 
 async fn load_scope_and_tier(

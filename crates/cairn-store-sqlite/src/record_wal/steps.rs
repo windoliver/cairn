@@ -1,5 +1,8 @@
 //! Record WAL step bodies.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use cairn_core::wal::{OperationId, StepDef};
 use rusqlite::{Transaction, params};
 
@@ -16,6 +19,13 @@ pub(crate) enum RecordStepPayload {
 pub(crate) struct RecordStepBody {
     payload: RecordStepPayload,
     locks: RecordLocks,
+    /// Live-version count captured inside the Phase A transaction by the
+    /// `primary.mark_tombstone` step body for `forget_record`. `0` for
+    /// other op kinds. Read by `apply_forget_record` after the runner
+    /// returns to populate `ForgetReceipt::deleted_count` with a value
+    /// that reflects what THIS op actually tombstoned, not a pre-lock
+    /// snapshot that two concurrent forgets could both read as `1`.
+    deleted_count: Arc<AtomicU64>,
 }
 
 impl RecordStepBody {
@@ -24,6 +34,7 @@ impl RecordStepBody {
         Self {
             payload: RecordStepPayload::Upsert(Box::new(payload)),
             locks,
+            deleted_count: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -32,6 +43,7 @@ impl RecordStepBody {
         Self {
             payload: RecordStepPayload::Expire(Box::new(payload)),
             locks,
+            deleted_count: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -40,7 +52,14 @@ impl RecordStepBody {
         Self {
             payload: RecordStepPayload::Forget(Box::new(payload)),
             locks,
+            deleted_count: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Handle that the caller stashes before `runner::run_from` so it can
+    /// observe the in-txn count after the runner returns.
+    pub(crate) fn deleted_count_handle(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.deleted_count)
     }
 }
 
@@ -101,7 +120,7 @@ impl StepBody for RecordStepBody {
                 drain_edges_for_target(tx, payload.target_id.as_str())
             }
             (RecordStepPayload::Forget(payload), "primary.mark_tombstone") => {
-                mark_tombstone_and_emit_receipt(tx, op_id, payload)
+                mark_tombstone_and_emit_receipt(tx, op_id, payload, &self.deleted_count)
             }
             (RecordStepPayload::Forget(payload), "vector.drain") => {
                 drain_vectors_for_target(tx, payload.target_id.as_str())
@@ -328,11 +347,26 @@ fn mark_tombstone_and_emit_receipt(
     tx: &Transaction<'_>,
     op_id: &OperationId,
     payload: &ForgetPayload,
+    deleted_count: &AtomicU64,
 ) -> Result<(), StepBodyError> {
     use cairn_core::domain::{ConsentEvent, ConsentKind, ConsentPayload};
     use sha2::{Digest, Sha256};
 
     let now_ms = crate::store::current_unix_ms();
+
+    // Capture the live-version count INSIDE the Phase A transaction so
+    // two concurrent forgets cannot both report deleted_count=1. The
+    // record-WAL locks serialize the SELECT against the matching
+    // tombstone UPDATE on the same target — the second forget runs
+    // after the first has already flipped active=0 and reads 0.
+    let live_count: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM records WHERE target_id = ?1 AND active = 1",
+            params![payload.target_id.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(StepBodyError::Storage)?;
+    deleted_count.store(u64::try_from(live_count).unwrap_or(0), Ordering::SeqCst);
 
     // Brief §5.6 Phase A: tombstone every version of the target with
     // reason='forget' and active=0.

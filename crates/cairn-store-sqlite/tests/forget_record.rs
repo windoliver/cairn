@@ -467,3 +467,68 @@ async fn forget_record_phase_b_crash_resumes_from_last_done_step() {
         .expect("scan records");
     assert_eq!(row_count, 0, "Phase B primary.purge ran during recovery");
 }
+
+// ── Round 2 review: deleted_count is captured under the lock ───────────
+
+#[tokio::test]
+async fn concurrent_forgets_serialize_via_record_wal_lock() {
+    use std::sync::Arc as StdArc;
+
+    // In-process concurrency: two tokio tasks call forget_record on the
+    // same target through the same SqliteMemoryStore. The record-WAL
+    // entity-exclusive lock (brief §10.1 single-writer ordering)
+    // serializes them — exactly one acquires the lock and reports
+    // `deleted_count = 1`; the other fails fast with `RecordWalLock`.
+    //
+    // Round-2 review concern: a pre-lock SELECT could let two
+    // concurrent forgets both observe `active = 1` and both report
+    // `deleted_count = 1`. The fix moves the count read INSIDE the
+    // Phase A transaction (under the same lock), so the second forget
+    // — even if it eventually retried past the lock — would see
+    // `active = 0` and report `0`.
+    let store = StdArc::new(open_in_memory().await.expect("open"));
+    let record = sample();
+    let target = record.target_id.clone();
+    store.upsert(&record).await.expect("upsert");
+
+    let s1 = StdArc::clone(&store);
+    let s2 = StdArc::clone(&store);
+    let t1 = target.clone();
+    let t2 = target.clone();
+    let h1 = tokio::spawn(async move { s1.forget_record(&t1, &alice()).await });
+    let h2 = tokio::spawn(async move { s2.forget_record(&t2, &alice()).await });
+
+    let r1 = h1.await.expect("task1 join");
+    let r2 = h2.await.expect("task2 join");
+
+    let outcomes: Vec<Result<u64, String>> = [r1, r2]
+        .into_iter()
+        .map(|r| match r {
+            Ok(receipt) => Ok(receipt.deleted_count),
+            Err(e) => Err(e.to_string()),
+        })
+        .collect();
+
+    let successes: Vec<u64> = outcomes
+        .iter()
+        .filter_map(|o| o.as_ref().ok().copied())
+        .collect();
+    let failures: Vec<&String> = outcomes.iter().filter_map(|o| o.as_ref().err()).collect();
+
+    assert_eq!(
+        successes,
+        vec![1u64],
+        "exactly one concurrent forget must succeed with deleted_count=1; \
+         successes={successes:?} failures={failures:?}"
+    );
+    assert_eq!(
+        failures.len(),
+        1,
+        "the other concurrent forget must fail-fast on lock contention; got {failures:?}"
+    );
+    assert!(
+        failures[0].contains("record wal lock") || failures[0].contains("RecordWalLock"),
+        "loser must surface the typed RecordWalLock error; got {:?}",
+        failures[0]
+    );
+}
