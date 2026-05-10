@@ -2294,9 +2294,9 @@ mod tests {
         // not implement ConsentLookup, so consent.rs returns no
         // findings. Info findings: §6.3 deferred-info + §6.2
         // signature-verification-deferred advisory = 2. §6.4 (#258)
-        // is live; §6.6 (#259) is a real canary that emits a
-        // `Warning`-severity DeferredCheck — counted under warnings,
-        // not infos.
+        // is live; §6.6 (#83, closes #259) is the real walker —
+        // without a hot_body_loader wired it emits zero hot-memory
+        // findings (the old deferred-step canary Warning is gone).
         let info_count = result
             .data
             .findings
@@ -2540,12 +2540,17 @@ mod tests {
         }
     }
 
-    /// E2E corner cases for the §6.6 hot-memory canary (#259) at the
-    /// CLI handler boundary. Each test seeds a `FixtureStore`, builds
-    /// a `CairnConfig` with a custom `vault.hot_memory.recipe`, runs
-    /// the full lint pipeline, and inspects only §6.6-specific
-    /// findings. Author-registry errors from the empty registry are
-    /// ignored — the §6.2 path is exercised elsewhere.
+    /// E2E corner cases for the §6.6 hot-memory walker (#83; closes #259)
+    /// at the CLI handler boundary. Each test seeds a `FixtureStore`,
+    /// builds a `CairnConfig` with a custom `vault.hot_memory.recipe`, runs
+    /// the full lint pipeline, and inspects only §6.6-specific findings.
+    ///
+    /// The old deferred-step canary (#259) is gone. The real walker is
+    /// gated on `hot_body_loader` being wired by the CLI (Task 25). Until
+    /// Task 25 lands, `lint_handler` passes `hot_body_loader: None`, so
+    /// the walker emits zero hot-memory findings at the CLI boundary.
+    /// Author-registry errors from the empty registry are ignored here —
+    /// the §6.2 path is exercised elsewhere.
     mod hot_memory_canary_e2e {
         use super::*;
         use cairn_core::config::{CairnConfig, HotMemoryRecipeStep};
@@ -2576,6 +2581,8 @@ mod tests {
                 .count()
         }
 
+        /// Counts old-canary (#259) DeferredCheck Warnings. After the
+        /// rewrite (#83) this should always be zero — the canary is gone.
         fn count_259_deferred(result: &LintHandlerResult) -> usize {
             result
                 .data
@@ -2604,20 +2611,30 @@ mod tests {
             store.upsert(&r).await.expect("upsert");
         }
 
+        /// With no `hot_body_loader` wired (Task 25 is pending), the walker
+        /// emits no findings for the default recipe and empty vault.
+        /// The old deferred-step canary Warning (#259) is gone.
         #[tokio::test]
-        async fn default_recipe_empty_vault_emits_only_259_deferred_warning() {
+        async fn default_recipe_empty_vault_emits_no_hot_memory_findings() {
             let store = FixtureStore::default();
             let cfg = CairnConfig::default();
             let result = run_handler(&store, &cfg).await;
-            assert_eq!(count_259_deferred(&result), 1);
+            // No loader → no assembler call → no over-budget finding.
+            assert_eq!(count_259_deferred(&result), 0);
             assert_eq!(
                 count_kind_severity(&result, Kind::HotMemoryOverBudget, Severity::Warning),
                 0,
             );
+            assert_eq!(
+                count_kind_severity(&result, Kind::HotMemoryOverBudget, Severity::Error),
+                0,
+            );
         }
 
+        /// Without a loader, even a vault that would be over-budget produces
+        /// no hot-memory findings. The real detection requires Task 25.
         #[tokio::test]
-        async fn records_only_recipe_over_budget_emits_warning_no_259_deferred() {
+        async fn records_only_recipe_over_budget_no_findings_without_loader() {
             let store = FixtureStore::default();
             upsert_with(&store, 1, MemoryKind::Project, "x".repeat(2048), 0.9).await;
             let mut cfg = CairnConfig::default();
@@ -2625,24 +2642,24 @@ mod tests {
             cfg.vault.hot_memory.max_bytes = 256;
 
             let result = run_handler(&store, &cfg).await;
-            let warnings =
-                count_kind_severity(&result, Kind::HotMemoryOverBudget, Severity::Warning);
-            assert_eq!(warnings, 1);
-            assert_eq!(count_259_deferred(&result), 0);
-            let f = result
-                .data
-                .findings
-                .iter()
-                .find(|f| f.kind == Kind::HotMemoryOverBudget)
-                .expect("warning present");
+            // No loader → no over-budget detection.
             assert_eq!(
-                f.target.as_ref().and_then(|t| t.path.as_deref()),
-                Some(".cairn/config.yaml")
+                count_kind_severity(&result, Kind::HotMemoryOverBudget, Severity::Warning),
+                0,
             );
+            assert_eq!(
+                count_kind_severity(&result, Kind::HotMemoryOverBudget, Severity::Error),
+                0,
+            );
+            // Canary deferred Warning is gone.
+            assert_eq!(count_259_deferred(&result), 0);
         }
 
+        /// No loader → no findings even for mixed recipes with deferred steps.
+        /// The old canary's DeferredCheck Warning for filesystem-backed steps
+        /// is removed (#83 closes #259).
         #[tokio::test]
-        async fn mixed_recipe_under_budget_emits_only_259_deferred() {
+        async fn mixed_recipe_no_findings_without_loader() {
             let store = FixtureStore::default();
             upsert_with(&store, 2, MemoryKind::Project, "tiny".to_owned(), 0.5).await;
             let mut cfg = CairnConfig::default();
@@ -2655,11 +2672,13 @@ mod tests {
                 count_kind_severity(&result, Kind::HotMemoryOverBudget, Severity::Warning),
                 0,
             );
-            assert_eq!(count_259_deferred(&result), 1);
+            // The old #259 canary deferred Warning is gone.
+            assert_eq!(count_259_deferred(&result), 0);
         }
 
+        /// Records of kinds not in the recipe recipe do not emit findings.
         #[tokio::test]
-        async fn excluded_kinds_do_not_contribute_to_estimate() {
+        async fn excluded_kinds_do_not_emit_findings() {
             let store = FixtureStore::default();
             upsert_with(&store, 3, MemoryKind::UserSignal, "s".repeat(8192), 0.9).await;
             upsert_with(&store, 4, MemoryKind::Playbook, "p".repeat(8192), 0.9).await;
@@ -2675,8 +2694,11 @@ mod tests {
             assert_eq!(count_259_deferred(&result), 0);
         }
 
+        /// No loader → no overflow detection even with tied-salience records.
+        /// The real tied-salience tie-break behavior is tested in
+        /// `cairn-core::verbs::lint::checks::hot_memory::tests`.
         #[tokio::test]
-        async fn tied_salience_picks_largest_and_overflows() {
+        async fn tied_salience_no_findings_without_loader() {
             let store = FixtureStore::default();
             for seed in 10..14 {
                 upsert_with(&store, seed, MemoryKind::Project, "x".to_owned(), 0.5).await;
@@ -2689,13 +2711,20 @@ mod tests {
             cfg.vault.hot_memory.max_bytes = 2_000;
 
             let result = run_handler(&store, &cfg).await;
+            // No loader → no findings regardless of salience/budget.
             assert_eq!(
                 count_kind_severity(&result, Kind::HotMemoryOverBudget, Severity::Warning),
-                1,
-                "tied-salience tie-break must pick larger records and overflow 2_000-byte budget",
+                0,
+                "no loader wired: walker must not emit over-budget finding",
+            );
+            assert_eq!(
+                count_kind_severity(&result, Kind::HotMemoryOverBudget, Severity::Error),
+                0,
             );
         }
 
+        /// Degenerate max_bytes=1 must not panic, and without a loader must
+        /// produce no hot-memory findings.
         #[tokio::test]
         async fn degenerate_max_bytes_one_does_not_panic() {
             let store = FixtureStore::default();
@@ -2705,14 +2734,20 @@ mod tests {
             cfg.vault.hot_memory.max_bytes = 1;
 
             let result = run_handler(&store, &cfg).await;
+            // No panic. No findings without a loader.
             assert_eq!(
                 count_kind_severity(&result, Kind::HotMemoryOverBudget, Severity::Warning),
-                1,
+                0,
+            );
+            assert_eq!(
+                count_kind_severity(&result, Kind::HotMemoryOverBudget, Severity::Error),
+                0,
             );
         }
 
+        /// Empty recipe produces no hot-memory findings with or without a loader.
         #[tokio::test]
-        async fn empty_recipe_emits_no_259_findings() {
+        async fn empty_recipe_emits_no_hot_memory_findings() {
             let store = FixtureStore::default();
             upsert_with(&store, 40, MemoryKind::Project, "x".repeat(4096), 0.9).await;
             let mut cfg = CairnConfig::default();
