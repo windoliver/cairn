@@ -1186,6 +1186,7 @@ pub async fn lint_handler(
 
     let unresolvable_authors: std::collections::HashSet<cairn_core::domain::Identity> =
         prefetch_failures.keys().cloned().collect();
+    let hot_body_loader = |step| super::assemble_hot::lint_step_body_sync(vault_root, config, step);
     let inputs = LintInputs {
         records: &lint_records,
         config,
@@ -1193,8 +1194,8 @@ pub async fn lint_handler(
         author_states: &author_states,
         unresolvable_authors: &unresolvable_authors,
         consent_lookup,
-        vault_root: None,
-        hot_body_loader: None,
+        vault_root: Some(vault_root),
+        hot_body_loader: Some(&hot_body_loader),
     };
     let mut data = run_checks(&inputs).await;
 
@@ -2581,7 +2582,7 @@ mod tests {
                 .count()
         }
 
-        /// Counts old-canary (#259) DeferredCheck Warnings. After the
+        /// Counts old-canary (#259) `DeferredCheck` Warnings. After the
         /// rewrite (#83) this should always be zero — the canary is gone.
         fn count_259_deferred(result: &LintHandlerResult) -> usize {
             result
@@ -2656,7 +2657,7 @@ mod tests {
         }
 
         /// No loader → no findings even for mixed recipes with deferred steps.
-        /// The old canary's DeferredCheck Warning for filesystem-backed steps
+        /// The old canary's `DeferredCheck` Warning for filesystem-backed steps
         /// is removed (#83 closes #259).
         #[tokio::test]
         async fn mixed_recipe_no_findings_without_loader() {
@@ -2723,7 +2724,7 @@ mod tests {
             );
         }
 
-        /// Degenerate max_bytes=1 must not panic, and without a loader must
+        /// Degenerate `max_bytes=1` must not panic, and without a loader must
         /// produce no hot-memory findings.
         #[tokio::test]
         async fn degenerate_max_bytes_one_does_not_panic() {

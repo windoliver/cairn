@@ -869,3 +869,51 @@ fn read_sequence() -> u64 {
         .as_millis();
     u64::try_from(millis).unwrap_or(u64::MAX)
 }
+
+/// Sync, filesystem-only body loader used by the lint walker. Returns
+/// the body for filesystem-backed steps (`Purpose`, `Index`) and an
+/// empty string for store-backed steps. The lint over-budget check
+/// thus computes a strict lower bound — false-negatives are possible
+/// when store-backed steps push the prefix over budget, but
+/// false-positives are not. This is a significant improvement over the
+/// #259 canary, which could not weigh any step at all.
+///
+/// # Errors
+///
+/// Returns `Err(String)` when a filesystem-backed source exists but
+/// cannot be read (I/O error, symlink traversal, path-escape). A file
+/// that is absent (not-found / no-such-file) is treated as an empty
+/// body so the budget computation degrades gracefully — the
+/// `BrokenSourceLink` check separately emits an Error for missing files.
+pub(crate) fn lint_step_body_sync(
+    vault_root: &std::path::Path,
+    config: &cairn_core::config::CairnConfig,
+    step: cairn_core::generated::verbs::assemble_hot::HotRecipeStep,
+) -> Result<String, String> {
+    use cairn_core::generated::verbs::assemble_hot::HotRecipeStep;
+    let max_bytes = u64::from(config.vault.hot_memory.max_bytes);
+    let read_file = |rel: &std::path::Path| -> Result<String, String> {
+        cairn_core::verbs::assemble_hot::loader::read_vault_markdown_file(
+            vault_root, rel, max_bytes,
+        )
+        .map_err(|e| e.to_string())
+        .or_else(|e| {
+            // Treat absent files as empty — BrokenSourceLink owns the
+            // "missing source" finding; the budget check should not
+            // double-fault with a load error for the same condition.
+            if e.contains("No such file") || e.contains("not found") || e.contains("os error 2") {
+                Ok(String::new())
+            } else {
+                Err(e)
+            }
+        })
+    };
+    match step {
+        HotRecipeStep::Purpose => read_file(std::path::Path::new("purpose.md")),
+        HotRecipeStep::Index => read_file(std::path::Path::new("index.md")),
+        // Store-backed steps cannot be loaded synchronously from the lint
+        // dispatch context. Return empty so the budget computation remains a
+        // strict lower bound (no false-positives).
+        _ => Ok(String::new()),
+    }
+}
