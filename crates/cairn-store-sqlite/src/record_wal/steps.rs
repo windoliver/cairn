@@ -4,12 +4,15 @@ use cairn_core::wal::{OperationId, StepDef};
 use rusqlite::{Transaction, params};
 
 use crate::record_wal::locks::RecordLocks;
-use crate::record_wal::payload::{ExpirePayload, StoredEmbedOutcome, UpsertPayload};
+use crate::record_wal::payload::{
+    ExpirePayload, ForgetPayload, StoredEmbedOutcome, UpsertPayload,
+};
 use crate::wal::runner::{StepBody, StepBodyError};
 
 pub(crate) enum RecordStepPayload {
     Upsert(Box<UpsertPayload>),
     Expire(Box<ExpirePayload>),
+    Forget(Box<ForgetPayload>),
 }
 
 pub(crate) struct RecordStepBody {
@@ -30,6 +33,14 @@ impl RecordStepBody {
     pub(crate) fn new_expire(payload: ExpirePayload, locks: RecordLocks) -> Self {
         Self {
             payload: RecordStepPayload::Expire(Box::new(payload)),
+            locks,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn new_forget(payload: ForgetPayload, locks: RecordLocks) -> Self {
+        Self {
+            payload: RecordStepPayload::Forget(Box::new(payload)),
             locks,
         }
     }
@@ -82,10 +93,45 @@ impl StepBody for RecordStepBody {
             (RecordStepPayload::Expire(payload), "primary.mark_expired") => {
                 mark_expired(tx, payload)
             }
-            (RecordStepPayload::Expire(payload), "vector.drain") => drain_vectors(tx, payload),
-            (RecordStepPayload::Expire(payload), "fts.drain") => drain_fts(tx, payload),
-            (RecordStepPayload::Expire(payload), "edges.drain") => drain_edges(tx, payload),
-            (RecordStepPayload::Upsert(_) | RecordStepPayload::Expire(_), _) => Ok(()),
+            (RecordStepPayload::Expire(payload), "vector.drain") => {
+                drain_vectors_for_target(tx, payload.target_id.as_str())
+            }
+            (RecordStepPayload::Expire(payload), "fts.drain") => {
+                drain_fts_for_target(tx, payload.target_id.as_str())
+            }
+            (RecordStepPayload::Expire(payload), "edges.drain") => {
+                drain_edges_for_target(tx, payload.target_id.as_str())
+            }
+            (RecordStepPayload::Forget(payload), "primary.mark_tombstone") => {
+                mark_tombstone_and_emit_receipt(tx, op_id, payload)
+            }
+            (RecordStepPayload::Forget(payload), "vector.drain") => {
+                drain_vectors_for_target(tx, payload.target_id.as_str())
+            }
+            (RecordStepPayload::Forget(payload), "fts.drain") => {
+                drain_fts_for_target(tx, payload.target_id.as_str())
+            }
+            (RecordStepPayload::Forget(payload), "edges.drain") => {
+                drain_edges_for_target(tx, payload.target_id.as_str())
+            }
+            (RecordStepPayload::Forget(payload), "primary.purge") => {
+                primary_purge_for_target(tx, payload.target_id.as_str())
+            }
+            (RecordStepPayload::Forget(payload), "wal.purge_pre_images") => {
+                purge_wal_pre_images_for_target(tx, op_id, payload)
+            }
+            (RecordStepPayload::Forget(_), "snapshot.purge") => {
+                // P0: no `.cairn/snapshots/` or `nexus-data/` mirror exists
+                // (issue #109 lands the cold-storage layer). The bundle
+                // rewrite is a no-op until the snapshot registry exists.
+                Ok(())
+            }
+            (
+                RecordStepPayload::Upsert(_)
+                | RecordStepPayload::Expire(_)
+                | RecordStepPayload::Forget(_),
+                _,
+            ) => Ok(()),
         }
     }
 }
@@ -218,33 +264,31 @@ fn mark_expired(tx: &Transaction<'_>, payload: &ExpirePayload) -> Result<(), Ste
     Ok(())
 }
 
-fn drain_vectors(tx: &Transaction<'_>, payload: &ExpirePayload) -> Result<(), StepBodyError> {
+fn drain_vectors_for_target(tx: &Transaction<'_>, target: &str) -> Result<(), StepBodyError> {
     tx.execute(
         "DELETE FROM record_vectors \
           WHERE record_id IN (SELECT record_id FROM records WHERE target_id = ?1)",
-        params![payload.target_id.as_str()],
+        params![target],
     )
     .map_err(StepBodyError::Storage)?;
     tx.execute(
         "DELETE FROM pending_embeddings \
           WHERE record_id IN (SELECT record_id FROM records WHERE target_id = ?1)",
-        params![payload.target_id.as_str()],
+        params![target],
     )
     .map_err(StepBodyError::Storage)?;
     Ok(())
 }
 
-fn drain_fts(tx: &Transaction<'_>, payload: &ExpirePayload) -> Result<(), StepBodyError> {
+fn drain_fts_for_target(tx: &Transaction<'_>, target: &str) -> Result<(), StepBodyError> {
     let rowids = {
         let mut stmt = tx
             .prepare("SELECT rowid FROM records WHERE target_id = ?1")
             .map_err(StepBodyError::Storage)?;
-        stmt.query_map(params![payload.target_id.as_str()], |row| {
-            row.get::<_, i64>(0)
-        })
-        .map_err(StepBodyError::Storage)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(StepBodyError::Storage)?
+        stmt.query_map(params![target], |row| row.get::<_, i64>(0))
+            .map_err(StepBodyError::Storage)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StepBodyError::Storage)?
     };
     for rowid in rowids {
         tx.execute("DELETE FROM records_fts WHERE rowid = ?1", params![rowid])
@@ -253,12 +297,12 @@ fn drain_fts(tx: &Transaction<'_>, payload: &ExpirePayload) -> Result<(), StepBo
     Ok(())
 }
 
-fn drain_edges(tx: &Transaction<'_>, payload: &ExpirePayload) -> Result<(), StepBodyError> {
+fn drain_edges_for_target(tx: &Transaction<'_>, target: &str) -> Result<(), StepBodyError> {
     tx.execute(
         "DELETE FROM edges \
           WHERE src IN (SELECT record_id FROM records WHERE target_id = ?1) \
              OR dst IN (SELECT record_id FROM records WHERE target_id = ?1)",
-        params![payload.target_id.as_str()],
+        params![target],
     )
     .map_err(StepBodyError::Storage)?;
     Ok(())
@@ -268,6 +312,188 @@ fn now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+}
+
+/// Phase A of `forget_record` (brief §5.6 row 2). Tombstones every version
+/// of the target with `reason='forget'` and emits a body-free
+/// `ForgetIntent` consent receipt in the same transaction. The fusion is
+/// what makes the receipt atomic with the tombstone — neither half can be
+/// observed without the other.
+///
+/// Idempotent: re-running after a Phase-A crash re-applies the same
+/// `UPDATE` (no-op if rows are already in the target state) and inserts a
+/// fresh receipt with the same `op_id`. The journal allows multiple rows
+/// per `op_id`; the materializer keeps them all.
+fn mark_tombstone_and_emit_receipt(
+    tx: &mut Transaction<'_>,
+    op_id: &OperationId,
+    payload: &ForgetPayload,
+) -> Result<(), StepBodyError> {
+    use cairn_core::domain::{ConsentEvent, ConsentKind, ConsentPayload};
+    use sha2::{Digest, Sha256};
+
+    let now_ms = crate::store::current_unix_ms();
+
+    // Brief §5.6 Phase A: tombstone every version of the target with
+    // reason='forget' and active=0.
+    tx.execute(
+        "UPDATE records \
+            SET active = 0, \
+                tombstoned = 1, \
+                tombstone_reason = 'forget', \
+                updated_at = ?1 \
+          WHERE target_id = ?2",
+        params![now_ms, payload.target_id.as_str()],
+    )
+    .map_err(StepBodyError::Storage)?;
+
+    // sha256 of the raw target id. P1 follow-up (brief §14) introduces a
+    // per-user salt; the receipt schema does not change.
+    let mut hasher = Sha256::new();
+    hasher.update(payload.target_id.as_str().as_bytes());
+    let hex = format!("{:x}", hasher.finalize());
+    let target_id_hash = format!("sha256:{hex}");
+    let subject_hash = format!("sha256:{hex}");
+
+    let event = ConsentEvent {
+        consent_id: format!("CNS{}", ulid::Ulid::new()),
+        kind: ConsentKind::ForgetIntent,
+        actor: payload.actor.clone(),
+        subject: subject_hash,
+        scope: scope_canonical_wire(&payload.scope, payload.scope_tier),
+        op_id: Some(op_id.as_str().to_owned()),
+        sensor_id: None,
+        payload: ConsentPayload::IntentReceipt {
+            target_id_hash,
+            scope_tier: payload.scope_tier,
+            reason_code: payload.reason_code.clone(),
+        },
+        decided_at: now_rfc3339_from_ms(now_ms)?,
+        expires_at: None,
+    };
+
+    crate::consent::append(&*tx, &event)
+        .map_err(|e| StepBodyError::Failed(format!("consent append: {e}")))?;
+    Ok(())
+}
+
+/// Render a `ScopeTuple` into the consent journal `scope` slot. Defaults
+/// (no IDL-addressable dimension set) fall back to the visibility tier
+/// wire form so the slot is non-empty — `validate_scope` rejects empty.
+fn scope_canonical_wire(
+    scope: &cairn_core::domain::ScopeTuple,
+    tier: cairn_core::domain::MemoryVisibility,
+) -> String {
+    let wire = scope.canonical_wire();
+    if wire.is_empty() {
+        tier.as_str().to_owned()
+    } else {
+        wire
+    }
+}
+
+/// Build a UTC `Rfc3339Timestamp` from a Unix-millis instant. Matches
+/// the `from_unix_secs` constructor by truncating sub-second precision —
+/// `decided_at_iso` writers in this crate use second precision.
+///
+/// `current_unix_ms` saturates negative values to `0`, but we still clamp
+/// here (`max(0)`) so a future caller passing a degraded clock value
+/// cannot push us into the `from_unix_secs` error path. Errors are
+/// surfaced as [`StepBodyError::Failed`] so the WAL marks the step
+/// failed rather than the helper crashing.
+fn now_rfc3339_from_ms(
+    unix_ms: i64,
+) -> Result<cairn_core::domain::Rfc3339Timestamp, StepBodyError> {
+    let secs = unix_ms.div_euclid(1_000).max(0);
+    cairn_core::domain::Rfc3339Timestamp::from_unix_secs(secs)
+        .map_err(|e| StepBodyError::Failed(format!("rfc3339 from_unix_secs: {e}")))
+}
+
+/// Phase B step 4: collapse all body-bearing rows for the target. Re-runs
+/// the index drains defensively — vector.drain / fts.drain / edges.drain
+/// may have completed in a prior crash window, but the `idempotent: false`
+/// `primary.purge` step is the audit-invariant boundary so we make sure
+/// nothing survives.
+fn primary_purge_for_target(tx: &Transaction<'_>, target: &str) -> Result<(), StepBodyError> {
+    tx.execute(
+        "DELETE FROM record_vectors \
+          WHERE record_id IN (SELECT record_id FROM records WHERE target_id = ?1)",
+        params![target],
+    )
+    .map_err(StepBodyError::Storage)?;
+    tx.execute(
+        "DELETE FROM pending_embeddings \
+          WHERE record_id IN (SELECT record_id FROM records WHERE target_id = ?1)",
+        params![target],
+    )
+    .map_err(StepBodyError::Storage)?;
+    tx.execute("DELETE FROM records WHERE target_id = ?1", params![target])
+        .map_err(StepBodyError::Storage)?;
+    Ok(())
+}
+
+/// Phase B step 5: scrub WAL pre-image blobs that mention the forgotten
+/// target id, replacing them with a `{purged, target_id_hash, op_id,
+/// purged_at}` stub. The audit invariant (brief §5.6) is that no
+/// post-forget reader can recover the original record body from a WAL
+/// snapshot.
+///
+/// LIKE prefilter: target ids are ULIDs (`[0-9A-Z]{26}`) so they cannot
+/// contain `%` or `_` — no escaping needed. We treat the prefilter as
+/// authoritative: any `wal_steps.pre_image` whose CAST-to-TEXT contains
+/// the literal target id substring is rewritten in place. Snapshot bodies
+/// are JSON arrays of `{record_id, …}` produced by `stage_snapshot`, so a
+/// substring hit is a real reference (`record_id` values embed the
+/// `target_id`).
+fn purge_wal_pre_images_for_target(
+    tx: &mut Transaction<'_>,
+    self_op_id: &OperationId,
+    payload: &ForgetPayload,
+) -> Result<(), StepBodyError> {
+    use sha2::{Digest, Sha256};
+
+    let target = payload.target_id.as_str();
+    let needle = format!("%{target}%");
+    let rows: Vec<(String, u32)> = {
+        let mut stmt = tx
+            .prepare(
+                "SELECT operation_id, step_ord \
+                   FROM wal_steps \
+                  WHERE pre_image IS NOT NULL \
+                    AND CAST(pre_image AS TEXT) LIKE ?1",
+            )
+            .map_err(StepBodyError::Storage)?;
+        stmt.query_map(params![needle], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
+        })
+        .map_err(StepBodyError::Storage)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(StepBodyError::Storage)?
+    };
+
+    let now_ms = crate::store::current_unix_ms();
+    let mut hasher = Sha256::new();
+    hasher.update(target.as_bytes());
+    let target_id_hash = format!("sha256:{:x}", hasher.finalize());
+
+    for (op_id, step_ord) in rows {
+        let stub = serde_json::json!({
+            "purged": true,
+            "target_id_hash": target_id_hash,
+            "op_id": self_op_id.as_str(),
+            "purged_at": now_ms,
+        });
+        let bytes = serde_json::to_vec(&stub)
+            .map_err(|e| StepBodyError::Failed(format!("stub json: {e}")))?;
+        tx.execute(
+            "UPDATE wal_steps \
+                SET pre_image = ?1 \
+              WHERE operation_id = ?2 AND step_ord = ?3",
+            params![bytes, op_id, step_ord],
+        )
+        .map_err(StepBodyError::Storage)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
