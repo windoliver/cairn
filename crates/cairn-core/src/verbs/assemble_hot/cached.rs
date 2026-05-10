@@ -40,16 +40,22 @@ fn hex_lower(bytes: &[u8]) -> String {
 }
 
 /// Cache-aware `assemble_hot`. See module docs.
+///
+/// `budget_override` caps the assembled output size. When `None`, uses
+/// `config.max_bytes`. On cache hit, if the cached entry exceeds the
+/// effective budget, the entry is treated as a miss (option b).
 pub async fn cached_assemble(
     config: &HotMemoryConfig,
     agent: &Identity,
     vault_id: &str,
     cache: &dyn HotPrefixCache,
     metrics: &dyn MetricsSink,
+    budget_override: Option<u64>,
     load_bodies: impl FnOnce() -> Result<Vec<String>, AssembleHotError>,
 ) -> Result<AssembleHotData, CachedAssembleError> {
     let recipe_hash = recipe_hash_canonical(&config.recipe);
     let started = Instant::now();
+    let effective_budget = budget_override.unwrap_or_else(|| u64::from(config.max_bytes));
 
     // Read live watermarks; failure → bypass cache, still assemble + emit.
     let wm_now: SourceWatermarks = match cache.current_watermarks().await {
@@ -65,6 +71,7 @@ pub async fn cached_assemble(
                 started,
                 false,
                 SourceWatermarks::default(),
+                budget_override,
                 load_bodies,
             )
             .await;
@@ -74,7 +81,8 @@ pub async fn cached_assemble(
     // Cache lookup; non-corrupt errors bypass the cache for this call.
     let cache_get = cache.get(agent, &recipe_hash).await;
     if let Ok(Some(entry)) = &cache_get {
-        if entry.watermarks.matches(&wm_now) {
+        // Treat as miss if cached entry exceeds the effective budget (option b).
+        if entry.watermarks.matches(&wm_now) && entry.bytes <= effective_budget {
             let latency_ms = elapsed_ms(started);
             emit_event(
                 metrics,
@@ -82,7 +90,7 @@ pub async fn cached_assemble(
                 agent,
                 &recipe_hash,
                 entry.bytes,
-                u64::from(config.max_bytes),
+                effective_budget,
                 latency_ms,
                 true,
                 wm_now,
@@ -96,7 +104,7 @@ pub async fn cached_assemble(
 
     // Miss path: load + assemble + put + emit.
     let bodies = load_bodies()?;
-    let data = assemble_hot_from_bodies(config, bodies, None)?;
+    let data = assemble_hot_from_bodies(config, bodies, budget_override)?;
     let latency_ms = elapsed_ms(started);
 
     let entry = CachedPrefix {
@@ -117,7 +125,7 @@ pub async fn cached_assemble(
         agent,
         &recipe_hash,
         data.bytes,
-        u64::from(config.max_bytes),
+        effective_budget,
         latency_ms,
         false,
         wm_now,
@@ -140,10 +148,12 @@ async fn assemble_and_emit(
     started: Instant,
     cache_hit: bool,
     wm: SourceWatermarks,
+    budget_override: Option<u64>,
     load_bodies: impl FnOnce() -> Result<Vec<String>, AssembleHotError>,
 ) -> Result<AssembleHotData, CachedAssembleError> {
+    let effective_budget = budget_override.unwrap_or_else(|| u64::from(config.max_bytes));
     let bodies = load_bodies()?;
-    let data = assemble_hot_from_bodies(config, bodies, None)?;
+    let data = assemble_hot_from_bodies(config, bodies, budget_override)?;
     let latency_ms = elapsed_ms(started);
     emit_event(
         metrics,
@@ -151,7 +161,7 @@ async fn assemble_and_emit(
         agent,
         recipe_hash,
         data.bytes,
-        u64::from(config.max_bytes),
+        effective_budget,
         latency_ms,
         cache_hit,
         wm,
@@ -297,7 +307,7 @@ mod tests {
             assembled_at_ms: 0,
             assembly_latency_ms: 1,
         });
-        let data = cached_assemble(&cfg, &agent(), "v1", &cache, &metrics, || {
+        let data = cached_assemble(&cfg, &agent(), "v1", &cache, &metrics, None, || {
             panic!("loader must not run on cache hit")
         })
         .await
@@ -315,7 +325,7 @@ mod tests {
         let metrics = CapturingMetricsSink::new();
         let cfg = config();
         let recipe_len = cfg.recipe.len();
-        let data = cached_assemble(&cfg, &agent(), "v1", &cache, &metrics, move || {
+        let data = cached_assemble(&cfg, &agent(), "v1", &cache, &metrics, None, move || {
             Ok(vec![String::new(); recipe_len])
         })
         .await
@@ -344,7 +354,7 @@ mod tests {
         });
         let cfg = config();
         let recipe_len = cfg.recipe.len();
-        let data = cached_assemble(&cfg, &agent(), "v1", &cache, &metrics, move || {
+        let data = cached_assemble(&cfg, &agent(), "v1", &cache, &metrics, None, move || {
             Ok(vec![String::new(); recipe_len])
         })
         .await
@@ -362,7 +372,7 @@ mod tests {
         let metrics = CapturingMetricsSink::new();
         let cfg = config();
         let recipe_len = cfg.recipe.len();
-        let data = cached_assemble(&cfg, &agent(), "v1", &cache, &metrics, move || {
+        let data = cached_assemble(&cfg, &agent(), "v1", &cache, &metrics, None, move || {
             Ok(vec![String::new(); recipe_len])
         })
         .await
@@ -377,7 +387,7 @@ mod tests {
         let metrics = CapturingMetricsSink::new();
         let cfg = config();
         let recipe_len = cfg.recipe.len();
-        let _ = cached_assemble(&cfg, &agent(), "v1", &cache, &metrics, move || {
+        let _ = cached_assemble(&cfg, &agent(), "v1", &cache, &metrics, None, move || {
             Ok(vec![String::new(); recipe_len])
         })
         .await
@@ -401,7 +411,7 @@ mod tests {
         let cache = MockCache::default();
         let cfg = config();
         let recipe_len = cfg.recipe.len();
-        let _ = cached_assemble(&cfg, &agent(), "v1", &cache, &BrokenSink, move || {
+        let _ = cached_assemble(&cfg, &agent(), "v1", &cache, &BrokenSink, None, move || {
             Ok(vec![String::new(); recipe_len])
         })
         .await

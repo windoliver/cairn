@@ -33,6 +33,55 @@ const DEFAULT_ASSEMBLE_ISSUER: &str = "agt:cairn-cli:default:writer:v1";
 const DEFAULT_TENANT: &str = "default";
 const ASSEMBLE_ENTITY: &str = "ingest";
 
+/// In-process fallback cache used when `SqliteHotPrefixCache::open`
+/// fails (e.g., transient `SQLite` error during runtime). Always misses
+/// and always returns default watermarks so `cached_assemble` falls
+/// through to direct assembly.
+#[derive(Debug, Default)]
+struct NoopHotPrefixCache;
+
+#[async_trait::async_trait]
+impl cairn_core::contract::hot_prefix_cache::HotPrefixCache for NoopHotPrefixCache {
+    async fn current_watermarks(
+        &self,
+    ) -> Result<
+        cairn_core::domain::hot_prefix::SourceWatermarks,
+        cairn_core::contract::hot_prefix_cache::CacheError,
+    > {
+        Ok(cairn_core::domain::hot_prefix::SourceWatermarks::default())
+    }
+
+    async fn get(
+        &self,
+        _agent: &cairn_core::domain::Identity,
+        _recipe_hash: &str,
+    ) -> Result<
+        Option<cairn_core::contract::hot_prefix_cache::CachedPrefix>,
+        cairn_core::contract::hot_prefix_cache::CacheError,
+    > {
+        Ok(None)
+    }
+
+    async fn put(
+        &self,
+        _agent: &cairn_core::domain::Identity,
+        _recipe_hash: &str,
+        _entry: &cairn_core::contract::hot_prefix_cache::CachedPrefix,
+    ) -> Result<(), cairn_core::contract::hot_prefix_cache::CacheError> {
+        Ok(())
+    }
+
+    async fn bump(
+        &self,
+        _classes: &[cairn_core::domain::hot_prefix::SourceClass],
+    ) -> Result<
+        cairn_core::domain::hot_prefix::SourceWatermarks,
+        cairn_core::contract::hot_prefix_cache::CacheError,
+    > {
+        Ok(cairn_core::domain::hot_prefix::SourceWatermarks::default())
+    }
+}
+
 struct ReadAuthorization {
     operation_id: Ulid,
     scope: ScopeTuple,
@@ -132,11 +181,50 @@ async fn run_async(args: AssembleHotArgs, vault_root: PathBuf, config: CairnConf
         Err(resp) => return merge_policy_trace(read_policy_trace(&auth, 0, &[]), resp),
     };
     let policy_trace = read_policy_trace(&auth, loaded.files, &loaded.records);
-    match cairn_core::verbs::assemble_hot::assemble_hot_from_bodies(
+
+    // Open cache + metrics sink. Both failures degrade gracefully:
+    // on cache open failure, fall back to direct assembly (no caching
+    // for this call). On metrics open failure, use a no-op sink so
+    // the verb still succeeds.
+    let cache: Box<dyn cairn_core::contract::hot_prefix_cache::HotPrefixCache> =
+        match cairn_store_sqlite::SqliteHotPrefixCache::open(&ctx.vault_root).await {
+            Ok(c) => Box::new(c),
+            Err(e) => {
+                tracing::warn!(error = %e, "hot-prefix cache open failed; bypassing for this call");
+                Box::new(NoopHotPrefixCache)
+            }
+        };
+    let metrics: Box<dyn cairn_core::contract::metrics::MetricsSink> =
+        match crate::metrics::JsonlMetricsSink::open(&ctx.vault_root).await {
+            Ok(s) => Box::new(s),
+            Err(e) => {
+                tracing::warn!(error = %e, "metrics sink open failed; using noop");
+                Box::new(cairn_core::contract::metrics::NoopMetricsSink)
+            }
+        };
+
+    let vault_id = std::fs::read_to_string(ctx.vault_root.join(".cairn/vault.id"))
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+
+    // Bodies are loaded eagerly so the policy trace records the same
+    // records on hit and miss. A future refactor could push body
+    // loading into the cached_assemble closure to skip the work on
+    // hits — see issue #83 follow-up.
+    let bodies_for_closure = loaded.bodies;
+
+    match cairn_core::verbs::assemble_hot::cached::cached_assemble(
         &ctx.config.vault.hot_memory,
-        loaded.bodies,
+        &auth.issuer,
+        &vault_id,
+        cache.as_ref(),
+        metrics.as_ref(),
         Some(budget),
-    ) {
+        move || Ok(bodies_for_closure),
+    )
+    .await
+    {
         Ok(data) => super::signed::committed(
             ResponseVerb::AssembleHot,
             auth.operation_id,
