@@ -532,6 +532,86 @@ async fn forget_record_purges_primary_indexes_and_vectors() {
 }
 
 #[tokio::test]
+async fn forget_record_expires_entity_edges_and_clears_source_record_id() {
+    let store = open_in_memory().await.expect("open");
+    let record = sample_record();
+    store.upsert(&record).await.expect("upsert");
+
+    let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
+    let raw_record_id = record.id.as_str().to_owned();
+    conn.call(move |c| {
+        c.execute_batch(
+            "INSERT OR IGNORE INTO entity_nodes (id, name, name_norm, created_at) VALUES
+               ('forget-source', 'Forget Source', 'forget source', 1),
+               ('forget-target', 'Forget Target', 'forget target', 1);",
+        )?;
+        c.execute(
+            "INSERT INTO entity_edges \
+               (id, source_id, target_id, relation, confidence, confidence_score, \
+                valid_at, invalid_at, created_at, expired_at, tombstone_reason, \
+                source_record_id, body_hash) \
+             VALUES ('forget-edge', 'forget-source', 'forget-target', 'mentions', \
+                     'EXTRACTED', 0.9, 100, NULL, 100, NULL, NULL, ?1, ?2)",
+            params![raw_record_id, vec![7_u8; 32]],
+        )?;
+        Ok::<_, tokio_rusqlite::Error>(())
+    })
+    .await
+    .expect("seed entity edge");
+
+    let outcome = store
+        .forget_record(&record.id)
+        .await
+        .expect("forget record");
+    assert_eq!(outcome.deleted_count, 1);
+
+    let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
+    let raw_record_id = record.id.as_str().to_owned();
+    conn.call(move |c| {
+        let live_edges: i64 = c.query_row(
+            "SELECT COUNT(*) FROM entity_edges \
+              WHERE id = 'forget-edge' AND expired_at IS NULL",
+            [],
+            |row| row.get(0),
+        )?;
+        let retained_sources: i64 = c.query_row(
+            "SELECT COUNT(*) FROM entity_edges WHERE source_record_id = ?1",
+            params![raw_record_id],
+            |row| row.get(0),
+        )?;
+        let (expired_at, tombstone_reason): (Option<i64>, Option<String>) = c.query_row(
+            "SELECT expired_at, tombstone_reason \
+               FROM entity_edges WHERE id = 'forget-edge'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(live_edges, 0);
+        assert_eq!(retained_sources, 0);
+        assert!(expired_at.is_some());
+        assert_eq!(tombstone_reason.as_deref(), Some("forget"));
+
+        c.execute(
+            "INSERT INTO entity_edges \
+               (id, source_id, target_id, relation, confidence, confidence_score, \
+                valid_at, invalid_at, created_at, source_record_id, body_hash) \
+             VALUES ('forget-edge-successor', 'forget-source', 'forget-target', 'mentions', \
+                     'EXTRACTED', 0.8, 200, NULL, 200, NULL, ?1)",
+            params![vec![8_u8; 32]],
+        )?;
+        let successor_live: i64 = c.query_row(
+            "SELECT COUNT(*) FROM entity_edges \
+              WHERE id = 'forget-edge-successor' AND expired_at IS NULL",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(successor_live, 1);
+        Ok::<_, tokio_rusqlite::Error>(())
+    })
+    .await
+    .expect("entity edge forget assertions");
+}
+
+#[tokio::test]
 async fn forget_record_scrubs_body_bearing_wal_payloads_and_pre_images() {
     let store = open_in_memory().await.expect("open");
     let record = sample_record();
@@ -893,4 +973,44 @@ async fn purge_pending_lint_reports_exhausted_forget_phase_b_without_raw_ids() {
     })
     .await
     .expect("lint assertions");
+}
+
+#[tokio::test]
+async fn purge_pending_lint_reports_aborted_forget_phase_b_without_restart_remediation() {
+    let store = open_in_memory().await.expect("open");
+    let record = sample_record();
+    store.upsert(&record).await.expect("upsert");
+    let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
+    let raw_record_id = record.id.as_str().to_owned();
+    let raw_target_id = record.target_id.as_str().to_owned();
+    conn.call(move |c| {
+        c.execute(
+            "INSERT INTO wal_ops \
+               (operation_id, issued_seq, kind, state, envelope, issuer, \
+                target_hash, scope_json, expires_at, signature, issued_at, updated_at) \
+             VALUES ('forget_record-01J00000000000000000001003', 201, 'forget_record', \
+                     'ABORTED', '{}', 'issuer', \
+                     'hash:22222222222222222222222222222222', 'user=hmn:tafeng', 0, 'sig', 1, 1)",
+            [],
+        )?;
+        c.execute(
+            "INSERT INTO wal_steps \
+               (operation_id, step_ord, step_kind, state, attempts, last_error, started_at, finished_at) \
+             VALUES ('forget_record-01J00000000000000000001003', 5, 'wal.purge_pre_images', \
+                     'FAILED', 4, 'boom', 1, 2)",
+            [],
+        )?;
+        let findings =
+            cairn_store_sqlite::lint_purge_pending(c).expect("lint purge pending");
+        assert_eq!(findings.len(), 1);
+        let rendered = serde_json::to_string(&findings).expect("finding json");
+        assert!(rendered.contains("purge_failed"));
+        assert!(rendered.contains("ABORTED"));
+        assert!(!rendered.contains("restart Cairn to resume WAL recovery"));
+        assert!(!rendered.contains(&raw_record_id));
+        assert!(!rendered.contains(&raw_target_id));
+        Ok::<_, tokio_rusqlite::Error>(())
+    })
+    .await
+    .expect("aborted lint assertions");
 }

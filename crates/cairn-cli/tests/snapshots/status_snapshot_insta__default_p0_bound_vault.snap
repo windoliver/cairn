@@ -5,7 +5,8 @@ expression: v
 {
   "capabilities": [
     "cairn.mcp.v1.search.keyword",
-    "cairn.mcp.v1.policy_trace"
+    "cairn.mcp.v1.policy_trace",
+    "cairn.mcp.v1.forget.record"
   ],
   "contract": "cairn.mcp.v1",
   "extensions": [],

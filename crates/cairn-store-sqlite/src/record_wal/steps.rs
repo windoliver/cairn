@@ -389,6 +389,7 @@ fn drain_forget_fts(tx: &Transaction<'_>, payload: &ForgetPayload) -> Result<(),
 }
 
 fn drain_forget_edges(tx: &Transaction<'_>, payload: &ForgetPayload) -> Result<(), StepBodyError> {
+    tombstone_forget_entity_edges(tx, payload)?;
     tx.execute(
         "DELETE FROM edges \
           WHERE src IN (SELECT record_id FROM records WHERE target_id = ?1) \
@@ -402,6 +403,78 @@ fn drain_forget_edges(tx: &Transaction<'_>, payload: &ForgetPayload) -> Result<(
         params![payload.target_id.as_str()],
     )
     .map_err(StepBodyError::Storage)?;
+    Ok(())
+}
+
+struct ForgetEntityEdge {
+    id: String,
+    confidence: String,
+    confidence_score: f32,
+    valid_at: i64,
+    invalid_at: Option<i64>,
+    created_at: i64,
+    expired_at: Option<i64>,
+    tombstone_reason: Option<String>,
+}
+
+fn tombstone_forget_entity_edges(
+    tx: &Transaction<'_>,
+    payload: &ForgetPayload,
+) -> Result<(), StepBodyError> {
+    let edges = {
+        let mut stmt = tx
+            .prepare(
+                "SELECT id, confidence, confidence_score, valid_at, invalid_at, \
+                        created_at, expired_at, tombstone_reason \
+                   FROM entity_edges \
+                  WHERE source_record_id IN (\
+                        SELECT record_id FROM records WHERE target_id = ?1\
+                  )",
+            )
+            .map_err(StepBodyError::Storage)?;
+        stmt.query_map(params![payload.target_id.as_str()], |row| {
+            Ok(ForgetEntityEdge {
+                id: row.get(0)?,
+                confidence: row.get(1)?,
+                confidence_score: row.get(2)?,
+                valid_at: row.get(3)?,
+                invalid_at: row.get(4)?,
+                created_at: row.get(5)?,
+                expired_at: row.get(6)?,
+                tombstone_reason: row.get(7)?,
+            })
+        })
+        .map_err(StepBodyError::Storage)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(StepBodyError::Storage)?
+    };
+
+    let now_ms = crate::store::current_unix_ms();
+    for edge in edges {
+        let hash = crate::entity_graph::entity_edge_body_hash_components(
+            &edge.confidence,
+            edge.confidence_score,
+            edge.valid_at,
+            edge.invalid_at,
+            edge.created_at,
+            None,
+        );
+        tx.execute(
+            "UPDATE entity_edges \
+                SET expired_at = ?1, \
+                    tombstone_reason = ?2, \
+                    source_record_id = NULL, \
+                    body_hash = ?3 \
+              WHERE id = ?4",
+            params![
+                edge.expired_at.unwrap_or(now_ms),
+                edge.tombstone_reason.unwrap_or_else(|| "forget".to_owned()),
+                &hash[..],
+                edge.id,
+            ],
+        )
+        .map_err(StepBodyError::Storage)?;
+    }
     Ok(())
 }
 

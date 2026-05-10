@@ -68,11 +68,12 @@ pub fn lint_purge_pending(conn: &Connection) -> Result<Vec<Finding>, StoreError>
     ensure_table(conn, WAL_STEPS_TABLE)?;
 
     let mut stmt = conn.prepare(
-        "SELECT wo.operation_id, wo.target_hash, ws.step_ord, ws.step_kind, ws.state, ws.attempts
+        "SELECT wo.operation_id, wo.target_hash, wo.state, \
+                ws.step_ord, ws.step_kind, ws.state, ws.attempts
          FROM wal_ops wo
          JOIN wal_steps ws ON ws.operation_id = wo.operation_id
          WHERE wo.kind = 'forget_record'
-           AND wo.state = 'PREPARED'
+           AND wo.state IN ('PREPARED', 'ABORTED')
            AND ws.step_ord >= 1
            AND ws.state <> 'DONE'
          ORDER BY wo.issued_seq, ws.step_ord",
@@ -81,28 +82,39 @@ pub fn lint_purge_pending(conn: &Connection) -> Result<Vec<Finding>, StoreError>
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
-            row.get::<_, i64>(2)?,
-            row.get::<_, String>(3)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, i64>(3)?,
             row.get::<_, String>(4)?,
-            row.get::<_, i64>(5)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, i64>(6)?,
         ))
     })?;
 
     let mut findings = Vec::new();
     for row in rows {
-        let (operation_id, target_hash, step_ord, step_kind, state, attempts) = row?;
+        let (operation_id, target_hash, op_state, step_ord, step_kind, step_state, attempts) = row?;
+        let (label, suggested_fix) = if op_state == "ABORTED" {
+            (
+                "purge_failed",
+                "manual intervention required: inspect the WAL step error and verify residual \
+                 payload/pre-image purge before retrying or repairing the operation",
+            )
+        } else {
+            (
+                "purge_pending",
+                "restart Cairn to resume WAL recovery; if it repeats, inspect the WAL step error",
+            )
+        };
         findings.push(Finding {
             kind: Kind::DeferredCheck,
             severity: Severity::Warning,
             message: format!(
-                "purge_pending: forget_record operation {operation_id} target {target_hash} \
-                 stalled at step {step_ord} ({step_kind}) state={state} attempts={attempts}"
+                "{label}: forget_record operation {operation_id} target {target_hash} \
+                 op_state={op_state} stalled at step {step_ord} ({step_kind}) \
+                 state={step_state} attempts={attempts}"
             ),
             entities: None,
-            suggested_fix: Some(
-                "restart Cairn to resume WAL recovery; if it repeats, inspect the WAL step error"
-                    .to_owned(),
-            ),
+            suggested_fix: Some(suggested_fix.to_owned()),
             target: Some(Target {
                 operation_id: ulid_from_operation_id(&operation_id),
                 path: None,
