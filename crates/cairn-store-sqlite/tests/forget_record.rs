@@ -7,16 +7,124 @@ use std::sync::Arc;
 use cairn_core::contract::memory_store::{ListArgs, MemoryStore};
 use cairn_core::domain::{MemoryRecord, RecordId, ScopeTuple};
 use cairn_core::wal::{OperationId, WalKind};
+use cairn_embeddings_local::{EmbeddingModel, EmbeddingModelKind, MockEmbedder};
 use cairn_store_sqlite::record_wal::RecordWalRegistry;
 use cairn_store_sqlite::record_wal::payload::{
     PurgedPayload, RecordWalPayload, UpsertPayload, save_purged_payload_for_test,
 };
 use cairn_store_sqlite::wal::{RecoveryError, StepBodyRegistry};
-use cairn_store_sqlite::{StoreError, open_in_memory};
+use cairn_store_sqlite::{StoreError, open_in_memory, open_in_memory_with_embedder};
 use rusqlite::params;
 
 fn sample_record() -> MemoryRecord {
     cairn_core::domain::record::tests_export::sample_record()
+}
+
+async fn seed_pending_and_assert_vector_surfaces(
+    conn: &Arc<tokio_rusqlite::Connection>,
+    record_id: &RecordId,
+) {
+    let record_id = record_id.as_str().to_owned();
+    conn.call(move |c| {
+        c.execute(
+            "INSERT INTO pending_embeddings \
+               (record_id, reason, attempt_count, last_error, enqueued_at) \
+             VALUES (?1, 'opt_in_backfill', 0, NULL, 1)",
+            params![record_id],
+        )?;
+        let vectors: i64 = c.query_row(
+            "SELECT COUNT(*) FROM record_vectors WHERE record_id = ?1",
+            params![record_id],
+            |row| row.get(0),
+        )?;
+        let pending: i64 = c.query_row(
+            "SELECT COUNT(*) FROM pending_embeddings WHERE record_id = ?1",
+            params![record_id],
+            |row| row.get(0),
+        )?;
+        assert!(vectors > 0, "upsert should write a vector before forget");
+        assert!(pending > 0, "test should seed pending row before forget");
+        Ok::<_, tokio_rusqlite::Error>(())
+    })
+    .await
+    .expect("pre-forget vector assertions");
+}
+
+async fn assert_forget_purged_surfaces(
+    conn: &Arc<tokio_rusqlite::Connection>,
+    record: &MemoryRecord,
+    operation_id: &OperationId,
+) {
+    let record_id = record.id.as_str().to_owned();
+    let target_id = record.target_id.as_str().to_owned();
+    let body = record.body.clone();
+    let operation_id = operation_id.as_str().to_owned();
+    conn.call(move |c| {
+        let records: i64 = c.query_row(
+            "SELECT COUNT(*) FROM records WHERE target_id = ?1",
+            params![target_id],
+            |row| row.get(0),
+        )?;
+        let vectors: i64 = c.query_row(
+            "SELECT COUNT(*) FROM record_vectors WHERE record_id = ?1",
+            params![record_id],
+            |row| row.get(0),
+        )?;
+        let pending: i64 = c.query_row(
+            "SELECT COUNT(*) FROM pending_embeddings WHERE record_id = ?1",
+            params![record_id],
+            |row| row.get(0),
+        )?;
+        let fts_rows: i64 = c.query_row(
+            "SELECT COUNT(*) FROM records_fts WHERE body MATCH ?1",
+            params![body],
+            |row| row.get(0),
+        )?;
+        let op_state: String = c.query_row(
+            "SELECT state FROM wal_ops WHERE operation_id = ?1",
+            params![operation_id],
+            |row| row.get(0),
+        )?;
+        let done_steps: i64 = c.query_row(
+            "SELECT COUNT(*) FROM wal_steps \
+              WHERE operation_id = ?1 AND state = 'DONE'",
+            params![operation_id],
+            |row| row.get(0),
+        )?;
+        let total_steps: i64 = c.query_row(
+            "SELECT COUNT(*) FROM wal_steps WHERE operation_id = ?1",
+            params![operation_id],
+            |row| row.get(0),
+        )?;
+        let consent_payload: String = c.query_row(
+            "SELECT payload_json FROM consent_journal \
+              WHERE op_id = ?1 AND kind = 'forget_intent'",
+            params![operation_id],
+            |row| row.get(0),
+        )?;
+        assert_eq!(records, 0);
+        assert_eq!(vectors, 0);
+        assert_eq!(pending, 0);
+        assert_eq!(fts_rows, 0);
+        assert_eq!(op_state, "COMMITTED");
+        assert_eq!(done_steps, 7);
+        assert_eq!(total_steps, 7);
+        assert!(
+            !consent_payload.contains(&record_id),
+            "forget consent event must not retain record id"
+        );
+        assert!(
+            !consent_payload.contains(&target_id),
+            "forget consent event must not retain target id"
+        );
+        assert!(
+            !consent_payload.contains(&body),
+            "forget consent event must not retain body text"
+        );
+        Ok::<_, tokio_rusqlite::Error>(())
+    })
+    .await
+    .expect("physical purge assertions");
 }
 
 #[tokio::test]
@@ -267,10 +375,16 @@ async fn forget_resolution_reports_codec_for_malformed_scope() {
 
 #[tokio::test]
 async fn forget_record_purges_primary_indexes_and_vectors() {
-    let store = open_in_memory().await.expect("open");
+    let embedder: Arc<dyn EmbeddingModel> =
+        Arc::new(MockEmbedder::new(EmbeddingModelKind::BgeSmallEnV1_5));
+    let store = open_in_memory_with_embedder(Some(Arc::clone(&embedder)))
+        .await
+        .expect("open");
     let record = sample_record();
-    let body = record.body.clone();
     store.upsert(&record).await.expect("upsert");
+
+    let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
+    seed_pending_and_assert_vector_surfaces(&conn, &record.id).await;
 
     let outcome = store
         .forget_record(&record.id)
@@ -283,75 +397,7 @@ async fn forget_record_purges_primary_indexes_and_vectors() {
     assert!(listed.records.is_empty(), "forgotten record must be invisible");
 
     let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
-    let record_id = record.id.as_str().to_owned();
-    let target_id = record.target_id.as_str().to_owned();
-    let operation_id = outcome.operation_id.as_str().to_owned();
-    conn.call(move |c| {
-        let records: i64 = c.query_row(
-            "SELECT COUNT(*) FROM records WHERE target_id = ?1",
-            params![target_id],
-            |row| row.get(0),
-        )?;
-        let vectors: i64 = c.query_row(
-            "SELECT COUNT(*) FROM record_vectors WHERE record_id = ?1",
-            params![record_id],
-            |row| row.get(0),
-        )?;
-        let pending: i64 = c.query_row(
-            "SELECT COUNT(*) FROM pending_embeddings WHERE record_id = ?1",
-            params![record_id],
-            |row| row.get(0),
-        )?;
-        let fts_rows: i64 = c.query_row(
-            "SELECT COUNT(*) FROM records_fts WHERE body MATCH ?1",
-            params![body],
-            |row| row.get(0),
-        )?;
-        let op_state: String = c.query_row(
-            "SELECT state FROM wal_ops WHERE operation_id = ?1",
-            params![operation_id],
-            |row| row.get(0),
-        )?;
-        let done_steps: i64 = c.query_row(
-            "SELECT COUNT(*) FROM wal_steps \
-              WHERE operation_id = ?1 AND state = 'DONE'",
-            params![operation_id],
-            |row| row.get(0),
-        )?;
-        let total_steps: i64 = c.query_row(
-            "SELECT COUNT(*) FROM wal_steps WHERE operation_id = ?1",
-            params![operation_id],
-            |row| row.get(0),
-        )?;
-        let consent_payload: String = c.query_row(
-            "SELECT payload_json FROM consent_journal \
-              WHERE op_id = ?1 AND kind = 'forget_intent'",
-            params![operation_id],
-            |row| row.get(0),
-        )?;
-        assert_eq!(records, 0);
-        assert_eq!(vectors, 0);
-        assert_eq!(pending, 0);
-        assert_eq!(fts_rows, 0);
-        assert_eq!(op_state, "COMMITTED");
-        assert_eq!(done_steps, 7);
-        assert_eq!(total_steps, 7);
-        assert!(
-            !consent_payload.contains(&record_id),
-            "forget consent event must not retain record id"
-        );
-        assert!(
-            !consent_payload.contains(&target_id),
-            "forget consent event must not retain target id"
-        );
-        assert!(
-            !consent_payload.contains(&body),
-            "forget consent event must not retain body text"
-        );
-        Ok::<_, tokio_rusqlite::Error>(())
-    })
-    .await
-    .expect("physical purge assertions");
+    assert_forget_purged_surfaces(&conn, &record, &outcome.operation_id).await;
 }
 
 #[tokio::test]
@@ -401,22 +447,37 @@ async fn forget_record_does_not_scrub_unrelated_payload_mentions() {
 
     let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
     let unrelated_target = unrelated.target_id.as_str().to_owned();
-    let unrelated_op = conn
+    let forgotten_target = forgotten.target_id.as_str().to_owned();
+    let (unrelated_op, forgotten_op, forgotten_pre_images) = conn
         .call(move |c| {
-            c.query_row(
+            let unrelated_op = c.query_row(
                 "SELECT p.operation_id \
                    FROM wal_payloads p \
                    JOIN wal_ops o ON o.operation_id = p.operation_id \
                   WHERE p.kind = 'upsert' AND o.target_hash = ?1",
                 params![unrelated_target],
                 |row| row.get::<_, String>(0),
-            )
-            .map_err(tokio_rusqlite::Error::Rusqlite)
+            )?;
+            let forgotten_op = c.query_row(
+                "SELECT p.operation_id \
+                   FROM wal_payloads p \
+                   JOIN wal_ops o ON o.operation_id = p.operation_id \
+                  WHERE p.kind = 'upsert' AND o.target_hash = ?1",
+                params![forgotten_target],
+                |row| row.get::<_, String>(0),
+            )?;
+            let forgotten_pre_images = c.query_row(
+                "SELECT COUNT(*) FROM wal_steps \
+                  WHERE operation_id = ?1 AND pre_image IS NOT NULL",
+                params![forgotten_op],
+                |row| row.get::<_, i64>(0),
+            )?;
+            Ok::<_, tokio_rusqlite::Error>((unrelated_op, forgotten_op, forgotten_pre_images))
         })
         .await
-        .expect("unrelated upsert op");
+        .expect("upsert ops");
 
-    store
+    let outcome = store
         .forget_record(&forgotten.id)
         .await
         .expect("forget original");
@@ -429,6 +490,37 @@ async fn forget_record_does_not_scrub_unrelated_payload_mentions() {
             |row| row.get(0),
         )?;
         assert_eq!(kind, "upsert");
+        let (forgotten_kind, forgotten_type, purged_by): (String, String, String) = c.query_row(
+            "SELECT kind, \
+                    json_extract(payload_json, '$.type'), \
+                    json_extract(payload_json, '$.purged_by') \
+               FROM wal_payloads WHERE operation_id = ?1",
+            params![forgotten_op],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!(forgotten_kind, "purged");
+        assert_eq!(forgotten_type, "purged");
+        assert_eq!(purged_by, outcome.operation_id.as_str());
+
+        let current_kind: String = c.query_row(
+            "SELECT kind FROM wal_payloads WHERE operation_id = ?1",
+            params![outcome.operation_id.as_str()],
+            |row| row.get(0),
+        )?;
+        assert_eq!(current_kind, "forget_record");
+
+        if forgotten_pre_images > 0 {
+            let purged_pre_images: i64 = c.query_row(
+                "SELECT COUNT(*) FROM wal_steps \
+                  WHERE operation_id = ?1 \
+                    AND pre_image IS NOT NULL \
+                    AND json_extract(CAST(pre_image AS TEXT), '$.type') = 'purged' \
+                    AND json_extract(CAST(pre_image AS TEXT), '$.purged_by') = ?2",
+                params![forgotten_op, outcome.operation_id.as_str()],
+                |row| row.get(0),
+            )?;
+            assert_eq!(purged_pre_images, forgotten_pre_images);
+        }
         Ok::<_, tokio_rusqlite::Error>(())
     })
     .await
