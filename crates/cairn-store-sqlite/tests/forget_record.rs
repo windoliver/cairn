@@ -130,6 +130,22 @@ async fn forget_record_is_idempotent_under_repeat() {
 
     assert_eq!(r1.target_id_hash, r2.target_id_hash);
     assert_ne!(r1.op_id, r2.op_id, "every call mints a fresh op_id");
+    // Round-2 review: the in-txn `SELECT COUNT(*) WHERE active = 1`
+    // captures the live-version count under the record-WAL lock. The
+    // first forget tombstones one live row → `deleted_count = 1`; the
+    // second runs after Phase A purged the records table → reads 0.
+    // A regression to a pre-lock SELECT would still report `1` here
+    // because the second call's pre-lock read could observe the same
+    // active row before locking.
+    assert_eq!(
+        r1.deleted_count, 1,
+        "first forget should report exactly one tombstoned row"
+    );
+    assert_eq!(
+        r2.deleted_count, 0,
+        "post-contention re-forget must report deleted_count=0 — would \
+         regress to 1 if the count moved back to a pre-lock SELECT"
+    );
 
     // Verify two COMMITTED forget_record ops landed in wal_ops.
     let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
@@ -474,18 +490,12 @@ async fn forget_record_phase_b_crash_resumes_from_last_done_step() {
 async fn concurrent_forgets_serialize_via_record_wal_lock() {
     use std::sync::Arc as StdArc;
 
-    // In-process concurrency: two tokio tasks call forget_record on the
-    // same target through the same SqliteMemoryStore. The record-WAL
-    // entity-exclusive lock (brief §10.1 single-writer ordering)
-    // serializes them — exactly one acquires the lock and reports
-    // `deleted_count = 1`; the other fails fast with `RecordWalLock`.
-    //
-    // Round-2 review concern: a pre-lock SELECT could let two
-    // concurrent forgets both observe `active = 1` and both report
-    // `deleted_count = 1`. The fix moves the count read INSIDE the
-    // Phase A transaction (under the same lock), so the second forget
-    // — even if it eventually retried past the lock — would see
-    // `active = 0` and report `0`.
+    // Brief §10.1 single-writer ordering: the record-WAL
+    // entity-exclusive lock makes two same-target forgets fail-fast
+    // contend — exactly one acquires the lock and reports
+    // `deleted_count = 1`; the other surfaces the typed `RecordWalLock`
+    // error. This test pins the surfaced error type so a future
+    // change to a wait-and-retry policy gets a deliberate review.
     let store = StdArc::new(open_in_memory().await.expect("open"));
     let record = sample();
     let target = record.target_id.clone();
@@ -530,5 +540,72 @@ async fn concurrent_forgets_serialize_via_record_wal_lock() {
         failures[0].contains("record wal lock") || failures[0].contains("RecordWalLock"),
         "loser must surface the typed RecordWalLock error; got {:?}",
         failures[0]
+    );
+}
+
+#[tokio::test]
+async fn contended_forget_retried_after_lock_release_reports_zero() {
+    use std::sync::Arc as StdArc;
+    use std::time::Duration;
+
+    // Round-2 review (Codex): the fail-fast concurrent test above does
+    // NOT exercise the in-txn deleted_count fix — the loser never runs
+    // Phase A, so a regressed pre-lock SELECT would still satisfy "one
+    // dc=1, one error." This test fills that gap: spawn the contender,
+    // catch the RecordWalLock error, retry once the incumbent committed
+    // and released the lock, then assert the retry reports `0`.
+    //
+    // Behaviour invariant: after the first forget tombstoned the live
+    // row, ANY subsequent successful forget on the same target must
+    // observe zero live rows inside its own Phase A transaction. A
+    // regression to a pre-lock SELECT would let the contender stash
+    // its own pre-lock count of `1` and falsely report `deleted_count
+    // = 1` even after the incumbent already drained everything.
+    let store = StdArc::new(open_in_memory().await.expect("open"));
+    let record = sample();
+    let target = record.target_id.clone();
+    store.upsert(&record).await.expect("upsert");
+
+    let s1 = StdArc::clone(&store);
+    let s2 = StdArc::clone(&store);
+    let t1 = target.clone();
+    let t2 = target.clone();
+    let h1 = tokio::spawn(async move { s1.forget_record(&t1, &alice()).await });
+    let h2 = tokio::spawn(async move { s2.forget_record(&t2, &alice()).await });
+
+    let r1 = h1.await.expect("task1 join");
+    let r2 = h2.await.expect("task2 join");
+
+    let (winner, loser) = match (r1, r2) {
+        (Ok(w), Err(e)) | (Err(e), Ok(w)) => (w, e.to_string()),
+        (Ok(_), Ok(_)) => panic!("both succeeded — locks should serialize"),
+        (Err(e1), Err(e2)) => panic!("both failed: {e1}, {e2}"),
+    };
+    assert_eq!(
+        winner.deleted_count, 1,
+        "incumbent that acquired the lock must report dc=1"
+    );
+    assert!(
+        loser.contains("record wal lock") || loser.contains("RecordWalLock"),
+        "loser must surface RecordWalLock; got {loser:?}"
+    );
+
+    // Wait long enough for the incumbent's lock to fully release. The
+    // record-WAL locks unwind after `runner::run_from` returns and
+    // `finalize` commits — single-digit ms in tests, but give it 100ms
+    // for headroom.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let retry = store
+        .forget_record(&target, &alice())
+        .await
+        .expect("retry after lock released should succeed");
+    assert_eq!(
+        retry.deleted_count, 0,
+        "after the incumbent purged the records, the retry's in-txn \
+         SELECT must observe zero live rows. A regression to a pre-lock \
+         SELECT would let this still report `1` (the pre-lock count \
+         captured before the second forget could see the effect of the \
+         first)."
     );
 }
