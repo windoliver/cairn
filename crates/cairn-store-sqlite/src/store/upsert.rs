@@ -285,6 +285,15 @@ pub(crate) fn upsert_in_tx(
     )?;
 
     let outcome_id = new_record_id.unwrap_or_else(|| record.id.clone());
+
+    // Bump every hot-prefix source watermark this record affects, inside
+    // the same transaction so the bump is atomic with the record write
+    // (brief invariant 5; see issue #83).
+    //
+    // Only the content-changed path bumps — idempotent re-ingest (same body
+    // hash) does not alter downstream visibility, so the cache remains valid.
+    bump_hot_prefix_watermarks(tx, record)?;
+
     Ok(UpsertOutcome {
         record_id: outcome_id,
         target_id: record.target_id.clone(),
@@ -524,6 +533,46 @@ fn insert_row(
             row.schema_version_minor,
         ],
     )?;
+    Ok(())
+}
+
+/// Bump every hot-prefix source watermark this record affects, inside the
+/// caller's open transaction.
+///
+/// Called on the content-changed path of [`upsert_in_tx`] so the bump is
+/// atomic with the record write (brief invariant 5; see issue #83). The
+/// classifier ([`cairn_core::domain::hot_prefix::classify_record`]) is the
+/// single source of truth for which classes a record affects.
+///
+/// The idempotent re-ingest path deliberately does NOT call this function:
+/// a same-body re-ingest does not alter downstream visibility, so the cache
+/// remains valid and no invalidation is needed.
+fn bump_hot_prefix_watermarks(
+    tx: &Transaction<'_>,
+    record: &MemoryRecord,
+) -> Result<(), StoreError> {
+    let classes = cairn_core::domain::hot_prefix::classify_record(record);
+    if classes.is_empty() {
+        return Ok(());
+    }
+    let now_ms = current_unix_ms();
+    let placeholders = (0..classes.len())
+        .map(|i| format!("?{}", i + 2))
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "UPDATE hot_source_watermarks SET watermark = watermark + 1, \
+         updated_at_ms = ?1 WHERE class IN ({placeholders})"
+    );
+    let mut stmt = tx.prepare(&sql)?;
+    let class_strs: Vec<String> = classes.iter().map(|c| c.as_db_str().to_owned()).collect();
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(now_ms)];
+    for s in &class_strs {
+        params.push(Box::new(s.clone()));
+    }
+    let params_refs: Vec<&dyn rusqlite::ToSql> =
+        params.iter().map(std::convert::AsRef::as_ref).collect();
+    stmt.execute(params_refs.as_slice())?;
     Ok(())
 }
 
