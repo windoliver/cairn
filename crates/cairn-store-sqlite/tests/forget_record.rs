@@ -146,3 +146,51 @@ async fn forget_record_is_idempotent_under_repeat() {
         .expect("wal count");
     assert_eq!(count, 2, "both forget calls reach COMMITTED");
 }
+
+// ── Task 10 ────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn forget_record_scrubs_wal_pre_image_blobs() {
+    let store = open_in_memory().await.expect("open");
+    let record = sample();
+    let target = record.target_id.clone();
+    let body = record.body.clone();
+
+    // First upsert seeds the row. Second upsert (with a mutated body)
+    // forces snapshot.stage to capture a pre_image referencing the
+    // target's lineage — the very blob we want to verify is body-free
+    // post-forget.
+    store.upsert(&record).await.expect("upsert v1");
+    let mut v2 = record.clone();
+    v2.body = format!("{body}-revised");
+    store.upsert(&v2).await.expect("upsert v2");
+
+    store
+        .forget_record(&target, &alice())
+        .await
+        .expect("forget");
+
+    let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
+    let target_str = target.as_str().to_owned();
+    let body_str = body.clone();
+    let leaks: i64 = conn
+        .call(move |c| {
+            c.query_row(
+                "SELECT COUNT(*) FROM wal_steps \
+                  WHERE pre_image IS NOT NULL \
+                    AND ( \
+                          CAST(pre_image AS TEXT) LIKE '%' || ?1 || '%' \
+                       OR CAST(pre_image AS TEXT) LIKE '%' || ?2 || '%' \
+                    )",
+                rusqlite::params![target_str, body_str],
+                |row| row.get(0),
+            )
+            .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))
+        })
+        .await
+        .expect("scan");
+    assert_eq!(
+        leaks, 0,
+        "no wal_steps.pre_image blob may reference the forgotten target id or body"
+    );
+}
