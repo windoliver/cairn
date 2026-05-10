@@ -225,6 +225,14 @@ pub(crate) fn upsert_in_tx(
         let prior_hash = body_hash_from_str(prior_hash_str)?;
         if prior_hash == body_hash {
             reproject_in_place(tx, record, prior_id, *prior_version, &body_hash, now_ms)?;
+            // Codex review round 2 finding 2: reproject_in_place updates
+            // kind / visibility / scope / salience / tags from the new
+            // record. A same-body change from unpinned to pinned (or
+            // Reference to Project, or any classification-affecting
+            // mutation) would otherwise leave existing cache rows
+            // watermark-valid even though recipe selection changed.
+            // Pessimistically bump every class so the cache reassembles.
+            bump_hot_prefix_watermarks(tx, record, true)?;
             return idempotent_outcome(record, prior_id, *prior_version, prior_hash);
         }
     }

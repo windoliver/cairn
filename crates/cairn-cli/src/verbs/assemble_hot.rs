@@ -219,6 +219,7 @@ async fn run_async(args: AssembleHotArgs, vault_root: PathBuf, config: CairnConf
         &auth.issuer,
         &vault_id,
         Some(&ctx.vault_root),
+        args.session_id.as_deref(),
         cache.as_ref(),
         metrics.as_ref(),
         Some(budget),

@@ -261,7 +261,11 @@ mod tests {
         };
         let findings = run(&inputs);
         let kinds: Vec<Kind> = findings.iter().map(|f| f.kind).collect();
-        assert_eq!(findings.len(), 1, "expected exactly 1 finding; got {kinds:?}");
+        assert_eq!(
+            findings.len(),
+            1,
+            "expected exactly 1 finding; got {kinds:?}"
+        );
         assert!(matches!(findings[0].kind, Kind::DeferredCheck));
         assert!(matches!(findings[0].severity, Severity::Info));
         assert!(
