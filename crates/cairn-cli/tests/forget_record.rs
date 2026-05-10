@@ -50,6 +50,16 @@ fn hit_count(vault: &Path, query: &str) -> usize {
         .len()
 }
 
+fn forget_record_wal_operation_id(vault: &Path) -> String {
+    let conn = rusqlite::Connection::open(vault.join(".cairn/cairn.db")).expect("open cairn db");
+    conn.query_row(
+        "SELECT operation_id FROM wal_ops WHERE kind = 'forget_record'",
+        [],
+        |row| row.get(0),
+    )
+    .expect("forget_record wal op")
+}
+
 #[test]
 fn forget_record_json_commits_in_bound_vault() {
     let dir = tempfile::tempdir().expect("temp vault");
@@ -80,6 +90,7 @@ fn forget_record_json_commits_in_bound_vault() {
     assert_eq!(resp.contract, "cairn.mcp.v1");
     assert!(matches!(resp.status, ResponseStatus::Committed));
     assert!(matches!(resp.verb, ResponseVerb::Forget));
+    let response_operation_id = resp.operation_id.0.clone();
     let data = resp.data.expect("committed forget must carry data");
     let ResponseData::Forget(data) = data else {
         panic!("forget response must carry ForgetData");
@@ -95,11 +106,19 @@ fn forget_record_json_commits_in_bound_vault() {
         vec![record_id]
     );
 
+    assert_eq!(
+        forget_record_wal_operation_id(dir.path()),
+        format!("forget_record-{response_operation_id}")
+    );
     assert_eq!(hit_count(dir.path(), "issue58forgetunique"), 0);
 }
 
-fn assert_capability_unavailable(args: &[&str], capability: &str) {
-    let out = cli()
+fn assert_capability_unavailable(vault: Option<&Path>, args: &[&str], capability: &str) {
+    let mut cmd = cli();
+    if let Some(vault) = vault {
+        cmd.current_dir(vault);
+    }
+    let out = cmd
         .args(args)
         .output()
         .unwrap_or_else(|e| panic!("failed to run cairn {args:?}: {e}"));
@@ -123,6 +142,7 @@ fn assert_capability_unavailable(args: &[&str], capability: &str) {
 #[test]
 fn forget_session_and_scope_remain_capability_unavailable() {
     assert_capability_unavailable(
+        None,
         &[
             "forget",
             "--session",
@@ -132,6 +152,34 @@ fn forget_session_and_scope_remain_capability_unavailable() {
         "cairn.mcp.v1.forget.session",
     );
     assert_capability_unavailable(
+        None,
+        &["forget", "--scope", r#"{"tenant":"default"}"#, "--json"],
+        "cairn.mcp.v1.forget.scope",
+    );
+}
+
+#[test]
+fn forget_session_and_scope_ignore_malformed_vault_config() {
+    let dir = tempfile::tempdir().expect("temp vault");
+    bootstrap_vault(dir.path());
+    std::fs::write(
+        dir.path().join(".cairn/config.yaml"),
+        b": :\nnot: [valid yaml",
+    )
+    .expect("write malformed config");
+
+    assert_capability_unavailable(
+        Some(dir.path()),
+        &[
+            "forget",
+            "--session",
+            "01JXXXXXXXXXXXXXXXXXXXXXXX",
+            "--json",
+        ],
+        "cairn.mcp.v1.forget.session",
+    );
+    assert_capability_unavailable(
+        Some(dir.path()),
         &["forget", "--scope", r#"{"tenant":"default"}"#, "--json"],
         "cairn.mcp.v1.forget.scope",
     );

@@ -33,6 +33,42 @@ fn requested_capability(sub: &ArgMatches) -> &'static str {
 /// Run `cairn forget`.
 #[must_use]
 pub fn run(sub: &ArgMatches, vault_root: PathBuf, config: CairnConfig) -> ExitCode {
+    if !requires_vault_context(sub) {
+        return run_without_context(sub);
+    }
+
+    let json = sub.get_flag("json");
+
+    let Some(record_id) = sub.get_one::<String>("record_id") else {
+        return run_without_context(sub);
+    };
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            let resp = super::signed::aborted(ResponseVerb::Forget, format!("runtime build: {e}"));
+            emit_response(&resp, json, record_id);
+            return ExitCode::FAILURE;
+        }
+    };
+    let resp = rt.block_on(run_record(record_id.clone(), vault_root, config));
+    emit_response(&resp, json, record_id);
+    response_exit_code(&resp)
+}
+
+/// Whether this invocation needs the resolved vault path and config.
+#[must_use]
+pub fn requires_vault_context(sub: &ArgMatches) -> bool {
+    !sub.get_flag("dry-run")
+        && !sub.get_flag("human-review")
+        && sub.get_one::<String>("record_id").is_some()
+}
+
+/// Run `cairn forget` modes that do not open the vault store.
+#[must_use]
+pub fn run_without_context(sub: &ArgMatches) -> ExitCode {
     let json = sub.get_flag("json");
 
     let dry_run = sub.get_flag("dry-run");
@@ -48,24 +84,6 @@ pub fn run(sub: &ArgMatches, vault_root: PathBuf, config: CairnConfig) -> ExitCo
         // distinction collapses to "produce a placeholder plan." #9 will
         // split them into real builders.
         return crate::verbs::ingest_plan_stub(sub, mode, no_diff, json);
-    }
-
-    if let Some(record_id) = sub.get_one::<String>("record_id") {
-        let rt = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(rt) => rt,
-            Err(e) => {
-                let resp =
-                    super::signed::aborted(ResponseVerb::Forget, format!("runtime build: {e}"));
-                emit_response(&resp, json, record_id);
-                return ExitCode::FAILURE;
-            }
-        };
-        let resp = rt.block_on(run_record(record_id.clone(), vault_root, config));
-        emit_response(&resp, json, record_id);
-        return response_exit_code(&resp);
     }
 
     let capability = requested_capability(sub);
@@ -94,6 +112,10 @@ async fn run_record(record_id_raw: String, vault_root: PathBuf, config: CairnCon
     };
     match ctx.store.forget_record(&record_id).await {
         Ok(outcome) => {
+            let operation_id = match response_operation_id(&outcome.operation_id) {
+                Ok(operation_id) => operation_id,
+                Err(message) => return super::signed::aborted(ResponseVerb::Forget, message),
+            };
             let data = ForgetData {
                 deleted_count: outcome.deleted_count,
                 plan_ref: None,
@@ -107,7 +129,7 @@ async fn run_record(record_id_raw: String, vault_root: PathBuf, config: CairnCon
             };
             super::signed::committed(
                 ResponseVerb::Forget,
-                super::envelope::new_operation_id(),
+                operation_id,
                 ResponseData::Forget(data),
                 Vec::new(),
             )
@@ -119,6 +141,17 @@ async fn run_record(record_id_raw: String, vault_root: PathBuf, config: CairnCon
         ),
         Err(e) => super::signed::aborted(ResponseVerb::Forget, format!("store forget: {e}")),
     }
+}
+
+fn response_operation_id(operation_id: &cairn_core::wal::OperationId) -> Result<Ulid, String> {
+    const PREFIX: &str = "forget_record-";
+    let raw = operation_id.as_str();
+    let Some(ulid) = raw.strip_prefix(PREFIX) else {
+        return Err(format!("unexpected forget wal operation id: {raw}"));
+    };
+    RecordId::parse(ulid.to_owned())
+        .map_err(|e| format!("invalid forget wal operation id `{raw}`: {e}"))?;
+    Ok(Ulid(ulid.to_owned()))
 }
 
 fn emit_response(resp: &Response, json: bool, requested_record_id: &str) {
