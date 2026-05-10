@@ -308,6 +308,12 @@ impl CairnMcpHandler {
             embedding_provider_ready,
             llm_configured: false,
             contract_phase: cairn_core::status::Phase::V0_1,
+            // Brief §15: MCP-surface capability advertisement consults the
+            // MCP-specific wiring flags. `cairn.mcp.v1.forget.record` stays
+            // off here while `tools/call` falls through to `dispatch_stub`
+            // for forget; the CLI surface advertises it because its
+            // dispatch is wired.
+            surface: cairn_core::status::Surface::Mcp,
         };
 
         // Post-filter replay capabilities to keep status advertisement and

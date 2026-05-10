@@ -29,6 +29,11 @@ fn gates(bound: bool, model_present: bool, store: Option<StoreCaps>) -> Capabili
         embedding_provider_ready: model_present,
         llm_configured: false,
         contract_phase: Phase::V0_1,
+        // Default to the CLI surface — the surface where today's wiring
+        // flags are flipped on. Tests that exercise SDK/MCP surfaces
+        // construct gates directly with `surface: Surface::Sdk` /
+        // `Surface::Mcp` (see `forget_record_*` tests below).
+        surface: Surface::Cli,
     }
 }
 
@@ -100,15 +105,46 @@ fn local_embeddings_off_drops_semantic_and_hybrid() {
 }
 
 #[test]
-fn forget_record_advertised_after_wiring_flipped() {
-    // `wiring::FORGET_RECORD_WIRED` was flipped to true once the CLI dispatch
-    // landed (issue #58 dispatch extension). The brief §15 fail-closed
-    // contract is now satisfied because the runtime can honor the call.
+fn forget_record_advertised_on_cli_surface_after_wiring_flipped() {
+    // `wiring::FORGET_RECORD_WIRED_CLI` was flipped to true once the CLI
+    // dispatch landed (issue #58 dispatch extension). The brief §15
+    // fail-closed contract is satisfied because the CLI runtime honors
+    // every call against `cairn.mcp.v1.forget.record`.
     let g = gates(true, true, None);
     let caps = advertise(&g);
     assert!(
         caps.contains(&Capabilities::CairnMcpV1ForgetRecord),
-        "forget.record must be advertised once runtime is wired (brief §15)"
+        "forget.record must be advertised on the CLI surface (brief §15)"
+    );
+}
+
+#[test]
+fn forget_record_not_advertised_on_sdk_surface_until_wired() {
+    // `Sdk::forget` still returns `unimplemented` — brief §15 fail-closed
+    // forbids advertising `cairn.mcp.v1.forget.record` from `Sdk::status`
+    // until the SDK transport calls into `MemoryStore::forget_record`.
+    let mut g = gates(true, true, None);
+    g.surface = Surface::Sdk;
+    let caps = advertise(&g);
+    assert!(
+        !caps.contains(&Capabilities::CairnMcpV1ForgetRecord),
+        "forget.record must NOT be advertised on the SDK surface while \
+         `Sdk::forget` returns unimplemented (brief §15); got {caps:?}"
+    );
+}
+
+#[test]
+fn forget_record_not_advertised_on_mcp_surface_until_wired() {
+    // The MCP `tools/call` handler still falls through to `dispatch_stub`
+    // for forget — brief §15 fail-closed forbids advertising
+    // `cairn.mcp.v1.forget.record` until that path lands.
+    let mut g = gates(true, true, None);
+    g.surface = Surface::Mcp;
+    let caps = advertise(&g);
+    assert!(
+        !caps.contains(&Capabilities::CairnMcpV1ForgetRecord),
+        "forget.record must NOT be advertised on the MCP surface while \
+         the handler falls through to dispatch_stub (brief §15); got {caps:?}"
     );
 }
 
@@ -215,6 +251,7 @@ mod remediation_tests {
             embedding_provider_ready: true,
             llm_configured: false,
             contract_phase: Phase::V0_1,
+            surface: Surface::Cli,
         };
 
         for cap in advertise(&gates) {
@@ -268,6 +305,10 @@ mod prop_tests {
         )
     }
 
+    fn arb_surface() -> impl Strategy<Value = Surface> {
+        prop_oneof![Just(Surface::Cli), Just(Surface::Sdk), Just(Surface::Mcp)]
+    }
+
     fn arb_gates() -> impl Strategy<Value = CapabilityGates> {
         (
             arb_cap_set(),
@@ -277,9 +318,10 @@ mod prop_tests {
             any::<bool>(),
             any::<bool>(),
             arb_phase(),
+            arb_surface(),
         )
-            .prop_map(|(config, store, bound, model, embed_ready, llm, phase)| {
-                CapabilityGates {
+            .prop_map(
+                |(config, store, bound, model, embed_ready, llm, phase, surface)| CapabilityGates {
                     config,
                     store,
                     vault_bound: bound,
@@ -287,8 +329,9 @@ mod prop_tests {
                     embedding_provider_ready: embed_ready,
                     llm_configured: llm,
                     contract_phase: phase,
-                }
-            })
+                    surface,
+                },
+            )
     }
 
     // Turning a capability gate ON never removes capabilities. Catches
@@ -361,6 +404,7 @@ fn openai_provider_without_key_drops_semantic_and_hybrid() {
         embedding_provider_ready: false,
         llm_configured: false,
         contract_phase: Phase::V0_1,
+        surface: Surface::Cli,
     };
     let caps = advertise(&g);
     assert!(

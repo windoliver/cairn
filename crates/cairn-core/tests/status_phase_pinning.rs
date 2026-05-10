@@ -5,7 +5,7 @@
 
 use cairn_core::config::CapabilitySet;
 use cairn_core::generated::common::Capabilities;
-use cairn_core::status::{CapabilityGates, Phase, StoreCaps, advertise};
+use cairn_core::status::{CapabilityGates, Phase, StoreCaps, Surface, advertise};
 
 fn full_caps_set() -> CapabilitySet {
     CapabilitySet {
@@ -33,6 +33,10 @@ fn full_gates(phase: Phase) -> CapabilityGates {
         embedding_provider_ready: true,
         llm_configured: false,
         contract_phase: phase,
+        // Phase-pinning rules in §8.0.a are surface-independent — exercise
+        // the CLI surface here; per-surface gating gets its own test in
+        // `cairn_core::status::tests`.
+        surface: Surface::Cli,
     }
 }
 

@@ -62,6 +62,28 @@ pub struct StoreCaps {
     pub vector: bool,
 }
 
+/// Which Cairn surface is asking for a capability advertisement.
+///
+/// Brief §15 fail-closed: a capability appears in `status.capabilities`
+/// only when the calling surface can honor every call against it. When a
+/// dispatch path lands on the CLI ahead of the SDK transport / MCP handler,
+/// `advertise()` consults the per-surface wiring flag (e.g.
+/// [`wiring::FORGET_RECORD_WIRED_CLI`] vs `WIRED_SDK` / `WIRED_MCP`) so the
+/// lagging surfaces do not over-advertise.
+///
+/// `#[non_exhaustive]` so adding a future surface (e.g. a remote-RPC
+/// adapter, the in-tree skill) is non-breaking for downstream callers.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Surface {
+    /// `cairn` binary verbs.
+    Cli,
+    /// In-process typed SDK (`cairn-sdk`).
+    Sdk,
+    /// MCP adapter (`cairn-mcp`) — stdio + http transports.
+    Mcp,
+}
+
 /// Inputs for the per-capability decision rules in `advertise()`.
 // Four boolean fields (vault_bound, model_present, embedding_provider_ready,
 // llm_configured) represent orthogonal binary-state runtime probes. Each bool
@@ -124,6 +146,11 @@ pub struct CapabilityGates {
     pub llm_configured: bool,
     /// Contract-version phase the runtime is operating at.
     pub contract_phase: Phase,
+    /// Calling surface — selects per-surface wiring flags for
+    /// capabilities whose dispatch landed on some surfaces but not
+    /// others. See [`Surface`] and the per-surface wiring constants
+    /// in [`wiring`].
+    pub surface: Surface,
 }
 
 impl CapabilityGates {
@@ -174,7 +201,7 @@ pub fn advertise(gates: &CapabilityGates) -> Vec<Capabilities> {
     }
 
     // ── forget (capability surfaces; runtime wiring still all-false) ──────
-    if phase >= Phase::V0_1 && wiring::FORGET_RECORD_WIRED {
+    if phase >= Phase::V0_1 && forget_record_wired_for(gates.surface) {
         out.push(Capabilities::CairnMcpV1ForgetRecord);
     }
     if phase >= Phase::V0_2 && wiring::FORGET_SESSION_WIRED {
@@ -213,6 +240,20 @@ pub fn advertise(gates: &CapabilityGates) -> Vec<Capabilities> {
     }
 
     out
+}
+
+/// Per-surface lookup for `cairn.mcp.v1.forget.record` wiring.
+///
+/// Brief §15 fail-closed: the CLI dispatch landed in #58 ahead of the SDK
+/// transport and the MCP handler. Until those surfaces dispatch end-to-end,
+/// only the CLI advertises `forget.record` in `status`.
+#[must_use]
+fn forget_record_wired_for(surface: Surface) -> bool {
+    match surface {
+        Surface::Cli => wiring::FORGET_RECORD_WIRED_CLI,
+        Surface::Sdk => wiring::FORGET_RECORD_WIRED_SDK,
+        Surface::Mcp => wiring::FORGET_RECORD_WIRED_MCP,
+    }
 }
 
 #[cfg(test)]
