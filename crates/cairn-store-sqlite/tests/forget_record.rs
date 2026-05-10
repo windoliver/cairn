@@ -351,3 +351,118 @@ async fn forget_record_phase_a_crash_leaves_no_state() {
     assert!(post.is_none(), "recovered forget purges the target");
 }
 
+// ── Task 13 ────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn forget_record_phase_b_crash_resumes_from_last_done_step() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("cairn.sqlite");
+
+    let seed = sample();
+    let target = seed.target_id.clone();
+
+    {
+        let store = open(&path).await.expect("open");
+        store.upsert(&seed).await.expect("upsert seed");
+
+        // Stage a PREPARED forget op + payload + a wal_steps row
+        // marking step 0 (primary.mark_tombstone) DONE. Apply the
+        // tombstone effect manually so the on-disk state matches
+        // "Phase A commit succeeded, crashed before step 1."
+        let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
+        let target_str = target.as_str().to_owned();
+        let payload_json = serde_json::to_string(
+            &cairn_store_sqlite::record_wal::payload::RecordWalPayload::Forget(Box::new(
+                cairn_store_sqlite::record_wal::payload::ForgetPayload {
+                    target_id: target.clone(),
+                    scope: seed.scope.clone(),
+                    reason_code: "user_command".to_owned(),
+                    actor: alice(),
+                    scope_tier: cairn_core::domain::taxonomy::MemoryVisibility::Private,
+                },
+            )),
+        )
+        .expect("serialize");
+        let target_for_tx = target_str.clone();
+        conn.call(move |c| {
+            c.execute(
+                "INSERT INTO wal_ops \
+                   (operation_id, issued_seq, kind, state, envelope, issuer, \
+                    target_hash, scope_json, expires_at, signature, issued_at, updated_at) \
+                 VALUES ('op-phaseb-58', \
+                         COALESCE((SELECT MAX(issued_seq) FROM wal_ops),0)+1, \
+                         'forget_record','PREPARED','{}','test', \
+                         ?1, '{}', 0, 'sig', 1, 1)",
+                rusqlite::params![target_for_tx],
+            )?;
+            c.execute(
+                "INSERT INTO wal_payloads(operation_id, kind, payload_json, created_at) \
+                 VALUES ('op-phaseb-58', 'forget_record', ?1, 1)",
+                rusqlite::params![payload_json],
+            )?;
+            // Mark step 0 DONE so recovery resumes from step 1.
+            c.execute(
+                "INSERT INTO wal_steps \
+                   (operation_id, step_ord, step_kind, state, attempts, \
+                    started_at, finished_at) \
+                 VALUES ('op-phaseb-58', 0, 'primary.mark_tombstone', 'DONE', 1, 1, 2)",
+                [],
+            )?;
+            // Apply the tombstone effect of step 0 directly.
+            c.execute(
+                "UPDATE records \
+                    SET active = 0, tombstoned = 1, tombstone_reason = 'forget' \
+                  WHERE target_id = ?1",
+                rusqlite::params![target_for_tx],
+            )?;
+            Ok::<_, tokio_rusqlite::Error>(())
+        })
+        .await
+        .expect("seed half-run state");
+    }
+
+    // Reopen — recovery picks up the prepared op and runs steps 1-6.
+    let store = open(&path).await.expect("reopen");
+
+    let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
+    let (state, done_steps): (String, i64) = conn
+        .call(|c| {
+            let s: String = c.query_row(
+                "SELECT state FROM wal_ops WHERE operation_id = 'op-phaseb-58'",
+                [],
+                |row| row.get(0),
+            )?;
+            let n: i64 = c.query_row(
+                "SELECT COUNT(*) FROM wal_steps \
+                  WHERE operation_id = 'op-phaseb-58' AND state = 'DONE'",
+                [],
+                |row| row.get(0),
+            )?;
+            Ok((s, n))
+        })
+        .await
+        .expect("query state");
+
+    assert_eq!(
+        state, "COMMITTED",
+        "recovery drove the prepared op to COMMITTED"
+    );
+    assert_eq!(
+        done_steps, 7,
+        "every step in FORGET_RECORD_STEPS reached DONE during recovery"
+    );
+
+    let target_for_count = target.as_str().to_owned();
+    let row_count: i64 = conn
+        .call(move |c| {
+            c.query_row(
+                "SELECT COUNT(*) FROM records WHERE target_id = ?1",
+                rusqlite::params![target_for_count],
+                |row| row.get(0),
+            )
+            .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))
+        })
+        .await
+        .expect("scan records");
+    assert_eq!(row_count, 0, "Phase B primary.purge ran during recovery");
+}
