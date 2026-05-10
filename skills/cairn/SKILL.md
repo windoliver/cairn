@@ -268,10 +268,6 @@ cairn summarize --citations on 01H8XGJWBWBAQ4N1NQK1A8X9YZ 01H8XGJWBWBAQ4N1NQK1A8
 
 **Exclusivity:** this is the canonical hot-prefix surface
 
-**Pre-compaction reinjection path:**
-- before a harness compacts context, call `cairn assemble_hot --session SESSION_ID --budget BUDGET --json`
-- if the harness emits a `PreCompact` hook, splice the returned text into the post-compaction prefix before continuing, then persist the snapshot through `cairn capture_trace`
-
 **Example:**
 
 ```bash
@@ -389,9 +385,14 @@ Every command supports `--json` for machine-readable output. Parse stdout as JSO
 4. Every `ingest` signs with your agent identity — `cairn` reads it from `$CAIRN_IDENTITY` set at harness startup. Don't pass `--signed-intent` explicitly.
 5. Don't run `cairn ingest` for trivia the user didn't ask you to remember. Use the trigger list above — if it's not on the list, ask before storing.
 
+## Pre-compaction reinjection
+
+If the harness emits a `PreCompact` hook (or you can detect imminent context compaction), call `cairn assemble_hot --session ${SESSION_ID} --json` and splice the returned text into the post-compaction prefix so working priors survive the squeeze. Persist the pre-compaction transcript with `cairn capture_trace --from ${TRANSCRIPT_PATH} --json`.
+
 ---
 
 ## Protocol preludes (not core verbs)
 
 - `cairn handshake --json` — fresh per-call challenge mint.
 - `cairn status --json` — deterministic capability discovery (cacheable, no side effects).
+

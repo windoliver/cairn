@@ -97,7 +97,7 @@ fn floor_decimal_product(compaction_target: u32, ratio: f64) -> u64 {
 /// Run the fail-closed pre-compaction flow: budgeted assembly first, then
 /// snapshot persistence, returning reinjection metadata only on success.
 pub fn run_pre_compact<SNAP>(
-    event: PreCompactEvent,
+    event: &PreCompactEvent,
     cfg: &HotMemoryConfig,
     mut snapshot: SNAP,
 ) -> Result<PreCompactOutput, PreCompactError>
@@ -110,7 +110,7 @@ where
         cfg.pre_compact_safety_ratio,
     );
     let data = assemble_hot_with_budget(cfg, budget)?;
-    snapshot(&event, &data).map_err(|reason| PreCompactError::Snapshot { reason })?;
+    snapshot(event, &data).map_err(|reason| PreCompactError::Snapshot { reason })?;
 
     Ok(PreCompactOutput {
         reinjection_text: data.prefix,
@@ -177,7 +177,7 @@ mod tests {
         let calls = RefCell::new(Vec::new());
 
         let event = sample_event();
-        let out = run_pre_compact(event.clone(), &sample_cfg(), |snap_event, assembled| {
+        let out = run_pre_compact(&event, &sample_cfg(), |snap_event, assembled| {
             calls.borrow_mut().push(format!(
                 "snapshot:{}:{}:{}",
                 snap_event.last_user_turn_index, assembled.bytes, assembled.prefix
@@ -199,7 +199,7 @@ mod tests {
         let mut cfg = sample_cfg();
         cfg.recipe = vec![HotMemoryRecipeStep::Purpose; 65];
 
-        let err = run_pre_compact(sample_event(), &cfg, |_, _| {
+        let err = run_pre_compact(&sample_event(), &cfg, |_, _| {
             snapshot_called.set(true);
             Ok(())
         })
@@ -211,7 +211,7 @@ mod tests {
 
     #[test]
     fn pre_compact_snapshot_failure_rejects_hook() {
-        let err = run_pre_compact(sample_event(), &sample_cfg(), |_, assembled| {
+        let err = run_pre_compact(&sample_event(), &sample_cfg(), |_, assembled| {
             assert_eq!(assembled.bytes, 0);
             assert_eq!(assembled.prefix, "");
             Err("disk full".to_owned())

@@ -52,7 +52,7 @@ pub fn assemble_hot_with_budget(
     budget: u64,
 ) -> Result<AssembleHotData, AssembleHotError> {
     let mut budgeted = config.clone();
-    budgeted.max_bytes = budget.min(u64::from(u32::MAX)) as u32;
+    budgeted.max_bytes = u32::try_from(budget.min(u64::from(u32::MAX))).unwrap_or(u32::MAX);
     assemble_hot(&budgeted)
 }
 

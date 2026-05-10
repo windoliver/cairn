@@ -1346,7 +1346,7 @@ mod tests {
             serde_json::from_str(&json).expect("hot_memory deserializes");
         assert_eq!(round_trip, hot_memory);
         assert_eq!(round_trip.pre_compact_recipe, "handoff");
-        assert_eq!(round_trip.pre_compact_safety_ratio, 0.30);
+        assert!((round_trip.pre_compact_safety_ratio - 0.30).abs() < f64::EPSILON);
     }
 
     #[test]

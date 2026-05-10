@@ -43,6 +43,7 @@ fn emit_skill_md(doc: &Document) -> Result<GeneratedFile, CodegenError> {
     }
     push_output_format(&mut s);
     push_non_negotiable_rules(&mut s);
+    push_pre_compact_section(&mut s);
     s.push_str("---\n\n## Protocol preludes (not core verbs)\n\n");
     for prelude in &doc.preludes {
         let desc = match prelude.id.as_str() {
@@ -114,6 +115,11 @@ fn push_non_negotiable_rules(s: &mut String) {
     s.push_str("4. Every `ingest` signs with your agent identity — `cairn` reads it from `$CAIRN_IDENTITY` set at harness startup. Don't pass `--signed-intent` explicitly.\n");
     s.push_str("5. Don't run `cairn ingest` for trivia the user didn't ask you to remember. Use the trigger list above — if it's not on the list, ask before storing.\n");
     s.push('\n');
+}
+
+fn push_pre_compact_section(s: &mut String) {
+    s.push_str("## Pre-compaction reinjection\n\n");
+    s.push_str("If the harness emits a `PreCompact` hook (or you can detect imminent context compaction), call `cairn assemble_hot --session ${SESSION_ID} --json` and splice the returned text into the post-compaction prefix so working priors survive the squeeze. Persist the pre-compaction transcript with `cairn capture_trace --from ${TRANSCRIPT_PATH} --json`.\n\n");
 }
 
 fn push_verb_section(s: &mut String, verb: &VerbDef) -> Result<(), CodegenError> {
