@@ -7,6 +7,7 @@
     reason = "Task 3 intentionally lands record WAL scaffolding before later tasks wire callers"
 )]
 
+pub mod forget;
 pub mod payload;
 
 pub(crate) mod expire;

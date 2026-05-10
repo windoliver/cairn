@@ -4,7 +4,8 @@
 
 use std::sync::Arc;
 
-use cairn_core::domain::MemoryRecord;
+use cairn_core::contract::memory_store::MemoryStore;
+use cairn_core::domain::{MemoryRecord, RecordId};
 use cairn_core::wal::{OperationId, WalKind};
 use cairn_store_sqlite::record_wal::RecordWalRegistry;
 use cairn_store_sqlite::record_wal::payload::{
@@ -200,4 +201,39 @@ async fn recovery_rejects_purged_payload_for_body_bearing_kinds() {
             other => panic!("expected invariant, got {other:?}"),
         }
     }
+}
+
+#[tokio::test]
+async fn forget_resolution_loads_full_target_lineage() {
+    let store = open_in_memory().await.expect("open");
+    let first = sample_record();
+    let mut second = first.clone();
+    second.id = RecordId::parse("01J00000000000000000000002").expect("record id");
+    second.body = "replacement body for same target".to_owned();
+    let first_out = store.upsert(&first).await.expect("first upsert");
+    let second_out = store.upsert(&second).await.expect("second upsert");
+
+    let target =
+        cairn_store_sqlite::record_wal::forget::resolve_forget_target_for_test(&store, &first.id)
+            .await
+            .expect("resolve");
+
+    assert_eq!(target.requested_record_id, first.id);
+    assert_eq!(target.target_id, first.target_id);
+    assert_eq!(target.record_ids.len(), 2);
+    assert!(target.record_ids.contains(&first_out.record_id));
+    assert!(target.record_ids.contains(&second_out.record_id));
+    assert_eq!(target.scope, first.scope);
+    assert!(target.target_hash.starts_with("hash:"));
+}
+
+#[tokio::test]
+async fn forget_resolution_reports_not_found_for_missing_record() {
+    let store = open_in_memory().await.expect("open");
+    let missing = RecordId::parse("01J00000000000000000000999").expect("record id");
+    let err =
+        cairn_store_sqlite::record_wal::forget::resolve_forget_target_for_test(&store, &missing)
+            .await
+            .expect_err("missing record rejects");
+    assert!(matches!(err, StoreError::NotFound { id } if id == missing.as_str()));
 }
