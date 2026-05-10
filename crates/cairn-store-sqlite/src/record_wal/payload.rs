@@ -13,6 +13,7 @@ use crate::store::current_unix_ms;
 pub enum RecordWalPayload {
     Upsert(Box<UpsertPayload>),
     Expire(Box<ExpirePayload>),
+    Forget(Box<ForgetPayload>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -83,6 +84,16 @@ pub struct ExpirePayload {
     pub scope: ScopeTuple,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ForgetPayload {
+    pub target_id: TargetId,
+    #[serde(default)]
+    pub scope: ScopeTuple,
+    pub reason_code: String,
+    pub actor: cairn_core::domain::Identity,
+    pub scope_tier: cairn_core::domain::taxonomy::MemoryVisibility,
+}
+
 pub(crate) fn save_payload(
     conn: &Connection,
     op_id: &OperationId,
@@ -91,6 +102,7 @@ pub(crate) fn save_payload(
     let kind = match payload {
         RecordWalPayload::Upsert(_) => WalKind::Upsert.as_str(),
         RecordWalPayload::Expire(_) => WalKind::Expire.as_str(),
+        RecordWalPayload::Forget(_) => WalKind::ForgetRecord.as_str(),
     };
     let json = serde_json::to_string(payload)?;
     conn.execute(
@@ -167,5 +179,40 @@ pub fn load_upsert_payload_for_test(
         RecordWalPayload::Expire(_) => Err(StoreError::Invariant {
             what: "expected upsert payload, found expire payload".to_owned(),
         }),
+        RecordWalPayload::Forget(_) => Err(StoreError::Invariant {
+            what: "expected upsert payload, found forget payload".to_owned(),
+        }),
+    }
+}
+
+#[cfg(test)]
+mod forget_payload_tests {
+    use super::*;
+    use cairn_core::domain::{Identity, MemoryVisibility, ScopeTuple, TargetId};
+
+    #[test]
+    fn forget_payload_round_trips_through_record_wal_payload() {
+        let target =
+            TargetId::parse("01HQZX9F5N0000000000000000".to_owned()).expect("valid target id");
+        let actor = Identity::parse("hmn:alice:v1".to_owned()).expect("valid identity");
+        let payload = ForgetPayload {
+            target_id: target.clone(),
+            scope: ScopeTuple::default(),
+            reason_code: "user_command".to_owned(),
+            actor: actor.clone(),
+            scope_tier: MemoryVisibility::Private,
+        };
+        let wrapped = RecordWalPayload::Forget(Box::new(payload.clone()));
+        let json = serde_json::to_string(&wrapped).expect("serialize");
+        let decoded: RecordWalPayload = serde_json::from_str(&json).expect("deserialize");
+        match decoded {
+            RecordWalPayload::Forget(p) => {
+                assert_eq!(p.target_id, target);
+                assert_eq!(p.actor, actor);
+                assert_eq!(p.scope_tier, MemoryVisibility::Private);
+                assert_eq!(p.reason_code, "user_command");
+            }
+            _ => panic!("expected Forget variant after round trip"),
+        }
     }
 }
