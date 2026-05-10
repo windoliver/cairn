@@ -32,6 +32,7 @@ pub mod filter;
 pub mod flush_plan;
 pub mod folder;
 pub mod graph;
+pub mod hot_prefix;
 pub mod identity;
 pub mod intent;
 pub mod projection;
