@@ -8,14 +8,14 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use cairn_core::contract::memory_store::{
-    Edge, EdgeDir, EdgeKey, GraphNeighborsArgs, HybridSearchArgs, HybridSearchPage, IndexStats,
-    KeywordSearchArgs, KeywordSearchPage, ListArgs, ListPage, MemoryStore, MemoryStoreCapabilities,
-    RecordVersion, SemanticSearchArgs, SemanticSearchPage, StoreError, TombstoneReason,
-    UpsertOutcome,
+    Edge, EdgeDir, EdgeKey, ForgetReceipt, GraphNeighborsArgs, HybridSearchArgs, HybridSearchPage,
+    IndexStats, KeywordSearchArgs, KeywordSearchPage, ListArgs, ListPage, MemoryStore,
+    MemoryStoreCapabilities, RecordVersion, SemanticSearchArgs, SemanticSearchPage, StoreError,
+    TombstoneReason, UpsertOutcome,
 };
 use cairn_core::contract::version::VersionRange;
 use cairn_core::domain::consent_timeline::ConsentModel;
-use cairn_core::domain::{MemoryRecord, RecordId, TargetId};
+use cairn_core::domain::{Identity, MemoryRecord, RecordId, TargetId};
 use cairn_core::search::GraphCandidate;
 
 use crate::error::StoreError as ConcreteError;
@@ -66,6 +66,19 @@ impl MemoryStore for SqliteMemoryStore {
             return not_initialized("tombstone");
         }
         self.do_tombstone(id, reason).await.map_err(Into::into)
+    }
+
+    async fn forget_record(
+        &self,
+        target: &TargetId,
+        actor: &Identity,
+    ) -> Result<ForgetReceipt, StoreError> {
+        if self.conn.is_none() {
+            return not_initialized("forget_record");
+        }
+        self.do_forget_record(target, actor)
+            .await
+            .map_err(Into::into)
     }
 
     async fn versions(&self, target: &TargetId) -> Result<Vec<RecordVersion>, StoreError> {
