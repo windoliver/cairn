@@ -4,9 +4,7 @@ use cairn_core::wal::{OperationId, StepDef};
 use rusqlite::{Transaction, params};
 
 use crate::record_wal::locks::RecordLocks;
-use crate::record_wal::payload::{
-    ExpirePayload, ForgetPayload, StoredEmbedOutcome, UpsertPayload,
-};
+use crate::record_wal::payload::{ExpirePayload, ForgetPayload, StoredEmbedOutcome, UpsertPayload};
 use crate::wal::runner::{StepBody, StepBodyError};
 
 pub(crate) enum RecordStepPayload {
