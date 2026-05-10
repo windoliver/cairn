@@ -438,20 +438,51 @@ fn mark_tombstone_and_emit_receipt(
         return Ok(());
     }
 
-    // Resolve the in-txn scope/tier; fall back to the payload values
-    // only if the snapshot SELECT returned NULLs (defensive — should
-    // not happen when total_rows > 0).
-    let in_txn_scope = if in_txn_scope_json.is_empty() {
-        payload.scope.clone()
-    } else {
-        serde_json::from_str(&in_txn_scope_json).unwrap_or_else(|_| payload.scope.clone())
-    };
-    let in_txn_tier = if in_txn_visibility.is_empty() {
-        payload.scope_tier
-    } else {
-        cairn_core::domain::MemoryVisibility::parse(&in_txn_visibility)
-            .unwrap_or(payload.scope_tier)
-    };
+    // Round-8 review (Codex): for `total_rows > 0` we MUST resolve the
+    // in-txn scope/tier from the records table — falling back to
+    // `payload.scope` / `payload.scope_tier` would let stale pre-lock
+    // values leak into the audit receipt. Treat any parse failure or
+    // empty-string snapshot as a storage invariant break and abort
+    // Phase A; the WAL marks the step Failed and recovery surfaces it.
+    if in_txn_scope_json.is_empty() {
+        return Err(StepBodyError::Failed(format!(
+            "records.scope is NULL/empty for target {} despite total_rows > 0",
+            payload.target_id.as_str()
+        )));
+    }
+    if in_txn_visibility.is_empty() {
+        return Err(StepBodyError::Failed(format!(
+            "records.visibility is NULL/empty for target {} despite total_rows > 0",
+            payload.target_id.as_str()
+        )));
+    }
+    let in_txn_scope: cairn_core::domain::ScopeTuple = serde_json::from_str(&in_txn_scope_json)
+        .map_err(|e| {
+            StepBodyError::Failed(format!(
+                "records.scope is not valid JSON for target {}: {e}",
+                payload.target_id.as_str()
+            ))
+        })?;
+    let in_txn_tier =
+        cairn_core::domain::MemoryVisibility::parse(&in_txn_visibility).map_err(|e| {
+            StepBodyError::Failed(format!(
+                "records.visibility {in_txn_visibility:?} not parseable for target {}: {e}",
+                payload.target_id.as_str()
+            ))
+        })?;
+
+    // Known limitation (Round-8 review): the receipt records the scope
+    // and tier of the LATEST version only. A target lineage can in
+    // principle hold versions at different visibility tiers (an upsert
+    // that promoted Private → Public), and Phase B purges every
+    // version's body bytes. The receipt's single tier is therefore an
+    // incomplete summary of what was destroyed when the lineage spans
+    // tiers. Brief §14 forget-receipt allowlist does not yet model a
+    // multi-tier list; a follow-up should either extend the receipt
+    // schema or enforce per-target tier immutability at upsert time.
+    // For now we record the latest tier — better than the original
+    // pre-lock payload value and matches the most-recent reader-visible
+    // classification.
 
     // sha256 of the raw target id. P1 follow-up (brief §14) introduces a
     // per-user salt; the receipt schema does not change.
@@ -728,5 +759,146 @@ mod tests {
              commit purged active=1. A pre-lock SELECT (captured \
              before this function ran) would leak its stale `1` here."
         );
+    }
+
+    /// Round-8 review (Codex): the integration-level race regression
+    /// test cannot construct a real "stale payload after a same-target
+    /// upsert" interleaving — apply_forget_record's pre-lock read sees
+    /// whatever is committed when it runs. Pin the in-txn scope/tier
+    /// invariant at the unit-test layer instead: build a payload that
+    /// asserts a Private tier (the `stale` value), upsert a Public v2
+    /// AFTER the payload is built, then call the helper directly. The
+    /// emitted consent row's payload_json must say `"public"` — proving
+    /// the helper read the in-txn snapshot, not the payload.
+    #[test]
+    fn mark_tombstone_uses_in_txn_scope_tier_not_stale_payload() {
+        use std::sync::atomic::AtomicU64;
+
+        use cairn_core::domain::Identity;
+        use cairn_core::domain::taxonomy::MemoryVisibility;
+        use cairn_core::wal::{OperationId, WalKind};
+
+        use crate::record_wal::ops::new_operation_id;
+        use crate::record_wal::payload::ForgetPayload;
+
+        let mut conn = crate::open::open_in_memory_sync().expect("open");
+        let mut record = cairn_core::domain::record::tests_export::sample_record();
+        record.visibility = MemoryVisibility::Private;
+        let target = record.target_id.clone();
+
+        // v1 Private — what the simulated pre-lock read would observe.
+        let tx = conn.transaction().expect("tx v1");
+        let plan_v1 = crate::store::upsert::plan_upsert_in_tx(&tx, &record).expect("plan v1");
+        crate::store::upsert::stage_upsert_cow_in_tx(&tx, &record, &plan_v1).expect("stage v1");
+        crate::store::upsert::activate_upsert_in_tx(&tx, &plan_v1).expect("activate v1");
+        tx.commit().expect("commit v1");
+
+        // Build the "stale" payload that an apply_forget_record running
+        // in the race window would have constructed.
+        let payload = ForgetPayload {
+            target_id: target.clone(),
+            scope: record.scope.clone(),
+            reason_code: "user_command".to_owned(),
+            actor: Identity::parse("hmn:test:v1").expect("identity"),
+            scope_tier: MemoryVisibility::Private,
+        };
+
+        // Simulated race: a competing upsert commits Public v2 AFTER the
+        // payload was built, BEFORE the helper runs.
+        let mut v2 = record.clone();
+        v2.visibility = MemoryVisibility::Public;
+        v2.body = format!("{}-public", record.body);
+        let tx = conn.transaction().expect("tx v2");
+        let plan_v2 = crate::store::upsert::plan_upsert_in_tx(&tx, &v2).expect("plan v2");
+        crate::store::upsert::stage_upsert_cow_in_tx(&tx, &v2, &plan_v2).expect("stage v2");
+        crate::store::upsert::activate_upsert_in_tx(&tx, &plan_v2).expect("activate v2");
+        tx.commit().expect("commit v2");
+
+        // Run the helper with the stale (Private) payload against the
+        // database where Public v2 is now the latest version.
+        let op_id: OperationId = new_operation_id(WalKind::ForgetRecord).expect("op id");
+        let cell = AtomicU64::new(0);
+        let tx = conn.transaction().expect("tx forget");
+        mark_tombstone_and_emit_receipt(&tx, &op_id, &payload, &cell).expect("phase A");
+        tx.commit().expect("commit phase A");
+
+        // The consent_journal row written under op_id MUST carry the
+        // in-txn (Public) tier, not the payload's stale Private.
+        let payload_json: String = conn
+            .query_row(
+                "SELECT payload_json FROM consent_journal \
+                  WHERE kind = 'forget_intent' AND op_id = ?1",
+                params![op_id.as_str()],
+                |row| row.get(0),
+            )
+            .expect("consent row");
+        assert!(
+            payload_json.contains("\"scope_tier\":\"public\""),
+            "receipt scope_tier must come from the in-txn snapshot of the \
+             latest version (Public). A regression that read from \
+             payload.scope_tier (Private) would dilute the audit trail. \
+             Got: {payload_json}"
+        );
+        assert!(
+            !payload_json.contains("\"scope_tier\":\"private\""),
+            "receipt must NOT echo the stale payload's Private tier. \
+             Got: {payload_json}"
+        );
+    }
+
+    /// Round-8 review (Codex): when `total_rows > 0` but the in-txn
+    /// `records.visibility` is unparseable (corrupt row / schema drift),
+    /// the helper MUST fail closed instead of falling back to the
+    /// stale payload tier. This test inserts a row with a garbage
+    /// visibility string and asserts the helper rejects with
+    /// `StepBodyError::Failed`.
+    #[test]
+    fn mark_tombstone_fails_closed_on_unparseable_visibility() {
+        use std::sync::atomic::AtomicU64;
+
+        use cairn_core::domain::Identity;
+        use cairn_core::domain::taxonomy::MemoryVisibility;
+        use cairn_core::wal::{OperationId, WalKind};
+
+        use crate::record_wal::ops::new_operation_id;
+        use crate::record_wal::payload::ForgetPayload;
+
+        let mut conn = crate::open::open_in_memory_sync().expect("open");
+        let record = cairn_core::domain::record::tests_export::sample_record();
+
+        let tx = conn.transaction().expect("tx upsert");
+        let plan = crate::store::upsert::plan_upsert_in_tx(&tx, &record).expect("plan");
+        crate::store::upsert::stage_upsert_cow_in_tx(&tx, &record, &plan).expect("stage");
+        crate::store::upsert::activate_upsert_in_tx(&tx, &plan).expect("activate");
+        // Stomp the visibility column with an invalid value.
+        tx.execute(
+            "UPDATE records SET visibility = 'not_a_real_tier' WHERE target_id = ?1",
+            params![record.target_id.as_str()],
+        )
+        .expect("stomp visibility");
+        tx.commit().expect("commit");
+
+        let payload = ForgetPayload {
+            target_id: record.target_id.clone(),
+            scope: record.scope.clone(),
+            reason_code: "user_command".to_owned(),
+            actor: Identity::parse("hmn:test:v1").expect("identity"),
+            scope_tier: MemoryVisibility::Private,
+        };
+        let op_id: OperationId = new_operation_id(WalKind::ForgetRecord).expect("op id");
+        let cell = AtomicU64::new(0);
+        let tx = conn.transaction().expect("tx forget");
+        let result = mark_tombstone_and_emit_receipt(&tx, &op_id, &payload, &cell);
+        match result {
+            Err(StepBodyError::Failed(msg)) => {
+                assert!(
+                    msg.contains("visibility") && msg.contains("not_a_real_tier"),
+                    "error must name the bad column + value; got: {msg}"
+                );
+            }
+            other => {
+                panic!("expected StepBodyError::Failed for unparseable visibility, got {other:?}")
+            }
+        }
     }
 }
