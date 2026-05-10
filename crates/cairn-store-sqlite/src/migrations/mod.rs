@@ -91,6 +91,8 @@ const M0051_LOCK_ACQUISITION_ULID: &str = include_str!("sql/0051_lock_acquisitio
 // Issue #56 round-10 fix — UNIQUE constraint + sentinel-rejection trigger.
 const M0052_LOCK_ACQUISITION_ULID_UNIQUE: &str =
     include_str!("sql/0052_lock_acquisition_ulid_unique.sql");
+// Issue #83 — hot_prefix_cache + hot_source_watermarks tables.
+const M0053_HOT_PREFIX_CACHE: &str = include_str!("sql/0053_hot_prefix_cache.sql");
 
 /// Canonical SQL for migration 0020 (`workflow_jobs`). Re-exported so
 /// downstream crates (notably `cairn-workflows`, which hashes the
@@ -241,6 +243,7 @@ pub(crate) const MIGRATION_SOURCES: &[(i64, &str, &str)] = &[
         "0052_lock_acquisition_ulid_unique",
         M0052_LOCK_ACQUISITION_ULID_UNIQUE,
     ),
+    (53, "0053_hot_prefix_cache", M0053_HOT_PREFIX_CACHE),
 ];
 
 /// All migrations, in order. Returns a fresh `Migrations` set on every call
@@ -294,5 +297,6 @@ pub fn migrations() -> Migrations<'static> {
         M::up(M0050_LOCKS_V2),
         M::up(M0051_LOCK_ACQUISITION_ULID),
         M::up(M0052_LOCK_ACQUISITION_ULID_UNIQUE),
+        M::up(M0053_HOT_PREFIX_CACHE),
     ])
 }

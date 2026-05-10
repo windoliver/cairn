@@ -253,6 +253,10 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("table", "consent_journal_repair_audit"),
     ("trigger", "consent_journal_repair_audit_immutable"),
     ("trigger", "consent_journal_repair_audit_no_delete"),
+    // 0053_hot_prefix_cache (issue #83): hot-prefix cache + per-class
+    // watermarks for assemble_hot cache invalidation.
+    ("table", "hot_source_watermarks"),
+    ("table", "hot_prefix_cache"),
 ];
 
 /// Identity registry objects share `cairn.db` but are owned by
