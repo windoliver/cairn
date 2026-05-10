@@ -1,6 +1,7 @@
 //! `SqliteMemoryStore` impl modules.
 
 pub(crate) mod edges;
+pub(crate) mod expire;
 pub(crate) mod graph_search;
 pub(crate) mod hybrid;
 pub(crate) mod projection;

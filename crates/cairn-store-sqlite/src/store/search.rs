@@ -404,6 +404,7 @@ fn build_search_query(
          ) fts ON fts.rowid = r.rowid \
          WHERE r.active = 1 \
            AND r.tombstoned = 0 \
+           AND r.cow_staged = 0 \
            AND ",
     );
     sql.push_str(SUPERSESSION_NOT_EXISTS_CLAUSE);
@@ -700,7 +701,7 @@ async fn run_ann_query(
                   LIMIT {k}
              ) ann
              JOIN   records r ON r.record_id = ann.record_id
-             WHERE  r.active = 1 AND r.tombstoned = 0
+             WHERE  r.active = 1 AND r.tombstoned = 0 AND r.cow_staged = 0
                {vis_clause}
                {filter_clause}{scope_sql}
              ORDER BY ann.distance ASC"
