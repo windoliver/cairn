@@ -310,6 +310,19 @@ impl CairnMcpHandler {
             contract_phase: cairn_core::status::Phase::V0_1,
         };
 
+        // Post-filter capabilities whose shared core wiring flags are true
+        // for another surface but not yet honored by this MCP transport.
+        // CLI `forget --record` is wired for issue #58, but MCP non-search
+        // verbs still fall through `dispatch_stub`; do not advertise record
+        // forget here until MCP dispatch can honor it end-to-end.
+        let mut capabilities = cairn_core::status::advertise(&gates);
+        capabilities.retain(|c| {
+            !matches!(
+                c,
+                cairn_core::generated::common::Capabilities::CairnMcpV1ForgetRecord
+            )
+        });
+
         // Post-filter replay capabilities to keep status advertisement and
         // `handshake` tool exposure in lockstep at the MCP boundary
         // (round-2 review #3). `cairn-core::status::advertise` does not
@@ -320,7 +333,6 @@ impl CairnMcpHandler {
         // `handshake` (the prelude needs the sqlite handle to mint
         // nonces). Brief §15 fail-closed: capability advertisement
         // tracks the runtime that can actually honor it.
-        let mut capabilities = cairn_core::status::advertise(&gates);
         if self.sqlite_store.is_none() {
             capabilities.retain(|c| {
                 !matches!(
@@ -932,5 +944,23 @@ mod tests_plan_a {
                 "replay.{{sequence,challenge}} must not appear in status without a sqlite store; got: {cap:?}"
             );
         }
+    }
+
+    #[test]
+    fn forget_record_capability_filtered_until_mcp_dispatch_is_wired() {
+        let store: Arc<dyn cairn_core::contract::memory_store::MemoryStore> =
+            Arc::new(FixtureStore::default());
+        let scope: Arc<dyn McpSessionScope> = Arc::new(ConfigBackedScope::new(principal()));
+        let mut cfg = CairnConfig::default();
+        cfg.mcp.stdio.single_tenant = true;
+        cfg.mcp.stdio.principal = Some(principal());
+        let handler = CairnMcpHandler::with_store_and_scope(store, scope, cfg, principal());
+        let status = handler.status_response();
+        assert!(
+            !status
+                .capabilities
+                .contains(&cairn_core::generated::common::Capabilities::CairnMcpV1ForgetRecord),
+            "MCP status must not advertise forget.record until MCP dispatch is wired"
+        );
     }
 }

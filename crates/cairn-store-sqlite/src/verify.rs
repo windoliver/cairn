@@ -101,7 +101,7 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     // 0053_wal_payloads
     ("table", "wal_payloads"),
     ("trigger", "wal_payloads_kind_matches_wal"),
-    ("trigger", "wal_payloads_immutable"),
+    ("trigger", "wal_payloads_scrub_only"),
     ("trigger", "wal_payloads_no_delete"),
     // 0005_consent
     ("table", "consent_journal"),

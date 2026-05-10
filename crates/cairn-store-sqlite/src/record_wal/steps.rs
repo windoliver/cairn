@@ -1,15 +1,22 @@
 //! Record WAL step bodies.
 
+use cairn_core::domain::{
+    ConsentEvent, ConsentKind, ConsentPayload, Identity, MemoryVisibility, Rfc3339Timestamp,
+};
 use cairn_core::wal::{OperationId, StepDef};
 use rusqlite::{Transaction, params};
 
 use crate::record_wal::locks::RecordLocks;
-use crate::record_wal::payload::{ExpirePayload, StoredEmbedOutcome, UpsertPayload};
+use crate::record_wal::payload::{
+    ExpirePayload, ForgetPayload, PurgedPayload, RecordWalPayload, StoredEmbedOutcome,
+    UpsertPayload,
+};
 use crate::wal::runner::{StepBody, StepBodyError};
 
 pub(crate) enum RecordStepPayload {
     Upsert(Box<UpsertPayload>),
     Expire(Box<ExpirePayload>),
+    ForgetRecord(Box<ForgetPayload>),
 }
 
 pub(crate) struct RecordStepBody {
@@ -30,6 +37,14 @@ impl RecordStepBody {
     pub(crate) fn new_expire(payload: ExpirePayload, locks: RecordLocks) -> Self {
         Self {
             payload: RecordStepPayload::Expire(Box::new(payload)),
+            locks,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn new_forget_record(payload: ForgetPayload, locks: RecordLocks) -> Self {
+        Self {
+            payload: RecordStepPayload::ForgetRecord(Box::new(payload)),
             locks,
         }
     }
@@ -85,7 +100,31 @@ impl StepBody for RecordStepBody {
             (RecordStepPayload::Expire(payload), "vector.drain") => drain_vectors(tx, payload),
             (RecordStepPayload::Expire(payload), "fts.drain") => drain_fts(tx, payload),
             (RecordStepPayload::Expire(payload), "edges.drain") => drain_edges(tx, payload),
-            (RecordStepPayload::Upsert(_) | RecordStepPayload::Expire(_), _) => Ok(()),
+            (RecordStepPayload::ForgetRecord(payload), "primary.mark_tombstone") => {
+                mark_forget_tombstone(tx, op_id, payload)
+            }
+            (RecordStepPayload::ForgetRecord(payload), "vector.drain") => {
+                drain_forget_vectors(tx, payload)
+            }
+            (RecordStepPayload::ForgetRecord(payload), "fts.drain") => {
+                drain_forget_fts(tx, payload)
+            }
+            (RecordStepPayload::ForgetRecord(payload), "edges.drain") => {
+                drain_forget_edges(tx, payload)
+            }
+            (RecordStepPayload::ForgetRecord(payload), "primary.purge") => {
+                purge_forget_primary(tx, payload)
+            }
+            (RecordStepPayload::ForgetRecord(payload), "wal.purge_pre_images") => {
+                scrub_forget_wal(tx, op_id, payload)
+            }
+            (RecordStepPayload::ForgetRecord(_), "snapshot.purge")
+            | (
+                RecordStepPayload::Upsert(_)
+                | RecordStepPayload::Expire(_)
+                | RecordStepPayload::ForgetRecord(_),
+                _,
+            ) => Ok(()),
         }
     }
 }
@@ -261,6 +300,245 @@ fn drain_edges(tx: &Transaction<'_>, payload: &ExpirePayload) -> Result<(), Step
         params![payload.target_id.as_str()],
     )
     .map_err(StepBodyError::Storage)?;
+    Ok(())
+}
+
+fn mark_forget_tombstone(
+    tx: &Transaction<'_>,
+    op_id: &OperationId,
+    payload: &ForgetPayload,
+) -> Result<(), StepBodyError> {
+    tx.execute(
+        "UPDATE records \
+            SET active = 0, \
+                tombstoned = 1, \
+                tombstone_reason = 'forget', \
+                updated_at = ?1 \
+          WHERE target_id = ?2",
+        params![crate::store::current_unix_ms(), payload.target_id.as_str()],
+    )
+    .map_err(StepBodyError::Storage)?;
+    append_forget_consent(tx, op_id, payload)
+}
+
+fn append_forget_consent(
+    tx: &Transaction<'_>,
+    op_id: &OperationId,
+    payload: &ForgetPayload,
+) -> Result<(), StepBodyError> {
+    let actor =
+        Identity::parse("hmn:cairn-cli").map_err(|e| StepBodyError::Failed(e.to_string()))?;
+    let decided_at = Rfc3339Timestamp::from_unix_secs(crate::store::current_unix_ms() / 1000)
+        .map_err(|e| StepBodyError::Failed(e.to_string()))?;
+    let event = ConsentEvent {
+        consent_id: ulid::Ulid::new().to_string(),
+        kind: ConsentKind::ForgetIntent,
+        actor,
+        subject: payload.target_hash.clone(),
+        scope: payload.scope.canonical_wire(),
+        op_id: Some(op_id.as_str().to_owned()),
+        sensor_id: None,
+        payload: ConsentPayload::IntentReceipt {
+            target_id_hash: payload.target_hash.clone(),
+            scope_tier: MemoryVisibility::Private,
+            reason_code: payload.reason_code.clone(),
+        },
+        decided_at,
+        expires_at: None,
+    };
+    crate::consent::append(tx, &event).map_err(|e| StepBodyError::Failed(e.to_string()))?;
+    Ok(())
+}
+
+fn drain_forget_vectors(
+    tx: &Transaction<'_>,
+    payload: &ForgetPayload,
+) -> Result<(), StepBodyError> {
+    tx.execute(
+        "DELETE FROM record_vectors \
+          WHERE record_id IN (SELECT record_id FROM records WHERE target_id = ?1)",
+        params![payload.target_id.as_str()],
+    )
+    .map_err(StepBodyError::Storage)?;
+    tx.execute(
+        "DELETE FROM pending_embeddings \
+          WHERE record_id IN (SELECT record_id FROM records WHERE target_id = ?1)",
+        params![payload.target_id.as_str()],
+    )
+    .map_err(StepBodyError::Storage)?;
+    Ok(())
+}
+
+fn drain_forget_fts(tx: &Transaction<'_>, payload: &ForgetPayload) -> Result<(), StepBodyError> {
+    let rowids = {
+        let mut stmt = tx
+            .prepare("SELECT rowid FROM records WHERE target_id = ?1")
+            .map_err(StepBodyError::Storage)?;
+        stmt.query_map(params![payload.target_id.as_str()], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map_err(StepBodyError::Storage)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(StepBodyError::Storage)?
+    };
+    for rowid in rowids {
+        tx.execute("DELETE FROM records_fts WHERE rowid = ?1", params![rowid])
+            .map_err(StepBodyError::Storage)?;
+    }
+    Ok(())
+}
+
+fn drain_forget_edges(tx: &Transaction<'_>, payload: &ForgetPayload) -> Result<(), StepBodyError> {
+    tombstone_forget_entity_edges(tx, payload)?;
+    tx.execute(
+        "DELETE FROM edges \
+          WHERE src IN (SELECT record_id FROM records WHERE target_id = ?1) \
+             OR dst IN (SELECT record_id FROM records WHERE target_id = ?1)",
+        params![payload.target_id.as_str()],
+    )
+    .map_err(StepBodyError::Storage)?;
+    tx.execute(
+        "DELETE FROM entity_episodes \
+          WHERE episode_id IN (SELECT record_id FROM records WHERE target_id = ?1)",
+        params![payload.target_id.as_str()],
+    )
+    .map_err(StepBodyError::Storage)?;
+    Ok(())
+}
+
+struct ForgetEntityEdge {
+    id: String,
+    confidence: String,
+    confidence_score: f32,
+    valid_at: i64,
+    invalid_at: Option<i64>,
+    created_at: i64,
+    expired_at: Option<i64>,
+    tombstone_reason: Option<String>,
+}
+
+fn tombstone_forget_entity_edges(
+    tx: &Transaction<'_>,
+    payload: &ForgetPayload,
+) -> Result<(), StepBodyError> {
+    let edges = {
+        let mut stmt = tx
+            .prepare(
+                "SELECT id, confidence, confidence_score, valid_at, invalid_at, \
+                        created_at, expired_at, tombstone_reason \
+                   FROM entity_edges \
+                  WHERE source_record_id IN (\
+                        SELECT record_id FROM records WHERE target_id = ?1\
+                  )",
+            )
+            .map_err(StepBodyError::Storage)?;
+        stmt.query_map(params![payload.target_id.as_str()], |row| {
+            Ok(ForgetEntityEdge {
+                id: row.get(0)?,
+                confidence: row.get(1)?,
+                confidence_score: row.get(2)?,
+                valid_at: row.get(3)?,
+                invalid_at: row.get(4)?,
+                created_at: row.get(5)?,
+                expired_at: row.get(6)?,
+                tombstone_reason: row.get(7)?,
+            })
+        })
+        .map_err(StepBodyError::Storage)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(StepBodyError::Storage)?
+    };
+
+    let now_ms = crate::store::current_unix_ms();
+    for edge in edges {
+        let hash = crate::entity_graph::entity_edge_body_hash_components(
+            &edge.confidence,
+            edge.confidence_score,
+            edge.valid_at,
+            edge.invalid_at,
+            edge.created_at,
+            None,
+        );
+        tx.execute(
+            "UPDATE entity_edges \
+                SET expired_at = ?1, \
+                    tombstone_reason = ?2, \
+                    source_record_id = NULL, \
+                    body_hash = ?3 \
+              WHERE id = ?4",
+            params![
+                edge.expired_at.unwrap_or(now_ms),
+                edge.tombstone_reason.unwrap_or_else(|| "forget".to_owned()),
+                &hash[..],
+                edge.id,
+            ],
+        )
+        .map_err(StepBodyError::Storage)?;
+    }
+    Ok(())
+}
+
+fn purge_forget_primary(
+    tx: &Transaction<'_>,
+    payload: &ForgetPayload,
+) -> Result<(), StepBodyError> {
+    tx.execute(
+        "DELETE FROM records WHERE target_id = ?1",
+        params![payload.target_id.as_str()],
+    )
+    .map_err(StepBodyError::Storage)?;
+    Ok(())
+}
+
+fn scrub_forget_wal(
+    tx: &Transaction<'_>,
+    op_id: &OperationId,
+    payload: &ForgetPayload,
+) -> Result<(), StepBodyError> {
+    let stub = serde_json::to_string(&RecordWalPayload::Purged(Box::new(PurgedPayload {
+        target_hash: payload.target_hash.clone(),
+        purged_by: op_id.as_str().to_owned(),
+        purged_at: crate::store::current_unix_ms(),
+    })))
+    .map_err(|e| StepBodyError::Failed(format!("purged payload json: {e}")))?;
+    let stub_bytes = stub.as_bytes();
+    let candidate_ops = {
+        let mut stmt = tx
+            .prepare(
+                "SELECT p.operation_id \
+                   FROM wal_payloads p \
+                   JOIN wal_ops o ON o.operation_id = p.operation_id \
+                  WHERE p.kind IN ('upsert', 'expire') \
+                    AND p.operation_id <> ?1 \
+                    AND o.target_hash = ?2",
+            )
+            .map_err(StepBodyError::Storage)?;
+        stmt.query_map(params![op_id.as_str(), payload.target_id.as_str()], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(StepBodyError::Storage)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(StepBodyError::Storage)?
+    };
+
+    for candidate_op in candidate_ops {
+        tx.execute(
+            "UPDATE wal_steps \
+                SET pre_image = ?1 \
+              WHERE operation_id = ?2 \
+                AND pre_image IS NOT NULL",
+            params![stub_bytes, candidate_op.as_str()],
+        )
+        .map_err(StepBodyError::Storage)?;
+        tx.execute(
+            "UPDATE wal_payloads \
+                SET kind = 'purged', payload_json = ?1 \
+              WHERE operation_id = ?2 \
+                AND kind IN ('upsert', 'expire')",
+            params![stub.as_str(), candidate_op.as_str()],
+        )
+        .map_err(StepBodyError::Storage)?;
+    }
     Ok(())
 }
 

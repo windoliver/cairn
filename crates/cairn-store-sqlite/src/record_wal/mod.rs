@@ -7,6 +7,7 @@
     reason = "Task 3 intentionally lands record WAL scaffolding before later tasks wire callers"
 )]
 
+pub mod forget;
 pub mod payload;
 
 pub(crate) mod expire;
@@ -17,5 +18,6 @@ pub(crate) mod steps;
 pub(crate) mod upsert;
 
 pub(crate) use expire::apply_expire;
+pub(crate) use forget::apply_forget_record;
 pub use recovery::RecordWalRegistry;
 pub(crate) use upsert::apply_upsert;

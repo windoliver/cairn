@@ -1960,10 +1960,16 @@ fn has_warning_or_error(finding: &Finding) -> bool {
 fn emit_human(data: &LintData, operation_id: &Ulid) {
     println!("cairn lint: committed (operation_id: {})", operation_id.0);
     println!(
-        "summary: total={} contradictions={} ambiguous_edges={} auto_resolved={}",
+        "summary: total={} contradictions={} ambiguous_edges={} purge_pending={} auto_resolved={}",
         data.summary.total,
         summary_count(data, "contradictory_edge"),
         summary_count(data, "ambiguous_edge"),
+        data.findings
+            .iter()
+            .filter(|finding| {
+                finding.kind == Kind::DeferredCheck && finding.message.starts_with("purge_pending:")
+            })
+            .count(),
         data.summary.auto_resolved.unwrap_or(0),
     );
 

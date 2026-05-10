@@ -36,7 +36,7 @@ impl StepBodyRegistry for RecordWalRegistry {
         op_id: &OperationId,
     ) -> Result<Option<Arc<dyn StepBody>>, RecoveryError> {
         match kind {
-            WalKind::Upsert | WalKind::Expire => {}
+            WalKind::Upsert | WalKind::Expire | WalKind::ForgetRecord => {}
             _ => return Ok(None),
         }
 
@@ -75,13 +75,55 @@ impl StepBodyRegistry for RecordWalRegistry {
                 .map_err(|e| RecoveryError::Invariant(format!("recovery lock failed: {e}")))?;
                 Ok(Some(Arc::new(RecordStepBody::new_expire(*payload, locks))))
             }
-            (WalKind::Upsert, RecordWalPayload::Expire(_)) => Err(RecoveryError::Invariant(
-                "record wal payload variant expire does not match wal kind upsert".to_owned(),
-            )),
-            (WalKind::Expire, RecordWalPayload::Upsert(_)) => Err(RecoveryError::Invariant(
-                "record wal payload variant upsert does not match wal kind expire".to_owned(),
-            )),
+            (WalKind::ForgetRecord, RecordWalPayload::ForgetRecord(payload)) => {
+                let locks = acquire_for_record(
+                    conn,
+                    &payload.scope,
+                    &payload.target_id,
+                    &self.incarnation,
+                    op_id.as_str(),
+                    "record_wal_recovery_forget_record",
+                )
+                .await
+                .map_err(|e| RecoveryError::Invariant(format!("recovery lock failed: {e}")))?;
+                Ok(Some(Arc::new(RecordStepBody::new_forget_record(
+                    *payload, locks,
+                ))))
+            }
+            (kind, RecordWalPayload::Purged(_)) => Err(purged_payload_recovery(kind)),
+            (WalKind::Upsert, RecordWalPayload::Expire(_)) => {
+                Err(payload_mismatch("expire", "upsert"))
+            }
+            (WalKind::Upsert, RecordWalPayload::ForgetRecord(_)) => {
+                Err(payload_mismatch("forget_record", "upsert"))
+            }
+            (WalKind::Expire, RecordWalPayload::Upsert(_)) => {
+                Err(payload_mismatch("upsert", "expire"))
+            }
+            (WalKind::Expire, RecordWalPayload::ForgetRecord(_)) => {
+                Err(payload_mismatch("forget_record", "expire"))
+            }
+            (WalKind::ForgetRecord, RecordWalPayload::Upsert(_)) => {
+                Err(payload_mismatch("upsert", "forget_record"))
+            }
+            (WalKind::ForgetRecord, RecordWalPayload::Expire(_)) => {
+                Err(payload_mismatch("expire", "forget_record"))
+            }
             _ => Ok(None),
         }
     }
+}
+
+fn payload_mismatch(payload_variant: &str, wal_kind: &str) -> RecoveryError {
+    RecoveryError::Invariant(format!(
+        "record wal payload variant {payload_variant} does not match wal kind {wal_kind}"
+    ))
+}
+
+fn purged_payload_recovery(kind: WalKind) -> RecoveryError {
+    RecoveryError::Invariant(format!(
+        "purged record wal payload cannot be recovered as an active operation; \
+         record wal payload variant purged does not match wal kind {}",
+        kind.as_str()
+    ))
 }

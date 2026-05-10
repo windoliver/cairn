@@ -1067,7 +1067,18 @@ fn sdk_error_code_helper_returns_typed_code() {
 
 #[test]
 fn forget_rejects_unadvertised_target_with_capability_unavailable() {
-    let err = sdk()
+    let sdk = Sdk::with_store(
+        std::sync::Arc::new(noop_store::NoopStore),
+        cairn_core::config::CairnConfig::default(),
+    );
+    assert!(
+        !sdk.status()
+            .capabilities
+            .contains(&cairn_sdk::generated::common::Capabilities::CairnMcpV1ForgetRecord),
+        "SDK status must not advertise forget.record until SDK dispatch is wired"
+    );
+
+    let err = sdk
         .forget(&ForgetArgs::Record {
             record_id: ulid(),
             dry_run: None,
