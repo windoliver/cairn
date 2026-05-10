@@ -723,3 +723,60 @@ async fn forget_after_expire_writes_receipt_with_original_tier() {
         "Phase B primary.purge ran for the expired target"
     );
 }
+
+// ── Round 7 review: in-txn scope/tier read defeats pre-lock-read race ──
+
+#[tokio::test]
+async fn forget_records_post_upsert_visibility_in_consent_receipt() {
+    use cairn_core::domain::taxonomy::MemoryVisibility;
+
+    // Round-7 review (Codex): apply_forget_record reads scope+tier
+    // BEFORE acquiring the record-WAL lock (the values feed the
+    // entity/session lock legs). A same-target upsert could commit
+    // between that pre-lock read and the lock acquisition, leaving
+    // the receipt with stale tier metadata.
+    //
+    // Fix: mark_tombstone_and_emit_receipt re-reads scope+tier INSIDE
+    // the Phase A transaction. This test simulates the race by
+    // upserting a Private v1, then a Public v2 (BEFORE the forget),
+    // then forgetting. The receipt MUST reflect Public — the latest
+    // version's tier — not whatever the apply path read first.
+    let store = open_in_memory().await.expect("open");
+    let mut record = sample();
+    record.visibility = MemoryVisibility::Private;
+    let target = record.target_id.clone();
+    store.upsert(&record).await.expect("upsert v1 private");
+
+    // Bump visibility on the same target.
+    let mut v2 = record.clone();
+    v2.visibility = MemoryVisibility::Public;
+    v2.body = format!("{}-public", record.body);
+    store.upsert(&v2).await.expect("upsert v2 public");
+
+    let receipt = store
+        .forget_record(&target, &alice())
+        .await
+        .expect("forget");
+    assert_eq!(receipt.deleted_count, 1, "v2 was the live row");
+
+    let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
+    let receipt_op_id = receipt.op_id.clone();
+    let payload_json: String = conn
+        .call(move |c| {
+            c.query_row(
+                "SELECT payload_json FROM consent_journal \
+                  WHERE kind = 'forget_intent' AND op_id = ?1",
+                rusqlite::params![receipt_op_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))
+        })
+        .await
+        .expect("query consent");
+    assert!(
+        payload_json.contains("\"scope_tier\":\"public\""),
+        "receipt scope_tier must come from the in-txn read of the latest \
+         version (Public), not a stale pre-lock snapshot of v1 (Private). \
+         Got: {payload_json}"
+    );
+}

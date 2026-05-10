@@ -383,11 +383,36 @@ fn mark_tombstone_and_emit_receipt(
             |row| row.get(0),
         )
         .map_err(StepBodyError::Storage)?;
-    let total_rows: i64 = tx
+    // Snapshot scope + visibility from the latest record version
+    // INSIDE the Phase A transaction. The pre-lock read in
+    // `apply_forget_record` populates the payload's `scope` /
+    // `scope_tier` for lock-acquisition purposes (entity + session
+    // legs), but a same-target upsert that committed between that
+    // pre-lock read and the record-WAL lock acquisition could have
+    // moved the record to a different scope/tier. Brief §14 audit
+    // invariant: the consent receipt must record the scope/tier of
+    // the rows actually destroyed by THIS op.
+    //
+    // `total_rows` discriminates "truly already purged" (no
+    // receipt) from "rows present" (receipt with in-txn tier).
+    // Single-row scalar SELECT: always returns one row even when the
+    // subqueries are NULL (COALESCE -> '').
+    let (total_rows, in_txn_scope_json, in_txn_visibility): (i64, String, String) = tx
         .query_row(
-            "SELECT COUNT(*) FROM records WHERE target_id = ?1",
+            "SELECT \
+                (SELECT COUNT(*) FROM records WHERE target_id = ?1), \
+                COALESCE( \
+                    (SELECT scope FROM records WHERE target_id = ?1 \
+                       ORDER BY version DESC LIMIT 1), \
+                    '' \
+                ), \
+                COALESCE( \
+                    (SELECT visibility FROM records WHERE target_id = ?1 \
+                       ORDER BY version DESC LIMIT 1), \
+                    '' \
+                )",
             params![payload.target_id.as_str()],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .map_err(StepBodyError::Storage)?;
     let live_count_u64 = u64::try_from(live_count).unwrap_or(0);
@@ -413,6 +438,21 @@ fn mark_tombstone_and_emit_receipt(
         return Ok(());
     }
 
+    // Resolve the in-txn scope/tier; fall back to the payload values
+    // only if the snapshot SELECT returned NULLs (defensive — should
+    // not happen when total_rows > 0).
+    let in_txn_scope = if in_txn_scope_json.is_empty() {
+        payload.scope.clone()
+    } else {
+        serde_json::from_str(&in_txn_scope_json).unwrap_or_else(|_| payload.scope.clone())
+    };
+    let in_txn_tier = if in_txn_visibility.is_empty() {
+        payload.scope_tier
+    } else {
+        cairn_core::domain::MemoryVisibility::parse(&in_txn_visibility)
+            .unwrap_or(payload.scope_tier)
+    };
+
     // sha256 of the raw target id. P1 follow-up (brief §14) introduces a
     // per-user salt; the receipt schema does not change.
     let mut hasher = Sha256::new();
@@ -426,12 +466,12 @@ fn mark_tombstone_and_emit_receipt(
         kind: ConsentKind::ForgetIntent,
         actor: payload.actor.clone(),
         subject: subject_hash,
-        scope: scope_canonical_wire(&payload.scope, payload.scope_tier),
+        scope: scope_canonical_wire(&in_txn_scope, in_txn_tier),
         op_id: Some(op_id.as_str().to_owned()),
         sensor_id: None,
         payload: ConsentPayload::IntentReceipt {
             target_id_hash,
-            scope_tier: payload.scope_tier,
+            scope_tier: in_txn_tier,
             reason_code: payload.reason_code.clone(),
         },
         decided_at: now_rfc3339_from_ms(now_ms)?,
