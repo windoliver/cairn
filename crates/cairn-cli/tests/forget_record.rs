@@ -3,7 +3,9 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
-use cairn_core::generated::envelope::{Response, ResponseData, ResponseStatus, ResponseVerb};
+use cairn_core::generated::envelope::{
+    Response, ResponseData, ResponseStatus, ResponseVerb, RetrieveData,
+};
 use serde_json::Value;
 
 fn cli() -> Command {
@@ -50,6 +52,23 @@ fn hit_count(vault: &Path, query: &str) -> usize {
         .len()
 }
 
+fn retrieve_record(vault: &Path, record_id: &str) -> Response {
+    let out = run_in_vault(vault, &["retrieve", record_id, "--json"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "retrieve should commit\nstderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "retrieve envelope parse failed: {e}\nstdout: {}",
+            String::from_utf8_lossy(&out.stdout)
+        )
+    })
+}
+
 fn forget_record_wal_operation_id(vault: &Path) -> String {
     let conn = rusqlite::Connection::open(vault.join(".cairn/cairn.db")).expect("open cairn db");
     conn.query_row(
@@ -75,6 +94,12 @@ fn forget_record_json_commits_in_bound_vault() {
         .expect("ingest record_id")
         .to_owned();
     assert_eq!(hit_count(dir.path(), "issue58forgetunique"), 1);
+    let before = retrieve_record(dir.path(), &record_id);
+    let Some(ResponseData::Retrieve(RetrieveData::Record(before))) = before.data else {
+        panic!("retrieve before forget must return record data");
+    };
+    assert_eq!(before.record_id.0, record_id);
+    assert_eq!(before.body.as_deref(), Some(body));
 
     let out = run_in_vault(dir.path(), &["forget", "--record", &record_id, "--json"]);
     assert_eq!(
@@ -103,7 +128,7 @@ fn forget_record_json_commits_in_bound_vault() {
             .into_iter()
             .map(|id| id.0)
             .collect::<Vec<_>>(),
-        vec![record_id]
+        vec![record_id.clone()]
     );
 
     assert_eq!(
@@ -111,6 +136,94 @@ fn forget_record_json_commits_in_bound_vault() {
         format!("forget_record-{response_operation_id}")
     );
     assert_eq!(hit_count(dir.path(), "issue58forgetunique"), 0);
+
+    let after = retrieve_record(dir.path(), &record_id);
+    let Some(ResponseData::Retrieve(RetrieveData::Record(after))) = after.data else {
+        panic!("retrieve after forget must return typed empty record data");
+    };
+    assert_eq!(after.record_id.0, record_id);
+    assert_eq!(after.kind, "unknown");
+    assert!(
+        after.body.is_none(),
+        "retrieve after record forget must not return forgotten body"
+    );
+}
+
+#[test]
+fn forget_record_human_mode_commits_and_removes_search_hit() {
+    let dir = tempfile::tempdir().expect("temp vault");
+    bootstrap_vault(dir.path());
+
+    let body = "issue58humanforget body must disappear";
+    let ingest = run_json_ok(
+        dir.path(),
+        &["ingest", "--kind", "reference", "--body", body, "--json"],
+    );
+    let record_id = ingest["data"]["record_id"]
+        .as_str()
+        .expect("ingest record_id")
+        .to_owned();
+    assert_eq!(hit_count(dir.path(), "issue58humanforget"), 1);
+
+    let out = run_in_vault(dir.path(), &["forget", "--record", &record_id]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "human forget should commit\nstderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    assert_eq!(
+        stdout.trim(),
+        format!("cairn forget: committed record {record_id} (deleted 1)")
+    );
+    assert_eq!(hit_count(dir.path(), "issue58humanforget"), 0);
+}
+
+#[test]
+fn forget_record_second_cli_call_reports_not_found_without_body_leak() {
+    let dir = tempfile::tempdir().expect("temp vault");
+    bootstrap_vault(dir.path());
+
+    let body = "issue58secondforget body must not leak";
+    let ingest = run_json_ok(
+        dir.path(),
+        &["ingest", "--kind", "reference", "--body", body, "--json"],
+    );
+    let record_id = ingest["data"]["record_id"]
+        .as_str()
+        .expect("ingest record_id")
+        .to_owned();
+    let first = run_in_vault(dir.path(), &["forget", "--record", &record_id, "--json"]);
+    assert_eq!(
+        first.status.code(),
+        Some(0),
+        "first forget should commit\nstderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&first.stderr),
+        String::from_utf8_lossy(&first.stdout)
+    );
+
+    let second = run_in_vault(dir.path(), &["forget", "--record", &record_id, "--json"]);
+    assert_eq!(
+        second.status.code(),
+        Some(1),
+        "second forget should surface not found\nstderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&second.stderr),
+        String::from_utf8_lossy(&second.stdout)
+    );
+    let stdout = String::from_utf8(second.stdout).expect("utf-8 stdout");
+    let v: Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("not-found JSON parse failed: {e}\nstdout: {stdout:?}"));
+    assert_eq!(v["contract"], "cairn.mcp.v1");
+    assert_eq!(v["status"], "aborted");
+    assert_eq!(v["verb"], "forget");
+    assert_eq!(v["error"]["code"], "NotFound");
+    assert_eq!(v["error"]["data"]["target"], "record");
+    assert!(
+        !stdout.contains(body),
+        "second forget response must not leak forgotten body"
+    );
 }
 
 fn assert_capability_unavailable(vault: Option<&Path>, args: &[&str], capability: &str) {
