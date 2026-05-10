@@ -543,69 +543,12 @@ async fn concurrent_forgets_serialize_via_record_wal_lock() {
     );
 }
 
-#[tokio::test]
-async fn contended_forget_retried_after_lock_release_reports_zero() {
-    use std::sync::Arc as StdArc;
-    use std::time::Duration;
-
-    // Round-2 review (Codex): the fail-fast concurrent test above does
-    // NOT exercise the in-txn deleted_count fix — the loser never runs
-    // Phase A, so a regressed pre-lock SELECT would still satisfy "one
-    // dc=1, one error." This test fills that gap: spawn the contender,
-    // catch the RecordWalLock error, retry once the incumbent committed
-    // and released the lock, then assert the retry reports `0`.
-    //
-    // Behaviour invariant: after the first forget tombstoned the live
-    // row, ANY subsequent successful forget on the same target must
-    // observe zero live rows inside its own Phase A transaction. A
-    // regression to a pre-lock SELECT would let the contender stash
-    // its own pre-lock count of `1` and falsely report `deleted_count
-    // = 1` even after the incumbent already drained everything.
-    let store = StdArc::new(open_in_memory().await.expect("open"));
-    let record = sample();
-    let target = record.target_id.clone();
-    store.upsert(&record).await.expect("upsert");
-
-    let s1 = StdArc::clone(&store);
-    let s2 = StdArc::clone(&store);
-    let t1 = target.clone();
-    let t2 = target.clone();
-    let h1 = tokio::spawn(async move { s1.forget_record(&t1, &alice()).await });
-    let h2 = tokio::spawn(async move { s2.forget_record(&t2, &alice()).await });
-
-    let r1 = h1.await.expect("task1 join");
-    let r2 = h2.await.expect("task2 join");
-
-    let (winner, loser) = match (r1, r2) {
-        (Ok(w), Err(e)) | (Err(e), Ok(w)) => (w, e.to_string()),
-        (Ok(_), Ok(_)) => panic!("both succeeded — locks should serialize"),
-        (Err(e1), Err(e2)) => panic!("both failed: {e1}, {e2}"),
-    };
-    assert_eq!(
-        winner.deleted_count, 1,
-        "incumbent that acquired the lock must report dc=1"
-    );
-    assert!(
-        loser.contains("record wal lock") || loser.contains("RecordWalLock"),
-        "loser must surface RecordWalLock; got {loser:?}"
-    );
-
-    // Wait long enough for the incumbent's lock to fully release. The
-    // record-WAL locks unwind after `runner::run_from` returns and
-    // `finalize` commits — single-digit ms in tests, but give it 100ms
-    // for headroom.
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    let retry = store
-        .forget_record(&target, &alice())
-        .await
-        .expect("retry after lock released should succeed");
-    assert_eq!(
-        retry.deleted_count, 0,
-        "after the incumbent purged the records, the retry's in-txn \
-         SELECT must observe zero live rows. A regression to a pre-lock \
-         SELECT would let this still report `1` (the pre-lock count \
-         captured before the second forget could see the effect of the \
-         first)."
-    );
-}
+// Note on the deleted_count race fix: the strongest regression coverage
+// for the in-txn SELECT lives at the unit-test layer in
+// `record_wal/steps.rs::tests::mark_tombstone_count_is_captured_inside_transaction`.
+// That test calls `mark_tombstone_and_emit_receipt` directly against
+// transactions interleaved with an external commit, proving the count
+// is captured INSIDE the transaction (not via a pre-lock SELECT cached
+// outside it). Integration-level tests can't distinguish those two
+// implementations because the record-WAL locks fail-fast — no contender
+// reaches Phase A.

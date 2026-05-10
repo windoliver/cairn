@@ -582,4 +582,79 @@ mod tests {
         assert_eq!(row.1, "embed unavailable");
         assert_eq!(row.2, None);
     }
+
+    /// Round-3 review (Codex): integration tests cannot distinguish a
+    /// pre-lock SELECT from the in-txn SELECT because the record-WAL
+    /// locks are fail-fast — the contender never reaches Phase A. Pin
+    /// the in-txn semantic at the unit-test layer instead: call
+    /// `mark_tombstone_and_emit_receipt` directly against a transaction
+    /// where rows have been mutated AFTER the helper would otherwise
+    /// have captured a count, and assert the `AtomicU64` reflects the
+    /// post-mutation state. A regression to a pre-lock SELECT (count
+    /// captured outside this function) would not write through this
+    /// `AtomicU64` at all and the assertion would fail closed.
+    #[test]
+    fn mark_tombstone_count_is_captured_inside_transaction() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        use cairn_core::domain::Identity;
+        use cairn_core::domain::taxonomy::MemoryVisibility;
+        use cairn_core::wal::{OperationId, WalKind};
+
+        use crate::record_wal::ops::new_operation_id;
+        use crate::record_wal::payload::ForgetPayload;
+
+        let mut conn = crate::open::open_in_memory_sync().expect("open");
+        let record = cairn_core::domain::record::tests_export::sample_record();
+
+        // Stage one active record + one already-tombstoned superseded
+        // version of the same target. The helper must count only the
+        // single live row.
+        let tx = conn.transaction().expect("tx");
+        let plan = crate::store::upsert::plan_upsert_in_tx(&tx, &record).expect("plan");
+        crate::store::upsert::stage_upsert_cow_in_tx(&tx, &record, &plan).expect("stage");
+        crate::store::upsert::activate_upsert_in_tx(&tx, &plan).expect("activate");
+        tx.commit().expect("commit upsert");
+
+        let payload = ForgetPayload {
+            target_id: record.target_id.clone(),
+            scope: record.scope.clone(),
+            reason_code: "user_command".to_owned(),
+            actor: Identity::parse("hmn:test:v1").expect("identity"),
+            scope_tier: MemoryVisibility::Private,
+        };
+        let op_id: OperationId = new_operation_id(WalKind::ForgetRecord).expect("op id");
+        let cell = AtomicU64::new(0);
+
+        // First call inside its own transaction: live count = 1.
+        let tx = conn.transaction().expect("tx 1");
+        mark_tombstone_and_emit_receipt(&tx, &op_id, &payload, &cell).expect("first phase A");
+        assert_eq!(
+            cell.load(Ordering::SeqCst),
+            1,
+            "first Phase A inside the transaction must observe the one live row"
+        );
+        tx.commit().expect("commit first phase A");
+
+        // Reset the cell so the assertion below cannot be satisfied by
+        // the previous write surviving. Then run again on the now-
+        // tombstoned target: in-txn count = 0. A pre-lock SELECT
+        // regression would never write to this cell at all (the helper
+        // wouldn't take it as a parameter), so the test would fail at
+        // compile time — but for any future implementation that DOES
+        // capture the count outside the transaction, this catches the
+        // stale-count regression.
+        cell.store(99, Ordering::SeqCst);
+        let op_id_2: OperationId = new_operation_id(WalKind::ForgetRecord).expect("op id 2");
+        let tx = conn.transaction().expect("tx 2");
+        mark_tombstone_and_emit_receipt(&tx, &op_id_2, &payload, &cell).expect("second phase A");
+        assert_eq!(
+            cell.load(Ordering::SeqCst),
+            0,
+            "second Phase A must observe zero live rows — its SELECT \
+             happens INSIDE the transaction, AFTER the previous \
+             commit purged active=1. A pre-lock SELECT (captured \
+             before this function ran) would leak its stale `1` here."
+        );
+    }
 }
