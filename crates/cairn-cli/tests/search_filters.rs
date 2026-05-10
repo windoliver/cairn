@@ -20,7 +20,7 @@ fn bootstrap_vault(vault: &Path) {
     .expect("bootstrap vault");
 }
 
-fn json_stdout(out: std::process::Output) -> serde_json::Value {
+fn json_stdout(out: &std::process::Output) -> serde_json::Value {
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -42,7 +42,7 @@ fn ingest(vault: &Path, kind: &str, body: &str) -> String {
         .args(["ingest", "--kind", kind, "--body", body, "--json"])
         .output()
         .expect("cairn ingest");
-    let json = json_stdout(out);
+    let json = json_stdout(&out);
     json["data"]["record_id"]
         .as_str()
         .expect("record_id")
@@ -78,7 +78,7 @@ fn search_filters_narrow_keyword_results() {
         ])
         .output()
         .expect("cairn search --filters");
-    let json = json_stdout(out);
+    let json = json_stdout(&out);
     let hits = json["data"]["hits"].as_array().expect("hits array");
 
     assert_eq!(
