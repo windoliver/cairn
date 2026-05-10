@@ -83,3 +83,51 @@ fn assemble_hot_writes_one_metrics_line_per_call() {
         "second call must hit; got line2={line2}"
     );
 }
+
+#[test]
+fn watermark_bump_invalidates_cache_across_cli_calls() {
+    use cairn_core::contract::hot_prefix_cache::HotPrefixCache;
+    use cairn_core::domain::hot_prefix::SourceClass;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    bootstrap(&opts(dir.path())).expect("bootstrap");
+    seed_default_identity(dir.path());
+
+    let metrics_path = dir.path().join(".cairn/metrics.jsonl");
+
+    // Warm the cache: first call (miss), second call (hit).
+    assemble_hot(dir.path());
+    assemble_hot(dir.path());
+
+    // Simulate what `forget` will do once wired: bump a source-class
+    // watermark via the cache lib API. Bypasses the unwired CLI
+    // `forget` verb (capability gated; see envelope_tests.rs).
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    rt.block_on(async {
+        let cache = cairn_store_sqlite::SqliteHotPrefixCache::open(dir.path())
+            .await
+            .expect("open cache");
+        cache
+            .bump(&[SourceClass::ProfileEvidence])
+            .await
+            .expect("bump");
+    });
+
+    // Third call: must be a cache MISS because the watermark moved.
+    assemble_hot(dir.path());
+
+    let content = std::fs::read_to_string(&metrics_path).expect("read metrics");
+    let lines: Vec<&str> = content.lines().collect();
+    assert_eq!(
+        lines.len(),
+        3,
+        "expected 3 metric lines, got {}: {content}",
+        lines.len()
+    );
+
+    let last: serde_json::Value = serde_json::from_str(lines[2]).expect("parse last");
+    assert_eq!(
+        last["cache_hit"], false,
+        "watermark bump must invalidate the cache; last metric line: {last}"
+    );
+}
