@@ -1,6 +1,8 @@
 //! Durable JSON payloads for record WAL operations.
 
-use cairn_core::domain::{BodyHash, MemoryRecord, RecordId, ScopeTuple, TargetId};
+use cairn_core::domain::{
+    BodyHash, Identity, MemoryRecord, MemoryVisibility, RecordId, ScopeTuple, TargetId,
+};
 use cairn_core::wal::{OperationId, WalKind};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -13,6 +15,7 @@ use crate::store::current_unix_ms;
 pub enum RecordWalPayload {
     Upsert(Box<UpsertPayload>),
     Expire(Box<ExpirePayload>),
+    #[serde(rename = "forget_record")]
     Forget(Box<ForgetPayload>),
 }
 
@@ -90,8 +93,8 @@ pub struct ForgetPayload {
     #[serde(default)]
     pub scope: ScopeTuple,
     pub reason_code: String,
-    pub actor: cairn_core::domain::Identity,
-    pub scope_tier: cairn_core::domain::taxonomy::MemoryVisibility,
+    pub actor: Identity,
+    pub scope_tier: MemoryVisibility,
 }
 
 pub(crate) fn save_payload(
@@ -188,7 +191,6 @@ pub fn load_upsert_payload_for_test(
 #[cfg(test)]
 mod forget_payload_tests {
     use super::*;
-    use cairn_core::domain::{Identity, MemoryVisibility, ScopeTuple, TargetId};
 
     #[test]
     fn forget_payload_round_trips_through_record_wal_payload() {
@@ -204,6 +206,10 @@ mod forget_payload_tests {
         };
         let wrapped = RecordWalPayload::Forget(Box::new(payload.clone()));
         let json = serde_json::to_string(&wrapped).expect("serialize");
+        assert!(
+            json.contains("\"type\":\"forget_record\""),
+            "wire tag should match wal_payloads.kind"
+        );
         let decoded: RecordWalPayload = serde_json::from_str(&json).expect("deserialize");
         match decoded {
             RecordWalPayload::Forget(p) => {
