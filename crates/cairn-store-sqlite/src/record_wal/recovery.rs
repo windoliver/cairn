@@ -89,7 +89,6 @@ impl StepBodyRegistry for RecordWalRegistry {
                 }
                 RecordWalPayload::Purged(_) => Err(payload_mismatch("purged", "expire")),
             },
-            WalKind::ForgetRecord => Ok(None),
             _ => Ok(None),
         }
     }

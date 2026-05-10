@@ -183,9 +183,8 @@ async fn recovery_rejects_purged_payload_for_body_bearing_kinds() {
         ),
     ] {
         let op_id = OperationId::parse(op.to_owned()).expect("op id");
-        let err = match registry.body_for(&conn, kind, &op_id).await {
-            Err(err) => err,
-            Ok(_) => panic!("expected purged payload mismatch for {kind_name}"),
+        let Err(err) = registry.body_for(&conn, kind, &op_id).await else {
+            panic!("expected purged payload mismatch for {kind_name}");
         };
         match err {
             RecoveryError::Invariant(message) => {
