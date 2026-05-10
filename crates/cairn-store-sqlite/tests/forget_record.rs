@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use cairn_core::contract::memory_store::{ForgetReceipt, KeywordSearchArgs, ListArgs, MemoryStore};
 use cairn_core::domain::{Identity, MemoryRecord};
-use cairn_store_sqlite::open_in_memory;
+use cairn_store_sqlite::{open, open_in_memory};
 
 fn sample() -> MemoryRecord {
     cairn_core::domain::record::tests_export::sample_record()
@@ -270,3 +270,84 @@ fn collect_json_keys(value: &serde_json::Value, out: &mut std::collections::BTre
         _ => {}
     }
 }
+
+// ── Task 12 ────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn forget_record_phase_a_crash_leaves_no_state() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("cairn.sqlite");
+
+    let seed = sample();
+    let target = seed.target_id.clone();
+
+    {
+        let store = open(&path).await.expect("open");
+        store.upsert(&seed).await.expect("upsert seed");
+
+        // Stage a PREPARED forget_record op + payload but skip the step
+        // runner so Phase A never commits its tombstone.
+        let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
+        let target_str = target.as_str().to_owned();
+        let payload_json = serde_json::to_string(
+            &cairn_store_sqlite::record_wal::payload::RecordWalPayload::Forget(Box::new(
+                cairn_store_sqlite::record_wal::payload::ForgetPayload {
+                    target_id: target.clone(),
+                    scope: seed.scope.clone(),
+                    reason_code: "user_command".to_owned(),
+                    actor: alice(),
+                    scope_tier: cairn_core::domain::taxonomy::MemoryVisibility::Private,
+                },
+            )),
+        )
+        .expect("serialize");
+        conn.call(move |c| {
+            c.execute(
+                "INSERT INTO wal_ops \
+                   (operation_id, issued_seq, kind, state, envelope, issuer, \
+                    target_hash, scope_json, expires_at, signature, issued_at, updated_at) \
+                 VALUES ('op-crash-58', \
+                         COALESCE((SELECT MAX(issued_seq) FROM wal_ops),0)+1, \
+                         'forget_record','PREPARED','{}','test', \
+                         ?1, '{}', 0, 'sig', 1, 1)",
+                rusqlite::params![target_str],
+            )?;
+            c.execute(
+                "INSERT INTO wal_payloads(operation_id, kind, payload_json, created_at) \
+                 VALUES ('op-crash-58', 'forget_record', ?1, 1)",
+                rusqlite::params![payload_json],
+            )?;
+            Ok::<_, tokio_rusqlite::Error>(())
+        })
+        .await
+        .expect("seed PREPARED op");
+    } // drop store — simulates crash before Phase A txn could commit
+
+    // Reopen and assert recovery completes the prepared op.
+    let store = open(&path).await.expect("reopen");
+
+    let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
+    let state: String = conn
+        .call(|c| {
+            c.query_row(
+                "SELECT state FROM wal_ops WHERE operation_id = 'op-crash-58'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))
+        })
+        .await
+        .expect("read op state");
+    assert_eq!(
+        state, "COMMITTED",
+        "boot-time recovery resumed the prepared forget op to COMMITTED"
+    );
+
+    // The seed record must be gone from every reader after recovery.
+    let post = store
+        .get_active_by_target(&target)
+        .await
+        .expect("post lookup");
+    assert!(post.is_none(), "recovered forget purges the target");
+}
+
