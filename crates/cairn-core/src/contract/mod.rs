@@ -18,6 +18,8 @@
 //!   [`IdentityRegistry`] / [`RegistryError`] / [`IdentityVisibility`] /
 //!   [`MaintenanceMode`] / [`PurgeAcknowledgement`] / [`PurgeReason`].
 //! - Forward stubs (P1/P2, hidden until #113 / #124): `FrontendAdapter`, `AgentProvider`.
+//! - Metrics contract (§15): [`MetricsSink`] / [`MetricsError`],
+//!   [`CapturingMetricsSink`], [`NoopMetricsSink`].
 
 pub mod agent_provider;
 pub mod conformance;
@@ -31,6 +33,7 @@ pub mod llm_provider;
 pub mod manifest;
 pub mod mcp_server;
 pub mod memory_store;
+pub mod metrics;
 pub mod registry;
 pub mod sensor_ingress;
 pub mod version;
@@ -65,6 +68,7 @@ pub use llm_provider::{
 };
 pub use mcp_server::{MCPServer, MCPServerCapabilities, MCPServerPlugin};
 pub use memory_store::{MemoryStore, MemoryStoreCapabilities, MemoryStorePlugin};
+pub use metrics::{CapturingMetricsSink, MetricsError, MetricsSink, NoopMetricsSink};
 pub use sensor_ingress::{SensorIngress, SensorIngressCapabilities, SensorIngressPlugin};
 pub use workflow_orchestrator::{
     WorkflowOrchestrator, WorkflowOrchestratorCapabilities, WorkflowOrchestratorPlugin,
