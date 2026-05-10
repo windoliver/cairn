@@ -585,7 +585,10 @@ pub struct ForgetReceipt {
     pub target_id_hash: String,
     /// WAL operation id that committed the forget.
     pub op_id: String,
-    /// Unix milliseconds when Phase B step 5 (`primary.purge`) committed.
+    /// Unix milliseconds captured immediately after Phase B's seven-step
+    /// graph reached COMMITTED. The gap from `primary.purge` (step 5) to
+    /// here is the bounded duration of `wal.purge_pre_images` (step 6)
+    /// and `snapshot.purge` (step 7) — single-digit ms in P0.
     pub purged_at: i64,
 }
 
