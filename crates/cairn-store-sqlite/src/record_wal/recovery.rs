@@ -36,7 +36,7 @@ impl StepBodyRegistry for RecordWalRegistry {
         op_id: &OperationId,
     ) -> Result<Option<Arc<dyn StepBody>>, RecoveryError> {
         match kind {
-            WalKind::Upsert | WalKind::Expire => {}
+            WalKind::Upsert | WalKind::Expire | WalKind::ForgetRecord => {}
             _ => return Ok(None),
         }
 
@@ -75,11 +75,38 @@ impl StepBodyRegistry for RecordWalRegistry {
                 .map_err(|e| RecoveryError::Invariant(format!("recovery lock failed: {e}")))?;
                 Ok(Some(Arc::new(RecordStepBody::new_expire(*payload, locks))))
             }
+            (WalKind::ForgetRecord, RecordWalPayload::Forget(payload)) => {
+                let locks = acquire_for_record(
+                    conn,
+                    &payload.scope,
+                    &payload.target_id,
+                    &self.incarnation,
+                    op_id.as_str(),
+                    "record_wal_recovery_forget_record",
+                )
+                .await
+                .map_err(|e| RecoveryError::Invariant(format!("recovery lock failed: {e}")))?;
+                Ok(Some(Arc::new(RecordStepBody::new_forget(*payload, locks))))
+            }
             (WalKind::Upsert, RecordWalPayload::Expire(_)) => Err(RecoveryError::Invariant(
                 "record wal payload variant expire does not match wal kind upsert".to_owned(),
             )),
             (WalKind::Expire, RecordWalPayload::Upsert(_)) => Err(RecoveryError::Invariant(
                 "record wal payload variant upsert does not match wal kind expire".to_owned(),
+            )),
+            (WalKind::Upsert, RecordWalPayload::Forget(_)) => Err(RecoveryError::Invariant(
+                "record wal payload variant forget does not match wal kind upsert".to_owned(),
+            )),
+            (WalKind::Expire, RecordWalPayload::Forget(_)) => Err(RecoveryError::Invariant(
+                "record wal payload variant forget does not match wal kind expire".to_owned(),
+            )),
+            (WalKind::ForgetRecord, RecordWalPayload::Upsert(_)) => Err(RecoveryError::Invariant(
+                "record wal payload variant upsert does not match wal kind forget_record"
+                    .to_owned(),
+            )),
+            (WalKind::ForgetRecord, RecordWalPayload::Expire(_)) => Err(RecoveryError::Invariant(
+                "record wal payload variant expire does not match wal kind forget_record"
+                    .to_owned(),
             )),
             _ => Ok(None),
         }
