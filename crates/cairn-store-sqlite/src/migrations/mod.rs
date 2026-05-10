@@ -95,6 +95,9 @@ const M0052_LOCK_ACQUISITION_ULID_UNIQUE: &str =
 const M0053_WAL_PAYLOADS: &str = include_str!("sql/0053_wal_payloads.sql");
 // Issue #57 round-2 — internal marker for pre-activation COW rows.
 const M0054_RECORDS_COW_STAGING: &str = include_str!("sql/0054_records_cow_staging.sql");
+// Issue #58 — widen wal_payloads.kind to admit 'forget_record' for
+// record-level forget durable payloads.
+const M0055_WAL_PAYLOADS_FORGET: &str = include_str!("sql/0055_wal_payloads_forget.sql");
 
 /// Canonical SQL for migration 0020 (`workflow_jobs`). Re-exported so
 /// downstream crates (notably `cairn-workflows`, which hashes the
@@ -247,6 +250,7 @@ pub(crate) const MIGRATION_SOURCES: &[(i64, &str, &str)] = &[
     ),
     (53, "0053_wal_payloads", M0053_WAL_PAYLOADS),
     (54, "0054_records_cow_staging", M0054_RECORDS_COW_STAGING),
+    (55, "0055_wal_payloads_forget", M0055_WAL_PAYLOADS_FORGET),
 ];
 
 /// All migrations, in order. Returns a fresh `Migrations` set on every call
@@ -302,5 +306,6 @@ pub fn migrations() -> Migrations<'static> {
         M::up(M0052_LOCK_ACQUISITION_ULID_UNIQUE),
         M::up(M0053_WAL_PAYLOADS),
         M::up(M0054_RECORDS_COW_STAGING),
+        M::up(M0055_WAL_PAYLOADS_FORGET),
     ])
 }

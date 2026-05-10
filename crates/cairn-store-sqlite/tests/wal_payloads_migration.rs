@@ -101,3 +101,31 @@ async fn wal_payloads_kind_must_match_parent_operation() {
     .await
     .expect("kind-match assertion");
 }
+
+#[tokio::test]
+async fn migration_0055_widens_wal_payloads_kind_to_include_forget_record() {
+    let store = open_in_memory().await.expect("open in-memory store");
+    let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
+
+    // Insert a sentinel wal_ops row with kind=forget_record so the FK +
+    // trigger constraints are satisfied, then insert the matching payload
+    // under the widened CHECK introduced by migration 0055.
+    conn.call(|c| {
+        c.execute(
+            "INSERT INTO wal_ops \
+               (operation_id, issued_seq, kind, state, envelope, issuer, \
+                target_hash, scope_json, expires_at, signature, issued_at, updated_at) \
+             VALUES ('op-mig-55', 1, 'forget_record', 'ISSUED', '{}', 'test', \
+                     'target', '{}', 0, 'sig', 1, 1)",
+            [],
+        )?;
+        c.execute(
+            "INSERT INTO wal_payloads(operation_id, kind, payload_json, created_at) \
+             VALUES ('op-mig-55', 'forget_record', '{}', 1)",
+            [],
+        )?;
+        Ok::<_, tokio_rusqlite::Error>(())
+    })
+    .await
+    .expect("forget_record payload insert succeeds under widened CHECK");
+}
