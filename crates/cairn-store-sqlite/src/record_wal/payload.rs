@@ -13,6 +13,8 @@ use crate::store::current_unix_ms;
 pub enum RecordWalPayload {
     Upsert(Box<UpsertPayload>),
     Expire(Box<ExpirePayload>),
+    ForgetRecord(Box<ForgetPayload>),
+    Purged(Box<PurgedPayload>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -83,6 +85,23 @@ pub struct ExpirePayload {
     pub scope: ScopeTuple,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ForgetPayload {
+    pub requested_record_id: RecordId,
+    pub target_id: TargetId,
+    pub scope: ScopeTuple,
+    pub record_ids: Vec<RecordId>,
+    pub target_hash: String,
+    pub reason_code: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PurgedPayload {
+    pub target_hash: String,
+    pub purged_by: String,
+    pub purged_at: i64,
+}
+
 pub(crate) fn save_payload(
     conn: &Connection,
     op_id: &OperationId,
@@ -91,6 +110,12 @@ pub(crate) fn save_payload(
     let kind = match payload {
         RecordWalPayload::Upsert(_) => WalKind::Upsert.as_str(),
         RecordWalPayload::Expire(_) => WalKind::Expire.as_str(),
+        RecordWalPayload::ForgetRecord(_) => WalKind::ForgetRecord.as_str(),
+        RecordWalPayload::Purged(_) => {
+            return Err(StoreError::Invariant {
+                what: "purged wal payloads are written by scrub updates, not inserted".to_owned(),
+            });
+        }
     };
     let json = serde_json::to_string(payload)?;
     conn.execute(
@@ -166,6 +191,71 @@ pub fn load_upsert_payload_for_test(
         RecordWalPayload::Upsert(payload) => Ok(*payload),
         RecordWalPayload::Expire(_) => Err(StoreError::Invariant {
             what: "expected upsert payload, found expire payload".to_owned(),
+        }),
+        RecordWalPayload::ForgetRecord(_) => Err(StoreError::Invariant {
+            what: "expected upsert payload, found forget_record payload".to_owned(),
+        }),
+        RecordWalPayload::Purged(_) => Err(StoreError::Invariant {
+            what: "expected upsert payload, found purged payload".to_owned(),
+        }),
+    }
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+impl ForgetPayload {
+    #[must_use]
+    pub fn new_for_test(
+        requested_record_id: RecordId,
+        target_id: TargetId,
+        scope: ScopeTuple,
+        record_ids: Vec<RecordId>,
+        target_hash: String,
+    ) -> Self {
+        Self {
+            requested_record_id,
+            target_id,
+            scope,
+            record_ids,
+            target_hash,
+            reason_code: "user_command".to_owned(),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn save_forget_payload_for_test(
+    conn: &Connection,
+    op_id: &str,
+    payload: &ForgetPayload,
+) -> Result<(), StoreError> {
+    let op = OperationId::parse(op_id.to_owned()).map_err(|e| StoreError::Invariant {
+        what: format!("invalid test op id: {e}"),
+    })?;
+    save_payload(
+        conn,
+        &op,
+        &RecordWalPayload::ForgetRecord(Box::new(payload.clone())),
+    )
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn load_forget_payload_for_test(
+    conn: &Connection,
+    op_id: &str,
+) -> Result<ForgetPayload, StoreError> {
+    let op = OperationId::parse(op_id.to_owned()).map_err(|e| StoreError::Invariant {
+        what: format!("invalid test op id: {e}"),
+    })?;
+    match load_payload(conn, &op)? {
+        RecordWalPayload::ForgetRecord(payload) => Ok(*payload),
+        RecordWalPayload::Upsert(_) => Err(StoreError::Invariant {
+            what: "expected forget_record payload, found upsert payload".to_owned(),
+        }),
+        RecordWalPayload::Expire(_) => Err(StoreError::Invariant {
+            what: "expected forget_record payload, found expire payload".to_owned(),
+        }),
+        RecordWalPayload::Purged(_) => Err(StoreError::Invariant {
+            what: "expected forget_record payload, found purged payload".to_owned(),
         }),
     }
 }
