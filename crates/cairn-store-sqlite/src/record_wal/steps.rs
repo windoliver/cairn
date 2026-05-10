@@ -429,33 +429,40 @@ fn scrub_forget_wal(
     })))
     .map_err(|e| StepBodyError::Failed(format!("purged payload json: {e}")))?;
     let stub_bytes = stub.as_bytes();
-    let mut needles = Vec::with_capacity(payload.record_ids.len() + 1);
-    needles.push(payload.target_id.as_str().to_owned());
-    needles.extend(
-        payload
-            .record_ids
-            .iter()
-            .map(|record_id| record_id.as_str().to_owned()),
-    );
+    let candidate_ops = {
+        let mut stmt = tx
+            .prepare(
+                "SELECT p.operation_id \
+                   FROM wal_payloads p \
+                   JOIN wal_ops o ON o.operation_id = p.operation_id \
+                  WHERE p.kind IN ('upsert', 'expire') \
+                    AND p.operation_id <> ?1 \
+                    AND o.target_hash = ?2",
+            )
+            .map_err(StepBodyError::Storage)?;
+        stmt.query_map(params![op_id.as_str(), payload.target_id.as_str()], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(StepBodyError::Storage)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(StepBodyError::Storage)?
+    };
 
-    for needle in needles {
-        let like = format!("%{needle}%");
+    for candidate_op in candidate_ops {
         tx.execute(
             "UPDATE wal_steps \
                 SET pre_image = ?1 \
-              WHERE operation_id <> ?2 \
-                AND pre_image IS NOT NULL \
-                AND CAST(pre_image AS TEXT) LIKE ?3",
-            params![stub_bytes, op_id.as_str(), like],
+              WHERE operation_id = ?2 \
+                AND pre_image IS NOT NULL",
+            params![stub_bytes, candidate_op.as_str()],
         )
         .map_err(StepBodyError::Storage)?;
         tx.execute(
             "UPDATE wal_payloads \
                 SET kind = 'purged', payload_json = ?1 \
-              WHERE operation_id <> ?2 \
-                AND kind IN ('upsert', 'expire') \
-                AND payload_json LIKE ?3",
-            params![stub, op_id.as_str(), like],
+              WHERE operation_id = ?2 \
+                AND kind IN ('upsert', 'expire')",
+            params![stub.as_str(), candidate_op.as_str()],
         )
         .map_err(StepBodyError::Storage)?;
     }

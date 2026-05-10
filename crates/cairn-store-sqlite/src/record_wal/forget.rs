@@ -24,6 +24,14 @@ pub struct ForgetTarget {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct ForgetTargetSeed {
+    requested_record_id: RecordId,
+    target_id: TargetId,
+    scope: ScopeTuple,
+    target_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForgetOutcome {
     pub deleted_count: u64,
     pub tombstones: Vec<RecordId>,
@@ -38,18 +46,29 @@ pub(crate) async fn apply_forget_record(
     let incarnation = store.incarnation().cloned().ok_or(StoreError::Invariant {
         what: "forget_record requires daemon incarnation".to_owned(),
     })?;
-    let target = resolve_forget_target(store, record_id).await?;
+    let target_seed = resolve_forget_target_seed(store, record_id).await?;
     let op_id = new_operation_id(WalKind::ForgetRecord)?;
     let locks = acquire_for_record(
         &conn,
-        &target.scope,
-        &target.target_id,
+        &target_seed.scope,
+        &target_seed.target_id,
         &incarnation,
         op_id.as_str(),
         "record_wal_forget_record",
     )
     .await
     .map_err(|e| StoreError::RecordWalLock(Box::new(e)))?;
+
+    let record_ids =
+        load_forget_lineage(&conn, &target_seed.target_id, &target_seed.requested_record_id)
+            .await?;
+    let target = ForgetTarget {
+        requested_record_id: target_seed.requested_record_id,
+        target_id: target_seed.target_id,
+        scope: target_seed.scope,
+        record_ids,
+        target_hash: target_seed.target_hash,
+    };
 
     let payload = ForgetPayload {
         requested_record_id: target.requested_record_id.clone(),
@@ -110,6 +129,22 @@ async fn resolve_forget_target(
     record_id: &RecordId,
 ) -> Result<ForgetTarget, StoreError> {
     let conn = Arc::clone(store.require_conn("forget_record")?);
+    let seed = resolve_forget_target_seed(store, record_id).await?;
+    let record_ids = load_forget_lineage(&conn, &seed.target_id, &seed.requested_record_id).await?;
+    Ok(ForgetTarget {
+        requested_record_id: seed.requested_record_id,
+        target_id: seed.target_id,
+        scope: seed.scope,
+        record_ids,
+        target_hash: seed.target_hash,
+    })
+}
+
+async fn resolve_forget_target_seed(
+    store: &SqliteMemoryStore,
+    record_id: &RecordId,
+) -> Result<ForgetTargetSeed, StoreError> {
+    let conn = Arc::clone(store.require_conn("forget_record")?);
     let requested = record_id.clone();
     conn.call(move |c| {
         let row: Option<(String, String)> = c
@@ -137,7 +172,26 @@ async fn resolve_forget_target(
         })?;
         let scope: ScopeTuple = serde_json::from_str(&scope_json)
             .map_err(|e| tokio_rusqlite::Error::Other(Box::new(StoreError::Codec(e))))?;
+        let target_hash = hash_target_id(target_id.as_str());
+        Ok::<_, tokio_rusqlite::Error>(ForgetTargetSeed {
+            requested_record_id: requested,
+            target_id,
+            scope,
+            target_hash,
+        })
+    })
+    .await
+    .map_err(unpack_worker_err)
+}
 
+async fn load_forget_lineage(
+    conn: &Arc<tokio_rusqlite::Connection>,
+    target_id: &TargetId,
+    requested: &RecordId,
+) -> Result<Vec<RecordId>, StoreError> {
+    let target = target_id.as_str().to_owned();
+    let requested = requested.clone();
+    conn.call(move |c| {
         let mut stmt = c.prepare(
             "SELECT record_id \
                FROM records \
@@ -145,9 +199,16 @@ async fn resolve_forget_target(
               ORDER BY version ASC, record_id ASC",
         )?;
         let raw_ids = stmt
-            .query_map(params![target_id.as_str()], |row| row.get::<_, String>(0))?
+            .query_map(params![target], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        let ids = raw_ids
+        if raw_ids.is_empty() {
+            return Err(tokio_rusqlite::Error::Other(Box::new(
+                StoreError::NotFound {
+                    id: requested.as_str().to_owned(),
+                },
+            )));
+        }
+        raw_ids
             .into_iter()
             .map(|raw| {
                 RecordId::parse(raw.clone()).map_err(|e| StoreError::Invariant {
@@ -155,15 +216,7 @@ async fn resolve_forget_target(
                 })
             })
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
-        let target_hash = hash_target_id(target_id.as_str());
-        Ok::<_, tokio_rusqlite::Error>(ForgetTarget {
-            requested_record_id: requested,
-            target_id,
-            scope,
-            record_ids: ids,
-            target_hash,
-        })
+            .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))
     })
     .await
     .map_err(unpack_worker_err)

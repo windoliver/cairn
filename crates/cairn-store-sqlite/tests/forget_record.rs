@@ -285,6 +285,7 @@ async fn forget_record_purges_primary_indexes_and_vectors() {
     let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
     let record_id = record.id.as_str().to_owned();
     let target_id = record.target_id.as_str().to_owned();
+    let operation_id = outcome.operation_id.as_str().to_owned();
     conn.call(move |c| {
         let records: i64 = c.query_row(
             "SELECT COUNT(*) FROM records WHERE target_id = ?1",
@@ -306,10 +307,47 @@ async fn forget_record_purges_primary_indexes_and_vectors() {
             params![body],
             |row| row.get(0),
         )?;
+        let op_state: String = c.query_row(
+            "SELECT state FROM wal_ops WHERE operation_id = ?1",
+            params![operation_id],
+            |row| row.get(0),
+        )?;
+        let done_steps: i64 = c.query_row(
+            "SELECT COUNT(*) FROM wal_steps \
+              WHERE operation_id = ?1 AND state = 'DONE'",
+            params![operation_id],
+            |row| row.get(0),
+        )?;
+        let total_steps: i64 = c.query_row(
+            "SELECT COUNT(*) FROM wal_steps WHERE operation_id = ?1",
+            params![operation_id],
+            |row| row.get(0),
+        )?;
+        let consent_payload: String = c.query_row(
+            "SELECT payload_json FROM consent_journal \
+              WHERE op_id = ?1 AND kind = 'forget_intent'",
+            params![operation_id],
+            |row| row.get(0),
+        )?;
         assert_eq!(records, 0);
         assert_eq!(vectors, 0);
         assert_eq!(pending, 0);
         assert_eq!(fts_rows, 0);
+        assert_eq!(op_state, "COMMITTED");
+        assert_eq!(done_steps, 7);
+        assert_eq!(total_steps, 7);
+        assert!(
+            !consent_payload.contains(&record_id),
+            "forget consent event must not retain record id"
+        );
+        assert!(
+            !consent_payload.contains(&target_id),
+            "forget consent event must not retain target id"
+        );
+        assert!(
+            !consent_payload.contains(&body),
+            "forget consent event must not retain body text"
+        );
         Ok::<_, tokio_rusqlite::Error>(())
     })
     .await
@@ -342,4 +380,57 @@ async fn forget_record_keeps_session_siblings_visible() {
     let listed = store.list(&ListArgs::default()).await.expect("list");
     assert_eq!(listed.records.len(), 1);
     assert_eq!(listed.records[0].id, sibling.id);
+}
+
+#[tokio::test]
+async fn forget_record_does_not_scrub_unrelated_payload_mentions() {
+    let store = open_in_memory().await.expect("open");
+    let forgotten = sample_record();
+    let mut unrelated = sample_record();
+    unrelated.id = RecordId::parse("01J00000000000000000000004").expect("record id");
+    unrelated.target_id =
+        cairn_core::domain::TargetId::parse("01HQZX9F5N0000000000000004").expect("target");
+    unrelated.body = format!(
+        "unrelated note mentions {} and {} only as text",
+        forgotten.id.as_str(),
+        forgotten.target_id.as_str()
+    );
+
+    store.upsert(&forgotten).await.expect("forgotten upsert");
+    store.upsert(&unrelated).await.expect("unrelated upsert");
+
+    let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
+    let unrelated_target = unrelated.target_id.as_str().to_owned();
+    let unrelated_op = conn
+        .call(move |c| {
+            c.query_row(
+                "SELECT p.operation_id \
+                   FROM wal_payloads p \
+                   JOIN wal_ops o ON o.operation_id = p.operation_id \
+                  WHERE p.kind = 'upsert' AND o.target_hash = ?1",
+                params![unrelated_target],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(tokio_rusqlite::Error::Rusqlite)
+        })
+        .await
+        .expect("unrelated upsert op");
+
+    store
+        .forget_record(&forgotten.id)
+        .await
+        .expect("forget original");
+
+    let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
+    conn.call(move |c| {
+        let kind: String = c.query_row(
+            "SELECT kind FROM wal_payloads WHERE operation_id = ?1",
+            params![unrelated_op],
+            |row| row.get(0),
+        )?;
+        assert_eq!(kind, "upsert");
+        Ok::<_, tokio_rusqlite::Error>(())
+    })
+    .await
+    .expect("unrelated payload remains");
 }
