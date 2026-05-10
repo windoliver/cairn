@@ -194,3 +194,79 @@ async fn forget_record_scrubs_wal_pre_image_blobs() {
         "no wal_steps.pre_image blob may reference the forgotten target id or body"
     );
 }
+
+// ── Task 11 ────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn forget_record_emits_body_free_consent_receipt() {
+    use cairn_core::domain::{ConsentEvent, ConsentKind, ConsentPayload};
+
+    let store = open_in_memory().await.expect("open");
+    let record = sample();
+    let target = record.target_id.clone();
+
+    store.upsert(&record).await.expect("upsert");
+    let receipt = store
+        .forget_record(&target, &alice())
+        .await
+        .expect("forget");
+
+    let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
+    let op_id = receipt.op_id.clone();
+
+    let events: Vec<ConsentEvent> = conn
+        .call(move |c| {
+            cairn_store_sqlite::consent::query_by_op(c, &op_id)
+                .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))
+        })
+        .await
+        .expect("query consent");
+
+    assert_eq!(events.len(), 1, "exactly one ForgetIntent receipt per op");
+    let event = &events[0];
+    assert!(matches!(event.kind, ConsentKind::ForgetIntent));
+    match &event.payload {
+        ConsentPayload::IntentReceipt {
+            target_id_hash,
+            reason_code,
+            ..
+        } => {
+            assert_eq!(target_id_hash, &receipt.target_id_hash);
+            assert_eq!(reason_code, "user_command");
+        }
+        other => panic!("expected IntentReceipt payload, got {other:?}"),
+    }
+
+    // Defense-in-depth: the JSON wire form must not contain any body-bearing
+    // field NAME. Substring matching would false-positive on legitimate
+    // values (e.g. reason_code "user_command" contains "command"), so
+    // recurse the JSON value tree and check key names only — mirroring the
+    // canonical `forbids_body_bearing_field_names_anywhere` test in
+    // `cairn_core::domain::consent`.
+    let value = serde_json::to_value(event).expect("serialize event");
+    let mut keys = std::collections::BTreeSet::new();
+    collect_json_keys(&value, &mut keys);
+    for banned in ConsentEvent::BANNED_FIELDS {
+        assert!(
+            !keys.contains(*banned),
+            "consent event JSON must not contain banned field {banned}; saw keys {keys:?}"
+        );
+    }
+}
+
+fn collect_json_keys(value: &serde_json::Value, out: &mut std::collections::BTreeSet<String>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (k, v) in map {
+                out.insert(k.clone());
+                collect_json_keys(v, out);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_json_keys(item, out);
+            }
+        }
+        _ => {}
+    }
+}
