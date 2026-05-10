@@ -159,8 +159,11 @@ fn kind_key(k: Kind) -> String {
         Kind::DataGap => "data_gap",
         Kind::MalformedRecord => "malformed_record",
         Kind::BrokenActorChain => "broken_actor_chain",
+        Kind::BrokenSourceLink => "broken_source_link",
         Kind::MissingProvenance => "missing_provenance",
+        Kind::MissingSummary => "missing_summary",
         Kind::StaleSchema => "stale_schema",
+        Kind::StaleProfileLine => "stale_profile_line",
         Kind::HotMemoryOverBudget => "hot_memory_over_budget",
         Kind::IndexDrift => "index_drift",
         Kind::DeferredCheck => "deferred_check",
@@ -312,6 +315,19 @@ mod tests {
         let fwd = canonicalize(&run_checks(&inputs_fwd).await.findings);
         let rev = canonicalize(&run_checks(&inputs_rev).await.findings);
         assert_eq!(fwd, rev, "run_checks is record-order-dependent");
+    }
+
+    #[test]
+    fn kind_key_includes_new_hot_memory_kinds() {
+        assert_eq!(
+            super::kind_key(Kind::StaleProfileLine),
+            "stale_profile_line"
+        );
+        assert_eq!(
+            super::kind_key(Kind::BrokenSourceLink),
+            "broken_source_link"
+        );
+        assert_eq!(super::kind_key(Kind::MissingSummary), "missing_summary");
     }
 
     #[tokio::test]
