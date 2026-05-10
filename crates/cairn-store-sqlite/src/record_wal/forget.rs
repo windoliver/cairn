@@ -42,10 +42,13 @@ async fn resolve_forget_target(
                 },
             )));
         };
-        let target_id = TargetId::parse(target_raw.clone())
-            .map_err(|e| tokio_rusqlite::Error::Other(Box::new(StoreError::InvalidRecord(e))))?;
+        let target_id = TargetId::parse(target_raw.clone()).map_err(|e| {
+            tokio_rusqlite::Error::Other(Box::new(StoreError::Invariant {
+                what: format!("invalid target_id `{target_raw}` in forget target: {e}"),
+            }))
+        })?;
         let scope: ScopeTuple = serde_json::from_str(&scope_json)
-            .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
+            .map_err(|e| tokio_rusqlite::Error::Other(Box::new(StoreError::Codec(e))))?;
 
         let mut stmt = c.prepare(
             "SELECT record_id \
@@ -53,20 +56,18 @@ async fn resolve_forget_target(
               WHERE target_id = ?1 \
               ORDER BY version ASC, record_id ASC",
         )?;
-        let ids = stmt
+        let raw_ids = stmt
             .query_map(params![target_id.as_str()], |row| row.get::<_, String>(0))?
-            .map(|row| {
-                row.and_then(|raw| {
-                    RecordId::parse(raw).map_err(|e| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            0,
-                            rusqlite::types::Type::Text,
-                            Box::new(e),
-                        )
-                    })
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let ids = raw_ids
+            .into_iter()
+            .map(|raw| {
+                RecordId::parse(raw.clone()).map_err(|e| StoreError::Invariant {
+                    what: format!("invalid record_id `{raw}` in forget lineage: {e}"),
                 })
             })
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
         let target_hash = hash_target_id(target_id.as_str());
         Ok::<_, tokio_rusqlite::Error>(ForgetTarget {
             requested_record_id: requested,

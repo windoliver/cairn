@@ -237,3 +237,30 @@ async fn forget_resolution_reports_not_found_for_missing_record() {
             .expect_err("missing record rejects");
     assert!(matches!(err, StoreError::NotFound { id } if id == missing.as_str()));
 }
+
+#[tokio::test]
+async fn forget_resolution_reports_codec_for_malformed_scope() {
+    let store = open_in_memory().await.expect("open");
+    let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
+    let record = sample_record();
+    store.upsert(&record).await.expect("upsert");
+
+    conn.call({
+        let record_id = record.id.clone();
+        move |c| {
+            c.execute(
+                "UPDATE records SET scope = ?1 WHERE record_id = ?2",
+                params!["not-json", record_id.as_str()],
+            )?;
+            Ok::<_, tokio_rusqlite::Error>(())
+        }
+    })
+    .await
+    .expect("corrupt scope");
+
+    let err =
+        cairn_store_sqlite::record_wal::forget::resolve_forget_target_for_test(&store, &record.id)
+            .await
+            .expect_err("malformed scope rejects");
+    assert!(matches!(err, StoreError::Codec(_)));
+}
