@@ -184,3 +184,31 @@ fn forget_session_and_scope_ignore_malformed_vault_config() {
         "cairn.mcp.v1.forget.scope",
     );
 }
+
+#[test]
+fn forget_session_and_scope_ignore_invalid_explicit_vault() {
+    assert_capability_unavailable(
+        None,
+        &[
+            "--vault",
+            "definitely-not-a-vault-name",
+            "forget",
+            "--session",
+            "01JXXXXXXXXXXXXXXXXXXXXXXX",
+            "--json",
+        ],
+        "cairn.mcp.v1.forget.session",
+    );
+    assert_capability_unavailable(
+        None,
+        &[
+            "--vault",
+            "definitely-not-a-vault-name",
+            "forget",
+            "--scope",
+            r#"{"tenant":"default"}"#,
+            "--json",
+        ],
+        "cairn.mcp.v1.forget.scope",
+    );
+}

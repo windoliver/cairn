@@ -253,10 +253,18 @@ impl<T: Transport> Sdk<T> {
     /// Project the SDK's executable state into a wire-format capability list.
     ///
     /// Delegates to [`cairn_core::status::advertise`] — the single source of
-    /// truth for capability advertisement. Both [`Self::status`] and
-    /// [`Self::require_capability`] read from here so they cannot drift.
+    /// truth for capability advertisement — then filters capabilities whose
+    /// shared wiring flag is true for another surface but not yet honored by
+    /// this SDK transport. Both [`Self::status`] and [`Self::require_capability`]
+    /// read from here so they cannot drift.
     fn advertised_capabilities(&self) -> Vec<Capabilities> {
-        cairn_core::status::advertise(&self.gates())
+        let mut capabilities = cairn_core::status::advertise(&self.gates());
+        // CLI `forget --record` is wired for issue #58, so the shared core
+        // flag is true. The SDK `forget` method still returns
+        // `Unimplemented` for all targets; do not advertise record forget
+        // here until SDK dispatch can honor it end-to-end.
+        capabilities.retain(|c| !matches!(c, Capabilities::CairnMcpV1ForgetRecord));
+        capabilities
     }
 
     /// `handshake` — challenge mint (brief §8.0.a point d).
