@@ -3,6 +3,8 @@
 use std::collections::BTreeMap;
 
 use cairn_core::domain::graph::EdgeConfidence;
+use cairn_core::generated::common::Ulid;
+use cairn_core::generated::verbs::lint::Target;
 use cairn_core::generated::verbs::lint::{Finding, Kind, Severity};
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 
@@ -41,9 +43,11 @@ pub fn lint_edges(conn: &Connection) -> Result<EdgeLintReport, StoreError> {
 
     let mut findings = contradiction_findings(conn)?;
     let ambiguous_findings = ambiguous_findings(conn)?;
+    let purge_findings = lint_purge_pending(conn)?;
     let contradictions = usize_to_u64(findings.len());
     let ambiguous_edges = usize_to_u64(ambiguous_findings.len());
     findings.extend(ambiguous_findings);
+    findings.extend(purge_findings);
 
     Ok(EdgeLintReport {
         findings,
@@ -51,6 +55,63 @@ pub fn lint_edges(conn: &Connection) -> Result<EdgeLintReport, StoreError> {
         ambiguous_edges,
         auto_resolved: 0,
     })
+}
+
+/// Find record-forget operations whose Phase B purge work is still incomplete.
+///
+/// # Errors
+///
+/// Returns [`StoreError`] when WAL tables are missing or `SQLite` rejects the
+/// query.
+pub fn lint_purge_pending(conn: &Connection) -> Result<Vec<Finding>, StoreError> {
+    ensure_table(conn, WAL_OPS_TABLE)?;
+    ensure_table(conn, WAL_STEPS_TABLE)?;
+
+    let mut stmt = conn.prepare(
+        "SELECT wo.operation_id, wo.target_hash, ws.step_ord, ws.step_kind, ws.state, ws.attempts
+         FROM wal_ops wo
+         JOIN wal_steps ws ON ws.operation_id = wo.operation_id
+         WHERE wo.kind = 'forget_record'
+           AND wo.state = 'PREPARED'
+           AND ws.step_ord >= 1
+           AND ws.state <> 'DONE'
+         ORDER BY wo.issued_seq, ws.step_ord",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, i64>(5)?,
+        ))
+    })?;
+
+    let mut findings = Vec::new();
+    for row in rows {
+        let (operation_id, target_hash, step_ord, step_kind, state, attempts) = row?;
+        findings.push(Finding {
+            kind: Kind::DeferredCheck,
+            severity: Severity::Warning,
+            message: format!(
+                "purge_pending: forget_record operation {operation_id} target {target_hash} \
+                 stalled at step {step_ord} ({step_kind}) state={state} attempts={attempts}"
+            ),
+            entities: None,
+            suggested_fix: Some(
+                "restart Cairn to resume WAL recovery; if it repeats, inspect the WAL step error"
+                    .to_owned(),
+            ),
+            target: Some(Target {
+                operation_id: ulid_from_operation_id(&operation_id),
+                path: None,
+                record_id: None,
+            }),
+            tracking_issue: Some(58),
+        });
+    }
+    Ok(findings)
 }
 
 /// Invalidate duplicate live edges and record the repair through the WAL.
@@ -294,6 +355,13 @@ fn parse_confidence(edge_id: &str, value: &str) -> Result<EdgeConfidence, StoreE
         edge_id: edge_id.to_owned(),
         value: value.to_owned(),
     })
+}
+
+fn ulid_from_operation_id(raw: &str) -> Option<Ulid> {
+    raw.rsplit_once('-')
+        .map(|(_, tail)| tail)
+        .filter(|tail| tail.len() == 26)
+        .map(|tail| Ulid((*tail).to_owned()))
 }
 
 fn edge_body_hash(

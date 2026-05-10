@@ -28,7 +28,7 @@ pub mod wal;
 
 pub use error::StoreError;
 pub use identity::SqliteIdentityRegistry;
-pub use lint::{EdgeLintReport, lint_edges, resolve_edge_contradictions};
+pub use lint::{EdgeLintReport, lint_edges, lint_purge_pending, resolve_edge_contradictions};
 pub use open::{
     open, open_in_memory, open_in_memory_with_embedder, open_in_memory_with_embedder_and_config,
     open_with_embedder, open_with_embedder_and_config, peek_capabilities,

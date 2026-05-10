@@ -13,7 +13,7 @@ use cairn_store_sqlite::record_wal::payload::{
     PurgedPayload, RecordWalPayload, UpsertPayload, save_purged_payload_for_test,
 };
 use cairn_store_sqlite::wal::{RecoveryError, StepBodyRegistry};
-use cairn_store_sqlite::{StoreError, open_in_memory, open_in_memory_with_embedder};
+use cairn_store_sqlite::{StoreError, open, open_in_memory, open_in_memory_with_embedder};
 use rusqlite::params;
 
 fn sample_record() -> MemoryRecord {
@@ -394,7 +394,10 @@ async fn forget_record_purges_primary_indexes_and_vectors() {
     assert_eq!(outcome.tombstones, vec![record.id.clone()]);
 
     let listed = store.list(&ListArgs::default()).await.expect("list");
-    assert!(listed.records.is_empty(), "forgotten record must be invisible");
+    assert!(
+        listed.records.is_empty(),
+        "forgotten record must be invisible"
+    );
 
     let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
     assert_forget_purged_surfaces(&conn, &record, &outcome.operation_id).await;
@@ -418,10 +421,7 @@ async fn forget_record_keeps_session_siblings_visible() {
 
     store.upsert(&first).await.expect("first upsert");
     store.upsert(&sibling).await.expect("sibling upsert");
-    store
-        .forget_record(&first.id)
-        .await
-        .expect("forget first");
+    store.forget_record(&first.id).await.expect("forget first");
 
     let listed = store.list(&ListArgs::default()).await.expect("list");
     assert_eq!(listed.records.len(), 1);
@@ -525,4 +525,202 @@ async fn forget_record_does_not_scrub_unrelated_payload_mentions() {
     })
     .await
     .expect("unrelated payload remains");
+}
+
+#[tokio::test]
+async fn prepared_forget_recovers_from_persisted_payload() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("cairn.sqlite");
+    let op_id = "forget_record-01J00000000000000000001000";
+    let record = sample_record();
+    let target_hash = "hash:00000000000000000000000000000000".to_owned();
+
+    {
+        let store = open(&path).await.expect("open #1");
+        store.upsert(&record).await.expect("seed record");
+        let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
+        let payload_json = serde_json::json!({
+            "type": "forget_record",
+            "requested_record_id": record.id.as_str(),
+            "target_id": record.target_id.as_str(),
+            "scope": record.scope.clone(),
+            "record_ids": [record.id.as_str()],
+            "target_hash": target_hash.clone(),
+            "reason_code": "user_command"
+        })
+        .to_string();
+        conn.call(move |c| {
+            c.execute("DELETE FROM lock_holders", [])?;
+            c.execute("DELETE FROM locks", [])?;
+            c.execute(
+                "INSERT INTO wal_ops \
+                   (operation_id, issued_seq, kind, state, envelope, issuer, \
+                    target_hash, scope_json, expires_at, signature, issued_at, updated_at) \
+                 VALUES (?1, 100, 'forget_record', 'ISSUED', '{}', 'issuer', ?2, ?3, 0, 'sig', 1, 1)",
+                params![op_id, target_hash, record.scope.canonical_wire()],
+            )?;
+            c.execute(
+                "UPDATE wal_ops SET state = 'PREPARED', updated_at = 2 \
+                 WHERE operation_id = ?1",
+                params![op_id],
+            )?;
+            c.execute(
+                "INSERT INTO wal_payloads(operation_id, kind, payload_json, created_at) \
+                 VALUES (?1, 'forget_record', ?2, 1)",
+                params![op_id, payload_json],
+            )?;
+            Ok::<_, tokio_rusqlite::Error>(())
+        })
+        .await
+        .expect("seed prepared forget");
+    }
+
+    let store = open(&path).await.expect("open #2 triggers recovery");
+    assert!(
+        store
+            .list(&ListArgs::default())
+            .await
+            .expect("list")
+            .records
+            .is_empty()
+    );
+    let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
+    conn.call(move |c| {
+        let state: String = c.query_row(
+            "SELECT state FROM wal_ops WHERE operation_id = ?1",
+            params![op_id],
+            |row| row.get(0),
+        )?;
+        let done: i64 = c.query_row(
+            "SELECT COUNT(*) FROM wal_steps WHERE operation_id = ?1 AND state = 'DONE'",
+            params![op_id],
+            |row| row.get(0),
+        )?;
+        assert_eq!(state, "COMMITTED");
+        assert_eq!(done, 7);
+        Ok::<_, tokio_rusqlite::Error>(())
+    })
+    .await
+    .expect("recovery assertions");
+}
+
+#[tokio::test]
+async fn prepared_forget_recovers_after_tombstone_linearization() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("cairn.sqlite");
+    let op_id = "forget_record-01J00000000000000000001002";
+    let record = sample_record();
+    let target_hash = "hash:22222222222222222222222222222222".to_owned();
+
+    {
+        let store = open(&path).await.expect("open #1");
+        store.upsert(&record).await.expect("seed record");
+        let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
+        let payload_json = serde_json::json!({
+            "type": "forget_record",
+            "requested_record_id": record.id.as_str(),
+            "target_id": record.target_id.as_str(),
+            "scope": record.scope.clone(),
+            "record_ids": [record.id.as_str()],
+            "target_hash": target_hash.clone(),
+            "reason_code": "user_command"
+        })
+        .to_string();
+        conn.call(move |c| {
+            c.execute("DELETE FROM lock_holders", [])?;
+            c.execute("DELETE FROM locks", [])?;
+            c.execute(
+                "INSERT INTO wal_ops \
+                   (operation_id, issued_seq, kind, state, envelope, issuer, \
+                    target_hash, scope_json, expires_at, signature, issued_at, updated_at) \
+                 VALUES (?1, 101, 'forget_record', 'PREPARED', '{}', 'issuer', ?2, ?3, 0, 'sig', 1, 2)",
+                params![op_id, target_hash, record.scope.canonical_wire()],
+            )?;
+            c.execute(
+                "INSERT INTO wal_payloads(operation_id, kind, payload_json, created_at) \
+                 VALUES (?1, 'forget_record', ?2, 1)",
+                params![op_id, payload_json],
+            )?;
+            c.execute(
+                "UPDATE records \
+                    SET active = 0, tombstoned = 1, tombstone_reason = 'forget' \
+                  WHERE target_id = ?1",
+                params![record.target_id.as_str()],
+            )?;
+            c.execute(
+                "INSERT INTO wal_steps \
+                   (operation_id, step_ord, step_kind, state, attempts, started_at, finished_at) \
+                 VALUES (?1, 0, 'primary.mark_tombstone', 'DONE', 1, 1, 2)",
+                params![op_id],
+            )?;
+            Ok::<_, tokio_rusqlite::Error>(())
+        })
+        .await
+        .expect("seed linearized forget");
+    }
+
+    let store = open(&path).await.expect("open #2 triggers recovery");
+    assert!(
+        store
+            .list(&ListArgs::default())
+            .await
+            .expect("list")
+            .records
+            .is_empty(),
+        "linearized forget must stay invisible during recovery"
+    );
+    let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
+    conn.call(move |c| {
+        let state: String = c.query_row(
+            "SELECT state FROM wal_ops WHERE operation_id = ?1",
+            params![op_id],
+            |row| row.get(0),
+        )?;
+        let remaining_records: i64 =
+            c.query_row("SELECT COUNT(*) FROM records", [], |row| row.get(0))?;
+        assert_eq!(state, "COMMITTED");
+        assert_eq!(remaining_records, 0);
+        Ok::<_, tokio_rusqlite::Error>(())
+    })
+    .await
+    .expect("linearized recovery assertions");
+}
+
+#[tokio::test]
+async fn purge_pending_lint_reports_exhausted_forget_phase_b_without_raw_ids() {
+    let store = open_in_memory().await.expect("open");
+    let record = sample_record();
+    store.upsert(&record).await.expect("upsert");
+    let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
+    let raw_record_id = record.id.as_str().to_owned();
+    let raw_target_id = record.target_id.as_str().to_owned();
+    conn.call(move |c| {
+        c.execute(
+            "INSERT INTO wal_ops \
+               (operation_id, issued_seq, kind, state, envelope, issuer, \
+                target_hash, scope_json, expires_at, signature, issued_at, updated_at) \
+             VALUES ('forget_record-01J00000000000000000001001', 200, 'forget_record', \
+                     'PREPARED', '{}', 'issuer', \
+                     'hash:11111111111111111111111111111111', 'user=hmn:tafeng', 0, 'sig', 1, 1)",
+            [],
+        )?;
+        c.execute(
+            "INSERT INTO wal_steps \
+               (operation_id, step_ord, step_kind, state, attempts, last_error, started_at, finished_at) \
+             VALUES ('forget_record-01J00000000000000000001001', 5, 'wal.purge_pre_images', \
+                     'FAILED', 3, 'boom', 1, 2)",
+            [],
+        )?;
+        let findings =
+            cairn_store_sqlite::lint_purge_pending(c).expect("lint purge pending");
+        assert_eq!(findings.len(), 1);
+        let rendered = serde_json::to_string(&findings).expect("finding json");
+        assert!(rendered.contains("purge_pending"));
+        assert!(rendered.contains("hash:11111111111111111111111111111111"));
+        assert!(!rendered.contains(&raw_record_id));
+        assert!(!rendered.contains(&raw_target_id));
+        Ok::<_, tokio_rusqlite::Error>(())
+    })
+    .await
+    .expect("lint assertions");
 }
