@@ -6,9 +6,10 @@
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use cairn_core::domain::flush_plan::store::{Bucket, bucket_dir, plan_path};
-use cairn_core::domain::flush_plan::{ApplyKind, PersistedPlan, PlanStatus};
+use cairn_core::domain::flush_plan::{ApplyKind, FlushPlan, PersistedPlan, PlanStatus};
 
 /// Validate that `s` is a canonical 26-char Crockford-base32 ULID
 /// (uppercase, no `I L O U`, leading char `0..=7`). Mirrors the
@@ -38,6 +39,8 @@ fn is_valid_ulid_str(s: &str) -> bool {
     })
 }
 use clap::{Arg, ArgAction, ArgMatches, Command};
+
+use super::flush_apply;
 
 /// Build the `flush` subcommand group.
 #[must_use]
@@ -238,38 +241,49 @@ fn apply(vault: &Path, m: &ArgMatches) -> ExitCode {
         return ExitCode::from(65);
     }
 
-    // Phase 1 — drift check. Without a wired MemoryStore in this PR, the
-    // check is a no-op pass-through. When #9 lands (the WAL state machine),
-    // replace this with a real `MemoryStore::get_active_by_target` +
-    // body-hash comparison against `persisted.plan.target_hash(&target)`.
-
-    // Phase 2 — apply. Same story: no MemoryStore wired here. The mutation
-    // walk is a no-op for now; this is the shape the WAL apply will take.
-
-    // Honest no-op: warn the operator that this binary moves the plan but
-    // does NOT execute mutations against MemoryStore. Persisted status
-    // captures `apply_kind = MetadataOnly` so the audit trail is truthful.
-    eprintln!(
-        "cairn flush apply: WARNING — MemoryStore mutations are not yet wired (#9). \
-         Plan {id} will be marked applied for audit only; no records were written."
-    );
     if persisted.plan.placeholder {
+        eprintln!(
+            "cairn flush apply: WARNING — MemoryStore mutations are not yet wired (#9). \
+             Plan {id} will be marked applied for audit only; no records were written."
+        );
         eprintln!(
             "cairn flush apply: NOTE — plan {id} was produced by the CLI stub planner \
              (`cairn-cli::ingest_plan_stub`) and does NOT reflect a real ingest/forget \
              pipeline run. Treat as a placeholder for testing the lifecycle only."
         );
+        persisted.status = PlanStatus::Applied {
+            at: now_rfc3339(),
+            apply_kind: ApplyKind::MetadataOnly,
+        };
+    } else {
+        if let Err(e) = apply_real_plan(vault, &persisted.plan) {
+            eprintln!("cairn flush apply: apply failed: {e:#}");
+            rollback_claim(vault, &claim, &ulid);
+            return ExitCode::from(70);
+        }
+        persisted.status = PlanStatus::Applied {
+            at: now_rfc3339(),
+            apply_kind: ApplyKind::Full,
+        };
     }
-    persisted.status = PlanStatus::Applied {
-        at: now_rfc3339(),
-        apply_kind: ApplyKind::MetadataOnly,
-    };
     if let Err(e) = publish_terminal(vault, &claim, &applied, &persisted, &ulid) {
         eprintln!("cairn flush apply: publish failed: {e}");
         return ExitCode::from(70); // EX_SOFTWARE
     }
     emit_apply_ok(json, id, "applied");
     ExitCode::SUCCESS
+}
+
+fn apply_real_plan(vault: &Path, plan: &FlushPlan) -> anyhow::Result<()> {
+    let db_path = crate::mcp::store_db_path(vault);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async move {
+        let sqlite = Arc::new(cairn_store_sqlite::open(&db_path).await?);
+        let store: Arc<dyn cairn_core::contract::memory_store::MemoryStore> = sqlite.clone();
+        flush_apply::apply_real_plan(&store, &sqlite, plan).await
+    })
 }
 
 #[allow(

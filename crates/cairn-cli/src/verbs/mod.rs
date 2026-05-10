@@ -10,6 +10,7 @@ pub mod assemble_hot;
 pub mod capture_trace;
 pub mod envelope;
 pub mod flush;
+pub mod flush_apply;
 pub mod forget;
 pub mod handshake;
 pub mod ingest;

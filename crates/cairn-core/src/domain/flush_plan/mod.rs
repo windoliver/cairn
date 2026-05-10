@@ -95,6 +95,40 @@ impl FlushPlan {
 
 /// One concrete mutation inside a [`FlushPlan`]. Tagged externally for
 /// stable JSON shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PatchTarget {
+    /// Patch the active record for the target.
+    Record(TargetId),
+    /// Patch the session metadata document for the session.
+    Session(SessionId),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+/// Which match occurrence(s) a patch replacement should edit.
+pub enum ReplaceOccurrence {
+    /// Replace the first matching occurrence.
+    First,
+    /// Replace every matching occurrence.
+    All,
+    /// Replace the nth matching occurrence (zero-based).
+    Nth(usize),
+}
+
+/// One string replacement inside a patch mutation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StrReplace {
+    /// Existing substring to find.
+    pub old: String,
+    /// Replacement substring.
+    pub new: String,
+    /// Which occurrence(s) to replace.
+    pub occurrence: ReplaceOccurrence,
+}
+
+/// One concrete mutation inside a [`FlushPlan`]. Tagged externally for
+/// stable JSON shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[non_exhaustive]
@@ -113,6 +147,20 @@ pub enum PlannedMutation {
         target: TargetId,
         /// Version the caller observed — prevents blind deletes.
         prior_version: u32,
+    },
+    /// Patch an existing record or session metadata document.
+    Patch {
+        /// Which document the string replacements apply to.
+        target: PatchTarget,
+        /// Ordered string replacements applied left-to-right.
+        str_replace: Vec<StrReplace>,
+    },
+    /// Rename an existing target id to a new target id.
+    Rename {
+        /// Existing target lineage key.
+        record_id: TargetId,
+        /// Destination lineage key.
+        new_id: TargetId,
     },
     /// Promote a raw/wiki record to a different memory kind.
     Promote {

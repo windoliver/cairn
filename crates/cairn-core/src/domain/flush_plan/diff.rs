@@ -3,7 +3,7 @@
 
 use std::fmt::Write as _;
 
-use super::{FlushPlan, PlannedMutation};
+use super::{FlushPlan, PatchTarget, PlannedMutation, ReplaceOccurrence};
 
 /// Maximum body excerpt length per mutation, characters.
 pub const MAX_BODY_EXCERPT: usize = 4096;
@@ -70,6 +70,43 @@ pub fn render(plan: &FlushPlan) -> String {
                 writeln!(&mut out, "- **Target:** `{}`", target.as_str()).ok();
                 writeln!(&mut out, "- **Prior version:** {prior_version}").ok();
             }
+            PlannedMutation::Patch {
+                target,
+                str_replace,
+            } => {
+                writeln!(&mut out, "- **Kind:** patch").ok();
+                match target {
+                    PatchTarget::Record(target) => {
+                        writeln!(&mut out, "- **Target:** `{}`", target.as_str()).ok();
+                    }
+                    PatchTarget::Session(session) => {
+                        writeln!(&mut out, "- **Session:** `{}`", session.as_str()).ok();
+                    }
+                }
+                for change in str_replace {
+                    let occurrence = match change.occurrence {
+                        ReplaceOccurrence::First => "first".to_owned(),
+                        ReplaceOccurrence::All => "all".to_owned(),
+                        ReplaceOccurrence::Nth(n) => format!("nth({n})"),
+                    };
+                    writeln!(
+                        &mut out,
+                        "- **Replace:** `{}` -> `{}` ({occurrence})",
+                        change.old, change.new
+                    )
+                    .ok();
+                }
+            }
+            PlannedMutation::Rename { record_id, new_id } => {
+                writeln!(&mut out, "- **Kind:** rename").ok();
+                writeln!(
+                    &mut out,
+                    "- **Target:** `{}` -> `{}`",
+                    record_id.as_str(),
+                    new_id.as_str()
+                )
+                .ok();
+            }
             PlannedMutation::Promote {
                 from,
                 to_kind,
@@ -109,10 +146,30 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
+    use crate::domain::flush_plan::StrReplace;
     use crate::domain::{
-        FlushMode, FlushPlan, Identity, PlanReason, PlannedMutation, ScopeTuple, TargetId,
+        FlushMode, FlushPlan, Identity, PlanReason, PlannedMutation, ScopeTuple, SessionId,
+        TargetId,
     };
     use crate::generated::common::Ulid;
+
+    fn sample_plan_base(mutations: Vec<PlannedMutation>) -> FlushPlan {
+        FlushPlan {
+            operation_id: Ulid("01HQZK000000000000000000VP".into()),
+            issued_at: "2026-05-04T12:00:00Z".into(),
+            issuer: Identity::parse("agt:claude-code:opus-4-7:reviewer:v1").unwrap(),
+            principal: None,
+            scope: ScopeTuple::default(),
+            mode: FlushMode::HumanReview,
+            mutations,
+            reason: PlanReason::UserIngest,
+            source_events: vec![],
+            target_hashes: BTreeMap::default(),
+            dependencies: vec![],
+            expires_at: "2026-05-04T12:05:00Z".into(),
+            placeholder: false,
+        }
+    }
 
     /// Round 2 (#54): `MAX_BODY_EXCERPT` truncation must walk back to a
     /// UTF-8 char boundary rather than panic when a multibyte codepoint
@@ -132,22 +189,11 @@ mod tests {
         let mut record = crate::domain::record::tests_export::sample_record();
         record.body = body;
         let plan = FlushPlan {
-            operation_id: Ulid("01HQZK000000000000000000VP".into()),
-            issued_at: "2026-05-04T12:00:00Z".into(),
-            issuer: Identity::parse("agt:claude-code:opus-4-7:reviewer:v1").unwrap(),
-            principal: None,
-            scope: ScopeTuple::default(),
-            mode: FlushMode::HumanReview,
             mutations: vec![PlannedMutation::Upsert {
                 record: Box::new(record),
                 prior_version: None,
             }],
-            reason: PlanReason::UserIngest,
-            source_events: vec![],
-            target_hashes: BTreeMap::default(),
-            dependencies: vec![],
-            expires_at: "2026-05-04T12:05:00Z".into(),
-            placeholder: false,
+            ..sample_plan_base(Vec::new())
         };
         // Must not panic when slicing the body at the byte boundary.
         let md = render(&plan);
@@ -156,28 +202,38 @@ mod tests {
 
     #[test]
     fn renders_delete_mutation() {
-        let plan = FlushPlan {
-            operation_id: Ulid("01HQZK000000000000000000VP".into()),
-            issued_at: "2026-05-04T12:00:00Z".into(),
-            issuer: Identity::parse("agt:claude-code:opus-4-7:reviewer:v1").unwrap(),
-            principal: None,
-            scope: ScopeTuple::default(),
-            mode: FlushMode::HumanReview,
-            mutations: vec![PlannedMutation::Delete {
-                target: TargetId::parse("01HQZX9F5N0000000000000000").unwrap(),
-                prior_version: 3,
-            }],
-            reason: PlanReason::UserIngest,
-            source_events: vec![],
-            target_hashes: BTreeMap::default(),
-            dependencies: vec![],
-            expires_at: "2026-05-04T12:05:00Z".into(),
-            placeholder: false,
-        };
+        let plan = sample_plan_base(vec![PlannedMutation::Delete {
+            target: TargetId::parse("01HQZX9F5N0000000000000000").unwrap(),
+            prior_version: 3,
+        }]);
         let md = render(&plan);
         assert!(md.contains("# FlushPlan 01HQZK"));
         assert!(md.contains("- **Kind:** delete"));
         assert!(md.contains("- **Target:** `01HQZX9F5N0000000000000000`"));
         assert!(md.contains("- **Prior version:** 3"));
+    }
+
+    #[test]
+    fn renders_session_patch_mutation() {
+        let plan = sample_plan_base(vec![PlannedMutation::Patch {
+            target: PatchTarget::Session(SessionId::parse("01JTS6R4J70000000000000000").unwrap()),
+            str_replace: vec![StrReplace {
+                old: "draft".into(),
+                new: "final".into(),
+                occurrence: ReplaceOccurrence::First,
+            }],
+        }]);
+        let md = render(&plan);
+        insta::assert_snapshot!("diff_patch_session_md", md);
+    }
+
+    #[test]
+    fn renders_rename_mutation() {
+        let plan = sample_plan_base(vec![PlannedMutation::Rename {
+            record_id: TargetId::parse("01JTS6R4J70000000000000001").unwrap(),
+            new_id: TargetId::parse("01JTS6R4J70000000000000002").unwrap(),
+        }]);
+        let md = render(&plan);
+        insta::assert_snapshot!("diff_rename_md", md);
     }
 }

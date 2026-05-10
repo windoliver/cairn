@@ -2,14 +2,64 @@
 
 use std::path::Path;
 
+use cairn_core::contract::memory_store::{Edge, EdgeDir, EdgeKind, MemoryStore};
 use cairn_core::domain::flush_plan::store::{Bucket, bucket_dir, plan_path};
+use cairn_core::domain::flush_plan::{
+    FlushMode, PatchTarget, PersistedPlan, PlanReason, PlannedMutation, ReplaceOccurrence,
+    StrReplace,
+};
+use cairn_core::domain::session::SessionIdentity;
+use cairn_core::domain::{Identity, ScopeTuple, TargetId};
 use cairn_test_fixtures::flush_plan::sample_pending;
+use cairn_test_fixtures::sample_record;
 
 fn write_pending(vault: &Path, id: &str) {
     let p = sample_pending(id);
     let path = plan_path(vault, Bucket::Pending, &p.plan.operation_id);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, serde_json::to_vec_pretty(&p).unwrap()).unwrap();
+}
+
+fn write_non_placeholder_pending_noop(vault: &Path, id: &str) {
+    write_real_pending_plan(vault, id, vec![]);
+}
+
+fn write_real_pending_plan(vault: &Path, id: &str, mutations: Vec<PlannedMutation>) {
+    let plan = cairn_core::domain::flush_plan::FlushPlan {
+        operation_id: cairn_core::generated::common::Ulid(id.into()),
+        issued_at: "2026-05-09T12:00:00Z".into(),
+        issuer: Identity::parse("agt:claude-code:opus-4-7:reviewer:v1").unwrap(),
+        principal: None,
+        scope: ScopeTuple::default(),
+        mode: FlushMode::HumanReview,
+        mutations,
+        reason: PlanReason::UserIngest,
+        source_events: vec![],
+        target_hashes: std::collections::BTreeMap::new(),
+        dependencies: vec![],
+        expires_at: "2099-05-09T12:05:00Z".into(),
+        placeholder: false,
+    };
+    let persisted = PersistedPlan::pending(plan);
+    let path = plan_path(vault, Bucket::Pending, &persisted.plan.operation_id);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, serde_json::to_vec_pretty(&persisted).unwrap()).unwrap();
+}
+
+fn open_store(
+    vault: &Path,
+) -> (
+    tokio::runtime::Runtime,
+    cairn_store_sqlite::SqliteMemoryStore,
+) {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let store = rt
+        .block_on(cairn_store_sqlite::open(vault.join(".cairn/cairn.db")))
+        .unwrap();
+    (rt, store)
 }
 
 #[test]
@@ -964,5 +1014,308 @@ fn flush_apply_warns_on_placeholder_and_records_metadata_only() {
     assert_eq!(
         *apply_kind,
         cairn_core::domain::flush_plan::ApplyKind::MetadataOnly
+    );
+}
+
+#[test]
+fn flush_apply_real_plan_records_full_apply_kind() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01JTS6R4J7000000000000000A";
+    write_non_placeholder_pending_noop(vault.path(), id);
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let out = std::process::Command::new(bin)
+        .args(["flush", "apply", id])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let applied_path = plan_path(
+        vault.path(),
+        Bucket::Applied,
+        &cairn_core::generated::common::Ulid(id.into()),
+    );
+    let persisted: cairn_core::domain::flush_plan::PersistedPlan =
+        serde_json::from_slice(&std::fs::read(&applied_path).unwrap()).unwrap();
+    let cairn_core::domain::flush_plan::PlanStatus::Applied { ref apply_kind, .. } =
+        persisted.status
+    else {
+        panic!("expected Applied status, got {:?}", persisted.status);
+    };
+    assert_eq!(*apply_kind, cairn_core::domain::flush_plan::ApplyKind::Full);
+}
+
+#[test]
+fn flush_apply_patch_updates_record_body_and_keeps_old_version() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01JTS6R4J7000000000000000B";
+    let mut record = sample_record(1);
+    record.body = "alpha beta".into();
+    let target = record.target_id.clone();
+
+    let (rt, store) = open_store(vault.path());
+    rt.block_on(store.upsert(&record)).expect("seed record");
+
+    write_real_pending_plan(
+        vault.path(),
+        id,
+        vec![PlannedMutation::Patch {
+            target: PatchTarget::Record(target.clone()),
+            str_replace: vec![StrReplace {
+                old: "beta".into(),
+                new: "gamma".into(),
+                occurrence: ReplaceOccurrence::First,
+            }],
+        }],
+    );
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let out = std::process::Command::new(bin)
+        .args(["flush", "apply", id])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let active = rt
+        .block_on(store.get_active_by_target(&target))
+        .expect("read active")
+        .expect("active record");
+    assert_eq!(active.record.body, "alpha gamma");
+    let history = rt.block_on(store.versions(&target)).expect("history");
+    assert_eq!(
+        history.len(),
+        2,
+        "expected superseded old version to remain"
+    );
+    let old = rt
+        .block_on(store.get(&history[0].record_id))
+        .expect("fetch old version")
+        .expect("old version body");
+    assert_eq!(old.body, "alpha beta");
+    assert!(
+        active
+            .record
+            .extra_frontmatter
+            .contains_key("flush_patch_history"),
+        "patched record should carry patch audit metadata"
+    );
+}
+
+#[test]
+fn flush_apply_patch_missing_substring_fails_atomically() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01JTS6R4J7000000000000000C";
+    let mut record = sample_record(2);
+    record.body = "alpha beta".into();
+    let target = record.target_id.clone();
+
+    let (rt, store) = open_store(vault.path());
+    rt.block_on(store.upsert(&record)).expect("seed record");
+
+    write_real_pending_plan(
+        vault.path(),
+        id,
+        vec![PlannedMutation::Patch {
+            target: PatchTarget::Record(target.clone()),
+            str_replace: vec![StrReplace {
+                old: "delta".into(),
+                new: "gamma".into(),
+                occurrence: ReplaceOccurrence::First,
+            }],
+        }],
+    );
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let out = std::process::Command::new(bin)
+        .args(["flush", "apply", id])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    assert_eq!(
+        out.status.code(),
+        Some(70),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("patch substring not found"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let active = rt
+        .block_on(store.get_active_by_target(&target))
+        .expect("read active")
+        .expect("active record");
+    assert_eq!(active.record.body, "alpha beta");
+    let history = rt.block_on(store.versions(&target)).expect("history");
+    assert_eq!(
+        history.len(),
+        1,
+        "atomic failure must not write a new version"
+    );
+}
+
+#[test]
+fn flush_apply_patch_session_metadata_updates_live_session() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01JTS6R4J7000000000000000D";
+    let (rt, store) = open_store(vault.path());
+    let identity = SessionIdentity::new(
+        Identity::parse("hmn:alice:v1").unwrap(),
+        Identity::parse("agt:claude-code:opus-4-7:main:v1").unwrap(),
+        Some(vault.path().display().to_string()),
+    )
+    .unwrap();
+    let session = rt
+        .block_on(store.create_session(
+            &identity,
+            cairn_store_sqlite::NewSessionMetadata {
+                channel: Some("chat".into()),
+                priority: Some("low".into()),
+                tags: vec!["alpha".into()],
+            },
+        ))
+        .unwrap();
+
+    write_real_pending_plan(
+        vault.path(),
+        id,
+        vec![PlannedMutation::Patch {
+            target: PatchTarget::Session(session.id.clone()),
+            str_replace: vec![StrReplace {
+                old: "chat".into(),
+                new: "ops".into(),
+                occurrence: ReplaceOccurrence::First,
+            }],
+        }],
+    );
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let out = std::process::Command::new(bin)
+        .args(["flush", "apply", id])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let patched = rt
+        .block_on(store.resolve_explicit_session(&session.id, &identity))
+        .expect("resolve patched session");
+    assert_eq!(patched.channel.as_deref(), Some("ops"));
+}
+
+#[test]
+fn flush_apply_rename_rejects_live_destination_collision() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01JTS6R4J7000000000000000E";
+    let source = sample_record(3);
+    let dest = sample_record(4);
+
+    let (rt, store) = open_store(vault.path());
+    rt.block_on(store.upsert(&source)).expect("seed source");
+    rt.block_on(store.upsert(&dest)).expect("seed destination");
+
+    write_real_pending_plan(
+        vault.path(),
+        id,
+        vec![PlannedMutation::Rename {
+            record_id: source.target_id.clone(),
+            new_id: dest.target_id.clone(),
+        }],
+    );
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let out = std::process::Command::new(bin)
+        .args(["flush", "apply", id])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    assert_eq!(
+        out.status.code(),
+        Some(70),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("rename destination already exists"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn flush_apply_rename_rewrites_inbound_edges_to_new_active_record() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01JTS6R4J7000000000000000F";
+    let source = sample_record(5);
+    let inbound = sample_record(6);
+    let new_target = TargetId::parse("01JTS6R4J7000000000000000G").unwrap();
+
+    let (rt, store) = open_store(vault.path());
+    rt.block_on(store.upsert(&source)).expect("seed source");
+    rt.block_on(store.upsert(&inbound)).expect("seed inbound");
+    rt.block_on(store.put_edge(&Edge {
+        src: inbound.id.clone(),
+        dst: source.id.clone(),
+        kind: EdgeKind::Mentions,
+        weight: None,
+    }))
+    .expect("seed inbound edge");
+
+    write_real_pending_plan(
+        vault.path(),
+        id,
+        vec![PlannedMutation::Rename {
+            record_id: source.target_id.clone(),
+            new_id: new_target.clone(),
+        }],
+    );
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let out = std::process::Command::new(bin)
+        .args(["flush", "apply", id])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let active = rt
+        .block_on(store.get_active_by_target(&new_target))
+        .expect("read renamed target")
+        .expect("renamed record");
+    assert!(
+        rt.block_on(store.get_active_by_target(&source.target_id))
+            .expect("read old target")
+            .is_none(),
+        "old target should no longer resolve as active"
+    );
+    let inbound_edges = rt
+        .block_on(store.neighbours(&active.record.id, EdgeDir::In))
+        .expect("read inbound edges");
+    assert!(
+        inbound_edges
+            .iter()
+            .any(|edge| edge.src == inbound.id && edge.kind == EdgeKind::Mentions),
+        "expected mentions edge to follow renamed record"
     );
 }

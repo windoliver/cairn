@@ -20,8 +20,13 @@
 //!
 //! [`MemoryStore`]: cairn_core::contract::memory_store::MemoryStore
 
-use cairn_core::contract::memory_store::{Edge, EdgeKey, TombstoneReason, UpsertOutcome};
-use cairn_core::domain::{BodyHash, MemoryRecord, RecordId, SessionId, SignedAdmission};
+use cairn_core::contract::memory_store::{
+    Edge, EdgeKey, EdgeKind, StoredRecord, TombstoneReason, UpsertOutcome,
+};
+use cairn_core::contract::version::SchemaVersion;
+use cairn_core::domain::{
+    BodyHash, MemoryRecord, RecordId, Session, SessionId, SignedAdmission, TargetId,
+};
 use rusqlite::{OptionalExtension as _, Transaction, params};
 use tracing::instrument;
 
@@ -29,6 +34,7 @@ use crate::error::StoreError;
 use crate::replay::challenge::MintedChallenge;
 use crate::replay::{ReplayError, WalPrepareInputs};
 use crate::store::projection::{ProjectedRow, record_from_json};
+use crate::store::sessions::{InTxError, read_session_by_id};
 use crate::store::upsert::upsert_in_tx;
 use crate::store::{SqliteMemoryStore, current_unix_ms};
 
@@ -41,6 +47,62 @@ pub struct StoreTx<'a> {
 }
 
 impl StoreTx<'_> {
+    /// Snapshot-read the active, non-tombstoned row for one target inside the
+    /// caller's transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Sqlite`] for SQL failures, [`StoreError::Codec`]
+    /// when the stored `record_json` cannot be deserialized, and
+    /// [`StoreError::Invariant`] when version or schema-version columns carry
+    /// structurally invalid values.
+    pub fn get_active_by_target(
+        &self,
+        target: &TargetId,
+    ) -> Result<Option<StoredRecord>, StoreError> {
+        let row: Option<(String, i64, Option<i64>, Option<i64>)> = self
+            .tx
+            .query_row(
+                "SELECT record_json, version, schema_version_major, schema_version_minor \
+                   FROM records \
+                  WHERE target_id = ?1 AND active = 1 AND tombstoned = 0 \
+                  LIMIT 1",
+                params![target.as_str()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+        let Some((record_json, version_i64, schema_major, schema_minor)) = row else {
+            return Ok(None);
+        };
+        let record = record_from_json(&record_json)?;
+        let version = u32::try_from(version_i64).map_err(|_| StoreError::Invariant {
+            what: format!("stored version overflows u32: {version_i64}"),
+        })?;
+        let schema_version = match (schema_major, schema_minor) {
+            (Some(major), Some(minor)) => Some(SchemaVersion {
+                major: u32::try_from(major).map_err(|_| StoreError::Invariant {
+                    what: format!("schema_version_major out of u32 range: {major}"),
+                })?,
+                minor: u32::try_from(minor).map_err(|_| StoreError::Invariant {
+                    what: format!("schema_version_minor out of u32 range: {minor}"),
+                })?,
+            }),
+            (None, None) => None,
+            (major, minor) => {
+                return Err(StoreError::Invariant {
+                    what: format!(
+                        "records.schema_version_(major,minor) inconsistent: ({major:?}, {minor:?})"
+                    ),
+                });
+            }
+        };
+        Ok(Some(StoredRecord {
+            record,
+            version,
+            schema_version,
+        }))
+    }
+
     /// Synchronous upsert against the open transaction. Delegates to the
     /// same internal `upsert_in_tx` helper that
     /// `SqliteMemoryStore::do_upsert` uses, so this and the async trait
@@ -72,6 +134,118 @@ impl StoreTx<'_> {
                 SET tombstoned = 1, tombstone_reason = ?1, updated_at = ?2 \
               WHERE record_id = ?3",
             params![reason.as_db_str(), now_ms, id.as_str()],
+        )?;
+        Ok(())
+    }
+
+    /// Mark a specific active row inactive without deleting its historical
+    /// version record.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Sqlite`] for SQL failures.
+    pub fn deactivate_record(&self, id: &RecordId) -> Result<(), StoreError> {
+        let now_ms = current_unix_ms();
+        self.tx.execute(
+            "UPDATE records SET active = 0, updated_at = ?1 WHERE record_id = ?2 AND active = 1",
+            params![now_ms, id.as_str()],
+        )?;
+        Ok(())
+    }
+
+    /// Read one explicit session row inside the caller's transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::SessionNotFound`] when no row exists,
+    /// [`StoreError::SessionEnded`] when the row is closed, and the usual
+    /// [`StoreError`] variants for SQL / codec / invariant failures.
+    pub fn get_live_session(&self, session_id: &SessionId) -> Result<Session, StoreError> {
+        let id_str = session_id.as_str();
+        let Some(session) = read_session_by_id(&self.tx, id_str).map_err(|e| match e {
+            InTxError::Sqlite(err) => StoreError::Sqlite(err),
+            InTxError::Codec(err) => StoreError::Codec(err),
+            InTxError::Invariant(what) => StoreError::Invariant { what },
+            InTxError::Terminal(err) => err,
+            InTxError::UniqueViolation | InTxError::StaleSnapshot => StoreError::Invariant {
+                what: "unexpected retry-only session read state".into(),
+            },
+        })?
+        else {
+            return Err(StoreError::SessionNotFound {
+                session_id: id_str.to_owned(),
+            });
+        };
+        if let Some(ended_at_unix_ms) = session.ended_at_unix_ms {
+            return Err(StoreError::SessionEnded {
+                session_id: id_str.to_owned(),
+                ended_at_unix_ms,
+            });
+        }
+        Ok(session)
+    }
+
+    /// Persist session metadata fields in place and treat the patch as session
+    /// activity by bumping `last_activity_at`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Codec`] when tag serialization fails and
+    /// [`StoreError::Sqlite`] for SQL failures.
+    pub fn update_session_metadata(&self, session: &Session) -> Result<(), StoreError> {
+        let now_ms = current_unix_ms();
+        let tags_json = if session.tags.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&session.tags)?)
+        };
+        self.tx.execute(
+            "UPDATE sessions \
+                SET title = ?1, channel = ?2, priority = ?3, tags = ?4, last_activity_at = ?5 \
+              WHERE session_id = ?6 AND ended_at IS NULL",
+            params![
+                session.title.as_str(),
+                session.channel.as_deref(),
+                session.priority.as_deref(),
+                tags_json,
+                now_ms,
+                session.id.as_str(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Copy every non-`updates` edge attached to `old_id` onto `new_id`, then
+    /// delete the old rows so live graph traversals follow the renamed record.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Sqlite`] for SQL failures.
+    pub fn rewrite_non_updates_edges(
+        &self,
+        old_id: &RecordId,
+        new_id: &RecordId,
+    ) -> Result<(), StoreError> {
+        self.tx.execute(
+            "INSERT OR REPLACE INTO edges (src, dst, kind, weight) \
+             SELECT CASE WHEN src = ?1 THEN ?2 ELSE src END, \
+                    CASE WHEN dst = ?1 THEN ?2 ELSE dst END, \
+                    kind, \
+                    weight \
+               FROM edges \
+              WHERE kind != ?3 \
+                AND (src = ?1 OR dst = ?1)",
+            params![
+                old_id.as_str(),
+                new_id.as_str(),
+                EdgeKind::Updates.as_db_str()
+            ],
+        )?;
+        self.tx.execute(
+            "DELETE FROM edges \
+              WHERE kind != ?1 \
+                AND (src = ?2 OR dst = ?2)",
+            params![EdgeKind::Updates.as_db_str(), old_id.as_str()],
         )?;
         Ok(())
     }

@@ -94,6 +94,32 @@ pub enum StoreError {
         id: String,
     },
 
+    /// A flush patch targeted a record lineage with no live row.
+    #[error("patch target not found: {target_id}")]
+    PatchTargetMissing {
+        /// The target lineage id that was not found.
+        target_id: String,
+    },
+
+    /// A flush patch requested a substring occurrence that does not exist in
+    /// the current document text.
+    #[error("patch substring not found for {target}: `{needle}` ({occurrence})")]
+    PatchSubstringMissing {
+        /// Human-readable target label (`record:<id>` or `session:<id>`).
+        target: String,
+        /// The substring the caller requested.
+        needle: String,
+        /// Which occurrence form failed (`first`, `all`, `nth(N)`).
+        occurrence: String,
+    },
+
+    /// A flush rename attempted to land on an already-live destination target.
+    #[error("rename destination already exists: {target_id}")]
+    RenameTargetConflict {
+        /// The destination target id that is already live.
+        target_id: String,
+    },
+
     /// Method requires a capability the store does not advertise.
     /// `what` is the cap flag name (`"fts"`, `"vector"`, `"graph_edges"`,
     /// `"transactions"`).
