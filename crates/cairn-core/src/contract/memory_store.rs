@@ -32,7 +32,14 @@ use crate::search::ScoreExplain;
 /// `MemoryStoreCapabilities::graph_search` flag and the
 /// `search_graph_neighbors` trait method (default impl returns
 /// `CapabilityUnavailable`) ship in the same bump.
-pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 5, 0);
+/// Bumped 0.5 → 0.6 in #58 when `MemoryStore::forget_record` and
+/// `ForgetReceipt` landed for the §5.6 record-level forget pipeline.
+/// Adding a new required trait method is a structural break for any
+/// downstream adapter that does not provide its own implementation —
+/// the default impl returns `"capability unavailable: forget_record"`
+/// so trait-object consumers compile, but the trait surface itself
+/// has grown.
+pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 6, 0);
 
 /// Errors raised by `MemoryStore` implementations. Adapters define their
 /// own concrete type (e.g. `cairn_store_sqlite::StoreError`); this is the
@@ -153,6 +160,32 @@ pub trait MemoryStore: Send + Sync {
     /// Mark a specific record version as tombstoned with the given reason.
     /// Idempotent — already-tombstoned rows return `Ok(())`.
     async fn tombstone(&self, id: &RecordId, reason: TombstoneReason) -> Result<(), StoreError>;
+
+    /// Record-level forget (brief §5.6 row 2, §14 audit invariant).
+    ///
+    /// Phase A tombstones every version of `target` with reason `Forget`
+    /// and fuses a body-free [`crate::domain::ConsentEvent`] receipt into
+    /// the same `SQLite` transaction. Phase B physically purges record rows,
+    /// derived indexes, and any WAL pre-image blob that referenced
+    /// the forgotten content. Idempotent and crash-safe at every step.
+    ///
+    /// `actor` is the resolved principal authoring the forget — the
+    /// engine writes it into `consent_journal.actor` for audit-keyed
+    /// queries. CLI/MCP/SDK callers (issue #9) pass the principal
+    /// resolved by the signed-envelope guard.
+    ///
+    /// Returns the body-free [`ForgetReceipt`] proving deletion.
+    ///
+    /// # Errors
+    /// Default impl returns `"capability unavailable: forget_record"`.
+    async fn forget_record(
+        &self,
+        target: &TargetId,
+        actor: &crate::domain::Identity,
+    ) -> Result<ForgetReceipt, StoreError> {
+        let _ = (target, actor);
+        Err("capability unavailable: forget_record".into())
+    }
 
     /// Full version history for a target, oldest → newest. Includes
     /// active and inactive rows.
@@ -538,6 +571,22 @@ impl TombstoneReason {
             _ => None,
         }
     }
+}
+
+/// Outcome of a `forget_record` call (brief §14 forget-receipt allowlist).
+///
+/// Body-free by construction: only the salted target hash, the WAL op id,
+/// and the purge timestamp survive. The corresponding row in
+/// `consent_journal` carries the same `target_id_hash` and `op_id` so
+/// audits can join the two without exposing forgotten content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForgetReceipt {
+    /// `sha256:<hex>` of the forgotten `target_id`.
+    pub target_id_hash: String,
+    /// WAL operation id that committed the forget.
+    pub op_id: String,
+    /// Unix milliseconds when Phase B step 5 (`primary.purge`) committed.
+    pub purged_at: i64,
 }
 
 /// Outcome of an `upsert` call. `content_changed = false` indicates the
@@ -1002,7 +1051,7 @@ mod tests {
     impl MemoryStorePlugin for StubStore {
         const NAME: &'static str = "stub";
         const SUPPORTED_VERSIONS: VersionRange =
-            VersionRange::new(ContractVersion::new(0, 5, 0), ContractVersion::new(0, 6, 0));
+            VersionRange::new(ContractVersion::new(0, 6, 0), ContractVersion::new(0, 7, 0));
     }
 
     #[tokio::test]
@@ -1136,11 +1185,12 @@ mod tests {
         assert!(err.to_string().contains("bitemporal_graph"));
     }
 
-    /// `CONTRACT_VERSION` for the `MemoryStore` trait is locked to 0.5.0.
+    /// `CONTRACT_VERSION` for the `MemoryStore` trait is locked to 0.6.0.
     /// #258 bumped 0.3→0.4 (per-row `schema_version`). #191 bumped 0.4→0.5
-    /// (`auth_scope`, `graph_search` capability + trait method).
+    /// (`auth_scope`, `graph_search` capability + trait method). #58 bumped
+    /// 0.5→0.6 (`forget_record` trait method + `ForgetReceipt`).
     #[test]
-    fn contract_version_locked_to_0_5_0() {
-        assert_eq!(CONTRACT_VERSION, ContractVersion::new(0, 5, 0));
+    fn contract_version_locked_to_0_6_0() {
+        assert_eq!(CONTRACT_VERSION, ContractVersion::new(0, 6, 0));
     }
 }
