@@ -552,3 +552,88 @@ async fn concurrent_forgets_serialize_via_record_wal_lock() {
 // outside it). Integration-level tests can't distinguish those two
 // implementations because the record-WAL locks fail-fast — no contender
 // reaches Phase A.
+
+// ── Round 5 review: receipt fidelity for non-private repeat forget ─────
+
+#[tokio::test]
+async fn repeat_forget_after_purge_does_not_dilute_consent_audit_trail() {
+    use cairn_core::domain::taxonomy::MemoryVisibility;
+
+    // Round-5 review (Codex): a repeat forget against an already-purged
+    // target previously appended a SECOND consent_journal row using
+    // `ScopeTuple::default()` and `MemoryVisibility::Private` — the
+    // post-purge `load_scope_and_tier` defaults. For a record that
+    // started life as `Team`/`Org`/`Public`, this misclassified the
+    // audit trail.
+    //
+    // Fix: skip the consent receipt when the in-txn count observes
+    // zero live rows. Brief §14: the authoritative receipt is the one
+    // bound to the destructive Phase A; a no-op forget has nothing to
+    // audit beyond what the original receipt already captured.
+    let store = open_in_memory().await.expect("open");
+    let mut record = sample();
+    // Force a non-default tier so the regression — defaulting to
+    // Private on the second receipt — would visibly demote it.
+    record.visibility = MemoryVisibility::Team;
+    let target = record.target_id.clone();
+    store.upsert(&record).await.expect("upsert");
+
+    let r1 = store
+        .forget_record(&target, &alice())
+        .await
+        .expect("first forget");
+    assert_eq!(r1.deleted_count, 1, "first forget tombstones the live row");
+
+    let r2 = store
+        .forget_record(&target, &alice())
+        .await
+        .expect("second forget");
+    assert_eq!(
+        r2.deleted_count, 0,
+        "repeat forget after purge observes zero live rows in-txn"
+    );
+
+    // Inspect consent_journal: exactly one ForgetIntent for this
+    // target_id_hash; its scope_tier reflects the original Team
+    // visibility (no diluted Private receipt from the second call).
+    let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
+    let target_id_hash = r1.target_id_hash.clone();
+    let receipts: Vec<(String, String)> = conn
+        .call(move |c| {
+            let mut stmt = c.prepare(
+                "SELECT op_id, payload_json FROM consent_journal \
+                  WHERE kind = 'forget_intent' \
+                    AND payload_json LIKE '%' || ?1 || '%'",
+            )?;
+            let rows = stmt
+                .query_map(rusqlite::params![target_id_hash], |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                        row.get::<_, String>(1)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+        .await
+        .expect("query consent");
+
+    assert_eq!(
+        receipts.len(),
+        1,
+        "exactly one ForgetIntent receipt per target — repeat forget \
+         must not append a duplicate. Got: {receipts:?}"
+    );
+    let (op_id, payload_json) = &receipts[0];
+    assert_eq!(
+        op_id, &r1.op_id,
+        "the surviving receipt must be the one written by the *real* \
+         destructive op, not the no-op"
+    );
+    assert!(
+        payload_json.contains("\"scope_tier\":\"team\""),
+        "receipt scope_tier must preserve the original Team visibility \
+         — a regression to default-Private would record \"private\". \
+         Got payload: {payload_json}"
+    );
+}

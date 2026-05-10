@@ -343,6 +343,16 @@ fn now_secs() -> i64 {
 /// replay produces exactly one receipt per successful Phase-A commit.
 /// The `UPDATE` itself is idempotent — re-running over already-tombstoned
 /// rows is a no-op.
+///
+/// **No-op forgets do not append a consent receipt.** When the in-txn
+/// count observes zero live rows (idempotent re-forget after the
+/// records were already purged), the helper records `deleted_count = 0`
+/// in the cell and returns without writing to `consent_journal`. The
+/// authoritative receipt is the one the *original* forget wrote with
+/// the real scope/tier; appending another receipt with the post-purge
+/// `ScopeTuple::default()` + `MemoryVisibility::Private` defaults
+/// would dilute the audit trail and misclassify a previously
+/// team/org/public scoped record. Round-5 review (Codex).
 fn mark_tombstone_and_emit_receipt(
     tx: &Transaction<'_>,
     op_id: &OperationId,
@@ -366,7 +376,8 @@ fn mark_tombstone_and_emit_receipt(
             |row| row.get(0),
         )
         .map_err(StepBodyError::Storage)?;
-    deleted_count.store(u64::try_from(live_count).unwrap_or(0), Ordering::SeqCst);
+    let live_count_u64 = u64::try_from(live_count).unwrap_or(0);
+    deleted_count.store(live_count_u64, Ordering::SeqCst);
 
     // Brief §5.6 Phase A: tombstone every version of the target with
     // reason='forget' and active=0.
@@ -380,6 +391,12 @@ fn mark_tombstone_and_emit_receipt(
         params![now_ms, payload.target_id.as_str()],
     )
     .map_err(StepBodyError::Storage)?;
+
+    // No-op forget (records already purged): skip the receipt.
+    // See doc comment above for the audit-invariant rationale.
+    if live_count_u64 == 0 {
+        return Ok(());
+    }
 
     // sha256 of the raw target id. P1 follow-up (brief §14) introduces a
     // per-user salt; the receipt schema does not change.
