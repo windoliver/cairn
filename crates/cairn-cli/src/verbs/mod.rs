@@ -10,6 +10,7 @@ pub mod assemble_hot;
 pub mod capture_trace;
 pub mod envelope;
 pub mod flush;
+/// Real `flush apply` executor for non-placeholder plans (issue #289).
 pub mod flush_apply;
 pub mod forget;
 pub mod handshake;
@@ -58,7 +59,7 @@ pub fn with_fix_markdown(cmd: clap::Command) -> clap::Command {
 }
 
 /// Add `--plan <ULID>` flag to the `lint` subcommand. Lints the named pending
-/// FlushPlan instead of running the live-store edge linter — surfaces issues
+/// `FlushPlan` instead of running the live-store edge linter — surfaces issues
 /// (e.g. rename target collisions) before `flush apply` runs.
 #[must_use]
 pub fn with_lint_plan(cmd: clap::Command) -> clap::Command {

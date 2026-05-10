@@ -11,6 +11,11 @@ pub const MAX_BODY_EXCERPT: usize = 4096;
 /// Render the plan to markdown. Deterministic — same plan in, same bytes
 /// out (byte-stable for snapshot tests).
 #[must_use]
+#[allow(
+    clippy::too_many_lines,
+    reason = "linear per-variant rendering; splitting per mutation kind would scatter \
+              snapshot-stable formatting across helpers without simplifying the flow"
+)]
 pub fn render(plan: &FlushPlan) -> String {
     let mut out = String::with_capacity(1024);
     writeln!(&mut out, "# FlushPlan {}", plan.operation_id.0).ok();

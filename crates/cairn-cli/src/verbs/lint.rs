@@ -1975,8 +1975,13 @@ pub fn run(sub: &ArgMatches, vault_root: Option<&Path>) -> ExitCode {
 }
 
 /// `cairn lint --plan <ULID>` (issue #289): structurally lint a pending
-/// FlushPlan, then check rename mutations against the live store. Surfaces
+/// `FlushPlan`, then check rename mutations against the live store. Surfaces
 /// rename-target collisions before `flush apply` consumes the plan.
+#[allow(
+    clippy::too_many_lines,
+    reason = "linear load → walk-mutations → live-check → emit; splitting would scatter \
+              error-emission boilerplate (json vs human) across helpers without simplifying flow"
+)]
 fn run_plan_lint(json: bool, vault_root: Option<&Path>, plan_id: &str) -> ExitCode {
     use cairn_core::domain::flush_plan::store::{Bucket, plan_path};
     use cairn_core::domain::flush_plan::{PersistedPlan, PlannedMutation};
@@ -2120,15 +2125,13 @@ fn run_plan_lint(json: bool, vault_root: Option<&Path>, plan_id: &str) -> ExitCo
             "plan_id": plan_id,
             "findings": findings,
         }));
-    } else {
-        if has_findings {
-            eprintln!("cairn lint --plan {plan_id}: {} finding(s)", findings.len());
-            for f in &findings {
-                eprintln!("  - {f}");
-            }
-        } else {
-            println!("cairn lint --plan {plan_id}: clean");
+    } else if has_findings {
+        eprintln!("cairn lint --plan {plan_id}: {} finding(s)", findings.len());
+        for f in &findings {
+            eprintln!("  - {f}");
         }
+    } else {
+        println!("cairn lint --plan {plan_id}: clean");
     }
 
     if has_findings {
