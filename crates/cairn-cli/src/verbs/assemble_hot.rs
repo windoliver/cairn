@@ -891,10 +891,19 @@ pub(crate) fn lint_step_body_sync(
     step: cairn_core::generated::verbs::assemble_hot::HotRecipeStep,
 ) -> Result<String, String> {
     use cairn_core::generated::verbs::assemble_hot::HotRecipeStep;
-    let max_bytes = u64::from(config.vault.hot_memory.max_bytes);
+    // `config` is currently unused — reserved for future per-step
+    // policy gating. Keep the parameter stable for lint dispatch.
+    let _ = config;
+    // Per-file safety cap: read up to the assembler's absolute hard cap
+    // (segments::MAX_BYTES = 4 MiB), NOT the configured budget. Reading
+    // only `max_bytes` would mask over-budget content from the walker —
+    // a 200-byte purpose.md against an 8-byte budget would be silently
+    // truncated to 8 bytes, and `assemble_hot_with_loader` would never
+    // see the overflow it is supposed to detect.
+    let safety_cap = cairn_core::verbs::assemble_hot::segments::MAX_BYTES;
     let read_file = |rel: &std::path::Path| -> Result<String, String> {
         cairn_core::verbs::assemble_hot::loader::read_vault_markdown_file(
-            vault_root, rel, max_bytes,
+            vault_root, rel, safety_cap,
         )
         .map_err(|e| e.to_string())
         .or_else(|e| {
