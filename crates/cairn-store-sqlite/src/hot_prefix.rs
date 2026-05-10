@@ -3,7 +3,7 @@
 //! `hot_source_watermarks` tables.
 //!
 //! Convention: this cache opens its **own** `AsyncConn` to the existing DB
-//! at `<vault_root>/cairn.db`. Migrations must already be applied (typically
+//! at `<vault_root>/.cairn/cairn.db`. Migrations must already be applied (typically
 //! by `cairn_store_sqlite::open`). The dual-connection layout is safe because
 //! WAL mode permits concurrent writers; the store and the cache share the same
 //! underlying file but coordinate through `SQLite`'s write-lock protocol.
@@ -21,7 +21,7 @@ use cairn_core::generated::verbs::assemble_hot::HotSegment;
 
 /// `SQLite`-backed hot-prefix cache.
 ///
-/// Opens its own connection to `<vault_root>/cairn.db` rather than sharing
+/// Opens its own connection to `<vault_root>/.cairn/cairn.db` rather than sharing
 /// the primary store connection. `SQLite` WAL mode allows multiple concurrent
 /// writers, so the two handles do not block each other.
 pub struct SqliteHotPrefixCache {
@@ -29,7 +29,7 @@ pub struct SqliteHotPrefixCache {
 }
 
 impl SqliteHotPrefixCache {
-    /// Open a fresh connection to `<vault_root>/cairn.db`. The DB is
+    /// Open a fresh connection to `<vault_root>/.cairn/cairn.db`. The DB is
     /// expected to have already been migrated by
     /// `cairn_store_sqlite::open` — this constructor does NOT re-run
     /// migrations.
@@ -37,7 +37,7 @@ impl SqliteHotPrefixCache {
     /// # Errors
     /// Returns [`CacheError::Backend`] if the DB file cannot be opened.
     pub async fn open(vault_root: &Path) -> Result<Self, CacheError> {
-        let db = vault_root.join("cairn.db");
+        let db = vault_root.join(".cairn").join("cairn.db");
         let conn = AsyncConn::open(&db)
             .await
             .map_err(|e| CacheError::Backend(Box::new(e)))?;

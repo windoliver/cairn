@@ -12,7 +12,13 @@ fn agent() -> Identity {
 async fn fresh_vault() -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
     // Bootstrap the SQLite store so migrations (including 0053) run.
-    let _store = cairn_store_sqlite::open(dir.path().join("cairn.db"))
+    // The canonical path is `<vault_root>/.cairn/cairn.db` — mirror what
+    // the CLI uses so `SqliteHotPrefixCache::open(vault.path())` finds the
+    // same file.
+    tokio::fs::create_dir_all(dir.path().join(".cairn"))
+        .await
+        .expect("create .cairn dir");
+    let _store = cairn_store_sqlite::open(dir.path().join(".cairn/cairn.db"))
         .await
         .expect("open store");
     dir
@@ -53,7 +59,10 @@ async fn upserting_user_record_bumps_profile_evidence() {
     use cairn_core::domain::taxonomy::MemoryKind;
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let store = cairn_store_sqlite::open(dir.path().join("cairn.db"))
+    tokio::fs::create_dir_all(dir.path().join(".cairn"))
+        .await
+        .expect("create .cairn dir");
+    let store = cairn_store_sqlite::open(dir.path().join(".cairn/cairn.db"))
         .await
         .expect("open store");
     let cache = SqliteHotPrefixCache::open(dir.path())
@@ -119,7 +128,10 @@ async fn tombstone_bumps_all_six_watermarks() {
     use cairn_core::contract::memory_store::{MemoryStore, TombstoneReason};
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let store = cairn_store_sqlite::open(dir.path().join("cairn.db"))
+    tokio::fs::create_dir_all(dir.path().join(".cairn"))
+        .await
+        .expect("create .cairn dir");
+    let store = cairn_store_sqlite::open(dir.path().join(".cairn/cairn.db"))
         .await
         .expect("open store");
     let cache = SqliteHotPrefixCache::open(dir.path())
