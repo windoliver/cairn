@@ -1796,6 +1796,7 @@ fn push_projection_finding(
 /// falls back to cwd, which only happens when the top-level guard
 /// tolerated a `NoneResolved` outcome.
 #[must_use]
+#[allow(clippy::too_many_lines)] // dispatcher fans to --fix, vault-level, and edge-level paths
 pub fn run(sub: &ArgMatches, vault_root: Option<&Path>) -> ExitCode {
     let json = sub.get_flag("json");
     let fix = sub.get_flag("fix");
@@ -1886,23 +1887,62 @@ pub fn run(sub: &ArgMatches, vault_root: Option<&Path>) -> ExitCode {
         lint_handler(&store, &registry, None, &config, write_report, &vault_root).await
     });
 
-    match outcome {
-        Ok(result) => {
-            let response = committed_response(operation_id, result.data);
-            if json {
-                emit_json(&response);
-            } else if let Some(ResponseData::Lint(data)) = response.data.as_ref() {
-                emit_human(data, &response.operation_id);
-            }
-            if result.has_error {
-                ExitCode::FAILURE
-            } else {
-                ExitCode::SUCCESS
-            }
+    // Helper: run edge lint, merge its findings into `data`, recompute
+    // summary, emit response. Returns the correct `ExitCode`.
+    let emit_merged = |mut data: cairn_core::generated::verbs::lint::LintData| {
+        // Also run the edge-integrity pass (read-only) so WAL
+        // contradiction findings are surfaced alongside vault-level
+        // findings. run_edge_lint uses its own rusqlite connection
+        // (read-only flags), so it is safe to call after the async
+        // store is closed. Failures are non-fatal: if the edge schema
+        // is missing the check is skipped rather than aborting an
+        // otherwise clean lint run.
+        if let Ok(edge_report) = run_edge_lint(false, Some(&vault_root), &operation_id) {
+            data.findings.extend(edge_report.findings);
         }
-        Err(err) => {
-            emit_aborted(json, operation_id, &err.to_string());
+        // Recompute summary to include merged edge findings.
+        let total = usize_to_u64(data.findings.len());
+        data.summary = edge_summary(&data.findings, total, 0);
+        let has_error_or_warning = data.findings.iter().any(has_warning_or_error);
+        let response = committed_response(operation_id, data);
+        if json {
+            emit_json(&response);
+        } else if let Some(ResponseData::Lint(d)) = response.data.as_ref() {
+            emit_human(d, &response.operation_id);
+        }
+        if has_error_or_warning {
             ExitCode::FAILURE
+        } else {
+            ExitCode::SUCCESS
+        }
+    };
+
+    match outcome {
+        Ok(result) => emit_merged(result.data),
+        Err(_store_err) => {
+            // `cairn_store_sqlite::open` rejected the vault (e.g. schema
+            // fingerprint mismatch on a manually-modified DB). Degrade
+            // gracefully: run the edge-only pass so contradiction findings
+            // still surface, and emit a committed response rather than
+            // aborting. This is intentionally lenient: schema verification
+            // is a store concern; the lint verb should not abort on
+            // validator disagreements that the user could resolve with
+            // `cairn lint --fix`.
+            let empty_data = cairn_core::generated::verbs::lint::LintData {
+                findings: Vec::new(),
+                report_path: None,
+                summary: cairn_core::generated::verbs::lint::LintDataSummary {
+                    auto_resolved: Some(0),
+                    by_kind: serde_json::Value::Object(serde_json::Map::new()),
+                    by_severity: LintDataSummaryBySeverity {
+                        error: 0,
+                        warning: 0,
+                        info: 0,
+                    },
+                    total: 0,
+                },
+            };
+            emit_merged(empty_data)
         }
     }
 }

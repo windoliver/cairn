@@ -1,5 +1,5 @@
-//! E2E for hot_memory lint: clean bootstrap → no findings; missing
-//! purpose.md → BrokenSourceLink Error. See issue #83.
+//! E2E for `hot_memory` lint: clean bootstrap → no findings; missing
+//! `purpose.md` → `BrokenSourceLink` Error. See issue #83.
 //!
 //! Tests call `lint_handler` directly (the CLI-crate library boundary),
 //! following the same pattern as `lint_drift.rs`. The `cairn lint` binary
