@@ -59,9 +59,12 @@ pub(crate) async fn apply_forget_record(
     .await
     .map_err(|e| StoreError::RecordWalLock(Box::new(e)))?;
 
-    let record_ids =
-        load_forget_lineage(&conn, &target_seed.target_id, &target_seed.requested_record_id)
-            .await?;
+    let record_ids = load_forget_lineage(
+        &conn,
+        &target_seed.target_id,
+        &target_seed.requested_record_id,
+    )
+    .await?;
     let target = ForgetTarget {
         requested_record_id: target_seed.requested_record_id,
         target_id: target_seed.target_id,

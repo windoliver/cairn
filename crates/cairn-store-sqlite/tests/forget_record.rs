@@ -563,10 +563,7 @@ async fn forget_record_replay_is_idempotent_after_primary_purge() {
     let record = sample_record();
     store.upsert(&record).await.expect("upsert");
 
-    let outcome = store
-        .forget_record(&record.id)
-        .await
-        .expect("first forget");
+    let outcome = store.forget_record(&record.id).await.expect("first forget");
     assert_eq!(outcome.deleted_count, 1);
 
     let err = store
