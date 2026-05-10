@@ -541,10 +541,18 @@ fn capture_trace_rejects_session_arg_until_scoped_import_supported() {
 }
 
 #[test]
-fn forget_record_returns_capability_unavailable() {
+fn forget_session_returns_capability_unavailable() {
+    // `forget --record` is now wired through SqliteMemoryStore::forget_record
+    // (issue #58); the negative-path coverage moved to `--session`, which
+    // still gates on a v0.2 runtime that has not landed.
     assert_rejected_capability_unavailable(
-        &["forget", "--record", "01JXXXXXXXXXXXXXXXXXXXXXXX", "--json"],
-        "cairn.mcp.v1.forget.record",
+        &[
+            "forget",
+            "--session",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "--json",
+        ],
+        "cairn.mcp.v1.forget.session",
     );
 }
 
@@ -636,10 +644,14 @@ fn status_in_bound_vault_advertises_search_and_policy_trace() {
         "hybrid must NOT be advertised when no embedding model is on disk \
          (runtime resolves an embedder for hybrid mode); got {caps:?}"
     );
+    // `cairn.mcp.v1.forget.record` was previously in this stub-only list;
+    // it's now end-to-end wired (issue #58) and lives in the positive
+    // assertion in `assert_status_capabilities_are_deterministic` over in
+    // `issue7_cli_e2e.rs`. `forget.session` stays here — it remains
+    // unwired until the v0.2 runtime lands.
     for stub_cap in [
         "cairn.mcp.v1.retrieve.session",
         "cairn.mcp.v1.retrieve.full",
-        "cairn.mcp.v1.forget.record",
         "cairn.mcp.v1.forget.session",
     ] {
         assert!(
@@ -647,6 +659,11 @@ fn status_in_bound_vault_advertises_search_and_policy_trace() {
             "stub-only capability {stub_cap} must NOT be advertised; got {caps:?}"
         );
     }
+    assert!(
+        caps.contains("cairn.mcp.v1.forget.record"),
+        "forget.record must be advertised in a bound vault now that the CLI \
+         dispatch is wired (issue #58); got {caps:?}"
+    );
 }
 
 #[test]

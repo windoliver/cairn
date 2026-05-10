@@ -93,8 +93,9 @@ fn assert_status_capabilities_are_deterministic(vault_path: &str) {
         "retrieve.record must not be advertised until runtime can honor it: {caps_one:?}"
     );
     assert!(
-        !caps_one.contains(&"cairn.mcp.v1.forget.record".to_owned()),
-        "forget.record must not be advertised until runtime can honor it: {caps_one:?}"
+        caps_one.contains(&"cairn.mcp.v1.forget.record".to_owned()),
+        "forget.record must be advertised in a bound vault now that the CLI \
+         dispatch is wired to SqliteMemoryStore::forget_record (issue #58): {caps_one:?}"
     );
 }
 
@@ -145,6 +146,11 @@ fn assert_sensitive_verb_rejection(out: &Output, args: &[&str], verb: &str, capa
 }
 
 fn assert_unadvertised_sensitive_verbs_fail_closed(vault_path: &str) {
+    // `forget --record` was previously here as the second arm; it's been
+    // removed because the CLI now wires the dispatch path through
+    // `SqliteMemoryStore::forget_record` (issue #58). Negative-path coverage
+    // for forget is preserved by `forget --session` which still returns
+    // CapabilityUnavailable until the v0.2 runtime lands.
     for (args, verb, capability) in [
         (
             vec![
@@ -162,12 +168,12 @@ fn assert_unadvertised_sensitive_verbs_fail_closed(vault_path: &str) {
                 "--vault",
                 vault_path,
                 "forget",
-                "--record",
+                "--session",
                 "01JXXXXXXXXXXXXXXXXXXXXXXX",
                 "--json",
             ],
             "forget",
-            "cairn.mcp.v1.forget.record",
+            "cairn.mcp.v1.forget.session",
         ),
     ] {
         let out = run(&args);
