@@ -127,6 +127,115 @@ async fn assert_forget_purged_surfaces(
     .expect("physical purge assertions");
 }
 
+async fn seed_upsert_pre_image_leak(
+    conn: &Arc<tokio_rusqlite::Connection>,
+    record: &MemoryRecord,
+) -> String {
+    let record_id = record.id.as_str().to_owned();
+    let target_id = record.target_id.as_str().to_owned();
+    let body = record.body.clone();
+    conn.call(move |c| {
+        let upsert_op = c.query_row(
+            "SELECT p.operation_id \
+               FROM wal_payloads p \
+               JOIN wal_ops o ON o.operation_id = p.operation_id \
+              WHERE p.kind = 'upsert' AND o.target_hash = ?1",
+            params![target_id],
+            |row| row.get::<_, String>(0),
+        )?;
+        let leaked_pre_image = serde_json::json!({
+            "type": "test_leak",
+            "record_id": record_id,
+            "body": body,
+        })
+        .to_string()
+        .into_bytes();
+        let changed = c.execute(
+            "UPDATE wal_steps \
+                SET pre_image = ?1 \
+              WHERE operation_id = ?2 \
+                AND step_ord = ( \
+                    SELECT MIN(step_ord) FROM wal_steps WHERE operation_id = ?2 \
+                )",
+            params![leaked_pre_image, upsert_op],
+        )?;
+        assert_eq!(changed, 1, "test should seed one upsert pre_image leak");
+        Ok::<_, tokio_rusqlite::Error>(upsert_op)
+    })
+    .await
+    .expect("seed leaking pre_image")
+}
+
+async fn assert_forget_scrubbed_prior_wal_and_kept_body_free_payload(
+    conn: &Arc<tokio_rusqlite::Connection>,
+    record: &MemoryRecord,
+    upsert_op: String,
+    forget_op: &OperationId,
+) {
+    let record_id = record.id.as_str().to_owned();
+    let body = record.body.clone();
+    let forget_op = forget_op.as_str().to_owned();
+    conn.call(move |c| {
+        let retained_fragments = {
+            let mut stmt = c.prepare(
+                "SELECT 'payload', payload_json \
+                   FROM wal_payloads \
+                  WHERE operation_id = ?1 \
+                 UNION ALL \
+                 SELECT 'pre_image', CAST(pre_image AS TEXT) \
+                   FROM wal_steps \
+                  WHERE operation_id = ?1 AND pre_image IS NOT NULL",
+            )?;
+            stmt.query_map(params![upsert_op], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        assert!(
+            !retained_fragments.is_empty(),
+            "prior body-bearing WAL retention should remain as scrub stubs"
+        );
+        for (surface, retained) in &retained_fragments {
+            assert!(
+                !retained.contains(&body),
+                "scrubbed prior {surface} must not retain body text: {retained}"
+            );
+            assert!(
+                !retained.contains(&record_id),
+                "scrubbed prior {surface} must not retain raw record id: {retained}"
+            );
+        }
+
+        let purged_stubs: i64 = c.query_row(
+            "SELECT COUNT(*) \
+               FROM wal_payloads \
+              WHERE operation_id = ?1 \
+                AND kind = 'purged' \
+                AND json_extract(payload_json, '$.type') = 'purged'",
+            params![upsert_op],
+            |row| row.get(0),
+        )?;
+        assert!(purged_stubs > 0, "at least one purged stub should remain");
+
+        let (forget_kind, forget_type, forget_json): (String, String, String) = c.query_row(
+            "SELECT kind, json_extract(payload_json, '$.type'), payload_json \
+               FROM wal_payloads \
+              WHERE operation_id = ?1",
+            params![forget_op],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!(forget_kind, "forget_record");
+        assert_eq!(forget_type, "forget_record");
+        assert!(
+            !forget_json.contains(&body),
+            "current forget payload must remain body-free"
+        );
+        Ok::<_, tokio_rusqlite::Error>(())
+    })
+    .await
+    .expect("scrub assertions");
+}
+
 #[tokio::test]
 async fn forget_payload_round_trips_body_free() {
     let store = open_in_memory().await.expect("open");
@@ -401,6 +510,50 @@ async fn forget_record_purges_primary_indexes_and_vectors() {
 
     let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
     assert_forget_purged_surfaces(&conn, &record, &outcome.operation_id).await;
+}
+
+#[tokio::test]
+async fn forget_record_scrubs_body_bearing_wal_payloads_and_pre_images() {
+    let store = open_in_memory().await.expect("open");
+    let record = sample_record();
+    store.upsert(&record).await.expect("upsert");
+
+    let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
+    let upsert_op = seed_upsert_pre_image_leak(&conn, &record).await;
+
+    let outcome = store
+        .forget_record(&record.id)
+        .await
+        .expect("forget record");
+    assert_eq!(outcome.deleted_count, 1);
+
+    let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
+    assert_forget_scrubbed_prior_wal_and_kept_body_free_payload(
+        &conn,
+        &record,
+        upsert_op,
+        &outcome.operation_id,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn forget_record_replay_is_idempotent_after_primary_purge() {
+    let store = open_in_memory().await.expect("open");
+    let record = sample_record();
+    store.upsert(&record).await.expect("upsert");
+
+    let outcome = store
+        .forget_record(&record.id)
+        .await
+        .expect("first forget");
+    assert_eq!(outcome.deleted_count, 1);
+
+    let err = store
+        .forget_record(&record.id)
+        .await
+        .expect_err("second forget should see purged primary row");
+    assert!(matches!(err, StoreError::NotFound { id } if id == record.id.as_str()));
 }
 
 #[tokio::test]
