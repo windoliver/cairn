@@ -4,8 +4,8 @@
 
 use std::sync::Arc;
 
-use cairn_core::contract::memory_store::MemoryStore;
-use cairn_core::domain::{MemoryRecord, RecordId};
+use cairn_core::contract::memory_store::{ListArgs, MemoryStore};
+use cairn_core::domain::{MemoryRecord, RecordId, ScopeTuple};
 use cairn_core::wal::{OperationId, WalKind};
 use cairn_store_sqlite::record_wal::RecordWalRegistry;
 use cairn_store_sqlite::record_wal::payload::{
@@ -263,4 +263,83 @@ async fn forget_resolution_reports_codec_for_malformed_scope() {
             .await
             .expect_err("malformed scope rejects");
     assert!(matches!(err, StoreError::Codec(_)));
+}
+
+#[tokio::test]
+async fn forget_record_purges_primary_indexes_and_vectors() {
+    let store = open_in_memory().await.expect("open");
+    let record = sample_record();
+    let body = record.body.clone();
+    store.upsert(&record).await.expect("upsert");
+
+    let outcome = store
+        .forget_record(&record.id)
+        .await
+        .expect("forget record");
+    assert_eq!(outcome.deleted_count, 1);
+    assert_eq!(outcome.tombstones, vec![record.id.clone()]);
+
+    let listed = store.list(&ListArgs::default()).await.expect("list");
+    assert!(listed.records.is_empty(), "forgotten record must be invisible");
+
+    let conn = Arc::clone(store.raw_conn_for_admin().expect("connected"));
+    let record_id = record.id.as_str().to_owned();
+    let target_id = record.target_id.as_str().to_owned();
+    conn.call(move |c| {
+        let records: i64 = c.query_row(
+            "SELECT COUNT(*) FROM records WHERE target_id = ?1",
+            params![target_id],
+            |row| row.get(0),
+        )?;
+        let vectors: i64 = c.query_row(
+            "SELECT COUNT(*) FROM record_vectors WHERE record_id = ?1",
+            params![record_id],
+            |row| row.get(0),
+        )?;
+        let pending: i64 = c.query_row(
+            "SELECT COUNT(*) FROM pending_embeddings WHERE record_id = ?1",
+            params![record_id],
+            |row| row.get(0),
+        )?;
+        let fts_rows: i64 = c.query_row(
+            "SELECT COUNT(*) FROM records_fts WHERE body MATCH ?1",
+            params![body],
+            |row| row.get(0),
+        )?;
+        assert_eq!(records, 0);
+        assert_eq!(vectors, 0);
+        assert_eq!(pending, 0);
+        assert_eq!(fts_rows, 0);
+        Ok::<_, tokio_rusqlite::Error>(())
+    })
+    .await
+    .expect("physical purge assertions");
+}
+
+#[tokio::test]
+async fn forget_record_keeps_session_siblings_visible() {
+    let store = open_in_memory().await.expect("open");
+    let first = sample_record();
+    let mut sibling = sample_record();
+    sibling.id = RecordId::parse("01J00000000000000000000003").expect("record id");
+    sibling.target_id =
+        cairn_core::domain::TargetId::parse("01HQZX9F5N0000000000000003").expect("target");
+    sibling.body = "sibling body remains".to_owned();
+    sibling.scope = ScopeTuple {
+        session_id: first.scope.session_id.clone(),
+        user: first.scope.user.clone(),
+        agent: first.scope.agent.clone(),
+        ..ScopeTuple::default()
+    };
+
+    store.upsert(&first).await.expect("first upsert");
+    store.upsert(&sibling).await.expect("sibling upsert");
+    store
+        .forget_record(&first.id)
+        .await
+        .expect("forget first");
+
+    let listed = store.list(&ListArgs::default()).await.expect("list");
+    assert_eq!(listed.records.len(), 1);
+    assert_eq!(listed.records[0].id, sibling.id);
 }
