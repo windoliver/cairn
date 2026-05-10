@@ -320,12 +320,14 @@ fn now_secs() -> i64 {
 /// what makes the receipt atomic with the tombstone — neither half can be
 /// observed without the other.
 ///
-/// Idempotent: re-running after a Phase-A crash re-applies the same
-/// `UPDATE` (no-op if rows are already in the target state) and inserts a
-/// fresh receipt with the same `op_id`. The journal allows multiple rows
-/// per `op_id`; the materializer keeps them all.
+/// Phase A is atomic: the runner wraps this body in one `SQLite` txn, so
+/// the tombstone `UPDATE` and the `consent_journal` append commit
+/// together or not at all. A crashed Phase A leaves neither side effect;
+/// replay produces exactly one receipt per successful Phase-A commit.
+/// The `UPDATE` itself is idempotent — re-running over already-tombstoned
+/// rows is a no-op.
 fn mark_tombstone_and_emit_receipt(
-    tx: &mut Transaction<'_>,
+    tx: &Transaction<'_>,
     op_id: &OperationId,
     payload: &ForgetPayload,
 ) -> Result<(), StepBodyError> {
@@ -372,7 +374,7 @@ fn mark_tombstone_and_emit_receipt(
         expires_at: None,
     };
 
-    crate::consent::append(&*tx, &event)
+    crate::consent::append(tx, &event)
         .map_err(|e| StepBodyError::Failed(format!("consent append: {e}")))?;
     Ok(())
 }
@@ -439,14 +441,34 @@ fn primary_purge_for_target(tx: &Transaction<'_>, target: &str) -> Result<(), St
 /// snapshot.
 ///
 /// LIKE prefilter: target ids are ULIDs (`[0-9A-Z]{26}`) so they cannot
-/// contain `%` or `_` — no escaping needed. We treat the prefilter as
-/// authoritative: any `wal_steps.pre_image` whose CAST-to-TEXT contains
-/// the literal target id substring is rewritten in place. Snapshot bodies
-/// are JSON arrays of `{record_id, …}` produced by `stage_snapshot`, so a
-/// substring hit is a real reference (`record_id` values embed the
-/// `target_id`).
+/// contain `%` or `_` — no escaping needed. Any `wal_steps.pre_image`
+/// whose CAST-to-TEXT contains the literal target id substring is
+/// rewritten in place.
+///
+/// **Coverage in P0 is forward-defense.** `stage_snapshot` (the only
+/// step that currently writes `pre_image` blobs) projects
+/// `{record_id, version, active, tombstoned, tombstone_reason,
+/// body_hash}` — none of which carry body bytes and none of which
+/// embed the target id (`RecordId` and `TargetId` are independent
+/// ULIDs per
+/// `cairn_core::domain::record::tests::target_id_independent_of_id`).
+/// So the body-leakage invariant is already satisfied by construction
+/// for current snapshot `pre_image`s, and the LIKE prefilter on the raw
+/// target-id substring will not match any of them in practice.
+///
+/// This step body still runs because:
+/// 1. Future step bodies that stage `target_id`-bearing `pre_image`s
+///    will be caught.
+/// 2. It documents intent — the audit-invariant test (#58 Task 10)
+///    can grep for the target id substring with confidence that any
+///    matches would have been stubbed.
+///
+/// A follow-up (filed when issue #58 closes) may extend this to scrub
+/// `pre_image`s that reference any of the target's purged `record_id`s,
+/// but that requires capturing the record-id list at Phase A before
+/// `primary.purge` deletes the records — out of scope here.
 fn purge_wal_pre_images_for_target(
-    tx: &mut Transaction<'_>,
+    tx: &Transaction<'_>,
     self_op_id: &OperationId,
     payload: &ForgetPayload,
 ) -> Result<(), StepBodyError> {
