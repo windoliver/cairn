@@ -3,6 +3,7 @@
 pub mod actor_chain;
 pub mod consent;
 pub mod hot_memory;
+pub mod hot_memory_walker;
 pub mod index_drift;
 pub mod malformed;
 pub mod projection;
