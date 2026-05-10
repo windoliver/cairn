@@ -113,3 +113,40 @@ async fn bump_invalidates_cached_row() {
         "bump must move live watermarks past the cached snapshot"
     );
 }
+
+#[tokio::test]
+async fn tombstone_bumps_all_six_watermarks() {
+    use cairn_core::contract::memory_store::{MemoryStore, TombstoneReason};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = cairn_store_sqlite::open(dir.path().join("cairn.db"))
+        .await
+        .expect("open store");
+    let cache = SqliteHotPrefixCache::open(dir.path())
+        .await
+        .expect("open cache");
+
+    // Upsert a record so tombstone has something to target.
+    let mut rec = cairn_test_fixtures::sample_record(1);
+    rec.tags.retain(|t| t != "pinned");
+    store.upsert(&rec).await.expect("upsert");
+
+    let before = cache.current_watermarks().await.expect("wm");
+
+    store
+        .tombstone(&rec.id, TombstoneReason::Forget)
+        .await
+        .expect("tombstone");
+
+    let after = cache.current_watermarks().await.expect("wm");
+
+    assert!(
+        after.profile_evidence > before.profile_evidence,
+        "ProfileEvidence"
+    );
+    assert!(after.pinned > before.pinned, "Pinned");
+    assert!(after.purpose_index > before.purpose_index, "PurposeIndex");
+    assert!(after.summaries > before.summaries, "Summaries");
+    assert!(after.playbooks > before.playbooks, "Playbooks");
+    assert!(after.policy > before.policy, "Policy");
+}
