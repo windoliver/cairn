@@ -259,3 +259,19 @@ pub fn load_forget_payload_for_test(
         }),
     }
 }
+
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn save_purged_payload_for_test(
+    conn: &Connection,
+    op_id: &str,
+    payload: &PurgedPayload,
+) -> Result<(), StoreError> {
+    let op = OperationId::parse(op_id.to_owned()).map_err(|e| StoreError::Invariant {
+        what: format!("invalid test op id: {e}"),
+    })?;
+    save_payload(
+        conn,
+        &op,
+        &RecordWalPayload::Purged(Box::new(payload.clone())),
+    )
+}

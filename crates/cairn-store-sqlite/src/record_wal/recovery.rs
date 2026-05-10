@@ -48,40 +48,55 @@ impl StepBodyRegistry for RecordWalRegistry {
             .await
             .map_err(RecoveryError::Storage)?;
 
-        match (kind, payload) {
-            (WalKind::Upsert, RecordWalPayload::Upsert(payload)) => {
-                let locks = acquire_for_record(
-                    conn,
-                    &payload.record.scope,
-                    &payload.record.target_id,
-                    &self.incarnation,
-                    op_id.as_str(),
-                    "record_wal_recovery_upsert",
-                )
-                .await
-                .map_err(|e| RecoveryError::Invariant(format!("recovery lock failed: {e}")))?;
-                Ok(Some(Arc::new(RecordStepBody::new_upsert(*payload, locks))))
-            }
-            (WalKind::Expire, RecordWalPayload::Expire(payload)) => {
-                let locks = acquire_for_record(
-                    conn,
-                    &payload.scope,
-                    &payload.target_id,
-                    &self.incarnation,
-                    op_id.as_str(),
-                    "record_wal_recovery_expire",
-                )
-                .await
-                .map_err(|e| RecoveryError::Invariant(format!("recovery lock failed: {e}")))?;
-                Ok(Some(Arc::new(RecordStepBody::new_expire(*payload, locks))))
-            }
-            (WalKind::Upsert, RecordWalPayload::Expire(_)) => Err(RecoveryError::Invariant(
-                "record wal payload variant expire does not match wal kind upsert".to_owned(),
-            )),
-            (WalKind::Expire, RecordWalPayload::Upsert(_)) => Err(RecoveryError::Invariant(
-                "record wal payload variant upsert does not match wal kind expire".to_owned(),
-            )),
+        match kind {
+            WalKind::Upsert => match payload {
+                RecordWalPayload::Upsert(payload) => {
+                    let locks = acquire_for_record(
+                        conn,
+                        &payload.record.scope,
+                        &payload.record.target_id,
+                        &self.incarnation,
+                        op_id.as_str(),
+                        "record_wal_recovery_upsert",
+                    )
+                    .await
+                    .map_err(|e| RecoveryError::Invariant(format!("recovery lock failed: {e}")))?;
+                    Ok(Some(Arc::new(RecordStepBody::new_upsert(*payload, locks))))
+                }
+                RecordWalPayload::Expire(_) => Err(payload_mismatch("expire", "upsert")),
+                RecordWalPayload::ForgetRecord(_) => {
+                    Err(payload_mismatch("forget_record", "upsert"))
+                }
+                RecordWalPayload::Purged(_) => Err(payload_mismatch("purged", "upsert")),
+            },
+            WalKind::Expire => match payload {
+                RecordWalPayload::Expire(payload) => {
+                    let locks = acquire_for_record(
+                        conn,
+                        &payload.scope,
+                        &payload.target_id,
+                        &self.incarnation,
+                        op_id.as_str(),
+                        "record_wal_recovery_expire",
+                    )
+                    .await
+                    .map_err(|e| RecoveryError::Invariant(format!("recovery lock failed: {e}")))?;
+                    Ok(Some(Arc::new(RecordStepBody::new_expire(*payload, locks))))
+                }
+                RecordWalPayload::Upsert(_) => Err(payload_mismatch("upsert", "expire")),
+                RecordWalPayload::ForgetRecord(_) => {
+                    Err(payload_mismatch("forget_record", "expire"))
+                }
+                RecordWalPayload::Purged(_) => Err(payload_mismatch("purged", "expire")),
+            },
+            WalKind::ForgetRecord => Ok(None),
             _ => Ok(None),
         }
     }
+}
+
+fn payload_mismatch(payload_variant: &str, wal_kind: &str) -> RecoveryError {
+    RecoveryError::Invariant(format!(
+        "record wal payload variant {payload_variant} does not match wal kind {wal_kind}"
+    ))
 }
