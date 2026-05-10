@@ -7,6 +7,10 @@
 //! time; a later cache read is a hit only when every field still
 //! matches the live counter.
 
+use smallvec::SmallVec;
+
+use crate::domain::MemoryRecord;
+use crate::domain::taxonomy::MemoryKind;
 use serde::{Deserialize, Serialize};
 
 /// One bucket of the hot-prefix invalidation tree.
@@ -105,9 +109,103 @@ impl SourceWatermarks {
     }
 }
 
+/// Classify a record into the source classes whose watermarks must be
+/// bumped when this record is upserted, updated, or tombstoned.
+///
+/// The returned `SmallVec` is stack-allocated for the common case of ≤2
+/// classes; callers are expected to iterate it and call
+/// [`SourceWatermarks::bump`] once per class inside the same transaction.
+#[must_use]
+pub fn classify_record(r: &MemoryRecord) -> SmallVec<[SourceClass; 2]> {
+    let mut out = SmallVec::new();
+    let pinned = is_pinned(r);
+    match r.kind {
+        MemoryKind::User
+        | MemoryKind::Feedback
+        | MemoryKind::Entity
+        | MemoryKind::StrategySuccess
+        | MemoryKind::StrategyFailure => {
+            out.push(SourceClass::ProfileEvidence);
+            if pinned {
+                out.push(SourceClass::Pinned);
+            }
+        }
+        MemoryKind::Project if pinned => out.push(SourceClass::Pinned),
+        MemoryKind::Playbook => out.push(SourceClass::Playbooks),
+        _ => {}
+    }
+    out
+}
+
+/// Mirror of `cairn-cli/src/verbs/assemble_hot.rs:457 is_pinned_record`.
+/// A record is pinned when it carries the `"pinned"` tag **or** when
+/// `extra_frontmatter["pinned"]` is the JSON boolean `true`.
+fn is_pinned(r: &MemoryRecord) -> bool {
+    r.tags.iter().any(|tag| tag == "pinned")
+        || r.extra_frontmatter
+            .get("pinned")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::record::tests_export::sample_record;
+    use crate::domain::taxonomy::MemoryKind;
+
+    /// Build a test record of the given kind, optionally setting the canonical
+    /// "pinned" tag so that `is_pinned` returns true.
+    fn rec(kind: MemoryKind, pinned: bool) -> crate::domain::MemoryRecord {
+        let mut r = sample_record();
+        r.kind = kind;
+        if pinned {
+            // Canonical pin predicate: tag "pinned" — mirrors
+            // cairn-cli/src/verbs/assemble_hot.rs:457 `is_pinned_record`.
+            r.tags.push("pinned".to_owned());
+        }
+        r
+    }
+
+    #[test]
+    fn classify_user_pinned_emits_profile_and_pinned() {
+        let classes = classify_record(&rec(MemoryKind::User, true));
+        assert_eq!(
+            classes.into_vec(),
+            vec![SourceClass::ProfileEvidence, SourceClass::Pinned]
+        );
+    }
+
+    #[test]
+    fn classify_user_unpinned_emits_only_profile_evidence() {
+        let classes = classify_record(&rec(MemoryKind::User, false));
+        assert_eq!(classes.into_vec(), vec![SourceClass::ProfileEvidence]);
+    }
+
+    #[test]
+    fn classify_project_pinned_emits_only_pinned() {
+        let classes = classify_record(&rec(MemoryKind::Project, true));
+        assert_eq!(classes.into_vec(), vec![SourceClass::Pinned]);
+    }
+
+    #[test]
+    fn classify_project_unpinned_emits_nothing() {
+        let classes = classify_record(&rec(MemoryKind::Project, false));
+        assert!(classes.is_empty());
+    }
+
+    #[test]
+    fn classify_playbook_emits_playbooks() {
+        let classes = classify_record(&rec(MemoryKind::Playbook, false));
+        assert_eq!(classes.into_vec(), vec![SourceClass::Playbooks]);
+    }
+
+    #[test]
+    fn classify_unrelated_kind_emits_nothing() {
+        // `Reference` is not a profile-evidence or playbook kind.
+        let classes = classify_record(&rec(MemoryKind::Reference, false));
+        assert!(classes.is_empty());
+    }
 
     #[test]
     fn watermarks_match_is_reflexive() {

@@ -59,6 +59,7 @@ chrono = { workspace = true }
 jsonschema = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "time"] }
 twox-hash = { workspace = true }
+smallvec = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }
