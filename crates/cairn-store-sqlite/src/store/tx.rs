@@ -47,6 +47,27 @@ pub struct StoreTx<'a> {
 }
 
 impl StoreTx<'_> {
+    /// Round 9 review fix: returns `true` if any row (active or
+    /// tombstoned) in the records table has ever owned this `target_id`.
+    /// `flush apply rename` uses this to reject destinations that would
+    /// hijack a retired lineage and merge unrelated histories under one
+    /// target.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Sqlite`] on SQL failures.
+    pub fn target_id_ever_used(&self, target: &TargetId) -> Result<bool, StoreError> {
+        let row: Option<i64> = self
+            .tx
+            .query_row(
+                "SELECT 1 FROM records WHERE target_id = ?1 LIMIT 1",
+                params![target.as_str()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(row.is_some())
+    }
+
     /// Snapshot-read the active, non-tombstoned row for one target inside the
     /// caller's transaction.
     ///

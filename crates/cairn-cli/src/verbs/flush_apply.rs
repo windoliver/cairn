@@ -355,7 +355,11 @@ fn apply_rename(
             id: source_target.as_str().to_owned(),
         });
     };
-    if tx.get_active_by_target(new_target)?.is_some() {
+    // Round 9 review fix: rejecting only the live destination left a
+    // hole — a retired (tombstoned) target_id could be reused, merging
+    // unrelated histories under one lineage. The destination must be
+    // entirely fresh.
+    if tx.target_id_ever_used(new_target)? {
         return Err(StoreError::RenameTargetConflict {
             target_id: new_target.as_str().to_owned(),
         });
