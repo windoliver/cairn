@@ -43,6 +43,9 @@ pub enum DropReason {
 }
 
 /// Result of trying to emit one local sensor event.
+// Keep the emitted event by value: this short-lived adapter return type is
+// matched directly by integration tests and callers using the public API.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum EmitOutcome {
     /// Observation became a validated capture event.

@@ -61,8 +61,10 @@ fn enabled_hook_sensor_emits_valid_capture_event() {
 
 #[test]
 fn disabled_hook_sensor_drops_without_event() {
-    let mut config = LocalSensorConfig::default();
-    config.hooks = SensorSettings::disabled();
+    let config = LocalSensorConfig {
+        hooks: SensorSettings::disabled(),
+        ..Default::default()
+    };
     let observation = HookObservation {
         event_id: id("01ARZ3NDEKTSV4RRFFQ69G5FAW"),
         captured_at: ts(),
