@@ -581,10 +581,10 @@ impl ServerHandler for CairnMcpHandler {
 
 /// Dispatch the `search` tool against a wired store.
 ///
-/// Parses the MCP tool arguments into [`cairn_core::generated::verbs::search::SearchArgs`],
+/// Parses the MCP tool arguments into the generated search request args,
 /// derives the capability set from config, calls
 /// [`cairn_core::verbs::search::run`], and serializes the result into a
-/// [`CallToolResult`].
+/// generated response envelope inside a [`CallToolResult`].
 #[allow(
     clippy::too_many_lines,
     reason = "linear arg→request→outcome→envelope flow; splitting reduces clarity"
@@ -594,17 +594,22 @@ async fn handle_search(
     config: CairnConfig,
     arguments: Option<serde_json::Map<String, serde_json::Value>>,
 ) -> CallToolResult {
-    use cairn_core::generated::verbs::search::{SearchArgs, SearchArgsMode};
+    use cairn_core::generated::envelope::{RequestArgs, RequestVerb, ResponseVerb};
+    use cairn_core::generated::verbs::search::SearchArgsMode;
 
-    // Parse args from the MCP tool argument map.
-    let args_json = serde_json::Value::Object(arguments.unwrap_or_default());
-    let args: SearchArgs = match serde_json::from_value(args_json) {
-        Ok(a) => a,
-        Err(e) => {
-            return CallToolResult::error(vec![Content::text(format!(
-                "cairn search: invalid args: {e}"
-            ))]);
+    // Parse args from the MCP tool argument map through the generated
+    // envelope adapter so parse failures use the canonical Response shape.
+    let args = match crate::verb_envelope::parse_args(RequestVerb::Search, arguments) {
+        Ok(RequestArgs::Search(args)) => args,
+        Ok(_) => {
+            let response = crate::verb_envelope::invalid_args_response(
+                ResponseVerb::Search,
+                "args",
+                "expected search arguments",
+            );
+            return crate::verb_envelope::call_result_from_response(response);
         }
+        Err(response) => return crate::verb_envelope::call_result_from_response(response),
     };
 
     // Map IDL mode to core dispatcher mode.
@@ -614,7 +619,12 @@ async fn handle_search(
         SearchArgsMode::Hybrid => cairn_core::verbs::search::SearchMode::Hybrid,
         // Forward-compat: reject unknown future variants fail-closed.
         _ => {
-            return CallToolResult::error(vec![Content::text("cairn search: unknown mode")]);
+            let response = crate::verb_envelope::invalid_args_response(
+                ResponseVerb::Search,
+                "mode",
+                "unknown search mode",
+            );
+            return crate::verb_envelope::call_result_from_response(response);
         }
     };
 
@@ -649,41 +659,43 @@ async fn handle_search(
         explain: args.explain.unwrap_or(false),
     };
 
-    let outcome =
-        match cairn_core::verbs::search::run(store.as_ref(), &config, &caps, request).await {
-            Ok(o) => o,
-            Err(cairn_core::verbs::search::SearchError::CapabilityUnavailable { capability }) => {
-                let remediation = cairn_core::status::remediation_for(capability);
-                let msg = match remediation {
-                    Some(hint) => format!(
-                        "cairn search: capability unavailable: {capability}\n  hint: {hint}"
-                    ),
-                    None => format!("cairn search: capability unavailable: {capability}"),
-                };
-                return CallToolResult::error(vec![Content::text(msg)]);
-            }
-            Err(cairn_core::verbs::search::SearchError::InvalidArgs { reason }) => {
-                return CallToolResult::error(vec![Content::text(format!(
-                    "cairn search: invalid args: {reason}"
-                ))]);
-            }
-            Err(cairn_core::verbs::search::SearchError::InvalidFilter { reason }) => {
-                return CallToolResult::error(vec![Content::text(format!(
-                    "cairn search: invalid filter: {reason}"
-                ))]);
-            }
-            Err(cairn_core::verbs::search::SearchError::Store(e)) => {
-                return CallToolResult::error(vec![Content::text(format!(
-                    "cairn search: store error: {e}"
-                ))]);
-            }
-            // Forward-compat: surface unknown error variants as internal errors.
-            Err(e) => {
-                return CallToolResult::error(vec![Content::text(format!(
-                    "cairn search: internal error: {e}"
-                ))]);
-            }
-        };
+    let outcome = match cairn_core::verbs::search::run(store.as_ref(), &config, &caps, request)
+        .await
+    {
+        Ok(o) => o,
+        Err(cairn_core::verbs::search::SearchError::CapabilityUnavailable { capability }) => {
+            let response = crate::verb_envelope::capability_unavailable_response(
+                ResponseVerb::Search,
+                capability,
+            );
+            return crate::verb_envelope::call_result_from_response(response);
+        }
+        Err(cairn_core::verbs::search::SearchError::InvalidArgs { reason }) => {
+            let response =
+                crate::verb_envelope::invalid_args_response(ResponseVerb::Search, "args", &reason);
+            return crate::verb_envelope::call_result_from_response(response);
+        }
+        Err(cairn_core::verbs::search::SearchError::InvalidFilter { reason }) => {
+            let response =
+                crate::verb_envelope::invalid_filter_response(ResponseVerb::Search, &reason);
+            return crate::verb_envelope::call_result_from_response(response);
+        }
+        Err(cairn_core::verbs::search::SearchError::Store(e)) => {
+            let response = crate::verb_envelope::aborted_internal(
+                ResponseVerb::Search,
+                &format!("store error: {e}"),
+            );
+            return crate::verb_envelope::call_result_from_response(response);
+        }
+        // Forward-compat: surface unknown error variants as internal errors.
+        Err(e) => {
+            let response = crate::verb_envelope::aborted_internal(
+                ResponseVerb::Search,
+                &format!("internal error: {e}"),
+            );
+            return crate::verb_envelope::call_result_from_response(response);
+        }
+    };
 
     search_outcome_to_result(outcome, mode)
 }
@@ -695,8 +707,9 @@ fn search_outcome_to_result(
     mode: cairn_core::verbs::search::SearchMode,
 ) -> CallToolResult {
     use cairn_core::generated::common::Ulid;
+    use cairn_core::generated::envelope::{ResponseData, ResponseVerb};
     use cairn_core::generated::verbs::search::{Hit, HitTrust, ScoreExplain, SearchData};
-    use cairn_core::policy_trace::to_wire_exclusions;
+    use cairn_core::policy_trace::{to_wire, to_wire_exclusions};
 
     let hits: Vec<Hit> = outcome
         .candidates
@@ -719,9 +732,9 @@ fn search_outcome_to_result(
                 semantic_rank: e
                     .semantic_rank
                     .map(|r| i64::try_from(r).unwrap_or(i64::MAX)),
-                rrf_score: e.rrf_score,
-                cosine: e.cosine,
-                final_score: e.final_score,
+                rrf_score: finite_or_zero(e.rrf_score),
+                cosine: finite_option(e.cosine),
+                final_score: finite_or_zero(e.final_score),
             })
             .collect()
     });
@@ -746,12 +759,12 @@ fn search_outcome_to_result(
         degraded_legs,
     };
 
-    match serde_json::to_string(&data) {
-        Ok(s) => CallToolResult::success(vec![Content::text(s)]),
-        Err(e) => CallToolResult::error(vec![Content::text(format!(
-            "cairn search: serialize error: {e}"
-        ))]),
-    }
+    let response = crate::verb_envelope::committed(
+        ResponseVerb::Search,
+        ResponseData::Search(data),
+        to_wire(&outcome.policy_trace),
+    );
+    crate::verb_envelope::call_result_from_response(response)
 }
 
 /// Stub dispatcher returned while real verb wiring is pending.
@@ -797,7 +810,21 @@ fn hit_score(
         // Keyword + future variants (SearchMode is #[non_exhaustive]).
         _ => c.bm25,
     };
-    if raw.is_finite() { raw } else { 0.0 }
+    finite_or_zero(raw)
+}
+
+/// Replace non-finite floats with zero before writing generated JSON
+/// envelopes. JSON Schema numbers cannot represent NaN or infinity.
+#[inline]
+#[must_use]
+fn finite_or_zero(value: f64) -> f64 {
+    if value.is_finite() { value } else { 0.0 }
+}
+
+#[inline]
+#[must_use]
+fn finite_option(value: Option<f64>) -> Option<f64> {
+    value.map(finite_or_zero)
 }
 
 /// Convert a domain [`cairn_core::search::DegradedLeg`] into the IDL

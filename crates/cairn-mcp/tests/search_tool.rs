@@ -19,7 +19,9 @@ use cairn_core::contract::memory_store::{
 use cairn_core::contract::version::{ContractVersion, VersionRange};
 use cairn_core::domain::record::MemoryRecord;
 use cairn_core::domain::{RecordId, TargetId};
-use cairn_core::generated::envelope::{Response, ResponseData, ResponseStatus, ResponseVerb};
+use cairn_core::generated::envelope::{
+    Response, ResponseData, ResponsePolicyTraceResult, ResponseStatus, ResponseVerb,
+};
 use cairn_mcp::handler::CairnMcpHandler;
 use rmcp::ServiceExt as _;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -228,10 +230,26 @@ async fn search_tool_with_store_returns_success_envelope() {
         26,
         "operation_id must be a ULID"
     );
-    assert!(
-        envelope.policy_trace.is_empty(),
-        "empty fixture store should not add policy trace entries"
+    assert_eq!(
+        envelope.policy_trace.len(),
+        3,
+        "successful search should forward core policy trace entries"
     );
+    assert_eq!(envelope.policy_trace[0].gate, "search.scope");
+    assert!(matches!(
+        envelope.policy_trace[0].result,
+        ResponsePolicyTraceResult::Pass
+    ));
+    assert_eq!(envelope.policy_trace[1].gate, "search.capability");
+    assert!(matches!(
+        envelope.policy_trace[1].result,
+        ResponsePolicyTraceResult::Pass
+    ));
+    assert_eq!(envelope.policy_trace[2].gate, "search.read_filter");
+    assert!(matches!(
+        envelope.policy_trace[2].result,
+        ResponsePolicyTraceResult::Pass
+    ));
     assert!(envelope.error.is_none());
     assert!(envelope.target.is_none());
 
