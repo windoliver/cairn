@@ -207,32 +207,76 @@ impl StoreTx<'_> {
     }
 
     /// Persist session metadata fields in place and treat the patch as session
-    /// activity by bumping `last_activity_at`.
+    /// activity by bumping `last_activity_at`. Use this for in-band user
+    /// edits; for out-of-band review-time mutations (e.g. `flush apply`)
+    /// call [`Self::update_session_metadata_preserve_activity`] so the
+    /// session resolver does not see review activity as a fresh user
+    /// signal.
     ///
     /// # Errors
     ///
     /// Returns [`StoreError::Codec`] when tag serialization fails and
     /// [`StoreError::Sqlite`] for SQL failures.
     pub fn update_session_metadata(&self, session: &Session) -> Result<(), StoreError> {
-        let now_ms = current_unix_ms();
+        self.update_session_metadata_inner(session, true)
+    }
+
+    /// Re-loop r8 finding 2: variant of [`Self::update_session_metadata`]
+    /// that preserves the existing `last_activity_at`. Out-of-band
+    /// flush-apply edits must not resurrect or prolong an idle session
+    /// for the purposes of `find_active_session` / resolver auto-pick.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Codec`] when tag serialization fails and
+    /// [`StoreError::Sqlite`] for SQL failures.
+    pub fn update_session_metadata_preserve_activity(
+        &self,
+        session: &Session,
+    ) -> Result<(), StoreError> {
+        self.update_session_metadata_inner(session, false)
+    }
+
+    fn update_session_metadata_inner(
+        &self,
+        session: &Session,
+        bump_activity: bool,
+    ) -> Result<(), StoreError> {
         let tags_json = if session.tags.is_empty() {
             None
         } else {
             Some(serde_json::to_string(&session.tags)?)
         };
-        self.tx.execute(
-            "UPDATE sessions \
-                SET title = ?1, channel = ?2, priority = ?3, tags = ?4, last_activity_at = ?5 \
-              WHERE session_id = ?6 AND ended_at IS NULL",
-            params![
-                session.title.as_str(),
-                session.channel.as_deref(),
-                session.priority.as_deref(),
-                tags_json,
-                now_ms,
-                session.id.as_str(),
-            ],
-        )?;
+        if bump_activity {
+            let now_ms = current_unix_ms();
+            self.tx.execute(
+                "UPDATE sessions \
+                    SET title = ?1, channel = ?2, priority = ?3, tags = ?4, \
+                        last_activity_at = ?5 \
+                  WHERE session_id = ?6 AND ended_at IS NULL",
+                params![
+                    session.title.as_str(),
+                    session.channel.as_deref(),
+                    session.priority.as_deref(),
+                    tags_json,
+                    now_ms,
+                    session.id.as_str(),
+                ],
+            )?;
+        } else {
+            self.tx.execute(
+                "UPDATE sessions \
+                    SET title = ?1, channel = ?2, priority = ?3, tags = ?4 \
+                  WHERE session_id = ?5 AND ended_at IS NULL",
+                params![
+                    session.title.as_str(),
+                    session.channel.as_deref(),
+                    session.priority.as_deref(),
+                    tags_json,
+                    session.id.as_str(),
+                ],
+            )?;
+        }
         Ok(())
     }
 

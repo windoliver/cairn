@@ -386,7 +386,24 @@ fn apply_record_patch(
     let prior_hash = BodyHash::compute(&stored.record.body);
     let prior_signature = stored.record.signature.as_str().to_owned();
     let target_label = format!("record:{}", target.as_str());
+    let prior_body = stored.record.body.clone();
     stored.record.body = apply_str_replacements(&stored.record.body, replacements, &target_label)?;
+    // Re-loop r8 finding 1: a patch whose replacements cancel back to
+    // the original body (or each `old == new`) would otherwise hit the
+    // store's same-body `reproject_in_place` branch and silently
+    // overwrite the original author-signed row with the flush-mutated
+    // sentinel. Refuse the no-op so the pristine pre-patch row is
+    // preserved as history.
+    if stored.record.body == prior_body {
+        return Err(StoreError::Invariant {
+            what: format!(
+                "patch for record `{}` is a no-op (post-replacement body equals \
+                 pre-patch body); refusing rather than overwriting the original \
+                 author-signed row in place",
+                target.as_str(),
+            ),
+        });
+    }
     stored.record.updated_at = current_timestamp()?;
     // Re-loop round 3: replace the author signature with the well-known
     // flush-mutated sentinel so downstream verifiers cannot treat the
@@ -427,7 +444,7 @@ fn apply_session_patch(
     for replacement in replacements {
         apply_one_session_replacement(&mut session, replacement, session_id)?;
     }
-    tx.update_session_metadata(&session)?;
+    tx.update_session_metadata_preserve_activity(&session)?;
     let post_state = SessionPatchDocument::from(&session);
     tx.append_session_metadata_audit(
         session_id,
@@ -682,6 +699,13 @@ fn apply_str_replacements(
         if replacement.old.is_empty() {
             return Err(StoreError::Invariant {
                 what: format!("patch replacement for {target_label} cannot use an empty `old`"),
+            });
+        }
+        if replacement.old == replacement.new {
+            return Err(StoreError::Invariant {
+                what: format!(
+                    "patch replacement for {target_label} is a no-op (`old` equals `new`)"
+                ),
             });
         }
         current = apply_one_replacement(&current, replacement, target_label)?;
