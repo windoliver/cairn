@@ -45,7 +45,7 @@ pub fn emit(config: &LocalSensorConfig, observation: ClipboardObservation) -> Em
         };
     }
 
-    let sanitized_bytes = if observation.mime_type == TEXT_PLAIN {
+    let (sanitized_bytes, payload_byte_len) = if observation.mime_type == TEXT_PLAIN {
         let Ok(text) = std::str::from_utf8(&observation.bytes) else {
             return EmitOutcome::Dropped {
                 sensor: SensorKind::Clipboard,
@@ -53,7 +53,11 @@ pub fn emit(config: &LocalSensorConfig, observation: ClipboardObservation) -> Em
             };
         };
         match sanitize_text_payload(text) {
-            PolicyAction::Sanitized(text) => text.into_bytes(),
+            PolicyAction::Sanitized(text) => {
+                let sanitized_bytes = text.into_bytes();
+                let byte_len = sanitized_bytes.len();
+                (sanitized_bytes, byte_len)
+            }
             PolicyAction::Rejected(reason) => {
                 return EmitOutcome::Dropped {
                     sensor: SensorKind::Clipboard,
@@ -62,7 +66,7 @@ pub fn emit(config: &LocalSensorConfig, observation: ClipboardObservation) -> Em
             }
         }
     } else if observation.metadata_only {
-        Vec::new()
+        (Vec::new(), observation.bytes.len())
     } else {
         return EmitOutcome::Dropped {
             sensor: SensorKind::Clipboard,
@@ -70,7 +74,7 @@ pub fn emit(config: &LocalSensorConfig, observation: ClipboardObservation) -> Em
         };
     };
 
-    let Ok(byte_len) = u64::try_from(sanitized_bytes.len()) else {
+    let Ok(byte_len) = u64::try_from(payload_byte_len) else {
         return EmitOutcome::Dropped {
             sensor: SensorKind::Clipboard,
             reason: DropReason::MalformedObservation(

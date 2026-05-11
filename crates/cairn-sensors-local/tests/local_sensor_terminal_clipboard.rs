@@ -179,9 +179,38 @@ fn clipboard_text_redacts_before_hashing_and_emits_valid_event() {
 }
 
 #[test]
-fn clipboard_drops_unsupported_mime_without_metadata_only() {
+fn clipboard_metadata_only_non_text_reports_original_byte_len_and_hashes_empty_payload() {
     let observation = ClipboardObservation {
         event_id: id("01ARZ3NDEKTSV4RRFFQ69G5FB3"),
+        captured_at: ts(),
+        mime_type: "image/png".to_owned(),
+        bytes: vec![1, 2, 3, 4, 5],
+        metadata_only: true,
+        refs: None,
+    };
+
+    let event = emitted(clipboard::emit(&enabled_config(), observation));
+
+    assert_eq!(event.sensor_id.as_str(), "snr:local:clipboard:default:v1");
+    assert_eq!(event.source_family, SourceFamily::Clipboard);
+    assert_eq!(event.payload_hash.as_str(), hash(b""));
+    match &event.payload {
+        CapturePayload::Clipboard {
+            mime_type,
+            byte_len,
+        } => {
+            assert_eq!(mime_type, "image/png");
+            assert_eq!(*byte_len, 5);
+        }
+        other => panic!("unexpected payload: {other:?}"),
+    }
+    event.validate_for_capture().expect("valid event");
+}
+
+#[test]
+fn clipboard_drops_unsupported_mime_without_metadata_only() {
+    let observation = ClipboardObservation {
+        event_id: id("01ARZ3NDEKTSV4RRFFQ69G5FB4"),
         captured_at: ts(),
         mime_type: "application/octet-stream".to_owned(),
         bytes: vec![1, 2, 3],
