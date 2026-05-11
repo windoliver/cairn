@@ -39,6 +39,7 @@ pub mod provenance;
 pub mod record;
 pub mod scope;
 pub mod session;
+pub mod source_ref;
 pub mod target_id;
 pub mod taxonomy;
 pub mod time;
@@ -72,6 +73,7 @@ pub use projection::{
 };
 pub use provenance::Provenance;
 pub use record::{MemoryRecord, RecordId};
+pub use source_ref::{SourceRef, validate_source_refs};
 pub use scope::ScopeTuple;
 pub use session::{
     DEFAULT_IDLE_WINDOW_SECS, LastActiveSession, Session, SessionDecision, SessionId,

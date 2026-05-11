@@ -202,6 +202,7 @@ fn provenance_from_event(event: &CaptureEvent) -> Provenance {
         source_hash: event.payload_hash.as_str().to_owned(),
         consent_ref: "consent:pending".to_owned(),
         llm_id_if_any: None,
+        source_refs: Vec::new(),
     }
 }
 

@@ -124,6 +124,7 @@ pub fn summarize_turn(
         source_hash: format!("sha256:{}", "0".repeat(64)),
         consent_ref: "consent:pending".to_owned(),
         llm_id_if_any: None,
+        source_refs: Vec::new(),
     };
     let scope = ScopeTuple {
         session_id: Some(session_id.as_str().to_owned()),
