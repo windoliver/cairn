@@ -536,6 +536,8 @@ async fn run_checks_emits_broken_actor_chain_warning_for_revoked_author() {
         author_states: &states,
         unresolvable_authors: &std::collections::HashSet::new(),
         consent_lookup: None,
+        vault_root: None,
+        hot_body_loader: None,
     };
 
     let data = run_checks(&inputs).await;

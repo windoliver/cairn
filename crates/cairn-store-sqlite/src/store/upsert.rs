@@ -169,6 +169,16 @@ pub(crate) fn upsert_in_tx(
     let plan = plan_upsert_in_tx(tx, record)?;
     stage_upsert_cow_in_tx(tx, record, &plan)?;
     activate_upsert_in_tx(tx, &plan)?;
+    // Hot-prefix cache invalidation (issue #83). Only the
+    // content-changed path bumps — same-body idempotent re-ingest
+    // does not alter downstream visibility under main's COW design
+    // (it no longer reprojects metadata). On supersession (prior row
+    // existed), bump every class pessimistically because the prior
+    // row's classification is unknown at this layer. See codex round
+    // 1 finding 1 + round 2 finding 2.
+    if plan.content_changed {
+        bump_hot_prefix_watermarks(tx, record, plan.prior_record_id.is_some())?;
+    }
     Ok(UpsertOutcome {
         record_id: plan.outcome_record_id,
         target_id: plan.target_id,
@@ -557,6 +567,61 @@ fn insert_row_with_active(
             active,
         )?;
     }
+    Ok(())
+}
+
+/// Bump every hot-prefix source watermark this record affects, inside the
+/// caller's open transaction.
+///
+/// Called on the content-changed (and same-body reproject) path of
+/// [`activate_upsert_in_tx`] so the bump is atomic with the record write
+/// (brief invariant 5; see issue #83). The classifier
+/// ([`cairn_core::domain::hot_prefix::classify_record`]) is the single
+/// source of truth for which classes a record affects.
+///
+/// `is_supersession` true (a prior row existed under the same `target_id`)
+/// triggers a pessimistic bump-all because the prior row's classification
+/// is unknown at this layer — codex review round 1 finding 1 + round 2
+/// finding 2.
+pub(crate) fn bump_hot_prefix_watermarks(
+    tx: &Transaction<'_>,
+    record: &MemoryRecord,
+    is_supersession: bool,
+) -> Result<(), StoreError> {
+    let now_ms = current_unix_ms();
+    if is_supersession {
+        // Pessimistic bump-all: prior row's classification is unknown
+        // at this layer without re-deserializing record_json. Bump every
+        // class so any cache snapshot taken before this write is forced
+        // to reassemble. See codex review round 1 finding 1.
+        tx.execute(
+            "UPDATE hot_source_watermarks SET watermark = watermark + 1, \
+             updated_at_ms = ?1",
+            params![now_ms],
+        )?;
+        return Ok(());
+    }
+    let classes = cairn_core::domain::hot_prefix::classify_record(record);
+    if classes.is_empty() {
+        return Ok(());
+    }
+    let placeholders = (0..classes.len())
+        .map(|i| format!("?{}", i + 2))
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "UPDATE hot_source_watermarks SET watermark = watermark + 1, \
+         updated_at_ms = ?1 WHERE class IN ({placeholders})"
+    );
+    let mut stmt = tx.prepare(&sql)?;
+    let class_strs: Vec<String> = classes.iter().map(|c| c.as_db_str().to_owned()).collect();
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(now_ms)];
+    for s in &class_strs {
+        params.push(Box::new(s.clone()));
+    }
+    let params_refs: Vec<&dyn rusqlite::ToSql> =
+        params.iter().map(std::convert::AsRef::as_ref).collect();
+    stmt.execute(params_refs.as_slice())?;
     Ok(())
 }
 

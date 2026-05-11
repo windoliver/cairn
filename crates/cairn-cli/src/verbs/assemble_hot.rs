@@ -33,6 +33,55 @@ const DEFAULT_ASSEMBLE_ISSUER: &str = "agt:cairn-cli:default:writer:v1";
 const DEFAULT_TENANT: &str = "default";
 const ASSEMBLE_ENTITY: &str = "ingest";
 
+/// In-process fallback cache used when `SqliteHotPrefixCache::open`
+/// fails (e.g., transient `SQLite` error during runtime). Always misses
+/// and always returns default watermarks so `cached_assemble` falls
+/// through to direct assembly.
+#[derive(Debug, Default)]
+struct NoopHotPrefixCache;
+
+#[async_trait::async_trait]
+impl cairn_core::contract::hot_prefix_cache::HotPrefixCache for NoopHotPrefixCache {
+    async fn current_watermarks(
+        &self,
+    ) -> Result<
+        cairn_core::domain::hot_prefix::SourceWatermarks,
+        cairn_core::contract::hot_prefix_cache::CacheError,
+    > {
+        Ok(cairn_core::domain::hot_prefix::SourceWatermarks::default())
+    }
+
+    async fn get(
+        &self,
+        _agent: &cairn_core::domain::Identity,
+        _recipe_hash: &str,
+    ) -> Result<
+        Option<cairn_core::contract::hot_prefix_cache::CachedPrefix>,
+        cairn_core::contract::hot_prefix_cache::CacheError,
+    > {
+        Ok(None)
+    }
+
+    async fn put(
+        &self,
+        _agent: &cairn_core::domain::Identity,
+        _recipe_hash: &str,
+        _entry: &cairn_core::contract::hot_prefix_cache::CachedPrefix,
+    ) -> Result<(), cairn_core::contract::hot_prefix_cache::CacheError> {
+        Ok(())
+    }
+
+    async fn bump(
+        &self,
+        _classes: &[cairn_core::domain::hot_prefix::SourceClass],
+    ) -> Result<
+        cairn_core::domain::hot_prefix::SourceWatermarks,
+        cairn_core::contract::hot_prefix_cache::CacheError,
+    > {
+        Ok(cairn_core::domain::hot_prefix::SourceWatermarks::default())
+    }
+}
+
 struct ReadAuthorization {
     operation_id: Ulid,
     scope: ScopeTuple,
@@ -100,6 +149,10 @@ pub fn run(sub: &ArgMatches, vault_root: PathBuf, config: CairnConfig) -> ExitCo
     response_exit_code(&resp)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "dispatch fans through bootstrap, cache open, pre-load snapshot, body load, cached_assemble, explain"
+)]
 async fn run_async(args: AssembleHotArgs, vault_root: PathBuf, config: CairnConfig) -> Response {
     let ctx =
         match super::signed::open_context(ResponseVerb::AssembleHot, &vault_root, config).await {
@@ -118,6 +171,40 @@ async fn run_async(args: AssembleHotArgs, vault_root: PathBuf, config: CairnConf
             "assemble_hot recipe exceeds max segment count",
         );
     }
+
+    // Open cache + metrics sink. Both failures degrade gracefully:
+    // on cache open failure, fall back to direct assembly (no caching
+    // for this call). On metrics open failure, use a no-op sink so
+    // the verb still succeeds.
+    let cache: Box<dyn cairn_core::contract::hot_prefix_cache::HotPrefixCache> =
+        match cairn_store_sqlite::SqliteHotPrefixCache::open(&ctx.vault_root).await {
+            Ok(c) => Box::new(c),
+            Err(e) => {
+                tracing::warn!(error = %e, "hot-prefix cache open failed; bypassing for this call");
+                Box::new(NoopHotPrefixCache)
+            }
+        };
+    let metrics: Box<dyn cairn_core::contract::metrics::MetricsSink> =
+        match crate::metrics::JsonlMetricsSink::open(&ctx.vault_root).await {
+            Ok(s) => Box::new(s),
+            Err(e) => {
+                tracing::warn!(error = %e, "metrics sink open failed; using noop");
+                Box::new(cairn_core::contract::metrics::NoopMetricsSink)
+            }
+        };
+
+    // Codex review round 3 finding 1: capture (watermarks, fs_fingerprint)
+    // BEFORE load_hot_bodies. cached_assemble compares this pre-load
+    // snapshot to its own post-assembly snapshot; any mutation that
+    // commits during body loading or assembly is detected and the put
+    // is skipped to avoid poisoning the cache.
+    let pre_load = cairn_core::verbs::assemble_hot::cached::pre_load_snapshot(
+        cache.as_ref(),
+        Some(&ctx.vault_root),
+    )
+    .await
+    .ok();
+
     let loaded = match load_hot_bodies(
         &ctx.store,
         &ctx.vault_root,
@@ -132,11 +219,32 @@ async fn run_async(args: AssembleHotArgs, vault_root: PathBuf, config: CairnConf
         Err(resp) => return merge_policy_trace(read_policy_trace(&auth, 0, &[]), resp),
     };
     let policy_trace = read_policy_trace(&auth, loaded.files, &loaded.records);
-    match cairn_core::verbs::assemble_hot::assemble_hot_from_bodies(
+
+    let vault_id = std::fs::read_to_string(ctx.vault_root.join(".cairn/vault.id"))
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+
+    // Bodies are loaded eagerly so the policy trace records the same
+    // records on hit and miss. A future refactor could push body
+    // loading into the cached_assemble closure to skip the work on
+    // hits — see issue #83 follow-up.
+    let bodies_for_closure = loaded.bodies;
+
+    match cairn_core::verbs::assemble_hot::cached::cached_assemble(
         &ctx.config.vault.hot_memory,
-        loaded.bodies,
+        &auth.issuer,
+        &vault_id,
+        Some(&ctx.vault_root),
+        args.session_id.as_deref(),
+        pre_load.as_ref(),
+        cache.as_ref(),
+        metrics.as_ref(),
         Some(budget),
-    ) {
+        move || Ok(bodies_for_closure),
+    )
+    .await
+    {
         Ok(mut data) => {
             // `--explain` (Args.explain) layers a typed per-step debug
             // trace on top of the assembled prefix. The trace runs the
@@ -940,4 +1048,61 @@ fn read_sequence() -> u64 {
         .unwrap_or_default()
         .as_millis();
     u64::try_from(millis).unwrap_or(u64::MAX)
+}
+
+/// Sync, filesystem-only body loader used by the lint walker. Returns
+/// the body for filesystem-backed steps (`Purpose`, `Index`) and an
+/// empty string for store-backed steps. The lint over-budget check
+/// thus computes a strict lower bound — false-negatives are possible
+/// when store-backed steps push the prefix over budget, but
+/// false-positives are not. This is a significant improvement over the
+/// #259 canary, which could not weigh any step at all.
+///
+/// # Errors
+///
+/// Returns `Err(String)` when a filesystem-backed source exists but
+/// cannot be read (I/O error, symlink traversal, path-escape). A file
+/// that is absent (not-found / no-such-file) is treated as an empty
+/// body so the budget computation degrades gracefully — the
+/// `BrokenSourceLink` check separately emits an Error for missing files.
+pub(crate) fn lint_step_body_sync(
+    vault_root: &std::path::Path,
+    config: &cairn_core::config::CairnConfig,
+    step: cairn_core::generated::verbs::assemble_hot::HotRecipeStep,
+) -> Result<String, String> {
+    use cairn_core::generated::verbs::assemble_hot::HotRecipeStep;
+    // `config` is currently unused — reserved for future per-step
+    // policy gating. Keep the parameter stable for lint dispatch.
+    let _ = config;
+    // Per-file safety cap: read up to the assembler's absolute hard cap
+    // (segments::MAX_BYTES = 4 MiB), NOT the configured budget. Reading
+    // only `max_bytes` would mask over-budget content from the walker —
+    // a 200-byte purpose.md against an 8-byte budget would be silently
+    // truncated to 8 bytes, and `assemble_hot_with_loader` would never
+    // see the overflow it is supposed to detect.
+    let safety_cap = cairn_core::verbs::assemble_hot::segments::MAX_BYTES;
+    let read_file = |rel: &std::path::Path| -> Result<String, String> {
+        cairn_core::verbs::assemble_hot::loader::read_vault_markdown_file(
+            vault_root, rel, safety_cap,
+        )
+        .map_err(|e| e.to_string())
+        .or_else(|e| {
+            // Treat absent files as empty — BrokenSourceLink owns the
+            // "missing source" finding; the budget check should not
+            // double-fault with a load error for the same condition.
+            if e.contains("No such file") || e.contains("not found") || e.contains("os error 2") {
+                Ok(String::new())
+            } else {
+                Err(e)
+            }
+        })
+    };
+    match step {
+        HotRecipeStep::Purpose => read_file(std::path::Path::new("purpose.md")),
+        HotRecipeStep::Index => read_file(std::path::Path::new("index.md")),
+        // Store-backed steps cannot be loaded synchronously from the lint
+        // dispatch context. Return empty so the budget computation remains a
+        // strict lower bound (no false-positives).
+        _ => Ok(String::new()),
+    }
 }

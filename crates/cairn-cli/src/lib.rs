@@ -13,6 +13,7 @@ pub mod hooks;
 pub mod identity;
 pub mod llm;
 pub mod mcp;
+pub mod metrics;
 pub mod plugins;
 pub mod render;
 pub mod repair;
