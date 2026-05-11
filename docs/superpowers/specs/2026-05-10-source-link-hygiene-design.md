@@ -126,39 +126,72 @@ Two distinct scopes are possible:
   later would get a new `RecordId` and slip past the journal lookup.
 
 Replay key: a new dedicated digest, distinct from the existing
-`BodyHash` used for upsert idempotency:
+`BodyHash` used for upsert idempotency.
 
+**Framing.** The digest input is the canonical-JSON serialization of a
+single tagged, versioned struct — never raw concatenation. This rules
+out boundary-shift collisions:
+
+```rust
+#[derive(Serialize)]
+struct ReplayHashInput<'a> {
+    v: u32,                          // schema version (initially 1)
+    domain: &'static str,            // const "cairn.replay_hash.v1"
+    body: &'a CanonicalBody,
+    source_refs: &'a [SourceRef],    // sorted, unique (per Provenance invariant)
+    originating_agent_id: &'a Identity,
+    source_sensor: &'a Identity,
+}
+
+// replay_hash = sha256(canonical_json(ReplayHashInput { ... }))
 ```
-replay_hash = sha256(
-    canonical_body_bytes              ||  // canonical-JSON of body
-    canonical_source_refs_bytes       ||  // sorted by id, hashes included
-    originating_agent_id_bytes        ||  // from Provenance
-    source_sensor_bytes                   // from Provenance
-)
-```
 
-- Domain location: `pipeline::canonical::replay_hash`.
-- The body-only `BodyHash` (already used for upsert idempotency) is
-  intentionally NOT reused — that hash collapses two distinct records
-  with the same body text but different provenance, agent, or sensor.
-  `replay_hash` includes those provenance disambiguators so target-
-  scope forget never over-blocks unrelated records.
-- `MemoryRecord` does NOT gain a persisted `replay_hash` field.
-  Computing it is cheap (a single SHA-256 over already-canonical
-  bytes), and persisting it would create a sync-drift hazard. Both
-  `forget` and `lint` compute it on demand from the in-hand record.
-- Legacy records (pre-change) work without backfill: the canonical
-  inputs (`source_refs`, body, agent, sensor) are already either
-  present or trivially-defaulted. When `source_refs` is empty, the
-  canonical bytes for that segment are the canonical-JSON empty array
-  — `replay_hash` is still well-defined and stable.
+Canonical-JSON rules (locked in `pipeline::canonical`):
+- Object keys lex-sorted.
+- No insignificant whitespace.
+- Numbers in shortest-round-trip form.
+- UTF-8 NFC for strings.
 
-`forget` (issue #58 scope, called out here for the contract):
+A property test in `pipeline::canonical::replay_hash` exercises:
+field permutation → canonical sort → identical hash; tampered byte →
+different hash; round-trip stability across `serde_json` versions.
+
+**Domain location:** `pipeline::canonical::replay_hash`. The body-only
+`BodyHash` (already used for upsert idempotency) is intentionally NOT
+reused — that hash collapses two distinct records with the same body
+text but different provenance, agent, or sensor.
+
+**Persistence:** `MemoryRecord` does NOT gain a persisted `replay_hash`
+field. Computing it is cheap, and persisting it would create a sync-
+drift hazard. Both `forget` and `lint` compute it on demand from the
+in-hand record.
+
+**Legacy records — target-scope forget gating.** The reviewer-flagged
+hazard: a legacy record forgotten with empty `source_refs` produces
+one replay-hash; the same record re-ingested later with populated
+`source_refs` produces a different replay-hash; forget no longer
+matches → privacy regression.
+
+Resolution: **target-scope forget is gated on non-empty
+`source_refs`.** `forget` rejects a target-scope op against a record
+with empty `source_refs` and returns
+`ForgetError::SourceRefsRequiredForTargetScope` with remediation
+pointing the operator to re-ingest the source first. Source-scope
+forget (no `target_replay_hash`) still works against any record —
+it's keyed by source-bytes hash which is stable.
+
+After re-ingest populates `source_refs`, target-scope forget on that
+record becomes available. The lint rule `source_link_missing` already
+flags empty `source_refs` as `error`, so existing vaults will be
+nudged toward re-ingest as part of normal lint hygiene before any
+target-scope forget op is needed.
+
+`forget` flow (issue #58 scope, called out here for the contract):
   1. Loads the target record by `RecordId`.
-  2. Computes `replay_hash` from the record in hand.
-  3. Writes the journal row with `target_replay_hash = Some(<hash>)`.
-  This works identically for records written before and after #257
-  lands.
+  2. If target-scope and `source_refs.is_empty()`, returns the gated
+     error above.
+  3. Computes `replay_hash` from the (now-populated) record in hand.
+  4. Writes the journal row with `target_replay_hash = Some(<hash>)`.
 
 Consent-journal variant:
 
