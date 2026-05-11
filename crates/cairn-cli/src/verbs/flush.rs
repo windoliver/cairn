@@ -17,7 +17,7 @@ use cairn_core::domain::flush_plan::{ApplyKind, FlushPlan, PersistedPlan, PlanSt
 /// the CLI cannot turn an unvalidated CLI argument into a filesystem
 /// path component (`/`, `..`, absolute path) before the embedded
 /// `operation_id` gate has a chance to run.
-fn is_valid_ulid_str(s: &str) -> bool {
+pub(crate) fn is_valid_ulid_str(s: &str) -> bool {
     if s.len() != 26 {
         return false;
     }
@@ -256,9 +256,33 @@ fn apply(vault: &Path, m: &ArgMatches) -> ExitCode {
             apply_kind: ApplyKind::MetadataOnly,
         };
     } else {
-        if let Err(e) = apply_real_plan(vault, &persisted.plan) {
+        // Sidecar (issue #289 review round 1): if a prior apply attempt
+        // crashed between the SQLite commit and `publish_terminal`, the
+        // sidecar `<claim>.committed` is on disk. Replaying the mutations
+        // against the already-mutated store would double-apply (Rename
+        // would now hit `RenameTargetConflict`, Patch would fail drift,
+        // etc). When the sidecar is present we skip apply and proceed
+        // straight to publish — the DB side is durable.
+        let committed_sidecar = committed_sidecar_path(&claim);
+        if committed_sidecar.exists() {
+            eprintln!(
+                "cairn flush apply: detected committed-sidecar for {id}; \
+                 DB mutations from a prior attempt are durable, resuming publish only."
+            );
+        } else if let Err(e) = apply_real_plan(vault, &persisted.plan) {
             eprintln!("cairn flush apply: apply failed: {e:#}");
             rollback_claim(vault, &claim, &ulid);
+            return ExitCode::from(70);
+        } else if let Err(e) = write_committed_sidecar(&committed_sidecar) {
+            // DB is mutated. The sidecar write is what makes a publish-phase
+            // crash recoverable without double-applying. If we cannot write
+            // it, surface loudly — the operator must triage manually before
+            // any retry.
+            eprintln!(
+                "cairn flush apply: SQLite mutations committed but committed-sidecar \
+                 write failed: {e}. DO NOT retry without manual recovery; data is \
+                 mutated but `applied/` will not reflect it on the next attempt."
+            );
             return ExitCode::from(70);
         }
         persisted.status = PlanStatus::Applied {
@@ -272,6 +296,35 @@ fn apply(vault: &Path, m: &ArgMatches) -> ExitCode {
     }
     emit_apply_ok(json, id, "applied");
     ExitCode::SUCCESS
+}
+
+/// Sidecar path used to mark "`SQLite` mutations committed, publish still
+/// pending" — see issue #289 review round 1. Lives next to the in-flight
+/// claim and is removed after `publish_terminal` succeeds.
+fn committed_sidecar_path(claim: &Path) -> PathBuf {
+    let mut p = claim.as_os_str().to_owned();
+    p.push(".committed");
+    PathBuf::from(p)
+}
+
+/// Atomically write the committed-sidecar file. fsyncs the file and its
+/// parent directory so a crash here cannot leave an "almost-written"
+/// sidecar that's later truncated.
+fn write_committed_sidecar(path: &Path) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(format!(".tmp.{}", std::process::id()));
+    let tmp = PathBuf::from(tmp);
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(b"committed\n")?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)?;
+    if let Some(parent) = path.parent() {
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
 }
 
 fn apply_real_plan(vault: &Path, plan: &FlushPlan) -> anyhow::Result<()> {
@@ -663,6 +716,11 @@ fn publish_terminal(
     }
     // Claim file is no longer needed (terminal is the canonical record).
     let _ = std::fs::remove_file(claim);
+    // The committed-sidecar (issue #289 review round 1) only meant
+    // "publish still pending"; once the terminal hard-link is durable the
+    // sidecar must go so a future, separate apply on a fresh claim does
+    // not mistake it for an already-applied operation.
+    let _ = std::fs::remove_file(committed_sidecar_path(claim));
     let _ = std::fs::remove_file(cairn_core::domain::flush_plan::store::diff_path(
         vault, ulid,
     ));

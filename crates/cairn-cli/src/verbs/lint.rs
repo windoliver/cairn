@@ -1987,6 +1987,25 @@ fn run_plan_lint(json: bool, vault_root: Option<&Path>, plan_id: &str) -> ExitCo
     use cairn_core::domain::flush_plan::{PersistedPlan, PlannedMutation};
 
     let op = new_operation_id();
+    // Reject non-canonical ULIDs before constructing the filesystem path.
+    // `plan_path` interpolates the id into the path; without this gate a
+    // caller could traverse via `..` or absolute-path components and point
+    // the lint at arbitrary `.plan.json` files outside `.cairn/flush/pending`.
+    if !super::flush::is_valid_ulid_str(plan_id) {
+        let msg = format!(
+            "lint --plan: invalid ULID `{plan_id}` (expected 26-char Crockford base32)"
+        );
+        if json {
+            emit_json(&serde_json::json!({
+                "code": "InvalidArgument",
+                "message": msg,
+                "operation_id": op.0,
+            }));
+        } else {
+            human_error("lint", "InvalidArgument", &msg, &op);
+        }
+        return ExitCode::from(64);
+    }
     let Some(vault_root) = vault_root else {
         let msg = "lint --plan requires a resolved vault root: pass --vault NAME_OR_PATH \
                    or set CAIRN_VAULT";

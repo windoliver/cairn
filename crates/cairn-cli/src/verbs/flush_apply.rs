@@ -38,11 +38,57 @@ pub(crate) async fn apply_real_plan(
     sqlite
         .with_tx(move |tx| {
             for mutation in &plan.mutations {
+                check_drift(tx, &plan, mutation)?;
                 apply_mutation(tx, &plan.operation_id.0, mutation)?;
             }
             Ok(())
         })
         .await?;
+    Ok(())
+}
+
+/// Drift guard (issue #289 review round 1): before mutating, verify the live
+/// record body hash matches the plan's recorded pre-state in
+/// `target_hashes`. If the plan author did not record a hash for the
+/// target, the check is skipped (consistent with stub-planner output that
+/// leaves the map empty). Aborts the WAL tx on mismatch so partial mutations
+/// roll back.
+fn check_drift(
+    tx: &mut cairn_store_sqlite::StoreTx<'_>,
+    plan: &FlushPlan,
+    mutation: &PlannedMutation,
+) -> Result<(), StoreError> {
+    let target = match mutation {
+        PlannedMutation::Patch {
+            target: PatchTarget::Record(target),
+            ..
+        } => target,
+        PlannedMutation::Rename { record_id, .. } => record_id,
+        // Session metadata patches do not have a body to hash; rename/patch
+        // for sessions is covered by `session.ended_at IS NULL` in the
+        // tx-level helpers, not by `target_hashes`.
+        _ => return Ok(()),
+    };
+    let Some(expected) = plan.target_hash(target) else {
+        return Ok(());
+    };
+    let Some(stored) = tx.get_active_by_target(target)? else {
+        return Err(StoreError::PatchTargetMissing {
+            target_id: target.as_str().to_owned(),
+        });
+    };
+    let actual = BodyHash::compute(&stored.record.body);
+    if actual.as_str() != expected {
+        return Err(StoreError::Invariant {
+            what: format!(
+                "flush apply drift: target `{}` body hash `{}` does not match plan \
+                 pre-state hash `{}`; live record changed between plan creation and apply",
+                target.as_str(),
+                actual.as_str(),
+                expected,
+            ),
+        });
+    }
     Ok(())
 }
 
