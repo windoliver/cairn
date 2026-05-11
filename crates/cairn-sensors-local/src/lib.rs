@@ -1,7 +1,7 @@
 //! Local sensors for Cairn — IDE hook, terminal, clipboard, voice, screen.
 //!
-//! P0 scaffold: stub `SensorIngress` impl with all capability flags
-//! `false`. Real capture lands per-sensor in #84 and follow-ups.
+//! Deterministic local sensor ingress advertises batch emission and
+//! consent-aware capture. Real capture lands per-sensor in #84 follow-ups.
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 

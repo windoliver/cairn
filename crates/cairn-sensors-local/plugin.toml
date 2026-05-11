@@ -12,6 +12,6 @@ minor = 2
 patch = 0
 
 [features]
-batches = false
+batches = true
 streaming = false
-consent_aware = false
+consent_aware = true

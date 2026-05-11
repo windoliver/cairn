@@ -1,6 +1,7 @@
 #![allow(missing_docs)]
 
 use cairn_core::contract::sensor_ingress::SensorIngress;
+use cairn_core::domain::SourceFamily;
 use cairn_sensors_local::{
     CaptureBudget, DropReason, EmitOutcome, LocalSensorConfig, LocalSensorIngress, SensorKind,
     SensorSettings,
@@ -44,4 +45,25 @@ fn sensor_settings_default_budget_is_unbounded() {
 
     assert!(settings.budget.allows(1, 1024));
     assert_eq!(settings.budget, CaptureBudget::default());
+}
+
+#[test]
+fn sensor_kind_maps_local_source_families_only() {
+    assert_eq!(
+        SensorKind::from_source_family(SourceFamily::Hook),
+        Some(SensorKind::Hook)
+    );
+    assert_eq!(
+        SensorKind::from_source_family(SourceFamily::Ide),
+        Some(SensorKind::Ide)
+    );
+    assert_eq!(
+        SensorKind::from_source_family(SourceFamily::Terminal),
+        Some(SensorKind::Terminal)
+    );
+    assert_eq!(
+        SensorKind::from_source_family(SourceFamily::Clipboard),
+        Some(SensorKind::Clipboard)
+    );
+    assert_eq!(SensorKind::from_source_family(SourceFamily::Cli), None);
 }
