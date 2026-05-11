@@ -13,6 +13,8 @@ description = "Local sensors (IDE hook, terminal, clipboard, voice, screen) for 
 [dependencies]
 cairn-core = { workspace = true }
 async-trait = { workspace = true }
+regex = { workspace = true }
+sha2 = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
