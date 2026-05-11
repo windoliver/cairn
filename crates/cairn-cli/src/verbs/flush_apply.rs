@@ -120,6 +120,28 @@ fn enforce_session_scope(
     session: &Session,
 ) -> Result<(), StoreError> {
     let plan_scope = &plan.scope;
+    // Re-loop round 2 finding 2: sessions cannot validate `tenant`,
+    // `workspace`, or `entity` (the SessionIdentity tuple does not
+    // carry them), so a plan that narrows on any of those dimensions
+    // is not safely applicable to a session. Reject rather than
+    // silently dropping the constraint.
+    for (name, value) in [
+        ("tenant", plan_scope.tenant.as_deref()),
+        ("workspace", plan_scope.workspace.as_deref()),
+        ("entity", plan_scope.entity.as_deref()),
+    ] {
+        if let Some(v) = value {
+            return Err(StoreError::Invariant {
+                what: format!(
+                    "flush apply: plan scope dimension `{name}={v}` cannot be enforced \
+                     against session `{}` (sessions are keyed by user/agent/project_root \
+                     only); refusing session patch rather than silently dropping the \
+                     constraint",
+                    session.id.as_str(),
+                ),
+            });
+        }
+    }
     // session_id dimension
     if let Some(scoped) = &plan_scope.session_id
         && scoped != session.id.as_str()
