@@ -14,7 +14,8 @@ issue.
 ## Data-model decision
 
 **Additive, not replacing.** Existing `source_hash: String` stays. New
-field `source_refs: Vec<SourceRef>` is added alongside it:
+field `source_refs: Vec<SourceRef>` is added alongside it with a
+deterministic ordering invariant so the scalar remains stable:
 
 ```rust
 pub struct SourceRef {
@@ -39,12 +40,21 @@ Rationale & compatibility:
 - `source_refs` is `#[serde(default)]` → records written before this
   change deserialize with an empty vec. The first re-`ingest` populates
   it.
-- `Provenance::validate()` adds: if `source_refs` is non-empty, the
-  first entry's `hash` MUST equal `source_hash` (drift guard). Empty
-  `source_refs` is permitted at the type level — the lint rule
+- **Deterministic primary-source semantics.** `Provenance::validate()`
+  enforces, when `source_refs` is non-empty:
+  1. Entries are sorted ascending by `id` (lex order, byte-wise).
+  2. `id`s are unique within the vector.
+  3. `source_refs[0].hash == source_hash` (the "primary" is the
+     lex-smallest id; this is deterministic and does not depend on
+     ingest order).
+  Reordering the vector is therefore not legal — old readers that still
+  rely on the scalar see a fixed primary source identity rather than an
+  arbitrary one.
+- Empty `source_refs` is permitted at the type level — the lint rule
   (`source_link_present`) flags it. This lets the brief evolve toward
   `Vec<SourceRef>`-only later without a second wire break: when the
-  brief is amended, remove the scalar in a follow-up versioned migration.
+  brief is amended, remove the scalar in a follow-up versioned
+  migration.
 
 `SourceRef::validate()`:
 - `id` non-empty, no leading `/`, no `..` segments, no embedded NUL.
@@ -101,39 +111,57 @@ syscalls inside `verbs/lint/`.
 
 ### 4. Consent journal extension
 
-Per brief §5.6: forget severs the source-to-memory link; future
-re-ingestion checks the journal and skips previously-forgotten **targets
-by content-hash**. A source-id-only entry is too coarse — one forgotten
-target on a multi-record source would either force suppressing all
-future ingest from that source (data loss) or allow re-derived
-forgotten content back when the source is copied/renamed (privacy
-regression).
+Per brief §5.6, forget severs the source-to-memory link and future
+re-ingestion must skip previously-forgotten **targets by content-hash**.
+Two distinct scopes are possible:
 
-Therefore the journal row carries content-hash granularity:
+- **Source-scope forget** — operator forgets a source file outright;
+  every record derived from those source bytes is dead. Replay-block
+  key is the **source-bytes hash** (`SourceRef.hash` space).
+- **Target-scope forget** — operator forgets one specific derived
+  record while other records from the same source stay live. Replay-
+  block key is the **record id**.
+
+Both scopes share one consent-journal variant; the scope is encoded by
+which field is present:
 
 ```rust
 pub enum ConsentKind {
     // ... existing variants ...
     SourceForget {
-        source_id: String,        // logical id, for operator diagnostics
-        content_hash: String,     // "<algo>:<hex>" — the replay-block key
-        target_id: Option<RecordId>,  // None when whole-source forget
-        op_id: String,            // forget operation that produced this row
+        source_id: String,                // logical id, operator diagnostics
+        source_bytes_hash: String,        // "<algo>:<hex>" — same hash space as SourceRef.hash
+        target_id: Option<RecordId>,      // Some → target-scope; None → source-scope
+        op_id: String,                    // forget operation that produced this row
     },
 }
 ```
 
-Journal query helpers:
+`source_bytes_hash` is **the same hash space as `SourceRef.hash`** —
+both are `sha256/sha512/blake3` of the raw source bytes. Naming made
+explicit to remove the prior ambiguity between source-bytes hash and
+target-content hash. There is no separate "target content hash" — a
+target is identified by `RecordId`, which is already content-addressed
+in the existing pipeline.
+
+Journal query helpers (all O(n) over journal rows; callers cache):
 ```rust
-fn forgotten_content_hashes(&self) -> HashSet<String>;   // primary lookup
-fn forgotten_source_ids(&self) -> HashSet<String>;       // diagnostic, not authoritative
-fn forget_op_for(&self, content_hash: &str) -> Option<&str>;
+fn forgotten_source_bytes_hashes(&self) -> HashSet<&str>; // source-scope set
+fn forgotten_target_ids(&self) -> HashSet<&RecordId>;     // target-scope set
+fn forget_op_for_source(&self, hash: &str) -> Option<&str>;
+fn forget_op_for_target(&self, id: &RecordId) -> Option<&str>;
 ```
 
-Lint rule `source_not_forgotten` cross-references each record's
-`source_refs[i].hash` (not just `source_id`) against
-`forgotten_content_hashes()`. This matches the brief's content-addressed
-invariant and survives renames or copies of the source file.
+Lint rule `source_not_forgotten` runs both checks:
+1. For each `record.provenance.source_refs[i].hash`, look up in
+   `forgotten_source_bytes_hashes()` → if hit AND `target_id` is
+   `None` in the matching row, emit `source_after_forget` against
+   the record.
+2. For the record itself, look up `target_ids` →
+   `forgotten_target_ids()`. Hit ⇒ same finding kind, scope = target.
+
+This survives source rename/copy (same bytes, same hash) and never
+over-blocks: target-scope rows only flag their specific record.
 
 `source_id` stays on the row for operator-facing finding messages
 (`forgotten source <id>`) but does not participate in dedup logic.
@@ -154,13 +182,40 @@ Removing `DeferredCheck`-emitting path from `checks/provenance.rs` is in
 scope (no longer needed). Keep `DeferredCheck` variant itself for future
 use.
 
-### 7. LintInputs
-Extend `LintInputs<'a>`:
+### 7. LintInputs — fail-closed wiring
+
+Production `lint` invocations (CLI, MCP, SDK) MUST provide both
+dependencies. The public verb signature requires them:
+
 ```rust
-pub source_resolver: Option<&'a dyn SourceResolver>,
-pub consent_journal: Option<&'a dyn ConsentJournalReader>,
+// Production-facing entrypoint — non-optional.
+pub fn lint(
+    cfg: &CairnConfig,
+    records: &[MemoryRecord],
+    source_resolver: &dyn SourceResolver,
+    consent_journal: &dyn ConsentJournalReader,
+    // ... existing inputs ...
+) -> LintReport;
 ```
-Optional so unit tests can run without filesystem.
+
+If a surface forgets to wire one, the call doesn't compile — there is
+no run-time path that produces a silent "successful" lint with these
+rules skipped. CI test for each surface (CLI integration test, MCP
+adapter test, SDK call site) asserts the production code constructs
+both dependencies.
+
+For unit tests inside `cairn-core`, a `LintInputs` builder exposes
+the dependencies via in-memory stubs (`InMemorySourceResolver`,
+`InMemoryConsentJournal`) from `cairn-test-fixtures`. Test-only access
+is gated behind a `#[cfg(any(test, feature = "test-fixtures"))]`
+constructor — production binaries never see the empty path.
+
+If an operator deploys without a `sources/` directory at all,
+`SourceResolver::exists` returns `false` for every id; the rules then
+emit `error`-severity `source_link_dangling` findings rather than
+silently passing. Empty consent journal is fine — the rules iterate
+zero rows and produce zero forget-related findings, which is correct
+(nothing has been forgotten).
 
 ### 8. Rules (`crates/cairn-core/src/verbs/lint/checks/source_links.rs`)
 One module, five public fns:
@@ -171,9 +226,9 @@ One module, five public fns:
 - `pub fn run_source_not_forgotten(inputs) -> Vec<Finding>` — needs journal
 - `pub fn run_source_redact_on_forget_honored(inputs) -> Vec<Finding>` — needs resolver + journal
 
-Resolver/journal-dependent rules emit one info `DeferredCheck` finding
-when their dependency is absent, so lint stays a no-op when called
-without filesystem.
+Rule fns take `&dyn SourceResolver` / `&dyn ConsentJournalReader`
+directly (not `Option`) per Component 7 fail-closed wiring. There is
+no `DeferredCheck` info-finding path in production code.
 
 `run` in `checks/provenance.rs` becomes a thin dispatcher calling the
 five new fns (preserves the existing entrypoint name in `lint/mod.rs`).
