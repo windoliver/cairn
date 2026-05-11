@@ -19,7 +19,7 @@ use cairn_core::contract::memory_store::{
 use cairn_core::contract::version::{ContractVersion, VersionRange};
 use cairn_core::domain::record::MemoryRecord;
 use cairn_core::domain::{RecordId, TargetId};
-use cairn_core::generated::verbs::search::SearchData;
+use cairn_core::generated::envelope::{Response, ResponseData, ResponseStatus, ResponseVerb};
 use cairn_mcp::handler::CairnMcpHandler;
 use rmcp::ServiceExt as _;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -140,6 +140,18 @@ async fn recv_frame(
     serde_json::from_str(line.trim()).expect("parse frame as JSON")
 }
 
+fn first_text_content(call_resp: &serde_json::Value) -> &str {
+    let content = call_resp
+        .pointer("/result/content")
+        .and_then(serde_json::Value::as_array)
+        .expect("result.content must be an array");
+    assert!(!content.is_empty(), "content must not be empty");
+    content[0]
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .expect("first content item must have text field")
+}
+
 async fn do_initialize(
     writer: &mut (impl AsyncWriteExt + Unpin),
     reader: &mut BufReader<impl tokio::io::AsyncRead + Unpin>,
@@ -204,24 +216,46 @@ async fn search_tool_with_store_returns_success_envelope() {
         "search with wired store must not be an error; got: {call_resp}"
     );
 
-    // Extract the text content and parse as SearchData.
-    let content = call_resp
-        .pointer("/result/content")
-        .and_then(|v| v.as_array())
-        .expect("result.content must be an array");
-    assert!(!content.is_empty(), "content must not be empty");
+    let text = first_text_content(&call_resp);
+    let envelope: Response = serde_json::from_str(text)
+        .unwrap_or_else(|e| panic!("text must be valid Response JSON: {e}; text={text}"));
 
-    let text = content[0]
-        .get("text")
-        .and_then(serde_json::Value::as_str)
-        .expect("first content item must have text field");
+    assert_eq!(envelope.contract, "cairn.mcp.v1");
+    assert!(matches!(envelope.status, ResponseStatus::Committed));
+    assert!(matches!(envelope.verb, ResponseVerb::Search));
+    assert_eq!(
+        envelope.operation_id.0.len(),
+        26,
+        "operation_id must be a ULID"
+    );
+    assert!(
+        envelope.policy_trace.is_empty(),
+        "empty fixture store should not add policy trace entries"
+    );
+    assert!(envelope.error.is_none());
+    assert!(envelope.target.is_none());
 
-    let data: SearchData = serde_json::from_str(text).expect("text must be valid SearchData JSON");
-
+    let Some(ResponseData::Search(data)) = envelope.data else {
+        panic!("committed search envelope must carry SearchData: {envelope:?}");
+    };
     assert!(
         data.hits.is_empty(),
         "empty store: no hits expected, got {:?}",
         data.hits
+    );
+    assert!(
+        data.excluded
+            .as_ref()
+            .map_or(true, |excluded| excluded.is_empty()),
+        "empty store: no exclusions expected, got {:?}",
+        data.excluded
+    );
+    assert!(
+        data.degraded_legs
+            .as_ref()
+            .map_or(true, |degraded_legs| degraded_legs.is_empty()),
+        "empty store: no degraded legs expected, got {:?}",
+        data.degraded_legs
     );
     assert!(data.next_cursor.is_none());
     assert!(data.score_explain.is_none());
@@ -272,7 +306,7 @@ async fn search_tool_without_store_returns_stub_error() {
     );
 }
 
-/// Calling `search` with an invalid mode returns `isError = true`.
+/// Calling `search` with malformed/missing required args returns `isError = true`.
 #[tokio::test]
 async fn search_tool_invalid_args_returns_error() {
     let (server_half, client_half) = tokio::io::duplex(65_536);
@@ -314,6 +348,82 @@ async fn search_tool_invalid_args_returns_error() {
     assert!(
         is_error,
         "search with invalid args must return isError=true; got: {call_resp}"
+    );
+
+    let text = first_text_content(&call_resp);
+    let envelope: Response = serde_json::from_str(text)
+        .unwrap_or_else(|e| panic!("invalid-args response must be a Response: {e}; text={text}"));
+
+    assert!(matches!(envelope.status, ResponseStatus::Rejected));
+    assert!(matches!(envelope.verb, ResponseVerb::Search));
+    assert!(envelope.data.is_none());
+    let err = envelope.error.expect("rejected envelope must carry error");
+    assert_eq!(err["code"], "InvalidArgs");
+    assert_eq!(err["data"]["field"], "args");
+    assert!(
+        err["data"]["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("missing field"),
+        "reason should include serde's missing-field detail: {err}"
+    );
+    assert_eq!(envelope.operation_id.0.len(), 26);
+}
+
+#[tokio::test]
+async fn known_unwired_core_verb_returns_typed_aborted_envelope() {
+    let (server_half, client_half) = tokio::io::duplex(65_536);
+    let _server_task = tokio::spawn(async move {
+        CairnMcpHandler::with_store(Arc::new(EmptyStore), CairnConfig::default())
+            .serve(server_half)
+            .await
+            .expect("server init")
+            .waiting()
+            .await
+            .ok();
+    });
+
+    let (client_read, mut client_write) = tokio::io::split(client_half);
+    let mut client_reader = BufReader::new(client_read);
+
+    do_initialize(&mut client_write, &mut client_reader).await;
+
+    send_frame(
+        &mut client_write,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"retrieve","arguments":{"target":"record","id":"01ARZ3NDEKTSV4RRFFQ69G5FAV"}}}"#,
+    )
+    .await;
+
+    let call_resp = recv_frame(&mut client_reader).await;
+    assert!(
+        call_resp.get("result").is_some(),
+        "known unwired verb must yield result frame; got: {call_resp}"
+    );
+    let is_error = call_resp
+        .pointer("/result/isError")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    assert!(
+        is_error,
+        "known unwired verb must return isError=true; got: {call_resp}"
+    );
+
+    let text = first_text_content(&call_resp);
+    let envelope: Response = serde_json::from_str(text)
+        .unwrap_or_else(|e| panic!("unwired verb response must be a Response: {e}; text={text}"));
+
+    assert!(matches!(envelope.status, ResponseStatus::Aborted));
+    assert!(matches!(envelope.verb, ResponseVerb::Retrieve));
+    assert_eq!(envelope.operation_id.0.len(), 26);
+    assert!(envelope.data.is_none());
+    let err = envelope.error.expect("aborted envelope must carry error");
+    assert_eq!(err["code"], "Internal");
+    assert!(
+        err["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not yet implemented"),
+        "message should explain the MCP verb is not wired: {err}"
     );
 }
 

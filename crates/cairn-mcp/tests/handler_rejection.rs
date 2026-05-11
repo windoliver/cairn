@@ -17,6 +17,7 @@ use cairn_core::contract::memory_store::{
 use cairn_core::contract::version::{ContractVersion, VersionRange};
 use cairn_core::domain::record::MemoryRecord;
 use cairn_core::domain::{RecordId, TargetId};
+use cairn_core::generated::envelope::{Response, ResponseStatus, ResponseVerb};
 use cairn_mcp::CairnMcpHandler;
 use rmcp::ServiceExt as _;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -200,12 +201,24 @@ async fn mcp_search_semantic_rejection_carries_remediation() {
         .and_then(serde_json::Value::as_str)
         .expect("first content item must have a text field");
 
-    assert!(
-        text.contains("cairn.mcp.v1.search.semantic"),
-        "rejection text must include the capability id; got: {text:?}"
+    let envelope: Response = serde_json::from_str(text)
+        .unwrap_or_else(|e| panic!("semantic rejection must be a Response: {e}; text={text}"));
+    assert!(matches!(envelope.status, ResponseStatus::Rejected));
+    assert!(matches!(envelope.verb, ResponseVerb::Search));
+    assert_eq!(envelope.operation_id.0.len(), 26);
+    assert!(envelope.data.is_none());
+
+    let err = envelope.error.expect("rejected envelope must carry error");
+    assert_eq!(err["code"], "CapabilityUnavailable");
+    assert_eq!(
+        err["data"]["capability"], "cairn.mcp.v1.search.semantic",
+        "rejection must preserve capability id"
     );
     assert!(
-        text.contains("local_embeddings"),
-        "rejection text must include the remediation hint 'local_embeddings'; got: {text:?}"
+        err["data"]["remediation"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("local_embeddings"),
+        "rejection must preserve remediation hint: {err}"
     );
 }
