@@ -73,7 +73,7 @@ pub use projection::{
     ConflictOutcome, MarkdownProjector, ParsedProjection, ProjectedFile, ResyncError,
 };
 pub use provenance::Provenance;
-pub use record::{MemoryRecord, RecordId};
+pub use record::{Ed25519Signature, MemoryRecord, RecordId};
 pub use scope::ScopeTuple;
 pub use session::{
     DEFAULT_IDLE_WINDOW_SECS, LastActiveSession, Session, SessionDecision, SessionId,
