@@ -1,6 +1,8 @@
 -- Issue #83 follow-up: address codex adversarial review round 1 findings 1+2.
+-- Renumbered from 0054 → 0057 during rebase onto main, which had already
+-- taken 0053..0055 for #57 (WAL payloads / COW staging) and #58 (forget).
 --
--- 1. Add two new SourceClass watermark rows that migration 0053 missed.
+-- 1. Add two new SourceClass watermark rows that migration 0056 missed.
 --    classify_record now maps MemoryKind::Project (unpinned) to the new
 --    `projects` class and MemoryKind::UserSignal to `user_signals`,
 --    closing the cache-invalidation hole on `top_salience_project` and
@@ -19,4 +21,4 @@ INSERT OR IGNORE INTO hot_source_watermarks (class, watermark, updated_at_ms) VA
 ALTER TABLE hot_prefix_cache ADD COLUMN fs_fingerprint TEXT NOT NULL DEFAULT '';
 
 INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at)
-  VALUES (54, '0054_hot_source_watermarks_extras', '', strftime('%s','now') * 1000);
+  VALUES (57, '0057_hot_source_watermarks_extras', '', strftime('%s','now') * 1000);

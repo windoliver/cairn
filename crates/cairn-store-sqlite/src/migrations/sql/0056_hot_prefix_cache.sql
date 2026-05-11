@@ -25,4 +25,4 @@ CREATE TABLE hot_prefix_cache (
 ) WITHOUT ROWID;
 
 INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at)
-  VALUES (53, '0053_hot_prefix_cache', '', strftime('%s','now') * 1000);
+  VALUES (56, '0056_hot_prefix_cache', '', strftime('%s','now') * 1000);

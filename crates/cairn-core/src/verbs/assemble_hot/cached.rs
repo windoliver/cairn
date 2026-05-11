@@ -417,6 +417,11 @@ fn into_assemble_hot_data(entry: CachedPrefix) -> AssembleHotData {
         bytes: entry.bytes,
         prefix: String::from_utf8(entry.prefix).unwrap_or_default(),
         segments: Some(entry.segments),
+        // `debug` (the --explain trace) is never cached — it is
+        // request-specific. The CLI layers it on cache hits via
+        // build_explain_debug after cached_assemble returns. See
+        // crates/cairn-cli/src/verbs/assemble_hot.rs.
+        debug: None,
     }
 }
 
