@@ -1,0 +1,7 @@
+{
+  "cases": {
+    "ok_mint": {
+      "kind": "capability_rejected"
+    }
+  }
+}

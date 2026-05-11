@@ -1,0 +1,7 @@
+{
+  "cases": {
+    "ok_record": {
+      "kind": "invalid_args"
+    }
+  }
+}
