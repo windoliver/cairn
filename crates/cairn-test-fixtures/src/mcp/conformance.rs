@@ -9,6 +9,7 @@
 
 use include_dir::{Dir, include_dir};
 use serde::Deserialize;
+use serde_json::{Map, Value};
 
 /// One fixture entry, ready for replay.
 #[derive(Debug, Clone)]
@@ -224,6 +225,116 @@ pub fn load_case(id: &str) -> ConformanceCase {
         .unwrap_or_else(|| panic!("no conformance case with id {id}"))
 }
 
+/// Replace non-deterministic fields with stable placeholders and sort object
+/// keys recursively. Idempotent.
+///
+/// Volatile fields (replaced):
+/// - `operation_id` (top-level or nested) → `"<OPERATION_ID>"`
+/// - `data.server_info.started_at` → `"<STARTED_AT>"`
+/// - `data.server_info.incarnation` → `"<INCARNATION>"`
+/// - `data.server_info.build` → `"<BUILD>"`
+/// - `data.challenge.nonce` → `"<NONCE>"`
+/// - `data.challenge.expires_at` → `"<EXPIRES_AT>"`
+/// - any `policy_trace[*].timestamp` → `"<TIMESTAMP>"`
+///
+/// Every other field is preserved as-is. Object keys are sorted lexicographically.
+#[must_use]
+pub fn canonicalize(value: &Value) -> Value {
+    let mut v = value.clone();
+    replace_volatile_in_place(&mut v, &[]);
+    sort_keys_in_place(&mut v);
+    v
+}
+
+const VOLATILE_LEAF_KEYS: &[&str] = &["operation_id"];
+
+/// Maps a path (sequence of keys from the envelope root) to the placeholder
+/// used when the leaf at that path is replaced.
+const VOLATILE_PATHS: &[(&[&str], &str)] = &[
+    (&["data", "server_info", "started_at"], "<STARTED_AT>"),
+    (&["data", "server_info", "incarnation"], "<INCARNATION>"),
+    (&["data", "server_info", "build"], "<BUILD>"),
+    (&["data", "challenge", "nonce"], "<NONCE>"),
+    (&["data", "challenge", "expires_at"], "<EXPIRES_AT>"),
+];
+
+fn replace_volatile_in_place(v: &mut Value, path: &[String]) {
+    match v {
+        Value::Object(map) => {
+            // Path-based replacements (specific to known structural paths).
+            for (target, placeholder) in VOLATILE_PATHS {
+                if path.len() + 1 == target.len() {
+                    let prefix_matches = path
+                        .iter()
+                        .zip(target.iter())
+                        .all(|(p, t)| p.as_str() == *t);
+                    if prefix_matches {
+                        let leaf = target[target.len() - 1];
+                        if map.contains_key(leaf) {
+                            map.insert(leaf.to_string(), Value::String((*placeholder).into()));
+                        }
+                    }
+                }
+            }
+            // Leaf-key replacements (apply anywhere in the tree).
+            for key in VOLATILE_LEAF_KEYS {
+                if map.contains_key(*key) {
+                    let placeholder = if *key == "operation_id" {
+                        "<OPERATION_ID>"
+                    } else {
+                        continue;
+                    };
+                    map.insert((*key).into(), Value::String(placeholder.into()));
+                }
+            }
+            // Recurse with appended path.
+            let keys: Vec<String> = map.keys().cloned().collect();
+            for k in keys {
+                let mut next_path = path.to_vec();
+                next_path.push(k.clone());
+                if let Some(child) = map.get_mut(&k) {
+                    replace_volatile_in_place(child, &next_path);
+                }
+            }
+        }
+        Value::Array(arr) => {
+            // Policy-trace timestamp scrub: when the parent key is "policy_trace",
+            // each element's `timestamp` (if present) becomes "<TIMESTAMP>".
+            let in_policy_trace = matches!(path.last(), Some(k) if k == "policy_trace");
+            for item in arr.iter_mut() {
+                if in_policy_trace
+                    && let Value::Object(map) = &mut *item
+                    && map.contains_key("timestamp")
+                {
+                    map.insert("timestamp".into(), Value::String("<TIMESTAMP>".into()));
+                }
+                replace_volatile_in_place(item, path);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn sort_keys_in_place(v: &mut Value) {
+    match v {
+        Value::Object(map) => {
+            let mut sorted: Map<String, Value> =
+                map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            sorted.sort_keys();
+            for child in sorted.values_mut() {
+                sort_keys_in_place(child);
+            }
+            *map = sorted;
+        }
+        Value::Array(arr) => {
+            for item in arr.iter_mut() {
+                sort_keys_in_place(item);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,5 +399,72 @@ mod tests {
         let v: ConfigOverrides = serde_json::from_str(r#"{"semantic_search": true}"#).unwrap();
         assert!(v.semantic_search);
         assert!(v.keyword_search); // serde(default) applied → default = true
+    }
+
+    #[test]
+    fn canonicalize_sorts_keys_recursively() {
+        let unsorted = serde_json::json!({
+            "z": 1,
+            "a": { "z": 2, "a": 3 }
+        });
+        let canon = canonicalize(&unsorted);
+        let s = serde_json::to_string(&canon).unwrap();
+        // Inner object keys are sorted: "a" before "z".
+        assert_eq!(s, r#"{"a":{"a":3,"z":2},"z":1}"#);
+    }
+
+    #[test]
+    fn canonicalize_replaces_operation_id() {
+        let v = serde_json::json!({
+            "operation_id": "01HQZX9F5N0000000000000000",
+            "status": "committed"
+        });
+        let canon = canonicalize(&v);
+        assert_eq!(canon["operation_id"], serde_json::json!("<OPERATION_ID>"));
+    }
+
+    #[test]
+    fn canonicalize_replaces_server_info_volatile_fields() {
+        let v = serde_json::json!({
+            "data": {
+                "server_info": {
+                    "build": "abc123",
+                    "incarnation": "01HQZ...",
+                    "started_at": "2026-05-11T10:00:00Z",
+                    "version": "0.1.0"
+                }
+            }
+        });
+        let canon = canonicalize(&v);
+        let s = &canon["data"]["server_info"];
+        assert_eq!(s["build"], serde_json::json!("<BUILD>"));
+        assert_eq!(s["incarnation"], serde_json::json!("<INCARNATION>"));
+        assert_eq!(s["started_at"], serde_json::json!("<STARTED_AT>"));
+        assert_eq!(s["version"], serde_json::json!("0.1.0"));
+    }
+
+    #[test]
+    fn canonicalize_replaces_handshake_challenge_fields() {
+        let v = serde_json::json!({
+            "data": {
+                "challenge": {
+                    "expires_at": 1_735_000_000_000_u64,
+                    "nonce": "base64stuff=="
+                }
+            }
+        });
+        let canon = canonicalize(&v);
+        let c = &canon["data"]["challenge"];
+        assert_eq!(c["nonce"], serde_json::json!("<NONCE>"));
+        assert_eq!(c["expires_at"], serde_json::json!("<EXPIRES_AT>"));
+    }
+
+    #[test]
+    fn canonicalize_is_idempotent_on_every_fixture() {
+        for case in load_all() {
+            let a = canonicalize(&case.response);
+            let b = canonicalize(&a);
+            assert_eq!(a, b, "canonicalize is not idempotent on {}", case.id);
+        }
     }
 }
