@@ -172,10 +172,16 @@ fn apply_record_patch(
         });
     };
     let prior_hash = BodyHash::compute(&stored.record.body);
+    let prior_signature = stored.record.signature.as_str().to_owned();
     let target_label = format!("record:{}", target.as_str());
     stored.record.body = apply_str_replacements(&stored.record.body, replacements, &target_label)?;
     stored.record.updated_at = current_timestamp()?;
-    append_patch_audit(&mut stored.record, operation_id, prior_hash.as_str())?;
+    append_patch_audit(
+        &mut stored.record,
+        operation_id,
+        prior_hash.as_str(),
+        &prior_signature,
+    )?;
     let _ = tx.upsert(&stored.record)?;
     Ok(())
 }
@@ -187,6 +193,12 @@ fn apply_session_patch(
 ) -> Result<(), StoreError> {
     let mut session = tx.get_live_session(session_id)?;
     let target_label = format!("session:{}", session_id.as_str());
+    // Round 4 review fix: refuse session patches whose `old` substring
+    // appears in more than one logical field. Otherwise an edit intended
+    // for one field (e.g. `channel: "chat"`) could silently rewrite a
+    // homonym in another field (`title`, a tag, etc.) because the
+    // underlying patch is a raw string replace over the serialized JSON.
+    reject_ambiguous_session_replacements(&session, replacements, session_id)?;
     let doc_json = serde_json::to_string(&SessionPatchDocument::from(&session))?;
     let patched_json = apply_str_replacements(&doc_json, replacements, &target_label)?;
     let patched: SessionPatchDocument =
@@ -244,6 +256,54 @@ fn apply_rename(
     Ok(())
 }
 
+/// Refuses session-patch replacements whose `old` substring is present
+/// in more than one field of the session metadata (title / channel /
+/// priority / individual tags). See Round 4 finding 2.
+fn reject_ambiguous_session_replacements(
+    session: &Session,
+    replacements: &[StrReplace],
+    session_id: &cairn_core::domain::SessionId,
+) -> Result<(), StoreError> {
+    for replacement in replacements {
+        let mut hits = 0_usize;
+        let mut field_names: Vec<&'static str> = Vec::new();
+        let mut check = |field: &'static str, value: &str| {
+            if value.contains(&replacement.old) {
+                hits += 1;
+                field_names.push(field);
+            }
+        };
+        check("title", &session.title);
+        if let Some(channel) = &session.channel {
+            check("channel", channel);
+        }
+        if let Some(priority) = &session.priority {
+            check("priority", priority);
+        }
+        for (i, tag) in session.tags.iter().enumerate() {
+            if tag.contains(&replacement.old) {
+                hits += 1;
+                let _ = i;
+                field_names.push("tags");
+                break;
+            }
+        }
+        if hits > 1 {
+            return Err(StoreError::Invariant {
+                what: format!(
+                    "session patch for `{}`: `old` substring `{}` is ambiguous — \
+                     appears in multiple fields ({:?}). Author a narrower replacement \
+                     or split into per-field plans.",
+                    session_id.as_str(),
+                    replacement.old,
+                    field_names,
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn current_timestamp() -> Result<Rfc3339Timestamp, StoreError> {
     Rfc3339Timestamp::parse(cairn_core::time::now_rfc3339_seconds()).map_err(|e| {
         StoreError::Invariant {
@@ -256,11 +316,18 @@ fn append_patch_audit(
     record: &mut cairn_core::domain::MemoryRecord,
     operation_id: &str,
     old_body_hash: &str,
+    old_signature: &str,
 ) -> Result<(), StoreError> {
     let applied_at = current_timestamp()?.to_string();
+    // Round 4 review fix: record the pre-mutation signature so downstream
+    // verifiers can detect that the record was rewritten by a flush apply
+    // (the carried-over signature attests the pre-mutation body, not the
+    // post-mutation body — re-signing belongs to a separate trust-model
+    // change tracked outside this issue).
     let entry = json!({
         "operation_id": operation_id,
         "old_body_hash": old_body_hash,
+        "old_signature": old_signature,
         "applied_at": applied_at,
     });
     match record.extra_frontmatter.get_mut("flush_patch_history") {
