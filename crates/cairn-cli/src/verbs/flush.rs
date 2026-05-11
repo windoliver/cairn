@@ -173,6 +173,19 @@ fn apply(vault: &Path, m: &ArgMatches) -> ExitCode {
         }
     };
 
+    // Re-loop r7: hold an exclusive fs2 lock on the owned claim while
+    // this process is the live publisher. The orphan-resume code in
+    // `claim_pending` uses `try_lock_exclusive` on the claim file as
+    // a liveness proof — without this hold, a concurrent retry could
+    // seize the claim mid-publish. Drop on early returns.
+    let _claim_lock = match acquire_claim_lock(&claim) {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("cairn flush apply: could not acquire liveness lock: {e}");
+            rollback_claim(vault, &claim, &ulid);
+            return ExitCode::from(70);
+        }
+    };
     let bytes = match std::fs::read(&claim) {
         Ok(b) => b,
         Err(e) => {
@@ -381,6 +394,34 @@ fn unsupported_kind_name(m: &cairn_core::domain::flush_plan::PlannedMutation) ->
         PlannedMutation::Patch { .. } | PlannedMutation::Rename { .. } => "<supported>",
         _ => "<unknown>",
     }
+}
+
+/// Acquire an exclusive fs2 lock on the owned claim file. The returned
+/// `File` keeps the lock until it drops. See `orphan_is_dead` for the
+/// matching liveness probe used by orphan recovery.
+fn acquire_claim_lock(claim: &Path) -> std::io::Result<std::fs::File> {
+    use fs2::FileExt as _;
+    let f = std::fs::OpenOptions::new().read(true).open(claim)?;
+    f.try_lock_exclusive()?;
+    Ok(f)
+}
+
+/// Re-loop r7 finding 2: returns `true` iff the orphan file's previous
+/// owner is provably dead — i.e. we can acquire an exclusive fs2 lock
+/// on it without blocking. A live publisher in
+/// `apply_real_plan`/`publish_terminal` holds the same lock, so
+/// `try_lock_exclusive` fails fast against an in-progress publish
+/// instead of racing it.
+fn orphan_is_dead(orphan: &Path) -> bool {
+    use fs2::FileExt as _;
+    let Ok(f) = std::fs::OpenOptions::new().read(true).open(orphan) else {
+        return false;
+    };
+    let acquired = f.try_lock_exclusive().is_ok();
+    if acquired {
+        let _ = f.unlock();
+    }
+    acquired
 }
 
 /// Stranded marker path (issue #289 review round 2/3). Planted in the
@@ -732,7 +773,9 @@ fn claim_pending(
         // signal is already on disk.
         let committed_sidecar = committed_sidecar_path_for(vault, ulid);
         let stranded = stranded_marker_path(vault, ulid);
-        if committed_sidecar.exists() || stranded.exists() {
+        if (committed_sidecar.exists() || stranded.exists())
+            && orphan_is_dead(&orphan)
+        {
             match std::fs::rename(&orphan, &claim) {
                 Ok(()) => {
                     // Fall through to the canonical `claim.exists()`

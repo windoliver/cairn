@@ -251,6 +251,7 @@ impl StoreTx<'_> {
         &self,
         session_id: &SessionId,
         operation_id: &str,
+        mutation_seq: i64,
         pre_state: &T,
         post_state: &T,
     ) -> Result<(), StoreError>
@@ -268,11 +269,12 @@ impl StoreTx<'_> {
         .unwrap_or(i64::MAX);
         self.tx.execute(
             "INSERT INTO session_metadata_audit \
-                 (operation_id, session_id, pre_state, post_state, applied_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                 (operation_id, session_id, mutation_seq, pre_state, post_state, applied_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 operation_id,
                 session_id.as_str(),
+                mutation_seq,
                 pre_json,
                 post_json,
                 now_ms,

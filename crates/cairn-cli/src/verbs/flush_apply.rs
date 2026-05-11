@@ -222,8 +222,13 @@ pub(crate) async fn apply_real_plan(
                 check_drift(tx, &plan, mutation)?;
                 check_scope(tx, &plan, mutation)?;
             }
-            for mutation in &plan.mutations {
-                apply_mutation(tx, &plan.operation_id.0, mutation)?;
+            for (idx, mutation) in plan.mutations.iter().enumerate() {
+                apply_mutation(
+                    tx,
+                    &plan.operation_id.0,
+                    i64::try_from(idx).unwrap_or(i64::MAX),
+                    mutation,
+                )?;
             }
             Ok(())
         })
@@ -346,6 +351,7 @@ fn check_session_drift(
 fn apply_mutation(
     tx: &mut cairn_store_sqlite::StoreTx<'_>,
     operation_id: &str,
+    mutation_seq: i64,
     mutation: &PlannedMutation,
 ) -> Result<(), StoreError> {
     match mutation {
@@ -356,7 +362,7 @@ fn apply_mutation(
         PlannedMutation::Patch {
             target: PatchTarget::Session(session_id),
             str_replace,
-        } => apply_session_patch(tx, operation_id, session_id, str_replace),
+        } => apply_session_patch(tx, operation_id, mutation_seq, session_id, str_replace),
         PlannedMutation::Rename { record_id, new_id } => {
             apply_rename(tx, operation_id, record_id, new_id)
         }
@@ -400,6 +406,7 @@ fn apply_record_patch(
 fn apply_session_patch(
     tx: &mut cairn_store_sqlite::StoreTx<'_>,
     operation_id: &str,
+    mutation_seq: i64,
     session_id: &cairn_core::domain::SessionId,
     replacements: &[StrReplace],
 ) -> Result<(), StoreError> {
@@ -425,6 +432,7 @@ fn apply_session_patch(
     tx.append_session_metadata_audit(
         session_id,
         operation_id,
+        mutation_seq,
         &pre_state,
         &post_state,
     )?;
