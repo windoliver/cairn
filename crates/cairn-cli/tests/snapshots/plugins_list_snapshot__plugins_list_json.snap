@@ -22,8 +22,8 @@ expression: json
     },
     {
       "capabilities": {
-        "batches": false,
-        "consent_aware": false,
+        "batches": true,
+        "consent_aware": true,
         "streaming": false
       },
       "contract": "SensorIngress",
