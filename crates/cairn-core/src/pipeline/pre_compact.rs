@@ -85,6 +85,15 @@ pub enum PreCompactError {
         /// The unknown recipe identifier from config.
         name: String,
     },
+    /// `hot_memory.pre_compact_safety_ratio` is non-finite or non-positive.
+    /// `compute_budget` would coerce these to a zero budget, which would
+    /// silently render an empty reinjection payload; reject the hook
+    /// instead so the misconfiguration surfaces.
+    #[error("invalid pre_compact_safety_ratio: {ratio}")]
+    InvalidSafetyRatio {
+        /// The offending ratio from config.
+        ratio: f64,
+    },
 }
 
 /// Compute the reinjection budget from the compaction target and safety ratio.
@@ -163,8 +172,15 @@ where
 {
     // Validate first so an unknown recipe never appears in the span as
     // "in flight" and never triggers an assembly that would have to be
-    // rolled back.
+    // rolled back. Local ratio validation backstops callers that reach
+    // this API without running `CairnConfig::validate()` — without it,
+    // `compute_budget` would silently coerce the ratio to zero and the
+    // hook would emit an empty reinjection.
     let recipe_steps = resolve_pre_compact_recipe(&cfg.pre_compact_recipe)?;
+    let ratio = cfg.pre_compact_safety_ratio;
+    if !ratio.is_finite() || ratio <= 0.0 {
+        return Err(PreCompactError::InvalidSafetyRatio { ratio });
+    }
 
     let span = tracing::info_span!(
         "sensor.pre_compact",
@@ -340,6 +356,33 @@ mod tests {
             })
             .collect();
         assert_eq!(kinds, vec!["purpose".to_string(), "pinned_feedback".into()]);
+    }
+
+    #[test]
+    fn pre_compact_invalid_safety_ratio_fails_closed() {
+        // Non-finite and non-positive ratios would coerce
+        // `compute_budget` to zero and silently emit an empty
+        // reinjection. The hook must reject those configs instead.
+        for bad in [-0.1_f64, 0.0_f64, f64::NAN, f64::INFINITY] {
+            let snapshot_called = Cell::new(false);
+            let mut cfg = sample_cfg();
+            cfg.pre_compact_safety_ratio = bad;
+
+            let err = run_pre_compact(&sample_event(), &cfg, |_, _| {
+                snapshot_called.set(true);
+                Ok(())
+            })
+            .unwrap_err();
+
+            assert!(
+                !snapshot_called.get(),
+                "snapshot must not run for ratio {bad}"
+            );
+            assert!(
+                matches!(err, PreCompactError::InvalidSafetyRatio { .. }),
+                "expected InvalidSafetyRatio for {bad}, got {err:?}"
+            );
+        }
     }
 
     #[test]

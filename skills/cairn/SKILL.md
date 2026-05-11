@@ -387,7 +387,7 @@ Every command supports `--json` for machine-readable output. Parse stdout as JSO
 
 ## Pre-compaction reinjection
 
-If the harness emits a `PreCompact` hook (or you can detect imminent context compaction), call `cairn assemble_hot --session ${SESSION_ID} --json` and splice the returned text into the post-compaction prefix so working priors survive the squeeze. Persist the pre-compaction transcript with `cairn capture_trace --from ${TRANSCRIPT_PATH} --json`.
+If the harness emits a `PreCompact` hook (or you can detect imminent context compaction), call `cairn assemble_hot --json` and splice the returned text into the post-compaction prefix so working priors survive the squeeze. Persist the pre-compaction transcript with `cairn capture_trace --from ${TRANSCRIPT_PATH} --json`. Session-scoped reinjection (`--session ${SESSION_ID}`) lights up once issue #193 lands the session-aware loader and the runtime starts advertising `cairn.mcp.v1.sensors.pre_compact`.
 
 ---
 
