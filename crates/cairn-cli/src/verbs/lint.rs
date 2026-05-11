@@ -2100,24 +2100,39 @@ fn run_plan_lint(json: bool, vault_root: Option<&Path>, plan_id: &str) -> ExitCo
                 return ExitCode::FAILURE;
             }
         };
+        // Round 10 review fix: use the same historical-collision rule
+        // `flush apply rename` enforces, not just the live check —
+        // otherwise lint can bless a plan that apply will reject for
+        // hitting a retired target lineage.
+        let renames_owned: Vec<(
+            cairn_core::domain::TargetId,
+            cairn_core::domain::TargetId,
+        )> = renames
+            .iter()
+            .map(|(s, d)| ((*s).clone(), (*d).clone()))
+            .collect();
         let live_check: Result<Vec<String>, anyhow::Error> = rt.block_on(async {
             let store = cairn_store_sqlite::open(&db_path).await?;
-            let mut hits = Vec::new();
-            for (src, dst) in &renames {
-                let active = store
-                    .get_active_by_target(dst)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-                if active.is_some() {
-                    hits.push(format!(
-                        "rename target collision (live): `{}` is already a live target — \
-                         renaming `{}` would conflict",
-                        dst.as_str(),
-                        src.as_str(),
-                    ));
-                }
-            }
-            Ok(hits)
+            let renames = renames_owned;
+            store
+                .with_tx(move |tx| {
+                    let mut hits = Vec::new();
+                    for (src, dst) in &renames {
+                        if tx.target_id_ever_used(dst)? {
+                            let active = tx.get_active_by_target(dst)?;
+                            let kind = if active.is_some() { "live" } else { "retired" };
+                            hits.push(format!(
+                                "rename target collision ({kind}): `{}` has been used as a \
+                                 target lineage — renaming `{}` would conflict",
+                                dst.as_str(),
+                                src.as_str(),
+                            ));
+                        }
+                    }
+                    Ok(hits)
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))
         });
         match live_check {
             Ok(hits) => findings.extend(hits),

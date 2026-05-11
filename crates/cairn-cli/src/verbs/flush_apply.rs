@@ -41,6 +41,122 @@ pub fn session_drift_hash(session: &Session) -> String {
     BodyHash::compute(&json).as_str().to_owned()
 }
 
+/// Round 10 review fix: enforce that each plan dimension that is set
+/// matches the record's stored scope. Unset plan dimensions are
+/// unrestricted (the planner did not narrow on them). Returns the
+/// offending dimension name on the first mismatch so the error message
+/// can point operators at the right field.
+fn scope_satisfies(plan: &cairn_core::domain::ScopeTuple, record: &cairn_core::domain::ScopeTuple)
+    -> Result<(), &'static str>
+{
+    fn check(
+        plan: Option<&str>,
+        record: Option<&str>,
+        name: &'static str,
+    ) -> Result<(), &'static str> {
+        match (plan, record) {
+            (Some(p), Some(r)) if p == r => Ok(()),
+            (Some(_), _) => Err(name),
+            (None, _) => Ok(()),
+        }
+    }
+    check(plan.tenant.as_deref(), record.tenant.as_deref(), "tenant")?;
+    check(plan.workspace.as_deref(), record.workspace.as_deref(), "workspace")?;
+    check(plan.project.as_deref(), record.project.as_deref(), "project")?;
+    check(plan.session_id.as_deref(), record.session_id.as_deref(), "session_id")?;
+    check(plan.entity.as_deref(), record.entity.as_deref(), "entity")?;
+    check(plan.user.as_deref(), record.user.as_deref(), "user")?;
+    check(plan.agent.as_deref(), record.agent.as_deref(), "agent")?;
+    Ok(())
+}
+
+fn check_scope(
+    tx: &mut cairn_store_sqlite::StoreTx<'_>,
+    plan: &FlushPlan,
+    mutation: &PlannedMutation,
+) -> Result<(), StoreError> {
+    match mutation {
+        PlannedMutation::Patch {
+            target: PatchTarget::Record(target),
+            ..
+        }
+        | PlannedMutation::Rename {
+            record_id: target, ..
+        } => {
+            let Some(stored) = tx.get_active_by_target(target)? else {
+                return Err(StoreError::PatchTargetMissing {
+                    target_id: target.as_str().to_owned(),
+                });
+            };
+            enforce_record_scope(plan, &stored.record, target)
+        }
+        PlannedMutation::Patch {
+            target: PatchTarget::Session(session_id),
+            ..
+        } => {
+            let session = tx.get_live_session(session_id)?;
+            enforce_session_scope(plan, &session)
+        }
+        _ => Ok(()),
+    }
+}
+
+fn enforce_record_scope(
+    plan: &FlushPlan,
+    record: &cairn_core::domain::MemoryRecord,
+    target: &cairn_core::domain::TargetId,
+) -> Result<(), StoreError> {
+    scope_satisfies(&plan.scope, &record.scope).map_err(|dim| StoreError::Invariant {
+        what: format!(
+            "flush apply: plan scope dimension `{dim}` does not match record `{}` — \
+             refusing mutation outside authorized scope",
+            target.as_str(),
+        ),
+    })
+}
+
+fn enforce_session_scope(
+    plan: &FlushPlan,
+    session: &Session,
+) -> Result<(), StoreError> {
+    let plan_scope = &plan.scope;
+    // session_id dimension
+    if let Some(scoped) = &plan_scope.session_id
+        && scoped != session.id.as_str()
+    {
+        return Err(StoreError::Invariant {
+            what: format!(
+                "flush apply: plan scope `session_id={scoped}` does not match session `{}`",
+                session.id.as_str(),
+            ),
+        });
+    }
+    // user / agent dimensions
+    if let Some(user) = &plan_scope.user
+        && user != session.identity.user.as_str()
+    {
+        return Err(StoreError::Invariant {
+            what: format!(
+                "flush apply: plan scope `user={user}` does not match session `{}` user `{}`",
+                session.id.as_str(),
+                session.identity.user.as_str(),
+            ),
+        });
+    }
+    if let Some(agent) = &plan_scope.agent
+        && agent != session.identity.agent.as_str()
+    {
+        return Err(StoreError::Invariant {
+            what: format!(
+                "flush apply: plan scope `agent={agent}` does not match session `{}` agent `{}`",
+                session.id.as_str(),
+                session.identity.agent.as_str(),
+            ),
+        });
+    }
+    Ok(())
+}
+
 pub(crate) async fn apply_real_plan(
     _store: &Arc<dyn MemoryStore>,
     sqlite: &Arc<SqliteMemoryStore>,
@@ -56,8 +172,14 @@ pub(crate) async fn apply_real_plan(
                 // (patch-then-rename, multi-patch chains), so legitimate
                 // multi-step plans would self-trip. Phase 1 = drift,
                 // Phase 2 = apply.
+            //
+            // Round 10 review fix: enforce plan scope against each
+            // target's stored scope BEFORE mutating, so a pending plan
+            // staged outside the reviewer's authorized scope cannot
+            // patch/rename rows it does not own.
             for mutation in &plan.mutations {
                 check_drift(tx, &plan, mutation)?;
+                check_scope(tx, &plan, mutation)?;
             }
             for mutation in &plan.mutations {
                 apply_mutation(tx, &plan.operation_id.0, mutation)?;
