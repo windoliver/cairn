@@ -160,6 +160,45 @@ fn bless_response(case_id: &str, canonical_actual: &serde_json::Value) {
     eprintln!("[conformance] blessed {case_id}");
 }
 
+/// Assert the JSON-RPC outer envelope (jsonrpc, id, result/error) is well-formed
+/// for one representative Ok case. Complements the per-case envelope replay,
+/// which only diffs the inner Cairn envelope.
+#[tokio::test]
+async fn conformance_jsonrpc_layer_well_formed() {
+    let case = load_case("handshake/ok_mint");
+    let (server_half, client_half) = tokio::io::duplex(65_536);
+    let _server_task = tokio::spawn(async move {
+        CairnMcpHandler::new()
+            .serve(server_half)
+            .await
+            .expect("server init")
+            .waiting()
+            .await
+            .ok();
+    });
+
+    let (client_read, mut client_write) = tokio::io::split(client_half);
+    let mut client_reader = BufReader::new(client_read);
+    let _ = do_initialize(&mut client_write, &mut client_reader).await;
+
+    let frame = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 42,
+        "method": "tools/call",
+        "params": { "name": case.verb, "arguments": case.request.get("args").cloned().unwrap_or_default() }
+    });
+    send_frame(&mut client_write, &frame.to_string()).await;
+    let resp = recv_frame(&mut client_reader).await;
+
+    assert_eq!(resp["jsonrpc"], "2.0", "jsonrpc field");
+    assert_eq!(resp["id"], 42, "id must echo request id");
+    assert!(resp.get("result").is_some(), "result must be present");
+    assert!(
+        resp.get("error").is_none(),
+        "error must be absent for ok case"
+    );
+}
+
 // ── self-tests for the runner ────────────────────────────────────────────────
 mod runner_self_tests {
     use super::*;
