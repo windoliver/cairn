@@ -1,15 +1,21 @@
-//! End-to-end CLI test for the `handshake` MCP prelude tool (issue #65).
+//! End-to-end CLI tests for the `cairn mcp` stdio transport.
 //!
 //! Spawns a real `cairn mcp` subprocess against a synthesized vault
-//! (no `cairn bootstrap`, so no embedding-model download — round-1 review
-//! #3) and drives `initialize` + `tools/list` over the child's stdin/stdout
-//! to assert the production posture for `handshake`:
+//! (no `cairn bootstrap`, so no embedding-model download - round-1 review
+//! #3) and drives JSON-RPC over the child's stdin/stdout.
+//!
+//! For the `handshake` MCP prelude tool (issue #65), this asserts the
+//! production posture:
 //!
 //!  - When [`cairn_core::status::wiring::REPLAY_CHALLENGE_WIRED`] is
 //!    `false` (current state), `handshake` is absent from `tools/list`
 //!    even though the sqlite store is wired (brief §15 fail-closed,
 //!    round-1 review #1).
 //!  - When the flag is `true` (future state), `handshake` is present.
+//!
+//! For typed core verb envelopes (issue #66), this asserts that actual
+//! CLI-served `tools/call` responses carry generated `Response` JSON for
+//! malformed known verbs and known-but-unwired valid verbs.
 //!
 //! Reliability properties (round-3 review #3):
 //!  - The protocol helper returns `Result` instead of panicking, so the
@@ -22,11 +28,12 @@
 #![allow(missing_docs)]
 
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use cairn_core::generated::envelope::{Response, ResponseStatus, ResponseVerb};
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -108,7 +115,16 @@ impl Drop for ChildGuard {
 
 #[test]
 fn cairn_mcp_subprocess_advertises_handshake_per_wiring_flag() {
-    let vault = synth_vault("e2e-cli");
+    run_mcp_subprocess("e2e-cli", run_tools_list_protocol);
+}
+
+#[test]
+fn cairn_mcp_subprocess_returns_typed_envelopes_for_core_verb_calls() {
+    run_mcp_subprocess("e2e-cli-typed", run_typed_envelope_protocol);
+}
+
+fn run_mcp_subprocess(tenant: &str, protocol: fn(&mut Child) -> Result<(), String>) {
+    let vault = synth_vault(tenant);
     let child = Command::new(cli_bin())
         .args(["--vault"])
         .arg(vault.path())
@@ -123,7 +139,7 @@ fn cairn_mcp_subprocess_advertises_handshake_per_wiring_flag() {
 
     // Drive the protocol. Any failure path returns Err here; the
     // ChildGuard's Drop kills the subprocess on panic too.
-    if let Err(reason) = run_protocol(guard.as_mut()) {
+    if let Err(reason) = protocol(guard.as_mut()) {
         // Force-kill before we panic so the assertion message contains
         // the captured stderr without the live subprocess holding
         // resources.
@@ -173,71 +189,31 @@ fn cairn_mcp_subprocess_advertises_handshake_per_wiring_flag() {
     }
 }
 
-/// Drive the wire protocol. Returns `Err(reason)` on any failure so the
-/// caller's `ChildGuard` can clean up before propagating.
-fn run_protocol(child: &mut Child) -> Result<(), String> {
-    let mut stdin = child.stdin.take().ok_or("child stdin already taken")?;
-    let stdout = child.stdout.take().ok_or("child stdout already taken")?;
-    let stderr = child.stderr.take().ok_or("child stderr already taken")?;
+/// Drive `initialize` + `tools/list`. Returns `Err(reason)` on any failure so
+/// the caller's `ChildGuard` can clean up before propagating.
+fn run_tools_list_protocol(child: &mut Child) -> Result<(), String> {
+    let mut client = ProtocolClient::new(child)?;
 
-    let (tx_out, rx_out) = mpsc::channel::<Value>();
-    let _stdout_thread = std::thread::spawn(move || {
-        let mut reader = BufReader::new(stdout);
-        let mut line = String::new();
-        while reader.read_line(&mut line).unwrap_or(0) > 0 {
-            if let Ok(v) = serde_json::from_str::<Value>(line.trim())
-                && tx_out.send(v).is_err()
-            {
-                break;
-            }
-            line.clear();
-        }
-    });
-
-    let stderr_collected = Arc::new(Mutex::new(String::new()));
-    let stderr_clone = stderr_collected.clone();
-    let _stderr_thread = std::thread::spawn(move || {
-        let mut reader = BufReader::new(stderr);
-        let mut buf = String::new();
-        while reader.read_line(&mut buf).unwrap_or(0) > 0 {
-            stderr_clone.lock().expect("lock").push_str(&buf);
-            buf.clear();
-        }
-    });
-    let stderr_so_far = || stderr_collected.lock().expect("lock").clone();
-
-    send_frame(
-        &mut stdin,
-        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"cli-e2e","version":"0.0.0"}}}"#,
-    )?;
-    let init_resp = recv_frame(&rx_out, &stderr_so_far)?;
+    let init_resp = client.initialize("cli-e2e")?;
     let contract = init_resp
         .pointer("/result/capabilities/experimental/cairn.status/contract")
         .and_then(Value::as_str);
     if contract != Some("cairn.mcp.v1") {
         return Err(format!(
             "initialize did not carry cairn.mcp.v1 contract; got {contract:?}\nstderr: {}",
-            stderr_so_far()
+            client.stderr_so_far()
         ));
     }
 
-    send_frame(
-        &mut stdin,
-        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
-    )?;
-
-    send_frame(
-        &mut stdin,
-        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
-    )?;
-    let list_resp = recv_frame(&rx_out, &stderr_so_far)?;
+    client.send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#)?;
+    let list_resp = client.recv()?;
     let names: Vec<&str> = list_resp
         .pointer("/result/tools")
         .and_then(Value::as_array)
         .ok_or_else(|| {
             format!(
                 "tools/list response missing tools array: {list_resp}\nstderr: {}",
-                stderr_so_far()
+                client.stderr_so_far()
             )
         })?
         .iter()
@@ -257,8 +233,170 @@ fn run_protocol(child: &mut Child) -> Result<(), String> {
     }
 
     // Drop stdin so the server starts shutting down.
-    drop(stdin);
+    client.close_stdin();
     Ok(())
+}
+
+fn run_typed_envelope_protocol(child: &mut Child) -> Result<(), String> {
+    let mut client = ProtocolClient::new(child)?;
+    client.initialize("cli-e2e-typed")?;
+
+    client.send(
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search","arguments":{"query":"hello"}}}"#,
+    )?;
+    let invalid_search = client.recv()?;
+    let invalid_search = typed_error_envelope(
+        &invalid_search,
+        "invalid search args",
+        ResponseVerb::Search,
+        ResponseStatus::Rejected,
+        "InvalidArgs",
+    )?;
+    let err = invalid_search
+        .error
+        .as_ref()
+        .expect("invalid search args must carry error");
+    if err["data"]["field"] != "args" {
+        return Err(format!(
+            "invalid search args must identify args field; got {err}"
+        ));
+    }
+
+    client.send(
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"retrieve","arguments":{"target":"record"}}}"#,
+    )?;
+    let invalid_retrieve = client.recv()?;
+    let invalid_retrieve = typed_error_envelope(
+        &invalid_retrieve,
+        "invalid retrieve args",
+        ResponseVerb::Retrieve,
+        ResponseStatus::Rejected,
+        "InvalidArgs",
+    )?;
+    let err = invalid_retrieve
+        .error
+        .as_ref()
+        .expect("invalid retrieve args must carry error");
+    let reason = err["data"]["reason"].as_str().unwrap_or_default();
+    if err["data"]["field"] != "args" || !reason.contains("missing field") {
+        return Err(format!(
+            "invalid retrieve args must identify missing args field; got {err}"
+        ));
+    }
+
+    client.send(
+        r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"retrieve","arguments":{"target":"record","id":"01ARZ3NDEKTSV4RRFFQ69G5FAV"}}}"#,
+    )?;
+    let unwired_retrieve = client.recv()?;
+    let unwired_retrieve = typed_error_envelope(
+        &unwired_retrieve,
+        "valid unwired retrieve",
+        ResponseVerb::Retrieve,
+        ResponseStatus::Aborted,
+        "Internal",
+    )?;
+    let err = unwired_retrieve
+        .error
+        .as_ref()
+        .expect("unwired retrieve must carry error");
+    if !err["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("not yet implemented")
+    {
+        return Err(format!(
+            "unwired retrieve must explain missing MCP implementation; got {err}"
+        ));
+    }
+
+    // Drop stdin so the server starts shutting down.
+    client.close_stdin();
+    Ok(())
+}
+
+struct ProtocolClient {
+    stdin: Option<ChildStdin>,
+    rx_out: mpsc::Receiver<Value>,
+    stderr_collected: Arc<Mutex<String>>,
+}
+
+impl ProtocolClient {
+    fn new(child: &mut Child) -> Result<Self, String> {
+        let stdin = child.stdin.take().ok_or("child stdin already taken")?;
+        let stdout = child.stdout.take().ok_or("child stdout already taken")?;
+        let stderr = child.stderr.take().ok_or("child stderr already taken")?;
+
+        let (tx_out, rx_out) = mpsc::channel::<Value>();
+        let _stdout_thread = std::thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            let mut line = String::new();
+            while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                if let Ok(v) = serde_json::from_str::<Value>(line.trim())
+                    && tx_out.send(v).is_err()
+                {
+                    break;
+                }
+                line.clear();
+            }
+        });
+
+        let stderr_collected = Arc::new(Mutex::new(String::new()));
+        let stderr_clone = stderr_collected.clone();
+        let _stderr_thread = std::thread::spawn(move || {
+            let mut reader = BufReader::new(stderr);
+            let mut buf = String::new();
+            while reader.read_line(&mut buf).unwrap_or(0) > 0 {
+                stderr_clone.lock().expect("lock").push_str(&buf);
+                buf.clear();
+            }
+        });
+
+        Ok(Self {
+            stdin: Some(stdin),
+            rx_out,
+            stderr_collected,
+        })
+    }
+
+    fn send(&mut self, json: &str) -> Result<(), String> {
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| "child stdin already closed".to_owned())?;
+        send_frame(stdin, json)
+    }
+
+    fn recv(&self) -> Result<Value, String> {
+        recv_frame(&self.rx_out, &|| self.stderr_so_far())
+    }
+
+    fn initialize(&mut self, client_name: &str) -> Result<Value, String> {
+        let init = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": client_name,
+                    "version": "0.0.0",
+                },
+            },
+        });
+        self.send(&init.to_string())?;
+        let resp = self.recv()?;
+        self.send(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)?;
+        Ok(resp)
+    }
+
+    fn close_stdin(&mut self) {
+        self.stdin.take();
+    }
+
+    fn stderr_so_far(&self) -> String {
+        self.stderr_collected.lock().expect("lock").clone()
+    }
 }
 
 fn send_frame(stdin: &mut impl Write, json: &str) -> Result<(), String> {
@@ -282,4 +420,75 @@ fn recv_frame(
             stderr_so_far()
         )
     })
+}
+
+fn typed_error_envelope(
+    call_resp: &Value,
+    label: &str,
+    expected_verb: ResponseVerb,
+    expected_status: ResponseStatus,
+    expected_code: &str,
+) -> Result<Response, String> {
+    if call_resp.get("result").is_none() {
+        return Err(format!(
+            "{label} must yield a result frame; got {call_resp}"
+        ));
+    }
+    let is_error = call_resp
+        .pointer("/result/isError")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !is_error {
+        return Err(format!("{label} must set isError=true; got {call_resp}"));
+    }
+    let text = first_text_content(call_resp)
+        .ok_or_else(|| format!("{label} response must include text content; got {call_resp}"))?;
+    let envelope: Response = serde_json::from_str(text)
+        .map_err(|e| format!("{label} text must parse as Response JSON: {e}; text={text}"))?;
+    if envelope.contract != "cairn.mcp.v1" {
+        return Err(format!(
+            "{label} must carry cairn.mcp.v1 contract; got {}",
+            envelope.contract
+        ));
+    }
+    if envelope.status != expected_status {
+        return Err(format!(
+            "{label} status mismatch; expected {:?}, got {:?}",
+            expected_status, envelope.status
+        ));
+    }
+    if envelope.verb != expected_verb {
+        return Err(format!(
+            "{label} verb mismatch; expected {:?}, got {:?}",
+            expected_verb, envelope.verb
+        ));
+    }
+    if envelope.operation_id.0.len() != 26 {
+        return Err(format!(
+            "{label} operation_id must be a ULID; got {}",
+            envelope.operation_id.0
+        ));
+    }
+    if envelope.data.is_some() {
+        return Err(format!("{label} error envelope must not carry data"));
+    }
+    let err = envelope
+        .error
+        .as_ref()
+        .ok_or_else(|| format!("{label} must carry error object"))?;
+    if err["code"] != expected_code {
+        return Err(format!(
+            "{label} code mismatch; expected {expected_code}, got {err}"
+        ));
+    }
+    Ok(envelope)
+}
+
+fn first_text_content(call_resp: &Value) -> Option<&str> {
+    call_resp
+        .pointer("/result/content")
+        .and_then(Value::as_array)?
+        .first()?
+        .get("text")
+        .and_then(Value::as_str)
 }
