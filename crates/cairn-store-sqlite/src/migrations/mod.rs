@@ -105,6 +105,10 @@ const M0056_HOT_PREFIX_CACHE: &str = include_str!("sql/0056_hot_prefix_cache.sql
 // Renumbered from 0054 → 0057 during rebase.
 const M0057_HOT_SOURCE_WATERMARKS_EXTRAS: &str =
     include_str!("sql/0057_hot_source_watermarks_extras.sql");
+// Issue #289 re-loop r6 — durable audit for in-place session patches.
+// Renumbered from 0053 → 0058 during rebase onto main.
+const M0058_SESSION_METADATA_AUDIT: &str =
+    include_str!("sql/0058_session_metadata_audit.sql");
 
 /// Canonical SQL for migration 0020 (`workflow_jobs`). Re-exported so
 /// downstream crates (notably `cairn-workflows`, which hashes the
@@ -268,6 +272,11 @@ pub(crate) const MIGRATION_SOURCES: &[(i64, &str, &str)] = &[
         "0057_hot_source_watermarks_extras",
         M0057_HOT_SOURCE_WATERMARKS_EXTRAS,
     ),
+    (
+        58,
+        "0058_session_metadata_audit",
+        M0058_SESSION_METADATA_AUDIT,
+    ),
 ];
 
 /// All migrations, in order. Returns a fresh `Migrations` set on every call
@@ -326,5 +335,6 @@ pub fn migrations() -> Migrations<'static> {
         M::up(M0055_FORGET_RECORD_PAYLOAD_SCRUB),
         M::up(M0056_HOT_PREFIX_CACHE),
         M::up(M0057_HOT_SOURCE_WATERMARKS_EXTRAS),
+        M::up(M0058_SESSION_METADATA_AUDIT),
     ])
 }

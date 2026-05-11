@@ -356,7 +356,7 @@ fn apply_mutation(
         PlannedMutation::Patch {
             target: PatchTarget::Session(session_id),
             str_replace,
-        } => apply_session_patch(tx, session_id, str_replace),
+        } => apply_session_patch(tx, operation_id, session_id, str_replace),
         PlannedMutation::Rename { record_id, new_id } => {
             apply_rename(tx, operation_id, record_id, new_id)
         }
@@ -399,10 +399,16 @@ fn apply_record_patch(
 
 fn apply_session_patch(
     tx: &mut cairn_store_sqlite::StoreTx<'_>,
+    operation_id: &str,
     session_id: &cairn_core::domain::SessionId,
     replacements: &[StrReplace],
 ) -> Result<(), StoreError> {
     let mut session = tx.get_live_session(session_id)?;
+    // Re-loop round 6: capture pre-state for audit/rollback before
+    // any mutation. `session_metadata_audit` records the prior
+    // title/channel/priority/tags so recovery tooling can reconstruct
+    // the overwrite even though sessions are stored in place.
+    let pre_state = SessionPatchDocument::from(&session);
     // Round 4/5 review fix: patch session fields by typed-field
     // routing, NOT by string-replacing a serialized JSON blob.
     // The previous approach allowed `StrReplace.new` to contain
@@ -415,6 +421,13 @@ fn apply_session_patch(
         apply_one_session_replacement(&mut session, replacement, session_id)?;
     }
     tx.update_session_metadata(&session)?;
+    let post_state = SessionPatchDocument::from(&session);
+    tx.append_session_metadata_audit(
+        session_id,
+        operation_id,
+        &pre_state,
+        &post_state,
+    )?;
     Ok(())
 }
 

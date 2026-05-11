@@ -236,6 +236,51 @@ impl StoreTx<'_> {
         Ok(())
     }
 
+    /// Append a row to `session_metadata_audit` capturing the
+    /// pre-mutation and post-mutation session document JSON inside the
+    /// same transaction as the in-place `UPDATE sessions ...`. Provides
+    /// durable rollback evidence for `flush apply` session patches
+    /// (issue #289 re-loop r6). Pre/post are serialized by the caller
+    /// so they can use whatever canonical document shape the planner
+    /// recognized.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Sqlite`] on SQL failures.
+    pub fn append_session_metadata_audit<T>(
+        &self,
+        session_id: &SessionId,
+        operation_id: &str,
+        pre_state: &T,
+        post_state: &T,
+    ) -> Result<(), StoreError>
+    where
+        T: serde::Serialize,
+    {
+        let pre_json = serde_json::to_string(pre_state)?;
+        let post_json = serde_json::to_string(post_state)?;
+        let now_ms = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+        )
+        .unwrap_or(i64::MAX);
+        self.tx.execute(
+            "INSERT INTO session_metadata_audit \
+                 (operation_id, session_id, pre_state, post_state, applied_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                operation_id,
+                session_id.as_str(),
+                pre_json,
+                post_json,
+                now_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Copy every non-`updates` edge attached to `old_id` onto `new_id`.
     /// Round 7/8 review fix: the previous version also deleted the
     /// source rows, which irrecoverably erased the predecessor's graph
