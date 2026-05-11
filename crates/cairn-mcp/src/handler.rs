@@ -557,21 +557,36 @@ impl ServerHandler for CairnMcpHandler {
                 return Ok(crate::graph_tools::dispatch(&queries, &name, arguments).await);
             }
 
-            let known = crate::verb_envelope::core_verb_for_tool(name.as_ref()).is_some();
+            let request_verb = crate::verb_envelope::core_verb_for_tool(name.as_ref());
             let store = self.store.clone();
             let config = self.config.clone();
 
-            if !known {
+            let Some(request_verb) = request_verb else {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "cairn: unknown verb '{name}'. Available verbs: {}",
                     TOOLS.iter().map(|d| d.name).collect::<Vec<_>>().join(", ")
                 ))]));
-            }
+            };
+
+            let typed_args = match crate::verb_envelope::parse_args(request_verb, arguments) {
+                Ok(args) => args,
+                Err(response) => {
+                    return Ok(crate::verb_envelope::call_result_from_response(&response));
+                }
+            };
 
             if name.as_ref() == "search"
                 && let Some(store) = store
             {
-                return Ok(handle_search(store, config, arguments).await);
+                let cairn_core::generated::envelope::RequestArgs::Search(args) = typed_args else {
+                    let response = crate::verb_envelope::invalid_args_response(
+                        crate::verb_envelope::response_verb(request_verb),
+                        "args",
+                        "expected search arguments",
+                    );
+                    return Ok(crate::verb_envelope::call_result_from_response(&response));
+                };
+                return Ok(handle_search(store, config, args).await);
             }
 
             Ok(dispatch_stub(&name))
@@ -592,25 +607,10 @@ impl ServerHandler for CairnMcpHandler {
 async fn handle_search(
     store: Arc<dyn MemoryStore>,
     config: CairnConfig,
-    arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    args: cairn_core::generated::verbs::search::SearchArgs,
 ) -> CallToolResult {
-    use cairn_core::generated::envelope::{RequestArgs, RequestVerb, ResponseVerb};
+    use cairn_core::generated::envelope::ResponseVerb;
     use cairn_core::generated::verbs::search::SearchArgsMode;
-
-    // Parse args from the MCP tool argument map through the generated
-    // envelope adapter so parse failures use the canonical Response shape.
-    let args = match crate::verb_envelope::parse_args(RequestVerb::Search, arguments) {
-        Ok(RequestArgs::Search(args)) => args,
-        Ok(_) => {
-            let response = crate::verb_envelope::invalid_args_response(
-                ResponseVerb::Search,
-                "args",
-                "expected search arguments",
-            );
-            return crate::verb_envelope::call_result_from_response(&response);
-        }
-        Err(response) => return crate::verb_envelope::call_result_from_response(&response),
-    };
 
     // Map IDL mode to core dispatcher mode.
     let mode = match args.mode {

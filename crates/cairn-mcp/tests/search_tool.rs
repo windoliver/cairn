@@ -320,6 +320,63 @@ async fn search_tool_without_store_returns_stub_error() {
     );
 }
 
+#[tokio::test]
+async fn search_tool_without_store_invalid_args_returns_invalid_args_envelope() {
+    let (server_half, client_half) = tokio::io::duplex(65_536);
+    let _server_task = tokio::spawn(async move {
+        CairnMcpHandler::new()
+            .serve(server_half)
+            .await
+            .expect("server init")
+            .waiting()
+            .await
+            .ok();
+    });
+
+    let (client_read, mut client_write) = tokio::io::split(client_half);
+    let mut client_reader = BufReader::new(client_read);
+
+    do_initialize(&mut client_write, &mut client_reader).await;
+
+    send_frame(
+        &mut client_write,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search","arguments":{"query":"hello"}}}"#,
+    )
+    .await;
+
+    let call_resp = recv_frame(&mut client_reader).await;
+    assert!(
+        call_resp.get("result").is_some(),
+        "bad-args no-store search call must yield a result frame; got: {call_resp}"
+    );
+    let is_error = call_resp
+        .pointer("/result/isError")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    assert!(
+        is_error,
+        "search without store and invalid args must return isError=true; got: {call_resp}"
+    );
+
+    let text = first_text_content(&call_resp);
+    let envelope: Response = serde_json::from_str(text)
+        .unwrap_or_else(|e| panic!("invalid-args response must be a Response: {e}; text={text}"));
+
+    assert!(matches!(envelope.status, ResponseStatus::Rejected));
+    assert!(matches!(envelope.verb, ResponseVerb::Search));
+    assert!(envelope.data.is_none());
+    let err = envelope.error.expect("rejected envelope must carry error");
+    assert_eq!(err["code"], "InvalidArgs");
+    assert_eq!(err["data"]["field"], "args");
+    assert!(
+        err["data"]["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("missing field"),
+        "reason should include serde's missing-field detail: {err}"
+    );
+}
+
 /// Calling `search` with malformed/missing required args returns `isError = true`.
 #[tokio::test]
 async fn search_tool_invalid_args_returns_error() {
@@ -382,6 +439,64 @@ async fn search_tool_invalid_args_returns_error() {
         "reason should include serde's missing-field detail: {err}"
     );
     assert_eq!(envelope.operation_id.0.len(), 26);
+}
+
+#[tokio::test]
+async fn known_unwired_core_verb_invalid_args_returns_invalid_args_envelope() {
+    let (server_half, client_half) = tokio::io::duplex(65_536);
+    let _server_task = tokio::spawn(async move {
+        CairnMcpHandler::with_store(Arc::new(EmptyStore), CairnConfig::default())
+            .serve(server_half)
+            .await
+            .expect("server init")
+            .waiting()
+            .await
+            .ok();
+    });
+
+    let (client_read, mut client_write) = tokio::io::split(client_half);
+    let mut client_reader = BufReader::new(client_read);
+
+    do_initialize(&mut client_write, &mut client_reader).await;
+
+    send_frame(
+        &mut client_write,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"retrieve","arguments":{"target":"record"}}}"#,
+    )
+    .await;
+
+    let call_resp = recv_frame(&mut client_reader).await;
+    assert!(
+        call_resp.get("result").is_some(),
+        "bad-args known unwired verb must yield result frame; got: {call_resp}"
+    );
+    let is_error = call_resp
+        .pointer("/result/isError")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    assert!(
+        is_error,
+        "bad-args known unwired verb must return isError=true; got: {call_resp}"
+    );
+
+    let text = first_text_content(&call_resp);
+    let envelope: Response = serde_json::from_str(text)
+        .unwrap_or_else(|e| panic!("invalid-args response must be a Response: {e}; text={text}"));
+
+    assert!(matches!(envelope.status, ResponseStatus::Rejected));
+    assert!(matches!(envelope.verb, ResponseVerb::Retrieve));
+    assert_eq!(envelope.operation_id.0.len(), 26);
+    assert!(envelope.data.is_none());
+    let err = envelope.error.expect("rejected envelope must carry error");
+    assert_eq!(err["code"], "InvalidArgs");
+    assert_eq!(err["data"]["field"], "args");
+    assert!(
+        err["data"]["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("missing field"),
+        "reason should include serde's missing-field detail: {err}"
+    );
 }
 
 #[tokio::test]
