@@ -11,15 +11,18 @@
 
 use crate::config::{CairnConfig, CapabilitySet};
 use crate::contract::memory_store::{
-    HybridSearchArgs, KeywordSearchArgs, MemoryStore, SearchCandidate, SemanticSearchArgs,
+    HybridSearchArgs, KeywordCursor, KeywordSearchArgs, MemoryStore, SearchCandidate,
+    SemanticSearchArgs,
 };
-use crate::domain::filter::validate_filter;
+use crate::domain::filter::{ValidatedFilter, validate_filter};
 use crate::domain::record::MemoryRecord;
 use crate::domain::taxonomy::MemoryVisibility;
 use crate::domain::{BodyHash, ScopeTuple};
 use crate::generated::verbs::search::SearchArgsFilters;
 use crate::pipeline::explain::{Candidate as ExplainCandidate, ExplainConfig, explain_filter};
-use crate::policy_trace::{PolicyDetail, PolicyGate, PolicyOutcome, PolicyTraceEntry};
+use crate::policy_trace::{
+    PolicyDetail, PolicyGate, PolicyOutcome, PolicyTraceEntry, RecordExclusion,
+};
 use crate::search::{ScoreExplain, token_budget_trim};
 
 /// Mode requested by the caller.
@@ -117,6 +120,9 @@ pub enum SearchError {
 
 const POLICY_TRACE_CAP: &str = "cairn.mcp.v1.policy_trace";
 const EXPLAIN_FILTER_STALENESS_THRESHOLD_DAYS: u32 = 30;
+const READ_FILTER_OVERFETCH_FACTOR: usize = 4;
+const READ_FILTER_OVERFETCH_MIN_EXTRA: usize = 8;
+const READ_FILTER_OVERFETCH_MAX: usize = 1_000;
 const SECONDS_PER_DAY: i64 = 86_400;
 
 /// Fail-closed capability gate for `request.mode`.
@@ -192,19 +198,11 @@ pub async fn run(
         request.visibility_allowlist.clone()
     };
 
-    let (candidates, explain, degraded_legs) = match request.mode {
+    let (candidates, explain, read_filter_exclusions, degraded_legs) = match request.mode {
         SearchMode::Keyword => {
-            let args = KeywordSearchArgs {
-                query: request.query.clone(),
-                filter: validated_filter,
-                auth_scope: request.auth_scope.clone(),
-                visibility_allowlist: visibility,
-                limit: request.limit,
-                cursor: None,
-                with_explain: request.explain,
-            };
-            let page = store.search_keyword(&args).await?;
-            (page.candidates, page.explain, Vec::new())
+            let (candidates, explain, exclusions) =
+                search_keyword_backfilled(store, &request, validated_filter, visibility).await?;
+            (candidates, explain, exclusions, Vec::new())
         }
         SearchMode::Semantic => {
             let args = SemanticSearchArgs {
@@ -212,12 +210,18 @@ pub async fn run(
                 filter: validated_filter,
                 auth_scope: request.auth_scope.clone(),
                 visibility_allowlist: visibility,
-                limit: request.limit,
+                limit: read_filter_fetch_limit(request.limit),
                 model_label: request.model_label.clone(),
                 with_explain: request.explain,
             };
             let page = store.search_semantic(&args).await?;
-            (page.candidates, page.explain, Vec::new())
+            let (candidates, explain, exclusions) = apply_read_filter_backfilling(
+                request.mode,
+                &page.candidates,
+                page.explain.as_deref(),
+                request.limit,
+            );
+            (candidates, explain, exclusions, Vec::new())
         }
         SearchMode::Hybrid => {
             let args = HybridSearchArgs {
@@ -225,7 +229,7 @@ pub async fn run(
                 filter: validated_filter,
                 auth_scope: request.auth_scope.clone(),
                 visibility_allowlist: visibility,
-                limit: request.limit,
+                limit: read_filter_fetch_limit(request.limit),
                 model_label: request.model_label.clone(),
                 blend: config.search.rerank_blend,
                 rrf_k: config.search.rrf_k,
@@ -235,12 +239,17 @@ pub async fn run(
                 graph_confidence_min: config.search.graph_confidence_min,
             };
             let page = store.search_hybrid(&args).await?;
-            (page.candidates, page.explain, page.degraded_legs)
+            let (candidates, explain, exclusions) = apply_read_filter_backfilling(
+                request.mode,
+                &page.candidates,
+                page.explain.as_deref(),
+                request.limit,
+            );
+            let degraded_legs = page.degraded_legs;
+            (candidates, explain, exclusions, degraded_legs)
         }
     };
 
-    let (candidates, explain, read_filter_exclusions) =
-        apply_read_filter(request.mode, candidates, explain);
     let policy_trace = search_policy_trace(&read_filter_exclusions);
     let excluded = request.explain.then_some(read_filter_exclusions);
 
@@ -276,6 +285,121 @@ fn search_policy_trace(
             PolicyDetail::None,
         ),
     ]
+}
+
+async fn search_keyword_backfilled(
+    store: &dyn MemoryStore,
+    request: &SearchRequest,
+    filter: Option<ValidatedFilter<'_>>,
+    visibility: Vec<MemoryVisibility>,
+) -> Result<
+    (
+        Vec<SearchCandidate>,
+        Option<Vec<ScoreExplain>>,
+        Vec<RecordExclusion>,
+    ),
+    SearchError,
+> {
+    let target_limit = request.limit.max(1);
+    let mut cursor: Option<KeywordCursor> = None;
+    let mut all_candidates = Vec::new();
+    let mut all_explain = request.explain.then(Vec::new);
+
+    loop {
+        let args = KeywordSearchArgs {
+            query: request.query.clone(),
+            filter,
+            auth_scope: request.auth_scope.clone(),
+            visibility_allowlist: visibility.clone(),
+            limit: target_limit,
+            cursor: cursor.clone(),
+            with_explain: request.explain,
+        };
+        let page = store.search_keyword(&args).await?;
+        let next_cursor = page.next_cursor;
+        let candidate_offset = all_candidates.len();
+        let page_candidate_count = page.candidates.len();
+
+        if all_explain.is_some() {
+            if let Some(mut entries) = page.explain {
+                for (idx, entry) in entries.iter_mut().enumerate() {
+                    entry.bm25_rank = Some(candidate_offset + idx + 1);
+                }
+                if let Some(acc) = all_explain.as_mut() {
+                    acc.append(&mut entries);
+                }
+            } else {
+                all_explain = None;
+            }
+        }
+        all_candidates.extend(page.candidates);
+
+        let (filtered_candidates, filtered_explain, exclusions) = apply_read_filter_backfilling(
+            SearchMode::Keyword,
+            &all_candidates,
+            all_explain.as_deref(),
+            target_limit,
+        );
+        if filtered_candidates.len() >= target_limit
+            || next_cursor.is_none()
+            || page_candidate_count == 0
+        {
+            return Ok((filtered_candidates, filtered_explain, exclusions));
+        }
+        cursor = next_cursor;
+    }
+}
+
+fn read_filter_fetch_limit(limit: usize) -> usize {
+    let base = limit.max(1);
+    base.saturating_mul(READ_FILTER_OVERFETCH_FACTOR)
+        .max(base.saturating_add(READ_FILTER_OVERFETCH_MIN_EXTRA))
+        .min(READ_FILTER_OVERFETCH_MAX)
+}
+
+fn cap_search_results(
+    mut candidates: Vec<SearchCandidate>,
+    mut explain: Option<Vec<ScoreExplain>>,
+    limit: usize,
+) -> (Vec<SearchCandidate>, Option<Vec<ScoreExplain>>) {
+    let cap = limit.max(1);
+    if candidates.len() > cap {
+        candidates.truncate(cap);
+    }
+    if let Some(entries) = explain.as_mut()
+        && entries.len() > cap
+    {
+        entries.truncate(cap);
+    }
+    (candidates, explain)
+}
+
+fn apply_read_filter_backfilling(
+    mode: SearchMode,
+    candidates: &[SearchCandidate],
+    explain: Option<&[ScoreExplain]>,
+    limit: usize,
+) -> (
+    Vec<SearchCandidate>,
+    Option<Vec<ScoreExplain>>,
+    Vec<RecordExclusion>,
+) {
+    let cap = limit.max(1);
+    let total = candidates.len();
+    let mut window = cap.min(total);
+
+    loop {
+        let window_candidates = candidates.iter().take(window).cloned().collect();
+        let window_explain = explain.map(|entries| entries.iter().take(window).cloned().collect());
+        let (filtered_candidates, filtered_explain, exclusions) =
+            apply_read_filter(mode, window_candidates, window_explain);
+        if filtered_candidates.len() >= cap || window == total {
+            let (filtered_candidates, filtered_explain) =
+                cap_search_results(filtered_candidates, filtered_explain, cap);
+            return (filtered_candidates, filtered_explain, exclusions);
+        }
+        window = total.min(window.saturating_add(cap));
+    }
 }
 
 fn apply_read_filter(
