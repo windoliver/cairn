@@ -16,6 +16,7 @@ pub mod graph_tools;
 pub mod handler;
 pub mod prelude_tools;
 pub mod relay;
+pub mod verb_envelope;
 
 pub use error::TransportError;
 pub use handler::CairnMcpHandler;
