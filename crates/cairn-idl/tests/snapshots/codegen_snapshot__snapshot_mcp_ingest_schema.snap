@@ -1,5 +1,6 @@
 ---
 source: crates/cairn-idl/tests/codegen_snapshot.rs
+assertion_line: 51
 expression: "read(&files, \"crates/cairn-mcp/src/generated/schemas/verbs/ingest.json\")"
 ---
 {
@@ -25,6 +26,11 @@ expression: "read(&files, \"crates/cairn-mcp/src/generated/schemas/verbs/ingest.
         {
           "required": [
             "url"
+          ]
+        },
+        {
+          "required": [
+            "jsonl"
           ]
         }
       ],
@@ -67,6 +73,11 @@ expression: "read(&files, \"crates/cairn-mcp/src/generated/schemas/verbs/ingest.
           "description": "Extra YAML frontmatter fields to store alongside the body.",
           "type": "object"
         },
+        "harness": {
+          "description": "Optional harness parser name. Auto-detected from the first non-empty line when omitted.",
+          "minLength": 1,
+          "type": "string"
+        },
         "human_review": {
           "default": false,
           "description": "If true, persist a FlushPlan under .cairn/flush/pending/ for explicit `cairn flush apply` (brief §5.5). Mutually exclusive with dry_run.",
@@ -80,10 +91,21 @@ expression: "read(&files, \"crates/cairn-mcp/src/generated/schemas/verbs/ingest.
           },
           "type": "array"
         },
+        "jsonl": {
+          "description": "Path to a harness transcript JSONL file (or directory with --recursive) for backfill import.",
+          "minLength": 1,
+          "type": "string"
+        },
         "kind": {
           "description": "Memory taxonomy kind (19 possible values — see §3 taxonomy). Validated beyond JSON Schema by the classifier.",
           "minLength": 1,
           "type": "string"
+        },
+        "limit": {
+          "description": "Maximum number of transcript rows to import (jsonl backfill).",
+          "maximum": 4294967295,
+          "minimum": 1,
+          "type": "integer"
         },
         "mode": {
           "$ref": "#/$defs/IngestMode",
@@ -112,10 +134,15 @@ expression: "read(&files, \"crates/cairn-mcp/src/generated/schemas/verbs/ingest.
         },
         "recursive": {
           "default": true,
-          "description": "Whether folder ingest recurses into child directories. CLI default: true.",
+          "description": "Folder/jsonl ingest: recurse into child directories. CLI default: true.",
           "type": "boolean"
         },
         "session_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "session_id_from": {
+          "description": "Optional top-level JSON key whose string value overrides the generic parser's synthetic session id.",
           "minLength": 1,
           "type": "string"
         },
@@ -159,6 +186,37 @@ expression: "read(&files, \"crates/cairn-mcp/src/generated/schemas/verbs/ingest.
           "description": "Folder ingest file count when source is --folder.",
           "minimum": 0,
           "type": "integer"
+        },
+        "jsonl_summary": {
+          "additionalProperties": false,
+          "description": "JSONL transcript backfill counts. Present only when source is --jsonl.",
+          "properties": {
+            "elapsed_ms": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "files_scanned": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "records_written": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "sessions_parsed": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "sessions_skipped": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "turns_parsed": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
         },
         "plan_ref": {
           "description": "Path under .cairn/flush/pending/ when human_review=true; absent otherwise.",
@@ -250,6 +308,26 @@ expression: "read(&files, \"crates/cairn-mcp/src/generated/schemas/verbs/ingest.
         "value_source": "u32"
       },
       {
+        "long": "jsonl",
+        "name": "jsonl",
+        "value_source": "path"
+      },
+      {
+        "long": "harness",
+        "name": "harness",
+        "value_source": "string"
+      },
+      {
+        "long": "session-id-from",
+        "name": "session_id_from",
+        "value_source": "string"
+      },
+      {
+        "long": "limit",
+        "name": "limit",
+        "value_source": "u32"
+      },
+      {
         "long": "session",
         "name": "session_id",
         "value_source": "string"
@@ -270,9 +348,10 @@ expression: "read(&files, \"crates/cairn-mcp/src/generated/schemas/verbs/ingest.
         "body",
         "file",
         "folder",
-        "url"
+        "url",
+        "jsonl"
       ],
-      "description": "File, URL, folder, or '-' for stdin. Mutually exclusive with --body/--file/--folder/--url.",
+      "description": "File, URL, folder, JSONL transcript, or '-' for stdin. Mutually exclusive with --body/--file/--folder/--url/--jsonl.",
       "name": "source"
     }
   },

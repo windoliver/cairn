@@ -2532,12 +2532,17 @@ fn write_untagged_union_deserialize(
     if !union.is_empty() {
         write_xor_check(w, "raw", union);
     }
-    // Type-specific extra invariants. The IDL annotates `SignedIntent` with
-    // ULID/Identity/Nonce16Base64 patterns, key_version >= 1, sequence ≤
-    // 2^53−1, chain_parents maxItems=64 + uniqueItems. The generic IR
-    // doesn't carry those constraints so a TypeName match keeps the bespoke
-    // checks here while leaving the codegen for other untagged unions
-    // (IngestArgs, ...) untouched.
+    // Type-specific extra invariants. The generic IR lowers XOR membership
+    // for every untagged union, but some roots still need field-level checks
+    // from the source schema.
+    if u.name.0 == "IngestArgs" {
+        write_ingest_args_extra_checks(w);
+    }
+    // The IDL annotates `SignedIntent` with ULID/Identity/Nonce16Base64
+    // patterns, key_version >= 1, sequence ≤ 2^53−1, chain_parents
+    // maxItems=64 + uniqueItems. The generic IR doesn't carry those
+    // constraints so a TypeName match keeps the bespoke checks here while
+    // leaving the codegen for other untagged unions untouched.
     if u.name.0 == "SignedIntent" {
         write_signed_intent_extra_checks(w);
     }
@@ -2571,6 +2576,59 @@ fn write_untagged_union_deserialize(
     w.line("Self::try_from(raw).map_err(::serde::de::Error::custom)");
     w.dedent();
     w.line("}");
+    w.dedent();
+    w.line("}");
+}
+
+/// Emit bespoke field-level validation for `IngestArgs`.
+///
+/// `ingest.json` mixes a top-level XOR (`oneOf`) with scalar constraints on
+/// optional fields. The untagged-union lowering already enforces the source
+/// XOR, but without these checks the generated wire type would ignore the
+/// schema's `minLength` and `minimum` bounds for transcript-import fields.
+///
+/// We intentionally validate the legacy fields too so `IngestArgs` matches the
+/// rest of the generated verb surface:
+///
+/// - `kind`: minLength 1
+/// - `body` / `file` / `folder` / `url` / `jsonl`: minLength 1
+/// - `harness` / `session_id` / `session_id_from`: minLength 1
+/// - `tags[*]`: minLength 1
+/// - `limit`: minimum 1
+fn write_ingest_args_extra_checks(w: &mut RustWriter) {
+    w.line("if raw.kind.is_empty() { return Err(\"kind: must not be empty\"); }");
+    for field in [
+        "body",
+        "file",
+        "folder",
+        "url",
+        "jsonl",
+        "harness",
+        "session_id",
+        "session_id_from",
+    ] {
+        w.line(&format!("if let Some(v) = &raw.{field} {{"));
+        w.indent();
+        w.line(&format!(
+            "if v.is_empty() {{ return Err(\"{field}: must not be empty\"); }}"
+        ));
+        w.dedent();
+        w.line("}");
+    }
+    w.line("if let Some(v) = &raw.tags {");
+    w.indent();
+    w.line("for item in v {");
+    w.indent();
+    w.line("if item.is_empty() { return Err(\"tags: items must not be empty\"); }");
+    w.dedent();
+    w.line("}");
+    w.dedent();
+    w.line("}");
+    w.line("if let Some(lim) = raw.limit {");
+    w.indent();
+    w.line(
+        "if !(1..=4_294_967_295_i64).contains(&lim) { return Err(\"limit: must be in [1, 4294967295]\"); }",
+    );
     w.dedent();
     w.line("}");
 }

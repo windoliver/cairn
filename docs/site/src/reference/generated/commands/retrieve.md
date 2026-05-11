@@ -28,6 +28,9 @@ Options:
       --rehydrate
 
 
+      --include-reasoning
+
+
       --include <ENUM>
           [possible values: tool_calls, reasoning]
 

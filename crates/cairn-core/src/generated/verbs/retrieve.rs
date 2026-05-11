@@ -488,6 +488,9 @@ pub enum RetrieveArgs {
         cursor: Option<crate::generated::common::Cursor>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         include: Option<Vec<RetrieveArgsSessionInclude>>,
+        /// Sugar for requesting reasoning blocks in the retrieved session transcript.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        include_reasoning: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit: Option<i64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -499,6 +502,9 @@ pub enum RetrieveArgs {
     Turn {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         include: Option<Vec<RetrieveArgsTurnInclude>>,
+        /// Sugar for requesting reasoning blocks in the retrieved turn.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        include_reasoning: Option<bool>,
         session_id: String,
         turn_id: String,
     },
@@ -537,6 +543,9 @@ struct RawRetrieveArgsSession {
     cursor: Option<crate::generated::common::Cursor>,
     #[serde(default)]
     include: Option<Vec<RetrieveArgsSessionInclude>>,
+    /// Sugar for requesting reasoning blocks in the retrieved session transcript.
+    #[serde(default)]
+    include_reasoning: Option<bool>,
     #[serde(default)]
     limit: Option<i64>,
     #[serde(default)]
@@ -552,6 +561,9 @@ struct RawRetrieveArgsTurn {
     #[allow(dead_code)] target: serde::de::IgnoredAny,
     #[serde(default)]
     include: Option<Vec<RetrieveArgsTurnInclude>>,
+    /// Sugar for requesting reasoning blocks in the retrieved turn.
+    #[serde(default)]
+    include_reasoning: Option<bool>,
     session_id: String,
     turn_id: String,
 }
@@ -640,6 +652,7 @@ impl ::core::convert::TryFrom<RawRetrieveArgs> for RetrieveArgs {
             RawRetrieveArgs::Session(inner) => {
                 let cursor = inner.cursor;
                 let include = inner.include;
+                let include_reasoning = inner.include_reasoning;
                 let limit = inner.limit;
                 let order = inner.order;
                 let rehydrate = inner.rehydrate;
@@ -655,10 +668,11 @@ impl ::core::convert::TryFrom<RawRetrieveArgs> for RetrieveArgs {
                         if !seen.insert(*item as u8) { return Err("include: items must be unique"); }
                     }
                 }
-                Ok(Self::Session { cursor, include, limit, order, rehydrate, session_id })
+                Ok(Self::Session { cursor, include, include_reasoning, limit, order, rehydrate, session_id })
             },
             RawRetrieveArgs::Turn(inner) => {
                 let include = inner.include;
+                let include_reasoning = inner.include_reasoning;
                 let session_id = inner.session_id;
                 let turn_id = inner.turn_id;
                 if session_id.is_empty() { return Err("session_id: must not be empty"); }
@@ -669,7 +683,7 @@ impl ::core::convert::TryFrom<RawRetrieveArgs> for RetrieveArgs {
                         if !seen.insert(*item as u8) { return Err("include: items must be unique"); }
                     }
                 }
-                Ok(Self::Turn { include, session_id, turn_id })
+                Ok(Self::Turn { include, include_reasoning, session_id, turn_id })
             },
             RawRetrieveArgs::Folder(inner) => {
                 let depth = inner.depth;

@@ -122,6 +122,20 @@ fn proactive_event() -> CaptureEvent {
 }
 
 #[test]
+fn trace_block_reasoning_round_trips_signature_verbatim() {
+    use cairn_core::domain::TraceBlock;
+
+    let block = TraceBlock::Reasoning {
+        text: "working through tool choice".into(),
+        signature: Some("sig_abc123+/=".into()),
+    };
+
+    let json = serde_json::to_string(&block).expect("serialize");
+    let back: TraceBlock = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(back, block);
+}
+
+#[test]
 fn auto_event_validates_and_traces_to_sensor() {
     let ev = auto_event();
     ev.validate().expect("valid auto event");

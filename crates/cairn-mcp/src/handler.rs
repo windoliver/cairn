@@ -652,6 +652,7 @@ async fn handle_search(
         query: args.query.clone(),
         mode,
         limit,
+        include_reasoning: args.include_reasoning.unwrap_or(false),
         visibility_allowlist: vec![],
         auth_scope,
         model_label: config.search.embedding_model.as_str().to_owned(),

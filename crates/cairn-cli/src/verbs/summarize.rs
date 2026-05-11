@@ -234,6 +234,10 @@ async fn persist_summary(
         session_id: None,
         tags: Some(vec!["summary".to_owned()]),
         url: None,
+        jsonl: None,
+        harness: None,
+        session_id_from: None,
+        limit: None,
     };
     let prepared =
         cairn_core::verbs::ingest::prepare_ingest_body(&ingest_args, auth.issuer.as_str());

@@ -22,6 +22,11 @@
           "required": [
             "url"
           ]
+        },
+        {
+          "required": [
+            "jsonl"
+          ]
         }
       ],
       "properties": {
@@ -63,6 +68,11 @@
           "description": "Extra YAML frontmatter fields to store alongside the body.",
           "type": "object"
         },
+        "harness": {
+          "description": "Optional harness parser name. Auto-detected from the first non-empty line when omitted.",
+          "minLength": 1,
+          "type": "string"
+        },
         "human_review": {
           "default": false,
           "description": "If true, persist a FlushPlan under .cairn/flush/pending/ for explicit `cairn flush apply` (brief §5.5). Mutually exclusive with dry_run.",
@@ -76,10 +86,21 @@
           },
           "type": "array"
         },
+        "jsonl": {
+          "description": "Path to a harness transcript JSONL file (or directory with --recursive) for backfill import.",
+          "minLength": 1,
+          "type": "string"
+        },
         "kind": {
           "description": "Memory taxonomy kind (19 possible values — see §3 taxonomy). Validated beyond JSON Schema by the classifier.",
           "minLength": 1,
           "type": "string"
+        },
+        "limit": {
+          "description": "Maximum number of transcript rows to import (jsonl backfill).",
+          "maximum": 4294967295,
+          "minimum": 1,
+          "type": "integer"
         },
         "mode": {
           "$ref": "#/$defs/IngestMode",
@@ -108,10 +129,15 @@
         },
         "recursive": {
           "default": true,
-          "description": "Whether folder ingest recurses into child directories. CLI default: true.",
+          "description": "Folder/jsonl ingest: recurse into child directories. CLI default: true.",
           "type": "boolean"
         },
         "session_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "session_id_from": {
+          "description": "Optional top-level JSON key whose string value overrides the generic parser's synthetic session id.",
           "minLength": 1,
           "type": "string"
         },
@@ -155,6 +181,37 @@
           "description": "Folder ingest file count when source is --folder.",
           "minimum": 0,
           "type": "integer"
+        },
+        "jsonl_summary": {
+          "additionalProperties": false,
+          "description": "JSONL transcript backfill counts. Present only when source is --jsonl.",
+          "properties": {
+            "elapsed_ms": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "files_scanned": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "records_written": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "sessions_parsed": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "sessions_skipped": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "turns_parsed": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
         },
         "plan_ref": {
           "description": "Path under .cairn/flush/pending/ when human_review=true; absent otherwise.",

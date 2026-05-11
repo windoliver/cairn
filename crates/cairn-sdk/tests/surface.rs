@@ -52,6 +52,10 @@ fn ingest_body_args(body: &str) -> IngestArgs {
         session_id: None,
         tags: None,
         url: None,
+        jsonl: None,
+        harness: None,
+        session_id_from: None,
+        limit: None,
     }
 }
 
@@ -101,6 +105,7 @@ fn verb_response_serializes_as_canonical_envelope() {
             record_id: ulid(),
             session_id: "sess-1".to_owned(),
             plan_ref: None,
+            jsonl_summary: None,
         },
     };
     let value = serde_json::to_value(&resp).expect("serializes");
@@ -151,6 +156,7 @@ fn verb_response_rejects_envelope_invalid_target_combinations() {
             record_id: ulid(),
             session_id: "s".to_owned(),
             plan_ref: None,
+            jsonl_summary: None,
         },
     };
     assert!(serde_json::to_value(&stray).is_err());
@@ -476,6 +482,10 @@ fn ingest_accepts_well_formed_uri_schemes() {
             session_id: None,
             tags: None,
             url: Some(url.to_owned()),
+            jsonl: None,
+            harness: None,
+            session_id_from: None,
+            limit: None,
         };
         assert_unimplemented("ingest", sdk().ingest(&args));
     }
@@ -494,6 +504,7 @@ async fn search_rejects_empty_query_with_invalid_args() {
         query: String::new(),
         scope: None,
         explain: None,
+        include_reasoning: None,
     };
     match sdk().search(&args).await.expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
@@ -514,6 +525,7 @@ async fn search_rejects_out_of_range_limit_with_invalid_args() {
         query: "hello".to_owned(),
         scope: None,
         explain: None,
+        include_reasoning: None,
     };
     match sdk().search(&args).await.expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
@@ -541,6 +553,7 @@ async fn search_explain_rejects_when_policy_trace_capability_unadvertised() {
         query: "hello".to_owned(),
         scope: None,
         explain: Some(true),
+        include_reasoning: None,
     };
     let err = sdk()
         .search(&args)
@@ -573,6 +586,7 @@ async fn search_explain_false_rejects_unadvertised_keyword_mode() {
         query: "hello".to_owned(),
         scope: None,
         explain: Some(false),
+        include_reasoning: None,
     };
     let err = sdk()
         .search(&args)
@@ -610,6 +624,7 @@ async fn search_rejects_unadvertised_modes_with_capability_unavailable() {
             query: "hello".to_owned(),
             scope: None,
             explain: None,
+            include_reasoning: None,
         };
         let err = sdk()
             .search(&args)
@@ -678,6 +693,7 @@ async fn search_rejects_empty_and_filter_with_invalid_args() {
         query: "hi".to_owned(),
         scope: None,
         explain: None,
+        include_reasoning: None,
     };
     match sdk().search(&args).await.expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
@@ -707,6 +723,7 @@ async fn search_rejects_excessive_filter_depth_with_invalid_args() {
         query: "hi".to_owned(),
         scope: None,
         explain: None,
+        include_reasoning: None,
     };
     match sdk().search(&args).await.expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
@@ -731,6 +748,7 @@ async fn search_rejects_malformed_filter_leaf_with_invalid_args() {
         query: "hi".to_owned(),
         scope: None,
         explain: None,
+        include_reasoning: None,
     };
     match sdk().search(&args).await.expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
@@ -765,6 +783,7 @@ async fn search_accepts_extended_filter_operators() {
             query: "hi".to_owned(),
             scope: None,
             explain: None,
+            include_reasoning: None,
         };
         match sdk()
             .search(&args)
@@ -805,6 +824,7 @@ async fn search_rejects_malformed_extended_filter_operators_with_invalid_args() 
             query: "hi".to_owned(),
             scope: None,
             explain: None,
+            include_reasoning: None,
         };
         match sdk().search(&args).await.expect_err("must reject") {
             SdkError::InvalidArgs { .. } => {}
@@ -826,6 +846,7 @@ async fn search_rejects_malformed_cursor_with_invalid_args() {
         query: "hi".to_owned(),
         scope: None,
         explain: None,
+        include_reasoning: None,
     };
     match sdk().search(&args).await.expect_err("must reject") {
         SdkError::InvalidArgs { reason } => assert!(reason.contains("Cursor"), "reason: {reason}"),
@@ -846,6 +867,7 @@ async fn search_rejects_empty_scope_filter_with_invalid_args() {
         query: "hi".to_owned(),
         scope: Some(empty_scope_filter()),
         explain: None,
+        include_reasoning: None,
     };
     match sdk().search(&args).await.expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {

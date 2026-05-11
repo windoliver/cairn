@@ -83,4 +83,4 @@ pub use target_id::TargetId;
 pub use taxonomy::{MemoryClass, MemoryKind, MemoryVisibility};
 pub use time::{Clock, SystemClock};
 pub use timestamp::Rfc3339Timestamp;
-pub use trace::{TraceEvent, TraceLink, TraceLinkError};
+pub use trace::{TraceBlock, TraceEvent, TraceLink, TraceLinkError};

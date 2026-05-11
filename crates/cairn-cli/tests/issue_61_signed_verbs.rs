@@ -876,6 +876,7 @@ fn non_retrieve_committed_response_round_trips_without_target() {
             plan_ref: None,
             record_id: fixed_ulid(),
             session_id: "default".to_owned(),
+            jsonl_summary: None,
         }),
         vec![],
     );
@@ -935,6 +936,7 @@ fn committed_rejects_mismatched_verb_and_data() {
             plan_ref: None,
             record_id: fixed_ulid(),
             session_id: "default".to_owned(),
+            jsonl_summary: None,
         }),
         vec![],
     );
@@ -989,6 +991,10 @@ fn insert_session_record(vault: &Path, body: &str) -> String {
         session_id: None,
         tags: None,
         url: None,
+        jsonl: None,
+        harness: None,
+        session_id_from: None,
+        limit: None,
     };
     let prepared =
         cairn_core::verbs::ingest::prepare_ingest_body(&args, "agt:cairn-cli:default:writer:v1")

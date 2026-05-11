@@ -34,6 +34,10 @@ mod issue_61_core_verbs {
             session_id: Some("sess-1".to_owned()),
             tags: Some(vec!["issue-61".to_owned()]),
             url: None,
+            jsonl: None,
+            harness: None,
+            session_id_from: None,
+            limit: None,
         };
         let prepared = prepare_ingest_body(&args, "agt:test:writer:v1").expect("prepare");
         assert!(matches!(prepared, PreparedIngest::Proceed { .. }));
@@ -94,6 +98,10 @@ mod issue_61_core_verbs {
             session_id: None,
             tags: None,
             url: None,
+            jsonl: None,
+            harness: None,
+            session_id_from: None,
+            limit: None,
         };
         let prepared = prepare_ingest_body(&args, "agt:test:writer:v1").expect("prepare");
         if let PreparedIngest::Rejected {
@@ -129,6 +137,10 @@ mod issue_61_core_verbs {
             session_id: None,
             tags: None,
             url: None,
+            jsonl: None,
+            harness: None,
+            session_id_from: None,
+            limit: None,
         };
         let prepared =
             prepare_ingest_body(&args, "not-an-identity").expect("discard before issuer");
@@ -155,6 +167,10 @@ mod issue_61_core_verbs {
             session_id: None,
             tags: None,
             url: None,
+            jsonl: None,
+            harness: None,
+            session_id_from: None,
+            limit: None,
         };
         let err = prepare_ingest_body(&args, "agt:test:writer:v1").unwrap_err();
         assert!(matches!(err, DomainError::MalformedCapture { .. }));
@@ -450,6 +466,10 @@ mod issue_61_core_verbs {
             session_id: None,
             tags: None,
             url: None,
+            jsonl: None,
+            harness: None,
+            session_id_from: None,
+            limit: None,
         };
         let PreparedIngest::Proceed { record, .. } =
             prepare_ingest_body(&args, "agt:test:writer:v1").expect("prepare record")
