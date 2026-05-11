@@ -29,6 +29,18 @@ impl From<&Session> for SessionPatchDocument {
     }
 }
 
+/// Canonical pre-state hash for a session metadata document, used to
+/// populate `FlushPlan.target_hashes` when authoring a session patch.
+/// Exposed for integration tests; planners should call this when
+/// building real plans.
+#[must_use]
+pub fn session_drift_hash(session: &Session) -> String {
+    // serde_json::to_string never fails for these scalar/Vec fields.
+    let doc = SessionPatchDocument::from(session);
+    let json = serde_json::to_string(&doc).expect("SessionPatchDocument serialization");
+    BodyHash::compute(&json).as_str().to_owned()
+}
+
 pub(crate) async fn apply_real_plan(
     _store: &Arc<dyn MemoryStore>,
     sqlite: &Arc<SqliteMemoryStore>,
@@ -86,8 +98,18 @@ fn check_record_drift(
     plan: &FlushPlan,
     target: &cairn_core::domain::TargetId,
 ) -> Result<(), StoreError> {
+    // Round 6 review fix: non-placeholder Patch/Rename must declare a
+    // pre-state hash. Skipping drift when the map is empty made the
+    // protection optional for exactly the mutations that need it.
     let Some(expected) = plan.target_hash(target) else {
-        return Ok(());
+        return Err(StoreError::Invariant {
+            what: format!(
+                "flush apply: non-placeholder plan is missing `target_hashes` entry \
+                 for record `{}`; drift protection requires a pre-state hash for every \
+                 patch/rename target",
+                target.as_str(),
+            ),
+        });
     };
     let Some(stored) = tx.get_active_by_target(target)? else {
         return Err(StoreError::PatchTargetMissing {
@@ -120,7 +142,14 @@ fn check_session_drift(
     session_id: &cairn_core::domain::SessionId,
 ) -> Result<(), StoreError> {
     let Some(expected) = plan.session_hash(session_id) else {
-        return Ok(());
+        return Err(StoreError::Invariant {
+            what: format!(
+                "flush apply: non-placeholder plan is missing `target_hashes` entry \
+                 for session `{}`; drift protection requires a pre-state hash for every \
+                 session metadata patch",
+                session_id.as_str(),
+            ),
+        });
     };
     let session = tx.get_live_session(session_id)?;
     let doc_json = serde_json::to_string(&SessionPatchDocument::from(&session))?;

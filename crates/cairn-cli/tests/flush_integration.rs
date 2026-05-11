@@ -25,6 +25,15 @@ fn write_non_placeholder_pending_noop(vault: &Path, id: &str) {
 }
 
 fn write_real_pending_plan(vault: &Path, id: &str, mutations: Vec<PlannedMutation>) {
+    write_real_pending_plan_with_hashes(vault, id, mutations, std::collections::BTreeMap::new());
+}
+
+fn write_real_pending_plan_with_hashes(
+    vault: &Path,
+    id: &str,
+    mutations: Vec<PlannedMutation>,
+    target_hashes: std::collections::BTreeMap<String, String>,
+) {
     let plan = cairn_core::domain::flush_plan::FlushPlan {
         operation_id: cairn_core::generated::common::Ulid(id.into()),
         issued_at: "2026-05-09T12:00:00Z".into(),
@@ -35,7 +44,7 @@ fn write_real_pending_plan(vault: &Path, id: &str, mutations: Vec<PlannedMutatio
         mutations,
         reason: PlanReason::UserIngest,
         source_events: vec![],
-        target_hashes: std::collections::BTreeMap::new(),
+        target_hashes,
         dependencies: vec![],
         expires_at: "2099-05-09T12:05:00Z".into(),
         placeholder: false,
@@ -1062,7 +1071,14 @@ fn flush_apply_patch_updates_record_body_and_keeps_old_version() {
     let (rt, store) = open_store(vault.path());
     rt.block_on(store.upsert(&record)).expect("seed record");
 
-    write_real_pending_plan(
+    let mut hashes = std::collections::BTreeMap::new();
+    hashes.insert(
+        target.as_str().to_owned(),
+        cairn_core::domain::BodyHash::compute(&record.body)
+            .as_str()
+            .to_owned(),
+    );
+    write_real_pending_plan_with_hashes(
         vault.path(),
         id,
         vec![PlannedMutation::Patch {
@@ -1073,6 +1089,7 @@ fn flush_apply_patch_updates_record_body_and_keeps_old_version() {
                 occurrence: ReplaceOccurrence::First,
             }],
         }],
+        hashes,
     );
 
     let bin = env!("CARGO_BIN_EXE_cairn");
@@ -1123,7 +1140,14 @@ fn flush_apply_patch_missing_substring_fails_atomically() {
     let (rt, store) = open_store(vault.path());
     rt.block_on(store.upsert(&record)).expect("seed record");
 
-    write_real_pending_plan(
+    let mut hashes = std::collections::BTreeMap::new();
+    hashes.insert(
+        target.as_str().to_owned(),
+        cairn_core::domain::BodyHash::compute(&record.body)
+            .as_str()
+            .to_owned(),
+    );
+    write_real_pending_plan_with_hashes(
         vault.path(),
         id,
         vec![PlannedMutation::Patch {
@@ -1134,6 +1158,7 @@ fn flush_apply_patch_missing_substring_fails_atomically() {
                 occurrence: ReplaceOccurrence::First,
             }],
         }],
+        hashes,
     );
 
     let bin = env!("CARGO_BIN_EXE_cairn");
@@ -1189,7 +1214,12 @@ fn flush_apply_patch_session_metadata_updates_live_session() {
         ))
         .unwrap();
 
-    write_real_pending_plan(
+    let mut hashes = std::collections::BTreeMap::new();
+    hashes.insert(
+        session.id.as_str().to_owned(),
+        cairn_cli::verbs::flush_apply::session_drift_hash(&session),
+    );
+    write_real_pending_plan_with_hashes(
         vault.path(),
         id,
         vec![PlannedMutation::Patch {
@@ -1200,6 +1230,7 @@ fn flush_apply_patch_session_metadata_updates_live_session() {
                 occurrence: ReplaceOccurrence::First,
             }],
         }],
+        hashes,
     );
 
     let bin = env!("CARGO_BIN_EXE_cairn");
@@ -1231,13 +1262,21 @@ fn flush_apply_rename_rejects_live_destination_collision() {
     rt.block_on(store.upsert(&source)).expect("seed source");
     rt.block_on(store.upsert(&dest)).expect("seed destination");
 
-    write_real_pending_plan(
+    let mut hashes = std::collections::BTreeMap::new();
+    hashes.insert(
+        source.target_id.as_str().to_owned(),
+        cairn_core::domain::BodyHash::compute(&source.body)
+            .as_str()
+            .to_owned(),
+    );
+    write_real_pending_plan_with_hashes(
         vault.path(),
         id,
         vec![PlannedMutation::Rename {
             record_id: source.target_id.clone(),
             new_id: dest.target_id.clone(),
         }],
+        hashes,
     );
 
     let bin = env!("CARGO_BIN_EXE_cairn");
@@ -1395,13 +1434,21 @@ fn flush_apply_rename_rewrites_inbound_edges_to_new_active_record() {
     }))
     .expect("seed inbound edge");
 
-    write_real_pending_plan(
+    let mut hashes = std::collections::BTreeMap::new();
+    hashes.insert(
+        source.target_id.as_str().to_owned(),
+        cairn_core::domain::BodyHash::compute(&source.body)
+            .as_str()
+            .to_owned(),
+    );
+    write_real_pending_plan_with_hashes(
         vault.path(),
         id,
         vec![PlannedMutation::Rename {
             record_id: source.target_id.clone(),
             new_id: new_target.clone(),
         }],
+        hashes,
     );
 
     let bin = env!("CARGO_BIN_EXE_cairn");
