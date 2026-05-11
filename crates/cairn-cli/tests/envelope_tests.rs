@@ -541,10 +541,23 @@ fn capture_trace_rejects_session_arg_until_scoped_import_supported() {
 }
 
 #[test]
-fn forget_record_returns_capability_unavailable() {
+fn forget_session_returns_capability_unavailable() {
     assert_rejected_capability_unavailable(
-        &["forget", "--record", "01JXXXXXXXXXXXXXXXXXXXXXXX", "--json"],
-        "cairn.mcp.v1.forget.record",
+        &[
+            "forget",
+            "--session",
+            "01JXXXXXXXXXXXXXXXXXXXXXXX",
+            "--json",
+        ],
+        "cairn.mcp.v1.forget.session",
+    );
+}
+
+#[test]
+fn forget_scope_returns_capability_unavailable() {
+    assert_rejected_capability_unavailable(
+        &["forget", "--scope", r#"{"tenant":"default"}"#, "--json"],
+        "cairn.mcp.v1.forget.scope",
     );
 }
 
@@ -639,7 +652,6 @@ fn status_in_bound_vault_advertises_search_and_policy_trace() {
     for stub_cap in [
         "cairn.mcp.v1.retrieve.session",
         "cairn.mcp.v1.retrieve.full",
-        "cairn.mcp.v1.forget.record",
         "cairn.mcp.v1.forget.session",
     ] {
         assert!(

@@ -44,6 +44,10 @@ pub enum StoreError {
     #[error("wal recovery")]
     Recovery(#[from] crate::wal::RecoveryError),
 
+    /// Record-WAL step runner failed during public apply.
+    #[error("record wal runner")]
+    RecordWalRunner(#[from] crate::wal::RunnerError),
+
     /// Daemon-incarnation initialization failed (issue #56, brief §5.6).
     /// Raised from every public async open path when
     /// `locks::init_incarnation` cannot mint or read back the per-process
@@ -56,6 +60,10 @@ pub enum StoreError {
     /// `result_large_err`).
     #[error("daemon incarnation init")]
     LockInit(#[source] Box<crate::locks::LockError>),
+
+    /// Record-WAL apply could not acquire or assert locks.
+    #[error("record wal lock")]
+    RecordWalLock(#[source] Box<crate::locks::LockError>),
 
     /// `ConsentEvent` failed structural validation (kind/payload mismatch,
     /// malformed hash, etc.) before insert.

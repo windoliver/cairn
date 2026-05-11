@@ -18,6 +18,9 @@ Options:
       --budget <U32>
 
 
+      --explain
+
+
       --json
           Emit machine-readable JSON response envelope to stdout
 

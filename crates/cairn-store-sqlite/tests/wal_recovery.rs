@@ -55,7 +55,7 @@ impl StepBody for SyntheticBody {
     #[allow(clippy::match_same_arms)]
     fn run(
         &self,
-        _tx: &Transaction<'_>,
+        _tx: &mut Transaction<'_>,
         _op_id: &OperationId,
         step: &cairn_core::wal::StepDef,
     ) -> Result<(), StepBodyError> {
@@ -74,14 +74,22 @@ impl StepBody for SyntheticBody {
 struct OneKindRegistry {
     kind: WalKind,
     body: Arc<dyn StepBody>,
+    requested_ops: parking_lot::Mutex<Vec<String>>,
 }
 
+#[async_trait::async_trait]
 impl StepBodyRegistry for OneKindRegistry {
-    fn body_for(&self, kind: WalKind) -> Option<Arc<dyn StepBody>> {
+    async fn body_for(
+        &self,
+        _conn: &Arc<Connection>,
+        kind: WalKind,
+        op_id: &OperationId,
+    ) -> Result<Option<Arc<dyn StepBody>>, cairn_store_sqlite::wal::RecoveryError> {
+        self.requested_ops.lock().push(op_id.as_str().to_owned());
         if kind == self.kind {
-            Some(Arc::clone(&self.body))
+            Ok(Some(Arc::clone(&self.body)))
         } else {
-            None
+            Ok(None)
         }
     }
 }
@@ -172,6 +180,26 @@ async fn seed_step(
     .expect("seed wal_steps");
 }
 
+async fn seed_payload_json(
+    conn: &Arc<Connection>,
+    op_id: &str,
+    kind: WalKind,
+    payload_json: String,
+) {
+    let op = op_id.to_owned();
+    let kind_str = kind.as_str().to_owned();
+    conn.call(move |c| {
+        c.execute(
+            "INSERT INTO wal_payloads(operation_id, kind, payload_json, created_at) \
+             VALUES (?1, ?2, ?3, 0)",
+            params![op, kind_str, payload_json],
+        )?;
+        Ok::<_, tokio_rusqlite::Error>(())
+    })
+    .await
+    .expect("seed wal_payloads");
+}
+
 async fn read_op_state(conn: &Arc<Connection>, op_id: &str) -> String {
     let op = op_id.to_owned();
     conn.call(move |c| {
@@ -214,6 +242,7 @@ fn upsert_with_body(body: Arc<dyn StepBody>) -> RecoveryConfig {
         bodies: Box::new(OneKindRegistry {
             kind: WalKind::Upsert,
             body,
+            requested_ops: parking_lot::Mutex::new(Vec::new()),
         }),
     }
 }
@@ -354,6 +383,77 @@ async fn retry_exhaustion_aborts_op() {
     let (state, attempts) = read_step_row(&conn, "op-fail", 1).await;
     assert_eq!(state, "FAILED");
     assert_eq!(attempts, cairn_core::wal::MAX_STEP_ATTEMPTS);
+}
+
+#[tokio::test]
+async fn recovery_stops_at_durable_attempt_ceiling() {
+    let conn = open_db().await;
+    seed_op(&conn, "op-near-ceiling", WalKind::Upsert, "ISSUED", 1).await;
+    forward_to_prepared(&conn, "op-near-ceiling").await;
+    let names = upsert_step_names();
+    seed_step(
+        &conn,
+        "op-near-ceiling",
+        0,
+        names[0],
+        "FAILED",
+        cairn_core::wal::MAX_STEP_ATTEMPTS - 1,
+    )
+    .await;
+
+    let body = SyntheticBody::new(vec![BodyBehavior::AlwaysFail; 6]);
+    let cfg = upsert_with_body(body.clone());
+
+    let report = recover_pending(&conn, &cfg).await.expect("recover");
+
+    assert_eq!(report.aborted.len(), 1);
+    assert_eq!(report.aborted[0].1, 0, "step 0 should hit the ceiling");
+    assert_eq!(read_op_state(&conn, "op-near-ceiling").await, "ABORTED");
+    assert_eq!(
+        body.calls(0),
+        1,
+        "only one additional body invocation is allowed at MAX - 1"
+    );
+    assert_eq!(
+        read_step_row(&conn, "op-near-ceiling", 0).await,
+        ("FAILED".into(), cairn_core::wal::MAX_STEP_ATTEMPTS)
+    );
+}
+
+#[tokio::test]
+async fn recovery_rejects_payload_variant_that_disagrees_with_wal_kind() {
+    let store = open_in_memory().await.expect("open in-memory store");
+    let conn = Arc::clone(
+        store
+            .raw_conn_for_admin()
+            .expect("store has a live connection"),
+    );
+    seed_op(&conn, "op-kind-mismatch", WalKind::Expire, "ISSUED", 1).await;
+    forward_to_prepared(&conn, "op-kind-mismatch").await;
+
+    let record = cairn_core::domain::record::tests_export::sample_record();
+    let payload = cairn_store_sqlite::record_wal::payload::UpsertPayload::new_for_test(record);
+    let payload_json = serde_json::to_string(
+        &cairn_store_sqlite::record_wal::payload::RecordWalPayload::Upsert(Box::new(payload)),
+    )
+    .expect("payload json");
+    seed_payload_json(&conn, "op-kind-mismatch", WalKind::Expire, payload_json).await;
+
+    let cfg = RecoveryConfig {
+        enabled: true,
+        bodies: Box::new(cairn_store_sqlite::record_wal::RecordWalRegistry::new(
+            Arc::clone(store.incarnation().expect("incarnation")),
+        )),
+    };
+
+    let err = recover_pending(&conn, &cfg)
+        .await
+        .expect_err("kind/payload mismatch must fail recovery");
+    assert!(
+        err.to_string().contains("payload"),
+        "error should identify payload mismatch: {err}"
+    );
+    assert_eq!(read_op_state(&conn, "op-kind-mismatch").await, "PREPARED");
 }
 
 #[tokio::test]

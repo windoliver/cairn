@@ -98,6 +98,11 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     // sentinel-rejection trigger.
     ("index", "lock_holders_acquisition_ulid_idx"),
     ("trigger", "lock_holders_reject_sentinel_ulid"),
+    // 0053_wal_payloads
+    ("table", "wal_payloads"),
+    ("trigger", "wal_payloads_kind_matches_wal"),
+    ("trigger", "wal_payloads_scrub_only"),
+    ("trigger", "wal_payloads_no_delete"),
     // 0005_consent
     ("table", "consent_journal"),
     ("index", "consent_journal_subject_scope_idx"),

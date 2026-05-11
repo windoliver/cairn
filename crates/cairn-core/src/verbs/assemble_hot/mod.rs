@@ -1,14 +1,23 @@
 //! `assemble_hot` verb: hot-memory recipe assembly with cache-breakpoint
 //! segment markers. Brief §5, §7, §8.0.f. Issue #288.
 
+pub mod admissibility;
 pub mod assembler;
 pub mod cached;
+pub mod inclusion;
+pub mod inputs;
 pub mod loader;
 pub mod raw;
 pub mod segments;
+pub mod sources;
 
-pub use assembler::{AssembleHotError, assemble_hot, assemble_hot_from_bodies};
+pub use admissibility::{CONFIDENCE_FLOOR, admit};
+pub use assembler::{
+    AssembleHotError, assemble_hot, assemble_hot_from_bodies, assemble_hot_with_inputs,
+};
 pub use cached::{CachedAssembleError, cached_assemble, recipe_hash_canonical};
+pub use inclusion::{ExclusionReason, ExclusionTrace, InclusionTrace, LoadedSegment};
+pub use inputs::HotMemoryInputs;
 pub use segments::{
     AssembleHotValidationError, MAX_SEGMENTS, build_segments, default_stability, validate,
     validate_base, validate_segments, validate_with_recipe,

@@ -1,8 +1,8 @@
 # Folder Ingest Design — Issue #188
 
-**Date:** 2026-05-06  
-**Issue:** [#188 — `cairn ingest --folder <path>` folder scanning and knowledge-base builder](https://github.com/windoliver/cairn/issues/188)  
-**Brief sections:** §3 Vault Layout · §5.2 Write path · §5.2.a ExtractorWorker · §5.6 WAL · §8 CLI contract  
+**Date:** 2026-05-06
+**Issue:** [#188 — `cairn ingest --folder <path>` folder scanning and knowledge-base builder](https://github.com/windoliver/cairn/issues/188)
+**Brief sections:** §3 Vault Layout · §5.2 Write path · §5.2.a ExtractorWorker · §5.6 WAL · §8 CLI contract
 **Status:** Approved
 
 ---

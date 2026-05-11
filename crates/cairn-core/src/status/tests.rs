@@ -100,13 +100,12 @@ fn local_embeddings_off_drops_semantic_and_hybrid() {
 }
 
 #[test]
-fn forget_record_held_back_until_wiring_flips() {
-    // wiring::FORGET_RECORD_WIRED = false today.
+fn forget_record_advertises_when_runtime_is_wired() {
     let g = gates(true, true, None);
     let caps = advertise(&g);
     assert!(
-        !caps.contains(&Capabilities::CairnMcpV1ForgetRecord),
-        "forget.record advertised before runtime wired (brief §15)"
+        caps.contains(&Capabilities::CairnMcpV1ForgetRecord),
+        "forget.record must be advertised once runtime wiring is enabled"
     );
 }
 

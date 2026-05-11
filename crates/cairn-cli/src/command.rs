@@ -1,6 +1,6 @@
 //! Shared clap command tree for the runtime CLI and generated docs.
 
-use crate::{generated, identity, skill, verbs};
+use crate::{generated, hooks, identity, skill, verbs};
 
 /// Build the `cairn` command tree used by both `main.rs` and `cairn-docgen`.
 #[must_use]
@@ -40,6 +40,7 @@ pub fn build_command() -> clap::Command {
         .subcommand(verbs::with_json(verbs::with_flush_modes(
             generated::verbs::forget_subcommand(),
         )))
+        .subcommand(hooks::command())
         // Protocol preludes.
         .subcommand(verbs::with_json(with_issuer(
             generated::prelude::handshake_subcommand(),

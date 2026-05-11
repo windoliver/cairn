@@ -91,10 +91,20 @@ const M0051_LOCK_ACQUISITION_ULID: &str = include_str!("sql/0051_lock_acquisitio
 // Issue #56 round-10 fix — UNIQUE constraint + sentinel-rejection trigger.
 const M0052_LOCK_ACQUISITION_ULID_UNIQUE: &str =
     include_str!("sql/0052_lock_acquisition_ulid_unique.sql");
+// Issue #57 — durable body-bearing WAL payloads for upsert/expire recovery.
+const M0053_WAL_PAYLOADS: &str = include_str!("sql/0053_wal_payloads.sql");
+// Issue #57 round-2 — internal marker for pre-activation COW rows.
+const M0054_RECORDS_COW_STAGING: &str = include_str!("sql/0054_records_cow_staging.sql");
+// Issue #58 - forget_record payloads and WAL scrub stubs.
+const M0055_FORGET_RECORD_PAYLOAD_SCRUB: &str =
+    include_str!("sql/0055_forget_record_payload_scrub.sql");
 // Issue #83 — hot_prefix_cache + hot_source_watermarks tables.
-const M0053_HOT_PREFIX_CACHE: &str = include_str!("sql/0053_hot_prefix_cache.sql");
-const M0054_HOT_SOURCE_WATERMARKS_EXTRAS: &str =
-    include_str!("sql/0054_hot_source_watermarks_extras.sql");
+// Renumbered from 0053 → 0056 during rebase onto main.
+const M0056_HOT_PREFIX_CACHE: &str = include_str!("sql/0056_hot_prefix_cache.sql");
+// Issue #83 round-1 review follow-up — extra watermark classes + fs_fingerprint column.
+// Renumbered from 0054 → 0057 during rebase.
+const M0057_HOT_SOURCE_WATERMARKS_EXTRAS: &str =
+    include_str!("sql/0057_hot_source_watermarks_extras.sql");
 
 /// Canonical SQL for migration 0020 (`workflow_jobs`). Re-exported so
 /// downstream crates (notably `cairn-workflows`, which hashes the
@@ -245,11 +255,18 @@ pub(crate) const MIGRATION_SOURCES: &[(i64, &str, &str)] = &[
         "0052_lock_acquisition_ulid_unique",
         M0052_LOCK_ACQUISITION_ULID_UNIQUE,
     ),
-    (53, "0053_hot_prefix_cache", M0053_HOT_PREFIX_CACHE),
+    (53, "0053_wal_payloads", M0053_WAL_PAYLOADS),
+    (54, "0054_records_cow_staging", M0054_RECORDS_COW_STAGING),
     (
-        54,
-        "0054_hot_source_watermarks_extras",
-        M0054_HOT_SOURCE_WATERMARKS_EXTRAS,
+        55,
+        "0055_forget_record_payload_scrub",
+        M0055_FORGET_RECORD_PAYLOAD_SCRUB,
+    ),
+    (56, "0056_hot_prefix_cache", M0056_HOT_PREFIX_CACHE),
+    (
+        57,
+        "0057_hot_source_watermarks_extras",
+        M0057_HOT_SOURCE_WATERMARKS_EXTRAS,
     ),
 ];
 
@@ -304,7 +321,10 @@ pub fn migrations() -> Migrations<'static> {
         M::up(M0050_LOCKS_V2),
         M::up(M0051_LOCK_ACQUISITION_ULID),
         M::up(M0052_LOCK_ACQUISITION_ULID_UNIQUE),
-        M::up(M0053_HOT_PREFIX_CACHE),
-        M::up(M0054_HOT_SOURCE_WATERMARKS_EXTRAS),
+        M::up(M0053_WAL_PAYLOADS),
+        M::up(M0054_RECORDS_COW_STAGING),
+        M::up(M0055_FORGET_RECORD_PAYLOAD_SCRUB),
+        M::up(M0056_HOT_PREFIX_CACHE),
+        M::up(M0057_HOT_SOURCE_WATERMARKS_EXTRAS),
     ])
 }

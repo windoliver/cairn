@@ -459,6 +459,7 @@ dependencies = [
  "async-trait",
  "blake3",
  "bon",
+ "cairn-core",
  "chrono",
  "ed25519-dalek",
  "insta",
