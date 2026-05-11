@@ -611,6 +611,8 @@ dependencies = [
  "async-trait",
  "cairn-core",
  "cairn-test-fixtures",
+ "regex",
+ "sha2",
  "tracing",
 ]
 
