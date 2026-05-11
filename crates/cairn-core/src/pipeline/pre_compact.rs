@@ -94,6 +94,14 @@ pub enum PreCompactError {
         /// The offending ratio from config.
         ratio: f64,
     },
+    /// The runtime advertised the pre-compaction sensor as unwired (see
+    /// [`crate::status::wiring::SENSORS_PRE_COMPACT_WIRED`]). Failing
+    /// closed in the orchestrator (not just in `status`) blocks
+    /// partial-deployment or version-skew callers from persisting
+    /// snapshots and returning reinjection data the runtime says is
+    /// unsupported.
+    #[error("sensors.pre_compact is not wired in this build")]
+    Unavailable,
 }
 
 /// Compute the reinjection budget from the compaction target and safety ratio.
@@ -165,6 +173,33 @@ fn floor_decimal_product(compaction_target: u32, ratio: f64) -> u64 {
 pub fn run_pre_compact<SNAP>(
     event: &PreCompactEvent,
     cfg: &HotMemoryConfig,
+    snapshot: SNAP,
+) -> Result<PreCompactOutput, PreCompactError>
+where
+    SNAP: FnMut(&PreCompactEvent, &AssembleHotData) -> Result<(), String>,
+{
+    // Enforce the rollout gate inside the orchestrator, not only in
+    // `status`. Without this, an accidental or partial caller could
+    // start persisting pre-compaction snapshots and returning
+    // reinjection data while `status.capabilities` claims the sensor
+    // is unsupported — exactly the version-skew failure mode brief §15
+    // forbids.
+    if !crate::status::wiring::SENSORS_PRE_COMPACT_WIRED {
+        return Err(PreCompactError::Unavailable);
+    }
+    run_pre_compact_unchecked(event, cfg, snapshot)
+}
+
+/// Internal entrypoint that skips the [`SENSORS_PRE_COMPACT_WIRED`]
+/// gate so the orchestrator's pure logic remains testable while the
+/// production caller goes through [`run_pre_compact`]. Do **not** call
+/// from production code paths — only the gate-bearing wrapper above is
+/// allowed to reach here.
+///
+/// [`SENSORS_PRE_COMPACT_WIRED`]: crate::status::wiring::SENSORS_PRE_COMPACT_WIRED
+pub(crate) fn run_pre_compact_unchecked<SNAP>(
+    event: &PreCompactEvent,
+    cfg: &HotMemoryConfig,
     mut snapshot: SNAP,
 ) -> Result<PreCompactOutput, PreCompactError>
 where
@@ -227,6 +262,7 @@ mod tests {
 
     use super::{
         HANDOFF_RECIPE_NAME, PreCompactError, PreCompactEvent, compute_budget, run_pre_compact,
+        run_pre_compact_unchecked,
     };
     use crate::config::{HotMemoryConfig, HotMemoryRecipeStep};
     use crate::domain::SessionId;
@@ -280,7 +316,7 @@ mod tests {
         let calls = RefCell::new(Vec::new());
 
         let event = sample_event();
-        let out = run_pre_compact(&event, &sample_cfg(), |snap_event, assembled| {
+        let out = run_pre_compact_unchecked(&event, &sample_cfg(), |snap_event, assembled| {
             calls.borrow_mut().push(format!(
                 "snapshot:{}:{}:{}",
                 snap_event.last_user_turn_index, assembled.bytes, assembled.prefix
@@ -301,7 +337,7 @@ mod tests {
         // Issue #310 acceptance: a pre_compact event whose harness target is
         // 8 000 tokens must yield reinjection bytes inside the 0.30-ratio
         // budget (≤ 2 400 bytes), regardless of recipe content.
-        let out = run_pre_compact(&sample_event(), &sample_cfg(), |_, _| Ok(())).unwrap();
+        let out = run_pre_compact_unchecked(&sample_event(), &sample_cfg(), |_, _| Ok(())).unwrap();
 
         assert_eq!(out.budget_bytes, 2_400);
         assert!(
@@ -317,7 +353,7 @@ mod tests {
     fn pre_compact_emits_sensor_span_with_required_fields() {
         // Issue #310 acceptance: a `sensor.pre_compact` span must carry
         // session_id, recipe, budget, and output_bytes for harness audit.
-        let out = run_pre_compact(&sample_event(), &sample_cfg(), |_, _| Ok(())).unwrap();
+        let out = run_pre_compact_unchecked(&sample_event(), &sample_cfg(), |_, _| Ok(())).unwrap();
 
         assert!(logs_contain("sensor.pre_compact"));
         assert!(logs_contain("session_id=sess_01jv3e0h5n7d9c1m2p4q6r8s0t"));
@@ -344,7 +380,7 @@ mod tests {
         cfg.pre_compact_recipe = HANDOFF_RECIPE_NAME.to_owned();
 
         let captured = RefCell::new(None);
-        let _ = run_pre_compact(&sample_event(), &cfg, |_, assembled| {
+        let _ = run_pre_compact_unchecked(&sample_event(), &cfg, |_, assembled| {
             captured.replace(assembled.segments.clone());
             Ok(())
         })
@@ -364,6 +400,36 @@ mod tests {
     }
 
     #[test]
+    fn run_pre_compact_unwired_returns_unavailable_without_running_callback() {
+        // Orchestrator-side rollout gate: a partial-deployment caller
+        // that reaches `run_pre_compact` while the wiring constant is
+        // `false` must get `Unavailable` *before* any assembly or
+        // snapshot work runs. Otherwise the runtime would persist data
+        // that `status` claims is unsupported. Pinned against the
+        // current compile-time `SENSORS_PRE_COMPACT_WIRED`; the issue
+        // that flips the constant must replace this with a wired test.
+        if crate::status::wiring::SENSORS_PRE_COMPACT_WIRED {
+            return;
+        }
+
+        let snapshot_called = Cell::new(false);
+        let err = run_pre_compact(&sample_event(), &sample_cfg(), |_, _| {
+            snapshot_called.set(true);
+            Ok(())
+        })
+        .unwrap_err();
+
+        assert!(
+            !snapshot_called.get(),
+            "snapshot must not run while sensors.pre_compact is unwired"
+        );
+        assert!(
+            matches!(err, PreCompactError::Unavailable),
+            "expected Unavailable, got {err:?}"
+        );
+    }
+
+    #[test]
     fn pre_compact_invalid_safety_ratio_fails_closed() {
         // Non-finite and non-positive ratios would coerce
         // `compute_budget` to zero and silently emit an empty
@@ -380,7 +446,7 @@ mod tests {
             let mut cfg = sample_cfg();
             cfg.pre_compact_safety_ratio = bad;
 
-            let err = run_pre_compact(&sample_event(), &cfg, |_, _| {
+            let err = run_pre_compact_unchecked(&sample_event(), &cfg, |_, _| {
                 snapshot_called.set(true);
                 Ok(())
             })
@@ -408,7 +474,7 @@ mod tests {
         let mut cfg = sample_cfg();
         cfg.pre_compact_recipe = "not-a-real-preset".to_owned();
 
-        let err = run_pre_compact(&sample_event(), &cfg, |_, _| {
+        let err = run_pre_compact_unchecked(&sample_event(), &cfg, |_, _| {
             snapshot_called.set(true);
             Ok(())
         })
@@ -428,7 +494,7 @@ mod tests {
 
     #[test]
     fn pre_compact_snapshot_failure_rejects_hook() {
-        let err = run_pre_compact(&sample_event(), &sample_cfg(), |_, assembled| {
+        let err = run_pre_compact_unchecked(&sample_event(), &sample_cfg(), |_, assembled| {
             assert_eq!(assembled.bytes, 0);
             assert_eq!(assembled.prefix, "");
             Err("disk full".to_owned())
