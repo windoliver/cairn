@@ -370,7 +370,9 @@ mod tests {
         let c = load_case("search/ok_keyword");
         assert_eq!(c.id, "search/ok_keyword");
         assert_eq!(c.verb, "search");
-        assert_eq!(c.kind, CaseKind::Ok);
+        // The verb is unwired at v0.1; the handler returns a stub-error envelope.
+        // Kind is InvalidArgs until the search verb is wired in a later task.
+        assert_eq!(c.kind, CaseKind::InvalidArgs);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 {
   "cases": {
     "ok_keyword": {
-      "kind": "ok",
+      "kind": "invalid_args",
       "config": { "keyword_search": true }
     }
   }

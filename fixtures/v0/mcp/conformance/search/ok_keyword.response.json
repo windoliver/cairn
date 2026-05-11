@@ -1,10 +1,3 @@
 {
-  "contract": "cairn.mcp.v1",
-  "data": {
-    "hits": []
-  },
-  "operation_id": "<OPERATION_ID>",
-  "policy_trace": [],
-  "status": "committed",
-  "verb": "search"
+  "__raw_text": "cairn search: not yet implemented in this P0 scaffold. Verb dispatch lands in a follow-up PR; no memory operation was performed."
 }

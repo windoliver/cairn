@@ -14,7 +14,7 @@
 mod common;
 
 use cairn_mcp::CairnMcpHandler;
-use cairn_test_fixtures::mcp::conformance::{ConfigOverrides, canonicalize, load_case};
+use cairn_test_fixtures::mcp::conformance::{ConfigOverrides, canonicalize, load_all, load_case};
 use rmcp::ServiceExt as _;
 use tokio::io::BufReader;
 
@@ -117,6 +117,47 @@ fn unwrap_envelope_from_tool_result(resp: &serde_json::Value) -> serde_json::Val
     // Fallback: return the whole response frame so callers can diff it
     // rather than getting a misleading empty result.
     resp.clone()
+}
+
+/// Replay every loaded conformance case and assert the handler's envelope
+/// matches the canonical response after canonicalization.
+///
+/// On failure: print the case id, both canonical envelopes via
+/// `pretty_assertions`, and a `CAIRN_BLESS=1` hint.
+#[tokio::test]
+async fn conformance_envelope_replay() {
+    for case in load_all() {
+        eprintln!("[conformance] {}", case.id);
+        let handler = build_handler_for(case.config);
+        let actual = dispatch_envelope(handler, &case.request).await;
+
+        let actual_canon = canonicalize(&actual);
+        let expected_canon = canonicalize(&case.response);
+
+        if std::env::var_os("CAIRN_BLESS").is_some() && actual_canon != expected_canon {
+            // Bless workflow: write canonicalized actual back to disk.
+            bless_response(&case.id, &actual_canon);
+            continue;
+        }
+
+        pretty_assertions::assert_eq!(
+            actual_canon,
+            expected_canon,
+            "case {}: envelope mismatch (rerun with CAIRN_BLESS=1 to update)",
+            case.id,
+        );
+    }
+}
+
+fn bless_response(case_id: &str, canonical_actual: &serde_json::Value) {
+    let path = format!(
+        "{}/../../fixtures/v0/mcp/conformance/{case_id}.response.json",
+        env!("CARGO_MANIFEST_DIR"),
+    );
+    let pretty = serde_json::to_string_pretty(canonical_actual).expect("serialize bless");
+    std::fs::write(&path, pretty)
+        .unwrap_or_else(|e| panic!("CAIRN_BLESS: failed to write {path}: {e}"));
+    eprintln!("[conformance] blessed {case_id}");
 }
 
 // ── self-tests for the runner ────────────────────────────────────────────────
