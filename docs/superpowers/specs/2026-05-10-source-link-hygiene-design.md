@@ -125,23 +125,40 @@ Two distinct scopes are possible:
   store mints ULID-based ids on upsert, so the same content re-derived
   later would get a new `RecordId` and slip past the journal lookup.
 
-Adding a canonical body-hash:
+Replay key: a new dedicated digest, distinct from the existing
+`BodyHash` used for upsert idempotency:
 
-- `MemoryRecord` gains `body_hash: String` (`"<algo>:<hex>"` over the
-  canonical-JSON encoding of the record body, excluding mutable
-  frontmatter like `created_at`). Computed in `pipeline::canonical`
-  during `ingest`. Persisted on the record like `source_hash`.
-- The hash function and canonicalization are fully specified in
-  `pipeline::canonical::body_hash` and locked by a property test
-  (round-trip: deserialize → re-serialize → recompute → identical).
-- Old records (pre-change) lack `body_hash`. They deserialize with the
-  field defaulted to empty string. The lint rule `source_link_present`
-  also flags empty `body_hash` as `source_link_missing`, prompting
-  re-ingest. Forget-replay rules ignore records whose `body_hash` is
-  empty — there is nothing to compare yet. Privacy is preserved
-  because the *new* `body_hash` produced by re-ingest is what future
-  forget operations capture; legacy records that haven't been touched
-  cannot be the target of a forget op anyway.
+```
+replay_hash = sha256(
+    canonical_body_bytes              ||  // canonical-JSON of body
+    canonical_source_refs_bytes       ||  // sorted by id, hashes included
+    originating_agent_id_bytes        ||  // from Provenance
+    source_sensor_bytes                   // from Provenance
+)
+```
+
+- Domain location: `pipeline::canonical::replay_hash`.
+- The body-only `BodyHash` (already used for upsert idempotency) is
+  intentionally NOT reused — that hash collapses two distinct records
+  with the same body text but different provenance, agent, or sensor.
+  `replay_hash` includes those provenance disambiguators so target-
+  scope forget never over-blocks unrelated records.
+- `MemoryRecord` does NOT gain a persisted `replay_hash` field.
+  Computing it is cheap (a single SHA-256 over already-canonical
+  bytes), and persisting it would create a sync-drift hazard. Both
+  `forget` and `lint` compute it on demand from the in-hand record.
+- Legacy records (pre-change) work without backfill: the canonical
+  inputs (`source_refs`, body, agent, sensor) are already either
+  present or trivially-defaulted. When `source_refs` is empty, the
+  canonical bytes for that segment are the canonical-JSON empty array
+  — `replay_hash` is still well-defined and stable.
+
+`forget` (issue #58 scope, called out here for the contract):
+  1. Loads the target record by `RecordId`.
+  2. Computes `replay_hash` from the record in hand.
+  3. Writes the journal row with `target_replay_hash = Some(<hash>)`.
+  This works identically for records written before and after #257
+  lands.
 
 Consent-journal variant:
 
@@ -149,48 +166,45 @@ Consent-journal variant:
 pub enum ConsentKind {
     // ... existing variants ...
     SourceForget {
-        source_id: String,                // logical id, operator diagnostics
-        source_bytes_hash: String,        // "<algo>:<hex>" — same hash space as SourceRef.hash
-        target_body_hash: Option<String>, // Some → target-scope (content-derived); None → source-scope
-        op_id: String,                    // forget operation that produced this row
+        source_id: String,                  // logical id, operator diagnostics
+        source_bytes_hash: String,          // "<algo>:<hex>" — same hash space as SourceRef.hash
+        target_replay_hash: Option<String>, // Some → target-scope; None → source-scope
+        op_id: String,                      // forget operation that produced this row
     },
 }
 ```
 
 `source_bytes_hash` and `SourceRef.hash` share a hash space — both
-digest raw source bytes. `target_body_hash` is in the
-`pipeline::canonical::body_hash` space — same algorithms, different
-input (canonical record body, not source bytes). The two spaces never
-mix.
+digest raw source bytes. `target_replay_hash` is in the
+`pipeline::canonical::replay_hash` space (defined above). The two
+spaces never mix.
 
 Journal query helpers (all O(n) over journal rows; callers cache):
 ```rust
 fn forgotten_source_bytes_hashes(&self) -> HashSet<&str>; // source-scope set
-fn forgotten_target_body_hashes(&self) -> HashSet<&str>;  // target-scope set
+fn forgotten_target_replay_hashes(&self) -> HashSet<&str>; // target-scope set
 fn forget_op_for_source(&self, hash: &str) -> Option<&str>;
-fn forget_op_for_target_body(&self, hash: &str) -> Option<&str>;
+fn forget_op_for_target_replay(&self, hash: &str) -> Option<&str>;
 ```
 
 Lint rule `source_not_forgotten` runs both checks:
 1. For each `record.provenance.source_refs[i].hash`, look up in
    `forgotten_source_bytes_hashes()`. Hit ⇒ emit `source_after_forget`
    with scope=source.
-2. If `record.body_hash` is non-empty, look up in
-   `forgotten_target_body_hashes()`. Hit ⇒ emit `source_after_forget`
+2. Compute `replay_hash` for the record (via
+   `pipeline::canonical::replay_hash`), look up in
+   `forgotten_target_replay_hashes()`. Hit ⇒ emit `source_after_forget`
    with scope=target.
 
 This survives source rename/copy (same bytes, same hash), survives
-`RecordId` regeneration (target keyed by body content), and never
-over-blocks: target-scope rows only flag records whose body content
-matches what was forgotten.
+`RecordId` regeneration (target keyed by replay-hash), works for
+legacy records without backfill (forget recomputes replay-hash from
+record in hand), and never over-blocks (replay-hash includes
+provenance disambiguators, so distinct records with the same body but
+different provenance/agent/sensor get different keys).
 
 `source_id` stays on the row for operator-facing finding messages
 (`forgotten source <id>`) but does not participate in dedup logic.
-
-`forget` itself (issue #58 work; orthogonal to lint) is responsible
-for populating `target_body_hash` when writing the journal row — it
-reads the soon-to-be-forgotten record's `body_hash` and copies it
-into the journal.
 
 ### 5. Config
 - `config/mod.rs`: add `SourceConfig { redact_on_forget: bool }` under
