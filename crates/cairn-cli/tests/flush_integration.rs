@@ -1027,7 +1027,10 @@ fn flush_apply_warns_on_placeholder_and_records_metadata_only() {
 }
 
 #[test]
-fn flush_apply_real_plan_records_full_apply_kind() {
+fn flush_apply_real_plan_rejects_empty_mutations() {
+    // Re-loop r9 finding 1: a non-placeholder plan with no mutations
+    // must NOT publish `ApplyKind::Full` (that would be a misleading
+    // "fully applied" audit record for a planner-corruption / no-op).
     let vault = tempfile::tempdir().unwrap();
     let id = "01JTS6R4J7000000000000000A";
     write_non_placeholder_pending_noop(vault.path(), id);
@@ -1039,25 +1042,24 @@ fn flush_apply_real_plan_records_full_apply_kind() {
         .output()
         .expect("spawn cairn");
 
-    assert!(
-        out.status.success(),
+    assert_eq!(
+        out.status.code(),
+        Some(65),
         "stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-
-    let applied_path = plan_path(
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("has no mutations"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Plan must remain pending — refusal should roll the claim back.
+    let pending_path = plan_path(
         vault.path(),
-        Bucket::Applied,
+        Bucket::Pending,
         &cairn_core::generated::common::Ulid(id.into()),
     );
-    let persisted: cairn_core::domain::flush_plan::PersistedPlan =
-        serde_json::from_slice(&std::fs::read(&applied_path).unwrap()).unwrap();
-    let cairn_core::domain::flush_plan::PlanStatus::Applied { ref apply_kind, .. } =
-        persisted.status
-    else {
-        panic!("expected Applied status, got {:?}", persisted.status);
-    };
-    assert_eq!(*apply_kind, cairn_core::domain::flush_plan::ApplyKind::Full);
+    assert!(pending_path.exists(), "expected plan to roll back to pending");
 }
 
 #[test]

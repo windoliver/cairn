@@ -262,6 +262,19 @@ fn apply(vault: &Path, m: &ArgMatches) -> ExitCode {
     // contain only `Patch`/`Rename` to advance through the real
     // executor; anything else stays pending until a follow-up wires
     // the remaining variants.
+    // Re-loop r9 finding 1: a non-placeholder plan with no mutations
+    // would otherwise execute an empty tx and publish
+    // `ApplyKind::Full`, producing a misleading "fully applied" audit
+    // record for a no-op (or planner-corruption) plan. Refuse.
+    if !persisted.plan.placeholder && persisted.plan.mutations.is_empty() {
+        eprintln!(
+            "cairn flush apply: plan {id} is non-placeholder but has no mutations. \
+             Refusing to publish `ApplyKind::Full` for an empty plan — re-issue with \
+             actual mutations or mark the plan placeholder."
+        );
+        rollback_claim(vault, &claim, &ulid);
+        return ExitCode::from(65);
+    }
     if !persisted.plan.placeholder
         && let Some(unsupported) = persisted
             .plan
