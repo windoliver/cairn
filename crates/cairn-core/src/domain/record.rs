@@ -72,14 +72,12 @@ impl Ed25519Signature {
     /// so it survives serialization round-trips through wire types that
     /// still type `signature` as a non-optional `Ed25519Signature`.
     pub const FLUSH_MUTATED_SENTINEL: &'static str = concat!(
-        "ed25519:",
-        "00000000", "00000000", "00000000", "00000000",
-        "00000000", "00000000", "00000000", "00000000",
-        "00000000", "00000000", "00000000", "00000000",
-        "00000000", "00000000", "00000000", "00000000",
+        "ed25519:", "00000000", "00000000", "00000000", "00000000", "00000000", "00000000",
+        "00000000", "00000000", "00000000", "00000000", "00000000", "00000000", "00000000",
+        "00000000", "00000000", "00000000",
     );
 
-    /// Returns the [`FLUSH_MUTATED_SENTINEL`] as a parsed
+    /// Returns the [`Self::FLUSH_MUTATED_SENTINEL`] as a parsed
     /// [`Ed25519Signature`]. Infallible: the sentinel is a constant
     /// known to satisfy [`Ed25519Signature::parse`].
     #[must_use]
@@ -88,7 +86,7 @@ impl Ed25519Signature {
     }
 
     /// Returns `true` if this signature is the well-known
-    /// [`FLUSH_MUTATED_SENTINEL`] — i.e. the record was rewritten by a
+    /// [`Self::FLUSH_MUTATED_SENTINEL`] — i.e. the record was rewritten by a
     /// flush apply mutation and is no longer author-signed.
     #[must_use]
     pub fn is_flush_mutated_sentinel(&self) -> bool {
@@ -96,7 +94,7 @@ impl Ed25519Signature {
     }
 
     /// Returns `true` if this signature is structurally a real Ed25519
-    /// signature (NOT the [`FLUSH_MUTATED_SENTINEL`]). Trust boundaries
+    /// signature (NOT the [`Self::FLUSH_MUTATED_SENTINEL`]). Trust boundaries
     /// that treat a present `signature` field as authorial provenance
     /// MUST call this before accepting the record as author-signed —
     /// otherwise a record rewritten by `flush apply` will be

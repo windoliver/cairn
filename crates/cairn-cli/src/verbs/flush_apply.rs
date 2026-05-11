@@ -46,9 +46,10 @@ pub fn session_drift_hash(session: &Session) -> String {
 /// unrestricted (the planner did not narrow on them). Returns the
 /// offending dimension name on the first mismatch so the error message
 /// can point operators at the right field.
-fn scope_satisfies(plan: &cairn_core::domain::ScopeTuple, record: &cairn_core::domain::ScopeTuple)
-    -> Result<(), &'static str>
-{
+fn scope_satisfies(
+    plan: &cairn_core::domain::ScopeTuple,
+    record: &cairn_core::domain::ScopeTuple,
+) -> Result<(), &'static str> {
     fn check(
         plan: Option<&str>,
         record: Option<&str>,
@@ -61,9 +62,21 @@ fn scope_satisfies(plan: &cairn_core::domain::ScopeTuple, record: &cairn_core::d
         }
     }
     check(plan.tenant.as_deref(), record.tenant.as_deref(), "tenant")?;
-    check(plan.workspace.as_deref(), record.workspace.as_deref(), "workspace")?;
-    check(plan.project.as_deref(), record.project.as_deref(), "project")?;
-    check(plan.session_id.as_deref(), record.session_id.as_deref(), "session_id")?;
+    check(
+        plan.workspace.as_deref(),
+        record.workspace.as_deref(),
+        "workspace",
+    )?;
+    check(
+        plan.project.as_deref(),
+        record.project.as_deref(),
+        "project",
+    )?;
+    check(
+        plan.session_id.as_deref(),
+        record.session_id.as_deref(),
+        "session_id",
+    )?;
     check(plan.entity.as_deref(), record.entity.as_deref(), "entity")?;
     check(plan.user.as_deref(), record.user.as_deref(), "user")?;
     check(plan.agent.as_deref(), record.agent.as_deref(), "agent")?;
@@ -115,10 +128,7 @@ fn enforce_record_scope(
     })
 }
 
-fn enforce_session_scope(
-    plan: &FlushPlan,
-    session: &Session,
-) -> Result<(), StoreError> {
+fn enforce_session_scope(plan: &FlushPlan, session: &Session) -> Result<(), StoreError> {
     let plan_scope = &plan.scope;
     // Re-loop round 2 finding 2: sessions cannot validate `tenant`,
     // `workspace`, or `entity` (the SessionIdentity tuple does not
@@ -208,11 +218,11 @@ pub(crate) async fn apply_real_plan(
         .with_tx(move |tx| {
             // Round 3 review fix: drift-check the ORIGINAL pre-state once
             // per mutation BEFORE any apply runs. Doing the check inline
-                // would compare later mutations against the post-first-write
-                // state for plans that touch the same target twice
-                // (patch-then-rename, multi-patch chains), so legitimate
-                // multi-step plans would self-trip. Phase 1 = drift,
-                // Phase 2 = apply.
+            // would compare later mutations against the post-first-write
+            // state for plans that touch the same target twice
+            // (patch-then-rename, multi-patch chains), so legitimate
+            // multi-step plans would self-trip. Phase 1 = drift,
+            // Phase 2 = apply.
             //
             // Round 10 review fix: enforce plan scope against each
             // target's stored scope BEFORE mutating, so a pending plan
@@ -581,12 +591,9 @@ fn apply_rename(
     // stable across renames; `record_id` is per-version.
     let mut renamed = source.record.clone();
     let fresh_record_id = ulid::Ulid::new().to_string();
-    renamed.id =
-        RecordId::parse(fresh_record_id.clone()).map_err(|e| StoreError::Invariant {
-            what: format!(
-                "rename: fresh record_id `{fresh_record_id}` failed validation: {e}"
-            ),
-        })?;
+    renamed.id = RecordId::parse(fresh_record_id.clone()).map_err(|e| StoreError::Invariant {
+        what: format!("rename: fresh record_id `{fresh_record_id}` failed validation: {e}"),
+    })?;
     let prior_target = source.record.target_id.as_str().to_owned();
     let prior_signature = source.record.signature.as_str().to_owned();
     renamed.target_id = new_target.clone();

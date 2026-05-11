@@ -107,8 +107,7 @@ const M0057_HOT_SOURCE_WATERMARKS_EXTRAS: &str =
     include_str!("sql/0057_hot_source_watermarks_extras.sql");
 // Issue #289 re-loop r6 — durable audit for in-place session patches.
 // Renumbered from 0053 → 0058 during rebase onto main.
-const M0058_SESSION_METADATA_AUDIT: &str =
-    include_str!("sql/0058_session_metadata_audit.sql");
+const M0058_SESSION_METADATA_AUDIT: &str = include_str!("sql/0058_session_metadata_audit.sql");
 // Issue #289 re-loop r7 — add mutation_seq to allow repeated patches
 // against the same session within one plan.
 // Renumbered from 0054 → 0059 during rebase onto main.

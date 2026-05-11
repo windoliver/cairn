@@ -97,9 +97,7 @@ impl FlushPlan {
     /// reuse it under the session id.
     #[must_use]
     pub fn session_hash(&self, session: &SessionId) -> Option<&str> {
-        self.target_hashes
-            .get(session.as_str())
-            .map(String::as_str)
+        self.target_hashes.get(session.as_str()).map(String::as_str)
     }
 }
 

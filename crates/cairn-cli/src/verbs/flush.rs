@@ -444,10 +444,7 @@ fn orphan_is_dead(orphan: &Path) -> bool {
 /// the same id detects the marker and resumes straight to publish
 /// instead of replaying mutations. Removed by `publish_terminal` once
 /// the terminal hard-link is durable.
-fn stranded_marker_path(
-    vault: &Path,
-    ulid: &cairn_core::generated::common::Ulid,
-) -> PathBuf {
+fn stranded_marker_path(vault: &Path, ulid: &cairn_core::generated::common::Ulid) -> PathBuf {
     use cairn_core::domain::flush_plan::store::{Bucket, plan_path};
     plan_path(vault, Bucket::Applied, ulid).with_extension("json.stranded")
 }
@@ -480,10 +477,7 @@ fn write_stranded_marker(path: &Path) -> std::io::Result<()> {
 /// per-plan in-flight path (NOT the pid-suffixed owned-claim path) so
 /// resume after `process_owned_claim` still finds it. Removed by
 /// `publish_terminal`.
-fn committed_sidecar_path_for(
-    vault: &Path,
-    ulid: &cairn_core::generated::common::Ulid,
-) -> PathBuf {
+fn committed_sidecar_path_for(vault: &Path, ulid: &cairn_core::generated::common::Ulid) -> PathBuf {
     use cairn_core::domain::flush_plan::store::{Bucket, plan_path};
     let canonical = plan_path(vault, Bucket::Applied, ulid).with_extension("json.in-flight");
     let mut p = canonical.as_os_str().to_owned();
@@ -786,9 +780,7 @@ fn claim_pending(
         // signal is already on disk.
         let committed_sidecar = committed_sidecar_path_for(vault, ulid);
         let stranded = stranded_marker_path(vault, ulid);
-        if (committed_sidecar.exists() || stranded.exists())
-            && orphan_is_dead(&orphan)
-        {
+        if (committed_sidecar.exists() || stranded.exists()) && orphan_is_dead(&orphan) {
             match std::fs::rename(&orphan, &claim) {
                 Ok(()) => {
                     // Fall through to the canonical `claim.exists()`

@@ -1059,7 +1059,10 @@ fn flush_apply_real_plan_rejects_empty_mutations() {
         Bucket::Pending,
         &cairn_core::generated::common::Ulid(id.into()),
     );
-    assert!(pending_path.exists(), "expected plan to roll back to pending");
+    assert!(
+        pending_path.exists(),
+        "expected plan to roll back to pending"
+    );
 }
 
 #[test]

@@ -1992,9 +1992,8 @@ fn run_plan_lint(json: bool, vault_root: Option<&Path>, plan_id: &str) -> ExitCo
     // caller could traverse via `..` or absolute-path components and point
     // the lint at arbitrary `.plan.json` files outside `.cairn/flush/pending`.
     if !super::flush::is_valid_ulid_str(plan_id) {
-        let msg = format!(
-            "lint --plan: invalid ULID `{plan_id}` (expected 26-char Crockford base32)"
-        );
+        let msg =
+            format!("lint --plan: invalid ULID `{plan_id}` (expected 26-char Crockford base32)");
         if json {
             emit_json(&serde_json::json!({
                 "code": "InvalidArgument",
@@ -2104,13 +2103,11 @@ fn run_plan_lint(json: bool, vault_root: Option<&Path>, plan_id: &str) -> ExitCo
         // `flush apply rename` enforces, not just the live check —
         // otherwise lint can bless a plan that apply will reject for
         // hitting a retired target lineage.
-        let renames_owned: Vec<(
-            cairn_core::domain::TargetId,
-            cairn_core::domain::TargetId,
-        )> = renames
-            .iter()
-            .map(|(s, d)| ((*s).clone(), (*d).clone()))
-            .collect();
+        let renames_owned: Vec<(cairn_core::domain::TargetId, cairn_core::domain::TargetId)> =
+            renames
+                .iter()
+                .map(|(s, d)| ((*s).clone(), (*d).clone()))
+                .collect();
         let live_check: Result<Vec<String>, anyhow::Error> = rt.block_on(async {
             let store = cairn_store_sqlite::open(&db_path).await?;
             let renames = renames_owned;
