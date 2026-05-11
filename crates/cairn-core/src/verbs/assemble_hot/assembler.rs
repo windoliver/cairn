@@ -354,6 +354,8 @@ mod tests {
         let cfg = HotMemoryConfig {
             max_bytes: 4_194_304,
             recipe: vec![HotMemoryRecipeStep::Purpose; 65],
+            pre_compact_recipe: "handoff".to_string(),
+            pre_compact_safety_ratio: 0.30,
             ..HotMemoryConfig::default()
         };
         let err = assemble_hot(&cfg).unwrap_err();
@@ -374,6 +376,8 @@ mod tests {
         let cfg = HotMemoryConfig {
             max_bytes: 4_194_304,
             recipe: vec![HotMemoryRecipeStep::Purpose; 65],
+            pre_compact_recipe: "handoff".to_string(),
+            pre_compact_safety_ratio: 0.30,
         };
         let mut calls = 0_u32;
         let err = assemble_hot_with_loader(&cfg, |_| {
@@ -400,6 +404,8 @@ mod tests {
         let cfg = HotMemoryConfig {
             max_bytes: 4_194_304,
             recipe: vec![HotMemoryRecipeStep::Purpose; 65],
+            pre_compact_recipe: "handoff".to_string(),
+            pre_compact_safety_ratio: 0.30,
         };
         let err = assemble_hot_from_bodies(&cfg, Vec::new(), Some(1)).unwrap_err();
 
