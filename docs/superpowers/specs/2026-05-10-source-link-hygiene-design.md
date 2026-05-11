@@ -181,41 +181,67 @@ deterministic encoder owned by `cairn-core`, fully specified by:
 
 **Versioning and cross-version forget continuity**:
 
-Each `SourceForget` row persists the *version of the encoder* used
-when the hash was computed:
+The full replay-hash contract is versioned — not just the byte
+encoder. Each version `vN` ships **three frozen artifacts**:
+
+1. **Frozen input struct** `CanonicalReplayInputVN` — fixed field
+   set, no future evolution. Lives in
+   `pipeline::canonical::replay_hash::vN::Input`.
+2. **Frozen projection** `project_vN(&MemoryRecord) ->
+   CanonicalReplayInputVN` — reads only the `MemoryRecord` fields
+   that existed when `vN` was minted. Future `MemoryRecord`
+   additions are ignored by older projections.
+3. **Frozen encoder** `encode_vN(&CanonicalReplayInputVN) -> Vec<u8>`
+   — domain tag `cairn.replay_hash.vN`, canonical-JSON rules as
+   specified above.
+
+`replay_hash::compute(record, version)` chains
+`project_vN ∘ encode_vN ∘ sha256`. All three artifacts are
+immutable once shipped. Changes to `MemoryRecord` cannot retroactively
+shift `compute(_, v1)` output — `project_v1` reads a frozen subset.
+
+The set of supported versions is
+`pub const SUPPORTED_REPLAY_HASH_VERSIONS: &[u32] = &[1, ...]`.
+Removing a version is a deprecation cycle requiring an offline
+journal-rewrite op (out of scope for #257).
+
+Each `SourceForget` row persists the version used:
 
 ```rust
 SourceForget {
     source_id: String,
     source_bytes_hash: String,
-    target_replay_hash: Option<String>,
-    target_replay_hash_version: u32,        // matches the encoder's `v` tag
+    target: Option<TargetReplayKey>,    // Some → target-scope; None → source-scope
     op_id: String,
+}
+
+pub struct TargetReplayKey {
+    pub hash: String,                   // "<algo>:<hex>"
+    pub version: u32,                   // must be in SUPPORTED_REPLAY_HASH_VERSIONS
 }
 ```
 
-When `cairn-core` ships a new replay-hash version (`v: 2`), the
-**encoder retains every prior version** as a callable function:
-`replay_hash::compute(record, version: u32)`. The set of supported
-versions is `pub const SUPPORTED_REPLAY_HASH_VERSIONS: &[u32] =
-&[1, 2, ...]`.
+`TargetReplayKey` keeps `hash` and `version` paired structurally —
+no sentinel version values, no chance of a source-scope row leaking
+into target-scope lookups.
 
 Lint matching algorithm:
-1. Group all `target_replay_hash` journal rows by
-   `target_replay_hash_version`.
-2. For each version `v` present, compute the candidate record's
-   replay-hash at that version.
-3. Hit if any version's computed hash matches its corresponding
-   journal-row set.
+1. Group target-scope rows (`target.is_some()`) by `version`.
+2. For each version `v` present in the journal, compute the candidate
+   record's `replay_hash` at `v` via
+   `replay_hash::compute(record, v)`.
+3. Hit if the computed hash matches any row in that version's set.
 
-This means a target forgotten under `v1` stays blocked forever, even
-after the system computes `v2` for new records. No journal-row
-migration is required — old rows continue to match because the old
-encoder remains available.
+Validation: persisting a `TargetReplayKey` with a `version` not in
+`SUPPORTED_REPLAY_HASH_VERSIONS` is an integrity error rejected at
+the journal-write boundary. Lint similarly rejects unknown versions
+encountered at read time with an `error`-severity finding
+(`source_after_forget_unknown_version`), so an out-of-band journal
+corruption surfaces immediately rather than silently passing.
 
-Removing a supported version is itself a `cairn-core` breaking
-change requiring a deprecation cycle and an offline journal-rewrite
-op (out of scope for #257; tracked in a future versioning issue).
+A target forgotten under `v1` stays blocked forever. No journal-row
+migration is required — `project_v1` and `encode_v1` remain
+available.
 
 **Domain location:** `pipeline::canonical::replay_hash`. The body-only
 `BodyHash` (already used for upsert idempotency) is intentionally NOT
@@ -295,12 +321,17 @@ Consent-journal variant:
 pub enum ConsentKind {
     // ... existing variants ...
     SourceForget {
-        source_id: String,                          // logical id, operator diagnostics
-        source_bytes_hash: String,                  // "<algo>:<hex>" — same hash space as SourceRef.hash
-        target_replay_hash: Option<String>,         // Some → target-scope; None → source-scope
-        target_replay_hash_version: u32,            // encoder version used (0 when target_replay_hash is None)
-        op_id: String,                              // forget operation that produced this row
+        source_id: String,                // logical id, operator diagnostics
+        source_bytes_hash: String,        // "<algo>:<hex>" — same hash space as SourceRef.hash
+        target: Option<TargetReplayKey>,  // Some → target-scope; None → source-scope
+        op_id: String,                    // forget operation that produced this row
     },
+}
+
+// hash + version paired structurally — no sentinel values.
+pub struct TargetReplayKey {
+    pub hash: String,    // "<algo>:<hex>" in replay_hash space
+    pub version: u32,    // must be in SUPPORTED_REPLAY_HASH_VERSIONS
 }
 ```
 
@@ -312,10 +343,12 @@ spaces never mix.
 Journal query helpers (all O(n) over journal rows; callers cache):
 ```rust
 fn forgotten_source_bytes_hashes(&self) -> HashSet<&str>;
-fn forgotten_target_replay_hash_versions(&self) -> HashSet<u32>;
+// Returns versions present among rows whose `target` is `Some`.
+// Source-scope rows are excluded — `0` is never a return value.
+fn forgotten_target_replay_versions(&self) -> HashSet<u32>;
 fn forgotten_target_replay_hashes_for_version(&self, v: u32) -> HashSet<&str>;
 fn forget_op_for_source(&self, hash: &str) -> Option<&str>;
-fn forget_op_for_target_replay(&self, hash: &str, v: u32) -> Option<&str>;
+fn forget_op_for_target_replay(&self, key: &TargetReplayKey) -> Option<&str>;
 ```
 
 Lint rule `source_not_forgotten` runs both checks:
@@ -350,6 +383,7 @@ Extend generated `Kind`:
 - `SourceLinkDangling`
 - `SourceHashMismatch`
 - `SourceAfterForget`
+- `SourceAfterForgetUnknownVersion`
 - `SourceRedactSkipped`
 - `SourceLinkLegacyDuplicate`
 
