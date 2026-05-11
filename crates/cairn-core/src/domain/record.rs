@@ -62,6 +62,38 @@ impl Ed25519Signature {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Well-known all-zeros sentinel used to mark a record as "no longer
+    /// validly signed by its original author" — see issue #289. Stored
+    /// in place of a real Ed25519 signature after `flush apply` mutates
+    /// the canonical record bytes (Patch/Rename). Downstream verifiers
+    /// MUST treat this value as unsigned and refuse to accept it as
+    /// authorial provenance. Structurally valid `ed25519:` + 128 zeros
+    /// so it survives serialization round-trips through wire types that
+    /// still type `signature` as a non-optional `Ed25519Signature`.
+    pub const FLUSH_MUTATED_SENTINEL: &'static str = concat!(
+        "ed25519:",
+        "00000000", "00000000", "00000000", "00000000",
+        "00000000", "00000000", "00000000", "00000000",
+        "00000000", "00000000", "00000000", "00000000",
+        "00000000", "00000000", "00000000", "00000000",
+    );
+
+    /// Returns the [`FLUSH_MUTATED_SENTINEL`] as a parsed
+    /// [`Ed25519Signature`]. Infallible: the sentinel is a constant
+    /// known to satisfy [`Ed25519Signature::parse`].
+    #[must_use]
+    pub fn flush_mutated_sentinel() -> Self {
+        Self(Self::FLUSH_MUTATED_SENTINEL.to_owned())
+    }
+
+    /// Returns `true` if this signature is the well-known
+    /// [`FLUSH_MUTATED_SENTINEL`] — i.e. the record was rewritten by a
+    /// flush apply mutation and is no longer author-signed.
+    #[must_use]
+    pub fn is_flush_mutated_sentinel(&self) -> bool {
+        self.0 == Self::FLUSH_MUTATED_SENTINEL
+    }
 }
 
 impl<'de> Deserialize<'de> for Ed25519Signature {

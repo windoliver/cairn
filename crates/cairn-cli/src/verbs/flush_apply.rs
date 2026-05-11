@@ -357,7 +357,9 @@ fn apply_mutation(
             target: PatchTarget::Session(session_id),
             str_replace,
         } => apply_session_patch(tx, session_id, str_replace),
-        PlannedMutation::Rename { record_id, new_id } => apply_rename(tx, record_id, new_id),
+        PlannedMutation::Rename { record_id, new_id } => {
+            apply_rename(tx, operation_id, record_id, new_id)
+        }
         other => Err(StoreError::Invariant {
             what: format!("flush apply does not yet support mutation kind `{other:?}`"),
         }),
@@ -380,6 +382,11 @@ fn apply_record_patch(
     let target_label = format!("record:{}", target.as_str());
     stored.record.body = apply_str_replacements(&stored.record.body, replacements, &target_label)?;
     stored.record.updated_at = current_timestamp()?;
+    // Re-loop round 3: replace the author signature with the well-known
+    // flush-mutated sentinel so downstream verifiers cannot treat the
+    // post-patch record as still author-signed. The original signature
+    // is preserved in `flush_patch_history.old_signature` for audit.
+    stored.record.signature = cairn_core::domain::Ed25519Signature::flush_mutated_sentinel();
     append_patch_audit(
         &mut stored.record,
         operation_id,
@@ -510,6 +517,7 @@ fn apply_replacement_to_field(
 
 fn apply_rename(
     tx: &mut cairn_store_sqlite::StoreTx<'_>,
+    operation_id: &str,
     source_target: &cairn_core::domain::TargetId,
     new_target: &cairn_core::domain::TargetId,
 ) -> Result<(), StoreError> {
@@ -541,8 +549,17 @@ fn apply_rename(
                 "rename: fresh record_id `{fresh_record_id}` failed validation: {e}"
             ),
         })?;
+    let prior_target = source.record.target_id.as_str().to_owned();
+    let prior_signature = source.record.signature.as_str().to_owned();
     renamed.target_id = new_target.clone();
     renamed.updated_at = current_timestamp()?;
+    // Re-loop round 3: rename changes the record's canonical bytes
+    // (`target_id` and `updated_at` are inside the signed payload), so
+    // the old author signature no longer attests this record. Replace
+    // with the flush-mutated sentinel and audit the predecessor's
+    // signature alongside the prior target.
+    renamed.signature = cairn_core::domain::Ed25519Signature::flush_mutated_sentinel();
+    append_rename_audit(&mut renamed, operation_id, &prior_target, &prior_signature)?;
     let new_row = tx.upsert(&renamed)?;
 
     let new_edge = Edge {
@@ -554,6 +571,38 @@ fn apply_rename(
     tx.rewrite_non_updates_edges(&source.record.id, &new_row.record_id)?;
     tx.put_edge(&new_edge)?;
     tx.tombstone(&source.record.id, TombstoneReason::Update)?;
+    Ok(())
+}
+
+fn append_rename_audit(
+    record: &mut cairn_core::domain::MemoryRecord,
+    operation_id: &str,
+    prior_target: &str,
+    old_signature: &str,
+) -> Result<(), StoreError> {
+    let applied_at = current_timestamp()?.to_string();
+    let entry = json!({
+        "operation_id": operation_id,
+        "prior_target": prior_target,
+        "old_signature": old_signature,
+        "applied_at": applied_at,
+    });
+    match record.extra_frontmatter.get_mut("flush_rename_history") {
+        Some(value) => {
+            let Some(items) = value.as_array_mut() else {
+                return Err(StoreError::Invariant {
+                    what: "extra_frontmatter.flush_rename_history must be an array".into(),
+                });
+            };
+            items.push(entry);
+        }
+        None => {
+            record.extra_frontmatter.insert(
+                "flush_rename_history".into(),
+                serde_json::Value::Array(vec![entry]),
+            );
+        }
+    }
     Ok(())
 }
 
