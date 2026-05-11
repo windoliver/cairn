@@ -37,8 +37,17 @@ pub(crate) async fn apply_real_plan(
     let plan = plan.clone();
     sqlite
         .with_tx(move |tx| {
+            // Round 3 review fix: drift-check the ORIGINAL pre-state once
+            // per mutation BEFORE any apply runs. Doing the check inline
+                // would compare later mutations against the post-first-write
+                // state for plans that touch the same target twice
+                // (patch-then-rename, multi-patch chains), so legitimate
+                // multi-step plans would self-trip. Phase 1 = drift,
+                // Phase 2 = apply.
             for mutation in &plan.mutations {
                 check_drift(tx, &plan, mutation)?;
+            }
+            for mutation in &plan.mutations {
                 apply_mutation(tx, &plan.operation_id.0, mutation)?;
             }
             Ok(())

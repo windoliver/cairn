@@ -150,22 +150,6 @@ fn apply(vault: &Path, m: &ArgMatches) -> ExitCode {
     // the source vanished — that's how concurrent apply/reject callers
     // race-free settle to a single winner. The loser sees ENOENT and
     // returns NotFound (or AlreadyTerminal if the winner committed).
-    // Stranded marker (issue #289 review round 2): a prior attempt
-    // committed SQLite mutations but failed to write the committed
-    // sidecar, leaving an unrecoverable state. Refuse to apply this id
-    // again until an operator inspects and removes the marker — replaying
-    // would double-mutate.
-    let stranded = stranded_marker_path(vault, &ulid);
-    if stranded.exists() {
-        eprintln!(
-            "cairn flush apply: plan {id} is stranded ({}). A prior attempt committed \
-             SQLite mutations but could not persist its recovery sidecar; replaying would \
-             double-mutate. Manually verify the database state, then remove the stranded \
-             marker to proceed.",
-            stranded.display(),
-        );
-        return ExitCode::from(70);
-    }
     let claim = match claim_pending(vault, &ulid, "applied") {
         ClaimOutcome::Claimed(p) => p,
         ClaimOutcome::NotFound => {
@@ -280,10 +264,24 @@ fn apply(vault: &Path, m: &ArgMatches) -> ExitCode {
         // etc). When the sidecar is present we skip apply and proceed
         // straight to publish — the DB side is durable.
         let committed_sidecar = committed_sidecar_path(&claim);
+        let stranded = stranded_marker_path(vault, &ulid);
         if committed_sidecar.exists() {
             eprintln!(
                 "cairn flush apply: detected committed-sidecar for {id}; \
                  DB mutations from a prior attempt are durable, resuming publish only."
+            );
+        } else if stranded.exists() {
+            // Round 3 review fix: the stranded marker is the durable
+            // signal "SQLite mutations committed but sidecar write
+            // failed". A simple refusal would dead-end the plan (the
+            // pending file is already inside the claim path), so treat
+            // the marker as equivalent to the committed sidecar:
+            // skip apply, proceed to publish, and remove the marker
+            // after `publish_terminal` succeeds.
+            eprintln!(
+                "cairn flush apply: detected stranded marker for {id} ({}); \
+                 DB mutations from a prior attempt are durable, resuming publish only.",
+                stranded.display(),
             );
         } else if let Err(e) = apply_real_plan(vault, &persisted.plan) {
             eprintln!("cairn flush apply: apply failed: {e:#}");
@@ -306,9 +304,9 @@ fn apply(vault: &Path, m: &ArgMatches) -> ExitCode {
             } else {
                 eprintln!(
                     "cairn flush apply: SQLite mutations committed but committed-sidecar \
-                     write failed: {e}. Planted stranded marker at {}; future apply \
-                     attempts will refuse this id until an operator inspects and removes \
-                     the marker.",
+                     write failed: {e}. Planted stranded marker at {}; a subsequent \
+                     `flush apply {id}` will detect the marker and resume to publish \
+                     without replaying mutations.",
                     stranded.display(),
                 );
             }
@@ -327,10 +325,13 @@ fn apply(vault: &Path, m: &ArgMatches) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Stranded marker path (issue #289 review round 2). Planted in the
+/// Stranded marker path (issue #289 review round 2/3). Planted in the
 /// `applied/` directory when `SQLite` mutations have committed but the
-/// committed-sidecar could not be written; blocks future apply attempts
-/// for the same id until an operator removes the marker.
+/// committed-sidecar could not be written. Functions as an alternate
+/// "DB durable, publish pending" signal: a subsequent `flush apply` for
+/// the same id detects the marker and resumes straight to publish
+/// instead of replaying mutations. Removed by `publish_terminal` once
+/// the terminal hard-link is durable.
 fn stranded_marker_path(
     vault: &Path,
     ulid: &cairn_core::generated::common::Ulid,
@@ -785,6 +786,11 @@ fn publish_terminal(
     // sidecar must go so a future, separate apply on a fresh claim does
     // not mistake it for an already-applied operation.
     let _ = std::fs::remove_file(committed_sidecar_path(claim));
+    // Round 3 review fix: the stranded marker (planted when a prior
+    // sidecar write failed) is also a "publish pending" artifact —
+    // remove it once the terminal hard-link is durable so a future
+    // unrelated apply does not auto-resume off a stale marker.
+    let _ = std::fs::remove_file(stranded_marker_path(vault, ulid));
     let _ = std::fs::remove_file(cairn_core::domain::flush_plan::store::diff_path(
         vault, ulid,
     ));
