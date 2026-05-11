@@ -192,27 +192,115 @@ fn apply_session_patch(
     replacements: &[StrReplace],
 ) -> Result<(), StoreError> {
     let mut session = tx.get_live_session(session_id)?;
-    let target_label = format!("session:{}", session_id.as_str());
-    // Round 4 review fix: refuse session patches whose `old` substring
-    // appears in more than one logical field. Otherwise an edit intended
-    // for one field (e.g. `channel: "chat"`) could silently rewrite a
-    // homonym in another field (`title`, a tag, etc.) because the
-    // underlying patch is a raw string replace over the serialized JSON.
-    reject_ambiguous_session_replacements(&session, replacements, session_id)?;
-    let doc_json = serde_json::to_string(&SessionPatchDocument::from(&session))?;
-    let patched_json = apply_str_replacements(&doc_json, replacements, &target_label)?;
-    let patched: SessionPatchDocument =
-        serde_json::from_str(&patched_json).map_err(|e| StoreError::Invariant {
+    // Round 4/5 review fix: patch session fields by typed-field
+    // routing, NOT by string-replacing a serialized JSON blob.
+    // The previous approach allowed `StrReplace.new` to contain
+    // JSON syntax (e.g. `","priority":"high","x":"`), letting one
+    // replacement reach across to unrelated fields while still
+    // producing a parseable document. Pick the single field whose
+    // value contains `old` and apply the replacement to that field
+    // only; reject ambiguous (multi-field) matches.
+    for replacement in replacements {
+        apply_one_session_replacement(&mut session, replacement, session_id)?;
+    }
+    tx.update_session_metadata(&session)?;
+    Ok(())
+}
+
+/// Apply a single [`StrReplace`] to exactly one resolved session field.
+/// Rejects matches in zero or >1 field — the wire format does not name
+/// the target field, so the substring must uniquely identify it.
+fn apply_one_session_replacement(
+    session: &mut Session,
+    replacement: &StrReplace,
+    session_id: &cairn_core::domain::SessionId,
+) -> Result<(), StoreError> {
+    if replacement.old.is_empty() {
+        return Err(StoreError::Invariant {
             what: format!(
-                "session patch produced invalid metadata document for `{}`: {e}",
+                "session patch for `{}`: empty `old` is not allowed",
                 session_id.as_str()
             ),
-        })?;
-    session.title = patched.title;
-    session.channel = patched.channel;
-    session.priority = patched.priority;
-    session.tags = patched.tags;
-    tx.update_session_metadata(&session)?;
+        });
+    }
+    let target_label = format!("session:{}", session_id.as_str());
+    let mut hits: Vec<SessionField> = Vec::new();
+    if session.title.contains(&replacement.old) {
+        hits.push(SessionField::Title);
+    }
+    if let Some(ch) = &session.channel
+        && ch.contains(&replacement.old)
+    {
+        hits.push(SessionField::Channel);
+    }
+    if let Some(pr) = &session.priority
+        && pr.contains(&replacement.old)
+    {
+        hits.push(SessionField::Priority);
+    }
+    for (idx, tag) in session.tags.iter().enumerate() {
+        if tag.contains(&replacement.old) {
+            hits.push(SessionField::Tag(idx));
+        }
+    }
+    match hits.len() {
+        0 => Err(patch_substring_missing(
+            &target_label,
+            &replacement.old,
+            match replacement.occurrence {
+                ReplaceOccurrence::First => "first",
+                ReplaceOccurrence::All => "all",
+                ReplaceOccurrence::Nth(_) => "nth",
+            },
+        )),
+        1 => {
+            let field = hits.remove(0);
+            apply_replacement_to_field(session, field, replacement, &target_label)
+        }
+        _ => Err(StoreError::Invariant {
+            what: format!(
+                "session patch for `{}`: `old` substring `{}` is ambiguous — \
+                 matches multiple fields ({hits:?}). Author a narrower replacement \
+                 or split into per-field plans.",
+                session_id.as_str(),
+                replacement.old,
+            ),
+        }),
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SessionField {
+    Title,
+    Channel,
+    Priority,
+    Tag(usize),
+}
+
+fn apply_replacement_to_field(
+    session: &mut Session,
+    field: SessionField,
+    replacement: &StrReplace,
+    target_label: &str,
+) -> Result<(), StoreError> {
+    match field {
+        SessionField::Title => {
+            session.title =
+                apply_one_replacement(&session.title.clone(), replacement, target_label)?;
+        }
+        SessionField::Channel => {
+            let current = session.channel.clone().unwrap_or_default();
+            session.channel = Some(apply_one_replacement(&current, replacement, target_label)?);
+        }
+        SessionField::Priority => {
+            let current = session.priority.clone().unwrap_or_default();
+            session.priority = Some(apply_one_replacement(&current, replacement, target_label)?);
+        }
+        SessionField::Tag(idx) => {
+            let current = session.tags[idx].clone();
+            session.tags[idx] = apply_one_replacement(&current, replacement, target_label)?;
+        }
+    }
     Ok(())
 }
 
@@ -253,54 +341,6 @@ fn apply_rename(
     tx.rewrite_non_updates_edges(&source.record.id, &new_row.record_id)?;
     tx.put_edge(&new_edge)?;
     tx.tombstone(&source.record.id, TombstoneReason::Update)?;
-    Ok(())
-}
-
-/// Refuses session-patch replacements whose `old` substring is present
-/// in more than one field of the session metadata (title / channel /
-/// priority / individual tags). See Round 4 finding 2.
-fn reject_ambiguous_session_replacements(
-    session: &Session,
-    replacements: &[StrReplace],
-    session_id: &cairn_core::domain::SessionId,
-) -> Result<(), StoreError> {
-    for replacement in replacements {
-        let mut hits = 0_usize;
-        let mut field_names: Vec<&'static str> = Vec::new();
-        let mut check = |field: &'static str, value: &str| {
-            if value.contains(&replacement.old) {
-                hits += 1;
-                field_names.push(field);
-            }
-        };
-        check("title", &session.title);
-        if let Some(channel) = &session.channel {
-            check("channel", channel);
-        }
-        if let Some(priority) = &session.priority {
-            check("priority", priority);
-        }
-        for (i, tag) in session.tags.iter().enumerate() {
-            if tag.contains(&replacement.old) {
-                hits += 1;
-                let _ = i;
-                field_names.push("tags");
-                break;
-            }
-        }
-        if hits > 1 {
-            return Err(StoreError::Invariant {
-                what: format!(
-                    "session patch for `{}`: `old` substring `{}` is ambiguous — \
-                     appears in multiple fields ({:?}). Author a narrower replacement \
-                     or split into per-field plans.",
-                    session_id.as_str(),
-                    replacement.old,
-                    field_names,
-                ),
-            });
-        }
-    }
     Ok(())
 }
 

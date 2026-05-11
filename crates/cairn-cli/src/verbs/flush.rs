@@ -263,7 +263,12 @@ fn apply(vault: &Path, m: &ArgMatches) -> ExitCode {
         // would now hit `RenameTargetConflict`, Patch would fail drift,
         // etc). When the sidecar is present we skip apply and proceed
         // straight to publish — the DB side is durable.
-        let committed_sidecar = committed_sidecar_path(&claim);
+        // Round 5 review fix: probe the sidecar at a per-plan canonical
+        // path so resume after `process_owned_claim` (which renames the
+        // claim to a `*.in-flight.<pid>` path) still sees it. Previously
+        // we passed the live `claim` path, which made the sidecar key
+        // shift when ownership transferred, defeating crash recovery.
+        let committed_sidecar = committed_sidecar_path_for(vault, &ulid);
         let stranded = stranded_marker_path(vault, &ulid);
         if committed_sidecar.exists() {
             eprintln!(
@@ -364,10 +369,17 @@ fn write_stranded_marker(path: &Path) -> std::io::Result<()> {
 }
 
 /// Sidecar path used to mark "`SQLite` mutations committed, publish still
-/// pending" — see issue #289 review round 1. Lives next to the in-flight
-/// claim and is removed after `publish_terminal` succeeds.
-fn committed_sidecar_path(claim: &Path) -> PathBuf {
-    let mut p = claim.as_os_str().to_owned();
+/// pending" — see issue #289 review rounds 1/5. Keyed on the canonical
+/// per-plan in-flight path (NOT the pid-suffixed owned-claim path) so
+/// resume after `process_owned_claim` still finds it. Removed by
+/// `publish_terminal`.
+fn committed_sidecar_path_for(
+    vault: &Path,
+    ulid: &cairn_core::generated::common::Ulid,
+) -> PathBuf {
+    use cairn_core::domain::flush_plan::store::{Bucket, plan_path};
+    let canonical = plan_path(vault, Bucket::Applied, ulid).with_extension("json.in-flight");
+    let mut p = canonical.as_os_str().to_owned();
     p.push(".committed");
     PathBuf::from(p)
 }
@@ -785,7 +797,7 @@ fn publish_terminal(
     // "publish still pending"; once the terminal hard-link is durable the
     // sidecar must go so a future, separate apply on a fresh claim does
     // not mistake it for an already-applied operation.
-    let _ = std::fs::remove_file(committed_sidecar_path(claim));
+    let _ = std::fs::remove_file(committed_sidecar_path_for(vault, ulid));
     // Round 3 review fix: the stranded marker (planted when a prior
     // sidecar write failed) is also a "publish pending" artifact —
     // remove it once the terminal hard-link is durable so a future
