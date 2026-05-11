@@ -16,6 +16,7 @@ mod event;
 pub mod hook;
 pub mod ide;
 pub mod outcome;
+pub mod policy;
 
 pub use config::{CaptureBudget, LocalSensorConfig, SensorSettings};
 pub use outcome::{DropReason, EmitOutcome, SensorKind};
