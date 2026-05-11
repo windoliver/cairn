@@ -174,14 +174,48 @@ deterministic encoder owned by `cairn-core`, fully specified by:
   Each vector is `(input json, expected sha256:hex)`. Cover empty
   arrays, NFC normalization edges, escape boundary, sort ordering,
   large unicode strings, nested objects.
-- Upgrade-compat test: when `cairn-core` is published, the golden
-  vectors are versioned. Any change to the encoder that touches a
-  byte of any vector is a wire-version bump (`v: 2`), tracked in
-  the `replay_hash.v1` domain tag.
 - The canonical encoder lives in `cairn-core` (no transitive
   dependency on `serde_json` for *output*). Internal Rust types can
   still use `serde_json` for I/O elsewhere; the canonical encoder is
   a separate code path.
+
+**Versioning and cross-version forget continuity**:
+
+Each `SourceForget` row persists the *version of the encoder* used
+when the hash was computed:
+
+```rust
+SourceForget {
+    source_id: String,
+    source_bytes_hash: String,
+    target_replay_hash: Option<String>,
+    target_replay_hash_version: u32,        // matches the encoder's `v` tag
+    op_id: String,
+}
+```
+
+When `cairn-core` ships a new replay-hash version (`v: 2`), the
+**encoder retains every prior version** as a callable function:
+`replay_hash::compute(record, version: u32)`. The set of supported
+versions is `pub const SUPPORTED_REPLAY_HASH_VERSIONS: &[u32] =
+&[1, 2, ...]`.
+
+Lint matching algorithm:
+1. Group all `target_replay_hash` journal rows by
+   `target_replay_hash_version`.
+2. For each version `v` present, compute the candidate record's
+   replay-hash at that version.
+3. Hit if any version's computed hash matches its corresponding
+   journal-row set.
+
+This means a target forgotten under `v1` stays blocked forever, even
+after the system computes `v2` for new records. No journal-row
+migration is required — old rows continue to match because the old
+encoder remains available.
+
+Removing a supported version is itself a `cairn-core` breaking
+change requiring a deprecation cycle and an offline journal-rewrite
+op (out of scope for #257; tracked in a future versioning issue).
 
 **Domain location:** `pipeline::canonical::replay_hash`. The body-only
 `BodyHash` (already used for upsert idempotency) is intentionally NOT
@@ -193,48 +227,60 @@ field. Computing it is cheap, and persisting it would create a sync-
 drift hazard. Both `forget` and `lint` compute it on demand from the
 in-hand record.
 
-**Legacy records — target-scope forget migration contract.** A
-pre-change record with empty `source_refs` and the re-ingested record
-with populated `source_refs` hash differently. If a legacy duplicate
-remains in the vault after re-ingest, target-scope forget on the
-new record leaves the legacy copy live → privacy regression.
+**Legacy records — invariants enforced in `forget`, not by lint
+convention.** A pre-change record with empty `source_refs` and the
+re-ingested record with populated `source_refs` hash differently. If
+a legacy duplicate remains in the vault after re-ingest, target-scope
+forget on the new record leaves the legacy copy live → privacy
+regression.
 
-Resolution requires three guarantees, all gated by `lint`:
+`forget` is the privacy boundary, so it enforces the invariants
+directly inside the WAL transaction. Lint reports the same conditions
+for operator visibility, but is NOT load-bearing for safety.
 
-1. **Empty `source_refs` is a blocking lint error.**
-   `source_link_missing` is `severity: error`. CI / pre-commit
-   workflows MUST run `cairn lint --fail-on=error` before any forget
-   operation is accepted.
+Transactional pre-checks inside `forget` (target-scope path):
 
-2. **Target-scope forget is gated on non-empty `source_refs`.**
-   `forget` rejects target-scope ops against records with empty
-   `source_refs` and returns
-   `ForgetError::SourceRefsRequiredForTargetScope` (remediation:
-   "re-ingest source, then retry"). Source-scope forget (no
-   `target_replay_hash`) still works on any record — it's keyed by
-   source-bytes hash which is stable across the legacy gap.
+1. **Reject empty `source_refs`.** Returns
+   `ForgetError::SourceRefsRequiredForTargetScope`. Remediation:
+   re-ingest the source.
 
-3. **Re-ingest replaces, not duplicates.** The re-ingest contract
-   (issue #61 scope, called out here because #257 depends on it for
-   privacy soundness) MUST locate any pre-existing record produced
-   from the same `source_bytes_hash` and either overwrite it
-   in-place (preserving `RecordId`) or tombstone it via WAL Phase A
-   in the same transaction. A new lint rule
-   `source_link_legacy_duplicate` (`severity: error`) flags any pair
-   of active records `(legacy, modern)` where:
-   - `legacy.provenance.source_hash == modern.provenance.source_refs[i].hash`
-     for some `i`, AND
-   - `legacy.provenance.source_refs` is empty, AND
-   - `modern.provenance.source_refs` is non-empty.
-   This catches re-ingest paths that left duplicates behind. Operator
-   remediation: forget the legacy by source-scope, then retry.
+2. **Reject legacy duplicates.** Inside the same transaction that
+   reads the target record, `forget` queries the store for any
+   *other* active record `legacy` where:
+   - `legacy.provenance.source_hash` equals any
+     `target.provenance.source_refs[i].hash`, AND
+   - `legacy.provenance.source_refs.is_empty()`.
+   If found, `forget` returns
+   `ForgetError::LegacyDuplicateExists { legacy_id, source_hash }`.
+   Remediation: **operator runs the dedicated `cairn ingest --resync
+   <source_id>` (or equivalent) to tombstone the legacy copy in a
+   transaction**, then retries forget. Source-scope forget is NOT
+   suggested as remediation — it would over-broaden the privacy
+   action and remove unrelated records sharing the same source.
 
-The combination — `source_link_missing` (error) + re-ingest
-deduplication + `source_link_legacy_duplicate` (error) + target-scope
-gating — converges legacy and modern copies on the same forget key
-*before* target-scope forget is allowed to run. If any of the three
-guarantees fail, lint surfaces an error and forget refuses to operate
-at target scope.
+3. **Locked-snapshot semantics.** Both checks run against the same
+   read snapshot that produces `target_replay_hash`. A concurrent
+   re-ingest cannot race past these guards because the WAL state
+   machine serializes the read+check+write.
+
+Re-ingest (issue #61 scope, dependency of #257 privacy soundness):
+re-ingest of a source MUST locate any pre-existing record produced
+from the same `source_bytes_hash` with empty `source_refs` and
+tombstone it via WAL Phase A in the same transaction that creates
+the new record. The dedicated `--resync` mode also handles standalone
+legacy cleanup without ingest of new bytes.
+
+Lint rules (for operator visibility, not the privacy primitive):
+- `source_link_missing` (`severity: error`) flags any record with
+  empty `source_refs`.
+- `source_link_legacy_duplicate` (`severity: error`) flags any pair
+  of active records `(legacy, modern)` matching the criterion above.
+  Finding includes both `RecordId`s and the shared source hash.
+
+The combination — `forget` enforces invariants transactionally, lint
+surfaces them ahead of time — converges legacy and modern copies on
+the same forget key. Skipping lint cannot defeat the privacy
+guarantee; it only delays operator awareness of the duplicate state.
 
 `forget` flow (issue #58 scope, called out here for the contract):
   1. Loads the target record by `RecordId`.
@@ -249,10 +295,11 @@ Consent-journal variant:
 pub enum ConsentKind {
     // ... existing variants ...
     SourceForget {
-        source_id: String,                  // logical id, operator diagnostics
-        source_bytes_hash: String,          // "<algo>:<hex>" — same hash space as SourceRef.hash
-        target_replay_hash: Option<String>, // Some → target-scope; None → source-scope
-        op_id: String,                      // forget operation that produced this row
+        source_id: String,                          // logical id, operator diagnostics
+        source_bytes_hash: String,                  // "<algo>:<hex>" — same hash space as SourceRef.hash
+        target_replay_hash: Option<String>,         // Some → target-scope; None → source-scope
+        target_replay_hash_version: u32,            // encoder version used (0 when target_replay_hash is None)
+        op_id: String,                              // forget operation that produced this row
     },
 }
 ```
@@ -264,20 +311,23 @@ spaces never mix.
 
 Journal query helpers (all O(n) over journal rows; callers cache):
 ```rust
-fn forgotten_source_bytes_hashes(&self) -> HashSet<&str>; // source-scope set
-fn forgotten_target_replay_hashes(&self) -> HashSet<&str>; // target-scope set
+fn forgotten_source_bytes_hashes(&self) -> HashSet<&str>;
+fn forgotten_target_replay_hash_versions(&self) -> HashSet<u32>;
+fn forgotten_target_replay_hashes_for_version(&self, v: u32) -> HashSet<&str>;
 fn forget_op_for_source(&self, hash: &str) -> Option<&str>;
-fn forget_op_for_target_replay(&self, hash: &str) -> Option<&str>;
+fn forget_op_for_target_replay(&self, hash: &str, v: u32) -> Option<&str>;
 ```
 
 Lint rule `source_not_forgotten` runs both checks:
 1. For each `record.provenance.source_refs[i].hash`, look up in
    `forgotten_source_bytes_hashes()`. Hit ⇒ emit `source_after_forget`
    with scope=source.
-2. Compute `replay_hash` for the record (via
-   `pipeline::canonical::replay_hash`), look up in
-   `forgotten_target_replay_hashes()`. Hit ⇒ emit `source_after_forget`
-   with scope=target.
+2. For every encoder version `v` represented in the journal,
+   compute the candidate record's `replay_hash` at version `v`
+   (via `pipeline::canonical::replay_hash::compute(record, v)`) and
+   look up in `forgotten_target_replay_hashes_for_version(v)`. Hit ⇒
+   emit `source_after_forget` with scope=target. This guarantees a
+   target forgotten under any historical version remains blocked.
 
 This survives source rename/copy (same bytes, same hash), survives
 `RecordId` regeneration (target keyed by replay-hash), and never
