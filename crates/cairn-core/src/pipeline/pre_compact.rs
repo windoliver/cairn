@@ -178,7 +178,12 @@ where
     // hook would emit an empty reinjection.
     let recipe_steps = resolve_pre_compact_recipe(&cfg.pre_compact_recipe)?;
     let ratio = cfg.pre_compact_safety_ratio;
-    if !ratio.is_finite() || ratio <= 0.0 {
+    // Mirror the config-side `(0.0, 1.0]` invariant locally so a caller
+    // that bypasses `CairnConfig::validate()` cannot reinject more
+    // bytes than the runtime intended to reclaim — `> 1.0` would
+    // trivially blow the compaction budget and trigger immediate
+    // re-compaction.
+    if !ratio.is_finite() || ratio <= 0.0 || ratio > 1.0 {
         return Err(PreCompactError::InvalidSafetyRatio { ratio });
     }
 
@@ -363,7 +368,14 @@ mod tests {
         // Non-finite and non-positive ratios would coerce
         // `compute_budget` to zero and silently emit an empty
         // reinjection. The hook must reject those configs instead.
-        for bad in [-0.1_f64, 0.0_f64, f64::NAN, f64::INFINITY] {
+        for bad in [
+            -0.1_f64,
+            0.0_f64,
+            f64::NAN,
+            f64::INFINITY,
+            1.01_f64,
+            2.0_f64,
+        ] {
             let snapshot_called = Cell::new(false);
             let mut cfg = sample_cfg();
             cfg.pre_compact_safety_ratio = bad;
