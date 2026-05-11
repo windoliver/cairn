@@ -1,0 +1,8 @@
+{
+  "cases": {
+    "err_aggregate_unadvertised": {
+      "kind": "invalid_args",
+      "config": { "aggregate_extension_enabled": false }
+    }
+  }
+}

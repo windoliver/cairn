@@ -1,9 +1,9 @@
 {
   "cases": {
-    "ok_minimal": {
+    "err_unknown_verb": {
       "kind": "invalid_args"
     },
-    "err_persist_no_capability": {
+    "err_malformed_args": {
       "kind": "invalid_args"
     }
   }

@@ -3,6 +3,13 @@
     "ok_keyword": {
       "kind": "invalid_args",
       "config": { "keyword_search": true }
+    },
+    "err_invalid_mode": {
+      "kind": "invalid_args"
+    },
+    "err_semantic_disabled": {
+      "kind": "invalid_args",
+      "config": { "semantic_search": false }
     }
   }
 }

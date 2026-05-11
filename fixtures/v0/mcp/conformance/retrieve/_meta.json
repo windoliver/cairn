@@ -2,6 +2,9 @@
   "cases": {
     "ok_record": {
       "kind": "invalid_args"
+    },
+    "err_target_turn_unsupported": {
+      "kind": "invalid_args"
     }
   }
 }
