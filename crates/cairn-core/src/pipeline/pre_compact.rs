@@ -17,19 +17,23 @@ use crate::verbs::assemble_hot::assembler::{
 pub const HANDOFF_RECIPE_NAME: &str = "handoff";
 
 /// Resolve a `pre_compact_recipe` config value to a concrete recipe step
-/// list. Unknown names fall back to the caller's session-start recipe so
-/// misconfiguration cannot silently downgrade to the empty render.
-#[must_use]
-pub fn resolve_pre_compact_recipe(
-    name: &str,
-    fallback: &[HotMemoryRecipeStep],
-) -> Vec<HotMemoryRecipeStep> {
+/// list. Fails closed on unknown names so a typo cannot silently change
+/// the reinjection payload while telemetry keeps reporting the
+/// misconfigured value.
+///
+/// # Errors
+///
+/// Returns [`PreCompactError::UnknownRecipe`] when `name` is not one of
+/// the registered presets.
+pub fn resolve_pre_compact_recipe(name: &str) -> Result<Vec<HotMemoryRecipeStep>, PreCompactError> {
     match name {
-        HANDOFF_RECIPE_NAME => vec![
+        HANDOFF_RECIPE_NAME => Ok(vec![
             HotMemoryRecipeStep::Purpose,
             HotMemoryRecipeStep::PinnedFeedback,
-        ],
-        _ => fallback.to_vec(),
+        ]),
+        other => Err(PreCompactError::UnknownRecipe {
+            name: other.to_owned(),
+        }),
     }
 }
 
@@ -71,6 +75,15 @@ pub enum PreCompactError {
     Snapshot {
         /// Store or persistence layer failure detail.
         reason: String,
+    },
+    /// `hot_memory.pre_compact_recipe` references a preset the runtime
+    /// does not know about. Failing closed prevents misconfiguration
+    /// from silently substituting a different recipe at the compaction
+    /// boundary.
+    #[error("unknown pre_compact_recipe: {name}")]
+    UnknownRecipe {
+        /// The unknown recipe identifier from config.
+        name: String,
     },
 }
 
@@ -122,11 +135,24 @@ fn floor_decimal_product(compaction_target: u32, ratio: f64) -> u64 {
     }
 }
 
-/// Run the fail-closed pre-compaction flow: budgeted assembly first, then
-/// snapshot persistence, returning reinjection metadata only on success.
+/// Run the fail-closed pre-compaction flow: validate the configured
+/// recipe preset, run budgeted assembly, then persist the snapshot,
+/// returning reinjection metadata only on success.
 ///
 /// Emits a `sensor.pre_compact` span carrying `session_id`, `recipe`,
 /// `budget`, and `output_bytes` so harnesses can audit each fire-and-splice.
+/// The reported `recipe` is the *resolved* preset name, not the raw
+/// configured value: an unknown name fails closed via
+/// [`PreCompactError::UnknownRecipe`] before any assembly runs, so
+/// telemetry never reports a recipe that was not actually used.
+///
+/// The current `assemble_hot` pipeline is intentionally session-agnostic
+/// (per the stub `load_step_body` shipped pending issue #193). The
+/// `event.session_id` is therefore plumbed only into the snapshot
+/// persistence callback and the telemetry span — *not* the assembled
+/// payload — and the capability stays held back via
+/// [`crate::status::wiring::SENSORS_PRE_COMPACT_WIRED`] until #193 lands
+/// the session-scoped loader and a sensor/MCP dispatcher.
 pub fn run_pre_compact<SNAP>(
     event: &PreCompactEvent,
     cfg: &HotMemoryConfig,
@@ -135,6 +161,11 @@ pub fn run_pre_compact<SNAP>(
 where
     SNAP: FnMut(&PreCompactEvent, &AssembleHotData) -> Result<(), String>,
 {
+    // Validate first so an unknown recipe never appears in the span as
+    // "in flight" and never triggers an assembly that would have to be
+    // rolled back.
+    let recipe_steps = resolve_pre_compact_recipe(&cfg.pre_compact_recipe)?;
+
     let span = tracing::info_span!(
         "sensor.pre_compact",
         session_id = %event.session_id,
@@ -149,7 +180,6 @@ where
         cfg.pre_compact_safety_ratio,
     );
     span.record("budget", budget);
-    let recipe_steps = resolve_pre_compact_recipe(&cfg.pre_compact_recipe, &cfg.recipe);
     let data = assemble_hot_with_budget_and_recipe(cfg, budget, Some(&recipe_steps))?;
     span.record("output_bytes", data.bytes);
     snapshot(event, &data).map_err(|reason| PreCompactError::Snapshot { reason })?;
@@ -246,25 +276,6 @@ mod tests {
     }
 
     #[test]
-    fn pre_compact_assemble_failure_prevents_snapshot() {
-        let snapshot_called = Cell::new(false);
-        let mut cfg = sample_cfg();
-        // Force the fallback path so the recipe override doesn't shrink
-        // the assembled steps under the budget before assembly fails.
-        cfg.pre_compact_recipe = "force-fallback".to_owned();
-        cfg.recipe = vec![HotMemoryRecipeStep::Purpose; 65];
-
-        let err = run_pre_compact(&sample_event(), &cfg, |_, _| {
-            snapshot_called.set(true);
-            Ok(())
-        })
-        .unwrap_err();
-
-        assert!(!snapshot_called.get());
-        assert!(matches!(err, PreCompactError::AssembleHot(_)));
-    }
-
-    #[test]
     fn pre_compact_output_bytes_stay_within_safety_ratio_for_8000_target() {
         // Issue #310 acceptance: a pre_compact event whose harness target is
         // 8 000 tokens must yield reinjection bytes inside the 0.30-ratio
@@ -332,32 +343,32 @@ mod tests {
     }
 
     #[test]
-    fn pre_compact_unknown_recipe_falls_back_to_session_start() {
-        // Misconfiguration must not silently downgrade to the empty
-        // render: an unknown preset reuses the operator's session-start
-        // recipe rather than producing zero segments.
+    fn pre_compact_unknown_recipe_fails_closed_before_assembly_or_snapshot() {
+        // A typo or unregistered preset must reject the hook with
+        // `UnknownRecipe` before any assembly or snapshot persistence
+        // runs — operators get a loud signal instead of silently
+        // rendering a different recipe while telemetry keeps reporting
+        // the misconfigured value.
+        let snapshot_called = Cell::new(false);
         let mut cfg = sample_cfg();
-        cfg.recipe = vec![HotMemoryRecipeStep::Purpose, HotMemoryRecipeStep::Index];
         cfg.pre_compact_recipe = "not-a-real-preset".to_owned();
 
-        let captured = RefCell::new(None);
-        let _ = run_pre_compact(&sample_event(), &cfg, |_, assembled| {
-            captured.replace(assembled.segments.clone());
+        let err = run_pre_compact(&sample_event(), &cfg, |_, _| {
+            snapshot_called.set(true);
             Ok(())
         })
-        .unwrap();
+        .unwrap_err();
 
-        let segments = captured.borrow().clone().expect("segments emitted");
-        let kinds: Vec<String> = segments
-            .into_iter()
-            .map(|seg| {
-                serde_json::to_value(seg.step)
-                    .ok()
-                    .and_then(|v| v.as_str().map(str::to_owned))
-                    .unwrap_or_default()
-            })
-            .collect();
-        assert_eq!(kinds, vec!["purpose".to_string(), "index".into()]);
+        assert!(
+            !snapshot_called.get(),
+            "snapshot must not run on unknown recipe"
+        );
+        match err {
+            PreCompactError::UnknownRecipe { name } => {
+                assert_eq!(name, "not-a-real-preset");
+            }
+            other => panic!("expected UnknownRecipe, got {other:?}"),
+        }
     }
 
     #[test]
