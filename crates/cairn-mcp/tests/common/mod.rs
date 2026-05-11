@@ -15,7 +15,10 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 /// Write one newline-terminated JSON-RPC frame and flush.
 pub async fn send_frame(writer: &mut (impl AsyncWriteExt + Unpin), json: &str) {
-    writer.write_all(json.as_bytes()).await.expect("write frame");
+    writer
+        .write_all(json.as_bytes())
+        .await
+        .expect("write frame");
     writer.write_all(b"\n").await.expect("write newline");
     writer.flush().await.expect("flush");
 }
