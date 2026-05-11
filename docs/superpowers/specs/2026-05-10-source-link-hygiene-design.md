@@ -179,6 +179,14 @@ deterministic encoder owned by `cairn-core`, fully specified by:
   still use `serde_json` for I/O elsewhere; the canonical encoder is
   a separate code path.
 
+**Greenfield rollout — no journal back-compat surface.** `ConsentKind::SourceForget`
+does not yet exist in any released `cairn-core`; no `target_replay_hash`
+scalar field was ever shipped. Every `SourceForget` row in every vault
+will be written by code that ships with #257. There are no legacy
+rows to migrate, no "old shape" reader fallback needed, and no
+backfill required. The versioned `TargetReplayKey` schema is the
+first and only on-disk shape for this row kind.
+
 **Versioning and cross-version forget continuity**:
 
 The full replay-hash contract is versioned — not just the byte
@@ -362,6 +370,7 @@ fn malformed_source_forget_rows(&self) -> Vec<MalformedSourceForget<'_>>;
 pub struct MalformedSourceForget<'a> {
     pub op_id: &'a str,
     pub source_id: &'a str,
+    pub source_bytes_hash: Option<&'a str>,  // None when this field itself is unparseable
     pub reason: MalformedSourceForgetReason,
 }
 
@@ -370,26 +379,62 @@ pub enum MalformedSourceForgetReason {
     MalformedReplayHashFormat,
     MalformedSourceBytesHashFormat,
 }
+
+// Scope-narrowed integrity surface. Returns malformed rows whose
+// source identity intersects the caller's scope of interest.
+fn malformed_source_forget_rows_for_source(
+    &self,
+    source_bytes_hash: &str,
+) -> Vec<MalformedSourceForget<'_>>;
 ```
 
-**Fail-closed contract**: every entry point that consults the journal
-for forget enforcement (lint's `source_not_forgotten`, `forget`'s
-own duplicate/version checks) MUST call `malformed_source_forget_rows`
-first and treat a non-empty result as a blocking integrity failure.
+**Fail-closed contract, scoped to the source under examination.** A
+malformed row only blocks operations that would touch the same
+source identity — one bad row cannot stop unrelated forget activity.
+This narrows the blast radius without weakening enforcement: a
+malformed row affecting source X still blocks lint and forget for
+source X, but lint/forget for source Y proceeds normally.
 
-- Lint emits an `error`-severity finding per malformed row with kind
-  `source_after_forget_unknown_version` (the broader kind name is
-  retained; the discriminant on `MalformedSourceForgetReason`
-  populates the finding's `data` field for operator triage).
-- `forget` refuses to write any new row while malformed rows exist,
-  returning `ForgetError::JournalIntegrity` with the list of
-  offending `op_id`s. Operator remediation lives outside #257 (a
-  journal-rewrite admin tool).
+Scope rules:
 
-Implementations MUST NOT skip a malformed row and continue checking
-the remainder against valid rows — that converts journal corruption
-into silent loss of enforcement, which is the exact failure mode
-this contract is designed to prevent.
+- `forget` (writing a new row for source `H`):
+  1. Calls `malformed_source_forget_rows_for_source(H)`.
+  2. If the result is non-empty, returns
+     `ForgetError::JournalIntegrity { source_bytes_hash: H,
+     malformed_op_ids: [...] }`. Forget on other sources is
+     unaffected.
+  3. Otherwise proceeds with the duplicate/version checks.
+
+- `lint` rule `source_not_forgotten`, per candidate record `R`:
+  1. For each `R.provenance.source_refs[i].hash = H_i`, calls
+     `malformed_source_forget_rows_for_source(H_i)`.
+  2. If the union across `i` is non-empty, emits one
+     `source_after_forget_unknown_version` finding per malformed row,
+     scoped to `R`. The clean source-refs on `R` are still checked
+     normally (no silent skip — the malformed row is loud, the other
+     rows still enforce).
+
+- Always-on global health check (separate from per-record scoping):
+  lint additionally calls `malformed_source_forget_rows()` (the
+  global variant) once per run and emits one `error` finding per
+  malformed row that did not surface during per-record scanning.
+  This guarantees orphan malformed rows (no live record references
+  them anymore) still get reported, even though they do not block
+  unrelated operations. Operator remediation lives outside #257 (a
+  journal-rewrite admin tool); the lint finding provides the
+  pointer.
+
+A row's identity for scoping purposes is its `source_bytes_hash`. If
+that field is itself unparseable (`MalformedSourceBytesHashFormat`),
+the row is unscopeable and treated as global — it appears in
+`malformed_source_forget_rows()` but never in
+`malformed_source_forget_rows_for_source(_)`. Such rows still
+generate a lint finding via the global health check.
+
+Implementations MUST NOT skip a malformed row that falls within
+their scope and continue checking the remainder — that converts
+journal corruption into silent loss of enforcement, which is the
+failure mode this contract prevents.
 
 Lint rule `source_not_forgotten` runs both checks:
 1. For each `record.provenance.source_refs[i].hash`, look up in
