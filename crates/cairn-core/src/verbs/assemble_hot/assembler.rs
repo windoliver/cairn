@@ -7,7 +7,7 @@
 use super::segments::{
     AssembleHotValidationError, MAX_SEGMENTS, build_segments, validate, validate_with_recipe,
 };
-use crate::config::HotMemoryConfig;
+use crate::config::{HotMemoryConfig, HotMemoryRecipeStep};
 use crate::generated::verbs::assemble_hot::{AssembleHotData, HotRecipeStep};
 
 /// Errors returned by [`assemble_hot`].
@@ -51,8 +51,23 @@ pub fn assemble_hot_with_budget(
     config: &HotMemoryConfig,
     budget: u64,
 ) -> Result<AssembleHotData, AssembleHotError> {
+    assemble_hot_with_budget_and_recipe(config, budget, None)
+}
+
+/// Render hot memory with both a narrower byte budget and an optional
+/// recipe override. The pre-compaction flow uses this to honor
+/// `hot_memory.pre_compact_recipe` instead of falling back to the
+/// session-start recipe baked into [`HotMemoryConfig::recipe`].
+pub fn assemble_hot_with_budget_and_recipe(
+    config: &HotMemoryConfig,
+    budget: u64,
+    recipe_override: Option<&[HotMemoryRecipeStep]>,
+) -> Result<AssembleHotData, AssembleHotError> {
     let mut budgeted = config.clone();
     budgeted.max_bytes = u32::try_from(budget.min(u64::from(u32::MAX))).unwrap_or(u32::MAX);
+    if let Some(recipe) = recipe_override {
+        budgeted.recipe = recipe.to_vec();
+    }
     assemble_hot(&budgeted)
 }
 

@@ -142,12 +142,16 @@ fn pre_compact_capability_tracks_wiring_constant() {
 }
 
 #[test]
-fn pre_compact_capability_advertised_when_wired() {
+fn pre_compact_capability_held_back_until_dispatched() {
+    // The orchestrator + classifier exist (issue #310 core landing) but
+    // no sensor or MCP path dispatches them, so the capability must stay
+    // hidden — over-advertising would let clients negotiate a hook that
+    // has no callable wire entrypoint.
     let g = gates(true, true, None);
     let caps = advertise(&g);
     assert!(
-        caps.contains(&Capabilities::CairnMcpV1SensorsPreCompact),
-        "sensors.pre_compact should be advertised once runtime wiring lands"
+        !caps.contains(&Capabilities::CairnMcpV1SensorsPreCompact),
+        "sensors.pre_compact must remain hidden until a runtime caller dispatches run_pre_compact"
     );
 }
 

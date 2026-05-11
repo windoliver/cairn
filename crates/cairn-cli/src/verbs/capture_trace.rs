@@ -54,15 +54,6 @@ use super::envelope::{emit_json, human_error, invalid_args_response, new_operati
 const DEFAULT_TENANT: &str = "default";
 const CAPTURE_TRACE_ENTITY: &str = "ingest";
 
-fn classify_import_event(event: &CaptureEvent) -> anyhow::Result<TraceEvent> {
-    match &event.payload {
-        cairn_core::domain::CapturePayload::Hook { hook_name, .. } if hook_name == "PreCompact" => {
-            Ok(TraceEvent::PreCompact)
-        }
-        _ => classify(event).map_err(anyhow::Error::from),
-    }
-}
-
 /// Result returned by [`run_handler`] on success.
 #[derive(Debug, serde::Serialize)]
 pub struct CaptureTraceResponse {
@@ -268,7 +259,7 @@ async fn run_handler_inner(
             // unclassifiable event rather than persisting a partial set:
             // the summary record would otherwise be built from incomplete
             // data and become hard-to-detect data loss.
-            let classified = match classify_import_event(event) {
+            let classified = match classify(event) {
                 Ok(c) => c,
                 Err(e) => {
                     failed_turns.push((

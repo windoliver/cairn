@@ -59,10 +59,11 @@ impl ProjectedTraceBlocks {
 
 /// Map a [`CaptureEvent`] to a [`TraceEvent`]. Static rules; no LLM.
 ///
-/// Hook payloads route by hook name (brief §9.3). Terminal payloads
-/// with a tool reference are raw tool output, and proactive payloads
-/// whose kind explicitly names an agent/assistant message become
-/// assistant trace messages. `TurnSummary` is generated post-hoc by
+/// Hook payloads route by hook name (brief §9.3), including the
+/// `PreCompact` snapshot hook. Terminal payloads with a tool reference
+/// are raw tool output, and proactive payloads whose kind explicitly
+/// names an agent/assistant message become assistant trace messages.
+/// `TurnSummary` is generated post-hoc by
 /// [`crate::pipeline::turn::summarize_turn`] and never reaches
 /// `classify`.
 ///
@@ -77,6 +78,7 @@ pub fn classify(event: &CaptureEvent) -> Result<TraceEvent, TraceProjectError> {
             "PreToolUse" => Ok(TraceEvent::PreTool),
             "PostToolUse" => Ok(TraceEvent::PostTool),
             "ToolOutput" => Ok(TraceEvent::ToolOutput),
+            "PreCompact" => Ok(TraceEvent::PreCompact),
             "Stop" => Ok(TraceEvent::Stop),
             _ => Err(TraceProjectError::Unclassifiable),
         },
@@ -493,6 +495,14 @@ mod tests {
             classify(&mk_proactive_event("knowledge_gap")).unwrap_err(),
             TraceProjectError::Unclassifiable
         ));
+    }
+
+    #[test]
+    fn classifies_pre_compact() {
+        assert_eq!(
+            classify(&mk_hook_event("PreCompact")).unwrap(),
+            TraceEvent::PreCompact
+        );
     }
 
     #[test]

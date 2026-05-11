@@ -1,9 +1,37 @@
 //! Typed core models and pure budget math for the future pre-compaction hook.
 
-use crate::config::HotMemoryConfig;
+use crate::config::{HotMemoryConfig, HotMemoryRecipeStep};
 use crate::domain::SessionId;
 use crate::generated::verbs::assemble_hot::AssembleHotData;
-use crate::verbs::assemble_hot::assembler::{AssembleHotError, assemble_hot_with_budget};
+use crate::verbs::assemble_hot::assembler::{
+    AssembleHotError, assemble_hot_with_budget_and_recipe,
+};
+
+/// Recipe name reserved for the pre-compaction handoff preset.
+///
+/// Defined locally until the recipe-preset registry from #293 lands. The
+/// handoff preset is intentionally a minimal stable prefix — purpose plus
+/// pinned feedback — so the post-compaction window keeps the priors most
+/// likely to survive a context squeeze without burning budget on volatile
+/// signal.
+pub const HANDOFF_RECIPE_NAME: &str = "handoff";
+
+/// Resolve a `pre_compact_recipe` config value to a concrete recipe step
+/// list. Unknown names fall back to the caller's session-start recipe so
+/// misconfiguration cannot silently downgrade to the empty render.
+#[must_use]
+pub fn resolve_pre_compact_recipe(
+    name: &str,
+    fallback: &[HotMemoryRecipeStep],
+) -> Vec<HotMemoryRecipeStep> {
+    match name {
+        HANDOFF_RECIPE_NAME => vec![
+            HotMemoryRecipeStep::Purpose,
+            HotMemoryRecipeStep::PinnedFeedback,
+        ],
+        _ => fallback.to_vec(),
+    }
+}
 
 /// Input snapshot for a pre-compaction render attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,7 +149,8 @@ where
         cfg.pre_compact_safety_ratio,
     );
     span.record("budget", budget);
-    let data = assemble_hot_with_budget(cfg, budget)?;
+    let recipe_steps = resolve_pre_compact_recipe(&cfg.pre_compact_recipe, &cfg.recipe);
+    let data = assemble_hot_with_budget_and_recipe(cfg, budget, Some(&recipe_steps))?;
     span.record("output_bytes", data.bytes);
     snapshot(event, &data).map_err(|reason| PreCompactError::Snapshot { reason })?;
 
@@ -145,7 +174,9 @@ where
 mod tests {
     use std::cell::{Cell, RefCell};
 
-    use super::{PreCompactError, PreCompactEvent, compute_budget, run_pre_compact};
+    use super::{
+        HANDOFF_RECIPE_NAME, PreCompactError, PreCompactEvent, compute_budget, run_pre_compact,
+    };
     use crate::config::{HotMemoryConfig, HotMemoryRecipeStep};
     use crate::domain::SessionId;
 
@@ -218,6 +249,9 @@ mod tests {
     fn pre_compact_assemble_failure_prevents_snapshot() {
         let snapshot_called = Cell::new(false);
         let mut cfg = sample_cfg();
+        // Force the fallback path so the recipe override doesn't shrink
+        // the assembled steps under the budget before assembly fails.
+        cfg.pre_compact_recipe = "force-fallback".to_owned();
         cfg.recipe = vec![HotMemoryRecipeStep::Purpose; 65];
 
         let err = run_pre_compact(&sample_event(), &cfg, |_, _| {
@@ -258,6 +292,72 @@ mod tests {
         assert!(logs_contain("recipe=handoff"));
         assert!(logs_contain(&format!("budget={}", out.budget_bytes)));
         assert!(logs_contain(&format!("output_bytes={}", out.output_bytes)));
+    }
+
+    #[test]
+    fn pre_compact_handoff_recipe_overrides_session_start_steps() {
+        // The handoff preset must be the minimal stable prefix — purpose
+        // plus pinned feedback — not the full session-start recipe baked
+        // into HotMemoryConfig.recipe. Inspect the assembled segments to
+        // prove the override actually reached the assembler.
+        let mut cfg = sample_cfg();
+        cfg.recipe = vec![
+            HotMemoryRecipeStep::Purpose,
+            HotMemoryRecipeStep::Index,
+            HotMemoryRecipeStep::PinnedFeedback,
+            HotMemoryRecipeStep::TopSalienceProject,
+            HotMemoryRecipeStep::ActivePlaybook,
+            HotMemoryRecipeStep::RecentUserSignal,
+        ];
+        cfg.pre_compact_recipe = HANDOFF_RECIPE_NAME.to_owned();
+
+        let captured = RefCell::new(None);
+        let _ = run_pre_compact(&sample_event(), &cfg, |_, assembled| {
+            captured.replace(assembled.segments.clone());
+            Ok(())
+        })
+        .unwrap();
+
+        let segments = captured.borrow().clone().expect("segments emitted");
+        let kinds: Vec<String> = segments
+            .into_iter()
+            .map(|seg| {
+                serde_json::to_value(seg.step)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_owned))
+                    .unwrap_or_default()
+            })
+            .collect();
+        assert_eq!(kinds, vec!["purpose".to_string(), "pinned_feedback".into()]);
+    }
+
+    #[test]
+    fn pre_compact_unknown_recipe_falls_back_to_session_start() {
+        // Misconfiguration must not silently downgrade to the empty
+        // render: an unknown preset reuses the operator's session-start
+        // recipe rather than producing zero segments.
+        let mut cfg = sample_cfg();
+        cfg.recipe = vec![HotMemoryRecipeStep::Purpose, HotMemoryRecipeStep::Index];
+        cfg.pre_compact_recipe = "not-a-real-preset".to_owned();
+
+        let captured = RefCell::new(None);
+        let _ = run_pre_compact(&sample_event(), &cfg, |_, assembled| {
+            captured.replace(assembled.segments.clone());
+            Ok(())
+        })
+        .unwrap();
+
+        let segments = captured.borrow().clone().expect("segments emitted");
+        let kinds: Vec<String> = segments
+            .into_iter()
+            .map(|seg| {
+                serde_json::to_value(seg.step)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_owned))
+                    .unwrap_or_default()
+            })
+            .collect();
+        assert_eq!(kinds, vec!["purpose".to_string(), "index".into()]);
     }
 
     #[test]
