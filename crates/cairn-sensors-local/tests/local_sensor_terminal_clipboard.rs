@@ -76,6 +76,29 @@ fn terminal_sensor_redacts_before_hashing_and_emits_valid_event() {
 }
 
 #[test]
+fn disabled_terminal_sensor_drops_without_event() {
+    let observation = TerminalObservation {
+        event_id: id("01ARZ3NDEKTSV4RRFFQ69G5FB5"),
+        captured_at: ts(),
+        command: "cargo test".to_owned(),
+        exit_code: Some(0),
+        context: Some(TerminalContext::InteractiveTty),
+        output: String::new(),
+        refs: None,
+    };
+
+    let outcome = terminal::emit(&LocalSensorConfig::default(), observation);
+
+    assert_eq!(
+        outcome,
+        EmitOutcome::Dropped {
+            sensor: SensorKind::Terminal,
+            reason: DropReason::Disabled
+        }
+    );
+}
+
+#[test]
 fn terminal_sensor_drops_missing_context() {
     let observation = TerminalObservation {
         event_id: id("01ARZ3NDEKTSV4RRFFQ69G5FAZ"),
@@ -179,6 +202,35 @@ fn clipboard_text_redacts_before_hashing_and_emits_valid_event() {
 }
 
 #[test]
+fn clipboard_text_with_charset_redacts_before_hashing_and_emits_valid_event() {
+    let observation = ClipboardObservation {
+        event_id: id("01ARZ3NDEKTSV4RRFFQ69G5FB8"),
+        captured_at: ts(),
+        mime_type: "text/plain; charset=utf-8".to_owned(),
+        bytes: b"TOKEN=secret".to_vec(),
+        metadata_only: false,
+        refs: None,
+    };
+
+    let event = emitted(clipboard::emit(&enabled_config(), observation));
+
+    assert_eq!(event.sensor_id.as_str(), "snr:local:clipboard:default:v1");
+    assert_eq!(event.source_family, SourceFamily::Clipboard);
+    assert_eq!(event.payload_hash.as_str(), hash(b"TOKEN=[REDACTED]"));
+    match &event.payload {
+        CapturePayload::Clipboard {
+            mime_type,
+            byte_len,
+        } => {
+            assert_eq!(mime_type, "text/plain; charset=utf-8");
+            assert_eq!(*byte_len, 16);
+        }
+        other => panic!("unexpected payload: {other:?}"),
+    }
+    event.validate_for_capture().expect("valid event");
+}
+
+#[test]
 fn clipboard_metadata_only_non_text_reports_original_byte_len_and_hashes_empty_payload() {
     let observation = ClipboardObservation {
         event_id: id("01ARZ3NDEKTSV4RRFFQ69G5FB3"),
@@ -225,6 +277,99 @@ fn clipboard_drops_unsupported_mime_without_metadata_only() {
         EmitOutcome::Dropped {
             sensor: SensorKind::Clipboard,
             reason: DropReason::PolicyRejected("unsupported clipboard MIME type".to_owned())
+        }
+    );
+}
+
+#[test]
+fn disabled_clipboard_sensor_drops_without_event() {
+    let observation = ClipboardObservation {
+        event_id: id("01ARZ3NDEKTSV4RRFFQ69G5FB9"),
+        captured_at: ts(),
+        mime_type: "text/plain".to_owned(),
+        bytes: b"hello".to_vec(),
+        metadata_only: false,
+        refs: None,
+    };
+
+    let outcome = clipboard::emit(&LocalSensorConfig::default(), observation);
+
+    assert_eq!(
+        outcome,
+        EmitOutcome::Dropped {
+            sensor: SensorKind::Clipboard,
+            reason: DropReason::Disabled
+        }
+    );
+}
+
+#[test]
+fn clipboard_budget_drops_before_policy_or_event_creation() {
+    let mut config = enabled_config();
+    config.clipboard.budget = CaptureBudget {
+        max_items: Some(1),
+        max_bytes: Some(4),
+    };
+    let observation = ClipboardObservation {
+        event_id: id("01ARZ3NDEKTSV4RRFFQ69G5FBA"),
+        captured_at: ts(),
+        mime_type: "text/plain".to_owned(),
+        bytes: b"-----BEGIN PRIVATE KEY-----".to_vec(),
+        metadata_only: false,
+        refs: None,
+    };
+
+    let outcome = clipboard::emit(&config, observation);
+
+    assert_eq!(
+        outcome,
+        EmitOutcome::Dropped {
+            sensor: SensorKind::Clipboard,
+            reason: DropReason::BudgetExceeded
+        }
+    );
+}
+
+#[test]
+fn clipboard_text_rejects_non_utf8_payload() {
+    let observation = ClipboardObservation {
+        event_id: id("01ARZ3NDEKTSV4RRFFQ69G5FBB"),
+        captured_at: ts(),
+        mime_type: "text/plain".to_owned(),
+        bytes: vec![0xff],
+        metadata_only: false,
+        refs: None,
+    };
+
+    let outcome = clipboard::emit(&enabled_config(), observation);
+
+    assert_eq!(
+        outcome,
+        EmitOutcome::Dropped {
+            sensor: SensorKind::Clipboard,
+            reason: DropReason::PolicyRejected("clipboard text is not UTF-8".to_owned())
+        }
+    );
+}
+
+#[test]
+fn clipboard_text_rejects_private_key_payload() {
+    let observation = ClipboardObservation {
+        event_id: id("01ARZ3NDEKTSV4RRFFQ69G5FBC"),
+        captured_at: ts(),
+        mime_type: "text/plain".to_owned(),
+        bytes: b"-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----".to_vec(),
+        metadata_only: false,
+        refs: None,
+    };
+
+    let outcome = clipboard::emit(&enabled_config(), observation);
+
+    assert_eq!(
+        outcome,
+        EmitOutcome::Dropped {
+            sensor: SensorKind::Clipboard,
+            reason: DropReason::PolicyRejected("private key block".to_owned())
         }
     );
 }

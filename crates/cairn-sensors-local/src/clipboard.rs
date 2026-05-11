@@ -45,7 +45,7 @@ pub fn emit(config: &LocalSensorConfig, observation: ClipboardObservation) -> Em
         };
     }
 
-    let (sanitized_bytes, payload_byte_len) = if observation.mime_type == TEXT_PLAIN {
+    let (sanitized_bytes, payload_byte_len) = if is_text_plain_mime(&observation.mime_type) {
         let Ok(text) = std::str::from_utf8(&observation.bytes) else {
             return EmitOutcome::Dropped {
                 sensor: SensorKind::Clipboard,
@@ -101,4 +101,11 @@ pub fn emit(config: &LocalSensorConfig, observation: ClipboardObservation) -> Em
             reason: DropReason::MalformedObservation(err.to_string()),
         },
     }
+}
+
+fn is_text_plain_mime(mime_type: &str) -> bool {
+    mime_type
+        .split(';')
+        .next()
+        .is_some_and(|mime| mime.trim().eq_ignore_ascii_case(TEXT_PLAIN))
 }
