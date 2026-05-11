@@ -143,18 +143,45 @@ struct ReplayHashInput<'a> {
     source_sensor: &'a Identity,
 }
 
-// replay_hash = sha256(canonical_json(ReplayHashInput { ... }))
+// replay_hash = "sha256:" + hex(sha256(canonical_json(ReplayHashInput { ... })))
 ```
 
-Canonical-JSON rules (locked in `pipeline::canonical`):
-- Object keys lex-sorted.
-- No insignificant whitespace.
-- Numbers in shortest-round-trip form.
-- UTF-8 NFC for strings.
+**Encoder is hand-rolled, not `serde_json`.** The spec rules out
+delegating canonicalization to a third-party serializer whose output
+may shift across versions. `pipeline::canonical::encode` is a small
+deterministic encoder owned by `cairn-core`, fully specified by:
 
-A property test in `pipeline::canonical::replay_hash` exercises:
-field permutation → canonical sort → identical hash; tampered byte →
-different hash; round-trip stability across `serde_json` versions.
+- **Domain tag**: every digest input includes `domain: "cairn.replay_hash.v1"`.
+  Bumping `v` mints a new hash space — old journal entries do not
+  silently match new computations.
+- **Object key sort**: UTF-8 byte-wise ascending, stable, no Unicode
+  collation.
+- **String escapes**: `\"`, `\\`, `\n`, `\r`, `\t`, `\b`, `\f`, and
+  `\u00XX` for `0x00..=0x1F` and `0x7F`. All other characters emitted
+  literally as UTF-8 (no `\u` for non-ASCII).
+- **Strings**: normalized to Unicode NFC before encoding.
+- **Numbers**: integers as base-10 digits, no leading zeros, no signs
+  except `-` for negatives. No floats (the input struct contains
+  none).
+- **Booleans**: `true` / `false`.
+- **Null**: `null`.
+- **Arrays**: `[v0,v1,…]`, no spaces.
+- **Objects**: `{"k0":v0,"k1":v1,…}`, no spaces.
+- No insignificant whitespace anywhere.
+
+**Stability guarantees**:
+- Golden test vectors checked into `crates/cairn-core/tests/golden/replay_hash/`.
+  Each vector is `(input json, expected sha256:hex)`. Cover empty
+  arrays, NFC normalization edges, escape boundary, sort ordering,
+  large unicode strings, nested objects.
+- Upgrade-compat test: when `cairn-core` is published, the golden
+  vectors are versioned. Any change to the encoder that touches a
+  byte of any vector is a wire-version bump (`v: 2`), tracked in
+  the `replay_hash.v1` domain tag.
+- The canonical encoder lives in `cairn-core` (no transitive
+  dependency on `serde_json` for *output*). Internal Rust types can
+  still use `serde_json` for I/O elsewhere; the canonical encoder is
+  a separate code path.
 
 **Domain location:** `pipeline::canonical::replay_hash`. The body-only
 `BodyHash` (already used for upsert idempotency) is intentionally NOT
@@ -166,25 +193,48 @@ field. Computing it is cheap, and persisting it would create a sync-
 drift hazard. Both `forget` and `lint` compute it on demand from the
 in-hand record.
 
-**Legacy records — target-scope forget gating.** The reviewer-flagged
-hazard: a legacy record forgotten with empty `source_refs` produces
-one replay-hash; the same record re-ingested later with populated
-`source_refs` produces a different replay-hash; forget no longer
-matches → privacy regression.
+**Legacy records — target-scope forget migration contract.** A
+pre-change record with empty `source_refs` and the re-ingested record
+with populated `source_refs` hash differently. If a legacy duplicate
+remains in the vault after re-ingest, target-scope forget on the
+new record leaves the legacy copy live → privacy regression.
 
-Resolution: **target-scope forget is gated on non-empty
-`source_refs`.** `forget` rejects a target-scope op against a record
-with empty `source_refs` and returns
-`ForgetError::SourceRefsRequiredForTargetScope` with remediation
-pointing the operator to re-ingest the source first. Source-scope
-forget (no `target_replay_hash`) still works against any record —
-it's keyed by source-bytes hash which is stable.
+Resolution requires three guarantees, all gated by `lint`:
 
-After re-ingest populates `source_refs`, target-scope forget on that
-record becomes available. The lint rule `source_link_missing` already
-flags empty `source_refs` as `error`, so existing vaults will be
-nudged toward re-ingest as part of normal lint hygiene before any
-target-scope forget op is needed.
+1. **Empty `source_refs` is a blocking lint error.**
+   `source_link_missing` is `severity: error`. CI / pre-commit
+   workflows MUST run `cairn lint --fail-on=error` before any forget
+   operation is accepted.
+
+2. **Target-scope forget is gated on non-empty `source_refs`.**
+   `forget` rejects target-scope ops against records with empty
+   `source_refs` and returns
+   `ForgetError::SourceRefsRequiredForTargetScope` (remediation:
+   "re-ingest source, then retry"). Source-scope forget (no
+   `target_replay_hash`) still works on any record — it's keyed by
+   source-bytes hash which is stable across the legacy gap.
+
+3. **Re-ingest replaces, not duplicates.** The re-ingest contract
+   (issue #61 scope, called out here because #257 depends on it for
+   privacy soundness) MUST locate any pre-existing record produced
+   from the same `source_bytes_hash` and either overwrite it
+   in-place (preserving `RecordId`) or tombstone it via WAL Phase A
+   in the same transaction. A new lint rule
+   `source_link_legacy_duplicate` (`severity: error`) flags any pair
+   of active records `(legacy, modern)` where:
+   - `legacy.provenance.source_hash == modern.provenance.source_refs[i].hash`
+     for some `i`, AND
+   - `legacy.provenance.source_refs` is empty, AND
+   - `modern.provenance.source_refs` is non-empty.
+   This catches re-ingest paths that left duplicates behind. Operator
+   remediation: forget the legacy by source-scope, then retry.
+
+The combination — `source_link_missing` (error) + re-ingest
+deduplication + `source_link_legacy_duplicate` (error) + target-scope
+gating — converges legacy and modern copies on the same forget key
+*before* target-scope forget is allowed to run. If any of the three
+guarantees fail, lint surfaces an error and forget refuses to operate
+at target scope.
 
 `forget` flow (issue #58 scope, called out here for the contract):
   1. Loads the target record by `RecordId`.
@@ -230,11 +280,12 @@ Lint rule `source_not_forgotten` runs both checks:
    with scope=target.
 
 This survives source rename/copy (same bytes, same hash), survives
-`RecordId` regeneration (target keyed by replay-hash), works for
-legacy records without backfill (forget recomputes replay-hash from
-record in hand), and never over-blocks (replay-hash includes
-provenance disambiguators, so distinct records with the same body but
-different provenance/agent/sensor get different keys).
+`RecordId` regeneration (target keyed by replay-hash), and never
+over-blocks (replay-hash includes provenance disambiguators, so
+distinct records with the same body but different provenance/agent/
+sensor get different keys). Legacy-record handling is covered by the
+migration contract in Component 4 (target-scope gating + re-ingest
+dedup + `source_link_legacy_duplicate` lint rule).
 
 `source_id` stays on the row for operator-facing finding messages
 (`forgotten source <id>`) but does not participate in dedup logic.
@@ -250,6 +301,7 @@ Extend generated `Kind`:
 - `SourceHashMismatch`
 - `SourceAfterForget`
 - `SourceRedactSkipped`
+- `SourceLinkLegacyDuplicate`
 
 Removing `DeferredCheck`-emitting path from `checks/provenance.rs` is in
 scope (no longer needed). Keep `DeferredCheck` variant itself for future
@@ -366,8 +418,12 @@ Wired into `ci.yml` alongside `check-core-boundary.sh`.
    cross-field invariant + tests (existing tests keep passing — that's
    the back-compat acceptance bar). No fixture rewrites required.
 3. `SourceResolver` trait + `VaultLayout`-driven filesystem impl.
-4. `ConsentKind::SourceForget { source_id, content_hash, target_id,
-   op_id }` + journal query helpers.
+4. `ConsentKind::SourceForget { source_id, source_bytes_hash,
+   target_replay_hash, op_id }` + journal query helpers
+   (`forgotten_source_bytes_hashes`, `forgotten_target_replay_hashes`,
+   `forget_op_for_source`, `forget_op_for_target_replay`). Wire the
+   target-scope gating error path in `forget` (#58 follow-up; #257
+   only adds the journal schema and helpers).
 5. `SourceConfig` + config-defaults regen.
 6. `Kind` enum extension via IDL regen.
 7. `source_links.rs` rules + dispatcher rewire in `checks/provenance.rs`.
