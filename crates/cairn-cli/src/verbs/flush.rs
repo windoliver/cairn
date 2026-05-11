@@ -722,6 +722,32 @@ fn claim_pending(
     if !pending.exists()
         && let Some(orphan) = find_orphan_owned_claim(&claim, ulid)
     {
+        // Issue #289 re-loop r5: if a prior attempt durably committed
+        // SQLite mutations (committed-sidecar or stranded marker
+        // present), the orphan IS provably dead — its crash already
+        // happened post-commit. Auto-resume by renaming the orphan
+        // back to the canonical claim path so the caller can finish
+        // publish. Without this, a post-commit crash strands the plan
+        // until manual filesystem repair, even though the recovery
+        // signal is already on disk.
+        let committed_sidecar = committed_sidecar_path_for(vault, ulid);
+        let stranded = stranded_marker_path(vault, ulid);
+        if committed_sidecar.exists() || stranded.exists() {
+            match std::fs::rename(&orphan, &claim) {
+                Ok(()) => {
+                    // Fall through to the canonical `claim.exists()`
+                    // branch on next call (or the re-attempt below).
+                    // Re-execute the same exclusive-ownership rename
+                    // the caller used above.
+                    let owned = process_owned_claim(&claim);
+                    return match std::fs::rename(&claim, &owned) {
+                        Ok(()) => ClaimOutcome::Claimed(owned),
+                        Err(e) => ClaimOutcome::Err(e),
+                    };
+                }
+                Err(e) => return ClaimOutcome::Err(e),
+            }
+        }
         return ClaimOutcome::Err(std::io::Error::other(format!(
             "stranded in-flight claim for {0} at {1}; auto-recovery is disabled. \
              Verify the owning process is dead, then manually rename it back to \
