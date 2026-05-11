@@ -12,6 +12,7 @@ use cairn_core::contract::version::{ContractVersion, VersionRange};
 use cairn_core::register_plugin;
 
 pub mod config;
+mod event;
 pub mod outcome;
 
 pub use config::{CaptureBudget, LocalSensorConfig, SensorSettings};
