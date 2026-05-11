@@ -91,6 +91,16 @@ impl FlushPlan {
     pub fn target_hash(&self, target: &TargetId) -> Option<&str> {
         self.target_hashes.get(target.as_str()).map(String::as_str)
     }
+
+    /// Pre-state hash for a session metadata target (issue #289 review
+    /// round 2). `target_hashes` is keyed by string, so session patches
+    /// reuse it under the session id.
+    #[must_use]
+    pub fn session_hash(&self, session: &SessionId) -> Option<&str> {
+        self.target_hashes
+            .get(session.as_str())
+            .map(String::as_str)
+    }
 }
 
 /// One concrete mutation inside a [`FlushPlan`]. Tagged externally for

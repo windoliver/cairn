@@ -150,6 +150,22 @@ fn apply(vault: &Path, m: &ArgMatches) -> ExitCode {
     // the source vanished — that's how concurrent apply/reject callers
     // race-free settle to a single winner. The loser sees ENOENT and
     // returns NotFound (or AlreadyTerminal if the winner committed).
+    // Stranded marker (issue #289 review round 2): a prior attempt
+    // committed SQLite mutations but failed to write the committed
+    // sidecar, leaving an unrecoverable state. Refuse to apply this id
+    // again until an operator inspects and removes the marker — replaying
+    // would double-mutate.
+    let stranded = stranded_marker_path(vault, &ulid);
+    if stranded.exists() {
+        eprintln!(
+            "cairn flush apply: plan {id} is stranded ({}). A prior attempt committed \
+             SQLite mutations but could not persist its recovery sidecar; replaying would \
+             double-mutate. Manually verify the database state, then remove the stranded \
+             marker to proceed.",
+            stranded.display(),
+        );
+        return ExitCode::from(70);
+    }
     let claim = match claim_pending(vault, &ulid, "applied") {
         ClaimOutcome::Claimed(p) => p,
         ClaimOutcome::NotFound => {
@@ -274,15 +290,28 @@ fn apply(vault: &Path, m: &ArgMatches) -> ExitCode {
             rollback_claim(vault, &claim, &ulid);
             return ExitCode::from(70);
         } else if let Err(e) = write_committed_sidecar(&committed_sidecar) {
-            // DB is mutated. The sidecar write is what makes a publish-phase
-            // crash recoverable without double-applying. If we cannot write
-            // it, surface loudly — the operator must triage manually before
-            // any retry.
-            eprintln!(
-                "cairn flush apply: SQLite mutations committed but committed-sidecar \
-                 write failed: {e}. DO NOT retry without manual recovery; data is \
-                 mutated but `applied/` will not reflect it on the next attempt."
-            );
+            // DB is mutated but the recovery sidecar is missing. Plant the
+            // stranded marker (issue #289 review round 2) so the apply
+            // entry point refuses to re-execute mutations on retry. If
+            // marker placement also fails, surface both errors — manual
+            // intervention is required.
+            let stranded = stranded_marker_path(vault, &ulid);
+            if let Err(me) = write_stranded_marker(&stranded) {
+                eprintln!(
+                    "cairn flush apply: SQLite mutations committed but committed-sidecar \
+                     write failed: {e}; ALSO failed to plant stranded marker at {}: {me}. \
+                     DO NOT retry without manual recovery.",
+                    stranded.display(),
+                );
+            } else {
+                eprintln!(
+                    "cairn flush apply: SQLite mutations committed but committed-sidecar \
+                     write failed: {e}. Planted stranded marker at {}; future apply \
+                     attempts will refuse this id until an operator inspects and removes \
+                     the marker.",
+                    stranded.display(),
+                );
+            }
             return ExitCode::from(70);
         }
         persisted.status = PlanStatus::Applied {
@@ -296,6 +325,41 @@ fn apply(vault: &Path, m: &ArgMatches) -> ExitCode {
     }
     emit_apply_ok(json, id, "applied");
     ExitCode::SUCCESS
+}
+
+/// Stranded marker path (issue #289 review round 2). Planted in the
+/// `applied/` directory when `SQLite` mutations have committed but the
+/// committed-sidecar could not be written; blocks future apply attempts
+/// for the same id until an operator removes the marker.
+fn stranded_marker_path(
+    vault: &Path,
+    ulid: &cairn_core::generated::common::Ulid,
+) -> PathBuf {
+    use cairn_core::domain::flush_plan::store::{Bucket, plan_path};
+    plan_path(vault, Bucket::Applied, ulid).with_extension("json.stranded")
+}
+
+/// Write the stranded marker durably so a crash mid-write cannot leave
+/// an ambiguous half-written file. fsync the parent so the rename
+/// survives.
+fn write_stranded_marker(path: &Path) -> std::io::Result<()> {
+    use std::io::Write as _;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(format!(".tmp.{}", std::process::id()));
+    let tmp = PathBuf::from(tmp);
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(b"stranded: committed-sidecar write failed; manual recovery required\n")?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)?;
+    if let Some(parent) = path.parent() {
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
 }
 
 /// Sidecar path used to mark "`SQLite` mutations committed, publish still

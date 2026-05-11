@@ -58,17 +58,25 @@ fn check_drift(
     plan: &FlushPlan,
     mutation: &PlannedMutation,
 ) -> Result<(), StoreError> {
-    let target = match mutation {
+    match mutation {
         PlannedMutation::Patch {
             target: PatchTarget::Record(target),
             ..
-        } => target,
-        PlannedMutation::Rename { record_id, .. } => record_id,
-        // Session metadata patches do not have a body to hash; rename/patch
-        // for sessions is covered by `session.ended_at IS NULL` in the
-        // tx-level helpers, not by `target_hashes`.
-        _ => return Ok(()),
-    };
+        } => check_record_drift(tx, plan, target),
+        PlannedMutation::Rename { record_id, .. } => check_record_drift(tx, plan, record_id),
+        PlannedMutation::Patch {
+            target: PatchTarget::Session(session_id),
+            ..
+        } => check_session_drift(tx, plan, session_id),
+        _ => Ok(()),
+    }
+}
+
+fn check_record_drift(
+    tx: &mut cairn_store_sqlite::StoreTx<'_>,
+    plan: &FlushPlan,
+    target: &cairn_core::domain::TargetId,
+) -> Result<(), StoreError> {
     let Some(expected) = plan.target_hash(target) else {
         return Ok(());
     };
@@ -84,6 +92,36 @@ fn check_drift(
                 "flush apply drift: target `{}` body hash `{}` does not match plan \
                  pre-state hash `{}`; live record changed between plan creation and apply",
                 target.as_str(),
+                actual.as_str(),
+                expected,
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Round 2 review fix: session patches must also reject stale-state apply.
+/// Computes the same canonical [`SessionPatchDocument`] JSON the apply path
+/// will mutate, hashes it with [`BodyHash`], and compares against the
+/// plan's `target_hashes` entry keyed by `session_id`. Skipped when the
+/// plan author did not record a session hash (stub-planner output).
+fn check_session_drift(
+    tx: &mut cairn_store_sqlite::StoreTx<'_>,
+    plan: &FlushPlan,
+    session_id: &cairn_core::domain::SessionId,
+) -> Result<(), StoreError> {
+    let Some(expected) = plan.session_hash(session_id) else {
+        return Ok(());
+    };
+    let session = tx.get_live_session(session_id)?;
+    let doc_json = serde_json::to_string(&SessionPatchDocument::from(&session))?;
+    let actual = BodyHash::compute(&doc_json);
+    if actual.as_str() != expected {
+        return Err(StoreError::Invariant {
+            what: format!(
+                "flush apply drift: session `{}` metadata hash `{}` does not match plan \
+                 pre-state hash `{}`; live session changed between plan creation and apply",
+                session_id.as_str(),
                 actual.as_str(),
                 expected,
             ),
