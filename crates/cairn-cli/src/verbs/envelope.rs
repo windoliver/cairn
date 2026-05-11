@@ -72,6 +72,38 @@ pub fn invalid_args_response(verb: ResponseVerb, field: &str, reason: &str) -> R
     }
 }
 
+/// Build an `InvalidFilter` rejected response with structured error data.
+///
+/// Use for `search.filters` parse/validation failures. CLI callers should
+/// pair this with `ExitCode::from(64)` (`EX_USAGE`).
+#[must_use]
+pub fn invalid_filter_response(verb: ResponseVerb, reason: &str, path: Option<&str>) -> Response {
+    let mut data = serde_json::json!({ "reason": reason });
+    if let Some(path) = path
+        && !path.is_empty()
+        && let Some(obj) = data.as_object_mut()
+    {
+        obj.insert(
+            "path".to_owned(),
+            serde_json::Value::String(path.to_owned()),
+        );
+    }
+    Response {
+        contract: "cairn.mcp.v1".to_owned(),
+        data: None,
+        error: Some(serde_json::json!({
+            "code": "InvalidFilter",
+            "message": format!("invalid filter: {reason}"),
+            "data": data,
+        })),
+        operation_id: new_operation_id(),
+        policy_trace: Vec::<ResponsePolicyTrace>::new(),
+        status: ResponseStatus::Rejected,
+        target: None,
+        verb,
+    }
+}
+
 /// Build a `NotFound` aborted response with structured error data.
 ///
 /// Use for resource-discovery failures that occur before dispatch — the
