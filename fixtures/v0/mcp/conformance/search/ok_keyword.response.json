@@ -1,0 +1,10 @@
+{
+  "contract": "cairn.mcp.v1",
+  "data": {
+    "hits": []
+  },
+  "operation_id": "<OPERATION_ID>",
+  "policy_trace": [],
+  "status": "committed",
+  "verb": "search"
+}

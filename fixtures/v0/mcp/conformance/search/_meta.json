@@ -1,0 +1,8 @@
+{
+  "cases": {
+    "ok_keyword": {
+      "kind": "ok",
+      "config": { "keyword_search": true }
+    }
+  }
+}

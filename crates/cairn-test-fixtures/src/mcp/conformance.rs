@@ -7,6 +7,7 @@
 //! on orphans or missing entries (brief §8.0.a fail-closed invariant projected
 //! into the test infra layer).
 
+use include_dir::{Dir, include_dir};
 use serde::Deserialize;
 
 /// One fixture entry, ready for replay.
@@ -102,9 +103,164 @@ impl ConfigOverrides {
     }
 }
 
+/// Embedded fixture tree — `fixtures/v0/mcp/conformance/` at compile time.
+static CONFORMANCE_DIR: Dir<'static> =
+    include_dir!("$CARGO_MANIFEST_DIR/../../fixtures/v0/mcp/conformance");
+
+#[derive(Debug, Deserialize)]
+struct MetaFile {
+    cases: std::collections::BTreeMap<String, MetaEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MetaEntry {
+    kind: CaseKind,
+    #[serde(default)]
+    config: ConfigOverrides,
+}
+
+/// Load every fixture under `fixtures/v0/mcp/conformance/`, sorted by id.
+///
+/// # Panics
+///
+/// Panics if:
+/// - A `_meta.json` is malformed.
+/// - A case named in `_meta.json` is missing its `.request.json` or
+///   `.response.json`.
+/// - A `.request.json` / `.response.json` on disk is not named in `_meta.json`.
+#[must_use]
+pub fn load_all() -> Vec<ConformanceCase> {
+    let mut out = Vec::new();
+    for verb_dir in CONFORMANCE_DIR.dirs() {
+        let verb = verb_dir
+            .path()
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_else(|| {
+                panic!("verb dir has non-UTF-8 name: {}", verb_dir.path().display())
+            });
+        let meta_file = verb_dir
+            .get_file(format!("{}/_meta.json", verb_dir.path().display()))
+            .unwrap_or_else(|| panic!("missing _meta.json in {}", verb_dir.path().display()));
+        let meta: MetaFile = serde_json::from_slice(meta_file.contents())
+            .unwrap_or_else(|e| panic!("malformed _meta.json in {verb}: {e}"));
+
+        // Build the set of on-disk case ids from filenames.
+        let mut on_disk = std::collections::BTreeSet::<String>::new();
+        for f in verb_dir.files() {
+            let name = f
+                .path()
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or_else(|| {
+                    panic!("fixture file has non-UTF-8 name: {}", f.path().display())
+                });
+            if name == "_meta.json" {
+                continue;
+            }
+            if let Some(case_id) = name.strip_suffix(".request.json") {
+                on_disk.insert(case_id.to_string());
+            } else if let Some(case_id) = name.strip_suffix(".response.json") {
+                on_disk.insert(case_id.to_string());
+            } else {
+                panic!("unexpected file {} in {}", name, verb_dir.path().display());
+            }
+        }
+
+        // Orphan check: every on-disk case id must be in _meta.json.
+        for case_id in &on_disk {
+            assert!(
+                meta.cases.contains_key(case_id),
+                "fixture {verb}/{case_id} has no _meta.json entry",
+            );
+        }
+        // Reverse orphan check: every _meta.json entry must have files on disk.
+        for case_id in meta.cases.keys() {
+            assert!(
+                on_disk.contains(case_id),
+                "_meta.json entry {verb}/{case_id} has no .request/.response files",
+            );
+            let req = verb_dir
+                .get_file(format!(
+                    "{}/{}.request.json",
+                    verb_dir.path().display(),
+                    case_id
+                ))
+                .unwrap_or_else(|| panic!("missing {verb}/{case_id}.request.json"));
+            let resp = verb_dir
+                .get_file(format!(
+                    "{}/{}.response.json",
+                    verb_dir.path().display(),
+                    case_id
+                ))
+                .unwrap_or_else(|| panic!("missing {verb}/{case_id}.response.json"));
+            let entry = &meta.cases[case_id];
+            out.push(ConformanceCase {
+                id: format!("{verb}/{case_id}"),
+                verb: verb.to_string(),
+                kind: entry.kind,
+                config: entry.config,
+                request: serde_json::from_slice(req.contents())
+                    .unwrap_or_else(|e| panic!("{verb}/{case_id}.request.json: {e}")),
+                response: serde_json::from_slice(resp.contents())
+                    .unwrap_or_else(|e| panic!("{verb}/{case_id}.response.json: {e}")),
+            });
+        }
+    }
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out
+}
+
+/// Load one case by id (e.g., `"search/ok_keyword"`).
+///
+/// # Panics
+///
+/// If the case does not exist.
+#[must_use]
+pub fn load_case(id: &str) -> ConformanceCase {
+    load_all()
+        .into_iter()
+        .find(|c| c.id == id)
+        .unwrap_or_else(|| panic!("no conformance case with id {id}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn load_all_returns_at_least_one_case() {
+        let cases = load_all();
+        assert!(
+            !cases.is_empty(),
+            "expected at least one fixture under fixtures/v0/mcp/conformance/"
+        );
+    }
+
+    #[test]
+    fn load_all_pairs_request_with_response() {
+        let cases = load_all();
+        for c in &cases {
+            assert!(
+                c.request.is_object(),
+                "case {}: request must be a JSON object",
+                c.id
+            );
+            assert!(
+                c.response.is_object(),
+                "case {}: response must be a JSON object",
+                c.id
+            );
+        }
+    }
+
+    #[test]
+    fn load_case_returns_by_id() {
+        let c = load_case("search/ok_keyword");
+        assert_eq!(c.id, "search/ok_keyword");
+        assert_eq!(c.verb, "search");
+        assert_eq!(c.kind, CaseKind::Ok);
+    }
 
     #[test]
     fn case_kind_deserializes_snake_case() {
