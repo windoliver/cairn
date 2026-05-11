@@ -215,8 +215,14 @@ impl StoreTx<'_> {
         Ok(())
     }
 
-    /// Copy every non-`updates` edge attached to `old_id` onto `new_id`, then
-    /// delete the old rows so live graph traversals follow the renamed record.
+    /// Copy every non-`updates` edge attached to `old_id` onto `new_id`.
+    /// Round 7/8 review fix: the previous version also deleted the
+    /// source rows, which irrecoverably erased the predecessor's graph
+    /// history. Now copies are additive — `new_id` gains the same edges
+    /// for live traversal while `old_id` retains its original
+    /// relationships so audit/rollback tooling can still reconstruct the
+    /// pre-rename neighbourhood. Uses `INSERT OR IGNORE` so an
+    /// already-existing edge on `new_id` is not silently overwritten.
     ///
     /// # Errors
     ///
@@ -227,7 +233,7 @@ impl StoreTx<'_> {
         new_id: &RecordId,
     ) -> Result<(), StoreError> {
         self.tx.execute(
-            "INSERT OR REPLACE INTO edges (src, dst, kind, weight) \
+            "INSERT OR IGNORE INTO edges (src, dst, kind, weight) \
              SELECT CASE WHEN src = ?1 THEN ?2 ELSE src END, \
                     CASE WHEN dst = ?1 THEN ?2 ELSE dst END, \
                     kind, \
@@ -240,12 +246,6 @@ impl StoreTx<'_> {
                 new_id.as_str(),
                 EdgeKind::Updates.as_db_str()
             ],
-        )?;
-        self.tx.execute(
-            "DELETE FROM edges \
-              WHERE kind != ?1 \
-                AND (src = ?2 OR dst = ?2)",
-            params![EdgeKind::Updates.as_db_str(), old_id.as_str()],
         )?;
         Ok(())
     }
