@@ -607,9 +607,9 @@ async fn handle_search(
                 "args",
                 "expected search arguments",
             );
-            return crate::verb_envelope::call_result_from_response(response);
+            return crate::verb_envelope::call_result_from_response(&response);
         }
-        Err(response) => return crate::verb_envelope::call_result_from_response(response),
+        Err(response) => return crate::verb_envelope::call_result_from_response(&response),
     };
 
     // Map IDL mode to core dispatcher mode.
@@ -624,7 +624,7 @@ async fn handle_search(
                 "mode",
                 "unknown search mode",
             );
-            return crate::verb_envelope::call_result_from_response(response);
+            return crate::verb_envelope::call_result_from_response(&response);
         }
     };
 
@@ -668,24 +668,24 @@ async fn handle_search(
                 ResponseVerb::Search,
                 capability,
             );
-            return crate::verb_envelope::call_result_from_response(response);
+            return crate::verb_envelope::call_result_from_response(&response);
         }
         Err(cairn_core::verbs::search::SearchError::InvalidArgs { reason }) => {
             let response =
                 crate::verb_envelope::invalid_args_response(ResponseVerb::Search, "args", &reason);
-            return crate::verb_envelope::call_result_from_response(response);
+            return crate::verb_envelope::call_result_from_response(&response);
         }
         Err(cairn_core::verbs::search::SearchError::InvalidFilter { reason }) => {
             let response =
                 crate::verb_envelope::invalid_filter_response(ResponseVerb::Search, &reason);
-            return crate::verb_envelope::call_result_from_response(response);
+            return crate::verb_envelope::call_result_from_response(&response);
         }
         Err(cairn_core::verbs::search::SearchError::Store(e)) => {
             let response = crate::verb_envelope::aborted_internal(
                 ResponseVerb::Search,
                 &format!("store error: {e}"),
             );
-            return crate::verb_envelope::call_result_from_response(response);
+            return crate::verb_envelope::call_result_from_response(&response);
         }
         // Forward-compat: surface unknown error variants as internal errors.
         Err(e) => {
@@ -693,7 +693,7 @@ async fn handle_search(
                 ResponseVerb::Search,
                 &format!("internal error: {e}"),
             );
-            return crate::verb_envelope::call_result_from_response(response);
+            return crate::verb_envelope::call_result_from_response(&response);
         }
     };
 
@@ -764,7 +764,7 @@ fn search_outcome_to_result(
         ResponseData::Search(data),
         to_wire(&outcome.policy_trace),
     );
-    crate::verb_envelope::call_result_from_response(response)
+    crate::verb_envelope::call_result_from_response(&response)
 }
 
 /// Stub dispatcher returned while real verb wiring is pending.
@@ -781,7 +781,7 @@ pub fn dispatch_stub(verb: &str) -> CallToolResult {
 
     if let Some(request_verb) = crate::verb_envelope::core_verb_for_tool(verb) {
         return crate::verb_envelope::call_result_from_response(
-            crate::verb_envelope::aborted_internal(
+            &crate::verb_envelope::aborted_internal(
                 crate::verb_envelope::response_verb(request_verb),
                 &message,
             ),

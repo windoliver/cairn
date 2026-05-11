@@ -47,6 +47,10 @@ pub fn response_verb(verb: RequestVerb) -> ResponseVerb {
 /// MCP passes only an args object, not the whole signed request envelope. This
 /// adapter dispatches on the already-known tool verb and lets the generated
 /// deserializers enforce each verb's shape.
+#[allow(
+    clippy::result_large_err,
+    reason = "the MCP adapter intentionally returns generated response envelopes as typed error payloads at the transport boundary"
+)]
 pub fn parse_args(
     verb: RequestVerb,
     arguments: Option<serde_json::Map<String, serde_json::Value>>,
@@ -257,10 +261,10 @@ pub fn aborted_internal(verb: ResponseVerb, message: &str) -> Response {
 
 /// Serialize a generated response envelope into an MCP tool result.
 #[must_use]
-pub fn call_result_from_response(response: Response) -> CallToolResult {
-    let (text, is_serialization_fallback) = response_json_text(&response);
+pub fn call_result_from_response(response: &Response) -> CallToolResult {
+    let (text, is_serialization_fallback) = response_json_text(response);
     let is_committed =
-        matches!(response.status, ResponseStatus::Committed) && !is_serialization_fallback;
+        matches!(&response.status, ResponseStatus::Committed) && !is_serialization_fallback;
     let content = vec![Content::text(text)];
 
     if is_committed {
@@ -270,6 +274,10 @@ pub fn call_result_from_response(response: Response) -> CallToolResult {
     }
 }
 
+#[allow(
+    clippy::result_large_err,
+    reason = "the MCP adapter intentionally returns generated response envelopes as typed error payloads at the transport boundary"
+)]
 fn parse_arg_payload<T: DeserializeOwned>(
     verb: RequestVerb,
     args: serde_json::Value,
@@ -468,7 +476,7 @@ mod tests {
     fn response_call_result_round_trips_through_generated_deserializer() {
         let response =
             aborted_internal(ResponseVerb::Retrieve, "not yet implemented in MCP adapter");
-        let result = call_result_from_response(response);
+        let result = call_result_from_response(&response);
         assert_eq!(result.is_error, Some(true));
         let decoded: Response =
             serde_json::from_str(response_text(&result)).expect("content must be Response JSON");
@@ -480,7 +488,7 @@ mod tests {
     #[test]
     fn committed_search_response_round_trips_through_generated_deserializer() {
         let response = committed(ResponseVerb::Search, search_data(), Vec::new());
-        let result = call_result_from_response(response);
+        let result = call_result_from_response(&response);
         assert_eq!(result.is_error, Some(false));
         let decoded: Response =
             serde_json::from_str(response_text(&result)).expect("content must be Response JSON");
@@ -492,7 +500,7 @@ mod tests {
     #[test]
     fn committed_retrieve_sets_target_and_round_trips() {
         let response = committed_retrieve(retrieve_record_data(), Vec::new());
-        let result = call_result_from_response(response);
+        let result = call_result_from_response(&response);
         assert_eq!(result.is_error, Some(false));
         let decoded: Response =
             serde_json::from_str(response_text(&result)).expect("content must be Response JSON");
@@ -508,7 +516,7 @@ mod tests {
             ResponseData::Retrieve(retrieve_record_data()),
             Vec::new(),
         );
-        let result = call_result_from_response(response);
+        let result = call_result_from_response(&response);
         assert_eq!(result.is_error, Some(true));
         let decoded: Response =
             serde_json::from_str(response_text(&result)).expect("content must be Response JSON");
@@ -524,7 +532,7 @@ mod tests {
             ResponseData::Retrieve(retrieve_record_data()),
             Vec::new(),
         );
-        let result = call_result_from_response(response);
+        let result = call_result_from_response(&response);
         assert_eq!(result.is_error, Some(true));
         let decoded: Response =
             serde_json::from_str(response_text(&result)).expect("content must be Response JSON");
@@ -538,7 +546,7 @@ mod tests {
     fn unknown_capability_falls_back_to_valid_internal_error() {
         let response =
             capability_unavailable_response(ResponseVerb::Search, "not.a.real.capability");
-        let result = call_result_from_response(response);
+        let result = call_result_from_response(&response);
         assert_eq!(result.is_error, Some(true));
         let decoded: Response =
             serde_json::from_str(response_text(&result)).expect("content must be Response JSON");
@@ -551,7 +559,7 @@ mod tests {
     #[test]
     fn unknown_verb_response_round_trips_as_unknown_verb_rejection() {
         let response = unknown_verb_response("graph.neighbours");
-        let result = call_result_from_response(response);
+        let result = call_result_from_response(&response);
         assert_eq!(result.is_error, Some(true));
         let decoded: Response =
             serde_json::from_str(response_text(&result)).expect("content must be Response JSON");
@@ -570,7 +578,7 @@ mod tests {
             capability_unavailable_response(ResponseVerb::Unknown, "not.a.real.capability"),
             aborted_internal(ResponseVerb::Unknown, "bad"),
         ] {
-            let result = call_result_from_response(response);
+            let result = call_result_from_response(&response);
             assert_eq!(result.is_error, Some(true));
             let decoded: Response = serde_json::from_str(response_text(&result))
                 .expect("content must be Response JSON");
@@ -588,7 +596,7 @@ mod tests {
             invalid_filter_response(ResponseVerb::Search, ""),
             aborted_internal(ResponseVerb::Search, ""),
         ] {
-            let result = call_result_from_response(response);
+            let result = call_result_from_response(&response);
             assert_eq!(result.is_error, Some(true));
             let decoded: Response = serde_json::from_str(response_text(&result))
                 .expect("content must be Response JSON");

@@ -262,16 +262,12 @@ async fn search_tool_with_store_returns_success_envelope() {
         data.hits
     );
     assert!(
-        data.excluded
-            .as_ref()
-            .map_or(true, |excluded| excluded.is_empty()),
+        data.excluded.as_ref().is_none_or(Vec::is_empty),
         "empty store: no exclusions expected, got {:?}",
         data.excluded
     );
     assert!(
-        data.degraded_legs
-            .as_ref()
-            .map_or(true, |degraded_legs| degraded_legs.is_empty()),
+        data.degraded_legs.as_ref().is_none_or(Vec::is_empty),
         "empty store: no degraded legs expected, got {:?}",
         data.degraded_legs
     );
