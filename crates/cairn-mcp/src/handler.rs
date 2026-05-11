@@ -557,7 +557,7 @@ impl ServerHandler for CairnMcpHandler {
                 return Ok(crate::graph_tools::dispatch(&queries, &name, arguments).await);
             }
 
-            let known = TOOLS.iter().any(|d| d.name == name.as_ref());
+            let known = crate::verb_envelope::core_verb_for_tool(name.as_ref()).is_some();
             let store = self.store.clone();
             let config = self.config.clone();
 
@@ -769,15 +769,26 @@ fn search_outcome_to_result(
 
 /// Stub dispatcher returned while real verb wiring is pending.
 ///
-/// Returns a [`CallToolResult`] with `is_error = true` and a message
-/// explaining that the verb is not yet wired. This function is `pub` so the
-/// parity test in Task 8 can call it directly.
+/// Returns a [`CallToolResult`] with `is_error = true` and a message explaining
+/// that the verb is not yet wired. Known generated core verbs are wrapped in
+/// their typed generated aborted response envelopes; unknown direct calls keep
+/// the plain placeholder text.
 #[must_use]
 pub fn dispatch_stub(verb: &str) -> CallToolResult {
-    CallToolResult::error(vec![Content::text(format!(
-        "cairn {verb}: not yet implemented in this P0 scaffold. \
-         Verb dispatch lands in a follow-up PR; no memory operation was performed."
-    ))])
+    let message = format!(
+        "cairn {verb}: not yet implemented in MCP adapter; no memory operation was performed."
+    );
+
+    if let Some(request_verb) = crate::verb_envelope::core_verb_for_tool(verb) {
+        return crate::verb_envelope::call_result_from_response(
+            crate::verb_envelope::aborted_internal(
+                crate::verb_envelope::response_verb(request_verb),
+                &message,
+            ),
+        );
+    }
+
+    CallToolResult::error(vec![Content::text(message)])
 }
 
 /// Mode-appropriate score for an MCP search hit.
