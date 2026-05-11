@@ -26,7 +26,7 @@ fn env_var_re() -> &'static Regex {
     })
 }
 
-/// Replace every `${VAR}` in `src` with its environment variable value.
+/// Replace every `${VAR}` in a scalar string with its environment variable value.
 ///
 /// Only `[A-Z_][A-Z0-9_]*` variable names are recognized. Placeholders with
 /// lowercase names (e.g. `${not_a_var}`) are left verbatim and never trigger
@@ -54,6 +54,31 @@ pub fn interpolate_env(src: &str) -> Result<String, ConfigError> {
     Ok(result.into_owned())
 }
 
+fn interpolate_env_value(value: &mut serde_yaml_ng::Value) -> Result<(), ConfigError> {
+    match value {
+        serde_yaml_ng::Value::String(s) => {
+            *s = interpolate_env(s)?;
+        }
+        serde_yaml_ng::Value::Sequence(items) => {
+            for item in items {
+                interpolate_env_value(item)?;
+            }
+        }
+        serde_yaml_ng::Value::Mapping(map) => {
+            for (_, value) in map {
+                interpolate_env_value(value)?;
+            }
+        }
+        serde_yaml_ng::Value::Tagged(tagged) => {
+            interpolate_env_value(&mut tagged.value)?;
+        }
+        serde_yaml_ng::Value::Null
+        | serde_yaml_ng::Value::Bool(_)
+        | serde_yaml_ng::Value::Number(_) => {}
+    }
+    Ok(())
+}
+
 /// Load and validate the active `CairnConfig` for the given vault.
 ///
 /// Applies the four-layer precedence described in the module doc. If no
@@ -65,23 +90,28 @@ pub fn interpolate_env(src: &str) -> Result<String, ConfigError> {
 /// rejects the resulting config.
 pub fn load(vault_path: &Path, cli: &CliOverrides) -> Result<CairnConfig> {
     use figment::Figment;
-    use figment::providers::{Env, Format, Serialized, Yaml};
+    use figment::providers::{Env, Serialized};
 
     let config_path = vault_path.join(".cairn/config.yaml");
 
-    let yaml_content: String = if config_path.exists() {
+    let file_config = if config_path.exists() {
         let raw = std::fs::read_to_string(&config_path)
             .with_context(|| format!("reading {}", config_path.display()))?;
-        interpolate_env(&raw)
+        let mut yaml: serde_yaml_ng::Value = serde_yaml_ng::from_str(&raw)
+            .with_context(|| format!("parsing {}", config_path.display()))?;
+        interpolate_env_value(&mut yaml)
             .map_err(anyhow::Error::from)
-            .with_context(|| "resolving ${VAR} placeholders in config")?
+            .with_context(|| "resolving ${VAR} placeholders in config")?;
+        Some(serde_yaml_ng::from_value::<CairnConfig>(yaml).context("extracting config file")?)
     } else {
-        String::new()
+        None
     };
 
-    let config: CairnConfig = Figment::new()
-        .merge(Serialized::defaults(CairnConfig::default()))
-        .merge(Yaml::string(&yaml_content))
+    let mut figment = Figment::new().merge(Serialized::defaults(CairnConfig::default()));
+    if let Some(file_config) = file_config {
+        figment = figment.merge(Serialized::defaults(file_config));
+    }
+    let config: CairnConfig = figment
         .merge(Env::prefixed("CAIRN_").split("__"))
         .merge(Serialized::globals(cli))
         .extract()
@@ -116,7 +146,7 @@ pub fn write_default(vault_path: &Path) -> Result<()> {
     std::fs::create_dir_all(&config_dir)
         .with_context(|| format!("creating {}", config_dir.display()))?;
 
-    let yaml = serde_yaml::to_string(&CairnConfig::default())
+    let yaml = serde_yaml_ng::to_string(&CairnConfig::default())
         .context("serializing default config to YAML")?;
 
     std::fs::write(&config_path, yaml)
@@ -162,5 +192,30 @@ mod tests {
         // Only uppercase+underscore names are recognized; lowercase passes through.
         let input = "note: ${not_a_var}";
         assert_eq!(interpolate_env(input).unwrap(), input);
+    }
+
+    #[test]
+    fn load_interpolates_env_after_yaml_parse() {
+        temp_env::with_var(
+            "CAIRN_UNIT_TEST_SECRET_YAML_CHARS",
+            Some("real: value # not a comment\nstill secret"),
+            || {
+                let dir = tempfile::tempdir().unwrap();
+                let config_dir = dir.path().join(".cairn");
+                std::fs::create_dir_all(&config_dir).unwrap();
+                std::fs::write(
+                    config_dir.join("config.yaml"),
+                    "llm:\n  api_key: ${CAIRN_UNIT_TEST_SECRET_YAML_CHARS}\n",
+                )
+                .unwrap();
+
+                let config = load(dir.path(), &CliOverrides::default()).unwrap();
+
+                assert_eq!(
+                    config.llm.api_key.as_deref(),
+                    Some("real: value # not a comment\nstill secret")
+                );
+            },
+        );
     }
 }

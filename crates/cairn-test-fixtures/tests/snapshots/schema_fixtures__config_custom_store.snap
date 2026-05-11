@@ -44,6 +44,9 @@ expression: "&c"
   "store": {
     "kind": "custom:cairn-store-qdrant"
   },
+  "search": {
+    "local_embeddings": true
+  },
   "llm": {
     "provider": null,
     "base_url": null,

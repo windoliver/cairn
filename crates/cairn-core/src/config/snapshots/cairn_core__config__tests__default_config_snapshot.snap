@@ -39,6 +39,9 @@ expression: json
   "store": {
     "kind": "sqlite"
   },
+  "search": {
+    "local_embeddings": true
+  },
   "llm": {
     "provider": null,
     "base_url": null,
