@@ -11,12 +11,14 @@ use cairn_core::contract::sensor_ingress::{
 use cairn_core::contract::version::{ContractVersion, VersionRange};
 use cairn_core::register_plugin;
 
+pub mod clipboard;
 pub mod config;
 mod event;
 pub mod hook;
 pub mod ide;
 pub mod outcome;
 pub mod policy;
+pub mod terminal;
 
 pub use config::{CaptureBudget, LocalSensorConfig, SensorSettings};
 pub use outcome::{DropReason, EmitOutcome, SensorKind};
