@@ -13,39 +13,61 @@ issue.
 
 ## Data-model decision
 
-Replace `Provenance.source_hash: String` (single) with:
+**Additive, not replacing.** Existing `source_hash: String` stays. New
+field `source_refs: Vec<SourceRef>` is added alongside it:
 
 ```rust
 pub struct SourceRef {
-    pub id: String,    // path-relative key under <vault>/sources/
+    pub id: String,    // logical identifier, opaque to lint
     pub hash: String,  // "<algo>:<hex>", algo ∈ {sha256, sha512, blake3}
 }
 
 pub struct Provenance {
-    // ... existing fields ...
-    pub source_refs: Vec<SourceRef>,  // was: source_hash: String
+    // ... existing fields preserved verbatim ...
+    pub source_hash: String,  // PRESERVED — primary source's hash (back-compat)
+
+    #[serde(default)]
+    pub source_refs: Vec<SourceRef>,  // NEW
 }
 ```
 
-Rationale: the `source_hash_match` rule needs a per-source hash; parallel
-`source_ids` / `source_hashes` arrays are a known antipattern; the brief
-treats provenance as a set without committing to scalar.
+Rationale & compatibility:
+- `source_hash` stays on the wire so existing vaults, snapshots, and
+  generated IDL keep parsing. Per CLAUDE.md §6.10: "adding a required
+  field is a breaking change; use `#[serde(default)]` + optional fields
+  for forward compat."
+- `source_refs` is `#[serde(default)]` → records written before this
+  change deserialize with an empty vec. The first re-`ingest` populates
+  it.
+- `Provenance::validate()` adds: if `source_refs` is non-empty, the
+  first entry's `hash` MUST equal `source_hash` (drift guard). Empty
+  `source_refs` is permitted at the type level — the lint rule
+  (`source_link_present`) flags it. This lets the brief evolve toward
+  `Vec<SourceRef>`-only later without a second wire break: when the
+  brief is amended, remove the scalar in a follow-up versioned migration.
 
 `SourceRef::validate()`:
-- `id` non-empty, no leading `/`, no `..` segments.
+- `id` non-empty, no leading `/`, no `..` segments, no embedded NUL.
+  `id` is a **logical key**, not a filesystem path. Mapping `id → path`
+  is the resolver's job (see Component 3) and depends on configured
+  vault layout, not on this struct.
 - `hash` matches `<algo>:<hex>` with correct hex length (reuse existing
   `validate_source_hash` logic from `provenance.rs`).
 
-`Provenance::validate()` accepts empty `source_refs` at the type level —
-the lint rule (not the domain validator) enforces non-empty, because
-historical fixtures and synthetic records may legitimately have zero
-sources.
+### Wire compatibility checklist
+- IDL change is additive: `source_refs` is optional in the schema.
+- Codegen-regen committed; existing serialized records (pre-change)
+  deserialize cleanly under tests.
+- `cargo run -p cairn-cli --bin cairn-docgen -- --write` rerun if
+  user-facing docs reference `Provenance`.
 
 ## Components
 
 ### 1. Domain (`cairn-core`)
 - `domain/source_ref.rs` — new module, `SourceRef` + `validate`.
-- `domain/provenance.rs` — drop `source_hash`, add `source_refs: Vec<SourceRef>`.
+- `domain/provenance.rs` — keep `source_hash`, ADD `source_refs:
+  Vec<SourceRef>` with `#[serde(default)]`. Cross-field invariant in
+  `validate()`: when non-empty, `source_refs[0].hash == source_hash`.
 - `domain/error.rs` — no new variants; reuse `MissingProvenance { field }`
   and `InvalidIdentity`.
 
@@ -59,18 +81,62 @@ sources.
 pub trait SourceResolver {
     fn exists(&self, id: &str) -> bool;
     fn read(&self, id: &str) -> Result<Vec<u8>, SourceResolverError>;
-    fn vault_path(&self, id: &str) -> PathBuf;  // for error messages
+    /// Diagnostic path for finding messages. Implementation-defined —
+    /// callers MUST NOT parse this. Lint uses it only as a hint for the
+    /// operator (e.g. `expected_path` in `source_link_dangling`).
+    fn locator(&self, id: &str) -> String;
 }
 ```
-Filesystem impl in `cairn-cli` (or `cairn-test-fixtures` for tests):
-reads `<vault>/sources/<id>`. Trait is read-only — there is no `write`.
+
+**No hard-coded layout.** `SourceRef.id` is a logical identifier. The
+resolver maps `id → bytes` using configured vault layout (per brief §3:
+folder names like `sources/` are configurable; some vaults may use
+`inbox/` or per-sensor subtrees). Lint never assumes a path scheme.
+
+Filesystem impl lives in the vault adapter crate (likely `cairn-cli` or
+a new `cairn-vault-fs`); it consults `VaultLayout` from config to
+resolve `id`. Trait is read-only — there is no `write` method by
+construction, and the CI grep gate (Component 12) enforces no write
+syscalls inside `verbs/lint/`.
 
 ### 4. Consent journal extension
-- `domain/consent.rs`: add `ConsentKind::SourceForget` variant carrying
-  `{ source_id: String, op_id: String }`.
-- `contract::consent_journal` (or wherever the journal query lives):
-  add `fn forgotten_source_ids(&self) -> HashSet<String>` default impl
-  iterating over rows.
+
+Per brief §5.6: forget severs the source-to-memory link; future
+re-ingestion checks the journal and skips previously-forgotten **targets
+by content-hash**. A source-id-only entry is too coarse — one forgotten
+target on a multi-record source would either force suppressing all
+future ingest from that source (data loss) or allow re-derived
+forgotten content back when the source is copied/renamed (privacy
+regression).
+
+Therefore the journal row carries content-hash granularity:
+
+```rust
+pub enum ConsentKind {
+    // ... existing variants ...
+    SourceForget {
+        source_id: String,        // logical id, for operator diagnostics
+        content_hash: String,     // "<algo>:<hex>" — the replay-block key
+        target_id: Option<RecordId>,  // None when whole-source forget
+        op_id: String,            // forget operation that produced this row
+    },
+}
+```
+
+Journal query helpers:
+```rust
+fn forgotten_content_hashes(&self) -> HashSet<String>;   // primary lookup
+fn forgotten_source_ids(&self) -> HashSet<String>;       // diagnostic, not authoritative
+fn forget_op_for(&self, content_hash: &str) -> Option<&str>;
+```
+
+Lint rule `source_not_forgotten` cross-references each record's
+`source_refs[i].hash` (not just `source_id`) against
+`forgotten_content_hashes()`. This matches the brief's content-addressed
+invariant and survives renames or copies of the source file.
+
+`source_id` stays on the row for operator-facing finding messages
+(`forgotten source <id>`) but does not participate in dedup logic.
 
 ### 5. Config
 - `config/mod.rs`: add `SourceConfig { redact_on_forget: bool }` under
@@ -159,17 +225,24 @@ Wired into `ci.yml` alongside `check-core-boundary.sh`.
 
 ## Migration steps (commit-by-commit)
 
-1. IDL change + codegen regen.
-2. `SourceRef` domain + `Provenance` field swap. Fix every compile error
-   (fixtures, ingest test bodies, snapshot outputs). One commit, but
-   expect ~15 files touched.
-3. `SourceResolver` trait + filesystem impl in `cairn-cli`.
-4. `ConsentKind::SourceForget` + journal query helper.
+1. IDL: add optional `source_refs` to `Provenance`. Codegen regen.
+2. `SourceRef` domain module + `Provenance` additive field +
+   cross-field invariant + tests (existing tests keep passing — that's
+   the back-compat acceptance bar). No fixture rewrites required.
+3. `SourceResolver` trait + `VaultLayout`-driven filesystem impl.
+4. `ConsentKind::SourceForget { source_id, content_hash, target_id,
+   op_id }` + journal query helpers.
 5. `SourceConfig` + config-defaults regen.
 6. `Kind` enum extension via IDL regen.
 7. `source_links.rs` rules + dispatcher rewire in `checks/provenance.rs`.
 8. Fixtures + snapshot tests + integration test.
 9. CI gate script + workflow wiring.
+
+Step 2 is the contract-touching step; it must remain back-compat by
+construction (existing serialized records deserialize identically).
+Steps 3–4 carry their own brief-touching contract changes (the
+resolver trait is new; the consent kind is new). All other steps are
+mechanical.
 
 ## Out of scope
 
@@ -193,9 +266,19 @@ Wired into `ci.yml` alongside `check-core-boundary.sh`.
 
 ## Risks
 
-- Big mechanical diff on `Provenance` field swap. Mitigation: do step 2
-  in one commit, no other logic changes mixed in.
 - IDL regen produces drift across crates. Mitigation: CI already gates
   on `cairn-codegen --check`.
-- Existing `Provenance::validate` tests assume scalar `source_hash` —
-  rewrite, don't extend (test names will change).
+- Cross-field invariant (`source_refs[0].hash == source_hash`) could
+  surprise authors of synthetic records. Mitigation: documented in the
+  domain module's rustdoc; the invariant only activates when
+  `source_refs` is non-empty.
+- Brief amendment outstanding: the brief still defines provenance as
+  `{..., source_hash, ...}` (scalar). This spec adds `source_refs`
+  additively without removing the scalar — once #257 lands, a follow-up
+  PR updates `docs/design/design-brief.md` §6.5 to acknowledge the
+  vector. A second future PR removes `source_hash` after a deprecation
+  window, gated by a wire-version bump.
+- Resolver locator strings are diagnostic-only. Tests must assert
+  finding shape (presence of `source_id`, presence of human-readable
+  locator) rather than exact path bytes, so the filesystem layout can
+  vary across operator configurations without breaking snapshots.
