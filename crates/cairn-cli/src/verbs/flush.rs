@@ -241,16 +241,36 @@ fn apply(vault: &Path, m: &ArgMatches) -> ExitCode {
         return ExitCode::from(65);
     }
 
-    if persisted.plan.placeholder {
-        eprintln!(
-            "cairn flush apply: WARNING — MemoryStore mutations are not yet wired (#9). \
-             Plan {id} will be marked applied for audit only; no records were written."
-        );
-        eprintln!(
-            "cairn flush apply: NOTE — plan {id} was produced by the CLI stub planner \
-             (`cairn-cli::ingest_plan_stub`) and does NOT reflect a real ingest/forget \
-             pipeline run. Treat as a placeholder for testing the lifecycle only."
-        );
+    // Issue #289 review (re-loop r1) finding 1: this branch only wires
+    // `Patch` and `Rename` through the real executor. Plans that contain
+    // any other `PlannedMutation` variant (`Upsert` / `Delete` /
+    // `Promote` / `Expire` / `ForgetSession` / `ForgetRecord` / `Evolve`)
+    // are not yet supported by `apply_real_plan` and must preserve the
+    // pre-branch metadata-only path so existing plans still advance
+    // through the lifecycle without a hard apply failure.
+    let unsupported_in_plan = persisted
+        .plan
+        .mutations
+        .iter()
+        .any(|m| !is_real_apply_supported(m));
+    if persisted.plan.placeholder || unsupported_in_plan {
+        if persisted.plan.placeholder {
+            eprintln!(
+                "cairn flush apply: WARNING — MemoryStore mutations are not yet wired (#9). \
+                 Plan {id} will be marked applied for audit only; no records were written."
+            );
+            eprintln!(
+                "cairn flush apply: NOTE — plan {id} was produced by the CLI stub planner \
+                 (`cairn-cli::ingest_plan_stub`) and does NOT reflect a real ingest/forget \
+                 pipeline run. Treat as a placeholder for testing the lifecycle only."
+            );
+        } else {
+            eprintln!(
+                "cairn flush apply: NOTE — plan {id} contains mutation kinds outside \
+                 issue #289's scope (Patch/Rename); falling back to metadata-only apply. \
+                 No records were written. Wire the remaining variants in a follow-up."
+            );
+        }
         persisted.status = PlanStatus::Applied {
             at: now_rfc3339(),
             apply_kind: ApplyKind::MetadataOnly,
@@ -328,6 +348,17 @@ fn apply(vault: &Path, m: &ArgMatches) -> ExitCode {
     }
     emit_apply_ok(json, id, "applied");
     ExitCode::SUCCESS
+}
+
+/// Issue #289 only wires `Patch` and `Rename` through the real executor;
+/// every other `PlannedMutation` variant falls back to the metadata-only
+/// path so legacy plans still advance.
+fn is_real_apply_supported(m: &cairn_core::domain::flush_plan::PlannedMutation) -> bool {
+    use cairn_core::domain::flush_plan::PlannedMutation;
+    matches!(
+        m,
+        PlannedMutation::Patch { .. } | PlannedMutation::Rename { .. }
+    )
 }
 
 /// Stranded marker path (issue #289 review round 2/3). Planted in the

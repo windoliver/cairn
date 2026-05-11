@@ -154,6 +154,25 @@ fn enforce_session_scope(
             ),
         });
     }
+    // Re-loop round 1 finding 2: sessions are keyed by
+    // `(user, agent, project_root)`, so a project-scoped plan must not
+    // be able to mutate a same-user/same-agent session belonging to a
+    // different project. Compare `plan.scope.project` against
+    // `session.identity.project_root`; if the plan narrows on project,
+    // the session must declare the same project_root.
+    if let Some(project) = &plan_scope.project {
+        let session_project = session.identity.project_root.as_deref();
+        if session_project != Some(project.as_str()) {
+            return Err(StoreError::Invariant {
+                what: format!(
+                    "flush apply: plan scope `project={project}` does not match session \
+                     `{}` project_root `{}`",
+                    session.id.as_str(),
+                    session_project.unwrap_or("<none>"),
+                ),
+            });
+        }
+    }
     Ok(())
 }
 
