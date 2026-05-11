@@ -116,19 +116,31 @@ fn check_record_drift(
             target_id: target.as_str().to_owned(),
         });
     };
-    let actual = BodyHash::compute(&stored.record.body);
-    if actual.as_str() != expected {
+    let actual = record_drift_hash(&stored.record);
+    if actual != expected {
         return Err(StoreError::Invariant {
             what: format!(
-                "flush apply drift: target `{}` body hash `{}` does not match plan \
+                "flush apply drift: target `{}` record hash `{}` does not match plan \
                  pre-state hash `{}`; live record changed between plan creation and apply",
                 target.as_str(),
-                actual.as_str(),
+                actual,
                 expected,
             ),
         });
     }
     Ok(())
+}
+
+/// Canonical pre-state hash for a record. Covers the full reviewed
+/// state (body + scope/visibility/frontmatter/signature/etc) by hashing
+/// its serde JSON serialization — not just the body — so metadata-only
+/// rewrites between plan creation and apply still trip the drift gate.
+/// Exposed for integration tests and planners building real patch/rename
+/// plans.
+#[must_use]
+pub fn record_drift_hash(record: &cairn_core::domain::MemoryRecord) -> String {
+    let json = serde_json::to_string(record).expect("MemoryRecord serialization");
+    BodyHash::compute(&json).as_str().to_owned()
 }
 
 /// Round 2 review fix: session patches must also reject stale-state apply.
@@ -349,12 +361,17 @@ fn apply_rename(
         });
     }
 
+    // Round 7 review fix: mint a fresh `record_id` for the renamed
+    // record. Previously this reused `new_target` as the row's primary
+    // key, which collided with any historical (now-tombstoned) lineage
+    // that had once owned that ULID. The `target_id` is what stays
+    // stable across renames; `record_id` is per-version.
     let mut renamed = source.record.clone();
+    let fresh_record_id = ulid::Ulid::new().to_string();
     renamed.id =
-        RecordId::parse(new_target.as_str().to_owned()).map_err(|e| StoreError::Invariant {
+        RecordId::parse(fresh_record_id.clone()).map_err(|e| StoreError::Invariant {
             what: format!(
-                "rename destination `{}` cannot be re-used as record_id: {e}",
-                new_target.as_str()
+                "rename: fresh record_id `{fresh_record_id}` failed validation: {e}"
             ),
         })?;
     renamed.target_id = new_target.clone();

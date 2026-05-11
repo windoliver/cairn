@@ -1070,13 +1070,15 @@ fn flush_apply_patch_updates_record_body_and_keeps_old_version() {
 
     let (rt, store) = open_store(vault.path());
     rt.block_on(store.upsert(&record)).expect("seed record");
+    let stored = rt
+        .block_on(store.get_active_by_target(&target))
+        .expect("read stored")
+        .expect("stored record");
 
     let mut hashes = std::collections::BTreeMap::new();
     hashes.insert(
         target.as_str().to_owned(),
-        cairn_core::domain::BodyHash::compute(&record.body)
-            .as_str()
-            .to_owned(),
+        cairn_cli::verbs::flush_apply::record_drift_hash(&stored.record),
     );
     write_real_pending_plan_with_hashes(
         vault.path(),
@@ -1139,13 +1141,15 @@ fn flush_apply_patch_missing_substring_fails_atomically() {
 
     let (rt, store) = open_store(vault.path());
     rt.block_on(store.upsert(&record)).expect("seed record");
+    let stored = rt
+        .block_on(store.get_active_by_target(&target))
+        .expect("read stored")
+        .expect("stored record");
 
     let mut hashes = std::collections::BTreeMap::new();
     hashes.insert(
         target.as_str().to_owned(),
-        cairn_core::domain::BodyHash::compute(&record.body)
-            .as_str()
-            .to_owned(),
+        cairn_cli::verbs::flush_apply::record_drift_hash(&stored.record),
     );
     write_real_pending_plan_with_hashes(
         vault.path(),
@@ -1261,13 +1265,15 @@ fn flush_apply_rename_rejects_live_destination_collision() {
     let (rt, store) = open_store(vault.path());
     rt.block_on(store.upsert(&source)).expect("seed source");
     rt.block_on(store.upsert(&dest)).expect("seed destination");
+    let stored_source = rt
+        .block_on(store.get_active_by_target(&source.target_id))
+        .expect("read source")
+        .expect("source row");
 
     let mut hashes = std::collections::BTreeMap::new();
     hashes.insert(
         source.target_id.as_str().to_owned(),
-        cairn_core::domain::BodyHash::compute(&source.body)
-            .as_str()
-            .to_owned(),
+        cairn_cli::verbs::flush_apply::record_drift_hash(&stored_source.record),
     );
     write_real_pending_plan_with_hashes(
         vault.path(),
@@ -1433,13 +1439,15 @@ fn flush_apply_rename_rewrites_inbound_edges_to_new_active_record() {
         weight: None,
     }))
     .expect("seed inbound edge");
+    let stored_source = rt
+        .block_on(store.get_active_by_target(&source.target_id))
+        .expect("read source")
+        .expect("source row");
 
     let mut hashes = std::collections::BTreeMap::new();
     hashes.insert(
         source.target_id.as_str().to_owned(),
-        cairn_core::domain::BodyHash::compute(&source.body)
-            .as_str()
-            .to_owned(),
+        cairn_cli::verbs::flush_apply::record_drift_hash(&stored_source.record),
     );
     write_real_pending_plan_with_hashes(
         vault.path(),
