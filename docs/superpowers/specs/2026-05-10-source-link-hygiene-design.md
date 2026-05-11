@@ -313,7 +313,10 @@ guarantee; it only delays operator awareness of the duplicate state.
   2. If target-scope and `source_refs.is_empty()`, returns the gated
      error above.
   3. Computes `replay_hash` from the (now-populated) record in hand.
-  4. Writes the journal row with `target_replay_hash = Some(<hash>)`.
+  4. Writes the journal row with `target = Some(TargetReplayKey {
+     hash: <computed>, version: <current encoder version> })`. The
+   write boundary rejects rows whose `version` is not in
+   `SUPPORTED_REPLAY_HASH_VERSIONS`.
 
 Consent-journal variant:
 
@@ -349,7 +352,44 @@ fn forgotten_target_replay_versions(&self) -> HashSet<u32>;
 fn forgotten_target_replay_hashes_for_version(&self, v: u32) -> HashSet<&str>;
 fn forget_op_for_source(&self, hash: &str) -> Option<&str>;
 fn forget_op_for_target_replay(&self, key: &TargetReplayKey) -> Option<&str>;
+
+// Integrity surface. The above helpers silently drop rows that fail
+// validation; this one exposes them so lint can fail closed.
+fn malformed_source_forget_rows(&self) -> Vec<MalformedSourceForget<'_>>;
 ```
+
+```rust
+pub struct MalformedSourceForget<'a> {
+    pub op_id: &'a str,
+    pub source_id: &'a str,
+    pub reason: MalformedSourceForgetReason,
+}
+
+pub enum MalformedSourceForgetReason {
+    UnsupportedReplayHashVersion { version: u32 },
+    MalformedReplayHashFormat,
+    MalformedSourceBytesHashFormat,
+}
+```
+
+**Fail-closed contract**: every entry point that consults the journal
+for forget enforcement (lint's `source_not_forgotten`, `forget`'s
+own duplicate/version checks) MUST call `malformed_source_forget_rows`
+first and treat a non-empty result as a blocking integrity failure.
+
+- Lint emits an `error`-severity finding per malformed row with kind
+  `source_after_forget_unknown_version` (the broader kind name is
+  retained; the discriminant on `MalformedSourceForgetReason`
+  populates the finding's `data` field for operator triage).
+- `forget` refuses to write any new row while malformed rows exist,
+  returning `ForgetError::JournalIntegrity` with the list of
+  offending `op_id`s. Operator remediation lives outside #257 (a
+  journal-rewrite admin tool).
+
+Implementations MUST NOT skip a malformed row and continue checking
+the remainder against valid rows — that converts journal corruption
+into silent loss of enforcement, which is the exact failure mode
+this contract is designed to prevent.
 
 Lint rule `source_not_forgotten` runs both checks:
 1. For each `record.provenance.source_refs[i].hash`, look up in
@@ -503,11 +543,17 @@ Wired into `ci.yml` alongside `check-core-boundary.sh`.
    the back-compat acceptance bar). No fixture rewrites required.
 3. `SourceResolver` trait + `VaultLayout`-driven filesystem impl.
 4. `ConsentKind::SourceForget { source_id, source_bytes_hash,
-   target_replay_hash, op_id }` + journal query helpers
-   (`forgotten_source_bytes_hashes`, `forgotten_target_replay_hashes`,
-   `forget_op_for_source`, `forget_op_for_target_replay`). Wire the
-   target-scope gating error path in `forget` (#58 follow-up; #257
-   only adds the journal schema and helpers).
+   target: Option<TargetReplayKey>, op_id }` and
+   `TargetReplayKey { hash, version }` types + frozen
+   `pipeline::canonical::replay_hash::v1` artifacts (input struct,
+   projection, encoder) + journal query helpers
+   (`forgotten_source_bytes_hashes`,
+   `forgotten_target_replay_versions`,
+   `forgotten_target_replay_hashes_for_version`,
+   `forget_op_for_source`, `forget_op_for_target_replay`,
+   `malformed_source_forget_rows`). Wire the target-scope gating
+   error path in `forget` (#58 follow-up; #257 only adds the journal
+   schema, helpers, and the integrity surface).
 5. `SourceConfig` + config-defaults regen.
 6. `Kind` enum extension via IDL regen.
 7. `source_links.rs` rules + dispatcher rewire in `checks/provenance.rs`.
