@@ -13,6 +13,8 @@ use cairn_core::register_plugin;
 
 pub mod config;
 mod event;
+pub mod hook;
+pub mod ide;
 pub mod outcome;
 
 pub use config::{CaptureBudget, LocalSensorConfig, SensorSettings};

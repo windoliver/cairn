@@ -1,7 +1,5 @@
 //! Shared local sensor event construction.
 
-#![allow(dead_code)]
-
 use cairn_core::domain::{
     ActorChainEntry, CaptureEvent, CaptureEventId, CaptureMode, CapturePayload, CaptureRefs,
     ChainRole, DomainError, Identity, PayloadHash, Rfc3339Timestamp, SourceFamily,
