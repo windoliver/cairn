@@ -120,10 +120,30 @@ Two distinct scopes are possible:
   key is the **source-bytes hash** (`SourceRef.hash` space).
 - **Target-scope forget** — operator forgets one specific derived
   record while other records from the same source stay live. Replay-
-  block key is the **record id**.
+  block key is the **target body hash** — a content-derived digest
+  over the canonicalized record body. **Not** `RecordId`: today the
+  store mints ULID-based ids on upsert, so the same content re-derived
+  later would get a new `RecordId` and slip past the journal lookup.
 
-Both scopes share one consent-journal variant; the scope is encoded by
-which field is present:
+Adding a canonical body-hash:
+
+- `MemoryRecord` gains `body_hash: String` (`"<algo>:<hex>"` over the
+  canonical-JSON encoding of the record body, excluding mutable
+  frontmatter like `created_at`). Computed in `pipeline::canonical`
+  during `ingest`. Persisted on the record like `source_hash`.
+- The hash function and canonicalization are fully specified in
+  `pipeline::canonical::body_hash` and locked by a property test
+  (round-trip: deserialize → re-serialize → recompute → identical).
+- Old records (pre-change) lack `body_hash`. They deserialize with the
+  field defaulted to empty string. The lint rule `source_link_present`
+  also flags empty `body_hash` as `source_link_missing`, prompting
+  re-ingest. Forget-replay rules ignore records whose `body_hash` is
+  empty — there is nothing to compare yet. Privacy is preserved
+  because the *new* `body_hash` produced by re-ingest is what future
+  forget operations capture; legacy records that haven't been touched
+  cannot be the target of a forget op anyway.
+
+Consent-journal variant:
 
 ```rust
 pub enum ConsentKind {
@@ -131,40 +151,46 @@ pub enum ConsentKind {
     SourceForget {
         source_id: String,                // logical id, operator diagnostics
         source_bytes_hash: String,        // "<algo>:<hex>" — same hash space as SourceRef.hash
-        target_id: Option<RecordId>,      // Some → target-scope; None → source-scope
+        target_body_hash: Option<String>, // Some → target-scope (content-derived); None → source-scope
         op_id: String,                    // forget operation that produced this row
     },
 }
 ```
 
-`source_bytes_hash` is **the same hash space as `SourceRef.hash`** —
-both are `sha256/sha512/blake3` of the raw source bytes. Naming made
-explicit to remove the prior ambiguity between source-bytes hash and
-target-content hash. There is no separate "target content hash" — a
-target is identified by `RecordId`, which is already content-addressed
-in the existing pipeline.
+`source_bytes_hash` and `SourceRef.hash` share a hash space — both
+digest raw source bytes. `target_body_hash` is in the
+`pipeline::canonical::body_hash` space — same algorithms, different
+input (canonical record body, not source bytes). The two spaces never
+mix.
 
 Journal query helpers (all O(n) over journal rows; callers cache):
 ```rust
 fn forgotten_source_bytes_hashes(&self) -> HashSet<&str>; // source-scope set
-fn forgotten_target_ids(&self) -> HashSet<&RecordId>;     // target-scope set
+fn forgotten_target_body_hashes(&self) -> HashSet<&str>;  // target-scope set
 fn forget_op_for_source(&self, hash: &str) -> Option<&str>;
-fn forget_op_for_target(&self, id: &RecordId) -> Option<&str>;
+fn forget_op_for_target_body(&self, hash: &str) -> Option<&str>;
 ```
 
 Lint rule `source_not_forgotten` runs both checks:
 1. For each `record.provenance.source_refs[i].hash`, look up in
-   `forgotten_source_bytes_hashes()` → if hit AND `target_id` is
-   `None` in the matching row, emit `source_after_forget` against
-   the record.
-2. For the record itself, look up `target_ids` →
-   `forgotten_target_ids()`. Hit ⇒ same finding kind, scope = target.
+   `forgotten_source_bytes_hashes()`. Hit ⇒ emit `source_after_forget`
+   with scope=source.
+2. If `record.body_hash` is non-empty, look up in
+   `forgotten_target_body_hashes()`. Hit ⇒ emit `source_after_forget`
+   with scope=target.
 
-This survives source rename/copy (same bytes, same hash) and never
-over-blocks: target-scope rows only flag their specific record.
+This survives source rename/copy (same bytes, same hash), survives
+`RecordId` regeneration (target keyed by body content), and never
+over-blocks: target-scope rows only flag records whose body content
+matches what was forgotten.
 
 `source_id` stays on the row for operator-facing finding messages
 (`forgotten source <id>`) but does not participate in dedup logic.
+
+`forget` itself (issue #58 work; orthogonal to lint) is responsible
+for populating `target_body_hash` when writing the journal row — it
+reads the soon-to-be-forgotten record's `body_hash` and copies it
+into the journal.
 
 ### 5. Config
 - `config/mod.rs`: add `SourceConfig { redact_on_forget: bool }` under
@@ -184,11 +210,13 @@ use.
 
 ### 7. LintInputs — fail-closed wiring
 
-Production `lint` invocations (CLI, MCP, SDK) MUST provide both
-dependencies. The public verb signature requires them:
+`lint` in `cairn-core` takes the resolver and journal as trait
+objects. **`cairn-core` does not construct adapter-backed impls** —
+that would violate the workspace dep rule (CLAUDE.md §3: core has zero
+deps on other workspace crates). Callers inject the impls:
 
 ```rust
-// Production-facing entrypoint — non-optional.
+// cairn-core public entrypoint — trait-object inputs, no Option.
 pub fn lint(
     cfg: &CairnConfig,
     records: &[MemoryRecord],
@@ -198,17 +226,23 @@ pub fn lint(
 ) -> LintReport;
 ```
 
-If a surface forgets to wire one, the call doesn't compile — there is
-no run-time path that produces a silent "successful" lint with these
-rules skipped. CI test for each surface (CLI integration test, MCP
-adapter test, SDK call site) asserts the production code constructs
-both dependencies.
+Per-surface wiring (each surface constructs the impls it owns, then
+passes them through):
+
+| Surface | Resolver impl | Journal impl |
+|---|---|---|
+| `cairn-cli` (ground truth) | `VaultFsResolver` (from `cairn-cli` or new `cairn-vault-fs` adapter) reading the configured vault layout | `SqliteConsentJournalReader` (from `cairn-store-sqlite`) |
+| `cairn-mcp` | Re-uses the CLI's wiring — MCP runs inside the CLI process (brief §6.12). MCP itself stays protocol-only. | Same. |
+| `cairn-sdk` | **Caller-injected.** The SDK adds `lint(cfg, records, resolver, journal)` as a function on its typed surface, parameterized over the trait objects. The SDK does NOT construct filesystem or sqlite-backed impls — that would break the thin-wrapper invariant. The SDK ships a convenience helper that returns a config-driven resolver+journal when the caller passes a vault path, *implemented as an optional feature `vault-fs` that pulls in the adapter crates*. The default SDK build remains core-only. |
+
+This keeps "CLI is ground truth" (CLAUDE.md §3) intact. SDK callers
+who don't enable the `vault-fs` feature must inject their own
+implementations — there is no silent fall-through to empty stubs in
+production code.
 
 For unit tests inside `cairn-core`, a `LintInputs` builder exposes
-the dependencies via in-memory stubs (`InMemorySourceResolver`,
-`InMemoryConsentJournal`) from `cairn-test-fixtures`. Test-only access
-is gated behind a `#[cfg(any(test, feature = "test-fixtures"))]`
-constructor — production binaries never see the empty path.
+in-memory stubs (`InMemorySourceResolver`, `InMemoryConsentJournal`)
+from `cairn-test-fixtures` (dev-dep only).
 
 If an operator deploys without a `sources/` directory at all,
 `SourceResolver::exists` returns `false` for every id; the rules then
