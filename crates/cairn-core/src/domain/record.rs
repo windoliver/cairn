@@ -94,6 +94,18 @@ impl Ed25519Signature {
     pub fn is_flush_mutated_sentinel(&self) -> bool {
         self.0 == Self::FLUSH_MUTATED_SENTINEL
     }
+
+    /// Returns `true` if this signature is structurally a real Ed25519
+    /// signature (NOT the [`FLUSH_MUTATED_SENTINEL`]). Trust boundaries
+    /// that treat a present `signature` field as authorial provenance
+    /// MUST call this before accepting the record as author-signed —
+    /// otherwise a record rewritten by `flush apply` will be
+    /// indistinguishable from an admission-signed record at the wire
+    /// shape. See issue #289 re-loop r4 finding 3.
+    #[must_use]
+    pub fn attests_author(&self) -> bool {
+        !self.is_flush_mutated_sentinel()
+    }
 }
 
 impl<'de> Deserialize<'de> for Ed25519Signature {
@@ -237,6 +249,26 @@ pub struct MemoryRecord {
 }
 
 impl MemoryRecord {
+    /// Convenience: `true` if this record's `signature` is the
+    /// [`Ed25519Signature::FLUSH_MUTATED_SENTINEL`] — i.e. it was
+    /// rewritten by a `flush apply` mutation and is no longer
+    /// author-signed. See issue #289 re-loop r4 finding 3.
+    #[must_use]
+    pub fn is_flush_mutated(&self) -> bool {
+        self.signature.is_flush_mutated_sentinel()
+    }
+
+    /// Convenience: `true` if this record's `signature` still attests
+    /// authorial provenance (i.e. it is NOT the flush-mutated
+    /// sentinel). Trust boundaries that gate on "is the author's
+    /// signature still valid for the current payload" should call this
+    /// before any keychain-resident crypto check. See issue #289
+    /// re-loop r4 finding 3.
+    #[must_use]
+    pub fn signature_attests_author(&self) -> bool {
+        self.signature.attests_author()
+    }
+
     /// Validate every domain invariant. Returns the first violation found.
     ///
     /// This is **shape validation only** — it confirms the record is
