@@ -244,28 +244,26 @@ fn bless_response(case_id: &str, canonical_actual: &serde_json::Value) {
     eprintln!("[conformance] blessed {case_id}");
 }
 
-/// Brief §8.0.a invariant (b): every un-advertised capability rejects with
-/// `CapabilityUnavailable`.
+/// Brief §8.0.a invariant (b), strict form: every un-advertised capability
+/// rejects with `error.code = "CapabilityUnavailable"` AND
+/// `error.data.capability` matches the wire id.
 ///
-/// Iterates every `Capabilities` variant. For each one *not* advertised under
-/// a default-P0 gates set AND whose dispatcher path is routable today, sends a
-/// minimal request envelope and asserts the response is `status: "rejected"`,
-/// `error.code: "CapabilityUnavailable"`, `error.data.capability` matches the
-/// capability id.
-///
-/// At v0.1 the unwired handler routes most un-advertised capabilities through
+/// At v0.1 the unwired handler routes un-advertised modes through
 /// `dispatch_stub`, which returns a `__raw_text` envelope rather than a proper
 /// `CapabilityUnavailable` JSON envelope. The test is therefore marked
 /// `#[ignore]` to document the gap without blocking CI. It will be un-ignored
 /// once the §8.0.a (b) rejection path is wired end-to-end in the MCP handler.
-/// See issue #67 follow-up.
+///
+/// The weak form `unadvertised_capability_does_not_succeed` runs in CI and
+/// asserts the weaker invariant (response status != "committed"). See issue
+/// #67 follow-up.
 #[tokio::test]
 #[ignore = "v0.1 handler routes un-advertised modes through dispatch_stub and \
             returns __raw_text instead of a CapabilityUnavailable envelope. \
             This test documents the §8.0.a (b) invariant gap. Un-ignore once \
             the MCP handler correctly rejects un-advertised capabilities with \
             error.code=CapabilityUnavailable. See issue #67 follow-up."]
-async fn unadvertised_capability_rejects_for_every_routable_mode() {
+async fn unadvertised_capability_rejects_strict_form() {
     let gates = default_p0_gates();
     let advertised: std::collections::BTreeSet<&'static str> = advertise(&gates)
         .into_iter()
@@ -297,6 +295,54 @@ async fn unadvertised_capability_rejects_for_every_routable_mode() {
         assert_eq!(
             canon["error"]["data"]["capability"], wire,
             "{wire}: error.data.capability mismatch"
+        );
+        tested += 1;
+    }
+
+    assert!(
+        tested > 0,
+        "cross-product test did not exercise any verb-mode — every capability \
+         is advertised in default-P0 gates, which contradicts brief §15. \
+         Backstop is testing nothing — verify wiring constants in \
+         cairn-core::status::wiring."
+    );
+}
+
+/// Brief §8.0.a invariant (b), weak form — runs in CI.
+///
+/// For every un-advertised, routable verb-mode, asserts the response does NOT
+/// carry `status == "committed"`. Does NOT assert the specific error code or
+/// error shape (that is the strict form above, which is `#[ignore]`'d until
+/// handler wiring lands).
+///
+/// At v0.1 `dispatch_stub` returns `{"__raw_text": "..."}` for all un-wired
+/// paths. `__raw_text` envelopes have no `status` field, so `status != "committed"`
+/// trivially holds — the test is already meaningful as a guard against a future
+/// regression where a stub accidentally returns a success envelope.
+#[tokio::test]
+async fn unadvertised_capability_does_not_succeed() {
+    let gates = default_p0_gates();
+    let advertised: std::collections::BTreeSet<&'static str> = advertise(&gates)
+        .into_iter()
+        .map(capability_wire_id)
+        .collect();
+
+    let mut tested = 0usize;
+    for cap in all_capabilities() {
+        let wire = capability_wire_id(*cap);
+        if advertised.contains(wire) {
+            continue;
+        }
+        let Some(req) = minimal_request_for_capability(*cap) else {
+            continue; // not currently routable through tools/call dispatch
+        };
+        let handler = CairnMcpHandler::new();
+        let resp = dispatch_envelope(handler, &req).await;
+        let canon = canonicalize(&resp);
+
+        assert_ne!(
+            canon["status"], "committed",
+            "{wire}: un-advertised capability must not return status=committed"
         );
         tested += 1;
     }

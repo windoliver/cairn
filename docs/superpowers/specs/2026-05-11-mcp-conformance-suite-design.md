@@ -457,17 +457,20 @@ already in the workspace) will be vetted there.
 
 Brief §2 invariants touched:
 
-- **#6 Fail closed on capability** — strengthened. The cross-product test
-  mechanically asserts every un-advertised, dispatch-routable verb-mode rejects
-  with `CapabilityUnavailable`. No silent downgrade is possible without a test
-  red.
+- **#6 Fail closed on capability** — partially strengthened. A weak
+  cross-product assertion (`unadvertised_capability_does_not_succeed`) runs in
+  CI and verifies no un-advertised, dispatch-routable verb-mode returns
+  `status == "committed"`. The strict form (`unadvertised_capability_rejects_strict_form`,
+  `#[ignore]`'d) will additionally assert `error.code == "CapabilityUnavailable"`
+  and `error.data.capability` once handler wiring lands.
 - **#3 CLI is ground truth** — unchanged. Conformance asserts MCP matches the
   envelope contract; CLI parity tests in other crates continue to be the
   source of truth for verb semantics.
 - **#4 Seven contracts** — unchanged. No new core API, no new IDL, no new trait.
 
-Brief §8.0.a (b) — *every un-advertised cap → `CapabilityUnavailable`* — is the
-invariant this work makes mechanically testable.
+Brief §8.0.a (b) — *every un-advertised cap MUST reject* — is partially tested:
+a weak assertion (response status != committed) runs in CI; the strict form
+(error.code == CapabilityUnavailable) is `#[ignore]`'d pending handler wiring.
 
 ## 11. Deliverables for the PR
 
