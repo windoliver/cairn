@@ -8,8 +8,9 @@
 //! - [`ContractVersion`], [`VersionRange`] — versioning primitives (full path: [`version`]).
 //! - [`PluginRegistry`], [`PluginName`], [`PluginError`] — runtime registry (full path: [`registry`]).
 //! - [`PluginManifest`], [`ContractKind`] — capability manifest (full path: [`manifest`]).
-//! - Five P0 contract traits + their capability structs:
-//!   [`MemoryStore`] / [`MemoryStoreCapabilities`],
+//! - Five P0 contract traits + their capability structs and contract request/error types:
+//!   [`MemoryStore`] / [`MemoryStoreCapabilities`] / [`HotMemoryRequest`] /
+//!   [`HotMemoryInvalidationScope`] / [`MemoryStoreError`],
 //!   [`LLMProvider`] / [`LLMProviderCapabilities`],
 //!   [`WorkflowOrchestrator`] / [`WorkflowOrchestratorCapabilities`],
 //!   [`SensorIngress`] / [`SensorIngressCapabilities`],
@@ -42,6 +43,9 @@ pub use agent_provider::{AgentProvider, AgentProviderCapabilities};
 pub use frontend_adapter::{FrontendAdapter, FrontendAdapterCapabilities};
 pub use llm_provider::{LLMProvider, LLMProviderCapabilities};
 pub use mcp_server::{MCPServer, MCPServerCapabilities};
-pub use memory_store::{MemoryStore, MemoryStoreCapabilities};
+pub use memory_store::{
+    HotMemoryInvalidationScope, HotMemoryRequest, MemoryStore, MemoryStoreCapabilities,
+    MemoryStoreError,
+};
 pub use sensor_ingress::{SensorIngress, SensorIngressCapabilities};
 pub use workflow_orchestrator::{WorkflowOrchestrator, WorkflowOrchestratorCapabilities};

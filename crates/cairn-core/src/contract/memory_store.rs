@@ -1,13 +1,13 @@
 //! `MemoryStore` contract (brief §4 row 1).
 //!
-//! P0 scaffold: surface only — `name`, `capabilities`,
+//! P0 scaffold: surface only - `name`, `capabilities`,
 //! `supported_contract_versions`. CRUD/FTS/ANN/graph methods land in #46.
 
 use crate::contract::version::{ContractVersion, VersionRange};
 use crate::hot_memory::{HotMemoryInput, HotMemoryOutput};
 
 /// Contract version for `MemoryStore`. Bumps when the trait surface changes.
-pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 1, 0);
+pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 1, 1);
 
 /// Static capability declaration for a `MemoryStore` impl.
 ///
@@ -62,11 +62,63 @@ pub enum MemoryStoreError {
     #[error("memory store unavailable: {0}")]
     Unavailable(String),
     /// A backend query failed.
-    #[error("memory store query failed: {0}")]
-    Query(String),
+    #[error("memory store query failed: {message}")]
+    Query {
+        /// Human-readable backend query failure context.
+        message: String,
+        /// Optional backend source error.
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
+    },
     /// A backend cache operation failed.
-    #[error("memory store cache failed: {0}")]
-    Cache(String),
+    #[error("memory store cache failed: {message}")]
+    Cache {
+        /// Human-readable backend cache failure context.
+        message: String,
+        /// Optional backend source error.
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
+    },
+}
+
+impl MemoryStoreError {
+    /// Build a query failure without a backend source error.
+    pub fn query(message: impl Into<String>) -> Self {
+        Self::Query {
+            message: message.into(),
+            source: None,
+        }
+    }
+
+    /// Build a query failure preserving the backend source error.
+    pub fn query_with_source(
+        message: impl Into<String>,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::Query {
+            message: message.into(),
+            source: Some(Box::new(source)),
+        }
+    }
+
+    /// Build a cache failure without a backend source error.
+    pub fn cache(message: impl Into<String>) -> Self {
+        Self::Cache {
+            message: message.into(),
+            source: None,
+        }
+    }
+
+    /// Build a cache failure preserving the backend source error.
+    pub fn cache_with_source(
+        message: impl Into<String>,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::Cache {
+            message: message.into(),
+            source: Some(Box::new(source)),
+        }
+    }
 }
 
 /// Storage contract — typed CRUD + ANN + FTS + graph over `MemoryRecord`.
@@ -219,6 +271,15 @@ mod tests {
         assert!(s.supported_contract_versions().accepts(CONTRACT_VERSION));
     }
 
+    #[test]
+    fn contract_version_bumps_for_hot_memory_surface() {
+        assert_eq!(CONTRACT_VERSION, ContractVersion::new(0, 1, 1));
+        assert!(
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+                .accepts(CONTRACT_VERSION)
+        );
+    }
+
     #[tokio::test]
     async fn dyn_store_supports_hot_memory_methods() {
         let s: Box<dyn MemoryStore> = Box::new(StubStore);
@@ -236,5 +297,24 @@ mod tests {
         assert_eq!(input.source_revision, "stub-revision");
         let key = s.hot_memory_cache_key(&request, &input).expect("cache key");
         assert!(!key.is_empty());
+        let cached = s.load_hot_memory_cache(&key).await.expect("load cache");
+        assert!(cached.is_none());
+        s.store_hot_memory_cache(
+            &key,
+            &HotMemoryOutput {
+                prefix: String::new(),
+                bytes: 0,
+                sources: Vec::new(),
+                truncation: Vec::new(),
+                cache: crate::hot_memory::HotMemoryCacheInfo::miss(&key),
+            },
+        )
+        .await
+        .expect("store cache");
+        let invalidated = s
+            .invalidate_hot_memory_cache(HotMemoryInvalidationScope::Vault)
+            .await
+            .expect("invalidate cache");
+        assert_eq!(invalidated, 0);
     }
 }
