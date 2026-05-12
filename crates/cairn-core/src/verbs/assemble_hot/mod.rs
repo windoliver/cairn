@@ -13,7 +13,8 @@ pub mod sources;
 
 pub use admissibility::{CONFIDENCE_FLOOR, admit};
 pub use assembler::{
-    AssembleHotError, assemble_hot, assemble_hot_from_bodies, assemble_hot_with_inputs,
+    AssembleHotError, assemble_hot, assemble_hot_from_bodies, assemble_hot_recipe,
+    assemble_hot_with_inputs,
 };
 pub use cached::{CachedAssembleError, cached_assemble, recipe_hash_canonical};
 pub use inclusion::{ExclusionReason, ExclusionTrace, InclusionTrace, LoadedSegment};

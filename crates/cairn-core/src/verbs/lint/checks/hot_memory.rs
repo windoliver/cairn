@@ -211,6 +211,9 @@ mod tests {
     fn walker_with_oversized_loader_emits_over_budget_error() {
         let mut cfg = CairnConfig::default();
         cfg.vault.hot_memory.max_bytes = 8;
+        if let Some(preset) = cfg.vault.hot_memory.recipes.get_mut("chat") {
+            preset.max_bytes = 8;
+        }
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("purpose.md"), "x").unwrap();
         std::fs::write(dir.path().join("index.md"), "x").unwrap();

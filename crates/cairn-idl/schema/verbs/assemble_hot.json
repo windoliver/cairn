@@ -9,6 +9,7 @@
   "x-cairn-cli": {
     "command": "assemble_hot",
     "flags": [
+      { "name": "recipe",     "long": "recipe",  "value_source": "string" },
       { "name": "session_id", "long": "session", "value_source": "string" },
       { "name": "budget",     "long": "budget",  "value_source": "u32" },
       { "name": "explain",    "long": "explain", "value_source": "bool" }
@@ -25,6 +26,7 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "recipe":     { "type": "string", "minLength": 1 },
         "session_id": { "type": "string", "minLength": 1 },
         "budget":     { "type": "integer", "minimum": 0, "maximum": 4194304, "description": "Byte budget for the assembled prefix (default 25000; hard cap 4 MiB)." },
         "explain":    { "type": "boolean", "description": "When true, the response carries a `debug` payload describing per-step inclusion + typed exclusion reasons. Defaults to false; older callers omit it." }
@@ -38,6 +40,7 @@
       "properties": {
         "prefix": { "type": "string", "description": "Assembled hot-memory text ready to inject into the agent prompt. May be empty when no hot-memory is available." },
         "bytes":  { "type": "integer", "minimum": 0, "maximum": 4194304 },
+        "recipe": { "type": "string", "minLength": 1, "description": "Name of the hot-memory recipe preset that produced this assembled prefix. Optional for wire compat with legacy producers; new producers always emit it." },
         "segments": {
           "type": "array",
           "items": { "$ref": "#/$defs/HotSegment" },

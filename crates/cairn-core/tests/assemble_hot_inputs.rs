@@ -113,10 +113,13 @@ proptest! {
         // counts vary with the proptest-supplied size; the recipe is
         // the default 6-step shape so segments overhead is constant.
         let purpose: String = "p".repeat(body_size);
-        let cfg = HotMemoryConfig {
+        let mut cfg = HotMemoryConfig {
             max_bytes,
             ..HotMemoryConfig::default()
         };
+        if let Some(preset) = cfg.recipes.get_mut(&cfg.default_recipe.clone()) {
+            preset.max_bytes = max_bytes;
+        }
         let inputs = HotMemoryInputs {
             purpose_md: &purpose,
             index_md: "",
