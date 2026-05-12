@@ -1,13 +1,13 @@
 {
   "cases": {
     "ok_record": {
-      "kind": "invalid_args"
+      "kind": "stub"
     },
     "err_mode_session_unsupported": {
-      "kind": "invalid_args"
+      "kind": "stub"
     },
     "err_mode_scope_unsupported": {
-      "kind": "invalid_args"
+      "kind": "stub"
     }
   }
 }

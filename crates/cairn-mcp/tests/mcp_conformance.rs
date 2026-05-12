@@ -17,7 +17,9 @@ use cairn_core::config::CapabilitySet;
 use cairn_core::generated::common::Capabilities;
 use cairn_core::status::{CapabilityGates, Phase, StoreCaps, advertise};
 use cairn_mcp::CairnMcpHandler;
-use cairn_test_fixtures::mcp::conformance::{ConfigOverrides, canonicalize, load_all, load_case};
+use cairn_test_fixtures::mcp::conformance::{
+    CaseKind, ConformanceCase, ConfigOverrides, canonicalize, load_all, load_case,
+};
 use rmcp::ServiceExt as _;
 use tokio::io::BufReader;
 
@@ -122,6 +124,79 @@ fn unwrap_envelope_from_tool_result(resp: &serde_json::Value) -> serde_json::Val
     resp.clone()
 }
 
+/// Assert structural invariants for the Cairn envelope based on the case kind.
+///
+/// This is a *pre-diff* guard: it catches handler regressions where a
+/// structured envelope degrades to `__raw_text` (or vice-versa) even when the
+/// fixture diff would also catch it, by providing a cleaner error message at
+/// the structural level.
+///
+/// Per-kind rules (brief §8.0.b):
+/// - `Ok`:               `status == "committed"`, no `error` field.
+/// - `InvalidArgs`:      `status == "rejected"`, `error.code` present.
+/// - `CapabilityRejected`: `error.code == "CapabilityUnavailable"`,
+///                       `error.data.capability` present.
+/// - `ExtensionRejected`: some rejection signal present (no `status ==
+///                       "committed"`), flexible on error code.
+/// - `Stub`:             no structural assertion — pass through.
+fn assert_envelope_structure(case: &ConformanceCase, actual: &serde_json::Value) {
+    match case.kind {
+        CaseKind::Ok => {
+            assert_eq!(
+                actual["status"], "committed",
+                "case {}: Ok case must have status=committed",
+                case.id
+            );
+            assert!(
+                actual.get("error").is_none(),
+                "case {}: Ok case must not have an error field",
+                case.id
+            );
+        }
+        CaseKind::InvalidArgs => {
+            assert_eq!(
+                actual["status"], "rejected",
+                "case {}: InvalidArgs case must have status=rejected",
+                case.id
+            );
+            assert!(
+                actual.get("error").and_then(|e| e.get("code")).is_some(),
+                "case {}: InvalidArgs case must have error.code",
+                case.id
+            );
+        }
+        CaseKind::CapabilityRejected => {
+            assert_eq!(
+                actual["error"]["code"], "CapabilityUnavailable",
+                "case {}: CapabilityRejected case must have error.code=CapabilityUnavailable",
+                case.id
+            );
+            assert!(
+                actual
+                    .get("error")
+                    .and_then(|e| e.get("data"))
+                    .and_then(|d| d.get("capability"))
+                    .is_some(),
+                "case {}: CapabilityRejected case must have error.data.capability",
+                case.id
+            );
+        }
+        CaseKind::ExtensionRejected => {
+            // Flexible: any rejection path is acceptable, but the response
+            // must NOT look like a successful commit.
+            assert_ne!(
+                actual["status"], "committed",
+                "case {}: ExtensionRejected case must not have status=committed",
+                case.id
+            );
+        }
+        CaseKind::Stub => {
+            // No structural assertion for stub cases — dispatch_stub returns
+            // __raw_text, which is expected and recorded in the fixture.
+        }
+    }
+}
+
 /// Replay every loaded conformance case and assert the handler's envelope
 /// matches the canonical response after canonicalization.
 ///
@@ -136,6 +211,12 @@ async fn conformance_envelope_replay() {
 
         let actual_canon = canonicalize(&actual);
         let expected_canon = canonicalize(&case.response);
+
+        // Structural pre-check: assert the response shape matches what the
+        // case kind requires before diffing against the fixture. This catches
+        // handler regressions (e.g., structured → __raw_text) with a precise
+        // error rather than a raw JSON diff.
+        assert_envelope_structure(&case, &actual_canon);
 
         if std::env::var_os("CAIRN_BLESS").is_some() && actual_canon != expected_canon {
             // Bless workflow: write canonicalized actual back to disk.

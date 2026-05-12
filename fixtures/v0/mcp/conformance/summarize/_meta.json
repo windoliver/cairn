@@ -1,10 +1,10 @@
 {
   "cases": {
     "ok_minimal": {
-      "kind": "invalid_args"
+      "kind": "stub"
     },
     "err_persist_no_capability": {
-      "kind": "invalid_args"
+      "kind": "stub"
     }
   }
 }

@@ -47,6 +47,11 @@ pub enum CaseKind {
     /// Same as `CapabilityRejected` but for verbs from an extension namespace
     /// that the runtime does not advertise (brief §8.0.a, extensions table).
     ExtensionRejected,
+    /// v0.1 dispatch_stub state — verb is in the tool list but its handler
+    /// returns a `__raw_text` placeholder, not a structured envelope. No
+    /// structural assertion is applied. To be re-blessed and re-classified
+    /// once handler wiring lands.
+    Stub,
 }
 
 /// Per-case capability gates. Mirrors the subset of
@@ -370,9 +375,9 @@ mod tests {
         let c = load_case("search/ok_keyword");
         assert_eq!(c.id, "search/ok_keyword");
         assert_eq!(c.verb, "search");
-        // The verb is unwired at v0.1; the handler returns a stub-error envelope.
-        // Kind is InvalidArgs until the search verb is wired in a later task.
-        assert_eq!(c.kind, CaseKind::InvalidArgs);
+        // The verb is unwired at v0.1; the handler returns a __raw_text stub.
+        // Kind is Stub until the search verb is wired in a later task.
+        assert_eq!(c.kind, CaseKind::Stub);
     }
 
     #[test]
@@ -385,6 +390,8 @@ mod tests {
         assert_eq!(v, CaseKind::CapabilityRejected);
         let v: CaseKind = serde_json::from_str("\"extension_rejected\"").unwrap();
         assert_eq!(v, CaseKind::ExtensionRejected);
+        let v: CaseKind = serde_json::from_str("\"stub\"").unwrap();
+        assert_eq!(v, CaseKind::Stub);
     }
 
     #[test]

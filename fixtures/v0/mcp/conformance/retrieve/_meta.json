@@ -1,10 +1,10 @@
 {
   "cases": {
     "ok_record": {
-      "kind": "invalid_args"
+      "kind": "stub"
     },
     "err_target_turn_unsupported": {
-      "kind": "invalid_args"
+      "kind": "stub"
     }
   }
 }
