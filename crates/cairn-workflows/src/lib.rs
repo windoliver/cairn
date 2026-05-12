@@ -13,7 +13,7 @@ pub mod scheduler;
 pub mod sqlite_store;
 
 pub use consent_mirror::{ConsentLogMaterializer, MirrorError};
-pub use scheduler::{Clock, MockClock, SystemClock};
+pub use scheduler::{Clock, MockClock, Scheduler, SchedulerConfig, SystemClock};
 pub use sqlite_store::{SqliteJobStore, SqliteJobStoreInitError};
 
 use cairn_core::contract::version::{ContractVersion, VersionRange};
