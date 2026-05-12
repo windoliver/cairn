@@ -15,7 +15,11 @@ use cairn_core::contract::frontend_adapter::{
 use cairn_core::contract::manifest::PluginManifest;
 use cairn_core::contract::registry::{PluginName, PluginRegistry};
 use cairn_core::contract::version::{ContractVersion, VersionRange};
-use cairn_core::domain::BodyHash;
+use cairn_core::domain::{
+    ActorChainEntry, CanonicalRecordHash, ChainRole, EvidenceVector, Identity, MemoryClass,
+    MemoryKind, MemoryRecord, MemoryVisibility, Provenance, Rfc3339Timestamp, ScopeTuple,
+    TargetId,
+};
 
 const FRONTEND_MANIFEST: &str = r#"
 name = "stub-frontend-runner"
@@ -129,7 +133,7 @@ impl FrontendAdapter for ConformanceFrontend {
         if edit.target_hash != sample_target_hash() {
             return Err(FrontendReconcileError::PolicyDenied {
                 gate: "target_hash".into(),
-                reason: "projection hash does not match body hash".into(),
+                reason: "projection hash does not match canonical record hash".into(),
             }
             .into());
         }
@@ -206,6 +210,35 @@ fn frontend_adapter_runner_reports_expected_tier2_case_ids() {
 }
 
 #[test]
+fn frontend_adapter_runner_fails_unimplemented_reconcile_cases() {
+    let mut reg = PluginRegistry::new();
+    let name = PluginName::new("stub-frontend-runner").expect("valid");
+    let manifest = PluginManifest::parse_toml(FRONTEND_MANIFEST).expect("manifest parses");
+    reg.register_frontend_adapter_with_manifest(name.clone(), manifest, Arc::new(StubFrontend))
+        .expect("registers");
+
+    let outcomes = run_conformance_for_plugin(&reg, &name);
+
+    for id in [
+        "rejects_immutable_field_edits",
+        "rejects_replayed_operation",
+        "rejects_tampered_target_hash",
+        "rejects_unrecognized_principal",
+        "honors_optimistic_version_check",
+    ] {
+        let outcome = outcomes
+            .iter()
+            .find(|outcome| outcome.id == id)
+            .expect("required tier-2 case exists");
+        assert!(
+            matches!(outcome.status, CaseStatus::Failed { .. }),
+            "tier-2 case {id} must fail closed when reconcile is unimplemented, got {:?}",
+            outcome.status
+        );
+    }
+}
+
+#[test]
 fn frontend_adapter_runner_marks_contract_stub_tier2_cases_ok() {
     let mut reg = PluginRegistry::new();
     let name = PluginName::new("stub-frontend-runner").expect("valid");
@@ -238,6 +271,48 @@ fn frontend_adapter_runner_marks_contract_stub_tier2_cases_ok() {
     }
 }
 
-fn sample_target_hash() -> BodyHash {
-    BodyHash::compute("trusted body")
+fn sample_target_hash() -> CanonicalRecordHash {
+    CanonicalRecordHash::compute(&sample_record()).expect("sample record hashes")
+}
+
+fn sample_record() -> MemoryRecord {
+    let user_id = Identity::parse("hmn:known-user").expect("valid identity");
+    MemoryRecord {
+        id: cairn_core::domain::RecordId::parse("01HQZX9F5N0000000000000000")
+            .expect("valid record id"),
+        target_id: TargetId::parse("01HQZX9F5N0000000000000000").expect("valid target id"),
+        kind: MemoryKind::User,
+        class: MemoryClass::Semantic,
+        visibility: MemoryVisibility::Private,
+        scope: ScopeTuple {
+            user: Some("hmn:known-user".to_owned()),
+            ..ScopeTuple::default()
+        },
+        body: "trusted body".to_owned(),
+        provenance: Provenance {
+            source_sensor: Identity::parse("snr:local:hook:cc-session:v1").expect("valid identity"),
+            created_at: Rfc3339Timestamp::parse("2026-04-22T14:02:11Z").expect("valid timestamp"),
+            originating_agent_id: user_id.clone(),
+            source_hash: format!("sha256:{}", "a".repeat(64)),
+            consent_ref: "consent:01HQZ".to_owned(),
+            llm_id_if_any: None,
+        },
+        updated_at: Rfc3339Timestamp::parse("2026-04-22T14:05:11Z").expect("valid timestamp"),
+        evidence: EvidenceVector::default(),
+        salience: 0.5,
+        confidence: 0.7,
+        actor_chain: vec![ActorChainEntry {
+            role: ChainRole::Author,
+            identity: user_id,
+            at: Rfc3339Timestamp::parse("2026-04-22T14:02:11Z").expect("valid timestamp"),
+        }],
+        signature: cairn_core::domain::record::Ed25519Signature::parse(format!(
+            "ed25519:{}",
+            "a".repeat(128)
+        ))
+        .expect("valid signature"),
+        tags: vec!["pref".to_owned()],
+        extra_frontmatter: std::collections::BTreeMap::new(),
+        consent_model: None,
+    }
 }

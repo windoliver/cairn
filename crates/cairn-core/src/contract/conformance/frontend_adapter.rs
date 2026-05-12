@@ -19,7 +19,11 @@ use crate::contract::frontend_adapter::{
 };
 use crate::contract::frontend_adapter::CONTRACT_VERSION;
 use crate::contract::registry::{PluginName, PluginRegistry};
-use crate::domain::{BodyHash, Identity, TargetId};
+use crate::domain::{
+    ActorChainEntry, CanonicalRecordHash, ChainRole, EvidenceVector, Identity, MemoryClass,
+    MemoryKind, MemoryRecord, MemoryVisibility, Provenance, Rfc3339Timestamp, ScopeTuple,
+    TargetId,
+};
 
 /// Run tier-1 + tier-2 cases for a `FrontendAdapter` plugin.
 #[must_use]
@@ -214,8 +218,8 @@ fn expect_reconcile_error(
 ) -> CaseOutcome {
     let status = match plugin.reconcile(ctx, edit) {
         Err(FrontendAdapterError::Reconcile(error)) if matcher(&error) => CaseStatus::Ok,
-        Err(FrontendAdapterError::NotImplemented { .. }) => CaseStatus::Pending {
-            reason: "adapter did not implement reconcile contract checks",
+        Err(FrontendAdapterError::NotImplemented { operation }) => CaseStatus::Failed {
+            message: format!("adapter does not implement required conformance operation {operation}"),
         },
         Err(FrontendAdapterError::Reconcile(error)) => CaseStatus::Failed {
             message: format!("unexpected reconcile error: {error}"),
@@ -244,7 +248,7 @@ fn sample_identity_context(principal: &str) -> FrontendIdentityContext {
 
 fn sample_edit(
     expected_version: u64,
-    target_hash: BodyHash,
+    target_hash: CanonicalRecordHash,
     field_diff: BTreeMap<String, serde_json::Value>,
 ) -> FrontendEdit {
     FrontendEdit {
@@ -255,6 +259,47 @@ fn sample_edit(
     }
 }
 
-fn sample_hash(body: &str) -> BodyHash {
-    BodyHash::compute(body)
+fn sample_hash(body: &str) -> CanonicalRecordHash {
+    CanonicalRecordHash::compute(&sample_record(body)).expect("sample record hashes")
+}
+
+fn sample_record(body: &str) -> MemoryRecord {
+    let user_id = Identity::parse("hmn:known-user").expect("valid identity");
+    MemoryRecord {
+        id: crate::domain::RecordId::parse("01HQZX9F5N0000000000000000").expect("valid record id"),
+        target_id: TargetId::parse("01HQZX9F5N0000000000000000").expect("valid target id"),
+        kind: MemoryKind::User,
+        class: MemoryClass::Semantic,
+        visibility: MemoryVisibility::Private,
+        scope: ScopeTuple {
+            user: Some("hmn:known-user".to_owned()),
+            ..ScopeTuple::default()
+        },
+        body: body.to_owned(),
+        provenance: Provenance {
+            source_sensor: Identity::parse("snr:local:hook:cc-session:v1").expect("valid identity"),
+            created_at: Rfc3339Timestamp::parse("2026-04-22T14:02:11Z").expect("valid timestamp"),
+            originating_agent_id: user_id.clone(),
+            source_hash: format!("sha256:{}", "a".repeat(64)),
+            consent_ref: "consent:01HQZ".to_owned(),
+            llm_id_if_any: None,
+        },
+        updated_at: Rfc3339Timestamp::parse("2026-04-22T14:05:11Z").expect("valid timestamp"),
+        evidence: EvidenceVector::default(),
+        salience: 0.5,
+        confidence: 0.7,
+        actor_chain: vec![ActorChainEntry {
+            role: ChainRole::Author,
+            identity: user_id,
+            at: Rfc3339Timestamp::parse("2026-04-22T14:02:11Z").expect("valid timestamp"),
+        }],
+        signature: crate::domain::record::Ed25519Signature::parse(format!(
+            "ed25519:{}",
+            "a".repeat(128)
+        ))
+        .expect("valid signature"),
+        tags: vec!["pref".to_owned()],
+        extra_frontmatter: BTreeMap::new(),
+        consent_model: None,
+    }
 }
