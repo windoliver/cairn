@@ -29,7 +29,7 @@ fn env_var_re() -> &'static Regex {
     })
 }
 
-/// Replace every `${VAR}` in `src` with its environment variable value.
+/// Replace every `${VAR}` in a scalar string with its environment variable value.
 ///
 /// Only `[A-Z_][A-Z0-9_]*` variable names are recognized. Placeholders with
 /// lowercase names (e.g. `${not_a_var}`) are left verbatim and never trigger
@@ -55,6 +55,26 @@ pub fn interpolate_env(src: &str) -> Result<String, ConfigError> {
         return Err(ConfigError::UnresolvedEnvVar(name));
     }
     Ok(result.into_owned())
+}
+
+fn interpolate_env_value(value: &mut Value) -> Result<(), ConfigError> {
+    match value {
+        Value::String(s) => {
+            *s = interpolate_env(s)?;
+        }
+        Value::Array(items) => {
+            for item in items {
+                interpolate_env_value(item)?;
+            }
+        }
+        Value::Object(map) => {
+            for value in map.values_mut() {
+                interpolate_env_value(value)?;
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+    Ok(())
 }
 
 /// Load and validate the active `CairnConfig` for the given vault.
@@ -105,11 +125,11 @@ fn read_yaml_overlay(path: &Path) -> Result<Option<Value>> {
     }
     let raw =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let interpolated = interpolate_env(&raw)
+    let mut value: Value =
+        yaml_serde::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
+    interpolate_env_value(&mut value)
         .map_err(anyhow::Error::from)
         .with_context(|| format!("resolving ${{VAR}} placeholders in {}", path.display()))?;
-    let value: Value = yaml_serde::from_str(&interpolated)
-        .with_context(|| format!("parsing {}", path.display()))?;
     if value.is_null() {
         Ok(None)
     } else {
@@ -358,5 +378,30 @@ mod tests {
         // Only uppercase+underscore names are recognized; lowercase passes through.
         let input = "note: ${not_a_var}";
         assert_eq!(interpolate_env(input).unwrap(), input);
+    }
+
+    #[test]
+    fn load_interpolates_env_after_yaml_parse() {
+        temp_env::with_var(
+            "CAIRN_UNIT_TEST_SECRET_YAML_CHARS",
+            Some("real: value # not a comment\nstill secret"),
+            || {
+                let dir = tempfile::tempdir().unwrap();
+                let config_dir = dir.path().join(".cairn");
+                std::fs::create_dir_all(&config_dir).unwrap();
+                std::fs::write(
+                    config_dir.join("config.yaml"),
+                    "llm:\n  api_key: ${CAIRN_UNIT_TEST_SECRET_YAML_CHARS}\n",
+                )
+                .unwrap();
+
+                let config = load(dir.path(), &CliOverrides::default()).unwrap();
+
+                assert_eq!(
+                    config.llm.api_key.as_deref(),
+                    Some("real: value # not a comment\nstill secret")
+                );
+            },
+        );
     }
 }

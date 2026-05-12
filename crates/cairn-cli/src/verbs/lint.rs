@@ -1803,7 +1803,12 @@ pub fn run(sub: &ArgMatches, vault_root: Option<&Path>) -> ExitCode {
     let fix_markdown_flag = sub.get_flag("fix-markdown");
     let fix_folders_flag = sub.get_flag("fix-folders");
     let write_report = sub.get_flag("write_report");
+    let plan_id = sub.get_one::<String>("plan").cloned();
     let operation_id = new_operation_id();
+
+    if let Some(plan_id) = plan_id {
+        return run_plan_lint(json, vault_root, &plan_id);
+    }
 
     if fix_markdown_flag {
         return run_fix_markdown(json, vault_root);
@@ -1966,6 +1971,204 @@ pub fn run(sub: &ArgMatches, vault_root: Option<&Path>) -> ExitCode {
             };
             emit_merged(degraded_data)
         }
+    }
+}
+
+/// `cairn lint --plan <ULID>` (issue #289): structurally lint a pending
+/// `FlushPlan`, then check rename mutations against the live store. Surfaces
+/// rename-target collisions before `flush apply` consumes the plan.
+#[allow(
+    clippy::too_many_lines,
+    reason = "linear load → walk-mutations → live-check → emit; splitting would scatter \
+              error-emission boilerplate (json vs human) across helpers without simplifying flow"
+)]
+fn run_plan_lint(json: bool, vault_root: Option<&Path>, plan_id: &str) -> ExitCode {
+    use cairn_core::domain::flush_plan::store::{Bucket, plan_path};
+    use cairn_core::domain::flush_plan::{PersistedPlan, PlannedMutation};
+
+    let op = new_operation_id();
+    // Reject non-canonical ULIDs before constructing the filesystem path.
+    // `plan_path` interpolates the id into the path; without this gate a
+    // caller could traverse via `..` or absolute-path components and point
+    // the lint at arbitrary `.plan.json` files outside `.cairn/flush/pending`.
+    if !super::flush::is_valid_ulid_str(plan_id) {
+        let msg =
+            format!("lint --plan: invalid ULID `{plan_id}` (expected 26-char Crockford base32)");
+        if json {
+            emit_json(&serde_json::json!({
+                "code": "InvalidArgument",
+                "message": msg,
+                "operation_id": op.0,
+            }));
+        } else {
+            human_error("lint", "InvalidArgument", &msg, &op);
+        }
+        return ExitCode::from(64);
+    }
+    let Some(vault_root) = vault_root else {
+        let msg = "lint --plan requires a resolved vault root: pass --vault NAME_OR_PATH \
+                   or set CAIRN_VAULT";
+        if json {
+            emit_json(&serde_json::json!({
+                "code": "Internal",
+                "message": msg,
+                "operation_id": op.0,
+            }));
+        } else {
+            human_error("lint", "Internal", msg, &op);
+        }
+        return ExitCode::from(78);
+    };
+
+    let ulid = cairn_core::generated::common::Ulid(plan_id.to_owned());
+    let path = plan_path(vault_root, Bucket::Pending, &ulid);
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) => {
+            let msg = format!("read pending plan {plan_id}: {e}");
+            if json {
+                emit_json(&serde_json::json!({
+                    "code": "NotFound",
+                    "message": msg,
+                    "operation_id": op.0,
+                }));
+            } else {
+                human_error("lint", "NotFound", &msg, &op);
+            }
+            return ExitCode::from(66);
+        }
+    };
+    let persisted: PersistedPlan = match serde_json::from_slice(&bytes) {
+        Ok(p) => p,
+        Err(e) => {
+            let msg = format!("parse pending plan {plan_id}: {e}");
+            if json {
+                emit_json(&serde_json::json!({
+                    "code": "Internal",
+                    "message": msg,
+                    "operation_id": op.0,
+                }));
+            } else {
+                human_error("lint", "Internal", &msg, &op);
+            }
+            return ExitCode::from(65);
+        }
+    };
+
+    let mut findings: Vec<String> = Vec::new();
+    let mut seen_new_ids: BTreeMap<String, usize> = BTreeMap::new();
+    let mut renames: Vec<(cairn_core::domain::TargetId, cairn_core::domain::TargetId)> = Vec::new();
+
+    for (idx, mutation) in persisted.plan.mutations.iter().enumerate() {
+        if let PlannedMutation::Rename { record_id, new_id } = mutation {
+            if record_id == new_id {
+                findings.push(format!(
+                    "rename mutation #{idx}: source and destination are identical (`{}`)",
+                    new_id.as_str(),
+                ));
+            }
+            if let Some(prev) = seen_new_ids.insert(new_id.as_str().to_owned(), idx) {
+                findings.push(format!(
+                    "rename target collision (intra-plan): mutations #{prev} and #{idx} both \
+                     rename to `{}`",
+                    new_id.as_str(),
+                ));
+            }
+            renames.push((record_id.clone(), new_id.clone()));
+        }
+    }
+
+    let db_path = vault_root.join(".cairn").join("cairn.db");
+    if db_path.exists() && !renames.is_empty() {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                let msg = format!("tokio init error: {e}");
+                if json {
+                    emit_json(&serde_json::json!({
+                        "code": "Internal",
+                        "message": msg,
+                        "operation_id": op.0,
+                    }));
+                } else {
+                    human_error("lint", "Internal", &msg, &op);
+                }
+                return ExitCode::FAILURE;
+            }
+        };
+        // Round 10 review fix: use the same historical-collision rule
+        // `flush apply rename` enforces, not just the live check —
+        // otherwise lint can bless a plan that apply will reject for
+        // hitting a retired target lineage.
+        let renames_owned: Vec<(cairn_core::domain::TargetId, cairn_core::domain::TargetId)> =
+            renames
+                .iter()
+                .map(|(s, d)| ((*s).clone(), (*d).clone()))
+                .collect();
+        let live_check: Result<Vec<String>, anyhow::Error> = rt.block_on(async {
+            let store = cairn_store_sqlite::open(&db_path).await?;
+            let renames = renames_owned;
+            store
+                .with_tx(move |tx| {
+                    let mut hits = Vec::new();
+                    for (src, dst) in &renames {
+                        if tx.target_id_ever_used(dst)? {
+                            let active = tx.get_active_by_target(dst)?;
+                            let kind = if active.is_some() { "live" } else { "retired" };
+                            hits.push(format!(
+                                "rename target collision ({kind}): `{}` has been used as a \
+                                 target lineage — renaming `{}` would conflict",
+                                dst.as_str(),
+                                src.as_str(),
+                            ));
+                        }
+                    }
+                    Ok(hits)
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))
+        });
+        match live_check {
+            Ok(hits) => findings.extend(hits),
+            Err(e) => {
+                let msg = format!("open store for live rename check: {e}");
+                if json {
+                    emit_json(&serde_json::json!({
+                        "code": "Internal",
+                        "message": msg,
+                        "operation_id": op.0,
+                    }));
+                } else {
+                    human_error("lint", "Internal", &msg, &op);
+                }
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
+    let has_findings = !findings.is_empty();
+    if json {
+        emit_json(&serde_json::json!({
+            "operation_id": op.0,
+            "plan_id": plan_id,
+            "findings": findings,
+        }));
+    } else if has_findings {
+        eprintln!("cairn lint --plan {plan_id}: {} finding(s)", findings.len());
+        for f in &findings {
+            eprintln!("  - {f}");
+        }
+    } else {
+        println!("cairn lint --plan {plan_id}: clean");
+    }
+
+    if has_findings {
+        ExitCode::from(65) // EX_DATAERR
+    } else {
+        ExitCode::SUCCESS
     }
 }
 
