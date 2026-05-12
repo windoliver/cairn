@@ -905,6 +905,7 @@ async fn capture_trace_single_turn_persists_and_summarizes() {
 #[tokio::test]
 #[allow(
     clippy::expect_used,
+    clippy::too_many_lines,
     reason = "test: panics surface broken invariants immediately"
 )]
 async fn capture_trace_imports_full_trace_scope_in_one_turn() {

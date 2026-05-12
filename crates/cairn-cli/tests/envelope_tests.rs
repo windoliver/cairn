@@ -698,7 +698,7 @@ fn capture_trace_cli_imports_full_trace_scope_e2e() {
             .extra_frontmatter
             .get("trace")
             .and_then(|trace| trace.get("sequence"))
-            .and_then(|value| value.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .expect("trace sequence")
     });
 
