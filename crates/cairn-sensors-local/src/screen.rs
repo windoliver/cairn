@@ -4,9 +4,9 @@ use cairn_core::config::{ScreenBackend, ScreenOcrEngine, ScreenSensorConfig};
 use cairn_core::generated::common::Capabilities;
 
 /// Sensor label used by the in-process xcap backend.
-pub const XCAP_SENSOR_LABEL: &str = "screen.xcap";
+pub const XCAP_SENSOR_LABEL: &str = "snr:local:screen:xcap:v1";
 /// Sensor label used by the optional screenpipe backend.
-pub const SCREENPIPE_SENSOR_LABEL: &str = "screen.screenpipe";
+pub const SCREENPIPE_SENSOR_LABEL: &str = "snr:local:screen:screenpipe:v1";
 
 /// Runtime availability state for screen capture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,19 +24,25 @@ pub enum ScreenState {
 /// Capture mode resolved for this runtime boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScreenMode {
+    /// Capture is off.
+    Off,
     /// Point-in-time screenshot plus OCR snapshot.
     Snapshot,
+    /// Continuous capture mode.
+    Continuous,
 }
 
 /// Runtime permission status for screen capture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScreenPermission {
-    /// Permission has not been checked by this mockable boundary.
-    Unknown,
+    /// Permission has not been requested.
+    NotRequested,
     /// Permission is available.
     Granted,
     /// Permission is missing or denied.
     Denied,
+    /// Permission was granted previously and later revoked.
+    Revoked,
 }
 
 /// OCR engine after resolving `Auto`.
@@ -56,12 +62,14 @@ impl ResolvedScreenOcrEngine {
     /// Resolve a configured OCR engine into the concrete runtime engine.
     #[must_use]
     pub fn from_config(engine: ScreenOcrEngine) -> Self {
+        if engine == ScreenOcrEngine::Auto {
+            return platform_default_ocr_engine();
+        }
+
         match engine {
-            ScreenOcrEngine::Auto => platform_default_ocr_engine(),
             ScreenOcrEngine::Vision => Self::Vision,
             ScreenOcrEngine::Winrt => Self::Winrt,
             ScreenOcrEngine::Tesseract => Self::Tesseract,
-            ScreenOcrEngine::Off => Self::Off,
             _ => Self::Off,
         }
     }
@@ -72,10 +80,12 @@ impl ResolvedScreenOcrEngine {
 pub enum ScreenDegradationCode {
     /// Sensor is explicitly disabled in config.
     Disabled,
-    /// Requested backend is not compiled into this binary.
-    BackendUnavailable,
     /// OS permission is missing or denied.
     PermissionMissing,
+    /// Requested backend is not compiled into this binary.
+    BackendUnavailable,
+    /// Capture is degraded for a reason that does not have a narrower code.
+    Degraded,
 }
 
 /// Screen capture degradation details.
@@ -83,13 +93,18 @@ pub enum ScreenDegradationCode {
 pub struct ScreenDegradation {
     /// Stable degradation code.
     pub code: ScreenDegradationCode,
+    /// Operator-facing degradation message.
+    pub message: String,
 }
 
 impl ScreenDegradation {
     /// Create a degradation from its stable code.
     #[must_use]
-    pub const fn new(code: ScreenDegradationCode) -> Self {
-        Self { code }
+    pub fn new(code: ScreenDegradationCode) -> Self {
+        Self {
+            code,
+            message: degradation_message(code).to_owned(),
+        }
     }
 }
 
@@ -213,7 +228,8 @@ pub struct BasicScreenPolicy;
 impl ScreenPolicy for BasicScreenPolicy {
     fn apply(&self, mut observation: ScreenObservation) -> ScreenObservation {
         if observation.text.to_lowercase().contains("password=") {
-            observation.text = "[redacted]".to_owned();
+            observation.text.clear();
+            observation.text.push_str("[redacted]");
         }
         observation
     }
@@ -285,8 +301,8 @@ pub fn probe_config(config: &ScreenSensorConfig) -> ScreenProbe {
         return ScreenProbe {
             backend: config.backend,
             state: ScreenState::Disabled,
-            mode: ScreenMode::Snapshot,
-            permission: ScreenPermission::Unknown,
+            mode: ScreenMode::Off,
+            permission: ScreenPermission::NotRequested,
             ocr_engine,
             degradation: Some(ScreenDegradation::new(ScreenDegradationCode::Disabled)),
         };
@@ -301,8 +317,8 @@ pub fn probe_config(config: &ScreenSensorConfig) -> ScreenProbe {
                 ScreenProbe {
                     backend: config.backend,
                     state: ScreenState::Degraded,
-                    mode: ScreenMode::Snapshot,
-                    permission: ScreenPermission::Unknown,
+                    mode: ScreenMode::Off,
+                    permission: ScreenPermission::NotRequested,
                     ocr_engine,
                     degradation: Some(ScreenDegradation::new(
                         ScreenDegradationCode::BackendUnavailable,
@@ -313,12 +329,10 @@ pub fn probe_config(config: &ScreenSensorConfig) -> ScreenProbe {
         _ => ScreenProbe {
             backend: config.backend,
             state: ScreenState::Degraded,
-            mode: ScreenMode::Snapshot,
-            permission: ScreenPermission::Unknown,
+            mode: ScreenMode::Off,
+            permission: ScreenPermission::NotRequested,
             ocr_engine,
-            degradation: Some(ScreenDegradation::new(
-                ScreenDegradationCode::BackendUnavailable,
-            )),
+            degradation: Some(ScreenDegradation::new(ScreenDegradationCode::Degraded)),
         },
     }
 }
@@ -336,6 +350,15 @@ fn permission_missing_probe(
         degradation: Some(ScreenDegradation::new(
             ScreenDegradationCode::PermissionMissing,
         )),
+    }
+}
+
+fn degradation_message(code: ScreenDegradationCode) -> &'static str {
+    match code {
+        ScreenDegradationCode::Disabled => "screen sensor is disabled in config",
+        ScreenDegradationCode::PermissionMissing => "screen capture permission is missing",
+        ScreenDegradationCode::BackendUnavailable => "screen backend is unavailable",
+        ScreenDegradationCode::Degraded => "screen sensor is degraded",
     }
 }
 
@@ -460,6 +483,42 @@ mod tests {
         assert_eq!(result.window_title, "screen.rs");
         assert_eq!(result.sensor_label, XCAP_SENSOR_LABEL);
         assert_eq!(result.bounding_boxes.len(), 1);
+    }
+
+    #[test]
+    fn disabled_probe_has_status_ready_shape() {
+        let probe = probe_config(&ScreenSensorConfig::default());
+        assert_eq!(probe.backend, ScreenBackend::Xcap);
+        assert_eq!(probe.state, ScreenState::Disabled);
+        assert_eq!(probe.mode, ScreenMode::Off);
+        assert_eq!(probe.permission, ScreenPermission::NotRequested);
+        let degradation = probe.degradation.unwrap();
+        assert_eq!(degradation.code, ScreenDegradationCode::Disabled);
+        assert_eq!(degradation.message, "screen sensor is disabled in config");
+    }
+
+    #[test]
+    fn compiled_capabilities_include_xcap_and_one_platform_ocr() {
+        let capabilities = compiled_capabilities();
+        assert!(capabilities.contains(&Capabilities::CairnSensorV1ScreenXcap));
+
+        let ocr_capabilities = capabilities
+            .iter()
+            .filter(|capability| {
+                matches!(
+                    capability,
+                    Capabilities::CairnSensorV1ScreenOcrVision
+                        | Capabilities::CairnSensorV1ScreenOcrWinrt
+                        | Capabilities::CairnSensorV1ScreenOcrTesseract
+                )
+            })
+            .count();
+        assert_eq!(ocr_capabilities, 1);
+
+        assert_eq!(
+            capabilities.contains(&Capabilities::CairnSensorV1ScreenScreenpipe),
+            cfg!(feature = "screenpipe-runtime")
+        );
     }
 
     #[test]
