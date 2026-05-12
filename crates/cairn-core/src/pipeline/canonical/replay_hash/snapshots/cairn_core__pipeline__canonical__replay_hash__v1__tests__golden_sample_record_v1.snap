@@ -1,0 +1,6 @@
+---
+source: crates/cairn-core/src/pipeline/canonical/replay_hash/v1.rs
+assertion_line: 219
+expression: hash
+---
+sha256:a397e5ef875be43edbe20ca95c7d10cb21f67762c9450ce5e120565c79bd8d88

@@ -10,6 +10,7 @@ use crate::contract::consent_journal::{
 use crate::contract::source_resolver::SourceResolverError;
 use crate::domain::SourceRef;
 use crate::generated::verbs::lint::{Finding, Kind, Severity};
+use crate::pipeline::canonical::replay_hash;
 use crate::verbs::lint::{LintInputs, LintRecord, finding, target_path, target_record};
 
 /// Runs the §6.3 provenance checks.
@@ -94,7 +95,41 @@ fn check_record(
         check_redact_on_forget(record, inputs, source_forgets, &source_hashes, findings);
     }
 
+    check_target_scope_forget(record, inputs, source_forgets, findings);
     check_legacy_duplicates(record, inputs, &source_hashes, findings);
+}
+
+fn check_target_scope_forget(
+    record: &LintRecord,
+    inputs: &LintInputs<'_>,
+    source_forgets: &[SourceForget],
+    findings: &mut Vec<Finding>,
+) {
+    let versions = inputs.consent_journal.forgotten_target_replay_versions();
+    for v in versions {
+        let Some(computed) = replay_hash::compute(&record.stored.record, v) else {
+            // Unsupported version on disk — already surfaced via the
+            // malformed-row path; do not double-emit here.
+            continue;
+        };
+        for row in source_forgets {
+            let Some(target) = row.target.as_ref() else {
+                continue;
+            };
+            if target.version == v && target.hash == computed {
+                let mut f = finding(
+                    Kind::SourceAfterForget,
+                    Severity::Error,
+                    format!(
+                        "record matches target-scope forget under replay-hash v{v} (source `{}`, op `{}`)",
+                        row.source_id, row.op_id
+                    ),
+                );
+                f.target = Some(target_record(&record.stored.record.id));
+                findings.push(f);
+            }
+        }
+    }
 }
 
 fn check_source_ref(
@@ -488,6 +523,7 @@ mod tests {
                 op_id: "forget-op-1".to_owned(),
                 source_id: "sources/chat/session-1.md".to_owned(),
                 source_bytes_hash: format!("sha256:{}", "a".repeat(64)),
+                target: None,
             }],
             malformed: Vec::new(),
         };
@@ -574,6 +610,7 @@ mod tests {
                 op_id: "forget-op-redact".to_owned(),
                 source_id: "sources/chat/session-1.md".to_owned(),
                 source_bytes_hash: hash,
+                target: None,
             }],
             malformed: Vec::new(),
         };
@@ -641,5 +678,88 @@ mod tests {
                 .iter()
                 .any(|f| f.kind == Kind::SourceLinkLegacyDuplicate)
         );
+    }
+
+    #[test]
+    fn emits_source_after_forget_for_target_scope_replay_hash_match() {
+        use crate::contract::TargetReplayKey;
+        use crate::pipeline::canonical::replay_hash;
+
+        let cfg = CairnConfig::default();
+        let record = lint_record_with_provenance(sample_provenance());
+        let replay = replay_hash::compute(&record.stored.record, 1).expect("v1");
+        let resolver = StaticResolver {
+            by_id: HashMap::from([(
+                "sources/chat/session-1.md".to_owned(),
+                b"unrelated bytes".to_vec(),
+            )]),
+        };
+        let journal = StaticJournal {
+            forgotten: std::collections::HashSet::new(),
+            source_forgets: vec![SourceForget {
+                op_id: "forget-op-target".to_owned(),
+                source_id: "sources/chat/session-1.md".to_owned(),
+                source_bytes_hash: format!("sha256:{}", "b".repeat(64)),
+                target: Some(TargetReplayKey {
+                    hash: replay,
+                    version: 1,
+                }),
+            }],
+            malformed: Vec::new(),
+        };
+        let inputs = LintInputs {
+            records: std::slice::from_ref(&record),
+            config: &cfg,
+            index_stats: IndexStats::new(1, 1),
+            author_states: empty_author_states(),
+            unresolvable_authors: empty_unresolvable_authors(),
+            consent_lookup: None,
+            source_resolver: &resolver,
+            consent_journal: &journal,
+        };
+
+        let findings = run(&inputs);
+        assert!(
+            findings.iter().any(|f| f.kind == Kind::SourceAfterForget
+                && f.message.contains("target-scope forget")
+                && f.message.contains("forget-op-target")),
+            "findings: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn finding_shape_snapshot_for_source_link_missing() {
+        let cfg = CairnConfig::default();
+        let mut provenance = sample_provenance();
+        provenance.source_refs.clear();
+        let record = lint_record_with_provenance(provenance);
+        let resolver = StaticResolver {
+            by_id: HashMap::new(),
+        };
+        let journal = StaticJournal {
+            forgotten: std::collections::HashSet::new(),
+            source_forgets: Vec::new(),
+            malformed: Vec::new(),
+        };
+        let inputs = LintInputs {
+            records: std::slice::from_ref(&record),
+            config: &cfg,
+            index_stats: IndexStats::new(1, 1),
+            author_states: empty_author_states(),
+            unresolvable_authors: empty_unresolvable_authors(),
+            consent_lookup: None,
+            source_resolver: &resolver,
+            consent_journal: &journal,
+        };
+
+        let mut findings = run(&inputs);
+        // Strip the record-id from the snapshot — it's a ULID and
+        // varies between sample_record invocations.
+        for f in &mut findings {
+            if let Some(t) = f.target.as_mut() {
+                t.record_id = None;
+            }
+        }
+        insta::assert_yaml_snapshot!("finding_shape_source_link_missing", findings);
     }
 }

@@ -50,6 +50,7 @@ pub use version::{ContractVersion, VersionRange};
 pub use agent_provider::{AgentProvider, AgentProviderCapabilities, AgentProviderPlugin};
 pub use consent_journal::{
     ConsentJournalReader, MalformedSourceForget, MalformedSourceForgetReason, SourceForget,
+    TargetReplayKey,
 };
 pub use consent_lookup::{ConsentLookup, ConsentLookupError};
 pub use frontend_adapter::{FrontendAdapter, FrontendAdapterCapabilities, FrontendAdapterPlugin};

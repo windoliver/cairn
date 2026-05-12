@@ -7,6 +7,21 @@
 
 use std::collections::HashSet;
 
+/// Versioned replay-hash key persisted on every target-scope
+/// `source_forget` row. `hash` lives in
+/// `pipeline::canonical::replay_hash` space; `version` names the
+/// frozen encoder used to mint it. Source-scope rows carry
+/// `target: None`. See the design doc Component 4.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TargetReplayKey {
+    /// `"<algo>:<hex>"` replay-hash. Same hash space as
+    /// [`crate::pipeline::canonical::replay_hash::compute`] output.
+    pub hash: String,
+    /// Frozen encoder version used to compute `hash`. Must be in
+    /// [`crate::pipeline::canonical::replay_hash::SUPPORTED_REPLAY_HASH_VERSIONS`].
+    pub version: u32,
+}
+
 /// Well-formed `source_forget` journal row relevant to lint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceForget {
@@ -16,6 +31,9 @@ pub struct SourceForget {
     pub source_id: String,
     /// Raw source-bytes hash in `SourceRef.hash` space.
     pub source_bytes_hash: String,
+    /// `Some` for target-scope forgets; `None` for source-scope. See
+    /// design doc Component 4.
+    pub target: Option<TargetReplayKey>,
 }
 
 /// Malformed `source_forget` journal row surfaced fail-closed through lint.
@@ -64,6 +82,27 @@ pub trait ConsentJournalReader: Send + Sync {
         &self,
         source_bytes_hash: &str,
     ) -> Vec<MalformedSourceForget>;
+
+    /// Encoder versions present among well-formed target-scope rows.
+    /// Source-scope rows (`target.is_none()`) are excluded — version
+    /// `0` is therefore never returned. Lint iterates this set to
+    /// compute `replay_hash::compute(record, v)` per version.
+    fn forgotten_target_replay_versions(&self) -> HashSet<u32> {
+        self.forgotten_source_forgets()
+            .into_iter()
+            .filter_map(|row| row.target.map(|t| t.version))
+            .collect()
+    }
+
+    /// Well-formed target-scope replay-hashes minted under `version`.
+    fn forgotten_target_replay_hashes_for_version(&self, version: u32) -> HashSet<String> {
+        self.forgotten_source_forgets()
+            .into_iter()
+            .filter_map(|row| row.target)
+            .filter(|t| t.version == version)
+            .map(|t| t.hash)
+            .collect()
+    }
 }
 
 #[cfg(test)]

@@ -257,11 +257,17 @@ fn parse_source_forget_row(
         }));
     }
 
-    if let Some(target) = payload.get("target").filter(|value| !value.is_null()) {
+    let target = if let Some(target) = payload.get("target").filter(|value| !value.is_null()) {
         let version = target.get("version").and_then(serde_json::Value::as_u64);
-        if let Some(version) = version
-            && version != 1
-        {
+        let Some(version) = version else {
+            return Ok(ParsedSourceForget::Malformed(MalformedSourceForget {
+                op_id,
+                source_id,
+                source_bytes_hash: Some(source_bytes_hash),
+                reason: MalformedSourceForgetReason::UnsupportedReplayHashVersion { version: 0 },
+            }));
+        };
+        if version != 1 {
             return Ok(ParsedSourceForget::Malformed(MalformedSourceForget {
                 op_id,
                 source_id,
@@ -272,20 +278,27 @@ fn parse_source_forget_row(
             }));
         }
         let target_hash = target.get("hash").and_then(serde_json::Value::as_str);
-        if !target_hash.is_some_and(looks_like_source_hash) {
+        let Some(target_hash) = target_hash.filter(|h| looks_like_source_hash(h)) else {
             return Ok(ParsedSourceForget::Malformed(MalformedSourceForget {
                 op_id,
                 source_id,
                 source_bytes_hash: Some(source_bytes_hash),
                 reason: MalformedSourceForgetReason::MalformedReplayHashFormat,
             }));
-        }
-    }
+        };
+        Some(cairn_core::contract::TargetReplayKey {
+            hash: target_hash.to_owned(),
+            version: u32::try_from(version).unwrap_or(u32::MAX),
+        })
+    } else {
+        None
+    };
 
     Ok(ParsedSourceForget::WellFormed(SourceForget {
         op_id,
         source_id,
         source_bytes_hash,
+        target,
     }))
 }
 
