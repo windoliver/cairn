@@ -1,3 +1,15 @@
 {
-  "__raw_text": "cairn search: not yet implemented in this P0 scaffold. Verb dispatch lands in a follow-up PR; no memory operation was performed."
+  "contract": "cairn.mcp.v1",
+  "error": {
+    "code": "CapabilityUnavailable",
+    "data": {
+      "capability": "cairn.mcp.v1.search.semantic",
+      "remediation": "set search.local_embeddings: true in .cairn/config.yaml and run cairn embed download to materialize the embedding model"
+    },
+    "message": "cairn search: capability unavailable: cairn.mcp.v1.search.semantic"
+  },
+  "operation_id": "<OPERATION_ID>",
+  "policy_trace": [],
+  "status": "rejected",
+  "verb": "search"
 }

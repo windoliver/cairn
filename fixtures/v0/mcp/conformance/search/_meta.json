@@ -8,8 +8,8 @@
       "kind": "stub"
     },
     "err_semantic_disabled": {
-      "kind": "stub",
-      "config": { "semantic_search": false }
+      "kind": "capability_rejected",
+      "config": { "keyword_search": true, "semantic_search": false }
     }
   }
 }
