@@ -53,8 +53,8 @@ pub use agent_provider::{AgentProvider, AgentProviderCapabilities, AgentProvider
 pub use consent_lookup::{ConsentLookup, ConsentLookupError};
 pub use frontend_adapter::{
     FrontendAdapter, FrontendAdapterCapabilities, FrontendAdapterError, FrontendAdapterPlugin,
-    FrontendEdit, FrontendEventStream, FrontendFieldClass, FrontendFieldPolicy,
-    FrontendIdentityContext, FrontendProjection, FrontendProjectionRequest,
+    FrontendBackendState, FrontendEdit, FrontendEventStream, FrontendFieldClass,
+    FrontendFieldPolicy, FrontendIdentityContext, FrontendProjection, FrontendProjectionRequest,
     FrontendReconcileError, FrontendReconcileRequest, FrontendSubscription,
 };
 pub use hot_prefix_cache::{CacheError, CachedPrefix, HotPrefixCache};

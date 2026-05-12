@@ -5,8 +5,10 @@
 
 use std::collections::BTreeMap;
 
-use crate::domain::{CanonicalRecordHash, Identity, TargetId, VerifiedSignedIntent};
+use crate::contract::memory_store::StoredRecord;
 use crate::contract::version::{ContractVersion, VersionRange};
+use crate::domain::{CanonicalRecordHash, Identity, TargetId};
+use crate::generated::envelope::SignedIntent;
 
 /// Contract version for `FrontendAdapter`. Bumps when the trait surface changes.
 #[doc(hidden)]
@@ -82,13 +84,25 @@ impl FrontendFieldPolicy {
 }
 
 /// Narrow projection request for adapter-facing backend state projection.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
+#[doc(hidden)]
+pub struct FrontendBackendState {
+    /// Canonical stored record snapshot the projection is derived from.
+    pub stored: StoredRecord,
+    /// Backend hash the frontend must present back during reconcile.
+    pub target_hash: CanonicalRecordHash,
+}
+
+/// Narrow projection request for adapter-facing backend state projection.
+#[derive(Debug, Clone, PartialEq)]
 #[doc(hidden)]
 pub struct FrontendProjectionRequest {
     /// Target record or memory identifier.
     pub target_id: TargetId,
     /// Version the caller expects to project.
     pub expected_version: u64,
+    /// Backend snapshot to project into a frontend representation.
+    pub backend: FrontendBackendState,
 }
 
 /// Narrow projection output consumed by frontends and tests.
@@ -113,8 +127,8 @@ pub struct FrontendIdentityContext {
     pub principal: Identity,
     /// Optional agent identity on whose behalf the edit originated.
     pub agent: Option<Identity>,
-    /// Signed intent envelope presented with the edit, if any.
-    pub signed_intent: Option<VerifiedSignedIntent>,
+    /// Signed intent envelope presented with the edit.
+    pub signed_intent: SignedIntent,
 }
 
 /// Raw frontend edit observed by an adapter.
@@ -157,6 +171,18 @@ pub enum FrontendReconcileError {
     /// No signed intent envelope accompanied the edit.
     #[error("frontend reconcile requires a signed intent")]
     UnsignedIntent,
+    /// Signed intent expired before the reconcile call reached apply time.
+    #[error(
+        "frontend reconcile intent expired: issued_at={issued_at}, expires_at={expires_at}, now={now}"
+    )]
+    ExpiredIntent {
+        /// Wire-form `issued_at` from the rejected envelope.
+        issued_at: String,
+        /// Wire-form `expires_at` from the rejected envelope.
+        expires_at: String,
+        /// Wall-clock instant at the time of the rejection.
+        now: String,
+    },
     /// The same signed operation was seen before.
     #[error("frontend reconcile detected a replayed operation")]
     ReplayDetected,
@@ -166,6 +192,14 @@ pub enum FrontendReconcileError {
     /// A policy gate rejected the reconcile request.
     #[error("frontend reconcile policy denied: {gate}: {reason}")]
     PolicyDenied { gate: String, reason: String },
+    /// File-originated edit must be quarantined and rolled back before apply.
+    #[error("frontend reconcile requires quarantine: {reason} ({quarantine_id:?})")]
+    QuarantineRequired {
+        /// Human-readable explanation for the quarantine.
+        reason: String,
+        /// Optional quarantine artifact identifier.
+        quarantine_id: Option<String>,
+    },
     /// Caller lacks a capability required for the attempted edit.
     #[error("frontend reconcile requires capability {required}")]
     InsufficientCapability { required: String },

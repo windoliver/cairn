@@ -8,17 +8,18 @@ use std::sync::Arc;
 
 use cairn_core::contract::conformance::{CaseStatus, Tier, run_conformance_for_plugin};
 use cairn_core::contract::frontend_adapter::{
-    FrontendAdapter, FrontendAdapterCapabilities, FrontendAdapterError, FrontendEdit,
-    FrontendFieldClass, FrontendFieldPolicy, FrontendIdentityContext, FrontendReconcileError,
+    FrontendAdapter, FrontendAdapterCapabilities, FrontendAdapterError, FrontendBackendState,
+    FrontendEdit, FrontendFieldClass, FrontendFieldPolicy, FrontendIdentityContext,
+    FrontendProjection, FrontendProjectionRequest, FrontendReconcileError,
     FrontendReconcileRequest,
 };
 use cairn_core::contract::manifest::PluginManifest;
+use cairn_core::contract::memory_store::StoredRecord;
 use cairn_core::contract::registry::{PluginName, PluginRegistry};
 use cairn_core::contract::version::{ContractVersion, VersionRange};
 use cairn_core::domain::{
     ActorChainEntry, CanonicalRecordHash, ChainRole, EvidenceVector, Identity, MemoryClass,
-    MemoryKind, MemoryRecord, MemoryVisibility, Provenance, Rfc3339Timestamp, ScopeTuple,
-    TargetId,
+    MemoryKind, MemoryRecord, MemoryVisibility, Provenance, Rfc3339Timestamp, ScopeTuple, TargetId,
 };
 
 const FRONTEND_MANIFEST: &str = r#"
@@ -91,6 +92,18 @@ impl FrontendAdapter for ConformanceFrontend {
         VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
     }
 
+    fn project(
+        &self,
+        request: &FrontendProjectionRequest,
+    ) -> Result<FrontendProjection, FrontendAdapterError> {
+        Ok(FrontendProjection {
+            body: request.backend.stored.record.body.clone(),
+            frontmatter: vec![("version".into(), request.backend.stored.version.to_string())],
+            sidecars: Vec::new(),
+            target_hash: request.backend.target_hash.clone(),
+        })
+    }
+
     fn reconcile(
         &self,
         ctx: FrontendIdentityContext,
@@ -117,10 +130,18 @@ impl FrontendAdapter for ConformanceFrontend {
         {
             return Err(FrontendReconcileError::ReplayDetected.into());
         }
+        if ctx.signed_intent.expires_at.as_str() != "2026-04-22T14:07:11Z" {
+            return Err(FrontendReconcileError::ExpiredIntent {
+                issued_at: ctx.signed_intent.issued_at.clone(),
+                expires_at: ctx.signed_intent.expires_at.clone(),
+                now: "2026-04-22T15:00:00Z".into(),
+            }
+            .into());
+        }
         if ctx.principal.as_str() != "hmn:known-user" {
-            return Err(FrontendReconcileError::PolicyDenied {
-                gate: "principal".into(),
+            return Err(FrontendReconcileError::QuarantineRequired {
                 reason: "principal is not registered for this adapter".into(),
+                quarantine_id: Some("01HQZX9F5N0000000000000001".into()),
             }
             .into());
         }
@@ -151,13 +172,19 @@ impl FrontendAdapter for ConformanceFrontend {
 fn frontend_field_policy_allows_user_content_and_metadata_only() {
     assert!(FrontendFieldPolicy::is_mutable_from_frontend("body"));
     assert!(FrontendFieldPolicy::is_mutable_from_frontend("tags"));
-    assert!(FrontendFieldPolicy::is_mutable_from_frontend("last_read_at"));
+    assert!(FrontendFieldPolicy::is_mutable_from_frontend(
+        "last_read_at"
+    ));
 
     assert!(!FrontendFieldPolicy::is_mutable_from_frontend("kind"));
-    assert!(!FrontendFieldPolicy::is_mutable_from_frontend("operation_id"));
+    assert!(!FrontendFieldPolicy::is_mutable_from_frontend(
+        "operation_id"
+    ));
     assert!(!FrontendFieldPolicy::is_mutable_from_frontend("visibility"));
     assert!(!FrontendFieldPolicy::is_mutable_from_frontend("version"));
-    assert!(!FrontendFieldPolicy::is_mutable_from_frontend("unknown_future_field"));
+    assert!(!FrontendFieldPolicy::is_mutable_from_frontend(
+        "unknown_future_field"
+    ));
 }
 
 #[test]
@@ -188,6 +215,67 @@ fn frontend_reconcile_error_exposes_immutable_field_variant() {
 }
 
 #[test]
+fn frontend_reconcile_error_exposes_expired_intent_variant() {
+    let err = FrontendReconcileError::ExpiredIntent {
+        issued_at: "2026-04-22T14:02:11Z".into(),
+        expires_at: "2026-04-22T14:07:11Z".into(),
+        now: "2026-04-22T15:00:00Z".into(),
+    };
+    let rendered = err.to_string();
+    assert!(rendered.contains("expired"));
+    assert!(rendered.contains("2026-04-22T15:00:00Z"));
+}
+
+#[test]
+fn frontend_reconcile_error_exposes_quarantine_variant() {
+    let err = FrontendReconcileError::QuarantineRequired {
+        reason: "daemon user mismatch".into(),
+        quarantine_id: Some("01HQZX9F5N0000000000000001".into()),
+    };
+    let rendered = err.to_string();
+    assert!(rendered.contains("quarantine"));
+    assert!(rendered.contains("01HQZX9F5N0000000000000001"));
+}
+
+#[test]
+fn frontend_projection_request_carries_backend_state_snapshot() {
+    let request = FrontendProjectionRequest {
+        target_id: TargetId::parse("01HQZX9F5N0000000000000000").expect("valid target id"),
+        expected_version: 100,
+        backend: FrontendBackendState {
+            stored: StoredRecord {
+                record: sample_record(),
+                version: 100,
+                schema_version: None,
+            },
+            target_hash: sample_target_hash(),
+        },
+    };
+
+    let projection = ConformanceFrontend
+        .project(&request)
+        .expect("projection should succeed");
+    assert_eq!(projection.body, "trusted body");
+    assert_eq!(
+        projection.frontmatter,
+        vec![("version".into(), "100".into())]
+    );
+    assert_eq!(projection.target_hash, sample_target_hash());
+}
+
+#[test]
+fn frontend_identity_context_carries_required_signed_intent() {
+    let ctx = FrontendIdentityContext {
+        principal: Identity::parse("hmn:known-user").expect("valid identity"),
+        agent: None,
+        signed_intent: sample_signed_intent("2026-04-22T14:07:11Z"),
+    };
+
+    assert_eq!(ctx.signed_intent.issuer.0, "hmn:known-user");
+    assert_eq!(ctx.signed_intent.expires_at, "2026-04-22T14:07:11Z");
+}
+
+#[test]
 fn frontend_adapter_runner_reports_expected_tier2_case_ids() {
     let mut reg = PluginRegistry::new();
     let name = PluginName::new("stub-frontend-runner").expect("valid");
@@ -205,8 +293,9 @@ fn frontend_adapter_runner_reports_expected_tier2_case_ids() {
     assert!(tier2_ids.contains(&"rejects_immutable_field_edits"));
     assert!(tier2_ids.contains(&"rejects_replayed_operation"));
     assert!(tier2_ids.contains(&"rejects_tampered_target_hash"));
-    assert!(tier2_ids.contains(&"rejects_unrecognized_principal"));
+    assert!(tier2_ids.contains(&"quarantines_unrecognized_principal"));
     assert!(tier2_ids.contains(&"honors_optimistic_version_check"));
+    assert!(tier2_ids.contains(&"rejects_expired_signed_intent"));
 }
 
 #[test]
@@ -223,8 +312,9 @@ fn frontend_adapter_runner_fails_unimplemented_reconcile_cases() {
         "rejects_immutable_field_edits",
         "rejects_replayed_operation",
         "rejects_tampered_target_hash",
-        "rejects_unrecognized_principal",
+        "quarantines_unrecognized_principal",
         "honors_optimistic_version_check",
+        "rejects_expired_signed_intent",
     ] {
         let outcome = outcomes
             .iter()
@@ -256,8 +346,9 @@ fn frontend_adapter_runner_marks_contract_stub_tier2_cases_ok() {
         "rejects_immutable_field_edits",
         "rejects_replayed_operation",
         "rejects_tampered_target_hash",
-        "rejects_unrecognized_principal",
+        "quarantines_unrecognized_principal",
         "honors_optimistic_version_check",
+        "rejects_expired_signed_intent",
     ] {
         let outcome = outcomes
             .iter()
@@ -273,6 +364,28 @@ fn frontend_adapter_runner_marks_contract_stub_tier2_cases_ok() {
 
 fn sample_target_hash() -> CanonicalRecordHash {
     CanonicalRecordHash::compute(&sample_record()).expect("sample record hashes")
+}
+
+fn sample_signed_intent(expires_at: &str) -> cairn_core::generated::envelope::SignedIntent {
+    serde_json::from_value(serde_json::json!({
+        "chain_parents": [],
+        "expires_at": expires_at,
+        "issued_at": "2026-04-22T14:02:11Z",
+        "issuer": "hmn:known-user",
+        "key_version": 1,
+        "nonce": "YWJjZGVmZ2hpamtsbW5vcA==",
+        "operation_id": "01HQZX9F5N0000000000000001",
+        "scope": {
+            "entity": "ent",
+            "tenant": "acme",
+            "tier": "project",
+            "workspace": "ws"
+        },
+        "server_challenge": "YWJjZGVmZ2hpamtsbW5vcA==",
+        "signature": format!("ed25519:{}", "a".repeat(128)),
+        "target_hash": sample_target_hash().as_str(),
+    }))
+    .expect("valid signed intent fixture")
 }
 
 fn sample_record() -> MemoryRecord {

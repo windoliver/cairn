@@ -37,9 +37,7 @@ fn capability_structs_default() {
 
 #[test]
 fn frontend_contract_types_are_reachable() {
-    use cairn_core::contract::{
-        FrontendFieldClass, FrontendFieldPolicy, FrontendReconcileError,
-    };
+    use cairn_core::contract::{FrontendFieldClass, FrontendFieldPolicy, FrontendReconcileError};
 
     let _: FrontendAdapterCapabilities = FrontendAdapterCapabilities::default();
     let _: FrontendFieldClass = FrontendFieldClass::UserContent;
