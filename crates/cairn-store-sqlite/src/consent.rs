@@ -12,6 +12,9 @@
 //! should wrap the two in a single `BEGIN IMMEDIATE; … COMMIT;` per
 //! brief §5.6.
 
+use std::collections::HashSet;
+
+use cairn_core::contract::{MalformedSourceForget, MalformedSourceForgetReason, SourceForget};
 use cairn_core::domain::{
     ConsentEvent, ConsentKind, ConsentPayload, Identity, Rfc3339Timestamp, SensorLabel,
 };
@@ -143,6 +146,159 @@ pub fn max_rowid(conn: &Connection) -> Result<i64, StoreError> {
         .optional()?
         .flatten();
     Ok(value.unwrap_or(0))
+}
+
+/// Every forgotten source-bytes hash currently persisted in the consent
+/// journal.
+///
+/// Today this looks for future `source_forget` rows and returns an empty
+/// set on current schemas where that kind is not yet written. Keeping the
+/// query here lets CLI lint inject a real store-backed reader now without
+/// teaching `cairn-core` about `SQLite`.
+///
+/// # Errors
+/// Returns [`StoreError`] on `SQLite` failures or malformed
+/// `source_forget` payload JSON.
+pub fn forgotten_source_bytes_hashes(conn: &Connection) -> Result<HashSet<String>, StoreError> {
+    Ok(source_forget_snapshot(conn)?
+        .rows
+        .into_iter()
+        .map(|row| row.source_bytes_hash)
+        .collect())
+}
+
+/// Parsed well-formed `source_forget` rows currently visible in the journal.
+///
+/// # Errors
+/// Returns [`StoreError`] on `SQLite` failures or malformed JSON payloads.
+pub fn forgotten_source_forgets(conn: &Connection) -> Result<Vec<SourceForget>, StoreError> {
+    Ok(source_forget_snapshot(conn)?.rows)
+}
+
+/// Parsed malformed `source_forget` rows currently visible in the journal.
+///
+/// # Errors
+/// Returns [`StoreError`] on `SQLite` failures or malformed JSON payloads.
+pub fn malformed_source_forget_rows(
+    conn: &Connection,
+) -> Result<Vec<MalformedSourceForget>, StoreError> {
+    Ok(source_forget_snapshot(conn)?.malformed)
+}
+
+#[derive(Default)]
+struct SourceForgetSnapshot {
+    rows: Vec<SourceForget>,
+    malformed: Vec<MalformedSourceForget>,
+}
+
+fn source_forget_snapshot(conn: &Connection) -> Result<SourceForgetSnapshot, StoreError> {
+    let mut stmt = conn.prepare(
+        "SELECT op_id, subject, payload_json \
+         FROM consent_journal \
+         WHERE kind = 'source_forget' \
+         ORDER BY rowid ASC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, Option<String>>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<String>>(2)?,
+        ))
+    })?;
+    let mut out = SourceForgetSnapshot::default();
+    for row in rows {
+        let (op_id, subject, payload_json) = row?;
+        let parsed = parse_source_forget_row(op_id, subject, payload_json)?;
+        match parsed {
+            ParsedSourceForget::WellFormed(row) => out.rows.push(row),
+            ParsedSourceForget::Malformed(row) => out.malformed.push(row),
+        }
+    }
+    Ok(out)
+}
+
+enum ParsedSourceForget {
+    WellFormed(SourceForget),
+    Malformed(MalformedSourceForget),
+}
+
+fn parse_source_forget_row(
+    op_id: Option<String>,
+    subject: Option<String>,
+    payload_json: Option<String>,
+) -> Result<ParsedSourceForget, StoreError> {
+    let op_id = op_id.unwrap_or_default();
+    let payload_json = payload_json.unwrap_or_else(|| "null".to_owned());
+    let payload: serde_json::Value = serde_json::from_str(&payload_json)?;
+    let source_id = payload
+        .get("source_id")
+        .and_then(serde_json::Value::as_str)
+        .map_or_else(|| subject.unwrap_or_default(), ToOwned::to_owned);
+    let source_bytes_hash = payload
+        .get("source_bytes_hash")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned);
+
+    let Some(source_bytes_hash) = source_bytes_hash else {
+        return Ok(ParsedSourceForget::Malformed(MalformedSourceForget {
+            op_id,
+            source_id,
+            source_bytes_hash: None,
+            reason: MalformedSourceForgetReason::MalformedSourceBytesHashFormat,
+        }));
+    };
+
+    if !looks_like_source_hash(&source_bytes_hash) {
+        return Ok(ParsedSourceForget::Malformed(MalformedSourceForget {
+            op_id,
+            source_id,
+            source_bytes_hash: None,
+            reason: MalformedSourceForgetReason::MalformedSourceBytesHashFormat,
+        }));
+    }
+
+    if let Some(target) = payload.get("target").filter(|value| !value.is_null()) {
+        let version = target.get("version").and_then(serde_json::Value::as_u64);
+        if let Some(version) = version
+            && version != 1
+        {
+            return Ok(ParsedSourceForget::Malformed(MalformedSourceForget {
+                op_id,
+                source_id,
+                source_bytes_hash: Some(source_bytes_hash),
+                reason: MalformedSourceForgetReason::UnsupportedReplayHashVersion {
+                    version: u32::try_from(version).unwrap_or(u32::MAX),
+                },
+            }));
+        }
+        let target_hash = target.get("hash").and_then(serde_json::Value::as_str);
+        if !target_hash.is_some_and(looks_like_source_hash) {
+            return Ok(ParsedSourceForget::Malformed(MalformedSourceForget {
+                op_id,
+                source_id,
+                source_bytes_hash: Some(source_bytes_hash),
+                reason: MalformedSourceForgetReason::MalformedReplayHashFormat,
+            }));
+        }
+    }
+
+    Ok(ParsedSourceForget::WellFormed(SourceForget {
+        op_id,
+        source_id,
+        source_bytes_hash,
+    }))
+}
+
+fn looks_like_source_hash(raw: &str) -> bool {
+    let Some((algo, hex)) = raw.split_once(':') else {
+        return false;
+    };
+    let expected_len = match algo {
+        "sha256" | "blake3" => 64,
+        "sha512" => 128,
+        _ => return false,
+    };
+    hex.len() == expected_len && hex.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 fn query_where(

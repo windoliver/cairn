@@ -39,6 +39,13 @@ pub enum Kind {
     Orphan,
     ProjectionDrift,
     ProjectionMissing,
+    SourceAfterForget,
+    SourceAfterForgetUnknownVersion,
+    SourceHashMismatch,
+    SourceLinkDangling,
+    SourceLinkLegacyDuplicate,
+    SourceLinkMissing,
+    SourceRedactSkipped,
     Stale,
     StaleSchema,
 }

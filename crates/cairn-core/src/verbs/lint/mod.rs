@@ -6,8 +6,10 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::config::CairnConfig;
+use crate::contract::consent_journal::ConsentJournalReader;
 use crate::contract::consent_lookup::ConsentLookup;
 use crate::contract::memory_store::{IndexStats, StoredRecord};
+use crate::contract::source_resolver::SourceResolver;
 use crate::domain::Identity;
 use crate::domain::record::RecordId;
 use crate::generated::verbs::lint::{
@@ -64,6 +66,11 @@ pub struct LintInputs<'a> {
     /// wired one — the §6.5 check downgrades to a no-op so `lint` stays
     /// useful in fixture-only / pre-#253 contexts.
     pub consent_lookup: Option<&'a (dyn ConsentLookup + 'a)>,
+    /// Resolver for immutable source bytes referenced by
+    /// `record.provenance.source_refs`.
+    pub source_resolver: &'a (dyn SourceResolver + 'a),
+    /// Read-only forget-related view of `consent_journal`.
+    pub consent_journal: &'a (dyn ConsentJournalReader + 'a),
 }
 
 impl std::fmt::Debug for LintInputs<'_> {
@@ -75,6 +82,8 @@ impl std::fmt::Debug for LintInputs<'_> {
             .field("author_states", &self.author_states.len())
             .field("unresolvable_authors", &self.unresolvable_authors.len())
             .field("consent_lookup", &self.consent_lookup.is_some())
+            .field("source_resolver", &"<dyn SourceResolver>")
+            .field("consent_journal", &"<dyn ConsentJournalReader>")
             .finish()
     }
 }
@@ -99,6 +108,61 @@ pub(crate) fn empty_unresolvable_authors() -> &'static HashSet<Identity> {
     use std::sync::OnceLock;
     static S: OnceLock<HashSet<Identity>> = OnceLock::new();
     S.get_or_init(HashSet::new)
+}
+
+#[cfg(test)]
+struct EmptySourceResolver;
+
+#[cfg(test)]
+impl SourceResolver for EmptySourceResolver {
+    fn exists(&self, _id: &str) -> bool {
+        false
+    }
+
+    fn read(&self, _id: &str) -> Result<Vec<u8>, crate::contract::SourceResolverError> {
+        Err(crate::contract::SourceResolverError::NotFound)
+    }
+
+    fn locator(&self, id: &str) -> String {
+        format!("empty:{id}")
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn empty_source_resolver() -> &'static dyn SourceResolver {
+    static RESOLVER: EmptySourceResolver = EmptySourceResolver;
+    &RESOLVER
+}
+
+#[cfg(test)]
+struct EmptyConsentJournal;
+
+#[cfg(test)]
+impl ConsentJournalReader for EmptyConsentJournal {
+    fn forgotten_source_bytes_hashes(&self) -> HashSet<String> {
+        HashSet::new()
+    }
+
+    fn forgotten_source_forgets(&self) -> Vec<crate::contract::SourceForget> {
+        Vec::new()
+    }
+
+    fn malformed_source_forget_rows(&self) -> Vec<crate::contract::MalformedSourceForget> {
+        Vec::new()
+    }
+
+    fn malformed_source_forget_rows_for_source(
+        &self,
+        _source_bytes_hash: &str,
+    ) -> Vec<crate::contract::MalformedSourceForget> {
+        Vec::new()
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn empty_consent_journal() -> &'static dyn ConsentJournalReader {
+    static JOURNAL: EmptyConsentJournal = EmptyConsentJournal;
+    &JOURNAL
 }
 
 /// Run every check, aggregate findings, return the canonical `LintData`.
@@ -166,6 +230,13 @@ fn kind_key(k: Kind) -> String {
         Kind::DeferredCheck => "deferred_check",
         Kind::ProjectionDrift => "projection_drift",
         Kind::ProjectionMissing => "projection_missing",
+        Kind::SourceAfterForget => "source_after_forget",
+        Kind::SourceAfterForgetUnknownVersion => "source_after_forget_unknown_version",
+        Kind::SourceHashMismatch => "source_hash_mismatch",
+        Kind::SourceLinkDangling => "source_link_dangling",
+        Kind::SourceLinkLegacyDuplicate => "source_link_legacy_duplicate",
+        Kind::SourceLinkMissing => "source_link_missing",
+        Kind::SourceRedactSkipped => "source_redact_skipped",
     }
     .to_owned()
 }
@@ -234,6 +305,8 @@ mod tests {
             author_states: crate::verbs::lint::empty_author_states(),
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: None,
+            source_resolver: crate::verbs::lint::empty_source_resolver(),
+            consent_journal: crate::verbs::lint::empty_consent_journal(),
         };
         let data = run_checks(&inputs).await;
         // Empty records: consent (#253) is wired but has nothing to
@@ -242,8 +315,8 @@ mod tests {
         // emits one Warning DeferredCheck because the default recipe
         // leans on steps the canary cannot reproduce exactly
         // (purpose, index, pinned_feedback, active_playbook,
-        // recent_user_signal). Provenance (#257) remains a stub →
-        // 2 DeferredCheck findings (1 Warning + 1 Info).
+        // recent_user_signal). Provenance (#257) now runs real
+        // record-level checks, so with no records it emits nothing.
         assert_eq!(data.summary.total, data.findings.len() as u64);
         assert_eq!(data.summary.by_severity.error, 0);
         assert_eq!(data.summary.by_severity.warning, 1);
@@ -252,9 +325,9 @@ mod tests {
                 .iter()
                 .filter(|f| matches!(f.kind, Kind::DeferredCheck))
                 .count(),
-            2
+            1
         );
-        assert_eq!(data.summary.by_severity.info, 1);
+        assert_eq!(data.summary.by_severity.info, 0);
     }
 
     #[tokio::test]
@@ -299,6 +372,8 @@ mod tests {
             author_states: crate::verbs::lint::empty_author_states(),
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: None,
+            source_resolver: crate::verbs::lint::empty_source_resolver(),
+            consent_journal: crate::verbs::lint::empty_consent_journal(),
         };
         let inputs_rev = LintInputs {
             records: &reversed,
@@ -307,6 +382,8 @@ mod tests {
             author_states: crate::verbs::lint::empty_author_states(),
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: None,
+            source_resolver: crate::verbs::lint::empty_source_resolver(),
+            consent_journal: crate::verbs::lint::empty_consent_journal(),
         };
 
         let fwd = canonicalize(&run_checks(&inputs_fwd).await.findings);
@@ -325,6 +402,8 @@ mod tests {
             author_states: crate::verbs::lint::empty_author_states(),
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: None,
+            source_resolver: crate::verbs::lint::empty_source_resolver(),
+            consent_journal: crate::verbs::lint::empty_consent_journal(),
         };
         let data = run_checks(&inputs).await;
         assert_eq!(data.summary.total, data.findings.len() as u64);
@@ -338,17 +417,17 @@ mod tests {
         // returns `Same` and no finding fires. hot_memory (#259) is
         // a real canary now and emits one Warning DeferredCheck for
         // the default recipe's deferred steps. Provenance (#257)
-        // remains a stub → 2 DeferredCheck findings (1 Warning +
-        // 1 Info), 1 Error.
-        assert_eq!(data.summary.by_severity.error, 1);
+        // now runs real checks, and the sample record's empty
+        // `source_refs` yields a `SourceLinkMissing` Error.
+        assert_eq!(data.summary.by_severity.error, 2);
         assert_eq!(data.summary.by_severity.warning, 1);
         assert_eq!(
             data.findings
                 .iter()
                 .filter(|f| matches!(f.kind, Kind::DeferredCheck))
                 .count(),
-            2
+            1
         );
-        assert_eq!(data.summary.by_severity.info, 1);
+        assert_eq!(data.summary.by_severity.info, 0);
     }
 }

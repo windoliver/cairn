@@ -112,7 +112,10 @@ mod tests {
 
     #[test]
     fn error_display_is_operator_readable() {
-        assert_eq!(format!("{}", SourceResolverError::NotFound), "source not found");
+        assert_eq!(
+            format!("{}", SourceResolverError::NotFound),
+            "source not found"
+        );
         assert_eq!(
             format!(
                 "{}",
