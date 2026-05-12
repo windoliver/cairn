@@ -7,7 +7,8 @@ use std::process::Command;
 
 use cairn_core::domain::{
     ActorChainEntry, CaptureEvent, CaptureEventId, CaptureMode, CapturePayload, CaptureRefs,
-    ChainRole, Identity, PayloadHash, Rfc3339Timestamp, SourceFamily,
+    ChainRole, Identity, MemoryRecord, PayloadHash, Rfc3339Timestamp, SourceFamily,
+    TerminalContext,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -113,6 +114,215 @@ fn write_capture_trace_event(vault: &Path, session: &str, turn: &str, body: &str
     let mut f = std::fs::File::create(&trace_path).expect("create trace JSONL");
     let line = serde_json::to_string(&event).expect("serialize event");
     writeln!(f, "{line}").expect("write trace JSONL");
+    trace_path
+}
+
+fn write_source_for_family(vault: &Path, family: &str, event_id: &str, body: &str) -> String {
+    let sources = vault.join("sources").join(family);
+    std::fs::create_dir_all(&sources).expect("create source family dir");
+    let payload_ref = format!("sources/{family}/{event_id}.txt");
+    std::fs::write(vault.join(&payload_ref), body).expect("write source body");
+    payload_ref
+}
+
+#[allow(clippy::too_many_arguments)]
+fn make_trace_hook_event(
+    event_id: &str,
+    hook_name: &str,
+    session: &str,
+    turn: &str,
+    timestamp: &str,
+    tool_id: Option<&str>,
+    payload_ref: &str,
+    body: &str,
+) -> CaptureEvent {
+    let sensor =
+        Identity::parse("snr:local:hook:cc-session:v1").expect("invariant: valid sensor id");
+    CaptureEvent {
+        event_id: CaptureEventId::parse(event_id).expect("invariant: valid ULID"),
+        sensor_id: sensor.clone(),
+        capture_mode: CaptureMode::Auto,
+        actor_chain: vec![ActorChainEntry {
+            role: ChainRole::Author,
+            identity: sensor,
+            at: Rfc3339Timestamp::parse(timestamp).expect("invariant: valid RFC-3339"),
+        }],
+        refs: Some(CaptureRefs {
+            session_id: Some(session.to_owned()),
+            turn_id: Some(turn.to_owned()),
+            tool_id: tool_id.map(ToOwned::to_owned),
+        }),
+        payload_hash: PayloadHash::parse(format!("sha256:{}", sha256_hex(body)))
+            .expect("invariant: valid sha256 hash"),
+        payload_ref: payload_ref.to_owned(),
+        captured_at: Rfc3339Timestamp::parse(timestamp).expect("invariant: valid RFC-3339"),
+        payload: CapturePayload::Hook {
+            hook_name: hook_name.to_owned(),
+            tool_name: None,
+        },
+        source_family: SourceFamily::Hook,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn make_trace_terminal_event(
+    event_id: &str,
+    session: &str,
+    turn: &str,
+    timestamp: &str,
+    tool_id: &str,
+    payload_ref: &str,
+    body: &str,
+) -> CaptureEvent {
+    let sensor =
+        Identity::parse("snr:local:terminal:default:v1").expect("invariant: valid sensor id");
+    CaptureEvent {
+        event_id: CaptureEventId::parse(event_id).expect("invariant: valid ULID"),
+        sensor_id: sensor.clone(),
+        capture_mode: CaptureMode::Auto,
+        actor_chain: vec![ActorChainEntry {
+            role: ChainRole::Author,
+            identity: sensor,
+            at: Rfc3339Timestamp::parse(timestamp).expect("invariant: valid RFC-3339"),
+        }],
+        refs: Some(CaptureRefs {
+            session_id: Some(session.to_owned()),
+            turn_id: Some(turn.to_owned()),
+            tool_id: Some(tool_id.to_owned()),
+        }),
+        payload_hash: PayloadHash::parse(format!("sha256:{}", sha256_hex(body)))
+            .expect("invariant: valid sha256 hash"),
+        payload_ref: payload_ref.to_owned(),
+        captured_at: Rfc3339Timestamp::parse(timestamp).expect("invariant: valid RFC-3339"),
+        payload: CapturePayload::Terminal {
+            command: "bash -lc 'cargo test -p cairn-core'".into(),
+            exit_code: Some(0),
+            context: Some(TerminalContext::InteractiveTty),
+        },
+        source_family: SourceFamily::Terminal,
+    }
+}
+
+fn make_trace_agent_event(
+    event_id: &str,
+    session: &str,
+    turn: &str,
+    timestamp: &str,
+    payload_ref: &str,
+    body: &str,
+) -> CaptureEvent {
+    let sensor =
+        Identity::parse("snr:local:proactive:codex:v1").expect("invariant: valid sensor id");
+    let author =
+        Identity::parse("agt:codex:gpt-5:main:v1").expect("invariant: valid agent identity");
+    CaptureEvent {
+        event_id: CaptureEventId::parse(event_id).expect("invariant: valid ULID"),
+        sensor_id: sensor,
+        capture_mode: CaptureMode::Proactive,
+        actor_chain: vec![ActorChainEntry {
+            role: ChainRole::Author,
+            identity: author,
+            at: Rfc3339Timestamp::parse(timestamp).expect("invariant: valid RFC-3339"),
+        }],
+        refs: Some(CaptureRefs {
+            session_id: Some(session.to_owned()),
+            turn_id: Some(turn.to_owned()),
+            tool_id: None,
+        }),
+        payload_hash: PayloadHash::parse(format!("sha256:{}", sha256_hex(body)))
+            .expect("invariant: valid sha256 hash"),
+        payload_ref: payload_ref.to_owned(),
+        captured_at: Rfc3339Timestamp::parse(timestamp).expect("invariant: valid RFC-3339"),
+        payload: CapturePayload::Proactive {
+            kind: "agent_message".into(),
+            rationale: "assistant trace message".into(),
+        },
+        source_family: SourceFamily::Proactive,
+    }
+}
+
+fn write_full_scope_trace_fixture(vault: &Path, session: &str, turn: &str) -> PathBuf {
+    let user_id = "01ARZ3NDEKTSV4RRFFQ69G5FAN";
+    let agent_id = "01ARZ3NDEKTSV4RRFFQ69G5FAP";
+    let pre_id = "01ARZ3NDEKTSV4RRFFQ69G5FAQ";
+    let output_id = "01ARZ3NDEKTSV4RRFFQ69G5FAR";
+    let post_id = "01ARZ3NDEKTSV4RRFFQ69G5FAS";
+    let stop_id = "01ARZ3NDEKTSV4RRFFQ69G5FAT";
+    let tool_id = "toolu_cli_full_scope_01";
+
+    let user_body = "Please run the targeted tests.";
+    let agent_body = "I will run the targeted core tests now.";
+    let pre_body = r#"{"tool":"bash","input":{"command":"cargo test -p cairn-core"}}"#;
+    let output_body = "\x1b[32mrunning 3 tests\x1b[0m\nall passed\n";
+    let post_body = r#"{"tool":"bash","exit_code":0}"#;
+    let stop_body = "turn ended";
+
+    let events = [
+        make_trace_hook_event(
+            user_id,
+            "UserPromptSubmit",
+            session,
+            turn,
+            "2026-05-02T02:00:01Z",
+            None,
+            &write_source_for_family(vault, "hook", user_id, user_body),
+            user_body,
+        ),
+        make_trace_agent_event(
+            agent_id,
+            session,
+            turn,
+            "2026-05-02T02:00:02Z",
+            &write_source_for_family(vault, "proactive", agent_id, agent_body),
+            agent_body,
+        ),
+        make_trace_hook_event(
+            pre_id,
+            "PreToolUse",
+            session,
+            turn,
+            "2026-05-02T02:00:03Z",
+            Some(tool_id),
+            &write_source_for_family(vault, "hook", pre_id, pre_body),
+            pre_body,
+        ),
+        make_trace_terminal_event(
+            output_id,
+            session,
+            turn,
+            "2026-05-02T02:00:04Z",
+            tool_id,
+            &write_source_for_family(vault, "terminal", output_id, output_body),
+            output_body,
+        ),
+        make_trace_hook_event(
+            post_id,
+            "PostToolUse",
+            session,
+            turn,
+            "2026-05-02T02:00:05Z",
+            Some(tool_id),
+            &write_source_for_family(vault, "hook", post_id, post_body),
+            post_body,
+        ),
+        make_trace_hook_event(
+            stop_id,
+            "Stop",
+            session,
+            turn,
+            "2026-05-02T02:00:06Z",
+            None,
+            &write_source_for_family(vault, "hook", stop_id, stop_body),
+            stop_body,
+        ),
+    ];
+
+    let trace_path = vault.join("full-scope-trace.jsonl");
+    let mut f = std::fs::File::create(&trace_path).expect("create full-scope trace JSONL");
+    for event in &events {
+        writeln!(f, "{}", serde_json::to_string(event).expect("event json"))
+            .expect("write full-scope trace JSONL");
+    }
     trace_path
 }
 
@@ -396,6 +606,160 @@ fn capture_trace_returns_committed_envelope() {
     assert_eq!(v["data"]["failed_turns"].as_array().map(Vec::len), Some(0));
     assert!(v["operation_id"].is_string());
     assert!(v["policy_trace"].is_array());
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "CLI-level regression intentionally covers a full six-event trace turn"
+)]
+fn capture_trace_cli_imports_full_trace_scope_e2e() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    cairn_cli::vault::bootstrap(&cairn_cli::vault::BootstrapOpts {
+        vault_path: dir.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap vault");
+    let session = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let turn = "turn-cli-full-scope";
+    let trace_path = write_full_scope_trace_fixture(dir.path(), session, turn);
+
+    let out = cli()
+        .current_dir(dir.path())
+        .args([
+            "capture_trace",
+            "--from",
+            trace_path.to_str().expect("utf-8 trace path"),
+            "--json",
+        ])
+        .output()
+        .expect("cairn capture_trace --json");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "capture_trace should exit 0 (committed), got {:?}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    let v: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("capture_trace JSON parse failed: {e}\nstdout: {stdout:?}"));
+    assert_eq!(v["contract"], "cairn.mcp.v1");
+    assert_eq!(v["status"], "committed");
+    assert_eq!(v["verb"], "capture_trace");
+    assert_eq!(v["data"]["failed_turns"].as_array().map(Vec::len), Some(0));
+
+    let conn =
+        rusqlite::Connection::open(dir.path().join(".cairn").join("cairn.db")).expect("open db");
+    let mut stmt = conn
+        .prepare("SELECT record_json FROM records WHERE active = 1")
+        .expect("prepare record query");
+    let records = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("query records")
+        .map(|row| {
+            let json = row.expect("record_json row");
+            serde_json::from_str::<MemoryRecord>(&json)
+                .unwrap_or_else(|e| panic!("record_json parse failed: {e}\njson: {json}"))
+        })
+        .collect::<Vec<_>>();
+
+    let mut turn_records = records
+        .iter()
+        .filter(|record| {
+            record
+                .extra_frontmatter
+                .get("trace")
+                .and_then(|trace| trace.get("turn_id"))
+                .and_then(|value| value.as_str())
+                == Some(turn)
+        })
+        .collect::<Vec<_>>();
+    let summary_count = turn_records
+        .iter()
+        .filter(|record| {
+            record
+                .extra_frontmatter
+                .get("trace_event")
+                .and_then(|value| value.as_str())
+                == Some("turn_summary")
+        })
+        .count();
+    assert_eq!(summary_count, 1, "Stop should create one turn summary");
+    turn_records.retain(|record| {
+        record
+            .extra_frontmatter
+            .get("trace_event")
+            .and_then(|value| value.as_str())
+            != Some("turn_summary")
+    });
+    turn_records.sort_by_key(|record| {
+        record
+            .extra_frontmatter
+            .get("trace")
+            .and_then(|trace| trace.get("sequence"))
+            .and_then(|value| value.as_u64())
+            .expect("trace sequence")
+    });
+
+    let trace_events = turn_records
+        .iter()
+        .map(|record| {
+            record
+                .extra_frontmatter
+                .get("trace_event")
+                .and_then(|value| value.as_str())
+                .expect("trace_event")
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        trace_events,
+        [
+            "user_message",
+            "agent_message",
+            "pre_tool",
+            "tool_output",
+            "post_tool",
+            "stop",
+        ]
+    );
+
+    let tool_output = turn_records
+        .iter()
+        .find(|record| {
+            record
+                .extra_frontmatter
+                .get("trace_event")
+                .and_then(|value| value.as_str())
+                == Some("tool_output")
+        })
+        .expect("tool_output row");
+    assert!(tool_output.body.contains("running 3 tests"));
+    assert!(tool_output.body.contains("all passed"));
+    assert!(
+        !tool_output.body.contains('\x1b'),
+        "CLI capture_trace must squash interactive terminal body before persist"
+    );
+    let parent = tool_output.extra_frontmatter["trace"]["parent_event_id"]
+        .as_str()
+        .expect("tool_output parent_event_id");
+    assert_eq!(parent, "01ARZ3NDEKTSV4RRFFQ69G5FAQ");
+
+    let post_tool = turn_records
+        .iter()
+        .find(|record| {
+            record
+                .extra_frontmatter
+                .get("trace_event")
+                .and_then(|value| value.as_str())
+                == Some("post_tool")
+        })
+        .expect("post_tool row");
+    let parent = post_tool.extra_frontmatter["trace"]["parent_event_id"]
+        .as_str()
+        .expect("post_tool parent_event_id");
+    assert_eq!(parent, "01ARZ3NDEKTSV4RRFFQ69G5FAQ");
 }
 
 #[test]
