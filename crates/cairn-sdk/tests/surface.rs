@@ -682,6 +682,45 @@ fn retrieve_profile_requires_user_or_agent() {
     }
 }
 
+#[test]
+fn retrieve_tool_call_rejects_empty_fields_with_invalid_args() {
+    let args = RetrieveArgs::ToolCall {
+        session_id: String::new(),
+        turn_id: "turn-1".to_owned(),
+        tool_call_id: "call-1".to_owned(),
+    };
+    match sdk().retrieve(&args).expect_err("must reject") {
+        SdkError::InvalidArgs { reason } => {
+            assert!(reason.contains("session_id"), "reason: {reason}");
+        }
+        other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+
+    let args = RetrieveArgs::ToolCall {
+        session_id: "session-1".to_owned(),
+        turn_id: String::new(),
+        tool_call_id: "call-1".to_owned(),
+    };
+    match sdk().retrieve(&args).expect_err("must reject") {
+        SdkError::InvalidArgs { reason } => {
+            assert!(reason.contains("turn_id"), "reason: {reason}");
+        }
+        other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+
+    let args = RetrieveArgs::ToolCall {
+        session_id: "session-1".to_owned(),
+        turn_id: "turn-1".to_owned(),
+        tool_call_id: String::new(),
+    };
+    match sdk().retrieve(&args).expect_err("must reject") {
+        SdkError::InvalidArgs { reason } => {
+            assert!(reason.contains("tool_call_id"), "reason: {reason}");
+        }
+        other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn search_rejects_empty_and_filter_with_invalid_args() {
     let args = SearchArgs {

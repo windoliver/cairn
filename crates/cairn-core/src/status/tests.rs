@@ -110,6 +110,33 @@ fn forget_record_advertises_when_runtime_is_wired() {
 }
 
 #[test]
+fn retrieve_session_turn_and_tool_call_advertise_when_runtime_is_wired() {
+    let g = gates(true, true, None);
+    let caps = advertise(&g);
+    for cap in [
+        Capabilities::CairnMcpV1RetrieveSession,
+        Capabilities::CairnMcpV1RetrieveTurn,
+        Capabilities::CairnMcpV1RetrieveToolCall,
+    ] {
+        assert!(
+            caps.contains(&cap),
+            "wired retrieve target {cap:?} must be advertised"
+        );
+    }
+    for cap in [
+        Capabilities::CairnMcpV1RetrieveRecord,
+        Capabilities::CairnMcpV1RetrieveFolder,
+        Capabilities::CairnMcpV1RetrieveScope,
+        Capabilities::CairnMcpV1RetrieveProfile,
+    ] {
+        assert!(
+            !caps.contains(&cap),
+            "unwired retrieve target {cap:?} must not be advertised"
+        );
+    }
+}
+
+#[test]
 fn forget_session_pinned_to_v0_2_phase() {
     let mut g = gates(true, true, None);
     g.contract_phase = Phase::V0_1;
@@ -397,6 +424,7 @@ mod exhaustiveness {
             Capabilities::CairnMcpV1RetrieveRecord => "retrieve.record",
             Capabilities::CairnMcpV1RetrieveSession => "retrieve.session",
             Capabilities::CairnMcpV1RetrieveTurn => "retrieve.turn",
+            Capabilities::CairnMcpV1RetrieveToolCall => "retrieve.tool_call",
             Capabilities::CairnMcpV1RetrieveFolder => "retrieve.folder",
             Capabilities::CairnMcpV1RetrieveScope => "retrieve.scope",
             Capabilities::CairnMcpV1RetrieveProfile => "retrieve.profile",
@@ -432,6 +460,7 @@ mod exhaustiveness {
             Capabilities::CairnMcpV1RetrieveRecord,
             Capabilities::CairnMcpV1RetrieveSession,
             Capabilities::CairnMcpV1RetrieveTurn,
+            Capabilities::CairnMcpV1RetrieveToolCall,
             Capabilities::CairnMcpV1RetrieveFolder,
             Capabilities::CairnMcpV1RetrieveScope,
             Capabilities::CairnMcpV1RetrieveProfile,

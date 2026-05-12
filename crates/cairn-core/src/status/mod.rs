@@ -146,7 +146,7 @@ pub fn advertise(gates: &CapabilityGates) -> Vec<Capabilities> {
 
     let phase = gates.contract_phase;
     let cfg = &gates.config;
-    let mut out = Vec::with_capacity(8);
+    let mut out = Vec::with_capacity(9);
 
     // ── search ────────────────────────────────────────────────────────────
     if cfg.keyword_search && gates.store_ok(|s| s.fts) {
@@ -193,6 +193,9 @@ pub fn advertise(gates: &CapabilityGates) -> Vec<Capabilities> {
     }
     if wiring::RETRIEVE_TURN_WIRED {
         out.push(Capabilities::CairnMcpV1RetrieveTurn);
+    }
+    if wiring::RETRIEVE_TOOL_CALL_WIRED {
+        out.push(Capabilities::CairnMcpV1RetrieveToolCall);
     }
     if wiring::RETRIEVE_FOLDER_WIRED {
         out.push(Capabilities::CairnMcpV1RetrieveFolder);

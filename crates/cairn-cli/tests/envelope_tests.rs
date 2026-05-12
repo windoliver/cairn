@@ -1013,9 +1013,22 @@ fn status_in_bound_vault_advertises_search_and_policy_trace() {
         "hybrid must NOT be advertised when no embedding model is on disk \
          (runtime resolves an embedder for hybrid mode); got {caps:?}"
     );
-    for stub_cap in [
+    for wired_cap in [
         "cairn.mcp.v1.retrieve.session",
+        "cairn.mcp.v1.retrieve.turn",
+        "cairn.mcp.v1.retrieve.tool_call",
+    ] {
+        assert!(
+            caps.contains(wired_cap),
+            "wired retrieve capability {wired_cap} must be advertised; got {caps:?}"
+        );
+    }
+    for stub_cap in [
+        "cairn.mcp.v1.retrieve.record",
         "cairn.mcp.v1.retrieve.full",
+        "cairn.mcp.v1.retrieve.folder",
+        "cairn.mcp.v1.retrieve.scope",
+        "cairn.mcp.v1.retrieve.profile",
         "cairn.mcp.v1.forget.session",
     ] {
         assert!(
