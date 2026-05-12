@@ -59,15 +59,12 @@ impl ProjectedTraceBlocks {
 
 /// Map a [`CaptureEvent`] to a [`TraceEvent`]. Static rules; no LLM.
 ///
-/// **P0 supports only the four hook payloads** routed by hook name
-/// (brief §9.3): `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`.
-/// The remaining `TraceEvent` variants — `AgentMessage`, `ToolOutput`,
-/// `TurnSummary` — are produced by other paths: `AgentMessage` and
-/// `ToolOutput` await sensor adapters (issue #84); `TurnSummary` is
-/// generated post-hoc by [`crate::pipeline::turn::summarize_turn`] and
-/// never reaches `classify`. Until those land, JSONL streams that
-/// include them will fail their entire turn at the importer (the
-/// importer fails closed rather than persisting a partial set).
+/// Hook payloads route by hook name (brief §9.3). Terminal payloads
+/// with a tool reference are raw tool output, and proactive payloads
+/// whose kind explicitly names an agent/assistant message become
+/// assistant trace messages. `TurnSummary` is generated post-hoc by
+/// [`crate::pipeline::turn::summarize_turn`] and never reaches
+/// `classify`.
 ///
 /// # Errors
 ///
@@ -79,9 +76,24 @@ pub fn classify(event: &CaptureEvent) -> Result<TraceEvent, TraceProjectError> {
             "UserPromptSubmit" => Ok(TraceEvent::UserMessage),
             "PreToolUse" => Ok(TraceEvent::PreTool),
             "PostToolUse" => Ok(TraceEvent::PostTool),
+            "ToolOutput" => Ok(TraceEvent::ToolOutput),
             "Stop" => Ok(TraceEvent::Stop),
             _ => Err(TraceProjectError::Unclassifiable),
         },
+        CapturePayload::Terminal { .. }
+            if event
+                .refs
+                .as_ref()
+                .and_then(|refs| refs.tool_id.as_ref())
+                .is_some() =>
+        {
+            Ok(TraceEvent::ToolOutput)
+        }
+        CapturePayload::Proactive { kind, .. }
+            if matches!(kind.as_str(), "agent_message" | "assistant_message") =>
+        {
+            Ok(TraceEvent::AgentMessage)
+        }
         _ => Err(TraceProjectError::Unclassifiable),
     }
 }
@@ -290,7 +302,7 @@ mod tests {
         ActorChainEntry, ChainRole, Identity, Rfc3339Timestamp, SessionId,
         capture::{
             CaptureEvent, CaptureEventId, CaptureMode, CapturePayload, CaptureRefs, PayloadHash,
-            SourceFamily,
+            SourceFamily, TerminalContext,
         },
     };
     use crate::pipeline::extract::body;
@@ -333,6 +345,49 @@ mod tests {
             },
             source_family: SourceFamily::Hook,
         }
+    }
+
+    fn mk_terminal_event(tool_id: Option<&str>) -> CaptureEvent {
+        let mut event = mk_hook_event("UserPromptSubmit");
+        event.sensor_id =
+            Identity::parse("snr:local:terminal:default:v1").expect("valid terminal sensor");
+        event.actor_chain = vec![ActorChainEntry {
+            role: ChainRole::Author,
+            identity: event.sensor_id.clone(),
+            at: ts(),
+        }];
+        event.refs = Some(CaptureRefs {
+            session_id: Some("sess".into()),
+            turn_id: Some("turn".into()),
+            tool_id: tool_id.map(ToOwned::to_owned),
+        });
+        event.payload_ref = "sources/terminal/01ARZ3NDEKTSV4RRFFQ69G5FAV.txt".into();
+        event.payload = CapturePayload::Terminal {
+            command: "cargo test".into(),
+            exit_code: Some(0),
+            context: Some(TerminalContext::NonInteractiveOrStructured),
+        };
+        event.source_family = SourceFamily::Terminal;
+        event
+    }
+
+    fn mk_proactive_event(kind: &str) -> CaptureEvent {
+        let mut event = mk_hook_event("UserPromptSubmit");
+        event.sensor_id =
+            Identity::parse("snr:local:proactive:codex:v1").expect("valid proactive sensor");
+        event.capture_mode = CaptureMode::Proactive;
+        event.actor_chain = vec![ActorChainEntry {
+            role: ChainRole::Author,
+            identity: Identity::parse("agt:codex:gpt-5:main:v1").expect("valid agent"),
+            at: ts(),
+        }];
+        event.payload_ref = "sources/proactive/01ARZ3NDEKTSV4RRFFQ69G5FAV.txt".into();
+        event.payload = CapturePayload::Proactive {
+            kind: kind.into(),
+            rationale: "captured final agent response".into(),
+        };
+        event.source_family = SourceFamily::Proactive;
+        event
     }
 
     #[test]
@@ -379,6 +434,49 @@ mod tests {
             classify(&mk_hook_event("PostToolUse")).unwrap(),
             TraceEvent::PostTool
         );
+    }
+
+    #[test]
+    fn classifies_hook_tool_output() {
+        let mut event = mk_hook_event("ToolOutput");
+        event.refs.as_mut().expect("refs").tool_id = Some("toolu_1".into());
+        assert_eq!(classify(&event).unwrap(), TraceEvent::ToolOutput);
+    }
+
+    #[test]
+    fn classifies_terminal_tool_output_when_tool_ref_present() {
+        assert_eq!(
+            classify(&mk_terminal_event(Some("toolu_1"))).unwrap(),
+            TraceEvent::ToolOutput
+        );
+    }
+
+    #[test]
+    fn rejects_terminal_without_tool_ref() {
+        assert!(matches!(
+            classify(&mk_terminal_event(None)).unwrap_err(),
+            TraceProjectError::Unclassifiable
+        ));
+    }
+
+    #[test]
+    fn classifies_proactive_agent_message_kinds() {
+        assert_eq!(
+            classify(&mk_proactive_event("agent_message")).unwrap(),
+            TraceEvent::AgentMessage
+        );
+        assert_eq!(
+            classify(&mk_proactive_event("assistant_message")).unwrap(),
+            TraceEvent::AgentMessage
+        );
+    }
+
+    #[test]
+    fn rejects_other_proactive_kinds() {
+        assert!(matches!(
+            classify(&mk_proactive_event("knowledge_gap")).unwrap_err(),
+            TraceProjectError::Unclassifiable
+        ));
     }
 
     #[test]

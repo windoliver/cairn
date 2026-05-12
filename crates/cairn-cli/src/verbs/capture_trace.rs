@@ -35,7 +35,7 @@ use cairn_core::generated::envelope::{
 };
 use cairn_core::generated::verbs::capture_trace::{CaptureTraceData, FailedTurn};
 use cairn_core::pipeline::capture_trace::{classify, project};
-use cairn_core::pipeline::dispatch::{BypassReason, DefaultRegistry, DispatchDecision, dispatch};
+use cairn_core::pipeline::dispatch::{DefaultRegistry, trace_body_bytes};
 use cairn_core::pipeline::extract::body::ResolvedBody;
 use cairn_core::pipeline::filter::{Decision, FilterInputs, fence, redact, should_memorize};
 use cairn_core::pipeline::turn::summarize_turn;
@@ -255,13 +255,10 @@ async fn run_handler_inner(
         let mut needs_parent_from_store: Vec<(usize, String)> = Vec::new();
 
         for event in &group {
-            // Classify the event. P0 only recognizes the four hook payloads
-            // (UserPromptSubmit / PreToolUse / PostToolUse / Stop). Other
-            // shapes (`AgentMessage`, `ToolOutput`) await sensor adapters
-            // (#84). Fail the whole turn on the first unclassifiable event
-            // rather than persisting a partial set: the summary record
-            // would otherwise be built from incomplete data and become
-            // hard-to-detect data loss.
+            // Classify the event. Fail the whole turn on the first
+            // unclassifiable event rather than persisting a partial set:
+            // the summary record would otherwise be built from incomplete
+            // data and become hard-to-detect data loss.
             let classified = match classify(event) {
                 Ok(c) => c,
                 Err(e) => {
@@ -278,56 +275,42 @@ async fn run_handler_inner(
                 had_stop = true;
             }
 
-            // Capture → Extract dispatch (issue #217). Every event reaching
-            // this driver passes through the routing decision before we
-            // resolve the body bytes from sources/. P0 trace replay only
-            // accepts hook payloads (classify() rejects everything else),
-            // so the decision is always `Bypass(NonTerminalFamily)` —
-            // raw bytes flow to Extract unchanged. Calling dispatch here
-            // anyway makes the routing path live in production: a future
-            // PR that admits a Terminal payload here cannot bypass the
-            // squash gate, and a malformed envelope is rejected with
-            // `MalformedEnvelope` before we open `sources/`.
-            match dispatch(event, &DefaultRegistry) {
-                DispatchDecision::Bypass(BypassReason::NonTerminalFamily) => {}
-                DispatchDecision::Bypass(BypassReason::MalformedEnvelope) => {
-                    failed_turns.push((
-                        session_str.clone(),
-                        turn_str.clone(),
-                        format!("dispatch {}: malformed envelope", event.event_id),
-                    ));
-                    group_failed = true;
-                    break;
-                }
-                other => {
-                    // classify() already rejected non-hook payloads; reaching
-                    // any other dispatch decision means the classifier and
-                    // dispatch driver disagree about routing. Surface as a
-                    // turn-level failure rather than silently proceeding.
-                    failed_turns.push((
-                        session_str.clone(),
-                        turn_str.clone(),
-                        format!(
-                            "dispatch {}: unexpected decision {other:?} for hook payload",
-                            event.event_id
-                        ),
-                    ));
-                    group_failed = true;
-                    break;
-                }
-            }
-
-            // Resolve body from sources/, then run the same pre-persist
+            // Resolve body from sources/, route it through the Capture →
+            // Extract dispatch decision, then run the same pre-persist
             // filter gate used by write-path ingest. A discard rejects the
             // whole turn before projection so trace rows and summaries cannot
             // contain partial privacy-blocked content.
-            let raw_text = match resolve_body_text(vault_root, event).await {
-                Ok(t) => t,
+            let raw_bytes = match resolve_body_bytes(vault_root, event).await {
+                Ok(bytes) => bytes,
                 Err(e) => {
                     failed_turns.push((
                         session_str.clone(),
                         turn_str.clone(),
                         format!("resolve_body: {e}"),
+                    ));
+                    group_failed = true;
+                    break;
+                }
+            };
+            let body_bytes = match trace_body_bytes(event, &raw_bytes, &DefaultRegistry) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    failed_turns.push((
+                        session_str.clone(),
+                        turn_str.clone(),
+                        format!("trace_body {}: {e}", event.event_id),
+                    ));
+                    group_failed = true;
+                    break;
+                }
+            };
+            let raw_text = match String::from_utf8(body_bytes) {
+                Ok(text) => text,
+                Err(e) => {
+                    failed_turns.push((
+                        session_str.clone(),
+                        turn_str.clone(),
+                        format!("resolve_body: routed body is not valid UTF-8: {e}"),
                     ));
                     group_failed = true;
                     break;
@@ -555,8 +538,8 @@ fn bind_record_scope(record: &mut cairn_core::domain::MemoryRecord, scope_bindin
 }
 
 /// Read the payload bytes referenced by `event.payload_ref` from disk
-/// (relative to `vault_root`), verify the SHA-256 hash matches
-/// `event.payload_hash`, and return the body as a UTF-8 `String`.
+/// (relative to `vault_root`) and verify the SHA-256 hash matches
+/// `event.payload_hash`.
 ///
 /// The `payload_hash` field may be prefixed with `"sha256:"` — this prefix
 /// is stripped before comparison.
@@ -565,8 +548,7 @@ fn bind_record_scope(record: &mut cairn_core::domain::MemoryRecord, scope_bindin
 ///
 /// - I/O error reading the file.
 /// - SHA-256 mismatch between the stored hash and the computed hash.
-/// - Bytes not valid UTF-8.
-async fn resolve_body_text(vault_root: &Path, event: &CaptureEvent) -> anyhow::Result<String> {
+async fn resolve_body_bytes(vault_root: &Path, event: &CaptureEvent) -> anyhow::Result<Vec<u8>> {
     // Trust boundary: `payload_ref` is caller-supplied (the JSONL on disk).
     // A matching `payload_hash` is integrity, not authorization — without a
     // path containment check, a crafted entry like `../../../etc/passwd`
@@ -609,8 +591,7 @@ async fn resolve_body_text(vault_root: &Path, event: &CaptureEvent) -> anyhow::R
         );
     }
 
-    String::from_utf8(bytes)
-        .with_context(|| format!("payload at {} is not valid UTF-8", path.display()))
+    Ok(bytes)
 }
 
 /// Compute the lowercase hex SHA-256 digest of `bytes`.
