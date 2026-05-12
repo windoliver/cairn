@@ -41,6 +41,16 @@ pub enum Capabilities {
     CairnMcpV1ExtensionFederation,
     #[serde(rename = "cairn.mcp.v1.extension.sessiontree")]
     CairnMcpV1ExtensionSessiontree,
+    #[serde(rename = "cairn.sensor.v1.screen.xcap")]
+    CairnSensorV1ScreenXcap,
+    #[serde(rename = "cairn.sensor.v1.screen.screenpipe")]
+    CairnSensorV1ScreenScreenpipe,
+    #[serde(rename = "cairn.sensor.v1.screen.ocr.vision")]
+    CairnSensorV1ScreenOcrVision,
+    #[serde(rename = "cairn.sensor.v1.screen.ocr.winrt")]
+    CairnSensorV1ScreenOcrWinrt,
+    #[serde(rename = "cairn.sensor.v1.screen.ocr.tesseract")]
+    CairnSensorV1ScreenOcrTesseract,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]

@@ -87,4 +87,9 @@ pub const CAPABILITIES: &[&str] = &[
     "cairn.mcp.v1.extension.admin",
     "cairn.mcp.v1.extension.federation",
     "cairn.mcp.v1.extension.sessiontree",
+    "cairn.sensor.v1.screen.xcap",
+    "cairn.sensor.v1.screen.screenpipe",
+    "cairn.sensor.v1.screen.ocr.vision",
+    "cairn.sensor.v1.screen.ocr.winrt",
+    "cairn.sensor.v1.screen.ocr.tesseract",
 ];

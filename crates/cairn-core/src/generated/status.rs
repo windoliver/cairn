@@ -5,6 +5,92 @@
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatusResponseSensorsScreenBackend {
+    Xcap,
+    Screenpipe,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatusResponseSensorsScreenDegradationCode {
+    #[serde(rename = "screen.disabled")]
+    ScreenDisabled,
+    #[serde(rename = "screen.permission_missing")]
+    ScreenPermissionMissing,
+    #[serde(rename = "screen.backend_unavailable")]
+    ScreenBackendUnavailable,
+    #[serde(rename = "screen.degraded")]
+    ScreenDegraded,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusResponseSensorsScreenDegradation {
+    pub code: StatusResponseSensorsScreenDegradationCode,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatusResponseSensorsScreenMode {
+    Off,
+    Snapshot,
+    Continuous,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatusResponseSensorsScreenOcrEngine {
+    Vision,
+    Winrt,
+    Tesseract,
+    Off,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatusResponseSensorsScreenPermission {
+    NotRequested,
+    Granted,
+    Denied,
+    Revoked,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatusResponseSensorsScreenState {
+    Disabled,
+    PermissionMissing,
+    Degraded,
+    Enabled,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusResponseSensorsScreen {
+    pub backend: StatusResponseSensorsScreenBackend,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub degradation: Option<StatusResponseSensorsScreenDegradation>,
+    pub mode: StatusResponseSensorsScreenMode,
+    pub ocr_engine: StatusResponseSensorsScreenOcrEngine,
+    pub permission: StatusResponseSensorsScreenPermission,
+    pub state: StatusResponseSensorsScreenState,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusResponseSensors {
+    pub screen: StatusResponseSensorsScreen,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StatusResponseServerInfo {
@@ -21,6 +107,7 @@ pub struct StatusResponse {
     pub capabilities: Vec<crate::generated::common::Capabilities>,
     pub contract: String,
     pub extensions: Vec<crate::generated::common::Namespace>,
+    pub sensors: StatusResponseSensors,
     pub server_info: StatusResponseServerInfo,
 }
 
