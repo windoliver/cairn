@@ -704,6 +704,29 @@ mod tests {
     }
 
     #[test]
+    fn config_error_weight_display() {
+        let e = ConfigError::InvalidWeight {
+            field: "vault.hot_memory.god_node_weight",
+            value: 1.01,
+            min: 0.0,
+            max: 1.0,
+        };
+        assert_eq!(
+            e.to_string(),
+            "invalid weight for vault.hot_memory.god_node_weight: value 1.01 must be in [0, 1]"
+        );
+        assert!(matches!(
+            e,
+            ConfigError::InvalidWeight {
+                field: "vault.hot_memory.god_node_weight",
+                value: 1.01,
+                min: 0.0,
+                max: 1.0,
+            }
+        ));
+    }
+
+    #[test]
     fn config_error_env_var_display() {
         let e = ConfigError::UnresolvedEnvVar("OPENAI_API_KEY".into());
         assert_eq!(
@@ -853,6 +876,20 @@ mod tests {
     fn validate_rejects_hot_memory_god_node_weight_below_zero() {
         let mut config = CairnConfig::default();
         config.vault.hot_memory.god_node_weight = -0.01;
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidWeight {
+                field: "vault.hot_memory.god_node_weight",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_hot_memory_god_node_weight_nan() {
+        let mut config = CairnConfig::default();
+        config.vault.hot_memory.god_node_weight = f32::NAN;
         let err = config.validate().unwrap_err();
         assert!(matches!(
             err,
