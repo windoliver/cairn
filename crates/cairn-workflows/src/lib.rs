@@ -8,10 +8,12 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod consolidation;
 pub mod consent_mirror;
 pub mod scheduler;
 pub mod sqlite_store;
 
+pub use consolidation::ConsolidationPayload;
 pub use consent_mirror::{ConsentLogMaterializer, MirrorError};
 pub use scheduler::{Clock, MockClock, Scheduler, SchedulerConfig, SystemClock};
 pub use sqlite_store::{SqliteJobStore, SqliteJobStoreInitError};
