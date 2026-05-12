@@ -73,6 +73,18 @@ fn cairn_env_override_wins_over_file() {
 }
 
 #[test]
+fn cairn_env_override_sets_screen_backend() {
+    let dir = tempfile::tempdir().unwrap();
+    temp_env::with_var("CAIRN_SENSORS__SCREEN__BACKEND", Some("screenpipe"), || {
+        let config = load(dir.path(), &CliOverrides::default()).unwrap();
+        assert_eq!(
+            config.sensors.screen.backend,
+            cairn_core::config::ScreenBackend::Screenpipe
+        );
+    });
+}
+
+#[test]
 fn invalid_config_returns_error() {
     let dir = tempfile::tempdir().unwrap();
     // zero budget is invalid

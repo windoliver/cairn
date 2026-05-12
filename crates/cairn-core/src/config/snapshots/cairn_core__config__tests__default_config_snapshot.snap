@@ -1,5 +1,6 @@
 ---
 source: crates/cairn-core/src/config/mod.rs
+assertion_line: 1115
 expression: json
 ---
 {
@@ -53,7 +54,17 @@ expression: json
       "enabled": true
     },
     "screen": {
-      "enabled": false
+      "enabled": false,
+      "backend": "xcap",
+      "ocr": {
+        "engine": "auto"
+      },
+      "allow_apps": [],
+      "blur_password_fields": true,
+      "budget": {
+        "max_frames_per_minute": 12,
+        "max_text_bytes_per_event": 16384
+      }
     },
     "slack": {
       "enabled": false,

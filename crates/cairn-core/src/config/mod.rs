@@ -411,7 +411,7 @@ pub struct SensorsConfig {
     /// IDE sensor configuration.
     pub ide: SensorToggle,
     /// Screen sensor configuration.
-    pub screen: SensorToggle,
+    pub screen: ScreenSensorConfig,
     /// Slack sensor configuration.
     pub slack: SlackSensorConfig,
 }
@@ -421,7 +421,7 @@ impl Default for SensorsConfig {
         Self {
             hooks: SensorToggle { enabled: true },
             ide: SensorToggle { enabled: true },
-            screen: SensorToggle { enabled: false },
+            screen: ScreenSensorConfig::default(),
             slack: SlackSensorConfig::default(),
         }
     }
@@ -432,6 +432,94 @@ impl Default for SensorsConfig {
 pub struct SensorToggle {
     /// Whether this sensor is enabled.
     pub enabled: bool,
+}
+
+/// Screen sensor backend selection (brief §9.1, ADR 0003).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum ScreenBackend {
+    /// In-process xcap capture path. Default P0 backend.
+    #[default]
+    Xcap,
+    /// Optional screenpipe subprocess path behind `screenpipe-runtime`.
+    Screenpipe,
+}
+
+/// Screen OCR engine requested in config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum ScreenOcrEngine {
+    /// Resolve to the platform default at runtime.
+    #[default]
+    Auto,
+    /// Apple Vision OCR.
+    Vision,
+    /// Windows Runtime OCR.
+    Winrt,
+    /// Tesseract OCR.
+    Tesseract,
+    /// Capture metadata without OCR text.
+    Off,
+}
+
+/// OCR-specific screen sensor configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ScreenOcrConfig {
+    /// Requested OCR engine.
+    pub engine: ScreenOcrEngine,
+}
+
+/// Capture budgets enforced before screen observations enter policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScreenCaptureBudget {
+    /// Maximum frames accepted per minute.
+    pub max_frames_per_minute: u32,
+    /// Maximum OCR text bytes retained per event.
+    pub max_text_bytes_per_event: u32,
+}
+
+impl Default for ScreenCaptureBudget {
+    fn default() -> Self {
+        Self {
+            max_frames_per_minute: 12,
+            max_text_bytes_per_event: 16_384,
+        }
+    }
+}
+
+/// Screen sensor configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScreenSensorConfig {
+    /// Whether the screen sensor may capture.
+    pub enabled: bool,
+    /// Capture backend.
+    pub backend: ScreenBackend,
+    /// OCR engine configuration.
+    pub ocr: ScreenOcrConfig,
+    /// Focused apps allowed for capture. Empty means no app restriction.
+    pub allow_apps: Vec<String>,
+    /// Whether password fields are blurred or dropped before policy.
+    pub blur_password_fields: bool,
+    /// Capture budget limits.
+    pub budget: ScreenCaptureBudget,
+}
+
+impl Default for ScreenSensorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            backend: ScreenBackend::Xcap,
+            ocr: ScreenOcrConfig::default(),
+            allow_apps: Vec::new(),
+            blur_password_fields: true,
+            budget: ScreenCaptureBudget::default(),
+        }
+    }
 }
 
 /// Slack sensor configuration.
@@ -548,6 +636,8 @@ pub struct CapabilitySet {
     pub llm_extract: bool,
     /// True iff the pipeline chain contains an `agent` worker.
     pub agent_extract: bool,
+    /// True iff config explicitly enables screen capture.
+    pub screen_capture_enabled: bool,
     /// False for `sqlite` (P0). P1+ stores may advertise this.
     pub graph_edges: bool,
 }
@@ -607,6 +697,19 @@ impl CairnConfig {
             }
         }
 
+        if self.sensors.screen.budget.max_frames_per_minute == 0 {
+            return Err(ConfigError::InvalidBudget {
+                field: "sensors.screen.budget.max_frames_per_minute",
+                value: 0_u64,
+            });
+        }
+        if self.sensors.screen.budget.max_text_bytes_per_event == 0 {
+            return Err(ConfigError::InvalidBudget {
+                field: "sensors.screen.budget.max_text_bytes_per_event",
+                value: 0_u64,
+            });
+        }
+
         // 5. LLM extractor in chain requires an LLM provider
         let has_llm_worker = self
             .pipeline
@@ -655,6 +758,7 @@ impl CairnConfig {
             hybrid_search: llm_on,
             llm_extract: llm_on,
             agent_extract,
+            screen_capture_enabled: self.sensors.screen.enabled,
             graph_edges: false, // P0: sqlite always false; P1+ gates on store capability
         }
     }
@@ -772,6 +876,27 @@ mod tests {
     }
 
     #[test]
+    fn default_screen_config_is_safe_and_off() {
+        let screen = &CairnConfig::default().sensors.screen;
+        assert!(!screen.enabled);
+        assert_eq!(screen.backend, ScreenBackend::Xcap);
+        assert_eq!(screen.ocr.engine, ScreenOcrEngine::Auto);
+        assert!(screen.allow_apps.is_empty());
+        assert!(screen.blur_password_fields);
+        assert_eq!(screen.budget.max_frames_per_minute, 12);
+        assert_eq!(screen.budget.max_text_bytes_per_event, 16_384);
+    }
+
+    #[test]
+    fn screen_toggle_shape_still_deserializes() {
+        let json = r#"{"sensors":{"screen":{"enabled":false}}}"#;
+        let config: CairnConfig = serde_json::from_str(json).unwrap();
+        assert!(!config.sensors.screen.enabled);
+        assert_eq!(config.sensors.screen.backend, ScreenBackend::Xcap);
+        assert_eq!(config.sensors.screen.ocr.engine, ScreenOcrEngine::Auto);
+    }
+
+    #[test]
     fn default_orchestrator_is_local() {
         assert_eq!(
             CairnConfig::default().workflows.orchestrator,
@@ -811,6 +936,34 @@ mod tests {
         config.pipeline.extract.chain[0].budget.max_tokens = Some(0);
         let err = config.validate().unwrap_err();
         assert!(matches!(err, ConfigError::InvalidBudget { .. }));
+    }
+
+    #[test]
+    fn validate_rejects_zero_screen_frame_budget() {
+        let mut config = CairnConfig::default();
+        config.sensors.screen.budget.max_frames_per_minute = 0;
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidBudget {
+                field: "sensors.screen.budget.max_frames_per_minute",
+                value: 0
+            }
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_zero_screen_text_budget() {
+        let mut config = CairnConfig::default();
+        config.sensors.screen.budget.max_text_bytes_per_event = 0;
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidBudget {
+                field: "sensors.screen.budget.max_text_bytes_per_event",
+                value: 0
+            }
+        ));
     }
 
     #[test]
@@ -923,6 +1076,10 @@ mod tests {
         assert!(!caps.hybrid_search, "no LLM → no hybrid");
         assert!(!caps.llm_extract, "no LLM → no llm_extract");
         assert!(!caps.agent_extract, "default chain has no agent worker");
+        assert!(
+            !caps.screen_capture_enabled,
+            "screen capture is off by default"
+        );
         assert!(!caps.graph_edges, "sqlite → no graph edges");
     }
 
