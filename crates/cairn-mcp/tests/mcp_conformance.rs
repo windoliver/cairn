@@ -13,30 +13,88 @@
 #[path = "common/mod.rs"]
 mod common;
 
-use cairn_core::config::CapabilitySet;
+use std::sync::Arc;
+
+use cairn_core::config::{CairnConfig, CapabilitySet};
+use cairn_core::domain::ScopeTuple;
 use cairn_core::generated::common::Capabilities;
+use cairn_core::mcp_auth::{McpAuthContext, McpSessionScope, ScopeResolutionError};
 use cairn_core::status::{CapabilityGates, Phase, StoreCaps, advertise};
 use cairn_mcp::CairnMcpHandler;
+use cairn_test_fixtures::graph::tiny_graph as tiny_graph_async;
 use cairn_test_fixtures::mcp::conformance::{
-    CaseKind, ConformanceCase, ConfigOverrides, canonicalize, load_all, load_case,
+    CaseKind, ConfigOverrides, ConformanceCase, canonicalize, load_all, load_case,
 };
 use rmcp::ServiceExt as _;
 use tokio::io::BufReader;
 
 use common::{do_initialize, recv_frame, send_frame};
 
+/// Scope resolver that returns a fixed allowed-scope list. Used by the wired
+/// handler path in `build_handler_for`.
+struct StaticScope(Vec<ScopeTuple>);
+
+impl McpSessionScope for StaticScope {
+    fn allowed_scopes(
+        &self,
+        _ctx: &McpAuthContext<'_>,
+    ) -> Result<Vec<ScopeTuple>, ScopeResolutionError> {
+        Ok(self.0.clone())
+    }
+}
+
 /// Build a handler with the case's capability gates wired in.
 ///
-/// This intentionally uses `CairnMcpHandler::new()` (the unwired variant) for
-/// most cases — that's the same handler `smoke.rs` and `init_status_parity.rs`
-/// use for protocol-layer assertions, and it produces deterministic envelopes
-/// for the unwired verbs at v0.1. Cases that need a real store (a few of the
-/// `Ok` ones, e.g., `ingest/ok_minimal`) construct a wired handler via the
-/// existing `tiny_graph_async` helper.
-fn build_handler_for(_config: ConfigOverrides) -> CairnMcpHandler {
-    // For Task 6 + 7 we only need the unwired handler. Wired handlers land in
-    // Task 8 when wired-store happy-path fixtures arrive.
-    CairnMcpHandler::new()
+/// Fast path: `ConfigOverrides::default()` returns `CairnMcpHandler::new()`
+/// (the unwired variant). All 19 v0.1 fixtures use the default, so the suite
+/// stays fast and deterministic.
+///
+/// Wired path: any non-default `ConfigOverrides` builds a real store-backed
+/// handler via `tiny_graph_async()` + `with_store_scope_and_sqlite`, with a
+/// `CairnConfig` that mirrors the case's overrides:
+/// - `cfg.search.local_embeddings = config.semantic_search` — disabling
+///   `local_embeddings` causes `capabilities()` to produce
+///   `semantic_search: false` AND `hybrid_search: false` regardless of the
+///   embedding provider. Enabling it requires `embedding_provider_ready` to
+///   also be true; the store's `vector` cap drives that in the handler.
+/// - `config.keyword_search` has no matching config knob (`capabilities()`
+///   always returns `keyword_search: true`). If a future fixture needs
+///   `keyword_search: false`, add a `CapabilitySet` override path here.
+/// - `config.policy_trace` has no direct config field (`capabilities()`
+///   hard-codes `policy_trace: true` in P0). Tracked as a gap; until the
+///   config knob exists, `policy_trace: false` overrides are silently ignored
+///   in the wired path and the case must use the unwired handler or fixture
+///   assertions must tolerate the discrepancy.
+/// - `config.aggregate_extension_enabled` / `admin_extension_enabled` are
+///   runtime-registered, not `CapabilitySet` fields. Wired path currently has
+///   no hook for them; cases testing extension gates rely on the unwired
+///   handler (which also doesn't register them).
+async fn build_handler_for(config: ConfigOverrides) -> CairnMcpHandler {
+    if config == ConfigOverrides::default() {
+        // Fast path: unwired handler, no store spin-up.
+        return CairnMcpHandler::new();
+    }
+
+    // Wired path: build a real store-backed handler and mirror the config
+    // overrides that have a direct CairnConfig field mapping.
+    let f = tiny_graph_async().await;
+    let mut cfg = CairnConfig::default();
+    cfg.mcp.stdio.single_tenant = true;
+    cfg.mcp.stdio.principal = Some(f.scope_a.clone());
+
+    // Mirror semantic/hybrid gate: local_embeddings = false prevents the
+    // handler from advertising or routing semantic/hybrid even when the
+    // embedding provider is ready.
+    cfg.search.local_embeddings = config.semantic_search;
+
+    // NOTE: policy_trace (config.policy_trace) has no CairnConfig field yet
+    // — capabilities() always returns policy_trace: true. Ignored here.
+    // NOTE: aggregate_extension_enabled / admin_extension_enabled are runtime
+    // registrations, not CapabilitySet fields. Ignored here.
+
+    let scope: Arc<dyn McpSessionScope> = Arc::new(StaticScope(vec![f.scope_a.clone()]));
+    let store_dyn: Arc<dyn cairn_core::contract::memory_store::MemoryStore> = f.store.clone();
+    CairnMcpHandler::with_store_scope_and_sqlite(store_dyn, f.store, scope, cfg, f.scope_a)
 }
 
 /// Round-trip one envelope through a fresh handler via `tools/call` over
@@ -132,13 +190,13 @@ fn unwrap_envelope_from_tool_result(resp: &serde_json::Value) -> serde_json::Val
 /// the structural level.
 ///
 /// Per-kind rules (brief §8.0.b):
-/// - `Ok`:               `status == "committed"`, no `error` field.
-/// - `InvalidArgs`:      `status == "rejected"`, `error.code` present.
+/// - `Ok`: `status == "committed"`, no `error` field.
+/// - `InvalidArgs`: `status == "rejected"`, `error.code` present.
 /// - `CapabilityRejected`: `error.code == "CapabilityUnavailable"`,
-///                       `error.data.capability` present.
-/// - `ExtensionRejected`: some rejection signal present (no `status ==
-///                       "committed"`), flexible on error code.
-/// - `Stub`:             no structural assertion — pass through.
+///   `error.data.capability` present.
+/// - `ExtensionRejected`: some rejection signal present
+///   (no `status == "committed"`), flexible on error code.
+/// - `Stub`: no structural assertion — pass through.
 fn assert_envelope_structure(case: &ConformanceCase, actual: &serde_json::Value) {
     match case.kind {
         CaseKind::Ok => {
@@ -206,7 +264,7 @@ fn assert_envelope_structure(case: &ConformanceCase, actual: &serde_json::Value)
 async fn conformance_envelope_replay() {
     for case in load_all() {
         eprintln!("[conformance] {}", case.id);
-        let handler = build_handler_for(case.config);
+        let handler = build_handler_for(case.config).await;
         let actual = dispatch_envelope(handler, &case.request).await;
 
         let actual_canon = canonicalize(&actual);
@@ -556,7 +614,7 @@ mod runner_self_tests {
         // handler produces.
         case.response["data"]["hits"] = serde_json::json!([{ "definitely": "wrong" }]);
 
-        let handler = build_handler_for(case.config);
+        let handler = build_handler_for(case.config).await;
         let actual = dispatch_envelope(handler, &case.request).await;
 
         let result = std::panic::catch_unwind(|| {

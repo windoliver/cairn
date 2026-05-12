@@ -47,7 +47,7 @@ pub enum CaseKind {
     /// Same as `CapabilityRejected` but for verbs from an extension namespace
     /// that the runtime does not advertise (brief §8.0.a, extensions table).
     ExtensionRejected,
-    /// v0.1 dispatch_stub state — verb is in the tool list but its handler
+    /// v0.1 `dispatch_stub` state — verb is in the tool list but its handler
     /// returns a `__raw_text` placeholder, not a structured envelope. No
     /// structural assertion is applied. To be re-blessed and re-classified
     /// once handler wiring lands.
