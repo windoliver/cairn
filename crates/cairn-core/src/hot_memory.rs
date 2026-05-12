@@ -82,6 +82,7 @@ pub struct HotMemoryOptions {
 
 /// Cache state reported by the caller.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum HotMemoryCacheStatus {
     /// Assembled result came from cache.
     Hit,
@@ -284,12 +285,16 @@ fn compare_sources(
 }
 
 fn rank(source: &HotMemorySource, god_node_weight: f32) -> f32 {
-    let base = (clean_score(source.salience) + clean_score(source.evidence_score)) / 2.0;
+    let base = clean_score(source.salience).midpoint(clean_score(source.evidence_score));
     (base * (1.0 - god_node_weight)) + (clean_score(source.centrality_score) * god_node_weight)
 }
 
 fn clean_score(score: f32) -> f32 {
-    if score.is_nan() { 0.0 } else { score }
+    if score.is_finite() {
+        score.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
 }
 
 fn clamp_weight(weight: f32) -> f32 {
@@ -478,5 +483,81 @@ mod tests {
             },
         );
         assert!(out.prefix.find("central").unwrap() < out.prefix.find("evidence").unwrap());
+    }
+
+    #[test]
+    fn cache_status_serializes_as_snake_case() {
+        let json = serde_json::to_string(&HotMemoryCacheStatus::Refreshed).unwrap();
+        assert_eq!(json, r#""refreshed""#);
+    }
+
+    #[test]
+    fn non_finite_scores_do_not_outrank_valid_scores() {
+        let input = HotMemoryInput {
+            sources: vec![
+                HotMemorySource {
+                    salience: f32::INFINITY,
+                    evidence_score: f32::NAN,
+                    centrality_score: f32::INFINITY,
+                    ..source(
+                        HotMemorySourceKind::HighSalience,
+                        "01J0000000000000000000001",
+                        "invalid",
+                        0.0,
+                    )
+                },
+                HotMemorySource {
+                    salience: 0.5,
+                    evidence_score: 0.5,
+                    centrality_score: 0.5,
+                    ..source(
+                        HotMemorySourceKind::HighSalience,
+                        "01J0000000000000000000002",
+                        "valid",
+                        0.0,
+                    )
+                },
+            ],
+            source_revision: "rev-d".to_owned(),
+        };
+        let out = assemble_hot_memory(
+            &input,
+            HotMemoryOptions {
+                budget_bytes: 4096,
+                god_node_weight: 0.5,
+                cache: HotMemoryCacheInfo::miss("key-d"),
+            },
+        );
+        assert!(out.prefix.find("valid").unwrap() < out.prefix.find("invalid").unwrap());
+    }
+
+    #[test]
+    fn ties_fall_back_to_record_id_ascending() {
+        let input = HotMemoryInput {
+            sources: vec![
+                source(
+                    HotMemorySourceKind::HighSalience,
+                    "01J0000000000000000000002",
+                    "second",
+                    0.5,
+                ),
+                source(
+                    HotMemorySourceKind::HighSalience,
+                    "01J0000000000000000000001",
+                    "first",
+                    0.5,
+                ),
+            ],
+            source_revision: "rev-e".to_owned(),
+        };
+        let out = assemble_hot_memory(
+            &input,
+            HotMemoryOptions {
+                budget_bytes: 4096,
+                god_node_weight: 0.0,
+                cache: HotMemoryCacheInfo::miss("key-e"),
+            },
+        );
+        assert!(out.prefix.find("first").unwrap() < out.prefix.find("second").unwrap());
     }
 }
