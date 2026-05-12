@@ -649,41 +649,61 @@ async fn handle_search(
         explain: args.explain.unwrap_or(false),
     };
 
-    let outcome =
-        match cairn_core::verbs::search::run(store.as_ref(), &config, &caps, request).await {
-            Ok(o) => o,
-            Err(cairn_core::verbs::search::SearchError::CapabilityUnavailable { capability }) => {
-                let remediation = cairn_core::status::remediation_for(capability);
-                let msg = match remediation {
-                    Some(hint) => format!(
-                        "cairn search: capability unavailable: {capability}\n  hint: {hint}"
-                    ),
-                    None => format!("cairn search: capability unavailable: {capability}"),
-                };
-                return CallToolResult::error(vec![Content::text(msg)]);
+    let outcome = match cairn_core::verbs::search::run(store.as_ref(), &config, &caps, request)
+        .await
+    {
+        Ok(o) => o,
+        Err(cairn_core::verbs::search::SearchError::CapabilityUnavailable { capability }) => {
+            // Emit a structured §8.0.b rejection envelope so conformance
+            // tests and MCP clients can machine-read the error code and
+            // capability id rather than parsing a plain-text message.
+            // operation_id is required per §8.0.b even on rejections.
+            let operation_id = cairn_core::time::new_operation_id();
+            let mut error_data = serde_json::json!({ "capability": capability });
+            if let Some(hint) = cairn_core::status::remediation_for(capability) {
+                error_data["remediation"] = serde_json::Value::String(hint.to_owned());
             }
-            Err(cairn_core::verbs::search::SearchError::InvalidArgs { reason }) => {
-                return CallToolResult::error(vec![Content::text(format!(
-                    "cairn search: invalid args: {reason}"
-                ))]);
-            }
-            Err(cairn_core::verbs::search::SearchError::InvalidFilter { reason }) => {
-                return CallToolResult::error(vec![Content::text(format!(
-                    "cairn search: invalid filter: {reason}"
-                ))]);
-            }
-            Err(cairn_core::verbs::search::SearchError::Store(e)) => {
-                return CallToolResult::error(vec![Content::text(format!(
-                    "cairn search: store error: {e}"
-                ))]);
-            }
-            // Forward-compat: surface unknown error variants as internal errors.
-            Err(e) => {
-                return CallToolResult::error(vec![Content::text(format!(
-                    "cairn search: internal error: {e}"
-                ))]);
-            }
-        };
+            let envelope = serde_json::json!({
+                "contract": "cairn.mcp.v1",
+                "verb": "search",
+                "operation_id": operation_id.0,
+                "status": "rejected",
+                "error": {
+                    "code": "CapabilityUnavailable",
+                    "message": format!("cairn search: capability unavailable: {capability}"),
+                    "data": error_data
+                },
+                "policy_trace": []
+            });
+            // Serialization of a serde_json::json! literal is always
+            // infallible (all values are JSON-representable). Fall back
+            // to a plain-text message rather than panicking.
+            let body = serde_json::to_string(&envelope)
+                .unwrap_or_else(|_| format!("cairn search: capability unavailable: {capability}"));
+            return CallToolResult::error(vec![Content::text(body)]);
+        }
+        Err(cairn_core::verbs::search::SearchError::InvalidArgs { reason }) => {
+            return CallToolResult::error(vec![Content::text(format!(
+                "cairn search: invalid args: {reason}"
+            ))]);
+        }
+        Err(cairn_core::verbs::search::SearchError::InvalidFilter { reason }) => {
+            return CallToolResult::error(vec![Content::text(format!(
+                "cairn search: invalid filter: {reason}"
+            ))]);
+        }
+        Err(cairn_core::verbs::search::SearchError::Store(e)) => {
+            return CallToolResult::error(vec![Content::text(format!(
+                "cairn search: store error: {e}"
+            ))]);
+        }
+        // Forward-compat: surface unknown error variants as internal errors.
+        Err(e) => {
+            return CallToolResult::error(vec![Content::text(format!(
+                "cairn search: internal error: {e}"
+            ))]);
+        }
+    };
 
     search_outcome_to_result(outcome, mode)
 }
