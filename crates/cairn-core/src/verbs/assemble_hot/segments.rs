@@ -171,6 +171,10 @@ pub enum AssembleHotValidationError {
         /// The offending byte offset.
         offset: u64,
     },
+    /// `data.recipe` is `Some("")`; the schema declares the field as a
+    /// non-empty string when present.
+    #[error("data.recipe must be a non-empty string when present")]
+    EmptyRecipeName,
 }
 
 /// Build (`prefix`, `segments`) from a configured recipe and parallel
@@ -254,6 +258,12 @@ pub fn validate_base(data: &AssembleHotData) -> Result<(), AssembleHotValidation
             bytes: data.bytes,
             prefix_len,
         });
+    }
+    // The schema declares `recipe` as a non-empty string when present;
+    // enforce that at the deserialize trust boundary so contract-invalid
+    // envelopes cannot propagate through typed code paths.
+    if matches!(data.recipe.as_deref(), Some("")) {
+        return Err(AssembleHotValidationError::EmptyRecipeName);
     }
     Ok(())
 }
@@ -523,6 +533,7 @@ mod tests {
         AssembleHotData {
             bytes: prefix.len() as u64,
             prefix,
+            recipe: Some("chat".into()),
             segments: Some(segments),
             debug: None,
         }
@@ -531,6 +542,31 @@ mod tests {
     #[test]
     fn validate_base_accepts_well_formed() {
         assert!(validate_base(&well_formed_data()).is_ok());
+    }
+
+    #[test]
+    fn validate_base_rejects_empty_recipe_name() {
+        let mut d = well_formed_data();
+        d.recipe = Some(String::new());
+        assert!(matches!(
+            validate_base(&d),
+            Err(AssembleHotValidationError::EmptyRecipeName)
+        ));
+    }
+
+    #[test]
+    fn try_from_raw_rejects_empty_recipe_at_deserialize() {
+        // The wire-validation bridge runs validate_base, so a payload
+        // with `"recipe":""` must be rejected on deserialize and never
+        // reach typed code.
+        let json = r#"{"bytes":0,"prefix":"","recipe":"","segments":[]}"#;
+        let err = serde_json::from_str::<AssembleHotData>(json)
+            .expect_err("empty recipe must fail to deserialize");
+        assert!(
+            err.to_string()
+                .contains("recipe must be a non-empty string"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -548,6 +584,7 @@ mod tests {
         let d = AssembleHotData {
             bytes: 0,
             prefix: String::new(),
+            recipe: Some("chat".into()),
             segments: Some(vec![]),
             debug: None,
         };
@@ -559,6 +596,7 @@ mod tests {
         let d = AssembleHotData {
             bytes: 3,
             prefix: "abc".into(),
+            recipe: Some("chat".into()),
             segments: Some(vec![]),
             debug: None,
         };
@@ -578,6 +616,7 @@ mod tests {
         let d = AssembleHotData {
             bytes: 0,
             prefix: String::new(),
+            recipe: Some("chat".into()),
             segments: None,
             debug: None,
         };
@@ -667,6 +706,7 @@ mod tests {
         let d = AssembleHotData {
             bytes: MAX_BYTES + 1,
             prefix: String::new(),
+            recipe: Some("chat".into()),
             segments: None,
             debug: None,
         };
@@ -703,6 +743,7 @@ mod tests {
         let d = AssembleHotData {
             bytes: prefix_len,
             prefix,
+            recipe: Some("chat".into()),
             segments: Some(vec![s0, s1]),
             debug: None,
         };
@@ -733,6 +774,7 @@ mod tests {
         let d = AssembleHotData {
             bytes: 0,
             prefix: String::new(),
+            recipe: Some("chat".into()),
             segments: Some(segs),
             debug: None,
         };
@@ -782,6 +824,7 @@ mod tests {
         let d = AssembleHotData {
             bytes: 0,
             prefix: String::new(),
+            recipe: Some("chat".into()),
             segments: None,
             debug: None,
         };
@@ -799,6 +842,7 @@ mod tests {
         let d = AssembleHotData {
             bytes: prefix.len() as u64,
             prefix,
+            recipe: Some("chat".into()),
             segments: Some(segments),
             debug: None,
         };

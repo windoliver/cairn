@@ -108,10 +108,68 @@ impl From<&MemoryRecord> for LoadedRecordTrace {
     }
 }
 
+fn reject_invalid_args(json: bool, field: &str, reason: &str) -> ExitCode {
+    let resp = invalid_args_response(ResponseVerb::AssembleHot, field, reason);
+    if json {
+        emit_json(&resp);
+    } else {
+        human_error("assemble_hot", "InvalidArgs", reason, &resp.operation_id);
+    }
+    ExitCode::from(78) // EX_CONFIG
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b_chars: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b_chars.len()).collect();
+    let mut curr = vec![0; b_chars.len() + 1];
+    for (i, a_ch) in a.chars().enumerate() {
+        curr[0] = i + 1;
+        for (j, b_ch) in b_chars.iter().enumerate() {
+            let cost = usize::from(a_ch != *b_ch);
+            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b_chars.len()]
+}
+
+fn nearest_recipe_name<'a>(requested: &str, names: &[&'a str]) -> Option<&'a str> {
+    // Case-insensitive matching so a typo like `DEBUG` suggests `debug`.
+    let lowered = requested.to_lowercase();
+    names
+        .iter()
+        .copied()
+        .min_by_key(|candidate| edit_distance(&lowered, &candidate.to_lowercase()))
+}
+
 /// Run `cairn assemble_hot`.
 #[must_use]
-pub fn run(sub: &ArgMatches, vault_root: PathBuf, config: CairnConfig) -> ExitCode {
+pub fn run(sub: &ArgMatches, vault_root: PathBuf, mut config: CairnConfig) -> ExitCode {
     let json = sub.get_flag("json");
+    // `--recipe <name>` selects a named preset from
+    // `vault.hot_memory.recipes`. Resolve it up-front: the resolved
+    // recipe name becomes the new `default_recipe` so every downstream
+    // call to `config.vault.hot_memory.resolve_recipe(None)` selects
+    // it, and the flat `recipe`/`max_bytes` fields are synchronized
+    // for the upstream loader that still reads them directly.
+    let requested_recipe = sub.get_one::<String>("recipe").map(String::as_str);
+    let Some(resolved) = config.vault.hot_memory.resolve_recipe(requested_recipe) else {
+        let names = config.vault.hot_memory.recipe_names();
+        let hint = requested_recipe
+            .and_then(|name| nearest_recipe_name(name, &names))
+            .map(|name| format!("; did you mean {name:?}?"))
+            .unwrap_or_default();
+        let requested = requested_recipe.unwrap_or(&config.vault.hot_memory.default_recipe);
+        let reason = format!("unknown recipe {requested:?}{hint}");
+        return reject_invalid_args(json, "recipe", &reason);
+    };
+    let resolved_name = resolved.name.clone();
+    let resolved_steps = resolved.steps.to_vec();
+    let resolved_max = resolved.max_bytes;
+    config.vault.hot_memory.default_recipe = resolved_name;
+    config.vault.hot_memory.recipe = resolved_steps;
+    config.vault.hot_memory.max_bytes = resolved_max;
+
     let args = match assemble_args_from_matches(sub) {
         Ok(args) => args,
         Err(resp) => {

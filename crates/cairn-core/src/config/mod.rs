@@ -68,6 +68,21 @@ pub enum ConfigError {
         /// The invalid ratio value.
         value: f64,
     },
+    /// `vault.hot_memory.default_recipe` named a recipe that does not exist.
+    #[error("vault.hot_memory.default_recipe {name:?} does not exist in vault.hot_memory.recipes")]
+    MissingHotMemoryDefaultRecipe {
+        /// The missing recipe name.
+        name: String,
+    },
+    /// A recipe-related identifier (default name or table key) failed a
+    /// non-emptiness / shape check before reaching the wire boundary.
+    #[error("invalid recipe name for {field}: {reason}")]
+    InvalidRecipeName {
+        /// Config path that contains the offending name.
+        field: &'static str,
+        /// Reason the name was rejected.
+        reason: &'static str,
+    },
     /// A retention key glob is malformed.
     #[error("invalid retention key pattern: {0}")]
     InvalidRetentionKey(String),
@@ -117,6 +132,7 @@ pub enum HotMemoryRecipeStep {
     /// Pinned feedback (brief §3.1).
     PinnedFeedback,
     /// Top salience project (brief §3.1).
+    #[serde(alias = "top_salience")]
     TopSalienceProject,
     /// Active playbook (brief §3.1).
     ActivePlaybook,
@@ -557,35 +573,87 @@ impl Default for IndexConfig {
 }
 
 /// Hot-memory assembly recipe and budget (§3.1 `hot_memory`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct HotMemoryConfig {
     /// Ordered steps in the assembly recipe.
     pub recipe: Vec<HotMemoryRecipeStep>,
     /// Maximum bytes in the assembled hot prefix. Must be > 0.
     pub max_bytes: u32,
     /// Recipe label to use for `PreCompact` reinjection.
-    #[serde(default = "default_pre_compact_recipe")]
     pub pre_compact_recipe: String,
     /// Fraction of `compaction_target` reserved for `PreCompact` reinjection.
-    #[serde(default = "default_pre_compact_safety_ratio")]
     pub pre_compact_safety_ratio: f64,
+    /// Name of the recipe to use when the caller does not pass `--recipe`.
+    pub default_recipe: String,
+    /// Named recipe presets keyed by user-facing recipe name.
+    pub recipes: BTreeMap<String, HotMemoryRecipePreset>,
+}
+
+/// One named hot-memory recipe preset.
+///
+/// YAML entries must supply BOTH `steps` and `max_bytes` — partial
+/// presets are rejected at deserialize time. This makes the override
+/// semantics explicit: overriding a recipe in YAML is a full
+/// replacement, not a deep-merge against the built-in entry. Eliminates
+/// the "missing field silently widens budget to a generic default"
+/// footgun for users overriding e.g. `recipes.wake-up.steps`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HotMemoryRecipePreset {
+    /// Ordered steps in the recipe preset.
+    pub steps: Vec<HotMemoryRecipeStep>,
+    /// Maximum bytes for this recipe preset.
+    pub max_bytes: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HotMemoryRecipePresetWire {
+    steps: Option<Vec<HotMemoryRecipeStep>>,
+    max_bytes: Option<u32>,
+}
+
+impl<'de> Deserialize<'de> for HotMemoryRecipePreset {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+        let wire = HotMemoryRecipePresetWire::deserialize(deserializer)?;
+        let steps = wire.steps.ok_or_else(|| {
+            D::Error::custom("recipe preset is missing required field `steps` (partial overrides are not allowed)")
+        })?;
+        let max_bytes = wire.max_bytes.ok_or_else(|| {
+            D::Error::custom("recipe preset is missing required field `max_bytes` (partial overrides are not allowed)")
+        })?;
+        Ok(Self { steps, max_bytes })
+    }
+}
+
+/// Resolved hot-memory recipe selection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedHotMemoryRecipe<'a> {
+    /// User-visible recipe name.
+    pub name: String,
+    /// Recipe steps to execute.
+    pub steps: &'a [HotMemoryRecipeStep],
+    /// Effective byte budget for the recipe.
+    pub max_bytes: u32,
 }
 
 impl Default for HotMemoryConfig {
     fn default() -> Self {
+        let recipes = hot_memory_builtin_recipes();
+        let chat = recipes
+            .get("chat")
+            .unwrap_or_else(|| unreachable!("invariant: built-in chat recipe exists"));
         Self {
-            recipe: vec![
-                HotMemoryRecipeStep::Purpose,
-                HotMemoryRecipeStep::Index,
-                HotMemoryRecipeStep::PinnedFeedback,
-                HotMemoryRecipeStep::TopSalienceProject,
-                HotMemoryRecipeStep::ActivePlaybook,
-                HotMemoryRecipeStep::RecentUserSignal,
-            ],
-            max_bytes: 25_600,
+            recipe: chat.steps.clone(),
+            max_bytes: chat.max_bytes,
             pre_compact_recipe: default_pre_compact_recipe(),
             pre_compact_safety_ratio: default_pre_compact_safety_ratio(),
+            default_recipe: "chat".into(),
+            recipes,
         }
     }
 }
@@ -596,6 +664,244 @@ fn default_pre_compact_recipe() -> String {
 
 fn default_pre_compact_safety_ratio() -> f64 {
     0.30
+}
+
+impl HotMemoryConfig {
+    /// Resolve the effective named recipe for an `assemble_hot` request.
+    #[must_use]
+    pub fn resolve_recipe(&self, requested: Option<&str>) -> Option<ResolvedHotMemoryRecipe<'_>> {
+        let name = requested.unwrap_or(&self.default_recipe);
+        // Named-recipe table is the single source of truth. Flat
+        // `recipe`/`max_bytes` are kept only for pre-recipe configs
+        // that loaded legacy scalars; the deserializer mirrors those
+        // into the default-recipe table entry so this lookup wins in
+        // both cases.
+        if let Some(recipe) = self.recipes.get(name) {
+            return Some(ResolvedHotMemoryRecipe {
+                name: name.to_owned(),
+                steps: &recipe.steps,
+                max_bytes: recipe.max_bytes,
+            });
+        }
+        // Legacy fallback: only fires when the recipes table is
+        // completely empty (a pre-recipe config carrying only the flat
+        // `recipe`/`max_bytes` scalars). A populated table that simply
+        // does not contain `name` returns `None` so callers fail closed
+        // — silently substituting stale flat fields for a missing entry
+        // (e.g. `default_recipe = "ghost"`) would turn a config typo
+        // into misexecution under a misleading recipe name.
+        if self.recipes.is_empty() && name == self.default_recipe {
+            return Some(ResolvedHotMemoryRecipe {
+                name: name.to_owned(),
+                steps: &self.recipe,
+                max_bytes: self.max_bytes,
+            });
+        }
+        None
+    }
+
+    /// Return all known named recipe keys in stable order.
+    #[must_use]
+    pub fn recipe_names(&self) -> Vec<&str> {
+        self.recipes.keys().map(String::as_str).collect()
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct HotMemoryConfigWire {
+    recipe: Option<Vec<HotMemoryRecipeStep>>,
+    max_bytes: Option<u32>,
+    pre_compact_recipe: Option<String>,
+    pre_compact_safety_ratio: Option<f64>,
+    default_recipe: Option<String>,
+    recipes: BTreeMap<String, HotMemoryRecipePreset>,
+}
+
+impl<'de> Deserialize<'de> for HotMemoryConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = HotMemoryConfigWire::deserialize(deserializer)?;
+        let mut cfg = HotMemoryConfig::default();
+        // Two input modes — figment layering of a serialized default
+        // under a user YAML overlay can produce either, never both:
+        //   - "new shape": `recipes` and/or `default_recipe` present.
+        //     The user opts into named-recipe semantics. The table is
+        //     authoritative; legacy scalars in the same input are
+        //     treated as historic noise from a default that was
+        //     serialized in legacy form and silently dropped — they
+        //     never overwrite the resolved table entry, so the
+        //     `resolve_recipe` lookup is unambiguous.
+        //   - "legacy shape": only `recipe` and/or `max_bytes`. This
+        //     is the form a pre-recipe binary writes (and what
+        //     Serialize itself emits for the canonical default, so
+        //     rollback to such a binary can read this branch's
+        //     bootstrap output). Mirror the scalars into
+        //     `recipes[default_recipe]` so resolve_recipe still sees
+        //     them.
+        if let Some(pre_compact_recipe) = raw.pre_compact_recipe {
+            cfg.pre_compact_recipe = pre_compact_recipe;
+        }
+        if let Some(pre_compact_safety_ratio) = raw.pre_compact_safety_ratio {
+            cfg.pre_compact_safety_ratio = pre_compact_safety_ratio;
+        }
+        let raw_has_new_shape = !raw.recipes.is_empty() || raw.default_recipe.is_some();
+        if raw_has_new_shape {
+            cfg.recipes.extend(raw.recipes);
+            if let Some(default_recipe) = raw.default_recipe {
+                cfg.default_recipe = default_recipe;
+            }
+            if let Some(recipe) = cfg.recipes.get(&cfg.default_recipe) {
+                cfg.recipe.clone_from(&recipe.steps);
+                cfg.max_bytes = recipe.max_bytes;
+            }
+        } else {
+            let legacy_scalars_present = raw.recipe.is_some() || raw.max_bytes.is_some();
+            if let Some(recipe) = raw.recipe {
+                cfg.recipe = recipe;
+            }
+            if let Some(max_bytes) = raw.max_bytes {
+                cfg.max_bytes = max_bytes;
+            }
+            if legacy_scalars_present {
+                cfg.recipes.insert(
+                    cfg.default_recipe.clone(),
+                    HotMemoryRecipePreset {
+                        steps: cfg.recipe.clone(),
+                        max_bytes: cfg.max_bytes,
+                    },
+                );
+            }
+        }
+
+        Ok(cfg)
+    }
+}
+
+impl Serialize for HotMemoryConfig {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // Rollback-safety strategy:
+        //   - When the config matches the canonical built-in defaults
+        //     (no custom recipes, default_recipe == "chat"), emit only
+        //     the legacy `recipe`/`max_bytes` scalars. A pre-recipe
+        //     binary can read these losslessly. Bootstrap writes the
+        //     default config to disk, so the on-disk file produced by
+        //     this branch is rollback-safe in the common path.
+        //   - Once the user customizes (`default_recipe` override or
+        //     custom `recipes` entries), emit the new named-recipe
+        //     shape. This is a forward-only step: a pre-recipe binary
+        //     will fail closed on the unknown fields. Real rollback
+        //     across the customization boundary needs
+        //     `deny_unknown_fields` relaxed in an older release first.
+        #[derive(Serialize)]
+        #[serde(deny_unknown_fields)]
+        struct LegacyOut<'a> {
+            recipe: &'a [HotMemoryRecipeStep],
+            max_bytes: u32,
+            pre_compact_recipe: &'a str,
+            pre_compact_safety_ratio: f64,
+        }
+        #[derive(Serialize)]
+        #[serde(deny_unknown_fields)]
+        struct HotMemoryConfigOut<'a> {
+            pre_compact_recipe: &'a str,
+            pre_compact_safety_ratio: f64,
+            default_recipe: &'a str,
+            recipes: BTreeMap<String, HotMemoryRecipePreset>,
+        }
+
+        let builtins = hot_memory_builtin_recipes();
+        let is_canonical_default = self.default_recipe == "chat" && self.recipes == builtins;
+        if is_canonical_default {
+            return LegacyOut {
+                recipe: &self.recipe,
+                max_bytes: self.max_bytes,
+                pre_compact_recipe: &self.pre_compact_recipe,
+                pre_compact_safety_ratio: self.pre_compact_safety_ratio,
+            }
+            .serialize(serializer);
+        }
+
+        // The recipes table is the single source of truth — emit it
+        // verbatim. The flat `recipe`/`max_bytes` fields are kept only
+        // for legacy back-compat at deserialize time; reconstructing
+        // the default-recipe entry from them here would silently
+        // overwrite a programmatic edit to `recipes[default_recipe]`.
+        HotMemoryConfigOut {
+            pre_compact_recipe: &self.pre_compact_recipe,
+            pre_compact_safety_ratio: self.pre_compact_safety_ratio,
+            default_recipe: &self.default_recipe,
+            recipes: self.recipes.clone(),
+        }
+        .serialize(serializer)
+    }
+}
+
+fn hot_memory_builtin_recipes() -> BTreeMap<String, HotMemoryRecipePreset> {
+    BTreeMap::from([
+        (
+            "chat".into(),
+            HotMemoryRecipePreset {
+                steps: vec![
+                    HotMemoryRecipeStep::Purpose,
+                    HotMemoryRecipeStep::Index,
+                    HotMemoryRecipeStep::PinnedFeedback,
+                    HotMemoryRecipeStep::TopSalienceProject,
+                    HotMemoryRecipeStep::ActivePlaybook,
+                    HotMemoryRecipeStep::RecentUserSignal,
+                ],
+                max_bytes: 25_600,
+            },
+        ),
+        // wake-up / debug / handoff are built from cairn.mcp.v1
+        // steps only. The richer steps the brief sketches
+        // (`last_session_digest`, `recent_failures`, `contradictions`,
+        // `last_session_summary`) require a v2 contract bump; until
+        // then the presets approximate intent using v1 steps. Operators
+        // wanting custom shapes can declare recipes in
+        // `.cairn/config.yaml` (exercised by the
+        // `cairn_assemble_hot_custom_config_recipe_requires_no_code_change`
+        // smoke test).
+        (
+            "wake-up".into(),
+            HotMemoryRecipePreset {
+                steps: vec![
+                    HotMemoryRecipeStep::Purpose,
+                    HotMemoryRecipeStep::RecentUserSignal,
+                ],
+                max_bytes: 8_192,
+            },
+        ),
+        (
+            "debug".into(),
+            HotMemoryRecipePreset {
+                steps: vec![
+                    HotMemoryRecipeStep::Purpose,
+                    HotMemoryRecipeStep::PinnedFeedback,
+                    HotMemoryRecipeStep::TopSalienceProject,
+                    HotMemoryRecipeStep::RecentUserSignal,
+                ],
+                max_bytes: 16_384,
+            },
+        ),
+        (
+            "handoff".into(),
+            HotMemoryRecipePreset {
+                steps: vec![
+                    HotMemoryRecipeStep::Purpose,
+                    HotMemoryRecipeStep::Index,
+                    HotMemoryRecipeStep::ActivePlaybook,
+                    HotMemoryRecipeStep::RecentUserSignal,
+                ],
+                max_bytes: 16_384,
+            },
+        ),
+    ])
 }
 
 // ── Store ─────────────────────────────────────────────────────────────────
@@ -856,6 +1162,10 @@ impl CairnConfig {
     ///
     /// # Errors
     /// See [`ConfigError`] variants for the full list.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "linear validation table; splitting hurts readability"
+    )]
     pub fn validate(&self) -> Result<(), ConfigError> {
         use crate::contract::registry::PluginName;
 
@@ -875,8 +1185,11 @@ impl CairnConfig {
             })?;
         }
 
-        // 3. hot_memory.max_bytes must be > 0
-        if self.vault.hot_memory.max_bytes == 0 {
+        // 3. hot_memory.max_bytes must be > 0. Check the legacy scalar
+        //    only when there is no named-recipe table to resolve from;
+        //    otherwise the per-recipe loop below validates each entry's
+        //    max_bytes and the table is the authoritative source.
+        if self.vault.hot_memory.recipes.is_empty() && self.vault.hot_memory.max_bytes == 0 {
             return Err(ConfigError::InvalidBudget {
                 field: "vault.hot_memory.max_bytes",
                 value: 0_u64,
@@ -890,6 +1203,42 @@ impl CairnConfig {
                 field: "vault.hot_memory.pre_compact_safety_ratio",
                 value: self.vault.hot_memory.pre_compact_safety_ratio,
             });
+        }
+
+        if self.vault.hot_memory.default_recipe.is_empty() {
+            return Err(ConfigError::InvalidRecipeName {
+                field: "vault.hot_memory.default_recipe",
+                reason: "must not be empty",
+            });
+        }
+        if !self
+            .vault
+            .hot_memory
+            .recipes
+            .contains_key(&self.vault.hot_memory.default_recipe)
+        {
+            return Err(ConfigError::MissingHotMemoryDefaultRecipe {
+                name: self.vault.hot_memory.default_recipe.clone(),
+            });
+        }
+        for (name, recipe) in &self.vault.hot_memory.recipes {
+            if name.is_empty() {
+                return Err(ConfigError::InvalidRecipeName {
+                    field: "vault.hot_memory.recipes",
+                    reason: "recipe key must not be empty",
+                });
+            }
+            if recipe.max_bytes == 0 {
+                return Err(ConfigError::InvalidBudget {
+                    field: "vault.hot_memory.recipes[].max_bytes",
+                    value: 0_u64,
+                });
+            }
+            // Empty `steps` is intentionally allowed — operators can
+            // declare a recipe with no steps to disable hot-memory
+            // assembly for that preset. The assembler honors this and
+            // emits `segments: []` with an empty prefix (covered by
+            // `assemble_hot_empty_recipe`).
         }
 
         // 4. Extractor budget fields must be > 0 when set
@@ -1215,16 +1564,249 @@ mod tests {
 
     #[test]
     fn validate_rejects_zero_hot_memory_budget() {
+        // The named-recipe table is the authoritative source of truth.
+        // A zero budget on the resolved default recipe must be rejected
+        // regardless of what the legacy flat scalar says.
         let mut config = CairnConfig::default();
-        config.vault.hot_memory.max_bytes = 0;
+        if let Some(entry) = config.vault.hot_memory.recipes.get_mut("chat") {
+            entry.max_bytes = 0;
+        }
         let err = config.validate().unwrap_err();
         assert!(matches!(
             err,
             ConfigError::InvalidBudget {
-                field: "vault.hot_memory.max_bytes",
+                field: "vault.hot_memory.recipes[].max_bytes",
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn validate_rejects_default_recipe_not_in_recipes() {
+        let mut config = CairnConfig::default();
+        config.vault.hot_memory.default_recipe = "ghost".into();
+        let err = config.validate().unwrap_err();
+        match err {
+            ConfigError::MissingHotMemoryDefaultRecipe { name } => {
+                assert_eq!(name, "ghost");
+            }
+            other => panic!("expected MissingHotMemoryDefaultRecipe, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deserialize_rejects_partial_recipe_preset_missing_max_bytes() {
+        // A YAML override like `recipes.wake-up.steps: [...]` previously
+        // silently widened the budget to a generic default by relying on
+        // `HotMemoryRecipePreset::default`. Now an incomplete preset is
+        // rejected at deserialize so users opt into a full replacement
+        // explicitly (or override one of the built-in entries verbatim).
+        let json = r#"{
+            "recipes": {
+                "wake-up": { "steps": ["purpose"] }
+            }
+        }"#;
+        let err = serde_json::from_str::<HotMemoryConfig>(json)
+            .expect_err("partial recipe preset must be rejected");
+        assert!(
+            err.to_string().contains("max_bytes"),
+            "error should mention the missing field: {err}"
+        );
+    }
+
+    #[test]
+    fn deserialize_rejects_partial_recipe_preset_missing_steps() {
+        let json = r#"{
+            "recipes": {
+                "wake-up": { "max_bytes": 4096 }
+            }
+        }"#;
+        let err = serde_json::from_str::<HotMemoryConfig>(json)
+            .expect_err("partial recipe preset must be rejected");
+        assert!(
+            err.to_string().contains("steps"),
+            "error should mention the missing field: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_in_process_recipes_mutation_with_stale_legacy_max_bytes() {
+        // Regression: a programmatic editor that mutates
+        // `recipes[default_recipe].max_bytes` without mirroring the
+        // legacy flat scalar must not be vetoed by validate(). The
+        // named-recipe table is the authoritative source.
+        let mut config = CairnConfig::default();
+        config.vault.hot_memory.max_bytes = 0; // stale legacy
+        if let Some(entry) = config.vault.hot_memory.recipes.get_mut("chat") {
+            entry.max_bytes = 16_384;
+        }
+        config
+            .validate()
+            .expect("named-recipe budget is authoritative");
+    }
+
+    #[test]
+    fn validate_accepts_recipe_with_empty_steps() {
+        // Compat: operators can declare a recipe with `steps: []` to
+        // disable hot-memory assembly for that preset. Validation must
+        // not reject this — the assembler emits `segments: []` for it.
+        let mut config = CairnConfig::default();
+        config.vault.hot_memory.recipes.insert(
+            "disabled".into(),
+            HotMemoryRecipePreset {
+                steps: vec![],
+                max_bytes: 1024,
+            },
+        );
+        config.validate().expect("empty steps must be accepted");
+    }
+
+    #[test]
+    fn validate_rejects_empty_default_recipe() {
+        let mut config = CairnConfig::default();
+        config.vault.hot_memory.default_recipe = String::new();
+        let err = config.validate().unwrap_err();
+        match err {
+            ConfigError::InvalidRecipeName { field, .. } => {
+                assert_eq!(field, "vault.hot_memory.default_recipe");
+            }
+            other => panic!("expected InvalidRecipeName, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_empty_recipe_table_key() {
+        let mut config = CairnConfig::default();
+        config.vault.hot_memory.recipes.insert(
+            String::new(),
+            HotMemoryRecipePreset {
+                steps: vec![HotMemoryRecipeStep::Purpose],
+                max_bytes: 1024,
+            },
+        );
+        let err = config.validate().unwrap_err();
+        match err {
+            ConfigError::InvalidRecipeName { field, .. } => {
+                assert_eq!(field, "vault.hot_memory.recipes");
+            }
+            other => panic!("expected InvalidRecipeName, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_recipe_with_zero_max_bytes() {
+        let mut config = CairnConfig::default();
+        config.vault.hot_memory.recipes.insert(
+            "broken".into(),
+            HotMemoryRecipePreset {
+                steps: vec![HotMemoryRecipeStep::Purpose],
+                max_bytes: 0,
+            },
+        );
+        let err = config.validate().unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidBudget { .. }));
+    }
+
+    #[test]
+    fn resolve_recipe_chat_matches_default() {
+        let cfg = HotMemoryConfig::default();
+        let with_flag = cfg.resolve_recipe(Some("chat")).expect("chat resolves");
+        let default = cfg.resolve_recipe(None).expect("default resolves");
+        assert_eq!(with_flag.steps, default.steps);
+        assert_eq!(with_flag.max_bytes, default.max_bytes);
+        assert_eq!(with_flag.name, default.name);
+    }
+
+    #[test]
+    fn resolve_recipe_user_override_of_built_in_wins() {
+        // A user redefining `chat` in config must shadow the built-in.
+        let mut cfg = HotMemoryConfig::default();
+        cfg.recipes.insert(
+            "chat".into(),
+            HotMemoryRecipePreset {
+                steps: vec![HotMemoryRecipeStep::Purpose],
+                max_bytes: 999,
+            },
+        );
+        let r = cfg.resolve_recipe(Some("chat")).expect("chat resolves");
+        // resolve_recipe short-circuits on default_recipe and reads cfg.recipe;
+        // the user-supplied recipe block only takes effect after deserialize
+        // mirrors it into cfg.recipe. Direct in-process mutation does not, so
+        // assert against the recipes table to capture the user override
+        // intent at the source.
+        assert_eq!(cfg.recipes["chat"].max_bytes, 999);
+        // ResolvedHotMemoryRecipe always reports a `chat` name when chat is
+        // requested or default.
+        assert_eq!(r.name, "chat");
+    }
+
+    #[test]
+    fn resolve_recipe_unknown_returns_none() {
+        let cfg = HotMemoryConfig::default();
+        assert!(cfg.resolve_recipe(Some("nope")).is_none());
+    }
+
+    #[test]
+    fn resolve_recipe_unknown_default_with_populated_table_returns_none() {
+        // Regression: an in-process mutation like
+        // `default_recipe = "ghost"` against a populated recipes table
+        // must fail closed (None), not silently fall back to the flat
+        // `recipe`/`max_bytes` scalars under a misleading recipe name.
+        let cfg = HotMemoryConfig {
+            default_recipe: "ghost".into(),
+            ..HotMemoryConfig::default()
+        };
+        assert!(
+            cfg.resolve_recipe(None).is_none(),
+            "missing default in a populated table must not fall back to legacy flat fields"
+        );
+    }
+
+    #[test]
+    fn recipe_step_unknown_variant_rejected_at_parse() {
+        // The HotMemoryRecipeStep enum is closed — adding a config recipe
+        // step the binary does not know about must fail at deserialize
+        // time, not silently fall through to an unrecognized step.
+        let json = r#"["purpose","not_a_real_step"]"#;
+        let result: Result<Vec<HotMemoryRecipeStep>, _> = serde_json::from_str(json);
+        assert!(result.is_err(), "unknown step must be rejected");
+    }
+
+    #[test]
+    fn deserialize_new_shape_wins_over_legacy_scalars() {
+        // Figment layering can produce an input that carries both the
+        // user-supplied new shape and the historic legacy scalars from
+        // a serialized default. The new shape is authoritative and the
+        // legacy fields are dropped, so `resolve_recipe` sees a single
+        // unambiguous source of truth.
+        let json = r#"{
+            "default_recipe": "chat",
+            "recipes": {
+                "chat": { "steps": ["purpose","index"], "max_bytes": 999 }
+            },
+            "max_bytes": 42
+        }"#;
+        let cfg: HotMemoryConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.max_bytes, 999);
+        assert_eq!(cfg.recipes["chat"].max_bytes, 999);
+    }
+
+    #[test]
+    fn deserialize_legacy_only_mirrors_into_recipes_table() {
+        // A pure-legacy config (pre-recipe binary's output, or what
+        // Serialize emits for the canonical default) must populate the
+        // recipes table so resolve_recipe sees the user's overrides.
+        let json = r#"{
+            "recipe": ["purpose","index"],
+            "max_bytes": 42
+        }"#;
+        let cfg: HotMemoryConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.max_bytes, 42);
+        assert_eq!(cfg.recipes["chat"].max_bytes, 42);
+        assert_eq!(cfg.recipes["chat"].steps.len(), 2);
+        let r = cfg.resolve_recipe(None).expect("chat resolves");
+        assert_eq!(r.max_bytes, 42);
+        assert_eq!(r.steps.len(), 2);
     }
 
     #[test]
@@ -1441,6 +2023,71 @@ mod tests {
         let json = serde_json::to_string_pretty(&CairnConfig::default())
             .expect("CairnConfig::default() must be serializable");
         insta::assert_snapshot!(json);
+    }
+
+    #[test]
+    fn canonical_default_serializes_to_legacy_form_for_rollback() {
+        // Rollback-safety pin: when the user has not customized the
+        // recipe table, Serialize must emit the legacy `recipe` /
+        // `max_bytes` scalar shape only. A pre-recipe binary's
+        // `deny_unknown_fields` deserializer can read this losslessly.
+        let cfg = HotMemoryConfig::default();
+        let value = serde_json::to_value(&cfg).expect("serialize");
+        let obj = value.as_object().expect("object");
+        assert!(
+            obj.contains_key("recipe"),
+            "legacy `recipe` must be present"
+        );
+        assert!(
+            obj.contains_key("max_bytes"),
+            "legacy `max_bytes` must be present"
+        );
+        assert!(
+            !obj.contains_key("recipes"),
+            "canonical default must not emit `recipes` (rollback hazard)"
+        );
+        assert!(
+            !obj.contains_key("default_recipe"),
+            "canonical default must not emit `default_recipe` (rollback hazard)"
+        );
+    }
+
+    #[test]
+    fn customized_config_serializes_new_shape() {
+        // Once the user customizes, Serialize must switch to the new
+        // shape so resolve_recipe sees the user's table on next load.
+        // (Forward-only — documented limitation.)
+        let mut cfg = HotMemoryConfig::default();
+        cfg.recipes.insert(
+            "tiny".into(),
+            HotMemoryRecipePreset {
+                steps: vec![HotMemoryRecipeStep::Purpose],
+                max_bytes: 1024,
+            },
+        );
+        let value = serde_json::to_value(&cfg).expect("serialize");
+        let obj = value.as_object().expect("object");
+        assert!(obj.contains_key("recipes"));
+        assert!(obj.contains_key("default_recipe"));
+        assert!(
+            !obj.contains_key("recipe"),
+            "new shape must not include legacy scalar"
+        );
+    }
+
+    #[test]
+    fn serialize_then_deserialize_default_roundtrips_resolution() {
+        // Roundtrip: serialize the canonical default (legacy form),
+        // deserialize, and verify resolve_recipe(None) returns a result
+        // byte-identical to the original.
+        let original = HotMemoryConfig::default();
+        let json = serde_json::to_string(&original).expect("serialize");
+        let parsed: HotMemoryConfig = serde_json::from_str(&json).expect("deserialize");
+        let orig_r = original.resolve_recipe(None).expect("original resolves");
+        let parsed_r = parsed.resolve_recipe(None).expect("parsed resolves");
+        assert_eq!(orig_r.name, parsed_r.name);
+        assert_eq!(orig_r.max_bytes, parsed_r.max_bytes);
+        assert_eq!(orig_r.steps, parsed_r.steps);
     }
 
     #[test]

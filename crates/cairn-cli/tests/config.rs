@@ -116,9 +116,37 @@ fn invalid_config_returns_error() {
         write_yaml(dir.path(), "vault:\n  hot_memory:\n    max_bytes: 0\n");
         let err = load(dir.path(), &CliOverrides::default()).unwrap_err();
         let msg = format!("{err:#}");
+        // Legacy `max_bytes: 0` is mirrored into recipes[default_recipe]
+        // by the deserializer, so validation reports the resolved
+        // per-recipe field rather than the legacy scalar.
         assert!(
-            msg.contains("vault.hot_memory.max_bytes"),
+            msg.contains("hot_memory") && msg.contains("max_bytes"),
             "error should mention the bad field: {msg}"
+        );
+    });
+}
+
+#[test]
+fn load_named_hot_memory_recipes_and_default_recipe() {
+    with_clean_config_env(&[], || {
+        let dir = tempfile::tempdir().unwrap();
+        write_yaml(
+            dir.path(),
+            "vault:\n  hot_memory:\n    default_recipe: wake-up\n    recipes:\n      chat:\n        steps: [purpose, index, pinned_feedback, top_salience, active_playbook, recent_user_signal]\n        max_bytes: 25000\n      wake-up:\n        steps: [purpose, recent_user_signal]\n        max_bytes: 12000\n",
+        );
+        let config = load(dir.path(), &CliOverrides::default()).unwrap();
+        let value = serde_json::to_value(&config).unwrap();
+        assert_eq!(
+            value.pointer("/vault/hot_memory/default_recipe"),
+            Some(&serde_json::Value::String("wake-up".to_owned()))
+        );
+        assert_eq!(
+            value.pointer("/vault/hot_memory/recipes/chat/max_bytes"),
+            Some(&serde_json::Value::Number(25_000_u64.into()))
+        );
+        assert_eq!(
+            value.pointer("/vault/hot_memory/recipes/wake-up/steps/1"),
+            Some(&serde_json::Value::String("recent_user_signal".to_owned()))
         );
     });
 }

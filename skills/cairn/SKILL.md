@@ -275,6 +275,10 @@ cairn assemble_hot
 ```
 
 ```bash
+cairn assemble_hot --recipe RECIPE
+```
+
+```bash
 cairn assemble_hot --session SESSION_ID
 ```
 

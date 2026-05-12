@@ -35,6 +35,11 @@ async fn oversized_purpose_md_emits_hot_memory_over_budget() {
     let registry = SqliteIdentityRegistry::open_in_memory().expect("registry");
     let mut cfg = CairnConfig::default();
     cfg.vault.hot_memory.max_bytes = 64; // way smaller than 4 KB.
+    // resolve_recipe consults the named-recipe table first; shrink the
+    // default `chat` preset's budget so it routes through.
+    if let Some(preset) = cfg.vault.hot_memory.recipes.get_mut("chat") {
+        preset.max_bytes = 64;
+    }
 
     let result =
         cairn_cli::verbs::lint::lint_handler(&store, &registry, None, &cfg, false, vault.path())

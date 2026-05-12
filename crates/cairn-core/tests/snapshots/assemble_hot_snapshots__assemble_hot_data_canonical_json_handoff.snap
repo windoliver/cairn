@@ -1,12 +1,11 @@
 ---
 source: crates/cairn-core/tests/assemble_hot_snapshots.rs
-assertion_line: 53
-expression: "snapshot_for_recipe(\"chat\")"
+expression: "snapshot_for_recipe(\"handoff\")"
 ---
 {
-  "bytes": 56,
-  "prefix": "purpose body\nindex body\npinned\nsalience\nplaybook\nsignal\n",
-  "recipe": "chat",
+  "bytes": 40,
+  "prefix": "purpose body\nindex body\nplaybook\nsignal\n",
+  "recipe": "handoff",
   "segments": [
     {
       "byte_end": 13,
@@ -23,29 +22,15 @@ expression: "snapshot_for_recipe(\"chat\")"
       "step": "index"
     },
     {
-      "byte_end": 31,
+      "byte_end": 33,
       "byte_start": 24,
-      "content_hash": "dbdbfc4eea60c31dfdb68830dcf4393aa7e1fb5b64af6377e444c6c42e909203",
-      "stability": "stable_5m",
-      "step": "pinned_feedback"
-    },
-    {
-      "byte_end": 40,
-      "byte_start": 31,
-      "content_hash": "24a0d4b2307993b802cd519301e9d868f10e48721f70c7e5613b0b0244e064df",
-      "stability": "stable_5m",
-      "step": "top_salience_project"
-    },
-    {
-      "byte_end": 49,
-      "byte_start": 40,
       "content_hash": "bed3054354c5074a5d26ff8b56179f0c45bd23e14a3876fb022160c57e71150a",
       "stability": "stable_5m",
       "step": "active_playbook"
     },
     {
-      "byte_end": 56,
-      "byte_start": 49,
+      "byte_end": 40,
+      "byte_start": 33,
       "content_hash": "3037f94da9d48d4abbbaa27bb97374852648877ee36e8ca7b4b2bcfe7a9c40f7",
       "stability": "volatile",
       "step": "recent_user_signal"

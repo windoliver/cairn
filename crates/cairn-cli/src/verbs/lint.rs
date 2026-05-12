@@ -2878,7 +2878,23 @@ mod tests {
     /// the §6.2 path is exercised elsewhere.
     mod hot_memory_canary_e2e {
         use super::*;
-        use cairn_core::config::{CairnConfig, HotMemoryRecipeStep};
+        use cairn_core::config::{CairnConfig, HotMemoryRecipePreset, HotMemoryRecipeStep};
+
+        #[allow(dead_code)]
+        fn set_default_recipe(
+            cfg: &mut CairnConfig,
+            steps: Vec<HotMemoryRecipeStep>,
+            max_bytes: u32,
+        ) {
+            // Lint resolves the active recipe through
+            // `HotMemoryConfig::resolve_recipe`, which reads the named-recipe
+            // table. Mutate `recipes[default_recipe]` so each test fixture's
+            // overrides actually take effect.
+            cfg.vault.hot_memory.recipes.insert(
+                cfg.vault.hot_memory.default_recipe.clone(),
+                HotMemoryRecipePreset { steps, max_bytes },
+            );
+        }
         use cairn_core::domain::taxonomy::MemoryKind;
         use cairn_core::generated::verbs::lint::{Kind, Severity};
         use cairn_store_sqlite::SqliteIdentityRegistry;
@@ -2963,8 +2979,7 @@ mod tests {
             let store = FixtureStore::default();
             upsert_with(&store, 1, MemoryKind::Project, "x".repeat(2048), 0.9).await;
             let mut cfg = CairnConfig::default();
-            cfg.vault.hot_memory.recipe = vec![HotMemoryRecipeStep::TopSalienceProject];
-            cfg.vault.hot_memory.max_bytes = 256;
+            set_default_recipe(&mut cfg, vec![HotMemoryRecipeStep::TopSalienceProject], 256);
 
             let result = run_handler(&store, &cfg).await;
             // No loader → no over-budget detection.
@@ -2988,10 +3003,15 @@ mod tests {
             let store = FixtureStore::default();
             upsert_with(&store, 2, MemoryKind::Project, "tiny".to_owned(), 0.5).await;
             let mut cfg = CairnConfig::default();
-            cfg.vault.hot_memory.recipe = vec![
-                HotMemoryRecipeStep::Index,
-                HotMemoryRecipeStep::TopSalienceProject,
-            ];
+            let default_max = cfg.vault.hot_memory.max_bytes;
+            set_default_recipe(
+                &mut cfg,
+                vec![
+                    HotMemoryRecipeStep::Index,
+                    HotMemoryRecipeStep::TopSalienceProject,
+                ],
+                default_max,
+            );
             let result = run_handler(&store, &cfg).await;
             assert_eq!(
                 count_kind_severity(&result, Kind::HotMemoryOverBudget, Severity::Warning),
@@ -3008,8 +3028,7 @@ mod tests {
             upsert_with(&store, 3, MemoryKind::UserSignal, "s".repeat(8192), 0.9).await;
             upsert_with(&store, 4, MemoryKind::Playbook, "p".repeat(8192), 0.9).await;
             let mut cfg = CairnConfig::default();
-            cfg.vault.hot_memory.recipe = vec![HotMemoryRecipeStep::TopSalienceProject];
-            cfg.vault.hot_memory.max_bytes = 16;
+            set_default_recipe(&mut cfg, vec![HotMemoryRecipeStep::TopSalienceProject], 16);
 
             let result = run_handler(&store, &cfg).await;
             assert_eq!(
@@ -3032,8 +3051,11 @@ mod tests {
                 upsert_with(&store, seed, MemoryKind::Project, "L".repeat(800), 0.5).await;
             }
             let mut cfg = CairnConfig::default();
-            cfg.vault.hot_memory.recipe = vec![HotMemoryRecipeStep::TopSalienceProject];
-            cfg.vault.hot_memory.max_bytes = 2_000;
+            set_default_recipe(
+                &mut cfg,
+                vec![HotMemoryRecipeStep::TopSalienceProject],
+                2_000,
+            );
 
             let result = run_handler(&store, &cfg).await;
             // No loader → no findings regardless of salience/budget.
@@ -3055,8 +3077,7 @@ mod tests {
             let store = FixtureStore::default();
             upsert_with(&store, 30, MemoryKind::Project, "x".to_owned(), 0.5).await;
             let mut cfg = CairnConfig::default();
-            cfg.vault.hot_memory.recipe = vec![HotMemoryRecipeStep::TopSalienceProject];
-            cfg.vault.hot_memory.max_bytes = 1;
+            set_default_recipe(&mut cfg, vec![HotMemoryRecipeStep::TopSalienceProject], 1);
 
             let result = run_handler(&store, &cfg).await;
             // No panic. No findings without a loader.
@@ -3076,8 +3097,7 @@ mod tests {
             let store = FixtureStore::default();
             upsert_with(&store, 40, MemoryKind::Project, "x".repeat(4096), 0.9).await;
             let mut cfg = CairnConfig::default();
-            cfg.vault.hot_memory.recipe = vec![];
-            cfg.vault.hot_memory.max_bytes = 16;
+            set_default_recipe(&mut cfg, vec![], 16);
 
             let result = run_handler(&store, &cfg).await;
             assert_eq!(

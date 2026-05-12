@@ -37,11 +37,36 @@ pub enum AssembleHotError {
         /// Loader-supplied reason string.
         reason: String,
     },
+    /// `HotMemoryConfig::resolve_recipe` returned `None` for the
+    /// configured `default_recipe`. Validation would normally reject
+    /// this earlier, but direct in-process mutation of the config can
+    /// produce an unresolved default — surface it instead of panicking.
+    #[error("unknown default recipe: {name:?}")]
+    UnknownRecipe {
+        /// The unresolved recipe name.
+        name: String,
+    },
 }
 
 /// Run the hot-memory recipe and return a validated `AssembleHotData`.
+///
+/// Resolves the default recipe through
+/// [`HotMemoryConfig::resolve_recipe`], so the named-recipe table is
+/// the single source of truth for every caller — direct in-process
+/// mutation of `config.recipes[default_recipe]` takes effect on the
+/// very next call.
 pub fn assemble_hot(config: &HotMemoryConfig) -> Result<AssembleHotData, AssembleHotError> {
-    assemble_hot_with_loader(config, load_step_body)
+    let resolved = config
+        .resolve_recipe(None)
+        .ok_or_else(|| AssembleHotError::UnknownRecipe {
+            name: config.default_recipe.clone(),
+        })?;
+    assemble_hot_recipe_with_loader(
+        &resolved.name,
+        resolved.steps,
+        resolved.max_bytes,
+        load_step_body,
+    )
 }
 
 /// Render hot memory using a narrower byte budget than the config default.
@@ -64,10 +89,26 @@ pub fn assemble_hot_with_budget_and_recipe(
     recipe_override: Option<&[HotMemoryRecipeStep]>,
 ) -> Result<AssembleHotData, AssembleHotError> {
     let mut budgeted = config.clone();
-    budgeted.max_bytes = u32::try_from(budget.min(u64::from(u32::MAX))).unwrap_or(u32::MAX);
+    let budget_u32 = u32::try_from(budget.min(u64::from(u32::MAX))).unwrap_or(u32::MAX);
+    budgeted.max_bytes = budget_u32;
     if let Some(recipe) = recipe_override {
         budgeted.recipe = recipe.to_vec();
     }
+    // `assemble_hot` reads through `resolve_recipe`, which consults
+    // `recipes[default_recipe]` rather than the flat `recipe`/`max_bytes`
+    // scalars. Mirror the budget + step override into the default-recipe
+    // preset so the override actually reaches the assembler.
+    let default_name = budgeted.default_recipe.clone();
+    let preset = budgeted.recipes.entry(default_name).or_insert_with(|| {
+        crate::config::HotMemoryRecipePreset {
+            steps: budgeted.recipe.clone(),
+            max_bytes: budget_u32,
+        }
+    });
+    if let Some(recipe) = recipe_override {
+        preset.steps = recipe.to_vec();
+    }
+    preset.max_bytes = budget_u32;
     assemble_hot(&budgeted)
 }
 
@@ -77,18 +118,46 @@ pub fn assemble_hot_with_budget_and_recipe(
 /// surface as [`AssembleHotError::LoadFailed`].
 pub fn assemble_hot_with_loader<F>(
     config: &HotMemoryConfig,
+    loader: F,
+) -> Result<AssembleHotData, AssembleHotError>
+where
+    F: FnMut(HotRecipeStep) -> Result<String, String>,
+{
+    let resolved = config
+        .resolve_recipe(None)
+        .ok_or_else(|| AssembleHotError::UnknownRecipe {
+            name: config.default_recipe.clone(),
+        })?;
+    assemble_hot_recipe_with_loader(&resolved.name, resolved.steps, resolved.max_bytes, loader)
+}
+
+/// Run one selected named recipe and return validated `AssembleHotData`.
+pub fn assemble_hot_recipe(
+    recipe_name: &str,
+    steps: &[HotMemoryRecipeStep],
+    max_bytes: u32,
+) -> Result<AssembleHotData, AssembleHotError> {
+    assemble_hot_recipe_with_loader(recipe_name, steps, max_bytes, load_step_body)
+}
+
+/// Variant of [`assemble_hot`] that accepts a selected recipe name plus steps.
+pub fn assemble_hot_recipe_with_loader<F>(
+    recipe_name: &str,
+    steps: &[HotMemoryRecipeStep],
+    max_bytes: u32,
     mut loader: F,
 ) -> Result<AssembleHotData, AssembleHotError>
 where
     F: FnMut(HotRecipeStep) -> Result<String, String>,
 {
-    validate_config_recipe_len(config)?;
-    let recipe: Vec<HotRecipeStep> = config
-        .recipe
-        .iter()
-        .copied()
-        .map(HotRecipeStep::from)
-        .collect();
+    if steps.len() > MAX_SEGMENTS {
+        return Err(AssembleHotValidationError::TooManySegments {
+            got: steps.len(),
+            max: MAX_SEGMENTS,
+        }
+        .into());
+    }
+    let recipe: Vec<HotRecipeStep> = steps.iter().copied().map(HotRecipeStep::from).collect();
     let mut bodies: Vec<String> = Vec::with_capacity(recipe.len());
     for step in recipe.iter().copied() {
         let body = loader(step).map_err(|reason| AssembleHotError::LoadFailed { step, reason })?;
@@ -97,13 +166,14 @@ where
     let bodies_refs: Vec<&str> = bodies.iter().map(String::as_str).collect();
     let (prefix, segments) = build_segments(&recipe, &bodies_refs)?;
     let bytes = prefix.len() as u64;
-    let max = u64::from(config.max_bytes);
+    let max = u64::from(max_bytes);
     if bytes > max {
         return Err(AssembleHotError::BudgetExceeded { got: bytes, max });
     }
     let data = AssembleHotData {
         bytes,
         prefix,
+        recipe: Some(recipe_name.to_owned()),
         segments: Some(segments),
         debug: None,
     };
@@ -120,22 +190,27 @@ pub fn assemble_hot_from_bodies(
     bodies: Vec<String>,
     budget_override: Option<u64>,
 ) -> Result<AssembleHotData, AssembleHotError> {
-    validate_config_recipe_len(config)?;
-    let recipe: Vec<HotRecipeStep> = config
-        .recipe
+    let resolved = config
+        .resolve_recipe(None)
+        .ok_or_else(|| AssembleHotError::UnknownRecipe {
+            name: config.default_recipe.clone(),
+        })?;
+    validate_recipe_len(resolved.steps)?;
+    let recipe: Vec<HotRecipeStep> = resolved
+        .steps
         .iter()
         .copied()
         .map(HotRecipeStep::from)
         .collect();
-    let max = budget_override
-        .unwrap_or_else(|| u64::from(config.max_bytes))
-        .min(u64::from(config.max_bytes));
+    let resolved_max = u64::from(resolved.max_bytes);
+    let max = budget_override.unwrap_or(resolved_max).min(resolved_max);
     let trimmed = super::loader::trim_bodies_to_budget(&recipe, bodies, max);
     let refs: Vec<&str> = trimmed.iter().map(String::as_str).collect();
     let (prefix, segments) = build_segments(&recipe, &refs)?;
     let data = AssembleHotData {
         bytes: prefix.len() as u64,
         prefix,
+        recipe: Some(resolved.name.clone()),
         segments: Some(segments),
         debug: None,
     };
@@ -143,10 +218,10 @@ pub fn assemble_hot_from_bodies(
     Ok(data)
 }
 
-fn validate_config_recipe_len(config: &HotMemoryConfig) -> Result<(), AssembleHotError> {
-    if config.recipe.len() > MAX_SEGMENTS {
+fn validate_recipe_len(steps: &[HotMemoryRecipeStep]) -> Result<(), AssembleHotError> {
+    if steps.len() > MAX_SEGMENTS {
         return Err(AssembleHotValidationError::TooManySegments {
-            got: config.recipe.len(),
+            got: steps.len(),
             max: MAX_SEGMENTS,
         }
         .into());
@@ -177,9 +252,14 @@ pub fn assemble_hot_with_inputs(
 ) -> Result<AssembleHotData, AssembleHotError> {
     use crate::generated::verbs::assemble_hot::{HotMemoryDebug, HotStepTrace};
 
-    validate_config_recipe_len(config)?;
-    let recipe: Vec<HotRecipeStep> = config
-        .recipe
+    let resolved = config
+        .resolve_recipe(None)
+        .ok_or_else(|| AssembleHotError::UnknownRecipe {
+            name: config.default_recipe.clone(),
+        })?;
+    validate_recipe_len(resolved.steps)?;
+    let recipe: Vec<HotRecipeStep> = resolved
+        .steps
         .iter()
         .copied()
         .map(HotRecipeStep::from)
@@ -200,7 +280,7 @@ pub fn assemble_hot_with_inputs(
     let (prefix, segments) = build_segments(&recipe, &bodies_refs)?;
 
     let bytes = prefix.len() as u64;
-    let max = u64::from(config.max_bytes);
+    let max = u64::from(resolved.max_bytes);
     if bytes > max {
         return Err(AssembleHotError::BudgetExceeded { got: bytes, max });
     }
@@ -214,6 +294,7 @@ pub fn assemble_hot_with_inputs(
     let data = AssembleHotData {
         bytes,
         prefix,
+        recipe: Some(resolved.name.clone()),
         segments: Some(segments),
         debug,
     };
@@ -328,6 +409,7 @@ mod tests {
         let data = assemble_hot(&cfg).unwrap();
         assert_eq!(data.prefix, "");
         assert_eq!(data.bytes, 0);
+        assert_eq!(data.recipe.as_deref(), Some("chat"));
         let segments = data.segments.expect("segments emitted");
         assert_eq!(segments.len(), cfg.recipe.len());
         for s in &segments {
@@ -338,11 +420,42 @@ mod tests {
 
     #[test]
     fn assemble_hot_empty_recipe() {
+        use crate::config::HotMemoryRecipePreset;
         let mut cfg = HotMemoryConfig::default();
-        cfg.recipe.clear();
+        cfg.recipes.insert(
+            "chat".into(),
+            HotMemoryRecipePreset {
+                steps: vec![],
+                max_bytes: cfg.max_bytes,
+            },
+        );
         let data = assemble_hot(&cfg).unwrap();
         assert_eq!(data.prefix, "");
+        assert_eq!(data.recipe.as_deref(), Some("chat"));
         assert_eq!(data.segments, Some(vec![]));
+    }
+
+    #[test]
+    fn assemble_hot_resolves_through_recipes_table() {
+        // Regression: in-process mutation of `recipes[default_recipe]`
+        // must take effect on the very next call. Public APIs route
+        // through `HotMemoryConfig::resolve_recipe` rather than the
+        // legacy flat fields.
+        use crate::config::{HotMemoryRecipePreset, HotMemoryRecipeStep};
+        let mut cfg = HotMemoryConfig::default();
+        cfg.recipes.insert(
+            "chat".into(),
+            HotMemoryRecipePreset {
+                steps: vec![HotMemoryRecipeStep::Purpose],
+                max_bytes: 1024,
+            },
+        );
+        let data = assemble_hot(&cfg).unwrap();
+        assert_eq!(
+            data.segments.as_ref().map_or(0, Vec::len),
+            1,
+            "mutated recipes[chat] must drive output, not flat cfg.recipe"
+        );
     }
 
     #[test]
@@ -350,13 +463,19 @@ mod tests {
         // A recipe with 65 steps would emit a `segments` array the wire
         // contract rejects (MAX_SEGMENTS = 64). The assembler must catch
         // this before serialization.
-        use crate::config::HotMemoryRecipeStep;
-        let cfg = HotMemoryConfig {
+        use crate::config::{HotMemoryRecipePreset, HotMemoryRecipeStep};
+        let mut cfg = HotMemoryConfig {
             max_bytes: 4_194_304,
             recipe: vec![HotMemoryRecipeStep::Purpose; 65],
-            pre_compact_recipe: "handoff".to_string(),
-            pre_compact_safety_ratio: 0.30,
+            ..HotMemoryConfig::default()
         };
+        cfg.recipes.insert(
+            "chat".into(),
+            HotMemoryRecipePreset {
+                steps: vec![HotMemoryRecipeStep::Purpose; 65],
+                max_bytes: 4_194_304,
+            },
+        );
         let err = assemble_hot(&cfg).unwrap_err();
         match err {
             AssembleHotError::Segments(
@@ -371,13 +490,15 @@ mod tests {
 
     #[test]
     fn assemble_hot_rejects_over_max_segments_before_loading() {
-        use crate::config::HotMemoryRecipeStep;
-        let cfg = HotMemoryConfig {
-            max_bytes: 4_194_304,
-            recipe: vec![HotMemoryRecipeStep::Purpose; 65],
-            pre_compact_recipe: "handoff".to_string(),
-            pre_compact_safety_ratio: 0.30,
-        };
+        use crate::config::{HotMemoryRecipePreset, HotMemoryRecipeStep};
+        let mut cfg = HotMemoryConfig::default();
+        cfg.recipes.insert(
+            "chat".into(),
+            HotMemoryRecipePreset {
+                steps: vec![HotMemoryRecipeStep::Purpose; 65],
+                max_bytes: 4_194_304,
+            },
+        );
         let mut calls = 0_u32;
         let err = assemble_hot_with_loader(&cfg, |_| {
             calls += 1;
@@ -399,13 +520,15 @@ mod tests {
 
     #[test]
     fn assemble_hot_from_bodies_rejects_over_max_segments_before_trimming() {
-        use crate::config::HotMemoryRecipeStep;
-        let cfg = HotMemoryConfig {
-            max_bytes: 4_194_304,
-            recipe: vec![HotMemoryRecipeStep::Purpose; 65],
-            pre_compact_recipe: "handoff".to_string(),
-            pre_compact_safety_ratio: 0.30,
-        };
+        use crate::config::{HotMemoryRecipePreset, HotMemoryRecipeStep};
+        let mut cfg = HotMemoryConfig::default();
+        cfg.recipes.insert(
+            "chat".into(),
+            HotMemoryRecipePreset {
+                steps: vec![HotMemoryRecipeStep::Purpose; 65],
+                max_bytes: 4_194_304,
+            },
+        );
         let err = assemble_hot_from_bodies(&cfg, Vec::new(), Some(1)).unwrap_err();
 
         match err {
@@ -423,10 +546,11 @@ mod tests {
     fn assemble_hot_rejects_over_budget_recipe() {
         // Use a non-stub loader to simulate #193's real loading path.
         // max_bytes is 8, but each body is 4 bytes × 6 steps = 24 bytes.
-        let cfg = HotMemoryConfig {
-            max_bytes: 8,
-            ..HotMemoryConfig::default()
-        };
+        let mut cfg = HotMemoryConfig::default();
+        cfg.recipes
+            .get_mut("chat")
+            .expect("chat preset exists in defaults")
+            .max_bytes = 8;
         let err = assemble_hot_with_loader(&cfg, |_| Ok("AAAA".to_owned())).unwrap_err();
         match err {
             AssembleHotError::BudgetExceeded { got, max } => {
@@ -439,10 +563,11 @@ mod tests {
 
     #[test]
     fn assemble_hot_accepts_within_budget_recipe() {
-        let cfg = HotMemoryConfig {
-            max_bytes: 64,
-            ..HotMemoryConfig::default()
-        };
+        let mut cfg = HotMemoryConfig::default();
+        cfg.recipes
+            .get_mut("chat")
+            .expect("chat preset exists in defaults")
+            .max_bytes = 64;
         let data = assemble_hot_with_loader(&cfg, |_| Ok("AA".to_owned())).unwrap();
         assert_eq!(data.bytes, 12);
     }
