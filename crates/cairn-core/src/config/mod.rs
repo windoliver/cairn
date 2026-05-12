@@ -622,7 +622,7 @@ pub struct ExtractBudget {
 ///
 /// The verb layer calls `config.capabilities()` before dispatching to
 /// gate features that require capabilities that may not be present.
-// Six orthogonal capability flags; a bitflags type would obscure the intent.
+// Orthogonal capability flags; a bitflags type would obscure the intent.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilitySet {
@@ -1106,6 +1106,14 @@ mod tests {
         });
         let caps = config.capabilities();
         assert!(caps.agent_extract);
+    }
+
+    #[test]
+    fn capabilities_screen_capture_enabled_when_config_enabled() {
+        let mut config = CairnConfig::default();
+        config.sensors.screen.enabled = true;
+        let caps = config.capabilities();
+        assert!(caps.screen_capture_enabled);
     }
 
     #[test]
