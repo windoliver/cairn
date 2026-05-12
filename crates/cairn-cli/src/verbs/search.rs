@@ -136,6 +136,7 @@ async fn run_async(
     mode: SearchMode,
 ) -> ExitCode {
     let query = sub.get_one::<String>("query").cloned().unwrap_or_default();
+    let include_reasoning = sub.get_flag("include_reasoning");
     // The generated subcommand registers `limit` as `u32`; map to a usize
     // for downstream args. Floor at 1 to avoid degenerate empty-page calls.
     let limit: usize = sub
@@ -342,6 +343,7 @@ async fn run_async(
             SearchMode::Hybrid => cairn_core::verbs::search::SearchMode::Hybrid,
         },
         limit,
+        include_reasoning,
         visibility_allowlist: vec![],
         auth_scope: cairn_core::domain::ScopeTuple {
             tenant: sub.get_one::<String>("scope-tenant").cloned(),

@@ -15,6 +15,7 @@ pub mod flush_apply;
 pub mod forget;
 pub mod handshake;
 pub mod ingest;
+pub mod ingest_jsonl;
 pub mod lint;
 pub mod retrieve;
 pub mod search;

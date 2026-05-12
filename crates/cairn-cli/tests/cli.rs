@@ -132,6 +132,19 @@ fn repair_consent_journal_help_lists_delete_options() {
 }
 
 #[test]
+fn search_and_retrieve_help_list_include_reasoning_flag() {
+    for command in [["search", "--help"], ["retrieve", "--help"]] {
+        let out = cli().args(command).output().expect("verb --help");
+        assert!(out.status.success(), "exit: {:?}", out.status);
+        let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+        assert!(
+            stdout.contains("--include-reasoning"),
+            "help output missing --include-reasoning for {command:?}: {stdout}",
+        );
+    }
+}
+
+#[test]
 fn repair_delete_requires_reason_and_yes() {
     let missing_yes = cli()
         .args([

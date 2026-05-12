@@ -24,6 +24,11 @@
         "filters": {
           "$ref": "#/$defs/filter"
         },
+        "include_reasoning": {
+          "default": false,
+          "description": "When true, include records whose trace blocks contain reasoning content. Default false keeps reasoning-bearing records out of ordinary search results.",
+          "type": "boolean"
+        },
         "limit": {
           "maximum": 1000,
           "minimum": 1,

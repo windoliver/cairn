@@ -372,6 +372,7 @@ impl<T: Transport> Sdk<T> {
             query: args.query.clone(),
             mode,
             limit,
+            include_reasoning: args.include_reasoning.unwrap_or(false),
             visibility_allowlist: vec![],
             auth_scope,
             model_label: self.config.search.embedding_model.as_str().to_owned(),

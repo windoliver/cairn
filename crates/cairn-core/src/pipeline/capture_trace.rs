@@ -15,7 +15,7 @@ use crate::domain::{
     capture::{CaptureEvent, CapturePayload},
     record::{Ed25519Signature, MemoryRecord, RecordId},
     taxonomy::{MemoryClass, MemoryKind, MemoryVisibility},
-    trace::{TraceEvent, TraceLink, TraceLinkError, summary_record_id},
+    trace::{TraceBlock, TraceEvent, TraceLink, TraceLinkError, summary_record_id},
 };
 use crate::pipeline::extract::body::ResolvedBody;
 
@@ -41,6 +41,20 @@ pub enum TraceProjectError {
     /// JSON serialization failed (e.g., serializing `TraceEvent`).
     #[error("serde: {0}")]
     Serde(#[from] serde_json::Error),
+}
+
+/// Optional structured blocks to attach to a projected trace record.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProjectedTraceBlocks {
+    /// Ordered transcript blocks for this trace record.
+    pub blocks: Vec<TraceBlock>,
+}
+
+impl ProjectedTraceBlocks {
+    #[must_use]
+    fn is_empty(&self) -> bool {
+        self.blocks.is_empty()
+    }
 }
 
 /// Map a [`CaptureEvent`] to a [`TraceEvent`]. Static rules; no LLM.
@@ -95,6 +109,28 @@ pub fn project(
     resolved_body: &ResolvedBody<'_>,
     link: &TraceLink,
 ) -> Result<MemoryRecord, TraceProjectError> {
+    project_with_blocks(
+        event,
+        classified,
+        resolved_body,
+        link,
+        &ProjectedTraceBlocks::default(),
+    )
+}
+
+/// Project a trace record with optional structured transcript blocks.
+///
+/// # Errors
+///
+/// Returns the same errors as [`project`], plus any `serde_json`
+/// serialization failure while storing `trace_blocks`.
+pub fn project_with_blocks(
+    event: &CaptureEvent,
+    classified: TraceEvent,
+    resolved_body: &ResolvedBody<'_>,
+    link: &TraceLink,
+    trace_blocks: &ProjectedTraceBlocks,
+) -> Result<MemoryRecord, TraceProjectError> {
     link.validate(classified)?;
 
     // Build extra_frontmatter["trace"]: the canonical linkage blob (spec §6.1, §8.1).
@@ -135,6 +171,12 @@ pub fn project(
     let mut extra: BTreeMap<String, Json> = BTreeMap::new();
     extra.insert("trace_event".into(), serde_json::to_value(classified)?);
     extra.insert("trace".into(), Json::Object(trace_obj));
+    if !trace_blocks.is_empty() {
+        extra.insert(
+            "trace_blocks".into(),
+            serde_json::to_value(&trace_blocks.blocks)?,
+        );
+    }
 
     let body = shape_body(classified, resolved_body.text());
 
