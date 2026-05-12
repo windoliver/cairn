@@ -48,7 +48,7 @@ impl McpSessionScope for StaticScope {
 /// Routing rule (round-2 fix for Finding A/C): route by `case.kind`, not by
 /// `config == ConfigOverrides::default()`. `Stub`-kind cases document the
 /// v0.1 `dispatch_stub` behavior — the unwired handler is correct for them.
-/// Every other kind (Ok, InvalidArgs, CapabilityRejected, ExtensionRejected)
+/// Every other kind (`Ok`, `InvalidArgs`, `CapabilityRejected`, `ExtensionRejected`)
 /// requires a real wired handler so the verb dispatch path runs and emits a
 /// structured envelope that `assert_envelope_structure` can actually validate.
 ///
@@ -429,6 +429,120 @@ async fn unadvertised_capability_does_not_succeed() {
          Backstop is testing nothing — verify wiring constants in \
          cairn-core::status::wiring."
     );
+}
+
+/// Brief §8.0.a invariant (b), wired-path form — checks only capabilities whose
+/// un-advertised dispatch path runs through the real verb dispatcher
+/// (`handle_search` / `handle_forget` / etc.) rather than `dispatch_stub`.
+///
+/// For each wired-routable un-advertised capability:
+/// - Builds the wired handler with the default-P0 config (semantic/hybrid off).
+/// - Dispatches the minimal request.
+/// - Asserts response has `status == "rejected"`.
+/// - Asserts `error.code == "CapabilityUnavailable"`.
+/// - Asserts `error.data.capability` matches the wire id.
+///
+/// At v0.1 `handle_search` returns `Content::text(plain_message)` for the
+/// `CapabilityUnavailable` arm rather than a structured JSON envelope. The
+/// `unwrap_envelope_from_tool_result` helper then wraps the plain text as
+/// `{"__raw_text": "..."}`, which has no `status` or `error` fields. The
+/// structured assertions therefore fail. The test is `#[ignore]`'d to document
+/// the gap without blocking CI. Un-ignore once `handle_search` (and
+/// `handle_forget`, etc.) emit a proper `{"status":"rejected","error":{"code":
+/// "CapabilityUnavailable","data":{"capability":"..."}}}` JSON envelope instead
+/// of plain text for this error arm.
+///
+/// Coverage expands as more verbs are wired — add new cases to
+/// `minimal_request_for_wired_capability` in the same PR that wires the handler.
+#[tokio::test]
+#[ignore = "v0.1 handle_search returns plain-text Content::text for CapabilityUnavailable \
+            instead of a structured JSON envelope. The __raw_text wrapper has no status \
+            or error fields, so the structured assertions fail. Un-ignore once the handler \
+            emits a proper {status:rejected, error:{code:CapabilityUnavailable, \
+            data:{capability:...}}} envelope for this error arm. See issue #67 round 2."]
+async fn unadvertised_wired_capability_rejects_with_structured_error() {
+    let gates = default_p0_gates();
+    let advertised: std::collections::BTreeSet<&'static str> = advertise(&gates)
+        .into_iter()
+        .map(capability_wire_id)
+        .collect();
+
+    let config = ConfigOverrides::default(); // semantic_search: false, hybrid: false
+    let mut tested = 0usize;
+    for cap in all_capabilities() {
+        let wire = capability_wire_id(*cap);
+        if advertised.contains(wire) {
+            continue;
+        }
+        // Only exercise capabilities whose dispatch path runs through the real
+        // verb handler (handle_search / handle_forget / etc.). Capabilities
+        // routed through dispatch_stub are covered by their Stub fixtures and
+        // by unadvertised_capability_does_not_succeed.
+        let Some(req) = minimal_request_for_wired_capability(*cap) else {
+            continue;
+        };
+        let handler = build_wired_handler_for(&config).await;
+        let resp = dispatch_envelope(handler, &req).await;
+        let canon = canonicalize(&resp);
+
+        assert_eq!(
+            canon["status"], "rejected",
+            "{wire}: wired handler must return status=rejected for un-advertised capability, \
+             got: {canon}"
+        );
+        assert_eq!(
+            canon["error"]["code"], "CapabilityUnavailable",
+            "{wire}: wired handler must return error.code=CapabilityUnavailable"
+        );
+        assert_eq!(
+            canon["error"]["data"]["capability"], wire,
+            "{wire}: error.data.capability must match wire id"
+        );
+        tested += 1;
+    }
+
+    assert!(
+        tested > 0,
+        "wired cross-product test did not exercise any verb-mode — either every wired \
+         capability is advertised, or minimal_request_for_wired_capability is too \
+         conservative. Verify search.semantic / search.hybrid appear in the \
+         un-advertised set under default-P0 gates."
+    );
+}
+
+/// Return a minimal request for capabilities whose dispatch path runs through
+/// the real wired verb handler (`handle_search`, `handle_forget`, etc.) rather
+/// than `dispatch_stub`. Only search.semantic and search.hybrid qualify at v0.1:
+/// both are routed through `handle_search` when a store is wired, and both are
+/// un-advertised under the default P0 config (`semantic_search: false`).
+///
+/// Add new cases here in the same PR that wires the corresponding handler arm.
+/// Capabilities routed through `dispatch_stub` belong in
+/// `minimal_request_for_capability`, not here.
+///
+/// `#[allow(unreachable_patterns)]` is required because `Capabilities` is
+/// `#[non_exhaustive]`.
+#[allow(unreachable_patterns)]
+fn minimal_request_for_wired_capability(cap: Capabilities) -> Option<serde_json::Value> {
+    use Capabilities as C;
+    match cap {
+        // search.semantic and search.hybrid: dispatched through handle_search
+        // when a store is wired. Both are un-advertised under default P0 config
+        // (semantic_search: false, hybrid_search: false).
+        C::CairnMcpV1SearchSemantic => Some(serde_json::json!({
+            "args": { "mode": "semantic", "query": "x" },
+            "contract": "cairn.mcp.v1",
+            "verb": "search"
+        })),
+        C::CairnMcpV1SearchHybrid => Some(serde_json::json!({
+            "args": { "mode": "hybrid", "query": "x" },
+            "contract": "cairn.mcp.v1",
+            "verb": "search"
+        })),
+        // All other un-advertised caps route through dispatch_stub at v0.1.
+        // Add new wired arms here as handlers are landed.
+        _ => None,
+    }
 }
 
 /// Construct the default P0 capability gates (keyword search enabled, no
