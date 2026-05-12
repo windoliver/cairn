@@ -59,6 +59,8 @@ pub enum Capabilities {
     CairnMcpV1ExtensionSessiontree,
     #[serde(rename = "cairn.mcp.v1.policy_trace")]
     CairnMcpV1PolicyTrace,
+    #[serde(rename = "cairn.mcp.v1.sensors.pre_compact")]
+    CairnMcpV1SensorsPreCompact,
     #[serde(rename = "cairn.mcp.v1.replay.sequence")]
     CairnMcpV1ReplaySequence,
     #[serde(rename = "cairn.mcp.v1.replay.challenge")]

@@ -1,6 +1,5 @@
 ---
 source: crates/cairn-test-fixtures/tests/schema_fixtures.rs
-assertion_line: 110
 expression: "&c"
 ---
 {
@@ -30,7 +29,9 @@ expression: "&c"
         "index",
         "pinned_feedback"
       ],
-      "max_bytes": 8192
+      "max_bytes": 8192,
+      "pre_compact_recipe": "handoff",
+      "pre_compact_safety_ratio": 0.3
     },
     "retention": {
       "raw/sensor_observation_*.md": "7d",

@@ -59,10 +59,11 @@ impl ProjectedTraceBlocks {
 
 /// Map a [`CaptureEvent`] to a [`TraceEvent`]. Static rules; no LLM.
 ///
-/// Hook payloads route by hook name (brief §9.3). Terminal payloads
-/// with a tool reference are raw tool output, and proactive payloads
-/// whose kind explicitly names an agent/assistant message become
-/// assistant trace messages. `TurnSummary` is generated post-hoc by
+/// Hook payloads route by hook name (brief §9.3), including the
+/// `PreCompact` snapshot hook. Terminal payloads with a tool reference
+/// are raw tool output, and proactive payloads whose kind explicitly
+/// names an agent/assistant message become assistant trace messages.
+/// `TurnSummary` is generated post-hoc by
 /// [`crate::pipeline::turn::summarize_turn`] and never reaches
 /// `classify`.
 ///
@@ -77,6 +78,7 @@ pub fn classify(event: &CaptureEvent) -> Result<TraceEvent, TraceProjectError> {
             "PreToolUse" => Ok(TraceEvent::PreTool),
             "PostToolUse" => Ok(TraceEvent::PostTool),
             "ToolOutput" => Ok(TraceEvent::ToolOutput),
+            "PreCompact" => Ok(TraceEvent::PreCompact),
             "Stop" => Ok(TraceEvent::Stop),
             _ => Err(TraceProjectError::Unclassifiable),
         },
@@ -226,6 +228,22 @@ pub fn project_with_blocks(
         extra_frontmatter: extra,
         consent_model: None,
     })
+}
+
+/// Persist a `PreCompact` hook snapshot through the existing trace-record
+/// path while preserving its distinct lifecycle boundary in the stored
+/// `trace_event` field.
+pub fn project_pre_compact_snapshot(
+    event: &CaptureEvent,
+    resolved_body: &ResolvedBody<'_>,
+    link: &TraceLink,
+) -> Result<MemoryRecord, TraceProjectError> {
+    match &event.payload {
+        CapturePayload::Hook { hook_name, .. } if hook_name == "PreCompact" => {}
+        _ => return Err(TraceProjectError::Unclassifiable),
+    }
+
+    project(event, TraceEvent::PreCompact, resolved_body, link)
 }
 
 /// Build a [`Provenance`] from a [`CaptureEvent`].
@@ -480,8 +498,40 @@ mod tests {
     }
 
     #[test]
+    fn classifies_pre_compact() {
+        assert_eq!(
+            classify(&mk_hook_event("PreCompact")).unwrap(),
+            TraceEvent::PreCompact
+        );
+    }
+
+    #[test]
     fn classifies_stop() {
         assert_eq!(classify(&mk_hook_event("Stop")).unwrap(), TraceEvent::Stop);
+    }
+
+    #[test]
+    fn projects_pre_compact_snapshot_through_trace_path() {
+        let event = mk_hook_event("PreCompact");
+        let resolved = body::for_test("before compact");
+        let link = TraceLink {
+            session_id: SessionId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+                .expect("invariant: valid ULID"),
+            turn_id: "turn-1".into(),
+            sequence: 7,
+            capture_event_id: event.event_id.clone(),
+            parent_event_id: None,
+            tool_call_id: None,
+            member_event_ids: Vec::new(),
+        };
+
+        let record = project_pre_compact_snapshot(&event, &resolved, &link).unwrap();
+        assert_eq!(record.kind, MemoryKind::Trace);
+        assert_eq!(record.body, "before compact");
+        assert_eq!(
+            record.extra_frontmatter.get("trace_event").unwrap(),
+            "pre_compact"
+        );
     }
 
     #[test]

@@ -7,7 +7,7 @@
 use super::segments::{
     AssembleHotValidationError, MAX_SEGMENTS, build_segments, validate, validate_with_recipe,
 };
-use crate::config::HotMemoryConfig;
+use crate::config::{HotMemoryConfig, HotMemoryRecipeStep};
 use crate::generated::verbs::assemble_hot::{AssembleHotData, HotRecipeStep};
 
 /// Errors returned by [`assemble_hot`].
@@ -42,6 +42,33 @@ pub enum AssembleHotError {
 /// Run the hot-memory recipe and return a validated `AssembleHotData`.
 pub fn assemble_hot(config: &HotMemoryConfig) -> Result<AssembleHotData, AssembleHotError> {
     assemble_hot_with_loader(config, load_step_body)
+}
+
+/// Render hot memory using a narrower byte budget than the config default.
+/// This keeps `assemble_hot` itself a pure renderer while callers such as
+/// pre-compaction can supply a fail-closed budget cap.
+pub fn assemble_hot_with_budget(
+    config: &HotMemoryConfig,
+    budget: u64,
+) -> Result<AssembleHotData, AssembleHotError> {
+    assemble_hot_with_budget_and_recipe(config, budget, None)
+}
+
+/// Render hot memory with both a narrower byte budget and an optional
+/// recipe override. The pre-compaction flow uses this to honor
+/// `hot_memory.pre_compact_recipe` instead of falling back to the
+/// session-start recipe baked into [`HotMemoryConfig::recipe`].
+pub fn assemble_hot_with_budget_and_recipe(
+    config: &HotMemoryConfig,
+    budget: u64,
+    recipe_override: Option<&[HotMemoryRecipeStep]>,
+) -> Result<AssembleHotData, AssembleHotError> {
+    let mut budgeted = config.clone();
+    budgeted.max_bytes = u32::try_from(budget.min(u64::from(u32::MAX))).unwrap_or(u32::MAX);
+    if let Some(recipe) = recipe_override {
+        budgeted.recipe = recipe.to_vec();
+    }
+    assemble_hot(&budgeted)
 }
 
 /// Variant of [`assemble_hot`] that accepts an explicit fallible loader.
@@ -327,6 +354,8 @@ mod tests {
         let cfg = HotMemoryConfig {
             max_bytes: 4_194_304,
             recipe: vec![HotMemoryRecipeStep::Purpose; 65],
+            pre_compact_recipe: "handoff".to_string(),
+            pre_compact_safety_ratio: 0.30,
         };
         let err = assemble_hot(&cfg).unwrap_err();
         match err {
@@ -346,6 +375,8 @@ mod tests {
         let cfg = HotMemoryConfig {
             max_bytes: 4_194_304,
             recipe: vec![HotMemoryRecipeStep::Purpose; 65],
+            pre_compact_recipe: "handoff".to_string(),
+            pre_compact_safety_ratio: 0.30,
         };
         let mut calls = 0_u32;
         let err = assemble_hot_with_loader(&cfg, |_| {
@@ -372,6 +403,8 @@ mod tests {
         let cfg = HotMemoryConfig {
             max_bytes: 4_194_304,
             recipe: vec![HotMemoryRecipeStep::Purpose; 65],
+            pre_compact_recipe: "handoff".to_string(),
+            pre_compact_safety_ratio: 0.30,
         };
         let err = assemble_hot_from_bodies(&cfg, Vec::new(), Some(1)).unwrap_err();
 

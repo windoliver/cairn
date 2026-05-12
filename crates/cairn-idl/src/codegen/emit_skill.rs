@@ -43,6 +43,7 @@ fn emit_skill_md(doc: &Document) -> Result<GeneratedFile, CodegenError> {
     }
     push_output_format(&mut s);
     push_non_negotiable_rules(&mut s);
+    push_pre_compact_section(&mut s);
     s.push_str("---\n\n## Protocol preludes (not core verbs)\n\n");
     for prelude in &doc.preludes {
         let desc = match prelude.id.as_str() {
@@ -114,6 +115,11 @@ fn push_non_negotiable_rules(s: &mut String) {
     s.push_str("4. Every `ingest` signs with your agent identity — `cairn` reads it from `$CAIRN_IDENTITY` set at harness startup. Don't pass `--signed-intent` explicitly.\n");
     s.push_str("5. Don't run `cairn ingest` for trivia the user didn't ask you to remember. Use the trigger list above — if it's not on the list, ask before storing.\n");
     s.push('\n');
+}
+
+fn push_pre_compact_section(s: &mut String) {
+    s.push_str("## Pre-compaction reinjection (experimental — not yet usable)\n\n");
+    s.push_str("**Do not rely on this path to preserve context yet.** The pre-compaction hook is still gated: `cairn.mcp.v1.sensors.pre_compact` is intentionally not advertised in `cairn status`, and `cairn assemble_hot` runs against a stub loader that returns empty bodies, so any reinjection at the compaction boundary will be empty. Issue #193 lands the session-aware loader and the runtime advertisement flip; until then, treat compaction as lossy and rely on `cairn capture_trace --from ${TRANSCRIPT_PATH} --json` after the fact for replay, not on live reinjection.\n\n");
 }
 
 fn push_verb_section(s: &mut String, verb: &VerbDef) -> Result<(), CodegenError> {

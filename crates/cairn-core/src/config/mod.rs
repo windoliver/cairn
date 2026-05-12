@@ -60,6 +60,14 @@ pub enum ConfigError {
         /// The invalid budget value.
         value: u64,
     },
+    /// A ratio field fell outside its accepted range.
+    #[error("invalid ratio for {field}: value {value} must be > 0 and <= 1")]
+    InvalidRatio {
+        /// The config field containing the invalid ratio.
+        field: &'static str,
+        /// The invalid ratio value.
+        value: f64,
+    },
     /// A retention key glob is malformed.
     #[error("invalid retention key pattern: {0}")]
     InvalidRetentionKey(String),
@@ -556,6 +564,12 @@ pub struct HotMemoryConfig {
     pub recipe: Vec<HotMemoryRecipeStep>,
     /// Maximum bytes in the assembled hot prefix. Must be > 0.
     pub max_bytes: u32,
+    /// Recipe label to use for `PreCompact` reinjection.
+    #[serde(default = "default_pre_compact_recipe")]
+    pub pre_compact_recipe: String,
+    /// Fraction of `compaction_target` reserved for `PreCompact` reinjection.
+    #[serde(default = "default_pre_compact_safety_ratio")]
+    pub pre_compact_safety_ratio: f64,
 }
 
 impl Default for HotMemoryConfig {
@@ -570,8 +584,18 @@ impl Default for HotMemoryConfig {
                 HotMemoryRecipeStep::RecentUserSignal,
             ],
             max_bytes: 25_600,
+            pre_compact_recipe: default_pre_compact_recipe(),
+            pre_compact_safety_ratio: default_pre_compact_safety_ratio(),
         }
     }
+}
+
+fn default_pre_compact_recipe() -> String {
+    "handoff".to_owned()
+}
+
+fn default_pre_compact_safety_ratio() -> f64 {
+    0.30
 }
 
 // ── Store ─────────────────────────────────────────────────────────────────
@@ -858,6 +882,15 @@ impl CairnConfig {
                 value: 0_u64,
             });
         }
+        if self.vault.hot_memory.pre_compact_safety_ratio.is_nan()
+            || self.vault.hot_memory.pre_compact_safety_ratio <= 0.0
+            || self.vault.hot_memory.pre_compact_safety_ratio > 1.0
+        {
+            return Err(ConfigError::InvalidRatio {
+                field: "vault.hot_memory.pre_compact_safety_ratio",
+                value: self.vault.hot_memory.pre_compact_safety_ratio,
+            });
+        }
 
         // 4. Extractor budget fields must be > 0 when set
         for entry in &self.pipeline.extract.chain {
@@ -1056,6 +1089,18 @@ mod tests {
         assert_eq!(
             e.to_string(),
             "unresolved env var in config: ${OPENAI_API_KEY}"
+        );
+    }
+
+    #[test]
+    fn config_error_ratio_display() {
+        let e = ConfigError::InvalidRatio {
+            field: "vault.hot_memory.pre_compact_safety_ratio",
+            value: 1.25,
+        };
+        assert_eq!(
+            e.to_string(),
+            "invalid ratio for vault.hot_memory.pre_compact_safety_ratio: value 1.25 must be > 0 and <= 1"
         );
     }
 
@@ -1291,6 +1336,45 @@ mod tests {
         assert_eq!(config.vault.layout.sources, "inbox");
         assert_eq!(config.vault.layout.enabled_kinds.len(), 2);
         assert!(!config.sensors.ide.enabled);
+    }
+
+    #[test]
+    fn hot_memory_defaults_round_trip() {
+        let hot_memory = HotMemoryConfig::default();
+        let json = serde_json::to_string(&hot_memory).expect("hot_memory serializes");
+        let round_trip: HotMemoryConfig =
+            serde_json::from_str(&json).expect("hot_memory deserializes");
+        assert_eq!(round_trip, hot_memory);
+        assert_eq!(round_trip.pre_compact_recipe, "handoff");
+        assert!((round_trip.pre_compact_safety_ratio - 0.30).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn validate_rejects_pre_compact_safety_ratio_above_one() {
+        let mut config = CairnConfig::default();
+        config.vault.hot_memory.pre_compact_safety_ratio = 1.01;
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidRatio {
+                field: "vault.hot_memory.pre_compact_safety_ratio",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_pre_compact_safety_ratio_nan() {
+        let mut config = CairnConfig::default();
+        config.vault.hot_memory.pre_compact_safety_ratio = f64::NAN;
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidRatio {
+                field: "vault.hot_memory.pre_compact_safety_ratio",
+                ..
+            }
+        ));
     }
 
     #[test]

@@ -34,7 +34,7 @@ use cairn_core::generated::envelope::{
     Response, ResponseData, ResponsePolicyTrace, ResponseStatus, ResponseVerb,
 };
 use cairn_core::generated::verbs::capture_trace::{CaptureTraceData, FailedTurn};
-use cairn_core::pipeline::capture_trace::{classify, project};
+use cairn_core::pipeline::capture_trace::{classify, project, project_pre_compact_snapshot};
 use cairn_core::pipeline::dispatch::{DefaultRegistry, trace_body_bytes};
 use cairn_core::pipeline::extract::body::ResolvedBody;
 use cairn_core::pipeline::filter::{Decision, FilterInputs, fence, redact, should_memorize};
@@ -387,7 +387,11 @@ async fn run_handler_inner(
             // `for` iteration scope.
             let resolved = ResolvedBody::from_trace_hook(&text);
 
-            let mut record = match project(event, classified, &resolved, &link) {
+            let mut record = match if classified == TraceEvent::PreCompact {
+                project_pre_compact_snapshot(event, &resolved, &link)
+            } else {
+                project(event, classified, &resolved, &link)
+            } {
                 Ok(r) => r,
                 Err(e) => {
                     failed_turns.push((

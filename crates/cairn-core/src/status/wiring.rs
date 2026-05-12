@@ -34,6 +34,18 @@ pub const RETRIEVE_SCOPE_WIRED: bool = false;
 /// `retrieve --profile` dispatch path.
 pub const RETRIEVE_PROFILE_WIRED: bool = false;
 
+/// `PreCompact` sensor capture + status advertisement path (issue #310).
+///
+/// Held off until a real dispatched runtime caller invokes
+/// `pipeline::pre_compact::run_pre_compact` and persists the snapshot.
+/// Today the orchestrator and trace projector exist (issue #310 core
+/// landing), but no sensor or MCP path dispatches them, so advertising
+/// the capability would let clients negotiate support that has no
+/// callable hook on the wire — exactly the over-advertise failure mode
+/// brief §15 forbids. Flip to `true` in the issue that lands the
+/// sensor + MCP dispatch path.
+pub const SENSORS_PRE_COMPACT_WIRED: bool = false;
+
 /// Sequence-mode replay rejection routed through every signed-verb path
 /// (`prepare_wal_with_replay` integration; held back per
 /// `crates/cairn-cli/src/verbs/status.rs` round-2 review #2).
