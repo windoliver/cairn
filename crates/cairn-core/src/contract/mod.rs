@@ -51,7 +51,12 @@ pub use version::{ContractVersion, VersionRange};
 
 pub use agent_provider::{AgentProvider, AgentProviderCapabilities, AgentProviderPlugin};
 pub use consent_lookup::{ConsentLookup, ConsentLookupError};
-pub use frontend_adapter::{FrontendAdapter, FrontendAdapterCapabilities, FrontendAdapterPlugin};
+pub use frontend_adapter::{
+    FrontendAdapter, FrontendAdapterCapabilities, FrontendAdapterError, FrontendAdapterPlugin,
+    FrontendBackendState, FrontendEdit, FrontendEventStream, FrontendFieldClass,
+    FrontendFieldPolicy, FrontendIdentityContext, FrontendProjection, FrontendProjectionRequest,
+    FrontendReconcileError, FrontendReconcileRequest, FrontendSubscription,
+};
 pub use hot_prefix_cache::{CacheError, CachedPrefix, HotPrefixCache};
 pub use identity_registry::{
     IdentityRegistry, IdentityVisibility, MaintenanceMode, PurgeAcknowledgement, PurgeReason,
