@@ -7,6 +7,7 @@ use cairn_cli::verbs::capture_trace::{read_jsonl_events, run_handler};
 use cairn_core::domain::{
     ActorChainEntry, CaptureEvent, CaptureEventId, CaptureMode, CapturePayload, CaptureRefs,
     ChainRole, Identity, PayloadHash, Rfc3339Timestamp, SessionId, SourceFamily,
+    capture::TerminalContext,
 };
 
 /// Build a minimal valid `Hook` [`CaptureEvent`] for use in tests.
@@ -288,6 +289,148 @@ fn write_fixture(vault: &Path, jsonl_path: &Path) {
             &post_ref,
             &sha256_hex(post_body),
         ),
+        make_event(
+            id_stop,
+            "Stop",
+            session,
+            turn,
+            "2026-05-02T00:00:04Z",
+            None,
+            &stop_ref,
+            &sha256_hex(stop_body),
+        ),
+    ];
+
+    let mut f = std::fs::File::create(jsonl_path).expect("create JSONL file");
+    for ev in &events {
+        let line = serde_json::to_string(ev).expect("serialize event");
+        writeln!(f, "{line}").expect("write JSONL line");
+    }
+}
+
+/// Write a single turn that includes both a proactive agent message and a
+/// terminal-backed tool output. This exercises the non-hook trace-event
+/// classifications that complete issue #77's event coverage.
+#[allow(
+    clippy::too_many_lines,
+    reason = "fixture: six events × full struct literals for non-hook variants"
+)]
+fn write_agent_and_tool_output_fixture(vault: &Path, jsonl_path: &Path) {
+    let session = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let turn = "turn-1";
+    let tool_id = "toolu_test_01";
+
+    let id_user = ULID_A;
+    let id_pre = ULID_B;
+    let id_agent = "01ARZ3NDEKTSV4RRFFQ69G5FAJ";
+    let id_post = "01ARZ3NDEKTSV4RRFFQ69G5FAC";
+    let id_output = "01ARZ3NDEKTSV4RRFFQ69G5FAK";
+    let id_stop = "01ARZ3NDEKTSV4RRFFQ69G5FAD";
+
+    let user_body = "Please run the deployment check";
+    let pre_body = r#"{"tool":"bash","input":{"command":"./deploy-check.sh"}}"#;
+    let agent_body = "I will summarize the deployment output for review.";
+    let post_body = r#"{"tool":"bash","status":"completed"}"#;
+    let output_body = "Deploy output complete: 12 services healthy, 0 errors.";
+    let stop_body = "session ended";
+
+    let user_ref = write_source(vault, &format!("{id_user}.txt"), user_body);
+    let pre_ref = write_source(vault, &format!("{id_pre}.txt"), pre_body);
+    let agent_ref = write_source(vault, &format!("{id_agent}.txt"), agent_body);
+    let post_ref = write_source(vault, &format!("{id_post}.txt"), post_body);
+    let output_ref = write_source(vault, &format!("{id_output}.txt"), output_body);
+    let stop_ref = write_source(vault, &format!("{id_stop}.txt"), stop_body);
+
+    let proactive_sensor = Identity::parse("snr:local:proactive:claude-code:v1")
+        .expect("invariant: valid proactive sensor id");
+    let terminal_sensor =
+        Identity::parse("snr:local:terminal:default:v1").expect("invariant: valid terminal id");
+
+    let events = vec![
+        make_event(
+            id_user,
+            "UserPromptSubmit",
+            session,
+            turn,
+            "2026-05-02T00:00:01Z",
+            None,
+            &user_ref,
+            &sha256_hex(user_body),
+        ),
+        make_event(
+            id_pre,
+            "PreToolUse",
+            session,
+            turn,
+            "2026-05-02T00:00:02Z",
+            Some(tool_id.to_owned()),
+            &pre_ref,
+            &sha256_hex(pre_body),
+        ),
+        CaptureEvent {
+            event_id: CaptureEventId::parse(id_agent).expect("invariant: valid ULID"),
+            sensor_id: proactive_sensor,
+            capture_mode: CaptureMode::Proactive,
+            actor_chain: vec![ActorChainEntry {
+                role: ChainRole::Author,
+                identity: Identity::parse("agt:claude-code:opus-4-7:reviewer:v1")
+                    .expect("invariant: valid agent identity"),
+                at: Rfc3339Timestamp::parse("2026-05-02T00:00:02.500Z")
+                    .expect("invariant: valid RFC-3339"),
+            }],
+            refs: Some(CaptureRefs {
+                session_id: Some(session.to_owned()),
+                turn_id: Some(turn.to_owned()),
+                tool_id: None,
+            }),
+            payload_hash: PayloadHash::parse(format!("sha256:{}", sha256_hex(agent_body)))
+                .expect("invariant: valid sha256 hash"),
+            payload_ref: agent_ref,
+            captured_at: Rfc3339Timestamp::parse("2026-05-02T00:00:02.500Z")
+                .expect("invariant: valid RFC-3339"),
+            payload: CapturePayload::Proactive {
+                kind: "feedback".into(),
+                rationale: "agent produced a user-visible summary".into(),
+            },
+            source_family: SourceFamily::Proactive,
+        },
+        make_event(
+            id_post,
+            "PostToolUse",
+            session,
+            turn,
+            "2026-05-02T00:00:03Z",
+            Some(tool_id.to_owned()),
+            &post_ref,
+            &sha256_hex(post_body),
+        ),
+        CaptureEvent {
+            event_id: CaptureEventId::parse(id_output).expect("invariant: valid ULID"),
+            sensor_id: terminal_sensor.clone(),
+            capture_mode: CaptureMode::Auto,
+            actor_chain: vec![ActorChainEntry {
+                role: ChainRole::Author,
+                identity: terminal_sensor,
+                at: Rfc3339Timestamp::parse("2026-05-02T00:00:03.500Z")
+                    .expect("invariant: valid RFC-3339"),
+            }],
+            refs: Some(CaptureRefs {
+                session_id: Some(session.to_owned()),
+                turn_id: Some(turn.to_owned()),
+                tool_id: Some(tool_id.to_owned()),
+            }),
+            payload_hash: PayloadHash::parse(format!("sha256:{}", sha256_hex(output_body)))
+                .expect("invariant: valid sha256 hash"),
+            payload_ref: output_ref,
+            captured_at: Rfc3339Timestamp::parse("2026-05-02T00:00:03.500Z")
+                .expect("invariant: valid RFC-3339"),
+            payload: CapturePayload::Terminal {
+                command: "./deploy-check.sh".into(),
+                exit_code: Some(0),
+                context: Some(TerminalContext::InteractiveTty),
+            },
+            source_family: SourceFamily::Terminal,
+        },
         make_event(
             id_stop,
             "Stop",
@@ -871,6 +1014,71 @@ async fn capture_trace_blocks_secret_body_before_persisting_turn() {
             assert!(
                 !tx.turn_summary_exists(&session_id, turn)?,
                 "privacy-blocked turn must not create a summary"
+            );
+            Ok(())
+        })
+        .await
+        .expect("store query should succeed");
+}
+
+#[tokio::test]
+#[allow(
+    clippy::expect_used,
+    reason = "test: panics surface broken invariants immediately"
+)]
+async fn agent_message_and_tool_output_persist_and_redact() {
+    let vault = tempfile::tempdir().expect("tempdir");
+    let store = open_test_store_in_memory().await;
+    let jsonl_path = vault.path().join("trace.jsonl");
+
+    write_agent_and_tool_output_fixture(vault.path(), &jsonl_path);
+
+    let resp = run_handler(&store, vault.path(), &jsonl_path)
+        .await
+        .expect("run_handler should succeed");
+
+    assert!(
+        resp.failed_turns.is_empty(),
+        "expected no failures, got: {:?}",
+        resp.failed_turns
+    );
+
+    let session_id = SessionId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").expect("valid session_id");
+
+    store
+        .with_tx(move |tx| {
+            let rows = tx.list_trace_events(&session_id, "turn-1")?;
+            assert_eq!(rows.len(), 6, "expected 6 trace events, got {}", rows.len());
+
+            let _agent = rows
+                .iter()
+                .find(|r| {
+                    r.extra_frontmatter
+                        .get("trace_event")
+                        .and_then(|v| v.as_str())
+                        == Some("agent_message")
+                })
+                .expect("agent_message row");
+
+            let output = rows
+                .iter()
+                .find(|r| {
+                    r.extra_frontmatter
+                        .get("trace_event")
+                        .and_then(|v| v.as_str())
+                        == Some("tool_output")
+                })
+                .expect("tool_output row");
+            assert_eq!(
+                output.extra_frontmatter["trace"]["parent_event_id"]
+                    .as_str()
+                    .expect("parent_event_id present"),
+                ULID_B,
+                "tool_output should attach to the pre_tool event"
+            );
+            assert!(
+                tx.turn_summary_exists(&session_id, "turn-1")?,
+                "turn summary should exist after Stop event"
             );
             Ok(())
         })

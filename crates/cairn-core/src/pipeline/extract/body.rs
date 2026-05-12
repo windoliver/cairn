@@ -174,20 +174,18 @@ impl<'a> ResolvedBody<'a> {
     /// Construct from hash-verified bytes read from `sources/` by the
     /// trace-capture pipeline (brief §5.0). The caller must have already
     /// verified `sha256(bytes) == event.payload_hash` before calling this
-    /// constructor. Intended for hook events that are **not** user-utterance
-    /// hooks (e.g. `PreToolUse`, `PostToolUse`, `Stop`) — those hooks carry
-    /// tool/agent content rather than direct user text, so `HookUtterance`
-    /// is not an appropriate source tag. The source is recorded as
-    /// `HookUtterance` because that is the closest match for
-    /// harness-captured hook payload bytes; a future task will introduce a
-    /// dedicated `HookCapture` or `TracePayload` variant.
+    /// constructor. Intended for trace-event payload bytes that are not
+    /// direct user utterances, such as tool lifecycle hooks, proactive agent
+    /// messages, and terminal-backed tool output. The source is recorded as
+    /// `HookUtterance` because that is the closest existing body-source tag;
+    /// a future task will introduce a dedicated trace-capture source.
     ///
     /// **Do not use outside the `capture_trace` verb pipeline.** Every other
     /// body resolution path should go through the typed constructors
     /// (`from_user_ingest`, `from_hook_utterance`) which enforce
     /// payload-variant invariants.
     #[must_use]
-    pub fn from_trace_hook(text: &'a str) -> Self {
+    pub fn from_trace_capture(text: &'a str) -> Self {
         Self {
             text,
             source: BodySource::HookUtterance,

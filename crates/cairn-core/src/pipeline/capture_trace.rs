@@ -59,15 +59,16 @@ impl ProjectedTraceBlocks {
 
 /// Map a [`CaptureEvent`] to a [`TraceEvent`]. Static rules; no LLM.
 ///
-/// **P0 supports only the four hook payloads** routed by hook name
-/// (brief §9.3): `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`.
-/// The remaining `TraceEvent` variants — `AgentMessage`, `ToolOutput`,
-/// `TurnSummary` — are produced by other paths: `AgentMessage` and
-/// `ToolOutput` await sensor adapters (issue #84); `TurnSummary` is
-/// generated post-hoc by [`crate::pipeline::turn::summarize_turn`] and
-/// never reaches `classify`. Until those land, JSONL streams that
-/// include them will fail their entire turn at the importer (the
-/// importer fails closed rather than persisting a partial set).
+/// P0 recognizes hook-backed user/tool lifecycle events plus two existing
+/// non-hook capture families used by the trace importer:
+///
+/// - `CapturePayload::Hook`: `UserPromptSubmit`, `PreToolUse`,
+///   `PostToolUse`, `Stop`
+/// - `CapturePayload::Proactive`: `AgentMessage`
+/// - `CapturePayload::Terminal` with `refs.tool_id`: `ToolOutput`
+///
+/// `TurnSummary` is generated post-hoc by
+/// [`crate::pipeline::turn::summarize_turn`] and never reaches `classify`.
 ///
 /// # Errors
 ///
@@ -82,6 +83,14 @@ pub fn classify(event: &CaptureEvent) -> Result<TraceEvent, TraceProjectError> {
             "Stop" => Ok(TraceEvent::Stop),
             _ => Err(TraceProjectError::Unclassifiable),
         },
+        CapturePayload::Proactive { .. } => Ok(TraceEvent::AgentMessage),
+        CapturePayload::Terminal { .. } => event
+            .refs
+            .as_ref()
+            .and_then(|refs| refs.tool_id.as_ref())
+            .map_or(Err(TraceProjectError::Unclassifiable), |_| {
+                Ok(TraceEvent::ToolOutput)
+            }),
         _ => Err(TraceProjectError::Unclassifiable),
     }
 }
@@ -335,6 +344,71 @@ mod tests {
         }
     }
 
+    fn mk_proactive_event() -> CaptureEvent {
+        CaptureEvent {
+            event_id: CaptureEventId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAW")
+                .expect("invariant: fixed ULID is valid"),
+            sensor_id: Identity::parse("snr:local:proactive:claude-code:v1")
+                .expect("invariant: fixed sensor identity is valid"),
+            capture_mode: CaptureMode::Proactive,
+            actor_chain: vec![ActorChainEntry {
+                role: ChainRole::Author,
+                identity: Identity::parse("agt:claude-code:opus-4-7:reviewer:v1")
+                    .expect("invariant: fixed agent identity is valid"),
+                at: ts(),
+            }],
+            refs: Some(CaptureRefs {
+                session_id: Some("sess".into()),
+                turn_id: Some("turn".into()),
+                tool_id: None,
+            }),
+            payload_hash: PayloadHash::parse(
+                "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            )
+            .expect("invariant: well-formed sha256 hash"),
+            payload_ref: "sources/proactive/01ARZ3NDEKTSV4RRFFQ69G5FAW.txt".into(),
+            captured_at: ts(),
+            payload: CapturePayload::Proactive {
+                kind: "feedback".into(),
+                rationale: "high-salience correction".into(),
+            },
+            source_family: SourceFamily::Proactive,
+        }
+    }
+
+    fn mk_terminal_event() -> CaptureEvent {
+        CaptureEvent {
+            event_id: CaptureEventId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAX")
+                .expect("invariant: fixed ULID is valid"),
+            sensor_id: Identity::parse("snr:local:terminal:default:v1")
+                .expect("invariant: fixed sensor identity is valid"),
+            capture_mode: CaptureMode::Auto,
+            actor_chain: vec![ActorChainEntry {
+                role: ChainRole::Author,
+                identity: Identity::parse("snr:local:terminal:default:v1")
+                    .expect("invariant: fixed sensor identity is valid"),
+                at: ts(),
+            }],
+            refs: Some(CaptureRefs {
+                session_id: Some("sess".into()),
+                turn_id: Some("turn".into()),
+                tool_id: Some("toolu_test_01".into()),
+            }),
+            payload_hash: PayloadHash::parse(
+                "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            )
+            .expect("invariant: well-formed sha256 hash"),
+            payload_ref: "sources/terminal/01ARZ3NDEKTSV4RRFFQ69G5FAX.txt".into(),
+            captured_at: ts(),
+            payload: CapturePayload::Terminal {
+                command: "bash".into(),
+                exit_code: Some(0),
+                context: Some(crate::domain::capture::TerminalContext::InteractiveTty),
+            },
+            source_family: SourceFamily::Terminal,
+        }
+    }
+
     #[test]
     fn body_truncates_at_cap() {
         let big = "x".repeat(TRACE_BODY_CAP + 100);
@@ -384,6 +458,22 @@ mod tests {
     #[test]
     fn classifies_stop() {
         assert_eq!(classify(&mk_hook_event("Stop")).unwrap(), TraceEvent::Stop);
+    }
+
+    #[test]
+    fn classifies_proactive_as_agent_message() {
+        assert_eq!(
+            classify(&mk_proactive_event()).unwrap(),
+            TraceEvent::AgentMessage
+        );
+    }
+
+    #[test]
+    fn classifies_terminal_as_tool_output() {
+        assert_eq!(
+            classify(&mk_terminal_event()).unwrap(),
+            TraceEvent::ToolOutput
+        );
     }
 
     #[test]

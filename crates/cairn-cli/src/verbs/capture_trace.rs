@@ -289,7 +289,19 @@ async fn run_handler_inner(
             // squash gate, and a malformed envelope is rejected with
             // `MalformedEnvelope` before we open `sources/`.
             match dispatch(event, &DefaultRegistry) {
-                DispatchDecision::Bypass(BypassReason::NonTerminalFamily) => {}
+                // Non-terminal families (Hook, Proactive, Ide, …) and the
+                // terminal-state bypass variants all flow raw bytes through
+                // Extract unchanged at P0. Squash is also admitted: trace
+                // replay re-ingests previously captured terminal payloads
+                // whose bytes are already on disk under `sources/`, so the
+                // squash binder cannot rewrite them and the importer treats
+                // the squash decision as "accept and proceed".
+                DispatchDecision::Bypass(
+                    BypassReason::NonTerminalFamily
+                    | BypassReason::TerminalNonInteractive
+                    | BypassReason::TerminalLegacyMissingContext,
+                )
+                | DispatchDecision::Squash(_) => {}
                 DispatchDecision::Bypass(BypassReason::MalformedEnvelope) => {
                     failed_turns.push((
                         session_str.clone(),
@@ -300,17 +312,14 @@ async fn run_handler_inner(
                     break;
                 }
                 other => {
-                    // classify() already rejected non-hook payloads; reaching
-                    // any other dispatch decision means the classifier and
-                    // dispatch driver disagree about routing. Surface as a
-                    // turn-level failure rather than silently proceeding.
+                    // `DispatchDecision` and `BypassReason` are
+                    // `#[non_exhaustive]`. A future routing variant that we
+                    // do not yet admit must fail closed: surface a
+                    // turn-level error rather than silently proceeding.
                     failed_turns.push((
                         session_str.clone(),
                         turn_str.clone(),
-                        format!(
-                            "dispatch {}: unexpected decision {other:?} for hook payload",
-                            event.event_id
-                        ),
+                        format!("dispatch {}: unexpected decision {other:?}", event.event_id),
                     ));
                     group_failed = true;
                     break;
@@ -402,7 +411,7 @@ async fn run_handler_inner(
             // the duration of the `project` call only, which completes before
             // `text` is dropped. This is safe because both live in the same
             // `for` iteration scope.
-            let resolved = ResolvedBody::from_trace_hook(&text);
+            let resolved = ResolvedBody::from_trace_capture(&text);
 
             let mut record = match project(event, classified, &resolved, &link) {
                 Ok(r) => r,
