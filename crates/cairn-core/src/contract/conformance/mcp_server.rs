@@ -119,14 +119,11 @@ fn tier1_capability_self_consistency_floor(
 }
 
 fn tier2_tool_availability() -> CaseOutcome {
-    // Core owns the cross-plugin contract checks but cannot depend on a
-    // concrete MCP adapter to initialize a server or invoke tools/list.
-    // Adapter crates should cover concrete handler behavior directly.
     CaseOutcome {
         id: "initialize_and_list_tools",
         tier: Tier::Two,
         status: CaseStatus::Pending {
-            reason: "real impl pending",
+            reason: "transport-level MCP initialization is not exercised from cairn-core",
         },
     }
 }

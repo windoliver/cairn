@@ -45,6 +45,20 @@ pub trait MCPServer: Send + Sync {
     fn supported_contract_versions(&self) -> VersionRange;
 }
 
+/// Static identity descriptor for a [`MCPServer`] plugin (§4.1).
+///
+/// Carries the two associated consts the `register_plugin_with!` macro checks
+/// before construction. See [`MemoryStorePlugin`](crate::contract::MemoryStorePlugin)
+/// for the design rationale.
+// Matches brief §4 row 5 trait name; CLAUDE.md §1 says brief wins.
+#[allow(clippy::upper_case_acronyms)]
+pub trait MCPServerPlugin: MCPServer + Sized {
+    /// Stable plugin name, checked statically before construction (§4.1).
+    const NAME: &'static str;
+    /// Version range checked statically before construction (§4.1).
+    const SUPPORTED_VERSIONS: VersionRange;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -54,7 +68,7 @@ mod tests {
     #[async_trait::async_trait]
     impl MCPServer for StubMcp {
         fn name(&self) -> &'static str {
-            "stub-mcp"
+            Self::NAME
         }
         fn capabilities(&self) -> &MCPServerCapabilities {
             static CAPS: MCPServerCapabilities = MCPServerCapabilities {
@@ -66,8 +80,14 @@ mod tests {
             &CAPS
         }
         fn supported_contract_versions(&self) -> VersionRange {
-            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+            Self::SUPPORTED_VERSIONS
         }
+    }
+
+    impl MCPServerPlugin for StubMcp {
+        const NAME: &'static str = "stub-mcp";
+        const SUPPORTED_VERSIONS: VersionRange =
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0));
     }
 
     #[test]
@@ -75,5 +95,11 @@ mod tests {
         let m: Box<dyn MCPServer> = Box::new(StubMcp);
         assert_eq!(m.name(), "stub-mcp");
         assert!(m.supported_contract_versions().accepts(CONTRACT_VERSION));
+    }
+
+    #[test]
+    fn static_consts_accessible() {
+        assert_eq!(StubMcp::NAME, "stub-mcp");
+        assert!(StubMcp::SUPPORTED_VERSIONS.accepts(CONTRACT_VERSION));
     }
 }

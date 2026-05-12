@@ -4,7 +4,14 @@
 use std::process::Command;
 
 fn cli() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_cairn"))
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_cairn"));
+    // Pin CWD to a clean tempdir so the workspace root's transient
+    // `.cairn/` (left by other tests downloading embedding models) does
+    // not trip the vault resolver into reporting a half-bootstrapped
+    // vault and exiting EX_CONFIG.
+    cmd.current_dir(std::env::temp_dir());
+    cmd.env_remove("CAIRN_VAULT");
+    cmd
 }
 
 #[test]

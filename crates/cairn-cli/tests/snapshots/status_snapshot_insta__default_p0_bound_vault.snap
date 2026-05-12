@@ -1,0 +1,66 @@
+---
+source: crates/cairn-cli/tests/status_snapshot_insta.rs
+expression: v
+---
+{
+  "capabilities": [
+    "cairn.mcp.v1.search.keyword",
+    "cairn.mcp.v1.policy_trace",
+    "cairn.mcp.v1.forget.record"
+  ],
+  "contract": "cairn.mcp.v1",
+  "extensions": [],
+  "mcp_graph_tools": {
+    "probe_basis": "full",
+    "reason": "single_tenant_off",
+    "state": "unavailable"
+  },
+  "pipeline_dispatch": [
+    {
+      "decision": "bypass",
+      "source_family": "cli"
+    },
+    {
+      "decision": "bypass",
+      "source_family": "clipboard"
+    },
+    {
+      "decision": "bypass",
+      "source_family": "hook"
+    },
+    {
+      "decision": "bypass",
+      "source_family": "ide"
+    },
+    {
+      "decision": "bypass",
+      "source_family": "mcp"
+    },
+    {
+      "decision": "bypass",
+      "source_family": "proactive"
+    },
+    {
+      "decision": "bypass",
+      "source_family": "recording_batch"
+    },
+    {
+      "decision": "bypass",
+      "source_family": "screen"
+    },
+    {
+      "decision": "squash_when_interactive_tty",
+      "source_family": "terminal"
+    },
+    {
+      "decision": "bypass",
+      "source_family": "voice"
+    }
+  ],
+  "server_info": {
+    "build": "<masked>",
+    "incarnation": "<masked>",
+    "started_at": "<masked>",
+    "version": "<masked>"
+  }
+}

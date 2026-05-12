@@ -4,8 +4,8 @@
 //! `validate_against_intent` accepts only this type so the type system
 //! catches "called with raw bytes off the wire" at compile time.
 //! Production callers mint instances via
-//! [`crate::verifier::verify_signed_intent`] — that function (P0:
-//! syntactic checks; P1+: full crypto + replay) is the single
+//! [`crate::verifier::EnvelopeVerifier::verify`] — that method runs the
+//! full crypto + lifecycle + scope + expiry pipeline and is the single
 //! production path. The construction primitive itself lives behind a
 //! sealed trait (`SignedIntentVerifier::__from_verified`) gated by a
 //! private witness, so external crates cannot bypass the verifier.

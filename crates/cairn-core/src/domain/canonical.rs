@@ -105,6 +105,35 @@ pub fn canonical_bytes_signed_payload(record: &MemoryRecord) -> Result<Vec<u8>, 
     })
 }
 
+/// Encode `intent` to canonical-JSON bytes with the `signature` field
+/// removed. The result is the byte string that was signed, suitable for
+/// passing to [`ed25519_dalek::Verifier::verify`] alongside
+/// `intent.signature`.
+///
+/// # Errors
+/// Returns [`DomainError::InvalidIdentity`] if `intent` cannot be
+/// serialized to a JSON object (should never happen — `SignedIntent` is a
+/// struct).
+pub fn canonical_bytes_signed_intent(
+    intent: &crate::generated::envelope::SignedIntent,
+) -> Result<Vec<u8>, crate::domain::DomainError> {
+    let mut value =
+        serde_json::to_value(intent).map_err(|e| crate::domain::DomainError::InvalidIdentity {
+            message: format!("canonical serialize failed: {e}"),
+        })?;
+    let map = value
+        .as_object_mut()
+        .ok_or_else(|| crate::domain::DomainError::InvalidIdentity {
+            message: "SignedIntent did not serialize to a JSON object".into(),
+        })?;
+    map.remove("signature");
+    serde_json_canonicalizer::to_vec(&value).map_err(|e| {
+        crate::domain::DomainError::InvalidIdentity {
+            message: format!("canonical serialize failed: {e}"),
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,18 +141,19 @@ mod tests {
     fn sample() -> MemoryRecord {
         use crate::domain::{
             ActorChainEntry, ChainRole, EvidenceVector, Identity, MemoryClass, MemoryKind,
-            MemoryVisibility, Provenance, Rfc3339Timestamp, ScopeTuple,
+            MemoryVisibility, Provenance, Rfc3339Timestamp, ScopeTuple, TargetId,
             record::{Ed25519Signature, RecordId},
         };
         use std::collections::BTreeMap;
-        let user = Identity::parse("usr:tafeng").expect("valid");
+        let user = Identity::parse("hmn:tafeng").expect("valid");
         MemoryRecord {
             id: RecordId::parse("01HQZX9F5N0000000000000000").expect("valid"),
+            target_id: TargetId::parse("01HQZX9F5N0000000000000000").expect("valid"),
             kind: MemoryKind::User,
             class: MemoryClass::Semantic,
             visibility: MemoryVisibility::Private,
             scope: ScopeTuple {
-                user: Some("usr:tafeng".to_owned()),
+                user: Some("hmn:tafeng".to_owned()),
                 ..ScopeTuple::default()
             },
             body: "user prefers dark mode".to_owned(),
@@ -153,6 +183,7 @@ mod tests {
                 .expect("valid"),
             tags: vec!["pref".to_owned()],
             extra_frontmatter: BTreeMap::new(),
+            consent_model: None,
         }
     }
 
@@ -254,5 +285,71 @@ mod tests {
             canonical_bytes(&value).expect("canonical"),
             br#"{"a":"Hello!","b":false,"c":120}"#
         );
+    }
+
+    #[test]
+    fn signed_intent_canonical_strips_signature() {
+        use crate::generated::common;
+        use crate::generated::envelope::{SignedIntent, SignedIntentScope, SignedIntentScopeTier};
+
+        let mk = |sig: &str| SignedIntent {
+            chain_parents: vec![],
+            expires_at: "2026-04-22T14:07:11Z".into(),
+            issued_at: "2026-04-22T14:02:11Z".into(),
+            issuer: common::Identity("hmn:tafeng".into()),
+            key_version: 1,
+            nonce: common::Nonce16Base64("AAAAAAAAAAAAAAAAAAAAAA==".into()),
+            operation_id: common::Ulid("01HQZX9F5N0000000000000000".into()),
+            scope: SignedIntentScope {
+                tenant: "acme".into(),
+                workspace: "ws".into(),
+                entity: "ent".into(),
+                tier: SignedIntentScopeTier::Project,
+            },
+            sequence: Some(1),
+            server_challenge: None,
+            signature: common::Ed25519Signature(format!("ed25519:{sig}")),
+            target_hash: format!("sha256:{}", "a".repeat(64)),
+        };
+
+        let a = canonical_bytes_signed_intent(&mk(&"a".repeat(128))).unwrap();
+        let b = canonical_bytes_signed_intent(&mk(&"b".repeat(128))).unwrap();
+        assert_eq!(
+            a, b,
+            "canonical bytes must be invariant under signature mutation"
+        );
+        assert!(!std::str::from_utf8(&a).unwrap().contains("signature"));
+    }
+
+    #[test]
+    fn signed_intent_canonical_changes_when_payload_changes() {
+        use crate::generated::common;
+        use crate::generated::envelope::{SignedIntent, SignedIntentScope, SignedIntentScopeTier};
+
+        let base = SignedIntent {
+            chain_parents: vec![],
+            expires_at: "2026-04-22T14:07:11Z".into(),
+            issued_at: "2026-04-22T14:02:11Z".into(),
+            issuer: common::Identity("hmn:tafeng".into()),
+            key_version: 1,
+            nonce: common::Nonce16Base64("AAAAAAAAAAAAAAAAAAAAAA==".into()),
+            operation_id: common::Ulid("01HQZX9F5N0000000000000000".into()),
+            scope: SignedIntentScope {
+                tenant: "acme".into(),
+                workspace: "ws".into(),
+                entity: "ent".into(),
+                tier: SignedIntentScopeTier::Project,
+            },
+            sequence: Some(1),
+            server_challenge: None,
+            signature: common::Ed25519Signature(format!("ed25519:{}", "a".repeat(128))),
+            target_hash: format!("sha256:{}", "a".repeat(64)),
+        };
+        let mut tweaked = base.clone();
+        tweaked.scope.entity = "different".into();
+
+        let a = canonical_bytes_signed_intent(&base).unwrap();
+        let b = canonical_bytes_signed_intent(&tweaked).unwrap();
+        assert_ne!(a, b);
     }
 }

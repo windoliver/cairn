@@ -15,6 +15,12 @@
           "$ref": "../common/primitives.json#/$defs/Cursor",
           "description": "Opaque continuation token from a prior search Data.next_cursor."
         },
+        "explain": {
+          "default": false,
+          "description": "When true, populate policy_trace and data.excluded with per-record exclusions for Tier-2 read filters. Has no effect on the candidate set the caller could see. `explain: true` requires the cairn.mcp.v1.policy_trace capability — servers that do not advertise it MUST reject `explain: true` with CapabilityUnavailable (sysexit 69).",
+          "type": "boolean",
+          "x-cairn-capability-when-true": "cairn.mcp.v1.policy_trace"
+        },
         "filters": {
           "$ref": "#/$defs/filter"
         },
@@ -57,6 +63,20 @@
     "Data": {
       "additionalProperties": false,
       "properties": {
+        "degraded_legs": {
+          "description": "Per-leg degradation entries when one or more search legs (semantic, graph, or graph seed sources) failed or were unavailable. Empty/absent when every requested leg contributed. Lets callers distinguish a low-recall result from a partial-failure result without inspecting server logs.",
+          "items": {
+            "$ref": "#/$defs/DegradedLegEntry"
+          },
+          "type": "array"
+        },
+        "excluded": {
+          "description": "Per-record exclusions; present only when args.explain is true.",
+          "items": {
+            "$ref": "../common/record_exclusion.json"
+          },
+          "type": "array"
+        },
         "hits": {
           "items": {
             "$ref": "#/$defs/Hit"
@@ -65,10 +85,53 @@
         },
         "next_cursor": {
           "$ref": "../common/primitives.json#/$defs/Cursor"
+        },
+        "score_explain": {
+          "description": "Optional per-candidate score-component explanations. Present only when args.explain is true (which itself requires the cairn.mcp.v1.policy_trace capability).",
+          "items": {
+            "$ref": "#/$defs/ScoreExplain"
+          },
+          "type": "array"
         }
       },
       "required": [
         "hits"
+      ],
+      "type": "object"
+    },
+    "DegradedLegEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "leg": {
+          "description": "Which hybrid leg degraded.",
+          "enum": [
+            "semantic",
+            "graph"
+          ],
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why the leg degraded.",
+          "enum": [
+            "sql_error",
+            "capability_unavailable",
+            "timeout"
+          ],
+          "type": "string"
+        },
+        "source": {
+          "description": "Graph-leg only: which seed source was in flight when the leg degraded. Absent for non-graph legs.",
+          "enum": [
+            "all",
+            "auth_keyword_seed",
+            "auth_semantic_seed"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "leg",
+        "reason"
       ],
       "type": "object"
     },
@@ -100,6 +163,37 @@
         "record_id",
         "score",
         "trust"
+      ],
+      "type": "object"
+    },
+    "ScoreExplain": {
+      "additionalProperties": false,
+      "properties": {
+        "bm25_rank": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "cosine": {
+          "type": "number"
+        },
+        "final_score": {
+          "type": "number"
+        },
+        "record_id": {
+          "$ref": "../common/primitives.json#/$defs/Ulid"
+        },
+        "rrf_score": {
+          "type": "number"
+        },
+        "semantic_rank": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "record_id",
+        "rrf_score",
+        "final_score"
       ],
       "type": "object"
     },

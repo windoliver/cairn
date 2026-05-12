@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc ee6230db97c87dfcc16a268e38b332501689b10cc0f3b2458163270f306f3631 # shrinks to events = [ConsentTimelineEvent { consent_ref: "c:1", seq: 81, kind: Issued, sensor_id: SensorLabel("local:s:h:v1"), scope: "private", decided_at: Rfc3339Timestamp("2023-11-14T22:13:20Z"), expires_at: None }, ConsentTimelineEvent { consent_ref: "c:1", seq: 81, kind: Issued, sensor_id: SensorLabel("local:s:h:v1"), scope: "private", decided_at: Rfc3339Timestamp("2023-11-14T22:13:21Z"), expires_at: None }]

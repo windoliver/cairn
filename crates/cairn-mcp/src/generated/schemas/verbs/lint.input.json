@@ -3,6 +3,11 @@
     "Args": {
       "additionalProperties": false,
       "properties": {
+        "fix": {
+          "description": "When true, resolves live bitemporal edge contradictions by invalidating lower-confidence edges.",
+          "type": "boolean",
+          "x-cairn-auth": "write_capability"
+        },
         "write_report": {
           "description": "When true, writes .cairn/lint-report.md.",
           "type": "boolean",
@@ -16,31 +21,7 @@
       "properties": {
         "findings": {
           "items": {
-            "additionalProperties": false,
-            "properties": {
-              "kind": {
-                "enum": [
-                  "contradiction",
-                  "orphan",
-                  "stale",
-                  "missing_concept",
-                  "data_gap"
-                ],
-                "type": "string"
-              },
-              "message": {
-                "minLength": 1,
-                "type": "string"
-              },
-              "record_id": {
-                "$ref": "../common/primitives.json#/$defs/Ulid"
-              }
-            },
-            "required": [
-              "kind",
-              "message"
-            ],
-            "type": "object"
+            "$ref": "#/$defs/Finding"
           },
           "type": "array"
         },
@@ -51,17 +32,39 @@
         "summary": {
           "additionalProperties": false,
           "properties": {
-            "contradictions": {
+            "auto_resolved": {
               "minimum": 0,
               "type": "integer"
             },
-            "orphans": {
-              "minimum": 0,
-              "type": "integer"
+            "by_kind": {
+              "additionalProperties": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "object"
             },
-            "stale": {
-              "minimum": 0,
-              "type": "integer"
+            "by_severity": {
+              "additionalProperties": false,
+              "properties": {
+                "error": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "info": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "warning": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "error",
+                "warning",
+                "info"
+              ],
+              "type": "object"
             },
             "total": {
               "minimum": 0,
@@ -69,7 +72,9 @@
             }
           },
           "required": [
-            "total"
+            "total",
+            "by_severity",
+            "by_kind"
           ],
           "type": "object"
         }
@@ -78,6 +83,94 @@
         "summary",
         "findings"
       ],
+      "type": "object"
+    },
+    "Finding": {
+      "additionalProperties": false,
+      "properties": {
+        "entities": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "$ref": "#/$defs/Kind"
+        },
+        "message": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "severity": {
+          "$ref": "#/$defs/Severity"
+        },
+        "suggested_fix": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/$defs/Target"
+        },
+        "tracking_issue": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "severity",
+        "message"
+      ],
+      "type": "object"
+    },
+    "Kind": {
+      "enum": [
+        "broken_actor_chain",
+        "broken_source_link",
+        "contradictory_edge",
+        "contradiction",
+        "data_gap",
+        "deferred_check",
+        "ambiguous_edge",
+        "hot_memory_over_budget",
+        "index_drift",
+        "malformed_record",
+        "missing_concept",
+        "missing_provenance",
+        "missing_summary",
+        "orphan",
+        "projection_drift",
+        "projection_missing",
+        "stale",
+        "stale_profile_line",
+        "stale_schema"
+      ],
+      "type": "string"
+    },
+    "Severity": {
+      "enum": [
+        "error",
+        "warning",
+        "info"
+      ],
+      "type": "string"
+    },
+    "Target": {
+      "additionalProperties": false,
+      "description": "At most one field SHOULD be set; consumers may treat multiple as the most-specific available.",
+      "properties": {
+        "operation_id": {
+          "$ref": "../common/primitives.json#/$defs/Ulid"
+        },
+        "path": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "record_id": {
+          "$ref": "../common/primitives.json#/$defs/Ulid"
+        }
+      },
       "type": "object"
     }
   },

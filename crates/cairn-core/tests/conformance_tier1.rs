@@ -9,13 +9,17 @@ use std::sync::Arc;
 use cairn_core::contract::conformance::{CaseStatus, Tier, run_conformance_for_plugin};
 use cairn_core::contract::manifest::PluginManifest;
 use cairn_core::contract::mcp_server::{MCPServer, MCPServerCapabilities};
-use cairn_core::contract::memory_store::{MemoryStore, MemoryStoreCapabilities};
+use cairn_core::contract::memory_store::{
+    Edge, EdgeDir, EdgeKey, KeywordSearchArgs, KeywordSearchPage, ListArgs, ListPage, MemoryStore,
+    MemoryStoreCapabilities, RecordVersion, StoreError, TombstoneReason, UpsertOutcome,
+};
 use cairn_core::contract::registry::{PluginName, PluginRegistry};
 use cairn_core::contract::sensor_ingress::{SensorIngress, SensorIngressCapabilities};
 use cairn_core::contract::version::{ContractVersion, VersionRange};
 use cairn_core::contract::workflow_orchestrator::{
     WorkflowOrchestrator, WorkflowOrchestratorCapabilities,
 };
+use cairn_core::domain::{MemoryRecord, RecordId, TargetId};
 
 const STORE_MANIFEST: &str = r#"
 name = "stub-store"
@@ -23,12 +27,12 @@ contract = "MemoryStore"
 
 [contract_version_range.min]
 major = 0
-minor = 1
+minor = 5
 patch = 0
 
 [contract_version_range.max_exclusive]
 major = 0
-minor = 2
+minor = 6
 patch = 0
 
 [features]
@@ -53,11 +57,47 @@ impl MemoryStore for StubStore {
             vector: false,
             graph_edges: false,
             transactions: false,
+            per_record_consent_model: false,
+
+            graph_search: false,
         };
         &CAPS
     }
     fn supported_contract_versions(&self) -> VersionRange {
-        VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+        VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 6, 0))
+    }
+    async fn upsert(&self, _r: &MemoryRecord) -> Result<UpsertOutcome, StoreError> {
+        Err("stub: upsert not implemented".into())
+    }
+    async fn get(&self, _id: &RecordId) -> Result<Option<MemoryRecord>, StoreError> {
+        Ok(None)
+    }
+    async fn list(&self, _args: &ListArgs) -> Result<ListPage, StoreError> {
+        Ok(ListPage {
+            records: vec![],
+            next_cursor: None,
+        })
+    }
+    async fn tombstone(&self, _id: &RecordId, _r: TombstoneReason) -> Result<(), StoreError> {
+        Ok(())
+    }
+    async fn versions(&self, _t: &TargetId) -> Result<Vec<RecordVersion>, StoreError> {
+        Ok(vec![])
+    }
+    async fn put_edge(&self, _e: &Edge) -> Result<(), StoreError> {
+        Ok(())
+    }
+    async fn remove_edge(&self, _k: &EdgeKey) -> Result<bool, StoreError> {
+        Ok(false)
+    }
+    async fn neighbours(&self, _id: &RecordId, _d: EdgeDir) -> Result<Vec<Edge>, StoreError> {
+        Ok(vec![])
+    }
+    async fn search_keyword(
+        &self,
+        _args: &KeywordSearchArgs<'_>,
+    ) -> Result<KeywordSearchPage, StoreError> {
+        Err("stub: search_keyword not implemented".into())
     }
 }
 
@@ -161,7 +201,7 @@ fn tier1_cases_pass_for_well_formed_mcp_server() {
 }
 
 #[test]
-fn mcp_tool_availability_remains_pending_without_concrete_handler_check() {
+fn mcp_tool_conformance_stays_pending_without_runtime_check() {
     let mut reg = PluginRegistry::new();
     let name = PluginName::new("stub-mcp").expect("valid");
     let manifest = PluginManifest::parse_toml(MCP_MANIFEST).expect("manifest parses");
@@ -169,15 +209,15 @@ fn mcp_tool_availability_remains_pending_without_concrete_handler_check() {
         .expect("registers");
 
     let outcomes = run_conformance_for_plugin(&reg, &name);
-    let case = outcomes
+    let tool_case = outcomes
         .iter()
-        .find(|o| o.id == "initialize_and_list_tools")
-        .expect("mcp tier-2 case exists");
+        .find(|outcome| outcome.id == "initialize_and_list_tools")
+        .expect("tool conformance case exists");
 
     assert!(
-        matches!(case.status, CaseStatus::Pending { .. }),
-        "core conformance cannot prove concrete MCP tool listing, got {:?}",
-        case.status
+        matches!(tool_case.status, CaseStatus::Pending { .. }),
+        "tool conformance needs a real initialize/list-tools check, got {:?}",
+        tool_case.status
     );
 }
 

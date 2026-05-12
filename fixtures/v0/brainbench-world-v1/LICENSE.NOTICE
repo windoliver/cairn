@@ -1,0 +1,24 @@
+BrainBench world-v1 corpus (vendored)
+
+Source:    https://github.com/garrytan/gbrain-evals
+Commit:    b8cf8ad057635cbb03c0f3996acb693afbcae605
+Path:      eval/data/world-v1/
+Files:     241 *.json pages (~1.0 MB)
+License:   MIT (see https://github.com/garrytan/gbrain-evals/blob/b8cf8ad/LICENSE)
+
+This directory contains a verbatim copy of the world-v1 corpus
+(`pages/*.json`) at the pinned commit above. Each page JSON carries
+upstream's `slug`, `title`, `compiled_truth` (loaded as `body` via
+serde alias in cairn-bench), `_facts`, `timeline`, and `type` fields
+unchanged.
+
+The derived snapshot files `queries.json` (145 graded queries) and
+`upstream-baseline.json` (per-adapter per-query metrics) are produced
+by running the upstream eval runner against the same pinned commit
+and committed separately. See `scripts/README-brainbench-capture.md`
+for the capture procedure (requires bun + OPENAI_API_KEY, ~$0.50 in
+fees).
+
+MIT License terms apply to the page JSONs. cairn's added derivations
+(report renderer, adapter wiring) are licensed under cairn's own
+license.

@@ -39,6 +39,137 @@ impl Rfc3339Timestamp {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Construct a UTC timestamp from seconds since the Unix epoch
+    /// (1970-01-01T00:00:00Z). Negative values are rejected — Cairn has no
+    /// pre-1970 use case and accepting them would require widening the
+    /// year-component validator.
+    ///
+    /// The output is always rendered in `YYYY-MM-DDTHH:MM:SSZ` form so it
+    /// round-trips through [`Self::parse`].
+    pub fn from_unix_secs(secs: i64) -> Result<Self, DomainError> {
+        if secs < 0 {
+            return Err(DomainError::InvalidTimestamp {
+                message: format!("`{secs}`: negative unix seconds not supported"),
+            });
+        }
+        let days = secs / 86_400;
+        let time_of_day = secs % 86_400;
+        let hour = time_of_day / 3_600;
+        let minute = (time_of_day % 3_600) / 60;
+        let second = time_of_day % 60;
+
+        // Inverse of Hinnant "days from civil": Unix epoch 1970-01-01 lives
+        // 719_468 days after the civil-day-zero (0000-03-01). We work in
+        // that civil-zero frame so the algorithm matches the forward
+        // version used for ordering.
+        let z = days + 719_468;
+        let era = if z >= 0 {
+            z / 146_097
+        } else {
+            (z - 146_096) / 146_097
+        };
+        let doe = z - era * 146_097;
+        let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+        let y = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let day = doy - (153 * mp + 2) / 5 + 1;
+        let month = if mp < 10 { mp + 3 } else { mp - 9 };
+        let year = y + i64::from(month <= 2);
+
+        let raw = format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z");
+        Self::parse(raw)
+    }
+
+    /// Compare two timestamps chronologically, accounting for timezone
+    /// offsets. Lexical comparison of `as_str()` is wrong once offsets are
+    /// involved (`2026-04-22T15:00:00+02:00` happens *before*
+    /// `2026-04-22T14:00:00Z` chronologically but sorts *after* it
+    /// lexically). The string has already been validated by `parse`, so the
+    /// fixed-position parsing here cannot panic on a `Rfc3339Timestamp`
+    /// produced through the public API.
+    #[must_use]
+    pub fn cmp_chronological(&self, other: &Self) -> std::cmp::Ordering {
+        chronological_key(&self.0).cmp(&chronological_key(&other.0))
+    }
+
+    /// Convert to a [`chrono::DateTime<chrono::Utc>`] for arithmetic that
+    /// the in-tree comparator (`cmp_chronological`) cannot express — for
+    /// example, the verifier's `[issued_at − skew, expires_at)` window
+    /// check.
+    ///
+    /// The inner string was validated by [`Rfc3339Timestamp::parse`]
+    /// before construction, so the chrono parse below cannot fail for any
+    /// value reachable through the public API.
+    #[must_use]
+    #[allow(
+        clippy::expect_used,
+        reason = "invariant: Rfc3339Timestamp inner string validated by parse()"
+    )]
+    pub fn as_chrono(&self) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(&self.0)
+            .expect("invariant: Rfc3339Timestamp inner string validated by parse()")
+            .with_timezone(&chrono::Utc)
+    }
+}
+
+/// Convert a validated RFC3339 string to a `(utc_seconds_from_civil_day_zero,
+/// nanoseconds)` sort key. Civil-day-zero is 0000-03-01 per Hinnant's
+/// "days from civil" algorithm; the absolute origin is irrelevant for
+/// ordering as long as it is the same for every value being compared.
+fn chronological_key(s: &str) -> (i64, u32) {
+    let bytes = s.as_bytes();
+    let year = i64::from(u16_digits(&bytes[..4]));
+    let month = i64::from(u8_digits(&bytes[5..7]));
+    let day = i64::from(u8_digits(&bytes[8..10]));
+    let hour = i64::from(u8_digits(&bytes[11..13]));
+    let minute = i64::from(u8_digits(&bytes[14..16]));
+    let second = i64::from(u8_digits(&bytes[17..19]));
+
+    // Hinnant "days from civil": days since 0000-03-01.
+    let y = year - i64::from(month <= 2);
+    let era = if y >= 0 { y / 400 } else { (y - 399) / 400 };
+    let yoe = y - era * 400;
+    let m_adj = if month > 2 { month - 3 } else { month + 9 };
+    let doy = (153 * m_adj + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe;
+
+    let mut sec = days * 86_400 + hour * 3_600 + minute * 60 + second;
+
+    let mut idx = 19;
+    let mut frac_nanos: u32 = 0;
+    if idx < bytes.len() && bytes[idx] == b'.' {
+        idx += 1;
+        let frac_start = idx;
+        while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+            idx += 1;
+        }
+        let mut digits: u64 = 0;
+        for b in &bytes[frac_start..idx] {
+            digits = digits * 10 + u64::from(b - b'0');
+        }
+        let frac_len = idx - frac_start;
+        for _ in frac_len..9 {
+            digits *= 10;
+        }
+        // `digits` ≤ 999_999_999 (parser caps at 9 digits) — fits in u32.
+        frac_nanos = u32::try_from(digits).unwrap_or(u32::MAX);
+    }
+
+    if idx < bytes.len()
+        && let b'+' | b'-' = bytes[idx]
+    {
+        // To convert local time to UTC, subtract the offset:
+        //   local = utc + offset  →  utc = local - offset.
+        let sign: i64 = if bytes[idx] == b'-' { 1 } else { -1 };
+        let oh = i64::from(u8_digits(&bytes[idx + 1..idx + 3]));
+        let om = i64::from(u8_digits(&bytes[idx + 4..idx + 6]));
+        sec += sign * (oh * 3_600 + om * 60);
+    }
+
+    (sec, frac_nanos)
 }
 
 impl std::fmt::Display for Rfc3339Timestamp {
@@ -198,6 +329,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn chronological_compares_offsets_correctly() {
+        // `+02:00` at 15:00 is the same instant as `13:00Z`, so it
+        // pre-dates `14:00Z` chronologically — even though it sorts
+        // after `14:00Z` lexically.
+        let earlier_offset = Rfc3339Timestamp::parse("2026-04-22T15:00:00+02:00").expect("valid");
+        let later_utc = Rfc3339Timestamp::parse("2026-04-22T14:00:00Z").expect("valid");
+        assert_eq!(
+            earlier_offset.cmp_chronological(&later_utc),
+            std::cmp::Ordering::Less,
+            "offset+02:00 15:00 should be before 14:00Z",
+        );
+    }
+
+    #[test]
+    fn chronological_compares_negative_offsets() {
+        // `-05:00` at 09:00 = 14:00Z, so it is the same instant as
+        // `14:00Z` and equal to it chronologically.
+        let neg = Rfc3339Timestamp::parse("2026-04-22T09:00:00-05:00").expect("valid");
+        let utc = Rfc3339Timestamp::parse("2026-04-22T14:00:00Z").expect("valid");
+        assert_eq!(neg.cmp_chronological(&utc), std::cmp::Ordering::Equal);
+    }
+
+    #[test]
+    fn chronological_uses_fractional_seconds() {
+        let a = Rfc3339Timestamp::parse("2026-04-22T14:00:00.100Z").expect("valid");
+        let b = Rfc3339Timestamp::parse("2026-04-22T14:00:00.200Z").expect("valid");
+        assert_eq!(a.cmp_chronological(&b), std::cmp::Ordering::Less);
+    }
+
+    #[test]
     fn accepts_z_form() {
         Rfc3339Timestamp::parse("2026-04-22T14:02:11Z").expect("valid");
     }
@@ -270,6 +431,40 @@ mod tests {
     #[test]
     fn accepts_400_year_leap() {
         Rfc3339Timestamp::parse("2000-02-29T00:00:00Z").expect("400-year leap");
+    }
+
+    #[test]
+    fn from_unix_secs_round_trips() {
+        // Epoch.
+        let epoch = Rfc3339Timestamp::from_unix_secs(0).expect("invariant: epoch is valid");
+        assert_eq!(epoch.as_str(), "1970-01-01T00:00:00Z");
+
+        // A reference instant (2026-04-22T14:02:11Z).
+        let parsed =
+            Rfc3339Timestamp::parse("2026-04-22T14:02:11Z").expect("invariant: literal valid");
+        // Compute the secs the forward algorithm gives, then invert.
+        let key = chronological_key("2026-04-22T14:02:11Z");
+        let built =
+            Rfc3339Timestamp::from_unix_secs(key.0 - chronological_key("1970-01-01T00:00:00Z").0)
+                .expect("invariant: built timestamp is valid");
+        assert_eq!(built, parsed);
+        assert_eq!(built.cmp_chronological(&parsed), std::cmp::Ordering::Equal,);
+
+        // Cross a leap-day boundary to exercise the civil-day inverse.
+        let leap = Rfc3339Timestamp::parse("2024-02-29T12:34:56Z")
+            .expect("invariant: leap day literal valid");
+        let leap_secs = chronological_key("2024-02-29T12:34:56Z").0
+            - chronological_key("1970-01-01T00:00:00Z").0;
+        let leap_built = Rfc3339Timestamp::from_unix_secs(leap_secs)
+            .expect("invariant: leap-day built timestamp is valid");
+        assert_eq!(leap_built, leap);
+    }
+
+    #[test]
+    fn from_unix_secs_rejects_negative() {
+        let err = Rfc3339Timestamp::from_unix_secs(-1)
+            .expect_err("invariant: negative unix seconds rejected");
+        assert!(matches!(err, DomainError::InvalidTimestamp { .. }));
     }
 
     #[test]
