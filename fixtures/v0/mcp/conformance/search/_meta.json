@@ -5,7 +5,7 @@
       "config": { "keyword_search": true }
     },
     "err_invalid_mode": {
-      "kind": "stub"
+      "kind": "invalid_args"
     },
     "err_semantic_disabled": {
       "kind": "capability_rejected",

@@ -6,7 +6,7 @@
       "capability": "cairn.mcp.v1.search.semantic",
       "remediation": "set search.local_embeddings: true in .cairn/config.yaml and run cairn embed download to materialize the embedding model"
     },
-    "message": "cairn search: capability unavailable: cairn.mcp.v1.search.semantic"
+    "message": "this server does not advertise cairn.mcp.v1.search.semantic; the requested feature requires it"
   },
   "operation_id": "<OPERATION_ID>",
   "policy_trace": [],

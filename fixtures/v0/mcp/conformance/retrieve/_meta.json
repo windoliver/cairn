@@ -4,7 +4,7 @@
       "kind": "stub"
     },
     "err_target_turn_unsupported": {
-      "kind": "stub"
+      "kind": "invalid_args"
     }
   }
 }

@@ -2,7 +2,8 @@
 //!
 //! Drives `handle_search` (via the full wire protocol) to a
 //! `CapabilityUnavailable` rejection and asserts that the `CallToolResult`
-//! text carries both the capability string and the registered remediation hint.
+//! text is a well-formed §8.0.b structured envelope carrying the capability
+//! string, `error.code == "CapabilityUnavailable"`, and the remediation hint.
 
 #![allow(missing_docs)]
 

@@ -1,3 +1,11 @@
 {
-  "__raw_text": "cairn ingest: not yet implemented in this P0 scaffold. Verb dispatch lands in a follow-up PR; no memory operation was performed."
+  "contract": "cairn.mcp.v1",
+  "error": {
+    "code": "Internal",
+    "message": "cairn ingest: not yet implemented in MCP adapter; no memory operation was performed."
+  },
+  "operation_id": "<OPERATION_ID>",
+  "policy_trace": [],
+  "status": "aborted",
+  "verb": "ingest"
 }
