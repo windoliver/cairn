@@ -855,7 +855,11 @@ mod tests {
 
     #[test]
     fn default_hot_memory_god_node_weight_is_point_three() {
-        assert_eq!(CairnConfig::default().vault.hot_memory.god_node_weight, 0.3);
+        let weight = CairnConfig::default().vault.hot_memory.god_node_weight;
+        assert!(
+            (weight - 0.3).abs() < f32::EPSILON,
+            "expected default god_node_weight 0.3, got {weight}"
+        );
     }
 
     #[test]
