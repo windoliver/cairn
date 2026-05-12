@@ -8,7 +8,13 @@
 use std::process::ExitCode;
 
 use cairn_core::generated::common::Capabilities;
-use cairn_core::generated::status::{StatusResponse, StatusResponseServerInfo};
+use cairn_core::generated::status::{
+    StatusResponse, StatusResponseSensors, StatusResponseSensorsScreen,
+    StatusResponseSensorsScreenBackend, StatusResponseSensorsScreenDegradation,
+    StatusResponseSensorsScreenDegradationCode, StatusResponseSensorsScreenMode,
+    StatusResponseSensorsScreenOcrEngine, StatusResponseSensorsScreenPermission,
+    StatusResponseSensorsScreenState, StatusResponseServerInfo,
+};
 
 use super::envelope::{emit_json, new_operation_id};
 
@@ -27,6 +33,7 @@ pub fn run(json: bool) -> ExitCode {
         },
         capabilities: p0_capabilities(),
         extensions: vec![],
+        sensors: default_screen_sensors(),
     };
 
     if json {
@@ -55,6 +62,22 @@ pub fn run(json: bool) -> ExitCode {
 /// Update this list when store adapters land (issue #9).
 fn p0_capabilities() -> Vec<Capabilities> {
     vec![]
+}
+
+fn default_screen_sensors() -> StatusResponseSensors {
+    StatusResponseSensors {
+        screen: StatusResponseSensorsScreen {
+            backend: StatusResponseSensorsScreenBackend::Xcap,
+            degradation: Some(StatusResponseSensorsScreenDegradation {
+                code: StatusResponseSensorsScreenDegradationCode::ScreenDisabled,
+                message: "screen sensor is disabled in config".to_owned(),
+            }),
+            mode: StatusResponseSensorsScreenMode::Off,
+            ocr_engine: StatusResponseSensorsScreenOcrEngine::Tesseract,
+            permission: StatusResponseSensorsScreenPermission::NotRequested,
+            state: StatusResponseSensorsScreenState::Disabled,
+        },
+    }
 }
 
 /// Return the current UTC time as an RFC-3339 string without sub-second precision.
@@ -210,5 +233,36 @@ mod tests {
     fn p0_capabilities_returns_empty() {
         let caps = p0_capabilities();
         assert!(caps.is_empty(), "P0 must advertise no capabilities");
+    }
+
+    #[test]
+    fn default_screen_sensors_reports_disabled_screen() {
+        use cairn_core::generated::status::{
+            StatusResponseSensorsScreenBackend, StatusResponseSensorsScreenDegradationCode,
+            StatusResponseSensorsScreenMode, StatusResponseSensorsScreenOcrEngine,
+            StatusResponseSensorsScreenPermission, StatusResponseSensorsScreenState,
+        };
+
+        let sensors = default_screen_sensors();
+        let screen = sensors.screen;
+
+        assert_eq!(screen.backend, StatusResponseSensorsScreenBackend::Xcap);
+        assert_eq!(screen.state, StatusResponseSensorsScreenState::Disabled);
+        assert_eq!(screen.mode, StatusResponseSensorsScreenMode::Off);
+        assert_eq!(
+            screen.ocr_engine,
+            StatusResponseSensorsScreenOcrEngine::Tesseract
+        );
+        assert_eq!(
+            screen.permission,
+            StatusResponseSensorsScreenPermission::NotRequested
+        );
+
+        let degradation = screen.degradation.expect("disabled screen degradation");
+        assert_eq!(
+            degradation.code,
+            StatusResponseSensorsScreenDegradationCode::ScreenDisabled
+        );
+        assert_eq!(degradation.message, "screen sensor is disabled in config");
     }
 }
