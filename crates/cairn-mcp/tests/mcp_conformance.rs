@@ -455,11 +455,6 @@ async fn unadvertised_capability_does_not_succeed() {
 /// Coverage expands as more verbs are wired — add new cases to
 /// `minimal_request_for_wired_capability` in the same PR that wires the handler.
 #[tokio::test]
-#[ignore = "v0.1 handle_search returns plain-text Content::text for CapabilityUnavailable \
-            instead of a structured JSON envelope. The __raw_text wrapper has no status \
-            or error fields, so the structured assertions fail. Un-ignore once the handler \
-            emits a proper {status:rejected, error:{code:CapabilityUnavailable, \
-            data:{capability:...}}} envelope for this error arm. See issue #67 round 2."]
 async fn unadvertised_wired_capability_rejects_with_structured_error() {
     let gates = default_p0_gates();
     let advertised: std::collections::BTreeSet<&'static str> = advertise(&gates)
