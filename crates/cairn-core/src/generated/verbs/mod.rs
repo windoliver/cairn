@@ -92,4 +92,5 @@ pub const CAPABILITIES: &[&str] = &[
     "cairn.mcp.v1.sensors.pre_compact",
     "cairn.mcp.v1.replay.sequence",
     "cairn.mcp.v1.replay.challenge",
+    "cairn.workflows.v1.consolidation",
 ];

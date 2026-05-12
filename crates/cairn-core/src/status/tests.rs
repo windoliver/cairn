@@ -158,6 +158,18 @@ fn replay_capabilities_held_back() {
 }
 
 #[test]
+fn consolidation_capability_hidden_until_wired() {
+    let g = gates(true, true, None);
+    let caps = advertise(&g);
+    let has_it = caps.contains(&Capabilities::CairnWorkflowsV1Consolidation);
+    assert_eq!(
+        has_it,
+        wiring::CONSOLIDATION_WORKFLOW_WIRED,
+        "advertise must mirror CONSOLIDATION_WORKFLOW_WIRED"
+    );
+}
+
+#[test]
 fn pre_compact_capability_tracks_wiring_constant() {
     let g = gates(true, true, None);
     let caps = advertise(&g);
@@ -227,6 +239,14 @@ mod remediation_tests {
     }
 
     #[test]
+    fn consolidation_remediation_present() {
+        let hint = REMEDIATION
+            .iter()
+            .find(|(code, _)| *code == "consolidation.unavailable");
+        assert!(hint.is_some(), "remediation hint for consolidation must exist");
+    }
+
+    #[test]
     fn remediation_table_has_no_empty_strings() {
         for (cap, hint) in REMEDIATION {
             assert!(!cap.is_empty(), "empty capability key");
@@ -279,6 +299,10 @@ mod remediation_tests {
             if cap_str == "cairn.mcp.v1.search.keyword"
                 || cap_str == "cairn.mcp.v1.policy_trace"
                 || cap_str == "cairn.mcp.v1.sensors.pre_compact"
+                // Consolidation uses error code "consolidation.unavailable",
+                // not the wire string, so it is not in the REMEDIATION table
+                // under the capability's wire name.
+                || cap_str == "cairn.workflows.v1.consolidation"
             {
                 continue;
             }
@@ -462,6 +486,7 @@ mod exhaustiveness {
             Capabilities::CairnMcpV1RetrieveProfile => "retrieve.profile",
             Capabilities::CairnMcpV1ReplaySequence => "replay.sequence",
             Capabilities::CairnMcpV1ReplayChallenge => "replay.challenge",
+            Capabilities::CairnWorkflowsV1Consolidation => "workflows.consolidation",
             // Extension capabilities advertise via status.extensions, not
             // status.capabilities — they ride a separate code path.
             Capabilities::CairnMcpV1ExtensionAggregate => "ext.aggregate",
@@ -499,6 +524,7 @@ mod exhaustiveness {
             Capabilities::CairnMcpV1RetrieveProfile,
             Capabilities::CairnMcpV1ReplaySequence,
             Capabilities::CairnMcpV1ReplayChallenge,
+            Capabilities::CairnWorkflowsV1Consolidation,
             Capabilities::CairnMcpV1ExtensionAggregate,
             Capabilities::CairnMcpV1ExtensionAdmin,
             Capabilities::CairnMcpV1ExtensionFederation,

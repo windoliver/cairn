@@ -596,7 +596,7 @@ fn is_rfc3339_datetime(s: &str) -> bool {
 /// Return true iff `s` is one of the closed capability strings in
 /// `capabilities/capabilities.json#oneOf[].const`.
 fn is_known_capability(s: &str) -> bool {
-    matches!(s, "cairn.mcp.v1.search.keyword" | "cairn.mcp.v1.search.semantic" | "cairn.mcp.v1.search.hybrid" | "cairn.mcp.v1.retrieve.record" | "cairn.mcp.v1.retrieve.session" | "cairn.mcp.v1.retrieve.turn" | "cairn.mcp.v1.retrieve.tool_call" | "cairn.mcp.v1.retrieve.folder" | "cairn.mcp.v1.retrieve.scope" | "cairn.mcp.v1.retrieve.profile" | "cairn.mcp.v1.forget.record" | "cairn.mcp.v1.forget.session" | "cairn.mcp.v1.forget.scope" | "cairn.mcp.v1.extension.aggregate" | "cairn.mcp.v1.extension.admin" | "cairn.mcp.v1.extension.federation" | "cairn.mcp.v1.extension.sessiontree" | "cairn.mcp.v1.policy_trace" | "cairn.mcp.v1.sensors.pre_compact" | "cairn.mcp.v1.replay.sequence" | "cairn.mcp.v1.replay.challenge")
+    matches!(s, "cairn.mcp.v1.search.keyword" | "cairn.mcp.v1.search.semantic" | "cairn.mcp.v1.search.hybrid" | "cairn.mcp.v1.retrieve.record" | "cairn.mcp.v1.retrieve.session" | "cairn.mcp.v1.retrieve.turn" | "cairn.mcp.v1.retrieve.tool_call" | "cairn.mcp.v1.retrieve.folder" | "cairn.mcp.v1.retrieve.scope" | "cairn.mcp.v1.retrieve.profile" | "cairn.mcp.v1.forget.record" | "cairn.mcp.v1.forget.session" | "cairn.mcp.v1.forget.scope" | "cairn.mcp.v1.extension.aggregate" | "cairn.mcp.v1.extension.admin" | "cairn.mcp.v1.extension.federation" | "cairn.mcp.v1.extension.sessiontree" | "cairn.mcp.v1.policy_trace" | "cairn.mcp.v1.sensors.pre_compact" | "cairn.mcp.v1.replay.sequence" | "cairn.mcp.v1.replay.challenge" | "cairn.workflows.v1.consolidation")
 }
 
 /// Structural validator for the error envelope payload. Mirrors the

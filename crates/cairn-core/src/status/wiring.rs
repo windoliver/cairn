@@ -56,3 +56,11 @@ pub const REPLAY_SEQUENCE_WIRED: bool = false;
 
 /// Challenge-mode replay rejection routed through every signed-verb path.
 pub const REPLAY_CHALLENGE_WIRED: bool = false;
+
+/// Rolling-summary `ConsolidationWorkflow` dispatch path (issue #90).
+///
+/// Held off until the scheduler loop is wired into `cairn-cli`'s
+/// long-running entry points and the trigger calls `enqueue_if_due`
+/// from the `capture_trace` path. Flip in the issue that lands the
+/// dispatch wiring.
+pub const CONSOLIDATION_WORKFLOW_WIRED: bool = false;

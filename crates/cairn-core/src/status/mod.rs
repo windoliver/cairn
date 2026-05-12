@@ -221,6 +221,11 @@ pub fn advertise(gates: &CapabilityGates) -> Vec<Capabilities> {
         out.push(Capabilities::CairnMcpV1ReplayChallenge);
     }
 
+    // ── workflows (held back until scheduler is wired; issue #90) ─────────
+    if wiring::CONSOLIDATION_WORKFLOW_WIRED {
+        out.push(Capabilities::CairnWorkflowsV1Consolidation);
+    }
+
     out
 }
 

@@ -86,6 +86,10 @@
     {
       "const": "cairn.mcp.v1.replay.challenge",
       "x-cairn-since": "v0.1"
+    },
+    {
+      "const": "cairn.workflows.v1.consolidation",
+      "x-cairn-since": "v0.1"
     }
   ],
   "title": "Cairn capability strings (P0)",
