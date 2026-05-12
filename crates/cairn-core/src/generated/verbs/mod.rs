@@ -77,6 +77,7 @@ pub const CAPABILITIES: &[&str] = &[
     "cairn.mcp.v1.retrieve.record",
     "cairn.mcp.v1.retrieve.session",
     "cairn.mcp.v1.retrieve.turn",
+    "cairn.mcp.v1.retrieve.tool_call",
     "cairn.mcp.v1.retrieve.folder",
     "cairn.mcp.v1.retrieve.scope",
     "cairn.mcp.v1.retrieve.profile",

@@ -122,6 +122,7 @@ fn retrieve_surfaces_capability_per_target() {
         ("target=record", "cairn.mcp.v1.retrieve.record"),
         ("target=session", "cairn.mcp.v1.retrieve.session"),
         ("target=turn", "cairn.mcp.v1.retrieve.turn"),
+        ("target=tool_call", "cairn.mcp.v1.retrieve.tool_call"),
         ("target=folder", "cairn.mcp.v1.retrieve.folder"),
         ("target=scope", "cairn.mcp.v1.retrieve.scope"),
         ("target=profile", "cairn.mcp.v1.retrieve.profile"),

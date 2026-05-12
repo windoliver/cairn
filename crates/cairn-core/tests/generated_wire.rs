@@ -1330,6 +1330,33 @@ fn retrieve_session_accepts_valid() {
 }
 
 #[test]
+fn retrieve_tool_call_args_accept_valid() {
+    let json = serde_json::json!({
+        "target": "tool_call",
+        "session_id": "s1",
+        "turn_id": "t1",
+        "tool_call_id": "call-1"
+    });
+    let parsed: RetrieveArgs = serde_json::from_value(json).unwrap();
+    assert!(matches!(parsed, RetrieveArgs::ToolCall { .. }));
+}
+
+#[test]
+fn retrieve_tool_call_args_reject_empty_tool_call_id() {
+    let json = serde_json::json!({
+        "target": "tool_call",
+        "session_id": "s1",
+        "turn_id": "t1",
+        "tool_call_id": ""
+    });
+    let err = serde_json::from_value::<RetrieveArgs>(json).unwrap_err();
+    assert!(
+        err.to_string().contains("tool_call_id"),
+        "expected tool_call_id-empty error, got: {err}"
+    );
+}
+
+#[test]
 fn retrieve_folder_rejects_depth_above_max() {
     let json = serde_json::json!({
         "target": "folder",
@@ -2582,6 +2609,61 @@ fn retrieve_data_session_rejects_empty_session_id() {
     assert!(
         err.to_string().contains("session_id"),
         "expected DataSession.session_id rejection, got: {err}"
+    );
+}
+
+#[test]
+fn retrieve_tool_call_response_round_trips() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("retrieve"));
+    m.insert("status".into(), serde_json::json!("committed"));
+    m.insert("target".into(), serde_json::json!("tool_call"));
+    m.insert(
+        "data".into(),
+        serde_json::json!({
+            "session_id": "s1",
+            "turn_id": "t1",
+            "tool_call_id": "call-1",
+            "items": [{
+                "turn_id": "t1",
+                "role": "tool",
+                "linkage": {
+                    "record_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                    "trace_event": "pre_tool",
+                    "sequence": 2,
+                    "capture_event_id": "evt-pre",
+                    "tool_call_id": "call-1",
+                    "payload_hash": "sha256:abc"
+                }
+            }]
+        }),
+    );
+    let resp: Response = serde_json::from_value(serde_json::Value::Object(m)).unwrap();
+    assert!(matches!(
+        resp.data,
+        Some(ResponseData::Retrieve(RetrieveData::ToolCall(_)))
+    ));
+}
+
+#[test]
+fn retrieve_data_tool_call_rejects_empty_ids() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("retrieve"));
+    m.insert("status".into(), serde_json::json!("committed"));
+    m.insert("target".into(), serde_json::json!("tool_call"));
+    m.insert(
+        "data".into(),
+        serde_json::json!({
+            "session_id": "s1",
+            "turn_id": "",
+            "tool_call_id": "call-1",
+            "items": []
+        }),
+    );
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("turn_id"),
+        "expected DataToolCall.turn_id rejection, got: {err}"
     );
 }
 

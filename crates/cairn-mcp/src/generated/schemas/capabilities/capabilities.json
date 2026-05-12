@@ -28,6 +28,10 @@
       "x-cairn-since": "v0.1"
     },
     {
+      "const": "cairn.mcp.v1.retrieve.tool_call",
+      "x-cairn-since": "v0.1"
+    },
+    {
       "const": "cairn.mcp.v1.retrieve.folder",
       "x-cairn-since": "v0.1"
     },

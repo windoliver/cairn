@@ -174,6 +174,7 @@ pub fn turn_item_with_options(
         reasoning: include_reasoning
             .then(|| reasoning_content(record))
             .flatten(),
+        linkage: None,
         role: turn_item_role(record),
         tool_calls: include_tool_calls.then(|| tool_calls(record)).flatten(),
         turn_id: trace_turn_id(record).unwrap_or_else(|| record.id.as_str().to_owned()),

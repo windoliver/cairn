@@ -279,6 +279,47 @@ impl<'de> ::serde::Deserialize<'de> for DataSession {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct DataToolCall {
+    pub items: Vec<TurnItem>,
+    pub session_id: String,
+    pub tool_call_id: String,
+    pub turn_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDataToolCall {
+    items: Vec<TurnItem>,
+    session_id: String,
+    tool_call_id: String,
+    turn_id: String,
+}
+
+impl ::core::convert::TryFrom<RawDataToolCall> for DataToolCall {
+    type Error = &'static str;
+    fn try_from(raw: RawDataToolCall) -> Result<Self, Self::Error> {
+        if raw.session_id.is_empty() { return Err("session_id: must not be empty"); }
+        if raw.turn_id.is_empty() { return Err("turn_id: must not be empty"); }
+        if raw.tool_call_id.is_empty() { return Err("tool_call_id: must not be empty"); }
+        Ok(Self {
+            items: raw.items,
+            session_id: raw.session_id,
+            tool_call_id: raw.tool_call_id,
+            turn_id: raw.turn_id,
+        })
+    }
+}
+
+impl<'de> ::serde::Deserialize<'de> for DataToolCall {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: ::serde::Deserializer<'de> {
+        let raw = RawDataToolCall::deserialize(deserializer)?;
+        Self::try_from(raw).map_err(::serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct DataTurn {
     pub session_id: String,
     /// Ordered TurnItems for the turn — one per trace event (user/agent message, pre/post tool, tool output, stop, summary). Sorted by (captured_at, capture_event_id).
@@ -299,6 +340,7 @@ impl ::core::convert::TryFrom<RawDataTurn> for DataTurn {
     type Error = &'static str;
     fn try_from(raw: RawDataTurn) -> Result<Self, Self::Error> {
         if raw.session_id.is_empty() { return Err("session_id: must not be empty"); }
+        if raw.turn_id.is_empty() { return Err("turn_id: must not be empty"); }
         Ok(Self {
             session_id: raw.session_id,
             turn: raw.turn,
@@ -428,6 +470,80 @@ impl<'de> ::serde::Deserialize<'de> for RecordRef {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TraceLinkage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_event_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_event_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_hash: Option<String>,
+    pub record_id: crate::generated::common::Ulid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_event: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTraceLinkage {
+    #[serde(default)]
+    capture_event_id: Option<String>,
+    #[serde(default)]
+    parent_event_id: Option<String>,
+    #[serde(default)]
+    payload_hash: Option<String>,
+    record_id: crate::generated::common::Ulid,
+    #[serde(default)]
+    sequence: Option<u64>,
+    #[serde(default)]
+    tool_call_id: Option<String>,
+    #[serde(default)]
+    trace_event: Option<String>,
+}
+
+impl ::core::convert::TryFrom<RawTraceLinkage> for TraceLinkage {
+    type Error = &'static str;
+    fn try_from(raw: RawTraceLinkage) -> Result<Self, Self::Error> {
+        if let Some(s) = &raw.trace_event {
+            if s.is_empty() { return Err("trace_event: must not be empty"); }
+        }
+        if let Some(s) = &raw.capture_event_id {
+            if s.is_empty() { return Err("capture_event_id: must not be empty"); }
+        }
+        if let Some(s) = &raw.parent_event_id {
+            if s.is_empty() { return Err("parent_event_id: must not be empty"); }
+        }
+        if let Some(s) = &raw.tool_call_id {
+            if s.is_empty() { return Err("tool_call_id: must not be empty"); }
+        }
+        if let Some(s) = &raw.payload_hash {
+            if s.is_empty() { return Err("payload_hash: must not be empty"); }
+        }
+        Ok(Self {
+            capture_event_id: raw.capture_event_id,
+            parent_event_id: raw.parent_event_id,
+            payload_hash: raw.payload_hash,
+            record_id: raw.record_id,
+            sequence: raw.sequence,
+            tool_call_id: raw.tool_call_id,
+            trace_event: raw.trace_event,
+        })
+    }
+}
+
+impl<'de> ::serde::Deserialize<'de> for TraceLinkage {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: ::serde::Deserializer<'de> {
+        let raw = RawTraceLinkage::deserialize(deserializer)?;
+        Self::try_from(raw).map_err(::serde::de::Error::custom)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -443,6 +559,8 @@ pub enum TurnItemRole {
 pub struct TurnItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linkage: Option<TraceLinkage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
     pub role: TurnItemRole,
@@ -508,6 +626,11 @@ pub enum RetrieveArgs {
         session_id: String,
         turn_id: String,
     },
+    ToolCall {
+        session_id: String,
+        tool_call_id: String,
+        turn_id: String,
+    },
     Folder {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         depth: Option<u64>,
@@ -570,6 +693,15 @@ struct RawRetrieveArgsTurn {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RawRetrieveArgsToolCall {
+    #[allow(dead_code)] target: serde::de::IgnoredAny,
+    session_id: String,
+    tool_call_id: String,
+    turn_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawRetrieveArgsFolder {
     #[allow(dead_code)] target: serde::de::IgnoredAny,
     #[serde(default)]
@@ -601,6 +733,7 @@ enum RawRetrieveArgs {
     Record(RawRetrieveArgsRecord),
     Session(RawRetrieveArgsSession),
     Turn(RawRetrieveArgsTurn),
+    ToolCall(RawRetrieveArgsToolCall),
     Folder(RawRetrieveArgsFolder),
     Scope(RawRetrieveArgsScope),
     Profile(RawRetrieveArgsProfile),
@@ -623,6 +756,10 @@ impl<'de> ::serde::Deserialize<'de> for RawRetrieveArgs {
             "turn" => {
                 let v = <RawRetrieveArgsTurn as ::serde::Deserialize>::deserialize(value).map_err(::serde::de::Error::custom)?;
                 Ok(Self::Turn(v))
+            },
+            "tool_call" => {
+                let v = <RawRetrieveArgsToolCall as ::serde::Deserialize>::deserialize(value).map_err(::serde::de::Error::custom)?;
+                Ok(Self::ToolCall(v))
             },
             "folder" => {
                 let v = <RawRetrieveArgsFolder as ::serde::Deserialize>::deserialize(value).map_err(::serde::de::Error::custom)?;
@@ -676,6 +813,7 @@ impl ::core::convert::TryFrom<RawRetrieveArgs> for RetrieveArgs {
                 let session_id = inner.session_id;
                 let turn_id = inner.turn_id;
                 if session_id.is_empty() { return Err("session_id: must not be empty"); }
+                if turn_id.is_empty() { return Err("turn_id: must not be empty"); }
                 if let Some(inc) = &include {
                     if inc.is_empty() { return Err("include: must contain at least one item"); }
                     let mut seen = ::std::collections::BTreeSet::new();
@@ -684,6 +822,15 @@ impl ::core::convert::TryFrom<RawRetrieveArgs> for RetrieveArgs {
                     }
                 }
                 Ok(Self::Turn { include, include_reasoning, session_id, turn_id })
+            },
+            RawRetrieveArgs::ToolCall(inner) => {
+                let session_id = inner.session_id;
+                let tool_call_id = inner.tool_call_id;
+                let turn_id = inner.turn_id;
+                if session_id.is_empty() { return Err("session_id: must not be empty"); }
+                if turn_id.is_empty() { return Err("turn_id: must not be empty"); }
+                if tool_call_id.is_empty() { return Err("tool_call_id: must not be empty"); }
+                Ok(Self::ToolCall { session_id, tool_call_id, turn_id })
             },
             RawRetrieveArgs::Folder(inner) => {
                 let depth = inner.depth;
@@ -735,6 +882,7 @@ impl RetrieveArgs {
             Self::Record { .. } => Some("cairn.mcp.v1.retrieve.record"),
             Self::Session { .. } => Some("cairn.mcp.v1.retrieve.session"),
             Self::Turn { .. } => Some("cairn.mcp.v1.retrieve.turn"),
+            Self::ToolCall { .. } => Some("cairn.mcp.v1.retrieve.tool_call"),
             Self::Folder { .. } => Some("cairn.mcp.v1.retrieve.folder"),
             Self::Scope { .. } => Some("cairn.mcp.v1.retrieve.scope"),
             Self::Profile { .. } => Some("cairn.mcp.v1.retrieve.profile"),
