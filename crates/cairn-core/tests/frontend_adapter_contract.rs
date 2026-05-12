@@ -276,6 +276,132 @@ fn frontend_identity_context_carries_required_signed_intent() {
 }
 
 #[test]
+fn frontend_project_to_reconcile_round_trip_preserves_snapshot_binding() {
+    let adapter = ConformanceFrontend;
+    let request = sample_projection_request();
+    let projection = adapter
+        .project(&request)
+        .expect("projection should succeed");
+
+    let reconcile = adapter
+        .reconcile(
+            FrontendIdentityContext {
+                principal: Identity::parse("hmn:known-user").expect("valid identity"),
+                agent: Some(Identity::parse("agt:test:frontend:v1").expect("valid identity")),
+                signed_intent: sample_signed_intent("2026-04-22T14:07:11Z"),
+            },
+            FrontendEdit {
+                target_id: request.target_id.clone(),
+                expected_version: request.expected_version,
+                target_hash: projection.target_hash.clone(),
+                field_diff: std::collections::BTreeMap::from([(
+                    "body".into(),
+                    serde_json::json!("updated body"),
+                )]),
+            },
+        )
+        .expect("reconcile should succeed");
+
+    assert_eq!(reconcile.target_id, request.target_id);
+    assert_eq!(reconcile.expected_version, request.expected_version);
+    assert_eq!(reconcile.target_hash, projection.target_hash);
+    assert_eq!(
+        reconcile.field_diff.get("body"),
+        Some(&serde_json::json!("updated body"))
+    );
+    assert_eq!(reconcile.ctx.principal.as_str(), "hmn:known-user");
+    assert_eq!(
+        reconcile
+            .ctx
+            .agent
+            .expect("agent should round-trip")
+            .as_str(),
+        "agt:test:frontend:v1"
+    );
+}
+
+#[test]
+fn frontend_reconcile_accepts_mutable_metadata_edits() {
+    let reconcile = ConformanceFrontend
+        .reconcile(
+            FrontendIdentityContext {
+                principal: Identity::parse("hmn:known-user").expect("valid identity"),
+                agent: None,
+                signed_intent: sample_signed_intent("2026-04-22T14:07:11Z"),
+            },
+            FrontendEdit {
+                target_id: TargetId::parse("01HQZX9F5N0000000000000000").expect("valid target id"),
+                expected_version: 100,
+                target_hash: sample_target_hash(),
+                field_diff: std::collections::BTreeMap::from([(
+                    "last_read_at".into(),
+                    serde_json::json!("2026-04-22T14:06:11Z"),
+                )]),
+            },
+        )
+        .expect("mutable metadata edit should succeed");
+
+    assert_eq!(
+        reconcile.field_diff.get("last_read_at"),
+        Some(&serde_json::json!("2026-04-22T14:06:11Z"))
+    );
+}
+
+#[test]
+fn frontend_reconcile_quarantines_unrecognized_principal_before_version_or_hash_checks() {
+    let err = ConformanceFrontend
+        .reconcile(
+            FrontendIdentityContext {
+                principal: Identity::parse("hmn:unknown-user").expect("valid identity"),
+                agent: None,
+                signed_intent: sample_signed_intent("2026-04-22T14:07:11Z"),
+            },
+            FrontendEdit {
+                target_id: TargetId::parse("01HQZX9F5N0000000000000000").expect("valid target id"),
+                expected_version: 99,
+                target_hash: sample_hash("tampered body"),
+                field_diff: std::collections::BTreeMap::from([(
+                    "body".into(),
+                    serde_json::json!("updated"),
+                )]),
+            },
+        )
+        .expect_err("unknown principal should quarantine before later checks");
+
+    assert!(matches!(
+        err,
+        FrontendAdapterError::Reconcile(FrontendReconcileError::QuarantineRequired { .. })
+    ));
+}
+
+#[test]
+fn frontend_reconcile_rejects_expired_intent_before_quarantine() {
+    let err = ConformanceFrontend
+        .reconcile(
+            FrontendIdentityContext {
+                principal: Identity::parse("hmn:unknown-user").expect("valid identity"),
+                agent: None,
+                signed_intent: sample_signed_intent("2026-04-22T14:06:11Z"),
+            },
+            FrontendEdit {
+                target_id: TargetId::parse("01HQZX9F5N0000000000000000").expect("valid target id"),
+                expected_version: 100,
+                target_hash: sample_target_hash(),
+                field_diff: std::collections::BTreeMap::from([(
+                    "body".into(),
+                    serde_json::json!("updated"),
+                )]),
+            },
+        )
+        .expect_err("expired intent should fail before quarantine path");
+
+    assert!(matches!(
+        err,
+        FrontendAdapterError::Reconcile(FrontendReconcileError::ExpiredIntent { .. })
+    ));
+}
+
+#[test]
 fn frontend_adapter_runner_reports_expected_tier2_case_ids() {
     let mut reg = PluginRegistry::new();
     let name = PluginName::new("stub-frontend-runner").expect("valid");
@@ -366,6 +492,25 @@ fn sample_target_hash() -> CanonicalRecordHash {
     CanonicalRecordHash::compute(&sample_record()).expect("sample record hashes")
 }
 
+fn sample_hash(body: &str) -> CanonicalRecordHash {
+    CanonicalRecordHash::compute(&sample_record_with_body(body)).expect("sample record hashes")
+}
+
+fn sample_projection_request() -> FrontendProjectionRequest {
+    FrontendProjectionRequest {
+        target_id: TargetId::parse("01HQZX9F5N0000000000000000").expect("valid target id"),
+        expected_version: 100,
+        backend: FrontendBackendState {
+            stored: StoredRecord {
+                record: sample_record(),
+                version: 100,
+                schema_version: None,
+            },
+            target_hash: sample_target_hash(),
+        },
+    }
+}
+
 fn sample_signed_intent(expires_at: &str) -> cairn_core::generated::envelope::SignedIntent {
     serde_json::from_value(serde_json::json!({
         "chain_parents": [],
@@ -389,6 +534,10 @@ fn sample_signed_intent(expires_at: &str) -> cairn_core::generated::envelope::Si
 }
 
 fn sample_record() -> MemoryRecord {
+    sample_record_with_body("trusted body")
+}
+
+fn sample_record_with_body(body: &str) -> MemoryRecord {
     let user_id = Identity::parse("hmn:known-user").expect("valid identity");
     MemoryRecord {
         id: cairn_core::domain::RecordId::parse("01HQZX9F5N0000000000000000")
@@ -401,7 +550,7 @@ fn sample_record() -> MemoryRecord {
             user: Some("hmn:known-user".to_owned()),
             ..ScopeTuple::default()
         },
-        body: "trusted body".to_owned(),
+        body: body.to_owned(),
         provenance: Provenance {
             source_sensor: Identity::parse("snr:local:hook:cc-session:v1").expect("valid identity"),
             created_at: Rfc3339Timestamp::parse("2026-04-22T14:02:11Z").expect("valid timestamp"),
