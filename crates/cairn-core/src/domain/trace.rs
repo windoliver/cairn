@@ -1,6 +1,7 @@
 //! Trace-record domain types (issue #77, brief §5.0, §9.3).
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value as Json;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use ulid::Ulid;
@@ -31,6 +32,46 @@ pub enum TraceEvent {
     Stop,
     /// A summarising record written at the end of a turn.
     TurnSummary,
+}
+
+/// Structured content blocks carried by a trace record.
+///
+/// These preserve higher-fidelity transcript content, including opaque
+/// provider reasoning signatures that must round-trip verbatim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TraceBlock {
+    /// A provider reasoning/thinking block.
+    Reasoning {
+        /// Verbatim reasoning text.
+        text: String,
+        /// Provider-issued opaque signature, preserved byte-for-byte.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
+    /// A plain text block.
+    Text {
+        /// User- or agent-visible text.
+        text: String,
+    },
+    /// A tool invocation request block.
+    ToolUse {
+        /// Tool name.
+        tool: String,
+        /// Tool input payload.
+        input: Json,
+        /// Harness/provider block id.
+        id: String,
+    },
+    /// A tool result block.
+    ToolResult {
+        /// The originating tool use block id.
+        tool_use_id: String,
+        /// Tool output content.
+        content: String,
+        /// Whether the result represents an error.
+        is_error: bool,
+    },
 }
 
 /// Linkage metadata attached to every trace record. Stored under

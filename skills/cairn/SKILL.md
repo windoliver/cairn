@@ -56,6 +56,10 @@ cairn ingest --kind KIND --url URL
 ```
 
 ```bash
+cairn ingest --kind KIND --jsonl JSONL
+```
+
+```bash
 cairn ingest --kind KIND --folder FOLDER --recursive
 ```
 
@@ -73,6 +77,18 @@ cairn ingest --kind KIND --folder FOLDER --mode keyword
 
 ```bash
 cairn ingest --kind KIND --folder FOLDER --batch-size 1
+```
+
+```bash
+cairn ingest --kind KIND --body BODY --harness HARNESS
+```
+
+```bash
+cairn ingest --kind KIND --body BODY --session-id-from SESSION_ID_FROM
+```
+
+```bash
+cairn ingest --kind KIND --body BODY --limit 1
 ```
 
 ```bash
@@ -129,6 +145,10 @@ cairn search --mode keyword --cursor CURSOR QUERY
 cairn search --mode keyword --explain QUERY
 ```
 
+```bash
+cairn search --mode keyword --include-reasoning QUERY
+```
+
 ## `cairn retrieve`
 
 **Use when:**
@@ -163,6 +183,10 @@ cairn retrieve --session SESSION_ID --rehydrate
 ```
 
 ```bash
+cairn retrieve --session SESSION_ID --include-reasoning
+```
+
+```bash
 cairn retrieve --session SESSION_ID --include tool_calls
 ```
 
@@ -172,6 +196,10 @@ cairn retrieve --session SESSION_ID --cursor CURSOR
 
 ```bash
 cairn retrieve --session SESSION_ID --turn TURN_ID
+```
+
+```bash
+cairn retrieve --session SESSION_ID --turn TURN_ID --include-reasoning
 ```
 
 ```bash

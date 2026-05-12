@@ -327,6 +327,11 @@ pub fn run(
         return run_resync(sub, json, resync_path, vault_root.as_path());
     }
 
+    // --jsonl <path>: harness transcript backfill (issue #311, brief §5.5).
+    if let Some(jsonl_path) = sub.get_one::<std::path::PathBuf>("jsonl") {
+        return crate::verbs::ingest_jsonl::run(sub, json, jsonl_path, &vault_root);
+    }
+
     // --dry-run / --human-review: build a stub FlushPlan and either print
     // or persist it. Returns before the source-count validation so these
     // flags can be combined with a normal --kind/--body without tripping the
@@ -547,6 +552,7 @@ fn run_resync(sub: &ArgMatches, json: bool, resync_path: &Path, vault_root: &Pat
                     plan_ref: None,
                     record_id: Ulid(result.target_id),
                     session_id,
+                    jsonl_summary: None,
                 })),
                 error: None,
                 operation_id: new_operation_id(),
@@ -711,6 +717,7 @@ async fn run_async(
                         plan_ref: None,
                         record_id,
                         session_id,
+                        jsonl_summary: None,
                     };
                     let resp = super::signed::committed(
                         ResponseVerb::Ingest,
@@ -942,6 +949,12 @@ fn ingest_args_from_matches(sub: &ArgMatches, body: String) -> IngestArgs {
             .get_many::<String>("tags")
             .map(|vals| vals.cloned().collect()),
         url: None,
+        jsonl: sub
+            .get_one::<PathBuf>("jsonl")
+            .map(|p| p.to_string_lossy().into_owned()),
+        harness: sub.get_one::<String>("harness").cloned(),
+        session_id_from: sub.get_one::<String>("session_id_from").cloned(),
+        limit: sub.get_one::<u32>("limit").map(|v| i64::from(*v)),
     }
 }
 

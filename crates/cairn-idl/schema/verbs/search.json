@@ -37,6 +37,11 @@
         "name": "explain",
         "long": "explain",
         "value_source": "bool"
+      },
+      {
+        "name": "include_reasoning",
+        "long": "include-reasoning",
+        "value_source": "bool"
       }
     ],
     "positional": {
@@ -116,6 +121,11 @@
           "default": false,
           "x-cairn-capability-when-true": "cairn.mcp.v1.policy_trace",
           "description": "When true, populate policy_trace and data.excluded with per-record exclusions for Tier-2 read filters. Has no effect on the candidate set the caller could see. `explain: true` requires the cairn.mcp.v1.policy_trace capability — servers that do not advertise it MUST reject `explain: true` with CapabilityUnavailable (sysexit 69)."
+        },
+        "include_reasoning": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, include records whose trace blocks contain reasoning content. Default false keeps reasoning-bearing records out of ordinary search results."
         }
       }
     },

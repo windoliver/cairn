@@ -46,6 +46,8 @@ pub struct SearchRequest {
     pub mode: SearchMode,
     /// Page size.
     pub limit: usize,
+    /// Whether reasoning-bearing records should be returned.
+    pub include_reasoning: bool,
     /// Visibility allowlist; empty = no narrowing.
     pub visibility_allowlist: Vec<MemoryVisibility>,
     /// Authorization scope tuple. Threaded into every search SQL path
@@ -82,6 +84,62 @@ pub struct SearchOutcome {
     /// surfaces it here so partial-result signaling is not silently
     /// dropped between the store and the wire surface. Issue #191.
     pub degraded_legs: Vec<crate::search::DegradedLeg>,
+}
+
+fn candidate_has_reasoning(candidate: &SearchCandidate) -> bool {
+    // Fail closed: if the row's `record_json` won't parse, treat it as
+    // potentially reasoning-bearing and exclude it from default results.
+    // The privacy boundary must not silently lower itself on store
+    // corruption or version skew.
+    let Ok(record_json) = serde_json::from_str::<serde_json::Value>(&candidate.record_json) else {
+        return true;
+    };
+    let Some(trace_blocks) = record_json
+        .get("extra_frontmatter")
+        .and_then(|value| value.get("trace_blocks"))
+    else {
+        return false;
+    };
+    // Same fail-closed rule for a non-array `trace_blocks`: schema skew
+    // means we cannot prove the row is reasoning-free.
+    let Some(blocks) = trace_blocks.as_array() else {
+        return true;
+    };
+    blocks.iter().any(|block| {
+        block
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|kind| kind.eq_ignore_ascii_case("reasoning"))
+    })
+}
+
+fn filter_reasoning_candidates(
+    candidates: Vec<SearchCandidate>,
+    explain: Option<Vec<ScoreExplain>>,
+    include_reasoning: bool,
+) -> (Vec<SearchCandidate>, Option<Vec<ScoreExplain>>) {
+    if include_reasoning {
+        return (candidates, explain);
+    }
+
+    let mut kept_candidates = Vec::with_capacity(candidates.len());
+    let mut kept_explain = explain
+        .as_ref()
+        .map(|entries| Vec::with_capacity(entries.len()));
+
+    for (index, candidate) in candidates.into_iter().enumerate() {
+        if candidate_has_reasoning(&candidate) {
+            continue;
+        }
+        kept_candidates.push(candidate);
+        if let (Some(entries), Some(kept)) = (explain.as_ref(), kept_explain.as_mut())
+            && let Some(entry) = entries.get(index)
+        {
+            kept.push(entry.clone());
+        }
+    }
+
+    (kept_candidates, kept_explain)
 }
 
 /// Errors raised by the dispatcher.
@@ -249,6 +307,12 @@ pub async fn run(
             (candidates, explain, exclusions, degraded_legs)
         }
     };
+
+    // Apply the reasoning-hiding privacy filter on top of the Tier-2
+    // read filter. Default-hidden unless the caller opts in via
+    // `--include-reasoning`. See issue #311.
+    let (candidates, explain) =
+        filter_reasoning_candidates(candidates, explain, request.include_reasoning);
 
     let policy_trace = search_policy_trace(&read_filter_exclusions);
     let excluded = request.explain.then_some(read_filter_exclusions);
@@ -652,6 +716,7 @@ mod tests {
             query: "hello".to_owned(),
             mode,
             limit: 10,
+            include_reasoning: false,
             visibility_allowlist: vec![],
             auth_scope: ScopeTuple::default(),
             model_label: "MiniLM-L6-v2".to_owned(),
@@ -1241,6 +1306,170 @@ mod tests {
             outcome.candidates.len() < 3,
             "trim should have reduced count from 3, got {}",
             outcome.candidates.len()
+        );
+    }
+
+    fn reasoning_candidate(
+        prefix: &str,
+        index: usize,
+        record_json: &serde_json::Value,
+    ) -> SearchCandidate {
+        use crate::domain::taxonomy::{MemoryClass, MemoryKind, MemoryVisibility};
+
+        let id_str = format!("{prefix}{index:016X}");
+        SearchCandidate {
+            record_id: RecordId::parse(id_str).expect("valid record id"),
+            target_id: TargetId::parse(format!("{prefix}0000000000000000"))
+                .expect("valid target id"),
+            scope: ScopeTuple::default(),
+            kind: MemoryKind::Fact,
+            class: MemoryClass::Episodic,
+            visibility: MemoryVisibility::Private,
+            bm25: 0.0,
+            recency_seconds: 0,
+            confidence: 1.0,
+            salience: 1.0,
+            staleness_seconds: 0,
+            snippet: format!("candidate-{index}"),
+            record_json: serde_json::to_string(record_json).expect("record json"),
+            semantic_distance: None,
+        }
+    }
+
+    struct ReasoningStore {
+        id_prefix: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl MemoryStore for ReasoningStore {
+        fn name(&self) -> &'static str {
+            "reasoning"
+        }
+        fn capabilities(&self) -> &MemoryStoreCapabilities {
+            static CAPS: MemoryStoreCapabilities = MemoryStoreCapabilities {
+                fts: true,
+                vector: false,
+                graph_edges: false,
+                transactions: true,
+                per_record_consent_model: true,
+                graph_search: false,
+            };
+            &CAPS
+        }
+        fn supported_contract_versions(&self) -> VersionRange {
+            use super::super::super::contract::memory_store::CONTRACT_VERSION;
+            VersionRange::new(
+                CONTRACT_VERSION,
+                ContractVersion::new(CONTRACT_VERSION.major, CONTRACT_VERSION.minor + 1, 0),
+            )
+        }
+        async fn upsert(&self, _r: &MemoryRecord) -> Result<UpsertOutcome, StoreError> {
+            unimplemented!()
+        }
+        async fn get(&self, _id: &RecordId) -> Result<Option<MemoryRecord>, StoreError> {
+            Ok(None)
+        }
+        async fn list(&self, _args: &ListArgs) -> Result<ListPage, StoreError> {
+            unimplemented!()
+        }
+        async fn tombstone(
+            &self,
+            _id: &RecordId,
+            _reason: TombstoneReason,
+        ) -> Result<(), StoreError> {
+            unimplemented!()
+        }
+        async fn versions(&self, _target: &TargetId) -> Result<Vec<RecordVersion>, StoreError> {
+            unimplemented!()
+        }
+        async fn put_edge(&self, _edge: &Edge) -> Result<(), StoreError> {
+            unimplemented!()
+        }
+        async fn remove_edge(&self, _key: &EdgeKey) -> Result<bool, StoreError> {
+            unimplemented!()
+        }
+        async fn neighbours(&self, _id: &RecordId, _dir: EdgeDir) -> Result<Vec<Edge>, StoreError> {
+            unimplemented!()
+        }
+        async fn search_keyword(
+            &self,
+            _args: &KeywordSearchArgs<'_>,
+        ) -> Result<KeywordSearchPage, StoreError> {
+            Ok(KeywordSearchPage {
+                candidates: vec![
+                    reasoning_candidate(
+                        self.id_prefix,
+                        0,
+                        &serde_json::json!({
+                            "extra_frontmatter": {
+                                "trace_blocks": [
+                                    {"kind": "reasoning", "text": "private chain"}
+                                ]
+                            }
+                        }),
+                    ),
+                    reasoning_candidate(self.id_prefix, 1, &serde_json::json!({})),
+                ],
+                next_cursor: None,
+                explain: None,
+            })
+        }
+        async fn search_semantic(
+            &self,
+            _args: &SemanticSearchArgs<'_>,
+        ) -> Result<SemanticSearchPage, StoreError> {
+            unimplemented!()
+        }
+        async fn search_hybrid(
+            &self,
+            _args: &HybridSearchArgs<'_>,
+        ) -> Result<HybridSearchPage, StoreError> {
+            unimplemented!()
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatcher_hides_reasoning_candidates_by_default() {
+        let config = CairnConfig::default();
+        let outcome = run(
+            &ReasoningStore {
+                id_prefix: "01HQZX9F5P",
+            },
+            &config,
+            &caps(true, false, false),
+            req(SearchMode::Keyword),
+        )
+        .await
+        .expect("ok");
+
+        assert_eq!(
+            outcome.candidates.len(),
+            1,
+            "reasoning result should be filtered"
+        );
+        assert_eq!(outcome.candidates[0].snippet, "candidate-1");
+    }
+
+    #[tokio::test]
+    async fn dispatcher_keeps_reasoning_candidates_when_opted_in() {
+        let config = CairnConfig::default();
+        let mut request = req(SearchMode::Keyword);
+        request.include_reasoning = true;
+        let outcome = run(
+            &ReasoningStore {
+                id_prefix: "01HQZX9F5Q",
+            },
+            &config,
+            &caps(true, false, false),
+            request,
+        )
+        .await
+        .expect("ok");
+
+        assert_eq!(
+            outcome.candidates.len(),
+            2,
+            "opt-in should keep reasoning result"
         );
     }
 }

@@ -12,6 +12,7 @@ pub mod graph;
 pub mod hybrid_vault;
 pub mod intent;
 pub mod keystore;
+pub mod mcp;
 pub mod store;
 pub use fake_consent_lookup::FakeConsentLookup;
 pub use hybrid_vault::{HybridTestVault, RecordSpec, build_hybrid_test_vault};

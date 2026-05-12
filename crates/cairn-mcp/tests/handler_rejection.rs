@@ -2,7 +2,8 @@
 //!
 //! Drives `handle_search` (via the full wire protocol) to a
 //! `CapabilityUnavailable` rejection and asserts that the `CallToolResult`
-//! text carries both the capability string and the registered remediation hint.
+//! text is a well-formed §8.0.b structured envelope carrying the capability
+//! string, `error.code == "CapabilityUnavailable"`, and the remediation hint.
 
 #![allow(missing_docs)]
 
@@ -17,7 +18,6 @@ use cairn_core::contract::memory_store::{
 use cairn_core::contract::version::{ContractVersion, VersionRange};
 use cairn_core::domain::record::MemoryRecord;
 use cairn_core::domain::{RecordId, TargetId};
-use cairn_core::generated::envelope::{Response, ResponseStatus, ResponseVerb};
 use cairn_mcp::CairnMcpHandler;
 use rmcp::ServiceExt as _;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -136,14 +136,17 @@ async fn do_initialize(
 
 /// When the store advertises `fts=true, vector=false`, calling `search` with
 /// `mode=semantic` must return a `CallToolResult` with `isError=true` whose
-/// text content carries:
-/// - the capability id `cairn.mcp.v1.search.semantic`, and
-/// - the remediation hint keyword `local_embeddings`.
+/// text content is a structured §8.0.b `CapabilityUnavailable` JSON envelope
+/// carrying:
+/// - `error.code == "CapabilityUnavailable"`,
+/// - `error.data.capability == "cairn.mcp.v1.search.semantic"`, and
+/// - `error.data.remediation` containing the keyword `local_embeddings`.
 ///
 /// This pins the `CapabilityUnavailable` arm of `handle_search` and catches
-/// the class of bug where MCP derivation uses the wrong config field (e.g.
-/// `config.search.local_embeddings` instead of `store.vector`) when deciding
-/// whether to grant semantic capability.
+/// two classes of bug:
+/// 1. MCP derivation uses the wrong config field (e.g., `config.search.local_embeddings`
+///    instead of `store.vector`) when deciding whether to grant semantic capability.
+/// 2. The handler degrades the structured JSON envelope back to a plain-text message.
 #[tokio::test]
 async fn mcp_search_semantic_rejection_carries_remediation() {
     let (server_half, client_half) = tokio::io::duplex(65_536);
@@ -188,8 +191,7 @@ async fn mcp_search_semantic_rejection_carries_remediation() {
         "semantic search with vector=false must return isError=true; got: {call_resp}"
     );
 
-    // Extract the text content and verify it carries the capability id
-    // and the remediation hint.
+    // Extract the text content and parse it as a structured §8.0.b envelope.
     let content = call_resp
         .pointer("/result/content")
         .and_then(|v| v.as_array())
@@ -201,24 +203,49 @@ async fn mcp_search_semantic_rejection_carries_remediation() {
         .and_then(serde_json::Value::as_str)
         .expect("first content item must have a text field");
 
-    let envelope: Response = serde_json::from_str(text)
-        .unwrap_or_else(|e| panic!("semantic rejection must be a Response: {e}; text={text}"));
-    assert!(matches!(envelope.status, ResponseStatus::Rejected));
-    assert!(matches!(envelope.verb, ResponseVerb::Search));
-    assert_eq!(envelope.operation_id.0.len(), 26);
-    assert!(envelope.data.is_none());
+    // The text must be a valid JSON object (structured envelope), not plain text.
+    let envelope: serde_json::Value =
+        serde_json::from_str(text).expect("rejection text must be a valid JSON envelope");
 
-    let err = envelope.error.expect("rejected envelope must carry error");
-    assert_eq!(err["code"], "CapabilityUnavailable");
+    // §8.0.b: contract, verb, status, operation_id must be present.
     assert_eq!(
-        err["data"]["capability"], "cairn.mcp.v1.search.semantic",
-        "rejection must preserve capability id"
+        envelope["contract"], "cairn.mcp.v1",
+        "envelope.contract must be 'cairn.mcp.v1'; got: {envelope}"
+    );
+    assert_eq!(
+        envelope["verb"], "search",
+        "envelope.verb must be 'search'; got: {envelope}"
+    );
+    assert_eq!(
+        envelope["status"], "rejected",
+        "envelope.status must be 'rejected'; got: {envelope}"
     );
     assert!(
-        err["data"]["remediation"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("local_embeddings"),
-        "rejection must preserve remediation hint: {err}"
+        envelope
+            .get("operation_id")
+            .and_then(|v| v.as_str())
+            .is_some(),
+        "envelope.operation_id must be present; got: {envelope}"
+    );
+
+    // error.code must be CapabilityUnavailable.
+    assert_eq!(
+        envelope["error"]["code"], "CapabilityUnavailable",
+        "error.code must be 'CapabilityUnavailable'; got: {envelope}"
+    );
+
+    // error.data.capability must be the exact wire id.
+    assert_eq!(
+        envelope["error"]["data"]["capability"], "cairn.mcp.v1.search.semantic",
+        "error.data.capability must be 'cairn.mcp.v1.search.semantic'; got: {envelope}"
+    );
+
+    // error.data.remediation must carry the local_embeddings hint.
+    let remediation = envelope["error"]["data"]["remediation"]
+        .as_str()
+        .expect("error.data.remediation must be a string");
+    assert!(
+        remediation.contains("local_embeddings"),
+        "error.data.remediation must contain 'local_embeddings'; got: {remediation:?}"
     );
 }

@@ -221,7 +221,7 @@ fn build_summary_body(
             .get("trace_event")
             .and_then(Json::as_str)
             .unwrap_or("");
-        let excerpt: String = r.body.chars().take(80).collect();
+        let excerpt = summary_excerpt(r);
         // writeln! on String is infallible (String's fmt::Write never errors).
         let _ = writeln!(body, "- [seq {seq}] {evt}: {excerpt}");
         if body.len() >= TRACE_BODY_CAP {
@@ -234,6 +234,52 @@ fn build_summary_body(
         }
     }
     Ok(body)
+}
+
+fn summary_excerpt(record: &MemoryRecord) -> String {
+    if !record.body.is_empty() {
+        return record.body.chars().take(80).collect();
+    }
+
+    record
+        .extra_frontmatter
+        .get("trace_blocks")
+        .and_then(trace_blocks_excerpt)
+        .unwrap_or_default()
+}
+
+fn trace_blocks_excerpt(value: &Json) -> Option<String> {
+    let blocks = value.as_array()?;
+    let mut out = String::new();
+    for block in blocks {
+        let obj = block.as_object()?;
+        // Skip reasoning blocks — they must not leak into searchable summary
+        // bodies. Reasoning visibility is controlled by the search filter
+        // against `extra_frontmatter.trace_blocks`; the summary excerpt is
+        // already past that gate.
+        let kind = obj.get("kind").and_then(Json::as_str).unwrap_or_default();
+        if kind.eq_ignore_ascii_case("reasoning") {
+            continue;
+        }
+        let Some(text) = obj
+            .get("text")
+            .and_then(Json::as_str)
+            .or_else(|| obj.get("content").and_then(Json::as_str))
+        else {
+            continue;
+        };
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(text);
+        if out.len() >= 80 {
+            break;
+        }
+    }
+    if out.is_empty() {
+        return None;
+    }
+    Some(out.chars().take(80).collect())
 }
 
 /// Build the `extra_frontmatter` map for a turn-summary record.
@@ -512,6 +558,52 @@ mod tests {
         assert_eq!(members[0], "01ARZ3NDEKTSV4RRFFQ69G5FAA");
         assert_eq!(members[1], "01ARZ3NDEKTSV4RRFFQ69G5FAB");
         assert_eq!(summary.id, summary_record_id(&s, "turn-1"));
+    }
+
+    #[test]
+    fn summarize_blocks_excerpt_omits_reasoning_signatures() {
+        let s = SessionId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").expect("valid");
+        let mut record = mk_trace_record(
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "turn-1",
+            0,
+            "01ARZ3NDEKTSV4RRFFQ69G5FAA",
+            "agent_message",
+            "",
+        );
+        record.extra_frontmatter.insert(
+            "trace_blocks".into(),
+            serde_json::json!([
+                {
+                    "kind": "reasoning",
+                    "text": "compare the tool outputs carefully",
+                    "signature": "sig-secret-keep-out"
+                },
+                {
+                    "kind": "tool_result",
+                    "tool_use_id": "toolu_1",
+                    "content": "selected ripgrep",
+                    "is_error": false
+                }
+            ]),
+        );
+
+        let summary = summarize_turn(&s, "turn-1", &[record]).expect("summary");
+        assert!(
+            !summary.body.contains("compare the tool outputs carefully"),
+            "summary must not leak reasoning text: {}",
+            summary.body
+        );
+        assert!(
+            summary.body.contains("selected ripgrep"),
+            "summary should include tool result text: {}",
+            summary.body
+        );
+        assert!(
+            !summary.body.contains("sig-secret-keep-out"),
+            "summary must not leak reasoning signatures: {}",
+            summary.body
+        );
     }
 
     #[test]

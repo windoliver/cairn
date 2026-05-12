@@ -17,14 +17,18 @@
       { "name": "exclude",     "long": "exclude",     "value_source": "list<string>" },
       { "name": "mode",        "long": "mode",        "value_source": "enum(keyword,semantic,full)" },
       { "name": "batch_size",  "long": "batch-size",  "value_source": "u32" },
+      { "name": "jsonl",       "long": "jsonl",       "value_source": "path" },
+      { "name": "harness",     "long": "harness",     "value_source": "string" },
+      { "name": "session_id_from", "long": "session-id-from", "value_source": "string" },
+      { "name": "limit",       "long": "limit",       "value_source": "u32" },
       { "name": "session_id",  "long": "session",     "value_source": "string" },
       { "name": "tags",        "long": "tags",        "value_source": "list<string>" },
       { "name": "no_cache",    "long": "no-cache",    "value_source": "bool" }
     ],
     "positional": {
       "name": "source",
-      "description": "File, URL, folder, or '-' for stdin. Mutually exclusive with --body/--file/--folder/--url.",
-      "aliases_one_of": ["body", "file", "folder", "url"]
+      "description": "File, URL, folder, JSONL transcript, or '-' for stdin. Mutually exclusive with --body/--file/--folder/--url/--jsonl.",
+      "aliases_one_of": ["body", "file", "folder", "url", "jsonl"]
     }
   },
   "x-cairn-capability": null,
@@ -64,7 +68,7 @@
         "recursive": {
           "type": "boolean",
           "default": true,
-          "description": "Whether folder ingest recurses into child directories. CLI default: true."
+          "description": "Folder/jsonl ingest: recurse into child directories. CLI default: true."
         },
         "include": {
           "type": "array",
@@ -93,6 +97,10 @@
           "default": 64,
           "description": "Maximum cache-miss files per FlushPlan batch."
         },
+        "jsonl": { "type": "string", "minLength": 1, "description": "Path to a harness transcript JSONL file (or directory with --recursive) for backfill import." },
+        "harness": { "type": "string", "minLength": 1, "description": "Optional harness parser name. Auto-detected from the first non-empty line when omitted." },
+        "session_id_from": { "type": "string", "minLength": 1, "description": "Optional top-level JSON key whose string value overrides the generic parser's synthetic session id." },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 4294967295, "description": "Maximum number of transcript rows to import (jsonl backfill)." },
         "session_id": { "type": "string", "minLength": 1 },
         "tags": {
           "type": "array",
@@ -126,7 +134,8 @@
         { "required": ["body"] },
         { "required": ["file"] },
         { "required": ["folder"] },
-        { "required": ["url"] }
+        { "required": ["url"] },
+        { "required": ["jsonl"] }
       ]
     },
     "IngestMode": {
@@ -148,7 +157,20 @@
         "files_processed": { "type": "integer", "minimum": 0, "description": "Folder ingest file count when source is --folder." },
         "cache_hits": { "type": "integer", "minimum": 0, "description": "Folder ingest cache hits." },
         "cache_misses": { "type": "integer", "minimum": 0, "description": "Folder ingest cache misses or forced re-extractions." },
-        "cache_writes": { "type": "integer", "minimum": 0, "description": "Folder ingest cache entries written." }
+        "cache_writes": { "type": "integer", "minimum": 0, "description": "Folder ingest cache entries written." },
+        "jsonl_summary": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "JSONL transcript backfill counts. Present only when source is --jsonl.",
+          "properties": {
+            "files_scanned":    { "type": "integer", "minimum": 0 },
+            "sessions_parsed":  { "type": "integer", "minimum": 0 },
+            "turns_parsed":     { "type": "integer", "minimum": 0 },
+            "records_written":  { "type": "integer", "minimum": 0 },
+            "sessions_skipped": { "type": "integer", "minimum": 0 },
+            "elapsed_ms":       { "type": "integer", "minimum": 0 }
+          }
+        }
       }
     }
   }

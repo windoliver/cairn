@@ -34,6 +34,9 @@ Options:
       --explain
 
 
+      --include-reasoning
+
+
       --scope-tenant <TENANT>
           Narrow auth_scope.tenant on every search leg (issue #191)
 
