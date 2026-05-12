@@ -356,7 +356,6 @@ mod tests {
             recipe: vec![HotMemoryRecipeStep::Purpose; 65],
             pre_compact_recipe: "handoff".to_string(),
             pre_compact_safety_ratio: 0.30,
-            ..HotMemoryConfig::default()
         };
         let err = assemble_hot(&cfg).unwrap_err();
         match err {
