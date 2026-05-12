@@ -14,6 +14,7 @@ pub mod intent;
 pub mod keystore;
 pub mod mcp;
 pub mod store;
+pub mod trace;
 pub use fake_consent_lookup::FakeConsentLookup;
 pub use hybrid_vault::{HybridTestVault, RecordSpec, build_hybrid_test_vault};
 pub use keystore::MemoryKeystore;

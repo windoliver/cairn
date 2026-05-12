@@ -23,6 +23,7 @@ pub mod record_wal;
 pub mod repair;
 pub mod replay;
 pub mod store;
+pub mod trace_window;
 pub mod vec_ext;
 mod verify;
 pub mod wal;
