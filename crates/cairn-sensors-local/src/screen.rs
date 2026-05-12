@@ -1,0 +1,528 @@
+//! Mockable runtime boundary for local screen capture.
+
+use cairn_core::config::{ScreenBackend, ScreenOcrEngine, ScreenSensorConfig};
+use cairn_core::generated::common::Capabilities;
+
+/// Sensor label used by the in-process xcap backend.
+pub const XCAP_SENSOR_LABEL: &str = "screen.xcap";
+/// Sensor label used by the optional screenpipe backend.
+pub const SCREENPIPE_SENSOR_LABEL: &str = "screen.screenpipe";
+
+/// Runtime availability state for screen capture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScreenState {
+    /// Config disabled the screen sensor.
+    Disabled,
+    /// Capture is available.
+    Enabled,
+    /// Capture cannot run because OS permission is missing.
+    PermissionMissing,
+    /// Capture is configured but degraded.
+    Degraded,
+}
+
+/// Capture mode resolved for this runtime boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScreenMode {
+    /// Point-in-time screenshot plus OCR snapshot.
+    Snapshot,
+}
+
+/// Runtime permission status for screen capture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScreenPermission {
+    /// Permission has not been checked by this mockable boundary.
+    Unknown,
+    /// Permission is available.
+    Granted,
+    /// Permission is missing or denied.
+    Denied,
+}
+
+/// OCR engine after resolving `Auto`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolvedScreenOcrEngine {
+    /// Apple Vision OCR.
+    Vision,
+    /// Windows Runtime OCR.
+    Winrt,
+    /// Tesseract OCR.
+    Tesseract,
+    /// OCR is disabled.
+    Off,
+}
+
+impl ResolvedScreenOcrEngine {
+    /// Resolve a configured OCR engine into the concrete runtime engine.
+    #[must_use]
+    pub fn from_config(engine: ScreenOcrEngine) -> Self {
+        match engine {
+            ScreenOcrEngine::Auto => platform_default_ocr_engine(),
+            ScreenOcrEngine::Vision => Self::Vision,
+            ScreenOcrEngine::Winrt => Self::Winrt,
+            ScreenOcrEngine::Tesseract => Self::Tesseract,
+            ScreenOcrEngine::Off => Self::Off,
+            _ => Self::Off,
+        }
+    }
+}
+
+/// Stable degradation codes for screen capture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScreenDegradationCode {
+    /// Sensor is explicitly disabled in config.
+    Disabled,
+    /// Requested backend is not compiled into this binary.
+    BackendUnavailable,
+    /// OS permission is missing or denied.
+    PermissionMissing,
+}
+
+/// Screen capture degradation details.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenDegradation {
+    /// Stable degradation code.
+    pub code: ScreenDegradationCode,
+}
+
+impl ScreenDegradation {
+    /// Create a degradation from its stable code.
+    #[must_use]
+    pub const fn new(code: ScreenDegradationCode) -> Self {
+        Self { code }
+    }
+}
+
+/// Result of probing a configured screen backend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenProbe {
+    /// Configured backend.
+    pub backend: ScreenBackend,
+    /// Runtime state.
+    pub state: ScreenState,
+    /// Runtime capture mode.
+    pub mode: ScreenMode,
+    /// Runtime permission status.
+    pub permission: ScreenPermission,
+    /// Resolved OCR engine.
+    pub ocr_engine: ResolvedScreenOcrEngine,
+    /// Degradation if capture is not fully enabled.
+    pub degradation: Option<ScreenDegradation>,
+}
+
+impl ScreenProbe {
+    /// Return the stable degradation code, if any.
+    #[must_use]
+    pub fn degradation_code(&self) -> Option<ScreenDegradationCode> {
+        self.degradation
+            .as_ref()
+            .map(|degradation| degradation.code)
+    }
+}
+
+/// OCR bounding box in screen coordinates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundingBox {
+    /// Left coordinate.
+    pub x: u32,
+    /// Top coordinate.
+    pub y: u32,
+    /// Box width.
+    pub width: u32,
+    /// Box height.
+    pub height: u32,
+}
+
+/// Captured screen text and focused-window metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenObservation {
+    /// OCR text.
+    pub text: String,
+    /// Focused application name.
+    pub app: String,
+    /// Focused window title.
+    pub window_title: String,
+    /// URL associated with the focused context, when known.
+    pub url: Option<String>,
+    /// OCR text bounding boxes.
+    pub bounding_boxes: Vec<BoundingBox>,
+    /// Capture timestamp.
+    pub captured_at: String,
+    /// Sensor label that produced this observation.
+    pub sensor_label: String,
+    /// Backend that produced this observation.
+    pub backend: ScreenBackend,
+    /// OCR engine that produced this observation.
+    pub ocr_engine: ResolvedScreenOcrEngine,
+}
+
+/// Errors emitted by the screen runtime boundary.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ScreenError {
+    /// Capture is unavailable for the current configuration.
+    #[error("screen capture unavailable: {0:?}")]
+    Unavailable(ScreenDegradationCode),
+    /// Backend-specific capture failure.
+    #[error("screen capture failed: {0}")]
+    CaptureFailed(String),
+}
+
+impl ScreenError {
+    /// Return a stable code for policy/status mapping.
+    #[must_use]
+    pub fn code(&self) -> ScreenDegradationCode {
+        match self {
+            Self::Unavailable(code) => *code,
+            Self::CaptureFailed(_) => ScreenDegradationCode::BackendUnavailable,
+        }
+    }
+}
+
+/// Backend implementation that can be mocked in tests.
+pub trait ScreenBackendRuntime {
+    /// Probe backend availability without capturing.
+    fn probe(&self, config: &ScreenSensorConfig) -> ScreenProbe;
+
+    /// Capture a single snapshot.
+    fn capture_snapshot(
+        &self,
+        config: &ScreenSensorConfig,
+    ) -> Result<ScreenObservation, ScreenError>;
+}
+
+/// Policy applied after budget enforcement and before observations leave runtime.
+pub trait ScreenPolicy {
+    /// Apply redaction or filtering to an observation.
+    fn apply(&self, observation: ScreenObservation) -> ScreenObservation;
+}
+
+/// Policy that leaves observations unchanged.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoopScreenPolicy;
+
+impl ScreenPolicy for NoopScreenPolicy {
+    fn apply(&self, observation: ScreenObservation) -> ScreenObservation {
+        observation
+    }
+}
+
+/// Basic fixture policy for early screen-runtime tests.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BasicScreenPolicy;
+
+impl ScreenPolicy for BasicScreenPolicy {
+    fn apply(&self, mut observation: ScreenObservation) -> ScreenObservation {
+        if observation.text.to_lowercase().contains("password=") {
+            observation.text = "[redacted]".to_owned();
+        }
+        observation
+    }
+}
+
+/// Mockable screen sensor that composes backend and policy.
+#[derive(Debug, Clone)]
+pub struct ScreenSensor<B, P> {
+    backend: B,
+    policy: P,
+}
+
+impl<B, P> ScreenSensor<B, P>
+where
+    B: ScreenBackendRuntime,
+    P: ScreenPolicy,
+{
+    /// Create a screen sensor from a backend runtime and policy.
+    #[must_use]
+    pub const fn new(backend: B, policy: P) -> Self {
+        Self { backend, policy }
+    }
+
+    /// Capture a single snapshot, returning `None` when the sensor is disabled.
+    pub fn capture_snapshot(
+        &self,
+        config: &ScreenSensorConfig,
+    ) -> Result<Option<ScreenObservation>, ScreenError> {
+        if !config.enabled {
+            return Ok(None);
+        }
+
+        let probe = self.backend.probe(config);
+        if probe.state != ScreenState::Enabled {
+            return Err(ScreenError::Unavailable(
+                probe
+                    .degradation_code()
+                    .unwrap_or(ScreenDegradationCode::BackendUnavailable),
+            ));
+        }
+
+        let mut observation = self.backend.capture_snapshot(config)?;
+        truncate_text_to_budget(
+            &mut observation.text,
+            config.budget.max_text_bytes_per_event,
+        );
+        Ok(Some(self.policy.apply(observation)))
+    }
+}
+
+/// Capabilities compiled into this crate for screen capture.
+#[must_use]
+pub fn compiled_capabilities() -> Vec<Capabilities> {
+    let mut capabilities = vec![
+        Capabilities::CairnSensorV1ScreenXcap,
+        platform_ocr_capability(),
+    ];
+    if cfg!(feature = "screenpipe-runtime") {
+        capabilities.push(Capabilities::CairnSensorV1ScreenScreenpipe);
+    }
+    capabilities
+}
+
+/// Probe a screen config without touching desktop APIs.
+#[must_use]
+pub fn probe_config(config: &ScreenSensorConfig) -> ScreenProbe {
+    let ocr_engine = ResolvedScreenOcrEngine::from_config(config.ocr.engine);
+    if !config.enabled {
+        return ScreenProbe {
+            backend: config.backend,
+            state: ScreenState::Disabled,
+            mode: ScreenMode::Snapshot,
+            permission: ScreenPermission::Unknown,
+            ocr_engine,
+            degradation: Some(ScreenDegradation::new(ScreenDegradationCode::Disabled)),
+        };
+    }
+
+    match config.backend {
+        ScreenBackend::Xcap => permission_missing_probe(config.backend, ocr_engine),
+        ScreenBackend::Screenpipe => {
+            if cfg!(feature = "screenpipe-runtime") {
+                permission_missing_probe(config.backend, ocr_engine)
+            } else {
+                ScreenProbe {
+                    backend: config.backend,
+                    state: ScreenState::Degraded,
+                    mode: ScreenMode::Snapshot,
+                    permission: ScreenPermission::Unknown,
+                    ocr_engine,
+                    degradation: Some(ScreenDegradation::new(
+                        ScreenDegradationCode::BackendUnavailable,
+                    )),
+                }
+            }
+        }
+        _ => ScreenProbe {
+            backend: config.backend,
+            state: ScreenState::Degraded,
+            mode: ScreenMode::Snapshot,
+            permission: ScreenPermission::Unknown,
+            ocr_engine,
+            degradation: Some(ScreenDegradation::new(
+                ScreenDegradationCode::BackendUnavailable,
+            )),
+        },
+    }
+}
+
+fn permission_missing_probe(
+    backend: ScreenBackend,
+    ocr_engine: ResolvedScreenOcrEngine,
+) -> ScreenProbe {
+    ScreenProbe {
+        backend,
+        state: ScreenState::PermissionMissing,
+        mode: ScreenMode::Snapshot,
+        permission: ScreenPermission::Denied,
+        ocr_engine,
+        degradation: Some(ScreenDegradation::new(
+            ScreenDegradationCode::PermissionMissing,
+        )),
+    }
+}
+
+fn truncate_text_to_budget(text: &mut String, max_bytes: u32) {
+    let max_bytes = max_bytes as usize;
+    if text.len() <= max_bytes {
+        return;
+    }
+
+    let mut truncate_at = max_bytes;
+    while !text.is_char_boundary(truncate_at) {
+        truncate_at -= 1;
+    }
+    text.truncate(truncate_at);
+}
+
+fn platform_default_ocr_engine() -> ResolvedScreenOcrEngine {
+    if cfg!(target_os = "macos") {
+        ResolvedScreenOcrEngine::Vision
+    } else if cfg!(target_os = "windows") {
+        ResolvedScreenOcrEngine::Winrt
+    } else {
+        ResolvedScreenOcrEngine::Tesseract
+    }
+}
+
+fn platform_ocr_capability() -> Capabilities {
+    if cfg!(target_os = "macos") {
+        Capabilities::CairnSensorV1ScreenOcrVision
+    } else if cfg!(target_os = "windows") {
+        Capabilities::CairnSensorV1ScreenOcrWinrt
+    } else {
+        Capabilities::CairnSensorV1ScreenOcrTesseract
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use cairn_core::config::{ScreenBackend, ScreenSensorConfig};
+
+    use super::*;
+
+    #[derive(Clone)]
+    struct FakeBackend {
+        probe: ScreenProbe,
+        observation: ScreenObservation,
+    }
+
+    impl ScreenBackendRuntime for FakeBackend {
+        fn probe(&self, _config: &ScreenSensorConfig) -> ScreenProbe {
+            self.probe.clone()
+        }
+
+        fn capture_snapshot(
+            &self,
+            _config: &ScreenSensorConfig,
+        ) -> Result<ScreenObservation, ScreenError> {
+            Ok(self.observation.clone())
+        }
+    }
+
+    fn enabled_config() -> ScreenSensorConfig {
+        ScreenSensorConfig {
+            enabled: true,
+            ..ScreenSensorConfig::default()
+        }
+    }
+
+    fn fake_probe() -> ScreenProbe {
+        ScreenProbe {
+            backend: ScreenBackend::Xcap,
+            state: ScreenState::Enabled,
+            mode: ScreenMode::Snapshot,
+            permission: ScreenPermission::Granted,
+            ocr_engine: ResolvedScreenOcrEngine::Tesseract,
+            degradation: None,
+        }
+    }
+
+    fn fake_observation(text: &str) -> ScreenObservation {
+        ScreenObservation {
+            text: text.to_owned(),
+            app: "Code".to_owned(),
+            window_title: "screen.rs".to_owned(),
+            url: Some("file:///tmp/screen.rs".to_owned()),
+            bounding_boxes: vec![BoundingBox {
+                x: 1,
+                y: 2,
+                width: 300,
+                height: 40,
+            }],
+            captured_at: "2026-05-12T12:00:00Z".to_owned(),
+            sensor_label: XCAP_SENSOR_LABEL.to_owned(),
+            backend: ScreenBackend::Xcap,
+            ocr_engine: ResolvedScreenOcrEngine::Tesseract,
+        }
+    }
+
+    #[test]
+    fn disabled_sensor_emits_nothing() {
+        let backend = FakeBackend {
+            probe: fake_probe(),
+            observation: fake_observation("ignored"),
+        };
+        let sensor = ScreenSensor::new(backend, NoopScreenPolicy);
+        let result = sensor
+            .capture_snapshot(&ScreenSensorConfig::default())
+            .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn fake_backend_emits_ocr_text_and_metadata() {
+        let backend = FakeBackend {
+            probe: fake_probe(),
+            observation: fake_observation("meeting notes"),
+        };
+        let sensor = ScreenSensor::new(backend, NoopScreenPolicy);
+        let result = sensor.capture_snapshot(&enabled_config()).unwrap().unwrap();
+        assert_eq!(result.text, "meeting notes");
+        assert_eq!(result.app, "Code");
+        assert_eq!(result.window_title, "screen.rs");
+        assert_eq!(result.sensor_label, XCAP_SENSOR_LABEL);
+        assert_eq!(result.bounding_boxes.len(), 1);
+    }
+
+    #[test]
+    fn screenpipe_without_feature_reports_backend_unavailable() {
+        let config = ScreenSensorConfig {
+            enabled: true,
+            backend: ScreenBackend::Screenpipe,
+            ..ScreenSensorConfig::default()
+        };
+        let probe = probe_config(&config);
+        if cfg!(feature = "screenpipe-runtime") {
+            assert_ne!(
+                probe.degradation_code(),
+                Some(ScreenDegradationCode::BackendUnavailable)
+            );
+        } else {
+            assert_eq!(probe.state, ScreenState::Degraded);
+            assert_eq!(
+                probe.degradation_code(),
+                Some(ScreenDegradationCode::BackendUnavailable)
+            );
+        }
+    }
+
+    #[test]
+    fn permission_missing_probe_blocks_capture() {
+        let backend = FakeBackend {
+            probe: ScreenProbe {
+                state: ScreenState::PermissionMissing,
+                permission: ScreenPermission::Denied,
+                degradation: Some(ScreenDegradation::new(
+                    ScreenDegradationCode::PermissionMissing,
+                )),
+                ..fake_probe()
+            },
+            observation: fake_observation("not emitted"),
+        };
+        let sensor = ScreenSensor::new(backend, NoopScreenPolicy);
+        let err = sensor.capture_snapshot(&enabled_config()).unwrap_err();
+        assert_eq!(err.code(), ScreenDegradationCode::PermissionMissing);
+    }
+
+    #[test]
+    fn text_budget_truncates_on_utf8_boundary() {
+        let mut config = enabled_config();
+        config.budget.max_text_bytes_per_event = 5;
+        let backend = FakeBackend {
+            probe: fake_probe(),
+            observation: fake_observation("éclair"),
+        };
+        let sensor = ScreenSensor::new(backend, NoopScreenPolicy);
+        let result = sensor.capture_snapshot(&config).unwrap().unwrap();
+        assert_eq!(result.text, "écla");
+    }
+
+    #[test]
+    fn policy_redacts_password_text() {
+        let backend = FakeBackend {
+            probe: fake_probe(),
+            observation: fake_observation("password=abc123"),
+        };
+        let sensor = ScreenSensor::new(backend, BasicScreenPolicy);
+        let result = sensor.capture_snapshot(&enabled_config()).unwrap().unwrap();
+        assert_eq!(result.text, "[redacted]");
+    }
+}

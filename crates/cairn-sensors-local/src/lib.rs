@@ -11,6 +11,8 @@ use cairn_core::contract::sensor_ingress::{
 use cairn_core::contract::version::{ContractVersion, VersionRange};
 use cairn_core::register_plugin;
 
+pub mod screen;
+
 /// Stable plugin name. Matches `name = ...` in `plugin.toml`.
 pub const PLUGIN_NAME: &str = "cairn-sensors-local";
 
