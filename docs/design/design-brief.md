@@ -252,10 +252,10 @@ The same split Karpathy's LLM‑Wiki pattern prescribes: the LLM compiles and ma
 1. A source lands in `sources/` (drag‑drop, web clip, source sensor).
 2. `Capture → Extract → Filter → Classify → Store` writes one or more records into `raw/`.
 3. `ConsolidationWorkflow` + `PromotionWorkflow` merge / compress / promote records into `wiki/` pages and `skills/` procedures.
-4. `wiki/` pages link to `raw/` records (via frontmatter `source_ids`) which link to `sources/` documents (via frontmatter `origin`). The trail is auditable end to end.
+4. `wiki/` pages link to `raw/` records (via `provenance.source_ids` in frontmatter) which link to `sources/` documents (via frontmatter `origin`). The trail is auditable end to end.
 5. `EvaluationWorkflow` + `lint` detect orphans, contradictions, stale claims, and data gaps across all three layers.
 
-**Memory file format.** YAML frontmatter (id, kind, class, visibility, scope, confidence, salience, created, updated, origin, source_ids, provenance, tags, links) + markdown body. Pure functions read/write the frontmatter; LLM calls author the body. Humans rarely edit `raw/` or `wiki/` directly — when they do, the next `ConsolidationWorkflow` pass reconciles.
+**Memory file format.** YAML frontmatter (id, kind, class, visibility, scope, confidence, salience, created, updated, origin, provenance `{source_sensor, created_at, llm_id_if_any, originating_agent_id, source_ids, source_hash, consent_ref}`, tags, links) + markdown body. Pure functions read/write the frontmatter; LLM calls author the body. Humans rarely edit `raw/` or `wiki/` directly — when they do, the next `ConsolidationWorkflow` pass reconciles.
 
 **Git is first‑class.** The vault is a git repo. Version history, branching, and collaboration come free. Humans curate sources + schema; the LLM edits records + wiki; merge conflicts are resolved by `ConsolidationWorkflow`.
 
@@ -2262,7 +2262,7 @@ Confidence is a single scalar; **Evidence** is the multi‑factor vector that dr
 
 ### 6.5 Provenance (mandatory on every record)
 
-`{source_sensor, created_at, llm_id_if_any, originating_agent_id, source_hash, consent_ref}` — always present. Never optional.
+`{source_sensor, created_at, llm_id_if_any, originating_agent_id, source_ids, source_hash, consent_ref}` — always present. Never optional. `source_ids` is the source-document pointer set; `source_hash` is the content-addressable evidence hash for the bytes the record was derived from.
 
 ---
 
