@@ -7,6 +7,7 @@
 
 use std::process::ExitCode;
 
+use cairn_core::config::{CairnConfig, ScreenBackend};
 use cairn_core::generated::common::Capabilities;
 use cairn_core::generated::status::{
     StatusResponse, StatusResponseSensors, StatusResponseSensorsScreen,
@@ -15,6 +16,12 @@ use cairn_core::generated::status::{
     StatusResponseSensorsScreenOcrEngine, StatusResponseSensorsScreenPermission,
     StatusResponseSensorsScreenState, StatusResponseServerInfo,
 };
+use cairn_sensors_local::screen::{
+    self, ResolvedScreenOcrEngine, ScreenDegradationCode, ScreenMode, ScreenPermission,
+    ScreenProbe, ScreenState,
+};
+
+use crate::config::CliOverrides;
 
 use super::envelope::{emit_json, new_operation_id};
 
@@ -23,18 +30,8 @@ use super::envelope::{emit_json, new_operation_id};
 pub fn run(json: bool) -> ExitCode {
     let incarnation = new_operation_id();
     let started_at = chrono_like_now();
-    let resp = StatusResponse {
-        contract: "cairn.mcp.v1".to_owned(),
-        server_info: StatusResponseServerInfo {
-            version: env!("CARGO_PKG_VERSION").to_owned(),
-            build: build_profile(),
-            started_at: started_at.clone(),
-            incarnation: incarnation.clone(),
-        },
-        capabilities: p0_capabilities(),
-        extensions: vec![],
-        sensors: default_screen_sensors(),
-    };
+    let config = load_status_config();
+    let resp = build_response(&config, started_at.clone(), incarnation.clone());
 
     if json {
         emit_json(&resp);
@@ -54,8 +51,44 @@ pub fn run(json: bool) -> ExitCode {
                 );
             }
         }
+        println!(
+            "screen:      {:?} {:?}",
+            resp.sensors.screen.backend, resp.sensors.screen.state
+        );
     }
     ExitCode::SUCCESS
+}
+
+fn load_status_config() -> CairnConfig {
+    let overrides = CliOverrides::default();
+    std::env::current_dir()
+        .ok()
+        .and_then(|current_dir| crate::config::load(&current_dir, &overrides).ok())
+        .unwrap_or_default()
+}
+
+fn build_response(
+    config: &CairnConfig,
+    started_at: String,
+    incarnation: cairn_core::generated::common::Ulid,
+) -> StatusResponse {
+    let mut capabilities = p0_capabilities();
+    capabilities.extend(screen::compiled_capabilities());
+    capabilities.sort_by_key(|capability| serde_json::to_string(capability).unwrap_or_default());
+    capabilities.dedup();
+
+    StatusResponse {
+        contract: "cairn.mcp.v1".to_owned(),
+        server_info: StatusResponseServerInfo {
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            build: build_profile(),
+            started_at,
+            incarnation,
+        },
+        capabilities,
+        extensions: vec![],
+        sensors: map_screen_probe(&screen::probe_config(&config.sensors.screen)),
+    }
 }
 
 /// P0 advertises no capabilities — the store adapter is not wired yet.
@@ -64,19 +97,85 @@ fn p0_capabilities() -> Vec<Capabilities> {
     vec![]
 }
 
-fn default_screen_sensors() -> StatusResponseSensors {
+fn map_screen_probe(probe: &ScreenProbe) -> StatusResponseSensors {
     StatusResponseSensors {
         screen: StatusResponseSensorsScreen {
-            backend: StatusResponseSensorsScreenBackend::Xcap,
-            degradation: Some(StatusResponseSensorsScreenDegradation {
-                code: StatusResponseSensorsScreenDegradationCode::ScreenDisabled,
-                message: "screen sensor is disabled in config".to_owned(),
+            backend: map_screen_backend(probe.backend),
+            degradation: probe.degradation.as_ref().map(|degradation| {
+                StatusResponseSensorsScreenDegradation {
+                    code: map_screen_degradation_code(degradation.code),
+                    message: degradation.message.clone(),
+                }
             }),
-            mode: StatusResponseSensorsScreenMode::Off,
-            ocr_engine: StatusResponseSensorsScreenOcrEngine::Tesseract,
-            permission: StatusResponseSensorsScreenPermission::NotRequested,
-            state: StatusResponseSensorsScreenState::Disabled,
+            mode: map_screen_mode(probe.mode),
+            ocr_engine: map_screen_ocr_engine(probe.ocr_engine),
+            permission: map_screen_permission(probe.permission),
+            state: map_screen_state(probe.state),
         },
+    }
+}
+
+fn map_screen_backend(backend: ScreenBackend) -> StatusResponseSensorsScreenBackend {
+    match backend {
+        ScreenBackend::Xcap => StatusResponseSensorsScreenBackend::Xcap,
+        ScreenBackend::Screenpipe => StatusResponseSensorsScreenBackend::Screenpipe,
+        _ => StatusResponseSensorsScreenBackend::Xcap,
+    }
+}
+
+fn map_screen_state(state: ScreenState) -> StatusResponseSensorsScreenState {
+    match state {
+        ScreenState::Disabled => StatusResponseSensorsScreenState::Disabled,
+        ScreenState::Enabled => StatusResponseSensorsScreenState::Enabled,
+        ScreenState::PermissionMissing => StatusResponseSensorsScreenState::PermissionMissing,
+        ScreenState::Degraded => StatusResponseSensorsScreenState::Degraded,
+    }
+}
+
+fn map_screen_mode(mode: ScreenMode) -> StatusResponseSensorsScreenMode {
+    match mode {
+        ScreenMode::Off => StatusResponseSensorsScreenMode::Off,
+        ScreenMode::Snapshot => StatusResponseSensorsScreenMode::Snapshot,
+        ScreenMode::Continuous => StatusResponseSensorsScreenMode::Continuous,
+    }
+}
+
+fn map_screen_ocr_engine(
+    ocr_engine: ResolvedScreenOcrEngine,
+) -> StatusResponseSensorsScreenOcrEngine {
+    match ocr_engine {
+        ResolvedScreenOcrEngine::Vision => StatusResponseSensorsScreenOcrEngine::Vision,
+        ResolvedScreenOcrEngine::Winrt => StatusResponseSensorsScreenOcrEngine::Winrt,
+        ResolvedScreenOcrEngine::Tesseract => StatusResponseSensorsScreenOcrEngine::Tesseract,
+        ResolvedScreenOcrEngine::Off => StatusResponseSensorsScreenOcrEngine::Off,
+    }
+}
+
+fn map_screen_permission(permission: ScreenPermission) -> StatusResponseSensorsScreenPermission {
+    match permission {
+        ScreenPermission::NotRequested => StatusResponseSensorsScreenPermission::NotRequested,
+        ScreenPermission::Granted => StatusResponseSensorsScreenPermission::Granted,
+        ScreenPermission::Denied => StatusResponseSensorsScreenPermission::Denied,
+        ScreenPermission::Revoked => StatusResponseSensorsScreenPermission::Revoked,
+    }
+}
+
+fn map_screen_degradation_code(
+    code: ScreenDegradationCode,
+) -> StatusResponseSensorsScreenDegradationCode {
+    match code {
+        ScreenDegradationCode::Disabled => {
+            StatusResponseSensorsScreenDegradationCode::ScreenDisabled
+        }
+        ScreenDegradationCode::PermissionMissing => {
+            StatusResponseSensorsScreenDegradationCode::ScreenPermissionMissing
+        }
+        ScreenDegradationCode::BackendUnavailable => {
+            StatusResponseSensorsScreenDegradationCode::ScreenBackendUnavailable
+        }
+        ScreenDegradationCode::Degraded => {
+            StatusResponseSensorsScreenDegradationCode::ScreenDegraded
+        }
     }
 }
 
@@ -236,14 +335,15 @@ mod tests {
     }
 
     #[test]
-    fn default_screen_sensors_reports_disabled_screen() {
+    fn map_screen_probe_reports_disabled_screen() {
         use cairn_core::generated::status::{
             StatusResponseSensorsScreenBackend, StatusResponseSensorsScreenDegradationCode,
             StatusResponseSensorsScreenMode, StatusResponseSensorsScreenOcrEngine,
             StatusResponseSensorsScreenPermission, StatusResponseSensorsScreenState,
         };
 
-        let sensors = default_screen_sensors();
+        let config = CairnConfig::default();
+        let sensors = map_screen_probe(&screen::probe_config(&config.sensors.screen));
         let screen = sensors.screen;
 
         assert_eq!(screen.backend, StatusResponseSensorsScreenBackend::Xcap);
