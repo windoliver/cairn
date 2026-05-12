@@ -3,7 +3,8 @@
 //! Returns the contract version, advertised capabilities, and server info.
 //! For P0 (no daemon), a fresh incarnation ULID is minted per invocation.
 //! When the store adapter lands, read the incarnation from the daemon table.
-//! For P0 scaffold with no store wired, capabilities is empty.
+//! P0 status includes compiled local sensor capabilities; store capabilities
+//! remain unwired.
 
 use std::process::ExitCode;
 
@@ -52,8 +53,9 @@ pub fn run(json: bool) -> ExitCode {
             }
         }
         println!(
-            "screen:      {:?} {:?}",
-            resp.sensors.screen.backend, resp.sensors.screen.state
+            "screen:      {} {}",
+            status_screen_backend_label(resp.sensors.screen.backend),
+            status_screen_state_label(resp.sensors.screen.state)
         );
     }
     ExitCode::SUCCESS
@@ -119,7 +121,27 @@ fn map_screen_backend(backend: ScreenBackend) -> StatusResponseSensorsScreenBack
     match backend {
         ScreenBackend::Xcap => StatusResponseSensorsScreenBackend::Xcap,
         ScreenBackend::Screenpipe => StatusResponseSensorsScreenBackend::Screenpipe,
+        // The current status schema is closed; unknown config backends are
+        // reported as xcap while `probe_config` separately degrades them.
         _ => StatusResponseSensorsScreenBackend::Xcap,
+    }
+}
+
+fn status_screen_backend_label(backend: StatusResponseSensorsScreenBackend) -> &'static str {
+    match backend {
+        StatusResponseSensorsScreenBackend::Xcap => "xcap",
+        StatusResponseSensorsScreenBackend::Screenpipe => "screenpipe",
+        _ => "xcap",
+    }
+}
+
+fn status_screen_state_label(state: StatusResponseSensorsScreenState) -> &'static str {
+    match state {
+        StatusResponseSensorsScreenState::Disabled => "disabled",
+        StatusResponseSensorsScreenState::Enabled => "enabled",
+        StatusResponseSensorsScreenState::PermissionMissing => "permission_missing",
+        StatusResponseSensorsScreenState::Degraded => "degraded",
+        _ => "degraded",
     }
 }
 

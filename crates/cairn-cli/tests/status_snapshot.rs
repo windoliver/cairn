@@ -31,8 +31,13 @@ fn status_json_has_required_keys() {
 
 #[test]
 fn status_json_reports_screen_default_disabled() {
+    let dir = tempfile::tempdir().expect("temp dir");
     let out = cli()
         .args(["status", "--json"])
+        .current_dir(dir.path())
+        .env_remove("CAIRN_SENSORS__SCREEN__ENABLED")
+        .env_remove("CAIRN_SENSORS__SCREEN__BACKEND")
+        .env_remove("CAIRN_SENSORS__SCREEN__OCR__ENGINE")
         .output()
         .expect("cairn status --json");
     assert!(out.status.success(), "exit: {:?}", out.status);
@@ -55,21 +60,36 @@ fn status_json_reports_screen_default_disabled() {
 
 #[test]
 fn status_json_reports_unavailable_screenpipe_from_env() {
+    let dir = tempfile::tempdir().expect("temp dir");
     let out = cli()
         .args(["status", "--json"])
+        .current_dir(dir.path())
         .env("CAIRN_SENSORS__SCREEN__ENABLED", "true")
         .env("CAIRN_SENSORS__SCREEN__BACKEND", "screenpipe")
+        .env_remove("CAIRN_SENSORS__SCREEN__OCR__ENGINE")
         .output()
         .expect("cairn status --json");
     assert!(out.status.success(), "exit: {:?}", out.status);
     let stdout = String::from_utf8(out.stdout).expect("utf-8");
     let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
     assert_eq!(v["sensors"]["screen"]["backend"], "screenpipe");
-    assert_eq!(v["sensors"]["screen"]["state"], "degraded");
-    assert_eq!(
-        v["sensors"]["screen"]["degradation"]["code"],
-        "screen.backend_unavailable"
-    );
+    let caps = v["capabilities"].as_array().expect("capabilities array");
+    if caps
+        .iter()
+        .any(|c| c == "cairn.sensor.v1.screen.screenpipe")
+    {
+        assert_eq!(v["sensors"]["screen"]["state"], "permission_missing");
+        assert_eq!(
+            v["sensors"]["screen"]["degradation"]["code"],
+            "screen.permission_missing"
+        );
+    } else {
+        assert_eq!(v["sensors"]["screen"]["state"], "degraded");
+        assert_eq!(
+            v["sensors"]["screen"]["degradation"]["code"],
+            "screen.backend_unavailable"
+        );
+    }
 }
 
 #[test]
