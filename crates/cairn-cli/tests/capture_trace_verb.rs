@@ -1250,6 +1250,34 @@ fn write_late_tool_output_fixture(vault: &Path, jsonl_path: &Path) {
     writeln!(f, "{line}").expect("write JSONL line");
 }
 
+/// Write a single-turn fixture containing a `PreCompact` hook snapshot.
+///
+/// The event belongs to its own turn and intentionally omits a `Stop` hook:
+/// pre-compaction snapshots are lifecycle boundaries, not end-of-turn
+/// summaries. The source file is written under `vault/sources/hook/`.
+fn write_pre_compact_fixture(vault: &Path, jsonl_path: &Path) {
+    let session = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let turn = "turn-pre-compact";
+    let event_id = "01ARZ3NDEKTSV4RRFFQ69G5FAM";
+    let body = "transcript snapshot before compaction";
+    let payload_ref = write_source(vault, &format!("{event_id}.txt"), body);
+
+    let event = make_event(
+        event_id,
+        "PreCompact",
+        session,
+        turn,
+        "2026-05-02T00:00:05Z",
+        None,
+        &payload_ref,
+        &sha256_hex(body),
+    );
+
+    let mut f = std::fs::File::create(jsonl_path).expect("create JSONL file");
+    let line = serde_json::to_string(&event).expect("serialize event");
+    writeln!(f, "{line}").expect("write JSONL line");
+}
+
 // ── Test 1: replay idempotency ────────────────────────────────────────────────
 
 /// Replaying the same JSONL file twice must not create duplicate records.
@@ -1317,6 +1345,48 @@ async fn replay_is_idempotent() {
                 );
                 Ok(())
             }
+        })
+        .await
+        .expect("store query should succeed");
+}
+
+#[tokio::test]
+#[allow(
+    clippy::expect_used,
+    reason = "test: panics surface broken invariants immediately"
+)]
+async fn pre_compact_event_is_captured_fail_closed() {
+    let vault = tempfile::tempdir().expect("tempdir");
+    let store = open_test_store_in_memory().await;
+    let jsonl_path = vault.path().join("trace.jsonl");
+
+    write_pre_compact_fixture(vault.path(), &jsonl_path);
+
+    let resp = run_handler(&store, vault.path(), &jsonl_path)
+        .await
+        .expect("run_handler should succeed");
+
+    assert!(
+        resp.failed_turns.is_empty(),
+        "PreCompact should persist cleanly, got failures: {:?}",
+        resp.failed_turns
+    );
+
+    let session_id = SessionId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").expect("valid session_id");
+    store
+        .with_tx(move |tx| {
+            let rows = tx.list_trace_events(&session_id, "turn-pre-compact")?;
+            assert_eq!(rows.len(), 1, "expected one pre-compact trace event");
+            assert_eq!(
+                rows[0].extra_frontmatter["trace_event"].as_str(),
+                Some("pre_compact"),
+                "trace_event should record the pre_compact lifecycle boundary"
+            );
+            assert!(
+                !tx.turn_summary_exists(&session_id, "turn-pre-compact")?,
+                "pre-compact snapshots should not synthesize a turn summary without Stop"
+            );
+            Ok(())
         })
         .await
         .expect("store query should succeed");

@@ -1361,12 +1361,18 @@ fn validate_summarize(args: &SummarizeArgs) -> Result<(), SdkError> {
 }
 
 /// Mirrors the JSON-schema constraints for `assemble_hot`: `budget`
-/// in `[0, 4 MiB]`, `session_id` non-empty when present.
+/// in `[0, 4 MiB]`, optional `recipe` non-empty when present, and
+/// `session_id` non-empty when present.
 fn validate_assemble_hot(args: &AssembleHotArgs) -> Result<(), SdkError> {
     if let Some(budget) = args.budget
         && budget > 4_194_304
     {
         return Err(invalid("budget: must be <= 4194304 (4 MiB)"));
+    }
+    if let Some(recipe) = &args.recipe
+        && recipe.is_empty()
+    {
+        return Err(invalid("recipe: must not be empty when present"));
     }
     if let Some(session_id) = &args.session_id
         && session_id.is_empty()

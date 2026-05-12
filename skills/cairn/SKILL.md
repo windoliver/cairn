@@ -279,6 +279,10 @@ cairn assemble_hot
 ```
 
 ```bash
+cairn assemble_hot --recipe RECIPE
+```
+
+```bash
 cairn assemble_hot --session SESSION_ID
 ```
 
@@ -388,6 +392,10 @@ Every command supports `--json` for machine-readable output. Parse stdout as JSO
 3. If a command fails, show the user `stderr` verbatim. Don't paper over errors.
 4. Every `ingest` signs with your agent identity — `cairn` reads it from `$CAIRN_IDENTITY` set at harness startup. Don't pass `--signed-intent` explicitly.
 5. Don't run `cairn ingest` for trivia the user didn't ask you to remember. Use the trigger list above — if it's not on the list, ask before storing.
+
+## Pre-compaction reinjection (experimental — not yet usable)
+
+**Do not rely on this path to preserve context yet.** The pre-compaction hook is still gated: `cairn.mcp.v1.sensors.pre_compact` is intentionally not advertised in `cairn status`, and `cairn assemble_hot` runs against a stub loader that returns empty bodies, so any reinjection at the compaction boundary will be empty. Issue #193 lands the session-aware loader and the runtime advertisement flip; until then, treat compaction as lossy and rely on `cairn capture_trace --from ${TRANSCRIPT_PATH} --json` after the fact for replay, not on live reinjection.
 
 ---
 

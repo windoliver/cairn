@@ -76,6 +76,10 @@
       "x-cairn-since": "v0.1"
     },
     {
+      "const": "cairn.mcp.v1.sensors.pre_compact",
+      "x-cairn-since": "v0.1"
+    },
+    {
       "const": "cairn.mcp.v1.replay.sequence",
       "x-cairn-since": "v0.1"
     },

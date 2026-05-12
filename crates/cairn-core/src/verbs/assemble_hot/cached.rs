@@ -276,7 +276,7 @@ pub async fn cached_assemble(
                 wm_now,
             )
             .await;
-            return Ok(into_assemble_hot_data(entry.clone()));
+            return Ok(into_assemble_hot_data(entry.clone(), config));
         }
     } else if let Err(e) = &cache_get {
         tracing::warn!(error = %e, "hot-prefix cache: get failed; bypassing cache for this call");
@@ -412,11 +412,16 @@ async fn emit_event(
     }
 }
 
-fn into_assemble_hot_data(entry: CachedPrefix) -> AssembleHotData {
+fn into_assemble_hot_data(entry: CachedPrefix, config: &HotMemoryConfig) -> AssembleHotData {
     AssembleHotData {
         bytes: entry.bytes,
         prefix: String::from_utf8(entry.prefix).unwrap_or_default(),
         segments: Some(entry.segments),
+        recipe: if config.default_recipe.is_empty() {
+            None
+        } else {
+            Some(config.default_recipe.clone())
+        },
         // `debug` (the --explain trace) is never cached — it is
         // request-specific. The CLI layers it on cache hits via
         // build_explain_debug after cached_assemble returns. See

@@ -136,8 +136,9 @@ impl CapabilityGates {
 
 /// The decision table — single source of truth for capability advertisement.
 ///
-/// Returns the wire-stable order: search → `policy_trace` → forget → retrieve
-/// → replay. `vault_bound: false` short-circuits to `Vec::new()`.
+/// Returns the wire-stable order: search → `policy_trace` →
+/// `sensors.pre_compact` → forget → retrieve → replay. `vault_bound: false`
+/// short-circuits to `Vec::new()`.
 #[must_use]
 pub fn advertise(gates: &CapabilityGates) -> Vec<Capabilities> {
     if !gates.vault_bound {
@@ -171,6 +172,11 @@ pub fn advertise(gates: &CapabilityGates) -> Vec<Capabilities> {
     // ── policy_trace ──────────────────────────────────────────────────────
     if cfg.policy_trace {
         out.push(Capabilities::CairnMcpV1PolicyTrace);
+    }
+
+    // ── sensors ───────────────────────────────────────────────────────────
+    if wiring::SENSORS_PRE_COMPACT_WIRED {
+        out.push(Capabilities::CairnMcpV1SensorsPreCompact);
     }
 
     // ── forget (capability surfaces; runtime wiring still all-false) ──────

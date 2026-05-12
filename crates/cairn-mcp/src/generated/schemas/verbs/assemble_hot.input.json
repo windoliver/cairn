@@ -13,6 +13,10 @@
           "description": "When true, the response carries a `debug` payload describing per-step inclusion + typed exclusion reasons. Defaults to false; older callers omit it.",
           "type": "boolean"
         },
+        "recipe": {
+          "minLength": 1,
+          "type": "string"
+        },
         "session_id": {
           "minLength": 1,
           "type": "string"
@@ -34,6 +38,11 @@
         },
         "prefix": {
           "description": "Assembled hot-memory text ready to inject into the agent prompt. May be empty when no hot-memory is available.",
+          "type": "string"
+        },
+        "recipe": {
+          "description": "Name of the hot-memory recipe preset that produced this assembled prefix. Optional for wire compat with legacy producers; new producers always emit it.",
+          "minLength": 1,
           "type": "string"
         },
         "segments": {

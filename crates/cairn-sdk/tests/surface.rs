@@ -965,6 +965,7 @@ fn summarize_rejects_empty_record_ids_with_invalid_args() {
 fn assemble_hot_rejects_oversized_budget_with_invalid_args() {
     let args = AssembleHotArgs {
         budget: Some(4_194_305),
+        recipe: None,
         session_id: None,
         explain: None,
     };
@@ -1032,6 +1033,7 @@ fn assemble_hot_rejects_any_budget_until_loader_lands() {
     // rather than silently drop a knob the caller asked to enforce.
     let args = AssembleHotArgs {
         budget: Some(1024),
+        recipe: None,
         session_id: None,
         explain: None,
     };
@@ -1048,6 +1050,7 @@ fn assemble_hot_rejects_any_budget_until_loader_lands() {
 fn assemble_hot_rejects_any_session_id_until_loader_lands() {
     let args = AssembleHotArgs {
         budget: None,
+        recipe: None,
         session_id: Some("01J0000000000000000000000A".to_owned()),
         explain: None,
     };
@@ -1069,6 +1072,7 @@ fn assemble_hot_returns_unimplemented_in_sdk() {
     // probes, so vault-binding cannot diverge).
     let args = AssembleHotArgs {
         budget: None,
+        recipe: None,
         session_id: None,
         explain: None,
     };
