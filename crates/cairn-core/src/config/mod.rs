@@ -1,5 +1,8 @@
 //! Typed config structs for `.cairn/config.yaml` (brief §3.1, §4.1, §5.2.a).
 
+pub mod consolidation;
+pub use consolidation::{ConsolidationConfig, ConsolidationConfigError};
+
 pub mod mcp;
 pub use mcp::{McpConfig, McpStdioConfig};
 
@@ -483,6 +486,9 @@ pub struct CairnConfig {
     pub pipeline: PipelineConfig,
     /// MCP transport configuration (issue #190).
     pub mcp: McpConfig,
+    /// Rolling-summary consolidation workflow configuration (brief §5.3, §10.0).
+    #[serde(default)]
+    pub consolidation: ConsolidationConfig,
 }
 
 // ── Vault ─────────────────────────────────────────────────────────────────
