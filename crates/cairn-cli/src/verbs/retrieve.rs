@@ -51,6 +51,15 @@ struct SessionTurnGroup {
     records: Vec<MemoryRecord>,
 }
 
+struct SessionRetrieveRequest {
+    session_id: String,
+    limit: Option<i64>,
+    order: Option<RetrieveArgsSessionOrder>,
+    include: Option<Vec<RetrieveArgsSessionInclude>>,
+    cursor: Option<Cursor>,
+    read_budget_chars: usize,
+}
+
 #[derive(Debug, Clone)]
 struct BudgetReport {
     budget_chars: usize,
@@ -139,12 +148,14 @@ async fn run_async(args: RetrieveArgs, vault_root: PathBuf, config: CairnConfig)
         } => {
             retrieve_session(
                 &ctx.store,
-                session_id,
-                limit,
-                order,
-                include,
-                cursor,
-                read_budget_chars,
+                SessionRetrieveRequest {
+                    session_id,
+                    limit,
+                    order,
+                    include,
+                    cursor,
+                    read_budget_chars,
+                },
                 &auth,
             )
             .await
@@ -265,14 +276,17 @@ async fn retrieve_scope(
 
 async fn retrieve_session(
     store: &SqliteMemoryStore,
-    session_id: String,
-    limit: Option<i64>,
-    order: Option<RetrieveArgsSessionOrder>,
-    include: Option<Vec<RetrieveArgsSessionInclude>>,
-    cursor: Option<Cursor>,
-    read_budget_chars: usize,
+    request: SessionRetrieveRequest,
     auth: &ReadAuthorization,
 ) -> Response {
+    let SessionRetrieveRequest {
+        session_id,
+        limit,
+        order,
+        include,
+        cursor,
+        read_budget_chars,
+    } = request;
     let mut args = scoped_list_args(auth);
     if let Some(scope) = &mut args.scope {
         scope.session_id = Some(session_id.clone());
@@ -1182,7 +1196,6 @@ fn session_cursor(order: RetrieveArgsSessionOrder, offset: usize) -> Cursor {
 
 fn session_order_wire(order: RetrieveArgsSessionOrder) -> &'static str {
     match order {
-        RetrieveArgsSessionOrder::Asc => "asc",
         RetrieveArgsSessionOrder::Desc => "desc",
         _ => "asc",
     }

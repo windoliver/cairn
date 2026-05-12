@@ -1230,18 +1230,11 @@ fn validate_retrieve(args: &RetrieveArgs) -> Result<(), SdkError> {
             {
                 return Err(invalid("limit: must be in [1, 10000]"));
             }
-            if let Some(inc) = include {
-                if inc.is_empty() {
-                    return Err(invalid("include: must contain at least one item"));
-                }
-                let mut seen = std::collections::BTreeSet::new();
-                for item in inc {
-                    if !seen.insert(*item as u8) {
-                        return Err(invalid("include: items must be unique"));
-                    }
-                }
-            }
-            Ok(())
+            validate_include_codes(
+                include
+                    .as_ref()
+                    .map(|inc| inc.iter().map(|item| *item as u8)),
+            )
         }
         A::Turn {
             session_id,
@@ -1251,18 +1244,11 @@ fn validate_retrieve(args: &RetrieveArgs) -> Result<(), SdkError> {
             if session_id.is_empty() {
                 return Err(invalid("session_id: must not be empty"));
             }
-            if let Some(inc) = include {
-                if inc.is_empty() {
-                    return Err(invalid("include: must contain at least one item"));
-                }
-                let mut seen = std::collections::BTreeSet::new();
-                for item in inc {
-                    if !seen.insert(*item as u8) {
-                        return Err(invalid("include: items must be unique"));
-                    }
-                }
-            }
-            Ok(())
+            validate_include_codes(
+                include
+                    .as_ref()
+                    .map(|inc| inc.iter().map(|item| *item as u8)),
+            )
         }
         A::ToolCall {
             session_id,
@@ -1325,6 +1311,27 @@ fn validate_retrieve(args: &RetrieveArgs) -> Result<(), SdkError> {
         // future variants rather than silently accept them.
         _ => Err(invalid("unsupported retrieve target variant")),
     }
+}
+
+fn validate_include_codes<I>(include: Option<I>) -> Result<(), SdkError>
+where
+    I: IntoIterator<Item = u8>,
+{
+    let Some(include) = include else {
+        return Ok(());
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    let mut count = 0usize;
+    for item in include {
+        count += 1;
+        if !seen.insert(item) {
+            return Err(invalid("include: items must be unique"));
+        }
+    }
+    if count == 0 {
+        return Err(invalid("include: must contain at least one item"));
+    }
+    Ok(())
 }
 
 /// Mirrors the JSON-schema constraints for `summarize` (the generated

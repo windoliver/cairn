@@ -20,12 +20,67 @@ use cairn_core::generated::envelope::{
     ResponseVerb, RetrieveData,
 };
 use cairn_core::generated::verbs::ingest::IngestData;
-use cairn_core::generated::verbs::retrieve::{DataRecord, TurnItemRole};
+use cairn_core::generated::verbs::retrieve::{DataRecord, DataToolCall, DataTurn, TurnItemRole};
 use rusqlite::Connection;
 use sha2::{Digest as _, Sha256};
 
 fn cli() -> Command {
     Command::new(env!("CARGO_BIN_EXE_cairn"))
+}
+
+fn retrieve_turn_json(
+    vault: &Path,
+    session_id: &str,
+    turn_id: &str,
+    include_tool_calls: bool,
+) -> DataTurn {
+    let mut cmd = cli();
+    cmd.current_dir(vault)
+        .args(["retrieve", "--session", session_id, "--turn", turn_id]);
+    if include_tool_calls {
+        cmd.args(["--include", "tool_calls"]);
+    }
+    let out = cmd.arg("--json").output().expect("run retrieve turn");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let resp: Response = serde_json::from_slice(&out.stdout).expect("response");
+    let Some(ResponseData::Retrieve(RetrieveData::Turn(data))) = resp.data else {
+        panic!("retrieve turn must return turn data");
+    };
+    data
+}
+
+fn retrieve_tool_call_json(vault: &Path, session_id: &str, turn_id: &str) -> DataToolCall {
+    let out = cli()
+        .current_dir(vault)
+        .args([
+            "retrieve",
+            "--tool-call",
+            "call-1",
+            "--session",
+            session_id,
+            "--turn",
+            turn_id,
+            "--json",
+        ])
+        .output()
+        .expect("run retrieve tool-call");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let resp: Response = serde_json::from_slice(&out.stdout).expect("response");
+    assert_eq!(resp.target, Some(ResponseTarget::ToolCall));
+    let Some(ResponseData::Retrieve(RetrieveData::ToolCall(data))) = resp.data else {
+        panic!("retrieve tool-call must return tool-call data");
+    };
+    data
 }
 
 fn assert_policy_trace_body_free(value: &serde_json::Value) {
@@ -774,58 +829,14 @@ fn retrieve_turn_and_tool_call_return_linkage() {
     let trace_path = write_issue_78_trace_fixture(vault.path(), SESSION_ID);
     run_capture_trace(vault.path(), &trace_path);
 
-    let hidden = cli()
-        .current_dir(vault.path())
-        .args([
-            "retrieve",
-            "--session",
-            SESSION_ID,
-            "--turn",
-            "turn-1",
-            "--json",
-        ])
-        .output()
-        .expect("run retrieve turn");
-    assert_eq!(
-        hidden.status.code(),
-        Some(0),
-        "stderr={}",
-        String::from_utf8_lossy(&hidden.stderr)
-    );
-    let resp: Response = serde_json::from_slice(&hidden.stdout).expect("response");
-    let Some(ResponseData::Retrieve(RetrieveData::Turn(data))) = resp.data else {
-        panic!("retrieve turn must return turn data");
-    };
+    let data = retrieve_turn_json(vault.path(), SESSION_ID, "turn-1", false);
     assert!(
         data.turn
             .iter()
             .any(|item| item.role == TurnItemRole::Tool && item.content.is_none())
     );
 
-    let included = cli()
-        .current_dir(vault.path())
-        .args([
-            "retrieve",
-            "--session",
-            SESSION_ID,
-            "--turn",
-            "turn-1",
-            "--include",
-            "tool_calls",
-            "--json",
-        ])
-        .output()
-        .expect("run retrieve turn include");
-    assert_eq!(
-        included.status.code(),
-        Some(0),
-        "stderr={}",
-        String::from_utf8_lossy(&included.stderr)
-    );
-    let resp: Response = serde_json::from_slice(&included.stdout).expect("response");
-    let Some(ResponseData::Retrieve(RetrieveData::Turn(data))) = resp.data else {
-        panic!("retrieve turn must return turn data");
-    };
+    let data = retrieve_turn_json(vault.path(), SESSION_ID, "turn-1", true);
     assert!(
         data.turn
             .iter()
@@ -838,31 +849,7 @@ fn retrieve_turn_and_tool_call_return_linkage() {
             == Some("call-1")
     }));
 
-    let tool_call = cli()
-        .current_dir(vault.path())
-        .args([
-            "retrieve",
-            "--tool-call",
-            "call-1",
-            "--session",
-            SESSION_ID,
-            "--turn",
-            "turn-1",
-            "--json",
-        ])
-        .output()
-        .expect("run retrieve tool-call");
-    assert_eq!(
-        tool_call.status.code(),
-        Some(0),
-        "stderr={}",
-        String::from_utf8_lossy(&tool_call.stderr)
-    );
-    let resp: Response = serde_json::from_slice(&tool_call.stdout).expect("response");
-    assert_eq!(resp.target, Some(ResponseTarget::ToolCall));
-    let Some(ResponseData::Retrieve(RetrieveData::ToolCall(data))) = resp.data else {
-        panic!("retrieve tool-call must return tool-call data");
-    };
+    let data = retrieve_tool_call_json(vault.path(), SESSION_ID, "turn-1");
     assert_eq!(data.tool_call_id, "call-1");
     assert_eq!(data.items.len(), 2);
     assert!(data.items.iter().all(|item| {
