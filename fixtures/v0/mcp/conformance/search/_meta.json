@@ -1,0 +1,15 @@
+{
+  "cases": {
+    "ok_keyword": {
+      "kind": "stub",
+      "config": { "keyword_search": true }
+    },
+    "err_invalid_mode": {
+      "kind": "invalid_args"
+    },
+    "err_semantic_disabled": {
+      "kind": "capability_rejected",
+      "config": { "keyword_search": true, "semantic_search": false }
+    }
+  }
+}
