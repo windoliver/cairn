@@ -20,12 +20,67 @@ use cairn_core::generated::envelope::{
     ResponseVerb, RetrieveData,
 };
 use cairn_core::generated::verbs::ingest::IngestData;
-use cairn_core::generated::verbs::retrieve::DataRecord;
+use cairn_core::generated::verbs::retrieve::{DataRecord, DataToolCall, DataTurn, TurnItemRole};
 use rusqlite::Connection;
 use sha2::{Digest as _, Sha256};
 
 fn cli() -> Command {
     Command::new(env!("CARGO_BIN_EXE_cairn"))
+}
+
+fn retrieve_turn_json(
+    vault: &Path,
+    session_id: &str,
+    turn_id: &str,
+    include_tool_calls: bool,
+) -> DataTurn {
+    let mut cmd = cli();
+    cmd.current_dir(vault)
+        .args(["retrieve", "--session", session_id, "--turn", turn_id]);
+    if include_tool_calls {
+        cmd.args(["--include", "tool_calls"]);
+    }
+    let out = cmd.arg("--json").output().expect("run retrieve turn");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let resp: Response = serde_json::from_slice(&out.stdout).expect("response");
+    let Some(ResponseData::Retrieve(RetrieveData::Turn(data))) = resp.data else {
+        panic!("retrieve turn must return turn data");
+    };
+    data
+}
+
+fn retrieve_tool_call_json(vault: &Path, session_id: &str, turn_id: &str) -> DataToolCall {
+    let out = cli()
+        .current_dir(vault)
+        .args([
+            "retrieve",
+            "--tool-call",
+            "call-1",
+            "--session",
+            session_id,
+            "--turn",
+            turn_id,
+            "--json",
+        ])
+        .output()
+        .expect("run retrieve tool-call");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let resp: Response = serde_json::from_slice(&out.stdout).expect("response");
+    assert_eq!(resp.target, Some(ResponseTarget::ToolCall));
+    let Some(ResponseData::Retrieve(RetrieveData::ToolCall(data))) = resp.data else {
+        panic!("retrieve tool-call must return tool-call data");
+    };
+    data
 }
 
 fn assert_policy_trace_body_free(value: &serde_json::Value) {
@@ -674,7 +729,7 @@ fn retrieve_session_after_capture_trace_honors_scope_and_limit() {
     let Some(ResponseData::Retrieve(RetrieveData::Session(data))) = resp.data else {
         panic!("retrieve session must return session data");
     };
-    assert_eq!(data.items.len(), 2);
+    assert_eq!(data.items.len(), 3);
     assert_eq!(
         data.items[0].content.as_deref(),
         Some("first trace message")
@@ -682,6 +737,215 @@ fn retrieve_session_after_capture_trace_honors_scope_and_limit() {
     assert_eq!(
         data.items[1].content.as_deref(),
         Some("second trace message")
+    );
+    assert_eq!(
+        data.items[2].content.as_deref(),
+        Some("third trace message")
+    );
+}
+
+#[test]
+fn retrieve_session_windows_by_turn_with_cursor() {
+    const SESSION_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let vault = tempfile::tempdir().expect("vault");
+    bootstrap(&BootstrapOpts {
+        vault_path: vault.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap");
+    let _ = ingest_reference(vault.path(), "seed default issuer before retrieve");
+    let trace_path = write_issue_78_trace_fixture(vault.path(), SESSION_ID);
+    run_capture_trace(vault.path(), &trace_path);
+
+    let first = cli()
+        .current_dir(vault.path())
+        .args([
+            "retrieve",
+            "--session",
+            SESSION_ID,
+            "--limit",
+            "2",
+            "--order",
+            "desc",
+            "--json",
+        ])
+        .output()
+        .expect("run retrieve session");
+    assert_eq!(
+        first.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let resp: Response = serde_json::from_slice(&first.stdout).expect("response");
+    let Some(ResponseData::Retrieve(RetrieveData::Session(data))) = resp.data else {
+        panic!("retrieve session must return session data");
+    };
+    assert!(data.items.iter().any(|item| item.turn_id == "turn-3"));
+    assert!(data.items.iter().any(|item| item.turn_id == "turn-2"));
+    assert!(!data.items.iter().any(|item| item.turn_id == "turn-1"));
+    let cursor = data.next_cursor.expect("next cursor").0;
+
+    let second = cli()
+        .current_dir(vault.path())
+        .args([
+            "retrieve",
+            "--session",
+            SESSION_ID,
+            "--limit",
+            "2",
+            "--order",
+            "desc",
+            "--cursor",
+            &cursor,
+            "--json",
+        ])
+        .output()
+        .expect("run retrieve session cursor");
+    assert_eq!(
+        second.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let resp: Response = serde_json::from_slice(&second.stdout).expect("response");
+    let Some(ResponseData::Retrieve(RetrieveData::Session(data))) = resp.data else {
+        panic!("retrieve session must return session data");
+    };
+    assert!(data.items.iter().all(|item| item.turn_id == "turn-1"));
+    assert!(data.next_cursor.is_none());
+}
+
+#[test]
+fn retrieve_turn_and_tool_call_return_linkage() {
+    const SESSION_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let vault = tempfile::tempdir().expect("vault");
+    bootstrap(&BootstrapOpts {
+        vault_path: vault.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap");
+    let _ = ingest_reference(vault.path(), "seed default issuer before retrieve");
+    let trace_path = write_issue_78_trace_fixture(vault.path(), SESSION_ID);
+    run_capture_trace(vault.path(), &trace_path);
+
+    let data = retrieve_turn_json(vault.path(), SESSION_ID, "turn-1", false);
+    assert!(
+        data.turn
+            .iter()
+            .any(|item| item.role == TurnItemRole::Tool && item.content.is_none())
+    );
+
+    let data = retrieve_turn_json(vault.path(), SESSION_ID, "turn-1", true);
+    assert!(
+        data.turn
+            .iter()
+            .any(|item| item.content.as_deref() == Some("run cargo test"))
+    );
+    assert!(data.turn.iter().any(|item| {
+        item.linkage
+            .as_ref()
+            .and_then(|linkage| linkage.tool_call_id.as_deref())
+            == Some("call-1")
+    }));
+
+    let data = retrieve_tool_call_json(vault.path(), SESSION_ID, "turn-1");
+    assert_eq!(data.tool_call_id, "call-1");
+    assert_eq!(data.items.len(), 2);
+    assert!(data.items.iter().all(|item| {
+        item.linkage
+            .as_ref()
+            .and_then(|linkage| linkage.tool_call_id.as_deref())
+            == Some("call-1")
+    }));
+}
+
+#[test]
+fn retrieve_session_budget_trace_is_deterministic_and_body_free() {
+    const SESSION_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let vault = tempfile::tempdir().expect("vault");
+    bootstrap(&BootstrapOpts {
+        vault_path: vault.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap");
+    set_retrieve_budget(vault.path(), 20);
+    let _ = ingest_reference(vault.path(), "seed default issuer before retrieve");
+    let trace_path = write_issue_78_trace_fixture(vault.path(), SESSION_ID);
+    run_capture_trace(vault.path(), &trace_path);
+
+    let retrieve = cli()
+        .current_dir(vault.path())
+        .args([
+            "retrieve",
+            "--session",
+            SESSION_ID,
+            "--order",
+            "asc",
+            "--json",
+        ])
+        .output()
+        .expect("run retrieve session");
+    assert_eq!(
+        retrieve.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&retrieve.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&retrieve.stdout).expect("json");
+    let trace = value["policy_trace"].as_array().expect("policy_trace");
+    let budget = trace
+        .iter()
+        .find(|entry| entry["gate"] == "read.budget")
+        .expect("read.budget");
+    let detail = budget["detail"].as_str().expect("detail");
+    assert!(detail.contains("chars=20"), "detail: {detail}");
+    assert!(detail.contains("trimmed=true"), "detail: {detail}");
+    assert!(
+        !detail.contains("turn one user"),
+        "budget trace must be body-free: {detail}"
+    );
+}
+
+#[test]
+fn retrieve_session_returns_redacted_trace_without_raw_secret() {
+    const SESSION_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let vault = tempfile::tempdir().expect("vault");
+    bootstrap(&BootstrapOpts {
+        vault_path: vault.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap");
+    let _ = ingest_reference(vault.path(), "seed default issuer before retrieve");
+    let trace_path = write_issue_78_trace_fixture(vault.path(), SESSION_ID);
+    run_capture_trace(vault.path(), &trace_path);
+
+    let retrieve = cli()
+        .current_dir(vault.path())
+        .args([
+            "retrieve",
+            "--session",
+            SESSION_ID,
+            "--order",
+            "asc",
+            "--json",
+        ])
+        .output()
+        .expect("run retrieve session");
+    assert_eq!(
+        retrieve.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&retrieve.stderr)
+    );
+    let text = String::from_utf8(retrieve.stdout).expect("utf-8");
+    assert!(
+        !text.contains("alice@example.com"),
+        "raw email leaked: {text}"
+    );
+    assert!(
+        text.contains("[REDACTED:email]"),
+        "redacted marker missing: {text}"
     );
 }
 
@@ -1042,6 +1306,100 @@ fn provision_agent(vault: &Path, slug: &str) -> String {
         .to_owned()
 }
 
+fn run_capture_trace(vault: &Path, trace_path: &Path) {
+    let capture = cli()
+        .current_dir(vault)
+        .args([
+            "capture_trace",
+            "--from",
+            trace_path.to_str().expect("utf-8 trace path"),
+            "--json",
+        ])
+        .output()
+        .expect("run capture_trace");
+    assert_eq!(
+        capture.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&capture.stderr)
+    );
+}
+
+fn set_retrieve_budget(vault: &Path, chars: usize) {
+    std::fs::write(
+        vault.join(".cairn/config.yaml"),
+        format!("search:\n  max_snippet_chars_per_page: {chars}\n"),
+    )
+    .expect("write retrieve budget config");
+}
+
+fn write_issue_78_trace_fixture(vault: &Path, session_id: &str) -> PathBuf {
+    let events = [
+        (
+            "01ARZ3NDEKTSV4RRFFQ69G5FAD",
+            "UserPromptSubmit",
+            "turn-1",
+            None,
+            "turn one user",
+            "2026-05-02T00:00:01Z",
+        ),
+        (
+            "01ARZ3NDEKTSV4RRFFQ69G5FAE",
+            "PreToolUse",
+            "turn-1",
+            Some("call-1"),
+            "run cargo test",
+            "2026-05-02T00:00:02Z",
+        ),
+        (
+            "01ARZ3NDEKTSV4RRFFQ69G5FAF",
+            "PostToolUse",
+            "turn-1",
+            Some("call-1"),
+            "cargo test ok",
+            "2026-05-02T00:00:03Z",
+        ),
+        (
+            "01ARZ3NDEKTSV4RRFFQ69G5FAG",
+            "UserPromptSubmit",
+            "turn-2",
+            None,
+            "turn two user alice@example.com",
+            "2026-05-02T00:00:04Z",
+        ),
+        (
+            "01ARZ3NDEKTSV4RRFFQ69G5FAH",
+            "UserPromptSubmit",
+            "turn-3",
+            None,
+            "turn three user",
+            "2026-05-02T00:00:05Z",
+        ),
+    ];
+    let trace_path = vault.join("issue-78-trace.jsonl");
+    let mut jsonl = std::fs::File::create(&trace_path).expect("create trace jsonl");
+    for (event_id, hook_name, turn_id, tool_id, body, timestamp) in events {
+        let payload_ref = write_trace_source(vault, event_id, body);
+        let event = capture_trace_event_with_hook(
+            event_id,
+            session_id,
+            turn_id,
+            hook_name,
+            tool_id,
+            timestamp,
+            &payload_ref,
+            body,
+        );
+        writeln!(
+            jsonl,
+            "{}",
+            serde_json::to_string(&event).expect("event json")
+        )
+        .expect("write trace event");
+    }
+    trace_path
+}
+
 fn write_issue_61_trace_fixture(vault: &Path, session_id: &str) -> PathBuf {
     let events = [
         (
@@ -1080,6 +1438,45 @@ fn write_issue_61_trace_fixture(vault: &Path, session_id: &str) -> PathBuf {
         .expect("write trace event");
     }
     trace_path
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capture_trace_event_with_hook(
+    event_id: &str,
+    session_id: &str,
+    turn_id: &str,
+    hook_name: &str,
+    tool_id: Option<&str>,
+    timestamp: &str,
+    payload_ref: &str,
+    body: &str,
+) -> CaptureEvent {
+    let sensor =
+        Identity::parse("snr:local:hook:cc-session:v1").expect("invariant: valid sensor id");
+    CaptureEvent {
+        event_id: CaptureEventId::parse(event_id).expect("invariant: valid ULID"),
+        sensor_id: sensor.clone(),
+        capture_mode: CaptureMode::Auto,
+        actor_chain: vec![ActorChainEntry {
+            role: ChainRole::Author,
+            identity: sensor,
+            at: Rfc3339Timestamp::parse(timestamp).expect("invariant: valid RFC-3339"),
+        }],
+        refs: Some(CaptureRefs {
+            session_id: Some(session_id.to_owned()),
+            turn_id: Some(turn_id.to_owned()),
+            tool_id: tool_id.map(str::to_owned),
+        }),
+        payload_hash: PayloadHash::parse(format!("sha256:{}", sha256_hex(body)))
+            .expect("invariant: valid payload hash"),
+        payload_ref: payload_ref.to_owned(),
+        captured_at: Rfc3339Timestamp::parse(timestamp).expect("invariant: valid RFC-3339"),
+        payload: CapturePayload::Hook {
+            hook_name: hook_name.to_owned(),
+            tool_name: None,
+        },
+        source_family: SourceFamily::Hook,
+    }
 }
 
 fn write_trace_source(vault: &Path, event_id: &str, body: &str) -> String {

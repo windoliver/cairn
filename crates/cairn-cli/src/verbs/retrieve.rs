@@ -15,8 +15,8 @@ use cairn_core::domain::canonical::canonical_bytes_signed_intent;
 use cairn_core::domain::consent_timeline::ConsentModel;
 use cairn_core::domain::identity::keys::SecretHandle;
 use cairn_core::domain::taxonomy::MemoryVisibility;
-use cairn_core::domain::{Identity, MemoryRecord, RecordId, ScopeTuple};
-use cairn_core::generated::common::{Ed25519Signature, ScopeFilter, ScopeFilterTier, Ulid};
+use cairn_core::domain::{Identity, MemoryKind, MemoryRecord, RecordId, ScopeTuple};
+use cairn_core::generated::common::{Cursor, Ed25519Signature, ScopeFilter, ScopeFilterTier, Ulid};
 use cairn_core::generated::envelope::{
     RequestArgs, RequestVerb, Response, ResponseData, ResponsePolicyTrace,
     ResponsePolicyTraceResult, ResponseStatus, ResponseVerb, RetrieveData, SignedIntent,
@@ -35,12 +35,39 @@ use super::envelope::{emit_json, human_error, invalid_args_response, new_operati
 const DEFAULT_RETRIEVE_ISSUER: &str = "agt:cairn-cli:default:writer:v1";
 const DEFAULT_TENANT: &str = "default";
 const RETRIEVE_DEFAULT_ENTITY: &str = "ingest";
+const SESSION_CURSOR_PREFIX: &str = "session:v1";
 
 #[derive(Clone)]
 struct ReadAuthorization {
     operation_id: Ulid,
     scope: ScopeTuple,
     max_visibility: MemoryVisibility,
+}
+
+#[derive(Debug)]
+struct SessionTurnGroup {
+    turn_id: String,
+    sort_time: String,
+    records: Vec<MemoryRecord>,
+}
+
+struct SessionRetrieveRequest {
+    session_id: String,
+    limit: Option<i64>,
+    order: Option<RetrieveArgsSessionOrder>,
+    include: Option<Vec<RetrieveArgsSessionInclude>>,
+    cursor: Option<Cursor>,
+    read_budget_chars: usize,
+}
+
+#[derive(Debug, Clone)]
+struct BudgetReport {
+    budget_chars: usize,
+    items_in: usize,
+    items_out: usize,
+    turns_in: usize,
+    turns_out: usize,
+    trimmed: bool,
 }
 
 /// Run `cairn retrieve`.
@@ -94,6 +121,7 @@ async fn run_async(args: RetrieveArgs, vault_root: PathBuf, config: CairnConfig)
         Ok(auth) => auth,
         Err(resp) => return resp,
     };
+    let read_budget_chars = ctx.config.search.max_snippet_chars_per_page;
 
     match args {
         RetrieveArgs::Record { id } => retrieve_record(&ctx.store, id.0, &auth).await,
@@ -118,21 +146,51 @@ async fn run_async(args: RetrieveArgs, vault_root: PathBuf, config: CairnConfig)
             session_id,
             ..
         } => {
-            if cursor.is_some() {
-                return invalid_args_response(
-                    ResponseVerb::Retrieve,
-                    "cursor",
-                    "session pagination is not yet supported",
-                );
-            }
-            retrieve_session(&ctx.store, session_id, limit, order, include, &auth).await
+            retrieve_session(
+                &ctx.store,
+                SessionRetrieveRequest {
+                    session_id,
+                    limit,
+                    order,
+                    include,
+                    cursor,
+                    read_budget_chars,
+                },
+                &auth,
+            )
+            .await
         }
         RetrieveArgs::Turn {
             include,
             session_id,
             turn_id,
             ..
-        } => retrieve_turn(&ctx.store, session_id, turn_id, include, &auth).await,
+        } => {
+            retrieve_turn(
+                &ctx.store,
+                session_id,
+                turn_id,
+                include,
+                read_budget_chars,
+                &auth,
+            )
+            .await
+        }
+        RetrieveArgs::ToolCall {
+            session_id,
+            turn_id,
+            tool_call_id,
+        } => {
+            retrieve_tool_call(
+                &ctx.store,
+                session_id,
+                turn_id,
+                tool_call_id,
+                read_budget_chars,
+                &auth,
+            )
+            .await
+        }
         RetrieveArgs::Profile { agent, user } => {
             retrieve_profile(&ctx.store, user, agent, &auth).await
         }
@@ -158,11 +216,13 @@ async fn retrieve_record(
                 auth,
                 cairn_core::verbs::retrieve::record_data(&record),
                 std::slice::from_ref(&record),
+                None,
             ),
             None => committed(
                 auth,
                 cairn_core::verbs::retrieve::missing_record_data(Ulid(id)),
                 &[],
+                None,
             ),
         },
         Err(resp) => resp,
@@ -184,6 +244,7 @@ async fn retrieve_folder(
         auth,
         cairn_core::verbs::retrieve::folder_data(path, depth, &records),
         &records,
+        None,
     )
 }
 
@@ -197,6 +258,7 @@ async fn retrieve_scope(
             auth,
             cairn_core::verbs::retrieve::scope_data(scope, &[], None),
             &[],
+            None,
         );
     };
     let mut records = match list_records(store, list_args).await {
@@ -208,42 +270,71 @@ async fn retrieve_scope(
         auth,
         cairn_core::verbs::retrieve::scope_data(scope, &records, None),
         &records,
+        None,
     )
 }
 
 async fn retrieve_session(
     store: &SqliteMemoryStore,
-    session_id: String,
-    limit: Option<i64>,
-    order: Option<RetrieveArgsSessionOrder>,
-    include: Option<Vec<RetrieveArgsSessionInclude>>,
+    request: SessionRetrieveRequest,
     auth: &ReadAuthorization,
 ) -> Response {
+    let SessionRetrieveRequest {
+        session_id,
+        limit,
+        order,
+        include,
+        cursor,
+        read_budget_chars,
+    } = request;
     let mut args = scoped_list_args(auth);
     if let Some(scope) = &mut args.scope {
         scope.session_id = Some(session_id.clone());
     }
-    let requested_limit = limit.and_then(|v| usize::try_from(v).ok());
+    let order = order.unwrap_or(RetrieveArgsSessionOrder::Asc);
+    let start = match parse_session_cursor(cursor.as_ref(), order) {
+        Ok(start) => start,
+        Err(resp) => return resp,
+    };
+    let requested_limit = limit
+        .and_then(|v| usize::try_from(v).ok())
+        .unwrap_or(usize::MAX);
     let mut records = match list_records(store, args).await {
         Ok(records) => records,
         Err(resp) => return resp,
     };
     records.retain(|record| record.scope.session_id.as_deref() == Some(session_id.as_str()));
-    sort_trace_records(&mut records, order);
-    if let Some(limit) = requested_limit {
-        records.truncate(limit);
-    }
     let (include_reasoning, include_tool_calls) = session_include_flags(include.as_deref());
+    let groups = session_turn_groups(records, order);
+    let total_groups = groups.len();
+    let groups = groups
+        .into_iter()
+        .skip(start)
+        .take(requested_limit)
+        .collect::<Vec<_>>();
+    let (groups, budget_report) = trim_groups_to_budget(
+        groups,
+        read_budget_chars,
+        include_reasoning,
+        include_tool_calls,
+    );
+    let next_offset = start.saturating_add(groups.len());
+    let next_cursor = (next_offset < total_groups).then(|| session_cursor(order, next_offset));
+    let records = groups
+        .into_iter()
+        .flat_map(|group| group.records)
+        .collect::<Vec<_>>();
     committed(
         auth,
         cairn_core::verbs::retrieve::session_data_with_options(
             session_id,
             &records,
-            None,
+            next_cursor,
             include_reasoning,
             include_tool_calls,
         ),
         &records,
+        Some(&budget_report),
     )
 }
 
@@ -252,6 +343,7 @@ async fn retrieve_turn(
     session_id: String,
     turn_id: String,
     include: Option<Vec<RetrieveArgsTurnInclude>>,
+    read_budget_chars: usize,
     auth: &ReadAuthorization,
 ) -> Response {
     let mut args = scoped_list_args(auth);
@@ -272,9 +364,16 @@ async fn retrieve_turn(
             auth,
             cairn_core::verbs::retrieve::empty_turn_data(session_id, turn_id),
             &[],
+            None,
         );
     }
     let (include_reasoning, include_tool_calls) = turn_include_flags(include.as_deref());
+    let (records, budget_report) = trim_records_to_budget(
+        records,
+        read_budget_chars,
+        include_reasoning,
+        include_tool_calls,
+    );
     committed(
         auth,
         cairn_core::verbs::retrieve::turn_data_with_options(
@@ -285,6 +384,38 @@ async fn retrieve_turn(
             include_tool_calls,
         ),
         &records,
+        Some(&budget_report),
+    )
+}
+
+async fn retrieve_tool_call(
+    store: &SqliteMemoryStore,
+    session_id: String,
+    turn_id: String,
+    tool_call_id: String,
+    read_budget_chars: usize,
+    auth: &ReadAuthorization,
+) -> Response {
+    let mut args = scoped_list_args(auth);
+    if let Some(scope) = &mut args.scope {
+        scope.session_id = Some(session_id.clone());
+    }
+    let mut records = match list_records(store, args).await {
+        Ok(records) => records,
+        Err(resp) => return resp,
+    };
+    records.retain(|record| {
+        record.scope.session_id.as_deref() == Some(session_id.as_str())
+            && trace_turn_id(record).as_deref() == Some(turn_id.as_str())
+            && trace_tool_call_id(record).as_deref() == Some(tool_call_id.as_str())
+    });
+    sort_trace_records(&mut records, Some(RetrieveArgsSessionOrder::Asc));
+    let (records, budget_report) = trim_records_to_budget(records, read_budget_chars, false, true);
+    committed(
+        auth,
+        cairn_core::verbs::retrieve::tool_call_data(session_id, turn_id, tool_call_id, &records),
+        &records,
+        Some(&budget_report),
     )
 }
 
@@ -307,6 +438,7 @@ async fn retrieve_profile(
         auth,
         cairn_core::verbs::retrieve::profile_data(user, agent, &records),
         &records,
+        None,
     )
 }
 
@@ -321,11 +453,16 @@ async fn list_records(
         .map_err(|e| super::signed::aborted(ResponseVerb::Retrieve, format!("store list: {e}")))
 }
 
-fn committed(auth: &ReadAuthorization, data: RetrieveData, records: &[MemoryRecord]) -> Response {
+fn committed(
+    auth: &ReadAuthorization,
+    data: RetrieveData,
+    records: &[MemoryRecord],
+    budget: Option<&BudgetReport>,
+) -> Response {
     super::signed::committed_retrieve(
         auth.operation_id.clone(),
         data,
-        read_policy_trace(auth, records),
+        read_policy_trace(auth, records, budget),
     )
 }
 
@@ -541,6 +678,7 @@ fn intent_tier_to_visibility(tier: SignedIntentScopeTier) -> MemoryVisibility {
 fn read_policy_trace(
     auth: &ReadAuthorization,
     records: &[MemoryRecord],
+    budget: Option<&BudgetReport>,
 ) -> Vec<ResponsePolicyTrace> {
     let consent_detail = if records.is_empty() {
         "no_records".to_owned()
@@ -552,7 +690,7 @@ fn read_policy_trace(
     } else {
         "legacy_event".to_owned()
     };
-    vec![
+    let mut trace = vec![
         ResponsePolicyTrace {
             detail: Some("signed_scope_verified".to_owned()),
             gate: "read.scope".to_owned(),
@@ -568,7 +706,23 @@ fn read_policy_trace(
             gate: "read.consent".to_owned(),
             result: ResponsePolicyTraceResult::Pass,
         },
-    ]
+    ];
+    if let Some(budget) = budget {
+        trace.push(ResponsePolicyTrace {
+            detail: Some(format!(
+                "chars={} items_in={} items_out={} turns_in={} turns_out={} trimmed={}",
+                budget.budget_chars,
+                budget.items_in,
+                budget.items_out,
+                budget.turns_in,
+                budget.turns_out,
+                budget.trimmed
+            )),
+            gate: "read.budget".to_owned(),
+            result: ResponsePolicyTraceResult::Pass,
+        });
+    }
+    trace
 }
 
 fn session_include_flags(include: Option<&[RetrieveArgsSessionInclude]>) -> (bool, bool) {
@@ -616,6 +770,7 @@ fn retrieve_args_from_matches(sub: &ArgMatches) -> Result<RetrieveArgs, Response
                 "include",
                 "cursor",
                 "turn_id",
+                "tool_call_id",
                 "path",
                 "depth",
                 "scope",
@@ -625,6 +780,45 @@ fn retrieve_args_from_matches(sub: &ArgMatches) -> Result<RetrieveArgs, Response
             ],
         )?;
         serde_json::json!({ "target": "record", "id": id })
+    } else if let Some(tool_call_id) = sub.get_one::<String>("tool_call_id") {
+        reject_branch_args(
+            sub,
+            "tool_call",
+            &[
+                "id",
+                "limit",
+                "order",
+                "rehydrate",
+                "include",
+                "cursor",
+                "path",
+                "depth",
+                "scope",
+                "profile",
+                "user",
+                "agent",
+            ],
+        )?;
+        let session_id = sub.get_one::<String>("session_id").ok_or_else(|| {
+            invalid_args_response(
+                ResponseVerb::Retrieve,
+                "session_id",
+                "required for retrieve tool_call",
+            )
+        })?;
+        let turn_id = sub.get_one::<String>("turn_id").ok_or_else(|| {
+            invalid_args_response(
+                ResponseVerb::Retrieve,
+                "turn_id",
+                "required for retrieve tool_call",
+            )
+        })?;
+        serde_json::json!({
+            "target": "tool_call",
+            "session_id": session_id,
+            "turn_id": turn_id,
+            "tool_call_id": tool_call_id,
+        })
     } else if let Some(session_id) = sub.get_one::<String>("session_id") {
         if let Some(turn_id) = sub.get_one::<String>("turn_id") {
             reject_branch_args(
@@ -636,6 +830,7 @@ fn retrieve_args_from_matches(sub: &ArgMatches) -> Result<RetrieveArgs, Response
                     "order",
                     "rehydrate",
                     "cursor",
+                    "tool_call_id",
                     "path",
                     "depth",
                     "scope",
@@ -657,7 +852,16 @@ fn retrieve_args_from_matches(sub: &ArgMatches) -> Result<RetrieveArgs, Response
             reject_branch_args(
                 sub,
                 "session",
-                &["id", "path", "depth", "scope", "profile", "user", "agent"],
+                &[
+                    "id",
+                    "tool_call_id",
+                    "path",
+                    "depth",
+                    "scope",
+                    "profile",
+                    "user",
+                    "agent",
+                ],
             )?;
             let mut value = serde_json::json!({
                 "target": "session",
@@ -693,6 +897,7 @@ fn retrieve_args_from_matches(sub: &ArgMatches) -> Result<RetrieveArgs, Response
                 "include",
                 "cursor",
                 "turn_id",
+                "tool_call_id",
                 "scope",
                 "profile",
                 "user",
@@ -721,6 +926,7 @@ fn retrieve_args_from_matches(sub: &ArgMatches) -> Result<RetrieveArgs, Response
                 "rehydrate",
                 "include",
                 "turn_id",
+                "tool_call_id",
                 "path",
                 "depth",
                 "profile",
@@ -758,6 +964,7 @@ fn retrieve_args_from_matches(sub: &ArgMatches) -> Result<RetrieveArgs, Response
                 "include",
                 "cursor",
                 "turn_id",
+                "tool_call_id",
                 "path",
                 "depth",
                 "scope",
@@ -792,8 +999,8 @@ fn reject_branch_args(sub: &ArgMatches, target: &str, disallowed: &[&str]) -> Re
 
 fn arg_present(sub: &ArgMatches, name: &str) -> bool {
     match name {
-        "id" | "session_id" | "turn_id" | "path" | "scope" | "user" | "agent" | "cursor"
-        | "order" => sub.get_one::<String>(name).is_some(),
+        "id" | "session_id" | "turn_id" | "tool_call_id" | "path" | "scope" | "user" | "agent"
+        | "cursor" | "order" => sub.get_one::<String>(name).is_some(),
         "limit" => sub.get_one::<u32>(name).is_some(),
         "depth" => sub.get_one::<u8>(name).is_some(),
         "include" => sub.get_many::<String>(name).is_some(),
@@ -910,6 +1117,7 @@ fn sort_trace_records(records: &mut [MemoryRecord], order: Option<RetrieveArgsSe
     records.sort_by(|a, b| {
         trace_sequence(a)
             .cmp(&trace_sequence(b))
+            .then_with(|| trace_capture_event_id(a).cmp(&trace_capture_event_id(b)))
             .then_with(|| a.id.as_str().cmp(b.id.as_str()))
     });
     if matches!(order, Some(RetrieveArgsSessionOrder::Desc)) {
@@ -917,21 +1125,197 @@ fn sort_trace_records(records: &mut [MemoryRecord], order: Option<RetrieveArgsSe
     }
 }
 
-fn trace_sequence(record: &MemoryRecord) -> u64 {
+fn session_turn_groups(
+    mut records: Vec<MemoryRecord>,
+    order: RetrieveArgsSessionOrder,
+) -> Vec<SessionTurnGroup> {
+    records.retain(|record| trace_turn_id(record).is_some());
+    let mut by_turn = std::collections::BTreeMap::<String, Vec<MemoryRecord>>::new();
+    for record in records {
+        let turn_id = trace_turn_id(&record).expect("retained trace turn id");
+        by_turn.entry(turn_id).or_default().push(record);
+    }
+    let mut groups = by_turn
+        .into_iter()
+        .map(|(turn_id, mut records)| {
+            sort_trace_records(&mut records, Some(RetrieveArgsSessionOrder::Asc));
+            let sort_time = records
+                .iter()
+                .map(|record| record.updated_at.as_str().to_owned())
+                .min()
+                .unwrap_or_default();
+            SessionTurnGroup {
+                turn_id,
+                sort_time,
+                records,
+            }
+        })
+        .collect::<Vec<_>>();
+    groups.sort_by(|a, b| {
+        a.sort_time
+            .cmp(&b.sort_time)
+            .then_with(|| a.turn_id.cmp(&b.turn_id))
+    });
+    if matches!(order, RetrieveArgsSessionOrder::Desc) {
+        groups.reverse();
+    }
+    groups
+}
+
+fn parse_session_cursor(
+    cursor: Option<&Cursor>,
+    order: RetrieveArgsSessionOrder,
+) -> Result<usize, Response> {
+    let Some(cursor) = cursor else {
+        return Ok(0);
+    };
+    let expected_order = session_order_wire(order);
+    let parts = cursor.0.split(':').collect::<Vec<_>>();
+    if parts.len() != 4 || parts[0] != "session" || parts[1] != "v1" || parts[2] != expected_order {
+        return Err(invalid_args_response(
+            ResponseVerb::Retrieve,
+            "cursor",
+            "invalid session cursor for requested order",
+        ));
+    }
+    parts[3].parse::<usize>().map_err(|_| {
+        invalid_args_response(
+            ResponseVerb::Retrieve,
+            "cursor",
+            "invalid session cursor offset",
+        )
+    })
+}
+
+fn session_cursor(order: RetrieveArgsSessionOrder, offset: usize) -> Cursor {
+    Cursor(format!(
+        "{SESSION_CURSOR_PREFIX}:{}:{offset}",
+        session_order_wire(order)
+    ))
+}
+
+fn session_order_wire(order: RetrieveArgsSessionOrder) -> &'static str {
+    match order {
+        RetrieveArgsSessionOrder::Desc => "desc",
+        _ => "asc",
+    }
+}
+
+fn trim_records_to_budget(
+    records: Vec<MemoryRecord>,
+    budget_chars: usize,
+    include_reasoning: bool,
+    include_tool_calls: bool,
+) -> (Vec<MemoryRecord>, BudgetReport) {
+    let items_in = records.len();
+    let mut used = 0usize;
+    let mut out = Vec::new();
+    for record in records {
+        let cost = record_output_chars(&record, include_reasoning, include_tool_calls);
+        if !out.is_empty() && used.saturating_add(cost) > budget_chars {
+            break;
+        }
+        used = used.saturating_add(cost);
+        out.push(record);
+    }
+    let report = BudgetReport {
+        budget_chars,
+        items_in,
+        items_out: out.len(),
+        turns_in: 0,
+        turns_out: 0,
+        trimmed: out.len() < items_in,
+    };
+    (out, report)
+}
+
+fn trim_groups_to_budget(
+    groups: Vec<SessionTurnGroup>,
+    budget_chars: usize,
+    include_reasoning: bool,
+    include_tool_calls: bool,
+) -> (Vec<SessionTurnGroup>, BudgetReport) {
+    let turns_in = groups.len();
+    let items_in = groups.iter().map(|group| group.records.len()).sum();
+    let mut used = 0usize;
+    let mut out = Vec::new();
+    for group in groups {
+        let cost = group
+            .records
+            .iter()
+            .map(|record| record_output_chars(record, include_reasoning, include_tool_calls))
+            .sum::<usize>();
+        if !out.is_empty() && used.saturating_add(cost) > budget_chars {
+            break;
+        }
+        used = used.saturating_add(cost);
+        out.push(group);
+    }
+    let items_out = out.iter().map(|group| group.records.len()).sum();
+    let report = BudgetReport {
+        budget_chars,
+        items_in,
+        items_out,
+        turns_in,
+        turns_out: out.len(),
+        trimmed: out.len() < turns_in,
+    };
+    (out, report)
+}
+
+fn record_output_chars(
+    record: &MemoryRecord,
+    include_reasoning: bool,
+    include_tool_calls: bool,
+) -> usize {
+    let event = trace_event(record);
+    let is_tool_event = matches!(
+        event.as_deref(),
+        Some("pre_tool" | "post_tool" | "tool_output")
+    );
+    let is_reasoning = record.kind == MemoryKind::Reasoning;
+    if (is_tool_event && !include_tool_calls) || (is_reasoning && !include_reasoning) {
+        0
+    } else {
+        record.body.chars().count()
+    }
+}
+
+fn trace_sequence(record: &MemoryRecord) -> Option<u64> {
     record
         .extra_frontmatter
         .get("trace")
         .and_then(|trace| trace.get("sequence"))
         .and_then(serde_json::Value::as_u64)
-        .unwrap_or(u64::MAX)
+}
+
+fn trace_capture_event_id(record: &MemoryRecord) -> Option<String> {
+    trace_string(record, "capture_event_id")
+}
+
+fn trace_tool_call_id(record: &MemoryRecord) -> Option<String> {
+    trace_string(record, "tool_call_id")
 }
 
 fn trace_turn_id(record: &MemoryRecord) -> Option<String> {
+    trace_string(record, "turn_id")
+}
+
+fn trace_event(record: &MemoryRecord) -> Option<String> {
+    record
+        .extra_frontmatter
+        .get("trace_event")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+}
+
+fn trace_string(record: &MemoryRecord, key: &str) -> Option<String> {
     record
         .extra_frontmatter
         .get("trace")
-        .and_then(|trace| trace.get("turn_id"))
+        .and_then(|trace| trace.get(key))
         .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
         .map(str::to_owned)
 }
 

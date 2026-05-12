@@ -173,6 +173,26 @@ fn retrieve_args_tagged_union_exposes_per_variant_capability() {
         body.contains("Self::Profile { .. } => Some(\"cairn.mcp.v1.retrieve.profile\")"),
         "RetrieveArgs::Profile must expose its capability"
     );
+    assert!(
+        body.contains("Self::ToolCall { .. } => Some(\"cairn.mcp.v1.retrieve.tool_call\")"),
+        "RetrieveArgs::ToolCall must expose its capability"
+    );
+    let envelope = files
+        .iter()
+        .find(|f| {
+            f.path
+                .ends_with("crates/cairn-core/src/generated/envelope/mod.rs")
+        })
+        .unwrap();
+    let envelope_body = std::str::from_utf8(&envelope.bytes).unwrap();
+    assert!(
+        envelope_body.contains("ToolCall(crate::generated::verbs::retrieve::DataToolCall)"),
+        "RetrieveData must expose DataToolCall"
+    );
+    assert!(
+        envelope_body.contains("ResponseTarget::ToolCall => RetrieveData::ToolCall("),
+        "Response envelope must dispatch target=tool_call to DataToolCall"
+    );
 }
 
 #[test]

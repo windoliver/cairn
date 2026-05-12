@@ -211,6 +211,10 @@ cairn retrieve --session SESSION_ID --turn TURN_ID --include tool_calls
 ```
 
 ```bash
+cairn retrieve --session SESSION_ID --turn TURN_ID --tool-call TOOL_CALL_ID
+```
+
+```bash
 cairn retrieve --folder PATH
 ```
 

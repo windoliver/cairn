@@ -200,6 +200,9 @@ pub fn advertise(gates: &CapabilityGates) -> Vec<Capabilities> {
     if wiring::RETRIEVE_TURN_WIRED {
         out.push(Capabilities::CairnMcpV1RetrieveTurn);
     }
+    if wiring::RETRIEVE_TOOL_CALL_WIRED {
+        out.push(Capabilities::CairnMcpV1RetrieveToolCall);
+    }
     if wiring::RETRIEVE_FOLDER_WIRED {
         out.push(Capabilities::CairnMcpV1RetrieveFolder);
     }

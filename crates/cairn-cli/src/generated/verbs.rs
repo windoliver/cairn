@@ -57,6 +57,7 @@ pub fn retrieve_subcommand() -> clap::Command {
         .arg(clap::Arg::new("include").long("include").value_name("ENUM").value_parser(["tool_calls", "reasoning"]).action(clap::ArgAction::Append).value_delimiter(','))
         .arg(clap::Arg::new("cursor").long("cursor").value_name("STRING"))
         .arg(clap::Arg::new("turn_id").long("turn").value_name("STRING"))
+        .arg(clap::Arg::new("tool_call_id").long("tool-call").value_name("STRING"))
         .arg(clap::Arg::new("path").long("folder").value_name("STRING"))
         .arg(clap::Arg::new("depth").long("depth").value_name("U8").value_parser(clap::value_parser!(u8)))
         .arg(clap::Arg::new("scope").long("scope").value_name("JSON"))

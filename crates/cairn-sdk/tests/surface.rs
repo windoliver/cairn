@@ -682,6 +682,45 @@ fn retrieve_profile_requires_user_or_agent() {
     }
 }
 
+#[test]
+fn retrieve_tool_call_rejects_empty_fields_with_invalid_args() {
+    let args = RetrieveArgs::ToolCall {
+        session_id: String::new(),
+        turn_id: "turn-1".to_owned(),
+        tool_call_id: "call-1".to_owned(),
+    };
+    match sdk().retrieve(&args).expect_err("must reject") {
+        SdkError::InvalidArgs { reason } => {
+            assert!(reason.contains("session_id"), "reason: {reason}");
+        }
+        other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+
+    let args = RetrieveArgs::ToolCall {
+        session_id: "session-1".to_owned(),
+        turn_id: String::new(),
+        tool_call_id: "call-1".to_owned(),
+    };
+    match sdk().retrieve(&args).expect_err("must reject") {
+        SdkError::InvalidArgs { reason } => {
+            assert!(reason.contains("turn_id"), "reason: {reason}");
+        }
+        other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+
+    let args = RetrieveArgs::ToolCall {
+        session_id: "session-1".to_owned(),
+        turn_id: "turn-1".to_owned(),
+        tool_call_id: String::new(),
+    };
+    match sdk().retrieve(&args).expect_err("must reject") {
+        SdkError::InvalidArgs { reason } => {
+            assert!(reason.contains("tool_call_id"), "reason: {reason}");
+        }
+        other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn search_rejects_empty_and_filter_with_invalid_args() {
     let args = SearchArgs {
@@ -1115,6 +1154,43 @@ fn forget_rejects_unadvertised_target_with_capability_unavailable() {
     match err {
         SdkError::CapabilityUnavailable { capability, .. } => {
             assert_eq!(capability, "cairn.mcp.v1.forget.record");
+        }
+        other => panic!("expected CapabilityUnavailable, got {other:?}"),
+    }
+}
+
+#[test]
+fn retrieve_capabilities_filtered_until_sdk_dispatch_is_wired() {
+    let sdk = Sdk::with_store(
+        std::sync::Arc::new(noop_store::NoopStore),
+        cairn_core::config::CairnConfig::default(),
+    );
+    let status = sdk.status();
+    for cap in [
+        cairn_sdk::generated::common::Capabilities::CairnMcpV1RetrieveSession,
+        cairn_sdk::generated::common::Capabilities::CairnMcpV1RetrieveTurn,
+        cairn_sdk::generated::common::Capabilities::CairnMcpV1RetrieveToolCall,
+    ] {
+        assert!(
+            !status.capabilities.contains(&cap),
+            "SDK status must not advertise {cap:?} until SDK retrieve dispatch is wired"
+        );
+    }
+
+    let err = sdk
+        .retrieve(&RetrieveArgs::Session {
+            cursor: None,
+            include: None,
+            include_reasoning: None,
+            limit: None,
+            order: None,
+            rehydrate: None,
+            session_id: "session-1".to_owned(),
+        })
+        .expect_err("must fail closed until SDK retrieve dispatch is wired");
+    match err {
+        SdkError::CapabilityUnavailable { capability, .. } => {
+            assert_eq!(capability, "cairn.mcp.v1.retrieve.session");
         }
         other => panic!("expected CapabilityUnavailable, got {other:?}"),
     }

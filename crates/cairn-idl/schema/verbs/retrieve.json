@@ -28,6 +28,7 @@
         { "$ref": "#/$defs/ArgsRecord" },
         { "$ref": "#/$defs/ArgsSession" },
         { "$ref": "#/$defs/ArgsTurn" },
+        { "$ref": "#/$defs/ArgsToolCall" },
         { "$ref": "#/$defs/ArgsFolder" },
         { "$ref": "#/$defs/ArgsScope" },
         { "$ref": "#/$defs/ArgsProfile" }
@@ -116,6 +117,26 @@
         }
       }
     },
+    "ArgsToolCall": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target", "session_id", "turn_id", "tool_call_id"],
+      "x-cairn-capability": "cairn.mcp.v1.retrieve.tool_call",
+      "x-cairn-cli": {
+        "command": "retrieve",
+        "flags": [
+          { "name": "session_id",   "long": "session",   "value_source": "string" },
+          { "name": "turn_id",      "long": "turn",      "value_source": "string" },
+          { "name": "tool_call_id", "long": "tool-call", "value_source": "string" }
+        ]
+      },
+      "properties": {
+        "target":       { "const": "tool_call" },
+        "session_id":   { "type": "string", "minLength": 1 },
+        "turn_id":      { "type": "string", "minLength": 1 },
+        "tool_call_id": { "type": "string", "minLength": 1 }
+      }
+    },
     "ArgsFolder": {
       "type": "object",
       "additionalProperties": false,
@@ -186,6 +207,7 @@
         { "$ref": "#/$defs/DataProfile" },
         { "$ref": "#/$defs/DataSession" },
         { "$ref": "#/$defs/DataTurn" },
+        { "$ref": "#/$defs/DataToolCall" },
         { "$ref": "#/$defs/DataFolder" },
         { "$ref": "#/$defs/DataScope" }
       ],
@@ -318,6 +340,20 @@
         }
       }
     },
+    "DataToolCall": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id", "turn_id", "tool_call_id", "items"],
+      "properties": {
+        "session_id":   { "type": "string", "minLength": 1 },
+        "turn_id":      { "type": "string", "minLength": 1 },
+        "tool_call_id": { "type": "string", "minLength": 1 },
+        "items": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/TurnItem" }
+        }
+      }
+    },
     "DataFolder": {
       "type": "object",
       "additionalProperties": false,
@@ -344,6 +380,20 @@
         "next_cursor": { "$ref": "../common/primitives.json#/$defs/Cursor" }
       }
     },
+    "TraceLinkage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["record_id"],
+      "properties": {
+        "record_id":        { "$ref": "../common/primitives.json#/$defs/Ulid" },
+        "trace_event":      { "type": "string", "minLength": 1 },
+        "sequence":         { "type": "integer", "minimum": 0 },
+        "capture_event_id": { "type": "string", "minLength": 1 },
+        "parent_event_id":  { "type": "string", "minLength": 1 },
+        "tool_call_id":     { "type": "string", "minLength": 1 },
+        "payload_hash":     { "type": "string", "minLength": 1 }
+      }
+    },
     "TurnItem": {
       "type": "object",
       "additionalProperties": false,
@@ -353,7 +403,8 @@
         "role":    { "type": "string", "enum": ["user", "assistant", "tool", "system"] },
         "content": { "type": "string" },
         "tool_calls": { "type": "array", "items": { "type": "object" } },
-        "reasoning":  { "type": "string" }
+        "reasoning":  { "type": "string" },
+        "linkage": { "$ref": "#/$defs/TraceLinkage" }
       }
     },
     "RecordRef": {

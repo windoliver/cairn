@@ -20,10 +20,13 @@ pub const FORGET_SCOPE_WIRED: bool = false;
 pub const RETRIEVE_RECORD_WIRED: bool = false;
 
 /// `retrieve --session` dispatch path.
-pub const RETRIEVE_SESSION_WIRED: bool = false;
+pub const RETRIEVE_SESSION_WIRED: bool = true;
 
 /// `retrieve --turn` dispatch path.
-pub const RETRIEVE_TURN_WIRED: bool = false;
+pub const RETRIEVE_TURN_WIRED: bool = true;
+
+/// `retrieve --tool-call` dispatch path.
+pub const RETRIEVE_TOOL_CALL_WIRED: bool = true;
 
 /// `retrieve --folder` dispatch path.
 pub const RETRIEVE_FOLDER_WIRED: bool = false;

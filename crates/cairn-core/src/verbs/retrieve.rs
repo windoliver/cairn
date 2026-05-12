@@ -4,8 +4,8 @@ use crate::domain::{MemoryKind, MemoryRecord};
 use crate::generated::common::{Cursor, ScopeFilter, Ulid};
 use crate::generated::envelope::RetrieveData;
 use crate::generated::verbs::retrieve::{
-    DataFolder, DataProfile, DataProfileSubject, DataRecord, DataScope, DataSession, DataTurn,
-    KeyFacts, ProfileHalf, ProfileLine, RecordRef, TurnItem, TurnItemRole,
+    DataFolder, DataProfile, DataProfileSubject, DataRecord, DataScope, DataSession, DataToolCall,
+    DataTurn, KeyFacts, ProfileHalf, ProfileLine, RecordRef, TraceLinkage, TurnItem, TurnItemRole,
 };
 
 const SNIPPET_CHARS: usize = 160;
@@ -130,6 +130,25 @@ pub fn turn_data_with_options(
     })
 }
 
+/// Shape direct tool-call retrieval data from ordered trace records.
+#[must_use]
+pub fn tool_call_data(
+    session_id: String,
+    turn_id: String,
+    tool_call_id: String,
+    records: &[MemoryRecord],
+) -> RetrieveData {
+    RetrieveData::ToolCall(DataToolCall {
+        items: records
+            .iter()
+            .map(|record| turn_item_with_options(record, false, true))
+            .collect(),
+        session_id,
+        tool_call_id,
+        turn_id,
+    })
+}
+
 /// Shape profile retrieval data. The caller is responsible for passing at
 /// least one subject dimension, matching the generated `RetrieveArgs` gate.
 #[must_use]
@@ -174,6 +193,7 @@ pub fn turn_item_with_options(
         reasoning: include_reasoning
             .then(|| reasoning_content(record))
             .flatten(),
+        linkage: trace_linkage(record),
         role: turn_item_role(record),
         tool_calls: include_tool_calls.then(|| tool_calls(record)).flatten(),
         turn_id: trace_turn_id(record).unwrap_or_else(|| record.id.as_str().to_owned()),
@@ -236,10 +256,8 @@ fn turn_item_role(record: &MemoryRecord) -> TurnItemRole {
 }
 
 fn tool_calls(record: &MemoryRecord) -> Option<Vec<serde_json::Value>> {
-    if !matches!(
-        trace_event(record).as_deref(),
-        Some("pre_tool" | "post_tool")
-    ) {
+    let event = trace_event(record)?;
+    if !matches!(event.as_str(), "pre_tool" | "post_tool" | "tool_output") {
         return None;
     }
     let trace = record
@@ -253,7 +271,23 @@ fn tool_calls(record: &MemoryRecord) -> Option<Vec<serde_json::Value>> {
     if tool_call_id.is_empty() {
         return None;
     }
-    Some(vec![serde_json::json!({ "tool_call_id": tool_call_id })])
+    let mut value = serde_json::json!({
+        "tool_call_id": tool_call_id,
+        "trace_event": event,
+    });
+    if let Some(parent_event_id) = trace
+        .get("parent_event_id")
+        .and_then(serde_json::Value::as_str)
+    {
+        value["parent_event_id"] = serde_json::json!(parent_event_id);
+    }
+    if let Some(capture_event_id) = trace
+        .get("capture_event_id")
+        .and_then(serde_json::Value::as_str)
+    {
+        value["capture_event_id"] = serde_json::json!(capture_event_id);
+    }
+    Some(vec![value])
 }
 
 fn trace_event(record: &MemoryRecord) -> Option<String> {
@@ -270,6 +304,39 @@ fn trace_turn_id(record: &MemoryRecord) -> Option<String> {
         .get("trace")
         .and_then(|trace| trace.get("turn_id"))
         .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+}
+
+fn trace_linkage(record: &MemoryRecord) -> Option<TraceLinkage> {
+    let trace = record
+        .extra_frontmatter
+        .get("trace")
+        .and_then(serde_json::Value::as_object);
+    let trace_event = trace_event(record);
+    if trace.is_none() && trace_event.is_none() {
+        return None;
+    }
+    Some(TraceLinkage {
+        capture_event_id: trace_string(trace, "capture_event_id"),
+        parent_event_id: trace_string(trace, "parent_event_id"),
+        payload_hash: trace_string(trace, "payload_hash"),
+        record_id: wire_ulid(record.id.as_str()),
+        sequence: trace
+            .and_then(|obj| obj.get("sequence"))
+            .and_then(serde_json::Value::as_u64),
+        tool_call_id: trace_string(trace, "tool_call_id"),
+        trace_event,
+    })
+}
+
+fn trace_string(
+    trace: Option<&serde_json::Map<String, serde_json::Value>>,
+    key: &str,
+) -> Option<String> {
+    trace
+        .and_then(|obj| obj.get(key))
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
         .map(str::to_owned)
 }
 

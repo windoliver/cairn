@@ -312,14 +312,16 @@ impl CairnMcpHandler {
 
         // Post-filter capabilities whose shared core wiring flags are true
         // for another surface but not yet honored by this MCP transport.
-        // CLI `forget --record` is wired for issue #58, but MCP non-search
-        // verbs still fall through `dispatch_stub`; do not advertise record
-        // forget here until MCP dispatch can honor it end-to-end.
+        // MCP non-search verbs still fall through `dispatch_stub`; do not
+        // advertise them until MCP dispatch can honor them end-to-end.
         let mut capabilities = cairn_core::status::advertise(&gates);
         capabilities.retain(|c| {
             !matches!(
                 c,
                 cairn_core::generated::common::Capabilities::CairnMcpV1ForgetRecord
+                    | cairn_core::generated::common::Capabilities::CairnMcpV1RetrieveSession
+                    | cairn_core::generated::common::Capabilities::CairnMcpV1RetrieveTurn
+                    | cairn_core::generated::common::Capabilities::CairnMcpV1RetrieveToolCall
             )
         });
 
@@ -1008,5 +1010,27 @@ mod tests_plan_a {
                 .contains(&cairn_core::generated::common::Capabilities::CairnMcpV1ForgetRecord),
             "MCP status must not advertise forget.record until MCP dispatch is wired"
         );
+    }
+
+    #[test]
+    fn retrieve_capabilities_filtered_until_mcp_dispatch_is_wired() {
+        let store: Arc<dyn cairn_core::contract::memory_store::MemoryStore> =
+            Arc::new(FixtureStore::default());
+        let scope: Arc<dyn McpSessionScope> = Arc::new(ConfigBackedScope::new(principal()));
+        let mut cfg = CairnConfig::default();
+        cfg.mcp.stdio.single_tenant = true;
+        cfg.mcp.stdio.principal = Some(principal());
+        let handler = CairnMcpHandler::with_store_and_scope(store, scope, cfg, principal());
+        let status = handler.status_response();
+        for cap in [
+            cairn_core::generated::common::Capabilities::CairnMcpV1RetrieveSession,
+            cairn_core::generated::common::Capabilities::CairnMcpV1RetrieveTurn,
+            cairn_core::generated::common::Capabilities::CairnMcpV1RetrieveToolCall,
+        ] {
+            assert!(
+                !status.capabilities.contains(&cap),
+                "MCP status must not advertise {cap:?} until MCP retrieve dispatch is wired"
+            );
+        }
     }
 }

@@ -155,6 +155,7 @@ fn retrieve_target(data: &RetrieveData) -> ResponseTarget {
         RetrieveData::Profile(_) => ResponseTarget::Profile,
         RetrieveData::Session(_) => ResponseTarget::Session,
         RetrieveData::Turn(_) => ResponseTarget::Turn,
+        RetrieveData::ToolCall(_) => ResponseTarget::ToolCall,
         RetrieveData::Folder(_) => ResponseTarget::Folder,
         RetrieveData::Scope(_) => ResponseTarget::Scope,
         _ => panic!("unsupported retrieve data variant"),

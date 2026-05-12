@@ -259,11 +259,18 @@ impl<T: Transport> Sdk<T> {
     /// read from here so they cannot drift.
     fn advertised_capabilities(&self) -> Vec<Capabilities> {
         let mut capabilities = cairn_core::status::advertise(&self.gates());
-        // CLI `forget --record` is wired for issue #58, so the shared core
-        // flag is true. The SDK `forget` method still returns
-        // `Unimplemented` for all targets; do not advertise record forget
-        // here until SDK dispatch can honor it end-to-end.
-        capabilities.retain(|c| !matches!(c, Capabilities::CairnMcpV1ForgetRecord));
+        // CLI has some verb targets wired before the SDK transport does.
+        // Keep SDK negotiation fail-closed until these methods can honor the
+        // capabilities end-to-end.
+        capabilities.retain(|c| {
+            !matches!(
+                c,
+                Capabilities::CairnMcpV1ForgetRecord
+                    | Capabilities::CairnMcpV1RetrieveSession
+                    | Capabilities::CairnMcpV1RetrieveTurn
+                    | Capabilities::CairnMcpV1RetrieveToolCall
+            )
+        });
         capabilities
     }
 
@@ -1230,18 +1237,11 @@ fn validate_retrieve(args: &RetrieveArgs) -> Result<(), SdkError> {
             {
                 return Err(invalid("limit: must be in [1, 10000]"));
             }
-            if let Some(inc) = include {
-                if inc.is_empty() {
-                    return Err(invalid("include: must contain at least one item"));
-                }
-                let mut seen = std::collections::BTreeSet::new();
-                for item in inc {
-                    if !seen.insert(*item as u8) {
-                        return Err(invalid("include: items must be unique"));
-                    }
-                }
-            }
-            Ok(())
+            validate_include_codes(
+                include
+                    .as_ref()
+                    .map(|inc| inc.iter().map(|item| *item as u8)),
+            )
         }
         A::Turn {
             session_id,
@@ -1251,16 +1251,25 @@ fn validate_retrieve(args: &RetrieveArgs) -> Result<(), SdkError> {
             if session_id.is_empty() {
                 return Err(invalid("session_id: must not be empty"));
             }
-            if let Some(inc) = include {
-                if inc.is_empty() {
-                    return Err(invalid("include: must contain at least one item"));
-                }
-                let mut seen = std::collections::BTreeSet::new();
-                for item in inc {
-                    if !seen.insert(*item as u8) {
-                        return Err(invalid("include: items must be unique"));
-                    }
-                }
+            validate_include_codes(
+                include
+                    .as_ref()
+                    .map(|inc| inc.iter().map(|item| *item as u8)),
+            )
+        }
+        A::ToolCall {
+            session_id,
+            turn_id,
+            tool_call_id,
+        } => {
+            if session_id.is_empty() {
+                return Err(invalid("session_id: must not be empty"));
+            }
+            if turn_id.is_empty() {
+                return Err(invalid("turn_id: must not be empty"));
+            }
+            if tool_call_id.is_empty() {
+                return Err(invalid("tool_call_id: must not be empty"));
             }
             Ok(())
         }
@@ -1309,6 +1318,27 @@ fn validate_retrieve(args: &RetrieveArgs) -> Result<(), SdkError> {
         // future variants rather than silently accept them.
         _ => Err(invalid("unsupported retrieve target variant")),
     }
+}
+
+fn validate_include_codes<I>(include: Option<I>) -> Result<(), SdkError>
+where
+    I: IntoIterator<Item = u8>,
+{
+    let Some(include) = include else {
+        return Ok(());
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    let mut count = 0usize;
+    for item in include {
+        count += 1;
+        if !seen.insert(item) {
+            return Err(invalid("include: items must be unique"));
+        }
+    }
+    if count == 0 {
+        return Err(invalid("include: must contain at least one item"));
+    }
+    Ok(())
 }
 
 /// Mirrors the JSON-schema constraints for `summarize` (the generated

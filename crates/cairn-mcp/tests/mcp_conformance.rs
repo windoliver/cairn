@@ -581,6 +581,7 @@ fn all_capabilities() -> &'static [Capabilities] {
         C::CairnMcpV1RetrieveRecord,
         C::CairnMcpV1RetrieveSession,
         C::CairnMcpV1RetrieveTurn,
+        C::CairnMcpV1RetrieveToolCall,
         C::CairnMcpV1RetrieveFolder,
         C::CairnMcpV1RetrieveScope,
         C::CairnMcpV1RetrieveProfile,
@@ -617,6 +618,7 @@ fn capability_wire_id(cap: Capabilities) -> &'static str {
         C::CairnMcpV1RetrieveRecord => "cairn.mcp.v1.retrieve.record",
         C::CairnMcpV1RetrieveSession => "cairn.mcp.v1.retrieve.session",
         C::CairnMcpV1RetrieveTurn => "cairn.mcp.v1.retrieve.turn",
+        C::CairnMcpV1RetrieveToolCall => "cairn.mcp.v1.retrieve.tool_call",
         C::CairnMcpV1RetrieveFolder => "cairn.mcp.v1.retrieve.folder",
         C::CairnMcpV1RetrieveScope => "cairn.mcp.v1.retrieve.scope",
         C::CairnMcpV1RetrieveProfile => "cairn.mcp.v1.retrieve.profile",
@@ -678,7 +680,7 @@ fn minimal_request_for_capability(cap: Capabilities) -> Option<serde_json::Value
             "verb": "forget"
         }),
         // forget.session / forget.scope — handler not yet wired at v0.1.
-        // retrieve targets — all RETRIEVE_*_WIRED constants are false.
+        // retrieve record/folder/scope/profile — not yet advertised.
         // extension admin / federation / sessiontree — not yet wired.
         // policy_trace + replay — flags, not verb dispatch paths.
         // Wildcard covers future #[non_exhaustive] additions until they get
