@@ -29,6 +29,18 @@ pub enum ConfigError {
         /// The invalid budget value.
         value: u64,
     },
+    /// A floating-point weight was outside its closed range.
+    #[error("invalid weight for {field}: value {value} must be in [{min}, {max}]")]
+    InvalidWeight {
+        /// The config field name containing the invalid weight.
+        field: &'static str,
+        /// The invalid weight value.
+        value: f32,
+        /// Inclusive minimum.
+        min: f32,
+        /// Inclusive maximum.
+        max: f32,
+    },
     /// A retention key glob is malformed.
     #[error("invalid retention key pattern: {0}")]
     InvalidRetentionKey(String),
@@ -344,6 +356,8 @@ pub struct HotMemoryConfig {
     pub recipe: Vec<HotMemoryRecipeStep>,
     /// Maximum bytes in the assembled hot prefix. Must be > 0.
     pub max_bytes: u32,
+    /// Blend weight for entity graph degree centrality in hot-memory ranking.
+    pub god_node_weight: f32,
 }
 
 impl Default for HotMemoryConfig {
@@ -358,6 +372,7 @@ impl Default for HotMemoryConfig {
                 HotMemoryRecipeStep::RecentUserSignal,
             ],
             max_bytes: 25_600,
+            god_node_weight: 0.3,
         }
     }
 }
@@ -583,6 +598,16 @@ impl CairnConfig {
                 value: 0_u64,
             });
         }
+        if !(0.0..=1.0).contains(&self.vault.hot_memory.god_node_weight)
+            || self.vault.hot_memory.god_node_weight.is_nan()
+        {
+            return Err(ConfigError::InvalidWeight {
+                field: "vault.hot_memory.god_node_weight",
+                value: self.vault.hot_memory.god_node_weight,
+                min: 0.0,
+                max: 1.0,
+            });
+        }
 
         // 4. Extractor budget fields must be > 0 when set
         for entry in &self.pipeline.extract.chain {
@@ -800,6 +825,39 @@ mod tests {
             err,
             ConfigError::InvalidBudget {
                 field: "vault.hot_memory.max_bytes",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn default_hot_memory_god_node_weight_is_point_three() {
+        assert_eq!(CairnConfig::default().vault.hot_memory.god_node_weight, 0.3);
+    }
+
+    #[test]
+    fn validate_rejects_hot_memory_god_node_weight_above_one() {
+        let mut config = CairnConfig::default();
+        config.vault.hot_memory.god_node_weight = 1.01;
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidWeight {
+                field: "vault.hot_memory.god_node_weight",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_hot_memory_god_node_weight_below_zero() {
+        let mut config = CairnConfig::default();
+        config.vault.hot_memory.god_node_weight = -0.01;
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidWeight {
+                field: "vault.hot_memory.god_node_weight",
                 ..
             }
         ));

@@ -7,6 +7,66 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct CacheInfo {
+    pub key: String,
+    pub status: HotCacheStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum HotCacheStatus {
+    Hit,
+    Miss,
+    Refreshed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum HotSourceKind {
+    Purpose,
+    Profile,
+    Pinned,
+    HighSalience,
+    ProjectState,
+    RollingSummary,
+    Playbook,
+    RecentUserSignal,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceSummary {
+    pub attempted: u64,
+    pub bytes: u64,
+    pub included: u64,
+    pub kind: HotSourceKind,
+    pub omitted: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TruncationDecisionReason {
+    BudgetExhausted,
+    SectionTruncated,
+    RecordOmitted,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TruncationDecision {
+    pub attempted_bytes: u64,
+    pub included_bytes: u64,
+    pub kind: HotSourceKind,
+    pub reason: TruncationDecisionReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_id: Option<crate::generated::common::Ulid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AssembleHotArgs {
     /// Byte budget for the assembled prefix (default 25000; hard cap 4 MiB).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -19,8 +79,11 @@ pub struct AssembleHotArgs {
 #[serde(deny_unknown_fields)]
 pub struct AssembleHotData {
     pub bytes: u64,
+    pub cache: CacheInfo,
     /// Assembled hot-memory text ready to inject into the agent prompt. May be empty when no hot-memory is available.
     pub prefix: String,
+    pub sources: Vec<SourceSummary>,
+    pub truncation: Vec<TruncationDecision>,
 }
 
 pub const ARGS_SCHEMA: &[u8] = include_bytes!("../../../../cairn-mcp/src/generated/schemas/verbs/assemble_hot.json");

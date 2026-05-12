@@ -16,6 +16,23 @@
       },
       "type": "object"
     },
+    "CacheInfo": {
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/HotCacheStatus"
+        }
+      },
+      "required": [
+        "status",
+        "key"
+      ],
+      "type": "object"
+    },
     "Data": {
       "additionalProperties": false,
       "properties": {
@@ -24,14 +41,122 @@
           "minimum": 0,
           "type": "integer"
         },
+        "cache": {
+          "$ref": "#/$defs/CacheInfo"
+        },
         "prefix": {
           "description": "Assembled hot-memory text ready to inject into the agent prompt. May be empty when no hot-memory is available.",
           "type": "string"
+        },
+        "sources": {
+          "items": {
+            "$ref": "#/$defs/SourceSummary"
+          },
+          "type": "array"
+        },
+        "truncation": {
+          "items": {
+            "$ref": "#/$defs/TruncationDecision"
+          },
+          "type": "array"
         }
       },
       "required": [
         "prefix",
+        "bytes",
+        "sources",
+        "truncation",
+        "cache"
+      ],
+      "type": "object"
+    },
+    "HotCacheStatus": {
+      "enum": [
+        "hit",
+        "miss",
+        "refreshed"
+      ],
+      "type": "string"
+    },
+    "HotSourceKind": {
+      "enum": [
+        "purpose",
+        "profile",
+        "pinned",
+        "high_salience",
+        "project_state",
+        "rolling_summary",
+        "playbook",
+        "recent_user_signal"
+      ],
+      "type": "string"
+    },
+    "SourceSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "attempted": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "bytes": {
+          "maximum": 4194304,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "included": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kind": {
+          "$ref": "#/$defs/HotSourceKind"
+        },
+        "omitted": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "attempted",
+        "included",
+        "omitted",
         "bytes"
+      ],
+      "type": "object"
+    },
+    "TruncationDecision": {
+      "additionalProperties": false,
+      "properties": {
+        "attempted_bytes": {
+          "maximum": 4194304,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "included_bytes": {
+          "maximum": 4194304,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kind": {
+          "$ref": "#/$defs/HotSourceKind"
+        },
+        "reason": {
+          "enum": [
+            "budget_exhausted",
+            "section_truncated",
+            "record_omitted"
+          ],
+          "type": "string"
+        },
+        "record_id": {
+          "$ref": "../common/primitives.json#/$defs/Ulid"
+        }
+      },
+      "required": [
+        "kind",
+        "reason",
+        "attempted_bytes",
+        "included_bytes"
       ],
       "type": "object"
     }

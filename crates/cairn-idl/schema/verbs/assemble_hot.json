@@ -32,13 +32,72 @@
         "budget":     { "type": "integer", "minimum": 0, "maximum": 4194304, "description": "Byte budget for the assembled prefix (default 25000; hard cap 4 MiB)." }
       }
     },
+    "HotSourceKind": {
+      "type": "string",
+      "enum": [
+        "purpose",
+        "profile",
+        "pinned",
+        "high_salience",
+        "project_state",
+        "rolling_summary",
+        "playbook",
+        "recent_user_signal"
+      ]
+    },
+    "HotCacheStatus": {
+      "type": "string",
+      "enum": ["hit", "miss", "refreshed"]
+    },
+    "SourceSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "attempted", "included", "omitted", "bytes"],
+      "properties": {
+        "kind": { "$ref": "#/$defs/HotSourceKind" },
+        "attempted": { "type": "integer", "minimum": 0 },
+        "included": { "type": "integer", "minimum": 0 },
+        "omitted": { "type": "integer", "minimum": 0 },
+        "bytes": { "type": "integer", "minimum": 0, "maximum": 4194304 }
+      }
+    },
+    "TruncationDecision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "reason", "attempted_bytes", "included_bytes"],
+      "properties": {
+        "kind": { "$ref": "#/$defs/HotSourceKind" },
+        "record_id": { "$ref": "../common/primitives.json#/$defs/Ulid" },
+        "reason": { "type": "string", "enum": ["budget_exhausted", "section_truncated", "record_omitted"] },
+        "attempted_bytes": { "type": "integer", "minimum": 0, "maximum": 4194304 },
+        "included_bytes": { "type": "integer", "minimum": 0, "maximum": 4194304 }
+      }
+    },
+    "CacheInfo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "key"],
+      "properties": {
+        "status": { "$ref": "#/$defs/HotCacheStatus" },
+        "key": { "type": "string", "minLength": 1 }
+      }
+    },
     "Data": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["prefix", "bytes"],
+      "required": ["prefix", "bytes", "sources", "truncation", "cache"],
       "properties": {
         "prefix": { "type": "string", "description": "Assembled hot-memory text ready to inject into the agent prompt. May be empty when no hot-memory is available." },
-        "bytes":  { "type": "integer", "minimum": 0, "maximum": 4194304 }
+        "bytes": { "type": "integer", "minimum": 0, "maximum": 4194304 },
+        "sources": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/SourceSummary" }
+        },
+        "truncation": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/TruncationDecision" }
+        },
+        "cache": { "$ref": "#/$defs/CacheInfo" }
       }
     }
   }
