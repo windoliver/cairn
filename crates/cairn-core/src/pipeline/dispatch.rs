@@ -37,6 +37,7 @@
 //! [`DefaultRegistry`] returns `None` for every key at P0; the dispatch
 //! table above is the sole authority.
 
+use super::squash::{self, SquashConfig, UnstructuredBindError, UnstructuredTextBytes};
 use crate::domain::capture::{CaptureEvent, CapturePayload, SourceFamily, TerminalContext};
 use crate::generated::status::{
     StatusResponsePipelineDispatch, StatusResponsePipelineDispatchDecision,
@@ -150,6 +151,25 @@ pub enum BypassReason {
     MalformedEnvelope,
 }
 
+/// Errors returned while composing dispatch routing with trace body
+/// bytes.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum TraceBodyRouteError {
+    /// The dispatch decision admitted the payload to `squash`, but
+    /// binding the raw bytes to the event failed.
+    #[error("terminal trace squash bind failed: {0}")]
+    SquashBind(#[from] UnstructuredBindError),
+    /// The terminal event was produced by an older writer before the
+    /// terminal `context` field existed.
+    #[error("terminal trace legacy context requires migration before trace import")]
+    LegacyTerminalContext,
+    /// The capture envelope failed validation; trace import must fail
+    /// before any body bytes reach extraction.
+    #[error("malformed capture envelope cannot be imported as trace memory")]
+    MalformedEnvelope,
+}
+
 /// Per-[`SourceFamily`] bypass override registry.
 ///
 /// **P0 surface is family-granular and bypass-only.** Implementations
@@ -245,6 +265,40 @@ pub fn dispatch<R: ToolSchemaLookup + ?Sized>(
         // here would not change the decision, so we keep
         // `NonTerminalFamily` as the honest reason.
         _ => DispatchDecision::Bypass(BypassReason::NonTerminalFamily),
+    }
+}
+
+/// Route trace body bytes through the same dispatch decision the
+/// capture pipeline advertises.
+///
+/// Interactive terminal output is squashed before extraction.
+/// Structured terminal output and non-terminal families bypass lossy
+/// compaction and return the original bytes. Legacy terminal events
+/// with no context field return an error so importers preserve the
+/// migration signal instead of treating old data as structured output.
+///
+/// # Errors
+///
+/// Returns [`TraceBodyRouteError`] when the event is malformed, when a
+/// legacy terminal event needs migration, or when squash binding
+/// rejects the event/body pair.
+pub fn trace_body_bytes<R: ToolSchemaLookup + ?Sized>(
+    event: &CaptureEvent,
+    raw: &[u8],
+    registry: &R,
+) -> Result<Vec<u8>, TraceBodyRouteError> {
+    match dispatch(event, registry) {
+        DispatchDecision::Squash(admission) => {
+            let wrapped = UnstructuredTextBytes::try_from_terminal_event(event, raw, admission)?;
+            Ok(squash::squash(wrapped, &SquashConfig::default()).compacted_bytes)
+        }
+        DispatchDecision::Bypass(BypassReason::TerminalLegacyMissingContext) => {
+            Err(TraceBodyRouteError::LegacyTerminalContext)
+        }
+        DispatchDecision::Bypass(BypassReason::MalformedEnvelope) => {
+            Err(TraceBodyRouteError::MalformedEnvelope)
+        }
+        DispatchDecision::Bypass(_) => Ok(raw.to_vec()),
     }
 }
 
@@ -424,6 +478,47 @@ mod tests {
         assert_eq!(
             dispatch(&evt, &DefaultRegistry),
             DispatchDecision::Bypass(BypassReason::TerminalLegacyMissingContext)
+        );
+    }
+
+    #[test]
+    fn trace_body_squashes_interactive_terminal_output() {
+        let raw = b"\x1b[31mred\x1b[0m\nplain\n";
+        let evt = terminal_event_with_context(Some(TerminalContext::InteractiveTty), raw);
+
+        let body = trace_body_bytes(&evt, raw, &DefaultRegistry).expect("trace body bytes");
+
+        let body = String::from_utf8(body).expect("squash output is utf-8");
+        assert!(body.contains("red"));
+        assert!(body.contains("plain"));
+        assert!(
+            !body.contains('\x1b'),
+            "interactive terminal trace body must pass through squash"
+        );
+    }
+
+    #[test]
+    fn trace_body_bypasses_structured_terminal_output() {
+        let raw = br#"{"ok":true,"items":[1,2,3]}"#;
+        let evt =
+            terminal_event_with_context(Some(TerminalContext::NonInteractiveOrStructured), raw);
+
+        let body = trace_body_bytes(&evt, raw, &DefaultRegistry).expect("trace body bytes");
+
+        assert_eq!(body, raw);
+    }
+
+    #[test]
+    fn trace_body_rejects_legacy_terminal_context() {
+        let raw = b"legacy terminal output\n";
+        let evt = terminal_event_with_context(None, raw);
+
+        let err = trace_body_bytes(&evt, raw, &DefaultRegistry)
+            .expect_err("legacy terminal context must fail trace import");
+
+        assert!(
+            err.to_string().contains("legacy"),
+            "error should preserve the legacy-terminal migration signal: {err}"
         );
     }
 
