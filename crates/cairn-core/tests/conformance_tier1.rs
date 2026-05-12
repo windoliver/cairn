@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use cairn_core::contract::conformance::{CaseStatus, Tier, run_conformance_for_plugin};
+use cairn_core::contract::frontend_adapter::{FrontendAdapter, FrontendAdapterCapabilities};
 use cairn_core::contract::manifest::PluginManifest;
 use cairn_core::contract::mcp_server::{MCPServer, MCPServerCapabilities};
 use cairn_core::contract::memory_store::{
@@ -198,6 +199,80 @@ fn tier1_cases_pass_for_well_formed_mcp_server() {
     assert!(ids.contains(&"arc_pointer_stable"));
     assert!(ids.contains(&"capability_self_consistency_floor"));
     assert!(ids.contains(&"manifest_features_match_capabilities"));
+}
+
+const FRONTEND_MANIFEST: &str = r#"
+name = "stub-frontend"
+contract = "FrontendAdapter"
+
+[contract_version_range.min]
+major = 0
+minor = 0
+patch = 1
+
+[contract_version_range.max_exclusive]
+major = 0
+minor = 1
+patch = 0
+
+[features]
+frontmatter = false
+sidecar_files = false
+live_plugin = false
+graph_view = false
+"#;
+
+#[derive(Default)]
+struct StubFrontend;
+
+#[async_trait::async_trait]
+impl FrontendAdapter for StubFrontend {
+    fn name(&self) -> &'static str {
+        "stub-frontend"
+    }
+    fn capabilities(&self) -> &FrontendAdapterCapabilities {
+        static CAPS: FrontendAdapterCapabilities = FrontendAdapterCapabilities {
+            frontmatter: false,
+            sidecar_files: false,
+            live_plugin: false,
+            graph_view: false,
+            max_frontmatter_fields: 0,
+        };
+        &CAPS
+    }
+    fn supported_contract_versions(&self) -> VersionRange {
+        VersionRange::new(ContractVersion::new(0, 0, 1), ContractVersion::new(0, 1, 0))
+    }
+}
+
+#[test]
+fn tier1_cases_pass_for_well_formed_frontend_adapter() {
+    let mut reg = PluginRegistry::new();
+    let name = PluginName::new("stub-frontend").expect("valid");
+    let manifest = PluginManifest::parse_toml(FRONTEND_MANIFEST).expect("manifest parses");
+    reg.register_frontend_adapter_with_manifest(name.clone(), manifest, Arc::new(StubFrontend))
+        .expect("registers");
+
+    let outcomes = run_conformance_for_plugin(&reg, &name);
+
+    let tier1: Vec<_> = outcomes.iter().filter(|o| o.tier == Tier::One).collect();
+    for id in [
+        "manifest_matches_host",
+        "arc_pointer_stable",
+        "capability_self_consistency_floor",
+        "manifest_features_match_capabilities",
+    ] {
+        let outcome = tier1
+            .iter()
+            .find(|outcome| outcome.id == id)
+            .expect("required tier-1 case exists");
+        assert!(
+            matches!(outcome.status, CaseStatus::Ok),
+            "tier-1 case {} must pass, got {:?}",
+            outcome.id,
+            outcome.status
+        );
+    }
 }
 
 #[test]
