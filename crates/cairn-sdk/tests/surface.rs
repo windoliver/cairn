@@ -1155,6 +1155,43 @@ fn forget_rejects_unadvertised_target_with_capability_unavailable() {
     }
 }
 
+#[test]
+fn retrieve_capabilities_filtered_until_sdk_dispatch_is_wired() {
+    let sdk = Sdk::with_store(
+        std::sync::Arc::new(noop_store::NoopStore),
+        cairn_core::config::CairnConfig::default(),
+    );
+    let status = sdk.status();
+    for cap in [
+        cairn_sdk::generated::common::Capabilities::CairnMcpV1RetrieveSession,
+        cairn_sdk::generated::common::Capabilities::CairnMcpV1RetrieveTurn,
+        cairn_sdk::generated::common::Capabilities::CairnMcpV1RetrieveToolCall,
+    ] {
+        assert!(
+            !status.capabilities.contains(&cap),
+            "SDK status must not advertise {cap:?} until SDK retrieve dispatch is wired"
+        );
+    }
+
+    let err = sdk
+        .retrieve(&RetrieveArgs::Session {
+            cursor: None,
+            include: None,
+            include_reasoning: None,
+            limit: None,
+            order: None,
+            rehydrate: None,
+            session_id: "session-1".to_owned(),
+        })
+        .expect_err("must fail closed until SDK retrieve dispatch is wired");
+    match err {
+        SdkError::CapabilityUnavailable { capability, .. } => {
+            assert_eq!(capability, "cairn.mcp.v1.retrieve.session");
+        }
+        other => panic!("expected CapabilityUnavailable, got {other:?}"),
+    }
+}
+
 #[track_caller]
 fn assert_unimplemented<T: std::fmt::Debug>(verb: &'static str, result: Result<T, SdkError>) {
     let err = result.expect_err("P0 stubs must error until #9 wires the store");

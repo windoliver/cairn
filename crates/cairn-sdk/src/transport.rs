@@ -259,11 +259,18 @@ impl<T: Transport> Sdk<T> {
     /// read from here so they cannot drift.
     fn advertised_capabilities(&self) -> Vec<Capabilities> {
         let mut capabilities = cairn_core::status::advertise(&self.gates());
-        // CLI `forget --record` is wired for issue #58, so the shared core
-        // flag is true. The SDK `forget` method still returns
-        // `Unimplemented` for all targets; do not advertise record forget
-        // here until SDK dispatch can honor it end-to-end.
-        capabilities.retain(|c| !matches!(c, Capabilities::CairnMcpV1ForgetRecord));
+        // CLI has some verb targets wired before the SDK transport does.
+        // Keep SDK negotiation fail-closed until these methods can honor the
+        // capabilities end-to-end.
+        capabilities.retain(|c| {
+            !matches!(
+                c,
+                Capabilities::CairnMcpV1ForgetRecord
+                    | Capabilities::CairnMcpV1RetrieveSession
+                    | Capabilities::CairnMcpV1RetrieveTurn
+                    | Capabilities::CairnMcpV1RetrieveToolCall
+            )
+        });
         capabilities
     }
 
