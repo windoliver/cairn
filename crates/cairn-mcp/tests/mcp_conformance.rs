@@ -43,15 +43,22 @@ impl McpSessionScope for StaticScope {
     }
 }
 
-/// Build a handler with the case's capability gates wired in.
+/// Build a handler appropriate for the case's kind.
 ///
-/// Fast path: `ConfigOverrides::default()` returns `CairnMcpHandler::new()`
-/// (the unwired variant). All 19 v0.1 fixtures use the default, so the suite
-/// stays fast and deterministic.
+/// Routing rule (round-2 fix for Finding A/C): route by `case.kind`, not by
+/// `config == ConfigOverrides::default()`. `Stub`-kind cases document the
+/// v0.1 `dispatch_stub` behavior — the unwired handler is correct for them.
+/// Every other kind (Ok, InvalidArgs, CapabilityRejected, ExtensionRejected)
+/// requires a real wired handler so the verb dispatch path runs and emits a
+/// structured envelope that `assert_envelope_structure` can actually validate.
 ///
-/// Wired path: any non-default `ConfigOverrides` builds a real store-backed
-/// handler via `tiny_graph_async()` + `with_store_scope_and_sqlite`, with a
-/// `CairnConfig` that mirrors the case's overrides:
+/// Prior behavior routed by config equality, which caused `err_semantic_disabled`
+/// (config: `semantic_search: false`) to hit the fast path even when reclassified
+/// as `CapabilityRejected` — because `semantic_search: false` is the default.
+///
+/// Wired path: builds a real store-backed handler via `tiny_graph_async()` +
+/// `with_store_scope_and_sqlite`, with a `CairnConfig` that mirrors the case's
+/// `ConfigOverrides`:
 /// - `cfg.search.local_embeddings = config.semantic_search` — disabling
 ///   `local_embeddings` causes `capabilities()` to produce
 ///   `semantic_search: false` AND `hybrid_search: false` regardless of the
@@ -69,12 +76,22 @@ impl McpSessionScope for StaticScope {
 ///   runtime-registered, not `CapabilitySet` fields. Wired path currently has
 ///   no hook for them; cases testing extension gates rely on the unwired
 ///   handler (which also doesn't register them).
-async fn build_handler_for(config: ConfigOverrides) -> CairnMcpHandler {
-    if config == ConfigOverrides::default() {
-        // Fast path: unwired handler, no store spin-up.
+async fn build_handler_for(case: &ConformanceCase) -> CairnMcpHandler {
+    // Stub-kind cases document the v0.1 dispatch_stub behavior — use the
+    // unwired handler. Every other kind requires a real handler so the
+    // wired verb dispatch path runs and emits structured envelopes.
+    if case.kind == CaseKind::Stub {
         return CairnMcpHandler::new();
     }
 
+    build_wired_handler_for(&case.config).await
+}
+
+/// Build a wired store-backed handler with the given capability overrides.
+///
+/// Called by [`build_handler_for`] for non-Stub cases and by the standalone
+/// backstop test [`unadvertised_wired_capability_rejects_with_structured_error`].
+async fn build_wired_handler_for(config: &ConfigOverrides) -> CairnMcpHandler {
     // Wired path: build a real store-backed handler and mirror the config
     // overrides that have a direct CairnConfig field mapping.
     let f = tiny_graph_async().await;
@@ -264,7 +281,7 @@ fn assert_envelope_structure(case: &ConformanceCase, actual: &serde_json::Value)
 async fn conformance_envelope_replay() {
     for case in load_all() {
         eprintln!("[conformance] {}", case.id);
-        let handler = build_handler_for(case.config).await;
+        let handler = build_handler_for(&case).await;
         let actual = dispatch_envelope(handler, &case.request).await;
 
         let actual_canon = canonicalize(&actual);
@@ -614,7 +631,7 @@ mod runner_self_tests {
         // handler produces.
         case.response["data"]["hits"] = serde_json::json!([{ "definitely": "wrong" }]);
 
-        let handler = build_handler_for(case.config).await;
+        let handler = build_handler_for(&case).await;
         let actual = dispatch_envelope(handler, &case.request).await;
 
         let result = std::panic::catch_unwind(|| {
