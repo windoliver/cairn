@@ -37,7 +37,9 @@ use cairn_core::generated::verbs::capture_trace::{CaptureTraceData, FailedTurn};
 use cairn_core::pipeline::capture_trace::{classify, project};
 use cairn_core::pipeline::dispatch::{DefaultRegistry, trace_body_bytes};
 use cairn_core::pipeline::extract::body::ResolvedBody;
-use cairn_core::pipeline::filter::{Decision, FilterInputs, fence, redact, should_memorize};
+use cairn_core::pipeline::filter::{
+    Decision, FilterInputs, RedactionTag, fence, redact, should_memorize,
+};
 use cairn_core::pipeline::turn::summarize_turn;
 use cairn_core::policy_trace::{PolicyGate, PolicyTraceEntry, to_wire};
 use cairn_store_sqlite::SqliteMemoryStore;
@@ -318,7 +320,11 @@ async fn run_handler_inner(
             };
             let redacted = redact(&raw_text);
             let fenced = fence(&redacted.text);
-            let inputs = FilterInputs::new(&redacted, &fenced);
+            let blocks_secret = redacted.spans.iter().any(|span| is_secret_tag(span.tag));
+            let inputs = FilterInputs {
+                allow_redacted: !blocks_secret,
+                ..FilterInputs::new(&redacted, &fenced)
+            };
             let decision = should_memorize(&inputs);
             policy_trace_entries.extend([
                 PolicyTraceEntry::from(&redacted),
@@ -779,6 +785,20 @@ fn public_failed_turn_reason(reason: &str) -> String {
         return "trace_link_failed".to_owned();
     }
     "turn_failed".to_owned()
+}
+
+fn is_secret_tag(tag: RedactionTag) -> bool {
+    matches!(
+        tag,
+        RedactionTag::AwsAccessKeyId
+            | RedactionTag::GithubToken
+            | RedactionTag::SlackToken
+            | RedactionTag::Jwt
+            | RedactionTag::HexSecret
+            | RedactionTag::OpaqueApiKey
+            | RedactionTag::ContextKeyedSecret
+            | RedactionTag::PrivateKeyBlock
+    )
 }
 
 fn response_exit_code(resp: &Response) -> ExitCode {

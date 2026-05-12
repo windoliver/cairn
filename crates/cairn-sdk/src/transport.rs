@@ -1264,6 +1264,22 @@ fn validate_retrieve(args: &RetrieveArgs) -> Result<(), SdkError> {
             }
             Ok(())
         }
+        A::ToolCall {
+            session_id,
+            turn_id,
+            tool_call_id,
+        } => {
+            if session_id.is_empty() {
+                return Err(invalid("session_id: must not be empty"));
+            }
+            if turn_id.is_empty() {
+                return Err(invalid("turn_id: must not be empty"));
+            }
+            if tool_call_id.is_empty() {
+                return Err(invalid("tool_call_id: must not be empty"));
+            }
+            Ok(())
+        }
         A::Folder { path, depth } => {
             if path.is_empty() {
                 return Err(invalid("path: must not be empty"));

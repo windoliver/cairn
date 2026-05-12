@@ -305,6 +305,7 @@ fn retrieve_target(data: &RetrieveData) -> Option<ResponseTarget> {
         RetrieveData::Profile(_) => Some(ResponseTarget::Profile),
         RetrieveData::Session(_) => Some(ResponseTarget::Session),
         RetrieveData::Turn(_) => Some(ResponseTarget::Turn),
+        RetrieveData::ToolCall(_) => Some(ResponseTarget::ToolCall),
         RetrieveData::Folder(_) => Some(ResponseTarget::Folder),
         RetrieveData::Scope(_) => Some(ResponseTarget::Scope),
         _ => None,
