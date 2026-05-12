@@ -12,4 +12,5 @@ pub mod config;
 pub mod contract;
 pub mod domain;
 pub mod generated;
+pub mod hot_memory;
 pub mod verifier;
