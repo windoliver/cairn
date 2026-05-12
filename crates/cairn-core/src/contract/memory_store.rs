@@ -4,6 +4,7 @@
 //! `supported_contract_versions`. CRUD/FTS/ANN/graph methods land in #46.
 
 use crate::contract::version::{ContractVersion, VersionRange};
+use crate::hot_memory::{HotMemoryInput, HotMemoryOutput};
 
 /// Contract version for `MemoryStore`. Bumps when the trait surface changes.
 pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 1, 0);
@@ -27,6 +28,47 @@ pub struct MemoryStoreCapabilities {
     pub transactions: bool,
 }
 
+/// Request context for assembling hot memory.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HotMemoryRequest {
+    /// Session scope for the hot prefix.
+    pub session_id: Option<String>,
+    /// Agent scope when known.
+    pub agent_id: Option<String>,
+    /// Effective byte budget.
+    pub budget_bytes: u32,
+    /// Stable fingerprint of config values that affect hot memory.
+    pub config_fingerprint: String,
+    /// Centrality blend weight from config.
+    pub god_node_weight: f32,
+}
+
+/// Scope of a cache invalidation request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HotMemoryInvalidationScope {
+    /// Delete every hot-memory cache row in the vault.
+    Vault,
+    /// Delete cache rows for a session.
+    Session(String),
+    /// Delete cache rows for an agent.
+    Agent(String),
+}
+
+/// Errors from store-backed hot-memory reads and cache operations.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum MemoryStoreError {
+    /// The store cannot satisfy the request.
+    #[error("memory store unavailable: {0}")]
+    Unavailable(String),
+    /// A backend query failed.
+    #[error("memory store query failed: {0}")]
+    Query(String),
+    /// A backend cache operation failed.
+    #[error("memory store cache failed: {0}")]
+    Cache(String),
+}
+
 /// Storage contract — typed CRUD + ANN + FTS + graph over `MemoryRecord`.
 ///
 /// Brief §4 row 1: P0 default is pure `SQLite` + FTS5; P1 default is the
@@ -42,6 +84,63 @@ pub trait MemoryStore: Send + Sync {
 
     /// Range of `MemoryStore::CONTRACT_VERSION` values this impl accepts.
     fn supported_contract_versions(&self) -> VersionRange;
+
+    /// Fetch prepared hot-memory inputs for pure assembly.
+    async fn hot_memory_input(
+        &self,
+        _request: &HotMemoryRequest,
+    ) -> Result<HotMemoryInput, MemoryStoreError> {
+        Err(MemoryStoreError::Unavailable(format!(
+            "{} does not support hot memory",
+            self.name()
+        )))
+    }
+
+    /// Build the deterministic hot-memory cache key for this request and input.
+    fn hot_memory_cache_key(
+        &self,
+        _request: &HotMemoryRequest,
+        _input: &HotMemoryInput,
+    ) -> Result<String, MemoryStoreError> {
+        Err(MemoryStoreError::Unavailable(format!(
+            "{} does not support hot memory",
+            self.name()
+        )))
+    }
+
+    /// Return a cached assembled prefix when available.
+    async fn load_hot_memory_cache(
+        &self,
+        _key: &str,
+    ) -> Result<Option<HotMemoryOutput>, MemoryStoreError> {
+        Err(MemoryStoreError::Unavailable(format!(
+            "{} does not support hot memory",
+            self.name()
+        )))
+    }
+
+    /// Store an assembled prefix in the hot cache.
+    async fn store_hot_memory_cache(
+        &self,
+        _key: &str,
+        _output: &HotMemoryOutput,
+    ) -> Result<(), MemoryStoreError> {
+        Err(MemoryStoreError::Unavailable(format!(
+            "{} does not support hot memory",
+            self.name()
+        )))
+    }
+
+    /// Invalidate hot cache rows after relevant writes.
+    async fn invalidate_hot_memory_cache(
+        &self,
+        _scope: HotMemoryInvalidationScope,
+    ) -> Result<u64, MemoryStoreError> {
+        Err(MemoryStoreError::Unavailable(format!(
+            "{} does not support hot memory",
+            self.name()
+        )))
+    }
 }
 
 #[cfg(test)]
@@ -67,6 +166,49 @@ mod tests {
         fn supported_contract_versions(&self) -> VersionRange {
             VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
         }
+
+        async fn hot_memory_input(
+            &self,
+            _request: &HotMemoryRequest,
+        ) -> Result<HotMemoryInput, MemoryStoreError> {
+            Ok(HotMemoryInput {
+                sources: Vec::new(),
+                source_revision: "stub-revision".to_owned(),
+            })
+        }
+
+        fn hot_memory_cache_key(
+            &self,
+            request: &HotMemoryRequest,
+            input: &HotMemoryInput,
+        ) -> Result<String, MemoryStoreError> {
+            Ok(format!(
+                "{}:{}",
+                request.config_fingerprint, input.source_revision
+            ))
+        }
+
+        async fn load_hot_memory_cache(
+            &self,
+            _key: &str,
+        ) -> Result<Option<HotMemoryOutput>, MemoryStoreError> {
+            Ok(None)
+        }
+
+        async fn store_hot_memory_cache(
+            &self,
+            _key: &str,
+            _output: &HotMemoryOutput,
+        ) -> Result<(), MemoryStoreError> {
+            Ok(())
+        }
+
+        async fn invalidate_hot_memory_cache(
+            &self,
+            _scope: HotMemoryInvalidationScope,
+        ) -> Result<u64, MemoryStoreError> {
+            Ok(0)
+        }
     }
 
     #[test]
@@ -75,5 +217,24 @@ mod tests {
         assert_eq!(s.name(), "stub");
         assert!(s.capabilities().fts);
         assert!(s.supported_contract_versions().accepts(CONTRACT_VERSION));
+    }
+
+    #[tokio::test]
+    async fn dyn_store_supports_hot_memory_methods() {
+        let s: Box<dyn MemoryStore> = Box::new(StubStore);
+        let request = HotMemoryRequest {
+            session_id: Some("session-a".to_owned()),
+            agent_id: Some("agent-a".to_owned()),
+            budget_bytes: 1024,
+            config_fingerprint: "config-a".to_owned(),
+            god_node_weight: 0.3,
+        };
+        let input = s
+            .hot_memory_input(&request)
+            .await
+            .expect("hot memory input");
+        assert_eq!(input.source_revision, "stub-revision");
+        let key = s.hot_memory_cache_key(&request, &input).expect("cache key");
+        assert!(!key.is_empty());
     }
 }
