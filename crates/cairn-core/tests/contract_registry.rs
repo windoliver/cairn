@@ -8,7 +8,9 @@ use cairn_core::contract::agent_provider::{
     AgentProvider, AgentProviderCapabilities, AgentProviderPlugin,
 };
 use cairn_core::contract::frontend_adapter::{
-    FrontendAdapter, FrontendAdapterCapabilities, FrontendAdapterPlugin,
+    FrontendAdapter, FrontendAdapterCapabilities, FrontendAdapterError, FrontendAdapterPlugin,
+    FrontendEdit, FrontendIdentityContext, FrontendProjection, FrontendProjectionRequest,
+    FrontendReconcileRequest,
 };
 use cairn_core::contract::llm_provider::{
     CompletionOutput, CompletionRequest, LLMProvider, LLMProviderCapabilities, LLMProviderPlugin,
@@ -745,21 +747,38 @@ mod frontend_adapter_factory_plugin {
         }
         fn capabilities(&self) -> &FrontendAdapterCapabilities {
             static CAPS: FrontendAdapterCapabilities = FrontendAdapterCapabilities {
-                markdown_projection: false,
-                live_events: false,
-                reverse_edits: false,
+                frontmatter: false,
+                sidecar_files: false,
+                live_plugin: false,
+                graph_view: false,
+                max_frontmatter_fields: 0,
             };
             &CAPS
         }
         fn supported_contract_versions(&self) -> VersionRange {
             Self::SUPPORTED_VERSIONS
         }
+
+        fn project(
+            &self,
+            _request: &FrontendProjectionRequest,
+        ) -> Result<FrontendProjection, FrontendAdapterError> {
+            unimplemented!("filled after contract types land")
+        }
+
+        fn reconcile(
+            &self,
+            _ctx: FrontendIdentityContext,
+            _edit: FrontendEdit,
+        ) -> Result<FrontendReconcileRequest, FrontendAdapterError> {
+            unimplemented!("filled after contract types land")
+        }
     }
 
     impl FrontendAdapterPlugin for StubFrontend {
         const NAME: &'static str = "stub-frontend-factory";
         const SUPPORTED_VERSIONS: VersionRange =
-            VersionRange::new(ContractVersion::new(0, 0, 1), ContractVersion::new(0, 1, 0));
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0));
     }
 
     register_plugin_with!(
