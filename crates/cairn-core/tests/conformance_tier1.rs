@@ -207,12 +207,12 @@ contract = "FrontendAdapter"
 
 [contract_version_range.min]
 major = 0
-minor = 0
-patch = 1
+minor = 1
+patch = 0
 
 [contract_version_range.max_exclusive]
 major = 0
-minor = 1
+minor = 2
 patch = 0
 
 [features]
@@ -241,7 +241,7 @@ impl FrontendAdapter for StubFrontend {
         &CAPS
     }
     fn supported_contract_versions(&self) -> VersionRange {
-        VersionRange::new(ContractVersion::new(0, 0, 1), ContractVersion::new(0, 1, 0))
+        VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
     }
 }
 
@@ -256,6 +256,7 @@ fn tier1_cases_pass_for_well_formed_frontend_adapter() {
     let outcomes = run_conformance_for_plugin(&reg, &name);
 
     let tier1: Vec<_> = outcomes.iter().filter(|o| o.tier == Tier::One).collect();
+    assert_eq!(tier1.len(), 4, "expect 4 tier-1 cases");
     for id in [
         "manifest_matches_host",
         "arc_pointer_stable",
