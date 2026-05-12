@@ -8,10 +8,10 @@ use std::sync::Arc;
 
 use cairn_core::contract::conformance::{CaseStatus, Tier, run_conformance_for_plugin};
 use cairn_core::contract::frontend_adapter::{
-    FrontendAdapter, FrontendAdapterCapabilities, FrontendAdapterError, FrontendBackendState,
-    FrontendEdit, FrontendFieldClass, FrontendFieldPolicy, FrontendIdentityContext,
-    FrontendProjection, FrontendProjectionRequest, FrontendReconcileError,
-    FrontendReconcileRequest,
+    CONTRACT_VERSION, FrontendAdapter, FrontendAdapterCapabilities, FrontendAdapterError,
+    FrontendBackendState, FrontendEdit, FrontendEventStream, FrontendFieldClass,
+    FrontendFieldPolicy, FrontendIdentityContext, FrontendProjection, FrontendProjectionRequest,
+    FrontendReconcileError, FrontendReconcileRequest,
 };
 use cairn_core::contract::manifest::PluginManifest;
 use cairn_core::contract::memory_store::StoredRecord;
@@ -577,4 +577,341 @@ fn sample_record_with_body(body: &str) -> MemoryRecord {
         extra_frontmatter: std::collections::BTreeMap::new(),
         consent_model: None,
     }
+}
+
+// -----------------------------------------------------------------------------
+// Corner-case coverage for the FrontendAdapter contract surface.
+// -----------------------------------------------------------------------------
+
+#[derive(Default)]
+struct DefaultFrontend;
+
+#[async_trait::async_trait]
+impl FrontendAdapter for DefaultFrontend {
+    fn name(&self) -> &'static str {
+        "default-frontend"
+    }
+
+    fn capabilities(&self) -> &FrontendAdapterCapabilities {
+        static CAPS: FrontendAdapterCapabilities = FrontendAdapterCapabilities {
+            frontmatter: false,
+            sidecar_files: false,
+            live_plugin: false,
+            graph_view: false,
+            max_frontmatter_fields: 0,
+        };
+        &CAPS
+    }
+
+    fn supported_contract_versions(&self) -> VersionRange {
+        VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+    }
+}
+
+#[test]
+fn contract_version_pinned_to_zero_one_zero() {
+    assert_eq!(CONTRACT_VERSION, ContractVersion::new(0, 1, 0));
+}
+
+#[test]
+fn frontend_field_policy_classifies_every_known_bucket() {
+    assert_eq!(
+        FrontendFieldPolicy::classify("body"),
+        FrontendFieldClass::UserContent
+    );
+    assert_eq!(
+        FrontendFieldPolicy::classify("tags"),
+        FrontendFieldClass::UserContent
+    );
+    assert_eq!(
+        FrontendFieldPolicy::classify("wikilinks"),
+        FrontendFieldClass::UserContent
+    );
+    assert_eq!(
+        FrontendFieldPolicy::classify("last_read_at"),
+        FrontendFieldClass::Metadata
+    );
+    assert_eq!(
+        FrontendFieldPolicy::classify("local_sort_key"),
+        FrontendFieldClass::Metadata
+    );
+    assert_eq!(
+        FrontendFieldPolicy::classify("kind"),
+        FrontendFieldClass::Classification
+    );
+    assert_eq!(
+        FrontendFieldPolicy::classify("confidence"),
+        FrontendFieldClass::Classification
+    );
+    assert_eq!(
+        FrontendFieldPolicy::classify("evidence_vector"),
+        FrontendFieldClass::Classification
+    );
+    assert_eq!(
+        FrontendFieldPolicy::classify("actor_chain"),
+        FrontendFieldClass::IdentityProvenance
+    );
+    assert_eq!(
+        FrontendFieldPolicy::classify("signature"),
+        FrontendFieldClass::IdentityProvenance
+    );
+    assert_eq!(
+        FrontendFieldPolicy::classify("key_version"),
+        FrontendFieldClass::IdentityProvenance
+    );
+    assert_eq!(
+        FrontendFieldPolicy::classify("operation_id"),
+        FrontendFieldClass::IdentityProvenance
+    );
+    assert_eq!(
+        FrontendFieldPolicy::classify("consent_tier"),
+        FrontendFieldClass::VisibilityConsent
+    );
+    assert_eq!(
+        FrontendFieldPolicy::classify("consent_receipt_ref"),
+        FrontendFieldClass::VisibilityConsent
+    );
+    assert_eq!(
+        FrontendFieldPolicy::classify("visibility"),
+        FrontendFieldClass::VisibilityConsent
+    );
+    assert_eq!(
+        FrontendFieldPolicy::classify("share_grants"),
+        FrontendFieldClass::VisibilityConsent
+    );
+    assert_eq!(
+        FrontendFieldPolicy::classify("version"),
+        FrontendFieldClass::VersionAudit
+    );
+    assert_eq!(
+        FrontendFieldPolicy::classify("promoted_at"),
+        FrontendFieldClass::VersionAudit
+    );
+    assert_eq!(
+        FrontendFieldPolicy::classify("produced_by"),
+        FrontendFieldClass::VersionAudit
+    );
+    assert_eq!(
+        FrontendFieldPolicy::classify(""),
+        FrontendFieldClass::VersionAudit,
+    );
+}
+
+#[test]
+fn frontend_field_policy_rejects_each_immutable_class() {
+    for field in [
+        "kind",
+        "confidence",
+        "evidence_vector",
+        "actor_chain",
+        "signature",
+        "key_version",
+        "operation_id",
+        "consent_tier",
+        "consent_receipt_ref",
+        "visibility",
+        "share_grants",
+        "version",
+        "promoted_at",
+        "produced_by",
+    ] {
+        assert!(
+            !FrontendFieldPolicy::is_mutable_from_frontend(field),
+            "field {field} must be backend-owned and rejected from frontend edits"
+        );
+    }
+}
+
+#[test]
+fn frontend_capabilities_preserve_non_default_max_frontmatter_fields() {
+    let caps = FrontendAdapterCapabilities {
+        frontmatter: true,
+        sidecar_files: true,
+        live_plugin: true,
+        graph_view: true,
+        max_frontmatter_fields: 64,
+    };
+    assert!(caps.frontmatter);
+    assert!(caps.sidecar_files);
+    assert!(caps.live_plugin);
+    assert!(caps.graph_view);
+    assert_eq!(caps.max_frontmatter_fields, 64);
+    let copy = caps;
+    assert_eq!(copy, caps);
+}
+
+#[test]
+fn frontend_reconcile_error_display_covers_every_variant() {
+    let unsigned = FrontendReconcileError::UnsignedIntent.to_string();
+    assert!(unsigned.contains("signed intent"));
+
+    let conflict = FrontendReconcileError::Conflict { current_version: 7 }.to_string();
+    assert!(conflict.contains('7'));
+    assert!(conflict.contains("conflict"));
+
+    let replay = FrontendReconcileError::ReplayDetected.to_string();
+    assert!(replay.contains("replay"));
+
+    let policy = FrontendReconcileError::PolicyDenied {
+        gate: "target_hash".into(),
+        reason: "drift".into(),
+    }
+    .to_string();
+    assert!(policy.contains("target_hash"));
+    assert!(policy.contains("drift"));
+
+    let insufficient = FrontendReconcileError::InsufficientCapability {
+        required: "sidecar_files".into(),
+    }
+    .to_string();
+    assert!(insufficient.contains("sidecar_files"));
+}
+
+#[test]
+fn frontend_adapter_error_display_covers_every_variant() {
+    let not_impl = FrontendAdapterError::NotImplemented {
+        operation: "project",
+    }
+    .to_string();
+    assert!(not_impl.contains("project"));
+
+    let projection = FrontendAdapterError::Projection {
+        message: "missing backend snapshot".into(),
+    }
+    .to_string();
+    assert!(projection.contains("missing backend snapshot"));
+
+    let reconcile: FrontendAdapterError = FrontendReconcileError::UnsignedIntent.into();
+    let rendered = reconcile.to_string();
+    assert!(rendered.contains("signed intent"));
+}
+
+#[test]
+fn frontend_adapter_default_methods_fail_closed_and_return_typed_errors() {
+    let adapter = DefaultFrontend;
+
+    let projection_err = adapter
+        .project(&sample_projection_request())
+        .expect_err("default project must return NotImplemented");
+    assert!(matches!(
+        projection_err,
+        FrontendAdapterError::NotImplemented {
+            operation: "project"
+        }
+    ));
+
+    let reconcile_err = adapter
+        .reconcile(
+            FrontendIdentityContext {
+                principal: Identity::parse("hmn:known-user").expect("valid identity"),
+                agent: None,
+                signed_intent: sample_signed_intent("2026-04-22T14:07:11Z"),
+            },
+            FrontendEdit {
+                target_id: TargetId::parse("01HQZX9F5N0000000000000000").expect("valid target id"),
+                expected_version: 100,
+                target_hash: sample_target_hash(),
+                field_diff: std::collections::BTreeMap::new(),
+            },
+        )
+        .expect_err("default reconcile must return NotImplemented");
+    assert!(matches!(
+        reconcile_err,
+        FrontendAdapterError::NotImplemented {
+            operation: "reconcile"
+        }
+    ));
+
+    assert!(adapter.subscribe(FrontendEventStream).is_none());
+    adapter.shutdown();
+}
+
+fn assert_send_sync<T: Send + Sync + ?Sized>(_: &T) {}
+
+#[test]
+fn frontend_adapter_is_object_safe_and_send_sync() {
+    let adapter: Arc<dyn FrontendAdapter> = Arc::new(DefaultFrontend);
+    assert_send_sync(&*adapter);
+    assert_eq!(adapter.name(), "default-frontend");
+}
+
+#[test]
+fn frontend_reconcile_round_trip_carries_no_agent_when_absent() {
+    let reconcile = ConformanceFrontend
+        .reconcile(
+            FrontendIdentityContext {
+                principal: Identity::parse("hmn:known-user").expect("valid identity"),
+                agent: None,
+                signed_intent: sample_signed_intent("2026-04-22T14:07:11Z"),
+            },
+            FrontendEdit {
+                target_id: TargetId::parse("01HQZX9F5N0000000000000000").expect("valid target id"),
+                expected_version: 100,
+                target_hash: sample_target_hash(),
+                field_diff: std::collections::BTreeMap::from([(
+                    "tags".into(),
+                    serde_json::json!(["pref"]),
+                )]),
+            },
+        )
+        .expect("reconcile must succeed without an agent identity");
+
+    assert!(reconcile.ctx.agent.is_none());
+    assert_eq!(reconcile.field_diff.len(), 1);
+}
+
+#[test]
+fn frontend_reconcile_rejects_first_immutable_field_in_btree_order() {
+    let err = ConformanceFrontend
+        .reconcile(
+            FrontendIdentityContext {
+                principal: Identity::parse("hmn:known-user").expect("valid identity"),
+                agent: None,
+                signed_intent: sample_signed_intent("2026-04-22T14:07:11Z"),
+            },
+            FrontendEdit {
+                target_id: TargetId::parse("01HQZX9F5N0000000000000000").expect("valid target id"),
+                expected_version: 100,
+                target_hash: sample_target_hash(),
+                field_diff: std::collections::BTreeMap::from([
+                    ("body".into(), serde_json::json!("ok")),
+                    ("signature".into(), serde_json::json!("ed25519:...")),
+                    ("operation_id".into(), serde_json::json!("01HQ...")),
+                ]),
+            },
+        )
+        .expect_err("immutable signature/operation_id must reject the whole edit");
+
+    match err {
+        FrontendAdapterError::Reconcile(FrontendReconcileError::ImmutableFieldChanged {
+            field,
+        }) => {
+            assert!(
+                matches!(field.as_str(), "operation_id" | "signature"),
+                "expected an IdentityProvenance field, got {field}"
+            );
+        }
+        other => panic!("expected ImmutableFieldChanged, got {other:?}"),
+    }
+}
+
+#[test]
+fn frontend_projection_request_clones_preserve_payload_equality() {
+    let request = sample_projection_request();
+    let clone = request.clone();
+    assert_eq!(request, clone);
+    assert_eq!(request.expected_version, 100);
+    assert_eq!(request.backend.stored.version, 100);
+}
+
+#[test]
+fn frontend_projection_carries_explicit_sidecars_and_frontmatter() {
+    let projection = FrontendProjection {
+        body: "hello".into(),
+        frontmatter: vec![("k".into(), "v".into()), ("k2".into(), "v2".into())],
+        sidecars: vec![("graph.json".into(), "{}".into())],
+        target_hash: sample_target_hash(),
+    };
+    assert_eq!(projection.frontmatter.len(), 2);
+    assert_eq!(projection.sidecars[0].0, "graph.json");
 }

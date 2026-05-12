@@ -68,7 +68,9 @@ impl FrontendFieldPolicy {
             "consent_tier" | "consent_receipt_ref" | "visibility" | "share_grants" => {
                 FrontendFieldClass::VisibilityConsent
             }
-            "version" | "promoted_at" | "produced_by" => FrontendFieldClass::VersionAudit,
+            // Known version/audit fields (`version`, `promoted_at`,
+            // `produced_by`) and any unrecognized future field both fall
+            // through to VersionAudit (fail-closed for unknowns).
             _ => FrontendFieldClass::VersionAudit,
         }
     }

@@ -4,6 +4,11 @@
 //! manifest/identity/version invariants. Tier-2 cases exercise the pure
 //! reconcile contract with synthetic inputs and typed error matches.
 
+// Reason: tier-2 fixtures construct static `Identity` / `TargetId` /
+// `MemoryRecord` literals whose parse only fails on an authoring bug in
+// this file — at which point a panic is the correct way to surface it.
+#![allow(clippy::expect_used)]
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
