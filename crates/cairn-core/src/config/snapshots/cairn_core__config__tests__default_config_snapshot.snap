@@ -1,6 +1,6 @@
 ---
 source: crates/cairn-core/src/config/mod.rs
-assertion_line: 1184
+assertion_line: 1359
 expression: json
 ---
 {
