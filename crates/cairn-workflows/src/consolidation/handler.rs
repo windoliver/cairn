@@ -189,7 +189,11 @@ fn build_summary_record(
     // "summary:{session_id}:{last_sequence}" into a deterministic ULID-shaped
     // string. We derive it with SHA-256, take the first 16 bytes as a 128-bit
     // value, and encode as uppercase Crockford base32.
-    let target_id = stable_target_id(&payload.session_id, draft.last_sequence)?;
+    let target_id = stable_target_id(
+        payload.bound_scope.as_ref(),
+        &payload.session_id,
+        draft.last_sequence,
+    )?;
 
     // --- Timestamps ---
     let now_secs = std::time::SystemTime::now()
@@ -281,15 +285,31 @@ fn build_summary_record(
     })
 }
 
-/// Derive a deterministic, stable [`TargetId`] from `(session_id,
+/// Derive a deterministic, stable [`TargetId`] from `(scope, session_id,
 /// last_sequence)`. Uses SHA-256; takes the first 16 bytes as a 128-bit
 /// unsigned integer, encodes as 26-char Crockford base32. Highest 3 bits are
 /// cleared so the leading character stays in `[0..=7]` (ULID overflow guard).
+///
+/// The bound scope is folded in via [`ScopeTuple::canonical_wire`] so two
+/// scopes sharing a `session_id` at the same `last_sequence` produce
+/// distinct `target_id`s and cannot collide on the store's
+/// one-active-row-per-target-id invariant (round-5 adversarial review
+/// #1). At single-tenant P0 `bound_scope` is `None` and the key reduces
+/// to the prior `summary:{session}:{seq}` shape, preserving identity
+/// for already-emitted summaries.
 fn stable_target_id(
+    bound_scope: Option<&ScopeTuple>,
     session_id: &str,
     last_sequence: u32,
 ) -> Result<TargetId, Box<dyn std::error::Error + Send + Sync>> {
-    let key = format!("summary:{session_id}:{last_sequence}");
+    let scope_wire = bound_scope
+        .map(ScopeTuple::canonical_wire)
+        .unwrap_or_default();
+    let key = if scope_wire.is_empty() {
+        format!("summary:{session_id}:{last_sequence}")
+    } else {
+        format!("summary:{scope_wire}:{session_id}:{last_sequence}")
+    };
     let hash = sha256_hex(key.as_bytes());
     // Take first 32 hex chars → 16 bytes → 128-bit value.
     let hi = u64::from_str_radix(&hash[..16], 16)?;

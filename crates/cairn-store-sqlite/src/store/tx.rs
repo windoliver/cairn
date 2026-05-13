@@ -702,14 +702,15 @@ impl StoreTx<'_> {
         session_id: &SessionId,
         turn_id: &str,
     ) -> Result<u64, StoreError> {
-        // 1. If a summary for this (session, turn) already exists, reuse its
-        //    ordinal so re-summarization is idempotent.
+        // 1. If a summary for this (session, turn) already exists (active
+        //    OR tombstoned), reuse its ordinal so re-summarization stamps
+        //    the same value (idempotent replays after forget round-trips).
         let mut existing = self.tx.prepare(
             "SELECT CAST(json_extract(extra_frontmatter, '$.trace.sequence') AS INTEGER) \
              FROM records \
              WHERE trace_event = 'turn_summary' \
                AND trace_session_id = ?1 AND trace_turn_id = ?2 \
-               AND tombstoned = 0 \
+             ORDER BY tombstoned ASC \
              LIMIT 1",
         )?;
         if let Some(seq) = existing
@@ -722,14 +723,17 @@ impl StoreTx<'_> {
             return Ok(u64::try_from(seq.max(1)).unwrap_or(1));
         }
         // 2. Otherwise: 1 + max(sequence) across this session's existing
-        //    non-tombstoned summaries.
+        //    summaries — INCLUDING tombstoned rows (round-5 adversarial
+        //    review #2). The ordinal must be strictly monotonic per
+        //    session even when forget-cleanup later tombstones an earlier
+        //    summary; reusing a freed slot would let a future
+        //    list_trace_turns(since=N) skip a real turn.
         let mut next = self.tx.prepare(
             "SELECT COALESCE(MAX(CAST(json_extract(extra_frontmatter, \
                                                    '$.trace.sequence') AS INTEGER)), 0) + 1 \
              FROM records \
              WHERE trace_event = 'turn_summary' \
-               AND trace_session_id = ?1 \
-               AND tombstoned = 0",
+               AND trace_session_id = ?1",
         )?;
         let n: i64 = next.query_row(params![session_id.as_str()], |row| row.get(0))?;
         Ok(u64::try_from(n.max(1)).unwrap_or(1))

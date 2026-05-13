@@ -578,11 +578,17 @@ async fn run_handler_inner(
             // queries narrow to this issuer's data (round-4 adversarial
             // review #1). At single-tenant P0 `scope_binding` is `None`
             // and the *_scoped variants reduce to the un-narrowed query.
+            //
+            // Use `max_turn_summary_sequence_scoped` rather than counting
+            // active rows: a forget that tombstones one of the existing
+            // summaries should not regress `latest_sequence` (round-5
+            // adversarial review #2). The query includes tombstoned rows
+            // so cadence progress stays monotonic.
             let turn_count = match store
-                .list_trace_turns_scoped(&session_str, 0, u32::MAX, scope_binding)
+                .max_turn_summary_sequence_scoped(&session_str, scope_binding)
                 .await
             {
-                Ok(headers) => u32::try_from(headers.len()).unwrap_or(u32::MAX),
+                Ok(max_seq) => max_seq,
                 Err(_) => u32::try_from(projected_len).unwrap_or(u32::MAX),
             };
             let since_sequence = store

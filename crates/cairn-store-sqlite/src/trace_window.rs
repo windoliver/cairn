@@ -182,6 +182,50 @@ impl SqliteMemoryStore {
             .collect()
     }
 
+    /// Return the highest `trace.sequence` across `turn_summary`
+    /// records (active **or** tombstoned) for `session_id`, narrowed by
+    /// the optional bound scope. Returns `0` when no summary exists yet.
+    /// Used by the `capture_trace` enqueue path as the
+    /// `latest_sequence` argument to `enqueue_if_due`, so cadence
+    /// progress doesn't regress when a forget tombstones the newest
+    /// `turn_summary` (round-5 adversarial review #2).
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Worker`] on background-thread failure or
+    /// [`StoreError::Sqlite`] for surfaced SQL errors.
+    pub async fn max_turn_summary_sequence_scoped(
+        &self,
+        session_id: &str,
+        bound_scope: Option<&ScopeTuple>,
+    ) -> Result<u32, StoreError> {
+        let conn = self
+            .require_conn("max_turn_summary_sequence_scoped")?
+            .clone();
+        let session = session_id.to_owned();
+        let (extra_where, scope_bind_values) = scope_where_clause_starting_at(bound_scope, 2);
+        let max_seq: Option<i64> = conn
+            .call(move |c| {
+                let sql = format!(
+                    "SELECT MAX(trace_sequence)
+                     FROM records
+                     WHERE trace_event = 'turn_summary'
+                       AND trace_session_id = ?1
+                       {extra_where}"
+                );
+                let mut stmt = c.prepare_cached(&sql)?;
+                let mut binds: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(session.clone())];
+                for v in &scope_bind_values {
+                    binds.push(Box::new(v.clone()));
+                }
+                let param_refs: Vec<&dyn rusqlite::ToSql> =
+                    binds.iter().map(std::convert::AsRef::as_ref).collect();
+                let v: Option<i64> = stmt.query_row(param_refs.as_slice(), |row| row.get(0))?;
+                Ok(v)
+            })
+            .await?;
+        Ok(u32::try_from(max_seq.unwrap_or(0).max(0)).unwrap_or(u32::MAX))
+    }
+
     /// Return the highest `extra_frontmatter.consolidation.last_sequence`
     /// across rolling-summary records (active **or** tombstoned) for
     /// `session_id`. Returns `0` when no summary exists yet.
