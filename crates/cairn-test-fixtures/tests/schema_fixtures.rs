@@ -178,6 +178,26 @@ fn search_args_keyword_deserializes() {
     insta::assert_json_snapshot!("search_args_keyword", &a);
 }
 
+// ── Hot memory ───────────────────────────────────────────────────────────────
+
+use cairn_core::generated::verbs::assemble_hot::AssembleHotData;
+
+fn hot_memory_dir() -> std::path::PathBuf {
+    v0().join("hot-memory")
+}
+
+#[test]
+fn hot_memory_default_deserializes() {
+    let h: AssembleHotData = load_json(hot_memory_dir().join("default.json"));
+    insta::assert_json_snapshot!("hot_memory_default", &h);
+}
+
+#[test]
+fn hot_memory_truncated_deserializes() {
+    let h: AssembleHotData = load_json(hot_memory_dir().join("truncated.json"));
+    insta::assert_json_snapshot!("hot_memory_truncated", &h);
+}
+
 // ── Plugin manifests ──────────────────────────────────────────────────────────
 
 use cairn_core::contract::manifest::PluginManifest;

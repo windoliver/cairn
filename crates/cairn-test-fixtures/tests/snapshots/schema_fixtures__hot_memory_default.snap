@@ -1,0 +1,23 @@
+---
+source: crates/cairn-test-fixtures/tests/schema_fixtures.rs
+assertion_line: 192
+expression: "&h"
+---
+{
+  "bytes": 24,
+  "cache": {
+    "key": "fixture-default",
+    "status": "miss"
+  },
+  "prefix": "## purpose\npurpose text\n",
+  "sources": [
+    {
+      "attempted": 1,
+      "bytes": 24,
+      "included": 1,
+      "kind": "purpose",
+      "omitted": 0
+    }
+  ],
+  "truncation": []
+}
