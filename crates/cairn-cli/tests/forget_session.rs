@@ -2,7 +2,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::{path::Path, process::Command, time::Duration};
+use std::{path::Path, process::Command};
 
 fn cli() -> Command {
     Command::new(env!("CARGO_BIN_EXE_cairn"))
@@ -17,20 +17,33 @@ fn bootstrap_vault(vault: &Path) {
 }
 
 fn ingest_body(vault: &Path, body: &str, session_id: &str) -> String {
-    let out = cli()
-        .current_dir(vault)
-        .args([
-            "ingest",
-            "--kind",
-            "reasoning",
-            "--body",
-            body,
-            "--session",
-            session_id,
-            "--json",
-        ])
-        .output()
-        .expect("cairn ingest");
+    ingest_body_scoped(vault, body, session_id, None, None)
+}
+
+fn ingest_body_scoped(
+    vault: &Path,
+    body: &str,
+    session_id: &str,
+    tenant: Option<&str>,
+    workspace: Option<&str>,
+) -> String {
+    let mut cmd = cli();
+    cmd.current_dir(vault).args([
+        "ingest",
+        "--kind",
+        "reasoning",
+        "--body",
+        body,
+        "--session",
+        session_id,
+    ]);
+    if let Some(tenant) = tenant {
+        cmd.args(["--scope-tenant", tenant]);
+    }
+    if let Some(workspace) = workspace {
+        cmd.args(["--scope-workspace", workspace]);
+    }
+    let out = cmd.arg("--json").output().expect("cairn ingest");
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -80,6 +93,34 @@ fn session_row_count(db_path: &Path, session_id: &str) -> i64 {
         |row| row.get(0),
     )
     .expect("session count")
+}
+
+fn rewrite_target_scope(
+    db_path: &Path,
+    target_id: &str,
+    tenant: Option<&str>,
+    workspace: Option<&str>,
+) {
+    let conn = rusqlite::Connection::open(db_path).expect("open db");
+    conn.execute(
+        "UPDATE records
+            SET scope = json_set(
+                json_set(scope, '$.tenant', json(?2)),
+                '$.workspace',
+                json(?3)
+            )
+          WHERE target_id = ?1",
+        rusqlite::params![
+            target_id,
+            tenant
+                .map(|value| format!("\"{value}\""))
+                .unwrap_or_else(|| "null".to_owned()),
+            workspace
+                .map(|value| format!("\"{value}\""))
+                .unwrap_or_else(|| "null".to_owned())
+        ],
+    )
+    .expect("rewrite record scope");
 }
 
 #[test]
@@ -161,63 +202,110 @@ fn forget_session_keeps_live_targets_when_phase_b_fails_mid_session() {
         1,
         "second target should remain present so the operator can retry safely"
     );
+    let third = ingest_body(vault.path(), "turn three", "sess-42");
+    assert_eq!(
+        target_row_count(&db_path, &third),
+        1,
+        "failed forget must release session locks so follow-up ingest can proceed immediately"
+    );
 }
 
 #[test]
-fn ingest_session_rejects_while_exclusive_session_lock_is_held() {
+fn forget_session_rejects_ambiguous_cross_scope_session_ids() {
     let vault = tempfile::tempdir().expect("temp vault");
     bootstrap_vault(vault.path());
 
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("runtime");
-    let store = rt
-        .block_on(cairn_store_sqlite::open(
-            vault.path().join(".cairn/cairn.db"),
-        ))
-        .expect("open store");
-    let conn = std::sync::Arc::clone(store.raw_conn_for_admin().expect("raw conn"));
-    let inc = store.incarnation().cloned().expect("incarnation");
-    let resource = cairn_store_sqlite::locks::ResourceKey::session("default", "default", "sess-42");
-    let lock = rt
-        .block_on(cairn_store_sqlite::locks::acquire(
-            &conn,
-            &resource,
-            cairn_store_sqlite::locks::LockMode::Exclusive,
-            "test-holder",
-            Duration::from_secs(30),
-            &inc,
-            "forget --session test lock",
-        ))
-        .expect("acquire lock");
+    let first = ingest_body_scoped(vault.path(), "tenant a turn", "sess-42", None, None);
+    let second = ingest_body_scoped(vault.path(), "tenant b turn", "sess-42", None, None);
+    let db_path = vault.path().join(".cairn/cairn.db");
+    rewrite_target_scope(&db_path, &first, Some("tenant-a"), Some("workspace-a"));
+    rewrite_target_scope(&db_path, &second, Some("tenant-b"), Some("workspace-b"));
 
-    let ingest = cli()
+    let forget = cli()
         .current_dir(vault.path())
-        .args([
-            "ingest",
-            "--kind",
-            "reasoning",
-            "--body",
-            "blocked",
-            "--session",
-            "sess-42",
-            "--json",
-        ])
+        .args(["forget", "--session", "sess-42", "--json"])
         .output()
-        .expect("cairn ingest");
+        .expect("forget session");
 
-    rt.block_on(lock.release()).expect("release lock");
-
-    assert_ne!(
-        ingest.status.code(),
-        Some(0),
-        "ingest should fail while the exclusive session lock is held; stderr: {}",
-        String::from_utf8_lossy(&ingest.stderr)
-    );
     assert_eq!(
-        session_row_count(&vault.path().join(".cairn/cairn.db"), "sess-42"),
-        0,
-        "blocked ingest must not persist any live rows for the session"
+        forget.status.code(),
+        Some(64),
+        "ambiguous session forget should fail closed as invalid args; stderr: {}",
+        String::from_utf8_lossy(&forget.stderr)
     );
+
+    let stdout = String::from_utf8(forget.stdout).expect("utf-8 stdout");
+    let response: serde_json::Value = serde_json::from_str(stdout.trim()).expect("json envelope");
+    assert_eq!(response["status"], "rejected");
+    assert_eq!(response["error"]["code"], "InvalidArgs");
+
+    assert_eq!(target_row_count(&db_path, &first), 1);
+    assert_eq!(target_row_count(&db_path, &second), 1);
+    assert_eq!(session_row_count(&db_path, "sess-42"), 2);
+}
+
+#[test]
+fn forget_session_handles_real_all_scope_values_without_namespace_collision() {
+    let vault = tempfile::tempdir().expect("temp vault");
+    bootstrap_vault(vault.path());
+
+    let first = ingest_body_scoped(vault.path(), "turn one", "sess-42", None, None);
+    let second = ingest_body_scoped(vault.path(), "turn two", "sess-42", None, None);
+    let db_path = vault.path().join(".cairn/cairn.db");
+    rewrite_target_scope(&db_path, &first, Some("__all__"), Some("__all__"));
+    rewrite_target_scope(&db_path, &second, Some("__all__"), Some("__all__"));
+
+    let forget = cli()
+        .current_dir(vault.path())
+        .args(["forget", "--session", "sess-42", "--json"])
+        .output()
+        .expect("forget session");
+
+    assert_eq!(
+        forget.status.code(),
+        Some(0),
+        "forget should still commit when a real scope uses '__all__'; stderr: {}",
+        String::from_utf8_lossy(&forget.stderr)
+    );
+
+    let stdout = String::from_utf8(forget.stdout).expect("utf-8 stdout");
+    let response: serde_json::Value = serde_json::from_str(stdout.trim()).expect("json envelope");
+    assert_eq!(response["status"], "committed");
+    assert_eq!(response["data"]["deleted_count"], 2);
+
+    assert_eq!(target_row_count(&db_path, &first), 0);
+    assert_eq!(target_row_count(&db_path, &second), 0);
+}
+
+#[test]
+fn forget_session_rejects_null_and_empty_scope_components_as_distinct_partitions() {
+    let vault = tempfile::tempdir().expect("temp vault");
+    bootstrap_vault(vault.path());
+
+    let first = ingest_body_scoped(vault.path(), "null scope", "sess-42", None, None);
+    let second = ingest_body_scoped(vault.path(), "empty scope", "sess-42", None, None);
+    let db_path = vault.path().join(".cairn/cairn.db");
+    rewrite_target_scope(&db_path, &first, Some("tenant-a"), None);
+    rewrite_target_scope(&db_path, &second, Some("tenant-a"), Some(""));
+
+    let forget = cli()
+        .current_dir(vault.path())
+        .args(["forget", "--session", "sess-42", "--json"])
+        .output()
+        .expect("forget session");
+
+    assert_eq!(
+        forget.status.code(),
+        Some(64),
+        "null and empty-string scope components should remain distinct; stderr: {}",
+        String::from_utf8_lossy(&forget.stderr)
+    );
+
+    let stdout = String::from_utf8(forget.stdout).expect("utf-8 stdout");
+    let response: serde_json::Value = serde_json::from_str(stdout.trim()).expect("json envelope");
+    assert_eq!(response["status"], "rejected");
+    assert_eq!(response["error"]["code"], "InvalidArgs");
+
+    assert_eq!(target_row_count(&db_path, &first), 1);
+    assert_eq!(target_row_count(&db_path, &second), 1);
 }

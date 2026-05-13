@@ -139,6 +139,72 @@ impl StoreTx<'_> {
         Ok(targets)
     }
 
+    /// List distinct `(tenant, workspace)` partitions for a session id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Sqlite`] for query failures.
+    pub fn list_session_scope_partitions(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<(Option<String>, Option<String>)>, StoreError> {
+        let mut stmt = self.tx.prepare(
+            "SELECT DISTINCT \
+                json_extract(scope, '$.tenant') AS tenant, \
+                json_extract(scope, '$.workspace') AS workspace \
+               FROM records \
+              WHERE json_extract(scope, '$.session_id') = ?1 \
+              ORDER BY tenant, workspace",
+        )?;
+        let mut rows = stmt.query([session_id])?;
+        let mut scopes = Vec::new();
+        while let Some(row) = rows.next()? {
+            let tenant: Option<String> = row.get(0)?;
+            let workspace: Option<String> = row.get(1)?;
+            scopes.push((tenant, workspace));
+        }
+        Ok(scopes)
+    }
+
+    /// List distinct `target_id`s attached to records in one session scope partition.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Sqlite`] for query failures, or
+    /// [`StoreError::Invariant`] if a persisted `target_id` no longer parses
+    /// as a valid [`TargetId`].
+    pub fn list_target_ids_for_session_scope(
+        &self,
+        session_id: &str,
+        tenant: Option<&str>,
+        workspace: Option<&str>,
+    ) -> Result<Vec<TargetId>, StoreError> {
+        let mut stmt = self.tx.prepare(
+            "SELECT DISTINCT target_id
+               FROM records
+               WHERE json_extract(scope, '$.session_id') = ?1
+                 AND (
+                       (?2 IS NULL AND json_extract(scope, '$.tenant') IS NULL)
+                    OR json_extract(scope, '$.tenant') = ?2
+                 )
+                 AND (
+                       (?3 IS NULL AND json_extract(scope, '$.workspace') IS NULL)
+                    OR json_extract(scope, '$.workspace') = ?3
+                 )
+               ORDER BY target_id",
+        )?;
+        let mut rows = stmt.query(params![session_id, tenant, workspace])?;
+        let mut targets = Vec::new();
+        while let Some(row) = rows.next()? {
+            let target_id: String = row.get(0)?;
+            let target = TargetId::parse(target_id).map_err(|error| StoreError::Invariant {
+                what: format!("records.target_id round-trip failed: {error}"),
+            })?;
+            targets.push(target);
+        }
+        Ok(targets)
+    }
+
     /// Mint and persist a fresh single-use server challenge for
     /// `issuer`. Returns the base64 nonce + absolute expiry.
     /// See [`crate::replay::challenge::mint_challenge`] for full

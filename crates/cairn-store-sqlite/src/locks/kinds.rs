@@ -15,6 +15,9 @@ pub enum LockScope {
     /// `(tenant, workspace, session:<id>)` — write-with-session acquires Shared;
     /// `forget_session` acquires Exclusive for full Phase A.
     Session,
+    /// `(session:<id>)` — session-wide namespace fence used to serialize
+    /// `forget --session` against new session participants across partitions.
+    SessionNamespace,
     /// `(tenant, workspace)` — vault-wide admin ops (lint, reindex, migrations).
     /// Cairn extension to brief §5.6; brief is silent on admin lock scope.
     Vault,
@@ -25,6 +28,7 @@ impl fmt::Display for LockScope {
         f.write_str(match self {
             Self::Entity => "entity",
             Self::Session => "session",
+            Self::SessionNamespace => "session_namespace",
             Self::Vault => "vault",
         })
     }
@@ -60,7 +64,8 @@ impl fmt::Display for LockMode {
 
 /// Identifies one lockable resource (scope + key).
 ///
-/// Construct via the typed builders (`entity`, `session`, `vault`) — never
+/// Construct via the typed builders (`entity`, `session`, `session_namespace`,
+/// `vault`) — never
 /// hand-build, so resource serialization stays canonical across crates.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ResourceKey {
@@ -84,6 +89,15 @@ impl ResourceKey {
         Self {
             scope: LockScope::Session,
             key: format!("{tenant}:{workspace}:{session_id}"),
+        }
+    }
+
+    /// Session-wide namespace lock.
+    #[must_use]
+    pub fn session_namespace(session_id: &str) -> Self {
+        Self {
+            scope: LockScope::SessionNamespace,
+            key: session_id.to_owned(),
         }
     }
 
@@ -138,6 +152,13 @@ mod tests {
     fn vault_resource_str_is_stable() {
         let r = ResourceKey::vault("vault_xyz");
         assert_eq!(r.as_resource_str(), "vault:vault_xyz");
+    }
+
+    #[test]
+    fn session_namespace_resource_str_is_stable() {
+        let r = ResourceKey::session_namespace("sess_42");
+        assert_eq!(r.as_resource_str(), "session_namespace:sess_42");
+        assert_eq!(r.scope(), LockScope::SessionNamespace);
     }
 
     #[test]

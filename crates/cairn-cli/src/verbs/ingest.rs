@@ -73,6 +73,7 @@ const CLI_SENSOR_ID: &str = "snr:local:cli:p0:v1";
 const STDIN_LIMIT_BYTES: u64 = 4 * 1024 * 1024;
 const SESSION_LOCK_TENANT: &str = "default";
 const SESSION_LOCK_WORKSPACE: &str = "default";
+const UNSCOPED_LOCK_COMPONENT: &str = "__none__";
 const SESSION_LOCK_TTL: Duration = Duration::from_secs(30);
 
 #[derive(Default)]
@@ -628,25 +629,56 @@ fn run_body_ingest(
         let store = cairn_store_sqlite::open(&db_path)
             .await
             .map_err(|e| format!("open store: {e}"))?;
-        let lock = acquire_session_shared_lock(&store, &session_id)
+        let namespace_lock = acquire_session_namespace_shared_lock(&store, &session_id)
             .await
-            .map_err(|e| format!("acquire session lock: {e:#}"))?;
-        if source_hash_is_forgotten(&db_path, &record.provenance.source_hash) {
-            return Err(format!(
-                "source hash `{}` has a prior source-forget receipt and cannot be re-ingested",
-                record.provenance.source_hash
-            ));
+            .map_err(|e| format!("acquire session namespace lock: {e:#}"))?;
+        let lock = acquire_session_shared_lock(
+            &store,
+            scope.tenant.as_deref(),
+            scope.workspace.as_deref(),
+            &session_id,
+        )
+        .await;
+        let lock = match lock {
+            Ok(lock) => lock,
+            Err(error) => {
+                let release_result = namespace_lock.release().await;
+                return match release_result {
+                    Ok(()) => Err(format!("acquire session lock: {error:#}")),
+                    Err(release_error) => {
+                        Err(format!("acquire session lock: {error:#}; release session namespace lock: {release_error}"))
+                    }
+                };
+            }
+        };
+
+        let body_result = async {
+            if source_hash_is_forgotten(&db_path, &record.provenance.source_hash) {
+                return Err(format!(
+                    "source hash `{}` has a prior source-forget receipt and cannot be re-ingested",
+                    record.provenance.source_hash
+                ));
+            }
+            write_source_artifact(vault_root, &record.provenance.source_ids[0], &fenced.text)
+                .map_err(|e| format!("write source artifact: {e:#}"))?;
+            store
+                .upsert(&record)
+                .await
+                .map_err(|e| format!("store upsert: {e}"))
         }
-        write_source_artifact(vault_root, &record.provenance.source_ids[0], &fenced.text)
-            .map_err(|e| format!("write source artifact: {e:#}"))?;
-        let outcome = store
-            .upsert(&record)
-            .await
-            .map_err(|e| format!("store upsert: {e}"))?;
-        lock.release()
-            .await
-            .map_err(|e| format!("release session lock: {e}"))?;
-        Ok(outcome)
+        .await;
+
+        let lock_release = lock.release().await;
+        let namespace_release = namespace_lock.release().await;
+        match (body_result, lock_release, namespace_release) {
+            (Ok(outcome), Ok(()), Ok(())) => Ok(outcome),
+            (Err(error), Ok(()), Ok(())) => Err(error),
+            (_, Err(error), Ok(())) => Err(format!("release session lock: {error}")),
+            (_, Ok(()), Err(error)) => Err(format!("release session namespace lock: {error}")),
+            (_, Err(lock_error), Err(namespace_error)) => Err(format!(
+                "release session lock: {lock_error}; release session namespace lock: {namespace_error}"
+            )),
+        }
     }) {
         Ok(outcome) => outcome,
         Err(reason) if reason.contains("prior source-forget receipt") => {
@@ -719,6 +751,8 @@ fn source_hash_is_forgotten(db_path: &Path, source_hash: &str) -> bool {
 
 async fn acquire_session_shared_lock(
     store: &cairn_store_sqlite::SqliteMemoryStore,
+    tenant: Option<&str>,
+    workspace: Option<&str>,
     session_id: &str,
 ) -> anyhow::Result<cairn_store_sqlite::locks::LockHandle> {
     let conn = store
@@ -728,9 +762,15 @@ async fn acquire_session_shared_lock(
         .incarnation()
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("store incarnation unavailable"))?;
+    let tenant_component = tenant
+        .unwrap_or(UNSCOPED_LOCK_COMPONENT)
+        .if_empty(SESSION_LOCK_TENANT);
+    let workspace_component = workspace
+        .unwrap_or(UNSCOPED_LOCK_COMPONENT)
+        .if_empty(SESSION_LOCK_WORKSPACE);
     let resource = cairn_store_sqlite::locks::ResourceKey::session(
-        SESSION_LOCK_TENANT,
-        SESSION_LOCK_WORKSPACE,
+        &tenant_component,
+        &workspace_component,
         session_id,
     );
     let holder_id = format!("pid={}-{}", std::process::id(), ulid::Ulid::new());
@@ -745,6 +785,46 @@ async fn acquire_session_shared_lock(
     )
     .await
     .map_err(|e| anyhow::anyhow!("acquire session lock: {e}"))
+}
+
+async fn acquire_session_namespace_shared_lock(
+    store: &cairn_store_sqlite::SqliteMemoryStore,
+    session_id: &str,
+) -> anyhow::Result<cairn_store_sqlite::locks::LockHandle> {
+    let conn = store
+        .raw_conn_for_admin()
+        .ok_or_else(|| anyhow::anyhow!("store lock path unavailable"))?;
+    let incarnation = store
+        .incarnation()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("store incarnation unavailable"))?;
+    let resource = cairn_store_sqlite::locks::ResourceKey::session_namespace(session_id);
+    let holder_id = format!("pid={}-{}", std::process::id(), ulid::Ulid::new());
+    cairn_store_sqlite::locks::acquire(
+        conn,
+        &resource,
+        cairn_store_sqlite::locks::LockMode::Shared,
+        &holder_id,
+        SESSION_LOCK_TTL,
+        &incarnation,
+        "ingest",
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("acquire session namespace lock: {e}"))
+}
+
+trait LockComponentExt {
+    fn if_empty(self, fallback: &str) -> String;
+}
+
+impl LockComponentExt for &str {
+    fn if_empty(self, fallback: &str) -> String {
+        if self.is_empty() {
+            fallback.to_owned()
+        } else {
+            self.to_owned()
+        }
+    }
 }
 
 fn policy_trace_for_ingest(
@@ -1378,8 +1458,8 @@ mod tests {
         let conn = std::sync::Arc::clone(store.raw_conn_for_admin().unwrap());
         let incarnation = store.incarnation().cloned().unwrap();
         let resource = cairn_store_sqlite::locks::ResourceKey::session(
-            SESSION_LOCK_TENANT,
-            SESSION_LOCK_WORKSPACE,
+            UNSCOPED_LOCK_COMPONENT,
+            UNSCOPED_LOCK_COMPONENT,
             "sess-42",
         );
         let exclusive = cairn_store_sqlite::locks::acquire(
@@ -1394,12 +1474,41 @@ mod tests {
         .await
         .unwrap();
 
-        let err = acquire_session_shared_lock(&store, "sess-42")
+        let err = acquire_session_shared_lock(&store, None, None, "sess-42")
             .await
             .unwrap_err();
         assert!(
             err.to_string().contains("lock held"),
             "shared ingest lock should fail behind a live exclusive session holder: {err:#}"
+        );
+
+        exclusive.release().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_namespace_shared_lock_rejects_while_exclusive_holder_is_live() {
+        let store = cairn_store_sqlite::open_in_memory().await.unwrap();
+        let conn = std::sync::Arc::clone(store.raw_conn_for_admin().unwrap());
+        let incarnation = store.incarnation().cloned().unwrap();
+        let resource = cairn_store_sqlite::locks::ResourceKey::session_namespace("sess-42");
+        let exclusive = cairn_store_sqlite::locks::acquire(
+            &conn,
+            &resource,
+            cairn_store_sqlite::locks::LockMode::Exclusive,
+            "test-exclusive-holder",
+            SESSION_LOCK_TTL,
+            &incarnation,
+            "forget --session namespace test",
+        )
+        .await
+        .unwrap();
+
+        let err = acquire_session_namespace_shared_lock(&store, "sess-42")
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("lock held"),
+            "shared ingest namespace lock should fail behind a live exclusive holder: {err:#}"
         );
 
         exclusive.release().await.unwrap();
