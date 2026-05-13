@@ -528,8 +528,7 @@ fn source_extension(path: &Path) -> String {
     path.extension()
         .and_then(|ext| ext.to_str())
         .filter(|ext| !ext.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| "txt".to_owned())
+        .map_or_else(|| "txt".to_owned(), str::to_owned)
 }
 
 fn require_bound_vault(json: bool, vault_root: &Path) -> Option<ExitCode> {
