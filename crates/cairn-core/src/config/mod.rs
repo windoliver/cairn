@@ -563,7 +563,7 @@ pub struct CapabilitySet {
     pub llm_extract: bool,
     /// True iff the pipeline chain contains an `agent` worker.
     pub agent_extract: bool,
-    /// False for `sqlite` (P0). P1+ stores may advertise this.
+    /// True when the selected store supports graph edge storage and traversal.
     pub graph_edges: bool,
 }
 
@@ -680,7 +680,10 @@ impl CairnConfig {
             hybrid_search: llm_on,
             llm_extract: llm_on,
             agent_extract,
-            graph_edges: false, // P0: sqlite always false; P1+ gates on store capability
+            graph_edges: matches!(
+                self.store.kind,
+                StoreKind::Sqlite | StoreKind::NexusSandbox | StoreKind::NexusFull
+            ),
         }
     }
 }
@@ -1022,7 +1025,18 @@ mod tests {
         assert!(!caps.hybrid_search, "no LLM → no hybrid");
         assert!(!caps.llm_extract, "no LLM → no llm_extract");
         assert!(!caps.agent_extract, "default chain has no agent worker");
-        assert!(!caps.graph_edges, "sqlite → no graph edges");
+        assert!(caps.graph_edges, "sqlite → graph edges");
+    }
+
+    #[test]
+    fn capabilities_custom_store_does_not_assume_graph_edges() {
+        let mut config = CairnConfig::default();
+        config.store.kind = StoreKind::Custom("example-store".to_owned());
+        let caps = config.capabilities();
+        assert!(
+            !caps.graph_edges,
+            "custom stores must advertise graph edges"
+        );
     }
 
     #[test]
