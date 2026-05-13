@@ -93,7 +93,7 @@ until automated enforcement is added.
 | §16 Packaging | #18, #32, #100, #139–#142, #158 | — | Cargo and Homebrew, static smoke tests, desktop production packaging, release channels. |
 | §16.a Existing memory systems | #120, #151–#156 | — | Explicit P2 migration bridge epic and child issues. |
 | §17 Non-goals | _none_ | _none_ | No code deliverable and no current docs owner; non-goals language is reviewed ad-hoc in design-brief PRs. |
-| §18 Success criteria / adoption / consumer blueprint | #11, #18, #19, #25, #31, #32, #68–#70, #97–#103, #119–#120, #139–#142 | #136, #137 | User stories, skill adoption, reference consumers, and production criteria. |
+| §18 Success criteria / adoption / consumer blueprint | #11, #18, #19, #25, #31, #32, #68–#70, #97–#103, #119–#120, #139–#142, #343 | #136, #137 | User stories, skill adoption, reference consumers, and production criteria. #343 adds the zero-capture reminder decision slice for the v0.1 reference consumer. |
 | §18.d Cairn skill | #11, #68–#70 | — | Install, conventions, compatibility checks. |
 | §19 Sequencing | _none_ | — | Process-only row; phased milestones and `priority:` / `phase:` labels encode the sequence. |
 | §19.a KISS v0.1 subset | #3–#19, #33–#103 | #145, #146, #150 (resolved) | P0 substrate coverage with the resolved all-three-search-mode decision. |

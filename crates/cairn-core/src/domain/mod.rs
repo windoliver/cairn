@@ -44,6 +44,7 @@ pub mod taxonomy;
 pub mod time;
 pub mod timestamp;
 pub mod trace;
+pub mod zero_capture;
 
 pub use actor_chain::{ActorChainEntry, ChainRole, validate_chain};
 pub use admission::{AdmissionError, SignedAdmission, WalActionKind};
@@ -82,3 +83,7 @@ pub use taxonomy::{MemoryClass, MemoryKind, MemoryVisibility};
 pub use time::{Clock, SystemClock};
 pub use timestamp::Rfc3339Timestamp;
 pub use trace::{TraceEvent, TraceLink, TraceLinkError};
+pub use zero_capture::{
+    ZeroCaptureAuditInput, ZeroCaptureDecision, ZeroCaptureDecisionCode, ZeroCaptureNudge,
+    ZeroCaptureReport, ZeroCaptureSuppression, ZeroCaptureTrigger, decide_zero_capture_nudge,
+};
