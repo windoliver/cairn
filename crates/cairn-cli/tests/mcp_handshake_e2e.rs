@@ -34,6 +34,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use cairn_core::generated::envelope::{Response, ResponseStatus, ResponseVerb};
+use cairn_mcp::generated::TOOLS;
+use cairn_mcp::graph_tools::GRAPH_TOOLS;
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -121,6 +123,11 @@ fn cairn_mcp_subprocess_advertises_handshake_per_wiring_flag() {
 #[test]
 fn cairn_mcp_subprocess_returns_typed_envelopes_for_core_verb_calls() {
     run_mcp_subprocess("e2e-cli-typed", run_typed_envelope_protocol);
+}
+
+#[test]
+fn cairn_mcp_subprocess_lists_unique_core_verbs_and_expected_graph_tools() {
+    run_mcp_subprocess("e2e-cli-graph", run_graph_tools_protocol);
 }
 
 fn run_mcp_subprocess(tenant: &str, protocol: fn(&mut Child) -> Result<(), String>) {
@@ -219,6 +226,17 @@ fn run_tools_list_protocol(child: &mut Child) -> Result<(), String> {
         .iter()
         .filter_map(|t| t.get("name").and_then(Value::as_str))
         .collect();
+    let missing: Vec<&str> = TOOLS
+        .iter()
+        .map(|tool| tool.name)
+        .filter(|name| !names.contains(name))
+        .collect();
+
+    if !missing.is_empty() {
+        return Err(format!(
+            "tools/list over real stdio must include every generated core verb; missing {missing:?} from {names:?}"
+        ));
+    }
 
     if cairn_core::status::wiring::REPLAY_CHALLENGE_WIRED {
         if !names.contains(&"handshake") {
@@ -310,6 +328,53 @@ fn run_typed_envelope_protocol(child: &mut Child) -> Result<(), String> {
     }
 
     // Drop stdin so the server starts shutting down.
+    client.close_stdin();
+    Ok(())
+}
+
+fn run_graph_tools_protocol(child: &mut Child) -> Result<(), String> {
+    let mut client = ProtocolClient::new(child)?;
+    client.initialize("cli-e2e-graph")?;
+
+    client.send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#)?;
+    let list_resp = client.recv()?;
+    let names: Vec<&str> = list_resp
+        .pointer("/result/tools")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            format!(
+                "tools/list response missing tools array: {list_resp}\nstderr: {}",
+                client.stderr_so_far()
+            )
+        })?
+        .iter()
+        .filter_map(|t| t.get("name").and_then(Value::as_str))
+        .collect();
+
+    for core in TOOLS.iter().map(|tool| tool.name) {
+        let count = names.iter().filter(|name| **name == core).count();
+        if count != 1 {
+            return Err(format!(
+                "core verb {core} must appear exactly once in tools/list; got count={count} from {names:?}"
+            ));
+        }
+    }
+
+    let mut expected_graph: Vec<&str> = GRAPH_TOOLS.iter().map(|tool| tool.name).collect();
+    expected_graph.sort_unstable();
+    let mut actual_graph: Vec<&str> = names
+        .iter()
+        .copied()
+        .filter(|name| name.starts_with("graph."))
+        .collect();
+    actual_graph.sort_unstable();
+
+    if actual_graph != expected_graph {
+        return Err(format!(
+            "single-tenant stdio tools/list must advertise the expected graph tool set; got {actual_graph:?}, expected {expected_graph:?}"
+        ));
+    }
+
     client.close_stdin();
     Ok(())
 }

@@ -6,6 +6,8 @@
 
 use std::process::Command;
 
+use cairn_core::generated::handshake::HandshakeResponse;
+
 fn cli() -> Command {
     Command::new(env!("CARGO_BIN_EXE_cairn"))
 }
@@ -18,12 +20,14 @@ fn handshake_json_has_challenge_keys() {
         .expect("cairn handshake --json");
     assert!(out.status.success(), "exit: {:?}", out.status);
     let stdout = String::from_utf8(out.stdout).expect("utf-8");
-    let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
-    assert_eq!(v["contract"], "cairn.mcp.v1");
-    assert!(v["challenge"]["nonce"].is_string());
-    assert!(v["challenge"]["expires_at"].is_number());
-    let expires: u64 = v["challenge"]["expires_at"].as_u64().expect("u64");
-    assert!(expires > 0, "expires_at must be a positive epoch-ms value");
+    let response: HandshakeResponse =
+        serde_json::from_str(stdout.trim()).expect("handshake must parse as generated type");
+    assert_eq!(response.contract, "cairn.mcp.v1");
+    assert!(!response.challenge.nonce.0.is_empty());
+    assert!(
+        response.challenge.expires_at > 0,
+        "expires_at must be a positive epoch-ms value"
+    );
 }
 
 #[test]
@@ -36,12 +40,12 @@ fn two_handshakes_return_different_nonces() {
         .args(["handshake", "--json"])
         .output()
         .expect("handshake 2");
-    let v1: serde_json::Value =
+    let v1: HandshakeResponse =
         serde_json::from_str(String::from_utf8(out1.stdout).expect("utf-8").trim()).expect("json");
-    let v2: serde_json::Value =
+    let v2: HandshakeResponse =
         serde_json::from_str(String::from_utf8(out2.stdout).expect("utf-8").trim()).expect("json");
     assert_ne!(
-        v1["challenge"]["nonce"], v2["challenge"]["nonce"],
+        v1.challenge.nonce, v2.challenge.nonce,
         "consecutive handshakes must produce distinct nonces (§8.0.a point d)"
     );
 }
