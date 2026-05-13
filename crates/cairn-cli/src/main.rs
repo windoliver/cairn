@@ -572,29 +572,37 @@ fn run_admin(matches: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
         return rc;
     }
 
-    let config =
-        match cairn_cli::config::load(&vault_root, &cairn_cli::config::CliOverrides::default()) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("cairn admin: config error — {e:#}");
-                return ExitCode::from(78); // EX_CONFIG
-            }
-        };
-
     match matches.subcommand() {
         Some(("model", sub)) => match sub.subcommand() {
-            Some(("fetch", fetch_sub)) => {
-                verbs::admin_model_fetch::run(fetch_sub, &vault_root, &config)
-            }
+            Some(("fetch", fetch_sub)) => match load_admin_config(&vault_root) {
+                Ok(config) => verbs::admin_model_fetch::run(fetch_sub, &vault_root, &config),
+                Err(code) => code,
+            },
             _ => unreachable!(
                 "clap subcommand_required(true) on admin model ensures a subcommand is always present"
             ),
         },
-        Some(("reindex", sub)) => verbs::admin_reindex::run(sub, &vault_root, &config),
+        Some(("reindex", sub)) => match load_admin_config(&vault_root) {
+            Ok(config) => verbs::admin_reindex::run(sub, &vault_root, &config),
+            Err(code) => code,
+        },
+        Some(("snapshot", sub)) => verbs::admin_snapshot::run(sub, &vault_root),
+        Some(("restore", sub)) => verbs::admin_restore::run(sub, &vault_root),
         _ => unreachable!(
             "clap subcommand_required(true) on admin ensures a subcommand is always present"
         ),
     }
+}
+
+fn load_admin_config(
+    vault_root: &std::path::Path,
+) -> Result<cairn_core::config::CairnConfig, ExitCode> {
+    cairn_cli::config::load(vault_root, &cairn_cli::config::CliOverrides::default()).map_err(
+        |e| {
+            eprintln!("cairn admin: config error — {e:#}");
+            ExitCode::from(78) // EX_CONFIG
+        },
+    )
 }
 
 /// Apply the file-only vault-binding gate (`probe_vault_binding`) and
