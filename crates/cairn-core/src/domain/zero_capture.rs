@@ -3,6 +3,8 @@
 //! This module decides whether a session with meaningful activity but no
 //! successful Cairn writes should surface a retrospective reminder.
 
+use std::fmt::Write as _;
+
 use serde::{Deserialize, Serialize};
 
 use crate::domain::SessionId;
@@ -112,6 +114,52 @@ pub struct ZeroCaptureReport {
     pub decision: ZeroCaptureDecisionCode,
 }
 
+/// Aggregate counts for a batch of zero-capture reports.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ZeroCaptureReportSummary {
+    /// Total number of reports aggregated.
+    pub total: u64,
+    /// Reports that should emit a reminder.
+    pub emit_nudge: u64,
+    /// Reports suppressed because no activity occurred.
+    pub no_meaningful_activity: u64,
+    /// Reports suppressed because writes were already present.
+    pub writes_present: u64,
+    /// Reports suppressed by config.
+    pub disabled_by_config: u64,
+    /// Reports suppressed by policy.
+    pub policy_blocked: u64,
+}
+
+impl ZeroCaptureReportSummary {
+    /// Aggregate a slice of zero-capture reports.
+    #[must_use]
+    pub fn from_reports(reports: &[ZeroCaptureReport]) -> Self {
+        let mut summary = Self::default();
+        for report in reports {
+            summary.total += 1;
+            match report.decision {
+                ZeroCaptureDecisionCode::NoMeaningfulActivity => {
+                    summary.no_meaningful_activity += 1;
+                }
+                ZeroCaptureDecisionCode::WritesPresent => {
+                    summary.writes_present += 1;
+                }
+                ZeroCaptureDecisionCode::DisabledByConfig => {
+                    summary.disabled_by_config += 1;
+                }
+                ZeroCaptureDecisionCode::PolicyBlocked => {
+                    summary.policy_blocked += 1;
+                }
+                ZeroCaptureDecisionCode::EmitNudge => {
+                    summary.emit_nudge += 1;
+                }
+            }
+        }
+        summary
+    }
+}
+
 impl ZeroCaptureReport {
     /// Build a report from a previously computed decision.
     #[must_use]
@@ -139,6 +187,42 @@ impl ZeroCaptureReport {
             decision,
         }
     }
+}
+
+/// Render a markdown dogfood report for a batch of zero-capture reports.
+#[must_use]
+pub fn render_zero_capture_report(reports: &[ZeroCaptureReport]) -> String {
+    let summary = ZeroCaptureReportSummary::from_reports(reports);
+    let mut out = String::new();
+    out.push_str("# Zero-capture report\n\n");
+    let _ = writeln!(out, "- total: {}", summary.total);
+    let _ = writeln!(out, "- emit_nudge: {}", summary.emit_nudge);
+    let _ = writeln!(
+        out,
+        "- no_meaningful_activity: {}",
+        summary.no_meaningful_activity
+    );
+    let _ = writeln!(out, "- writes_present: {}", summary.writes_present);
+    let _ = writeln!(out, "- disabled_by_config: {}", summary.disabled_by_config);
+    let _ = writeln!(out, "- policy_blocked: {}\n", summary.policy_blocked);
+
+    if reports.is_empty() {
+        out.push_str("_no sessions_\n");
+        return out;
+    }
+
+    out.push_str("## sessions\n\n");
+    for report in reports {
+        let _ = writeln!(
+            out,
+            "- session: {}\n  - decision: {:?}\n  - activity_count: {}\n  - successful_write_count: {}",
+            report.session_id,
+            report.decision,
+            report.activity_count,
+            report.successful_write_count
+        );
+    }
+    out
 }
 
 /// Decide whether a zero-capture reminder should be surfaced.
@@ -270,5 +354,37 @@ mod tests {
         assert_eq!(report.activity_count, 3);
         assert_eq!(report.successful_write_count, 0);
         assert_eq!(report.decision, ZeroCaptureDecisionCode::EmitNudge);
+    }
+
+    #[test]
+    fn summary_counts_reports_by_decision() {
+        let emit = ZeroCaptureReport::from_decision(
+            &input(),
+            &decide_zero_capture_nudge(&input()),
+        );
+        let mut writes_input = input();
+        writes_input.successful_ingest_writes = 1;
+        let writes = ZeroCaptureReport::from_decision(
+            &writes_input,
+            &decide_zero_capture_nudge(&writes_input),
+        );
+        let summary = ZeroCaptureReportSummary::from_reports(&[emit, writes]);
+        assert_eq!(summary.total, 2);
+        assert_eq!(summary.emit_nudge, 1);
+        assert_eq!(summary.writes_present, 1);
+        assert_eq!(summary.no_meaningful_activity, 0);
+    }
+
+    #[test]
+    fn markdown_report_renders_summary_and_sessions() {
+        let report = ZeroCaptureReport::from_decision(
+            &input(),
+            &decide_zero_capture_nudge(&input()),
+        );
+        let markdown = render_zero_capture_report(&[report]);
+        assert!(markdown.contains("# Zero-capture report"));
+        assert!(markdown.contains("- emit_nudge: 1"));
+        assert!(markdown.contains("session: 01ARZ3NDEKTSV4RRFFQ69G5FAV"));
+        assert!(markdown.contains("successful_write_count: 0"));
     }
 }

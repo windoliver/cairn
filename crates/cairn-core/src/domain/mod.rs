@@ -85,5 +85,6 @@ pub use timestamp::Rfc3339Timestamp;
 pub use trace::{TraceEvent, TraceLink, TraceLinkError};
 pub use zero_capture::{
     ZeroCaptureAuditInput, ZeroCaptureDecision, ZeroCaptureDecisionCode, ZeroCaptureNudge,
-    ZeroCaptureReport, ZeroCaptureSuppression, ZeroCaptureTrigger, decide_zero_capture_nudge,
+    ZeroCaptureReport, ZeroCaptureReportSummary, ZeroCaptureSuppression, ZeroCaptureTrigger,
+    decide_zero_capture_nudge, render_zero_capture_report,
 };
