@@ -6,6 +6,7 @@ use std::sync::Arc;
 use cairn_core::config::CairnConfig;
 use cairn_core::contract::job_store::JobStore;
 use cairn_core::domain::{DomainError, Identity};
+use cairn_workflows::SqliteJobStore;
 use cairn_core::error::wire::envelope_error_for;
 use cairn_core::generated::common::Ulid;
 use cairn_core::generated::envelope::{
@@ -175,6 +176,17 @@ fn retrieve_target(data: &RetrieveData) -> ResponseTarget {
 }
 
 /// Open the shared vault, store, and identity context required by signed verbs.
+///
+/// Opens a `SqliteJobStore` against the same `.cairn/cairn.db` as the memory
+/// store, using a dedicated `rusqlite::Connection`. This lets short-lived CLI
+/// verbs (`capture_trace`, `forget`) enqueue `workflow_jobs` rows that the
+/// scheduler (running inside `cairn mcp serve`) will pick up on next boot.
+/// `SQLite` WAL mode allows the two connections to co-exist without blocking.
+///
+/// If the job-store connection fails (e.g. schema not yet migrated), we
+/// degrade gracefully: `job_store` is set to `None` and the verb continues
+/// without enqueueing. Consolidation jobs will be created on the next
+/// successful `mcp serve` boot.
 pub async fn open_context(
     verb: ResponseVerb,
     vault_root: &Path,
@@ -185,17 +197,43 @@ pub async fn open_context(
         .map_err(|e| aborted(verb, format!("identity open: {e}")))?;
     refuse_if_degraded(&report, report.mismatched_ids.clone())
         .map_err(|e| aborted(verb, format!("vault degraded: {e}")))?;
-    let store = cairn_store_sqlite::open(vault_root.join(".cairn/cairn.db"))
+    let db_path = vault_root.join(".cairn/cairn.db");
+    let store = cairn_store_sqlite::open(&db_path)
         .await
         .map_err(|e| aborted(verb, format!("store open: {e}")))?;
+
+    // Open a second connection for the job store. The async `open` above ran
+    // all migrations (including 0020 which provisions `workflow_jobs`), so
+    // `SqliteJobStore::new` finds the required schema objects. WAL mode allows
+    // both connections to co-exist. Failure is non-fatal: short-lived verbs
+    // degrade to no-enqueue rather than refusing to run.
+    let job_store: Option<Arc<dyn JobStore>> =
+        match rusqlite::Connection::open(&db_path) {
+            Ok(conn) => match SqliteJobStore::new(conn) {
+                Ok(js) => Some(Arc::new(js)),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "job-store init failed — workflow enqueue disabled for this invocation"
+                    );
+                    None
+                }
+            },
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "job-store connection failed — workflow enqueue disabled for this invocation"
+                );
+                None
+            }
+        };
+
     Ok(OpenedVerbContext {
         vault_root: vault_root.to_path_buf(),
         config,
         store,
         identity,
-        // Short-lived CLI verbs do not boot the scheduler; Task 17 will
-        // populate this for the long-lived `mcp serve` path.
-        job_store: None,
+        job_store,
     })
 }
 
