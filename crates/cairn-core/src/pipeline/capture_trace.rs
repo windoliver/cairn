@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use serde_json::{Map as JsonMap, Value as Json};
 
 use crate::domain::{
-    ChainRole, DomainError, EvidenceVector, Provenance, ScopeTuple, TargetId,
+    ChainRole, DomainError, EvidenceVector, Provenance, ScopeTuple, SourceId, TargetId,
     capture::{CaptureEvent, CapturePayload},
     record::{Ed25519Signature, MemoryRecord, RecordId},
     taxonomy::{MemoryClass, MemoryKind, MemoryVisibility},
@@ -218,6 +218,7 @@ pub fn project_with_blocks(
         visibility: MemoryVisibility::Private,
         scope,
         body,
+        source_ids: vec![source_id_from_payload_ref(&event.payload_ref)?],
         provenance: provenance_from_event(event),
         updated_at: event.captured_at.clone(),
         evidence: EvidenceVector::default(),
@@ -245,6 +246,17 @@ pub fn project_pre_compact_snapshot(
     }
 
     project(event, TraceEvent::PreCompact, resolved_body, link)
+}
+
+fn source_id_from_payload_ref(payload_ref: &str) -> Result<SourceId, TraceProjectError> {
+    let stem = payload_ref
+        .rsplit('/')
+        .next()
+        .and_then(|name| name.rsplit_once('.').map(|(stem, _)| stem).or(Some(name)))
+        .ok_or(DomainError::EmptyField {
+            field: "source_ids",
+        })?;
+    SourceId::parse(stem.to_owned()).map_err(TraceProjectError::from)
 }
 
 /// Build a [`Provenance`] from a [`CaptureEvent`].

@@ -145,6 +145,22 @@ fn search_and_retrieve_help_list_include_reasoning_flag() {
 }
 
 #[test]
+fn capture_trace_help_lists_blocks_flag() {
+    let out = cli()
+        .args(["capture_trace", "--help"])
+        .output()
+        .expect("capture_trace --help");
+    assert!(out.status.success(), "exit: {:?}", out.status);
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    for needle in ["--blocks", "--from", "--session"] {
+        assert!(
+            stdout.contains(needle),
+            "capture_trace help missing {needle}: {stdout}",
+        );
+    }
+}
+
+#[test]
 fn repair_delete_requires_reason_and_yes() {
     let missing_yes = cli()
         .args([

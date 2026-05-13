@@ -8,6 +8,7 @@
 pub mod command;
 pub mod config;
 pub mod docgen;
+pub mod doctor;
 pub(crate) mod generated;
 pub mod hooks;
 pub mod identity;

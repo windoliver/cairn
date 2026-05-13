@@ -8,7 +8,7 @@
 use std::io::Write;
 use std::process::ExitCode;
 
-use cairn_cli::{command, hooks, identity, plugins, repair, verbs};
+use cairn_cli::{command, doctor, hooks, identity, plugins, repair, verbs};
 use cairn_core::contract::registry::PluginError;
 use clap::ArgMatches;
 
@@ -253,6 +253,7 @@ fn main() -> ExitCode {
         Some(("handshake", sub)) => run_handshake(sub, explicit_vault.as_deref()),
         Some(("plugins", sub)) => run_plugins(sub),
         Some(("bootstrap", sub)) => run_bootstrap(sub),
+        Some(("doctor", sub)) => doctor::run(sub),
         Some(("mcp", _sub)) => {
             let (vault_root, source, config) =
                 match resolve_vault_and_config(explicit_vault.as_deref()) {

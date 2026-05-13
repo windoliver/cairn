@@ -329,6 +329,9 @@ fn sample_record(body: &str) -> MemoryRecord {
             ..ScopeTuple::default()
         },
         body: body.to_owned(),
+        source_ids: vec![
+            crate::domain::SourceId::parse("01HQZX9F5N0000000000000001").expect("valid source id"),
+        ],
         provenance: Provenance {
             source_sensor: Identity::parse("snr:local:hook:cc-session:v1").expect("valid identity"),
             created_at: Rfc3339Timestamp::parse("2026-04-22T14:02:11Z").expect("valid timestamp"),

@@ -8,6 +8,7 @@ Implemented today:
 - `status` reports contract and runtime status.
 - `handshake` returns the contract prelude handshake.
 - `bootstrap` writes the vault `.cairn/` layout.
+- `doctor claude-code` verifies the v0.1 reference-consumer setup end to end.
 - `vault add`, `vault list`, `vault switch`, and `vault remove` manage the
   local vault registry.
 - `plugins list` shows bundled plugin registrations.

@@ -16,7 +16,7 @@ use crate::contract::memory_store::{
 };
 use crate::domain::filter::{ValidatedFilter, validate_filter};
 use crate::domain::record::MemoryRecord;
-use crate::domain::taxonomy::MemoryVisibility;
+use crate::domain::taxonomy::{MemoryKind, MemoryVisibility};
 use crate::domain::{BodyHash, ScopeTuple};
 use crate::generated::verbs::search::SearchArgsFilters;
 use crate::pipeline::explain::{Candidate as ExplainCandidate, ExplainConfig, explain_filter};
@@ -94,6 +94,13 @@ fn candidate_has_reasoning(candidate: &SearchCandidate) -> bool {
     let Ok(record_json) = serde_json::from_str::<serde_json::Value>(&candidate.record_json) else {
         return true;
     };
+    if record_json
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|kind| kind == MemoryKind::Reasoning.as_str())
+    {
+        return true;
+    }
     let Some(trace_blocks) = record_json
         .get("extra_frontmatter")
         .and_then(|value| value.get("trace_blocks"))
@@ -1401,6 +1408,7 @@ mod tests {
                         self.id_prefix,
                         0,
                         &serde_json::json!({
+                            "kind": "trace",
                             "extra_frontmatter": {
                                 "trace_blocks": [
                                     {"kind": "reasoning", "text": "private chain"}
@@ -1408,7 +1416,14 @@ mod tests {
                             }
                         }),
                     ),
-                    reasoning_candidate(self.id_prefix, 1, &serde_json::json!({})),
+                    reasoning_candidate(
+                        self.id_prefix,
+                        1,
+                        &serde_json::json!({
+                            "kind": "reasoning"
+                        }),
+                    ),
+                    reasoning_candidate(self.id_prefix, 2, &serde_json::json!({})),
                 ],
                 next_cursor: None,
                 explain: None,
@@ -1447,7 +1462,7 @@ mod tests {
             1,
             "reasoning result should be filtered"
         );
-        assert_eq!(outcome.candidates[0].snippet, "candidate-1");
+        assert_eq!(outcome.candidates[0].snippet, "candidate-2");
     }
 
     #[tokio::test]
@@ -1468,7 +1483,7 @@ mod tests {
 
         assert_eq!(
             outcome.candidates.len(),
-            2,
+            3,
             "opt-in should keep reasoning result"
         );
     }
