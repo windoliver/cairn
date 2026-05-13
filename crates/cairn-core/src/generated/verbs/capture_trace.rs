@@ -13,17 +13,57 @@ pub struct FailedTurn {
     pub turn_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CaptureTraceArgs {
-    /// Path to the trace log or transcript file.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub from: Option<String>,
     /// Path to a JSON file containing a Vec<TraceBlock>. Accepts optional @path syntax.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocks: Option<String>,
+    /// Path to the trace log or transcript file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+}
+
+impl CaptureTraceArgs {
+    /// Enforce exactly-one-of presence across each XOR group declared in the IDL `oneOf`.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if (self.blocks.is_some() as u8 + self.from.is_some() as u8 + self.session_id.is_some() as u8) != 1 { return Err("exactly one of [blocks, from, session_id] is required"); }
+        Ok(())
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCaptureTraceArgs {
+    /// Path to a JSON file containing a Vec<TraceBlock>. Accepts optional @path syntax.
+    #[serde(default)]
+    blocks: Option<String>,
+    /// Path to the trace log or transcript file.
+    #[serde(default)]
+    from: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+}
+
+impl ::core::convert::TryFrom<RawCaptureTraceArgs> for CaptureTraceArgs {
+    type Error = &'static str;
+    fn try_from(raw: RawCaptureTraceArgs) -> Result<Self, Self::Error> {
+        if (raw.blocks.is_some() as u8 + raw.from.is_some() as u8 + raw.session_id.is_some() as u8) != 1 { return Err("exactly one of [blocks, from, session_id] is required"); }
+        Ok(Self {
+            blocks: raw.blocks,
+            from: raw.from,
+            session_id: raw.session_id,
+        })
+    }
+}
+
+impl<'de> ::serde::Deserialize<'de> for CaptureTraceArgs {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: ::serde::Deserializer<'de> {
+        let raw = RawCaptureTraceArgs::deserialize(deserializer)?;
+        Self::try_from(raw).map_err(::serde::de::Error::custom)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

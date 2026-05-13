@@ -564,10 +564,12 @@ fn summarize_returns_committed_envelope() {
     assert_eq!(v["status"], "committed");
     assert_eq!(v["verb"], "summarize");
     assert!(v["error"].is_null());
-    assert!(v["data"]["summary"]
-        .as_str()
-        .expect("summary")
-        .contains("summarize envelope body"));
+    assert!(
+        v["data"]["summary"]
+            .as_str()
+            .expect("summary")
+            .contains("summarize envelope body")
+    );
     assert!(v["operation_id"].is_string());
     assert!(v["policy_trace"].is_array());
 }

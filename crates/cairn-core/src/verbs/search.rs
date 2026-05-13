@@ -16,7 +16,7 @@ use crate::contract::memory_store::{
 };
 use crate::domain::filter::{ValidatedFilter, validate_filter};
 use crate::domain::record::MemoryRecord;
-use crate::domain::taxonomy::{MemoryVisibility, MemoryKind};
+use crate::domain::taxonomy::{MemoryKind, MemoryVisibility};
 use crate::domain::{BodyHash, ScopeTuple};
 use crate::generated::verbs::search::SearchArgsFilters;
 use crate::pipeline::explain::{Candidate as ExplainCandidate, ExplainConfig, explain_filter};

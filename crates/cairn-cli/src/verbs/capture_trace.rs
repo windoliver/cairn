@@ -31,8 +31,7 @@ use cairn_core::domain::capture::{
 };
 use cairn_core::domain::trace::{TraceBlock, TraceEvent, TraceLink};
 use cairn_core::domain::{
-    ActorChainEntry, CaptureEventId, ChainRole, Identity, Rfc3339Timestamp, ScopeTuple,
-    SessionId,
+    ActorChainEntry, CaptureEventId, ChainRole, Identity, Rfc3339Timestamp, ScopeTuple, SessionId,
 };
 use cairn_core::generated::common::Ulid as WireUlid;
 use cairn_core::generated::envelope::{
@@ -609,8 +608,8 @@ async fn run_blocks_handler_inner(
     );
     let turn_id = stable_turn_id(&import_id);
     let payload_ref = persist_trace_blocks_source(vault_root, &import_id, &raw_blocks).await?;
-    let payload_hash =
-        PayloadHash::parse(format!("sha256:{}", sha256_hex(&raw_blocks))).map_err(anyhow::Error::msg)?;
+    let payload_hash = PayloadHash::parse(format!("sha256:{}", sha256_hex(&raw_blocks)))
+        .map_err(anyhow::Error::msg)?;
     let captured_at = chrono::Utc::now();
     let mut policy_trace_entries = Vec::new();
     let mut projected = Vec::with_capacity(blocks.len());
@@ -934,7 +933,10 @@ fn block_body(block: &TraceBlock) -> String {
     match block {
         TraceBlock::Reasoning { text, .. } | TraceBlock::Text { text } => text.clone(),
         TraceBlock::ToolUse { tool, input, .. } => {
-            format!("{tool}\n{}", serde_json::to_string(input).unwrap_or_default())
+            format!(
+                "{tool}\n{}",
+                serde_json::to_string(input).unwrap_or_default()
+            )
         }
         TraceBlock::ToolResult { content, .. } => content.clone(),
     }

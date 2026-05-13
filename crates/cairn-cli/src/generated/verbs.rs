@@ -95,7 +95,6 @@ pub fn capture_trace_subcommand() -> clap::Command {
         .arg(clap::Arg::new("from").long("from").value_name("PATH").value_parser(clap::builder::PathBufValueParser::new()))
         .arg(clap::Arg::new("blocks").long("blocks").value_name("PATH").value_parser(clap::builder::PathBufValueParser::new()))
         .arg(clap::Arg::new("session_id").long("session").value_name("STRING"))
-        .group(clap::ArgGroup::new("capture_trace_input").required(true).multiple(false).arg("from").arg("blocks"))
 }
 
 /// `cairn lint` subcommand builder.
