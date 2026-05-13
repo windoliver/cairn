@@ -14,5 +14,5 @@ patch = 0
 [features]
 fts = false
 vector = false
-graph_edges = false
-transactions = false
+graph_edges = true
+transactions = true

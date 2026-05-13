@@ -27,7 +27,8 @@ expression: "&c"
         "active_playbook",
         "recent_user_signal"
       ],
-      "max_bytes": 25600
+      "max_bytes": 25600,
+      "god_node_weight": 0.3
     },
     "retention": {},
     "schema_files": [

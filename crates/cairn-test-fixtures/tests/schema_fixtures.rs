@@ -35,6 +35,7 @@ fn v0_directory_structure_exists() {
         "envelopes",
         "search-filters",
         "manifests",
+        "hot-memory",
     ] {
         let p = base.join(sub);
         assert!(p.is_dir(), "fixtures/v0/{sub} must be a directory: {p:?}");

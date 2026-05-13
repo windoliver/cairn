@@ -9,7 +9,7 @@ expression: json
         "extensions": false,
         "http_streamable": false,
         "sse": false,
-        "stdio": false
+        "stdio": true
       },
       "contract": "MCPServer",
       "contract_version_range": {
@@ -36,8 +36,8 @@ expression: json
     {
       "capabilities": {
         "fts": false,
-        "graph_edges": false,
-        "transactions": false,
+        "graph_edges": true,
+        "transactions": true,
         "vector": false
       },
       "contract": "MemoryStore",
