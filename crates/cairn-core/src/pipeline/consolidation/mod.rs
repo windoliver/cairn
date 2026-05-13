@@ -6,6 +6,6 @@ pub mod draft;
 pub mod errors;
 pub mod window;
 
-pub use draft::{compute_rolling_summary, RollingSummaryDraft, SummaryStatus};
+pub use draft::{RollingSummaryDraft, SummaryStatus, compute_rolling_summary};
 pub use errors::ConsolidationError;
-pub use window::{pick_window, TurnHeader, WindowSelection};
+pub use window::{TurnHeader, WindowSelection, pick_window};

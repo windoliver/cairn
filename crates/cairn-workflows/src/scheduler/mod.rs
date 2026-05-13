@@ -6,12 +6,14 @@ pub mod reaper;
 pub mod worker;
 
 pub use clock::{Clock, MockClock, SystemClock};
-pub use handler::{HandlerDispatchError, HandlerOutcome, HandlerRegistry, HandlerRegistryBuilder, JobHandler};
-pub use reaper::{run_reaper, ReaperConfig};
-pub use worker::{run_worker, WorkerConfig};
+pub use handler::{
+    HandlerDispatchError, HandlerOutcome, HandlerRegistry, HandlerRegistryBuilder, JobHandler,
+};
+pub use reaper::{ReaperConfig, run_reaper};
+pub use worker::{WorkerConfig, run_worker};
 
-use std::sync::Arc;
 use cairn_core::contract::job_store::JobStore;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -31,7 +33,11 @@ impl SchedulerConfig {
     #[must_use]
     pub const fn p0() -> Self {
         Self {
-            worker: WorkerConfig { lease_ms: 30_000, heartbeat_every_ms: 10_000, idle_poll_ms: 200 },
+            worker: WorkerConfig {
+                lease_ms: 30_000,
+                heartbeat_every_ms: 10_000,
+                idle_poll_ms: 200,
+            },
             reaper: ReaperConfig { interval_ms: 5_000 },
             worker_count: 2,
         }
@@ -80,8 +86,8 @@ impl Scheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sqlite_store::install_for_tests;
     use crate::SqliteJobStore;
+    use crate::sqlite_store::install_for_tests;
     use rusqlite::Connection;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -32,10 +32,8 @@ pub fn select(inputs: &HotMemoryInputs<'_>) -> LoadedSegment {
     // Group admissible candidates by session_id, collecting traces.
     // We need two passes: first collect per-session admissible records,
     // then apply the per-session TOP-K cap.
-    let mut by_session: std::collections::BTreeMap<
-        String,
-        Vec<(InclusionTrace, &MemoryRecord)>,
-    > = std::collections::BTreeMap::new();
+    let mut by_session: std::collections::BTreeMap<String, Vec<(InclusionTrace, &MemoryRecord)>> =
+        std::collections::BTreeMap::new();
     let mut excluded: Vec<ExclusionTrace> = Vec::new();
 
     for &record in inputs.rolling_summary_candidates {
@@ -64,17 +62,14 @@ pub fn select(inputs: &HotMemoryInputs<'_>) -> LoadedSegment {
             });
             continue;
         }
-        by_session
-            .entry(session)
-            .or_default()
-            .push((
-                InclusionTrace {
-                    record_id: record.id.clone(),
-                    score: 0.0,
-                    note: "newest rolling summary per session",
-                },
-                record,
-            ));
+        by_session.entry(session).or_default().push((
+            InclusionTrace {
+                record_id: record.id.clone(),
+                score: 0.0,
+                note: "newest rolling summary per session",
+            },
+            record,
+        ));
     }
 
     // For each session: sort newest-first, take up to MAX_PER_SESSION,
@@ -114,10 +109,10 @@ pub fn select(inputs: &HotMemoryInputs<'_>) -> LoadedSegment {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::Rfc3339Timestamp;
     use crate::domain::record::tests_export::sample_record;
     use crate::domain::scope::ScopeTuple;
     use crate::domain::taxonomy::MemoryVisibility;
-    use crate::domain::Rfc3339Timestamp;
 
     fn summary(session: &str, updated_at: &str) -> MemoryRecord {
         let mut r = sample_record();

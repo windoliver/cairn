@@ -60,7 +60,10 @@ pub fn pick_window(
     let take = (window_size as usize).min(filtered.len());
     let turns = filtered.into_iter().take(take).collect::<Vec<_>>();
     let last_sequence = turns.last().map(|t| t.sequence)?;
-    Some(WindowSelection { turns, last_sequence })
+    Some(WindowSelection {
+        turns,
+        last_sequence,
+    })
 }
 
 #[cfg(test)]
@@ -82,15 +85,27 @@ mod tests {
     fn picks_ascending_window() {
         let pool: Vec<_> = (1..=10).map(|s| turn(s, 0.7)).collect();
         let sel = pick_window(&pool, 0, 4, 2, 0.4).expect("eligible");
-        assert_eq!(sel.turns.iter().map(|t| t.sequence).collect::<Vec<_>>(), vec![1, 2, 3, 4]);
+        assert_eq!(
+            sel.turns.iter().map(|t| t.sequence).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
         assert_eq!(sel.last_sequence, 4);
     }
 
     #[test]
     fn skips_below_floor() {
-        let pool = vec![turn(1, 0.2), turn(2, 0.6), turn(3, 0.7), turn(4, 0.1), turn(5, 0.8)];
+        let pool = vec![
+            turn(1, 0.2),
+            turn(2, 0.6),
+            turn(3, 0.7),
+            turn(4, 0.1),
+            turn(5, 0.8),
+        ];
         let sel = pick_window(&pool, 0, 8, 2, 0.4).expect("eligible");
-        assert_eq!(sel.turns.iter().map(|t| t.sequence).collect::<Vec<_>>(), vec![2, 3, 5]);
+        assert_eq!(
+            sel.turns.iter().map(|t| t.sequence).collect::<Vec<_>>(),
+            vec![2, 3, 5]
+        );
     }
 
     #[test]
@@ -103,6 +118,9 @@ mod tests {
     fn skips_already_covered() {
         let pool: Vec<_> = (1..=6).map(|s| turn(s, 0.7)).collect();
         let sel = pick_window(&pool, 3, 4, 2, 0.4).expect("eligible");
-        assert_eq!(sel.turns.iter().map(|t| t.sequence).collect::<Vec<_>>(), vec![4, 5, 6]);
+        assert_eq!(
+            sel.turns.iter().map(|t| t.sequence).collect::<Vec<_>>(),
+            vec![4, 5, 6]
+        );
     }
 }

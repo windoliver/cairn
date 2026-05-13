@@ -50,8 +50,8 @@ pub async fn run_reaper(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scheduler::MockClock;
     use crate::SqliteJobStore;
+    use crate::scheduler::MockClock;
     use rusqlite::Connection;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

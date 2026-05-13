@@ -50,10 +50,7 @@ pub fn sample_turn_summary(session: &str, sequence: u32) -> MemoryRecord {
     );
     trace_obj.insert("turn_id".into(), Json::String(turn_id.clone()));
     // Use the caller-supplied sequence so list_trace_turns paging works.
-    trace_obj.insert(
-        "sequence".into(),
-        Json::Number(u64::from(sequence).into()),
-    );
+    trace_obj.insert("sequence".into(), Json::Number(u64::from(sequence).into()));
     // capture_event_id for a summary equals its deterministic record id.
     trace_obj.insert(
         "capture_event_id".into(),

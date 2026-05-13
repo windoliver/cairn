@@ -243,7 +243,10 @@ mod remediation_tests {
         let hint = REMEDIATION
             .iter()
             .find(|(code, _)| *code == "consolidation.unavailable");
-        assert!(hint.is_some(), "remediation hint for consolidation must exist");
+        assert!(
+            hint.is_some(),
+            "remediation hint for consolidation must exist"
+        );
     }
 
     #[test]

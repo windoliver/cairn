@@ -28,7 +28,11 @@ pub struct WorkerConfig {
 
 impl Default for WorkerConfig {
     fn default() -> Self {
-        Self { lease_ms: 30_000, heartbeat_every_ms: 10_000, idle_poll_ms: 200 }
+        Self {
+            lease_ms: 30_000,
+            heartbeat_every_ms: 10_000,
+            idle_poll_ms: 200,
+        }
     }
 }
 
@@ -79,7 +83,15 @@ async fn execute_one(
         Err(e) => {
             warn!(error = %e, job = %leased.job_id, "no handler; permanent fail");
             let now = clock.now_ms();
-            let _ = store.fail(&leased.job_id, &leased.lease, FailDisposition::Permanent, &e.to_string(), now).await;
+            let _ = store
+                .fail(
+                    &leased.job_id,
+                    &leased.lease,
+                    FailDisposition::Permanent,
+                    &e.to_string(),
+                    now,
+                )
+                .await;
             return;
         }
     };
@@ -121,10 +133,26 @@ async fn execute_one(
     let result = match outcome {
         HandlerOutcome::Done => store.complete(&leased.job_id, &leased.lease, now).await,
         HandlerOutcome::Retry { reason } => {
-            store.fail(&leased.job_id, &leased.lease, FailDisposition::Retry, &reason, now).await
+            store
+                .fail(
+                    &leased.job_id,
+                    &leased.lease,
+                    FailDisposition::Retry,
+                    &reason,
+                    now,
+                )
+                .await
         }
         HandlerOutcome::Permanent { reason } => {
-            store.fail(&leased.job_id, &leased.lease, FailDisposition::Permanent, &reason, now).await
+            store
+                .fail(
+                    &leased.job_id,
+                    &leased.lease,
+                    FailDisposition::Permanent,
+                    &reason,
+                    now,
+                )
+                .await
         }
     };
     if let Err(e) = result {
@@ -135,16 +163,20 @@ async fn execute_one(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scheduler::{HandlerRegistryBuilder, JobHandler, MockClock};
-    use cairn_core::contract::job_store::{EnqueueRequest, JobId, JobKind, JobPayload, RetryPolicy};
     use crate::SqliteJobStore;
+    use crate::scheduler::{HandlerRegistryBuilder, JobHandler, MockClock};
+    use cairn_core::contract::job_store::{
+        EnqueueRequest, JobId, JobKind, JobPayload, RetryPolicy,
+    };
     use rusqlite::Connection;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct Counter(Arc<AtomicUsize>);
     #[async_trait::async_trait]
     impl JobHandler for Counter {
-        fn kind(&self) -> JobKind { JobKind::new("counter") }
+        fn kind(&self) -> JobKind {
+            JobKind::new("counter")
+        }
         async fn handle(&self, _: &JobPayload) -> HandlerOutcome {
             self.0.fetch_add(1, Ordering::SeqCst);
             HandlerOutcome::Done
@@ -167,19 +199,33 @@ mod tests {
         let clock = Arc::new(MockClock::at(1_000)) as Arc<dyn Clock>;
         let cancel = CancellationToken::new();
 
-        store.enqueue(EnqueueRequest {
-            job_id: JobId::new("j-1"),
-            kind: JobKind::new("counter"),
-            payload: vec![],
-            queue_key: None,
-            dedupe_key: None,
-            not_before_ms: 0,
-            retry: RetryPolicy::DEFAULT,
-        }).await.unwrap();
+        store
+            .enqueue(EnqueueRequest {
+                job_id: JobId::new("j-1"),
+                kind: JobKind::new("counter"),
+                payload: vec![],
+                queue_key: None,
+                dedupe_key: None,
+                not_before_ms: 0,
+                retry: RetryPolicy::DEFAULT,
+            })
+            .await
+            .unwrap();
 
         let token = cancel.clone();
-        let config = WorkerConfig { lease_ms: 30_000, heartbeat_every_ms: 10_000, idle_poll_ms: 50 };
-        let handle = tokio::spawn(run_worker("w-1".into(), store.clone(), registry, clock.clone(), token, config));
+        let config = WorkerConfig {
+            lease_ms: 30_000,
+            heartbeat_every_ms: 10_000,
+            idle_poll_ms: 50,
+        };
+        let handle = tokio::spawn(run_worker(
+            "w-1".into(),
+            store.clone(),
+            registry,
+            clock.clone(),
+            token,
+            config,
+        ));
         // Poll until the handler has been called, with a generous timeout.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while counter.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {

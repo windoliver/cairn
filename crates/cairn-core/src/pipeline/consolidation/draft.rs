@@ -114,18 +114,29 @@ mod tests {
 
     #[test]
     fn authored_body_includes_each_turn_id() {
-        let win = WindowSelection { turns: vec![turn(1), turn(2), turn(3)], last_sequence: 3 };
+        let win = WindowSelection {
+            turns: vec![turn(1), turn(2), turn(3)],
+            last_sequence: 3,
+        };
         let draft = compute_rolling_summary(&win, &ConsolidationConfig::default()).unwrap();
         assert_eq!(draft.status, SummaryStatus::Authored);
-        assert!(draft.body.contains("t-1") && draft.body.contains("t-2") && draft.body.contains("t-3"));
+        assert!(
+            draft.body.contains("t-1") && draft.body.contains("t-2") && draft.body.contains("t-3")
+        );
         assert_eq!(draft.source_record_ids, vec!["rec-1", "rec-2", "rec-3"]);
         assert_eq!(draft.last_sequence, 3);
     }
 
     #[test]
     fn deferred_when_disabled() {
-        let win = WindowSelection { turns: vec![turn(1), turn(2)], last_sequence: 2 };
-        let cfg = ConsolidationConfig { enabled: false, ..ConsolidationConfig::default() };
+        let win = WindowSelection {
+            turns: vec![turn(1), turn(2)],
+            last_sequence: 2,
+        };
+        let cfg = ConsolidationConfig {
+            enabled: false,
+            ..ConsolidationConfig::default()
+        };
         let draft = compute_rolling_summary(&win, &cfg).unwrap();
         assert_eq!(draft.status, SummaryStatus::Deferred);
         assert!(draft.body.is_empty());
@@ -134,7 +145,10 @@ mod tests {
 
     #[test]
     fn empty_window_errors() {
-        let win = WindowSelection { turns: vec![], last_sequence: 0 };
+        let win = WindowSelection {
+            turns: vec![],
+            last_sequence: 0,
+        };
         assert!(matches!(
             compute_rolling_summary(&win, &ConsolidationConfig::default()),
             Err(ConsolidationError::EmptyWindow)
@@ -144,8 +158,14 @@ mod tests {
     #[test]
     fn respects_token_budget_floor() {
         let many: Vec<_> = (1..=200).map(turn).collect();
-        let win = WindowSelection { turns: many, last_sequence: 200 };
-        let cfg = ConsolidationConfig { token_budget: 32, ..ConsolidationConfig::default() };
+        let win = WindowSelection {
+            turns: many,
+            last_sequence: 200,
+        };
+        let cfg = ConsolidationConfig {
+            token_budget: 32,
+            ..ConsolidationConfig::default()
+        };
         let draft = compute_rolling_summary(&win, &cfg).unwrap();
         assert!(draft.body.len() <= 32 * 4 + 4); // +4 for truncation marker
         assert_eq!(draft.status, SummaryStatus::Authored);

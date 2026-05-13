@@ -12,11 +12,11 @@ use std::sync::Arc;
 use cairn_core::config::CairnConfig;
 use cairn_core::domain::ScopeTuple;
 use cairn_core::mcp_auth::{ConfigBackedScope, McpSessionScope};
+use cairn_workflows::scheduler::HandlerRegistryBuilder;
 use cairn_workflows::{
     ConsolidationForgetCleanupHandler, ConsolidationHandler, Scheduler, SchedulerConfig,
     SqliteJobStore, SystemClock,
 };
-use cairn_workflows::scheduler::HandlerRegistryBuilder;
 
 /// Outcome of resolving the `[mcp.stdio]` block into runtime components.
 pub struct ResolvedMcpScope {
@@ -142,9 +142,9 @@ pub fn run(
                             eprintln!("cairn mcp: failed to open SQLite store: {e}");
                             // Return an Err so the outer `match result` prints
                             // the exit code consistently.
-                            return Err(cairn_mcp::TransportError::Service(
-                                format!("store open: {e}"),
-                            ));
+                            return Err(cairn_mcp::TransportError::Service(format!(
+                                "store open: {e}"
+                            )));
                         }
                     };
 
@@ -160,9 +160,9 @@ pub fn run(
                     Ok(c) => c,
                     Err(e) => {
                         eprintln!("cairn mcp: failed to open job-store connection: {e}");
-                        return Err(cairn_mcp::TransportError::Service(
-                            format!("job-store connection: {e}"),
-                        ));
+                        return Err(cairn_mcp::TransportError::Service(format!(
+                            "job-store connection: {e}"
+                        )));
                     }
                 };
                 let job_store: Arc<dyn cairn_core::contract::job_store::JobStore> =
@@ -170,9 +170,9 @@ pub fn run(
                         Ok(s) => Arc::new(s),
                         Err(e) => {
                             eprintln!("cairn mcp: failed to initialize job store: {e}");
-                            return Err(cairn_mcp::TransportError::Service(
-                                format!("job-store init: {e}"),
-                            ));
+                            return Err(cairn_mcp::TransportError::Service(format!(
+                                "job-store init: {e}"
+                            )));
                         }
                     };
 

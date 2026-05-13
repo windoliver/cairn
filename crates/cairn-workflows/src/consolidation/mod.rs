@@ -6,8 +6,8 @@ pub mod payload;
 pub mod trigger;
 
 pub use forget_cleanup::{
-    ConsolidationForgetCleanupHandler, ForgetCleanupPayload, FORGET_CLEANUP_KIND,
+    ConsolidationForgetCleanupHandler, FORGET_CLEANUP_KIND, ForgetCleanupPayload,
 };
-pub use handler::{ConsolidationHandler, CONSOLIDATION_KIND};
+pub use handler::{CONSOLIDATION_KIND, ConsolidationHandler};
 pub use payload::ConsolidationPayload;
 pub use trigger::{EnqueueDecision, enqueue_if_due};

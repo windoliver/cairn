@@ -2,8 +2,8 @@
 //! `now_ms: i64` on every call; the scheduler owns the canonical
 //! source of time. Tests use [`MockClock`] to drive lease expiry.
 
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Source of wall-clock milliseconds.
@@ -18,7 +18,9 @@ pub struct SystemClock;
 
 impl Clock for SystemClock {
     fn now_ms(&self) -> i64 {
-        let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+        let d = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
         i64::try_from(d.as_millis()).unwrap_or(i64::MAX)
     }
 }

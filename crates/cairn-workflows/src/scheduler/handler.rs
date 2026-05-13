@@ -61,15 +61,19 @@ impl HandlerRegistryBuilder {
     #[must_use]
     pub fn with(mut self, handler: Arc<dyn JobHandler>) -> Self {
         let k = handler.kind();
-        debug_assert!(!self.handlers.contains_key(&k),
-            "duplicate handler for kind {k:?}");
+        debug_assert!(
+            !self.handlers.contains_key(&k),
+            "duplicate handler for kind {k:?}"
+        );
         self.handlers.insert(k, handler);
         self
     }
     /// Freeze the builder into a shareable registry.
     #[must_use]
     pub fn build(self) -> HandlerRegistry {
-        HandlerRegistry { handlers: Arc::new(self.handlers) }
+        HandlerRegistry {
+            handlers: Arc::new(self.handlers),
+        }
     }
 }
 
@@ -93,8 +97,12 @@ mod tests {
     struct Noop;
     #[async_trait::async_trait]
     impl JobHandler for Noop {
-        fn kind(&self) -> JobKind { JobKind::new("noop") }
-        async fn handle(&self, _: &JobPayload) -> HandlerOutcome { HandlerOutcome::Done }
+        fn kind(&self) -> JobKind {
+            JobKind::new("noop")
+        }
+        async fn handle(&self, _: &JobPayload) -> HandlerOutcome {
+            HandlerOutcome::Done
+        }
     }
 
     #[tokio::test]

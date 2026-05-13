@@ -230,8 +230,8 @@ fn stable_target_id(
 
 /// SHA-256 of `bytes`, returned as lowercase hex.
 fn sha256_hex(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
     use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
     let digest = Sha256::digest(bytes);
     digest.iter().fold(String::with_capacity(64), |mut acc, b| {
         let _ = write!(acc, "{b:02x}");
@@ -323,16 +323,17 @@ mod tests {
 
         let cfg = ConsolidationConfig::default();
         let h = ConsolidationHandler::new(store.clone(), cfg);
-        let payload =
-            ConsolidationPayload { session_id: SESSION_S1.to_owned(), since_sequence: 0 };
+        let payload = ConsolidationPayload {
+            session_id: SESSION_S1.to_owned(),
+            since_sequence: 0,
+        };
         let outcome = h.handle(&payload.to_bytes().expect("encode")).await;
         assert_eq!(outcome, HandlerOutcome::Done);
 
         // Confirm a reasoning record was written for this session.
         let listed = store.list(&ListArgs::default()).await.expect("list");
         let any_summary = listed.records.iter().any(|r| {
-            r.kind == MemoryKind::Reasoning
-                && r.extra_frontmatter.contains_key("consolidation")
+            r.kind == MemoryKind::Reasoning && r.extra_frontmatter.contains_key("consolidation")
         });
         assert!(any_summary, "summary record not emitted");
     }
@@ -352,8 +353,10 @@ mod tests {
         }
 
         let h = ConsolidationHandler::new(store.clone(), ConsolidationConfig::default());
-        let payload =
-            ConsolidationPayload { session_id: SESSION_S2.to_owned(), since_sequence: 0 };
+        let payload = ConsolidationPayload {
+            session_id: SESSION_S2.to_owned(),
+            since_sequence: 0,
+        };
         let bytes = payload.to_bytes().expect("encode");
 
         // Run twice.
@@ -366,6 +369,9 @@ mod tests {
             .iter()
             .filter(|r| r.kind == MemoryKind::Reasoning)
             .count();
-        assert_eq!(count, 1, "second handler call must be a no-op via body-hash dedup");
+        assert_eq!(
+            count, 1,
+            "second handler call must be a no-op via body-hash dedup"
+        );
     }
 }

@@ -53,18 +53,15 @@ impl SqliteMemoryStore {
                 ";
                 let mut stmt = c.prepare_cached(SQL)?;
                 let rows: Result<Vec<_>, rusqlite::Error> = stmt
-                    .query_map(
-                        params![session_id, since_sequence, limit],
-                        |row| {
-                            Ok((
-                                row.get::<_, String>(0)?,  // record_id
-                                row.get::<_, String>(1)?,  // trace_session_id
-                                row.get::<_, String>(2)?,  // trace_turn_id
-                                row.get::<_, u32>(3)?,     // trace_sequence
-                                row.get::<_, u32>(4)?,     // body_len (approx chars / 4 tokens)
-                            ))
-                        },
-                    )?
+                    .query_map(params![session_id, since_sequence, limit], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?, // record_id
+                            row.get::<_, String>(1)?, // trace_session_id
+                            row.get::<_, String>(2)?, // trace_turn_id
+                            row.get::<_, u32>(3)?,    // trace_sequence
+                            row.get::<_, u32>(4)?,    // body_len (approx chars / 4 tokens)
+                        ))
+                    })?
                     .collect();
                 Ok(rows?)
             })
@@ -72,16 +69,18 @@ impl SqliteMemoryStore {
 
         let headers = rows
             .into_iter()
-            .map(|(record_id, session_id, turn_id, sequence, body_len)| TurnHeader {
-                record_id,
-                session_id,
-                turn_id,
-                sequence,
-                // Approximate token count: characters / 4.
-                approx_tokens: body_len / 4,
-                // Constant baseline — real salience scoring is a separate workstream.
-                salience: 0.5,
-            })
+            .map(
+                |(record_id, session_id, turn_id, sequence, body_len)| TurnHeader {
+                    record_id,
+                    session_id,
+                    turn_id,
+                    sequence,
+                    // Approximate token count: characters / 4.
+                    approx_tokens: body_len / 4,
+                    // Constant baseline — real salience scoring is a separate workstream.
+                    salience: 0.5,
+                },
+            )
             .collect();
 
         Ok(headers)
@@ -122,9 +121,9 @@ impl SqliteMemoryStore {
                       )
                 ";
                 let mut stmt = c.prepare_cached(SQL)?;
-                let rows: Result<Vec<String>, rusqlite::Error> =
-                    stmt.query_map(params![source_id], |row| row.get::<_, String>(0))?
-                        .collect();
+                let rows: Result<Vec<String>, rusqlite::Error> = stmt
+                    .query_map(params![source_id], |row| row.get::<_, String>(0))?
+                    .collect();
                 Ok(rows?)
             })
             .await?;

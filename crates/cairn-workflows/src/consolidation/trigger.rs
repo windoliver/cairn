@@ -6,7 +6,7 @@ use cairn_core::contract::job_store::{
     EnqueueRequest, JobId, JobKind, JobStore, JobStoreError, RetryPolicy,
 };
 
-use super::{ConsolidationPayload, CONSOLIDATION_KIND};
+use super::{CONSOLIDATION_KIND, ConsolidationPayload};
 
 /// Outcome of a single [`enqueue_if_due`] call.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,10 +60,18 @@ pub async fn enqueue_if_due(
     }
     let new_turns = latest_sequence.saturating_sub(since_sequence);
     if new_turns < config.min_turns_for_trigger {
-        return Ok(EnqueueDecision::NotDue { latest_sequence, since_sequence });
+        return Ok(EnqueueDecision::NotDue {
+            latest_sequence,
+            since_sequence,
+        });
     }
-    let payload = ConsolidationPayload { session_id: session_id.to_owned(), since_sequence };
-    let bytes = payload.to_bytes().map_err(|e| JobStoreError::Backend(e.to_string()))?;
+    let payload = ConsolidationPayload {
+        session_id: session_id.to_owned(),
+        since_sequence,
+    };
+    let bytes = payload
+        .to_bytes()
+        .map_err(|e| JobStoreError::Backend(e.to_string()))?;
     let job_id = JobId::new(format!("consolidate:{session_id}:{since_sequence}"));
     let req = EnqueueRequest {
         job_id: job_id.clone(),
@@ -87,8 +95,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::sqlite_store::install_for_tests;
     use crate::SqliteJobStore;
+    use crate::sqlite_store::install_for_tests;
     use rusqlite::Connection;
 
     fn store() -> Arc<dyn JobStore> {
@@ -101,7 +109,9 @@ mod tests {
     async fn not_due_below_threshold() {
         let s = store();
         let cfg = ConsolidationConfig::default();
-        let d = enqueue_if_due(&*s, &cfg, "s1", 2, 0, 1_000).await.expect("ok");
+        let d = enqueue_if_due(&*s, &cfg, "s1", 2, 0, 1_000)
+            .await
+            .expect("ok");
         assert!(matches!(d, EnqueueDecision::NotDue { .. }));
     }
 
@@ -109,7 +119,9 @@ mod tests {
     async fn enqueues_when_due() {
         let s = store();
         let cfg = ConsolidationConfig::default();
-        let d = enqueue_if_due(&*s, &cfg, "s1", 10, 0, 1_000).await.expect("ok");
+        let d = enqueue_if_due(&*s, &cfg, "s1", 10, 0, 1_000)
+            .await
+            .expect("ok");
         assert!(matches!(d, EnqueueDecision::Enqueued { .. }));
     }
 
@@ -117,16 +129,25 @@ mod tests {
     async fn second_enqueue_idempotent() {
         let s = store();
         let cfg = ConsolidationConfig::default();
-        let _ = enqueue_if_due(&*s, &cfg, "s1", 10, 0, 1_000).await.expect("ok");
-        let d = enqueue_if_due(&*s, &cfg, "s1", 10, 0, 1_000).await.expect("ok");
+        let _ = enqueue_if_due(&*s, &cfg, "s1", 10, 0, 1_000)
+            .await
+            .expect("ok");
+        let d = enqueue_if_due(&*s, &cfg, "s1", 10, 0, 1_000)
+            .await
+            .expect("ok");
         assert!(matches!(d, EnqueueDecision::Enqueued { .. }));
     }
 
     #[tokio::test]
     async fn disabled_returns_disabled() {
         let s = store();
-        let cfg = ConsolidationConfig { enabled: false, ..ConsolidationConfig::default() };
-        let d = enqueue_if_due(&*s, &cfg, "s1", 10, 0, 1_000).await.expect("ok");
+        let cfg = ConsolidationConfig {
+            enabled: false,
+            ..ConsolidationConfig::default()
+        };
+        let d = enqueue_if_due(&*s, &cfg, "s1", 10, 0, 1_000)
+            .await
+            .expect("ok");
         assert_eq!(d, EnqueueDecision::Disabled);
     }
 }

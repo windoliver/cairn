@@ -39,7 +39,10 @@ mod tests {
 
     #[test]
     fn roundtrip() {
-        let p = ConsolidationPayload { session_id: "s1".into(), since_sequence: 12 };
+        let p = ConsolidationPayload {
+            session_id: "s1".into(),
+            since_sequence: 12,
+        };
         let bytes = p.to_bytes().expect("encode");
         let back = ConsolidationPayload::from_bytes(&bytes).expect("decode");
         assert_eq!(p, back);
