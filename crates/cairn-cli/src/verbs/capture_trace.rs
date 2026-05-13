@@ -50,7 +50,7 @@ use tokio::fs::File;
 use tokio::io::{AsyncBufReadExt as _, BufReader};
 use ulid::Ulid;
 
-use cairn_workflows::consolidation::enqueue_if_due;
+use cairn_workflows::consolidation::enqueue_if_due_scoped;
 
 use crate::identity::{guard::refuse_if_degraded, status::ReconciliationReport};
 
@@ -574,12 +574,19 @@ async fn run_handler_inner(
         // Failure is non-fatal — the CLI verb succeeds even if the scheduler
         // is absent or the enqueue fails.
         if let Some(js) = job_store {
-            let turn_count = match store.list_trace_turns(&session_str, 0, u32::MAX).await {
+            // Scope both reads + enqueue by the caller's bound scope so
+            // queries narrow to this issuer's data (round-4 adversarial
+            // review #1). At single-tenant P0 `scope_binding` is `None`
+            // and the *_scoped variants reduce to the un-narrowed query.
+            let turn_count = match store
+                .list_trace_turns_scoped(&session_str, 0, u32::MAX, scope_binding)
+                .await
+            {
                 Ok(headers) => u32::try_from(headers.len()).unwrap_or(u32::MAX),
                 Err(_) => u32::try_from(projected_len).unwrap_or(u32::MAX),
             };
             let since_sequence = store
-                .latest_consolidation_watermark(&session_str)
+                .latest_consolidation_watermark_scoped(&session_str, scope_binding)
                 .await
                 .unwrap_or(0);
             let now_ms = i64::try_from(
@@ -589,13 +596,14 @@ async fn run_handler_inner(
                     .as_millis(),
             )
             .unwrap_or(i64::MAX);
-            let _ = enqueue_if_due(
+            let _ = enqueue_if_due_scoped(
                 js,
                 consolidation_config,
                 &session_str,
                 turn_count,
                 since_sequence,
                 now_ms,
+                scope_binding,
             )
             .await;
         }

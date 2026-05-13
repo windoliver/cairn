@@ -75,10 +75,18 @@ impl ConsolidationHandler {
         &self,
         payload: ConsolidationPayload,
     ) -> Result<HandlerOutcome, Box<dyn std::error::Error + Send + Sync>> {
-        // Pull candidate turn headers (cap at a generous limit; pick_window narrows).
+        // Pull candidate turn headers, narrowed by the caller's bound
+        // scope so a job dispatched by tenant A cannot see tenant B's
+        // turn_summary rows that happen to share a session id (round-4
+        // adversarial review #1).
         let candidates = self
             .store
-            .list_trace_turns(&payload.session_id, payload.since_sequence, 256)
+            .list_trace_turns_scoped(
+                &payload.session_id,
+                payload.since_sequence,
+                256,
+                payload.bound_scope.as_ref(),
+            )
             .await?;
 
         let Some(window) = pick_window(
@@ -238,16 +246,27 @@ fn build_summary_record(
     // boundaries already handle it correctly.
     let signature = Ed25519Signature::flush_mutated_sentinel();
 
+    // Scope the emitted summary with the caller's full bound scope
+    // (round-4 adversarial review #1). At single-tenant P0
+    // `payload.bound_scope` is `None` and the summary scope reduces to
+    // `{ session_id }`, matching prior behavior.
+    let summary_scope = match payload.bound_scope.as_ref() {
+        Some(base) => ScopeTuple {
+            session_id: Some(payload.session_id.clone()),
+            ..base.clone()
+        },
+        None => ScopeTuple {
+            session_id: Some(payload.session_id.clone()),
+            ..ScopeTuple::default()
+        },
+    };
     Ok(MemoryRecord {
         id,
         target_id,
         kind: MemoryKind::Reasoning,
         class: MemoryClass::Episodic,
         visibility: MemoryVisibility::Private,
-        scope: ScopeTuple {
-            session_id: Some(payload.session_id.clone()),
-            ..ScopeTuple::default()
-        },
+        scope: summary_scope,
         body: draft.body.clone(),
         provenance,
         updated_at: now_ts,
@@ -378,7 +397,7 @@ mod tests {
         let h = ConsolidationHandler::new(store.clone(), cfg);
         let payload = ConsolidationPayload {
             session_id: SESSION_S1.to_owned(),
-            since_sequence: 0,
+            since_sequence: 0, bound_scope: None,
         };
         let outcome = h.handle(&payload.to_bytes().expect("encode")).await;
         assert_eq!(outcome, HandlerOutcome::Done);
@@ -408,7 +427,7 @@ mod tests {
         let h = ConsolidationHandler::new(store.clone(), ConsolidationConfig::default());
         let payload = ConsolidationPayload {
             session_id: SESSION_S2.to_owned(),
-            since_sequence: 0,
+            since_sequence: 0, bound_scope: None,
         };
         let bytes = payload.to_bytes().expect("encode");
 

@@ -55,6 +55,39 @@ pub async fn enqueue_if_due(
     since_sequence: u32,
     now_ms: i64,
 ) -> Result<EnqueueDecision, JobStoreError> {
+    enqueue_if_due_scoped(
+        store,
+        config,
+        session_id,
+        latest_sequence,
+        since_sequence,
+        now_ms,
+        None,
+    )
+    .await
+}
+
+/// Same as [`enqueue_if_due`] but binds the consolidation job to a
+/// caller-verified [`ScopeTuple`]. The handler will use this scope to
+/// filter `list_trace_turns` and the watermark query so the job
+/// cannot read or summarize records outside the issuer's authorized
+/// scope (round-4 adversarial review #1).
+///
+/// The `dedupe_key` is extended with a stable scope fingerprint so two
+/// scopes that share a session id enqueue distinct jobs rather than
+/// dedup-colliding.
+///
+/// # Errors
+/// Same as [`enqueue_if_due`].
+pub async fn enqueue_if_due_scoped(
+    store: &dyn JobStore,
+    config: &ConsolidationConfig,
+    session_id: &str,
+    latest_sequence: u32,
+    since_sequence: u32,
+    now_ms: i64,
+    bound_scope: Option<&cairn_core::domain::ScopeTuple>,
+) -> Result<EnqueueDecision, JobStoreError> {
     if !config.enabled {
         return Ok(EnqueueDecision::Disabled);
     }
@@ -68,17 +101,32 @@ pub async fn enqueue_if_due(
     let payload = ConsolidationPayload {
         session_id: session_id.to_owned(),
         since_sequence,
+        bound_scope: bound_scope.cloned(),
     };
     let bytes = payload
         .to_bytes()
         .map_err(|e| JobStoreError::Backend(e.to_string()))?;
-    let job_id = JobId::new(format!("consolidate:{session_id}:{since_sequence}"));
+    // Scope fingerprint: canonical_wire is the deterministic, hash-stable
+    // serialization of a ScopeTuple — empty for ScopeTuple::default().
+    // Empty fingerprint preserves the pre-multi-tenant key shape (P0 wire
+    // compat); non-empty fingerprint segregates two scopes that share a
+    // session id into distinct dedupe slots.
+    let scope_fp = bound_scope
+        .map(cairn_core::domain::ScopeTuple::canonical_wire)
+        .unwrap_or_default();
+    let scope_fp_short = if scope_fp.is_empty() {
+        String::new()
+    } else {
+        format!(":{}", hash_fingerprint(&scope_fp))
+    };
+    let job_id =
+        JobId::new(format!("consolidate:{session_id}:{since_sequence}{scope_fp_short}"));
     let req = EnqueueRequest {
         job_id: job_id.clone(),
         kind: JobKind::new(CONSOLIDATION_KIND),
         payload: bytes,
-        queue_key: Some(format!("consolidation:{session_id}")),
-        dedupe_key: Some(format!("{session_id}:{since_sequence}")),
+        queue_key: Some(format!("consolidation:{session_id}{scope_fp_short}")),
+        dedupe_key: Some(format!("{session_id}:{since_sequence}{scope_fp_short}")),
         not_before_ms: now_ms,
         retry: RetryPolicy::DEFAULT,
     };
@@ -88,6 +136,22 @@ pub async fn enqueue_if_due(
         }
         Err(e) => Err(e),
     }
+}
+
+/// 12-hex-char SHA-256 prefix of a scope fingerprint. Used to keep
+/// dedupe / queue keys bounded in length while preserving distinct
+/// scope identities.
+fn hash_fingerprint(s: &str) -> String {
+    use sha2::{Digest as _, Sha256};
+    use std::fmt::Write as _;
+    let mut h = Sha256::new();
+    h.update(s.as_bytes());
+    let digest = h.finalize();
+    let mut hex = String::with_capacity(12);
+    for b in digest.iter().take(6) {
+        let _ = write!(hex, "{b:02x}");
+    }
+    hex
 }
 
 #[cfg(test)]

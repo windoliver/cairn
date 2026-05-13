@@ -3,6 +3,7 @@
 //! and keeps replay logs human-readable.
 
 use cairn_core::contract::job_store::JobPayload;
+use cairn_core::domain::ScopeTuple;
 use serde::{Deserialize, Serialize};
 
 /// One enqueued rolling-summary request.
@@ -14,6 +15,15 @@ pub struct ConsolidationPayload {
     /// Watermark — the highest sequence already covered by a prior
     /// summary for this session. `0` for the first run.
     pub since_sequence: u32,
+    /// Bound scope (tenant / workspace / user / agent) the enqueuing
+    /// verb verified the issuer against. The handler MUST filter
+    /// `list_trace_turns` and the source-liveness re-check by this
+    /// scope so a job dispatched on behalf of tenant A cannot read or
+    /// summarize tenant B's `turn_summary` records (round-4 adversarial
+    /// review #1). `None` is single-tenant P0 — no tenant binding to
+    /// enforce.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound_scope: Option<ScopeTuple>,
 }
 
 impl ConsolidationPayload {
@@ -42,6 +52,22 @@ mod tests {
         let p = ConsolidationPayload {
             session_id: "s1".into(),
             since_sequence: 12,
+            bound_scope: None,
+        };
+        let bytes = p.to_bytes().expect("encode");
+        let back = ConsolidationPayload::from_bytes(&bytes).expect("decode");
+        assert_eq!(p, back);
+    }
+
+    #[test]
+    fn roundtrip_with_scope() {
+        let p = ConsolidationPayload {
+            session_id: "s1".into(),
+            since_sequence: 4,
+            bound_scope: Some(ScopeTuple {
+                tenant: Some("acme".into()),
+                ..ScopeTuple::default()
+            }),
         };
         let bytes = p.to_bytes().expect("encode");
         let back = ConsolidationPayload::from_bytes(&bytes).expect("decode");

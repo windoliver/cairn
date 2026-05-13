@@ -45,7 +45,7 @@ async fn seed_and_enqueue_consolidation<M: MemoryStore>(
         kind: JobKind::new(CONSOLIDATION_KIND),
         payload: ConsolidationPayload {
             session_id: session_id.to_owned(),
-            since_sequence: 0,
+            since_sequence: 0, bound_scope: None,
         }
         .to_bytes()
         .expect("encode consolidation payload"),

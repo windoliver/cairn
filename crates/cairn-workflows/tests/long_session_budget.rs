@@ -69,7 +69,7 @@ async fn long_session_summary_fits_within_token_budget() {
     // single job fires against all 200 turns with since_sequence = 0.
     let payload_bytes = ConsolidationPayload {
         session_id: session.to_owned(),
-        since_sequence: 0,
+        since_sequence: 0, bound_scope: None,
     }
     .to_bytes()
     .expect("encode payload");

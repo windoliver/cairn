@@ -10,4 +10,4 @@ pub use forget_cleanup::{
 };
 pub use handler::{CONSOLIDATION_KIND, ConsolidationHandler};
 pub use payload::ConsolidationPayload;
-pub use trigger::{EnqueueDecision, enqueue_if_due};
+pub use trigger::{EnqueueDecision, enqueue_if_due, enqueue_if_due_scoped};
