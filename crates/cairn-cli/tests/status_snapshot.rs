@@ -7,6 +7,12 @@ fn cli() -> Command {
     Command::new(env!("CARGO_BIN_EXE_cairn"))
 }
 
+fn write_config(dir: &std::path::Path, content: &str) {
+    let config_dir = dir.join(".cairn");
+    std::fs::create_dir_all(&config_dir).expect("create .cairn");
+    std::fs::write(config_dir.join("config.yaml"), content).expect("write config");
+}
+
 #[test]
 fn status_json_has_required_keys() {
     let out = cli()
@@ -90,6 +96,77 @@ fn status_json_reports_unavailable_screenpipe_from_env() {
             "screen.backend_unavailable"
         );
     }
+}
+
+#[test]
+fn status_json_uses_screen_config_file_e2e() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    write_config(
+        dir.path(),
+        "sensors:\n  screen:\n    enabled: true\n    backend: xcap\n",
+    );
+
+    let out = cli()
+        .args(["status", "--json"])
+        .current_dir(dir.path())
+        .env_remove("CAIRN_SENSORS__SCREEN__ENABLED")
+        .env_remove("CAIRN_SENSORS__SCREEN__BACKEND")
+        .env_remove("CAIRN_SENSORS__SCREEN__OCR__ENGINE")
+        .output()
+        .expect("cairn status --json");
+
+    assert!(out.status.success(), "exit: {:?}", out.status);
+    let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
+    assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+
+    assert_eq!(v["sensors"]["screen"]["backend"], "xcap");
+    assert_eq!(v["sensors"]["screen"]["state"], "permission_missing");
+    assert_eq!(v["sensors"]["screen"]["mode"], "snapshot");
+    assert_eq!(v["sensors"]["screen"]["permission"], "denied");
+    assert_eq!(
+        v["sensors"]["screen"]["degradation"]["code"],
+        "screen.permission_missing"
+    );
+}
+
+#[test]
+fn status_json_warns_and_falls_back_on_invalid_config_e2e() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    write_config(
+        dir.path(),
+        "sensors:\n  screen:\n    budget:\n      max_frames_per_minute: 0\n",
+    );
+
+    let out = cli()
+        .args(["status", "--json"])
+        .current_dir(dir.path())
+        .env_remove("CAIRN_SENSORS__SCREEN__ENABLED")
+        .env_remove("CAIRN_SENSORS__SCREEN__BACKEND")
+        .env_remove("CAIRN_SENSORS__SCREEN__OCR__ENGINE")
+        .output()
+        .expect("cairn status --json");
+
+    assert!(out.status.success(), "exit: {:?}", out.status);
+    let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("warning: failed to load config for status; using defaults"),
+        "missing config warning: {stderr}"
+    );
+    assert!(
+        stderr.contains("sensors.screen.budget.max_frames_per_minute"),
+        "warning should name invalid field: {stderr}"
+    );
+
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+    assert_eq!(v["sensors"]["screen"]["backend"], "xcap");
+    assert_eq!(v["sensors"]["screen"]["state"], "disabled");
+    assert_eq!(
+        v["sensors"]["screen"]["degradation"]["code"],
+        "screen.disabled"
+    );
 }
 
 #[test]

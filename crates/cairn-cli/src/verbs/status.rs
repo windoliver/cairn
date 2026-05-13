@@ -70,7 +70,7 @@ fn load_status_config() -> CairnConfig {
     match crate::config::load(&current_dir, &overrides) {
         Ok(config) => config,
         Err(err) => {
-            eprintln!("warning: failed to load config for status; using defaults: {err}");
+            eprintln!("warning: failed to load config for status; using defaults: {err:#}");
             CairnConfig::default()
         }
     }
