@@ -676,8 +676,7 @@ fn build_record(
         ..ScopeTuple::default()
     };
 
-    let source_id =
-        SourceId::parse(id.as_str().to_owned()).map_err(anyhow::Error::msg)?;
+    let source_id = SourceId::parse(id.as_str().to_owned()).map_err(anyhow::Error::msg)?;
     let record = MemoryRecord {
         id,
         target_id,

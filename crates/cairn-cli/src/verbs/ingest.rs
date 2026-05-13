@@ -430,9 +430,15 @@ struct ResolvedBody {
     body: String,
     // Retained for the source-artifact pipeline (issue #325 follow-up); the
     // signed-ingest path does not yet stage `sources/` files.
-    #[allow(dead_code, reason = "wired in upcoming source-artifact persistence task")]
+    #[allow(
+        dead_code,
+        reason = "wired in upcoming source-artifact persistence task"
+    )]
     source_subdir: &'static str,
-    #[allow(dead_code, reason = "wired in upcoming source-artifact persistence task")]
+    #[allow(
+        dead_code,
+        reason = "wired in upcoming source-artifact persistence task"
+    )]
     source_extension: String,
 }
 
