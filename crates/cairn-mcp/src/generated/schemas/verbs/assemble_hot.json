@@ -128,7 +128,7 @@
       "additionalProperties": false,
       "properties": {
         "attempted_bytes": {
-          "maximum": 4194304,
+          "maximum": 4294967295,
           "minimum": 0,
           "type": "integer"
         },

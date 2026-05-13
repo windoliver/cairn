@@ -69,7 +69,7 @@
         "kind": { "$ref": "#/$defs/HotSourceKind" },
         "record_id": { "$ref": "../common/primitives.json#/$defs/Ulid" },
         "reason": { "type": "string", "enum": ["budget_exhausted", "section_truncated", "record_omitted"] },
-        "attempted_bytes": { "type": "integer", "minimum": 0, "maximum": 4194304 },
+        "attempted_bytes": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
         "included_bytes": { "type": "integer", "minimum": 0, "maximum": 4194304 }
       }
     },

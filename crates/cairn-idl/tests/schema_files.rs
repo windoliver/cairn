@@ -643,6 +643,20 @@ fn every_typed_field_asserts_bounds_or_is_allowlisted() {
 }
 
 #[test]
+fn assemble_hot_attempted_bytes_schema_allows_sources_above_budget() {
+    let schema = read_json(&schema_dir().join("verbs/assemble_hot.json"));
+    let attempted_bytes = schema
+        .pointer("/$defs/TruncationDecision/properties/attempted_bytes")
+        .expect("attempted_bytes schema");
+
+    assert_eq!(
+        attempted_bytes.get("maximum").and_then(Value::as_u64),
+        Some(u64::from(u32::MAX)),
+        "attempted_bytes reports source length before truncation, so it must allow values above the 4 MiB assembled-prefix budget"
+    );
+}
+
+#[test]
 fn every_ref_resolves_to_a_real_file_or_local_fragment() {
     for path in manifest_paths() {
         let v = read_json(&path);
