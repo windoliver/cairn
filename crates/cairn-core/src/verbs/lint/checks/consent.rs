@@ -278,6 +278,7 @@ mod tests {
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: Some(&lookup),
             vault_root: None,
+            source_forgets: None,
             hot_body_loader: None,
         };
         let findings = run(&inputs).await;
@@ -301,6 +302,7 @@ mod tests {
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: Some(&lookup),
             vault_root: None,
+            source_forgets: None,
             hot_body_loader: None,
         };
         let f = run(&inputs).await;
@@ -325,6 +327,7 @@ mod tests {
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: Some(&lookup),
             vault_root: None,
+            source_forgets: None,
             hot_body_loader: None,
         };
         let f = run(&inputs).await;
@@ -362,6 +365,7 @@ mod tests {
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: Some(&lookup),
             vault_root: None,
+            source_forgets: None,
             hot_body_loader: None,
         };
         let f = run(&inputs).await;
@@ -409,6 +413,7 @@ mod tests {
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: Some(&lookup),
             vault_root: None,
+            source_forgets: None,
             hot_body_loader: None,
         };
         let f = run(&inputs).await;
@@ -459,6 +464,7 @@ mod tests {
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: Some(&lookup),
             vault_root: None,
+            source_forgets: None,
             hot_body_loader: None,
         };
         let f = run(&inputs).await;
@@ -502,6 +508,7 @@ mod tests {
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: Some(&lookup),
             vault_root: None,
+            source_forgets: None,
             hot_body_loader: None,
         };
         let f = run(&inputs).await;
@@ -548,6 +555,7 @@ mod tests {
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: Some(&lookup),
             vault_root: None,
+            source_forgets: None,
             hot_body_loader: None,
         };
         assert!(run(&inputs).await.is_empty());
@@ -565,6 +573,7 @@ mod tests {
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: None,
             vault_root: None,
+            source_forgets: None,
             hot_body_loader: None,
         };
         let f = run(&inputs).await;
@@ -592,6 +601,7 @@ mod tests {
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: None,
             vault_root: None,
+            source_forgets: None,
             hot_body_loader: None,
         };
         assert!(run(&inputs).await.is_empty());

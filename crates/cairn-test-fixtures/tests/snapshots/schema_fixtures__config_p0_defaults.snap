@@ -36,7 +36,8 @@ expression: "&c"
       "CLAUDE.md",
       "AGENTS.md",
       "GEMINI.md"
-    ]
+    ],
+    "redact_on_forget": false
   },
   "store": {
     "kind": "sqlite"

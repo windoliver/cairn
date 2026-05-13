@@ -141,6 +141,7 @@ mod tests {
             unresolvable_authors: empty_unresolvable_authors(),
             consent_lookup: None,
             vault_root: Some(vault),
+            source_forgets: None,
             hot_body_loader: None,
         }
     }
@@ -154,6 +155,7 @@ mod tests {
             unresolvable_authors: empty_unresolvable_authors(),
             consent_lookup: None,
             vault_root: None,
+            source_forgets: None,
             hot_body_loader: None,
         }
     }

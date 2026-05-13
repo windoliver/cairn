@@ -513,6 +513,12 @@ pub struct VaultConfig {
     pub retention: BTreeMap<String, String>,
     /// Schema files to include in the vault.
     pub schema_files: Vec<String>,
+    /// When `true`, `forget --target source` must also scrub the bytes of
+    /// the source file under `layout.sources/` (only hash + metadata remain).
+    /// Issue #257 rule `source_redact_on_forget_honored` audits this
+    /// invariant — when set, every `source_forget` journal row whose file is
+    /// still on disk with non-zero length is flagged.
+    pub redact_on_forget: bool,
 }
 
 impl Default for VaultConfig {
@@ -524,6 +530,7 @@ impl Default for VaultConfig {
             hot_memory: HotMemoryConfig::default(),
             retention: BTreeMap::new(),
             schema_files: vec!["CLAUDE.md".into(), "AGENTS.md".into(), "GEMINI.md".into()],
+            redact_on_forget: false,
         }
     }
 }

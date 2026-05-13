@@ -160,6 +160,7 @@ mod tests {
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: None,
             vault_root: None,
+            source_forgets: None,
             hot_body_loader: None,
         }
     }

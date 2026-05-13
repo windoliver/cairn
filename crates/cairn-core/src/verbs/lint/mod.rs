@@ -10,6 +10,7 @@ use crate::contract::consent_lookup::ConsentLookup;
 use crate::contract::memory_store::{IndexStats, StoredRecord};
 use crate::domain::Identity;
 use crate::domain::record::RecordId;
+use crate::domain::source_forget::SourceForgetEntry;
 use crate::generated::verbs::lint::{
     Finding, Kind, LintData, LintDataSummary, LintDataSummaryBySeverity, Severity, Target,
 };
@@ -68,6 +69,14 @@ pub struct LintInputs<'a> {
     /// links, missing summaries). `None` falls those checks back to
     /// no-ops so fixture-only tests of unrelated checks remain green.
     pub vault_root: Option<&'a std::path::Path>,
+    /// Pre-fetched `source_forget` journal slice keyed by `source_id`
+    /// (issue #257 rules 4 + 5). The dispatch layer assembles this map
+    /// from `consent_journal` rows where `kind = "source_forget"` before
+    /// invoking `run_checks`. `None` downgrades the source-forget checks
+    /// to no-ops so fixture-only tests of unrelated checks remain green
+    /// — production wiring depends on the source-forget write path
+    /// landing alongside this audit surface.
+    pub source_forgets: Option<&'a std::collections::HashMap<String, SourceForgetEntry>>,
     /// Loads step bodies for the dry-run hot-memory walker. `None`
     /// keeps the over-budget check on the canary path.
     pub hot_body_loader: Option<
@@ -92,6 +101,7 @@ impl std::fmt::Debug for LintInputs<'_> {
             .field("unresolvable_authors", &self.unresolvable_authors.len())
             .field("consent_lookup", &self.consent_lookup.is_some())
             .field("vault_root", &self.vault_root)
+            .field("source_forgets", &self.source_forgets.map(HashMap::len))
             .field("hot_body_loader", &self.hot_body_loader.is_some())
             .finish()
     }
@@ -257,6 +267,7 @@ mod tests {
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: None,
             vault_root: None,
+            source_forgets: None,
             hot_body_loader: None,
         };
         let data = run_checks(&inputs).await;
@@ -326,6 +337,7 @@ mod tests {
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: None,
             vault_root: None,
+            source_forgets: None,
             hot_body_loader: None,
         };
         let inputs_rev = LintInputs {
@@ -336,6 +348,7 @@ mod tests {
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: None,
             vault_root: None,
+            source_forgets: None,
             hot_body_loader: None,
         };
 
@@ -369,6 +382,7 @@ mod tests {
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: None,
             vault_root: None,
+            source_forgets: None,
             hot_body_loader: None,
         };
         let data = run_checks(&inputs).await;

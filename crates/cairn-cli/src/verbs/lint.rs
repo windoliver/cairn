@@ -1195,6 +1195,11 @@ pub async fn lint_handler(
         unresolvable_authors: &unresolvable_authors,
         consent_lookup,
         vault_root: Some(vault_root),
+        // Issue #257 rules 4 + 5 require a pre-fetched `source_forget`
+        // journal slice. The write path is not yet wired in this binary,
+        // so we pass `None` — the source-forget rules degrade to no-ops
+        // until the dispatch layer can populate this map.
+        source_forgets: None,
         hot_body_loader: Some(&hot_body_loader),
     };
     let mut data = run_checks(&inputs).await;

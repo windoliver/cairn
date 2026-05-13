@@ -55,6 +55,7 @@ mod tests {
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: None,
             vault_root: None,
+            source_forgets: None,
             hot_body_loader: None,
         };
         assert!(run(&li).is_empty());
@@ -71,6 +72,7 @@ mod tests {
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: None,
             vault_root: None,
+            source_forgets: None,
             hot_body_loader: None,
         };
         let f = run(&li);
@@ -97,6 +99,7 @@ mod tests {
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: None,
             vault_root: None,
+            source_forgets: None,
             hot_body_loader: None,
         };
         let f = run(&li);
@@ -115,6 +118,7 @@ mod tests {
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: None,
             vault_root: None,
+            source_forgets: None,
             hot_body_loader: None,
         };
         assert!(run(&li).is_empty());

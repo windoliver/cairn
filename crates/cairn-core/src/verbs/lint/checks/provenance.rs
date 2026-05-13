@@ -7,10 +7,17 @@
 //! - `source_ids` must exist and contain at least one string path
 //! - each referenced `sources/...` file must resolve under `vault_root`
 //! - the source file bytes must match `provenance.source_hash`
+//! - no active record may reference a `source_id` whose `source_forget`
+//!   row has already been written (rule 4 — `source_not_forgotten`)
+//! - when `vault.redact_on_forget = true`, every `source_forget` row's
+//!   source file must be content-scrubbed (zero-length on disk); the
+//!   journal row + hash are all that may remain (rule 5 —
+//!   `source_redact_on_forget_honored`)
 //!
-//! The remaining #257 bullets around `source_forget` / `redact_on_forget`
-//! need a read-only journal/config surface in `LintInputs`; this module
-//! only enforces what the current typed inputs can prove.
+//! The source-forget rules require `LintInputs::source_forgets` to be wired
+//! by the dispatch layer (pre-fetched `consent_journal` slice keyed by
+//! `source_id`). Until that write path lands, the CLI passes `None` and
+//! these two rules degrade to no-ops.
 //!
 //! When `vault_root` is not wired, filesystem-backed checks become a no-op so
 //! unrelated fixture tests can keep constructing `LintInputs` without a vault.
@@ -21,7 +28,7 @@ use blake3::Hasher as Blake3Hasher;
 use sha2::{Digest, Sha256, Sha512};
 
 use crate::generated::verbs::lint::{Finding, Kind, Severity};
-use crate::verbs::lint::{LintInputs, LintRecord, finding, target_record};
+use crate::verbs::lint::{LintInputs, LintRecord, finding, target_path, target_record};
 
 /// Run the source-link hygiene checks over every active record.
 #[must_use]
@@ -45,6 +52,18 @@ pub fn run(inputs: &LintInputs<'_>) -> Vec<Finding> {
                     continue;
                 }
             };
+
+            // Rule 4: source_not_forgotten — even before touching the
+            // filesystem, flag records that point at a source whose
+            // `source_forget` journal row has been written. Body-free
+            // check; vault_root is irrelevant.
+            if let Some(forgets) = inputs.source_forgets
+                && let Some(entry) = forgets.get(*source_id)
+            {
+                findings.push(source_after_forget(record, source_id, &entry.forget_op_id));
+                continue;
+            }
+
             let Some(vault_root) = inputs.vault_root else {
                 continue;
             };
@@ -76,6 +95,36 @@ pub fn run(inputs: &LintInputs<'_>) -> Vec<Finding> {
                         &message,
                     ));
                 }
+            }
+        }
+    }
+
+    // Rule 5: source_redact_on_forget_honored. Only enforced when both
+    // the config opt-in is set and a vault_root is wired so the on-disk
+    // file size can be probed. The check is per-source (not per-record):
+    // each `source_forget` row is audited once regardless of how many
+    // records cited the source before it was forgotten.
+    if inputs.config.vault.redact_on_forget
+        && let (Some(forgets), Some(vault_root)) = (inputs.source_forgets, inputs.vault_root)
+    {
+        let mut audited: Vec<&str> = forgets.keys().map(String::as_str).collect();
+        audited.sort_unstable();
+        for source_id in audited {
+            let Ok(relative_path) = validate_source_id_shape(source_root, source_id) else {
+                // Bad shape on a journal row is the source-forget write
+                // path's bug — surface it as a deferred check rather than
+                // silently dropping the audit.
+                findings.push(redact_audit_invalid_source_id(source_id));
+                continue;
+            };
+            let expected_path = vault_root.join(&relative_path);
+            match std::fs::metadata(&expected_path) {
+                Ok(meta) if meta.is_file() && meta.len() > 0 => {
+                    findings.push(source_redact_skipped(source_id, &expected_path));
+                }
+                // Missing or zero-length ⇒ purged or scrubbed-in-place;
+                // both satisfy the invariant.
+                _ => {}
             }
         }
     }
@@ -348,6 +397,63 @@ fn hash_check_failed(
     f
 }
 
+fn source_after_forget(record: &LintRecord, source_id: &str, forget_op_id: &str) -> Finding {
+    let mut f = finding(
+        Kind::MissingProvenance,
+        Severity::Error,
+        format!(
+            "source_after_forget: record references forgotten source. \
+             source_id={source_id} forget_op_id={forget_op_id}"
+        ),
+    );
+    f.target = Some(target_record(&record.stored.record.id));
+    f.suggested_fix = Some(
+        "forget this record (or rewrite it without the forgotten \
+         source_id) — the source's `source_forget` journal row was \
+         already written"
+            .to_owned(),
+    );
+    f.tracking_issue = Some(257);
+    f
+}
+
+fn source_redact_skipped(source_id: &str, expected_path: &Path) -> Finding {
+    let mut f = finding(
+        Kind::MissingProvenance,
+        Severity::Error,
+        format!(
+            "source_redact_skipped: vault.redact_on_forget is true but the \
+             source file still has non-zero length on disk. \
+             source_id={source_id} expected_path={}",
+            expected_path.display()
+        ),
+    );
+    f.target = Some(target_path(source_id.to_owned()));
+    f.suggested_fix = Some(
+        "scrub the source file in place (truncate to zero length) or \
+         disable `vault.redact_on_forget` if mandatory redaction is not \
+         the intended policy"
+            .to_owned(),
+    );
+    f.tracking_issue = Some(257);
+    f
+}
+
+fn redact_audit_invalid_source_id(source_id: &str) -> Finding {
+    let mut f = finding(
+        Kind::DeferredCheck,
+        Severity::Warning,
+        format!(
+            "redact_on_forget audit skipped: `source_forget` journal row \
+             carries a malformed source_id={source_id} (the write path \
+             allowed a value the audit cannot resolve to a vault path)"
+        ),
+    );
+    f.target = Some(target_path(source_id.to_owned()));
+    f.tracking_issue = Some(257);
+    f
+}
+
 fn multi_source_hash_gap(record: &LintRecord, source_id: &str, expected_path: &Path) -> Finding {
     let mut f = finding(
         Kind::DeferredCheck,
@@ -371,12 +477,14 @@ fn multi_source_hash_gap(record: &LintRecord, source_id: &str, expected_path: &P
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashMap};
 
     use super::*;
     use crate::config::CairnConfig;
     use crate::contract::memory_store::{IndexStats, StoredRecord};
+    use crate::domain::Rfc3339Timestamp;
     use crate::domain::record::tests_export::sample_record;
+    use crate::domain::source_forget::SourceForgetEntry;
     use crate::verbs::lint::{
         ConsentModel, LintInputs, LintRecord, SchemaVersion, empty_author_states,
         empty_unresolvable_authors,
@@ -417,8 +525,33 @@ mod tests {
             unresolvable_authors: empty_unresolvable_authors(),
             consent_lookup: None,
             vault_root: root,
+            source_forgets: None,
             hot_body_loader: None,
         }
+    }
+
+    fn inputs_with_forgets<'a>(
+        cfg: &'a CairnConfig,
+        records: &'a [LintRecord],
+        root: Option<&'a Path>,
+        forgets: &'a HashMap<String, SourceForgetEntry>,
+    ) -> LintInputs<'a> {
+        let mut li = inputs(cfg, records, root);
+        li.source_forgets = Some(forgets);
+        li
+    }
+
+    fn forgets(entries: &[(&str, &str)]) -> HashMap<String, SourceForgetEntry> {
+        let ts = Rfc3339Timestamp::parse("2026-05-12T00:00:00Z").expect("invariant: valid ts");
+        entries
+            .iter()
+            .map(|(sid, op)| {
+                (
+                    (*sid).to_owned(),
+                    SourceForgetEntry::new(*sid, *op, ts.clone()),
+                )
+            })
+            .collect()
     }
 
     fn sha256_hex(bytes: &[u8]) -> String {
@@ -526,12 +659,19 @@ mod tests {
         std::fs::create_dir_all(source_path.parent().expect("parent")).expect("mkdir");
         std::fs::write(&source_path, "alpha\nbeta\n").expect("write source");
 
-        let record = with_expected_hash(with_source_ids(lint_record(), &[source_id]), "not-a-digest".to_owned());
+        let record = with_expected_hash(
+            with_source_ids(lint_record(), &[source_id]),
+            "not-a-digest".to_owned(),
+        );
         let findings = run(&inputs(&cfg, &[record], Some(dir.path())));
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, Kind::MissingProvenance);
         assert!(findings[0].message.contains("source hash check failed"));
-        assert!(findings[0].message.contains("unsupported provenance.source_hash format"));
+        assert!(
+            findings[0]
+                .message
+                .contains("unsupported provenance.source_hash format")
+        );
     }
 
     #[test]
@@ -551,7 +691,11 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, Kind::MissingProvenance);
         assert!(findings[0].message.contains("source hash check failed"));
-        assert!(findings[0].message.contains("unsupported provenance.source_hash algorithm"));
+        assert!(
+            findings[0]
+                .message
+                .contains("unsupported provenance.source_hash algorithm")
+        );
     }
 
     #[test]
@@ -677,6 +821,165 @@ mod tests {
         assert!(
             findings.is_empty(),
             "expected no findings, got {findings:?}"
+        );
+    }
+
+    // ── Rule 4: source_not_forgotten ───────────────────────────────────
+
+    #[test]
+    fn record_referencing_forgotten_source_emits_source_after_forget_error() {
+        let cfg = CairnConfig::default();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source_id = "sources/hook/forgotten.txt";
+        let records = [with_source_ids(lint_record(), &[source_id])];
+        let f = forgets(&[(source_id, "op-forget-42")]);
+        let findings = run(&inputs_with_forgets(&cfg, &records, Some(dir.path()), &f));
+        assert_eq!(findings.len(), 1, "got: {findings:?}");
+        assert_eq!(findings[0].kind, Kind::MissingProvenance);
+        assert_eq!(findings[0].severity, Severity::Error);
+        assert!(findings[0].message.contains("source_after_forget"));
+        assert!(findings[0].message.contains(source_id));
+        assert!(findings[0].message.contains("op-forget-42"));
+        assert_eq!(findings[0].tracking_issue, Some(257));
+    }
+
+    #[test]
+    fn record_with_non_forgotten_source_passes_rule_4() {
+        let cfg = CairnConfig::default();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source_id = "sources/hook/active.txt";
+        let source_path = dir.path().join(source_id);
+        std::fs::create_dir_all(source_path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&source_path, "alpha\nbeta\n").expect("write source");
+        let record = with_expected_hash(
+            with_source_ids(lint_record(), &[source_id]),
+            sha256_hex(b"alpha\nbeta\n"),
+        );
+        let f = forgets(&[]);
+        let findings = run(&inputs_with_forgets(&cfg, &[record], Some(dir.path()), &f));
+        assert!(findings.is_empty(), "got: {findings:?}");
+    }
+
+    #[test]
+    fn rule_4_no_op_when_source_forgets_unwired() {
+        // None for source_forgets ⇒ rule 4 must not synthesize findings.
+        let cfg = CairnConfig::default();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source_id = "sources/hook/active.txt";
+        let source_path = dir.path().join(source_id);
+        std::fs::create_dir_all(source_path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&source_path, "alpha\nbeta\n").expect("write source");
+        let record = with_expected_hash(
+            with_source_ids(lint_record(), &[source_id]),
+            sha256_hex(b"alpha\nbeta\n"),
+        );
+        let findings = run(&inputs(&cfg, &[record], Some(dir.path())));
+        assert!(findings.is_empty(), "got: {findings:?}");
+    }
+
+    #[test]
+    fn rule_4_short_circuits_filesystem_check() {
+        // When source is forgotten, emit forget finding, not BrokenSourceLink.
+        let cfg = CairnConfig::default();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source_id = "sources/hook/forgotten.txt";
+        let records = [with_source_ids(lint_record(), &[source_id])];
+        let f = forgets(&[(source_id, "op-forget-7")]);
+        let findings = run(&inputs_with_forgets(&cfg, &records, Some(dir.path()), &f));
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].message.contains("source_after_forget"));
+    }
+
+    // ── Rule 5: source_redact_on_forget_honored ────────────────────────
+
+    fn cfg_with_redact_on_forget() -> CairnConfig {
+        let mut cfg = CairnConfig::default();
+        cfg.vault.redact_on_forget = true;
+        cfg
+    }
+
+    #[test]
+    fn rule_5_flags_unscrubbed_source_when_config_enabled() {
+        let cfg = cfg_with_redact_on_forget();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source_id = "sources/hook/forgotten.txt";
+        let source_path = dir.path().join(source_id);
+        std::fs::create_dir_all(source_path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&source_path, "still has content").expect("write source");
+        let f = forgets(&[(source_id, "op-forget-9")]);
+        let findings = run(&inputs_with_forgets(&cfg, &[], Some(dir.path()), &f));
+        let redact: Vec<_> = findings
+            .iter()
+            .filter(|f| f.message.contains("source_redact_skipped"))
+            .collect();
+        assert_eq!(redact.len(), 1, "got: {findings:?}");
+        assert_eq!(redact[0].severity, Severity::Error);
+        assert_eq!(redact[0].tracking_issue, Some(257));
+    }
+
+    #[test]
+    fn rule_5_passes_when_source_file_is_zero_length() {
+        let cfg = cfg_with_redact_on_forget();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source_id = "sources/hook/forgotten.txt";
+        let source_path = dir.path().join(source_id);
+        std::fs::create_dir_all(source_path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&source_path, b"").expect("write empty");
+        let f = forgets(&[(source_id, "op-forget-9")]);
+        let findings = run(&inputs_with_forgets(&cfg, &[], Some(dir.path()), &f));
+        assert!(findings.is_empty(), "got: {findings:?}");
+    }
+
+    #[test]
+    fn rule_5_passes_when_source_file_is_missing() {
+        // Fully purged sources satisfy redact invariant.
+        let cfg = cfg_with_redact_on_forget();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source_id = "sources/hook/purged.txt";
+        let f = forgets(&[(source_id, "op-forget-9")]);
+        let findings = run(&inputs_with_forgets(&cfg, &[], Some(dir.path()), &f));
+        assert!(findings.is_empty(), "got: {findings:?}");
+    }
+
+    #[test]
+    fn rule_5_no_op_when_redact_on_forget_disabled() {
+        let cfg = CairnConfig::default();
+        assert!(!cfg.vault.redact_on_forget);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source_id = "sources/hook/forgotten.txt";
+        let source_path = dir.path().join(source_id);
+        std::fs::create_dir_all(source_path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&source_path, "still here").expect("write source");
+        let f = forgets(&[(source_id, "op-forget-9")]);
+        let findings = run(&inputs_with_forgets(&cfg, &[], Some(dir.path()), &f));
+        assert!(findings.is_empty(), "got: {findings:?}");
+    }
+
+    #[test]
+    fn rule_5_no_op_without_vault_root() {
+        let cfg = cfg_with_redact_on_forget();
+        let source_id = "sources/hook/forgotten.txt";
+        let f = forgets(&[(source_id, "op-forget-9")]);
+        let findings = run(&inputs_with_forgets(&cfg, &[], None, &f));
+        assert!(findings.is_empty(), "got: {findings:?}");
+    }
+
+    #[test]
+    fn rule_5_emits_deferred_finding_on_malformed_journal_source_id() {
+        let cfg = cfg_with_redact_on_forget();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bad_id = "../escape.txt";
+        let f = forgets(&[(bad_id, "op-forget-9")]);
+        let findings = run(&inputs_with_forgets(&cfg, &[], Some(dir.path()), &f));
+        let deferred: Vec<_> = findings
+            .iter()
+            .filter(|f| f.kind == Kind::DeferredCheck)
+            .collect();
+        assert_eq!(deferred.len(), 1, "got: {findings:?}");
+        assert!(
+            deferred[0]
+                .message
+                .contains("redact_on_forget audit skipped")
         );
     }
 }

@@ -41,6 +41,7 @@ pub mod provenance;
 pub mod record;
 pub mod scope;
 pub mod session;
+pub mod source_forget;
 pub mod source_id;
 pub mod target_id;
 pub mod taxonomy;
@@ -80,6 +81,7 @@ pub use session::{
     DEFAULT_IDLE_WINDOW_SECS, LastActiveSession, Session, SessionDecision, SessionId,
     SessionIdentity, SessionSource, resolve_session,
 };
+pub use source_forget::SourceForgetEntry;
 pub use source_id::SourceId;
 pub use target_id::TargetId;
 pub use taxonomy::{MemoryClass, MemoryKind, MemoryVisibility};

@@ -188,6 +188,7 @@ mod tests {
             unresolvable_authors: empty_unresolvable_authors(),
             consent_lookup: None,
             vault_root: Some(dir.path()),
+            source_forgets: None,
             hot_body_loader: Some(&loader),
         };
         let findings = run(&inputs);
@@ -227,6 +228,7 @@ mod tests {
             unresolvable_authors: empty_unresolvable_authors(),
             consent_lookup: None,
             vault_root: Some(dir.path()),
+            source_forgets: None,
             hot_body_loader: Some(&loader),
         };
         let findings = run(&inputs);
@@ -260,6 +262,7 @@ mod tests {
             unresolvable_authors: empty_unresolvable_authors(),
             consent_lookup: None,
             vault_root: None,
+            source_forgets: None,
             hot_body_loader: None,
         };
         let findings = run(&inputs);
