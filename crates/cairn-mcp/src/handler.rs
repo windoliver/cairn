@@ -1,16 +1,32 @@
 //! `CairnMcpHandler` — MCP `ServerHandler` implementation.
 //!
 //! Wires the IDL-generated [`TOOLS`] constant into the `tools/list` response
-//! and routes `tools/call` through [`dispatch_stub`] while real verb dispatch
-//! is pending.
+//! and routes `tools/call` through implemented verb handlers.
 
+use std::path::Path;
 use std::sync::Arc;
 
+use cairn_core::config::CairnConfig;
+use cairn_core::contract::memory_store::HotMemoryRequest;
+use cairn_core::generated::common::Ulid;
+use cairn_core::generated::envelope::{
+    Response, ResponseData, ResponsePolicyTrace, ResponseStatus, ResponseVerb,
+};
+use cairn_core::generated::verbs::assemble_hot::{
+    AssembleHotArgs, AssembleHotData, CacheInfo, HotCacheStatus, HotSourceKind, SourceSummary,
+    TruncationDecision, TruncationDecisionReason,
+};
+use cairn_core::hot_memory::{
+    HotMemoryCacheStatus, HotMemoryOutput, HotMemorySourceKind, HotMemoryTruncationReason,
+    assemble_hot_with_store,
+};
+use cairn_store_sqlite::SqliteMemoryStore;
 use rmcp::{
     RoleServer, ServerHandler,
     model::{
-        CallToolRequestParams, CallToolResult, Content, Implementation, ListToolsResult,
-        PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool, ToolsCapability,
+        CallToolRequestParams, CallToolResult, Content, Implementation, JsonObject,
+        ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
+        ToolsCapability,
     },
     service::RequestContext,
 };
@@ -19,9 +35,9 @@ use crate::generated::TOOLS;
 
 /// MCP server handler for the Cairn verb layer.
 ///
-/// Implements [`rmcp::ServerHandler`]. P0 scaffold: `tools/list` is served
-/// from the IDL-generated [`TOOLS`] constant; `tools/call` returns a
-/// [`dispatch_stub`] error until real verb dispatch lands in a follow-up PR.
+/// Implements [`rmcp::ServerHandler`]. `tools/list` is served from the
+/// IDL-generated [`TOOLS`] constant; implemented tools dispatch to the same
+/// core/store path used by the CLI.
 #[derive(Debug, Default)]
 pub struct CairnMcpHandler;
 
@@ -75,9 +91,6 @@ impl ServerHandler for CairnMcpHandler {
     }
 
     /// Dispatch a tool call.
-    ///
-    /// Validates that the requested verb exists in [`TOOLS`], then delegates
-    /// to [`dispatch_stub`]. Real verb dispatch lands in a follow-up PR.
     fn call_tool(
         &self,
         request: CallToolRequestParams,
@@ -85,16 +98,21 @@ impl ServerHandler for CairnMcpHandler {
     ) -> impl std::future::Future<Output = Result<CallToolResult, rmcp::ErrorData>> + Send + '_
     {
         let name = request.name.clone();
+        let arguments = request.arguments;
         let known = TOOLS.iter().any(|d| d.name == name.as_ref());
-        let result = if known {
-            dispatch_stub(&name)
-        } else {
-            CallToolResult::error(vec![Content::text(format!(
-                "cairn: unknown verb '{name}'. Available verbs: {}",
-                TOOLS.iter().map(|d| d.name).collect::<Vec<_>>().join(", ")
-            ))])
-        };
-        std::future::ready(Ok(result))
+        async move {
+            let result = if name.as_ref() == "assemble_hot" {
+                assemble_hot_tool_result(arguments).await
+            } else if known {
+                dispatch_stub(&name)
+            } else {
+                CallToolResult::error(vec![Content::text(format!(
+                    "cairn: unknown verb '{name}'. Available verbs: {}",
+                    TOOLS.iter().map(|d| d.name).collect::<Vec<_>>().join(", ")
+                ))])
+            };
+            Ok(result)
+        }
     }
 }
 
@@ -109,4 +127,326 @@ pub fn dispatch_stub(verb: &str) -> CallToolResult {
         "cairn {verb}: not yet implemented in this P0 scaffold. \
          Verb dispatch lands in a follow-up PR; no memory operation was performed."
     ))])
+}
+
+async fn assemble_hot_tool_result(arguments: Option<JsonObject>) -> CallToolResult {
+    match std::env::current_dir() {
+        Ok(vault_path) => assemble_hot_tool_result_at(&vault_path, arguments).await,
+        Err(err) => {
+            response_tool_result(&internal_response(&format!("reading current dir: {err}")))
+        }
+    }
+}
+
+async fn assemble_hot_tool_result_at(
+    vault_path: &Path,
+    arguments: Option<JsonObject>,
+) -> CallToolResult {
+    let args = match parse_assemble_hot_args(arguments) {
+        Ok(args) => args,
+        Err(resp) => return response_tool_result(resp.as_ref()),
+    };
+    let config = match load_config(vault_path) {
+        Ok(config) => config,
+        Err(message) => {
+            return response_tool_result(&internal_response(&format!("loading config: {message}")));
+        }
+    };
+    let budget = match validate_budget(args.budget, config.vault.hot_memory.max_bytes) {
+        Ok(budget) => budget,
+        Err(resp) => return response_tool_result(resp.as_ref()),
+    };
+    let store = match SqliteMemoryStore::open(vault_path) {
+        Ok(store) => store,
+        Err(err) => {
+            return response_tool_result(&internal_response(&format!(
+                "opening sqlite store: {err}"
+            )));
+        }
+    };
+    let config_fingerprint = match serde_json::to_string(&config.vault.hot_memory) {
+        Ok(fingerprint) => fingerprint,
+        Err(err) => {
+            return response_tool_result(&internal_response(&format!(
+                "serializing hot-memory config fingerprint: {err}"
+            )));
+        }
+    };
+    let request = HotMemoryRequest {
+        session_id: args.session_id,
+        agent_id: None,
+        budget_bytes: budget,
+        config_fingerprint,
+        god_node_weight: config.vault.hot_memory.god_node_weight,
+        source_kinds: config.vault.hot_memory.source_kinds(),
+    };
+    match assemble_hot_with_store(&store, &request).await {
+        Ok(output) => response_tool_result(&committed_response(output)),
+        Err(err) => {
+            response_tool_result(&internal_response(&format!("assembling hot memory: {err}")))
+        }
+    }
+}
+
+fn parse_assemble_hot_args(
+    arguments: Option<JsonObject>,
+) -> Result<AssembleHotArgs, Box<Response>> {
+    let value = serde_json::Value::Object(arguments.unwrap_or_default());
+    let args = serde_json::from_value::<AssembleHotArgs>(value)
+        .map_err(|err| Box::new(invalid_args_response("arguments", &err.to_string())))?;
+    if args.session_id.as_deref() == Some("") {
+        return Err(Box::new(invalid_args_response(
+            "session_id",
+            "must not be empty",
+        )));
+    }
+    Ok(args)
+}
+
+fn validate_budget(budget: Option<u64>, default_budget: u32) -> Result<u32, Box<Response>> {
+    const HOT_MEMORY_MAX_BYTES: u64 = 4 * 1024 * 1024;
+    let budget = budget.unwrap_or(u64::from(default_budget));
+    if budget > HOT_MEMORY_MAX_BYTES {
+        return Err(Box::new(invalid_args_response(
+            "budget",
+            &format!("must be less than or equal to {HOT_MEMORY_MAX_BYTES} bytes"),
+        )));
+    }
+    u32::try_from(budget).map_err(|err| Box::new(invalid_args_response("budget", &err.to_string())))
+}
+
+fn load_config(vault_path: &Path) -> Result<CairnConfig, String> {
+    use figment::Figment;
+    use figment::providers::{Env, Format, Serialized, Yaml};
+
+    let config_path = vault_path.join(".cairn/config.yaml");
+    let yaml_content = if config_path.exists() {
+        let raw = std::fs::read_to_string(&config_path)
+            .map_err(|err| format!("reading {}: {err}", config_path.display()))?;
+        interpolate_env(&raw)?
+    } else {
+        String::new()
+    };
+
+    let config: CairnConfig = Figment::new()
+        .merge(Serialized::defaults(CairnConfig::default()))
+        .merge(Yaml::string(&yaml_content))
+        .merge(Env::prefixed("CAIRN_").split("__"))
+        .extract()
+        .map_err(|err| format!("parsing config: {err}"))?;
+
+    config
+        .validate()
+        .map_err(|err| format!("validating config: {err}"))?;
+    Ok(config)
+}
+
+fn interpolate_env(src: &str) -> Result<String, String> {
+    let mut out = String::with_capacity(src.len());
+    let mut rest = src;
+    while let Some(start) = rest.find("${") {
+        out.push_str(&rest[..start]);
+        let after_open = &rest[start + 2..];
+        let Some(end) = after_open.find('}') else {
+            out.push_str(&rest[start..]);
+            return Ok(out);
+        };
+        let name = &after_open[..end];
+        if is_env_name(name) {
+            let value = std::env::var(name)
+                .map_err(|_| format!("unresolved env var in config: ${{{name}}}"))?;
+            out.push_str(&value);
+        } else {
+            out.push_str("${");
+            out.push_str(name);
+            out.push('}');
+        }
+        rest = &after_open[end + 1..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
+fn is_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_uppercase())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_uppercase() || ch.is_ascii_digit())
+}
+
+fn committed_response(output: HotMemoryOutput) -> Response {
+    Response {
+        contract: "cairn.mcp.v1".to_owned(),
+        data: Some(ResponseData::AssembleHot(to_assemble_hot_data(output))),
+        error: None,
+        operation_id: new_operation_id(),
+        policy_trace: Vec::<ResponsePolicyTrace>::new(),
+        status: ResponseStatus::Committed,
+        target: None,
+        verb: ResponseVerb::AssembleHot,
+    }
+}
+
+fn internal_response(message: &str) -> Response {
+    Response {
+        contract: "cairn.mcp.v1".to_owned(),
+        data: None,
+        error: Some(serde_json::json!({
+            "code": "Internal",
+            "message": message,
+        })),
+        operation_id: new_operation_id(),
+        policy_trace: Vec::<ResponsePolicyTrace>::new(),
+        status: ResponseStatus::Aborted,
+        target: None,
+        verb: ResponseVerb::AssembleHot,
+    }
+}
+
+fn invalid_args_response(field: &str, reason: &str) -> Response {
+    Response {
+        contract: "cairn.mcp.v1".to_owned(),
+        data: None,
+        error: Some(serde_json::json!({
+            "code": "InvalidArgs",
+            "message": format!("invalid {field}: {reason}"),
+            "data": {
+                "field": field,
+                "reason": reason,
+            },
+        })),
+        operation_id: new_operation_id(),
+        policy_trace: Vec::<ResponsePolicyTrace>::new(),
+        status: ResponseStatus::Rejected,
+        target: None,
+        verb: ResponseVerb::AssembleHot,
+    }
+}
+
+fn response_tool_result(resp: &Response) -> CallToolResult {
+    let value = match serde_json::to_value(resp) {
+        Ok(value) => value,
+        Err(err) => {
+            return CallToolResult::structured_error(serde_json::json!({
+                "contract": "cairn.mcp.v1",
+                "verb": "assemble_hot",
+                "status": "aborted",
+                "operation_id": new_operation_id(),
+                "policy_trace": [],
+                "error": {
+                    "code": "Internal",
+                    "message": format!("serializing MCP response: {err}"),
+                },
+            }));
+        }
+    };
+    match resp.status {
+        ResponseStatus::Committed => CallToolResult::structured(value),
+        ResponseStatus::Rejected | ResponseStatus::Aborted => {
+            CallToolResult::structured_error(value)
+        }
+        _ => CallToolResult::structured_error(value),
+    }
+}
+
+fn to_assemble_hot_data(output: HotMemoryOutput) -> AssembleHotData {
+    AssembleHotData {
+        bytes: u64::from(output.bytes),
+        cache: CacheInfo {
+            key: output.cache.key,
+            status: map_cache_status(&output.cache.status),
+        },
+        prefix: output.prefix,
+        sources: output
+            .sources
+            .into_iter()
+            .map(|source| SourceSummary {
+                attempted: u64::from(source.attempted),
+                bytes: u64::from(source.bytes),
+                included: u64::from(source.included),
+                kind: map_source_kind(source.kind),
+                omitted: u64::from(source.omitted),
+            })
+            .collect(),
+        truncation: output
+            .truncation
+            .into_iter()
+            .map(|decision| TruncationDecision {
+                attempted_bytes: u64::from(decision.attempted_bytes),
+                included_bytes: u64::from(decision.included_bytes),
+                kind: map_source_kind(decision.kind),
+                reason: map_truncation_reason(decision.reason),
+                record_id: decision.record_id.map(Ulid),
+            })
+            .collect(),
+    }
+}
+
+fn map_source_kind(kind: HotMemorySourceKind) -> HotSourceKind {
+    match kind {
+        HotMemorySourceKind::Purpose => HotSourceKind::Purpose,
+        HotMemorySourceKind::Profile => HotSourceKind::Profile,
+        HotMemorySourceKind::Pinned => HotSourceKind::Pinned,
+        HotMemorySourceKind::HighSalience => HotSourceKind::HighSalience,
+        HotMemorySourceKind::ProjectState => HotSourceKind::ProjectState,
+        HotMemorySourceKind::RollingSummary => HotSourceKind::RollingSummary,
+        HotMemorySourceKind::Playbook => HotSourceKind::Playbook,
+        HotMemorySourceKind::RecentUserSignal => HotSourceKind::RecentUserSignal,
+    }
+}
+
+fn map_cache_status(status: &HotMemoryCacheStatus) -> HotCacheStatus {
+    match status {
+        HotMemoryCacheStatus::Hit => HotCacheStatus::Hit,
+        HotMemoryCacheStatus::Miss => HotCacheStatus::Miss,
+        HotMemoryCacheStatus::Refreshed => HotCacheStatus::Refreshed,
+    }
+}
+
+fn map_truncation_reason(reason: HotMemoryTruncationReason) -> TruncationDecisionReason {
+    match reason {
+        HotMemoryTruncationReason::BudgetExhausted => TruncationDecisionReason::BudgetExhausted,
+        HotMemoryTruncationReason::SectionTruncated => TruncationDecisionReason::SectionTruncated,
+        HotMemoryTruncationReason::RecordOmitted => TruncationDecisionReason::RecordOmitted,
+    }
+}
+
+fn new_operation_id() -> Ulid {
+    Ulid(ulid::Ulid::new().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn assemble_hot_tool_result_returns_committed_prefix() {
+        let dir = std::env::temp_dir().join(format!(
+            "cairn-mcp-assemble-hot-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("tempdir");
+        std::fs::write(dir.join("purpose.md"), "purpose from mcp").expect("purpose");
+        let args = serde_json::Map::new();
+
+        let result = assemble_hot_tool_result_at(&dir, Some(args)).await;
+
+        assert_eq!(result.is_error, Some(false));
+        let value = result.structured_content.expect("structured result");
+        assert_eq!(value["status"], "committed");
+        assert_eq!(value["verb"], "assemble_hot");
+        assert!(
+            value["data"]["prefix"]
+                .as_str()
+                .expect("prefix")
+                .contains("purpose from mcp")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

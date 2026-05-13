@@ -253,11 +253,15 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "cairn-core",
+ "cairn-store-sqlite",
  "cairn-test-fixtures",
+ "figment",
  "rmcp",
  "serde",
  "serde_json",
  "thiserror",
+ "tokio",
+ "ulid",
 ]
 
 [[package]]
