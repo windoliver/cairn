@@ -44,6 +44,7 @@ fn memory_store_hot_memory_types_exported() {
         budget_bytes: 1024,
         config_fingerprint: "config".to_owned(),
         god_node_weight: 0.3,
+        source_kinds: cairn_core::hot_memory::default_source_order(),
     };
     let _: HotMemoryInvalidationScope = HotMemoryInvalidationScope::Vault;
     let _: MemoryStoreError = MemoryStoreError::query("query failed");

@@ -365,15 +365,56 @@ impl Default for HotMemoryConfig {
         Self {
             recipe: vec![
                 HotMemoryRecipeStep::Purpose,
-                HotMemoryRecipeStep::Index,
                 HotMemoryRecipeStep::PinnedFeedback,
                 HotMemoryRecipeStep::TopSalienceProject,
+                HotMemoryRecipeStep::Index,
                 HotMemoryRecipeStep::ActivePlaybook,
                 HotMemoryRecipeStep::RecentUserSignal,
             ],
             max_bytes: 25_600,
             god_node_weight: 0.3,
         }
+    }
+}
+
+impl HotMemoryConfig {
+    /// Return enabled hot-memory source kinds in design order implied by this recipe.
+    #[must_use]
+    pub fn source_kinds(&self) -> Vec<crate::hot_memory::HotMemorySourceKind> {
+        use crate::hot_memory::HotMemorySourceKind;
+
+        let mut enabled = std::collections::HashSet::new();
+        for step in &self.recipe {
+            match step {
+                HotMemoryRecipeStep::Purpose => {
+                    enabled.insert(HotMemorySourceKind::Purpose);
+                    enabled.insert(HotMemorySourceKind::Profile);
+                }
+                HotMemoryRecipeStep::Index => {
+                    enabled.insert(HotMemorySourceKind::ProjectState);
+                    enabled.insert(HotMemorySourceKind::RollingSummary);
+                }
+                HotMemoryRecipeStep::PinnedFeedback => {
+                    enabled.insert(HotMemorySourceKind::Pinned);
+                }
+                HotMemoryRecipeStep::TopSalienceProject => {
+                    enabled.insert(HotMemorySourceKind::HighSalience);
+                    enabled.insert(HotMemorySourceKind::ProjectState);
+                    enabled.insert(HotMemorySourceKind::RollingSummary);
+                }
+                HotMemoryRecipeStep::ActivePlaybook => {
+                    enabled.insert(HotMemorySourceKind::Playbook);
+                }
+                HotMemoryRecipeStep::RecentUserSignal => {
+                    enabled.insert(HotMemorySourceKind::RecentUserSignal);
+                }
+            }
+        }
+
+        crate::hot_memory::default_source_order()
+            .into_iter()
+            .filter(|kind| enabled.contains(kind))
+            .collect()
     }
 }
 
@@ -750,6 +791,28 @@ mod tests {
     fn hot_memory_recipe_step_round_trips() {
         let json = serde_json::to_string(&HotMemoryRecipeStep::PinnedFeedback).unwrap();
         assert_eq!(json, r#""pinned_feedback""#);
+    }
+
+    #[test]
+    fn hot_memory_recipe_maps_to_design_source_order() {
+        let config = HotMemoryConfig {
+            recipe: vec![
+                HotMemoryRecipeStep::ActivePlaybook,
+                HotMemoryRecipeStep::Purpose,
+                HotMemoryRecipeStep::PinnedFeedback,
+            ],
+            ..HotMemoryConfig::default()
+        };
+
+        assert_eq!(
+            config.source_kinds(),
+            vec![
+                crate::hot_memory::HotMemorySourceKind::Purpose,
+                crate::hot_memory::HotMemorySourceKind::Profile,
+                crate::hot_memory::HotMemorySourceKind::Pinned,
+                crate::hot_memory::HotMemorySourceKind::Playbook,
+            ]
+        );
     }
 
     #[test]

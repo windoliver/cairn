@@ -5,6 +5,7 @@ use cairn_core::contract::memory_store::{
 };
 use cairn_core::hot_memory::{
     HotMemoryCacheInfo, HotMemoryOptions, HotMemorySourceKind, assemble_hot_memory,
+    default_source_order,
 };
 use cairn_store_sqlite::{HotRecordSeed, SqliteMemoryStore};
 use rusqlite::Connection;
@@ -16,6 +17,7 @@ fn request() -> HotMemoryRequest {
         budget_bytes: 4096,
         config_fingerprint: "config-a".to_owned(),
         god_node_weight: 0.3,
+        source_kinds: default_source_order(),
     }
 }
 
@@ -28,6 +30,9 @@ async fn hot_memory_input_reads_vault_files_records_and_edges() {
     store
         .write_vault_file("index.md", "index text")
         .expect("index");
+    store
+        .write_vault_file("profile.md", "profile text")
+        .expect("profile");
     store
         .insert_hot_record(
             HotRecordSeed::new(
@@ -73,6 +78,12 @@ async fn hot_memory_input_reads_vault_files_records_and_edges() {
         input
             .sources
             .iter()
+            .any(|s| s.kind == HotMemorySourceKind::Profile && s.body.contains("profile text"))
+    );
+    assert!(
+        input
+            .sources
+            .iter()
             .any(|s| s.kind == HotMemorySourceKind::Pinned && s.body.contains("pinned text"))
     );
     assert!(
@@ -82,6 +93,31 @@ async fn hot_memory_input_reads_vault_files_records_and_edges() {
             .any(|s| s.kind == HotMemorySourceKind::Playbook && s.body.contains("playbook text"))
     );
     assert!(input.sources.iter().any(|s| s.centrality_score > 0.0));
+}
+
+#[tokio::test]
+async fn hot_memory_input_respects_requested_source_kinds() {
+    let store = SqliteMemoryStore::open_memory().expect("store");
+    store
+        .write_vault_file("purpose.md", "purpose text")
+        .expect("purpose");
+    store
+        .write_vault_file("index.md", "index text")
+        .expect("index");
+    store
+        .insert_hot_record(
+            HotRecordSeed::new("01J0000000000000000000001", "user", "pinned text")
+                .tag("pinned")
+                .salience(0.9),
+        )
+        .expect("pinned");
+    let mut req = request();
+    req.source_kinds = vec![HotMemorySourceKind::Purpose];
+
+    let input = store.hot_memory_input(&req).await.expect("input");
+
+    assert_eq!(input.sources.len(), 1);
+    assert_eq!(input.sources[0].kind, HotMemorySourceKind::Purpose);
 }
 
 #[tokio::test]
@@ -112,6 +148,80 @@ async fn unmatched_hot_record_has_zero_centrality_when_edges_exist() {
         .expect("pinned source");
 
     assert!(pinned.centrality_score.abs() < f32::EPSILON);
+}
+
+#[tokio::test]
+async fn source_revision_changes_when_ranking_scores_change() {
+    let store = SqliteMemoryStore::open_memory().expect("store");
+    store
+        .insert_hot_record(
+            HotRecordSeed::new("01J0000000000000000000001", "user", "pinned text")
+                .tag("pinned")
+                .salience(0.8)
+                .evidence(0.4),
+        )
+        .expect("pinned");
+
+    let before = store
+        .hot_memory_input(&request())
+        .await
+        .expect("input before")
+        .source_revision;
+    store
+        .update_hot_record_scores("01J0000000000000000000001", 0.2, 0.9)
+        .expect("update scores");
+    let after = store
+        .hot_memory_input(&request())
+        .await
+        .expect("input after")
+        .source_revision;
+
+    assert_ne!(before, after);
+}
+
+#[tokio::test]
+async fn centrality_normalizes_across_candidate_sources_only() {
+    let store = SqliteMemoryStore::open_memory().expect("store");
+    store
+        .insert_hot_record(
+            HotRecordSeed::new(
+                "01J0000000000000000000001",
+                "user",
+                "pinned text about CandidateEntity",
+            )
+            .tag("pinned")
+            .salience(0.9),
+        )
+        .expect("candidate");
+    store
+        .insert_entity_edge(
+            "CandidateEntity",
+            "RelevantNeighbor",
+            "uses",
+            "src/candidate.rs",
+            None,
+        )
+        .expect("candidate edge");
+    for i in 0..5 {
+        store
+            .insert_entity_edge(
+                "UnrelatedHub",
+                format!("UnrelatedNeighbor{i}"),
+                "uses",
+                format!("src/unrelated_{i}.rs"),
+                None,
+            )
+            .expect("unrelated edge");
+    }
+
+    let input = store.hot_memory_input(&request()).await.expect("input");
+    let candidate = input
+        .sources
+        .iter()
+        .find(|source| source.record_id.as_deref() == Some("01J0000000000000000000001"))
+        .expect("candidate source");
+
+    assert!((candidate.centrality_score - 1.0).abs() < f32::EPSILON);
 }
 
 #[tokio::test]
@@ -253,6 +363,7 @@ async fn hot_memory_cache_hits_and_invalidates_by_session() {
             budget_bytes: req.budget_bytes,
             god_node_weight: req.god_node_weight,
             cache: HotMemoryCacheInfo::refreshed(key.clone()),
+            source_order: req.source_kinds.clone(),
         },
     );
     store

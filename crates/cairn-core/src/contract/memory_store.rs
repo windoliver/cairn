@@ -4,10 +4,10 @@
 //! `supported_contract_versions`. CRUD/FTS/ANN/graph methods land in #46.
 
 use crate::contract::version::{ContractVersion, VersionRange};
-use crate::hot_memory::{HotMemoryInput, HotMemoryOutput};
+use crate::hot_memory::{HotMemoryInput, HotMemoryOutput, HotMemorySourceKind};
 
 /// Contract version for `MemoryStore`. Bumps when the trait surface changes.
-pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 1, 1);
+pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 1, 2);
 
 /// Static capability declaration for a `MemoryStore` impl.
 ///
@@ -41,6 +41,8 @@ pub struct HotMemoryRequest {
     pub config_fingerprint: String,
     /// Centrality blend weight from config.
     pub god_node_weight: f32,
+    /// Enabled source kinds for this request, in assembly order.
+    pub source_kinds: Vec<HotMemorySourceKind>,
 }
 
 /// Scope of a cache invalidation request.
@@ -273,7 +275,7 @@ mod tests {
 
     #[test]
     fn contract_version_bumps_for_hot_memory_surface() {
-        assert_eq!(CONTRACT_VERSION, ContractVersion::new(0, 1, 1));
+        assert_eq!(CONTRACT_VERSION, ContractVersion::new(0, 1, 2));
         assert!(
             VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
                 .accepts(CONTRACT_VERSION)
@@ -289,6 +291,7 @@ mod tests {
             budget_bytes: 1024,
             config_fingerprint: "config-a".to_owned(),
             god_node_weight: 0.3,
+            source_kinds: crate::hot_memory::default_source_order(),
         };
         let input = s
             .hot_memory_input(&request)

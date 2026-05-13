@@ -79,6 +79,8 @@ pub struct HotMemoryOptions {
     pub god_node_weight: f32,
     /// Cache metadata to echo in the output.
     pub cache: HotMemoryCacheInfo,
+    /// Enabled source kinds in assembly order. Empty means the default design order.
+    pub source_order: Vec<HotMemorySourceKind>,
 }
 
 /// Cache state reported by the caller.
@@ -181,11 +183,12 @@ impl HotMemoryCacheInfo {
 pub fn assemble_hot_memory(input: &HotMemoryInput, options: HotMemoryOptions) -> HotMemoryOutput {
     let weight = clamp_weight(options.god_node_weight);
     let budget = options.budget_bytes as usize;
+    let source_order = normalize_source_order(&options.source_order);
     let mut prefix = String::new();
-    let mut summaries = Vec::with_capacity(kind_order().len());
+    let mut summaries = Vec::with_capacity(source_order.len());
     let mut truncation = Vec::new();
 
-    for kind in kind_order().iter().copied() {
+    for kind in source_order {
         let mut group: Vec<&HotMemorySource> = input
             .sources
             .iter()
@@ -277,6 +280,7 @@ pub async fn assemble_hot_with_store<S: MemoryStore + ?Sized>(
             budget_bytes: request.budget_bytes,
             god_node_weight: request.god_node_weight,
             cache: HotMemoryCacheInfo::refreshed(key.clone()),
+            source_order: request.source_kinds.clone(),
         },
     );
     store.store_hot_memory_cache(&key, &output).await?;
@@ -294,6 +298,23 @@ fn kind_order() -> &'static [HotMemorySourceKind] {
         HotMemorySourceKind::Playbook,
         HotMemorySourceKind::RecentUserSignal,
     ]
+}
+
+/// Default hot-memory source order from the design.
+#[must_use]
+pub fn default_source_order() -> Vec<HotMemorySourceKind> {
+    kind_order().to_vec()
+}
+
+fn normalize_source_order(source_order: &[HotMemorySourceKind]) -> Vec<HotMemorySourceKind> {
+    let mut order = if source_order.is_empty() {
+        default_source_order()
+    } else {
+        source_order.to_vec()
+    };
+    let mut seen = std::collections::HashSet::new();
+    order.retain(|kind| seen.insert(*kind));
+    order
 }
 
 fn compare_sources(
@@ -492,6 +513,7 @@ mod tests {
             budget_bytes: 4096,
             config_fingerprint: "config".to_owned(),
             god_node_weight: 0.3,
+            source_kinds: default_source_order(),
         };
         let first = assemble_hot_with_store(&store, &request)
             .await
@@ -540,6 +562,7 @@ mod tests {
                 budget_bytes: 4096,
                 god_node_weight: 0.3,
                 cache: HotMemoryCacheInfo::miss("key-a"),
+                source_order: default_source_order(),
             },
         );
         assert!(out.prefix.find("purpose").unwrap() < out.prefix.find("profile").unwrap());
@@ -565,6 +588,7 @@ mod tests {
                 budget_bytes: 12,
                 god_node_weight: 0.0,
                 cache: HotMemoryCacheInfo::miss("key-b"),
+                source_order: default_source_order(),
             },
         );
         assert!(out.prefix.is_char_boundary(out.prefix.len()));
@@ -607,6 +631,7 @@ mod tests {
                 budget_bytes: 4096,
                 god_node_weight: 0.7,
                 cache: HotMemoryCacheInfo::miss("key-c"),
+                source_order: default_source_order(),
             },
         );
         assert!(out.prefix.find("central").unwrap() < out.prefix.find("evidence").unwrap());
@@ -653,6 +678,7 @@ mod tests {
                 budget_bytes: 4096,
                 god_node_weight: 0.5,
                 cache: HotMemoryCacheInfo::miss("key-d"),
+                source_order: default_source_order(),
             },
         );
         assert!(out.prefix.find("valid").unwrap() < out.prefix.find("invalid").unwrap());
@@ -683,6 +709,7 @@ mod tests {
                 budget_bytes: 4096,
                 god_node_weight: 0.0,
                 cache: HotMemoryCacheInfo::miss("key-e"),
+                source_order: default_source_order(),
             },
         );
         assert!(out.prefix.find("first").unwrap() < out.prefix.find("second").unwrap());

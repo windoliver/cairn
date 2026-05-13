@@ -266,6 +266,27 @@ impl SqliteMemoryStore {
         Ok(())
     }
 
+    /// Update ranking scores for a hot-memory record row.
+    ///
+    /// # Errors
+    /// Returns an error when the update fails.
+    pub fn update_hot_record_scores(
+        &self,
+        record_id: impl AsRef<str>,
+        evidence_score: f32,
+        salience: f32,
+    ) -> Result<(), MemoryStoreError> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "UPDATE records
+             SET evidence_score = ?2, salience = ?3
+             WHERE record_id = ?1",
+            params![record_id.as_ref(), evidence_score, salience],
+        )
+        .map_err(|e| MemoryStoreError::query_with_source("update hot record scores", e))?;
+        Ok(())
+    }
+
     /// Insert an entity edge row.
     ///
     /// # Errors
@@ -466,17 +487,10 @@ impl SqliteMemoryStore {
             }
         }
 
-        let max_degree = degrees.values().copied().fold(0.0_f32, f32::max);
-        if max_degree == 0.0 {
+        if degrees.is_empty() {
             return Ok((BTreeMap::new(), graph_revision));
         }
-        Ok((
-            degrees
-                .into_iter()
-                .map(|(entity, degree)| (entity, degree / max_degree))
-                .collect(),
-            graph_revision,
-        ))
+        Ok((degrees, graph_revision))
     }
 }
 
@@ -505,11 +519,21 @@ impl MemoryStore for SqliteMemoryStore {
         request: &HotMemoryRequest,
     ) -> Result<HotMemoryInput, MemoryStoreError> {
         let mut sources = Vec::new();
-        if let Some(source) = self.read_vault_source("purpose.md", HotMemorySourceKind::Purpose)? {
+        if source_enabled(request, HotMemorySourceKind::Purpose)
+            && let Some(source) =
+                self.read_vault_source("purpose.md", HotMemorySourceKind::Purpose)?
+        {
             sources.push(source);
         }
-        if let Some(source) =
-            self.read_vault_source("index.md", HotMemorySourceKind::ProjectState)?
+        if source_enabled(request, HotMemorySourceKind::Profile)
+            && let Some(source) =
+                self.read_vault_source("profile.md", HotMemorySourceKind::Profile)?
+        {
+            sources.push(source);
+        }
+        if source_enabled(request, HotMemorySourceKind::ProjectState)
+            && let Some(source) =
+                self.read_vault_source("index.md", HotMemorySourceKind::ProjectState)?
         {
             sources.push(source);
         }
@@ -517,6 +541,9 @@ impl MemoryStore for SqliteMemoryStore {
         let (centrality, graph_revision) = self.centrality_scores()?;
         for row in self.record_rows(request)? {
             if let Some(kind) = hot_source_kind(&row) {
+                if !source_enabled(request, kind) {
+                    continue;
+                }
                 let score = record_centrality(&row, &centrality).unwrap_or(0.0);
                 sources.push(HotMemorySource {
                     kind,
@@ -531,6 +558,7 @@ impl MemoryStore for SqliteMemoryStore {
             }
         }
 
+        normalize_source_centrality(&mut sources);
         sources.sort_by(|left, right| {
             right
                 .updated_at
@@ -669,6 +697,7 @@ impl MemoryStore for SqliteMemoryStore {
 fn hot_source_kind(row: &RecordRow) -> Option<HotMemorySourceKind> {
     let is_pinned = row.tags.iter().any(|tag| tag == "pinned");
     match row.kind.as_str() {
+        "profile" | "user_profile" => Some(HotMemorySourceKind::Profile),
         "user" | "feedback" if is_pinned => Some(HotMemorySourceKind::Pinned),
         "project" | "reference" => Some(HotMemorySourceKind::ProjectState),
         "playbook" => Some(HotMemorySourceKind::Playbook),
@@ -687,6 +716,10 @@ fn hot_source_kind(row: &RecordRow) -> Option<HotMemorySourceKind> {
     }
 }
 
+fn source_enabled(request: &HotMemoryRequest, kind: HotMemorySourceKind) -> bool {
+    request.source_kinds.is_empty() || request.source_kinds.contains(&kind)
+}
+
 fn record_centrality(row: &RecordRow, centrality: &BTreeMap<String, f32>) -> Option<f32> {
     let haystack = format!("{} {}", row.record_id, row.body).to_lowercase();
     centrality
@@ -699,6 +732,27 @@ fn record_centrality(row: &RecordRow, centrality: &BTreeMap<String, f32>) -> Opt
             }
         })
         .max_by(f32::total_cmp)
+}
+
+fn normalize_source_centrality(sources: &mut [HotMemorySource]) {
+    let max = sources
+        .iter()
+        .map(|source| clean_score(source.centrality_score))
+        .fold(0.0_f32, f32::max);
+    if max <= 0.0 {
+        return;
+    }
+    for source in sources {
+        source.centrality_score = clean_score(source.centrality_score) / max;
+    }
+}
+
+fn clean_score(score: f32) -> f32 {
+    if score.is_finite() {
+        score.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 fn user_version(conn: &Connection) -> Result<i32, MemoryStoreError> {
@@ -780,17 +834,24 @@ fn table_columns(conn: &Connection, table: &str) -> Result<BTreeSet<String>, Mem
 }
 
 fn source_revision(sources: &[HotMemorySource], graph_revision: &str) -> String {
-    let mut parts = Vec::with_capacity((sources.len() * 4) + 2);
+    let mut parts = Vec::with_capacity((sources.len() * 7) + 2);
     parts.push("graph".to_owned());
     parts.push(graph_revision.to_owned());
     for source in sources {
         parts.push(kind_name(source.kind).to_owned());
         parts.push(source.record_id.clone().unwrap_or_default());
         parts.push(source.updated_at.clone());
+        parts.push(score_revision(source.salience));
+        parts.push(score_revision(source.evidence_score));
+        parts.push(score_revision(source.centrality_score));
         parts.push(source.body.clone());
     }
     let refs = parts.iter().map(String::as_str).collect::<Vec<_>>();
     hash_parts(&refs)
+}
+
+fn score_revision(score: f32) -> String {
+    score.to_bits().to_string()
 }
 
 fn graph_edge_revision(edges: &[(String, String, String, String)]) -> String {

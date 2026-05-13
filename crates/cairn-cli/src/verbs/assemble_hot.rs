@@ -78,6 +78,7 @@ fn assemble_hot_response(sub: &ArgMatches) -> Result<Response, Box<Response>> {
         budget_bytes: budget,
         config_fingerprint,
         god_node_weight: config.vault.hot_memory.god_node_weight,
+        source_kinds: config.vault.hot_memory.source_kinds(),
     };
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()

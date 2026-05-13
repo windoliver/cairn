@@ -1,5 +1,6 @@
 ---
 source: crates/cairn-core/src/config/mod.rs
+assertion_line: 1134
 expression: json
 ---
 {
@@ -21,9 +22,9 @@ expression: json
     "hot_memory": {
       "recipe": [
         "purpose",
-        "index",
         "pinned_feedback",
         "top_salience_project",
+        "index",
         "active_playbook",
         "recent_user_signal"
       ],
