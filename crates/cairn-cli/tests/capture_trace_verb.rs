@@ -992,7 +992,7 @@ async fn capture_trace_imports_recording_batch_segment_text() {
         &payload,
     );
     let hash = sha256_hex(&payload);
-    let sensor = Identity::parse("snr:local:recording:batch:v1").expect("valid sensor");
+    let sensor = Identity::parse("snr:local:recording:default:v1").expect("valid sensor");
     let captured_at = Rfc3339Timestamp::parse("2026-05-13T12:00:00Z").expect("valid ts");
     let event = CaptureEvent {
         event_id: CaptureEventId::parse(event_id).expect("valid ULID"),

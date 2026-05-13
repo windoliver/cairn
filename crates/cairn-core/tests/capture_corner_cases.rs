@@ -83,7 +83,7 @@ fn family_defaults(family: SourceFamily) -> (&'static str, CapturePayload) {
             },
         ),
         SourceFamily::RecordingBatch => (
-            "snr:local:recording:batch:v1",
+            "snr:local:recording:default:v1",
             CapturePayload::RecordingBatch {
                 segment_start_ms: 0,
                 segment_duration_ms: 1000,
@@ -190,8 +190,10 @@ fn allowed(mode: CaptureMode, family: SourceFamily) -> bool {
                 | SourceFamily::Voice
                 | SourceFamily::Screen
                 | SourceFamily::RecordingBatch,
-        ) | (CaptureMode::Explicit, SourceFamily::Cli | SourceFamily::Mcp,)
-            | (CaptureMode::Proactive, SourceFamily::Proactive)
+        ) | (
+            CaptureMode::Explicit,
+            SourceFamily::Cli | SourceFamily::Mcp | SourceFamily::RecordingBatch,
+        ) | (CaptureMode::Proactive, SourceFamily::Proactive)
     )
 }
 
@@ -392,8 +394,8 @@ fn recording_batch_zero_duration_rejected() {
     let mut ev = event_with(
         CaptureMode::Auto,
         SourceFamily::RecordingBatch,
-        "snr:local:recording:batch:v1",
-        chain_for(CaptureMode::Auto, "snr:local:recording:batch:v1"),
+        "snr:local:recording:default:v1",
+        chain_for(CaptureMode::Auto, "snr:local:recording:default:v1"),
         family_defaults(SourceFamily::RecordingBatch).1,
     );
     ev.payload = CapturePayload::RecordingBatch {
@@ -401,6 +403,25 @@ fn recording_batch_zero_duration_rejected() {
         segment_duration_ms: 0,
     };
     ev.validate().unwrap_err();
+}
+
+#[test]
+fn explicit_recording_batch_accepts_human_author_and_recording_sensor() {
+    let (_, payload) = family_defaults(SourceFamily::RecordingBatch);
+    let sensor = "snr:local:recording:default:v1";
+    let ev = event_with(
+        CaptureMode::Explicit,
+        SourceFamily::RecordingBatch,
+        sensor,
+        vec![
+            entry(ChainRole::Author, "hmn:recording-ingest"),
+            entry(ChainRole::Sensor, sensor),
+        ],
+        payload,
+    );
+
+    ev.validate_for_capture()
+        .expect("explicit recording batch event validates");
 }
 
 #[test]

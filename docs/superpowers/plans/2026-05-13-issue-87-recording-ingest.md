@@ -671,7 +671,7 @@ let event = CaptureEvent {
     event_id: CaptureEventId::parse("01ARZ3NDEKTSV4RRFFQ69G5FD0").expect("valid ULID"),
     captured_at: Rfc3339Timestamp::parse("2026-05-13T12:00:00Z").expect("valid ts"),
     source_family: SourceFamily::RecordingBatch,
-    sensor_id: Identity::parse("snr:local:recording:batch:v1").expect("valid sensor"),
+    sensor_id: Identity::parse("snr:local:recording:default:v1").expect("valid sensor"),
     mode: CaptureMode::Explicit,
     refs: Some(CaptureRefs {
         session_id: Some("01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned()),
@@ -686,7 +686,7 @@ let event = CaptureEvent {
     },
     actor_chain: vec![ActorChainEntry {
         role: ChainRole::Author,
-        identity: Identity::parse("snr:local:recording:batch:v1").expect("valid identity"),
+        identity: Identity::parse("snr:local:recording:default:v1").expect("valid identity"),
     }],
 };
 ```
@@ -797,7 +797,7 @@ use ulid::Ulid;
 Add:
 
 ```rust
-const RECORDING_SENSOR_ID: &str = "snr:local:recording:batch:v1";
+const RECORDING_SENSOR_ID: &str = "snr:local:recording:default:v1";
 const RECORDING_SESSION_ID: &str = "recording-batch";
 
 #[derive(Debug, Clone, PartialEq)]

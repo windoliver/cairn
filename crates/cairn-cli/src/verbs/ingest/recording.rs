@@ -6,9 +6,20 @@
 )]
 
 use cairn_core::domain::canonical::canonical_bytes;
+use cairn_core::domain::{
+    ActorChainEntry, CaptureEvent, CaptureEventId, CaptureMode, CapturePayload, CaptureRefs,
+    ChainRole, Identity, PayloadHash, Rfc3339Timestamp, SourceFamily,
+};
 use sha2::{Digest as _, Sha256};
 use std::collections::HashSet;
 use std::path::PathBuf;
+use ulid::Ulid;
+
+/// Design sensor identity for user-triggered batch recording ingest.
+const RECORDING_SENSOR_ID: &str = "snr:local:recording:default:v1";
+const RECORDING_AUTHOR_ID: &str = "hmn:recording-ingest";
+const RECORDING_CAPTURED_AT: &str = "2026-05-13T00:00:00Z";
+const RECORDING_SESSION_ID: &str = "recording-batch";
 
 #[derive(Debug, Clone, PartialEq)]
 enum SegmentKind {
@@ -39,6 +50,18 @@ struct SegmentPayload {
     segment_id: String,
     payload_hash: String,
     payload_json: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct StagedPayload {
+    vault_relative_path: String,
+    bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct CaptureBatch {
+    events: Vec<CaptureEvent>,
+    payloads: Vec<StagedPayload>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -234,6 +257,92 @@ fn build_segment_payloads(plan: &RecordingPlan) -> anyhow::Result<Vec<SegmentPay
     Ok(payloads)
 }
 
+fn build_capture_batch(plan: &RecordingPlan) -> anyhow::Result<CaptureBatch> {
+    let segment_payloads = build_segment_payloads(plan)?;
+    let sensor = Identity::parse(RECORDING_SENSOR_ID)?;
+    let author = Identity::parse(RECORDING_AUTHOR_ID)?;
+    let recording_dir = plan
+        .media_hash
+        .strip_prefix("sha256:")
+        .unwrap_or(plan.media_hash.as_str());
+    let turn_id = format!("recording-{recording_dir}");
+    let mut events = Vec::with_capacity(segment_payloads.len());
+    let mut payloads = Vec::with_capacity(segment_payloads.len());
+
+    for (ordinal, (segment, segment_payload)) in
+        plan.segments.iter().zip(segment_payloads).enumerate()
+    {
+        let event_id = deterministic_event_id(&segment_payload.segment_id)?;
+        let captured_at = segment_captured_at(segment, ordinal)?;
+        let payload_ref = format!("sources/recordings/{}/{}.json", recording_dir, event_id);
+        let event = CaptureEvent::try_new(
+            event_id,
+            sensor.clone(),
+            CaptureMode::Explicit,
+            vec![
+                ActorChainEntry {
+                    role: ChainRole::Author,
+                    identity: author.clone(),
+                    at: captured_at.clone(),
+                },
+                ActorChainEntry {
+                    role: ChainRole::Sensor,
+                    identity: sensor.clone(),
+                    at: captured_at.clone(),
+                },
+            ],
+            Some(CaptureRefs {
+                session_id: Some(RECORDING_SESSION_ID.to_owned()),
+                turn_id: Some(turn_id.clone()),
+                tool_id: None,
+            }),
+            PayloadHash::parse(segment_payload.payload_hash.clone())?,
+            payload_ref.clone(),
+            captured_at.clone(),
+            CapturePayload::RecordingBatch {
+                segment_start_ms: segment.start_ms,
+                segment_duration_ms: segment.duration_ms,
+            },
+            SourceFamily::RecordingBatch,
+        )?;
+
+        payloads.push(StagedPayload {
+            vault_relative_path: payload_ref,
+            bytes: segment_payload.payload_json,
+        });
+        events.push(event);
+    }
+
+    Ok(CaptureBatch { events, payloads })
+}
+
+fn deterministic_event_id(seed: &str) -> anyhow::Result<CaptureEventId> {
+    let digest = Sha256::digest(seed.as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    let ulid = Ulid::from_bytes(bytes).to_string();
+    Ok(CaptureEventId::parse(ulid)?)
+}
+
+fn segment_captured_at(
+    segment: &RecordingSegment,
+    ordinal: usize,
+) -> anyhow::Result<Rfc3339Timestamp> {
+    let base =
+        chrono::DateTime::parse_from_rfc3339(RECORDING_CAPTURED_AT)?.with_timezone(&chrono::Utc);
+    let segment_offset_ms = i64::try_from(segment.start_ms)
+        .map_err(|_| anyhow::anyhow!("segment start_ms does not fit timestamp offset"))?;
+    let ordinal_offset_us = i64::try_from(ordinal)
+        .map_err(|_| anyhow::anyhow!("segment ordinal does not fit timestamp offset"))?;
+    let captured_at = base
+        + chrono::Duration::milliseconds(segment_offset_ms)
+        + chrono::Duration::microseconds(ordinal_offset_us);
+
+    Ok(Rfc3339Timestamp::parse(
+        captured_at.to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
+    )?)
+}
+
 impl SegmentKind {
     const fn sort_rank(&self) -> u8 {
         match self {
@@ -270,6 +379,7 @@ fn hex_prefix(bytes: &[u8], chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cairn_core::domain::{CaptureMode, ChainRole, SourceId};
 
     const FIXTURE: &str = r#"{
       "media_path": "fixtures/v0/recordings/demo.mp4",
@@ -365,6 +475,217 @@ mod tests {
         assert!(
             value["media"].get("copied_path").is_none(),
             "payload must not imply media was copied"
+        );
+    }
+
+    #[test]
+    fn recording_plan_builds_valid_capture_events_and_payload_refs() {
+        let plan = parse_fixture_plan(FIXTURE).expect("fixture parses");
+        let batch = build_capture_batch(&plan).expect("batch builds");
+
+        assert_eq!(batch.events.len(), 3);
+        assert_eq!(batch.payloads.len(), 3);
+        assert_eq!(
+            batch.events[0].source_family,
+            cairn_core::domain::SourceFamily::RecordingBatch
+        );
+        assert_eq!(batch.events[0].capture_mode, CaptureMode::Explicit);
+        assert_eq!(
+            batch.events[0].sensor_id.as_str(),
+            "snr:local:recording:default:v1"
+        );
+        assert!(
+            batch.events[0]
+                .payload_ref
+                .starts_with("sources/recordings/")
+        );
+        assert_eq!(
+            batch
+                .events
+                .iter()
+                .map(|event| event.payload_ref.as_str())
+                .collect::<Vec<_>>(),
+            batch
+                .payloads
+                .iter()
+                .map(|payload| payload.vault_relative_path.as_str())
+                .collect::<Vec<_>>()
+        );
+
+        let again = build_capture_batch(&plan).expect("batch builds twice");
+        assert_eq!(
+            batch
+                .events
+                .iter()
+                .map(|event| event.event_id.as_str())
+                .collect::<Vec<_>>(),
+            again
+                .events
+                .iter()
+                .map(|event| event.event_id.as_str())
+                .collect::<Vec<_>>(),
+            "event ids must be deterministic"
+        );
+        assert_eq!(
+            batch
+                .events
+                .iter()
+                .map(|event| event.payload_ref.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                format!(
+                    "sources/recordings/0000000000000000000000000000000000000000000000000000000000000087/{}.json",
+                    batch.events[0].event_id
+                ),
+                format!(
+                    "sources/recordings/0000000000000000000000000000000000000000000000000000000000000087/{}.json",
+                    batch.events[1].event_id
+                ),
+                format!(
+                    "sources/recordings/0000000000000000000000000000000000000000000000000000000000000087/{}.json",
+                    batch.events[2].event_id
+                ),
+            ],
+            "payload refs should follow segment order and stable event ids"
+        );
+
+        let expected_boundaries = [(0, 1800), (2000, 1000), (3200, 900)];
+        let expected_text = [
+            "alpha recording launch note",
+            "screen shows gamma config",
+            "beta follow up action",
+        ];
+        for ((event, staged), &(start_ms, duration_ms)) in batch
+            .events
+            .iter()
+            .zip(&batch.payloads)
+            .zip(&expected_boundaries)
+        {
+            assert_eq!(
+                event.actor_chain[0].role,
+                ChainRole::Author,
+                "explicit recording event should be human-authored"
+            );
+            assert_eq!(
+                event.actor_chain[0].identity.as_str(),
+                "hmn:recording-ingest"
+            );
+            assert_eq!(event.actor_chain[0].at, event.captured_at);
+            assert_eq!(event.actor_chain[1].role, ChainRole::Sensor);
+            assert_eq!(
+                event.actor_chain[1].identity.as_str(),
+                "snr:local:recording:default:v1"
+            );
+            assert_eq!(event.actor_chain[1].at, event.captured_at);
+            let payload_stem = staged
+                .vault_relative_path
+                .rsplit('/')
+                .next()
+                .and_then(|name| name.strip_suffix(".json"))
+                .expect("payload filename stem");
+            assert_eq!(payload_stem, event.event_id.as_str());
+            SourceId::parse(payload_stem).expect("payload filename stem is valid source id");
+            assert_eq!(
+                event.payload,
+                CapturePayload::RecordingBatch {
+                    segment_start_ms: start_ms,
+                    segment_duration_ms: duration_ms,
+                }
+            );
+            assert_eq!(
+                event.payload_hash.as_str(),
+                format!("sha256:{:x}", Sha256::digest(&staged.bytes))
+            );
+            event.validate_for_capture().expect("recording event valid");
+        }
+
+        let mut sorted = batch.events.clone();
+        sorted.sort_by(|left, right| {
+            left.captured_at
+                .cmp_chronological(&right.captured_at)
+                .then_with(|| left.event_id.as_str().cmp(right.event_id.as_str()))
+        });
+        assert_eq!(
+            sorted
+                .iter()
+                .zip(&batch.payloads)
+                .map(|(event, payload)| {
+                    assert_eq!(event.payload_ref, payload.vault_relative_path);
+                    let value: serde_json::Value =
+                        serde_json::from_slice(&payload.bytes).expect("payload JSON");
+                    value["segment"]["text"].as_str().expect("text").to_owned()
+                })
+                .collect::<Vec<_>>(),
+            expected_text
+        );
+
+        let mut duplicate_plan = plan;
+        duplicate_plan.segments[1] = duplicate_plan.segments[0].clone();
+        let err = build_capture_batch(&duplicate_plan)
+            .expect_err("duplicate segment ids should reject batch construction");
+        assert!(
+            err.to_string().contains("duplicate recording segment_id"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn same_timestamp_segments_keep_plan_order_after_capture_trace_sort() {
+        let plan = RecordingPlan {
+            media_path: PathBuf::from("fixtures/v0/recordings/demo.mp4"),
+            media_hash: "sha256:0000000000000000000000000000000000000000000000000000000000000087"
+                .to_owned(),
+            duration_ms: 5200,
+            file_size: 1234,
+            skipped_frames: 0,
+            segments: vec![
+                RecordingSegment {
+                    start_ms: 1000,
+                    duration_ms: 500,
+                    text: "audio first".to_owned(),
+                    kind: SegmentKind::AudioTranscript {
+                        speaker_id: "speaker_01".to_owned(),
+                        confidence: 0.91,
+                    },
+                },
+                RecordingSegment {
+                    start_ms: 1000,
+                    duration_ms: 1000,
+                    text: "frame second".to_owned(),
+                    kind: SegmentKind::FrameOcr { confidence: 0.82 },
+                },
+            ],
+        };
+        let batch = build_capture_batch(&plan).expect("batch builds");
+
+        let mut sorted = batch.events.clone();
+        sorted.sort_by(|left, right| {
+            left.captured_at
+                .cmp_chronological(&right.captured_at)
+                .then_with(|| left.event_id.as_str().cmp(right.event_id.as_str()))
+        });
+
+        assert_eq!(
+            sorted
+                .iter()
+                .map(|event| match event.payload {
+                    CapturePayload::RecordingBatch {
+                        segment_start_ms,
+                        segment_duration_ms,
+                    } => (segment_start_ms, segment_duration_ms),
+                    _ => panic!("expected recording payload"),
+                })
+                .collect::<Vec<_>>(),
+            vec![(1000, 500), (1000, 1000)],
+            "ordinal timestamp offset must preserve plan order for tied start_ms"
+        );
+        assert_eq!(
+            batch
+                .events
+                .iter()
+                .map(|event| event.captured_at.as_str())
+                .collect::<Vec<_>>(),
+            vec!["2026-05-13T00:00:01.000000Z", "2026-05-13T00:00:01.000001Z"]
         );
     }
 
