@@ -111,7 +111,14 @@ pub fn summarize_turn(
     let member_ids = validate_and_collect_members(session_id, turn_id, events)?;
     let body = build_summary_body(session_id, turn_id, events)?;
     let id = summary_record_id(session_id, turn_id);
-    let extra = build_summary_frontmatter(session_id, turn_id, &id, member_ids);
+    // Use the event count as the summary sequence. The `records_trace_seq`
+    // UNIQUE index excludes `turn_summary` rows (migration 0023), so any
+    // non-zero value is safe. Using `events.len()` makes the sequence
+    // meaningful: it equals the number of events covered by this summary
+    // and is always > 0, so `list_trace_turns(since=0)` picks it up
+    // correctly via `trace_sequence > 0`.
+    let summary_sequence = u64::try_from(events.len()).unwrap_or(u64::MAX);
+    let extra = build_summary_frontmatter(session_id, turn_id, &id, member_ids, summary_sequence);
     let first = &events[0];
     // Safety: non-empty checked above; last index cannot fail.
     let last = &events[events.len() - 1];
@@ -283,11 +290,20 @@ fn trace_blocks_excerpt(value: &Json) -> Option<String> {
 }
 
 /// Build the `extra_frontmatter` map for a turn-summary record.
+///
+/// `summary_sequence` is the turn's event count (i.e., `events.len()`).
+/// This value is stored as `trace.sequence` so that
+/// `SqliteMemoryStore::list_trace_turns`'s `trace_sequence > since_sequence`
+/// predicate correctly includes summary records when `since_sequence = 0`.
+/// The `records_trace_seq` UNIQUE index excludes `turn_summary` rows
+/// (migration 0023 `WHERE trace_event != 'turn_summary'`), so the value
+/// does not conflict with per-event sequences.
 fn build_summary_frontmatter(
     session_id: &SessionId,
     turn_id: &str,
     id: &crate::domain::record::RecordId,
     member_ids: Vec<String>,
+    summary_sequence: u64,
 ) -> BTreeMap<String, Json> {
     let mut trace_obj = JsonMap::new();
     trace_obj.insert(
@@ -295,10 +311,11 @@ fn build_summary_frontmatter(
         Json::String(session_id.as_str().to_owned()),
     );
     trace_obj.insert("turn_id".into(), Json::String(turn_id.to_owned()));
-    // sequence = 0: summaries are out-of-band from the monotonic event
-    // sequence. The unique-seq SQLite index excludes summary records, so
-    // 0 is the designated sentinel and easy to filter on.
-    trace_obj.insert("sequence".into(), Json::Number(0_u64.into()));
+    // sequence = event count: makes this summary visible to
+    // `list_trace_turns(since=0)` via `trace_sequence > 0`.
+    // The records_trace_seq index excludes turn_summary rows so there
+    // is no UNIQUE collision with per-event sequences.
+    trace_obj.insert("sequence".into(), Json::Number(summary_sequence.into()));
     // capture_event_id for the summary equals its own deterministic record
     // id — synthetic, no underlying CaptureEvent.
     trace_obj.insert(
