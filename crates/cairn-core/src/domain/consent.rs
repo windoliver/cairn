@@ -76,6 +76,8 @@ pub enum ConsentKind {
     RememberIntent,
     /// Explicit user "forget this" intent — produces a body-free receipt.
     ForgetIntent,
+    /// Record forget severed the link from a source hash to Cairn memory.
+    SourceForget,
     /// Generic GRANT decision (0005-style consent grant).
     Grant,
     /// Generic REVOKE decision (0005-style consent revoke).
@@ -259,7 +261,9 @@ const fn expected_payload_variant(kind: ConsentKind) -> &'static str {
     match kind {
         ConsentKind::SensorEnable | ConsentKind::SensorDisable => "sensor_toggle",
         ConsentKind::PolicyChange => "policy_delta",
-        ConsentKind::RememberIntent | ConsentKind::ForgetIntent => "intent_receipt",
+        ConsentKind::RememberIntent | ConsentKind::ForgetIntent | ConsentKind::SourceForget => {
+            "intent_receipt"
+        }
         ConsentKind::Grant | ConsentKind::Revoke => "decision",
         ConsentKind::PromoteReceipt => "promote_receipt",
     }
@@ -320,7 +324,7 @@ fn validate_payload_for_kind(event: &ConsentEvent) -> Result<(), ConsentEventErr
             validate_dotted_key("subject", &event.subject)
         }
         (
-            ConsentKind::RememberIntent | ConsentKind::ForgetIntent,
+            ConsentKind::RememberIntent | ConsentKind::ForgetIntent | ConsentKind::SourceForget,
             ConsentPayload::IntentReceipt {
                 target_id_hash,
                 reason_code,
@@ -714,6 +718,18 @@ mod tests {
         }
     }
 
+    fn sample_source_forget() -> ConsentEvent {
+        let mut event = sample_forget();
+        event.consent_id = "01ARZ3NDEKTSV4RRFFQ69G5FB0".to_owned();
+        event.kind = ConsentKind::SourceForget;
+        event.payload = ConsentPayload::IntentReceipt {
+            target_id_hash: event.subject.clone(),
+            scope_tier: MemoryVisibility::Private,
+            reason_code: "record_forget".to_owned(),
+        };
+        event
+    }
+
     fn sample_sensor_enable() -> ConsentEvent {
         ConsentEvent {
             consent_id: "01ARZ3NDEKTSV4RRFFQ69G5FAW".to_owned(),
@@ -756,6 +772,14 @@ mod tests {
     #[test]
     fn round_trips_forget_through_json() {
         let event = sample_forget();
+        let s = serde_json::to_string(&event).expect("ser");
+        let back: ConsentEvent = serde_json::from_str(&s).expect("de");
+        assert_eq!(back, event);
+    }
+
+    #[test]
+    fn round_trips_source_forget_through_json() {
+        let event = sample_source_forget();
         let s = serde_json::to_string(&event).expect("ser");
         let back: ConsentEvent = serde_json::from_str(&s).expect("de");
         assert_eq!(back, event);

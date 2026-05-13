@@ -77,6 +77,7 @@ fn resolve_vault_or_cwd(
     };
     match cairn_cli::vault::resolve_vault(opts) {
         Ok(p) => {
+            verbs::forget::reconcile_pending_source_redactions(&p)?;
             let source = if explicit.is_some() {
                 VaultResolutionSource::Explicit
             } else if cwd
@@ -105,10 +106,9 @@ fn resolve_vault_or_cwd(
                 .downcast_ref::<cairn_cli::vault::VaultError>()
                 .is_some_and(|ve| matches!(ve, cairn_cli::vault::VaultError::NoneResolved));
             if is_none_resolved && explicit.is_none() {
-                Ok((
-                    cwd.unwrap_or_else(|| std::path::PathBuf::from(".")),
-                    VaultResolutionSource::CwdFallback,
-                ))
+                let path = cwd.unwrap_or_else(|| std::path::PathBuf::from("."));
+                verbs::forget::reconcile_pending_source_redactions(&path)?;
+                Ok((path, VaultResolutionSource::CwdFallback))
             } else {
                 Err(e)
             }
