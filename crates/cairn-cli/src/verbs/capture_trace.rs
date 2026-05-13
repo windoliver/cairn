@@ -41,7 +41,7 @@ use cairn_core::pipeline::extract::body::ResolvedBody;
 use cairn_core::pipeline::filter::{
     Decision, FilterInputs, RedactionTag, fence, redact, should_memorize,
 };
-use cairn_core::pipeline::turn::summarize_turn;
+use cairn_core::pipeline::turn::summarize_turn_with_scope;
 use cairn_core::policy_trace::{PolicyGate, PolicyTraceEntry, to_wire};
 use cairn_store_sqlite::SqliteMemoryStore;
 use clap::ArgMatches;
@@ -458,6 +458,11 @@ async fn run_handler_inner(
         let projected_len = projected.len();
         let session_id_tx = session_id.clone();
         let turn_str_tx = turn_str.clone();
+        // Clone scope binding for the move closure. None at single-tenant
+        // P0; Some when capture_trace is dispatched under a signed verb
+        // context with bound tenant/workspace (round-3 adversarial
+        // review #2).
+        let scope_binding_tx: Option<ScopeTuple> = scope_binding.cloned();
         let result = store
             .with_tx(move |tx| {
                 // Resolve any parent_event_ids that could not be satisfied
@@ -532,11 +537,12 @@ async fn run_handler_inner(
                 if had_stop || tx.turn_summary_exists(&session_id_tx, &turn_str_tx)? {
                     let final_rows = tx.list_trace_events(&session_id_tx, &turn_str_tx)?;
                     let turn_ordinal = tx.next_turn_ordinal(&session_id_tx, &turn_str_tx)?;
-                    let summary = summarize_turn(
+                    let summary = summarize_turn_with_scope(
                         &session_id_tx,
                         &turn_str_tx,
                         &final_rows,
                         turn_ordinal,
+                        scope_binding_tx.as_ref(),
                     )
                     .map_err(|e| cairn_store_sqlite::error::StoreError::Invariant {
                         what: format!("summarize_turn: {e}"),

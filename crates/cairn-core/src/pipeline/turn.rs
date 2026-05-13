@@ -115,6 +115,33 @@ pub fn summarize_turn(
     events: &[MemoryRecord],
     turn_ordinal: u64,
 ) -> Result<MemoryRecord, TurnSummaryError> {
+    summarize_turn_with_scope(session_id, turn_id, events, turn_ordinal, None)
+}
+
+/// Same as [`summarize_turn`] but also carries the caller's bound scope
+/// (tenant / workspace / user / agent) through to the summary record's
+/// scope. The supplied scope's `session_id` is overwritten with
+/// `session_id` to keep the canonical key consistent with the trace
+/// records' own scope. Used by `cairn capture_trace` so per-tenant
+/// `cairn forget` and `latest_consolidation_watermark` queries can
+/// safely filter by both tenant and session without mixing data across
+/// tenants that happen to share a session id (round-3 adversarial
+/// review #2).
+///
+/// `bound_scope = None` is the single-tenant P0 default — summary
+/// scope becomes `{ session_id: <id> }` and behavior matches the old
+/// `summarize_turn`.
+///
+/// # Errors
+///
+/// See [`TurnSummaryError`].
+pub fn summarize_turn_with_scope(
+    session_id: &SessionId,
+    turn_id: &str,
+    events: &[MemoryRecord],
+    turn_ordinal: u64,
+    bound_scope: Option<&ScopeTuple>,
+) -> Result<MemoryRecord, TurnSummaryError> {
     if events.is_empty() {
         return Err(TurnSummaryError::EmptyTurn);
     }
@@ -140,9 +167,16 @@ pub fn summarize_turn(
         consent_ref: "consent:pending".to_owned(),
         llm_id_if_any: None,
     };
-    let scope = ScopeTuple {
-        session_id: Some(session_id.as_str().to_owned()),
-        ..ScopeTuple::default()
+    let scope = if let Some(base) = bound_scope {
+        ScopeTuple {
+            session_id: Some(session_id.as_str().to_owned()),
+            ..base.clone()
+        }
+    } else {
+        ScopeTuple {
+            session_id: Some(session_id.as_str().to_owned()),
+            ..ScopeTuple::default()
+        }
     };
     let target_id = TargetId::parse(id.as_str())
         .unwrap_or_else(|_| unreachable!("summary_record_id always yields a valid ULID"));

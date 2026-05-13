@@ -158,19 +158,27 @@ impl SqliteMemoryStore {
         let session = session_id.to_owned();
         let watermark: Option<i64> = conn
             .call(move |c| {
-                // `scope` is stored as a JSON serialization of `ScopeTuple`
-                // (see `ProjectedRow::from_record`), so `{"session_id":"…"}`,
-                // not canonical-wire `session_id=…`. Filter via json_extract
-                // (round-2 adversarial review #2). Note: `consolidation` here
-                // is the rolling-summary frontmatter block, not an unrelated
-                // record kind.
+                // Include tombstoned summaries (round-3 adversarial review
+                // #1): the watermark must monotonically advance even when
+                // forget-cleanup removes the latest summary. If we only
+                // looked at active rows, forgetting any source in the
+                // newest summary would regress the watermark to the
+                // previous value (or 0), the dedupe_key would collapse
+                // back to a completed job's key, `enqueue_if_due` would
+                // treat that as success, and the session would silently
+                // stop consolidating. Tombstoning a summary does not
+                // undo the work the window covered — it just hides the
+                // synthesized prose.
+                //
+                // `scope` is stored as JSON via serde_json (see
+                // `ProjectedRow::from_record`), so `{"session_id":"…"}`
+                // — filter via json_extract, not canonical-wire equality.
                 const SQL: &str = "
                     SELECT MAX(CAST(
                         json_extract(extra_frontmatter, '$.consolidation.last_sequence')
                         AS INTEGER))
                     FROM records
                     WHERE kind = 'reasoning'
-                      AND active = 1 AND tombstoned = 0
                       AND json_extract(extra_frontmatter, '$.consolidation') IS NOT NULL
                       AND json_extract(scope, '$.session_id') = ?1
                 ";
