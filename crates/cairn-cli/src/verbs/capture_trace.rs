@@ -39,7 +39,8 @@ use cairn_core::generated::envelope::{
 };
 use cairn_core::generated::verbs::capture_trace::{CaptureTraceData, FailedTurn};
 use cairn_core::pipeline::capture_trace::{
-    ProjectedTraceBlocks, classify, project, project_pre_compact_snapshot, project_with_blocks,
+    ProjectedTraceBlocks, classify as core_classify, project, project_pre_compact_snapshot,
+    project_with_blocks,
 };
 use cairn_core::pipeline::dispatch::{DefaultRegistry, trace_body_bytes};
 use cairn_core::pipeline::extract::body::ResolvedBody;
@@ -339,7 +340,7 @@ async fn run_events_handler_inner_no_guard(
         // persisted in prior transactions and would mis-fire here).
         let mut last_pre_tool: BTreeMap<String, CaptureEventId> = BTreeMap::new();
         for event in &group {
-            if !matches!(classify(event), Ok(TraceEvent::PreTool)) {
+            if !matches!(classify_trace_event(event), Ok(TraceEvent::PreTool)) {
                 continue;
             }
             let Some(refs) = event.refs.as_ref() else {
@@ -360,7 +361,7 @@ async fn run_events_handler_inner_no_guard(
             // unclassifiable event rather than persisting a partial set:
             // the summary record would otherwise be built from incomplete
             // data and become hard-to-detect data loss.
-            let classified = match classify(event) {
+            let classified = match classify_trace_event(event) {
                 Ok(c) => c,
                 Err(e) => {
                     failed_turns.push((
@@ -701,7 +702,7 @@ async fn run_blocks_handler_inner(
             });
         }
 
-        let classified = classify(&event).map_err(anyhow::Error::msg)?;
+        let classified = core_classify(&event).map_err(anyhow::Error::msg)?;
         let parent_event_id = match &block {
             TraceBlock::ToolResult { tool_use_id, .. } => pre_tool_by_id.get(tool_use_id).cloned(),
             _ => None,
@@ -795,10 +796,20 @@ fn bind_record_scope(record: &mut cairn_core::domain::MemoryRecord, scope_bindin
 }
 
 fn trace_text(event: &CaptureEvent, body_bytes: &[u8]) -> anyhow::Result<String> {
-    if matches!(&event.payload, CapturePayload::Voice { .. }) {
-        return voice_transcript_text(body_bytes);
+    match &event.payload {
+        CapturePayload::Voice { .. } => voice_transcript_text(body_bytes),
+        CapturePayload::RecordingBatch { .. } => recording_segment_text(body_bytes),
+        _ => String::from_utf8(body_bytes.to_vec()).context("routed body is not valid UTF-8"),
     }
-    String::from_utf8(body_bytes.to_vec()).context("routed body is not valid UTF-8")
+}
+
+fn classify_trace_event(
+    event: &CaptureEvent,
+) -> Result<TraceEvent, cairn_core::pipeline::capture_trace::TraceProjectError> {
+    match &event.payload {
+        CapturePayload::RecordingBatch { .. } => Ok(TraceEvent::UserMessage),
+        _ => core_classify(event),
+    }
 }
 
 fn voice_transcript_text(body_bytes: &[u8]) -> anyhow::Result<String> {
@@ -811,6 +822,20 @@ fn voice_transcript_text(body_bytes: &[u8]) -> anyhow::Result<String> {
         .ok_or_else(|| anyhow::anyhow!("voice payload missing transcript.text"))?;
     if text.trim().is_empty() {
         anyhow::bail!("voice payload transcript.text is empty");
+    }
+    Ok(text.to_owned())
+}
+
+fn recording_segment_text(body_bytes: &[u8]) -> anyhow::Result<String> {
+    let raw: serde_json::Value =
+        serde_json::from_slice(body_bytes).context("recording payload is not valid JSON")?;
+    let text = raw
+        .get("segment")
+        .and_then(|segment| segment.get("text"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("recording payload missing segment.text"))?;
+    if text.trim().is_empty() {
+        anyhow::bail!("recording payload segment.text is empty");
     }
     Ok(text.to_owned())
 }

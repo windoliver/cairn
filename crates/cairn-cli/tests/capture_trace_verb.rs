@@ -970,6 +970,81 @@ async fn capture_trace_imports_events_from_memory_vector() {
     clippy::expect_used,
     reason = "test: panics surface broken invariants immediately"
 )]
+async fn capture_trace_imports_recording_batch_segment_text() {
+    let vault = tempfile::tempdir().expect("tempdir");
+    let store = open_test_store_in_memory().await;
+    let session = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let turn = "turn-recording";
+    let event_id = "01ARZ3NDEKTSV4RRFFQ69G5FD0";
+    let body_text = "recording batch body unique";
+    let payload = serde_json::json!({
+        "segment": {
+            "start_ms": 0,
+            "duration_ms": 1000,
+            "text": body_text
+        }
+    })
+    .to_string();
+    let payload_ref = write_source_for_family(
+        vault.path(),
+        "recordings/hash",
+        &format!("{event_id}.json"),
+        &payload,
+    );
+    let hash = sha256_hex(&payload);
+    let sensor = Identity::parse("snr:local:recording:batch:v1").expect("valid sensor");
+    let captured_at = Rfc3339Timestamp::parse("2026-05-13T12:00:00Z").expect("valid ts");
+    let event = CaptureEvent {
+        event_id: CaptureEventId::parse(event_id).expect("valid ULID"),
+        sensor_id: sensor.clone(),
+        capture_mode: CaptureMode::Auto,
+        actor_chain: vec![ActorChainEntry {
+            role: ChainRole::Author,
+            identity: sensor,
+            at: captured_at.clone(),
+        }],
+        refs: Some(CaptureRefs {
+            session_id: Some(session.to_owned()),
+            turn_id: Some(turn.to_owned()),
+            tool_id: None,
+        }),
+        payload_hash: PayloadHash::parse(format!("sha256:{hash}")).expect("valid hash"),
+        payload_ref,
+        captured_at,
+        payload: CapturePayload::RecordingBatch {
+            segment_start_ms: 0,
+            segment_duration_ms: 1000,
+        },
+        source_family: SourceFamily::RecordingBatch,
+    };
+
+    let resp = run_events_handler(&store, vault.path(), vec![event])
+        .await
+        .expect("run_events_handler should succeed");
+
+    assert!(
+        resp.failed_turns.is_empty(),
+        "expected no failures, got: {:?}",
+        resp.failed_turns
+    );
+
+    let session_id = SessionId::parse(session).expect("valid session_id");
+    store
+        .with_tx(move |tx| {
+            let rows = tx.list_trace_events(&session_id, turn)?;
+            assert_eq!(rows.len(), 1, "expected one recording trace row");
+            assert_eq!(rows[0].body, body_text);
+            Ok(())
+        })
+        .await
+        .expect("store query should succeed");
+}
+
+#[tokio::test]
+#[allow(
+    clippy::expect_used,
+    reason = "test: panics surface broken invariants immediately"
+)]
 async fn capture_trace_imports_events_from_memory_vector_with_scope() {
     let vault = tempfile::tempdir().expect("tempdir");
     let store = open_test_store_in_memory().await;
