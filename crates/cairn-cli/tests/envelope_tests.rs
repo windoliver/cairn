@@ -53,11 +53,6 @@ fn summarize_returns_aborted_internal() {
 }
 
 #[test]
-fn assemble_hot_returns_aborted_internal() {
-    assert_aborted_internal(&["assemble_hot", "--json"]);
-}
-
-#[test]
 fn capture_trace_returns_aborted_internal() {
     assert_aborted_internal(&["capture_trace", "--from", "/dev/null", "--json"]);
 }

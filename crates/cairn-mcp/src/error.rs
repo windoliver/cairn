@@ -16,4 +16,8 @@ pub enum McpTransportError {
     /// IO error on the underlying stdio transport.
     #[error("stdio IO error: {0}")]
     Io(#[from] std::io::Error),
+
+    /// rmcp service lifecycle failure.
+    #[error("MCP service error: {0}")]
+    Service(String),
 }
