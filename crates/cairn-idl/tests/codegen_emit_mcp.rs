@@ -209,10 +209,7 @@ fn input_schema_for_oneof_verbs_keeps_dispatch() {
     for verb in ["ingest", "capture_trace"] {
         let f = files
             .iter()
-            .find(|f| {
-                f.path
-                    .ends_with(format!("schemas/verbs/{verb}.input.json"))
-            })
+            .find(|f| f.path.ends_with(format!("schemas/verbs/{verb}.input.json")))
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&f.bytes).unwrap();
         let args = parsed.pointer("/$defs/Args").unwrap();
