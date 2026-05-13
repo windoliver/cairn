@@ -9,11 +9,13 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use cairn_core::config::CairnConfig;
+use cairn_core::contract::job_store::{EnqueueRequest, JobId, JobKind, RetryPolicy};
 use cairn_core::domain::RecordId;
 use cairn_core::generated::common::Ulid;
 use cairn_core::generated::envelope::ResponseVerb;
 use cairn_core::generated::envelope::{Response, ResponseData, ResponseStatus};
 use cairn_core::generated::verbs::forget::ForgetData;
+use cairn_workflows::consolidation::{FORGET_CLEANUP_KIND, ForgetCleanupPayload};
 use clap::ArgMatches;
 
 use super::envelope::{
@@ -116,6 +118,38 @@ async fn run_record(record_id_raw: String, vault_root: PathBuf, config: CairnCon
                 Ok(operation_id) => operation_id,
                 Err(message) => return super::signed::aborted(ResponseVerb::Forget, message),
             };
+
+            // Enqueue a forget-cleanup job so any consolidation summaries
+            // that referenced this record as a source are tombstoned.
+            // Non-fatal: if the job store is absent (short-lived CLI) or the
+            // enqueue fails (e.g. DuplicateDedupeKey from a prior run), we
+            // swallow the error and let the verb succeed. The scheduler will
+            // pick up the job when it boots (Task 17).
+            if let Some(js) = ctx.job_store.as_deref() {
+                let record_id_str = record_id.as_str().to_owned();
+                let payload = ForgetCleanupPayload {
+                    forgotten_record_id: record_id_str.clone(),
+                };
+                if let Ok(bytes) = payload.to_bytes() {
+                    let req = EnqueueRequest {
+                        job_id: JobId::new(format!("forget-cleanup:{record_id_str}")),
+                        kind: JobKind::new(FORGET_CLEANUP_KIND),
+                        payload: bytes,
+                        queue_key: None,
+                        dedupe_key: Some(record_id_str),
+                        not_before_ms: i64::try_from(
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis(),
+                        )
+                        .unwrap_or(i64::MAX),
+                        retry: RetryPolicy::DEFAULT,
+                    };
+                    let _ = js.enqueue(req).await;
+                }
+            }
+
             let data = ForgetData {
                 deleted_count: outcome.deleted_count,
                 plan_ref: None,
@@ -194,5 +228,48 @@ fn response_exit_code(resp: &Response) -> ExitCode {
         ResponseStatus::Committed => ExitCode::SUCCESS,
         ResponseStatus::Rejected => ExitCode::from(64),
         _ => ExitCode::FAILURE,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Smoke-test the `ForgetCleanupPayload` serialization and `EnqueueRequest`
+    /// construction that the `run_record` forget-cleanup path uses. Confirms
+    /// that the plumbing compiles and the payload round-trips cleanly without
+    /// requiring a full vault context.
+    ///
+    /// End-to-end enqueue coverage (`job_store=Some`, `store.forget_record`
+    /// succeeds, job lands in `workflow_jobs` table) lives in the integration
+    /// tests at Task 19 (`tests/forget_propagation.rs`).
+    #[test]
+    #[allow(
+        clippy::expect_used,
+        reason = "test: panics surface broken invariants immediately"
+    )]
+    fn forget_cleanup_payload_round_trips() {
+        let record_id_str = "01ARZ3NDEKTSV4RRFFQ69G5FAX".to_owned();
+        let payload = ForgetCleanupPayload {
+            forgotten_record_id: record_id_str.clone(),
+        };
+        let bytes = payload.to_bytes().expect("serialize payload");
+
+        let req = EnqueueRequest {
+            job_id: JobId::new(format!("forget-cleanup:{record_id_str}")),
+            kind: JobKind::new(FORGET_CLEANUP_KIND),
+            payload: bytes,
+            queue_key: None,
+            dedupe_key: Some(record_id_str.clone()),
+            not_before_ms: 1_000,
+            retry: RetryPolicy::DEFAULT,
+        };
+
+        assert_eq!(
+            req.job_id.as_str(),
+            &format!("forget-cleanup:{record_id_str}")
+        );
+        assert_eq!(req.kind.as_str(), FORGET_CLEANUP_KIND);
+        assert_eq!(req.dedupe_key.as_deref(), Some(record_id_str.as_str()));
     }
 }

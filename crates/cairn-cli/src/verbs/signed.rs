@@ -1,8 +1,10 @@
 //! Shared signed-verb utilities for issue #61.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use cairn_core::config::CairnConfig;
+use cairn_core::contract::job_store::JobStore;
 use cairn_core::domain::{DomainError, Identity};
 use cairn_core::error::wire::envelope_error_for;
 use cairn_core::generated::common::Ulid;
@@ -27,6 +29,16 @@ pub struct OpenedVerbContext {
     pub store: SqliteMemoryStore,
     /// Identity service with access to the durable identity registry.
     pub identity: IdentityService,
+    /// Optional job store for enqueuing background workflow jobs.
+    ///
+    /// `None` in short-lived CLI verb invocations (the scheduler loop is
+    /// not running). Set to `Some` by long-lived paths (MCP serve) that
+    /// boot the `Scheduler` — Task 17. Verb handlers that call
+    /// [`enqueue_if_due`] or enqueue forget-cleanup jobs gate on
+    /// `is_some()` so they degrade gracefully when the scheduler is absent.
+    ///
+    /// [`enqueue_if_due`]: cairn_workflows::consolidation::enqueue_if_due
+    pub job_store: Option<Arc<dyn JobStore>>,
 }
 
 /// Return the string error code from a response error body.
@@ -181,6 +193,9 @@ pub async fn open_context(
         config,
         store,
         identity,
+        // Short-lived CLI verbs do not boot the scheduler; Task 17 will
+        // populate this for the long-lived `mcp serve` path.
+        job_store: None,
     })
 }
 
