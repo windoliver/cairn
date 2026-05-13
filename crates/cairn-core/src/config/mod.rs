@@ -485,15 +485,13 @@ pub struct CairnConfig {
     pub pipeline: PipelineConfig,
     /// MCP transport configuration (issue #190).
     pub mcp: McpConfig,
-    /// Source-link hygiene policy (issue #257).
-    pub source: SourceConfig,
 }
 
 // ── Source ────────────────────────────────────────────────────────────────
 
 /// Source-link policy controlling how `forget` and lint treat sources
 /// under the vault (issue #257; brief §3, §5.6).
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SourceConfig {
     /// When true, `forget` MUST redact the raw bytes of any forgotten
@@ -507,14 +505,6 @@ pub struct SourceConfig {
     ///
     /// Default `false`: P0 operators can ship without the policy and
     /// lint stays quiet. Turning it on is a deliberate policy bump.
-    pub redact_on_forget: bool,
-}
-
-/// Source-file policy (§3 source forget notes).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(default, deny_unknown_fields)]
-pub struct SourceConfig {
-    /// When true, `forget` rewrites matching source files to metadata-only stubs.
     pub redact_on_forget: bool,
 }
 
