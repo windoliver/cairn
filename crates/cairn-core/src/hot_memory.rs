@@ -3,6 +3,7 @@
 //! This module is intentionally adapter-free: it performs deterministic
 //! in-memory ranking, rendering, budgeting, and metadata reporting only.
 
+use crate::contract::memory_store::{HotMemoryRequest, MemoryStore, MemoryStoreError};
 use serde::{Deserialize, Serialize};
 
 /// Source bucket for hot-memory assembly.
@@ -256,6 +257,32 @@ pub fn assemble_hot_memory(input: &HotMemoryInput, options: HotMemoryOptions) ->
     }
 }
 
+/// Assemble hot memory through a store-backed input source and cache.
+///
+/// This helper stays adapter-free by depending only on the core `MemoryStore`
+/// contract and the pure in-memory assembler in this module.
+pub async fn assemble_hot_with_store<S: MemoryStore + ?Sized>(
+    store: &S,
+    request: &HotMemoryRequest,
+) -> Result<HotMemoryOutput, MemoryStoreError> {
+    let input = store.hot_memory_input(request).await?;
+    let key = store.hot_memory_cache_key(request, &input)?;
+    if let Some(mut cached) = store.load_hot_memory_cache(&key).await? {
+        cached.cache = HotMemoryCacheInfo::hit(key);
+        return Ok(cached);
+    }
+    let output = assemble_hot_memory(
+        &input,
+        HotMemoryOptions {
+            budget_bytes: request.budget_bytes,
+            god_node_weight: request.god_node_weight,
+            cache: HotMemoryCacheInfo::refreshed(key.clone()),
+        },
+    );
+    store.store_hot_memory_cache(&key, &output).await?;
+    Ok(output)
+}
+
 fn kind_order() -> &'static [HotMemorySourceKind] {
     &[
         HotMemorySourceKind::Purpose,
@@ -363,6 +390,75 @@ fn to_u32(value: usize) -> u32 {
 mod tests {
     use super::*;
 
+    struct CacheStore {
+        input: HotMemoryInput,
+        cached: std::sync::Mutex<Option<HotMemoryOutput>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::contract::memory_store::MemoryStore for CacheStore {
+        fn name(&self) -> &'static str {
+            "cache-store"
+        }
+
+        fn capabilities(&self) -> &crate::contract::memory_store::MemoryStoreCapabilities {
+            static CAPS: crate::contract::memory_store::MemoryStoreCapabilities =
+                crate::contract::memory_store::MemoryStoreCapabilities {
+                    fts: true,
+                    vector: false,
+                    graph_edges: true,
+                    transactions: true,
+                };
+            &CAPS
+        }
+
+        fn supported_contract_versions(&self) -> crate::contract::version::VersionRange {
+            crate::contract::version::VersionRange::new(
+                crate::contract::version::ContractVersion::new(0, 1, 0),
+                crate::contract::version::ContractVersion::new(0, 2, 0),
+            )
+        }
+
+        async fn hot_memory_input(
+            &self,
+            _request: &crate::contract::memory_store::HotMemoryRequest,
+        ) -> Result<HotMemoryInput, crate::contract::memory_store::MemoryStoreError> {
+            Ok(self.input.clone())
+        }
+
+        fn hot_memory_cache_key(
+            &self,
+            _request: &crate::contract::memory_store::HotMemoryRequest,
+            input: &HotMemoryInput,
+        ) -> Result<String, crate::contract::memory_store::MemoryStoreError> {
+            Ok(format!("key-{}", input.source_revision))
+        }
+
+        async fn load_hot_memory_cache(
+            &self,
+            _key: &str,
+        ) -> Result<Option<HotMemoryOutput>, crate::contract::memory_store::MemoryStoreError>
+        {
+            Ok(self.cached.lock().expect("test mutex").clone())
+        }
+
+        async fn store_hot_memory_cache(
+            &self,
+            _key: &str,
+            output: &HotMemoryOutput,
+        ) -> Result<(), crate::contract::memory_store::MemoryStoreError> {
+            *self.cached.lock().expect("test mutex") = Some(output.clone());
+            Ok(())
+        }
+
+        async fn invalidate_hot_memory_cache(
+            &self,
+            _scope: crate::contract::memory_store::HotMemoryInvalidationScope,
+        ) -> Result<u64, crate::contract::memory_store::MemoryStoreError> {
+            Ok(0)
+        }
+    }
+
     fn source(kind: HotMemorySourceKind, id: &str, body: &str, rank: f32) -> HotMemorySource {
         HotMemorySource {
             kind,
@@ -374,6 +470,37 @@ mod tests {
             centrality_score: 0.0,
             updated_at: "2026-05-12T00:00:00Z".to_owned(),
         }
+    }
+
+    #[tokio::test]
+    async fn assemble_hot_with_store_returns_refreshed_then_hit() {
+        let store = CacheStore {
+            input: HotMemoryInput {
+                sources: vec![source(
+                    HotMemorySourceKind::Purpose,
+                    "01J0000000000000000000001",
+                    "purpose",
+                    1.0,
+                )],
+                source_revision: "rev".to_owned(),
+            },
+            cached: std::sync::Mutex::new(None),
+        };
+        let request = crate::contract::memory_store::HotMemoryRequest {
+            session_id: None,
+            agent_id: None,
+            budget_bytes: 4096,
+            config_fingerprint: "config".to_owned(),
+            god_node_weight: 0.3,
+        };
+        let first = assemble_hot_with_store(&store, &request)
+            .await
+            .expect("first");
+        assert_eq!(first.cache.status, HotMemoryCacheStatus::Refreshed);
+        let second = assemble_hot_with_store(&store, &request)
+            .await
+            .expect("second");
+        assert_eq!(second.cache.status, HotMemoryCacheStatus::Hit);
     }
 
     #[test]
