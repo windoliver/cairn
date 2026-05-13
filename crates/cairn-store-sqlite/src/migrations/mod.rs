@@ -117,8 +117,7 @@ const M0059_SESSION_METADATA_AUDIT_SEQ: &str =
 // to include uppercase letters (ULID session_id values are uppercase
 // Crockford base32). The Rust `validate_scope` has always allowed
 // `[A-Za-z0-9._:=,-]`; migration 0011 used `[a-z0-9._:=,-]` by mistake.
-const M0060_CONSENT_SCOPE_UPPERCASE: &str =
-    include_str!("sql/0060_consent_scope_uppercase.sql");
+const M0060_CONSENT_SCOPE_UPPERCASE: &str = include_str!("sql/0060_consent_scope_uppercase.sql");
 
 /// Canonical SQL for migration 0020 (`workflow_jobs`). Re-exported so
 /// downstream crates (notably `cairn-workflows`, which hashes the

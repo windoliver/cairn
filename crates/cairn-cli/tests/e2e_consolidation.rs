@@ -22,16 +22,16 @@ use assert_cmd::cargo::CommandCargoExt as _;
 use cairn_core::config::ConsolidationConfig;
 use cairn_core::contract::job_store::JobStore;
 use cairn_core::contract::memory_store::MemoryStore;
+use cairn_core::domain::taxonomy::MemoryKind;
 use cairn_core::domain::{
     ActorChainEntry, CaptureEvent, CaptureEventId, CaptureMode, CapturePayload, CaptureRefs,
     ChainRole, Identity, PayloadHash, Rfc3339Timestamp, SourceFamily,
 };
-use cairn_core::domain::taxonomy::MemoryKind;
+use cairn_workflows::SqliteJobStore;
 use cairn_workflows::consolidation::{ConsolidationForgetCleanupHandler, ConsolidationHandler};
 use cairn_workflows::scheduler::{
     Clock, HandlerRegistryBuilder, Scheduler, SchedulerConfig, SystemClock,
 };
-use cairn_workflows::SqliteJobStore;
 use sha2::{Digest as _, Sha256};
 
 const SESSION_ULID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
@@ -50,7 +50,10 @@ fn write_source_file(vault: &Path, family: &str, filename: &str, content: &str) 
     format!("sources/{family}/{filename}")
 }
 
-#[allow(clippy::too_many_arguments, reason = "test helper mirrors CaptureEvent fields")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "test helper mirrors CaptureEvent fields"
+)]
 fn make_hook_event(
     event_id: &str,
     hook_name: &str,
@@ -110,8 +113,7 @@ fn write_multi_turn_jsonl(vault: &Path, jsonl_path: &Path, turns: u32) {
             let event_id = format!("01ARZ3NDEKTSV4RRFFQ69G5F{a}{b}");
             let timestamp = format!("2026-05-12T0{turn}:0{j}:00Z");
             let body = format!("turn-{turn} {hook} body");
-            let payload_ref =
-                write_source_file(vault, "hook", &format!("{event_id}.txt"), &body);
+            let payload_ref = write_source_file(vault, "hook", &format!("{event_id}.txt"), &body);
             let tool = if *hook == "PreToolUse" || *hook == "PostToolUse" {
                 Some(tool_id.clone())
             } else {
@@ -300,8 +302,12 @@ async fn e2e_capture_trace_then_forget_propagates_to_summary() {
     drop(store_for_check);
 
     // ── Step 5: drain scheduler until a reasoning record appears ────────────
-    let store_after_drain =
-        drain_until(vault_root, Duration::from_secs(15), WaitFor::ReasoningRecordPresent).await;
+    let store_after_drain = drain_until(
+        vault_root,
+        Duration::from_secs(15),
+        WaitFor::ReasoningRecordPresent,
+    )
+    .await;
     let reasoning = read_reasoning_records(&store_after_drain).await;
     assert!(
         !reasoning.is_empty(),
@@ -311,10 +317,7 @@ async fn e2e_capture_trace_then_forget_propagates_to_summary() {
     drop(store_after_drain);
 
     // ── Step 6: forget one of the source turns ──────────────────────────────
-    let forget_target = turn_ids
-        .first()
-        .expect("at least one turn summary")
-        .clone();
+    let forget_target = turn_ids.first().expect("at least one turn summary").clone();
     let out = cairn_bin()
         .arg("forget")
         .arg("--record")

@@ -35,3 +35,6 @@ CREATE TRIGGER consent_journal_event_metadata_domains
 BEGIN
   SELECT RAISE(ABORT, 'consent_journal event metadata out of domain class');
 END;
+
+INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at)
+  VALUES (60, '0060_consent_scope_uppercase', '', strftime('%s','now') * 1000);

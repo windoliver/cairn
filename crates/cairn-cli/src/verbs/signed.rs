@@ -6,7 +6,6 @@ use std::sync::Arc;
 use cairn_core::config::CairnConfig;
 use cairn_core::contract::job_store::JobStore;
 use cairn_core::domain::{DomainError, Identity};
-use cairn_workflows::SqliteJobStore;
 use cairn_core::error::wire::envelope_error_for;
 use cairn_core::generated::common::Ulid;
 use cairn_core::generated::envelope::{
@@ -15,6 +14,7 @@ use cairn_core::generated::envelope::{
 };
 use cairn_core::verifier::{EnvelopeVerifier, ScopePolicy, resolve_issuer};
 use cairn_store_sqlite::SqliteMemoryStore;
+use cairn_workflows::SqliteJobStore;
 
 use crate::identity::{IdentityService, guard::refuse_if_degraded};
 
@@ -207,26 +207,25 @@ pub async fn open_context(
     // `SqliteJobStore::new` finds the required schema objects. WAL mode allows
     // both connections to co-exist. Failure is non-fatal: short-lived verbs
     // degrade to no-enqueue rather than refusing to run.
-    let job_store: Option<Arc<dyn JobStore>> =
-        match rusqlite::Connection::open(&db_path) {
-            Ok(conn) => match SqliteJobStore::new(conn) {
-                Ok(js) => Some(Arc::new(js)),
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "job-store init failed — workflow enqueue disabled for this invocation"
-                    );
-                    None
-                }
-            },
+    let job_store: Option<Arc<dyn JobStore>> = match rusqlite::Connection::open(&db_path) {
+        Ok(conn) => match SqliteJobStore::new(conn) {
+            Ok(js) => Some(Arc::new(js)),
             Err(e) => {
                 tracing::warn!(
                     error = %e,
-                    "job-store connection failed — workflow enqueue disabled for this invocation"
+                    "job-store init failed — workflow enqueue disabled for this invocation"
                 );
                 None
             }
-        };
+        },
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "job-store connection failed — workflow enqueue disabled for this invocation"
+            );
+            None
+        }
+    };
 
     Ok(OpenedVerbContext {
         vault_root: vault_root.to_path_buf(),
