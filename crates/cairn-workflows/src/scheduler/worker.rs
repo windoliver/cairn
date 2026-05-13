@@ -96,13 +96,25 @@ async fn execute_one(
         }
     };
 
+    // Lease-loss propagation (round-1 adversarial review #4):
+    // The heartbeat task notifies the main path via `lease_lost` whenever
+    // `store.heartbeat` returns an error. The main path races the handler
+    // future against `lease_lost.cancelled()` so a lease that expires
+    // mid-handler causes us to abandon the in-flight execution rather
+    // than letting it commit side effects whose lease no longer exists.
+    // The handler future is dropped at its next .await point — workflow
+    // authors that must guard side effects against replay still rely on
+    // step-level idempotency, but at least we stop *adding* effects once
+    // we know the lease is gone.
     let hb_token = CancellationToken::new();
+    let lease_lost = CancellationToken::new();
     let hb_handle = {
         let store = store.clone();
         let clock = clock.clone();
         let lease = leased.lease.clone();
         let job_id = leased.job_id.clone();
         let token = hb_token.clone();
+        let lost = lease_lost.clone();
         let interval_ms = u64::try_from(config.heartbeat_every_ms).unwrap_or(10_000);
         let lease_ms = config.lease_ms;
         tokio::spawn(async move {
@@ -114,6 +126,7 @@ async fn execute_one(
                         let new_expires = now.saturating_add(lease_ms);
                         if let Err(e) = store.heartbeat(&job_id, &lease, now, new_expires).await {
                             warn!(error = %e, job = %job_id, "heartbeat lost");
+                            lost.cancel();
                             return;
                         }
                     }
@@ -125,9 +138,20 @@ async fn execute_one(
     let outcome = tokio::select! {
         o = handler.handle(&leased.payload) => o,
         () = cancel.cancelled() => HandlerOutcome::Retry { reason: "scheduler shutdown".into() },
+        () = lease_lost.cancelled() => HandlerOutcome::Retry {
+            reason: "heartbeat lost — lease expired or stolen".into(),
+        },
     };
     hb_token.cancel();
     let _ = timeout(Duration::from_secs(1), hb_handle).await;
+
+    // If the lease is already known lost, skip the complete/fail call —
+    // it would fail with LeaseLost anyway and add log noise. The reaper
+    // or another worker will reclaim the row.
+    if lease_lost.is_cancelled() {
+        warn!(job = %leased.job_id, "abandoning execution after lease loss");
+        return;
+    }
 
     let now = clock.now_ms();
     let result = match outcome {

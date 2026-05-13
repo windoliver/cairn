@@ -9,7 +9,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use cairn_core::config::CairnConfig;
-use cairn_core::contract::job_store::{EnqueueRequest, JobId, JobKind, RetryPolicy};
+use cairn_core::contract::job_store::{EnqueueRequest, JobId, JobKind, JobStoreError, RetryPolicy};
+use cairn_core::contract::memory_store::{MemoryStore, TombstoneReason};
 use cairn_core::domain::RecordId;
 use cairn_core::generated::common::Ulid;
 use cairn_core::generated::envelope::ResponseVerb;
@@ -119,35 +120,64 @@ async fn run_record(record_id_raw: String, vault_root: PathBuf, config: CairnCon
                 Err(message) => return super::signed::aborted(ResponseVerb::Forget, message),
             };
 
-            // Enqueue a forget-cleanup job so any consolidation summaries
-            // that referenced this record as a source are tombstoned.
-            // Non-fatal: if the job store is absent (short-lived CLI) or the
-            // enqueue fails (e.g. DuplicateDedupeKey from a prior run), we
-            // swallow the error and let the verb succeed. The scheduler will
-            // pick up the job when it boots (Task 17).
-            if let Some(js) = ctx.job_store.as_deref() {
-                let record_id_str = record_id.as_str().to_owned();
+            // Cleanup propagation contract: by the time `forget` returns
+            // success, any rolling summaries that referenced `record_id`
+            // as a source MUST be either (a) already tombstoned in this
+            // call, or (b) covered by a durably-enqueued cleanup job.
+            //
+            // Three branches:
+            //   1. job_store present + enqueue OK → durable async cleanup.
+            //   2. job_store present + DuplicateDedupeKey → a prior run
+            //      already enqueued the same cleanup; assume it covers us.
+            //   3. job_store absent OR enqueue backend failure → fall back
+            //      to a synchronous inline cleanup so we never claim
+            //      success without honoring the contract. The inline path
+            //      reuses `find_summaries_by_source` + `tombstone`.
+            //
+            // Any error path that cannot deliver either (a) or (b) aborts
+            // the response — silent best-effort is incorrect (round-1
+            // adversarial review #1).
+            let record_id_str = record_id.as_str().to_owned();
+            let cleanup_outcome: Result<(), String> = if let Some(js) = ctx.job_store.as_deref() {
                 let payload = ForgetCleanupPayload {
                     forgotten_record_id: record_id_str.clone(),
                 };
-                if let Ok(bytes) = payload.to_bytes() {
-                    let req = EnqueueRequest {
-                        job_id: JobId::new(format!("forget-cleanup:{record_id_str}")),
-                        kind: JobKind::new(FORGET_CLEANUP_KIND),
-                        payload: bytes,
-                        queue_key: None,
-                        dedupe_key: Some(record_id_str),
-                        not_before_ms: i64::try_from(
-                            std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_millis(),
-                        )
-                        .unwrap_or(i64::MAX),
-                        retry: RetryPolicy::DEFAULT,
-                    };
-                    let _ = js.enqueue(req).await;
+                match payload.to_bytes() {
+                    Ok(bytes) => {
+                        let req = EnqueueRequest {
+                            job_id: JobId::new(format!("forget-cleanup:{record_id_str}")),
+                            kind: JobKind::new(FORGET_CLEANUP_KIND),
+                            payload: bytes,
+                            queue_key: None,
+                            dedupe_key: Some(record_id_str.clone()),
+                            not_before_ms: i64::try_from(
+                                std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis(),
+                            )
+                            .unwrap_or(i64::MAX),
+                            retry: RetryPolicy::DEFAULT,
+                        };
+                        match js.enqueue(req).await {
+                            Ok(()) | Err(JobStoreError::DuplicateDedupeKey { .. }) => Ok(()),
+                            Err(e) => {
+                                tracing::warn!(error = %e, %record_id_str,
+                                    "forget cleanup enqueue failed; falling back to inline cleanup");
+                                inline_forget_cleanup(&ctx.store, &record_id_str).await
+                            }
+                        }
+                    }
+                    Err(e) => Err(format!("forget cleanup: payload serialization: {e}")),
                 }
+            } else {
+                inline_forget_cleanup(&ctx.store, &record_id_str).await
+            };
+            if let Err(msg) = cleanup_outcome {
+                return super::signed::aborted(
+                    ResponseVerb::Forget,
+                    format!("forget cleanup propagation failed: {msg}"),
+                );
             }
 
             let data = ForgetData {
@@ -175,6 +205,27 @@ async fn run_record(record_id_raw: String, vault_root: PathBuf, config: CairnCon
         ),
         Err(e) => super::signed::aborted(ResponseVerb::Forget, format!("store forget: {e}")),
     }
+}
+
+/// Synchronously tombstone every active rolling summary whose
+/// `extra_frontmatter.consolidation.source_record_ids` array contains
+/// `forgotten_record_id`. Used as a fallback when the cleanup job
+/// cannot be durably enqueued.
+async fn inline_forget_cleanup(
+    store: &cairn_store_sqlite::SqliteMemoryStore,
+    forgotten_record_id: &str,
+) -> Result<(), String> {
+    let summaries = store
+        .find_summaries_by_source(forgotten_record_id)
+        .await
+        .map_err(|e| format!("find_summaries_by_source: {e}"))?;
+    for summary_id in summaries {
+        store
+            .tombstone(&summary_id, TombstoneReason::Forget)
+            .await
+            .map_err(|e| format!("tombstone summary {}: {e}", summary_id.as_str()))?;
+    }
+    Ok(())
 }
 
 fn response_operation_id(operation_id: &cairn_core::wal::OperationId) -> Result<Ulid, String> {

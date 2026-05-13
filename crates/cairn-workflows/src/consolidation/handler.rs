@@ -54,6 +54,23 @@ impl ConsolidationHandler {
         Self { store, config }
     }
 
+    /// Return `true` iff every `record_id` in `source_ids` is still
+    /// active (not tombstoned). `MemoryStore::get` returns `Ok(None)`
+    /// for tombstoned rows per the trait contract.
+    async fn all_sources_still_active(
+        &self,
+        source_ids: &[String],
+    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        for id_str in source_ids {
+            let id = cairn_core::domain::RecordId::parse(id_str.clone())
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+            if self.store.get(&id).await?.is_none() {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     async fn run_once(
         &self,
         payload: ConsolidationPayload,
@@ -82,6 +99,26 @@ impl ConsolidationHandler {
                 "consolidation_deferred (enabled = false)"
             );
             return Ok(HandlerOutcome::Done);
+        }
+
+        // Race guard (round-1 adversarial review #2):
+        // Between the `list_trace_turns` read above and the upsert below,
+        // a concurrent `cairn forget --record` (or its cleanup handler)
+        // may have tombstoned one of our source turns. If we commit the
+        // summary now, the forget-cleanup that has already run finds no
+        // summary to tombstone — leaving a live summary that references
+        // a forgotten source. Re-verify every source still active; if
+        // any disappeared, retry the whole computation (the next run
+        // will read a fresh, narrower candidate set and exclude the
+        // tombstoned turn). Bounded to keep us from looping forever.
+        if !self.all_sources_still_active(&draft.source_record_ids).await? {
+            info!(
+                session = %payload.session_id,
+                "source(s) tombstoned mid-flight; retrying with fresh window"
+            );
+            return Ok(HandlerOutcome::Retry {
+                reason: "source tombstoned between read and upsert".into(),
+            });
         }
 
         let record = build_summary_record(&payload, &draft)?;

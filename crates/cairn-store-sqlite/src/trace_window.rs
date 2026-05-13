@@ -137,4 +137,45 @@ impl SqliteMemoryStore {
             })
             .collect()
     }
+
+    /// Return the highest `extra_frontmatter.consolidation.last_sequence`
+    /// across active rolling-summary records for `session_id`. Returns
+    /// `0` when no summary exists yet. Used by `cairn capture_trace`
+    /// (and any other enqueue callsite) to compute the correct
+    /// `since_sequence` watermark for the next consolidation job —
+    /// without a watermark, a session's `dedupe_key` stays pinned to
+    /// `:0` forever and only the first window ever consolidates.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Worker`] on background-thread failure or
+    /// [`StoreError::Sqlite`] for surfaced SQL errors.
+    pub async fn latest_consolidation_watermark(
+        &self,
+        session_id: &str,
+    ) -> Result<u32, StoreError> {
+        let conn = self.require_conn("latest_consolidation_watermark")?.clone();
+        let session = session_id.to_owned();
+        let watermark: Option<i64> = conn
+            .call(move |c| {
+                // The summary's scope is exactly `session_id=<ULID>` (see
+                // `build_summary_record`), so an equality test on `scope`
+                // matches it without needing a generated column.
+                const SQL: &str = "
+                    SELECT MAX(CAST(
+                        json_extract(extra_frontmatter, '$.consolidation.last_sequence')
+                        AS INTEGER))
+                    FROM records
+                    WHERE kind = 'reasoning'
+                      AND active = 1 AND tombstoned = 0
+                      AND json_extract(extra_frontmatter, '$.consolidation') IS NOT NULL
+                      AND scope = 'session_id=' || ?1
+                ";
+                let mut stmt = c.prepare_cached(SQL)?;
+                let v: Option<i64> = stmt.query_row(params![session], |row| row.get(0))?;
+                Ok(v)
+            })
+            .await?;
+        Ok(u32::try_from(watermark.unwrap_or(0).max(0)).unwrap_or(u32::MAX))
+    }
 }
