@@ -19,6 +19,7 @@
 
 pub mod actor_chain;
 pub mod admission;
+pub mod backup;
 pub mod body_hash;
 pub mod canonical;
 pub mod capture;
@@ -51,6 +52,7 @@ pub mod trace;
 
 pub use actor_chain::{ActorChainEntry, ChainRole, validate_chain};
 pub use admission::{AdmissionError, SignedAdmission, WalActionKind};
+pub use backup::{BackupRegistryEntry, RewritePlan, ShreddedBackupEntry};
 pub use body_hash::BodyHash;
 pub use canonical::CanonicalRecordHash;
 pub use capture::{

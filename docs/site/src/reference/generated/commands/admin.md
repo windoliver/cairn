@@ -2,19 +2,21 @@
 
 # cairn admin
 
-Administrative operations (model management, reindex)
+Administrative operations (model management, reindex, backup substrate)
 
 ## Help
 
 ```text
-Administrative operations (model management, reindex)
+Administrative operations (model management, reindex, backup substrate)
 
 Usage: admin <COMMAND>
 
 Commands:
-  model    Embedding model management
-  reindex  Re-embed records into the ANN index
-  help     Print this message or the help of the given subcommand(s)
+  model     Embedding model management
+  reindex   Re-embed records into the ANN index
+  snapshot  Prepare a vault backup snapshot
+  restore   Prepare a restore operation from a backup
+  help      Print this message or the help of the given subcommand(s)
 
 Options:
   -h, --help
@@ -25,3 +27,5 @@ Options:
 
 - [`cairn admin model`](admin-model.md) - Embedding model management
 - [`cairn admin reindex`](admin-reindex.md) - Re-embed records into the ANN index
+- [`cairn admin snapshot`](admin-snapshot.md) - Prepare a vault backup snapshot
+- [`cairn admin restore`](admin-restore.md) - Prepare a restore operation from a backup

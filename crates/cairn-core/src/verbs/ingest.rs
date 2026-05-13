@@ -159,11 +159,12 @@ fn build_record(
         visibility,
         scope,
         body: fenced_text.to_owned(),
-        source_ids: vec![source_id],
+        source_ids: vec![source_id.clone()],
         provenance: Provenance {
             source_sensor: Identity::parse("snr:local:cli:ingest:v1")?,
             created_at: now.clone(),
             originating_agent_id: issuer.clone(),
+            source_ids: vec![source_id],
             source_hash,
             consent_ref: "consent:ingest:draft".to_owned(),
             llm_id_if_any: None,

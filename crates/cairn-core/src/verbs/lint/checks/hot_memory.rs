@@ -169,7 +169,10 @@ mod tests {
     use crate::config::CairnConfig;
     use crate::contract::memory_store::IndexStats;
     use crate::generated::verbs::assemble_hot::HotRecipeStep;
-    use crate::verbs::lint::{empty_author_states, empty_unresolvable_authors};
+    use crate::verbs::lint::{
+        empty_author_states, empty_source_artifacts, empty_source_forgets,
+        empty_unresolvable_authors,
+    };
 
     #[test]
     fn walker_with_loader_runs_assembler_and_no_findings_when_clean() {
@@ -187,6 +190,8 @@ mod tests {
             author_states: empty_author_states(),
             unresolvable_authors: empty_unresolvable_authors(),
             consent_lookup: None,
+            source_artifacts: empty_source_artifacts(),
+            source_forgets: empty_source_forgets(),
             vault_root: Some(dir.path()),
             hot_body_loader: Some(&loader),
             source_resolver: crate::verbs::lint::empty_source_resolver(),
@@ -228,6 +233,8 @@ mod tests {
             author_states: empty_author_states(),
             unresolvable_authors: empty_unresolvable_authors(),
             consent_lookup: None,
+            source_artifacts: empty_source_artifacts(),
+            source_forgets: empty_source_forgets(),
             vault_root: Some(dir.path()),
             hot_body_loader: Some(&loader),
             source_resolver: crate::verbs::lint::empty_source_resolver(),
@@ -263,6 +270,8 @@ mod tests {
             author_states: empty_author_states(),
             unresolvable_authors: empty_unresolvable_authors(),
             consent_lookup: None,
+            source_artifacts: empty_source_artifacts(),
+            source_forgets: empty_source_forgets(),
             vault_root: None,
             hot_body_loader: None,
             source_resolver: crate::verbs::lint::empty_source_resolver(),
