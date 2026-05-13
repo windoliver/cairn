@@ -197,11 +197,11 @@
   },
   "x-cairn-contract": "cairn.mcp.v1",
   "x-cairn-skill-triggers": {
-    "exclusivity": "this is the canonical vault-health surface",
-    "negative": [
+    "exclusivity_hints": "this is the canonical vault-health surface",
+    "negative_triggers": [
       "do NOT call per turn — run on a cadence (daily / on PR)"
     ],
-    "positive": [
+    "positive_triggers": [
       "use to check vault health — contradictions, orphans, stale claims, missing concept pages, malformed records, broken actor chains, schema drift, hot-memory budget, derived-index drift"
     ]
   },

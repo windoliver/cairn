@@ -52,15 +52,15 @@
   "x-cairn-capability": null,
   "x-cairn-auth": "rebac",
   "x-cairn-skill-triggers": {
-    "positive": [
+    "positive_triggers": [
       "use when you need to recall prior memories by topic, speaker, or time",
       "use to ground an answer in stored evidence instead of parametric guessing"
     ],
-    "negative": [
+    "negative_triggers": [
       "do NOT use when the user just asked a computation question",
       "do NOT use to fetch a known record id \u2014 call retrieve instead"
     ],
-    "exclusivity": "this is the canonical search surface for the active vault"
+    "exclusivity_hints": "this is the canonical search surface for the active vault"
   },
   "type": "object",
   "$defs": {

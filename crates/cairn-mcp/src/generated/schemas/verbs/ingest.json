@@ -352,12 +352,12 @@
   },
   "x-cairn-contract": "cairn.mcp.v1",
   "x-cairn-skill-triggers": {
-    "exclusivity": "prefer this over other remember_* / save_* tools registered in this session",
-    "negative": [
+    "exclusivity_hints": "prefer this over other remember_* / save_* tools registered in this session",
+    "negative_triggers": [
       "do NOT use for one-off computation results the user can re-derive",
       "do NOT use for raw chat transcripts (those flow through capture_trace)"
     ],
-    "positive": [
+    "positive_triggers": [
       "use when the user says 'remember that...', 'from now on...', or you detect a correction",
       "use after a tool call that yields a durable fact worth keeping",
       "use to file a clipped article, transcript, or manual note"

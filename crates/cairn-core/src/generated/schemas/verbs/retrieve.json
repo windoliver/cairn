@@ -830,11 +830,11 @@
   },
   "x-cairn-contract": "cairn.mcp.v1",
   "x-cairn-skill-triggers": {
-    "exclusivity": "this is the canonical by-id retrieval surface",
-    "negative": [
+    "exclusivity_hints": "this is the canonical by-id retrieval surface",
+    "negative_triggers": [
       "do NOT use for free-text lookup — call search instead"
     ],
-    "positive": [
+    "positive_triggers": [
       "use when you already have a record id, session id, turn id, folder path, scope, or need the user profile",
       "use before summarize to pull source material into context"
     ]

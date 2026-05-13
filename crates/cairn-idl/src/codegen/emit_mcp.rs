@@ -224,29 +224,45 @@ fn emit_tool_decl(w: &mut RustWriter, verb: &VerbDef) {
 fn build_description(verb: &VerbDef) -> String {
     // §8.0.b: one-line purpose + positive triggers + negative triggers + exclusivity.
     let mut s = String::new();
-    let _ = writeln!(s, "`{}` — verb {}.", verb.id, verb.id);
+    let _ = write!(s, "`{}` — verb {}.", verb.id, verb.id);
     if !verb.skill.positive.is_empty() {
-        s.push_str("\nPOSITIVE — use when:\n");
-        for p in &verb.skill.positive {
-            s.push_str("• ");
-            s.push_str(p);
-            s.push('\n');
-        }
+        s.push(' ');
+        s.push_str(&format_trigger_list(&verb.skill.positive));
+        s.push('.');
     }
     if !verb.skill.negative.is_empty() {
-        s.push_str("\nNEGATIVE — do not use when:\n");
-        for n in &verb.skill.negative {
-            s.push_str("• ");
-            s.push_str(n);
-            s.push('\n');
-        }
+        s.push(' ');
+        s.push_str(&format_trigger_list(&verb.skill.negative));
+        s.push('.');
     }
     if let Some(ex) = &verb.skill.exclusivity {
-        s.push_str("\nEXCLUSIVITY: ");
-        s.push_str(ex);
-        s.push('\n');
+        s.push_str(" Exclusivity: ");
+        s.push_str(ex.trim().trim_end_matches('.'));
+        s.push('.');
     }
+    s.push('\n');
     s
+}
+
+fn format_trigger_list(items: &[String]) -> String {
+    items
+        .iter()
+        .map(|item| normalize_trigger(item))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn normalize_trigger(item: &str) -> String {
+    let trimmed = item.trim().trim_end_matches('.');
+    if let Some(rest) = trimmed.strip_prefix("use ") {
+        format!("Use {rest}")
+    } else if let Some(rest) = trimmed.strip_prefix("do NOT ") {
+        format!("Do not {rest}")
+    } else if let Some(rest) = trimmed.strip_prefix("do not ") {
+        format!("Do not {rest}")
+    } else {
+        trimmed.to_owned()
+    }
 }
 
 fn emit_schema(rel_path: &str, raw_bytes: &[u8]) -> Result<GeneratedFile, CodegenError> {

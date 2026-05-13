@@ -34,16 +34,16 @@
   "x-cairn-capability": null,
   "x-cairn-auth": "signed_chain",
   "x-cairn-skill-triggers": {
-    "positive": [
+    "positive_triggers": [
       "use when the user says 'remember that...', 'from now on...', or you detect a correction",
       "use after a tool call that yields a durable fact worth keeping",
       "use to file a clipped article, transcript, or manual note"
     ],
-    "negative": [
+    "negative_triggers": [
       "do NOT use for one-off computation results the user can re-derive",
       "do NOT use for raw chat transcripts (those flow through capture_trace)"
     ],
-    "exclusivity": "prefer this over other remember_* / save_* tools registered in this session"
+    "exclusivity_hints": "prefer this over other remember_* / save_* tools registered in this session"
   },
   "type": "object",
   "$defs": {

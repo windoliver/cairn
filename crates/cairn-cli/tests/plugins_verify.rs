@@ -110,6 +110,30 @@ fn plugins_list_emits_alphabetical_rows() {
     assert!(store_idx < workflows_idx);
 }
 
+#[test]
+fn plugins_describe_mcp_prints_rendered_tool_descriptions() {
+    let output = Command::new(cairn_binary())
+        .args(["plugins", "describe", "--mcp"])
+        .output()
+        .expect("spawn cairn binary");
+
+    assert!(
+        output.status.success(),
+        "cairn plugins describe --mcp must exit 0; got {:?}, stderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
+    for tool in cairn_mcp::generated::TOOLS {
+        assert!(
+            stdout.contains(tool.description),
+            "describe output must include the rendered description for {}",
+            tool.name
+        );
+    }
+}
+
 fn assert_case_status(plugin: &serde_json::Value, case_id: &str, expected: &str) {
     let cases = plugin["cases"].as_array().expect("cases array");
     let case = cases
