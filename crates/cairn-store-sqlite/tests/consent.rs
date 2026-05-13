@@ -434,9 +434,7 @@ fn round_trip_preserves_every_kind() {
                     expires_at: None,
                 }
             }
-            ConsentKind::RememberIntent
-            | ConsentKind::ForgetIntent
-            | ConsentKind::SourceForget => {
+            ConsentKind::RememberIntent | ConsentKind::ForgetIntent | ConsentKind::SourceForget => {
                 let mut e = forget_event(&id, &h(0xff));
                 e.kind = *kind;
                 e

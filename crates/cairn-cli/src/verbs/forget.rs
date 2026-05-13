@@ -18,9 +18,7 @@ use std::process::ExitCode;
 
 use cairn_core::config::CairnConfig;
 use cairn_core::contract::memory_store::MemoryStore;
-use cairn_core::domain::{
-    ConsentEvent, ConsentKind, ConsentPayload, RecordId, Rfc3339Timestamp,
-};
+use cairn_core::domain::{ConsentEvent, ConsentKind, ConsentPayload, RecordId, Rfc3339Timestamp};
 use cairn_core::generated::common::Ulid;
 use cairn_core::generated::envelope::ResponseVerb;
 use cairn_core::generated::envelope::{Response, ResponseData, ResponseStatus};
