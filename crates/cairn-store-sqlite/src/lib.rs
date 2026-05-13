@@ -580,11 +580,13 @@ impl MemoryStore for SqliteMemoryStore {
         let session_id = request.session_id.as_deref().unwrap_or("");
         let agent_id = request.agent_id.as_deref().unwrap_or("");
         let budget = request.budget_bytes.to_string();
+        let source_order = source_order_revision(&request.source_kinds);
         let digest = hash_parts(&[
             session_id,
             agent_id,
             &budget,
             &request.config_fingerprint,
+            &source_order,
             &input.source_revision,
         ]);
         Ok(format!(
@@ -848,6 +850,14 @@ fn source_revision(sources: &[HotMemorySource], graph_revision: &str) -> String 
     }
     let refs = parts.iter().map(String::as_str).collect::<Vec<_>>();
     hash_parts(&refs)
+}
+
+fn source_order_revision(source_kinds: &[HotMemorySourceKind]) -> String {
+    let parts = source_kinds
+        .iter()
+        .map(|kind| kind_name(*kind))
+        .collect::<Vec<_>>();
+    hash_parts(&parts)
 }
 
 fn score_revision(score: f32) -> String {

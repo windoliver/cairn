@@ -4,8 +4,8 @@ use cairn_core::contract::memory_store::{
     HotMemoryInvalidationScope, HotMemoryRequest, MemoryStore,
 };
 use cairn_core::hot_memory::{
-    HotMemoryCacheInfo, HotMemoryOptions, HotMemorySourceKind, assemble_hot_memory,
-    default_source_order,
+    HotMemoryCacheInfo, HotMemoryCacheStatus, HotMemoryOptions, HotMemorySourceKind,
+    assemble_hot_memory, assemble_hot_with_store, default_source_order,
 };
 use cairn_store_sqlite::{HotRecordSeed, SqliteMemoryStore};
 use rusqlite::Connection;
@@ -389,4 +389,40 @@ async fn hot_memory_cache_hits_and_invalidates_by_session() {
             .expect("load cache")
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn hot_memory_cache_is_scoped_to_requested_source_order() {
+    let store = SqliteMemoryStore::open_memory().expect("store");
+    store
+        .write_vault_file("purpose.md", "purpose text")
+        .expect("purpose");
+    store
+        .write_vault_file("profile.md", "profile text")
+        .expect("profile");
+
+    let mut purpose_first = request();
+    purpose_first.source_kinds = vec![HotMemorySourceKind::Purpose, HotMemorySourceKind::Profile];
+    let purpose_output = assemble_hot_with_store(&store, &purpose_first)
+        .await
+        .expect("purpose first");
+    assert_eq!(purpose_output.cache.status, HotMemoryCacheStatus::Refreshed);
+
+    let mut profile_first = request();
+    profile_first.source_kinds = vec![HotMemorySourceKind::Profile, HotMemorySourceKind::Purpose];
+    let profile_output = assemble_hot_with_store(&store, &profile_first)
+        .await
+        .expect("profile first");
+
+    let purpose_index = profile_output
+        .prefix
+        .find("## purpose")
+        .expect("purpose section");
+    let profile_index = profile_output
+        .prefix
+        .find("## profile")
+        .expect("profile section");
+    assert!(profile_index < purpose_index);
+    assert_eq!(profile_output.cache.status, HotMemoryCacheStatus::Refreshed);
+    assert_ne!(profile_output.cache.key, purpose_output.cache.key);
 }
