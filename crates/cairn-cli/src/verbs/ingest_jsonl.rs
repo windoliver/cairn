@@ -21,7 +21,7 @@ use cairn_core::contract::memory_store::MemoryStore;
 use cairn_core::domain::record::{Ed25519Signature, RecordId};
 use cairn_core::domain::{
     ActorChainEntry, ChainRole, EvidenceVector, Identity, MemoryClass, MemoryKind, MemoryRecord,
-    MemoryVisibility, Provenance, Rfc3339Timestamp, ScopeTuple, TargetId,
+    MemoryVisibility, Provenance, Rfc3339Timestamp, ScopeTuple, SourceId, TargetId,
 };
 use cairn_core::generated::envelope::{
     Response, ResponseData, ResponsePolicyTrace, ResponseStatus, ResponseVerb,
@@ -676,6 +676,8 @@ fn build_record(
         ..ScopeTuple::default()
     };
 
+    let source_id =
+        SourceId::parse(id.as_str().to_owned()).map_err(anyhow::Error::msg)?;
     let record = MemoryRecord {
         id,
         target_id,
@@ -684,6 +686,7 @@ fn build_record(
         visibility: MemoryVisibility::Private,
         scope,
         body: body.to_owned(),
+        source_ids: vec![source_id],
         provenance: Provenance {
             source_sensor: Identity::parse(CLI_SENSOR_ID).map_err(anyhow::Error::msg)?,
             created_at: created_at.clone(),

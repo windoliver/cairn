@@ -141,7 +141,7 @@ mod tests {
     fn sample() -> MemoryRecord {
         use crate::domain::{
             ActorChainEntry, ChainRole, EvidenceVector, Identity, MemoryClass, MemoryKind,
-            MemoryVisibility, Provenance, Rfc3339Timestamp, ScopeTuple, TargetId,
+            MemoryVisibility, Provenance, Rfc3339Timestamp, ScopeTuple, SourceId, TargetId,
             record::{Ed25519Signature, RecordId},
         };
         use std::collections::BTreeMap;
@@ -157,6 +157,7 @@ mod tests {
                 ..ScopeTuple::default()
             },
             body: "user prefers dark mode".to_owned(),
+            source_ids: vec![SourceId::parse("01HQZX9F5N0000000000000001").expect("valid")],
             provenance: Provenance {
                 source_sensor: Identity::parse("snr:local:hook:cc-session:v1").expect("valid"),
                 created_at: Rfc3339Timestamp::parse("2026-04-22T14:02:11Z").expect("valid"),
