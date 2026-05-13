@@ -42,15 +42,44 @@ impl VaultFsSourceResolver {
     fn path_for(&self, id: &str) -> PathBuf {
         self.vault_root.join(id)
     }
+
+    /// Resolve `id` to a filesystem path and refuse to traverse outside
+    /// `vault_root`. `SourceRef.id` is a logical key validated at the
+    /// domain layer (no leading `/`, no `..` segments, no NUL); even
+    /// so, lexical join can still escape via symlinks. Canonicalize
+    /// once, verify containment, and treat any escape attempt as
+    /// `NotFound` to fail closed.
+    fn safe_path_for(&self, id: &str) -> Result<PathBuf, SourceResolverError> {
+        let candidate = self.path_for(id);
+        let canon_root =
+            std::fs::canonicalize(&self.vault_root).map_err(|e| SourceResolverError::Io {
+                detail: format!("canonicalize vault_root: {e}"),
+            })?;
+        let canon_candidate = match std::fs::canonicalize(&candidate) {
+            Ok(p) => p,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Err(SourceResolverError::NotFound);
+            }
+            Err(err) => {
+                return Err(SourceResolverError::Io {
+                    detail: err.to_string(),
+                });
+            }
+        };
+        if !canon_candidate.starts_with(&canon_root) {
+            return Err(SourceResolverError::NotFound);
+        }
+        Ok(canon_candidate)
+    }
 }
 
 impl SourceResolver for VaultFsSourceResolver {
     fn exists(&self, id: &str) -> bool {
-        self.path_for(id).is_file()
+        self.safe_path_for(id).is_ok_and(|p| p.is_file())
     }
 
     fn read(&self, id: &str) -> Result<Vec<u8>, SourceResolverError> {
-        let path = self.path_for(id);
+        let path = self.safe_path_for(id)?;
         match std::fs::read(&path) {
             Ok(bytes) => Ok(bytes),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -63,6 +92,9 @@ impl SourceResolver for VaultFsSourceResolver {
     }
 
     fn locator(&self, id: &str) -> String {
+        // Diagnostic-only — still surface the join-form to operators
+        // even when canonicalization fails, so finding messages name
+        // the path the operator would expect.
         self.path_for(id).display().to_string()
     }
 }
@@ -1228,7 +1260,7 @@ pub async fn lint_handler(
     let unresolvable_authors: std::collections::HashSet<cairn_core::domain::Identity> =
         prefetch_failures.keys().cloned().collect();
     let source_resolver = VaultFsSourceResolver::new(vault_root);
-    let consent_journal = open_consent_journal(vault_root)?;
+    let (consent_journal, consent_journal_unavailable) = open_consent_journal(vault_root)?;
     let inputs = LintInputs {
         records: &lint_records,
         config,
@@ -1243,6 +1275,10 @@ pub async fn lint_handler(
 
     if index_stats_skipped {
         push_index_stats_skipped(&mut data);
+    }
+
+    if consent_journal_unavailable && !lint_records.is_empty() {
+        push_consent_journal_unavailable(&mut data);
     }
 
     // Build affected-record map per failed identity. Per-record ids
@@ -1416,17 +1452,54 @@ async fn write_lint_report(
 }
 
 /// Open the `SQLite` consent-journal snapshot at the vault's standard
-/// `.cairn/cairn.db` path. Falls back to an empty reader when the DB
-/// file is absent — that matches the "fresh vault" case where no
-/// `source_forget` rows can exist yet.
-fn open_consent_journal(vault_root: &Path) -> anyhow::Result<SqliteConsentJournalReader> {
+/// `.cairn/cairn.db` path. Returns `(reader, unavailable)` — when the
+/// DB file is absent (and the vault is empty, fresh-init case) the
+/// unavailable flag drives a `DeferredCheck` finding rather than
+/// silently substituting an empty reader. Substituting silently turns
+/// every `source_after_forget` / `source_redact_skipped` check into a
+/// false negative when the store backend doesn't live at the default
+/// path — exactly the privacy regression to avoid.
+fn open_consent_journal(vault_root: &Path) -> anyhow::Result<(SqliteConsentJournalReader, bool)> {
     let db_path = vault_root.join(".cairn/cairn.db");
     if db_path.is_file() {
-        SqliteConsentJournalReader::open(&db_path)
+        let reader = SqliteConsentJournalReader::open(&db_path)
             .map_err(|e| anyhow::anyhow!("store: consent_journal: {e}"))
-            .context("lint: consent_journal")
+            .context("lint: consent_journal")?;
+        Ok((reader, false))
     } else {
-        Ok(SqliteConsentJournalReader::default())
+        Ok((SqliteConsentJournalReader::default(), true))
+    }
+}
+
+/// Append a `deferred_check` info finding noting that the
+/// `consent_journal` snapshot is unavailable — forget-related rules
+/// degrade to false negatives until the backend can provide a real
+/// journal. Mirror the index-stats degraded path so summary
+/// aggregates stay consistent.
+fn push_consent_journal_unavailable(data: &mut cairn_core::generated::verbs::lint::LintData) {
+    let f = cairn_core::generated::verbs::lint::Finding {
+        entities: None,
+        kind: cairn_core::generated::verbs::lint::Kind::DeferredCheck,
+        message: "consent_journal snapshot unavailable; source_after_forget / source_redact_skipped checks skipped"
+            .to_owned(),
+        severity: cairn_core::generated::verbs::lint::Severity::Info,
+        suggested_fix: Some(
+            "configure a backend that surfaces consent_journal rows (default vault layout creates .cairn/cairn.db)"
+                .to_owned(),
+        ),
+        target: None,
+        tracking_issue: None,
+    };
+    data.findings.push(f);
+    data.summary.total += 1;
+    data.summary.by_severity.info += 1;
+    if let serde_json::Value::Object(map) = &mut data.summary.by_kind {
+        let entry = map
+            .entry("deferred_check".to_owned())
+            .or_insert(serde_json::Value::from(0_u64));
+        if let Some(n) = entry.as_u64() {
+            *entry = serde_json::Value::from(n.saturating_add(1));
+        }
     }
 }
 
@@ -2368,11 +2441,13 @@ mod tests {
         // not implement ConsentLookup, so consent.rs returns no
         // findings. §6.3 (#257) now runs real source-link checks, and
         // FixtureStore records still carry empty `source_refs`, so
-        // lint emits a `SourceLinkMissing` Error rather than a deferred
-        // advisory. The remaining Info finding here is the §6.2
-        // signature-verification-deferred advisory. §6.6 (#259) is a
-        // real canary that emits a `Warning`-severity DeferredCheck —
-        // counted under warnings, not infos.
+        // lint emits a `SourceLinkMissing` Warning. Info findings:
+        // the §6.2 signature-verification-deferred advisory plus a
+        // consent-journal-unavailable DeferredCheck (FixtureStore
+        // does not back a `.cairn/cairn.db`, so source-after-forget
+        // / source-redact-skipped degrade fail-closed via info
+        // finding rather than silently passing). §6.6 (#259) is a
+        // Warning-severity DeferredCheck — counted under warnings.
         let info_count = result
             .data
             .findings
@@ -2385,8 +2460,8 @@ mod tests {
             })
             .count();
         assert_eq!(
-            info_count, 1,
-            "expect only the §6.2 signature-verification-deferred advisory as info"
+            info_count, 2,
+            "expect §6.2 signature-verification-deferred + consent-journal-unavailable advisories"
         );
         assert!(
             result.has_error,

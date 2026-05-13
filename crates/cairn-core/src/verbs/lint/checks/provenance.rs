@@ -64,10 +64,17 @@ fn check_record(
 ) {
     let provenance = &record.stored.record.provenance;
     if provenance.source_refs.is_empty() {
+        // Severity = Warning during rollout: ingest, capture_trace,
+        // turn, and folder-ingest planner all still construct
+        // records with empty `source_refs`. Emitting Error here
+        // would make lint permanently red on records the product
+        // still legitimately produces. Escalate to Error once every
+        // active writer is on the populated path (tracking: spec
+        // Component 4 rollout, follow-up to #257).
         let mut f = finding(
             Kind::SourceLinkMissing,
-            Severity::Error,
-            "record provenance must carry at least one source_ref",
+            Severity::Warning,
+            "record provenance has no source_refs",
         );
         f.target = Some(target_record(&record.stored.record.id));
         findings.push(f);
@@ -444,7 +451,8 @@ mod tests {
         let f = run(&inputs);
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].kind, Kind::SourceLinkMissing);
-        assert_eq!(f[0].severity, Severity::Error);
+        // Warning during rollout — see comment in `check_record`.
+        assert_eq!(f[0].severity, Severity::Warning);
     }
 
     #[test]

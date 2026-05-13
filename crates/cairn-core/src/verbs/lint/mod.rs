@@ -417,10 +417,12 @@ mod tests {
         // returns `Same` and no finding fires. hot_memory (#259) is
         // a real canary now and emits one Warning DeferredCheck for
         // the default recipe's deferred steps. Provenance (#257)
-        // now runs real checks, and the sample record's empty
-        // `source_refs` yields a `SourceLinkMissing` Error.
-        assert_eq!(data.summary.by_severity.error, 2);
-        assert_eq!(data.summary.by_severity.warning, 1);
+        // now runs real checks; the sample record's empty
+        // `source_refs` yields a `SourceLinkMissing` Warning (rollout
+        // severity — Error blocks lint on records every active writer
+        // still legitimately produces).
+        assert_eq!(data.summary.by_severity.error, 1);
+        assert_eq!(data.summary.by_severity.warning, 2);
         assert_eq!(
             data.findings
                 .iter()

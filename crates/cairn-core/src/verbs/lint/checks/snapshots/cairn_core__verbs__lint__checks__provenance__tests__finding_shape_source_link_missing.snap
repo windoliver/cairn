@@ -1,9 +1,9 @@
 ---
 source: crates/cairn-core/src/verbs/lint/checks/provenance.rs
-assertion_line: 763
+assertion_line: 771
 expression: findings
 ---
 - kind: source_link_missing
-  message: record provenance must carry at least one source_ref
-  severity: error
+  message: record provenance has no source_refs
+  severity: warning
   target: {}

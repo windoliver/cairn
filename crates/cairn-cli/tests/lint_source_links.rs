@@ -135,7 +135,7 @@ async fn read_only_lint_reports_missing_source_refs_as_error_e2e() {
         .iter()
         .find(|f| f.kind == Kind::SourceLinkMissing)
         .expect("missing source_ref finding");
-    assert_eq!(missing.severity, Severity::Error);
+    assert_eq!(missing.severity, Severity::Warning);
     assert_eq!(
         missing.target.as_ref().and_then(|t| t.record_id.as_ref()),
         Some(&cairn_core::generated::common::Ulid(
