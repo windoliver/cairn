@@ -28,7 +28,9 @@ expression: json
         "active_playbook",
         "recent_user_signal"
       ],
-      "max_bytes": 25600
+      "max_bytes": 25600,
+      "pre_compact_recipe": "handoff",
+      "pre_compact_safety_ratio": 0.3
     },
     "retention": {},
     "schema_files": [
@@ -45,6 +47,23 @@ expression: json
     "base_url": null,
     "model": null,
     "api_key": null
+  },
+  "search": {
+    "local_embeddings": true,
+    "embedding_model": "bge-small-en-v1.5",
+    "default_mode": "hybrid",
+    "default_provider": "local",
+    "rerank_blend": 0.7,
+    "fts_column_weights": [
+      10.0,
+      10.0,
+      5.0,
+      1.0
+    ],
+    "rrf_k": 60,
+    "rerank_topk": 20,
+    "max_snippet_chars_per_page": 8000,
+    "graph_confidence_min": 0.3
   },
   "sensors": {
     "hooks": {
@@ -88,6 +107,11 @@ expression: json
           }
         }
       ]
+    }
+  },
+  "mcp": {
+    "stdio": {
+      "single_tenant": false
     }
   }
 }

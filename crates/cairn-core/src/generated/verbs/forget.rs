@@ -10,12 +10,39 @@ use serde::{Deserialize, Serialize};
 #[non_exhaustive]
 pub enum ForgetArgs {
     Record {
+        /// If true, produce a FlushPlan and emit it without writing to MemoryStore (brief §5.5). Mutually exclusive with human_review.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dry_run: Option<bool>,
+        /// If true, persist a FlushPlan under .cairn/flush/pending/ for explicit `cairn flush apply` (brief §5.5). Mutually exclusive with dry_run.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        human_review: Option<bool>,
+        /// When human_review=true, skip emitting the markdown diff sidecar.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        no_diff: Option<bool>,
         record_id: crate::generated::common::Ulid,
     },
     Session {
+        /// If true, produce a FlushPlan and emit it without writing to MemoryStore (brief §5.5). Mutually exclusive with human_review.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dry_run: Option<bool>,
+        /// If true, persist a FlushPlan under .cairn/flush/pending/ for explicit `cairn flush apply` (brief §5.5). Mutually exclusive with dry_run.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        human_review: Option<bool>,
+        /// When human_review=true, skip emitting the markdown diff sidecar.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        no_diff: Option<bool>,
         session_id: String,
     },
     Scope {
+        /// If true, produce a FlushPlan and emit it without writing to MemoryStore (brief §5.5). Mutually exclusive with human_review.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dry_run: Option<bool>,
+        /// If true, persist a FlushPlan under .cairn/flush/pending/ for explicit `cairn flush apply` (brief §5.5). Mutually exclusive with dry_run.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        human_review: Option<bool>,
+        /// When human_review=true, skip emitting the markdown diff sidecar.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        no_diff: Option<bool>,
         scope: crate::generated::common::ScopeFilter,
     },
 }
@@ -24,6 +51,15 @@ pub enum ForgetArgs {
 #[serde(deny_unknown_fields)]
 struct RawForgetArgsRecord {
     #[allow(dead_code)] mode: serde::de::IgnoredAny,
+    /// If true, produce a FlushPlan and emit it without writing to MemoryStore (brief §5.5). Mutually exclusive with human_review.
+    #[serde(default)]
+    dry_run: Option<bool>,
+    /// If true, persist a FlushPlan under .cairn/flush/pending/ for explicit `cairn flush apply` (brief §5.5). Mutually exclusive with dry_run.
+    #[serde(default)]
+    human_review: Option<bool>,
+    /// When human_review=true, skip emitting the markdown diff sidecar.
+    #[serde(default)]
+    no_diff: Option<bool>,
     record_id: crate::generated::common::Ulid,
 }
 
@@ -31,6 +67,15 @@ struct RawForgetArgsRecord {
 #[serde(deny_unknown_fields)]
 struct RawForgetArgsSession {
     #[allow(dead_code)] mode: serde::de::IgnoredAny,
+    /// If true, produce a FlushPlan and emit it without writing to MemoryStore (brief §5.5). Mutually exclusive with human_review.
+    #[serde(default)]
+    dry_run: Option<bool>,
+    /// If true, persist a FlushPlan under .cairn/flush/pending/ for explicit `cairn flush apply` (brief §5.5). Mutually exclusive with dry_run.
+    #[serde(default)]
+    human_review: Option<bool>,
+    /// When human_review=true, skip emitting the markdown diff sidecar.
+    #[serde(default)]
+    no_diff: Option<bool>,
     session_id: String,
 }
 
@@ -38,6 +83,15 @@ struct RawForgetArgsSession {
 #[serde(deny_unknown_fields)]
 struct RawForgetArgsScope {
     #[allow(dead_code)] mode: serde::de::IgnoredAny,
+    /// If true, produce a FlushPlan and emit it without writing to MemoryStore (brief §5.5). Mutually exclusive with human_review.
+    #[serde(default)]
+    dry_run: Option<bool>,
+    /// If true, persist a FlushPlan under .cairn/flush/pending/ for explicit `cairn flush apply` (brief §5.5). Mutually exclusive with dry_run.
+    #[serde(default)]
+    human_review: Option<bool>,
+    /// When human_review=true, skip emitting the markdown diff sidecar.
+    #[serde(default)]
+    no_diff: Option<bool>,
     scope: crate::generated::common::ScopeFilter,
 }
 
@@ -75,17 +129,26 @@ impl ::core::convert::TryFrom<RawForgetArgs> for ForgetArgs {
     fn try_from(raw: RawForgetArgs) -> Result<Self, Self::Error> {
         match raw {
             RawForgetArgs::Record(inner) => {
+                let dry_run = inner.dry_run;
+                let human_review = inner.human_review;
+                let no_diff = inner.no_diff;
                 let record_id = inner.record_id;
-                Ok(Self::Record { record_id })
+                Ok(Self::Record { dry_run, human_review, no_diff, record_id })
             },
             RawForgetArgs::Session(inner) => {
+                let dry_run = inner.dry_run;
+                let human_review = inner.human_review;
+                let no_diff = inner.no_diff;
                 let session_id = inner.session_id;
                 if session_id.is_empty() { return Err("session_id: must not be empty"); }
-                Ok(Self::Session { session_id })
+                Ok(Self::Session { dry_run, human_review, no_diff, session_id })
             },
             RawForgetArgs::Scope(inner) => {
+                let dry_run = inner.dry_run;
+                let human_review = inner.human_review;
+                let no_diff = inner.no_diff;
                 let scope = inner.scope;
-                Ok(Self::Scope { scope })
+                Ok(Self::Scope { dry_run, human_review, no_diff, scope })
             },
         }
     }
@@ -115,8 +178,11 @@ impl ForgetArgs {
 #[serde(deny_unknown_fields)]
 pub struct ForgetData {
     pub deleted_count: u64,
+    /// Path under .cairn/flush/pending/ when human_review=true; absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tombstones: Option<Vec<crate::generated::common::Ulid>>,
 }
 
-pub const ARGS_SCHEMA: &[u8] = include_bytes!("../../../../cairn-mcp/src/generated/schemas/verbs/forget.json");
+pub const ARGS_SCHEMA: &[u8] = include_bytes!("../schemas/verbs/forget.json");

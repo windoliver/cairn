@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/common/record_exclusion.json",
+  "title": "RecordExclusion",
+  "x-cairn-contract": "cairn.mcp.v1",
+  "description": "Per-record exclusion entry returned on search responses when args.explain is true. Records the caller cannot otherwise see (Tier-1 visibility) never appear here.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["target_id", "gate", "detail"],
+  "properties": {
+    "target_id": { "$ref": "./primitives.json#/$defs/Ulid" },
+    "gate": {
+      "type": "string",
+      "enum": ["read_filter_relevance", "read_filter_staleness", "read_filter_dedup"]
+    },
+    "detail": {
+      "type": "string",
+      "maxLength": 128,
+      "pattern": "^([a-z][a-z0-9_:=,]*)?$",
+      "description": "Body-free wire code from PolicyDetail.to_wire_string(). Empty string for None; otherwise starts with a lowercase letter and contains only a-z0-9_:=, — no whitespace, no free text."
+    }
+  }
+}

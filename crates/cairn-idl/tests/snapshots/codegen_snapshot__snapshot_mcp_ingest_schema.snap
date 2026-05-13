@@ -20,17 +20,52 @@ expression: "read(&files, \"crates/cairn-mcp/src/generated/schemas/verbs/ingest.
         },
         {
           "required": [
+            "folder"
+          ]
+        },
+        {
+          "required": [
             "url"
+          ]
+        },
+        {
+          "required": [
+            "jsonl"
           ]
         }
       ],
       "properties": {
+        "batch_size": {
+          "default": 64,
+          "description": "Maximum cache-miss files per FlushPlan batch.",
+          "maximum": 65535,
+          "minimum": 1,
+          "type": "integer"
+        },
         "body": {
           "minLength": 1,
           "type": "string"
         },
+        "dry_run": {
+          "default": false,
+          "description": "If true, produce a FlushPlan and emit it without writing to MemoryStore (brief §5.5). Mutually exclusive with human_review.",
+          "type": "boolean"
+        },
+        "exclude": {
+          "description": "Exclude glob patterns for folder ingest.",
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": "array"
+        },
         "file": {
           "description": "Path on the local filesystem.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "folder": {
+          "description": "Folder path to ingest recursively with the extraction cache.",
           "minLength": 1,
           "type": "string"
         },
@@ -38,12 +73,76 @@ expression: "read(&files, \"crates/cairn-mcp/src/generated/schemas/verbs/ingest.
           "description": "Extra YAML frontmatter fields to store alongside the body.",
           "type": "object"
         },
+        "harness": {
+          "description": "Optional harness parser name. Auto-detected from the first non-empty line when omitted.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "human_review": {
+          "default": false,
+          "description": "If true, persist a FlushPlan under .cairn/flush/pending/ for explicit `cairn flush apply` (brief §5.5). Mutually exclusive with dry_run.",
+          "type": "boolean"
+        },
+        "include": {
+          "description": "Include glob patterns for folder ingest.",
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "jsonl": {
+          "description": "Path to a harness transcript JSONL file (or directory with --recursive) for backfill import.",
+          "minLength": 1,
+          "type": "string"
+        },
         "kind": {
           "description": "Memory taxonomy kind (19 possible values — see §3 taxonomy). Validated beyond JSON Schema by the classifier.",
           "minLength": 1,
           "type": "string"
         },
+        "limit": {
+          "description": "Maximum number of transcript rows to import (jsonl backfill).",
+          "maximum": 4294967295,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "mode": {
+          "$ref": "#/$defs/IngestMode",
+          "default": "keyword",
+          "description": "Folder ingest extraction mode.",
+          "oneOf": [
+            {
+              "const": "keyword"
+            },
+            {
+              "const": "semantic"
+            },
+            {
+              "const": "full"
+            }
+          ]
+        },
+        "no_cache": {
+          "description": "Bypass extraction cache lookup for folder ingest, but still write refreshed cache entries.",
+          "type": "boolean"
+        },
+        "no_diff": {
+          "default": false,
+          "description": "When human_review=true, skip emitting the markdown diff sidecar.",
+          "type": "boolean"
+        },
+        "recursive": {
+          "default": true,
+          "description": "Folder/jsonl ingest: recurse into child directories. CLI default: true.",
+          "type": "boolean"
+        },
         "session_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "session_id_from": {
+          "description": "Optional top-level JSON key whose string value overrides the generic parser's synthetic session id.",
           "minLength": 1,
           "type": "string"
         },
@@ -68,6 +167,62 @@ expression: "read(&files, \"crates/cairn-mcp/src/generated/schemas/verbs/ingest.
     "Data": {
       "additionalProperties": false,
       "properties": {
+        "cache_hits": {
+          "description": "Folder ingest cache hits.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cache_misses": {
+          "description": "Folder ingest cache misses or forced re-extractions.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cache_writes": {
+          "description": "Folder ingest cache entries written.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "files_processed": {
+          "description": "Folder ingest file count when source is --folder.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "jsonl_summary": {
+          "additionalProperties": false,
+          "description": "JSONL transcript backfill counts. Present only when source is --jsonl.",
+          "properties": {
+            "elapsed_ms": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "files_scanned": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "records_written": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "sessions_parsed": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "sessions_skipped": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "turns_parsed": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "plan_ref": {
+          "description": "Path under .cairn/flush/pending/ when human_review=true; absent otherwise.",
+          "minLength": 1,
+          "type": "string"
+        },
         "record_id": {
           "$ref": "../common/primitives.json#/$defs/Ulid",
           "description": "ULID of the newly stored record."
@@ -83,6 +238,14 @@ expression: "read(&files, \"crates/cairn-mcp/src/generated/schemas/verbs/ingest.
         "session_id"
       ],
       "type": "object"
+    },
+    "IngestMode": {
+      "enum": [
+        "keyword",
+        "semantic",
+        "full"
+      ],
+      "type": "string"
     }
   },
   "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/ingest.json",
@@ -110,9 +273,59 @@ expression: "read(&files, \"crates/cairn-mcp/src/generated/schemas/verbs/ingest.
         "value_source": "path"
       },
       {
+        "long": "folder",
+        "name": "folder",
+        "value_source": "path"
+      },
+      {
         "long": "url",
         "name": "url",
         "value_source": "string"
+      },
+      {
+        "long": "recursive",
+        "name": "recursive",
+        "value_source": "bool"
+      },
+      {
+        "long": "include",
+        "name": "include",
+        "value_source": "list<string>"
+      },
+      {
+        "long": "exclude",
+        "name": "exclude",
+        "value_source": "list<string>"
+      },
+      {
+        "long": "mode",
+        "name": "mode",
+        "value_source": "enum(keyword,semantic,full)"
+      },
+      {
+        "long": "batch-size",
+        "name": "batch_size",
+        "value_source": "u32"
+      },
+      {
+        "long": "jsonl",
+        "name": "jsonl",
+        "value_source": "path"
+      },
+      {
+        "long": "harness",
+        "name": "harness",
+        "value_source": "string"
+      },
+      {
+        "long": "session-id-from",
+        "name": "session_id_from",
+        "value_source": "string"
+      },
+      {
+        "long": "limit",
+        "name": "limit",
+        "value_source": "u32"
       },
       {
         "long": "session",
@@ -123,10 +336,22 @@ expression: "read(&files, \"crates/cairn-mcp/src/generated/schemas/verbs/ingest.
         "long": "tags",
         "name": "tags",
         "value_source": "list<string>"
+      },
+      {
+        "long": "no-cache",
+        "name": "no_cache",
+        "value_source": "bool"
       }
     ],
     "positional": {
-      "description": "File, URL, or '-' for stdin. Mutually exclusive with --body/--file/--url.",
+      "aliases_one_of": [
+        "body",
+        "file",
+        "folder",
+        "url",
+        "jsonl"
+      ],
+      "description": "File, URL, folder, JSONL transcript, or '-' for stdin. Mutually exclusive with --body/--file/--folder/--url/--jsonl.",
       "name": "source"
     }
   },

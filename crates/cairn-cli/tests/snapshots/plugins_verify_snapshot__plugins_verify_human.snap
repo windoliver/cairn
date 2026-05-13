@@ -1,5 +1,6 @@
 ---
 source: crates/cairn-cli/tests/plugins_verify_snapshot.rs
+assertion_line: 10
 expression: text
 ---
 cairn-mcp (MCPServer)

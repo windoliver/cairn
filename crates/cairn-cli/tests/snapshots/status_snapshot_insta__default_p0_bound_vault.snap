@@ -1,0 +1,85 @@
+---
+source: crates/cairn-cli/tests/status_snapshot_insta.rs
+assertion_line: 60
+expression: v
+---
+{
+  "capabilities": [
+    "cairn.mcp.v1.forget.record",
+    "cairn.mcp.v1.policy_trace",
+    "cairn.mcp.v1.retrieve.session",
+    "cairn.mcp.v1.retrieve.tool_call",
+    "cairn.mcp.v1.retrieve.turn",
+    "cairn.mcp.v1.search.keyword",
+    "cairn.sensor.v1.screen.ocr.vision",
+    "cairn.sensor.v1.screen.xcap"
+  ],
+  "contract": "cairn.mcp.v1",
+  "extensions": [],
+  "mcp_graph_tools": {
+    "probe_basis": "full",
+    "reason": "single_tenant_off",
+    "state": "unavailable"
+  },
+  "pipeline_dispatch": [
+    {
+      "decision": "bypass",
+      "source_family": "cli"
+    },
+    {
+      "decision": "bypass",
+      "source_family": "clipboard"
+    },
+    {
+      "decision": "bypass",
+      "source_family": "hook"
+    },
+    {
+      "decision": "bypass",
+      "source_family": "ide"
+    },
+    {
+      "decision": "bypass",
+      "source_family": "mcp"
+    },
+    {
+      "decision": "bypass",
+      "source_family": "proactive"
+    },
+    {
+      "decision": "bypass",
+      "source_family": "recording_batch"
+    },
+    {
+      "decision": "bypass",
+      "source_family": "screen"
+    },
+    {
+      "decision": "squash_when_interactive_tty",
+      "source_family": "terminal"
+    },
+    {
+      "decision": "bypass",
+      "source_family": "voice"
+    }
+  ],
+  "sensors": {
+    "screen": {
+      "backend": "xcap",
+      "degradation": {
+        "code": "screen.disabled",
+        "message": "screen sensor is disabled in config"
+      },
+      "mode": "off",
+      "ocr_engine": "vision",
+      "permission": "not_requested",
+      "state": "disabled"
+    }
+  },
+  "server_info": {
+    "build": "<masked>",
+    "incarnation": "<masked>",
+    "started_at": "<masked>",
+    "version": "<masked>"
+  }
+}

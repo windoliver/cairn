@@ -1,0 +1,208 @@
+//! Prelude tools — the MCP `handshake` surface (brief §8.0.a).
+//!
+//! The eight core verbs are frozen in [`crate::generated::TOOLS`] and ship
+//! through the IDL.  `status` and `handshake` are *protocol preludes* per
+//! brief §8.0.a — they are not counted among the eight verbs.
+//!
+//! - `status` is delivered through MCP's built-in `initialize` request: the
+//!   Cairn `StatusResponse` rides in
+//!   `serverCapabilities.experimental["cairn.status"]`. See
+//!   the `get_info` impl on [`crate::handler::CairnMcpHandler`].
+//! - `handshake` is exposed as a regular MCP tool registered alongside the
+//!   eight core verbs but kept in this hand-written slice so the
+//!   IDL-generated [`crate::generated::TOOLS`] count stays at eight.
+//!
+//! `handshake` requires a wired `SqliteMemoryStore` because it must persist
+//! the minted nonce in `outstanding_challenges` so a later signed envelope
+//! from the same `issuer` can redeem it (brief §4.2). Handlers constructed
+//! without a sqlite store therefore omit `handshake` from `tools/list` —
+//! brief §15 fail-closed: never advertise a capability that cannot be
+//! honored end-to-end.
+//!
+//! `handshake` is additionally gated on
+//! [`cairn_core::status::wiring::REPLAY_CHALLENGE_WIRED`]. While that flag is
+//! `false`, no signed-mutation path routes through `prepare_wal_with_replay`
+//! to consume a persisted nonce — minting one would let clients accumulate
+//! rows they cannot redeem through any shipped MCP verb, contradicting the
+//! `cairn.mcp.v1.replay.challenge` capability still held back from
+//! `status.capabilities`. The CLI's `cairn handshake --issuer` mirrors this
+//! posture by emitting a stderr warning; MCP clients are programs that
+//! cannot read the warning, so we fail closed at the protocol surface
+//! instead. When the signed-verb wiring lands and the flag flips, this
+//! tool unblocks automatically — tests read the flag at runtime so they
+//! follow the gate.
+
+use std::sync::Arc;
+
+use cairn_core::generated::common::Nonce16Base64;
+use cairn_core::generated::handshake::{HandshakeResponse, HandshakeResponseChallenge};
+use cairn_store_sqlite::SqliteMemoryStore;
+use rmcp::model::{CallToolResult, Content};
+
+use crate::generated::ToolDecl;
+
+/// Default challenge TTL in milliseconds — matches the brief default.
+const CHALLENGE_TTL_MS: i64 = 60_000;
+
+const HANDSHAKE_INPUT_SCHEMA: &[u8] = br#"{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["issuer"],
+  "properties": {
+    "issuer": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Caller's signing-key identity. The minted nonce is keyed by this issuer so the caller's next signed envelope can redeem it."
+    }
+  }
+}"#;
+
+const HANDSHAKE_DESCRIPTION: &str = "`handshake` — protocol prelude: mint a fresh single-use challenge nonce (brief §8.0.a).
+
+Inserts a row into `outstanding_challenges` keyed by the supplied `issuer`, returning a 16-byte base64 nonce + absolute expiry. The nonce is single-use and consumed by the next signed mutation from the same issuer.
+
+Two back-to-back calls always return distinct nonces. Not one of the eight core verbs — handshake is a protocol prelude.";
+
+/// Hand-written tool declarations for protocol preludes registered alongside
+/// the IDL-generated [`crate::generated::TOOLS`] slice. Kept separate so the
+/// canonical eight-verb count is preserved.
+pub const PRELUDE_TOOLS: &[ToolDecl] = &[ToolDecl {
+    name: "handshake",
+    description: HANDSHAKE_DESCRIPTION,
+    input_schema: HANDSHAKE_INPUT_SCHEMA,
+    capability: None,
+    auth: "rebac",
+    auth_overrides: &[],
+    capability_overrides: &[],
+}];
+
+/// `true` iff `name` is one of the prelude tools above.
+#[must_use]
+pub fn is_prelude_tool(name: &str) -> bool {
+    PRELUDE_TOOLS.iter().any(|d| d.name == name)
+}
+
+/// `true` iff the prelude tools should appear in `tools/list` and accept
+/// `tools/call` for the given runtime state. Currently equivalent to
+/// "sqlite store is wired AND `REPLAY_CHALLENGE_WIRED == true`" — both
+/// conditions are required end-to-end because the persisted nonce is
+/// only useful once a signed-verb path can redeem it via
+/// `prepare_wal_with_replay` (brief §15 fail-closed).
+///
+/// Callers pass the runtime wiring flag explicitly so unit tests can
+/// drive the dispatch path against a forced `true` value while the
+/// production path keeps the real const.
+#[must_use]
+pub fn is_enabled(sqlite_store_wired: bool, replay_challenge_wired: bool) -> bool {
+    sqlite_store_wired && replay_challenge_wired
+}
+
+fn capability_unavailable_replay_challenge() -> CallToolResult {
+    const CAP: &str = "cairn.mcp.v1.replay.challenge";
+    let mut text = format!("cairn handshake: capability unavailable: {CAP}");
+    if let Some(hint) = cairn_core::status::remediation_for(CAP) {
+        text.push_str("\n  hint: ");
+        text.push_str(hint);
+    }
+    CallToolResult::error(vec![Content::text(text)])
+}
+
+/// Dispatch a `tools/call` request whose tool name is in [`PRELUDE_TOOLS`].
+///
+/// Returns `CallToolResult` (with `is_error` set) for routing /
+/// argument failures so the rmcp transport surfaces the failure as an
+/// MCP error-in-result rather than a JSON-RPC error frame.
+///
+/// `replay_challenge_wired` is the runtime view of
+/// [`cairn_core::status::wiring::REPLAY_CHALLENGE_WIRED`]; production
+/// callers pass that const, tests pass `true` to drive the
+/// implementation directly.
+pub async fn dispatch(
+    name: &str,
+    arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    sqlite_store: Option<Arc<SqliteMemoryStore>>,
+    replay_challenge_wired: bool,
+) -> CallToolResult {
+    if !replay_challenge_wired {
+        return capability_unavailable_replay_challenge();
+    }
+    if name == "handshake" {
+        return handshake(arguments, sqlite_store).await;
+    }
+    CallToolResult::error(vec![Content::text(format!(
+        "cairn: unknown prelude tool '{name}'"
+    ))])
+}
+
+async fn handshake(
+    arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    sqlite_store: Option<Arc<SqliteMemoryStore>>,
+) -> CallToolResult {
+    let Some(store) = sqlite_store else {
+        return CallToolResult::error(vec![Content::text(
+            "cairn handshake: capability unavailable — handshake requires a \
+             wired sqlite store; this handler was constructed without one",
+        )]);
+    };
+
+    let issuer = match arguments
+        .as_ref()
+        .and_then(|m| m.get("issuer"))
+        .and_then(|v| v.as_str())
+    {
+        Some(s) if !s.is_empty() => s.to_owned(),
+        _ => {
+            return CallToolResult::error(vec![Content::text(
+                "cairn handshake: invalid args — `issuer` must be a non-empty string",
+            )]);
+        }
+    };
+
+    // Fail closed on a degraded clock (pre-1970 wall clock or a duration
+    // that does not fit in i64-ms). The CSPRNG-driven nonce is fine, but
+    // a bogus `now_ms` would either drop every live row in
+    // `outstanding_challenges` (saturated-future cutoff in the purge
+    // step) or mint a never-expiring challenge — both replay-correctness
+    // failures. Round-1 review #2.
+    let now_ms = match cairn_core::time::checked_now_ms() {
+        Ok(ms) => ms,
+        Err(e) => {
+            return CallToolResult::error(vec![Content::text(format!(
+                "cairn handshake: clock error — {e}"
+            ))]);
+        }
+    };
+    let issuer_for_tx = issuer.clone();
+    let mint_outcome = store
+        .with_tx(move |tx| tx.mint_challenge(&issuer_for_tx, now_ms, CHALLENGE_TTL_MS))
+        .await;
+
+    let chal = match mint_outcome {
+        Ok(c) => c,
+        Err(e) => {
+            return CallToolResult::error(vec![Content::text(format!(
+                "cairn handshake: store error: {e}"
+            ))]);
+        }
+    };
+
+    // `expires_at_ms` is `i64` from sqlite (matching INTEGER); the wire IDL
+    // uses `u64` (epoch-ms ≥ 0). Coerce defensively — only fails when the
+    // wall clock is before 1970, which we treat as "expires immediately".
+    let expires_at = u64::try_from(chal.expires_at_ms).unwrap_or(0);
+    let resp = HandshakeResponse {
+        contract: "cairn.mcp.v1".to_owned(),
+        challenge: HandshakeResponseChallenge {
+            nonce: Nonce16Base64(chal.nonce_b64),
+            expires_at,
+        },
+    };
+
+    match serde_json::to_string(&resp) {
+        Ok(s) => CallToolResult::success(vec![Content::text(s)]),
+        Err(e) => CallToolResult::error(vec![Content::text(format!(
+            "cairn handshake: serialize error: {e}"
+        ))]),
+    }
+}

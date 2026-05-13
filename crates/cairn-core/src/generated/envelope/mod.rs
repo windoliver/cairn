@@ -129,6 +129,7 @@ pub enum ResponseTarget {
     Record,
     Session,
     Turn,
+    ToolCall,
     Folder,
     Scope,
     Profile,
@@ -158,6 +159,7 @@ pub enum RetrieveData {
     Profile(crate::generated::verbs::retrieve::DataProfile),
     Session(crate::generated::verbs::retrieve::DataSession),
     Turn(crate::generated::verbs::retrieve::DataTurn),
+    ToolCall(crate::generated::verbs::retrieve::DataToolCall),
     Folder(crate::generated::verbs::retrieve::DataFolder),
     Scope(crate::generated::verbs::retrieve::DataScope),
 }
@@ -287,6 +289,9 @@ impl<'de> ::serde::Deserialize<'de> for Response {
                         ResponseTarget::Turn => RetrieveData::Turn(
                             <crate::generated::verbs::retrieve::DataTurn as ::serde::Deserialize>::deserialize(payload).map_err(::serde::de::Error::custom)?
                         ),
+                        ResponseTarget::ToolCall => RetrieveData::ToolCall(
+                            <crate::generated::verbs::retrieve::DataToolCall as ::serde::Deserialize>::deserialize(payload).map_err(::serde::de::Error::custom)?
+                        ),
                         ResponseTarget::Folder => RetrieveData::Folder(
                             <crate::generated::verbs::retrieve::DataFolder as ::serde::Deserialize>::deserialize(payload).map_err(::serde::de::Error::custom)?
                         ),
@@ -353,7 +358,7 @@ pub struct SignedIntent {
     pub chain_parents: Vec<crate::generated::common::Ulid>,
     pub expires_at: String,
     pub issued_at: String,
-    /// AgentIdentity, HumanIdentity, or SensorIdentity. Examples: agt:claude-code:opus-4-7:reviewer:v1, usr:alice, snr:local:screen:host:v1.
+    /// AgentIdentity, HumanIdentity, or SensorIdentity. Examples: agt:claude-code:opus-4-7:reviewer:v1, hmn:alice, snr:local:screen:host:v1.
     pub issuer: crate::generated::common::Identity,
     pub key_version: i64,
     /// Fresh per message; 16 bytes base64-encoded (22 chars unpadded or 24 chars with `==` padding).
@@ -388,7 +393,7 @@ struct RawSignedIntent {
     chain_parents: Vec<crate::generated::common::Ulid>,
     expires_at: String,
     issued_at: String,
-    /// AgentIdentity, HumanIdentity, or SensorIdentity. Examples: agt:claude-code:opus-4-7:reviewer:v1, usr:alice, snr:local:screen:host:v1.
+    /// AgentIdentity, HumanIdentity, or SensorIdentity. Examples: agt:claude-code:opus-4-7:reviewer:v1, hmn:alice, snr:local:screen:host:v1.
     issuer: crate::generated::common::Identity,
     key_version: i64,
     /// Fresh per message; 16 bytes base64-encoded (22 chars unpadded or 24 chars with `==` padding).
@@ -433,7 +438,7 @@ impl ::core::convert::TryFrom<RawSignedIntent> for SignedIntent {
         }
         if !is_ed25519_signature(&raw.signature.0) { return Err("signature: must be \"ed25519:\" + 128 lowercase hex chars"); }
         if !is_sha256_target_hash(&raw.target_hash) { return Err("target_hash: must be \"sha256:\" + 64 lowercase hex chars"); }
-        if !is_identity(&raw.issuer.0) { return Err("issuer: must start with one of [agt:, usr:, snr:] followed by a non-empty body in [A-Za-z0-9._:-]"); }
+        if !is_identity(&raw.issuer.0) { return Err("issuer: must start with one of [agt:, hmn:, snr:] followed by a non-empty body in [A-Za-z0-9._:-]"); }
         if raw.scope.tenant.is_empty() { return Err("scope.tenant: must not be empty"); }
         if raw.scope.workspace.is_empty() { return Err("scope.workspace: must not be empty"); }
         if raw.scope.entity.is_empty() { return Err("scope.entity: must not be empty"); }
@@ -464,11 +469,14 @@ impl<'de> ::serde::Deserialize<'de> for SignedIntent {
     }
 }
 
-/// Return true iff `s` is a valid Crockford base32 ULID — exactly 26 chars
-/// from the alphabet `0123456789ABCDEFGHJKMNPQRSTVWXYZ` (no I, L, O, U).
+/// Return true iff `s` is a valid 128-bit Crockford base32 ULID — exactly 26
+/// chars, first char `0..=7`, then the alphabet
+/// `0123456789ABCDEFGHJKMNPQRSTVWXYZ` (no I, L, O, U).
 fn is_ulid_shape(s: &str) -> bool {
     if s.len() != 26 { return false; }
-    s.bytes().all(|b| matches!(b,
+    let bytes = s.as_bytes();
+    if !matches!(bytes[0], b'0'..=b'7') { return false; }
+    bytes[1..].iter().all(|b| matches!(b,
         b'0'..=b'9' | b'A'..=b'H' | b'J' | b'K' | b'M' | b'N' | b'P'..=b'T' | b'V'..=b'Z'
     ))
 }
@@ -504,11 +512,11 @@ fn is_sha256_target_hash(s: &str) -> bool {
     tail.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// Return true iff `s` starts with `agt:`, `usr:`, or `snr:` followed by a
+/// Return true iff `s` starts with `agt:`, `hmn:`, or `snr:` followed by a
 /// non-empty body in `[A-Za-z0-9._:-]`.
 fn is_identity(s: &str) -> bool {
     let tail = if let Some(t) = s.strip_prefix("agt:") { t }
-        else if let Some(t) = s.strip_prefix("usr:") { t }
+        else if let Some(t) = s.strip_prefix("hmn:") { t }
         else if let Some(t) = s.strip_prefix("snr:") { t }
         else { return false; };
     if tail.is_empty() { return false; }
@@ -522,7 +530,7 @@ fn is_identity(s: &str) -> bool {
 /// length >= 20, separators at fixed positions, digits everywhere else,
 /// and each numeric field within its RFC-3339 range:
 /// month 01-12, day 01-(28|29|30|31) per the calendar, hour 00-23,
-/// minute 00-59, second 00-60 (leap second), offset hour 00-23,
+/// minute 00-59, second 00-59 (leap seconds unsupported), offset hour 00-23,
 /// offset minute 00-59. Day-of-month is calendar-aware — Feb 29 is
 /// accepted only in leap years (`(year % 4 == 0 && year % 100 != 0)
 /// || year % 400 == 0`).
@@ -558,8 +566,8 @@ fn is_rfc3339_datetime(s: &str) -> bool {
     let minute = two_digit(14);
     if minute > 59 { return false; }
     let second = two_digit(17);
-    // RFC-3339 §5.6 permits 60 for leap seconds.
-    if second > 60 { return false; }
+    // Cairn rejects `:60` until a real leap-second-aware parser is wired in.
+    if second > 59 { return false; }
     // Optional fractional seconds + mandatory offset (Z or ±HH:MM).
     let mut idx = 19;
     if idx < b.len() && b[idx] == b'.' {
@@ -588,7 +596,7 @@ fn is_rfc3339_datetime(s: &str) -> bool {
 /// Return true iff `s` is one of the closed capability strings in
 /// `capabilities/capabilities.json#oneOf[].const`.
 fn is_known_capability(s: &str) -> bool {
-    matches!(s, "cairn.mcp.v1.search.keyword" | "cairn.mcp.v1.search.semantic" | "cairn.mcp.v1.search.hybrid" | "cairn.mcp.v1.retrieve.record" | "cairn.mcp.v1.retrieve.session" | "cairn.mcp.v1.retrieve.turn" | "cairn.mcp.v1.retrieve.folder" | "cairn.mcp.v1.retrieve.scope" | "cairn.mcp.v1.retrieve.profile" | "cairn.mcp.v1.forget.record" | "cairn.mcp.v1.forget.session" | "cairn.mcp.v1.forget.scope" | "cairn.mcp.v1.extension.aggregate" | "cairn.mcp.v1.extension.admin" | "cairn.mcp.v1.extension.federation" | "cairn.mcp.v1.extension.sessiontree" | "cairn.sensor.v1.screen.xcap" | "cairn.sensor.v1.screen.screenpipe" | "cairn.sensor.v1.screen.ocr.vision" | "cairn.sensor.v1.screen.ocr.winrt" | "cairn.sensor.v1.screen.ocr.tesseract")
+    matches!(s, "cairn.mcp.v1.search.keyword" | "cairn.mcp.v1.search.semantic" | "cairn.mcp.v1.search.hybrid" | "cairn.mcp.v1.retrieve.record" | "cairn.mcp.v1.retrieve.session" | "cairn.mcp.v1.retrieve.turn" | "cairn.mcp.v1.retrieve.tool_call" | "cairn.mcp.v1.retrieve.folder" | "cairn.mcp.v1.retrieve.scope" | "cairn.mcp.v1.retrieve.profile" | "cairn.mcp.v1.forget.record" | "cairn.mcp.v1.forget.session" | "cairn.mcp.v1.forget.scope" | "cairn.mcp.v1.extension.aggregate" | "cairn.mcp.v1.extension.admin" | "cairn.mcp.v1.extension.federation" | "cairn.mcp.v1.extension.sessiontree" | "cairn.mcp.v1.policy_trace" | "cairn.mcp.v1.sensors.pre_compact" | "cairn.sensor.v1.screen.xcap" | "cairn.sensor.v1.screen.screenpipe" | "cairn.sensor.v1.screen.ocr.vision" | "cairn.sensor.v1.screen.ocr.winrt" | "cairn.sensor.v1.screen.ocr.tesseract" | "cairn.mcp.v1.replay.sequence" | "cairn.mcp.v1.replay.challenge")
 }
 
 /// Structural validator for the error envelope payload. Mirrors the
@@ -634,10 +642,14 @@ fn validate_error_envelope(err: &::serde_json::Value) -> Result<(), &'static str
         "CapabilityUnavailable" => {
             let data = obj.get("data").and_then(::serde_json::Value::as_object).ok_or("error.code=CapabilityUnavailable: data object required")?;
             for k in data.keys() {
-                if !matches!(k.as_str(), "capability") { return Err("error.code=CapabilityUnavailable: data has unknown key"); }
+                if !matches!(k.as_str(), "capability" | "remediation") { return Err("error.code=CapabilityUnavailable: data has unknown key"); }
             }
             let v = data.get("capability").and_then(::serde_json::Value::as_str).ok_or("error.code=CapabilityUnavailable: data.capability must be a capability string")?;
             if !is_known_capability(v) { return Err("error.code=CapabilityUnavailable: data.capability must be a known capability"); }
+            if let Some(v) = data.get("remediation") {
+                let v = v.as_str().ok_or("error.code=CapabilityUnavailable: data.remediation must be a string")?;
+                if v.is_empty() { return Err("error.code=CapabilityUnavailable: data.remediation must not be empty"); }
+            }
         },
         "UnknownVerb" => {
             let data = obj.get("data").and_then(::serde_json::Value::as_object).ok_or("error.code=UnknownVerb: data object required")?;

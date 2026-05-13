@@ -1,0 +1,5 @@
+---
+source: crates/cairn-llm-openai-compat/src/provider.rs
+expression: "LlmError::BudgetExceeded.to_string()"
+---
+llm.budget_exceeded

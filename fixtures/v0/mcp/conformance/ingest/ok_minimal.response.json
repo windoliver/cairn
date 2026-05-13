@@ -1,0 +1,11 @@
+{
+  "contract": "cairn.mcp.v1",
+  "error": {
+    "code": "Internal",
+    "message": "cairn ingest: not yet implemented in MCP adapter; no memory operation was performed."
+  },
+  "operation_id": "<OPERATION_ID>",
+  "policy_trace": [],
+  "status": "aborted",
+  "verb": "ingest"
+}

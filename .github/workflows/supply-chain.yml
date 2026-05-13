@@ -76,8 +76,10 @@ jobs:
       - name: Install toolchain (rust-toolchain.toml)
         run: rustup show active-toolchain || rustup toolchain install
       - name: Install cargo-machete
-        uses: taiki-e/install-action@787505cde8a44ea468a00478fe52baf23b15bccd # v2.75.21
-        with:
-          tool: cargo-machete
+        # Avoid taiki-e/install-action@v2.75.21's BASH_FUNC_ guard which
+        # currently false-positives on the GitHub-hosted runner image.
+        # Direct `cargo install --locked` is robust and adds ~10s when
+        # the rust cache is warm.
+        run: cargo install cargo-machete --locked --version 0.7.0
       - name: cargo machete
         run: cargo machete

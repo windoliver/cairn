@@ -1,0 +1,15 @@
+{
+  "contract": "cairn.mcp.v1",
+  "error": {
+    "code": "InvalidArgs",
+    "data": {
+      "field": "args",
+      "reason": "unknown variant `fuzzy`, expected one of `keyword`, `semantic`, `hybrid`"
+    },
+    "message": "invalid args: args: unknown variant `fuzzy`, expected one of `keyword`, `semantic`, `hybrid`"
+  },
+  "operation_id": "<OPERATION_ID>",
+  "policy_trace": [],
+  "status": "rejected",
+  "verb": "search"
+}
