@@ -17,7 +17,11 @@ pub struct FailedTurn {
 #[serde(deny_unknown_fields)]
 pub struct CaptureTraceArgs {
     /// Path to the trace log or transcript file.
-    pub from: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// Path to a JSON file containing a Vec<TraceBlock>. Accepts optional @path syntax.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocks: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
 }

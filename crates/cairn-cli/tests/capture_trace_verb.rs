@@ -3,11 +3,13 @@
 use std::io::Write as _;
 use std::path::Path;
 
-use cairn_cli::verbs::capture_trace::{read_jsonl_events, run_handler};
+use cairn_cli::verbs::capture_trace::{read_jsonl_events, run_blocks_handler, run_handler};
 use cairn_core::domain::{
     ActorChainEntry, CaptureEvent, CaptureEventId, CaptureMode, CapturePayload, CaptureRefs,
     ChainRole, Identity, PayloadHash, Rfc3339Timestamp, SessionId, SourceFamily, TerminalContext,
 };
+use sha2::{Digest as _, Sha256};
+use ulid::Ulid;
 
 /// Build a minimal valid `Hook` [`CaptureEvent`] for use in tests.
 ///
@@ -179,6 +181,19 @@ fn write_source_for_family(vault: &Path, family: &str, filename: &str, content: 
     let abs = dir.join(filename);
     std::fs::write(&abs, content).expect("write source file");
     format!("sources/{family}/{filename}")
+}
+
+fn stable_turn_id_for_blocks(session_id: &str, raw_blocks: &[u8]) -> String {
+    let mut h = Sha256::new();
+    h.update(b"cairn:capture-trace:blocks:import:v1\0");
+    h.update(session_id.as_bytes());
+    h.update([0]);
+    h.update(raw_blocks);
+    h.update([0]);
+    let digest = h.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    format!("trace-blocks-{}", Ulid::from_bytes(bytes))
 }
 
 /// Build a [`CaptureEvent`] for a `Hook` payload. The `payload_ref` and
@@ -1157,6 +1172,148 @@ async fn capture_trace_blocks_secret_body_before_persisting_turn() {
                 !tx.turn_summary_exists(&session_id, turn)?,
                 "privacy-blocked turn must not create a summary"
             );
+            Ok(())
+        })
+        .await
+        .expect("store query should succeed");
+}
+
+#[tokio::test]
+async fn run_blocks_handler_persists_trace_blocks_with_reasoning_signature() {
+    let vault = tempfile::tempdir().expect("tempdir");
+    let store = open_test_store_in_memory().await;
+    let blocks_path = vault.path().join("trace-blocks.json");
+    std::fs::write(
+        &blocks_path,
+        serde_json::json!([
+            {
+                "kind": "reasoning",
+                "text": "private chain of thought",
+                "signature": "sig_trace_blocks_v1"
+            },
+            {
+                "kind": "tool_use",
+                "tool": "Read",
+                "input": {"file": "README.md"},
+                "id": "tool-1"
+            },
+            {
+                "kind": "tool_result",
+                "tool_use_id": "tool-1",
+                "content": "file contents",
+                "is_error": false
+            },
+            {
+                "kind": "text",
+                "text": "final answer"
+            }
+        ])
+        .to_string(),
+    )
+    .expect("write trace blocks json");
+
+    let session = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let raw_blocks = std::fs::read(&blocks_path).expect("read trace blocks bytes");
+    let turn_id = stable_turn_id_for_blocks(session, &raw_blocks);
+    let resp = run_blocks_handler(&store, vault.path(), &blocks_path, session)
+        .await
+        .expect("run_blocks_handler should succeed");
+    assert!(
+        resp.failed_turns.is_empty(),
+        "expected no failures, got: {:?}",
+        resp.failed_turns
+    );
+
+    let session_id = SessionId::parse(session).expect("valid session_id");
+    store
+        .with_tx(move |tx| {
+            let rows = tx.list_trace_events(&session_id, &turn_id)?;
+            assert_eq!(rows.len(), 4, "expected one row per trace block");
+            let row_kinds: Vec<_> = rows.iter().map(|row| row.kind.as_str()).collect();
+            assert_eq!(row_kinds, vec!["reasoning", "trace", "trace", "trace"]);
+            let row_events: Vec<_> = rows
+                .iter()
+                .map(|row| row.extra_frontmatter["trace_event"].as_str().unwrap_or(""))
+                .collect();
+            assert_eq!(
+                row_events,
+                vec!["agent_message", "pre_tool", "tool_output", "agent_message"]
+            );
+
+            let row = &rows[0];
+            assert_eq!(
+                row.extra_frontmatter["trace_event"].as_str(),
+                Some("agent_message")
+            );
+            assert!(
+                row.body.contains("private chain of thought"),
+                "reasoning row should preserve reasoning body"
+            );
+
+            let blocks = row
+                .extra_frontmatter
+                .get("trace_blocks")
+                .and_then(|value| value.as_array())
+                .expect("trace_blocks array");
+            assert_eq!(blocks.len(), 1);
+            assert_eq!(blocks[0]["kind"].as_str(), Some("reasoning"));
+            assert_eq!(blocks[0]["signature"].as_str(), Some("sig_trace_blocks_v1"));
+            assert_eq!(
+                row.extra_frontmatter["trace"]["block_index"].as_u64(),
+                Some(0)
+            );
+
+            let tool_use = &rows[1];
+            assert!(tool_use.body.contains("Read"));
+            assert_eq!(
+                tool_use.extra_frontmatter["trace"]["tool_call_id"].as_str(),
+                Some("tool-1")
+            );
+
+            let tool_result = &rows[2];
+            assert_eq!(
+                tool_result.extra_frontmatter["trace"]["parent_event_id"].as_str(),
+                tool_use.extra_frontmatter["trace"]["capture_event_id"].as_str()
+            );
+
+            let text = &rows[3];
+            assert_eq!(text.body, "final answer");
+            Ok(())
+        })
+        .await
+        .expect("store query should succeed");
+}
+
+#[tokio::test]
+async fn run_blocks_handler_is_idempotent_for_same_input() {
+    let vault = tempfile::tempdir().expect("tempdir");
+    let store = open_test_store_in_memory().await;
+    let blocks_path = vault.path().join("trace-blocks.json");
+    std::fs::write(
+        &blocks_path,
+        serde_json::json!([
+            { "kind": "reasoning", "text": "private chain of thought", "signature": "sig_trace_blocks_v1" },
+            { "kind": "text", "text": "final answer" }
+        ])
+        .to_string(),
+    )
+    .expect("write trace blocks json");
+
+    let session = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let raw_blocks = std::fs::read(&blocks_path).expect("read trace blocks bytes");
+    let turn_id = stable_turn_id_for_blocks(session, &raw_blocks);
+    run_blocks_handler(&store, vault.path(), &blocks_path, session)
+        .await
+        .expect("first import");
+    run_blocks_handler(&store, vault.path(), &blocks_path, session)
+        .await
+        .expect("second import");
+
+    let session_id = SessionId::parse(session).expect("valid session_id");
+    store
+        .with_tx(move |tx| {
+            let rows = tx.list_trace_events(&session_id, &turn_id)?;
+            assert_eq!(rows.len(), 2, "re-import should not duplicate rows");
             Ok(())
         })
         .await

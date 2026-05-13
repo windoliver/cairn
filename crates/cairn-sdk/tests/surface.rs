@@ -938,11 +938,27 @@ fn assemble_hot_rejects_oversized_budget_with_invalid_args() {
 #[test]
 fn capture_trace_rejects_empty_from_with_invalid_args() {
     let args = CaptureTraceArgs {
-        from: String::new(),
+        from: Some(String::new()),
+        blocks: None,
         session_id: None,
     };
     match sdk().capture_trace(&args).expect_err("must reject") {
         SdkError::InvalidArgs { reason } => assert!(reason.contains("from"), "reason: {reason}"),
+        other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+}
+
+#[test]
+fn capture_trace_rejects_from_plus_session_with_invalid_args() {
+    let args = CaptureTraceArgs {
+        from: Some("/tmp/trace.log".to_owned()),
+        blocks: None,
+        session_id: Some("01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned()),
+    };
+    match sdk().capture_trace(&args).expect_err("must reject") {
+        SdkError::InvalidArgs { reason } => {
+            assert!(reason.contains("session_id"), "reason: {reason}");
+        }
         other => panic!("expected InvalidArgs, got {other:?}"),
     }
 }
@@ -1047,7 +1063,8 @@ fn assemble_hot_returns_unimplemented_in_sdk() {
 #[test]
 fn capture_trace_returns_internal_stub() {
     let args = CaptureTraceArgs {
-        from: "/tmp/trace.log".to_owned(),
+        from: Some("/tmp/trace.log".to_owned()),
+        blocks: None,
         session_id: None,
     };
     assert_unimplemented("capture_trace", sdk().capture_trace(&args));

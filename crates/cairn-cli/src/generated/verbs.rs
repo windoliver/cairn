@@ -92,8 +92,10 @@ pub fn assemble_hot_subcommand() -> clap::Command {
 pub fn capture_trace_subcommand() -> clap::Command {
     clap::Command::new("capture_trace")
         .about("cairn.mcp.v1 verb: capture_trace")
-        .arg(clap::Arg::new("from").long("from").value_name("PATH").value_parser(clap::builder::PathBufValueParser::new()).required(true))
+        .arg(clap::Arg::new("from").long("from").value_name("PATH").value_parser(clap::builder::PathBufValueParser::new()))
+        .arg(clap::Arg::new("blocks").long("blocks").value_name("PATH").value_parser(clap::builder::PathBufValueParser::new()))
         .arg(clap::Arg::new("session_id").long("session").value_name("STRING"))
+        .group(clap::ArgGroup::new("capture_trace_input").required(true).multiple(false).arg("from").arg("blocks"))
 }
 
 /// `cairn lint` subcommand builder.

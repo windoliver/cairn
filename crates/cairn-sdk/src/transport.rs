@@ -1346,16 +1346,44 @@ fn validate_assemble_hot(args: &AssembleHotArgs) -> Result<(), SdkError> {
     Ok(())
 }
 
-/// Mirrors the JSON-schema constraints for `capture_trace`: `from`
-/// non-empty (required), `session_id` non-empty when present.
+/// Mirrors the JSON-schema constraints for `capture_trace`: either
+/// `from` or (`blocks` + `session_id`) must be present; all provided
+/// strings must be non-empty.
 fn validate_capture_trace(args: &CaptureTraceArgs) -> Result<(), SdkError> {
-    if args.from.is_empty() {
-        return Err(invalid("from: must not be empty"));
+    if let Some(from) = &args.from
+        && from.is_empty()
+    {
+        return Err(invalid("from: must not be empty when present"));
+    }
+    if let Some(blocks) = &args.blocks
+        && blocks.is_empty()
+    {
+        return Err(invalid("blocks: must not be empty when present"));
     }
     if let Some(session_id) = &args.session_id
         && session_id.is_empty()
     {
         return Err(invalid("session_id: must not be empty when present"));
+    }
+    let has_from = args.from.is_some();
+    let has_blocks = args.blocks.is_some();
+    if !has_from && !has_blocks {
+        return Err(invalid("capture_trace: requires either `from` or `blocks`"));
+    }
+    if has_from && has_blocks {
+        return Err(invalid(
+            "capture_trace: `from` and `blocks` are mutually exclusive",
+        ));
+    }
+    if has_from && args.session_id.is_some() {
+        return Err(invalid(
+            "session_id: only supported with `blocks` for capture_trace",
+        ));
+    }
+    if has_blocks && args.session_id.is_none() {
+        return Err(invalid(
+            "session_id: required when using `blocks` for capture_trace",
+        ));
     }
     Ok(())
 }

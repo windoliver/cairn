@@ -9,3 +9,4 @@ pub mod malformed;
 pub mod projection;
 pub mod provenance;
 pub mod schema;
+pub mod trace_reasoning;
