@@ -5,7 +5,7 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -35,6 +35,8 @@ pub const MANIFEST_TOML: &str = include_str!("../plugin.toml");
 /// derive from one binding.
 pub const ACCEPTED_RANGE: VersionRange =
     VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0));
+
+const SCHEMA_VERSION: i32 = 1;
 
 /// `SQLite`-backed memory store.
 pub struct SqliteMemoryStore {
@@ -295,6 +297,16 @@ impl SqliteMemoryStore {
 
     fn migrate(&self) -> Result<(), MemoryStoreError> {
         let conn = self.lock_conn()?;
+        let version = user_version(&conn)?;
+        if version > SCHEMA_VERSION {
+            return Err(MemoryStoreError::query(format!(
+                "newer sqlite schema version {version} is not supported; maximum supported version is {SCHEMA_VERSION}"
+            )));
+        }
+        if version == SCHEMA_VERSION {
+            return verify_schema(&conn);
+        }
+
         conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS records (
@@ -334,7 +346,10 @@ impl SqliteMemoryStore {
             );
             ",
         )
-        .map_err(|e| MemoryStoreError::query_with_source("migrate sqlite store", e))
+        .map_err(|e| MemoryStoreError::query_with_source("migrate sqlite store", e))?;
+        verify_schema(&conn)?;
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)
+            .map_err(|e| MemoryStoreError::query_with_source("set sqlite schema version", e))
     }
 
     fn lock_conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>, MemoryStoreError> {
@@ -375,28 +390,32 @@ impl SqliteMemoryStore {
                 "SELECT record_id, kind, body, updated_at, evidence_score, salience,
                     tags_json, extra_frontmatter_json
                 FROM records
-                WHERE session_id IS NULL OR session_id = ?1
+                WHERE (session_id IS NULL OR session_id = ?1)
+                    AND (agent_id IS NULL OR agent_id = ?2)
                 ORDER BY updated_at DESC, record_id ASC",
             )
             .map_err(|e| MemoryStoreError::query_with_source("prepare hot records query", e))?;
         let rows = stmt
-            .query_map(params![request.session_id.as_deref()], |row| {
-                let tags_json: String = row.get(6)?;
-                let extra_json: String = row.get(7)?;
-                let tags = serde_json::from_str(&tags_json).unwrap_or_default();
-                let extra =
-                    serde_json::from_str(&extra_json).unwrap_or_else(|_| serde_json::json!({}));
-                Ok(RecordRow {
-                    record_id: row.get(0)?,
-                    kind: row.get(1)?,
-                    body: row.get(2)?,
-                    updated_at: row.get(3)?,
-                    evidence_score: row.get(4)?,
-                    salience: row.get(5)?,
-                    tags,
-                    extra,
-                })
-            })
+            .query_map(
+                params![request.session_id.as_deref(), request.agent_id.as_deref()],
+                |row| {
+                    let tags_json: String = row.get(6)?;
+                    let extra_json: String = row.get(7)?;
+                    let tags = serde_json::from_str(&tags_json).unwrap_or_default();
+                    let extra =
+                        serde_json::from_str(&extra_json).unwrap_or_else(|_| serde_json::json!({}));
+                    Ok(RecordRow {
+                        record_id: row.get(0)?,
+                        kind: row.get(1)?,
+                        body: row.get(2)?,
+                        updated_at: row.get(3)?,
+                        evidence_score: row.get(4)?,
+                        salience: row.get(5)?,
+                        tags,
+                        extra,
+                    })
+                },
+            )
             .map_err(|e| MemoryStoreError::query_with_source("query hot records", e))?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|e| MemoryStoreError::query_with_source("read hot records", e))
@@ -680,6 +699,84 @@ fn record_centrality(row: &RecordRow, centrality: &BTreeMap<String, f32>) -> Opt
             }
         })
         .max_by(f32::total_cmp)
+}
+
+fn user_version(conn: &Connection) -> Result<i32, MemoryStoreError> {
+    conn.query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(|e| MemoryStoreError::query_with_source("read sqlite schema version", e))
+}
+
+fn verify_schema(conn: &Connection) -> Result<(), MemoryStoreError> {
+    const REQUIRED: &[(&str, &[&str])] = &[
+        (
+            "records",
+            &[
+                "record_id",
+                "kind",
+                "class",
+                "visibility",
+                "session_id",
+                "agent_id",
+                "body",
+                "updated_at",
+                "evidence_score",
+                "salience",
+                "tags_json",
+                "extra_frontmatter_json",
+            ],
+        ),
+        (
+            "entity_edges",
+            &[
+                "edge_id",
+                "from_entity",
+                "to_entity",
+                "edge_kind",
+                "source_file",
+                "invalid_at",
+            ],
+        ),
+        (
+            "hot_memory_cache",
+            &[
+                "cache_key",
+                "session_id",
+                "agent_id",
+                "budget_bytes",
+                "config_fingerprint",
+                "source_revision",
+                "prefix",
+                "metadata_json",
+                "created_at",
+            ],
+        ),
+    ];
+
+    for (table, required_columns) in REQUIRED {
+        let actual_columns = table_columns(conn, table)?;
+        for column in *required_columns {
+            if !actual_columns.contains(*column) {
+                return Err(MemoryStoreError::query(format!(
+                    "sqlite schema migration incomplete: table {table} missing required column {column}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn table_columns(conn: &Connection, table: &str) -> Result<BTreeSet<String>, MemoryStoreError> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|e| {
+            MemoryStoreError::query_with_source("prepare sqlite schema verification", e)
+        })?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| MemoryStoreError::query_with_source("query sqlite schema columns", e))?;
+    columns
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map_err(|e| MemoryStoreError::query_with_source("read sqlite schema columns", e))
 }
 
 fn source_revision(sources: &[HotMemorySource], graph_revision: &str) -> String {

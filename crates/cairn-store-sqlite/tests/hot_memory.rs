@@ -7,6 +7,7 @@ use cairn_core::hot_memory::{
     HotMemoryCacheInfo, HotMemoryOptions, HotMemorySourceKind, assemble_hot_memory,
 };
 use cairn_store_sqlite::{HotRecordSeed, SqliteMemoryStore};
+use rusqlite::Connection;
 
 fn request() -> HotMemoryRequest {
     HotMemoryRequest {
@@ -149,6 +150,92 @@ async fn live_graph_edge_changes_hot_memory_source_revision() {
         .source_revision;
 
     assert_ne!(before, after);
+}
+
+#[tokio::test]
+async fn hot_memory_input_filters_records_by_agent_scope() {
+    let store = SqliteMemoryStore::open_memory().expect("store");
+    store
+        .insert_hot_record(
+            HotRecordSeed::new("01J0000000000000000000001", "user", "agent a pinned text")
+                .agent("agent-a")
+                .tag("pinned")
+                .salience(0.9),
+        )
+        .expect("agent a");
+    store
+        .insert_hot_record(
+            HotRecordSeed::new("01J0000000000000000000002", "user", "agent b pinned text")
+                .agent("agent-b")
+                .tag("pinned")
+                .salience(0.9),
+        )
+        .expect("agent b");
+
+    let input = store.hot_memory_input(&request()).await.expect("input");
+
+    assert!(
+        input
+            .sources
+            .iter()
+            .any(|s| s.body == "agent a pinned text")
+    );
+    assert!(
+        !input
+            .sources
+            .iter()
+            .any(|s| s.body == "agent b pinned text")
+    );
+}
+
+#[test]
+fn persistent_store_migration_is_idempotent_on_reopen() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    SqliteMemoryStore::open(tempdir.path()).expect("first open");
+    SqliteMemoryStore::open(tempdir.path()).expect("second open");
+
+    let conn = Connection::open(tempdir.path().join(".cairn/cairn.db")).expect("db");
+    let version: i32 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .expect("user version");
+
+    assert_eq!(version, 1);
+}
+
+#[test]
+fn opening_future_schema_version_returns_store_error() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(tempdir.path().join(".cairn")).expect("cairn dir");
+    let conn = Connection::open(tempdir.path().join(".cairn/cairn.db")).expect("db");
+    conn.execute_batch("PRAGMA user_version = 2;")
+        .expect("future version");
+
+    let Err(err) = SqliteMemoryStore::open(tempdir.path()) else {
+        panic!("future schema should be rejected");
+    };
+
+    assert!(err.to_string().contains("newer sqlite schema version"));
+}
+
+#[test]
+fn opening_partial_zero_version_schema_returns_clear_migration_error() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(tempdir.path().join(".cairn")).expect("cairn dir");
+    let conn = Connection::open(tempdir.path().join(".cairn/cairn.db")).expect("db");
+    conn.execute_batch(
+        "CREATE TABLE records (
+            record_id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL,
+            body TEXT NOT NULL
+        );",
+    )
+    .expect("partial schema");
+
+    let Err(err) = SqliteMemoryStore::open(tempdir.path()) else {
+        panic!("partial schema should be rejected");
+    };
+
+    assert!(err.to_string().contains("migration incomplete"));
 }
 
 #[tokio::test]
