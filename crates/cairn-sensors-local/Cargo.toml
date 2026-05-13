@@ -26,6 +26,9 @@ sherpa-onnx = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+xcap = { workspace = true }
+
 [dev-dependencies]
 cairn-test-fixtures = { workspace = true }
 tempfile = { workspace = true }

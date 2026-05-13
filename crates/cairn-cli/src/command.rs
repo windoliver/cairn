@@ -55,6 +55,7 @@ pub fn build_command() -> clap::Command {
         .subcommand(skill_subcommand())
         .subcommand(admin_subcommand())
         .subcommand(llm_subcommand())
+        .subcommand(verbs::screen::command())
         .subcommand(repair_subcommand())
         .subcommand(identity::cli::identity_subcommand())
         .subcommand(verbs::flush::command())

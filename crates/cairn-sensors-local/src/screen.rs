@@ -1,8 +1,11 @@
 //! Mockable runtime boundary for local screen capture.
 
 use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+#[cfg(target_os = "macos")]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use cairn_core::config::{ScreenBackend, ScreenOcrEngine, ScreenSensorConfig};
 use cairn_core::generated::common::Capabilities;
@@ -179,6 +182,19 @@ pub struct ScreenObservation {
     pub ocr_engine: ResolvedScreenOcrEngine,
 }
 
+/// Receipt for a screenshot written to disk by a screen backend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenCaptureReceipt {
+    /// Path where the PNG snapshot was written.
+    pub output_path: PathBuf,
+    /// Captured image width in physical pixels.
+    pub width: u32,
+    /// Captured image height in physical pixels.
+    pub height: u32,
+    /// Metadata observation associated with the screenshot.
+    pub observation: ScreenObservation,
+}
+
 /// Errors emitted by the screen runtime boundary.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ScreenError {
@@ -211,6 +227,16 @@ pub trait ScreenBackendRuntime {
         &self,
         config: &ScreenSensorConfig,
     ) -> Result<ScreenObservation, ScreenError>;
+}
+
+/// Backend implementation that can write a screenshot artifact.
+pub trait ScreenCaptureRuntime: ScreenBackendRuntime {
+    /// Capture a single PNG snapshot and return its metadata receipt.
+    fn capture_png_snapshot(
+        &self,
+        config: &ScreenSensorConfig,
+        output_path: &Path,
+    ) -> Result<ScreenCaptureReceipt, ScreenError>;
 }
 
 /// Policy applied after budget enforcement and before observations leave runtime.
@@ -329,6 +355,81 @@ where
     }
 }
 
+impl<B, P> ScreenSensor<B, P>
+where
+    B: ScreenCaptureRuntime,
+    P: ScreenPolicy,
+{
+    /// Capture a single PNG snapshot, returning `None` when disabled or filtered out.
+    pub fn capture_png_snapshot(
+        &self,
+        config: &ScreenSensorConfig,
+        output_path: &Path,
+    ) -> Result<Option<ScreenCaptureReceipt>, ScreenError> {
+        if !config.enabled {
+            return Ok(None);
+        }
+
+        let probe = self.backend.probe(config);
+        if probe.state != ScreenState::Enabled {
+            return Err(ScreenError::Unavailable(
+                probe
+                    .degradation_code()
+                    .unwrap_or(ScreenDegradationCode::BackendUnavailable),
+            ));
+        }
+
+        if !config.allow_apps.is_empty()
+            && !probe
+                .focused_app
+                .as_ref()
+                .is_some_and(|app| config.allow_apps.contains(app))
+        {
+            return Ok(None);
+        }
+
+        self.admit_frame(config.budget.max_frames_per_minute)?;
+
+        let mut receipt = self.backend.capture_png_snapshot(config, output_path)?;
+        if !config.allow_apps.is_empty() && !config.allow_apps.contains(&receipt.observation.app) {
+            return Ok(None);
+        }
+        truncate_text_to_budget(
+            &mut receipt.observation.text,
+            config.budget.max_text_bytes_per_event,
+        );
+        receipt.observation = self.policy.apply(receipt.observation)?;
+        Ok(Some(receipt))
+    }
+}
+
+/// In-process xcap backend runtime.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct XcapBackendRuntime;
+
+impl ScreenBackendRuntime for XcapBackendRuntime {
+    fn probe(&self, config: &ScreenSensorConfig) -> ScreenProbe {
+        xcap_probe(config)
+    }
+
+    fn capture_snapshot(
+        &self,
+        config: &ScreenSensorConfig,
+    ) -> Result<ScreenObservation, ScreenError> {
+        capture_xcap_observation(config)
+    }
+}
+
+impl ScreenCaptureRuntime for XcapBackendRuntime {
+    fn capture_png_snapshot(
+        &self,
+        config: &ScreenSensorConfig,
+        output_path: &Path,
+    ) -> Result<ScreenCaptureReceipt, ScreenError> {
+        capture_xcap_png_snapshot(config, output_path)
+    }
+}
+
 /// Capabilities compiled into this crate for screen capture.
 #[must_use]
 pub fn compiled_capabilities() -> Vec<Capabilities> {
@@ -342,7 +443,7 @@ pub fn compiled_capabilities() -> Vec<Capabilities> {
     capabilities
 }
 
-/// Probe a screen config without touching desktop APIs.
+/// Probe a screen config, using the configured runtime when available.
 #[must_use]
 pub fn probe_config(config: &ScreenSensorConfig) -> ScreenProbe {
     let ocr_engine = ResolvedScreenOcrEngine::from_config(config.ocr.engine);
@@ -359,33 +460,15 @@ pub fn probe_config(config: &ScreenSensorConfig) -> ScreenProbe {
     }
 
     match config.backend {
-        ScreenBackend::Xcap => permission_missing_probe(config.backend, ocr_engine),
+        ScreenBackend::Xcap => XcapBackendRuntime.probe(config),
         ScreenBackend::Screenpipe => {
             if cfg!(feature = "screenpipe-runtime") {
                 permission_missing_probe(config.backend, ocr_engine)
             } else {
-                ScreenProbe {
-                    backend: config.backend,
-                    state: ScreenState::Degraded,
-                    mode: ScreenMode::Off,
-                    permission: ScreenPermission::NotRequested,
-                    ocr_engine,
-                    degradation: Some(ScreenDegradation::new(
-                        ScreenDegradationCode::BackendUnavailable,
-                    )),
-                    focused_app: None,
-                }
+                backend_unavailable_probe(config.backend, ocr_engine)
             }
         }
-        _ => ScreenProbe {
-            backend: config.backend,
-            state: ScreenState::Degraded,
-            mode: ScreenMode::Off,
-            permission: ScreenPermission::NotRequested,
-            ocr_engine,
-            degradation: Some(ScreenDegradation::new(ScreenDegradationCode::Degraded)),
-            focused_app: None,
-        },
+        _ => degraded_probe(config.backend, ocr_engine),
     }
 }
 
@@ -404,6 +487,203 @@ fn permission_missing_probe(
         )),
         focused_app: None,
     }
+}
+
+fn backend_unavailable_probe(
+    backend: ScreenBackend,
+    ocr_engine: ResolvedScreenOcrEngine,
+) -> ScreenProbe {
+    ScreenProbe {
+        backend,
+        state: ScreenState::Degraded,
+        mode: ScreenMode::Off,
+        permission: ScreenPermission::NotRequested,
+        ocr_engine,
+        degradation: Some(ScreenDegradation::new(
+            ScreenDegradationCode::BackendUnavailable,
+        )),
+        focused_app: None,
+    }
+}
+
+fn degraded_probe(backend: ScreenBackend, ocr_engine: ResolvedScreenOcrEngine) -> ScreenProbe {
+    ScreenProbe {
+        backend,
+        state: ScreenState::Degraded,
+        mode: ScreenMode::Off,
+        permission: ScreenPermission::NotRequested,
+        ocr_engine,
+        degradation: Some(ScreenDegradation::new(ScreenDegradationCode::Degraded)),
+        focused_app: None,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn xcap_probe(config: &ScreenSensorConfig) -> ScreenProbe {
+    let ocr_engine = ResolvedScreenOcrEngine::from_config(config.ocr.engine);
+    match primary_xcap_monitor().and_then(|monitor| {
+        monitor
+            .capture_region(0, 0, 1, 1)
+            .map(|_| ())
+            .map_err(screen_error_from_xcap)
+    }) {
+        Ok(()) => ScreenProbe {
+            backend: ScreenBackend::Xcap,
+            state: ScreenState::Enabled,
+            mode: ScreenMode::Snapshot,
+            permission: ScreenPermission::Granted,
+            ocr_engine,
+            degradation: None,
+            focused_app: None,
+        },
+        Err(err) => probe_from_screen_error(ScreenBackend::Xcap, ocr_engine, err.code()),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn xcap_probe(config: &ScreenSensorConfig) -> ScreenProbe {
+    backend_unavailable_probe(
+        config.backend,
+        ResolvedScreenOcrEngine::from_config(config.ocr.engine),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn capture_xcap_observation(config: &ScreenSensorConfig) -> Result<ScreenObservation, ScreenError> {
+    let monitor = primary_xcap_monitor()?;
+    let image = monitor.capture_image().map_err(screen_error_from_xcap)?;
+    Ok(observation_from_monitor(
+        config,
+        &monitor,
+        image.width(),
+        image.height(),
+    ))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn capture_xcap_observation(
+    _config: &ScreenSensorConfig,
+) -> Result<ScreenObservation, ScreenError> {
+    Err(ScreenError::Unavailable(
+        ScreenDegradationCode::BackendUnavailable,
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn capture_xcap_png_snapshot(
+    config: &ScreenSensorConfig,
+    output_path: &Path,
+) -> Result<ScreenCaptureReceipt, ScreenError> {
+    let monitor = primary_xcap_monitor()?;
+    let image = monitor.capture_image().map_err(screen_error_from_xcap)?;
+    let width = image.width();
+    let height = image.height();
+    if let Some(parent) = output_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| ScreenError::CaptureFailed(err.to_string()))?;
+    }
+    image
+        .save(output_path)
+        .map_err(|err| ScreenError::CaptureFailed(err.to_string()))?;
+
+    Ok(ScreenCaptureReceipt {
+        output_path: output_path.to_path_buf(),
+        width,
+        height,
+        observation: observation_from_monitor(config, &monitor, width, height),
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn capture_xcap_png_snapshot(
+    _config: &ScreenSensorConfig,
+    _output_path: &Path,
+) -> Result<ScreenCaptureReceipt, ScreenError> {
+    Err(ScreenError::Unavailable(
+        ScreenDegradationCode::BackendUnavailable,
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn primary_xcap_monitor() -> Result<xcap::Monitor, ScreenError> {
+    let mut monitors = xcap::Monitor::all().map_err(screen_error_from_xcap)?;
+    if monitors.is_empty() {
+        return Err(ScreenError::Unavailable(
+            ScreenDegradationCode::BackendUnavailable,
+        ));
+    }
+    let primary = monitors
+        .iter()
+        .position(|monitor| monitor.is_primary().unwrap_or(false))
+        .unwrap_or(0);
+    Ok(monitors.swap_remove(primary))
+}
+
+#[cfg(target_os = "macos")]
+fn observation_from_monitor(
+    config: &ScreenSensorConfig,
+    monitor: &xcap::Monitor,
+    width: u32,
+    height: u32,
+) -> ScreenObservation {
+    let monitor_name = monitor.name().unwrap_or_else(|_| "screen".to_owned());
+    ScreenObservation {
+        text: String::new(),
+        app: "unknown".to_owned(),
+        window_title: format!("{monitor_name} ({width}x{height})"),
+        url: None,
+        bounding_boxes: Vec::new(),
+        captured_at: unix_timestamp_now(),
+        sensor_label: XCAP_SENSOR_LABEL.to_owned(),
+        backend: ScreenBackend::Xcap,
+        ocr_engine: ResolvedScreenOcrEngine::from_config(config.ocr.engine),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn probe_from_screen_error(
+    backend: ScreenBackend,
+    ocr_engine: ResolvedScreenOcrEngine,
+    code: ScreenDegradationCode,
+) -> ScreenProbe {
+    match code {
+        ScreenDegradationCode::PermissionMissing => permission_missing_probe(backend, ocr_engine),
+        ScreenDegradationCode::BackendUnavailable => backend_unavailable_probe(backend, ocr_engine),
+        ScreenDegradationCode::Disabled => ScreenProbe {
+            backend,
+            state: ScreenState::Disabled,
+            mode: ScreenMode::Off,
+            permission: ScreenPermission::NotRequested,
+            ocr_engine,
+            degradation: Some(ScreenDegradation::new(ScreenDegradationCode::Disabled)),
+            focused_app: None,
+        },
+        ScreenDegradationCode::Degraded => degraded_probe(backend, ocr_engine),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn screen_error_from_xcap(err: impl std::fmt::Display) -> ScreenError {
+    let message = err.to_string();
+    if is_screen_permission_error(&message) {
+        ScreenError::Unavailable(ScreenDegradationCode::PermissionMissing)
+    } else {
+        ScreenError::CaptureFailed(message)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn is_screen_permission_error(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("permission")
+        || message.contains("denied")
+        || message.contains("not granted")
+        || message.contains("not authorized")
+        || message.contains("screen recording")
+        || message.contains("failed to copy data")
 }
 
 fn degradation_message(code: ScreenDegradationCode) -> &'static str {
@@ -426,6 +706,14 @@ fn truncate_text_to_budget(text: &mut String, max_bytes: u32) {
         truncate_at -= 1;
     }
     text.truncate(truncate_at);
+}
+
+#[cfg(target_os = "macos")]
+fn unix_timestamp_now() -> String {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs());
+    format!("unix:{seconds}")
 }
 
 fn platform_default_ocr_engine() -> ResolvedScreenOcrEngine {
@@ -565,6 +853,45 @@ mod tests {
         assert_eq!(result.window_title, "screen.rs");
         assert_eq!(result.sensor_label, XCAP_SENSOR_LABEL);
         assert_eq!(result.bounding_boxes.len(), 1);
+    }
+
+    impl ScreenCaptureRuntime for FakeBackend {
+        fn capture_png_snapshot(
+            &self,
+            _config: &ScreenSensorConfig,
+            output_path: &std::path::Path,
+        ) -> Result<ScreenCaptureReceipt, ScreenError> {
+            std::fs::write(output_path, b"fake-png")
+                .map_err(|err| ScreenError::CaptureFailed(err.to_string()))?;
+            Ok(ScreenCaptureReceipt {
+                output_path: output_path.to_path_buf(),
+                width: 10,
+                height: 20,
+                observation: self.observation.clone(),
+            })
+        }
+    }
+
+    #[test]
+    fn fake_backend_writes_png_receipt_and_metadata() {
+        let backend = FakeBackend {
+            probe: fake_probe(),
+            observation: fake_observation("meeting notes"),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let output_path = dir.path().join("snapshot.png");
+        let sensor = ScreenSensor::new(backend, NoopScreenPolicy);
+
+        let receipt = sensor
+            .capture_png_snapshot(&enabled_config(), &output_path)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(receipt.output_path, output_path);
+        assert_eq!(receipt.width, 10);
+        assert_eq!(receipt.height, 20);
+        assert_eq!(receipt.observation.text, "meeting notes");
+        assert_eq!(std::fs::read(&receipt.output_path).unwrap(), b"fake-png");
     }
 
     #[test]

@@ -64,12 +64,11 @@ cargo run -p cairn-cli --locked -- plugins verify
 
 ### Local Screen Sensor Setup
 
-The screen sensor is opt-in and currently exposes config, status, capability
-advertisement, and a mockable runtime boundary. Live xcap screenshot capture is
-not wired yet, so `cairn status --json` can report the configured sensor shape,
-but it will not trigger the macOS permission dialog or emit a real screenshot.
+The screen sensor is opt-in. The default backend is the in-process `xcap`
+runtime, which probes desktop capture during `cairn status` when enabled and can
+write a one-shot PNG with `cairn screen capture`.
 
-To prepare macOS for the future live screen backend:
+To prepare macOS for live screen capture:
 
 1. Open **System Settings > Privacy & Security > Screen & System Audio Recording**
    ([Apple's screen/audio recording privacy pane](https://support.apple.com/guide/mac-help/mchld6aa7d23/mac)).
@@ -80,6 +79,15 @@ To prepare macOS for the future live screen backend:
    - **Codex** when running from the Codex desktop app, if it appears there.
    - A packaged **Cairn.app** when one exists.
 3. Quit and reopen the enabled app so macOS applies the permission.
+
+Enable the sensor in `.cairn/config.yaml`:
+
+```yaml
+sensors:
+  screen:
+    enabled: true
+    backend: xcap
+```
 
 You can verify the OS permission outside Cairn with:
 
@@ -94,9 +102,13 @@ You can verify Cairn's current screen status surface with:
 cargo run -p cairn-cli --locked -- status --json | jq '.sensors.screen'
 ```
 
-On the current pre-live-capture implementation, an enabled xcap config may
-still report `state: "permission_missing"` because status intentionally does
-not call desktop capture APIs.
+When permission is available, the status probe reports `state: "enabled"` and
+`permission: "granted"`. To capture a real PNG:
+
+```bash
+cargo run -p cairn-cli --locked -- screen capture --output /tmp/cairn-screen.png --json
+file /tmp/cairn-screen.png
+```
 
 The docs site source lives in `docs/site/`. Generated usage/reference pages are
 committed under `docs/site/src/reference/generated/` and kept fresh by:

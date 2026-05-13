@@ -132,13 +132,31 @@ fn status_json_uses_screen_config_file_e2e() {
     let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
 
     assert_eq!(v["sensors"]["screen"]["backend"], "xcap");
-    assert_eq!(v["sensors"]["screen"]["state"], "permission_missing");
     assert_eq!(v["sensors"]["screen"]["mode"], "snapshot");
-    assert_eq!(v["sensors"]["screen"]["permission"], "denied");
-    assert_eq!(
-        v["sensors"]["screen"]["degradation"]["code"],
-        "screen.permission_missing"
-    );
+    match v["sensors"]["screen"]["state"].as_str() {
+        Some("enabled") => {
+            assert_eq!(v["sensors"]["screen"]["permission"], "granted");
+            assert!(v["sensors"]["screen"]["degradation"].is_null());
+        }
+        Some("permission_missing") => {
+            assert_eq!(v["sensors"]["screen"]["permission"], "denied");
+            assert_eq!(
+                v["sensors"]["screen"]["degradation"]["code"],
+                "screen.permission_missing"
+            );
+        }
+        Some("degraded") => {
+            assert!(
+                matches!(
+                    v["sensors"]["screen"]["degradation"]["code"].as_str(),
+                    Some("screen.backend_unavailable" | "screen.degraded")
+                ),
+                "unexpected screen degradation: {}",
+                v["sensors"]["screen"]["degradation"]
+            );
+        }
+        other => panic!("unexpected screen state: {other:?}"),
+    }
 }
 
 #[test]

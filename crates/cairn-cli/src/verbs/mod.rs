@@ -18,6 +18,7 @@ pub mod ingest;
 pub mod ingest_jsonl;
 pub mod lint;
 pub mod retrieve;
+pub mod screen;
 pub mod search;
 pub mod signed;
 pub mod status;
