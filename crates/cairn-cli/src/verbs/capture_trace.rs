@@ -543,13 +543,28 @@ async fn run_handler_inner(
         }
 
         // After a successful turn commit, attempt to enqueue a consolidation
-        // job. `since_sequence=0` is intentional: the handler's watermark
-        // logic skips already-covered turns, and `dedupe_key="{session}:0"`
-        // makes the call idempotent across invocations for the same session
-        // window. Failure is non-fatal — the CLI verb succeeds even if the
-        // scheduler is absent or the enqueue fails.
+        // job. We query the session's actual turn-summary count from the DB
+        // so that `latest_sequence` reflects the cumulative number of closed
+        // turns — not just the event count in this batch. This ensures that
+        // four separate single-event imports each adding one closed turn will
+        // correctly trigger the consolidation threshold after the fourth call,
+        // rather than never triggering (since each batch alone has < 4 events).
+        //
+        // `since_sequence=0` is intentional: the handler's watermark logic
+        // skips already-covered turns, and `dedupe_key="{session}:0"` makes
+        // the enqueue idempotent across invocations for the same window.
+        // Failure is non-fatal — the CLI verb succeeds even if the scheduler
+        // is absent or the enqueue fails.
         if let Some(js) = job_store {
-            let latest_sequence = u32::try_from(projected_len).unwrap_or(u32::MAX);
+            // Read the total number of committed turn summaries for this
+            // session. `list_trace_turns` returns headers with
+            // `trace_sequence > 0`; the count equals the number of turns
+            // whose summaries are stored and visible. Cap at u32::MAX to avoid
+            // overflow when converting.
+            let turn_count = match store.list_trace_turns(&session_str, 0, u32::MAX).await {
+                Ok(headers) => u32::try_from(headers.len()).unwrap_or(u32::MAX),
+                Err(_) => u32::try_from(projected_len).unwrap_or(u32::MAX),
+            };
             let now_ms = i64::try_from(
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -561,7 +576,7 @@ async fn run_handler_inner(
                 js,
                 consolidation_config,
                 &session_str,
-                latest_sequence,
+                turn_count,
                 0,
                 now_ms,
             )
