@@ -1,6 +1,5 @@
 ---
 source: crates/cairn-core/src/config/mod.rs
-assertion_line: 1382
 expression: json
 ---
 {
@@ -106,8 +105,5 @@ expression: json
     "stdio": {
       "single_tenant": false
     }
-  },
-  "source": {
-    "redact_on_forget": false
   }
 }
