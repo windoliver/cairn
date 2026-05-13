@@ -11,7 +11,7 @@ use cairn_core::domain::taxonomy::MemoryKind;
 use cairn_test_fixtures::trace::sample_turn_summary;
 use cairn_workflows::{
     SqliteJobStore,
-    consolidation::{ConsolidationHandler, ConsolidationPayload, CONSOLIDATION_KIND},
+    consolidation::{CONSOLIDATION_KIND, ConsolidationHandler, ConsolidationPayload},
     scheduler::{Clock, HandlerRegistryBuilder, Scheduler, SchedulerConfig, SystemClock},
 };
 use tempfile::tempdir;
@@ -26,14 +26,17 @@ async fn long_session_summary_fits_within_token_budget() {
     let mem_path = dir.path().join("cairn.db");
 
     // The memory store opens + applies all migrations (including 0020).
-    let mem = Arc::new(cairn_store_sqlite::open(&mem_path).await.expect("open memory"));
+    let mem = Arc::new(
+        cairn_store_sqlite::open(&mem_path)
+            .await
+            .expect("open memory"),
+    );
 
     // Reuse the same DB file for the jobs store.
     // open_sync runs the full migration runner (same schema).
     let jobs_conn =
         cairn_store_sqlite::open_sync(&mem_path).expect("open_sync for jobs connection");
-    let jobs: Arc<dyn JobStore> =
-        Arc::new(SqliteJobStore::new(jobs_conn).expect("job store"));
+    let jobs: Arc<dyn JobStore> = Arc::new(SqliteJobStore::new(jobs_conn).expect("job store"));
 
     let cfg = ConsolidationConfig {
         window_size_turns: 32,

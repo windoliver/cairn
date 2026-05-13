@@ -9,54 +9,34 @@ use cairn_core::contract::job_store::{EnqueueRequest, JobId, JobKind, JobStore, 
 use cairn_core::contract::memory_store::{ListArgs, MemoryStore, TombstoneReason};
 use cairn_core::domain::record::RecordId;
 use cairn_core::domain::taxonomy::MemoryKind;
+use cairn_test_fixtures::trace::sample_turn_summary;
 use cairn_workflows::{
     SqliteJobStore,
     consolidation::{
-        ConsolidationForgetCleanupHandler, ConsolidationHandler, ConsolidationPayload,
-        ForgetCleanupPayload, CONSOLIDATION_KIND, FORGET_CLEANUP_KIND,
+        CONSOLIDATION_KIND, ConsolidationForgetCleanupHandler, ConsolidationHandler,
+        ConsolidationPayload, FORGET_CLEANUP_KIND, ForgetCleanupPayload,
     },
     scheduler::{Clock, HandlerRegistryBuilder, Scheduler, SchedulerConfig, SystemClock},
 };
-use cairn_test_fixtures::trace::sample_turn_summary;
 use tempfile::tempdir;
 
 /// A valid 26-char Crockford base32 ULID for use as session ID.
 const SESSION_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+/// Seed `n` turn-summary records and enqueue a consolidation job for `session_id`.
 #[allow(
     clippy::expect_used,
-    reason = "integration test: panics surface broken invariants immediately"
+    reason = "integration test helper: panics surface broken invariants immediately"
 )]
-async fn forgetting_source_turn_tombstones_summary() {
-    let dir = tempdir().expect("tempdir");
-    let mem_path = dir.path().join("cairn.db");
-
-    // The memory store opens + applies all migrations.
-    let mem = Arc::new(cairn_store_sqlite::open(&mem_path).await.expect("open memory"));
-
-    // Reuse the same DB file for the jobs store.
-    // open_sync runs the full migration chain so SqliteJobStore::new finds the schema.
-    let jobs_conn = cairn_store_sqlite::open_sync(&mem_path).expect("open_sync for jobs");
-    let jobs: Arc<dyn JobStore> = Arc::new(SqliteJobStore::new(jobs_conn).expect("job store"));
-
-    let cfg = ConsolidationConfig::default();
-    let registry = HandlerRegistryBuilder::default()
-        .with(Arc::new(ConsolidationHandler::new(mem.clone(), cfg)))
-        .with(Arc::new(ConsolidationForgetCleanupHandler::new(mem.clone())))
-        .build();
-    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-    let s = Scheduler::start(
-        "inc",
-        jobs.clone(),
-        &registry,
-        clock.clone(),
-        SchedulerConfig::p0(),
-    );
-
-    // Seed: 6 turns then enqueue a consolidation job directly.
-    for seq in 1..=6_u32 {
-        mem.upsert(&sample_turn_summary(SESSION_ID, seq))
+async fn seed_and_enqueue_consolidation<M: MemoryStore>(
+    mem: &Arc<M>,
+    jobs: &Arc<dyn JobStore>,
+    clock: &Arc<dyn Clock>,
+    session_id: &str,
+    n: u32,
+) {
+    for seq in 1..=n {
+        mem.upsert(&sample_turn_summary(session_id, seq))
             .await
             .expect("upsert turn");
     }
@@ -64,7 +44,7 @@ async fn forgetting_source_turn_tombstones_summary() {
         job_id: JobId::new("c-1"),
         kind: JobKind::new(CONSOLIDATION_KIND),
         payload: ConsolidationPayload {
-            session_id: SESSION_ID.to_owned(),
+            session_id: session_id.to_owned(),
             since_sequence: 0,
         }
         .to_bytes()
@@ -76,6 +56,47 @@ async fn forgetting_source_turn_tombstones_summary() {
     })
     .await
     .expect("enqueue consolidation job");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(
+    clippy::expect_used,
+    reason = "integration test: panics surface broken invariants immediately"
+)]
+async fn forgetting_source_turn_tombstones_summary() {
+    let dir = tempdir().expect("tempdir");
+    let mem_path = dir.path().join("cairn.db");
+
+    // The memory store opens + applies all migrations.
+    let mem = Arc::new(
+        cairn_store_sqlite::open(&mem_path)
+            .await
+            .expect("open memory"),
+    );
+
+    // Reuse the same DB file for the jobs store.
+    // open_sync runs the full migration chain so SqliteJobStore::new finds the schema.
+    let jobs_conn = cairn_store_sqlite::open_sync(&mem_path).expect("open_sync for jobs");
+    let jobs: Arc<dyn JobStore> = Arc::new(SqliteJobStore::new(jobs_conn).expect("job store"));
+
+    let cfg = ConsolidationConfig::default();
+    let registry = HandlerRegistryBuilder::default()
+        .with(Arc::new(ConsolidationHandler::new(mem.clone(), cfg)))
+        .with(Arc::new(ConsolidationForgetCleanupHandler::new(
+            mem.clone(),
+        )))
+        .build();
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+    let s = Scheduler::start(
+        "inc",
+        jobs.clone(),
+        &registry,
+        clock.clone(),
+        SchedulerConfig::p0(),
+    );
+
+    // Seed 6 turns then enqueue a consolidation job.
+    seed_and_enqueue_consolidation(&mem, &jobs, &clock, SESSION_ID, 6).await;
 
     // Poll until the summary `reasoning` record materialises.
     let mut summary_id: Option<RecordId> = None;

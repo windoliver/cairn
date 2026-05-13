@@ -9,12 +9,14 @@ use cairn_core::config::ConsolidationConfig;
 use cairn_core::contract::job_store::JobStore;
 use cairn_core::contract::memory_store::{ListArgs, MemoryStore};
 use cairn_core::domain::taxonomy::MemoryKind;
+use cairn_test_fixtures::trace::sample_turn_summary;
 use cairn_workflows::{
     SqliteJobStore,
-    consolidation::{enqueue_if_due, ConsolidationHandler},
-    scheduler::{Clock, HandlerRegistryBuilder, Scheduler, SchedulerConfig, SystemClock},
+    consolidation::{ConsolidationHandler, enqueue_if_due},
+    scheduler::{
+        Clock, HandlerRegistryBuilder, Scheduler, SchedulerConfig, SystemClock, WorkerConfig,
+    },
 };
-use cairn_test_fixtures::trace::sample_turn_summary;
 use tempfile::tempdir;
 
 /// A valid 26-char Crockford base32 ULID for use as session ID.
@@ -30,27 +32,33 @@ async fn long_session_emits_rolling_summary_without_blocking_turns() {
     let mem_path = dir.path().join("cairn.db");
 
     // The memory store opens + applies all migrations (including 0020).
-    let mem = Arc::new(cairn_store_sqlite::open(&mem_path).await.expect("open memory"));
+    let mem = Arc::new(
+        cairn_store_sqlite::open(&mem_path)
+            .await
+            .expect("open memory"),
+    );
 
     // Reuse the same DB file for the jobs store.
     // open_sync runs the full migration runner (same schema), so
     // SqliteJobStore::new can verify the 0020 schema objects.
     let jobs_conn =
         cairn_store_sqlite::open_sync(&mem_path).expect("open_sync for jobs connection");
-    let jobs: Arc<dyn JobStore> =
-        Arc::new(SqliteJobStore::new(jobs_conn).expect("job store"));
+    let jobs: Arc<dyn JobStore> = Arc::new(SqliteJobStore::new(jobs_conn).expect("job store"));
 
     let cfg = ConsolidationConfig::default();
     let h = Arc::new(ConsolidationHandler::new(mem.clone(), cfg));
     let registry = HandlerRegistryBuilder::default().with(h).build();
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-    let s = Scheduler::start(
-        "inc",
-        jobs.clone(),
-        &registry,
-        clock.clone(),
-        SchedulerConfig::p0(),
-    );
+    // Use a 20 ms idle-poll interval so the worker picks up the job quickly
+    // even when many other tests are running concurrently on the same host.
+    let sched_cfg = SchedulerConfig {
+        worker: WorkerConfig {
+            idle_poll_ms: 20,
+            ..SchedulerConfig::p0().worker
+        },
+        ..SchedulerConfig::p0()
+    };
+    let s = Scheduler::start("inc", jobs.clone(), &registry, clock.clone(), sched_cfg);
 
     // Simulate 12 turns landing.
     for seq in 1..=12_u32 {
@@ -65,17 +73,19 @@ async fn long_session_emits_rolling_summary_without_blocking_turns() {
     let mut found = false;
     while start.elapsed() < Duration::from_secs(10) {
         let listed = mem
-            .list(&ListArgs::default())
+            .list(&ListArgs {
+                limit: 100,
+                ..ListArgs::default()
+            })
             .await
             .expect("list records");
         if listed.records.iter().any(|r| {
-            r.kind == MemoryKind::Reasoning
-                && r.scope.session_id.as_deref() == Some(SESSION_ID)
+            r.kind == MemoryKind::Reasoning && r.scope.session_id.as_deref() == Some(SESSION_ID)
         }) {
             found = true;
             break;
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
     s.shutdown().await;

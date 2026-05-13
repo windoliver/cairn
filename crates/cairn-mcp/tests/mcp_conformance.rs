@@ -593,8 +593,10 @@ fn all_capabilities() -> &'static [Capabilities] {
         C::CairnMcpV1ExtensionFederation,
         C::CairnMcpV1ExtensionSessiontree,
         C::CairnMcpV1PolicyTrace,
+        C::CairnMcpV1SensorsPreCompact,
         C::CairnMcpV1ReplaySequence,
         C::CairnMcpV1ReplayChallenge,
+        C::CairnWorkflowsV1Consolidation,
     ]
 }
 
@@ -630,8 +632,10 @@ fn capability_wire_id(cap: Capabilities) -> &'static str {
         C::CairnMcpV1ExtensionFederation => "cairn.mcp.v1.extension.federation",
         C::CairnMcpV1ExtensionSessiontree => "cairn.mcp.v1.extension.sessiontree",
         C::CairnMcpV1PolicyTrace => "cairn.mcp.v1.policy_trace",
+        C::CairnMcpV1SensorsPreCompact => "cairn.mcp.v1.sensors.pre_compact",
         C::CairnMcpV1ReplaySequence => "cairn.mcp.v1.replay.sequence",
         C::CairnMcpV1ReplayChallenge => "cairn.mcp.v1.replay.challenge",
+        C::CairnWorkflowsV1Consolidation => "cairn.workflows.v1.consolidation",
         _ => panic!(
             "capability_wire_id: unknown Capabilities variant — update this \
              match arm when the IDL adds a new variant"
@@ -683,6 +687,8 @@ fn minimal_request_for_capability(cap: Capabilities) -> Option<serde_json::Value
         // retrieve record/folder/scope/profile — not yet advertised.
         // extension admin / federation / sessiontree — not yet wired.
         // policy_trace + replay — flags, not verb dispatch paths.
+        // sensors.pre_compact — sensor flag, not a verb dispatch path.
+        // workflows.v1.consolidation — background scheduler, not a tool-call path.
         // Wildcard covers future #[non_exhaustive] additions until they get
         // explicit arms above.
         _ => return None,
