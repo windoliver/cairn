@@ -402,7 +402,7 @@ impl SqliteMemoryStore {
             .map_err(|e| MemoryStoreError::query_with_source("read hot records", e))
     }
 
-    fn centrality_scores(&self) -> Result<BTreeMap<String, f32>, MemoryStoreError> {
+    fn centrality_scores(&self) -> Result<(BTreeMap<String, f32>, String), MemoryStoreError> {
         let conn = self.lock_conn()?;
         let mut stmt = conn
             .prepare(
@@ -424,6 +424,7 @@ impl SqliteMemoryStore {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| MemoryStoreError::query_with_source("read entity edges", e))?;
 
+        let graph_revision = graph_edge_revision(&edges);
         let mut mentions: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
         for (from, to, kind, file) in edges {
             mentions
@@ -448,12 +449,15 @@ impl SqliteMemoryStore {
 
         let max_degree = degrees.values().copied().fold(0.0_f32, f32::max);
         if max_degree == 0.0 {
-            return Ok(BTreeMap::new());
+            return Ok((BTreeMap::new(), graph_revision));
         }
-        Ok(degrees
-            .into_iter()
-            .map(|(entity, degree)| (entity, degree / max_degree))
-            .collect())
+        Ok((
+            degrees
+                .into_iter()
+                .map(|(entity, degree)| (entity, degree / max_degree))
+                .collect(),
+            graph_revision,
+        ))
     }
 }
 
@@ -491,11 +495,10 @@ impl MemoryStore for SqliteMemoryStore {
             sources.push(source);
         }
 
-        let centrality = self.centrality_scores()?;
-        let fallback_centrality = centrality.values().next_back().copied().unwrap_or(0.0);
+        let (centrality, graph_revision) = self.centrality_scores()?;
         for row in self.record_rows(request)? {
             if let Some(kind) = hot_source_kind(&row) {
-                let score = record_centrality(&row, &centrality).unwrap_or(fallback_centrality);
+                let score = record_centrality(&row, &centrality).unwrap_or(0.0);
                 sources.push(HotMemorySource {
                     kind,
                     record_id: Some(row.record_id.clone()),
@@ -515,7 +518,7 @@ impl MemoryStore for SqliteMemoryStore {
                 .cmp(&left.updated_at)
                 .then_with(|| left.record_id.cmp(&right.record_id))
         });
-        let revision = source_revision(&sources);
+        let revision = source_revision(&sources, &graph_revision);
         Ok(HotMemoryInput {
             sources,
             source_revision: revision,
@@ -679,8 +682,10 @@ fn record_centrality(row: &RecordRow, centrality: &BTreeMap<String, f32>) -> Opt
         .max_by(f32::total_cmp)
 }
 
-fn source_revision(sources: &[HotMemorySource]) -> String {
-    let mut parts = Vec::with_capacity(sources.len() * 4);
+fn source_revision(sources: &[HotMemorySource], graph_revision: &str) -> String {
+    let mut parts = Vec::with_capacity((sources.len() * 4) + 2);
+    parts.push("graph".to_owned());
+    parts.push(graph_revision.to_owned());
     for source in sources {
         parts.push(kind_name(source.kind).to_owned());
         parts.push(source.record_id.clone().unwrap_or_default());
@@ -689,6 +694,28 @@ fn source_revision(sources: &[HotMemorySource]) -> String {
     }
     let refs = parts.iter().map(String::as_str).collect::<Vec<_>>();
     hash_parts(&refs)
+}
+
+fn graph_edge_revision(edges: &[(String, String, String, String)]) -> String {
+    let mut rows = edges
+        .iter()
+        .map(|(from, to, kind, source)| {
+            [
+                from.as_str(),
+                to.as_str(),
+                kind.as_str(),
+                source.as_str(),
+                "live",
+            ]
+        })
+        .collect::<Vec<_>>();
+    rows.sort_unstable();
+
+    let mut parts = Vec::with_capacity(rows.len() * 5);
+    for row in rows {
+        parts.extend(row);
+    }
+    hash_parts(&parts)
 }
 
 fn hash_parts(parts: &[&str]) -> String {

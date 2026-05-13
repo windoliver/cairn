@@ -29,9 +29,13 @@ async fn hot_memory_input_reads_vault_files_records_and_edges() {
         .expect("index");
     store
         .insert_hot_record(
-            HotRecordSeed::new("01J0000000000000000000001", "user", "pinned text")
-                .tag("pinned")
-                .salience(0.9),
+            HotRecordSeed::new(
+                "01J0000000000000000000001",
+                "user",
+                "pinned text about ImportantType",
+            )
+            .tag("pinned")
+            .salience(0.9),
         )
         .expect("pinned");
     store
@@ -77,6 +81,74 @@ async fn hot_memory_input_reads_vault_files_records_and_edges() {
             .any(|s| s.kind == HotMemorySourceKind::Playbook && s.body.contains("playbook text"))
     );
     assert!(input.sources.iter().any(|s| s.centrality_score > 0.0));
+}
+
+#[tokio::test]
+async fn unmatched_hot_record_has_zero_centrality_when_edges_exist() {
+    let store = SqliteMemoryStore::open_memory().expect("store");
+    store
+        .insert_hot_record(
+            HotRecordSeed::new("01J0000000000000000000001", "user", "unmatched pinned text")
+                .tag("pinned")
+                .salience(0.9),
+        )
+        .expect("pinned");
+    store
+        .insert_entity_edge(
+            "ImportantType",
+            "ContainsOnly",
+            "uses",
+            "src/important.rs",
+            None,
+        )
+        .expect("edge");
+
+    let input = store.hot_memory_input(&request()).await.expect("input");
+    let pinned = input
+        .sources
+        .iter()
+        .find(|source| source.record_id.as_deref() == Some("01J0000000000000000000001"))
+        .expect("pinned source");
+
+    assert!(pinned.centrality_score.abs() < f32::EPSILON);
+}
+
+#[tokio::test]
+async fn live_graph_edge_changes_hot_memory_source_revision() {
+    let store = SqliteMemoryStore::open_memory().expect("store");
+    store
+        .insert_hot_record(
+            HotRecordSeed::new(
+                "01J0000000000000000000001",
+                "user",
+                "pinned text about ImportantType",
+            )
+            .tag("pinned")
+            .salience(0.9),
+        )
+        .expect("pinned");
+
+    let before = store
+        .hot_memory_input(&request())
+        .await
+        .expect("input before")
+        .source_revision;
+    store
+        .insert_entity_edge(
+            "ImportantType",
+            "ContainsOnly",
+            "uses",
+            "src/important.rs",
+            None,
+        )
+        .expect("edge");
+    let after = store
+        .hot_memory_input(&request())
+        .await
+        .expect("input after")
+        .source_revision;
+
+    assert_ne!(before, after);
 }
 
 #[tokio::test]
