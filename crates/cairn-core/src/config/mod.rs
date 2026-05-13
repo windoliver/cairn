@@ -475,6 +475,8 @@ pub struct CairnConfig {
     pub llm: LlmConfig,
     /// Search and embedding availability.
     pub search: SearchConfig,
+    /// Source-file forget/redaction policy.
+    pub source: SourceConfig,
     /// Sensor enablement.
     pub sensors: SensorsConfig,
     /// Workflow orchestrator selection.
@@ -505,6 +507,14 @@ pub struct SourceConfig {
     ///
     /// Default `false`: P0 operators can ship without the policy and
     /// lint stays quiet. Turning it on is a deliberate policy bump.
+    pub redact_on_forget: bool,
+}
+
+/// Source-file policy (§3 source forget notes).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct SourceConfig {
+    /// When true, `forget` rewrites matching source files to metadata-only stubs.
     pub redact_on_forget: bool,
 }
 

@@ -64,6 +64,8 @@ pub struct LocalSensorConfig {
     pub terminal: SensorSettings,
     /// Clipboard sensor settings.
     pub clipboard: SensorSettings,
+    /// Voice sensor settings.
+    pub voice: SensorSettings,
 }
 
 impl LocalSensorConfig {
@@ -75,6 +77,7 @@ impl LocalSensorConfig {
             ide: SensorSettings::disabled(),
             terminal: SensorSettings::disabled(),
             clipboard: SensorSettings::disabled(),
+            voice: SensorSettings::disabled(),
         }
     }
 }
@@ -86,6 +89,7 @@ impl Default for LocalSensorConfig {
             ide: SensorSettings::enabled(),
             terminal: SensorSettings::disabled(),
             clipboard: SensorSettings::disabled(),
+            voice: SensorSettings::disabled(),
         }
     }
 }

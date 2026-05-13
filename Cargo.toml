@@ -92,6 +92,8 @@ whoami = "1.5"
 schemars = "1.0"
 memchr = "2"
 smallvec = "1"
+cpal = "0.17.3"
+sherpa-onnx = { version = "1.13.1", default-features = false, features = ["static"] }
 
 # Path + version on intra-workspace deps so `cargo publish` can rewrite the
 # path to a registry version without losing the constraint. The version

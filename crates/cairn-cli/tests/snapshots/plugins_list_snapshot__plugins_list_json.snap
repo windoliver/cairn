@@ -24,7 +24,7 @@ expression: json
       "capabilities": {
         "batches": true,
         "consent_aware": true,
-        "streaming": false
+        "streaming": true
       },
       "contract": "SensorIngress",
       "contract_version_range": {
