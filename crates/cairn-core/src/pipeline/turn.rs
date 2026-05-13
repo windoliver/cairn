@@ -144,6 +144,7 @@ pub fn summarize_turn(
         visibility: MemoryVisibility::Private,
         scope,
         body,
+        source_ids: first.source_ids.clone(),
         provenance,
         updated_at: last.updated_at.clone(),
         evidence: EvidenceVector::default(),

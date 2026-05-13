@@ -19,7 +19,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::{
     ActorChainEntry, CanonicalRecordHash, ChainRole, DomainError, EvidenceVector, Identity,
-    IdentityKind, Provenance, Rfc3339Timestamp, ScopeTuple, TargetId, VerifiedSignedIntent,
+    IdentityKind, Provenance, Rfc3339Timestamp, ScopeTuple, SourceId, TargetId,
+    VerifiedSignedIntent,
     actor_chain::validate_chain,
     taxonomy::{MemoryClass, MemoryKind, MemoryVisibility},
 };
@@ -198,6 +199,8 @@ pub struct MemoryRecord {
     pub scope: ScopeTuple,
     /// Markdown body. Required and non-empty.
     pub body: String,
+    /// Source document ids referenced by this record's frontmatter (§3).
+    pub source_ids: Vec<SourceId>,
     /// Mandatory provenance frontmatter (§6.5).
     pub provenance: Provenance,
     /// Wall-clock instant of the most recent durable update.
@@ -820,7 +823,7 @@ pub mod tests_export {
     use crate::contract::memory_store::StoredRecord;
     use crate::domain::{
         ActorChainEntry, ChainRole, EvidenceVector, Identity, Provenance, Rfc3339Timestamp,
-        ScopeTuple, TargetId,
+        ScopeTuple, SourceId, TargetId,
         taxonomy::{MemoryClass, MemoryKind, MemoryVisibility},
     };
 
@@ -854,6 +857,7 @@ pub mod tests_export {
                 ..ScopeTuple::default()
             },
             body: "user prefers dark mode".to_owned(),
+            source_ids: vec![SourceId::parse("01HQZX9F5N0000000000000001").expect("valid")],
             provenance: Provenance {
                 source_sensor: Identity::parse("snr:local:hook:cc-session:v1").expect("valid"),
                 created_at: Rfc3339Timestamp::parse("2026-04-22T14:02:11Z").expect("valid"),
