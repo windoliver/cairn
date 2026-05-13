@@ -358,3 +358,180 @@ async fn e2e_capture_trace_then_forget_propagates_to_summary() {
         "summary should be tombstoned after forget propagation"
     );
 }
+
+/// Companion test: validate that `cairn mcp serve` (subprocess) boots the
+/// scheduler and drains queued consolidation jobs. The first test above
+/// runs the scheduler programmatically; this one closes the loop and
+/// proves the production code path (Task 17 wiring) actually works when
+/// spawned the way an operator would spawn it.
+///
+/// Flow:
+///   1. Bootstrap a real vault.
+///   2. Edit `.cairn/config.yaml` to enable `single_tenant + principal`
+///      (the gate that boots the scheduler inside `cairn mcp`).
+///   3. Run `cairn capture_trace --from <jsonl>` to enqueue a
+///      consolidation job.
+///   4. Spawn `cairn mcp serve` as a real subprocess.
+///   5. Poll the DB until a `reasoning` record materializes (proves the
+///      scheduler leased the job and the handler ran successfully).
+///   6. Close stdin so the subprocess shuts down cleanly.
+///   7. Assert the summary exists and links back to its source turns.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "linear e2e test reads naturally without extraction"
+)]
+async fn cairn_mcp_serve_subprocess_drains_queued_consolidation_job() {
+    use std::process::{Command, Stdio};
+    use std::time::Instant;
+
+    let vault = tempfile::tempdir().expect("tempdir");
+    let vault_root = vault.path();
+
+    // ── Step 1: bootstrap a real vault (writes config.yaml + vault.id) ─────
+    let out = cairn_bin()
+        .arg("bootstrap")
+        .arg("--vault-path")
+        .arg(vault_root)
+        .arg("--json")
+        .output()
+        .expect("spawn cairn bootstrap");
+    assert!(
+        out.status.success(),
+        "bootstrap failed: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // ── Step 2: enable single_tenant in config.yaml ────────────────────────
+    let config_path = vault_root.join(".cairn/config.yaml");
+    let mut cfg = std::fs::read_to_string(&config_path).expect("read config");
+    // Bootstrap writes an `mcp:` block with `stdio:` underneath whose
+    // single_tenant defaults to false. Replace the whole block with a
+    // single_tenant=true version + a principal.
+    if cfg.contains("mcp:") {
+        // Replace the existing block. The bootstrap config has known shape;
+        // append a complete mcp block at the end and let the later block
+        // win (yaml_serde::from_str takes the last duplicate). Simpler:
+        // strip the existing block by truncating the file at the first
+        // "\nmcp:" line and re-append our own.
+        if let Some(idx) = cfg.find("\nmcp:") {
+            cfg.truncate(idx);
+        }
+    }
+    cfg.push_str(
+        "\nmcp:\n  stdio:\n    single_tenant: true\n    principal:\n      tenant: e2e-mcp\n",
+    );
+    std::fs::write(&config_path, cfg).expect("write config");
+
+    // ── Step 3: generate JSONL + run capture_trace to enqueue a job ────────
+    let jsonl_path = vault_root.join("trace.jsonl");
+    write_multi_turn_jsonl(vault_root, &jsonl_path, 6);
+    let out = cairn_bin()
+        .arg("capture_trace")
+        .arg("--from")
+        .arg(&jsonl_path)
+        .arg("--vault")
+        .arg(vault_root)
+        .arg("--json")
+        .output()
+        .expect("spawn cairn capture_trace");
+    assert!(
+        out.status.success(),
+        "capture_trace failed: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let db_path = vault_root.join(".cairn/cairn.db");
+    let queued = count_workflow_jobs(&db_path, "consolidation.rolling_summary");
+    assert!(
+        queued >= 1,
+        "expected at least one consolidation job before mcp serve"
+    );
+
+    // ── Step 4: spawn `cairn mcp serve` as a real subprocess ───────────────
+    let mut child = Command::new(env!("CARGO_BIN_EXE_cairn"))
+        .arg("--vault")
+        .arg(vault_root)
+        .arg("mcp")
+        .env_remove("CAIRN_VAULT")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn cairn mcp");
+    let child_stdin = child.stdin.take().expect("stdin pipe");
+
+    // ── Step 5: poll DB until a reasoning record appears ───────────────────
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut reasoning_record_id: Option<cairn_core::domain::RecordId> = None;
+    while Instant::now() < deadline {
+        // Open via the sync helper so we don't fight tokio-rusqlite's pool
+        // while the subprocess is also touching the DB.
+        let Ok(conn) = rusqlite::Connection::open(&db_path) else {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            continue;
+        };
+        let row: rusqlite::Result<String> = conn.query_row(
+            "SELECT record_id FROM records
+             WHERE kind = 'reasoning' AND active = 1 AND tombstoned = 0
+             LIMIT 1",
+            [],
+            |r| r.get(0),
+        );
+        drop(conn);
+        if let Ok(id) = row {
+            reasoning_record_id =
+                Some(cairn_core::domain::RecordId::parse(&id).expect("parse record_id"));
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // ── Step 6: shut down `cairn mcp` cleanly ──────────────────────────────
+    // Drop stdin to signal EOF; the subprocess should exit on its own.
+    drop(child_stdin);
+    let shutdown_deadline = Instant::now() + Duration::from_secs(15);
+    let mut exited = false;
+    while Instant::now() < shutdown_deadline {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                exited = true;
+                break;
+            }
+            Ok(None) => tokio::time::sleep(Duration::from_millis(50)).await,
+            Err(_) => break,
+        }
+    }
+    if !exited {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("cairn mcp serve did not exit within 15s after stdin EOF");
+    }
+    let _ = child.wait();
+
+    // ── Step 7: assert that the subprocess produced a reasoning record ─────
+    let record_id = reasoning_record_id.expect(
+        "cairn mcp serve subprocess never produced a reasoning record within 20s — \
+         scheduler boot or handler dispatch is broken",
+    );
+
+    // Verify the source-link is present (rules out false positives).
+    let conn = rusqlite::Connection::open(&db_path).expect("conn");
+    let extra: String = conn
+        .query_row(
+            "SELECT extra_frontmatter FROM records WHERE record_id = ?1",
+            rusqlite::params![record_id.as_str()],
+            |r| r.get(0),
+        )
+        .expect("query frontmatter");
+    let parsed: serde_json::Value = serde_json::from_str(&extra).expect("parse frontmatter");
+    let sources = parsed
+        .pointer("/consolidation/source_record_ids")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !sources.is_empty(),
+        "reasoning record must carry consolidation.source_record_ids"
+    );
+}
