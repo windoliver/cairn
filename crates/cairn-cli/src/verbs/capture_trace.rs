@@ -536,7 +536,11 @@ async fn run_handler_inner(
                 // (round-2 adversarial review #1).
                 if had_stop || tx.turn_summary_exists(&session_id_tx, &turn_str_tx)? {
                     let final_rows = tx.list_trace_events(&session_id_tx, &turn_str_tx)?;
-                    let turn_ordinal = tx.next_turn_ordinal(&session_id_tx, &turn_str_tx)?;
+                    let turn_ordinal = tx.next_turn_ordinal_scoped(
+                        &session_id_tx,
+                        &turn_str_tx,
+                        scope_binding_tx.as_ref(),
+                    )?;
                     let summary = summarize_turn_with_scope(
                         &session_id_tx,
                         &turn_str_tx,
@@ -579,22 +583,30 @@ async fn run_handler_inner(
             // review #1). At single-tenant P0 `scope_binding` is `None`
             // and the *_scoped variants reduce to the un-narrowed query.
             //
-            // Use `max_turn_summary_sequence_scoped` rather than counting
-            // active rows: a forget that tombstones one of the existing
-            // summaries should not regress `latest_sequence` (round-5
-            // adversarial review #2). The query includes tombstoned rows
-            // so cadence progress stays monotonic.
-            let turn_count = match store
-                .max_turn_summary_sequence_scoped(&session_str, scope_binding)
-                .await
-            {
-                Ok(max_seq) => max_seq,
-                Err(_) => u32::try_from(projected_len).unwrap_or(u32::MAX),
-            };
+            // `latest_sequence` must equal what the handler will actually
+            // see in its window — ACTIVE turn_summary records whose
+            // sequence > watermark — plus the watermark itself, so that
+            // `latest - since = active_eligible_count` (the check
+            // `enqueue_if_due` performs). If we used max(seq) including
+            // tombstoned, a forget BEFORE the trigger threshold would
+            // make the trigger fire while the handler's window was
+            // empty; the dedupe_key would then permanently lock out
+            // future windows for that watermark (round-6 adversarial
+            // review #1). Watermark itself stays monotone via
+            // `latest_consolidation_watermark_scoped` which counts
+            // tombstoned summaries.
             let since_sequence = store
                 .latest_consolidation_watermark_scoped(&session_str, scope_binding)
                 .await
                 .unwrap_or(0);
+            let active_eligible = match store
+                .list_trace_turns_scoped(&session_str, since_sequence, u32::MAX, scope_binding)
+                .await
+            {
+                Ok(headers) => u32::try_from(headers.len()).unwrap_or(u32::MAX),
+                Err(_) => u32::try_from(projected_len).unwrap_or(u32::MAX),
+            };
+            let turn_count = since_sequence.saturating_add(active_eligible);
             let now_ms = i64::try_from(
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)

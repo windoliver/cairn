@@ -702,19 +702,84 @@ impl StoreTx<'_> {
         session_id: &SessionId,
         turn_id: &str,
     ) -> Result<u64, StoreError> {
-        // 1. If a summary for this (session, turn) already exists (active
-        //    OR tombstoned), reuse its ordinal so re-summarization stamps
-        //    the same value (idempotent replays after forget round-trips).
-        let mut existing = self.tx.prepare(
+        self.next_turn_ordinal_scoped(session_id, turn_id, None)
+    }
+
+    /// Scope-aware variant of [`Self::next_turn_ordinal`].
+    ///
+    /// The ordinal space is per `(session_id, bound_scope)` — two
+    /// scopes that share a session must NOT share an ordinal counter,
+    /// or one tenant's forget/replay can stomp the other's monotonic
+    /// progress (round-6 adversarial review #2).
+    ///
+    /// `bound_scope = None` reduces to the prior session-only behavior.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] for SQL failures.
+    pub fn next_turn_ordinal_scoped(
+        &self,
+        session_id: &SessionId,
+        turn_id: &str,
+        bound_scope: Option<&cairn_core::domain::ScopeTuple>,
+    ) -> Result<u64, StoreError> {
+        use std::fmt::Write as _;
+
+        fn scope_clauses(
+            bound_scope: Option<&cairn_core::domain::ScopeTuple>,
+            first_idx: usize,
+        ) -> (String, Vec<String>) {
+            let mut extra_where = String::new();
+            let mut binds: Vec<String> = Vec::new();
+            let Some(s) = bound_scope else {
+                return (extra_where, binds);
+            };
+            let mut idx = first_idx;
+            for (name, value) in [
+                ("tenant", s.tenant.as_deref()),
+                ("workspace", s.workspace.as_deref()),
+                ("user", s.user.as_deref()),
+                ("agent", s.agent.as_deref()),
+                ("entity", s.entity.as_deref()),
+            ] {
+                if let Some(v) = value {
+                    let _ = write!(
+                        extra_where,
+                        " AND json_extract(scope, '$.{name}') = ?{idx}"
+                    );
+                    binds.push(v.to_owned());
+                    idx += 1;
+                }
+            }
+            (extra_where, binds)
+        }
+
+        // 1. If a summary for this exact (session, turn, scope) already
+        //    exists, reuse its ordinal (idempotent replays).
+        //    Placeholders: ?1=session, ?2=turn, scope dims at ?3..
+        let (lookup_where, lookup_scope_binds) = scope_clauses(bound_scope, 3);
+        let lookup_sql = format!(
             "SELECT CAST(json_extract(extra_frontmatter, '$.trace.sequence') AS INTEGER) \
              FROM records \
              WHERE trace_event = 'turn_summary' \
                AND trace_session_id = ?1 AND trace_turn_id = ?2 \
+               {lookup_where} \
              ORDER BY tombstoned ASC \
-             LIMIT 1",
-        )?;
+             LIMIT 1"
+        );
+        let mut existing = self.tx.prepare(&lookup_sql)?;
+        let mut existing_binds: Vec<Box<dyn rusqlite::ToSql>> = vec![
+            Box::new(session_id.as_str().to_owned()),
+            Box::new(turn_id.to_owned()),
+        ];
+        for v in &lookup_scope_binds {
+            existing_binds.push(Box::new(v.clone()));
+        }
+        let existing_refs: Vec<&dyn rusqlite::ToSql> = existing_binds
+            .iter()
+            .map(std::convert::AsRef::as_ref)
+            .collect();
         if let Some(seq) = existing
-            .query_row(params![session_id.as_str(), turn_id], |row| {
+            .query_row(existing_refs.as_slice(), |row| {
                 row.get::<_, Option<i64>>(0)
             })
             .optional()?
@@ -722,20 +787,30 @@ impl StoreTx<'_> {
         {
             return Ok(u64::try_from(seq.max(1)).unwrap_or(1));
         }
-        // 2. Otherwise: 1 + max(sequence) across this session's existing
-        //    summaries — INCLUDING tombstoned rows (round-5 adversarial
-        //    review #2). The ordinal must be strictly monotonic per
-        //    session even when forget-cleanup later tombstones an earlier
-        //    summary; reusing a freed slot would let a future
-        //    list_trace_turns(since=N) skip a real turn.
-        let mut next = self.tx.prepare(
+
+        // 2. Otherwise: 1 + MAX(sequence) over this (session, scope)'s
+        //    existing summaries — INCLUDING tombstoned rows so the
+        //    counter is strictly monotonic across forget round-trips
+        //    (round-5 adversarial review #2).
+        //    Placeholders: ?1=session, scope dims at ?2..
+        let (next_where, next_scope_binds) = scope_clauses(bound_scope, 2);
+        let next_sql = format!(
             "SELECT COALESCE(MAX(CAST(json_extract(extra_frontmatter, \
                                                    '$.trace.sequence') AS INTEGER)), 0) + 1 \
              FROM records \
              WHERE trace_event = 'turn_summary' \
-               AND trace_session_id = ?1",
-        )?;
-        let n: i64 = next.query_row(params![session_id.as_str()], |row| row.get(0))?;
+               AND trace_session_id = ?1 \
+               {next_where}"
+        );
+        let mut next = self.tx.prepare(&next_sql)?;
+        let mut next_binds: Vec<Box<dyn rusqlite::ToSql>> =
+            vec![Box::new(session_id.as_str().to_owned())];
+        for v in &next_scope_binds {
+            next_binds.push(Box::new(v.clone()));
+        }
+        let next_refs: Vec<&dyn rusqlite::ToSql> =
+            next_binds.iter().map(std::convert::AsRef::as_ref).collect();
+        let n: i64 = next.query_row(next_refs.as_slice(), |row| row.get(0))?;
         Ok(u64::try_from(n.max(1)).unwrap_or(1))
     }
 

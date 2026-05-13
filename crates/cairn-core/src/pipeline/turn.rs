@@ -12,7 +12,7 @@ use serde_json::{Map as JsonMap, Value as Json};
 use crate::domain::capture::CaptureEvent;
 use crate::domain::record::{Ed25519Signature, MemoryRecord};
 use crate::domain::taxonomy::{MemoryClass, MemoryKind, MemoryVisibility};
-use crate::domain::trace::{TraceEvent, summary_record_id};
+use crate::domain::trace::TraceEvent;
 use crate::domain::{EvidenceVector, Provenance, ScopeTuple, SessionId, TargetId};
 use crate::pipeline::capture_trace::TRACE_BODY_CAP;
 
@@ -147,7 +147,7 @@ pub fn summarize_turn_with_scope(
     }
     let member_ids = validate_and_collect_members(session_id, turn_id, events)?;
     let body = build_summary_body(session_id, turn_id, events)?;
-    let id = summary_record_id(session_id, turn_id);
+    let id = crate::domain::trace::summary_record_id_scoped(bound_scope, session_id, turn_id);
     // `summary_sequence` uses the caller-supplied turn ordinal (1-based,
     // strictly monotonic per session). The `records_trace_seq` UNIQUE
     // index excludes `turn_summary` rows (migration 0023) so the value
@@ -616,7 +616,10 @@ mod tests {
         assert_eq!(members.len(), 2);
         assert_eq!(members[0], "01ARZ3NDEKTSV4RRFFQ69G5FAA");
         assert_eq!(members[1], "01ARZ3NDEKTSV4RRFFQ69G5FAB");
-        assert_eq!(summary.id, summary_record_id(&s, "turn-1"));
+        assert_eq!(
+            summary.id,
+            crate::domain::trace::summary_record_id(&s, "turn-1")
+        );
     }
 
     #[test]
