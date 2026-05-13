@@ -110,6 +110,7 @@ pub fn run_without_context(sub: &ArgMatches) -> ExitCode {
     ExitCode::from(EX_UNAVAILABLE)
 }
 
+#[allow(clippy::too_many_lines)]
 async fn run_record(record_id_raw: String, vault_root: PathBuf, config: CairnConfig) -> Response {
     let record_id = match RecordId::parse(record_id_raw.clone()) {
         Ok(record_id) => record_id,
@@ -200,16 +201,16 @@ async fn run_record(record_id_raw: String, vault_root: PathBuf, config: CairnCon
             } else {
                 None
             };
-            if config.source.redact_on_forget {
-                if let Err(e) = apply_redactions(&prepared_redactions) {
-                    if let Some(dir) = manifest_dir.as_ref() {
-                        let _ = restore_pending_redactions(&vault_root, dir);
-                    }
-                    return super::signed::aborted(
-                        ResponseVerb::Forget,
-                        format!("apply source redactions: {e}"),
-                    );
+            if config.source.redact_on_forget
+                && let Err(e) = apply_redactions(&prepared_redactions)
+            {
+                if let Some(dir) = manifest_dir.as_ref() {
+                    let _ = restore_pending_redactions(&vault_root, dir);
                 }
+                return super::signed::aborted(
+                    ResponseVerb::Forget,
+                    format!("apply source redactions: {e}"),
+                );
             }
 
             // Append body-free `source_forget` consent events inside a
@@ -248,14 +249,14 @@ async fn run_record(record_id_raw: String, vault_root: PathBuf, config: CairnCon
                 }
             }
 
-            if let Some(dir) = manifest_dir.as_ref() {
-                if let Err(e) = cleanup_pending_redactions(dir) {
-                    tracing::warn!(
-                        error = %e,
-                        dir = %dir.display(),
-                        "forget: cleanup of staged source-redaction manifest failed"
-                    );
-                }
+            if let Some(dir) = manifest_dir.as_ref()
+                && let Err(e) = cleanup_pending_redactions(dir)
+            {
+                tracing::warn!(
+                    error = %e,
+                    dir = %dir.display(),
+                    "forget: cleanup of staged source-redaction manifest failed"
+                );
             }
 
             let data = ForgetData {
