@@ -131,12 +131,6 @@ pub async fn read_jsonl_events(path: impl AsRef<Path>) -> anyhow::Result<Vec<Cap
 /// Returns an error only for unrecoverable setup failures (e.g. the JSONL
 /// file cannot be read, or envelope validation fails for all events). Per-turn
 /// failures are reported in [`CaptureTraceResponse::failed_turns`].
-#[allow(
-    clippy::too_many_lines,
-    reason = "CLI verb dispatcher: guard → parse → group → per-turn persist. \
-              Each step is linear; extracting sub-functions would hide the \
-              sequential flow without reducing complexity."
-)]
 pub async fn run_handler(
     store: &SqliteMemoryStore,
     vault_root: &Path,
@@ -153,6 +147,32 @@ pub async fn run_handler_with_scope(
     scope_binding: ScopeTuple,
 ) -> anyhow::Result<CaptureTraceResponse> {
     run_handler_inner(store, vault_root, from, Some(&scope_binding)).await
+}
+
+/// Persist an already-materialized batch of capture events.
+///
+/// This is used by import paths that have already staged and hashed payload
+/// files. Behavior matches [`run_handler`] except the events are supplied
+/// directly instead of read from JSONL. The vault guard runs before any
+/// persistence work.
+pub async fn run_events_handler(
+    store: &SqliteMemoryStore,
+    vault_root: &Path,
+    events: Vec<CaptureEvent>,
+) -> anyhow::Result<CaptureTraceResponse> {
+    capture_trace_guard()?;
+    run_events_handler_inner_no_guard(store, vault_root, events, None).await
+}
+
+/// Persist an already-materialized batch while binding projected rows to a verified vault scope.
+pub async fn run_events_handler_with_scope(
+    store: &SqliteMemoryStore,
+    vault_root: &Path,
+    events: Vec<CaptureEvent>,
+    scope_binding: ScopeTuple,
+) -> anyhow::Result<CaptureTraceResponse> {
+    capture_trace_guard()?;
+    run_events_handler_inner_no_guard(store, vault_root, events, Some(&scope_binding)).await
 }
 
 /// Persist a direct `Vec<TraceBlock>` capture from a JSON file.
@@ -223,12 +243,26 @@ async fn run_handler_inner(
     from: &Path,
     scope_binding: Option<&ScopeTuple>,
 ) -> anyhow::Result<CaptureTraceResponse> {
-    // §3.5 trust-boundary guard.
-    refuse_if_degraded(&ReconciliationReport::default(), vec![])
-        .context("capture_trace: vault degraded")?;
-
+    capture_trace_guard()?;
     let events = read_jsonl_events(from).await?;
+    run_events_handler_inner_no_guard(store, vault_root, events, scope_binding).await
+}
 
+fn capture_trace_guard() -> anyhow::Result<()> {
+    refuse_if_degraded(&ReconciliationReport::default(), vec![])
+        .context("capture_trace: vault degraded")
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "trace import keeps validation, projection, and per-turn atomicity in one ordered transaction flow"
+)]
+async fn run_events_handler_inner_no_guard(
+    store: &SqliteMemoryStore,
+    vault_root: &Path,
+    events: Vec<CaptureEvent>,
+    scope_binding: Option<&ScopeTuple>,
+) -> anyhow::Result<CaptureTraceResponse> {
     // Group by (session_id, turn_id). Events missing either ref, or
     // failing structural validation, are reported as failed and skipped
     // rather than aborting the whole import. Per-turn atomicity: a turn

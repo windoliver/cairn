@@ -3,10 +3,14 @@
 use std::io::Write as _;
 use std::path::Path;
 
-use cairn_cli::verbs::capture_trace::{read_jsonl_events, run_blocks_handler, run_handler};
+use cairn_cli::verbs::capture_trace::{
+    read_jsonl_events, run_blocks_handler, run_events_handler, run_events_handler_with_scope,
+    run_handler,
+};
 use cairn_core::domain::{
     ActorChainEntry, CaptureEvent, CaptureEventId, CaptureMode, CapturePayload, CaptureRefs,
-    ChainRole, Identity, PayloadHash, Rfc3339Timestamp, SessionId, SourceFamily, TerminalContext,
+    ChainRole, Identity, PayloadHash, Rfc3339Timestamp, ScopeTuple, SessionId, SourceFamily,
+    TerminalContext,
 };
 use sha2::{Digest as _, Sha256};
 use ulid::Ulid;
@@ -341,6 +345,16 @@ async fn open_test_store_in_memory() -> cairn_store_sqlite::SqliteMemoryStore {
 /// - Event ids: `01ARZ3NDEKTSV4RRFFQ69G5FAA` … `FAD`
 /// - Tool call id: `toolu_test_01`
 fn write_fixture(vault: &Path, jsonl_path: &Path) {
+    let events = one_turn_capture_events(vault);
+
+    let mut f = std::fs::File::create(jsonl_path).expect("create JSONL file");
+    for ev in &events {
+        let line = serde_json::to_string(ev).expect("serialize event");
+        writeln!(f, "{line}").expect("write JSONL line");
+    }
+}
+
+fn one_turn_capture_events(vault: &Path) -> Vec<CaptureEvent> {
     // ULIDs for each event.
     let id_user = "01ARZ3NDEKTSV4RRFFQ69G5FAA";
     let id_pre = "01ARZ3NDEKTSV4RRFFQ69G5FAB";
@@ -362,7 +376,7 @@ fn write_fixture(vault: &Path, jsonl_path: &Path) {
     let post_ref = write_source(vault, &format!("{id_post}.txt"), post_body);
     let stop_ref = write_source(vault, &format!("{id_stop}.txt"), stop_body);
 
-    let events = vec![
+    vec![
         make_event(
             id_user,
             "UserPromptSubmit",
@@ -403,13 +417,7 @@ fn write_fixture(vault: &Path, jsonl_path: &Path) {
             &stop_ref,
             &sha256_hex(stop_body),
         ),
-    ];
-
-    let mut f = std::fs::File::create(jsonl_path).expect("create JSONL file");
-    for ev in &events {
-        let line = serde_json::to_string(ev).expect("serialize event");
-        writeln!(f, "{line}").expect("write JSONL line");
-    }
+    ]
 }
 
 /// Same four events as [`write_fixture`] but emitted in JSONL with the
@@ -911,6 +919,93 @@ async fn capture_trace_single_turn_persists_and_summarizes() {
                 tx.turn_summary_exists(&session_id, "turn-1")?,
                 "turn summary should exist after Stop event"
             );
+            Ok(())
+        })
+        .await
+        .expect("store query should succeed");
+}
+
+#[tokio::test]
+#[allow(
+    clippy::expect_used,
+    reason = "test: panics surface broken invariants immediately"
+)]
+async fn capture_trace_imports_events_from_memory_vector() {
+    let vault = tempfile::tempdir().expect("tempdir");
+    let store = open_test_store_in_memory().await;
+    let events = one_turn_capture_events(vault.path());
+
+    let resp = run_events_handler(&store, vault.path(), events)
+        .await
+        .expect("run_events_handler should succeed");
+
+    assert!(
+        resp.failed_turns.is_empty(),
+        "expected no failures, got: {:?}",
+        resp.failed_turns
+    );
+    assert!(
+        !resp.policy_trace.is_empty(),
+        "vector import should run the shared policy filter path"
+    );
+
+    store
+        .with_tx(|tx| {
+            let session_id =
+                SessionId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").expect("valid session_id");
+            let rows = tx.list_trace_events(&session_id, "turn-1")?;
+            assert_eq!(rows.len(), 4, "expected 4 trace events, got {}", rows.len());
+            assert!(
+                tx.turn_summary_exists(&session_id, "turn-1")?,
+                "turn summary should exist after Stop event"
+            );
+            Ok(())
+        })
+        .await
+        .expect("store query should succeed");
+}
+
+#[tokio::test]
+#[allow(
+    clippy::expect_used,
+    reason = "test: panics surface broken invariants immediately"
+)]
+async fn capture_trace_imports_events_from_memory_vector_with_scope() {
+    let vault = tempfile::tempdir().expect("tempdir");
+    let store = open_test_store_in_memory().await;
+    let events = one_turn_capture_events(vault.path());
+    let scope_binding = ScopeTuple {
+        tenant: Some("tenant-vector".to_owned()),
+        workspace: Some("workspace-vector".to_owned()),
+        entity: Some("capture-trace-vector".to_owned()),
+        ..ScopeTuple::default()
+    };
+
+    let resp = run_events_handler_with_scope(&store, vault.path(), events, scope_binding)
+        .await
+        .expect("run_events_handler_with_scope should succeed");
+
+    assert!(
+        resp.failed_turns.is_empty(),
+        "expected no failures, got: {:?}",
+        resp.failed_turns
+    );
+    assert!(
+        !resp.policy_trace.is_empty(),
+        "scoped vector import should run the shared policy filter path"
+    );
+
+    store
+        .with_tx(|tx| {
+            let session_id =
+                SessionId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").expect("valid session_id");
+            let rows = tx.list_trace_events(&session_id, "turn-1")?;
+            assert_eq!(rows.len(), 4, "expected 4 trace events, got {}", rows.len());
+            for row in rows {
+                assert_eq!(row.scope.tenant.as_deref(), Some("tenant-vector"));
+                assert_eq!(row.scope.workspace.as_deref(), Some("workspace-vector"));
+                assert_eq!(row.scope.entity.as_deref(), Some("capture-trace-vector"));
+            }
             Ok(())
         })
         .await
