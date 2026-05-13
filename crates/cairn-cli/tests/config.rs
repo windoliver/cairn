@@ -2,6 +2,14 @@
 
 use cairn_cli::config::{CliOverrides, load, write_default};
 use cairn_core::config::{CairnConfig, StoreKind};
+use std::sync::Mutex;
+
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+fn with_cairn_env_lock<T>(f: impl FnOnce() -> T) -> T {
+    let _guard = ENV_LOCK.lock().unwrap();
+    f()
+}
 
 fn write_yaml(vault: &std::path::Path, content: &str) {
     let dir = vault.join(".cairn");
@@ -13,9 +21,19 @@ fn write_yaml(vault: &std::path::Path, content: &str) {
 
 #[test]
 fn absent_config_file_gives_default() {
-    let dir = tempfile::tempdir().unwrap();
-    let config = load(dir.path(), &CliOverrides::default()).unwrap();
-    assert_eq!(config, CairnConfig::default());
+    with_cairn_env_lock(|| {
+        temp_env::with_vars(
+            [
+                ("CAIRN_STORE__KIND", None::<&str>),
+                ("CAIRN_SENSORS__SCREEN__BACKEND", None::<&str>),
+            ],
+            || {
+                let dir = tempfile::tempdir().unwrap();
+                let config = load(dir.path(), &CliOverrides::default()).unwrap();
+                assert_eq!(config, CairnConfig::default());
+            },
+        );
+    });
 }
 
 #[test]
@@ -63,24 +81,28 @@ fn missing_env_var_returns_error() {
 #[test]
 fn cairn_env_override_wins_over_file() {
     // Use temp_env::with_var instead of set_var/remove_var (unsafe in edition 2024).
-    let dir = tempfile::tempdir().unwrap();
-    write_yaml(dir.path(), "store:\n  kind: nexus-sandbox\n");
-    temp_env::with_var("CAIRN_STORE__KIND", Some("sqlite"), || {
-        let config = load(dir.path(), &CliOverrides::default()).unwrap();
-        // CAIRN_STORE__KIND=sqlite overrides the file's nexus-sandbox
-        assert_eq!(config.store.kind, StoreKind::Sqlite);
+    with_cairn_env_lock(|| {
+        let dir = tempfile::tempdir().unwrap();
+        write_yaml(dir.path(), "store:\n  kind: nexus-sandbox\n");
+        temp_env::with_var("CAIRN_STORE__KIND", Some("sqlite"), || {
+            let config = load(dir.path(), &CliOverrides::default()).unwrap();
+            // CAIRN_STORE__KIND=sqlite overrides the file's nexus-sandbox
+            assert_eq!(config.store.kind, StoreKind::Sqlite);
+        });
     });
 }
 
 #[test]
 fn cairn_env_override_sets_screen_backend() {
-    let dir = tempfile::tempdir().unwrap();
-    temp_env::with_var("CAIRN_SENSORS__SCREEN__BACKEND", Some("screenpipe"), || {
-        let config = load(dir.path(), &CliOverrides::default()).unwrap();
-        assert_eq!(
-            config.sensors.screen.backend,
-            cairn_core::config::ScreenBackend::Screenpipe
-        );
+    with_cairn_env_lock(|| {
+        let dir = tempfile::tempdir().unwrap();
+        temp_env::with_var("CAIRN_SENSORS__SCREEN__BACKEND", Some("screenpipe"), || {
+            let config = load(dir.path(), &CliOverrides::default()).unwrap();
+            assert_eq!(
+                config.sensors.screen.backend,
+                cairn_core::config::ScreenBackend::Screenpipe
+            );
+        });
     });
 }
 
@@ -108,10 +130,20 @@ fn bootstrap_writes_config_file() {
 
 #[test]
 fn bootstrap_round_trips_to_default() {
-    let dir = tempfile::tempdir().unwrap();
-    write_default(dir.path()).unwrap();
-    let config = load(dir.path(), &CliOverrides::default()).unwrap();
-    assert_eq!(config, CairnConfig::default());
+    with_cairn_env_lock(|| {
+        temp_env::with_vars(
+            [
+                ("CAIRN_STORE__KIND", None::<&str>),
+                ("CAIRN_SENSORS__SCREEN__BACKEND", None::<&str>),
+            ],
+            || {
+                let dir = tempfile::tempdir().unwrap();
+                write_default(dir.path()).unwrap();
+                let config = load(dir.path(), &CliOverrides::default()).unwrap();
+                assert_eq!(config, CairnConfig::default());
+            },
+        );
+    });
 }
 
 #[test]

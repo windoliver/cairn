@@ -125,20 +125,20 @@ fn map_screen_probe(probe: &ScreenProbe) -> StatusResponseSensors {
 }
 
 fn map_screen_backend(backend: ScreenBackend) -> StatusResponseSensorsScreenBackend {
-    match backend {
-        ScreenBackend::Xcap => StatusResponseSensorsScreenBackend::Xcap,
-        ScreenBackend::Screenpipe => StatusResponseSensorsScreenBackend::Screenpipe,
+    if matches!(backend, ScreenBackend::Screenpipe) {
+        StatusResponseSensorsScreenBackend::Screenpipe
+    } else {
         // The current status schema is closed; unknown config backends are
         // reported as xcap while `probe_config` separately degrades them.
-        _ => StatusResponseSensorsScreenBackend::Xcap,
+        StatusResponseSensorsScreenBackend::Xcap
     }
 }
 
 fn status_screen_backend_label(backend: StatusResponseSensorsScreenBackend) -> &'static str {
-    match backend {
-        StatusResponseSensorsScreenBackend::Xcap => "xcap",
-        StatusResponseSensorsScreenBackend::Screenpipe => "screenpipe",
-        _ => "xcap",
+    if matches!(backend, StatusResponseSensorsScreenBackend::Screenpipe) {
+        "screenpipe"
+    } else {
+        "xcap"
     }
 }
 
@@ -147,7 +147,6 @@ fn status_screen_state_label(state: StatusResponseSensorsScreenState) -> &'stati
         StatusResponseSensorsScreenState::Disabled => "disabled",
         StatusResponseSensorsScreenState::Enabled => "enabled",
         StatusResponseSensorsScreenState::PermissionMissing => "permission_missing",
-        StatusResponseSensorsScreenState::Degraded => "degraded",
         _ => "degraded",
     }
 }
@@ -367,8 +366,8 @@ mod tests {
     fn map_screen_probe_reports_disabled_screen() {
         use cairn_core::generated::status::{
             StatusResponseSensorsScreenBackend, StatusResponseSensorsScreenDegradationCode,
-            StatusResponseSensorsScreenMode, StatusResponseSensorsScreenOcrEngine,
-            StatusResponseSensorsScreenPermission, StatusResponseSensorsScreenState,
+            StatusResponseSensorsScreenMode, StatusResponseSensorsScreenPermission,
+            StatusResponseSensorsScreenState,
         };
 
         let config = CairnConfig::default();

@@ -129,6 +129,8 @@ pub struct ScreenProbe {
     pub ocr_engine: ResolvedScreenOcrEngine,
     /// Degradation if capture is not fully enabled.
     pub degradation: Option<ScreenDegradation>,
+    /// Focused application name observed during probe, when available without capture.
+    pub focused_app: Option<String>,
 }
 
 impl ScreenProbe {
@@ -282,6 +284,15 @@ where
             ));
         }
 
+        if !config.allow_apps.is_empty()
+            && !probe
+                .focused_app
+                .as_ref()
+                .is_some_and(|app| config.allow_apps.contains(app))
+        {
+            return Ok(None);
+        }
+
         self.admit_frame(config.budget.max_frames_per_minute)?;
 
         let mut observation = self.backend.capture_snapshot(config)?;
@@ -343,6 +354,7 @@ pub fn probe_config(config: &ScreenSensorConfig) -> ScreenProbe {
             permission: ScreenPermission::NotRequested,
             ocr_engine,
             degradation: Some(ScreenDegradation::new(ScreenDegradationCode::Disabled)),
+            focused_app: None,
         };
     }
 
@@ -361,6 +373,7 @@ pub fn probe_config(config: &ScreenSensorConfig) -> ScreenProbe {
                     degradation: Some(ScreenDegradation::new(
                         ScreenDegradationCode::BackendUnavailable,
                     )),
+                    focused_app: None,
                 }
             }
         }
@@ -371,6 +384,7 @@ pub fn probe_config(config: &ScreenSensorConfig) -> ScreenProbe {
             permission: ScreenPermission::NotRequested,
             ocr_engine,
             degradation: Some(ScreenDegradation::new(ScreenDegradationCode::Degraded)),
+            focused_app: None,
         },
     }
 }
@@ -388,6 +402,7 @@ fn permission_missing_probe(
         degradation: Some(ScreenDegradation::new(
             ScreenDegradationCode::PermissionMissing,
         )),
+        focused_app: None,
     }
 }
 
@@ -482,6 +497,7 @@ mod tests {
             permission: ScreenPermission::Granted,
             ocr_engine: ResolvedScreenOcrEngine::Tesseract,
             degradation: None,
+            focused_app: Some("Code".to_owned()),
         }
     }
 
@@ -501,6 +517,25 @@ mod tests {
             sensor_label: XCAP_SENSOR_LABEL.to_owned(),
             backend: ScreenBackend::Xcap,
             ocr_engine: ResolvedScreenOcrEngine::Tesseract,
+        }
+    }
+
+    struct CaptureMustNotRunBackend {
+        probe: ScreenProbe,
+    }
+
+    impl ScreenBackendRuntime for CaptureMustNotRunBackend {
+        fn probe(&self, _config: &ScreenSensorConfig) -> ScreenProbe {
+            self.probe.clone()
+        }
+
+        fn capture_snapshot(
+            &self,
+            _config: &ScreenSensorConfig,
+        ) -> Result<ScreenObservation, ScreenError> {
+            Err(ScreenError::CaptureFailed(
+                "capture should not run for disallowed app".to_owned(),
+            ))
         }
     }
 
@@ -556,6 +591,20 @@ mod tests {
         let backend = FakeBackend {
             probe: fake_probe(),
             observation: fake_observation("meeting notes"),
+        };
+        let sensor = ScreenSensor::new(backend, NoopScreenPolicy);
+
+        let result = sensor.capture_snapshot(&config).unwrap();
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn allow_list_drops_disallowed_preflight_app_before_capture() {
+        let mut config = enabled_config();
+        config.allow_apps = vec!["Terminal".to_owned()];
+        let backend = CaptureMustNotRunBackend {
+            probe: fake_probe(),
         };
         let sensor = ScreenSensor::new(backend, NoopScreenPolicy);
 
