@@ -124,6 +124,15 @@ pub struct CapabilityGates {
     pub llm_configured: bool,
     /// Contract-version phase the runtime is operating at.
     pub contract_phase: Phase,
+    /// True when (a) `consolidation.enabled = true` in the active
+    /// config AND (b) the current runtime surface actually boots the
+    /// workflow scheduler (e.g. `cairn mcp serve --single-tenant`).
+    /// Without this gate, `advertise()` would offer the consolidation
+    /// capability on default `single_tenant=false` MCP deployments
+    /// where no scheduler is wired (round-8 adversarial review #2).
+    /// Defaults to `false` for back-compat with callers that don't yet
+    /// populate the field.
+    pub consolidation_runtime_ready: bool,
 }
 
 impl CapabilityGates {
@@ -222,7 +231,16 @@ pub fn advertise(gates: &CapabilityGates) -> Vec<Capabilities> {
     }
 
     // ── workflows (held back until scheduler is wired; issue #90) ─────────
-    if wiring::CONSOLIDATION_WORKFLOW_WIRED {
+    // Three independent gates must all be true:
+    //   1. compile-time wiring flag (the binary supports the path),
+    //   2. config opt-in (`consolidation.enabled = true`),
+    //   3. runtime readiness (this surface boots the scheduler).
+    // Without (3), default-stdio MCP deployments could advertise
+    // consolidation while their queued jobs never drain (round-8
+    // adversarial review #2).
+    if wiring::CONSOLIDATION_WORKFLOW_WIRED
+        && gates.consolidation_runtime_ready
+    {
         out.push(Capabilities::CairnWorkflowsV1Consolidation);
     }
 

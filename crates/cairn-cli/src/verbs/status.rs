@@ -281,6 +281,16 @@ fn compute_capabilities(
     let embedding_provider_ready =
         compute_embedding_provider_ready(config, model_present, vault_root);
 
+    // Consolidation runtime readiness mirrors the gates the `cairn mcp`
+    // boot path actually checks before constructing a Scheduler: the
+    // config must enable consolidation AND the deployment must be
+    // running in single_tenant mode with a bound principal (the only
+    // arm that constructs the SqliteJobStore + handlers). Without all
+    // three, status must not advertise the capability (round-8
+    // adversarial review #2).
+    let consolidation_runtime_ready = config.consolidation.enabled
+        && config.mcp.stdio.single_tenant
+        && config.mcp.stdio.principal.is_some();
     cairn_core::status::advertise(&cairn_core::status::CapabilityGates {
         config: config.capabilities(embedding_provider_ready),
         // CLI status path stays read-only and never opens the SQLite store.
@@ -290,6 +300,7 @@ fn compute_capabilities(
         model_present,
         embedding_provider_ready,
         llm_configured: false,
+        consolidation_runtime_ready,
         contract_phase: cairn_core::status::Phase::V0_1,
     })
 }
@@ -393,6 +404,9 @@ fn probe_mcp_graph_tools(
 /// passing through `cairn-core::status::advertise()`.
 fn capabilities_for_config(config: &CairnConfig, model_present: bool) -> Vec<Capabilities> {
     let embedding_provider_ready = compute_embedding_provider_ready(config, model_present, None);
+    let consolidation_runtime_ready = config.consolidation.enabled
+        && config.mcp.stdio.single_tenant
+        && config.mcp.stdio.principal.is_some();
     cairn_core::status::advertise(&cairn_core::status::CapabilityGates {
         config: config.capabilities(embedding_provider_ready),
         store: None,
@@ -401,6 +415,7 @@ fn capabilities_for_config(config: &CairnConfig, model_present: bool) -> Vec<Cap
         model_present,
         embedding_provider_ready,
         llm_configured: false,
+        consolidation_runtime_ready,
         contract_phase: cairn_core::status::Phase::V0_1,
     })
 }

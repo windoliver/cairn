@@ -564,6 +564,7 @@ fn default_p0_gates() -> CapabilityGates {
         embedding_provider_ready: false,
         llm_configured: false,
         contract_phase: Phase::V0_1,
+        consolidation_runtime_ready: false,
     }
 }
 

@@ -34,6 +34,7 @@ fn full_gates(phase: Phase) -> CapabilityGates {
         embedding_provider_ready: true,
         llm_configured: false,
         contract_phase: phase,
+        consolidation_runtime_ready: false,
     }
 }
 

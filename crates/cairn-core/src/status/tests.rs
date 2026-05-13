@@ -28,7 +28,8 @@ fn gates(bound: bool, model_present: bool, store: Option<StoreCaps>) -> Capabili
         // cloud-provider decoupling construct gates directly (see below).
         embedding_provider_ready: model_present,
         llm_configured: false,
-        contract_phase: Phase::V0_1,
+        consolidation_runtime_ready: false,
+            contract_phase: Phase::V0_1,
     }
 }
 
@@ -158,14 +159,25 @@ fn replay_capabilities_held_back() {
 }
 
 #[test]
-fn consolidation_capability_hidden_until_wired() {
-    let g = gates(true, true, None);
+fn consolidation_capability_requires_wiring_and_runtime_ready() {
+    // Gates with runtime NOT ready: cap must be absent regardless of
+    // the compile-time wiring constant (round-8 adversarial review #2).
+    let mut g = gates(true, true, None);
+    g.consolidation_runtime_ready = false;
+    let caps = advertise(&g);
+    assert!(
+        !caps.contains(&Capabilities::CairnWorkflowsV1Consolidation),
+        "must not advertise consolidation when runtime is not ready"
+    );
+
+    // Gates with runtime ready: cap presence mirrors the wiring const.
+    g.consolidation_runtime_ready = true;
     let caps = advertise(&g);
     let has_it = caps.contains(&Capabilities::CairnWorkflowsV1Consolidation);
     assert_eq!(
         has_it,
         wiring::CONSOLIDATION_WORKFLOW_WIRED,
-        "advertise must mirror CONSOLIDATION_WORKFLOW_WIRED"
+        "with runtime_ready=true, advertise mirrors CONSOLIDATION_WORKFLOW_WIRED"
     );
 }
 
@@ -287,6 +299,7 @@ mod remediation_tests {
             embedding_provider_ready: true,
             llm_configured: false,
             contract_phase: Phase::V0_1,
+            consolidation_runtime_ready: false,
         };
 
         for cap in advertise(&gates) {
@@ -368,7 +381,8 @@ mod prop_tests {
                     model_present: model,
                     embedding_provider_ready: embed_ready,
                     llm_configured: llm,
-                    contract_phase: phase,
+                    consolidation_runtime_ready: false,
+            contract_phase: phase,
                 }
             })
     }
@@ -442,7 +456,8 @@ fn openai_provider_without_key_drops_semantic_and_hybrid() {
         // Cloud provider not ready (feature flag off or API key missing)
         embedding_provider_ready: false,
         llm_configured: false,
-        contract_phase: Phase::V0_1,
+        consolidation_runtime_ready: false,
+            contract_phase: Phase::V0_1,
     };
     let caps = advertise(&g);
     assert!(

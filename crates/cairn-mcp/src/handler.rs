@@ -307,6 +307,7 @@ impl CairnMcpHandler {
             model_present,
             embedding_provider_ready,
             llm_configured: false,
+            consolidation_runtime_ready: false,
             contract_phase: cairn_core::status::Phase::V0_1,
         };
 

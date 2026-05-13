@@ -81,11 +81,18 @@ pub enum ConsolidationConfigError {
         /// Required minimum.
         floor: u32,
     },
-    /// `salience_floor` outside `[0, 1]`.
-    #[error("consolidation.salience_floor {actual} outside [0, 1]")]
+    /// `salience_floor` outside the currently-supported range.
+    #[error(
+        "consolidation.salience_floor {actual} outside [0, {max}] — real \
+         salience scoring is pending; list_trace_turns emits a constant \
+         0.5 baseline today, so any floor above that would gate every \
+         turn out of every window"
+    )]
     SalienceOutOfRange {
         /// Provided value.
         actual: f32,
+        /// Max accepted value while real salience scoring is pending.
+        max: f32,
     },
 }
 
@@ -93,6 +100,15 @@ impl ConsolidationConfig {
     /// Lowest-acceptable `token_budget`. Below this the summary cannot
     /// carry meaningful source-id linkage.
     pub const TOKEN_BUDGET_FLOOR: u32 = 32;
+
+    /// Highest-acceptable `salience_floor` while real per-turn salience
+    /// scoring is still pending. `SqliteMemoryStore::list_trace_turns`
+    /// stamps every header with a constant `0.5` baseline today, so any
+    /// floor above this would gate every turn out of every window and
+    /// trigger the round-7 dedupe-poisoning failure mode (round-8
+    /// adversarial review #3). Bumped to `1.0` when a real salience
+    /// signal lands.
+    pub const SALIENCE_FLOOR_MAX: f32 = 0.5;
 
     /// Validate semantic invariants the serde layer can't express.
     ///
@@ -108,9 +124,10 @@ impl ConsolidationConfig {
                 floor: Self::TOKEN_BUDGET_FLOOR,
             });
         }
-        if !(0.0..=1.0).contains(&self.salience_floor) {
+        if !(0.0..=Self::SALIENCE_FLOOR_MAX).contains(&self.salience_floor) {
             return Err(ConsolidationConfigError::SalienceOutOfRange {
                 actual: self.salience_floor,
+                max: Self::SALIENCE_FLOOR_MAX,
             });
         }
         Ok(())

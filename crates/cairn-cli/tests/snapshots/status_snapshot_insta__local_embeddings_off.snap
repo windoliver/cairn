@@ -9,8 +9,7 @@ expression: v
     "cairn.mcp.v1.forget.record",
     "cairn.mcp.v1.retrieve.session",
     "cairn.mcp.v1.retrieve.turn",
-    "cairn.mcp.v1.retrieve.tool_call",
-    "cairn.workflows.v1.consolidation"
+    "cairn.mcp.v1.retrieve.tool_call"
   ],
   "contract": "cairn.mcp.v1",
   "extensions": [],

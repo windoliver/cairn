@@ -1,6 +1,5 @@
 ---
 source: crates/cairn-cli/src/render.rs
-assertion_line: 132
 expression: "render_for_tty(b\"Compiling foo v0.1.0\\r    Finished in 1.2s\\r\\nbuild ok\\n\")"
 ---
 Compiling foo v0.1.0␍    Finished in 1.2s

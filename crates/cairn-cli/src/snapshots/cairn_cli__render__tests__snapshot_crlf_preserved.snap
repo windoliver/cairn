@@ -1,6 +1,5 @@
 ---
 source: crates/cairn-cli/src/render.rs
-assertion_line: 144
 expression: "render_for_tty(b\"alpha\\r\\nbeta\\r\\ngamma\\r\\n\")"
 ---
 alpha

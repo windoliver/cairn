@@ -218,11 +218,13 @@ impl ConsolidationHandler {
         // only enqueues one job at since_sequence=0. Without re-
         // enqueueing here, every window after the first would stay
         // unconsolidated until the next unrelated capture happens.
-        // After a successful summary, peek whether enough turns still
-        // remain past the new watermark to satisfy
-        // `min_turns_for_trigger` and enqueue another job at
-        // since_sequence = draft.last_sequence. Best-effort: enqueue
-        // failures are logged but do not fail this job.
+        //
+        // Failure propagation (round-8 adversarial review #1): the
+        // continuation is part of this job's success contract — if the
+        // candidate read or the follow-up enqueue fails with a backend
+        // error, return Retry. The summary upsert above is idempotent
+        // (stable target_id + body-hash dedup), so a retry re-runs
+        // safely. Done is reserved for "no further work needed."
         if let Some(js) = self.job_store.as_ref() {
             let new_since = draft.last_sequence;
             let next_candidates = self
@@ -234,7 +236,10 @@ impl ConsolidationHandler {
                     payload.bound_scope.as_ref(),
                 )
                 .await
-                .unwrap_or_default();
+                .map_err(|e| {
+                    warn!(error = %e, "follow-up window read failed; retrying");
+                    e
+                })?;
             let active = u32::try_from(next_candidates.len()).unwrap_or(u32::MAX);
             if active >= self.config.min_turns_for_trigger {
                 let now_ms = i64::try_from(
@@ -244,7 +249,7 @@ impl ConsolidationHandler {
                         .as_millis(),
                 )
                 .unwrap_or(i64::MAX);
-                let _ = crate::consolidation::enqueue_if_due_scoped(
+                match crate::consolidation::enqueue_if_due_scoped(
                     js.as_ref(),
                     &self.config,
                     &payload.session_id,
@@ -253,7 +258,23 @@ impl ConsolidationHandler {
                     now_ms,
                     payload.bound_scope.as_ref(),
                 )
-                .await;
+                .await
+                {
+                    Ok(_)
+                    | Err(cairn_core::contract::job_store::JobStoreError::DuplicateDedupeKey {
+                        ..
+                    }) => {
+                        // Either enqueued fresh (Ok(EnqueueDecision::*))
+                        // or a peer already queued the next window for
+                        // this watermark. Both are success states.
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "follow-up enqueue failed; retrying");
+                        return Ok(HandlerOutcome::Retry {
+                            reason: format!("follow-up enqueue: {e}"),
+                        });
+                    }
+                }
             }
         }
 
