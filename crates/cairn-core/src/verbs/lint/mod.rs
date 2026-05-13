@@ -266,8 +266,10 @@ mod tests {
         // no hot_body_loader wired and no vault_root, it still emits
         // ONE DeferredCheck Info advisory documenting the dormant
         // missing_summary check (codex review round 1 finding 4).
-        // Provenance (#257) remains a stub → 1 DeferredCheck Info.
-        // Total: 2 Info findings, no warnings/errors.
+        // Provenance (#257) now always validates `source_ids`
+        // frontmatter shape, but there are no records here, so it
+        // contributes no findings. Total: 1 Info finding, no
+        // warnings/errors.
         assert_eq!(data.summary.total, data.findings.len() as u64);
         assert_eq!(data.summary.by_severity.error, 0);
         assert_eq!(data.summary.by_severity.warning, 0);
@@ -276,9 +278,9 @@ mod tests {
                 .iter()
                 .filter(|f| matches!(f.kind, Kind::DeferredCheck))
                 .count(),
-            2
+            1
         );
-        assert_eq!(data.summary.by_severity.info, 2);
+        assert_eq!(data.summary.by_severity.info, 1);
     }
 
     #[tokio::test]
@@ -382,17 +384,20 @@ mod tests {
         // is the real walker now — with no hot_body_loader wired and
         // no vault_root, it emits ONE DeferredCheck Info for the
         // dormant missing_summary check (codex round 1 finding 4).
-        // Provenance (#257) remains a stub → 1 DeferredCheck Info, 1
-        // Error. Total: 2 Info + 1 Error.
-        assert_eq!(data.summary.by_severity.error, 1);
+        // Provenance (#257) now always validates source-link presence,
+        // even without a filesystem-backed vault_root. This legacy
+        // fixture record has no `source_ids`, so it emits one
+        // MissingProvenance Error; file-backed checks remain skipped.
+        // Total: 1 Info + 2 Errors.
+        assert_eq!(data.summary.by_severity.error, 2);
         assert_eq!(data.summary.by_severity.warning, 0);
         assert_eq!(
             data.findings
                 .iter()
                 .filter(|f| matches!(f.kind, Kind::DeferredCheck))
                 .count(),
-            2
+            1
         );
-        assert_eq!(data.summary.by_severity.info, 2);
+        assert_eq!(data.summary.by_severity.info, 1);
     }
 }

@@ -1,59 +1,682 @@
-//! §6.3 — `missing_provenance` check.
+//! §6.3 — source-link hygiene over record provenance.
 //!
-//! Source-link hygiene over `Provenance` requires a `source_refs` field
-//! (or a content-addressable `source_hash` resolver) that does not exist
-//! in `cairn-core` today. PR-1 emits a single `deferred_check` info
-//! finding pointing at the follow-up issue; #257 chooses the data-model
-//! direction and wires the real check.
+//! Records currently carry `source_ids` in frontmatter (`extra_frontmatter`)
+//! rather than in the typed `Provenance` struct. This check therefore audits
+//! the projected frontmatter plus the typed `provenance.source_hash` field:
+//!
+//! - `source_ids` must exist and contain at least one string path
+//! - each referenced `sources/...` file must resolve under `vault_root`
+//! - the source file bytes must match `provenance.source_hash`
+//!
+//! The remaining #257 bullets around `source_forget` / `redact_on_forget`
+//! need a read-only journal/config surface in `LintInputs`; this module
+//! only enforces what the current typed inputs can prove.
+//!
+//! When `vault_root` is not wired, filesystem-backed checks become a no-op so
+//! unrelated fixture tests can keep constructing `LintInputs` without a vault.
+
+use std::path::{Path, PathBuf};
+
+use blake3::Hasher as Blake3Hasher;
+use sha2::{Digest, Sha256, Sha512};
 
 use crate::generated::verbs::lint::{Finding, Kind, Severity};
-use crate::verbs::lint::{LintInputs, finding};
+use crate::verbs::lint::{LintInputs, LintRecord, finding, target_record};
 
-const TRACKING_ISSUE: i64 = 257;
-
-/// Always emits one info-severity `DeferredCheck` finding pointing at
-/// the follow-up issue.
+/// Run the source-link hygiene checks over every active record.
 #[must_use]
-pub fn run(_inputs: &LintInputs<'_>) -> Vec<Finding> {
+pub fn run(inputs: &LintInputs<'_>) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let source_root = inputs.config.vault.layout.sources.as_str();
+    for record in inputs.records {
+        let source_ids = match source_ids(record) {
+            Ok(ids) => ids,
+            Err(finding) => {
+                findings.push(finding);
+                continue;
+            }
+        };
+
+        for source_id in &source_ids {
+            let relative_path = match validate_source_id_shape(source_root, source_id) {
+                Ok(path) => path,
+                Err(detail) => {
+                    findings.push(invalid_source_id(record, source_id, &detail));
+                    continue;
+                }
+            };
+            let Some(vault_root) = inputs.vault_root else {
+                continue;
+            };
+            let expected_path = vault_root.join(&relative_path);
+            if !expected_path.is_file() {
+                findings.push(missing_source_file(record, source_id, &expected_path));
+                continue;
+            }
+
+            if source_ids.len() != 1 {
+                findings.push(multi_source_hash_gap(record, source_id, &expected_path));
+                continue;
+            }
+
+            match source_hash_matches(
+                &expected_path,
+                source_id,
+                &record.stored.record.provenance.source_hash,
+            ) {
+                Ok(true) => {}
+                Ok(false) => {
+                    findings.push(hash_mismatch(record, source_id, &expected_path));
+                }
+                Err(message) => {
+                    findings.push(hash_check_failed(
+                        record,
+                        source_id,
+                        &expected_path,
+                        &message,
+                    ));
+                }
+            }
+        }
+    }
+
+    findings
+}
+
+fn source_ids<'a>(record: &'a LintRecord) -> Result<Vec<&'a str>, Finding> {
+    let Some(value) = record.stored.record.extra_frontmatter.get("source_ids") else {
+        return Err(missing_source_ids(
+            record,
+            "record frontmatter is missing `source_ids`",
+        ));
+    };
+    let Some(items) = value.as_array() else {
+        return Err(missing_source_ids(
+            record,
+            "`source_ids` must be an array of vault-relative source paths",
+        ));
+    };
+
+    let ids: Vec<&str> = items.iter().filter_map(serde_json::Value::as_str).collect();
+    if ids.is_empty() || ids.len() != items.len() {
+        return Err(missing_source_ids(
+            record,
+            "`source_ids` must contain at least one string path",
+        ));
+    }
+
+    Ok(ids)
+}
+
+fn validate_source_id_shape(source_root: &str, source_id: &str) -> Result<PathBuf, String> {
+    use std::path::Component;
+
+    let path = Path::new(source_id);
+    let required_prefix = format!("{source_root}/");
+    if source_id.is_empty() {
+        return Err("source_ids entries must not be empty".to_owned());
+    }
+    if source_id.contains('\0') {
+        return Err("source_ids entries must not contain NUL bytes".to_owned());
+    }
+    if source_id.contains('\\') {
+        return Err("source_ids entries must use forward slashes".to_owned());
+    }
+    if source_id.contains("://") {
+        return Err("source_ids entries must not contain a URL scheme".to_owned());
+    }
+    if path.is_absolute() {
+        return Err("source_ids entries must be vault-relative paths".to_owned());
+    }
+    if !source_id.starts_with(&required_prefix) {
+        return Err(format!(
+            "source_ids entries must live under `{source_root}/`"
+        ));
+    }
+    if source_id.contains('?') || source_id.contains('#') {
+        return Err("source_ids entries must not contain query or fragment suffixes".to_owned());
+    }
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                return Err("source_ids entries must not contain `..`".to_owned());
+            }
+            Component::Normal(seg) if seg.is_empty() => {
+                return Err("source_ids entries must not contain empty path segments".to_owned());
+            }
+            _ => {}
+        }
+    }
+    if source_id.split('/').any(str::is_empty) {
+        return Err("source_ids entries must not contain empty path segments".to_owned());
+    }
+    Ok(path.to_path_buf())
+}
+
+fn source_hash_matches(path: &Path, source_id: &str, expected: &str) -> Result<bool, String> {
+    let bytes = std::fs::read(path)
+        .map_err(|e| format!("unable to read source file {}: {e}", path.display()))?;
+
+    if hash_bytes(expected, &bytes)? == *expected {
+        return Ok(true);
+    }
+
+    if !can_normalize_text_line_endings(source_id, &bytes) {
+        return Ok(false);
+    }
+
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        return Ok(false);
+    };
+    let normalized = text.replace("\r\n", "\n");
+    Ok(hash_bytes(expected, normalized.as_bytes())? == *expected)
+}
+
+fn can_normalize_text_line_endings(source_id: &str, bytes: &[u8]) -> bool {
+    if has_known_binary_extension(source_id) {
+        return false;
+    }
+
+    is_text_like_bytes(bytes)
+}
+
+fn has_known_binary_extension(source_id: &str) -> bool {
+    let Some(ext) = Path::new(source_id)
+        .extension()
+        .and_then(|ext| ext.to_str())
+    else {
+        return false;
+    };
+
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "bin"
+            | "png"
+            | "jpg"
+            | "jpeg"
+            | "gif"
+            | "webp"
+            | "pdf"
+            | "zip"
+            | "gz"
+            | "bz2"
+            | "xz"
+            | "7z"
+            | "tar"
+            | "mp3"
+            | "mp4"
+            | "mov"
+            | "avi"
+            | "wav"
+            | "ogg"
+            | "woff"
+            | "woff2"
+            | "ttf"
+            | "otf"
+            | "exe"
+            | "dll"
+            | "so"
+            | "dylib"
+            | "class"
+            | "jar"
+            | "pyc"
+    )
+}
+
+fn is_text_like_bytes(bytes: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return false;
+    };
+
+    !text
+        .chars()
+        .any(|ch| ch.is_control() && ch != '\n' && ch != '\r' && ch != '\t')
+}
+
+fn hash_bytes(expected: &str, bytes: &[u8]) -> Result<String, String> {
+    let Some((algo, _)) = expected.split_once(':') else {
+        return Err(format!(
+            "unsupported provenance.source_hash format `{expected}`"
+        ));
+    };
+
+    let digest = match algo {
+        "sha256" => format!("sha256:{:x}", Sha256::digest(bytes)),
+        "sha512" => format!("sha512:{:x}", Sha512::digest(bytes)),
+        "blake3" => {
+            let mut hasher = Blake3Hasher::new();
+            hasher.update(bytes);
+            format!("blake3:{}", hasher.finalize().to_hex())
+        }
+        _ => {
+            return Err(format!(
+                "unsupported provenance.source_hash algorithm `{algo}`"
+            ));
+        }
+    };
+
+    Ok(digest)
+}
+
+fn missing_source_ids(record: &LintRecord, detail: &str) -> Finding {
+    let mut f = finding(
+        Kind::MissingProvenance,
+        Severity::Error,
+        format!(
+            "record is missing valid source-link provenance: {detail} \
+             (expected non-empty `source_ids` frontmatter)"
+        ),
+    );
+    f.target = Some(target_record(&record.stored.record.id));
+    f.suggested_fix = Some(
+        "re-ingest the record with `source_ids` frontmatter pointing at the \
+         source file(s) under the configured source root"
+            .to_owned(),
+    );
+    f
+}
+
+fn missing_source_file(record: &LintRecord, source_id: &str, expected_path: &Path) -> Finding {
+    let mut f = finding(
+        Kind::BrokenSourceLink,
+        Severity::Error,
+        format!(
+            "source link does not resolve: source_id={source_id} \
+             expected_path={}",
+            expected_path.display()
+        ),
+    );
+    f.target = Some(target_record(&record.stored.record.id));
+    f.suggested_fix = Some(
+        "restore the missing source file or re-ingest the record with a valid \
+         `source_ids` entry"
+            .to_owned(),
+    );
+    f
+}
+
+fn invalid_source_id(record: &LintRecord, source_id: &str, detail: &str) -> Finding {
+    let mut f = finding(
+        Kind::MissingProvenance,
+        Severity::Error,
+        format!("invalid source_id `{source_id}`: {detail}"),
+    );
+    f.target = Some(target_record(&record.stored.record.id));
+    f.suggested_fix = Some(
+        "re-ingest the record with a vault-relative source-root path in \
+         `source_ids`"
+            .to_owned(),
+    );
+    f
+}
+
+fn hash_mismatch(record: &LintRecord, source_id: &str, expected_path: &Path) -> Finding {
+    let mut f = finding(
+        Kind::MissingProvenance,
+        Severity::Error,
+        format!(
+            "source hash mismatch: source_id={source_id} expected_path={} \
+             expected_hash={}",
+            expected_path.display(),
+            record.stored.record.provenance.source_hash
+        ),
+    );
+    f.target = Some(target_record(&record.stored.record.id));
+    f.suggested_fix = Some(
+        "restore the original source bytes or re-ingest the record so \
+         provenance.source_hash matches the current source file"
+            .to_owned(),
+    );
+    f
+}
+
+fn hash_check_failed(
+    record: &LintRecord,
+    source_id: &str,
+    expected_path: &Path,
+    detail: &str,
+) -> Finding {
+    let mut f = finding(
+        Kind::MissingProvenance,
+        Severity::Error,
+        format!(
+            "source hash check failed: source_id={source_id} expected_path={} {detail}",
+            expected_path.display()
+        ),
+    );
+    f.target = Some(target_record(&record.stored.record.id));
+    f
+}
+
+fn multi_source_hash_gap(record: &LintRecord, source_id: &str, expected_path: &Path) -> Finding {
     let mut f = finding(
         Kind::DeferredCheck,
         Severity::Info,
         format!(
-            "source-link hygiene requires source_refs on Provenance \
-             (tracked in #{TRACKING_ISSUE})"
+            "multi-source hash verification is deferred for source_id={source_id} \
+             expected_path={}: record carries multiple `source_ids` but only one \
+             `provenance.source_hash` value",
+            expected_path.display()
         ),
     );
-    f.tracking_issue = Some(TRACKING_ISSUE);
-    f.suggested_fix = Some(format!(
-        "ship #{TRACKING_ISSUE} to enable the real missing_provenance check"
-    ));
-    vec![f]
+    f.target = Some(target_record(&record.stored.record.id));
+    f.suggested_fix = Some(
+        "extend the record data model with per-source hashes before enforcing \
+         hash equality across multi-source records"
+            .to_owned(),
+    );
+    f.tracking_issue = Some(257);
+    f
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use crate::config::CairnConfig;
-    use crate::contract::memory_store::IndexStats;
+    use crate::contract::memory_store::{IndexStats, StoredRecord};
+    use crate::domain::record::tests_export::sample_record;
+    use crate::verbs::lint::{
+        ConsentModel, LintInputs, LintRecord, SchemaVersion, empty_author_states,
+        empty_unresolvable_authors,
+    };
+
+    fn lint_record() -> LintRecord {
+        LintRecord {
+            stored: StoredRecord {
+                record: sample_record(),
+                version: 1,
+                schema_version: Some(SchemaVersion::current()),
+            },
+            consent_model: ConsentModel::LegacyEvent,
+        }
+    }
+
+    fn with_source_ids(mut record: LintRecord, ids: &[&str]) -> LintRecord {
+        record.stored.record.extra_frontmatter =
+            BTreeMap::from([("source_ids".to_owned(), serde_json::json!(ids))]);
+        record
+    }
+
+    fn with_expected_hash(mut record: LintRecord, hash: String) -> LintRecord {
+        record.stored.record.provenance.source_hash = hash;
+        record
+    }
+
+    fn inputs<'a>(
+        cfg: &'a CairnConfig,
+        records: &'a [LintRecord],
+        root: Option<&'a Path>,
+    ) -> LintInputs<'a> {
+        LintInputs {
+            records,
+            config: cfg,
+            index_stats: IndexStats::new(records.len() as u64, records.len() as u64),
+            author_states: empty_author_states(),
+            unresolvable_authors: empty_unresolvable_authors(),
+            consent_lookup: None,
+            vault_root: root,
+            hot_body_loader: None,
+        }
+    }
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        format!("sha256:{:x}", Sha256::digest(bytes))
+    }
 
     #[test]
-    fn always_emits_one_info_finding_pointing_at_257() {
+    fn missing_source_ids_emits_missing_provenance_error() {
         let cfg = CairnConfig::default();
-        let inputs = LintInputs {
-            records: &[],
-            config: &cfg,
-            index_stats: IndexStats::new(0, 0),
-            author_states: crate::verbs::lint::empty_author_states(),
-            unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
-            consent_lookup: None,
-            vault_root: None,
-            hot_body_loader: None,
-        };
-        let f = run(&inputs);
-        assert_eq!(f.len(), 1);
-        assert_eq!(f[0].kind, Kind::DeferredCheck);
-        assert_eq!(f[0].severity, Severity::Info);
-        assert_eq!(f[0].tracking_issue, Some(257));
-        assert!(f[0].suggested_fix.is_some());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let records = [lint_record()];
+        let findings = run(&inputs(&cfg, &records, Some(dir.path())));
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, Kind::MissingProvenance);
+        assert_eq!(findings[0].severity, Severity::Error);
+        assert!(findings[0].message.contains("source_ids"));
+    }
+
+    #[test]
+    fn empty_source_ids_emits_missing_provenance_error() {
+        let cfg = CairnConfig::default();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let records = [with_source_ids(lint_record(), &[])];
+        let findings = run(&inputs(&cfg, &records, Some(dir.path())));
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, Kind::MissingProvenance);
+        assert!(findings[0].message.contains("source_ids"));
+    }
+
+    #[test]
+    fn missing_source_file_emits_broken_source_link_error() {
+        let cfg = CairnConfig::default();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source_id = "sources/hook/missing.txt";
+        let records = [with_source_ids(lint_record(), &[source_id])];
+        let findings = run(&inputs(&cfg, &records, Some(dir.path())));
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, Kind::BrokenSourceLink);
+        assert_eq!(findings[0].severity, Severity::Error);
+        assert!(findings[0].message.contains(source_id));
+        assert!(findings[0].message.contains("expected_path="));
+    }
+
+    #[test]
+    fn source_id_outside_sources_emits_missing_provenance_error() {
+        let cfg = CairnConfig::default();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let records = [with_source_ids(lint_record(), &["../escape.txt"])];
+        let findings = run(&inputs(&cfg, &records, Some(dir.path())));
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, Kind::MissingProvenance);
+        assert!(findings[0].message.contains("invalid source_id"));
+    }
+
+    #[test]
+    fn source_id_with_scheme_is_rejected() {
+        let cfg = CairnConfig::default();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let records = [with_source_ids(
+            lint_record(),
+            &["https://example.com/source.txt"],
+        )];
+        let findings = run(&inputs(&cfg, &records, Some(dir.path())));
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, Kind::MissingProvenance);
+        assert!(findings[0].message.contains("invalid source_id"));
+    }
+
+    #[test]
+    fn source_id_with_empty_segment_is_rejected() {
+        let cfg = CairnConfig::default();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let records = [with_source_ids(lint_record(), &["sources//double.txt"])];
+        let findings = run(&inputs(&cfg, &records, Some(dir.path())));
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, Kind::MissingProvenance);
+        assert!(findings[0].message.contains("invalid source_id"));
+    }
+
+    #[test]
+    fn edited_source_file_emits_missing_provenance_error() {
+        let cfg = CairnConfig::default();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source_id = "sources/hook/source.txt";
+        let source_path = dir.path().join(source_id);
+        std::fs::create_dir_all(source_path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&source_path, "edited bytes").expect("write source");
+
+        let record = with_expected_hash(
+            with_source_ids(lint_record(), &[source_id]),
+            sha256_hex(b"original bytes"),
+        );
+        let findings = run(&inputs(&cfg, &[record], Some(dir.path())));
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, Kind::MissingProvenance);
+        assert!(findings[0].message.contains("source hash mismatch"));
+    }
+
+    #[test]
+    fn malformed_source_hash_format_emits_hash_check_failed_error() {
+        let cfg = CairnConfig::default();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source_id = "sources/hook/source.txt";
+        let source_path = dir.path().join(source_id);
+        std::fs::create_dir_all(source_path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&source_path, "alpha\nbeta\n").expect("write source");
+
+        let record = with_expected_hash(with_source_ids(lint_record(), &[source_id]), "not-a-digest".to_owned());
+        let findings = run(&inputs(&cfg, &[record], Some(dir.path())));
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, Kind::MissingProvenance);
+        assert!(findings[0].message.contains("source hash check failed"));
+        assert!(findings[0].message.contains("unsupported provenance.source_hash format"));
+    }
+
+    #[test]
+    fn unsupported_source_hash_algorithm_emits_hash_check_failed_error() {
+        let cfg = CairnConfig::default();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source_id = "sources/hook/source.txt";
+        let source_path = dir.path().join(source_id);
+        std::fs::create_dir_all(source_path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&source_path, "alpha\nbeta\n").expect("write source");
+
+        let record = with_expected_hash(
+            with_source_ids(lint_record(), &[source_id]),
+            "sha1:deadbeef".to_owned(),
+        );
+        let findings = run(&inputs(&cfg, &[record], Some(dir.path())));
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, Kind::MissingProvenance);
+        assert!(findings[0].message.contains("source hash check failed"));
+        assert!(findings[0].message.contains("unsupported provenance.source_hash algorithm"));
+    }
+
+    #[test]
+    fn crlf_text_source_matches_lf_hash() {
+        let cfg = CairnConfig::default();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source_id = "sources/hook/source.txt";
+        let source_path = dir.path().join(source_id);
+        std::fs::create_dir_all(source_path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&source_path, "alpha\r\nbeta\r\n").expect("write source");
+
+        let record = with_expected_hash(
+            with_source_ids(lint_record(), &[source_id]),
+            sha256_hex(b"alpha\nbeta\n"),
+        );
+        let findings = run(&inputs(&cfg, &[record], Some(dir.path())));
+        assert!(
+            findings.is_empty(),
+            "expected no findings, got {findings:?}"
+        );
+    }
+
+    #[test]
+    fn no_vault_root_still_enforces_source_ids_presence() {
+        let cfg = CairnConfig::default();
+        let records = [lint_record()];
+        let findings = run(&inputs(&cfg, &records, None));
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, Kind::MissingProvenance);
+        assert!(findings[0].message.contains("source_ids"));
+    }
+
+    #[test]
+    fn no_vault_root_skips_filesystem_backed_source_checks() {
+        let cfg = CairnConfig::default();
+        let records = [with_source_ids(lint_record(), &["sources/hook/source.txt"])];
+        assert!(run(&inputs(&cfg, &records, None)).is_empty());
+    }
+
+    #[test]
+    fn no_vault_root_still_rejects_invalid_source_id_shapes() {
+        let cfg = CairnConfig::default();
+        let records = [with_source_ids(lint_record(), &["../escape.txt"])];
+        let findings = run(&inputs(&cfg, &records, None));
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, Kind::MissingProvenance);
+        assert!(findings[0].message.contains("invalid source_id"));
+    }
+
+    #[test]
+    fn crlf_normalization_does_not_hide_non_text_utf8_byte_drift() {
+        let cfg = CairnConfig::default();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source_id = "sources/hook/source.bin";
+        let source_path = dir.path().join(source_id);
+        std::fs::create_dir_all(source_path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&source_path, "{\"a\":1}\r\n{\"b\":2}\r\n").expect("write source");
+
+        let record = with_expected_hash(
+            with_source_ids(lint_record(), &[source_id]),
+            sha256_hex(b"{\"a\":1}\n{\"b\":2}\n"),
+        );
+        let findings = run(&inputs(&cfg, &[record], Some(dir.path())));
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, Kind::MissingProvenance);
+        assert!(findings[0].message.contains("source hash mismatch"));
+    }
+
+    #[test]
+    fn crlf_extensionless_text_source_matches_lf_hash() {
+        let cfg = CairnConfig::default();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source_id = "sources/hook/raw-email";
+        let source_path = dir.path().join(source_id);
+        std::fs::create_dir_all(source_path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&source_path, "alpha\r\nbeta\r\n").expect("write source");
+
+        let record = with_expected_hash(
+            with_source_ids(lint_record(), &[source_id]),
+            sha256_hex(b"alpha\nbeta\n"),
+        );
+        let findings = run(&inputs(&cfg, &[record], Some(dir.path())));
+        assert!(
+            findings.is_empty(),
+            "expected no findings, got {findings:?}"
+        );
+    }
+
+    #[test]
+    fn multiple_source_ids_emit_deferred_hash_gap_instead_of_false_mismatch() {
+        let cfg = CairnConfig::default();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = dir.path().join("sources/hook/a.txt");
+        let b = dir.path().join("sources/hook/b.txt");
+        std::fs::create_dir_all(a.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&a, "alpha").expect("write a");
+        std::fs::write(&b, "beta").expect("write b");
+
+        let record = with_expected_hash(
+            with_source_ids(lint_record(), &["sources/hook/a.txt", "sources/hook/b.txt"]),
+            sha256_hex(b"alpha"),
+        );
+        let findings = run(&inputs(&cfg, &[record], Some(dir.path())));
+        assert_eq!(findings.len(), 2);
+        assert!(findings.iter().all(|f| f.kind == Kind::DeferredCheck));
+    }
+
+    #[test]
+    fn configurable_source_root_is_respected() {
+        let mut cfg = CairnConfig::default();
+        cfg.vault.layout.sources = "inbox".to_owned();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source_id = "inbox/hook/source.txt";
+        let source_path = dir.path().join(source_id);
+        std::fs::create_dir_all(source_path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&source_path, "alpha\nbeta\n").expect("write source");
+
+        let record = with_expected_hash(
+            with_source_ids(lint_record(), &[source_id]),
+            sha256_hex(b"alpha\nbeta\n"),
+        );
+        let findings = run(&inputs(&cfg, &[record], Some(dir.path())));
+        assert!(
+            findings.is_empty(),
+            "expected no findings, got {findings:?}"
+        );
     }
 }
