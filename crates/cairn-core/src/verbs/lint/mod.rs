@@ -6,8 +6,10 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::config::CairnConfig;
+use crate::contract::consent_journal::ConsentJournalReader;
 use crate::contract::consent_lookup::ConsentLookup;
 use crate::contract::memory_store::{IndexStats, StoredRecord};
+use crate::contract::source_resolver::SourceResolver;
 use crate::domain::record::RecordId;
 use crate::domain::{Identity, SourceId};
 use crate::generated::verbs::lint::{
@@ -123,6 +125,11 @@ pub struct LintInputs<'a> {
                     + 'a
             ),
     >,
+    /// Resolver for immutable source bytes referenced by
+    /// `record.provenance.source_refs`.
+    pub source_resolver: &'a (dyn SourceResolver + 'a),
+    /// Read-only forget-related view of `consent_journal`.
+    pub consent_journal: &'a (dyn ConsentJournalReader + 'a),
 }
 
 impl std::fmt::Debug for LintInputs<'_> {
@@ -138,6 +145,8 @@ impl std::fmt::Debug for LintInputs<'_> {
             .field("source_forgets", &self.source_forgets.len())
             .field("vault_root", &self.vault_root)
             .field("hot_body_loader", &self.hot_body_loader.is_some())
+            .field("source_resolver", &"<dyn SourceResolver>")
+            .field("consent_journal", &"<dyn ConsentJournalReader>")
             .finish()
     }
 }
@@ -162,6 +171,61 @@ pub(crate) fn empty_unresolvable_authors() -> &'static HashSet<Identity> {
     use std::sync::OnceLock;
     static S: OnceLock<HashSet<Identity>> = OnceLock::new();
     S.get_or_init(HashSet::new)
+}
+
+#[cfg(test)]
+struct EmptySourceResolver;
+
+#[cfg(test)]
+impl SourceResolver for EmptySourceResolver {
+    fn exists(&self, _id: &str) -> bool {
+        false
+    }
+
+    fn read(&self, _id: &str) -> Result<Vec<u8>, crate::contract::SourceResolverError> {
+        Err(crate::contract::SourceResolverError::NotFound)
+    }
+
+    fn locator(&self, id: &str) -> String {
+        format!("empty:{id}")
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn empty_source_resolver() -> &'static dyn SourceResolver {
+    static RESOLVER: EmptySourceResolver = EmptySourceResolver;
+    &RESOLVER
+}
+
+#[cfg(test)]
+struct EmptyConsentJournal;
+
+#[cfg(test)]
+impl ConsentJournalReader for EmptyConsentJournal {
+    fn forgotten_source_bytes_hashes(&self) -> HashSet<String> {
+        HashSet::new()
+    }
+
+    fn forgotten_source_forgets(&self) -> Vec<crate::contract::SourceForget> {
+        Vec::new()
+    }
+
+    fn malformed_source_forget_rows(&self) -> Vec<crate::contract::MalformedSourceForget> {
+        Vec::new()
+    }
+
+    fn malformed_source_forget_rows_for_source(
+        &self,
+        _source_bytes_hash: &str,
+    ) -> Vec<crate::contract::MalformedSourceForget> {
+        Vec::new()
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn empty_consent_journal() -> &'static dyn ConsentJournalReader {
+    static JOURNAL: EmptyConsentJournal = EmptyConsentJournal;
+    &JOURNAL
 }
 
 /// Companion test helper: empty provenance source-artifact snapshot.
@@ -249,6 +313,13 @@ fn kind_key(k: Kind) -> String {
         Kind::DeferredCheck => "deferred_check",
         Kind::ProjectionDrift => "projection_drift",
         Kind::ProjectionMissing => "projection_missing",
+        Kind::SourceAfterForget => "source_after_forget",
+        Kind::SourceAfterForgetUnknownVersion => "source_after_forget_unknown_version",
+        Kind::SourceHashMismatch => "source_hash_mismatch",
+        Kind::SourceLinkDangling => "source_link_dangling",
+        Kind::SourceLinkLegacyDuplicate => "source_link_legacy_duplicate",
+        Kind::SourceLinkMissing => "source_link_missing",
+        Kind::SourceRedactSkipped => "source_redact_skipped",
     }
     .to_owned()
 }
@@ -342,29 +413,26 @@ mod tests {
             source_forgets: crate::verbs::lint::empty_source_forgets(),
             vault_root: None,
             hot_body_loader: None,
+            source_resolver: crate::verbs::lint::empty_source_resolver(),
+            consent_journal: crate::verbs::lint::empty_consent_journal(),
         };
         let data = run_checks(&inputs).await;
         // Empty records: consent (#253) is wired but has nothing to
         // classify, actor_chain (#256) the same, schema (#258) is
-        // live. hot_memory (#259 / #83) is now a real walker — with
-        // no hot_body_loader wired and no vault_root, it still emits
-        // ONE DeferredCheck Info advisory documenting the dormant
-        // missing_summary check. Provenance (#257) remains a stub →
-        // 1 DeferredCheck Info. Final info count is re-derived
-        // empirically by the test assertion below.
+        // live. With no records, provenance (#257) emits nothing.
+        // hot_memory (#83) still emits the dormant missing_summary
+        // DeferredCheck Info even without a body loader.
         assert_eq!(data.summary.total, data.findings.len() as u64);
         assert_eq!(data.summary.by_severity.error, 0);
         assert_eq!(data.summary.by_severity.warning, 0);
-        // Empirical count: with no records and no loader/vault_root,
-        // hot_memory's dormant missing_summary advisory is the only
-        // DeferredCheck. Provenance (#257) is record-driven so empties
-        // produce nothing.
-        let info_count = data
-            .findings
-            .iter()
-            .filter(|f| matches!(f.severity, Severity::Info))
-            .count() as u64;
-        assert_eq!(data.summary.by_severity.info, info_count);
+        assert_eq!(
+            data.findings
+                .iter()
+                .filter(|f| matches!(f.kind, Kind::DeferredCheck))
+                .count(),
+            1
+        );
+        assert_eq!(data.summary.by_severity.info, 1);
     }
 
     #[tokio::test]
@@ -414,6 +482,8 @@ mod tests {
             source_forgets: crate::verbs::lint::empty_source_forgets(),
             vault_root: None,
             hot_body_loader: None,
+            source_resolver: crate::verbs::lint::empty_source_resolver(),
+            consent_journal: crate::verbs::lint::empty_consent_journal(),
         };
         let inputs_rev = LintInputs {
             records: &reversed,
@@ -426,6 +496,8 @@ mod tests {
             source_forgets: crate::verbs::lint::empty_source_forgets(),
             vault_root: None,
             hot_body_loader: None,
+            source_resolver: crate::verbs::lint::empty_source_resolver(),
+            consent_journal: crate::verbs::lint::empty_consent_journal(),
         };
 
         let fwd = canonicalize(&run_checks(&inputs_fwd).await.findings);
@@ -462,6 +534,8 @@ mod tests {
             source_forgets: crate::verbs::lint::empty_source_forgets(),
             vault_root: None,
             hot_body_loader: None,
+            source_resolver: crate::verbs::lint::empty_source_resolver(),
+            consent_journal: crate::verbs::lint::empty_consent_journal(),
         };
         let data = run_checks(&inputs).await;
         assert_eq!(data.summary.total, data.findings.len() as u64);
@@ -472,19 +546,12 @@ mod tests {
         // returns no findings for a LegacyEvent record without a
         // ConsentLookup wired. §6.4 schema (#258) is live: record and
         // host both stamp at `SchemaVersion::current()` so `compare`
-        // returns `Same` and no finding fires. hot_memory (#259 / #83)
-        // is the real walker now — with no hot_body_loader wired and
-        // no vault_root, it emits ONE DeferredCheck Info for the
-        // dormant missing_summary check. Provenance (#257) remains
-        // a stub plus may emit additional findings depending on the
-        // source-artifact snapshot. Final info count is re-derived
-        // empirically below.
-        // Empirical post-merge counts: provenance check is now live so
-        // its findings displace the prior single DeferredCheck. Use the
-        // total/info counts as the canary. The exact severity mix is
-        // governed by per-check unit tests; this aggregator test only
-        // verifies the summary stays consistent with the raw findings.
-        assert_eq!(data.summary.by_severity.warning, 0);
+        // returns `Same` and no finding fires. Provenance (#257) is
+        // live, so the sample record's empty `source_refs` yields a
+        // `SourceLinkMissing` Warning. hot_memory (#83) contributes
+        // the missing_summary DeferredCheck Info.
+        assert_eq!(data.summary.by_severity.error, 1);
+        assert!(data.summary.by_severity.warning >= 1);
         let info_count = data
             .findings
             .iter()

@@ -168,6 +168,7 @@ fn build_record(
             source_hash,
             consent_ref: "consent:ingest:draft".to_owned(),
             llm_id_if_any: None,
+            source_refs: Vec::new(),
         },
         updated_at: now.clone(),
         evidence: EvidenceVector::default(),

@@ -866,6 +866,7 @@ pub mod tests_export {
                 source_hash: format!("sha256:{}", "a".repeat(64)),
                 consent_ref: "consent:01HQZ".to_owned(),
                 llm_id_if_any: None,
+                source_refs: Vec::new(),
             },
             updated_at: Rfc3339Timestamp::parse("2026-04-22T14:05:11Z").expect("valid"),
             evidence: EvidenceVector::default(),

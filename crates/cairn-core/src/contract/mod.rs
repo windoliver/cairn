@@ -23,6 +23,7 @@
 
 pub mod agent_provider;
 pub mod conformance;
+pub mod consent_journal;
 pub mod consent_lookup;
 pub mod frontend_adapter;
 pub mod hot_prefix_cache;
@@ -36,6 +37,7 @@ pub mod memory_store;
 pub mod metrics;
 pub mod registry;
 pub mod sensor_ingress;
+pub mod source_resolver;
 pub mod version;
 pub mod workflow_orchestrator;
 
@@ -50,6 +52,10 @@ pub use registry::{PluginError, PluginName, PluginRegistry};
 pub use version::{ContractVersion, VersionRange};
 
 pub use agent_provider::{AgentProvider, AgentProviderCapabilities, AgentProviderPlugin};
+pub use consent_journal::{
+    ConsentJournalReader, MalformedSourceForget, MalformedSourceForgetReason, SourceForget,
+    TargetReplayKey,
+};
 pub use consent_lookup::{ConsentLookup, ConsentLookupError};
 pub use frontend_adapter::{
     FrontendAdapter, FrontendAdapterCapabilities, FrontendAdapterError, FrontendAdapterPlugin,
@@ -75,6 +81,7 @@ pub use mcp_server::{MCPServer, MCPServerCapabilities, MCPServerPlugin};
 pub use memory_store::{MemoryStore, MemoryStoreCapabilities, MemoryStorePlugin};
 pub use metrics::{CapturingMetricsSink, MetricsError, MetricsSink, NoopMetricsSink};
 pub use sensor_ingress::{SensorIngress, SensorIngressCapabilities, SensorIngressPlugin};
+pub use source_resolver::{SourceResolver, SourceResolverError};
 pub use workflow_orchestrator::{
     WorkflowOrchestrator, WorkflowOrchestratorCapabilities, WorkflowOrchestratorPlugin,
 };
