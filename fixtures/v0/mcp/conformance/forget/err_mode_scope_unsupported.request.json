@@ -1,0 +1,10 @@
+{
+  "args": {
+    "mode": "scope",
+    "scope": {
+      "user": "test"
+    }
+  },
+  "contract": "cairn.mcp.v1",
+  "verb": "forget"
+}

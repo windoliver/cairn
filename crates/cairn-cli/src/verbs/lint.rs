@@ -1186,6 +1186,7 @@ pub struct LintHandlerResult {
 ///
 /// Returns an error if the store cannot be queried or if writing the
 /// report fails.
+#[allow(clippy::too_many_lines)] // dispatcher wires multiple subsystems; extraction deferred
 pub async fn lint_handler(
     store: &dyn cairn_core::contract::memory_store::MemoryStore,
     identity_registry: &dyn cairn_core::contract::identity_registry::IdentityRegistry,
@@ -1261,6 +1262,7 @@ pub async fn lint_handler(
         prefetch_failures.keys().cloned().collect();
     let source_resolver = VaultFsSourceResolver::new(vault_root);
     let (consent_journal, consent_journal_unavailable) = open_consent_journal(vault_root)?;
+    let hot_body_loader = |step| super::assemble_hot::lint_step_body_sync(vault_root, config, step);
     let inputs = LintInputs {
         records: &lint_records,
         config,
@@ -1268,6 +1270,8 @@ pub async fn lint_handler(
         author_states: &author_states,
         unresolvable_authors: &unresolvable_authors,
         consent_lookup,
+        vault_root: Some(vault_root),
+        hot_body_loader: Some(&hot_body_loader),
         source_resolver: &source_resolver,
         consent_journal: &consent_journal,
     };
@@ -1936,13 +1940,19 @@ fn push_projection_finding(
 /// falls back to cwd, which only happens when the top-level guard
 /// tolerated a `NoneResolved` outcome.
 #[must_use]
+#[allow(clippy::too_many_lines)] // dispatcher fans to --fix, vault-level, and edge-level paths
 pub fn run(sub: &ArgMatches, vault_root: Option<&Path>) -> ExitCode {
     let json = sub.get_flag("json");
     let fix = sub.get_flag("fix");
     let fix_markdown_flag = sub.get_flag("fix-markdown");
     let fix_folders_flag = sub.get_flag("fix-folders");
     let write_report = sub.get_flag("write_report");
+    let plan_id = sub.get_one::<String>("plan").cloned();
     let operation_id = new_operation_id();
+
+    if let Some(plan_id) = plan_id {
+        return run_plan_lint(json, vault_root, &plan_id);
+    }
 
     if fix_markdown_flag {
         return run_fix_markdown(json, vault_root);
@@ -1963,36 +1973,346 @@ pub fn run(sub: &ArgMatches, vault_root: Option<&Path>) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    if write_report {
-        emit_aborted(
-            json,
-            operation_id,
-            "lint --write-report is not wired in this CLI path",
-        );
-        return ExitCode::FAILURE;
+    // --fix resolves WAL edge contradictions via raw rusqlite (no store
+    // migration path); keep that path unchanged.
+    if fix {
+        match run_edge_lint(true, vault_root, &operation_id) {
+            Ok(report) => {
+                let has_blocking_findings = report.findings.iter().any(has_warning_or_error);
+                let data = lint_data(report);
+                let response = committed_response(operation_id, data);
+                if json {
+                    emit_json(&response);
+                } else if let Some(ResponseData::Lint(data)) = response.data.as_ref() {
+                    emit_human(data, &response.operation_id);
+                }
+                if has_blocking_findings {
+                    return ExitCode::FAILURE;
+                }
+                return ExitCode::SUCCESS;
+            }
+            Err(err) => {
+                emit_aborted(json, operation_id, &err.to_string());
+                return ExitCode::FAILURE;
+            }
+        }
     }
 
-    match run_edge_lint(fix, vault_root, &operation_id) {
-        Ok(report) => {
-            let has_blocking_findings = report.findings.iter().any(has_warning_or_error);
-            let data = lint_data(report);
-            let response = committed_response(operation_id, data);
-            if json {
-                emit_json(&response);
-            } else if let Some(ResponseData::Lint(data)) = response.data.as_ref() {
-                emit_human(data, &response.operation_id);
-            }
+    // Default (read-only) path: dispatch through lint_handler so the
+    // hot-memory walker (BrokenSourceLink, MissingSummary,
+    // StaleProfileLine) and all other vault-level checks run.
+    let vault_root = vault_root.map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    let db_path = vault_root.join(".cairn").join("cairn.db");
 
-            if has_blocking_findings && !fix {
-                ExitCode::FAILURE
+    if let Some(exit) = require_existing_vault(json, &vault_root, &db_path) {
+        return exit;
+    }
+
+    let config = match crate::config::load(&vault_root, &crate::config::CliOverrides::default()) {
+        Ok(c) => c,
+        Err(e) => {
+            emit_aborted(json, operation_id, &format!("config: {e:#}"));
+            return ExitCode::from(78); // EX_CONFIG
+        }
+    };
+
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            emit_aborted(json, operation_id, &format!("tokio init: {e}"));
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let outcome = rt.block_on(async {
+        let store = cairn_store_sqlite::open(&db_path)
+            .await
+            .map_err(|e| anyhow::anyhow!("open store: {e}"))?;
+        let registry = cairn_store_sqlite::SqliteIdentityRegistry::open(&db_path)
+            .map_err(|e| anyhow::anyhow!("open registry: {e}"))?;
+        lint_handler(&store, &registry, None, &config, write_report, &vault_root).await
+    });
+
+    // Helper: run edge lint, merge its findings into `data`, recompute
+    // summary, emit response. Returns the correct `ExitCode`.
+    let emit_merged = |mut data: cairn_core::generated::verbs::lint::LintData| {
+        // Also run the edge-integrity pass (read-only) so WAL
+        // contradiction findings are surfaced alongside vault-level
+        // findings. run_edge_lint uses its own rusqlite connection
+        // (read-only flags), so it is safe to call after the async
+        // store is closed. Failures are non-fatal: if the edge schema
+        // is missing the check is skipped rather than aborting an
+        // otherwise clean lint run.
+        if let Ok(edge_report) = run_edge_lint(false, Some(&vault_root), &operation_id) {
+            data.findings.extend(edge_report.findings);
+        }
+        // Recompute summary to include merged edge findings.
+        let total = usize_to_u64(data.findings.len());
+        data.summary = edge_summary(&data.findings, total, 0);
+        let has_error_or_warning = data.findings.iter().any(has_warning_or_error);
+        let response = committed_response(operation_id, data);
+        if json {
+            emit_json(&response);
+        } else if let Some(ResponseData::Lint(d)) = response.data.as_ref() {
+            emit_human(d, &response.operation_id);
+        }
+        if has_error_or_warning {
+            ExitCode::FAILURE
+        } else {
+            ExitCode::SUCCESS
+        }
+    };
+
+    match outcome {
+        Ok(result) => emit_merged(result.data),
+        Err(store_err) => {
+            // `cairn_store_sqlite::open` rejected the vault (e.g. schema
+            // fingerprint mismatch on a manually-modified DB). Degrade
+            // gracefully: run the edge-only pass so contradiction findings
+            // still surface, and emit a committed response rather than
+            // aborting. This is intentionally lenient: schema verification
+            // is a store concern; the lint verb should not abort on
+            // validator disagreements that the user could resolve with
+            // `cairn lint --fix`.
+            //
+            // Codex review round 1 finding 5: do NOT silently emit empty
+            // findings. Surface the store failure as a `DeferredCheck`
+            // Error so operators see explicitly that vault-level checks
+            // (including the hot-memory walker) did not run.
+            let store_err_msg = store_err.to_string();
+            let deferred = cairn_core::generated::verbs::lint::Finding {
+                entities: None,
+                kind: cairn_core::generated::verbs::lint::Kind::DeferredCheck,
+                message: format!(
+                    "lint vault-level checks did not run: store open failed ({store_err_msg}); \
+                     edge-integrity pass is the only coverage in this response"
+                ),
+                severity: cairn_core::generated::verbs::lint::Severity::Error,
+                suggested_fix: Some(
+                    "inspect .cairn/cairn.db schema state; try `cairn lint --fix` to repair \
+                     WAL edge contradictions, then re-run `cairn lint`"
+                        .to_owned(),
+                ),
+                target: None,
+                tracking_issue: Some(83),
+            };
+            let degraded_data = cairn_core::generated::verbs::lint::LintData {
+                findings: vec![deferred],
+                report_path: None,
+                summary: cairn_core::generated::verbs::lint::LintDataSummary {
+                    auto_resolved: Some(0),
+                    by_kind: serde_json::Value::Object(serde_json::Map::new()),
+                    by_severity: LintDataSummaryBySeverity {
+                        error: 1,
+                        warning: 0,
+                        info: 0,
+                    },
+                    total: 1,
+                },
+            };
+            emit_merged(degraded_data)
+        }
+    }
+}
+
+/// `cairn lint --plan <ULID>` (issue #289): structurally lint a pending
+/// `FlushPlan`, then check rename mutations against the live store. Surfaces
+/// rename-target collisions before `flush apply` consumes the plan.
+#[allow(
+    clippy::too_many_lines,
+    reason = "linear load → walk-mutations → live-check → emit; splitting would scatter \
+              error-emission boilerplate (json vs human) across helpers without simplifying flow"
+)]
+fn run_plan_lint(json: bool, vault_root: Option<&Path>, plan_id: &str) -> ExitCode {
+    use cairn_core::domain::flush_plan::store::{Bucket, plan_path};
+    use cairn_core::domain::flush_plan::{PersistedPlan, PlannedMutation};
+
+    let op = new_operation_id();
+    // Reject non-canonical ULIDs before constructing the filesystem path.
+    // `plan_path` interpolates the id into the path; without this gate a
+    // caller could traverse via `..` or absolute-path components and point
+    // the lint at arbitrary `.plan.json` files outside `.cairn/flush/pending`.
+    if !super::flush::is_valid_ulid_str(plan_id) {
+        let msg =
+            format!("lint --plan: invalid ULID `{plan_id}` (expected 26-char Crockford base32)");
+        if json {
+            emit_json(&serde_json::json!({
+                "code": "InvalidArgument",
+                "message": msg,
+                "operation_id": op.0,
+            }));
+        } else {
+            human_error("lint", "InvalidArgument", &msg, &op);
+        }
+        return ExitCode::from(64);
+    }
+    let Some(vault_root) = vault_root else {
+        let msg = "lint --plan requires a resolved vault root: pass --vault NAME_OR_PATH \
+                   or set CAIRN_VAULT";
+        if json {
+            emit_json(&serde_json::json!({
+                "code": "Internal",
+                "message": msg,
+                "operation_id": op.0,
+            }));
+        } else {
+            human_error("lint", "Internal", msg, &op);
+        }
+        return ExitCode::from(78);
+    };
+
+    let ulid = cairn_core::generated::common::Ulid(plan_id.to_owned());
+    let path = plan_path(vault_root, Bucket::Pending, &ulid);
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) => {
+            let msg = format!("read pending plan {plan_id}: {e}");
+            if json {
+                emit_json(&serde_json::json!({
+                    "code": "NotFound",
+                    "message": msg,
+                    "operation_id": op.0,
+                }));
             } else {
-                ExitCode::SUCCESS
+                human_error("lint", "NotFound", &msg, &op);
+            }
+            return ExitCode::from(66);
+        }
+    };
+    let persisted: PersistedPlan = match serde_json::from_slice(&bytes) {
+        Ok(p) => p,
+        Err(e) => {
+            let msg = format!("parse pending plan {plan_id}: {e}");
+            if json {
+                emit_json(&serde_json::json!({
+                    "code": "Internal",
+                    "message": msg,
+                    "operation_id": op.0,
+                }));
+            } else {
+                human_error("lint", "Internal", &msg, &op);
+            }
+            return ExitCode::from(65);
+        }
+    };
+
+    let mut findings: Vec<String> = Vec::new();
+    let mut seen_new_ids: BTreeMap<String, usize> = BTreeMap::new();
+    let mut renames: Vec<(cairn_core::domain::TargetId, cairn_core::domain::TargetId)> = Vec::new();
+
+    for (idx, mutation) in persisted.plan.mutations.iter().enumerate() {
+        if let PlannedMutation::Rename { record_id, new_id } = mutation {
+            if record_id == new_id {
+                findings.push(format!(
+                    "rename mutation #{idx}: source and destination are identical (`{}`)",
+                    new_id.as_str(),
+                ));
+            }
+            if let Some(prev) = seen_new_ids.insert(new_id.as_str().to_owned(), idx) {
+                findings.push(format!(
+                    "rename target collision (intra-plan): mutations #{prev} and #{idx} both \
+                     rename to `{}`",
+                    new_id.as_str(),
+                ));
+            }
+            renames.push((record_id.clone(), new_id.clone()));
+        }
+    }
+
+    let db_path = vault_root.join(".cairn").join("cairn.db");
+    if db_path.exists() && !renames.is_empty() {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                let msg = format!("tokio init error: {e}");
+                if json {
+                    emit_json(&serde_json::json!({
+                        "code": "Internal",
+                        "message": msg,
+                        "operation_id": op.0,
+                    }));
+                } else {
+                    human_error("lint", "Internal", &msg, &op);
+                }
+                return ExitCode::FAILURE;
+            }
+        };
+        // Round 10 review fix: use the same historical-collision rule
+        // `flush apply rename` enforces, not just the live check —
+        // otherwise lint can bless a plan that apply will reject for
+        // hitting a retired target lineage.
+        let renames_owned: Vec<(cairn_core::domain::TargetId, cairn_core::domain::TargetId)> =
+            renames
+                .iter()
+                .map(|(s, d)| ((*s).clone(), (*d).clone()))
+                .collect();
+        let live_check: Result<Vec<String>, anyhow::Error> = rt.block_on(async {
+            let store = cairn_store_sqlite::open(&db_path).await?;
+            let renames = renames_owned;
+            store
+                .with_tx(move |tx| {
+                    let mut hits = Vec::new();
+                    for (src, dst) in &renames {
+                        if tx.target_id_ever_used(dst)? {
+                            let active = tx.get_active_by_target(dst)?;
+                            let kind = if active.is_some() { "live" } else { "retired" };
+                            hits.push(format!(
+                                "rename target collision ({kind}): `{}` has been used as a \
+                                 target lineage — renaming `{}` would conflict",
+                                dst.as_str(),
+                                src.as_str(),
+                            ));
+                        }
+                    }
+                    Ok(hits)
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))
+        });
+        match live_check {
+            Ok(hits) => findings.extend(hits),
+            Err(e) => {
+                let msg = format!("open store for live rename check: {e}");
+                if json {
+                    emit_json(&serde_json::json!({
+                        "code": "Internal",
+                        "message": msg,
+                        "operation_id": op.0,
+                    }));
+                } else {
+                    human_error("lint", "Internal", &msg, &op);
+                }
+                return ExitCode::FAILURE;
             }
         }
-        Err(err) => {
-            emit_aborted(json, operation_id, &err.to_string());
-            ExitCode::FAILURE
+    }
+
+    let has_findings = !findings.is_empty();
+    if json {
+        emit_json(&serde_json::json!({
+            "operation_id": op.0,
+            "plan_id": plan_id,
+            "findings": findings,
+        }));
+    } else if has_findings {
+        eprintln!("cairn lint --plan {plan_id}: {} finding(s)", findings.len());
+        for f in &findings {
+            eprintln!("  - {f}");
         }
+    } else {
+        println!("cairn lint --plan {plan_id}: clean");
+    }
+
+    if has_findings {
+        ExitCode::from(65) // EX_DATAERR
+    } else {
+        ExitCode::SUCCESS
     }
 }
 
@@ -2442,12 +2762,9 @@ mod tests {
         // findings. §6.3 (#257) now runs real source-link checks, and
         // FixtureStore records still carry empty `source_refs`, so
         // lint emits a `SourceLinkMissing` Warning. Info findings:
-        // the §6.2 signature-verification-deferred advisory plus a
-        // consent-journal-unavailable DeferredCheck (FixtureStore
-        // does not back a `.cairn/cairn.db`, so source-after-forget
-        // / source-redact-skipped degrade fail-closed via info
-        // finding rather than silently passing). §6.6 (#259) is a
-        // Warning-severity DeferredCheck — counted under warnings.
+        // the §6.2 signature-verification-deferred advisory, the
+        // consent-journal-unavailable DeferredCheck, and the two
+        // hot_memory deferred advisories from the loader-backed path.
         let info_count = result
             .data
             .findings
@@ -2460,8 +2777,10 @@ mod tests {
             })
             .count();
         assert_eq!(
-            info_count, 2,
-            "expect §6.2 signature-verification-deferred + consent-journal-unavailable advisories"
+            info_count, 4,
+            "expect §6.3 deferred-info finding + §6.2 signature-verification-deferred advisory \
+             + hot_memory walker's store-backed-deferred + missing_summary-dormant advisories \
+             (codex review round 1 findings 3+4)"
         );
         assert!(
             result.has_error,
@@ -2691,15 +3010,36 @@ mod tests {
         }
     }
 
-    /// E2E corner cases for the §6.6 hot-memory canary (#259) at the
-    /// CLI handler boundary. Each test seeds a `FixtureStore`, builds
-    /// a `CairnConfig` with a custom `vault.hot_memory.recipe`, runs
-    /// the full lint pipeline, and inspects only §6.6-specific
-    /// findings. Author-registry errors from the empty registry are
-    /// ignored — the §6.2 path is exercised elsewhere.
+    /// E2E corner cases for the §6.6 hot-memory walker (#83; closes #259)
+    /// at the CLI handler boundary. Each test seeds a `FixtureStore`,
+    /// builds a `CairnConfig` with a custom `vault.hot_memory.recipe`, runs
+    /// the full lint pipeline, and inspects only §6.6-specific findings.
+    ///
+    /// The old deferred-step canary (#259) is gone. The real walker is
+    /// gated on `hot_body_loader` being wired by the CLI (Task 25). Until
+    /// Task 25 lands, `lint_handler` passes `hot_body_loader: None`, so
+    /// the walker emits zero hot-memory findings at the CLI boundary.
+    /// Author-registry errors from the empty registry are ignored here —
+    /// the §6.2 path is exercised elsewhere.
     mod hot_memory_canary_e2e {
         use super::*;
-        use cairn_core::config::{CairnConfig, HotMemoryRecipeStep};
+        use cairn_core::config::{CairnConfig, HotMemoryRecipePreset, HotMemoryRecipeStep};
+
+        #[allow(dead_code)]
+        fn set_default_recipe(
+            cfg: &mut CairnConfig,
+            steps: Vec<HotMemoryRecipeStep>,
+            max_bytes: u32,
+        ) {
+            // Lint resolves the active recipe through
+            // `HotMemoryConfig::resolve_recipe`, which reads the named-recipe
+            // table. Mutate `recipes[default_recipe]` so each test fixture's
+            // overrides actually take effect.
+            cfg.vault.hot_memory.recipes.insert(
+                cfg.vault.hot_memory.default_recipe.clone(),
+                HotMemoryRecipePreset { steps, max_bytes },
+            );
+        }
         use cairn_core::domain::taxonomy::MemoryKind;
         use cairn_core::generated::verbs::lint::{Kind, Severity};
         use cairn_store_sqlite::SqliteIdentityRegistry;
@@ -2727,6 +3067,8 @@ mod tests {
                 .count()
         }
 
+        /// Counts old-canary (#259) `DeferredCheck` Warnings. After the
+        /// rewrite (#83) this should always be zero — the canary is gone.
         fn count_259_deferred(result: &LintHandlerResult) -> usize {
             result
                 .data
@@ -2755,68 +3097,83 @@ mod tests {
             store.upsert(&r).await.expect("upsert");
         }
 
+        /// With no `hot_body_loader` wired (Task 25 is pending), the walker
+        /// emits no findings for the default recipe and empty vault.
+        /// The old deferred-step canary Warning (#259) is gone.
         #[tokio::test]
-        async fn default_recipe_empty_vault_emits_only_259_deferred_warning() {
+        async fn default_recipe_empty_vault_emits_no_hot_memory_findings() {
             let store = FixtureStore::default();
             let cfg = CairnConfig::default();
             let result = run_handler(&store, &cfg).await;
-            assert_eq!(count_259_deferred(&result), 1);
+            // No loader → no assembler call → no over-budget finding.
+            assert_eq!(count_259_deferred(&result), 0);
             assert_eq!(
                 count_kind_severity(&result, Kind::HotMemoryOverBudget, Severity::Warning),
                 0,
             );
+            assert_eq!(
+                count_kind_severity(&result, Kind::HotMemoryOverBudget, Severity::Error),
+                0,
+            );
         }
 
+        /// Without a loader, even a vault that would be over-budget produces
+        /// no hot-memory findings. The real detection requires Task 25.
         #[tokio::test]
-        async fn records_only_recipe_over_budget_emits_warning_no_259_deferred() {
+        async fn records_only_recipe_over_budget_no_findings_without_loader() {
             let store = FixtureStore::default();
             upsert_with(&store, 1, MemoryKind::Project, "x".repeat(2048), 0.9).await;
             let mut cfg = CairnConfig::default();
-            cfg.vault.hot_memory.recipe = vec![HotMemoryRecipeStep::TopSalienceProject];
-            cfg.vault.hot_memory.max_bytes = 256;
+            set_default_recipe(&mut cfg, vec![HotMemoryRecipeStep::TopSalienceProject], 256);
 
             let result = run_handler(&store, &cfg).await;
-            let warnings =
-                count_kind_severity(&result, Kind::HotMemoryOverBudget, Severity::Warning);
-            assert_eq!(warnings, 1);
-            assert_eq!(count_259_deferred(&result), 0);
-            let f = result
-                .data
-                .findings
-                .iter()
-                .find(|f| f.kind == Kind::HotMemoryOverBudget)
-                .expect("warning present");
+            // No loader → no over-budget detection.
             assert_eq!(
-                f.target.as_ref().and_then(|t| t.path.as_deref()),
-                Some(".cairn/config.yaml")
+                count_kind_severity(&result, Kind::HotMemoryOverBudget, Severity::Warning),
+                0,
             );
+            assert_eq!(
+                count_kind_severity(&result, Kind::HotMemoryOverBudget, Severity::Error),
+                0,
+            );
+            // Canary deferred Warning is gone.
+            assert_eq!(count_259_deferred(&result), 0);
         }
 
+        /// No loader → no findings even for mixed recipes with deferred steps.
+        /// The old canary's `DeferredCheck` Warning for filesystem-backed steps
+        /// is removed (#83 closes #259).
         #[tokio::test]
-        async fn mixed_recipe_under_budget_emits_only_259_deferred() {
+        async fn mixed_recipe_no_findings_without_loader() {
             let store = FixtureStore::default();
             upsert_with(&store, 2, MemoryKind::Project, "tiny".to_owned(), 0.5).await;
             let mut cfg = CairnConfig::default();
-            cfg.vault.hot_memory.recipe = vec![
-                HotMemoryRecipeStep::Index,
-                HotMemoryRecipeStep::TopSalienceProject,
-            ];
+            let default_max = cfg.vault.hot_memory.max_bytes;
+            set_default_recipe(
+                &mut cfg,
+                vec![
+                    HotMemoryRecipeStep::Index,
+                    HotMemoryRecipeStep::TopSalienceProject,
+                ],
+                default_max,
+            );
             let result = run_handler(&store, &cfg).await;
             assert_eq!(
                 count_kind_severity(&result, Kind::HotMemoryOverBudget, Severity::Warning),
                 0,
             );
-            assert_eq!(count_259_deferred(&result), 1);
+            // The old #259 canary deferred Warning is gone.
+            assert_eq!(count_259_deferred(&result), 0);
         }
 
+        /// Records of kinds not in the recipe recipe do not emit findings.
         #[tokio::test]
-        async fn excluded_kinds_do_not_contribute_to_estimate() {
+        async fn excluded_kinds_do_not_emit_findings() {
             let store = FixtureStore::default();
             upsert_with(&store, 3, MemoryKind::UserSignal, "s".repeat(8192), 0.9).await;
             upsert_with(&store, 4, MemoryKind::Playbook, "p".repeat(8192), 0.9).await;
             let mut cfg = CairnConfig::default();
-            cfg.vault.hot_memory.recipe = vec![HotMemoryRecipeStep::TopSalienceProject];
-            cfg.vault.hot_memory.max_bytes = 16;
+            set_default_recipe(&mut cfg, vec![HotMemoryRecipeStep::TopSalienceProject], 16);
 
             let result = run_handler(&store, &cfg).await;
             assert_eq!(
@@ -2826,8 +3183,11 @@ mod tests {
             assert_eq!(count_259_deferred(&result), 0);
         }
 
+        /// No loader → no overflow detection even with tied-salience records.
+        /// The real tied-salience tie-break behavior is tested in
+        /// `cairn-core::verbs::lint::checks::hot_memory::tests`.
         #[tokio::test]
-        async fn tied_salience_picks_largest_and_overflows() {
+        async fn tied_salience_no_findings_without_loader() {
             let store = FixtureStore::default();
             for seed in 10..14 {
                 upsert_with(&store, seed, MemoryKind::Project, "x".to_owned(), 0.5).await;
@@ -2836,39 +3196,53 @@ mod tests {
                 upsert_with(&store, seed, MemoryKind::Project, "L".repeat(800), 0.5).await;
             }
             let mut cfg = CairnConfig::default();
-            cfg.vault.hot_memory.recipe = vec![HotMemoryRecipeStep::TopSalienceProject];
-            cfg.vault.hot_memory.max_bytes = 2_000;
+            set_default_recipe(
+                &mut cfg,
+                vec![HotMemoryRecipeStep::TopSalienceProject],
+                2_000,
+            );
 
             let result = run_handler(&store, &cfg).await;
+            // No loader → no findings regardless of salience/budget.
             assert_eq!(
                 count_kind_severity(&result, Kind::HotMemoryOverBudget, Severity::Warning),
-                1,
-                "tied-salience tie-break must pick larger records and overflow 2_000-byte budget",
+                0,
+                "no loader wired: walker must not emit over-budget finding",
+            );
+            assert_eq!(
+                count_kind_severity(&result, Kind::HotMemoryOverBudget, Severity::Error),
+                0,
             );
         }
 
+        /// Degenerate `max_bytes=1` must not panic, and without a loader must
+        /// produce no hot-memory findings.
         #[tokio::test]
         async fn degenerate_max_bytes_one_does_not_panic() {
             let store = FixtureStore::default();
             upsert_with(&store, 30, MemoryKind::Project, "x".to_owned(), 0.5).await;
             let mut cfg = CairnConfig::default();
-            cfg.vault.hot_memory.recipe = vec![HotMemoryRecipeStep::TopSalienceProject];
-            cfg.vault.hot_memory.max_bytes = 1;
+            set_default_recipe(&mut cfg, vec![HotMemoryRecipeStep::TopSalienceProject], 1);
 
             let result = run_handler(&store, &cfg).await;
+            // No panic. No findings without a loader.
             assert_eq!(
                 count_kind_severity(&result, Kind::HotMemoryOverBudget, Severity::Warning),
-                1,
+                0,
+            );
+            assert_eq!(
+                count_kind_severity(&result, Kind::HotMemoryOverBudget, Severity::Error),
+                0,
             );
         }
 
+        /// Empty recipe produces no hot-memory findings with or without a loader.
         #[tokio::test]
-        async fn empty_recipe_emits_no_259_findings() {
+        async fn empty_recipe_emits_no_hot_memory_findings() {
             let store = FixtureStore::default();
             upsert_with(&store, 40, MemoryKind::Project, "x".repeat(4096), 0.9).await;
             let mut cfg = CairnConfig::default();
-            cfg.vault.hot_memory.recipe = vec![];
-            cfg.vault.hot_memory.max_bytes = 16;
+            set_default_recipe(&mut cfg, vec![], 16);
 
             let result = run_handler(&store, &cfg).await;
             assert_eq!(

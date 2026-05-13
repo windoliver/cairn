@@ -12,6 +12,7 @@
     { "const": "cairn.mcp.v1.retrieve.record",   "x-cairn-since": "v0.1" },
     { "const": "cairn.mcp.v1.retrieve.session",  "x-cairn-since": "v0.1" },
     { "const": "cairn.mcp.v1.retrieve.turn",     "x-cairn-since": "v0.1" },
+    { "const": "cairn.mcp.v1.retrieve.tool_call", "x-cairn-since": "v0.1" },
     { "const": "cairn.mcp.v1.retrieve.folder",   "x-cairn-since": "v0.1" },
     { "const": "cairn.mcp.v1.retrieve.scope",    "x-cairn-since": "v0.1" },
     { "const": "cairn.mcp.v1.retrieve.profile",  "x-cairn-since": "v0.1" },
@@ -23,6 +24,7 @@
     { "const": "cairn.mcp.v1.extension.federation",  "x-cairn-since": "v0.3" },
     { "const": "cairn.mcp.v1.extension.sessiontree", "x-cairn-since": "v0.3" },
     { "const": "cairn.mcp.v1.policy_trace",          "x-cairn-since": "v0.1" },
+    { "const": "cairn.mcp.v1.sensors.pre_compact",   "x-cairn-since": "v0.1" },
     { "const": "cairn.mcp.v1.replay.sequence",       "x-cairn-since": "v0.1" },
     { "const": "cairn.mcp.v1.replay.challenge",      "x-cairn-since": "v0.1" }
   ],

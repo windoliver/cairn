@@ -27,6 +27,8 @@ vault:
     - active_playbook
     - recent_user_signal
     max_bytes: 25600
+    pre_compact_recipe: handoff
+    pre_compact_safety_ratio: 0.3
   retention: {}
   schema_files:
   - CLAUDE.md

@@ -312,14 +312,16 @@ impl CairnMcpHandler {
 
         // Post-filter capabilities whose shared core wiring flags are true
         // for another surface but not yet honored by this MCP transport.
-        // CLI `forget --record` is wired for issue #58, but MCP non-search
-        // verbs still fall through `dispatch_stub`; do not advertise record
-        // forget here until MCP dispatch can honor it end-to-end.
+        // MCP non-search verbs still fall through `dispatch_stub`; do not
+        // advertise them until MCP dispatch can honor them end-to-end.
         let mut capabilities = cairn_core::status::advertise(&gates);
         capabilities.retain(|c| {
             !matches!(
                 c,
                 cairn_core::generated::common::Capabilities::CairnMcpV1ForgetRecord
+                    | cairn_core::generated::common::Capabilities::CairnMcpV1RetrieveSession
+                    | cairn_core::generated::common::Capabilities::CairnMcpV1RetrieveTurn
+                    | cairn_core::generated::common::Capabilities::CairnMcpV1RetrieveToolCall
             )
         });
 
@@ -557,21 +559,36 @@ impl ServerHandler for CairnMcpHandler {
                 return Ok(crate::graph_tools::dispatch(&queries, &name, arguments).await);
             }
 
-            let known = TOOLS.iter().any(|d| d.name == name.as_ref());
+            let request_verb = crate::verb_envelope::core_verb_for_tool(name.as_ref());
             let store = self.store.clone();
             let config = self.config.clone();
 
-            if !known {
+            let Some(request_verb) = request_verb else {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "cairn: unknown verb '{name}'. Available verbs: {}",
                     TOOLS.iter().map(|d| d.name).collect::<Vec<_>>().join(", ")
                 ))]));
-            }
+            };
+
+            let typed_args = match crate::verb_envelope::parse_args(request_verb, arguments) {
+                Ok(args) => args,
+                Err(response) => {
+                    return Ok(crate::verb_envelope::call_result_from_response(&response));
+                }
+            };
 
             if name.as_ref() == "search"
                 && let Some(store) = store
             {
-                return Ok(handle_search(store, config, arguments).await);
+                let cairn_core::generated::envelope::RequestArgs::Search(args) = typed_args else {
+                    let response = crate::verb_envelope::invalid_args_response(
+                        crate::verb_envelope::response_verb(request_verb),
+                        "args",
+                        "expected search arguments",
+                    );
+                    return Ok(crate::verb_envelope::call_result_from_response(&response));
+                };
+                return Ok(handle_search(store, config, args).await);
             }
 
             Ok(dispatch_stub(&name))
@@ -581,10 +598,10 @@ impl ServerHandler for CairnMcpHandler {
 
 /// Dispatch the `search` tool against a wired store.
 ///
-/// Parses the MCP tool arguments into [`cairn_core::generated::verbs::search::SearchArgs`],
+/// Parses the MCP tool arguments into the generated search request args,
 /// derives the capability set from config, calls
 /// [`cairn_core::verbs::search::run`], and serializes the result into a
-/// [`CallToolResult`].
+/// generated response envelope inside a [`CallToolResult`].
 #[allow(
     clippy::too_many_lines,
     reason = "linear arg→request→outcome→envelope flow; splitting reduces clarity"
@@ -592,20 +609,10 @@ impl ServerHandler for CairnMcpHandler {
 async fn handle_search(
     store: Arc<dyn MemoryStore>,
     config: CairnConfig,
-    arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    args: cairn_core::generated::verbs::search::SearchArgs,
 ) -> CallToolResult {
-    use cairn_core::generated::verbs::search::{SearchArgs, SearchArgsMode};
-
-    // Parse args from the MCP tool argument map.
-    let args_json = serde_json::Value::Object(arguments.unwrap_or_default());
-    let args: SearchArgs = match serde_json::from_value(args_json) {
-        Ok(a) => a,
-        Err(e) => {
-            return CallToolResult::error(vec![Content::text(format!(
-                "cairn search: invalid args: {e}"
-            ))]);
-        }
-    };
+    use cairn_core::generated::envelope::ResponseVerb;
+    use cairn_core::generated::verbs::search::SearchArgsMode;
 
     // Map IDL mode to core dispatcher mode.
     let mode = match args.mode {
@@ -614,7 +621,12 @@ async fn handle_search(
         SearchArgsMode::Hybrid => cairn_core::verbs::search::SearchMode::Hybrid,
         // Forward-compat: reject unknown future variants fail-closed.
         _ => {
-            return CallToolResult::error(vec![Content::text("cairn search: unknown mode")]);
+            let response = crate::verb_envelope::invalid_args_response(
+                ResponseVerb::Search,
+                "mode",
+                "unknown search mode",
+            );
+            return crate::verb_envelope::call_result_from_response(&response);
         }
     };
 
@@ -642,42 +654,51 @@ async fn handle_search(
         query: args.query.clone(),
         mode,
         limit,
+        include_reasoning: args.include_reasoning.unwrap_or(false),
         visibility_allowlist: vec![],
         auth_scope,
         model_label: config.search.embedding_model.as_str().to_owned(),
+        filter: args.filters.clone(),
         explain: args.explain.unwrap_or(false),
     };
 
-    let outcome =
-        match cairn_core::verbs::search::run(store.as_ref(), &config, &caps, request).await {
-            Ok(o) => o,
-            Err(cairn_core::verbs::search::SearchError::CapabilityUnavailable { capability }) => {
-                let remediation = cairn_core::status::remediation_for(capability);
-                let msg = match remediation {
-                    Some(hint) => format!(
-                        "cairn search: capability unavailable: {capability}\n  hint: {hint}"
-                    ),
-                    None => format!("cairn search: capability unavailable: {capability}"),
-                };
-                return CallToolResult::error(vec![Content::text(msg)]);
-            }
-            Err(cairn_core::verbs::search::SearchError::InvalidArgs { reason }) => {
-                return CallToolResult::error(vec![Content::text(format!(
-                    "cairn search: invalid args: {reason}"
-                ))]);
-            }
-            Err(cairn_core::verbs::search::SearchError::Store(e)) => {
-                return CallToolResult::error(vec![Content::text(format!(
-                    "cairn search: store error: {e}"
-                ))]);
-            }
-            // Forward-compat: surface unknown error variants as internal errors.
-            Err(e) => {
-                return CallToolResult::error(vec![Content::text(format!(
-                    "cairn search: internal error: {e}"
-                ))]);
-            }
-        };
+    let outcome = match cairn_core::verbs::search::run(store.as_ref(), &config, &caps, request)
+        .await
+    {
+        Ok(o) => o,
+        Err(cairn_core::verbs::search::SearchError::CapabilityUnavailable { capability }) => {
+            let response = crate::verb_envelope::capability_unavailable_response(
+                ResponseVerb::Search,
+                capability,
+            );
+            return crate::verb_envelope::call_result_from_response(&response);
+        }
+        Err(cairn_core::verbs::search::SearchError::InvalidArgs { reason }) => {
+            let response =
+                crate::verb_envelope::invalid_args_response(ResponseVerb::Search, "args", &reason);
+            return crate::verb_envelope::call_result_from_response(&response);
+        }
+        Err(cairn_core::verbs::search::SearchError::InvalidFilter { reason }) => {
+            let response =
+                crate::verb_envelope::invalid_filter_response(ResponseVerb::Search, &reason);
+            return crate::verb_envelope::call_result_from_response(&response);
+        }
+        Err(cairn_core::verbs::search::SearchError::Store(e)) => {
+            let response = crate::verb_envelope::aborted_internal(
+                ResponseVerb::Search,
+                &format!("store error: {e}"),
+            );
+            return crate::verb_envelope::call_result_from_response(&response);
+        }
+        // Forward-compat: surface unknown error variants as internal errors.
+        Err(e) => {
+            let response = crate::verb_envelope::aborted_internal(
+                ResponseVerb::Search,
+                &format!("internal error: {e}"),
+            );
+            return crate::verb_envelope::call_result_from_response(&response);
+        }
+    };
 
     search_outcome_to_result(outcome, mode)
 }
@@ -689,7 +710,9 @@ fn search_outcome_to_result(
     mode: cairn_core::verbs::search::SearchMode,
 ) -> CallToolResult {
     use cairn_core::generated::common::Ulid;
+    use cairn_core::generated::envelope::{ResponseData, ResponseVerb};
     use cairn_core::generated::verbs::search::{Hit, HitTrust, ScoreExplain, SearchData};
+    use cairn_core::policy_trace::{to_wire, to_wire_exclusions};
 
     let hits: Vec<Hit> = outcome
         .candidates
@@ -712,9 +735,9 @@ fn search_outcome_to_result(
                 semantic_rank: e
                     .semantic_rank
                     .map(|r| i64::try_from(r).unwrap_or(i64::MAX)),
-                rrf_score: e.rrf_score,
-                cosine: e.cosine,
-                final_score: e.final_score,
+                rrf_score: finite_or_zero(e.rrf_score),
+                cosine: finite_option(e.cosine),
+                final_score: finite_or_zero(e.final_score),
             })
             .collect()
     });
@@ -734,30 +757,41 @@ fn search_outcome_to_result(
     let data = SearchData {
         hits,
         next_cursor: None,
-        excluded: None,
+        excluded: outcome.excluded.map(|items| to_wire_exclusions(&items)),
         score_explain,
         degraded_legs,
     };
 
-    match serde_json::to_string(&data) {
-        Ok(s) => CallToolResult::success(vec![Content::text(s)]),
-        Err(e) => CallToolResult::error(vec![Content::text(format!(
-            "cairn search: serialize error: {e}"
-        ))]),
-    }
+    let response = crate::verb_envelope::committed(
+        ResponseVerb::Search,
+        ResponseData::Search(data),
+        to_wire(&outcome.policy_trace),
+    );
+    crate::verb_envelope::call_result_from_response(&response)
 }
 
 /// Stub dispatcher returned while real verb wiring is pending.
 ///
-/// Returns a [`CallToolResult`] with `is_error = true` and a message
-/// explaining that the verb is not yet wired. This function is `pub` so the
-/// parity test in Task 8 can call it directly.
+/// Returns a [`CallToolResult`] with `is_error = true` and a message explaining
+/// that the verb is not yet wired. Known generated core verbs are wrapped in
+/// their typed generated aborted response envelopes; unknown direct calls keep
+/// the plain placeholder text.
 #[must_use]
 pub fn dispatch_stub(verb: &str) -> CallToolResult {
-    CallToolResult::error(vec![Content::text(format!(
-        "cairn {verb}: not yet implemented in this P0 scaffold. \
-         Verb dispatch lands in a follow-up PR; no memory operation was performed."
-    ))])
+    let message = format!(
+        "cairn {verb}: not yet implemented in MCP adapter; no memory operation was performed."
+    );
+
+    if let Some(request_verb) = crate::verb_envelope::core_verb_for_tool(verb) {
+        return crate::verb_envelope::call_result_from_response(
+            &crate::verb_envelope::aborted_internal(
+                crate::verb_envelope::response_verb(request_verb),
+                &message,
+            ),
+        );
+    }
+
+    CallToolResult::error(vec![Content::text(message)])
 }
 
 /// Mode-appropriate score for an MCP search hit.
@@ -790,7 +824,21 @@ fn hit_score(
         // Keyword + future variants (SearchMode is #[non_exhaustive]).
         _ => c.bm25,
     };
-    if raw.is_finite() { raw } else { 0.0 }
+    finite_or_zero(raw)
+}
+
+/// Replace non-finite floats with zero before writing generated JSON
+/// envelopes. JSON Schema numbers cannot represent NaN or infinity.
+#[inline]
+#[must_use]
+fn finite_or_zero(value: f64) -> f64 {
+    if value.is_finite() { value } else { 0.0 }
+}
+
+#[inline]
+#[must_use]
+fn finite_option(value: Option<f64>) -> Option<f64> {
+    value.map(finite_or_zero)
 }
 
 /// Convert a domain [`cairn_core::search::DegradedLeg`] into the IDL
@@ -962,5 +1010,27 @@ mod tests_plan_a {
                 .contains(&cairn_core::generated::common::Capabilities::CairnMcpV1ForgetRecord),
             "MCP status must not advertise forget.record until MCP dispatch is wired"
         );
+    }
+
+    #[test]
+    fn retrieve_capabilities_filtered_until_mcp_dispatch_is_wired() {
+        let store: Arc<dyn cairn_core::contract::memory_store::MemoryStore> =
+            Arc::new(FixtureStore::default());
+        let scope: Arc<dyn McpSessionScope> = Arc::new(ConfigBackedScope::new(principal()));
+        let mut cfg = CairnConfig::default();
+        cfg.mcp.stdio.single_tenant = true;
+        cfg.mcp.stdio.principal = Some(principal());
+        let handler = CairnMcpHandler::with_store_and_scope(store, scope, cfg, principal());
+        let status = handler.status_response();
+        for cap in [
+            cairn_core::generated::common::Capabilities::CairnMcpV1RetrieveSession,
+            cairn_core::generated::common::Capabilities::CairnMcpV1RetrieveTurn,
+            cairn_core::generated::common::Capabilities::CairnMcpV1RetrieveToolCall,
+        ] {
+            assert!(
+                !status.capabilities.contains(&cap),
+                "MCP status must not advertise {cap:?} until MCP retrieve dispatch is wired"
+            );
+        }
     }
 }

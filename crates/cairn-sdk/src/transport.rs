@@ -259,11 +259,18 @@ impl<T: Transport> Sdk<T> {
     /// read from here so they cannot drift.
     fn advertised_capabilities(&self) -> Vec<Capabilities> {
         let mut capabilities = cairn_core::status::advertise(&self.gates());
-        // CLI `forget --record` is wired for issue #58, so the shared core
-        // flag is true. The SDK `forget` method still returns
-        // `Unimplemented` for all targets; do not advertise record forget
-        // here until SDK dispatch can honor it end-to-end.
-        capabilities.retain(|c| !matches!(c, Capabilities::CairnMcpV1ForgetRecord));
+        // CLI has some verb targets wired before the SDK transport does.
+        // Keep SDK negotiation fail-closed until these methods can honor the
+        // capabilities end-to-end.
+        capabilities.retain(|c| {
+            !matches!(
+                c,
+                Capabilities::CairnMcpV1ForgetRecord
+                    | Capabilities::CairnMcpV1RetrieveSession
+                    | Capabilities::CairnMcpV1RetrieveTurn
+                    | Capabilities::CairnMcpV1RetrieveToolCall
+            )
+        });
         capabilities
     }
 
@@ -372,9 +379,11 @@ impl<T: Transport> Sdk<T> {
             query: args.query.clone(),
             mode,
             limit,
+            include_reasoning: args.include_reasoning.unwrap_or(false),
             visibility_allowlist: vec![],
             auth_scope,
             model_label: self.config.search.embedding_model.as_str().to_owned(),
+            filter: args.filters.clone(),
             explain: args.explain.unwrap_or(false),
         };
 
@@ -390,6 +399,14 @@ impl<T: Transport> Sdk<T> {
             }
             Err(cairn_core::verbs::search::SearchError::InvalidArgs { reason }) => {
                 Err(SdkError::InvalidArgs { reason })
+            }
+            Err(cairn_core::verbs::search::SearchError::InvalidFilter { reason }) => {
+                Err(SdkError::Protocol {
+                    code: crate::error::ErrorCode::InvalidFilter,
+                    message: format!("invalid filter: {reason}"),
+                    data: Some(serde_json::json!({ "reason": reason })),
+                    operation_id: crate::stub::new_operation_id(),
+                })
             }
             Err(cairn_core::verbs::search::SearchError::Store(e)) => Err(SdkError::Protocol {
                 code: crate::error::ErrorCode::Internal,
@@ -640,6 +657,7 @@ fn envelope_from_outcome(
     use cairn_core::generated::common::Ulid;
     use cairn_core::generated::envelope::ResponseVerb;
     use cairn_core::generated::verbs::search::{Hit, HitTrust, ScoreExplain, SearchData};
+    use cairn_core::policy_trace::{to_wire, to_wire_exclusions};
 
     let hits: Vec<Hit> = outcome
         .candidates
@@ -687,14 +705,14 @@ fn envelope_from_outcome(
     let data = SearchData {
         hits,
         next_cursor: None,
-        excluded: None,
+        excluded: outcome.excluded.map(|items| to_wire_exclusions(&items)),
         score_explain,
         degraded_legs,
     };
 
     VerbResponse {
         operation_id: crate::stub::new_operation_id(),
-        policy_trace: vec![],
+        policy_trace: to_wire(&outcome.policy_trace),
         verb: ResponseVerb::Search,
         target: None,
         data,
@@ -1219,18 +1237,11 @@ fn validate_retrieve(args: &RetrieveArgs) -> Result<(), SdkError> {
             {
                 return Err(invalid("limit: must be in [1, 10000]"));
             }
-            if let Some(inc) = include {
-                if inc.is_empty() {
-                    return Err(invalid("include: must contain at least one item"));
-                }
-                let mut seen = std::collections::BTreeSet::new();
-                for item in inc {
-                    if !seen.insert(*item as u8) {
-                        return Err(invalid("include: items must be unique"));
-                    }
-                }
-            }
-            Ok(())
+            validate_include_codes(
+                include
+                    .as_ref()
+                    .map(|inc| inc.iter().map(|item| *item as u8)),
+            )
         }
         A::Turn {
             session_id,
@@ -1240,16 +1251,25 @@ fn validate_retrieve(args: &RetrieveArgs) -> Result<(), SdkError> {
             if session_id.is_empty() {
                 return Err(invalid("session_id: must not be empty"));
             }
-            if let Some(inc) = include {
-                if inc.is_empty() {
-                    return Err(invalid("include: must contain at least one item"));
-                }
-                let mut seen = std::collections::BTreeSet::new();
-                for item in inc {
-                    if !seen.insert(*item as u8) {
-                        return Err(invalid("include: items must be unique"));
-                    }
-                }
+            validate_include_codes(
+                include
+                    .as_ref()
+                    .map(|inc| inc.iter().map(|item| *item as u8)),
+            )
+        }
+        A::ToolCall {
+            session_id,
+            turn_id,
+            tool_call_id,
+        } => {
+            if session_id.is_empty() {
+                return Err(invalid("session_id: must not be empty"));
+            }
+            if turn_id.is_empty() {
+                return Err(invalid("turn_id: must not be empty"));
+            }
+            if tool_call_id.is_empty() {
+                return Err(invalid("tool_call_id: must not be empty"));
             }
             Ok(())
         }
@@ -1300,6 +1320,27 @@ fn validate_retrieve(args: &RetrieveArgs) -> Result<(), SdkError> {
     }
 }
 
+fn validate_include_codes<I>(include: Option<I>) -> Result<(), SdkError>
+where
+    I: IntoIterator<Item = u8>,
+{
+    let Some(include) = include else {
+        return Ok(());
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    let mut count = 0usize;
+    for item in include {
+        count += 1;
+        if !seen.insert(item) {
+            return Err(invalid("include: items must be unique"));
+        }
+    }
+    if count == 0 {
+        return Err(invalid("include: must contain at least one item"));
+    }
+    Ok(())
+}
+
 /// Mirrors the JSON-schema constraints for `summarize` (the generated
 /// Rust `SummarizeArgs` only enforces `deny_unknown_fields`, but the wire
 /// schema requires non-empty `record_ids` and non-empty `kind` if
@@ -1320,12 +1361,18 @@ fn validate_summarize(args: &SummarizeArgs) -> Result<(), SdkError> {
 }
 
 /// Mirrors the JSON-schema constraints for `assemble_hot`: `budget`
-/// in `[0, 4 MiB]`, `session_id` non-empty when present.
+/// in `[0, 4 MiB]`, optional `recipe` non-empty when present, and
+/// `session_id` non-empty when present.
 fn validate_assemble_hot(args: &AssembleHotArgs) -> Result<(), SdkError> {
     if let Some(budget) = args.budget
         && budget > 4_194_304
     {
         return Err(invalid("budget: must be <= 4194304 (4 MiB)"));
+    }
+    if let Some(recipe) = &args.recipe
+        && recipe.is_empty()
+    {
+        return Err(invalid("recipe: must not be empty when present"));
     }
     if let Some(session_id) = &args.session_id
         && session_id.is_empty()
@@ -1335,16 +1382,44 @@ fn validate_assemble_hot(args: &AssembleHotArgs) -> Result<(), SdkError> {
     Ok(())
 }
 
-/// Mirrors the JSON-schema constraints for `capture_trace`: `from`
-/// non-empty (required), `session_id` non-empty when present.
+/// Mirrors the JSON-schema constraints for `capture_trace`: either
+/// `from` or (`blocks` + `session_id`) must be present; all provided
+/// strings must be non-empty.
 fn validate_capture_trace(args: &CaptureTraceArgs) -> Result<(), SdkError> {
-    if args.from.is_empty() {
-        return Err(invalid("from: must not be empty"));
+    if let Some(from) = &args.from
+        && from.is_empty()
+    {
+        return Err(invalid("from: must not be empty when present"));
+    }
+    if let Some(blocks) = &args.blocks
+        && blocks.is_empty()
+    {
+        return Err(invalid("blocks: must not be empty when present"));
     }
     if let Some(session_id) = &args.session_id
         && session_id.is_empty()
     {
         return Err(invalid("session_id: must not be empty when present"));
+    }
+    let has_from = args.from.is_some();
+    let has_blocks = args.blocks.is_some();
+    if !has_from && !has_blocks {
+        return Err(invalid("capture_trace: requires either `from` or `blocks`"));
+    }
+    if has_from && has_blocks {
+        return Err(invalid(
+            "capture_trace: `from` and `blocks` are mutually exclusive",
+        ));
+    }
+    if has_from && args.session_id.is_some() {
+        return Err(invalid(
+            "session_id: only supported with `blocks` for capture_trace",
+        ));
+    }
+    if has_blocks && args.session_id.is_none() {
+        return Err(invalid(
+            "session_id: required when using `blocks` for capture_trace",
+        ));
     }
     Ok(())
 }

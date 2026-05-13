@@ -52,6 +52,10 @@ fn ingest_body_args(body: &str) -> IngestArgs {
         session_id: None,
         tags: None,
         url: None,
+        jsonl: None,
+        harness: None,
+        session_id_from: None,
+        limit: None,
     }
 }
 
@@ -101,6 +105,7 @@ fn verb_response_serializes_as_canonical_envelope() {
             record_id: ulid(),
             session_id: "sess-1".to_owned(),
             plan_ref: None,
+            jsonl_summary: None,
         },
     };
     let value = serde_json::to_value(&resp).expect("serializes");
@@ -151,6 +156,7 @@ fn verb_response_rejects_envelope_invalid_target_combinations() {
             record_id: ulid(),
             session_id: "s".to_owned(),
             plan_ref: None,
+            jsonl_summary: None,
         },
     };
     assert!(serde_json::to_value(&stray).is_err());
@@ -476,6 +482,10 @@ fn ingest_accepts_well_formed_uri_schemes() {
             session_id: None,
             tags: None,
             url: Some(url.to_owned()),
+            jsonl: None,
+            harness: None,
+            session_id_from: None,
+            limit: None,
         };
         assert_unimplemented("ingest", sdk().ingest(&args));
     }
@@ -494,6 +504,7 @@ async fn search_rejects_empty_query_with_invalid_args() {
         query: String::new(),
         scope: None,
         explain: None,
+        include_reasoning: None,
     };
     match sdk().search(&args).await.expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
@@ -514,6 +525,7 @@ async fn search_rejects_out_of_range_limit_with_invalid_args() {
         query: "hello".to_owned(),
         scope: None,
         explain: None,
+        include_reasoning: None,
     };
     match sdk().search(&args).await.expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
@@ -541,6 +553,7 @@ async fn search_explain_rejects_when_policy_trace_capability_unadvertised() {
         query: "hello".to_owned(),
         scope: None,
         explain: Some(true),
+        include_reasoning: None,
     };
     let err = sdk()
         .search(&args)
@@ -573,6 +586,7 @@ async fn search_explain_false_rejects_unadvertised_keyword_mode() {
         query: "hello".to_owned(),
         scope: None,
         explain: Some(false),
+        include_reasoning: None,
     };
     let err = sdk()
         .search(&args)
@@ -610,6 +624,7 @@ async fn search_rejects_unadvertised_modes_with_capability_unavailable() {
             query: "hello".to_owned(),
             scope: None,
             explain: None,
+            include_reasoning: None,
         };
         let err = sdk()
             .search(&args)
@@ -667,6 +682,45 @@ fn retrieve_profile_requires_user_or_agent() {
     }
 }
 
+#[test]
+fn retrieve_tool_call_rejects_empty_fields_with_invalid_args() {
+    let args = RetrieveArgs::ToolCall {
+        session_id: String::new(),
+        turn_id: "turn-1".to_owned(),
+        tool_call_id: "call-1".to_owned(),
+    };
+    match sdk().retrieve(&args).expect_err("must reject") {
+        SdkError::InvalidArgs { reason } => {
+            assert!(reason.contains("session_id"), "reason: {reason}");
+        }
+        other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+
+    let args = RetrieveArgs::ToolCall {
+        session_id: "session-1".to_owned(),
+        turn_id: String::new(),
+        tool_call_id: "call-1".to_owned(),
+    };
+    match sdk().retrieve(&args).expect_err("must reject") {
+        SdkError::InvalidArgs { reason } => {
+            assert!(reason.contains("turn_id"), "reason: {reason}");
+        }
+        other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+
+    let args = RetrieveArgs::ToolCall {
+        session_id: "session-1".to_owned(),
+        turn_id: "turn-1".to_owned(),
+        tool_call_id: String::new(),
+    };
+    match sdk().retrieve(&args).expect_err("must reject") {
+        SdkError::InvalidArgs { reason } => {
+            assert!(reason.contains("tool_call_id"), "reason: {reason}");
+        }
+        other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn search_rejects_empty_and_filter_with_invalid_args() {
     let args = SearchArgs {
@@ -678,6 +732,7 @@ async fn search_rejects_empty_and_filter_with_invalid_args() {
         query: "hi".to_owned(),
         scope: None,
         explain: None,
+        include_reasoning: None,
     };
     match sdk().search(&args).await.expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
@@ -707,6 +762,7 @@ async fn search_rejects_excessive_filter_depth_with_invalid_args() {
         query: "hi".to_owned(),
         scope: None,
         explain: None,
+        include_reasoning: None,
     };
     match sdk().search(&args).await.expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
@@ -731,6 +787,7 @@ async fn search_rejects_malformed_filter_leaf_with_invalid_args() {
         query: "hi".to_owned(),
         scope: None,
         explain: None,
+        include_reasoning: None,
     };
     match sdk().search(&args).await.expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
@@ -765,6 +822,7 @@ async fn search_accepts_extended_filter_operators() {
             query: "hi".to_owned(),
             scope: None,
             explain: None,
+            include_reasoning: None,
         };
         match sdk()
             .search(&args)
@@ -805,6 +863,7 @@ async fn search_rejects_malformed_extended_filter_operators_with_invalid_args() 
             query: "hi".to_owned(),
             scope: None,
             explain: None,
+            include_reasoning: None,
         };
         match sdk().search(&args).await.expect_err("must reject") {
             SdkError::InvalidArgs { .. } => {}
@@ -826,6 +885,7 @@ async fn search_rejects_malformed_cursor_with_invalid_args() {
         query: "hi".to_owned(),
         scope: None,
         explain: None,
+        include_reasoning: None,
     };
     match sdk().search(&args).await.expect_err("must reject") {
         SdkError::InvalidArgs { reason } => assert!(reason.contains("Cursor"), "reason: {reason}"),
@@ -846,6 +906,7 @@ async fn search_rejects_empty_scope_filter_with_invalid_args() {
         query: "hi".to_owned(),
         scope: Some(empty_scope_filter()),
         explain: None,
+        include_reasoning: None,
     };
     match sdk().search(&args).await.expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
@@ -904,6 +965,7 @@ fn summarize_rejects_empty_record_ids_with_invalid_args() {
 fn assemble_hot_rejects_oversized_budget_with_invalid_args() {
     let args = AssembleHotArgs {
         budget: Some(4_194_305),
+        recipe: None,
         session_id: None,
         explain: None,
     };
@@ -916,11 +978,27 @@ fn assemble_hot_rejects_oversized_budget_with_invalid_args() {
 #[test]
 fn capture_trace_rejects_empty_from_with_invalid_args() {
     let args = CaptureTraceArgs {
-        from: String::new(),
+        from: Some(String::new()),
+        blocks: None,
         session_id: None,
     };
     match sdk().capture_trace(&args).expect_err("must reject") {
         SdkError::InvalidArgs { reason } => assert!(reason.contains("from"), "reason: {reason}"),
+        other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+}
+
+#[test]
+fn capture_trace_rejects_from_plus_session_with_invalid_args() {
+    let args = CaptureTraceArgs {
+        from: Some("/tmp/trace.log".to_owned()),
+        blocks: None,
+        session_id: Some("01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned()),
+    };
+    match sdk().capture_trace(&args).expect_err("must reject") {
+        SdkError::InvalidArgs { reason } => {
+            assert!(reason.contains("session_id"), "reason: {reason}");
+        }
         other => panic!("expected InvalidArgs, got {other:?}"),
     }
 }
@@ -971,6 +1049,7 @@ fn assemble_hot_rejects_any_budget_until_loader_lands() {
     // rather than silently drop a knob the caller asked to enforce.
     let args = AssembleHotArgs {
         budget: Some(1024),
+        recipe: None,
         session_id: None,
         explain: None,
     };
@@ -987,6 +1066,7 @@ fn assemble_hot_rejects_any_budget_until_loader_lands() {
 fn assemble_hot_rejects_any_session_id_until_loader_lands() {
     let args = AssembleHotArgs {
         budget: None,
+        recipe: None,
         session_id: Some("01J0000000000000000000000A".to_owned()),
         explain: None,
     };
@@ -1008,6 +1088,7 @@ fn assemble_hot_returns_unimplemented_in_sdk() {
     // probes, so vault-binding cannot diverge).
     let args = AssembleHotArgs {
         budget: None,
+        recipe: None,
         session_id: None,
         explain: None,
     };
@@ -1025,7 +1106,8 @@ fn assemble_hot_returns_unimplemented_in_sdk() {
 #[test]
 fn capture_trace_returns_internal_stub() {
     let args = CaptureTraceArgs {
-        from: "/tmp/trace.log".to_owned(),
+        from: Some("/tmp/trace.log".to_owned()),
+        blocks: None,
         session_id: None,
     };
     assert_unimplemented("capture_trace", sdk().capture_trace(&args));
@@ -1089,6 +1171,43 @@ fn forget_rejects_unadvertised_target_with_capability_unavailable() {
     match err {
         SdkError::CapabilityUnavailable { capability, .. } => {
             assert_eq!(capability, "cairn.mcp.v1.forget.record");
+        }
+        other => panic!("expected CapabilityUnavailable, got {other:?}"),
+    }
+}
+
+#[test]
+fn retrieve_capabilities_filtered_until_sdk_dispatch_is_wired() {
+    let sdk = Sdk::with_store(
+        std::sync::Arc::new(noop_store::NoopStore),
+        cairn_core::config::CairnConfig::default(),
+    );
+    let status = sdk.status();
+    for cap in [
+        cairn_sdk::generated::common::Capabilities::CairnMcpV1RetrieveSession,
+        cairn_sdk::generated::common::Capabilities::CairnMcpV1RetrieveTurn,
+        cairn_sdk::generated::common::Capabilities::CairnMcpV1RetrieveToolCall,
+    ] {
+        assert!(
+            !status.capabilities.contains(&cap),
+            "SDK status must not advertise {cap:?} until SDK retrieve dispatch is wired"
+        );
+    }
+
+    let err = sdk
+        .retrieve(&RetrieveArgs::Session {
+            cursor: None,
+            include: None,
+            include_reasoning: None,
+            limit: None,
+            order: None,
+            rehydrate: None,
+            session_id: "session-1".to_owned(),
+        })
+        .expect_err("must fail closed until SDK retrieve dispatch is wired");
+    match err {
+        SdkError::CapabilityUnavailable { capability, .. } => {
+            assert_eq!(capability, "cairn.mcp.v1.retrieve.session");
         }
         other => panic!("expected CapabilityUnavailable, got {other:?}"),
     }

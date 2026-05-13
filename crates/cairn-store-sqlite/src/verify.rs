@@ -103,6 +103,11 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("trigger", "wal_payloads_kind_matches_wal"),
     ("trigger", "wal_payloads_scrub_only"),
     ("trigger", "wal_payloads_no_delete"),
+    // 0058_session_metadata_audit — durable rollback evidence for
+    // in-place session-metadata patches (issue #289 re-loop r6).
+    // Renumbered from 0053 → 0058 during rebase onto main.
+    ("table", "session_metadata_audit"),
+    ("index", "session_metadata_audit_by_session"),
     // 0005_consent
     ("table", "consent_journal"),
     ("index", "consent_journal_subject_scope_idx"),
@@ -258,6 +263,10 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("table", "consent_journal_repair_audit"),
     ("trigger", "consent_journal_repair_audit_immutable"),
     ("trigger", "consent_journal_repair_audit_no_delete"),
+    // 0053_hot_prefix_cache (issue #83): hot-prefix cache + per-class
+    // watermarks for assemble_hot cache invalidation.
+    ("table", "hot_source_watermarks"),
+    ("table", "hot_prefix_cache"),
 ];
 
 /// Identity registry objects share `cairn.db` but are owned by

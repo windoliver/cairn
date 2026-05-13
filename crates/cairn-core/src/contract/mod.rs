@@ -18,12 +18,15 @@
 //!   [`IdentityRegistry`] / [`RegistryError`] / [`IdentityVisibility`] /
 //!   [`MaintenanceMode`] / [`PurgeAcknowledgement`] / [`PurgeReason`].
 //! - Forward stubs (P1/P2, hidden until #113 / #124): `FrontendAdapter`, `AgentProvider`.
+//! - Metrics contract (§15): [`MetricsSink`] / [`MetricsError`],
+//!   [`CapturingMetricsSink`], [`NoopMetricsSink`].
 
 pub mod agent_provider;
 pub mod conformance;
 pub mod consent_journal;
 pub mod consent_lookup;
 pub mod frontend_adapter;
+pub mod hot_prefix_cache;
 pub mod identity_registry;
 pub mod job_store;
 pub mod keystore;
@@ -31,6 +34,7 @@ pub mod llm_provider;
 pub mod manifest;
 pub mod mcp_server;
 pub mod memory_store;
+pub mod metrics;
 pub mod registry;
 pub mod sensor_ingress;
 pub mod source_resolver;
@@ -53,7 +57,13 @@ pub use consent_journal::{
     TargetReplayKey,
 };
 pub use consent_lookup::{ConsentLookup, ConsentLookupError};
-pub use frontend_adapter::{FrontendAdapter, FrontendAdapterCapabilities, FrontendAdapterPlugin};
+pub use frontend_adapter::{
+    FrontendAdapter, FrontendAdapterCapabilities, FrontendAdapterError, FrontendAdapterPlugin,
+    FrontendBackendState, FrontendEdit, FrontendEventStream, FrontendFieldClass,
+    FrontendFieldPolicy, FrontendIdentityContext, FrontendProjection, FrontendProjectionRequest,
+    FrontendReconcileError, FrontendReconcileRequest, FrontendSubscription,
+};
+pub use hot_prefix_cache::{CacheError, CachedPrefix, HotPrefixCache};
 pub use identity_registry::{
     IdentityRegistry, IdentityVisibility, MaintenanceMode, PurgeAcknowledgement, PurgeReason,
     RegistryError,
@@ -69,6 +79,7 @@ pub use llm_provider::{
 };
 pub use mcp_server::{MCPServer, MCPServerCapabilities, MCPServerPlugin};
 pub use memory_store::{MemoryStore, MemoryStoreCapabilities, MemoryStorePlugin};
+pub use metrics::{CapturingMetricsSink, MetricsError, MetricsSink, NoopMetricsSink};
 pub use sensor_ingress::{SensorIngress, SensorIngressCapabilities, SensorIngressPlugin};
 pub use source_resolver::{SourceResolver, SourceResolverError};
 pub use workflow_orchestrator::{

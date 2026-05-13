@@ -136,8 +136,9 @@ impl CapabilityGates {
 
 /// The decision table — single source of truth for capability advertisement.
 ///
-/// Returns the wire-stable order: search → `policy_trace` → forget → retrieve
-/// → replay. `vault_bound: false` short-circuits to `Vec::new()`.
+/// Returns the wire-stable order: search → `policy_trace` →
+/// `sensors.pre_compact` → forget → retrieve → replay. `vault_bound: false`
+/// short-circuits to `Vec::new()`.
 #[must_use]
 pub fn advertise(gates: &CapabilityGates) -> Vec<Capabilities> {
     if !gates.vault_bound {
@@ -146,7 +147,7 @@ pub fn advertise(gates: &CapabilityGates) -> Vec<Capabilities> {
 
     let phase = gates.contract_phase;
     let cfg = &gates.config;
-    let mut out = Vec::with_capacity(8);
+    let mut out = Vec::with_capacity(9);
 
     // ── search ────────────────────────────────────────────────────────────
     if cfg.keyword_search && gates.store_ok(|s| s.fts) {
@@ -173,6 +174,11 @@ pub fn advertise(gates: &CapabilityGates) -> Vec<Capabilities> {
         out.push(Capabilities::CairnMcpV1PolicyTrace);
     }
 
+    // ── sensors ───────────────────────────────────────────────────────────
+    if wiring::SENSORS_PRE_COMPACT_WIRED {
+        out.push(Capabilities::CairnMcpV1SensorsPreCompact);
+    }
+
     // ── forget (capability surfaces; runtime wiring still all-false) ──────
     if phase >= Phase::V0_1 && wiring::FORGET_RECORD_WIRED {
         out.push(Capabilities::CairnMcpV1ForgetRecord);
@@ -193,6 +199,9 @@ pub fn advertise(gates: &CapabilityGates) -> Vec<Capabilities> {
     }
     if wiring::RETRIEVE_TURN_WIRED {
         out.push(Capabilities::CairnMcpV1RetrieveTurn);
+    }
+    if wiring::RETRIEVE_TOOL_CALL_WIRED {
+        out.push(Capabilities::CairnMcpV1RetrieveToolCall);
     }
     if wiring::RETRIEVE_FOLDER_WIRED {
         out.push(Capabilities::CairnMcpV1RetrieveFolder);

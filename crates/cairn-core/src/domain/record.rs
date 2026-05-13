@@ -19,7 +19,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::{
     ActorChainEntry, CanonicalRecordHash, ChainRole, DomainError, EvidenceVector, Identity,
-    IdentityKind, Provenance, Rfc3339Timestamp, ScopeTuple, TargetId, VerifiedSignedIntent,
+    IdentityKind, Provenance, Rfc3339Timestamp, ScopeTuple, SourceId, TargetId,
+    VerifiedSignedIntent,
     actor_chain::validate_chain,
     taxonomy::{MemoryClass, MemoryKind, MemoryVisibility},
 };
@@ -61,6 +62,48 @@ impl Ed25519Signature {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// Well-known all-zeros sentinel used to mark a record as "no longer
+    /// validly signed by its original author" — see issue #289. Stored
+    /// in place of a real Ed25519 signature after `flush apply` mutates
+    /// the canonical record bytes (Patch/Rename). Downstream verifiers
+    /// MUST treat this value as unsigned and refuse to accept it as
+    /// authorial provenance. Structurally valid `ed25519:` + 128 zeros
+    /// so it survives serialization round-trips through wire types that
+    /// still type `signature` as a non-optional `Ed25519Signature`.
+    pub const FLUSH_MUTATED_SENTINEL: &'static str = concat!(
+        "ed25519:", "00000000", "00000000", "00000000", "00000000", "00000000", "00000000",
+        "00000000", "00000000", "00000000", "00000000", "00000000", "00000000", "00000000",
+        "00000000", "00000000", "00000000",
+    );
+
+    /// Returns the [`Self::FLUSH_MUTATED_SENTINEL`] as a parsed
+    /// [`Ed25519Signature`]. Infallible: the sentinel is a constant
+    /// known to satisfy [`Ed25519Signature::parse`].
+    #[must_use]
+    pub fn flush_mutated_sentinel() -> Self {
+        Self(Self::FLUSH_MUTATED_SENTINEL.to_owned())
+    }
+
+    /// Returns `true` if this signature is the well-known
+    /// [`Self::FLUSH_MUTATED_SENTINEL`] — i.e. the record was rewritten by a
+    /// flush apply mutation and is no longer author-signed.
+    #[must_use]
+    pub fn is_flush_mutated_sentinel(&self) -> bool {
+        self.0 == Self::FLUSH_MUTATED_SENTINEL
+    }
+
+    /// Returns `true` if this signature is structurally a real Ed25519
+    /// signature (NOT the [`Self::FLUSH_MUTATED_SENTINEL`]). Trust boundaries
+    /// that treat a present `signature` field as authorial provenance
+    /// MUST call this before accepting the record as author-signed —
+    /// otherwise a record rewritten by `flush apply` will be
+    /// indistinguishable from an admission-signed record at the wire
+    /// shape. See issue #289 re-loop r4 finding 3.
+    #[must_use]
+    pub fn attests_author(&self) -> bool {
+        !self.is_flush_mutated_sentinel()
     }
 }
 
@@ -156,6 +199,8 @@ pub struct MemoryRecord {
     pub scope: ScopeTuple,
     /// Markdown body. Required and non-empty.
     pub body: String,
+    /// Source document ids referenced by this record's frontmatter (§3).
+    pub source_ids: Vec<SourceId>,
     /// Mandatory provenance frontmatter (§6.5).
     pub provenance: Provenance,
     /// Wall-clock instant of the most recent durable update.
@@ -205,6 +250,26 @@ pub struct MemoryRecord {
 }
 
 impl MemoryRecord {
+    /// Convenience: `true` if this record's `signature` is the
+    /// [`Ed25519Signature::FLUSH_MUTATED_SENTINEL`] — i.e. it was
+    /// rewritten by a `flush apply` mutation and is no longer
+    /// author-signed. See issue #289 re-loop r4 finding 3.
+    #[must_use]
+    pub fn is_flush_mutated(&self) -> bool {
+        self.signature.is_flush_mutated_sentinel()
+    }
+
+    /// Convenience: `true` if this record's `signature` still attests
+    /// authorial provenance (i.e. it is NOT the flush-mutated
+    /// sentinel). Trust boundaries that gate on "is the author's
+    /// signature still valid for the current payload" should call this
+    /// before any keychain-resident crypto check. See issue #289
+    /// re-loop r4 finding 3.
+    #[must_use]
+    pub fn signature_attests_author(&self) -> bool {
+        self.signature.attests_author()
+    }
+
     /// Validate every domain invariant. Returns the first violation found.
     ///
     /// This is **shape validation only** — it confirms the record is
@@ -758,7 +823,7 @@ pub mod tests_export {
     use crate::contract::memory_store::StoredRecord;
     use crate::domain::{
         ActorChainEntry, ChainRole, EvidenceVector, Identity, Provenance, Rfc3339Timestamp,
-        ScopeTuple, TargetId,
+        ScopeTuple, SourceId, TargetId,
         taxonomy::{MemoryClass, MemoryKind, MemoryVisibility},
     };
 
@@ -792,6 +857,7 @@ pub mod tests_export {
                 ..ScopeTuple::default()
             },
             body: "user prefers dark mode".to_owned(),
+            source_ids: vec![SourceId::parse("01HQZX9F5N0000000000000001").expect("valid")],
             provenance: Provenance {
                 source_sensor: Identity::parse("snr:local:hook:cc-session:v1").expect("valid"),
                 created_at: Rfc3339Timestamp::parse("2026-04-22T14:02:11Z").expect("valid"),

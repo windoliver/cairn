@@ -37,6 +37,8 @@ pub enum Capabilities {
     CairnMcpV1RetrieveSession,
     #[serde(rename = "cairn.mcp.v1.retrieve.turn")]
     CairnMcpV1RetrieveTurn,
+    #[serde(rename = "cairn.mcp.v1.retrieve.tool_call")]
+    CairnMcpV1RetrieveToolCall,
     #[serde(rename = "cairn.mcp.v1.retrieve.folder")]
     CairnMcpV1RetrieveFolder,
     #[serde(rename = "cairn.mcp.v1.retrieve.scope")]
@@ -59,6 +61,8 @@ pub enum Capabilities {
     CairnMcpV1ExtensionSessiontree,
     #[serde(rename = "cairn.mcp.v1.policy_trace")]
     CairnMcpV1PolicyTrace,
+    #[serde(rename = "cairn.mcp.v1.sensors.pre_compact")]
+    CairnMcpV1SensorsPreCompact,
     #[serde(rename = "cairn.mcp.v1.replay.sequence")]
     CairnMcpV1ReplaySequence,
     #[serde(rename = "cairn.mcp.v1.replay.challenge")]

@@ -92,6 +92,7 @@ pub const PROJECTED_STANDARD_FIELDS: &[&str] = &[
     "scope",
     "confidence",
     "salience",
+    "source_ids",
     "tags",
     "created",
     "updated",
@@ -175,6 +176,7 @@ struct FrontmatterDoc<'a> {
     scope: &'a ScopeTuple,
     confidence: f32,
     salience: f32,
+    source_ids: &'a [crate::domain::SourceId],
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     tags: &'a [String],
     created: &'a str,
@@ -195,6 +197,7 @@ impl MarkdownProjector {
             scope: &r.scope,
             confidence: r.confidence,
             salience: r.salience,
+            source_ids: &r.source_ids,
             tags: &r.tags,
             created: r.provenance.created_at.as_str(),
             updated: r.updated_at.as_str(),
@@ -377,15 +380,21 @@ impl MarkdownProjector {
                 store_version: current.version,
             };
         }
-        // Compare backend-owned projected fields (scope, confidence, salience, created,
-        // updated) using the canonical projection as the reference so both sides go through
-        // the same yaml_serde round-trip. This avoids f32↔f64 precision mismatches and
-        // YAML-tagged timestamp subtleties.
+        // Compare backend-owned projected fields (scope, confidence, salience, source_ids,
+        // created, updated) using the canonical projection as the reference so both sides go
+        // through the same yaml_serde round-trip. This avoids f32↔f64 precision mismatches
+        // and YAML-tagged timestamp subtleties.
         let canonical = self.project(current);
         // The canonical projection is always parseable; if it somehow isn't, skip the check.
         if let Ok(canonical_parsed) = self.parse(&canonical.content) {
-            const BACKEND_FIELDS: &[&str] =
-                &["scope", "confidence", "salience", "created", "updated"];
+            const BACKEND_FIELDS: &[&str] = &[
+                "scope",
+                "confidence",
+                "salience",
+                "source_ids",
+                "created",
+                "updated",
+            ];
             for field in BACKEND_FIELDS {
                 let canonical_val = canonical_parsed.raw_frontmatter.get(*field);
                 let file_val = parsed.raw_frontmatter.get(*field);

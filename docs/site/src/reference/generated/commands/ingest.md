@@ -13,7 +13,8 @@ Usage: ingest [OPTIONS] [source]
 
 Arguments:
   [source]
-          File, URL, folder, or '-' for stdin. Mutually exclusive with --body/--file/--folder/--url.
+          File, URL, folder, JSONL transcript, or '-' for stdin. Mutually exclusive with
+          --body/--file/--folder/--url/--jsonl.
 
 Options:
       --kind <STRING>
@@ -44,6 +45,18 @@ Options:
           [possible values: keyword, semantic, full]
 
       --batch-size <U32>
+
+
+      --jsonl <PATH>
+
+
+      --harness <STRING>
+
+
+      --session-id-from <STRING>
+
+
+      --limit <U32>
 
 
       --session <STRING>

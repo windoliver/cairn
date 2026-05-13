@@ -14,6 +14,7 @@ pub mod consent_reader;
 pub mod consent_timeline;
 pub mod entity_graph;
 pub mod error;
+pub mod hot_prefix;
 mod identity;
 pub mod lint;
 pub mod locks;
@@ -29,6 +30,7 @@ pub mod wal;
 
 pub use consent_reader::SqliteConsentJournalReader;
 pub use error::StoreError;
+pub use hot_prefix::SqliteHotPrefixCache;
 pub use identity::SqliteIdentityRegistry;
 pub use lint::{EdgeLintReport, lint_edges, lint_purge_pending, resolve_edge_contradictions};
 pub use open::{

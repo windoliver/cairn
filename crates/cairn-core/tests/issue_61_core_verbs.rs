@@ -8,7 +8,9 @@ use cairn_core::generated::verbs::retrieve::TurnItemRole;
 use cairn_core::pipeline::filter::Decision;
 use cairn_core::verbs::assemble_hot::loader::{read_vault_markdown_file, trim_bodies_to_budget};
 use cairn_core::verbs::ingest::{PreparedIngest, prepare_ingest_body};
-use cairn_core::verbs::retrieve::{profile_data, record_data, turn_data_with_options};
+use cairn_core::verbs::retrieve::{
+    profile_data, record_data, tool_call_data, turn_data_with_options,
+};
 use cairn_core::verbs::summarize::render_summary;
 
 mod issue_61_core_verbs {
@@ -34,6 +36,10 @@ mod issue_61_core_verbs {
             session_id: Some("sess-1".to_owned()),
             tags: Some(vec!["issue-61".to_owned()]),
             url: None,
+            jsonl: None,
+            harness: None,
+            session_id_from: None,
+            limit: None,
         };
         let prepared = prepare_ingest_body(&args, "agt:test:writer:v1").expect("prepare");
         assert!(matches!(prepared, PreparedIngest::Proceed { .. }));
@@ -94,6 +100,10 @@ mod issue_61_core_verbs {
             session_id: None,
             tags: None,
             url: None,
+            jsonl: None,
+            harness: None,
+            session_id_from: None,
+            limit: None,
         };
         let prepared = prepare_ingest_body(&args, "agt:test:writer:v1").expect("prepare");
         if let PreparedIngest::Rejected {
@@ -129,6 +139,10 @@ mod issue_61_core_verbs {
             session_id: None,
             tags: None,
             url: None,
+            jsonl: None,
+            harness: None,
+            session_id_from: None,
+            limit: None,
         };
         let prepared =
             prepare_ingest_body(&args, "not-an-identity").expect("discard before issuer");
@@ -155,6 +169,10 @@ mod issue_61_core_verbs {
             session_id: None,
             tags: None,
             url: None,
+            jsonl: None,
+            harness: None,
+            session_id_from: None,
+            limit: None,
         };
         let err = prepare_ingest_body(&args, "agt:test:writer:v1").unwrap_err();
         assert!(matches!(err, DomainError::MalformedCapture { .. }));
@@ -248,6 +266,84 @@ mod issue_61_core_verbs {
                     .and_then(|call| call.get("tool_call_id"))
                     .and_then(serde_json::Value::as_str)),
             Some("call-include")
+        );
+    }
+
+    #[test]
+    fn retrieve_turn_item_exposes_trace_linkage() {
+        let mut record = sample_core_record(
+            "tool body",
+            serde_json::json!({
+                "trace_event": "pre_tool",
+                "trace": {
+                    "turn_id": "turn-link",
+                    "sequence": 2,
+                    "capture_event_id": "evt-pre",
+                    "parent_event_id": "evt-parent",
+                    "tool_call_id": "call-link",
+                    "payload_hash": "sha256:abc"
+                }
+            }),
+        );
+        record.scope.session_id = Some("session-link".to_owned());
+
+        let data = turn_data_with_options(
+            "session-link".to_owned(),
+            "turn-link".to_owned(),
+            &[record.clone()],
+            false,
+            true,
+        );
+        let RetrieveData::Turn(data) = data else {
+            panic!("expected turn data");
+        };
+        let linkage = data.turn[0].linkage.as_ref().expect("linkage");
+        assert_eq!(linkage.record_id.0, record.id.as_str());
+        assert_eq!(linkage.trace_event.as_deref(), Some("pre_tool"));
+        assert_eq!(linkage.sequence, Some(2));
+        assert_eq!(linkage.capture_event_id.as_deref(), Some("evt-pre"));
+        assert_eq!(linkage.parent_event_id.as_deref(), Some("evt-parent"));
+        assert_eq!(linkage.tool_call_id.as_deref(), Some("call-link"));
+        assert_eq!(linkage.payload_hash.as_deref(), Some("sha256:abc"));
+    }
+
+    #[test]
+    fn retrieve_tool_call_data_uses_generated_shape() {
+        let mut record = sample_core_record(
+            "tool body",
+            serde_json::json!({
+                "trace_event": "post_tool",
+                "trace": {
+                    "turn_id": "turn-tool",
+                    "sequence": 3,
+                    "capture_event_id": "evt-post",
+                    "parent_event_id": "evt-pre",
+                    "tool_call_id": "call-tool"
+                }
+            }),
+        );
+        record.scope.session_id = Some("session-tool".to_owned());
+
+        let data = tool_call_data(
+            "session-tool".to_owned(),
+            "turn-tool".to_owned(),
+            "call-tool".to_owned(),
+            &[record],
+        );
+        let RetrieveData::ToolCall(data) = data else {
+            panic!("expected tool-call data");
+        };
+        assert_eq!(data.session_id, "session-tool");
+        assert_eq!(data.turn_id, "turn-tool");
+        assert_eq!(data.tool_call_id, "call-tool");
+        assert_eq!(data.items.len(), 1);
+        assert_eq!(data.items[0].role, TurnItemRole::Tool);
+        assert_eq!(
+            data.items[0]
+                .linkage
+                .as_ref()
+                .and_then(|linkage| linkage.tool_call_id.as_deref()),
+            Some("call-tool")
         );
     }
 
@@ -450,6 +546,10 @@ mod issue_61_core_verbs {
             session_id: None,
             tags: None,
             url: None,
+            jsonl: None,
+            harness: None,
+            session_id_from: None,
+            limit: None,
         };
         let PreparedIngest::Proceed { record, .. } =
             prepare_ingest_body(&args, "agt:test:writer:v1").expect("prepare record")

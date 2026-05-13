@@ -2,6 +2,7 @@
 //! embed the verb name in content text — matching the CLI exit-2 branch.
 #![allow(missing_docs)]
 
+use cairn_core::generated::envelope::{Response, ResponseStatus};
 use cairn_mcp::generated::TOOLS;
 use cairn_mcp::handler::dispatch_stub;
 use rmcp::model::{Content, RawContent};
@@ -18,6 +19,19 @@ fn content_to_text(content: &[Content]) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn first_text_content(content: &[Content]) -> &str {
+    content
+        .iter()
+        .find_map(|c| {
+            if let RawContent::Text(t) = &**c {
+                Some(t.text.as_str())
+            } else {
+                None
+            }
+        })
+        .expect("expected text content")
 }
 
 #[test]
@@ -75,4 +89,19 @@ fn unknown_verb_triggers_handler_error_branch() {
         content_text.contains("not yet implemented"),
         "dispatch_stub content must mention placeholder message; got: {content_text}"
     );
+}
+
+#[test]
+fn known_stub_content_is_parseable_response_envelope() {
+    for tool in TOOLS {
+        let result = dispatch_stub(tool.name);
+        let text = first_text_content(&result.content);
+        let envelope: Response = serde_json::from_str(text).unwrap_or_else(|e| {
+            panic!("{} stub must be Response JSON: {e}; text={text}", tool.name)
+        });
+        assert!(matches!(envelope.status, ResponseStatus::Aborted));
+        assert_eq!(envelope.operation_id.0.len(), 26);
+        let err = envelope.error.expect("aborted envelope must carry error");
+        assert_eq!(err["code"], "Internal");
+    }
 }

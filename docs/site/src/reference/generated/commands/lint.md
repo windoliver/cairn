@@ -18,6 +18,10 @@ Options:
       --fix
 
 
+      --plan <ULID>
+          Lint the pending FlushPlan with this id (issue #289 — surfaces rename target collisions
+          before apply)
+
       --fix-folders
           Regenerate folder _index.md sidecars and backlinks for every non-empty folder (brief §3.4,
           #44)

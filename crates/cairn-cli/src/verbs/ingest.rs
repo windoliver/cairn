@@ -327,6 +327,11 @@ pub fn run(
         return run_resync(sub, json, resync_path, vault_root.as_path());
     }
 
+    // --jsonl <path>: harness transcript backfill (issue #311, brief §5.5).
+    if let Some(jsonl_path) = sub.get_one::<std::path::PathBuf>("jsonl") {
+        return crate::verbs::ingest_jsonl::run(sub, json, jsonl_path, &vault_root);
+    }
+
     // --dry-run / --human-review: build a stub FlushPlan and either print
     // or persist it. Returns before the source-count validation so these
     // flags can be combined with a normal --kind/--body without tripping the
@@ -423,6 +428,18 @@ pub fn run(
 
 struct ResolvedBody {
     body: String,
+    // Retained for the source-artifact pipeline (issue #325 follow-up); the
+    // signed-ingest path does not yet stage `sources/` files.
+    #[allow(
+        dead_code,
+        reason = "wired in upcoming source-artifact persistence task"
+    )]
+    source_subdir: &'static str,
+    #[allow(
+        dead_code,
+        reason = "wired in upcoming source-artifact persistence task"
+    )]
+    source_extension: String,
 }
 
 fn parse_kind(sub: &ArgMatches, json: bool) -> Result<MemoryKind, ExitCode> {
@@ -457,30 +474,61 @@ fn resolve_body(sub: &ArgMatches) -> Result<ResolvedBody, String> {
                 .take(STDIN_LIMIT_BYTES)
                 .read_to_string(&mut buf)
                 .map_err(|e| format!("failed to read stdin: {e}"))?;
-            Ok(ResolvedBody { body: buf })
+            Ok(ResolvedBody {
+                body: buf,
+                source_subdir: "chat",
+                source_extension: "txt".to_owned(),
+            })
         } else {
             let path = PathBuf::from(src);
             if path.is_file() {
                 fs::read_to_string(&path)
-                    .map(|body| ResolvedBody { body })
+                    .map(|body| ResolvedBody {
+                        body,
+                        source_subdir: "documents",
+                        source_extension: source_extension(&path),
+                    })
                     .map_err(|e| format!("failed to read {}: {e}", path.display()))
             } else {
-                Ok(ResolvedBody { body: src.clone() })
+                Ok(ResolvedBody {
+                    body: src.clone(),
+                    source_subdir: "chat",
+                    source_extension: "txt".to_owned(),
+                })
             }
         };
     }
     if let Some(body) = sub.get_one::<String>("body") {
-        return Ok(ResolvedBody { body: body.clone() });
+        return Ok(ResolvedBody {
+            body: body.clone(),
+            source_subdir: "chat",
+            source_extension: "txt".to_owned(),
+        });
     }
     if let Some(path) = sub.get_one::<PathBuf>("file") {
         return fs::read_to_string(path)
-            .map(|body| ResolvedBody { body })
+            .map(|body| ResolvedBody {
+                body,
+                source_subdir: "documents",
+                source_extension: source_extension(path),
+            })
             .map_err(|e| format!("failed to read {}: {e}", path.display()));
     }
     if let Some(url) = sub.get_one::<String>("url") {
-        return Ok(ResolvedBody { body: url.clone() });
+        return Ok(ResolvedBody {
+            body: url.clone(),
+            source_subdir: "articles",
+            source_extension: "txt".to_owned(),
+        });
     }
     Err("exactly one source is required".to_owned())
+}
+
+fn source_extension(path: &Path) -> String {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .filter(|ext| !ext.is_empty())
+        .map_or_else(|| "txt".to_owned(), str::to_owned)
 }
 
 fn require_bound_vault(json: bool, vault_root: &Path) -> Option<ExitCode> {
@@ -547,6 +595,7 @@ fn run_resync(sub: &ArgMatches, json: bool, resync_path: &Path, vault_root: &Pat
                     plan_ref: None,
                     record_id: Ulid(result.target_id),
                     session_id,
+                    jsonl_summary: None,
                 })),
                 error: None,
                 operation_id: new_operation_id(),
@@ -711,6 +760,7 @@ async fn run_async(
                         plan_ref: None,
                         record_id,
                         session_id,
+                        jsonl_summary: None,
                     };
                     let resp = super::signed::committed(
                         ResponseVerb::Ingest,
@@ -942,6 +992,12 @@ fn ingest_args_from_matches(sub: &ArgMatches, body: String) -> IngestArgs {
             .get_many::<String>("tags")
             .map(|vals| vals.cloned().collect()),
         url: None,
+        jsonl: sub
+            .get_one::<PathBuf>("jsonl")
+            .map(|p| p.to_string_lossy().into_owned()),
+        harness: sub.get_one::<String>("harness").cloned(),
+        session_id_from: sub.get_one::<String>("session_id_from").cloned(),
+        limit: sub.get_one::<u32>("limit").map(|v| i64::from(*v)),
     }
 }
 

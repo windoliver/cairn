@@ -89,7 +89,23 @@ impl StepBody for RecordStepBody {
                     .to_store_plan()
                     .map_err(|e| StepBodyError::Failed(e.to_string()))?;
                 crate::store::upsert::activate_upsert_in_tx(tx, &plan)
-                    .map_err(|e| StepBodyError::Failed(e.to_string()))
+                    .map_err(|e| StepBodyError::Failed(e.to_string()))?;
+                // Hot-prefix cache invalidation (issue #83). Only the
+                // content-changed path bumps. On supersession
+                // (prior_record_id is Some), bump every class
+                // pessimistically because the prior row's
+                // classification is unknown at this layer. Atomic with
+                // activation: same tx, so any rollback rolls back the
+                // bump.
+                if plan.content_changed {
+                    crate::store::upsert::bump_hot_prefix_watermarks(
+                        tx,
+                        &payload.record,
+                        plan.prior_record_id.is_some(),
+                    )
+                    .map_err(|e| StepBodyError::Failed(e.to_string()))?;
+                }
+                Ok(())
             }
             (RecordStepPayload::Expire(payload), "snapshot.stage") => {
                 stage_snapshot(tx, op_id, step, payload.target_id.as_str())
@@ -308,6 +324,7 @@ fn mark_forget_tombstone(
     op_id: &OperationId,
     payload: &ForgetPayload,
 ) -> Result<(), StepBodyError> {
+    let now_ms = crate::store::current_unix_ms();
     tx.execute(
         "UPDATE records \
             SET active = 0, \
@@ -315,7 +332,17 @@ fn mark_forget_tombstone(
                 tombstone_reason = 'forget', \
                 updated_at = ?1 \
           WHERE target_id = ?2",
-        params![crate::store::current_unix_ms(), payload.target_id.as_str()],
+        params![now_ms, payload.target_id.as_str()],
+    )
+    .map_err(StepBodyError::Storage)?;
+    // Hot-prefix forget hard-gate (issue #83): bump every source-class
+    // watermark atomically with the tombstone so the cache cannot serve
+    // a forgotten record on its next read. No WHERE clause — every row
+    // is bumped.
+    tx.execute(
+        "UPDATE hot_source_watermarks SET watermark = watermark + 1, \
+         updated_at_ms = ?1",
+        params![now_ms],
     )
     .map_err(StepBodyError::Storage)?;
     append_forget_consent(tx, op_id, payload)

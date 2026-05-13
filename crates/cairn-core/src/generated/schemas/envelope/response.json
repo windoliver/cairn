@@ -294,6 +294,49 @@
           {
             "properties": {
               "target": {
+                "const": "tool_call"
+              }
+            },
+            "required": [
+              "target"
+            ]
+          }
+        ]
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "$ref": "../verbs/retrieve.json#/$defs/DataToolCall"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "allOf": [
+          {
+            "properties": {
+              "verb": {
+                "const": "retrieve"
+              }
+            },
+            "required": [
+              "verb"
+            ]
+          },
+          {
+            "properties": {
+              "status": {
+                "const": "committed"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          {
+            "properties": {
+              "target": {
                 "const": "folder"
               }
             },
@@ -699,6 +742,7 @@
         "record",
         "session",
         "turn",
+        "tool_call",
         "folder",
         "scope",
         "profile"

@@ -36,6 +36,7 @@ fn search_with_filter(filter: serde_json::Value) -> SearchArgs {
         query: "q".to_owned(),
         scope: None,
         explain: None,
+        include_reasoning: None,
     }
 }
 
@@ -58,6 +59,10 @@ fn ingest_with_url(url: String) -> IngestArgs {
         session_id: None,
         tags: None,
         url: Some(url),
+        jsonl: None,
+        harness: None,
+        session_id_from: None,
+        limit: None,
     }
 }
 
@@ -248,6 +253,10 @@ proptest! {
             session_id: None,
             tags: None,
             url: has_url.then(|| "http://example.com/x".to_owned()),
+            jsonl: None,
+            harness: None,
+            session_id_from: None,
+            limit: None,
         };
         let err = sdk().ingest(&args).expect_err("must reject");
         prop_assert!(is_invalid_args(&err));
@@ -279,6 +288,10 @@ async fn ingest_dry_run_and_human_review_both_true_rejects() {
         session_id: None,
         tags: None,
         url: None,
+        jsonl: None,
+        harness: None,
+        session_id_from: None,
+        limit: None,
     };
     let err = sdk().ingest(&args).expect_err("must reject double-mode");
     assert!(
@@ -329,6 +342,7 @@ async fn empty_scope_filter_rejects() {
             workspace: None,
         }),
         explain: None,
+        include_reasoning: None,
     };
     assert!(matches!(
         sdk().search(&args).await.expect_err("must reject"),
@@ -352,6 +366,7 @@ proptest! {
             query: "q".to_owned(),
             scope: None,
             explain: None,
+            include_reasoning: None,
         };
         prop_assert!(is_invalid_args(&search_sync(&args).expect_err("must reject")));
     }

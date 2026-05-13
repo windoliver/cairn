@@ -12,6 +12,9 @@ cairn.mcp.v1 verb: assemble_hot
 Usage: assemble_hot [OPTIONS]
 
 Options:
+      --recipe <STRING>
+
+
       --session <STRING>
 
 

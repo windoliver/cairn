@@ -12,7 +12,7 @@ use crate::domain::record::Ed25519Signature;
 use crate::domain::{
     ActorChainEntry, CaptureMode, ChainRole, DomainError, EvidenceVector, Identity, MemoryClass,
     MemoryKind, MemoryRecord, Provenance, RecordId, Rfc3339Timestamp, ScopeTuple, SourceFamily,
-    TargetId,
+    SourceId, TargetId,
 };
 use crate::generated::envelope::ResponsePolicyTrace;
 use crate::generated::verbs::ingest::IngestArgs;
@@ -150,6 +150,7 @@ fn build_record(
         crate::domain::IdentityKind::Sensor => {}
     }
 
+    let source_id = SourceId::parse(ulid::Ulid::new().to_string())?;
     let record = MemoryRecord {
         id: RecordId::parse(id.clone())?,
         target_id: TargetId::parse(id)?,
@@ -158,6 +159,7 @@ fn build_record(
         visibility,
         scope,
         body: fenced_text.to_owned(),
+        source_ids: vec![source_id],
         provenance: Provenance {
             source_sensor: Identity::parse("snr:local:cli:ingest:v1")?,
             created_at: now.clone(),

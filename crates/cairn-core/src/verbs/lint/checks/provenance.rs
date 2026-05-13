@@ -445,6 +445,8 @@ mod tests {
             author_states: empty_author_states(),
             unresolvable_authors: empty_unresolvable_authors(),
             consent_lookup: None,
+            vault_root: None,
+            hot_body_loader: None,
             source_resolver: &resolver,
             consent_journal: &journal,
         };
@@ -474,6 +476,8 @@ mod tests {
             author_states: empty_author_states(),
             unresolvable_authors: empty_unresolvable_authors(),
             consent_lookup: None,
+            vault_root: None,
+            hot_body_loader: None,
             source_resolver: &resolver,
             consent_journal: &journal,
         };
@@ -508,6 +512,8 @@ mod tests {
             author_states: empty_author_states(),
             unresolvable_authors: empty_unresolvable_authors(),
             consent_lookup: None,
+            vault_root: None,
+            hot_body_loader: None,
             source_resolver: &resolver,
             consent_journal: &journal,
         };
@@ -542,6 +548,8 @@ mod tests {
             author_states: empty_author_states(),
             unresolvable_authors: empty_unresolvable_authors(),
             consent_lookup: None,
+            vault_root: None,
+            hot_body_loader: None,
             source_resolver: &resolver,
             consent_journal: &journal,
         };
@@ -586,6 +594,8 @@ mod tests {
             author_states: empty_author_states(),
             unresolvable_authors: empty_unresolvable_authors(),
             consent_lookup: None,
+            vault_root: None,
+            hot_body_loader: None,
             source_resolver: &resolver,
             consent_journal: &journal,
         };
@@ -629,6 +639,8 @@ mod tests {
             author_states: empty_author_states(),
             unresolvable_authors: empty_unresolvable_authors(),
             consent_lookup: None,
+            vault_root: None,
+            hot_body_loader: None,
             source_resolver: &resolver,
             consent_journal: &journal,
         };
@@ -676,6 +688,8 @@ mod tests {
             author_states: empty_author_states(),
             unresolvable_authors: empty_unresolvable_authors(),
             consent_lookup: None,
+            vault_root: None,
+            hot_body_loader: None,
             source_resolver: &resolver,
             consent_journal: &journal,
         };
@@ -722,6 +736,8 @@ mod tests {
             author_states: empty_author_states(),
             unresolvable_authors: empty_unresolvable_authors(),
             consent_lookup: None,
+            vault_root: None,
+            hot_body_loader: None,
             source_resolver: &resolver,
             consent_journal: &journal,
         };
@@ -756,6 +772,8 @@ mod tests {
             author_states: empty_author_states(),
             unresolvable_authors: empty_unresolvable_authors(),
             consent_lookup: None,
+            vault_root: None,
+            hot_body_loader: None,
             source_resolver: &resolver,
             consent_journal: &journal,
         };

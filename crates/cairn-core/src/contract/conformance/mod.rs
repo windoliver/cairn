@@ -18,6 +18,7 @@
 //! See `docs/superpowers/specs/2026-04-25-plugin-host-list-verify-design.md`
 //! §4 for the full design.
 
+pub mod frontend_adapter;
 pub mod mcp_server;
 pub mod memory_store;
 pub mod sensor_ingress;
@@ -119,13 +120,12 @@ pub fn run_conformance_for_plugin(
         ContractKind::WorkflowOrchestrator => workflow_orchestrator::run(registry, name),
         ContractKind::SensorIngress => sensor_ingress::run(registry, name),
         ContractKind::MCPServer => mcp_server::run(registry, name),
+        ContractKind::FrontendAdapter => frontend_adapter::run(registry, name),
         // P0 ships no bundled plugins for these — return a single Failed
         // sentinel so `cairn plugins verify` cannot pass a manifest whose
         // contract has no conformance runner. Once these contracts get
         // bundled plugins, add per-contract `run` modules and route here.
-        kind @ (ContractKind::LLMProvider
-        | ContractKind::FrontendAdapter
-        | ContractKind::AgentProvider) => {
+        kind @ (ContractKind::LLMProvider | ContractKind::AgentProvider) => {
             vec![CaseOutcome {
                 id: "no_conformance_runner",
                 tier: Tier::One,

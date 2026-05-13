@@ -110,6 +110,33 @@ fn forget_record_advertises_when_runtime_is_wired() {
 }
 
 #[test]
+fn retrieve_session_turn_and_tool_call_advertise_when_runtime_is_wired() {
+    let g = gates(true, true, None);
+    let caps = advertise(&g);
+    for cap in [
+        Capabilities::CairnMcpV1RetrieveSession,
+        Capabilities::CairnMcpV1RetrieveTurn,
+        Capabilities::CairnMcpV1RetrieveToolCall,
+    ] {
+        assert!(
+            caps.contains(&cap),
+            "wired retrieve target {cap:?} must be advertised"
+        );
+    }
+    for cap in [
+        Capabilities::CairnMcpV1RetrieveRecord,
+        Capabilities::CairnMcpV1RetrieveFolder,
+        Capabilities::CairnMcpV1RetrieveScope,
+        Capabilities::CairnMcpV1RetrieveProfile,
+    ] {
+        assert!(
+            !caps.contains(&cap),
+            "unwired retrieve target {cap:?} must not be advertised"
+        );
+    }
+}
+
+#[test]
 fn forget_session_pinned_to_v0_2_phase() {
     let mut g = gates(true, true, None);
     g.contract_phase = Phase::V0_1;
@@ -128,6 +155,31 @@ fn replay_capabilities_held_back() {
     let caps = advertise(&g);
     assert!(!caps.contains(&Capabilities::CairnMcpV1ReplaySequence));
     assert!(!caps.contains(&Capabilities::CairnMcpV1ReplayChallenge));
+}
+
+#[test]
+fn pre_compact_capability_tracks_wiring_constant() {
+    let g = gates(true, true, None);
+    let caps = advertise(&g);
+    assert!(
+        caps.contains(&Capabilities::CairnMcpV1SensorsPreCompact)
+            == wiring::SENSORS_PRE_COMPACT_WIRED,
+        "sensors.pre_compact advertisement drifted from wiring constant"
+    );
+}
+
+#[test]
+fn pre_compact_capability_held_back_until_dispatched() {
+    // The orchestrator + classifier exist (issue #310 core landing) but
+    // no sensor or MCP path dispatches them, so the capability must stay
+    // hidden — over-advertising would let clients negotiate a hook that
+    // has no callable wire entrypoint.
+    let g = gates(true, true, None);
+    let caps = advertise(&g);
+    assert!(
+        !caps.contains(&Capabilities::CairnMcpV1SensorsPreCompact),
+        "sensors.pre_compact must remain hidden until a runtime caller dispatches run_pre_compact"
+    );
 }
 
 #[test]
@@ -221,7 +273,13 @@ mod remediation_tests {
                 .expect("cap serializes to string");
             // search.keyword and policy_trace are universally available; their
             // remediation is "should not happen" — None is acceptable.
-            if cap_str == "cairn.mcp.v1.search.keyword" || cap_str == "cairn.mcp.v1.policy_trace" {
+            // sensors.pre_compact is hook-advertisement only for now; there is
+            // no CapabilityUnavailable remediation path until a gated verb
+            // consumes it.
+            if cap_str == "cairn.mcp.v1.search.keyword"
+                || cap_str == "cairn.mcp.v1.policy_trace"
+                || cap_str == "cairn.mcp.v1.sensors.pre_compact"
+            {
                 continue;
             }
             assert!(
@@ -391,12 +449,14 @@ mod exhaustiveness {
             Capabilities::CairnMcpV1SearchSemantic => "search.semantic",
             Capabilities::CairnMcpV1SearchHybrid => "search.hybrid",
             Capabilities::CairnMcpV1PolicyTrace => "policy_trace",
+            Capabilities::CairnMcpV1SensorsPreCompact => "sensors.pre_compact",
             Capabilities::CairnMcpV1ForgetRecord => "forget.record",
             Capabilities::CairnMcpV1ForgetSession => "forget.session",
             Capabilities::CairnMcpV1ForgetScope => "forget.scope",
             Capabilities::CairnMcpV1RetrieveRecord => "retrieve.record",
             Capabilities::CairnMcpV1RetrieveSession => "retrieve.session",
             Capabilities::CairnMcpV1RetrieveTurn => "retrieve.turn",
+            Capabilities::CairnMcpV1RetrieveToolCall => "retrieve.tool_call",
             Capabilities::CairnMcpV1RetrieveFolder => "retrieve.folder",
             Capabilities::CairnMcpV1RetrieveScope => "retrieve.scope",
             Capabilities::CairnMcpV1RetrieveProfile => "retrieve.profile",
@@ -426,12 +486,14 @@ mod exhaustiveness {
             Capabilities::CairnMcpV1SearchSemantic,
             Capabilities::CairnMcpV1SearchHybrid,
             Capabilities::CairnMcpV1PolicyTrace,
+            Capabilities::CairnMcpV1SensorsPreCompact,
             Capabilities::CairnMcpV1ForgetRecord,
             Capabilities::CairnMcpV1ForgetSession,
             Capabilities::CairnMcpV1ForgetScope,
             Capabilities::CairnMcpV1RetrieveRecord,
             Capabilities::CairnMcpV1RetrieveSession,
             Capabilities::CairnMcpV1RetrieveTurn,
+            Capabilities::CairnMcpV1RetrieveToolCall,
             Capabilities::CairnMcpV1RetrieveFolder,
             Capabilities::CairnMcpV1RetrieveScope,
             Capabilities::CairnMcpV1RetrieveProfile,

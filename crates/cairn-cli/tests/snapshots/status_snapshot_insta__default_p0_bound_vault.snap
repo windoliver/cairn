@@ -6,7 +6,10 @@ expression: v
   "capabilities": [
     "cairn.mcp.v1.search.keyword",
     "cairn.mcp.v1.policy_trace",
-    "cairn.mcp.v1.forget.record"
+    "cairn.mcp.v1.forget.record",
+    "cairn.mcp.v1.retrieve.session",
+    "cairn.mcp.v1.retrieve.turn",
+    "cairn.mcp.v1.retrieve.tool_call"
   ],
   "contract": "cairn.mcp.v1",
   "extensions": [],

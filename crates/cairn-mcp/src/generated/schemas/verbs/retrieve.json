@@ -12,6 +12,9 @@
           "$ref": "#/$defs/ArgsTurn"
         },
         {
+          "$ref": "#/$defs/ArgsToolCall"
+        },
+        {
           "$ref": "#/$defs/ArgsFolder"
         },
         {
@@ -196,6 +199,10 @@
           "type": "array",
           "uniqueItems": true
         },
+        "include_reasoning": {
+          "description": "Sugar for requesting reasoning blocks in the retrieved session transcript.",
+          "type": "boolean"
+        },
         "limit": {
           "maximum": 10000,
           "minimum": 1,
@@ -249,6 +256,11 @@
             "value_source": "bool"
           },
           {
+            "long": "include-reasoning",
+            "name": "include_reasoning",
+            "value_source": "bool"
+          },
+          {
             "long": "include",
             "name": "include",
             "value_source": "list<enum(tool_calls,reasoning)>"
@@ -256,6 +268,54 @@
           {
             "long": "cursor",
             "name": "cursor",
+            "value_source": "string"
+          }
+        ]
+      }
+    },
+    "ArgsToolCall": {
+      "additionalProperties": false,
+      "properties": {
+        "session_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "target": {
+          "const": "tool_call"
+        },
+        "tool_call_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "turn_id": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "target",
+        "session_id",
+        "turn_id",
+        "tool_call_id"
+      ],
+      "type": "object",
+      "x-cairn-capability": "cairn.mcp.v1.retrieve.tool_call",
+      "x-cairn-cli": {
+        "command": "retrieve",
+        "flags": [
+          {
+            "long": "session",
+            "name": "session_id",
+            "value_source": "string"
+          },
+          {
+            "long": "turn",
+            "name": "turn_id",
+            "value_source": "string"
+          },
+          {
+            "long": "tool-call",
+            "name": "tool_call_id",
             "value_source": "string"
           }
         ]
@@ -275,6 +335,10 @@
           "minItems": 1,
           "type": "array",
           "uniqueItems": true
+        },
+        "include_reasoning": {
+          "description": "Sugar for requesting reasoning blocks in the retrieved turn.",
+          "type": "boolean"
         },
         "session_id": {
           "minLength": 1,
@@ -309,6 +373,11 @@
             "value_source": "string"
           },
           {
+            "long": "include-reasoning",
+            "name": "include_reasoning",
+            "value_source": "bool"
+          },
+          {
             "long": "include",
             "name": "include",
             "value_source": "list<enum(tool_calls,reasoning)>"
@@ -330,6 +399,9 @@
         },
         {
           "$ref": "#/$defs/DataTurn"
+        },
+        {
+          "$ref": "#/$defs/DataToolCall"
         },
         {
           "$ref": "#/$defs/DataFolder"
@@ -480,6 +552,36 @@
       },
       "required": [
         "session_id",
+        "items"
+      ],
+      "type": "object"
+    },
+    "DataToolCall": {
+      "additionalProperties": false,
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/TurnItem"
+          },
+          "type": "array"
+        },
+        "session_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "tool_call_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "turn_id": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "turn_id",
+        "tool_call_id",
         "items"
       ],
       "type": "object"
@@ -641,11 +743,50 @@
       ],
       "type": "object"
     },
+    "TraceLinkage": {
+      "additionalProperties": false,
+      "properties": {
+        "capture_event_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "parent_event_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "payload_hash": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "record_id": {
+          "$ref": "../common/primitives.json#/$defs/Ulid"
+        },
+        "sequence": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tool_call_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "trace_event": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "record_id"
+      ],
+      "type": "object"
+    },
     "TurnItem": {
       "additionalProperties": false,
       "properties": {
         "content": {
           "type": "string"
+        },
+        "linkage": {
+          "$ref": "#/$defs/TraceLinkage"
         },
         "reasoning": {
           "type": "string"

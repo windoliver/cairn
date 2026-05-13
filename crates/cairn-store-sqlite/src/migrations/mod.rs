@@ -98,6 +98,21 @@ const M0054_RECORDS_COW_STAGING: &str = include_str!("sql/0054_records_cow_stagi
 // Issue #58 - forget_record payloads and WAL scrub stubs.
 const M0055_FORGET_RECORD_PAYLOAD_SCRUB: &str =
     include_str!("sql/0055_forget_record_payload_scrub.sql");
+// Issue #83 — hot_prefix_cache + hot_source_watermarks tables.
+// Renumbered from 0053 → 0056 during rebase onto main.
+const M0056_HOT_PREFIX_CACHE: &str = include_str!("sql/0056_hot_prefix_cache.sql");
+// Issue #83 round-1 review follow-up — extra watermark classes + fs_fingerprint column.
+// Renumbered from 0054 → 0057 during rebase.
+const M0057_HOT_SOURCE_WATERMARKS_EXTRAS: &str =
+    include_str!("sql/0057_hot_source_watermarks_extras.sql");
+// Issue #289 re-loop r6 — durable audit for in-place session patches.
+// Renumbered from 0053 → 0058 during rebase onto main.
+const M0058_SESSION_METADATA_AUDIT: &str = include_str!("sql/0058_session_metadata_audit.sql");
+// Issue #289 re-loop r7 — add mutation_seq to allow repeated patches
+// against the same session within one plan.
+// Renumbered from 0054 → 0059 during rebase onto main.
+const M0059_SESSION_METADATA_AUDIT_SEQ: &str =
+    include_str!("sql/0059_session_metadata_audit_seq.sql");
 
 /// Canonical SQL for migration 0020 (`workflow_jobs`). Re-exported so
 /// downstream crates (notably `cairn-workflows`, which hashes the
@@ -255,6 +270,22 @@ pub(crate) const MIGRATION_SOURCES: &[(i64, &str, &str)] = &[
         "0055_forget_record_payload_scrub",
         M0055_FORGET_RECORD_PAYLOAD_SCRUB,
     ),
+    (56, "0056_hot_prefix_cache", M0056_HOT_PREFIX_CACHE),
+    (
+        57,
+        "0057_hot_source_watermarks_extras",
+        M0057_HOT_SOURCE_WATERMARKS_EXTRAS,
+    ),
+    (
+        58,
+        "0058_session_metadata_audit",
+        M0058_SESSION_METADATA_AUDIT,
+    ),
+    (
+        59,
+        "0059_session_metadata_audit_seq",
+        M0059_SESSION_METADATA_AUDIT_SEQ,
+    ),
 ];
 
 /// All migrations, in order. Returns a fresh `Migrations` set on every call
@@ -311,5 +342,9 @@ pub fn migrations() -> Migrations<'static> {
         M::up(M0053_WAL_PAYLOADS),
         M::up(M0054_RECORDS_COW_STAGING),
         M::up(M0055_FORGET_RECORD_PAYLOAD_SCRUB),
+        M::up(M0056_HOT_PREFIX_CACHE),
+        M::up(M0057_HOT_SOURCE_WATERMARKS_EXTRAS),
+        M::up(M0058_SESSION_METADATA_AUDIT),
+        M::up(M0059_SESSION_METADATA_AUDIT_SEQ),
     ])
 }
