@@ -17,6 +17,16 @@ mod issue_61_core_verbs {
     use super::*;
 
     #[test]
+    fn ingest_args_deserialize_rejects_empty_recording() {
+        let err = serde_json::from_value::<IngestArgs>(serde_json::json!({
+            "kind": "reference",
+            "recording": ""
+        }))
+        .expect_err("empty recording path must reject");
+        assert!(err.to_string().contains("recording"), "{err}");
+    }
+
+    #[test]
     fn ingest_redacts_and_fences_before_record_draft() {
         let args = IngestArgs {
             batch_size: None,
@@ -37,6 +47,7 @@ mod issue_61_core_verbs {
             tags: Some(vec!["issue-61".to_owned()]),
             url: None,
             jsonl: None,
+            recording: None,
             harness: None,
             session_id_from: None,
             limit: None,
@@ -101,6 +112,7 @@ mod issue_61_core_verbs {
             tags: None,
             url: None,
             jsonl: None,
+            recording: None,
             harness: None,
             session_id_from: None,
             limit: None,
@@ -140,6 +152,7 @@ mod issue_61_core_verbs {
             tags: None,
             url: None,
             jsonl: None,
+            recording: None,
             harness: None,
             session_id_from: None,
             limit: None,
@@ -170,6 +183,7 @@ mod issue_61_core_verbs {
             tags: None,
             url: None,
             jsonl: None,
+            recording: None,
             harness: None,
             session_id_from: None,
             limit: None,
@@ -180,6 +194,39 @@ mod issue_61_core_verbs {
         args.body = None;
         let err = prepare_ingest_body(&args, "agt:test:writer:v1").unwrap_err();
         assert!(matches!(err, DomainError::MalformedCapture { .. }));
+    }
+
+    #[test]
+    fn ingest_body_helper_rejects_recording_source_conflict() {
+        let args = IngestArgs {
+            batch_size: None,
+            body: Some("body text".to_owned()),
+            dry_run: None,
+            exclude: None,
+            file: None,
+            folder: None,
+            frontmatter: None,
+            human_review: None,
+            include: None,
+            kind: "reference".to_owned(),
+            mode: None,
+            no_cache: None,
+            no_diff: None,
+            recursive: None,
+            session_id: None,
+            tags: None,
+            url: None,
+            jsonl: None,
+            recording: Some("meeting.mp4".to_owned()),
+            harness: None,
+            session_id_from: None,
+            limit: None,
+        };
+        let err = prepare_ingest_body(&args, "agt:test:writer:v1").unwrap_err();
+        let DomainError::MalformedCapture { message } = err else {
+            panic!("expected malformed capture");
+        };
+        assert!(message.contains("recording"), "{message}");
     }
 
     #[test]
@@ -547,6 +594,7 @@ mod issue_61_core_verbs {
             tags: None,
             url: None,
             jsonl: None,
+            recording: None,
             harness: None,
             session_id_from: None,
             limit: None,

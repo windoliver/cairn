@@ -896,13 +896,11 @@ fn validate_uri(s: &str) -> Result<(), SdkError> {
     Ok(())
 }
 
-/// Mirrors the full `ingest` JSON Schema: the IDL `validate()` covers the
-/// exactly-one-of XOR; the schema additionally pins `minLength: 1` on `body`,
-/// `file`, `folder`, `url`, `kind`, `session_id`, every `include[*]`,
-/// every `exclude[*]`, and every `tags[*]`; `format: uri` on `url`; and
-/// `batch_size` in `[1, 65535]`. The generated `TryFrom<RawIngestArgs>` only
-/// enforces the XOR, so direct Rust construction would otherwise sail past
-/// these constraints.
+/// Mirrors the full `ingest` JSON Schema for direct Rust construction. The
+/// generated deserializer enforces the source XOR and scalar `minLength`
+/// constraints, but callers can construct `IngestArgs` directly and bypass
+/// that path. Keep this validator aligned with the schema so SDK calls fail
+/// closed before dispatch.
 fn validate_ingest(args: &IngestArgs) -> Result<(), SdkError> {
     args.validate().map_err(invalid)?;
     // Brief §5.5 — `dry_run` and `human_review` are mutually exclusive.
@@ -931,6 +929,11 @@ fn validate_ingest(args: &IngestArgs) -> Result<(), SdkError> {
     }
     if let Some(url) = &args.url {
         validate_uri(url)?;
+    }
+    if let Some(recording) = &args.recording
+        && recording.is_empty()
+    {
+        return Err(invalid("recording: must not be empty"));
     }
     if let Some(include) = &args.include {
         for pattern in include {

@@ -102,6 +102,158 @@ fn help_flag_lists_core_commands() {
 }
 
 #[test]
+fn ingest_help_lists_recording_flag() {
+    let out = cli()
+        .args(["ingest", "--help"])
+        .output()
+        .expect("ingest --help");
+    assert!(out.status.success(), "exit: {:?}", out.status);
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    assert!(
+        stdout.contains("--recording"),
+        "ingest help missing --recording: {stdout}",
+    );
+}
+
+#[test]
+fn ingest_recording_counts_as_source_but_is_not_implemented() {
+    let out = cli()
+        .args([
+            "ingest",
+            "--kind",
+            "reference",
+            "--recording",
+            "meeting.mp4",
+        ])
+        .output()
+        .expect("ingest --recording");
+    assert_eq!(out.status.code(), Some(64));
+    let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("--recording is not implemented yet"),
+        "recording should be counted as the selected source, stderr: {stderr}",
+    );
+}
+
+#[test]
+fn ingest_recording_conflicts_with_other_sources() {
+    let out = cli()
+        .args([
+            "ingest",
+            "--kind",
+            "reference",
+            "--body",
+            "note",
+            "--recording",
+            "meeting.mp4",
+        ])
+        .output()
+        .expect("ingest conflicting recording");
+    assert_eq!(out.status.code(), Some(64));
+    let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("exactly one of")
+            && stderr.contains("--recording")
+            && stderr.contains("got 2"),
+        "recording conflict should fail source counting, stderr: {stderr}",
+    );
+}
+
+#[test]
+fn ingest_recording_conflicts_with_jsonl_before_jsonl_dispatch() {
+    let out = cli()
+        .args([
+            "ingest",
+            "--kind",
+            "reference",
+            "--jsonl",
+            "missing.jsonl",
+            "--recording",
+            "meeting.mp4",
+        ])
+        .output()
+        .expect("ingest jsonl recording conflict");
+    assert_eq!(out.status.code(), Some(64));
+    let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("exactly one of")
+            && stderr.contains("--recording")
+            && stderr.contains("got 2"),
+        "recording/jsonl conflict should fail source counting before JSONL dispatch, stderr: {stderr}",
+    );
+}
+
+#[test]
+fn ingest_recording_conflicts_with_folder_before_folder_dispatch() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = cli()
+        .args([
+            "ingest",
+            "--kind",
+            "reference",
+            "--folder",
+            dir.path().to_str().expect("utf-8 path"),
+            "--recording",
+            "meeting.mp4",
+        ])
+        .output()
+        .expect("ingest folder recording conflict");
+    assert_eq!(out.status.code(), Some(64));
+    let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("exactly one of")
+            && stderr.contains("--recording")
+            && stderr.contains("got 2"),
+        "recording/folder conflict should fail source counting before folder dispatch, stderr: {stderr}",
+    );
+}
+
+#[test]
+fn ingest_recording_conflicts_with_positional_folder_before_folder_dispatch() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = cli()
+        .args([
+            "ingest",
+            "--kind",
+            "reference",
+            dir.path().to_str().expect("utf-8 path"),
+            "--recording",
+            "meeting.mp4",
+        ])
+        .output()
+        .expect("ingest positional folder recording conflict");
+    assert_eq!(out.status.code(), Some(64));
+    let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("exactly one of")
+            && stderr.contains("--recording")
+            && stderr.contains("got 2"),
+        "recording/positional-folder conflict should fail source counting before folder dispatch, stderr: {stderr}",
+    );
+}
+
+#[test]
+fn ingest_recording_dry_run_does_not_succeed() {
+    let out = cli()
+        .args([
+            "ingest",
+            "--kind",
+            "reference",
+            "--recording",
+            "meeting.mp4",
+            "--dry-run",
+        ])
+        .output()
+        .expect("ingest recording dry-run");
+    assert_eq!(out.status.code(), Some(64));
+    let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("--recording is not implemented yet"),
+        "recording dry-run should reach recording not-implemented path, stderr: {stderr}",
+    );
+}
+
+#[test]
 fn mcp_subcommand_help_exits_zero() {
     let out = cli()
         .args(["mcp", "--help"])

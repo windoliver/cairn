@@ -315,6 +315,18 @@ pub fn run(
     config: cairn_core::config::CairnConfig,
 ) -> ExitCode {
     let json = sub.get_flag("json");
+
+    // Task 1 exposes --recording at the contract/CLI layer before runtime
+    // recording ingest exists. Validate it before any early source dispatch
+    // (folder/jsonl/flush/resync) so it cannot route through another adapter.
+    if sub.get_one::<PathBuf>("recording").is_some() {
+        let source_count = ingest_source_count(sub);
+        if source_count != 1 {
+            return emit_ingest_source_conflict(source_count);
+        }
+        return emit_recording_not_implemented(json);
+    }
+
     if let Some(requested_folder) = sub.get_one::<PathBuf>("folder") {
         return folder::run(sub, vault_root.clone(), requested_folder.as_path(), false);
     }
@@ -353,13 +365,11 @@ pub fn run(
         return ExitCode::from(64);
     }
 
-    // Enforce IDL exactly-one-of: body/file/folder/url (positional `source` counts as one).
+    // Enforce IDL exactly-one-of: body/file/folder/url/jsonl/recording
+    // (positional `source` counts as one).
     let source_count = ingest_source_count(sub);
     if source_count != 1 {
-        eprintln!(
-            "cairn ingest: exactly one of [source, --body, --file, --folder, --url] is required (got {source_count})"
-        );
-        return ExitCode::from(64);
+        return emit_ingest_source_conflict(source_count);
     }
 
     let _kind = match parse_kind(sub, json) {
@@ -596,6 +606,7 @@ fn run_resync(sub: &ArgMatches, json: bool, resync_path: &Path, vault_root: &Pat
                     record_id: Ulid(result.target_id),
                     session_id,
                     jsonl_summary: None,
+                    recording_summary: None,
                 })),
                 error: None,
                 operation_id: new_operation_id(),
@@ -761,6 +772,7 @@ async fn run_async(
                         record_id,
                         session_id,
                         jsonl_summary: None,
+                        recording_summary: None,
                     };
                     let resp = super::signed::committed(
                         ResponseVerb::Ingest,
@@ -986,6 +998,7 @@ fn ingest_args_from_matches(sub: &ArgMatches, body: String) -> IngestArgs {
             }),
         no_cache: Some(sub.get_flag("no_cache")).filter(|b| *b),
         no_diff: Some(sub.get_flag("no-diff")).filter(|b| *b),
+        recording: None,
         recursive: Some(sub.get_flag("recursive")).filter(|b| *b),
         session_id: sub.get_one::<String>("session_id").cloned(),
         tags: sub
@@ -1030,6 +1043,26 @@ fn ingest_source_count(sub: &ArgMatches) -> u8 {
         + u8::from(sub.get_one::<PathBuf>("file").is_some())
         + u8::from(sub.get_one::<PathBuf>("folder").is_some())
         + u8::from(sub.get_one::<String>("url").is_some())
+        + u8::from(sub.get_one::<PathBuf>("jsonl").is_some())
+        + u8::from(sub.get_one::<PathBuf>("recording").is_some())
+}
+
+fn emit_ingest_source_conflict(source_count: u8) -> ExitCode {
+    eprintln!(
+        "cairn ingest: exactly one of [source, --body, --file, --folder, --url, --jsonl, --recording] is required (got {source_count})"
+    );
+    ExitCode::from(64)
+}
+
+fn emit_recording_not_implemented(json: bool) -> ExitCode {
+    let reason = "cairn ingest --recording is not implemented yet";
+    let resp = invalid_args_response(ResponseVerb::Ingest, "recording", reason);
+    if json {
+        emit_json(&resp);
+    } else {
+        human_error("ingest", "InvalidArgs", reason, &resp.operation_id);
+    }
+    ExitCode::from(64)
 }
 
 fn positional_folder_source(sub: &ArgMatches) -> Option<PathBuf> {

@@ -19,13 +19,14 @@ pub fn ingest_subcommand() -> clap::Command {
         .arg(clap::Arg::new("mode").long("mode").value_name("ENUM").value_parser(["keyword", "semantic", "full"]))
         .arg(clap::Arg::new("batch_size").long("batch-size").value_name("U32").value_parser(clap::value_parser!(u32)))
         .arg(clap::Arg::new("jsonl").long("jsonl").value_name("PATH").value_parser(clap::builder::PathBufValueParser::new()))
+        .arg(clap::Arg::new("recording").long("recording").value_name("PATH").value_parser(clap::builder::PathBufValueParser::new()))
         .arg(clap::Arg::new("harness").long("harness").value_name("STRING"))
         .arg(clap::Arg::new("session_id_from").long("session-id-from").value_name("STRING"))
         .arg(clap::Arg::new("limit").long("limit").value_name("U32").value_parser(clap::value_parser!(u32)))
         .arg(clap::Arg::new("session_id").long("session").value_name("STRING"))
         .arg(clap::Arg::new("tags").long("tags").value_name("STRING").action(clap::ArgAction::Append))
         .arg(clap::Arg::new("no_cache").long("no-cache").action(clap::ArgAction::SetTrue))
-        .arg(clap::Arg::new("source").help("File, URL, folder, JSONL transcript, or '-' for stdin. Mutually exclusive with --body/--file/--folder/--url/--jsonl.").required(false))
+        .arg(clap::Arg::new("source").help("File, URL, folder, JSONL transcript, recording, or '-' for stdin. Mutually exclusive with --body/--file/--folder/--url/--jsonl/--recording.").required(false))
 }
 
 /// `cairn search` subcommand builder.

@@ -751,6 +751,7 @@ fn emit_summary(json: bool, dry_run: bool, summary: &ImportSummary, files: &[Pat
                     sessions_skipped: Some(summary.sessions_skipped),
                     elapsed_ms: Some(summary.elapsed_ms),
                 }),
+                recording_summary: None,
             })),
             error: None,
             operation_id: op,

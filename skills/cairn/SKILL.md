@@ -60,6 +60,10 @@ cairn ingest --kind KIND --jsonl JSONL
 ```
 
 ```bash
+cairn ingest --kind KIND --recording RECORDING
+```
+
+```bash
 cairn ingest --kind KIND --folder FOLDER --recursive
 ```
 
