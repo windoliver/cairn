@@ -9,8 +9,9 @@ use thiserror::Error;
 #[non_exhaustive]
 pub enum DomainError {
     /// `provenance` is missing one of `source_sensor`, `created_at`,
-    /// `originating_agent_id`, `source_hash`, or `consent_ref`. §6.5 makes
-    /// every component mandatory; only `llm_id_if_any` is optional.
+    /// `originating_agent_id`, `source_ids`, `source_hash`, or
+    /// `consent_ref`. §6.5 makes every component mandatory; only
+    /// `llm_id_if_any` is optional.
     #[error("provenance: missing required field `{field}`")]
     MissingProvenance {
         /// Name of the missing provenance field.

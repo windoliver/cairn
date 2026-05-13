@@ -11,7 +11,7 @@
 pub const FORGET_RECORD_WIRED: bool = true;
 
 /// `forget --session` (v0.2+ runtime).
-pub const FORGET_SESSION_WIRED: bool = false;
+pub const FORGET_SESSION_WIRED: bool = true;
 
 /// `forget --scope` (v0.3+ runtime).
 pub const FORGET_SCOPE_WIRED: bool = false;

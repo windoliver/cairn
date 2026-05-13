@@ -219,7 +219,7 @@ pub fn project_with_blocks(
         scope,
         body,
         source_ids: vec![source_id_from_payload_ref(&event.payload_ref)?],
-        provenance: provenance_from_event(event),
+        provenance: provenance_from_event(event)?,
         updated_at: event.captured_at.clone(),
         evidence: EvidenceVector::default(),
         salience: 0.5,
@@ -273,21 +273,22 @@ fn source_id_from_payload_ref(payload_ref: &str) -> Result<SourceId, TraceProjec
 ///   consent journal integration lands in a later task.
 /// - `llm_id_if_any` = `None` — trace records are captured verbatim,
 ///   not produced by an LLM.
-fn provenance_from_event(event: &CaptureEvent) -> Provenance {
+fn provenance_from_event(event: &CaptureEvent) -> Result<Provenance, TraceProjectError> {
     let originating_agent_id = event
         .actor_chain
         .iter()
         .find(|e| e.role == ChainRole::Author)
         .map_or_else(|| event.sensor_id.clone(), |e| e.identity.clone());
 
-    Provenance {
+    Ok(Provenance {
         source_sensor: event.sensor_id.clone(),
         created_at: event.captured_at.clone(),
         originating_agent_id,
+        source_ids: vec![source_id_from_payload_ref(&event.payload_ref)?],
         source_hash: event.payload_hash.as_str().to_owned(),
         consent_ref: "consent:pending".to_owned(),
         llm_id_if_any: None,
-    }
+    })
 }
 
 /// Return a syntactically valid but content-free Ed25519 signature

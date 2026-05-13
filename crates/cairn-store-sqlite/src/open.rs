@@ -1,6 +1,8 @@
 //! `SQLite` open path: pragmas + migrations, returning an async store handle.
 
 use std::path::Path;
+#[cfg(test)]
+use std::process::Command;
 use std::sync::Arc;
 
 use cairn_core::contract::memory_store::MemoryStoreCapabilities;
@@ -19,6 +21,7 @@ use crate::wal::{RecoveryConfig, recover_pending};
 
 const PRAGMAS: &str = "PRAGMA journal_mode=WAL;\
      PRAGMA foreign_keys=ON;\
+     PRAGMA trusted_schema=ON;\
      PRAGMA synchronous=NORMAL;\
      PRAGMA busy_timeout=5000;\
      PRAGMA temp_store=MEMORY;\
@@ -91,6 +94,32 @@ fn build_store(
         _cancel: cancel,
         fts_column_weights,
     }
+}
+
+#[cfg(test)]
+async fn load_or_init_incarnation(
+    conn: &Arc<AsyncConn>,
+) -> Result<Arc<str>, crate::locks::LockError> {
+    match crate::locks::current_incarnation_owner(conn).await {
+        Ok((incarnation, pid)) if process_is_alive(pid) => Ok(incarnation),
+        Ok(_) | Err(crate::locks::LockError::NoIncarnation) => {
+            crate::locks::init_incarnation(conn).await
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(test)]
+fn process_is_alive(pid: i64) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+
+    Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "pid="])
+        .output()
+        .ok()
+        .is_some_and(|output| output.status.success() && !output.stdout.is_empty())
 }
 
 /// Runs WAL boot recovery (issue #55, brief §5.6). Called after migrations
@@ -683,7 +712,9 @@ mod resize_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::open_in_memory;
+    use std::sync::Arc;
+
+    use super::{load_or_init_incarnation, open_in_memory};
 
     /// Smoke test for issue #56 Task 8: every successful `open_*` path must
     /// mint and stash a daemon-incarnation id so later `locks::acquire`
@@ -695,6 +726,53 @@ mod tests {
             store.incarnation().is_some(),
             "open must call init_incarnation",
         );
+    }
+
+    /// A stale singleton row must trigger a fresh incarnation so a restarted
+    /// process can reclaim prior holders instead of inheriting a dead writer's
+    /// identity until lease expiry.
+    #[tokio::test]
+    async fn stale_singleton_pid_mints_a_fresh_incarnation() {
+        let store = open_in_memory().await.expect("open_in_memory");
+        let conn = Arc::clone(store.raw_conn_for_admin().expect("raw conn"));
+        let original = store
+            .incarnation()
+            .expect("open must seed incarnation")
+            .to_string();
+
+        conn.call(|conn| {
+            conn.execute(
+                "UPDATE daemon_incarnation
+                    SET incarnation_id = 'stale-incarnation',
+                        started_at = 0,
+                        pid = -1
+                  WHERE id = 1",
+                [],
+            )?;
+            Ok::<(), tokio_rusqlite::Error>(())
+        })
+        .await
+        .expect("seed stale singleton");
+
+        let refreshed = load_or_init_incarnation(&conn)
+            .await
+            .expect("reload incarnation");
+        assert_ne!(
+            refreshed.as_ref(),
+            "stale-incarnation",
+            "stale singleton pid should force a fresh incarnation",
+        );
+        assert_ne!(
+            refreshed.as_ref(),
+            original,
+            "restart recovery should not reuse the prior incarnation id",
+        );
+
+        let (current, pid) = crate::locks::current_incarnation_owner(&conn)
+            .await
+            .expect("current incarnation owner");
+        assert_eq!(current.as_ref(), refreshed.as_ref());
+        assert_eq!(pid, i64::from(std::process::id()));
     }
 }
 

@@ -40,6 +40,7 @@ fn record() -> MemoryRecord {
             source_sensor: Identity::parse("snr:local:hook:cc-session:v1").expect("valid"),
             created_at: Rfc3339Timestamp::parse("2026-04-22T14:02:11Z").expect("valid"),
             originating_agent_id: user_id.clone(),
+            source_ids: vec![SourceId::parse("01HQZX9F5N0000000000000000").expect("valid")],
             source_hash: format!("sha256:{}", "a".repeat(64)),
             consent_ref: "consent:01HQZ".to_owned(),
             llm_id_if_any: Some("opus-4-7".to_owned()),
@@ -134,6 +135,19 @@ fn missing_provenance_fails_validation() {
 }
 
 #[test]
+fn empty_source_ids_fail_validation() {
+    let mut r = record();
+    r.provenance.source_ids.clear();
+    let err = r.validate().unwrap_err();
+    assert!(matches!(
+        err,
+        DomainError::MissingProvenance {
+            field: "source_ids"
+        }
+    ));
+}
+
+#[test]
 fn invalid_identity_rejected_at_parse() {
     let err = Identity::parse("not_an_identity").unwrap_err();
     assert!(matches!(err, DomainError::InvalidIdentity { .. }));
@@ -162,6 +176,7 @@ fn unsupported_visibility_rejected_at_deserialize() {
             "source_sensor": "snr:local:hook:cc-session:v1",
             "created_at": "2026-04-22T14:02:11Z",
             "originating_agent_id": "agt:claude-code:opus-4-7:main:v1",
+            "source_ids": ["01HQZX9F5N0000000000000000"],
             "source_hash": format!("sha256:{}", "a".repeat(64)),
             "consent_ref": "consent:1",
             "llm_id_if_any": null
@@ -322,6 +337,7 @@ proptest! {
         prop_assert!(!back.id.as_str().is_empty());
         prop_assert!(!back.signature.as_str().is_empty());
         prop_assert!(!back.actor_chain.is_empty());
+        prop_assert!(!back.provenance.source_ids.is_empty());
         prop_assert!(!back.provenance.source_hash.is_empty());
         prop_assert!(!back.provenance.consent_ref.is_empty());
         back.validate().expect("validates after round-trip");

@@ -505,6 +505,8 @@ pub struct VaultConfig {
     pub name: String,
     /// Storage tier.
     pub tier: VaultTier,
+    /// Source-retention policy knobs.
+    pub source: SourceConfig,
     /// Folder layout and enabled kinds.
     pub layout: LayoutConfig,
     /// Hot-memory assembly recipe and budget.
@@ -520,6 +522,7 @@ impl Default for VaultConfig {
         Self {
             name: "my-vault".into(),
             tier: VaultTier::Local,
+            source: SourceConfig::default(),
             layout: LayoutConfig::default(),
             hot_memory: HotMemoryConfig::default(),
             retention: BTreeMap::new(),

@@ -38,6 +38,9 @@ use crate::store::sessions::{InTxError, read_session_by_id};
 use crate::store::upsert::upsert_in_tx;
 use crate::store::{SqliteMemoryStore, current_unix_ms};
 
+/// `(tenant, workspace)` partition tuple for a given session id.
+pub type SessionScopePartition = (Option<String>, Option<String>);
+
 /// Transactional handle exposed to closures passed to
 /// [`SqliteMemoryStore::with_tx`]. Methods are synchronous because the
 /// closure already runs on the DB worker thread; awaiting from inside
@@ -157,6 +160,123 @@ impl StoreTx<'_> {
             params![reason.as_db_str(), now_ms, id.as_str()],
         )?;
         Ok(())
+    }
+
+    /// Physically purge every version row for `target` and drain dependent
+    /// `edges` rows first so the delete satisfies foreign-key constraints.
+    ///
+    /// Returns the number of `records` rows deleted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Sqlite`] for SQL failures.
+    pub fn purge_target(&self, target: &TargetId) -> Result<u64, StoreError> {
+        self.tx.execute(
+            "DELETE FROM edges \
+              WHERE src IN (SELECT record_id FROM records WHERE target_id = ?1) \
+                 OR dst IN (SELECT record_id FROM records WHERE target_id = ?1)",
+            params![target.as_str()],
+        )?;
+        let deleted = self.tx.execute(
+            "DELETE FROM records WHERE target_id = ?1",
+            params![target.as_str()],
+        )?;
+        Ok(u64::try_from(deleted).unwrap_or(u64::MAX))
+    }
+
+    /// List distinct `target_id`s attached to records in the given session.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Sqlite`] for query failures, or
+    /// [`StoreError::Invariant`] if a persisted `target_id` no longer parses
+    /// as a valid [`TargetId`].
+    pub fn list_target_ids_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<TargetId>, StoreError> {
+        let mut stmt = self.tx.prepare(
+            "SELECT DISTINCT target_id
+               FROM records
+              WHERE json_extract(scope, '$.session_id') = ?1
+              ORDER BY target_id",
+        )?;
+        let mut rows = stmt.query([session_id])?;
+        let mut targets = Vec::new();
+        while let Some(row) = rows.next()? {
+            let target_id: String = row.get(0)?;
+            let target = TargetId::parse(target_id).map_err(|error| StoreError::Invariant {
+                what: format!("records.target_id round-trip failed: {error}"),
+            })?;
+            targets.push(target);
+        }
+        Ok(targets)
+    }
+
+    /// List distinct `(tenant, workspace)` partitions for a session id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Sqlite`] for query failures.
+    pub fn list_session_scope_partitions(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<SessionScopePartition>, StoreError> {
+        let mut stmt = self.tx.prepare(
+            "SELECT DISTINCT \
+                json_extract(scope, '$.tenant') AS tenant, \
+                json_extract(scope, '$.workspace') AS workspace \
+               FROM records \
+              WHERE json_extract(scope, '$.session_id') = ?1 \
+              ORDER BY tenant, workspace",
+        )?;
+        let mut rows = stmt.query([session_id])?;
+        let mut scopes = Vec::new();
+        while let Some(row) = rows.next()? {
+            let tenant: Option<String> = row.get(0)?;
+            let workspace: Option<String> = row.get(1)?;
+            scopes.push((tenant, workspace));
+        }
+        Ok(scopes)
+    }
+
+    /// List distinct `target_id`s attached to records in one session scope partition.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Sqlite`] for query failures, or
+    /// [`StoreError::Invariant`] if a persisted `target_id` no longer parses
+    /// as a valid [`TargetId`].
+    pub fn list_target_ids_for_session_scope(
+        &self,
+        session_id: &str,
+        tenant: Option<&str>,
+        workspace: Option<&str>,
+    ) -> Result<Vec<TargetId>, StoreError> {
+        let mut stmt = self.tx.prepare(
+            "SELECT DISTINCT target_id
+               FROM records
+               WHERE json_extract(scope, '$.session_id') = ?1
+                 AND (
+                       (?2 IS NULL AND json_extract(scope, '$.tenant') IS NULL)
+                    OR json_extract(scope, '$.tenant') = ?2
+                 )
+                 AND (
+                       (?3 IS NULL AND json_extract(scope, '$.workspace') IS NULL)
+                    OR json_extract(scope, '$.workspace') = ?3
+                 )
+               ORDER BY target_id",
+        )?;
+        let mut rows = stmt.query(params![session_id, tenant, workspace])?;
+        let mut targets = Vec::new();
+        while let Some(row) = rows.next()? {
+            let target_id: String = row.get(0)?;
+            let target = TargetId::parse(target_id).map_err(|error| StoreError::Invariant {
+                what: format!("records.target_id round-trip failed: {error}"),
+            })?;
+            targets.push(target);
+        }
+        Ok(targets)
     }
 
     /// Mark a specific active row inactive without deleting its historical

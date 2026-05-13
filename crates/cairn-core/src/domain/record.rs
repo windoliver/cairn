@@ -862,6 +862,7 @@ pub mod tests_export {
                 source_sensor: Identity::parse("snr:local:hook:cc-session:v1").expect("valid"),
                 created_at: Rfc3339Timestamp::parse("2026-04-22T14:02:11Z").expect("valid"),
                 originating_agent_id: user_id.clone(),
+                source_ids: vec![SourceId::parse("01HQZX9F5N0000000000000000").expect("valid")],
                 source_hash: format!("sha256:{}", "a".repeat(64)),
                 consent_ref: "consent:01HQZ".to_owned(),
                 llm_id_if_any: None,

@@ -119,6 +119,7 @@ pub fn summarize_turn(
         source_sensor: first.provenance.source_sensor.clone(),
         created_at: first.provenance.created_at.clone(),
         originating_agent_id: first.provenance.originating_agent_id.clone(),
+        source_ids: first.provenance.source_ids.clone(),
         // Summary has no raw source bytes — zeroed SHA256 sentinel mirrors
         // the all-zeros pattern used for the placeholder signature below.
         source_hash: format!("sha256:{}", "0".repeat(64)),

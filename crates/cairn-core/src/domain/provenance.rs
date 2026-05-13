@@ -1,13 +1,13 @@
 //! Provenance — mandatory on every record (brief §6.5).
 //!
 //! `{source_sensor, created_at, llm_id_if_any, originating_agent_id,
-//! source_hash, consent_ref}` — five required components plus one optional
-//! (`llm_id_if_any`). Every record must answer *who wrote me, when, under
-//! what consent, and from what evidence*.
+//! source_ids, source_hash, consent_ref}` — six required components plus one
+//! optional (`llm_id_if_any`). Every record must answer *who wrote me, when,
+//! under what consent, and from what evidence*.
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{DomainError, Identity, IdentityKind, Rfc3339Timestamp};
+use crate::domain::{DomainError, Identity, IdentityKind, Rfc3339Timestamp, SourceId};
 
 /// Mandatory provenance frontmatter on every [`crate::domain::MemoryRecord`].
 ///
@@ -25,6 +25,9 @@ pub struct Provenance {
     /// Agent or human who initiated the write. Distinct from the chain
     /// author when an upstream principal delegated.
     pub originating_agent_id: Identity,
+    /// Stable identifiers for the immutable source artifacts this record was
+    /// derived from. At least one source document must be named.
+    pub source_ids: Vec<SourceId>,
     /// Cryptographic hash of the source bytes the record was derived from.
     /// Format `<algo>:<hex>` where `algo ∈ {sha256, sha512, blake3}` and
     /// the hex tail length matches the algorithm's digest size.
@@ -45,6 +48,7 @@ struct ProvenanceWire {
     source_sensor: Identity,
     created_at: Rfc3339Timestamp,
     originating_agent_id: Identity,
+    source_ids: Vec<SourceId>,
     source_hash: String,
     consent_ref: String,
     /// Three-state on the wire: outer `None` = key absent (truncated record),
@@ -87,6 +91,7 @@ impl<'de> Deserialize<'de> for Provenance {
             source_sensor: raw.source_sensor,
             created_at: raw.created_at,
             originating_agent_id: raw.originating_agent_id,
+            source_ids: raw.source_ids,
             source_hash: raw.source_hash,
             consent_ref: raw.consent_ref,
             llm_id_if_any,
@@ -114,6 +119,11 @@ impl Provenance {
         // (sensor-authored raw events). The actual cross-field check —
         // "originator must appear in the chain" — happens in
         // `MemoryRecord::validate_actor_scope_consistency`.
+        if self.source_ids.is_empty() {
+            return Err(DomainError::MissingProvenance {
+                field: "source_ids",
+            });
+        }
         validate_source_hash(&self.source_hash)?;
         if self.consent_ref.is_empty() {
             return Err(DomainError::MissingProvenance {
@@ -174,6 +184,9 @@ mod tests {
             created_at: Rfc3339Timestamp::parse("2026-04-22T14:02:11Z").expect("valid"),
             originating_agent_id: Identity::parse("agt:claude-code:opus-4-7:main:v1")
                 .expect("valid"),
+            source_ids: vec![
+                crate::domain::SourceId::parse("01HQZX9F5N0000000000000000").expect("valid"),
+            ],
             source_hash: format!("sha256:{}", "a".repeat(64)),
             consent_ref: "consent:01HQZ".to_owned(),
             llm_id_if_any: None,
@@ -198,6 +211,19 @@ mod tests {
             err,
             DomainError::MissingProvenance {
                 field: "source_hash"
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_empty_source_ids() {
+        let mut p = sample();
+        p.source_ids.clear();
+        let err = p.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            DomainError::MissingProvenance {
+                field: "source_ids"
             }
         ));
     }
@@ -237,6 +263,7 @@ mod tests {
             "source_sensor": "snr:local:hook:cc-session:v1",
             "created_at": "2026-04-22T14:02:11Z",
             "originating_agent_id": "agt:claude-code:opus-4-7:main:v1",
+            "source_ids": ["01HQZX9F5N0000000000000000"],
             "source_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "consent_ref": "consent:01HQZ"
         }"#;
@@ -254,12 +281,31 @@ mod tests {
             "source_sensor": "snr:local:hook:cc-session:v1",
             "created_at": "2026-04-22T14:02:11Z",
             "originating_agent_id": "agt:claude-code:opus-4-7:main:v1",
+            "source_ids": ["01HQZX9F5N0000000000000000"],
             "source_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "consent_ref": "consent:01HQZ",
             "llm_id_if_any": null
         }"#;
         let p: Provenance = serde_json::from_str(json).expect("explicit null is valid");
         assert!(p.llm_id_if_any.is_none());
+    }
+
+    #[test]
+    fn deserialize_rejects_missing_source_ids() {
+        let json = r#"{
+            "source_sensor": "snr:local:hook:cc-session:v1",
+            "created_at": "2026-04-22T14:02:11Z",
+            "originating_agent_id": "agt:claude-code:opus-4-7:main:v1",
+            "source_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "consent_ref": "consent:01HQZ",
+            "llm_id_if_any": null
+        }"#;
+        let res: Result<Provenance, _> = serde_json::from_str(json);
+        let err = res.expect_err("missing source_ids key must fail");
+        assert!(
+            err.to_string().contains("source_ids"),
+            "error mentions field, got: {err}"
+        );
     }
 
     #[test]

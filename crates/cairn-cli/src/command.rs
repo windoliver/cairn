@@ -349,7 +349,7 @@ fn vault_subcommand() -> clap::Command {
 
 fn admin_subcommand() -> clap::Command {
     clap::Command::new("admin")
-        .about("Administrative operations (model management, reindex)")
+        .about("Administrative operations (model management, reindex, backup substrate)")
         .subcommand_required(true)
         .arg_required_else_help(true)
         .subcommand(
@@ -399,6 +399,47 @@ fn admin_subcommand() -> clap::Command {
                             "Rebuild FTS5 + vector indexes from the authoritative records table \
                              (use after derived indexes are deleted or corrupted).",
                         ),
+                )
+                .arg(
+                    clap::Arg::new("json")
+                        .long("json")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Emit JSON output"),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("snapshot")
+                .about("Prepare a vault backup snapshot")
+                .arg(
+                    clap::Arg::new("backup")
+                        .long("backup")
+                        .required(true)
+                        .value_name("PATH")
+                        .help("Destination path for the prepared backup"),
+                )
+                .arg(
+                    clap::Arg::new("json")
+                        .long("json")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Emit JSON output"),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("restore")
+                .about("Prepare a restore operation from a backup")
+                .arg(
+                    clap::Arg::new("from")
+                        .long("from")
+                        .required(true)
+                        .value_name("PATH")
+                        .help("Source backup path to restore from"),
+                )
+                .arg(
+                    clap::Arg::new("into")
+                        .long("into")
+                        .required(true)
+                        .value_name("PATH")
+                        .help("Destination vault path to restore into"),
                 )
                 .arg(
                     clap::Arg::new("json")
