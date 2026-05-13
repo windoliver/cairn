@@ -72,6 +72,7 @@ mod extract;
 mod folder;
 mod patterns;
 mod planner;
+mod recording;
 pub mod report;
 mod scanner;
 
