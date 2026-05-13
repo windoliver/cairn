@@ -70,6 +70,14 @@ impl VoiceAudioSource for OneChunkSource {
     }
 }
 
+struct NoChunkSource;
+
+impl VoiceAudioSource for NoChunkSource {
+    fn next_chunk(&mut self) -> Result<Option<VoiceAudioChunk>, String> {
+        Ok(None)
+    }
+}
+
 struct StaticTranscriber {
     calls: Cell<usize>,
 }
@@ -144,6 +152,25 @@ fn disabled_lazy_voice_capture_does_not_construct_runtime_dependencies() {
         })
     );
     assert!(!source_constructed.get());
+    assert!(!transcriber_constructed.get());
+}
+
+#[test]
+fn lazy_voice_capture_does_not_construct_transcriber_until_chunk_exists() {
+    let transcriber_constructed = Cell::new(false);
+
+    let outcome = voice::capture_next_chunk_lazy(
+        &enabled_config(),
+        || -> Result<NoChunkSource, String> { Ok(NoChunkSource) },
+        || -> Result<StaticTranscriber, String> {
+            transcriber_constructed.set(true);
+            Ok(StaticTranscriber {
+                calls: Cell::new(0),
+            })
+        },
+    );
+
+    assert_eq!(outcome, None);
     assert!(!transcriber_constructed.get());
 }
 

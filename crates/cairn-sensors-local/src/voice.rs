@@ -203,6 +203,19 @@ where
         }
     };
 
+    let chunk = match source.next_chunk() {
+        Ok(Some(chunk)) => chunk,
+        Ok(None) => return None,
+        Err(err) => {
+            return Some(EmitOutcome::Dropped {
+                sensor: SensorKind::Voice,
+                reason: DropReason::MalformedObservation(format!(
+                    "voice audio capture failed: {err}"
+                )),
+            });
+        }
+    };
+
     let transcriber = match transcriber_factory() {
         Ok(transcriber) => transcriber,
         Err(err) => {
@@ -215,7 +228,22 @@ where
         }
     };
 
-    capture_next_chunk(config, &mut source, &transcriber)
+    let transcript = match transcriber.transcribe(&chunk) {
+        Ok(transcript) => transcript,
+        Err(err) => {
+            return Some(EmitOutcome::Dropped {
+                sensor: SensorKind::Voice,
+                reason: DropReason::MalformedObservation(format!(
+                    "voice transcription failed: {err}"
+                )),
+            });
+        }
+    };
+
+    Some(emit(
+        config,
+        VoiceObservation::from_chunk(chunk, transcript),
+    ))
 }
 
 /// Emit one transcribed voice observation as a validated capture event.

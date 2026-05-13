@@ -247,7 +247,7 @@ fn capture_cpal_chunk(config: &CpalVoiceSourceConfig) -> Result<VoiceAudioChunk,
             &stream_config,
             &samples,
             &stream_error,
-            |sample| f32::from(sample) / f32::from(i16::MAX),
+            i16_sample_to_f32,
         ),
         SampleFormat::U16 => build_input_stream::<u16, _>(
             &device,
@@ -363,6 +363,14 @@ fn mono_samples(samples: &[f32], channels: u16) -> Result<Vec<f32>, String> {
         .collect())
 }
 
+fn i16_sample_to_f32(sample: i16) -> f32 {
+    if sample < 0 {
+        f32::from(sample) / 32_768.0
+    } else {
+        f32::from(sample) / f32::from(i16::MAX)
+    }
+}
+
 fn millis_u64(duration: Duration) -> Result<u64, String> {
     u64::try_from(duration.as_millis())
         .map_err(|_| "capture_duration is too large to encode as milliseconds".to_owned())
@@ -405,5 +413,12 @@ mod tests {
         let error = mono_samples(&[0.0, 1.0, 0.5], 2).expect_err("incomplete frame");
 
         assert!(error.contains("complete frames"));
+    }
+
+    #[test]
+    fn i16_sample_conversion_stays_in_normalized_range() {
+        assert!((super::i16_sample_to_f32(i16::MIN) - -1.0).abs() < f32::EPSILON);
+        assert!(super::i16_sample_to_f32(0).abs() < f32::EPSILON);
+        assert!(super::i16_sample_to_f32(i16::MAX) <= 1.0);
     }
 }
