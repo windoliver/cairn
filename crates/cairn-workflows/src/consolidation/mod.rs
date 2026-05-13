@@ -2,6 +2,8 @@
 
 pub mod handler;
 pub mod payload;
+pub mod trigger;
 
 pub use handler::{ConsolidationHandler, CONSOLIDATION_KIND};
 pub use payload::ConsolidationPayload;
+pub use trigger::{EnqueueDecision, enqueue_if_due};
