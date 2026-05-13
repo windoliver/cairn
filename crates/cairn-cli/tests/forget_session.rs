@@ -112,10 +112,8 @@ fn rewrite_target_scope(
           WHERE target_id = ?1",
         rusqlite::params![
             target_id,
-            tenant
-                .map_or_else(|| "null".to_owned(), |value| format!("\"{value}\"")),
-            workspace
-                .map_or_else(|| "null".to_owned(), |value| format!("\"{value}\""))
+            tenant.map_or_else(|| "null".to_owned(), |value| format!("\"{value}\"")),
+            workspace.map_or_else(|| "null".to_owned(), |value| format!("\"{value}\""))
         ],
     )
     .expect("rewrite record scope");

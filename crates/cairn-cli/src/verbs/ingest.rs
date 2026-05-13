@@ -1167,5 +1167,4 @@ mod tests {
             "quarantine file should have been written"
         );
     }
-
 }
