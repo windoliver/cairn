@@ -311,7 +311,7 @@ cairn capture_trace --from FROM
 ```
 
 ```bash
-cairn capture_trace --from FROM --session SESSION_ID
+cairn capture_trace --blocks BLOCKS --session SESSION_ID
 ```
 
 ## `cairn lint`

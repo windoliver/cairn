@@ -62,6 +62,12 @@ pub fn normalize_entity_name(input: &str) -> Option<String> {
     if out.ends_with(' ') {
         out.pop();
     }
+
+    // 4. Re-NFC: lowercasing can produce composable sequences (e.g.
+    //    "J\u{30c}".to_lowercase() yields "j\u{30c}", which NFC composes
+    //    into U+01F0 "ǰ"). Without a final NFC pass the function is not
+    //    idempotent on those inputs.
+    let out: String = out.nfc().collect();
     if out.is_empty() { None } else { Some(out) }
 }
 

@@ -11,6 +11,7 @@ use cairn_core::domain::{
     TerminalContext,
 };
 use sha2::{Digest as _, Sha256};
+use ulid::Ulid;
 
 fn cli() -> Command {
     Command::new(env!("CARGO_BIN_EXE_cairn"))
@@ -115,6 +116,50 @@ fn write_capture_trace_event(vault: &Path, session: &str, turn: &str, body: &str
     let line = serde_json::to_string(&event).expect("serialize event");
     writeln!(f, "{line}").expect("write trace JSONL");
     trace_path
+}
+
+fn write_trace_blocks_fixture(vault: &Path, filename: &str) -> (PathBuf, Vec<u8>) {
+    let path = vault.join(filename);
+    let raw = serde_json::json!([
+        {
+            "kind": "reasoning",
+            "text": "private chain of thought",
+            "signature": "sig_trace_blocks_v1"
+        },
+        {
+            "kind": "tool_use",
+            "tool": "Read",
+            "input": {"file": "README.md"},
+            "id": "tool-1"
+        },
+        {
+            "kind": "tool_result",
+            "tool_use_id": "tool-1",
+            "content": "file contents",
+            "is_error": false
+        },
+        {
+            "kind": "text",
+            "text": "final answer"
+        }
+    ])
+    .to_string()
+    .into_bytes();
+    std::fs::write(&path, &raw).expect("write trace blocks fixture");
+    (path, raw)
+}
+
+fn stable_turn_id_for_blocks(session_id: &str, raw_blocks: &[u8]) -> String {
+    let mut h = Sha256::new();
+    h.update(b"cairn:capture-trace:blocks:import:v1\0");
+    h.update(session_id.as_bytes());
+    h.update([0]);
+    h.update(raw_blocks);
+    h.update([0]);
+    let digest = h.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    format!("trace-blocks-{}", Ulid::from_bytes(bytes))
 }
 
 fn write_source_for_family(vault: &Path, family: &str, event_id: &str, body: &str) -> String {
@@ -609,6 +654,215 @@ fn capture_trace_returns_committed_envelope() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // end-to-end envelope assertion; splitting hides setup/expectation pairing
+fn capture_trace_blocks_returns_committed_envelope_and_hides_reasoning_by_default() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    cairn_cli::vault::bootstrap(&cairn_cli::vault::BootstrapOpts {
+        vault_path: dir.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap vault");
+    let session = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let (blocks_path, raw_blocks) = write_trace_blocks_fixture(dir.path(), "trace-blocks.json");
+    let turn_id = stable_turn_id_for_blocks(session, &raw_blocks);
+
+    let out = cli()
+        .current_dir(dir.path())
+        .args([
+            "capture_trace",
+            "--blocks",
+            &format!("@{}", blocks_path.display()),
+            "--session",
+            session,
+            "--json",
+        ])
+        .output()
+        .expect("cairn capture_trace --blocks --json");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "capture_trace --blocks should exit 0 (committed), got {:?}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+        panic!("capture_trace --blocks JSON parse failed: {e}\nstdout: {stdout:?}")
+    });
+    assert_eq!(v["contract"], "cairn.mcp.v1");
+    assert_eq!(v["status"], "committed");
+    assert_eq!(v["verb"], "capture_trace");
+    assert!(v["error"].is_null());
+    assert!(v["data"]["trace_id"].is_string());
+    assert_eq!(v["data"]["failed_turns"].as_array().map(Vec::len), Some(0));
+
+    let conn =
+        rusqlite::Connection::open(dir.path().join(".cairn").join("cairn.db")).expect("open db");
+    let mut stmt = conn
+        .prepare("SELECT record_json FROM records WHERE active = 1")
+        .expect("prepare record query");
+    let records = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("query records")
+        .map(|row| {
+            let json = row.expect("record_json row");
+            serde_json::from_str::<MemoryRecord>(&json)
+                .unwrap_or_else(|e| panic!("record_json parse failed: {e}\njson: {json}"))
+        })
+        .collect::<Vec<_>>();
+    let mut turn_records = records
+        .iter()
+        .filter(|record| {
+            record
+                .extra_frontmatter
+                .get("trace")
+                .and_then(|trace| trace.get("turn_id"))
+                .and_then(|value| value.as_str())
+                == Some(turn_id.as_str())
+        })
+        .collect::<Vec<_>>();
+    turn_records.sort_by_key(|record| {
+        record
+            .extra_frontmatter
+            .get("trace")
+            .and_then(|trace| trace.get("sequence"))
+            .and_then(serde_json::Value::as_u64)
+            .expect("trace sequence")
+    });
+    assert_eq!(
+        turn_records.len(),
+        4,
+        "expected one row per direct trace block"
+    );
+    assert_eq!(turn_records[0].kind.as_str(), "reasoning");
+    assert_eq!(
+        turn_records[0].extra_frontmatter["trace"]["block_index"].as_u64(),
+        Some(0)
+    );
+    assert_eq!(
+        turn_records[0].extra_frontmatter["trace_blocks"][0]["signature"].as_str(),
+        Some("sig_trace_blocks_v1")
+    );
+    assert_eq!(
+        turn_records[1].extra_frontmatter["trace"]["tool_call_id"].as_str(),
+        Some("tool-1")
+    );
+    assert_eq!(
+        turn_records[2].extra_frontmatter["trace"]["parent_event_id"].as_str(),
+        turn_records[1].extra_frontmatter["trace"]["capture_event_id"].as_str()
+    );
+    assert_eq!(turn_records[3].body, "final answer");
+
+    let hidden = cli()
+        .current_dir(dir.path())
+        .args([
+            "search",
+            "--mode",
+            "keyword",
+            "private chain of thought",
+            "--json",
+        ])
+        .output()
+        .expect("search without reasoning");
+    assert_eq!(
+        hidden.status.code(),
+        Some(0),
+        "search should exit 0; stderr: {}",
+        String::from_utf8_lossy(&hidden.stderr)
+    );
+    let hidden_stdout = String::from_utf8(hidden.stdout).expect("utf-8");
+    let hidden_v: serde_json::Value = serde_json::from_str(hidden_stdout.trim())
+        .unwrap_or_else(|e| panic!("search JSON parse failed: {e}\nstdout: {hidden_stdout:?}"));
+    assert_eq!(
+        hidden_v["data"]["hits"].as_array().map(Vec::len),
+        Some(0),
+        "reasoning rows should be hidden by default"
+    );
+
+    let visible = cli()
+        .current_dir(dir.path())
+        .args([
+            "search",
+            "--mode",
+            "keyword",
+            "private chain of thought",
+            "--include-reasoning",
+            "--json",
+        ])
+        .output()
+        .expect("search with reasoning");
+    assert_eq!(
+        visible.status.code(),
+        Some(0),
+        "search --include-reasoning should exit 0; stderr: {}",
+        String::from_utf8_lossy(&visible.stderr)
+    );
+    let visible_stdout = String::from_utf8(visible.stdout).expect("utf-8");
+    let visible_v: serde_json::Value =
+        serde_json::from_str(visible_stdout.trim()).unwrap_or_else(|e| {
+            panic!("search --include-reasoning JSON parse failed: {e}\nstdout: {visible_stdout:?}")
+        });
+    let hits = visible_v["data"]["hits"].as_array().expect("hits array");
+    assert_eq!(
+        hits.len(),
+        1,
+        "reasoning row should become visible when opted in"
+    );
+    let snippet = hits[0]["snippet"].as_str().expect("snippet");
+    assert!(
+        snippet.contains("private") && snippet.contains("chain") && snippet.contains("thought"),
+        "expected reasoning snippet tokens in opted-in search response: {hits:?}"
+    );
+}
+
+#[test]
+fn capture_trace_blocks_cli_reimport_is_idempotent() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    cairn_cli::vault::bootstrap(&cairn_cli::vault::BootstrapOpts {
+        vault_path: dir.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap vault");
+    let session = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let (blocks_path, raw_blocks) = write_trace_blocks_fixture(dir.path(), "trace-blocks.json");
+    let turn_id = stable_turn_id_for_blocks(session, &raw_blocks);
+
+    for label in ["first", "second"] {
+        let out = cli()
+            .current_dir(dir.path())
+            .args([
+                "capture_trace",
+                "--blocks",
+                blocks_path.to_str().expect("utf-8 blocks path"),
+                "--session",
+                session,
+                "--json",
+            ])
+            .output()
+            .unwrap_or_else(|e| panic!("{label} capture_trace --blocks --json failed: {e}"));
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{label} import should commit; stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    let conn =
+        rusqlite::Connection::open(dir.path().join(".cairn").join("cairn.db")).expect("open db");
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM records
+             WHERE active = 1
+               AND json_extract(record_json, '$.extra_frontmatter.trace.turn_id') = ?1",
+            [turn_id.as_str()],
+            |row| row.get(0),
+        )
+        .expect("count trace rows");
+    assert_eq!(count, 4, "re-import should not duplicate direct trace rows");
+}
+
+#[test]
 #[allow(
     clippy::too_many_lines,
     reason = "CLI-level regression intentionally covers a full six-event trace turn"
@@ -902,6 +1156,78 @@ fn capture_trace_rejects_session_arg_until_scoped_import_supported() {
     assert_eq!(v["status"], "rejected");
     assert_eq!(v["error"]["code"], "InvalidArgs");
     assert_eq!(v["error"]["data"]["field"], "session_id");
+}
+
+#[test]
+fn capture_trace_blocks_rejects_missing_session_arg() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    cairn_cli::vault::bootstrap(&cairn_cli::vault::BootstrapOpts {
+        vault_path: dir.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap vault");
+    let (blocks_path, _) = write_trace_blocks_fixture(dir.path(), "trace-blocks.json");
+    let out = cli()
+        .current_dir(dir.path())
+        .args([
+            "capture_trace",
+            "--blocks",
+            blocks_path.to_str().expect("utf-8 blocks path"),
+            "--json",
+        ])
+        .output()
+        .expect("cairn capture_trace --blocks --json");
+    assert_eq!(
+        out.status.code(),
+        Some(64),
+        "missing --session must fail closed; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+        panic!("capture_trace --blocks JSON parse failed: {e}\nstdout: {stdout:?}")
+    });
+    assert_eq!(v["status"], "rejected");
+    assert_eq!(v["error"]["code"], "InvalidArgs");
+    assert_eq!(v["error"]["data"]["field"], "session_id");
+}
+
+#[test]
+fn capture_trace_rejects_multiple_input_modes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    cairn_cli::vault::bootstrap(&cairn_cli::vault::BootstrapOpts {
+        vault_path: dir.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap vault");
+    let trace_path = dir.path().join("empty-trace.jsonl");
+    std::fs::write(&trace_path, "").expect("write empty trace file");
+    let (blocks_path, _) = write_trace_blocks_fixture(dir.path(), "trace-blocks.json");
+    let out = cli()
+        .current_dir(dir.path())
+        .args([
+            "capture_trace",
+            "--from",
+            trace_path.to_str().expect("utf-8 trace path"),
+            "--blocks",
+            blocks_path.to_str().expect("utf-8 blocks path"),
+            "--session",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "--json",
+        ])
+        .output()
+        .expect("cairn capture_trace --from --blocks --json");
+    assert!(
+        !out.status.success(),
+        "passing --from and --blocks together must be rejected; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    let envelope: serde_json::Value =
+        serde_json::from_str(&stdout).expect("InvalidArgs envelope on stdout");
+    assert_eq!(envelope["status"], "rejected");
+    assert_eq!(envelope["error"]["code"], "InvalidArgs");
+    assert_eq!(envelope["error"]["data"]["field"], "from|blocks");
 }
 
 #[test]
