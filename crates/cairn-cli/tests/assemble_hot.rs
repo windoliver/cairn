@@ -60,3 +60,24 @@ fn assemble_hot_budget_zero_returns_empty_prefix() {
     assert_eq!(v["data"]["prefix"], "");
     assert_eq!(v["data"]["bytes"], 0);
 }
+
+#[test]
+fn assemble_hot_budget_above_hard_cap_is_rejected() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = cli()
+        .current_dir(dir.path())
+        .args(["assemble_hot", "--budget", "4194305", "--json"])
+        .output()
+        .expect("run");
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf8");
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("json");
+    assert_eq!(v["status"], "rejected");
+    assert_eq!(v["error"]["code"], "InvalidArgs");
+    assert_eq!(v["error"]["data"]["field"], "budget");
+}

@@ -1,10 +1,10 @@
 //! End-to-end CLI smoke tests. Invokes the built `cairn` binary and asserts
-//! the P0 stub behaviour: help succeeds, verbs fail closed with `Internal`.
+//! the P0 CLI behaviour: help succeeds, unwired verbs fail closed with `Internal`.
 //!
 //! The CLI tree is generated from the IDL by `cairn-codegen`; the store is
-//! not wired yet (lands in #9), so every verb returns an `aborted` envelope
-//! with `code: "Internal"`. Exit-code contract (spec §5.2):
-//! - simple verb stubs (`ingest`, `search`, …) → exit 1, stderr contains
+//! not fully wired yet (lands across follow-up issues), so unwired verbs return
+//! an `aborted` envelope with `code: "Internal"`. Exit-code contract (spec §5.2):
+//! - simple unwired verb stubs (`ingest`, `search`, …) → exit 1, stderr contains
 //!   `Internal`, or `--json` → stdout contains `"status":"aborted"`.
 //! - clap usage errors (unknown flag, unknown subcommand, missing required
 //!   `ArgGroup`, bare invocation with `subcommand_required`) → 64
@@ -75,13 +75,7 @@ fn simple_verb_human_mode_exits_one_with_internal() {
     // and print "Internal" to stderr in human mode.
     // `ingest` is excluded: bare `cairn ingest` has no source → exit 64 (usage error).
     // `retrieve` and `forget` are excluded: required ArgGroup → exit 64 (usage error).
-    for verb in [
-        "search",
-        "summarize",
-        "assemble_hot",
-        "capture_trace",
-        "lint",
-    ] {
+    for verb in ["search", "summarize", "capture_trace", "lint"] {
         let out = cli().arg(verb).output().expect("cairn <verb>");
         assert!(
             !out.status.success(),
