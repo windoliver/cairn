@@ -152,7 +152,10 @@ pub(crate) fn rewrite_registered_backups(
         return Ok(());
     }
 
-    let target_set: BTreeSet<String> = targets.iter().map(|target| target.as_str().to_owned()).collect();
+    let target_set: BTreeSet<String> = targets
+        .iter()
+        .map(|target| target.as_str().to_owned())
+        .collect();
     for registry_entry in load_registry_entries(vault_root)? {
         let retained: Vec<TargetId> = registry_entry
             .entry
@@ -184,8 +187,8 @@ pub(crate) fn load_registry_entries(vault_root: &Path) -> Result<Vec<RegistryEnt
     }
 
     let mut entries = Vec::new();
-    for entry in fs::read_dir(&registry_dir)
-        .with_context(|| format!("read {}", registry_dir.display()))?
+    for entry in
+        fs::read_dir(&registry_dir).with_context(|| format!("read {}", registry_dir.display()))?
     {
         let path = entry?.path();
         if path.extension().and_then(std::ffi::OsStr::to_str) != Some("json") {
@@ -193,8 +196,8 @@ pub(crate) fn load_registry_entries(vault_root: &Path) -> Result<Vec<RegistryEnt
         }
 
         let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
-        let entry: BackupRegistryEntry = serde_json::from_slice(&bytes)
-            .with_context(|| format!("parse {}", path.display()))?;
+        let entry: BackupRegistryEntry =
+            serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
         entries.push(RegistryEntryFile { path, entry });
     }
 
@@ -212,10 +215,16 @@ fn rewrite_registered_backup(
     let artifact_path = PathBuf::from(&registry_entry.entry.artifact_path);
     validate_backup_root(&artifact_path)?;
     let parent = artifact_path.parent().ok_or_else(|| {
-        anyhow::anyhow!("backup artifact {} has no parent directory", artifact_path.display())
+        anyhow::anyhow!(
+            "backup artifact {} has no parent directory",
+            artifact_path.display()
+        )
     })?;
     let artifact_name = artifact_path.file_name().ok_or_else(|| {
-        anyhow::anyhow!("backup artifact {} has no file name", artifact_path.display())
+        anyhow::anyhow!(
+            "backup artifact {} has no file name",
+            artifact_path.display()
+        )
     })?;
     let rewrite_path = parent.join(format!(
         ".{}.rewrite-{}",
@@ -298,8 +307,8 @@ fn remove_path_if_exists(path: &Path) -> Result<()> {
         return Ok(());
     }
 
-    let metadata = fs::symlink_metadata(path)
-        .with_context(|| format!("stat {}", path.display()))?;
+    let metadata =
+        fs::symlink_metadata(path).with_context(|| format!("stat {}", path.display()))?;
     if metadata.is_dir() {
         fs::remove_dir_all(path).with_context(|| format!("remove {}", path.display()))?;
     } else {
@@ -387,8 +396,8 @@ fn current_record_forget_hashes(db_path: &Path) -> Result<BTreeSet<String>> {
         return Ok(BTreeSet::new());
     }
 
-    let events = cairn_store_sqlite::consent::read_since_rowid(&conn, 0)
-        .context("read consent journal")?;
+    let events =
+        cairn_store_sqlite::consent::read_since_rowid(&conn, 0).context("read consent journal")?;
     let mut hashes = BTreeSet::new();
     for (_, event) in events {
         if event.kind != ConsentKind::ForgetIntent {
@@ -429,8 +438,9 @@ fn collect_target_ids(db_path: &Path) -> Result<Vec<TargetId>> {
     for row in rows {
         let target = row?;
         targets.push(
-            TargetId::parse(target.clone())
-                .with_context(|| format!("parse target id `{target}` from {}", db_path.display()))?,
+            TargetId::parse(target.clone()).with_context(|| {
+                format!("parse target id `{target}` from {}", db_path.display())
+            })?,
         );
     }
     Ok(targets)
@@ -494,8 +504,11 @@ fn purge_targets(db_path: &Path, targets: &[TargetId]) -> Result<()> {
             [target.as_str()],
         )
         .with_context(|| format!("purge edges for {}", target.as_str()))?;
-        tx.execute("DELETE FROM records WHERE target_id = ?1", [target.as_str()])
-            .with_context(|| format!("purge records for {}", target.as_str()))?;
+        tx.execute(
+            "DELETE FROM records WHERE target_id = ?1",
+            [target.as_str()],
+        )
+        .with_context(|| format!("purge records for {}", target.as_str()))?;
     }
     tx.commit().context("commit purge transaction")?;
     Ok(())
@@ -517,9 +530,9 @@ fn rewrite_source_redaction_marker(
     operation_id: &str,
 ) -> Result<()> {
     let path = root.join(source_id.as_str());
-    let parent = path.parent().ok_or_else(|| {
-        anyhow::anyhow!("source path {} has no parent directory", path.display())
-    })?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("source path {} has no parent directory", path.display()))?;
     fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     let marker = format!(
         "cairn:redacted-source:v1\nsource_hash={source_hash}\noperation_id={operation_id}\n"
@@ -547,7 +560,10 @@ fn target_id_hash(target_id: &str) -> String {
 
 pub(crate) fn validate_backup_root(path: &Path) -> Result<()> {
     if !path.is_dir() {
-        anyhow::bail!("backup root {} does not exist or is not a directory", path.display());
+        anyhow::bail!(
+            "backup root {} does not exist or is not a directory",
+            path.display()
+        );
     }
 
     let db_path = path.join(".cairn/cairn.db");
@@ -596,7 +612,10 @@ fn normalize_absolute_path(path: &Path) -> Result<PathBuf> {
     let mut cursor = lexical.as_path();
     while !cursor.exists() {
         let name = cursor.file_name().ok_or_else(|| {
-            anyhow::anyhow!("cannot resolve non-existent path component for {}", lexical.display())
+            anyhow::anyhow!(
+                "cannot resolve non-existent path component for {}",
+                lexical.display()
+            )
         })?;
         suffix.push(name.to_os_string());
         cursor = cursor.parent().ok_or_else(|| {

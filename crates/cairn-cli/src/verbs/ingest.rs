@@ -27,6 +27,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context as _;
@@ -70,6 +71,9 @@ use super::status;
 const CLI_AUTHOR_ID: &str = "agt:cairn-cli:p0:v1";
 const CLI_SENSOR_ID: &str = "snr:local:cli:p0:v1";
 const STDIN_LIMIT_BYTES: u64 = 4 * 1024 * 1024;
+const SESSION_LOCK_TENANT: &str = "default";
+const SESSION_LOCK_WORKSPACE: &str = "default";
+const SESSION_LOCK_TTL: Duration = Duration::from_secs(30);
 
 #[derive(Default)]
 struct CacheStats {
@@ -611,25 +615,6 @@ fn run_body_ingest(
         Err(e) => return emit_internal(json, &format!("build record: {e:#}"), trace),
     };
     let db_path = vault_root.join(".cairn").join("cairn.db");
-    if source_hash_is_forgotten(&db_path, &record.provenance.source_hash) {
-        let reason = format!(
-            "source hash `{}` has a prior source-forget receipt and cannot be re-ingested",
-            record.provenance.source_hash
-        );
-        let mut resp = invalid_args_response(ResponseVerb::Ingest, "body", &reason);
-        resp.policy_trace = trace;
-        if json {
-            emit_json(&resp);
-        } else {
-            human_error("ingest", "InvalidArgs", &reason, &resp.operation_id);
-        }
-        return ExitCode::from(64);
-    }
-    if let Err(e) =
-        write_source_artifact(vault_root, &record.provenance.source_ids[0], &fenced.text)
-    {
-        return emit_internal(json, &format!("write source artifact: {e:#}"), trace);
-    }
 
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -640,11 +625,41 @@ fn run_body_ingest(
     };
 
     let outcome = match rt.block_on(async {
-        let store = cairn_store_sqlite::open(&db_path).await?;
-        store.upsert(&record).await
+        let store = cairn_store_sqlite::open(&db_path)
+            .await
+            .map_err(|e| format!("open store: {e}"))?;
+        let lock = acquire_session_shared_lock(&store, &session_id)
+            .await
+            .map_err(|e| format!("acquire session lock: {e:#}"))?;
+        if source_hash_is_forgotten(&db_path, &record.provenance.source_hash) {
+            return Err(format!(
+                "source hash `{}` has a prior source-forget receipt and cannot be re-ingested",
+                record.provenance.source_hash
+            ));
+        }
+        write_source_artifact(vault_root, &record.provenance.source_ids[0], &fenced.text)
+            .map_err(|e| format!("write source artifact: {e:#}"))?;
+        let outcome = store
+            .upsert(&record)
+            .await
+            .map_err(|e| format!("store upsert: {e}"))?;
+        lock.release()
+            .await
+            .map_err(|e| format!("release session lock: {e}"))?;
+        Ok(outcome)
     }) {
         Ok(outcome) => outcome,
-        Err(e) => return emit_internal(json, &format!("store upsert: {e}"), trace),
+        Err(reason) if reason.contains("prior source-forget receipt") => {
+            let mut resp = invalid_args_response(ResponseVerb::Ingest, "body", &reason);
+            resp.policy_trace = trace;
+            if json {
+                emit_json(&resp);
+            } else {
+                human_error("ingest", "InvalidArgs", &reason, &resp.operation_id);
+            }
+            return ExitCode::from(64);
+        }
+        Err(reason) => return emit_internal(json, &reason, trace),
     };
 
     let metric = IngestMetricRow::accepted(
@@ -700,6 +715,36 @@ fn source_hash_is_forgotten(db_path: &Path, source_hash: &str) -> bool {
                     if reason_code.starts_with("source_forget")
             )
     })
+}
+
+async fn acquire_session_shared_lock(
+    store: &cairn_store_sqlite::SqliteMemoryStore,
+    session_id: &str,
+) -> anyhow::Result<cairn_store_sqlite::locks::LockHandle> {
+    let conn = store
+        .raw_conn_for_admin()
+        .ok_or_else(|| anyhow::anyhow!("store lock path unavailable"))?;
+    let incarnation = store
+        .incarnation()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("store incarnation unavailable"))?;
+    let resource = cairn_store_sqlite::locks::ResourceKey::session(
+        SESSION_LOCK_TENANT,
+        SESSION_LOCK_WORKSPACE,
+        session_id,
+    );
+    let holder_id = format!("pid={}-{}", std::process::id(), ulid::Ulid::new());
+    cairn_store_sqlite::locks::acquire(
+        conn,
+        &resource,
+        cairn_store_sqlite::locks::LockMode::Shared,
+        &holder_id,
+        SESSION_LOCK_TTL,
+        &incarnation,
+        "ingest",
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("acquire session lock: {e}"))
 }
 
 fn policy_trace_for_ingest(
@@ -1325,5 +1370,38 @@ mod tests {
             !entries.is_empty(),
             "quarantine file should have been written"
         );
+    }
+
+    #[tokio::test]
+    async fn session_shared_lock_rejects_while_exclusive_holder_is_live() {
+        let store = cairn_store_sqlite::open_in_memory().await.unwrap();
+        let conn = std::sync::Arc::clone(store.raw_conn_for_admin().unwrap());
+        let incarnation = store.incarnation().cloned().unwrap();
+        let resource = cairn_store_sqlite::locks::ResourceKey::session(
+            SESSION_LOCK_TENANT,
+            SESSION_LOCK_WORKSPACE,
+            "sess-42",
+        );
+        let exclusive = cairn_store_sqlite::locks::acquire(
+            &conn,
+            &resource,
+            cairn_store_sqlite::locks::LockMode::Exclusive,
+            "test-exclusive-holder",
+            SESSION_LOCK_TTL,
+            &incarnation,
+            "forget --session test",
+        )
+        .await
+        .unwrap();
+
+        let err = acquire_session_shared_lock(&store, "sess-42")
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("lock held"),
+            "shared ingest lock should fail behind a live exclusive session holder: {err:#}"
+        );
+
+        exclusive.release().await.unwrap();
     }
 }

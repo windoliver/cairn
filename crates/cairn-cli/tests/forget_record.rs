@@ -243,11 +243,14 @@ fn forget_record_rewrites_registered_backup_and_appends_shred_log() {
     );
 
     let registry_entry = only_registry_entry(vault.path());
-    assert_eq!(registry_entry["artifact_path"], backup_path.display().to_string());
+    assert_eq!(
+        registry_entry["artifact_path"],
+        backup_path.display().to_string()
+    );
     assert_eq!(registry_entry["target_ids_included"], serde_json::json!([]));
 
-    let shredded_log = fs::read_to_string(vault.path().join(".cairn/backups/shredded.log"))
-        .expect("shredded log");
+    let shredded_log =
+        fs::read_to_string(vault.path().join(".cairn/backups/shredded.log")).expect("shredded log");
     let lines: Vec<_> = shredded_log.lines().collect();
     assert_eq!(lines.len(), 1, "expected one shredded backup entry");
     let entry: serde_json::Value = serde_json::from_str(lines[0]).expect("shredded entry json");

@@ -597,12 +597,10 @@ fn run_admin(matches: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
 fn load_admin_config(
     vault_root: &std::path::Path,
 ) -> Result<cairn_core::config::CairnConfig, ExitCode> {
-    cairn_cli::config::load(vault_root, &cairn_cli::config::CliOverrides::default()).map_err(
-        |e| {
-            eprintln!("cairn admin: config error — {e:#}");
-            ExitCode::from(78) // EX_CONFIG
-        },
-    )
+    cairn_cli::config::load(vault_root, &cairn_cli::config::CliOverrides::default()).map_err(|e| {
+        eprintln!("cairn admin: config error — {e:#}");
+        ExitCode::from(78) // EX_CONFIG
+    })
 }
 
 /// Apply the file-only vault-binding gate (`probe_vault_binding`) and

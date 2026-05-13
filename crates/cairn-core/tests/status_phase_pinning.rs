@@ -39,9 +39,14 @@ fn full_gates(phase: Phase) -> CapabilityGates {
 #[test]
 fn forget_session_pinned_to_v0_2_phase() {
     let caps_v0_1 = advertise(&full_gates(Phase::V0_1));
+    let caps_v0_2 = advertise(&full_gates(Phase::V0_2));
     assert!(
         !caps_v0_1.contains(&Capabilities::CairnMcpV1ForgetSession),
         "forget.session must NOT appear at v0.1 even with every gate on; got {caps_v0_1:?}"
+    );
+    assert!(
+        caps_v0_2.contains(&Capabilities::CairnMcpV1ForgetSession),
+        "forget.session must appear at v0.2 once wired; got {caps_v0_2:?}"
     );
 }
 

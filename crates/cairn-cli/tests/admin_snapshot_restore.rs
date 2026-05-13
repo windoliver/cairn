@@ -125,11 +125,23 @@ fn admin_snapshot_writes_backup_and_registry_entry() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(backup_path.exists(), "expected backup path to exist");
-    assert!(registry_dir.is_dir(), "expected backup registry dir to exist");
-    assert!(backup_path.join(".cairn/cairn.db").exists(), "expected db backup");
+    assert!(
+        registry_dir.is_dir(),
+        "expected backup registry dir to exist"
+    );
+    assert!(
+        backup_path.join(".cairn/cairn.db").exists(),
+        "expected db backup"
+    );
     assert!(backup_path.join("raw").is_dir(), "expected raw backup copy");
-    assert!(backup_path.join("wiki").is_dir(), "expected wiki backup copy");
-    assert!(backup_path.join("sources").is_dir(), "expected sources backup copy");
+    assert!(
+        backup_path.join("wiki").is_dir(),
+        "expected wiki backup copy"
+    );
+    assert!(
+        backup_path.join("sources").is_dir(),
+        "expected sources backup copy"
+    );
     assert_eq!(
         target_row_count(&backup_path.join(".cairn/cairn.db"), &record_id),
         1,
@@ -137,7 +149,10 @@ fn admin_snapshot_writes_backup_and_registry_entry() {
     );
 
     let registry_entry = only_registry_entry(vault.path());
-    assert_eq!(registry_entry["artifact_path"], backup_path.display().to_string());
+    assert_eq!(
+        registry_entry["artifact_path"],
+        backup_path.display().to_string()
+    );
     assert_eq!(
         registry_entry["target_ids_included"],
         serde_json::json!([record_id])
@@ -233,7 +248,10 @@ fn admin_snapshot_rejects_overlapping_backup_paths() {
     let vault = tempfile::tempdir().expect("vault tempdir");
     bootstrap_vault(vault.path());
 
-    for backup_path in [vault.path().to_path_buf(), vault.path().join("nested-backup")] {
+    for backup_path in [
+        vault.path().to_path_buf(),
+        vault.path().join("nested-backup"),
+    ] {
         let output = Command::cargo_bin("cairn")
             .expect("cairn binary")
             .env("CAIRN_VAULT", vault.path())
@@ -263,9 +281,7 @@ fn admin_snapshot_rejects_symlink_alias_overlap() {
     let alias_root = tempfile::tempdir().expect("alias tempdir");
     let alias_path = alias_root.path().join("vault-alias");
     if let Err(error) = try_create_dir_symlink(vault.path(), &alias_path) {
-        eprintln!(
-            "skipping symlink overlap test because symlink creation is unavailable: {error}"
-        );
+        eprintln!("skipping symlink overlap test because symlink creation is unavailable: {error}");
         return;
     }
 
@@ -398,7 +414,10 @@ fn admin_snapshot_and_restore_ignore_malformed_config() {
         "snapshot should ignore malformed config. stderr: {}",
         String::from_utf8_lossy(&snapshot_output.stderr)
     );
-    assert!(backup_path.exists(), "expected snapshot backup path to exist");
+    assert!(
+        backup_path.exists(),
+        "expected snapshot backup path to exist"
+    );
 
     let restore_target = vault.path().join("restore-target");
     let restore_output = Command::cargo_bin("cairn")

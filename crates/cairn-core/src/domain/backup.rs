@@ -69,7 +69,9 @@ impl RewritePlan {
             return Err(DomainError::EmptyField { field: "backup_id" });
         }
         if self.target_ids.is_empty() {
-            return Err(DomainError::EmptyField { field: "target_ids" });
+            return Err(DomainError::EmptyField {
+                field: "target_ids",
+            });
         }
         Ok(())
     }

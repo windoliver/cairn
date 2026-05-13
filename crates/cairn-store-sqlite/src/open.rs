@@ -94,6 +94,16 @@ fn build_store(
     }
 }
 
+async fn load_or_init_incarnation(
+    conn: &Arc<AsyncConn>,
+) -> Result<Arc<str>, crate::locks::LockError> {
+    match crate::locks::current_incarnation(conn).await {
+        Ok(incarnation) => Ok(incarnation),
+        Err(crate::locks::LockError::NoIncarnation) => crate::locks::init_incarnation(conn).await,
+        Err(error) => Err(error),
+    }
+}
+
 /// Runs WAL boot recovery (issue #55, brief §5.6). Called after migrations
 /// from every public async open path. Errors propagate so a corrupt WAL
 /// fails the open rather than serving requests against partial state.
@@ -173,7 +183,7 @@ pub async fn open_with_embedder_and_config(
     let graph_search = bootstrap(&conn, dim).await?;
     let conn = Arc::new(conn);
     run_boot_recovery(&conn).await?;
-    let incarnation = crate::locks::init_incarnation(&conn)
+    let incarnation = load_or_init_incarnation(&conn)
         .await
         .map_err(|e| StoreError::LockInit(Box::new(e)))?;
     Ok(build_store(
@@ -223,7 +233,7 @@ pub async fn open_in_memory_with_embedder_and_config(
     let graph_search = bootstrap(&conn, dim).await?;
     let conn = Arc::new(conn);
     run_boot_recovery(&conn).await?;
-    let incarnation = crate::locks::init_incarnation(&conn)
+    let incarnation = load_or_init_incarnation(&conn)
         .await
         .map_err(|e| StoreError::LockInit(Box::new(e)))?;
     Ok(build_store(

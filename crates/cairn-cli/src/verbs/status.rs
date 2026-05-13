@@ -26,6 +26,8 @@ use cairn_core::pipeline::dispatch::{DefaultRegistry, pipeline_dispatch_advertis
 
 use super::envelope::{emit_json, new_operation_id};
 
+const CLI_CONTRACT_PHASE: cairn_core::status::Phase = cairn_core::status::Phase::V0_2;
+
 /// Outcome of probing `<vault>/.cairn/vault.id` for the capability gate.
 #[derive(Debug, PartialEq, Eq)]
 pub enum VaultBinding {
@@ -290,7 +292,7 @@ fn compute_capabilities(
         model_present,
         embedding_provider_ready,
         llm_configured: false,
-        contract_phase: cairn_core::status::Phase::V0_1,
+        contract_phase: CLI_CONTRACT_PHASE,
     })
 }
 
@@ -401,7 +403,7 @@ fn capabilities_for_config(config: &CairnConfig, model_present: bool) -> Vec<Cap
         model_present,
         embedding_provider_ready,
         llm_configured: false,
-        contract_phase: cairn_core::status::Phase::V0_1,
+        contract_phase: CLI_CONTRACT_PHASE,
     })
 }
 

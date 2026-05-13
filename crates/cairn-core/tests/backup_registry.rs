@@ -3,8 +3,7 @@
 #![allow(missing_docs)]
 
 use cairn_core::domain::{
-    BackupRegistryEntry, DomainError, RewritePlan, Rfc3339Timestamp, ShreddedBackupEntry,
-    TargetId,
+    BackupRegistryEntry, DomainError, RewritePlan, Rfc3339Timestamp, ShreddedBackupEntry, TargetId,
 };
 
 #[test]
@@ -17,7 +16,12 @@ fn backup_registry_entry_rejects_empty_artifact_path() {
     };
 
     let err = entry.validate().unwrap_err();
-    assert_eq!(err, DomainError::EmptyField { field: "artifact_path" });
+    assert_eq!(
+        err,
+        DomainError::EmptyField {
+            field: "artifact_path"
+        }
+    );
 }
 
 #[test]
@@ -72,7 +76,12 @@ fn rewrite_plan_rejects_empty_target_ids() {
     let plan = RewritePlan::for_targets("bkp_01J00000000000000000000000", Vec::new());
 
     let err = plan.validate().unwrap_err();
-    assert_eq!(err, DomainError::EmptyField { field: "target_ids" });
+    assert_eq!(
+        err,
+        DomainError::EmptyField {
+            field: "target_ids"
+        }
+    );
 }
 
 #[test]
@@ -112,7 +121,12 @@ fn shredded_entry_rejects_empty_artifact_path() {
     );
 
     let err = entry.validate().unwrap_err();
-    assert_eq!(err, DomainError::EmptyField { field: "artifact_path" });
+    assert_eq!(
+        err,
+        DomainError::EmptyField {
+            field: "artifact_path"
+        }
+    );
 }
 
 #[test]
@@ -125,7 +139,10 @@ fn shredded_entry_rejects_empty_forget_operation_id() {
     );
 
     let err = entry.validate().unwrap_err();
-    assert_eq!(err, DomainError::EmptyField {
-        field: "forget_operation_id"
-    });
+    assert_eq!(
+        err,
+        DomainError::EmptyField {
+            field: "forget_operation_id"
+        }
+    );
 }

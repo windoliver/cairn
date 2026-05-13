@@ -368,13 +368,20 @@ fn status_in_bound_vault_advertises_search_and_policy_trace() {
     for stub_cap in [
         "cairn.mcp.v1.retrieve.session",
         "cairn.mcp.v1.retrieve.full",
-        "cairn.mcp.v1.forget.session",
     ] {
         assert!(
             !caps.contains(stub_cap),
             "stub-only capability {stub_cap} must NOT be advertised; got {caps:?}"
         );
     }
+    assert!(
+        caps.contains("cairn.mcp.v1.forget.session"),
+        "forget.session must be advertised once CLI status and execution are both at the v0.2 contract phase; got {caps:?}"
+    );
+    assert!(
+        !caps.contains("cairn.mcp.v1.forget.scope"),
+        "forget.scope must remain fail-closed and unadvertised; got {caps:?}"
+    );
     assert!(
         caps.contains("cairn.mcp.v1.forget.record"),
         "forget.record must be advertised in a bound vault once wiring is live; got {caps:?}"

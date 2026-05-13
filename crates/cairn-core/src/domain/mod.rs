@@ -19,8 +19,8 @@
 
 pub mod actor_chain;
 pub mod admission;
-pub mod body_hash;
 pub mod backup;
+pub mod body_hash;
 pub mod canonical;
 pub mod capture;
 pub mod capture_attribution;
