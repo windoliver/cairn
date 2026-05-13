@@ -40,7 +40,7 @@ fn record() -> MemoryRecord {
             source_sensor: Identity::parse("snr:local:hook:cc-session:v1").expect("valid"),
             created_at: Rfc3339Timestamp::parse("2026-04-22T14:02:11Z").expect("valid"),
             originating_agent_id: user_id.clone(),
-            source_ids: vec![SourceId::parse("src:01HQZX9F5N0000000000000000").expect("valid")],
+            source_ids: vec![SourceId::parse("01HQZX9F5N0000000000000000").expect("valid")],
             source_hash: format!("sha256:{}", "a".repeat(64)),
             consent_ref: "consent:01HQZ".to_owned(),
             llm_id_if_any: Some("opus-4-7".to_owned()),
@@ -176,7 +176,7 @@ fn unsupported_visibility_rejected_at_deserialize() {
             "source_sensor": "snr:local:hook:cc-session:v1",
             "created_at": "2026-04-22T14:02:11Z",
             "originating_agent_id": "agt:claude-code:opus-4-7:main:v1",
-            "source_ids": ["src:01HQZX9F5N0000000000000000"],
+            "source_ids": ["01HQZX9F5N0000000000000000"],
             "source_hash": format!("sha256:{}", "a".repeat(64)),
             "consent_ref": "consent:1",
             "llm_id_if_any": null

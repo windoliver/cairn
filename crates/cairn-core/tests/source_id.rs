@@ -6,8 +6,8 @@ use cairn_core::domain::SourceId;
 
 #[test]
 fn source_id_round_trips() {
-    let id = SourceId::parse("src:01HQZX9F5N0000000000000000").expect("valid");
-    assert_eq!(id.as_str(), "src:01HQZX9F5N0000000000000000");
+    let id = SourceId::parse("01HQZX9F5N0000000000000000").expect("valid");
+    assert_eq!(id.as_str(), "01HQZX9F5N0000000000000000");
 
     let json = serde_json::to_string(&id).expect("ser");
     let back: SourceId = serde_json::from_str(&json).expect("de");

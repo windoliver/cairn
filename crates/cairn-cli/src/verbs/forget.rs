@@ -42,8 +42,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::envelope::{
-    EX_UNAVAILABLE, capability_unavailable_response, emit_json, human_error,
-    invalid_args_response, new_operation_id, not_found_response,
+    EX_UNAVAILABLE, capability_unavailable_response, emit_json, human_error, invalid_args_response,
+    new_operation_id, not_found_response,
 };
 
 const SESSION_LOCK_TENANT: &str = "default";
@@ -685,12 +685,7 @@ impl ForgetOutcomeExt for cairn_store_sqlite::record_wal::forget::ForgetOutcome 
 // =====================================================================
 
 #[allow(clippy::too_many_lines)]
-fn run_session(
-    session_id: &str,
-    vault_root: &Path,
-    config: &CairnConfig,
-    json: bool,
-) -> ExitCode {
+fn run_session(session_id: &str, vault_root: &Path, config: &CairnConfig, json: bool) -> ExitCode {
     let operation_id = new_operation_id();
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -780,10 +775,8 @@ fn run_session(
             ExitCode::from(64)
         }
         Err(err) => {
-            let resp = super::envelope::internal_error_response(
-                ResponseVerb::Forget,
-                &err.to_string(),
-            );
+            let resp =
+                super::envelope::internal_error_response(ResponseVerb::Forget, &err.to_string());
             if json {
                 emit_json(&resp);
             } else {
@@ -794,6 +787,7 @@ fn run_session(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn forget_session(
     vault_root: PathBuf,
     session_id: &str,
@@ -817,9 +811,7 @@ async fn forget_session(
         let scope_partitions = store
             .with_tx(move |tx| tx.list_session_scope_partitions(&session_id_for_tx))
             .await
-            .map_err(|e| {
-                ForgetSessionError::Other(anyhow::anyhow!("list session scopes: {e}"))
-            })?;
+            .map_err(|e| ForgetSessionError::Other(anyhow::anyhow!("list session scopes: {e}")))?;
         let [(tenant, workspace)] = scope_partitions.as_slice() else {
             return if scope_partitions.is_empty() {
                 Err(ForgetSessionError::NotFound(session_id.to_owned()))
@@ -872,8 +864,8 @@ async fn forget_session(
                 if versions.is_empty() {
                     return Err(ForgetSessionError::NotFound(target_id.as_str().to_owned()));
                 }
-                deleted_count = deleted_count
-                    .saturating_add(u64::try_from(versions.len()).unwrap_or(u64::MAX));
+                deleted_count =
+                    deleted_count.saturating_add(u64::try_from(versions.len()).unwrap_or(u64::MAX));
                 tombstones.extend(
                     versions
                         .iter()
@@ -1001,13 +993,13 @@ async fn forget_session(
         }
         .await;
 
-        let release_result = partition_lock.release().await.map_err(|e| {
-            ForgetSessionError::Other(anyhow::anyhow!("release session lock: {e}"))
-        });
+        let release_result = partition_lock
+            .release()
+            .await
+            .map_err(|e| ForgetSessionError::Other(anyhow::anyhow!("release session lock: {e}")));
         match (body_result, release_result) {
             (Ok(receipt), Ok(())) => Ok(receipt),
-            (Err(error), Ok(())) => Err(error),
-            (Ok(_), Err(error)) | (Err(_), Err(error)) => Err(error),
+            (Err(error), Ok(())) | (_, Err(error)) => Err(error),
         }
     }
     .await;
@@ -1017,8 +1009,7 @@ async fn forget_session(
     });
     match (result, release_result) {
         (Ok(receipt), Ok(())) => Ok(receipt),
-        (Err(error), Ok(())) => Err(error),
-        (Ok(_), Err(error)) | (Err(_), Err(error)) => Err(error),
+        (Err(error), Ok(())) | (_, Err(error)) => Err(error),
     }
 }
 
@@ -1030,9 +1021,9 @@ async fn acquire_session_lock(
     mode: cairn_store_sqlite::locks::LockMode,
     operation_id: &str,
 ) -> Result<cairn_store_sqlite::locks::LockHandle, ForgetSessionError> {
-    let conn = store.raw_conn_for_admin().ok_or_else(|| {
-        ForgetSessionError::Other(anyhow::anyhow!("store lock path unavailable"))
-    })?;
+    let conn = store
+        .raw_conn_for_admin()
+        .ok_or_else(|| ForgetSessionError::Other(anyhow::anyhow!("store lock path unavailable")))?;
     let incarnation = store.incarnation().cloned().ok_or_else(|| {
         ForgetSessionError::Other(anyhow::anyhow!("store incarnation unavailable"))
     })?;
@@ -1067,9 +1058,9 @@ async fn acquire_session_namespace_lock(
     mode: cairn_store_sqlite::locks::LockMode,
     operation_id: &str,
 ) -> Result<cairn_store_sqlite::locks::LockHandle, ForgetSessionError> {
-    let conn = store.raw_conn_for_admin().ok_or_else(|| {
-        ForgetSessionError::Other(anyhow::anyhow!("store lock path unavailable"))
-    })?;
+    let conn = store
+        .raw_conn_for_admin()
+        .ok_or_else(|| ForgetSessionError::Other(anyhow::anyhow!("store lock path unavailable")))?;
     let incarnation = store.incarnation().cloned().ok_or_else(|| {
         ForgetSessionError::Other(anyhow::anyhow!("store incarnation unavailable"))
     })?;
@@ -1085,9 +1076,7 @@ async fn acquire_session_namespace_lock(
         operation_id,
     )
     .await
-    .map_err(|e| {
-        ForgetSessionError::Other(anyhow::anyhow!("acquire session namespace lock: {e}"))
-    })
+    .map_err(|e| ForgetSessionError::Other(anyhow::anyhow!("acquire session namespace lock: {e}")))
 }
 
 trait LockComponentExt {
@@ -1139,10 +1128,12 @@ fn rewrite_source_redaction_marker(
     operation_id: &str,
 ) -> Result<(), ForgetSessionError> {
     let path = vault_root.join(source_id.as_str());
-    let parent = path.parent().ok_or_else(|| ForgetSessionError::SourceRewrite {
-        path: source_id.as_str().to_owned(),
-        message: "missing parent directory".to_owned(),
-    })?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| ForgetSessionError::SourceRewrite {
+            path: source_id.as_str().to_owned(),
+            message: "missing parent directory".to_owned(),
+        })?;
     fs::create_dir_all(parent).map_err(|error| ForgetSessionError::SourceRewrite {
         path: source_id.as_str().to_owned(),
         message: error.to_string(),

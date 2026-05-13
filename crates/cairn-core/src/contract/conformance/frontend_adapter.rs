@@ -336,6 +336,10 @@ fn sample_record(body: &str) -> MemoryRecord {
             source_sensor: Identity::parse("snr:local:hook:cc-session:v1").expect("valid identity"),
             created_at: Rfc3339Timestamp::parse("2026-04-22T14:02:11Z").expect("valid timestamp"),
             originating_agent_id: user_id.clone(),
+            source_ids: vec![
+                crate::domain::SourceId::parse("01HQZX9F5N0000000000000001")
+                    .expect("valid source id"),
+            ],
             source_hash: format!("sha256:{}", "a".repeat(64)),
             consent_ref: "consent:01HQZ".to_owned(),
             llm_id_if_any: None,

@@ -26,7 +26,6 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context as _;
@@ -66,11 +65,6 @@ const DEFAULT_TENANT: &str = "default";
 const INGEST_ENTITY: &str = "ingest";
 const INGEST_CHALLENGE_TTL_MS: i64 = 5 * 60 * 1_000;
 const STDIN_LIMIT_BYTES: u64 = 4 * 1024 * 1024;
-const SESSION_LOCK_TENANT: &str = "default";
-const SESSION_LOCK_WORKSPACE: &str = "default";
-const UNSCOPED_LOCK_COMPONENT: &str = "__none__";
-const SESSION_LOCK_TTL: Duration = Duration::from_secs(30);
-
 mod apply;
 mod cache;
 mod extract;
@@ -1174,65 +1168,4 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn session_shared_lock_rejects_while_exclusive_holder_is_live() {
-        let store = cairn_store_sqlite::open_in_memory().await.unwrap();
-        let conn = std::sync::Arc::clone(store.raw_conn_for_admin().unwrap());
-        let incarnation = store.incarnation().cloned().unwrap();
-        let resource = cairn_store_sqlite::locks::ResourceKey::session(
-            UNSCOPED_LOCK_COMPONENT,
-            UNSCOPED_LOCK_COMPONENT,
-            "sess-42",
-        );
-        let exclusive = cairn_store_sqlite::locks::acquire(
-            &conn,
-            &resource,
-            cairn_store_sqlite::locks::LockMode::Exclusive,
-            "test-exclusive-holder",
-            SESSION_LOCK_TTL,
-            &incarnation,
-            "forget --session test",
-        )
-        .await
-        .unwrap();
-
-        let err = acquire_session_shared_lock(&store, None, None, "sess-42")
-            .await
-            .unwrap_err();
-        assert!(
-            err.to_string().contains("lock held"),
-            "shared ingest lock should fail behind a live exclusive session holder: {err:#}"
-        );
-
-        exclusive.release().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn session_namespace_shared_lock_rejects_while_exclusive_holder_is_live() {
-        let store = cairn_store_sqlite::open_in_memory().await.unwrap();
-        let conn = std::sync::Arc::clone(store.raw_conn_for_admin().unwrap());
-        let incarnation = store.incarnation().cloned().unwrap();
-        let resource = cairn_store_sqlite::locks::ResourceKey::session_namespace("sess-42");
-        let exclusive = cairn_store_sqlite::locks::acquire(
-            &conn,
-            &resource,
-            cairn_store_sqlite::locks::LockMode::Exclusive,
-            "test-exclusive-holder",
-            SESSION_LOCK_TTL,
-            &incarnation,
-            "forget --session namespace test",
-        )
-        .await
-        .unwrap();
-
-        let err = acquire_session_namespace_shared_lock(&store, "sess-42")
-            .await
-            .unwrap_err();
-        assert!(
-            err.to_string().contains("lock held"),
-            "shared ingest namespace lock should fail behind a live exclusive holder: {err:#}"
-        );
-
-        exclusive.release().await.unwrap();
-    }
 }

@@ -1,6 +1,7 @@
 //! `SQLite` open path: pragmas + migrations, returning an async store handle.
 
 use std::path::Path;
+#[cfg(test)]
 use std::process::Command;
 use std::sync::Arc;
 
@@ -95,17 +96,20 @@ fn build_store(
     }
 }
 
+#[cfg(test)]
 async fn load_or_init_incarnation(
     conn: &Arc<AsyncConn>,
 ) -> Result<Arc<str>, crate::locks::LockError> {
     match crate::locks::current_incarnation_owner(conn).await {
         Ok((incarnation, pid)) if process_is_alive(pid) => Ok(incarnation),
-        Ok(_) => crate::locks::init_incarnation(conn).await,
-        Err(crate::locks::LockError::NoIncarnation) => crate::locks::init_incarnation(conn).await,
+        Ok(_) | Err(crate::locks::LockError::NoIncarnation) => {
+            crate::locks::init_incarnation(conn).await
+        }
         Err(error) => Err(error),
     }
 }
 
+#[cfg(test)]
 fn process_is_alive(pid: i64) -> bool {
     if pid <= 0 {
         return false;
@@ -745,7 +749,7 @@ mod tests {
                   WHERE id = 1",
                 [],
             )?;
-            Ok::<(), rusqlite::Error>(())
+            Ok::<(), tokio_rusqlite::Error>(())
         })
         .await
         .expect("seed stale singleton");

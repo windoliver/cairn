@@ -531,15 +531,6 @@ impl Default for VaultConfig {
     }
 }
 
-/// Source-retention policy (§5.6 source forget / redaction).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(default, deny_unknown_fields)]
-pub struct SourceConfig {
-    /// When `true`, `forget --record` rewrites immutable source artifacts to a
-    /// body-free redaction marker after recording a source-forget receipt.
-    pub redact_on_forget: bool,
-}
-
 /// Folder names and enabled kinds (§3.1 layout block).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]

@@ -14,6 +14,7 @@ struct RestoreReceipt {
 }
 
 /// Run `cairn admin restore`.
+#[must_use]
 pub fn run(sub: &ArgMatches, vault_root: &Path) -> ExitCode {
     let from = PathBuf::from(
         sub.get_one::<String>("from")

@@ -185,7 +185,7 @@ mod tests {
             originating_agent_id: Identity::parse("agt:claude-code:opus-4-7:main:v1")
                 .expect("valid"),
             source_ids: vec![
-                crate::domain::SourceId::parse("src:01HQZX9F5N0000000000000000").expect("valid"),
+                crate::domain::SourceId::parse("01HQZX9F5N0000000000000000").expect("valid"),
             ],
             source_hash: format!("sha256:{}", "a".repeat(64)),
             consent_ref: "consent:01HQZ".to_owned(),
@@ -263,7 +263,7 @@ mod tests {
             "source_sensor": "snr:local:hook:cc-session:v1",
             "created_at": "2026-04-22T14:02:11Z",
             "originating_agent_id": "agt:claude-code:opus-4-7:main:v1",
-            "source_ids": ["src:01HQZX9F5N0000000000000000"],
+            "source_ids": ["01HQZX9F5N0000000000000000"],
             "source_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "consent_ref": "consent:01HQZ"
         }"#;
@@ -281,7 +281,7 @@ mod tests {
             "source_sensor": "snr:local:hook:cc-session:v1",
             "created_at": "2026-04-22T14:02:11Z",
             "originating_agent_id": "agt:claude-code:opus-4-7:main:v1",
-            "source_ids": ["src:01HQZX9F5N0000000000000000"],
+            "source_ids": ["01HQZX9F5N0000000000000000"],
             "source_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "consent_ref": "consent:01HQZ",
             "llm_id_if_any": null

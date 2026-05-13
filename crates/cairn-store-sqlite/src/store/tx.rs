@@ -38,6 +38,9 @@ use crate::store::sessions::{InTxError, read_session_by_id};
 use crate::store::upsert::upsert_in_tx;
 use crate::store::{SqliteMemoryStore, current_unix_ms};
 
+/// `(tenant, workspace)` partition tuple for a given session id.
+pub type SessionScopePartition = (Option<String>, Option<String>);
+
 /// Transactional handle exposed to closures passed to
 /// [`SqliteMemoryStore::with_tx`]. Methods are synchronous because the
 /// closure already runs on the DB worker thread; awaiting from inside
@@ -218,7 +221,7 @@ impl StoreTx<'_> {
     pub fn list_session_scope_partitions(
         &self,
         session_id: &str,
-    ) -> Result<Vec<(Option<String>, Option<String>)>, StoreError> {
+    ) -> Result<Vec<SessionScopePartition>, StoreError> {
         let mut stmt = self.tx.prepare(
             "SELECT DISTINCT \
                 json_extract(scope, '$.tenant') AS tenant, \

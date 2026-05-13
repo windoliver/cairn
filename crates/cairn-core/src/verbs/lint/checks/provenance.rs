@@ -7,6 +7,7 @@ use crate::verbs::lint::{LintInputs, SourceArtifactState, finding, target_path, 
 
 /// Emit source-link hygiene findings for every active record.
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn run(inputs: &LintInputs<'_>) -> Vec<Finding> {
     let mut findings = Vec::new();
     for record in inputs.records {

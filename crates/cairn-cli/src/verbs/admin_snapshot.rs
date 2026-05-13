@@ -38,6 +38,7 @@ struct SourceRewrite {
 }
 
 /// Run `cairn admin snapshot`.
+#[must_use]
 pub fn run(sub: &ArgMatches, vault_root: &Path) -> ExitCode {
     let backup_path = PathBuf::from(
         sub.get_one::<String>("backup")
