@@ -10,7 +10,7 @@
 
 **Brief sources:** §3 (vault layout and immutable sources), §5.6 (forget / source_forget), §6.5 (mandatory provenance), §8 (`lint` read-only surface).
 
-**Spec:** [docs/superpowers/specs/2026-05-12-issue-257-source-link-hygiene-design.md](/Users/sophiawj/private/cairn/.worktrees/issue-328-source-ids-provenance/docs/superpowers/specs/2026-05-12-issue-257-source-link-hygiene-design.md)
+**Spec:** [../specs/2026-05-12-issue-257-source-link-hygiene-design.md](../specs/2026-05-12-issue-257-source-link-hygiene-design.md)
 
 ---
 
