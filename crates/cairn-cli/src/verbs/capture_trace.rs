@@ -524,13 +524,23 @@ async fn run_handler_inner(
                 tx.validate_turn_links(&session_id_tx, &turn_str_tx)?;
 
                 // Summarize if Stop landed in this batch OR a summary already
-                // exists (closed-turn re-summarize per spec §4).
+                // exists (closed-turn re-summarize per spec §4). Stamp the
+                // summary with a strictly monotonic per-session turn ordinal
+                // so list_trace_turns + latest_consolidation_watermark
+                // advance correctly even when turns share an event count
+                // (round-2 adversarial review #1).
                 if had_stop || tx.turn_summary_exists(&session_id_tx, &turn_str_tx)? {
                     let final_rows = tx.list_trace_events(&session_id_tx, &turn_str_tx)?;
-                    let summary = summarize_turn(&session_id_tx, &turn_str_tx, &final_rows)
-                        .map_err(|e| cairn_store_sqlite::error::StoreError::Invariant {
-                            what: format!("summarize_turn: {e}"),
-                        })?;
+                    let turn_ordinal = tx.next_turn_ordinal(&session_id_tx, &turn_str_tx)?;
+                    let summary = summarize_turn(
+                        &session_id_tx,
+                        &turn_str_tx,
+                        &final_rows,
+                        turn_ordinal,
+                    )
+                    .map_err(|e| cairn_store_sqlite::error::StoreError::Invariant {
+                        what: format!("summarize_turn: {e}"),
+                    })?;
                     tx.upsert_trace(&summary)?;
                 }
                 Ok::<(), cairn_store_sqlite::error::StoreError>(())

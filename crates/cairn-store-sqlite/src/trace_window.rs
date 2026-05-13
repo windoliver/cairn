@@ -158,9 +158,12 @@ impl SqliteMemoryStore {
         let session = session_id.to_owned();
         let watermark: Option<i64> = conn
             .call(move |c| {
-                // The summary's scope is exactly `session_id=<ULID>` (see
-                // `build_summary_record`), so an equality test on `scope`
-                // matches it without needing a generated column.
+                // `scope` is stored as a JSON serialization of `ScopeTuple`
+                // (see `ProjectedRow::from_record`), so `{"session_id":"…"}`,
+                // not canonical-wire `session_id=…`. Filter via json_extract
+                // (round-2 adversarial review #2). Note: `consolidation` here
+                // is the rolling-summary frontmatter block, not an unrelated
+                // record kind.
                 const SQL: &str = "
                     SELECT MAX(CAST(
                         json_extract(extra_frontmatter, '$.consolidation.last_sequence')
@@ -169,7 +172,7 @@ impl SqliteMemoryStore {
                     WHERE kind = 'reasoning'
                       AND active = 1 AND tombstoned = 0
                       AND json_extract(extra_frontmatter, '$.consolidation') IS NOT NULL
-                      AND scope = 'session_id=' || ?1
+                      AND json_extract(scope, '$.session_id') = ?1
                 ";
                 let mut stmt = c.prepare_cached(SQL)?;
                 let v: Option<i64> = stmt.query_row(params![session], |row| row.get(0))?;

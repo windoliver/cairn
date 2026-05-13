@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use cairn_core::config::ConsolidationConfig;
 use cairn_core::contract::job_store::{JobKind, JobPayload};
-use cairn_core::contract::memory_store::{MemoryStore, UpsertOutcome};
+use cairn_core::contract::memory_store::{MemoryStore, TombstoneReason, UpsertOutcome};
 use cairn_core::domain::{
     ActorChainEntry, ChainRole, EvidenceVector, Identity, Provenance, Rfc3339Timestamp, ScopeTuple,
     TargetId,
@@ -101,20 +101,13 @@ impl ConsolidationHandler {
             return Ok(HandlerOutcome::Done);
         }
 
-        // Race guard (round-1 adversarial review #2):
-        // Between the `list_trace_turns` read above and the upsert below,
-        // a concurrent `cairn forget --record` (or its cleanup handler)
-        // may have tombstoned one of our source turns. If we commit the
-        // summary now, the forget-cleanup that has already run finds no
-        // summary to tombstone — leaving a live summary that references
-        // a forgotten source. Re-verify every source still active; if
-        // any disappeared, retry the whole computation (the next run
-        // will read a fresh, narrower candidate set and exclude the
-        // tombstoned turn). Bounded to keep us from looping forever.
+        // Pre-upsert source-liveness check. Best-effort cheap pass that
+        // catches the common case where forget completed before we
+        // started building the record.
         if !self.all_sources_still_active(&draft.source_record_ids).await? {
             info!(
                 session = %payload.session_id,
-                "source(s) tombstoned mid-flight; retrying with fresh window"
+                "source(s) tombstoned before upsert; retrying with fresh window"
             );
             return Ok(HandlerOutcome::Retry {
                 reason: "source tombstoned between read and upsert".into(),
@@ -127,6 +120,29 @@ impl ConsolidationHandler {
             content_changed,
             ..
         } = self.store.upsert(&record).await?;
+
+        // Post-upsert source-liveness recheck (round-2 adversarial review #3):
+        // The pre-check above is racy — `cairn forget --record` can
+        // tombstone a source AFTER the check returned but BEFORE our upsert
+        // commits, while our forget-cleanup peer already ran (or has not
+        // yet seen our summary because we hadn't written it). Closing this
+        // window without a transactional join requires us to recheck after
+        // commit: if any source is now tombstoned, tombstone our just-
+        // written summary so the contract "no live summary references a
+        // forgotten source" holds at-rest, even if briefly violated
+        // mid-flight. The forget-cleanup handler's next run will also
+        // tombstone us as belt-and-suspenders.
+        if !self.all_sources_still_active(&draft.source_record_ids).await? {
+            warn!(
+                session = %payload.session_id,
+                record_id = record_id.as_str(),
+                "source tombstoned after upsert — tombstoning own summary"
+            );
+            self.store
+                .tombstone(&record_id, TombstoneReason::Forget)
+                .await?;
+            return Ok(HandlerOutcome::Done);
+        }
 
         if content_changed {
             info!(

@@ -113,6 +113,61 @@ async fn run_record(record_id_raw: String, vault_root: PathBuf, config: CairnCon
         Ok(ctx) => ctx,
         Err(resp) => return resp,
     };
+    // Crash-window guard (round-2 adversarial review #4):
+    // The previous order was `forget_record` THEN cleanup enqueue, so a
+    // crash between the commit and the enqueue left a tombstoned source
+    // with no durable cleanup intent — summaries referencing the
+    // forgotten record stayed visible until a manual retry. Flip the
+    // order:
+    //   1. Enqueue the cleanup intent durably (or run inline if no job
+    //      store is wired).
+    //   2. Call `store.forget_record`.
+    //
+    // The cleanup handler now gates on "source is actually tombstoned"
+    // (see `ConsolidationForgetCleanupHandler`), so a speculative
+    // enqueue without a follow-up forget commit is harmless: the
+    // handler observes the source is still active and retries until
+    // either the forget commits or the retry budget is exhausted.
+    let record_id_str = record_id.as_str().to_owned();
+    let cleanup_outcome: Result<(), String> = if let Some(js) = ctx.job_store.as_deref() {
+        let payload = ForgetCleanupPayload {
+            forgotten_record_id: record_id_str.clone(),
+        };
+        match payload.to_bytes() {
+            Ok(bytes) => {
+                let req = EnqueueRequest {
+                    job_id: JobId::new(format!("forget-cleanup:{record_id_str}")),
+                    kind: JobKind::new(FORGET_CLEANUP_KIND),
+                    payload: bytes,
+                    queue_key: None,
+                    dedupe_key: Some(record_id_str.clone()),
+                    not_before_ms: i64::try_from(
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis(),
+                    )
+                    .unwrap_or(i64::MAX),
+                    retry: RetryPolicy::DEFAULT,
+                };
+                match js.enqueue(req).await {
+                    Ok(()) | Err(JobStoreError::DuplicateDedupeKey { .. }) => Ok(()),
+                    Err(e) => {
+                        tracing::warn!(error = %e, %record_id_str,
+                            "forget cleanup enqueue failed before forget commit; \
+                             will perform inline cleanup after forget succeeds");
+                        // Defer inline cleanup until after forget commits below.
+                        Err(format!("enqueue failed (will retry inline): {e}"))
+                    }
+                }
+            }
+            Err(e) => Err(format!("forget cleanup: payload serialization: {e}")),
+        }
+    } else {
+        // No job store: signal that inline cleanup must run post-commit.
+        Err("no job store; inline cleanup pending".into())
+    };
+
     match ctx.store.forget_record(&record_id).await {
         Ok(outcome) => {
             let operation_id = match response_operation_id(&outcome.operation_id) {
@@ -120,60 +175,14 @@ async fn run_record(record_id_raw: String, vault_root: PathBuf, config: CairnCon
                 Err(message) => return super::signed::aborted(ResponseVerb::Forget, message),
             };
 
-            // Cleanup propagation contract: by the time `forget` returns
-            // success, any rolling summaries that referenced `record_id`
-            // as a source MUST be either (a) already tombstoned in this
-            // call, or (b) covered by a durably-enqueued cleanup job.
-            //
-            // Three branches:
-            //   1. job_store present + enqueue OK → durable async cleanup.
-            //   2. job_store present + DuplicateDedupeKey → a prior run
-            //      already enqueued the same cleanup; assume it covers us.
-            //   3. job_store absent OR enqueue backend failure → fall back
-            //      to a synchronous inline cleanup so we never claim
-            //      success without honoring the contract. The inline path
-            //      reuses `find_summaries_by_source` + `tombstone`.
-            //
-            // Any error path that cannot deliver either (a) or (b) aborts
-            // the response — silent best-effort is incorrect (round-1
-            // adversarial review #1).
-            let record_id_str = record_id.as_str().to_owned();
-            let cleanup_outcome: Result<(), String> = if let Some(js) = ctx.job_store.as_deref() {
-                let payload = ForgetCleanupPayload {
-                    forgotten_record_id: record_id_str.clone(),
-                };
-                match payload.to_bytes() {
-                    Ok(bytes) => {
-                        let req = EnqueueRequest {
-                            job_id: JobId::new(format!("forget-cleanup:{record_id_str}")),
-                            kind: JobKind::new(FORGET_CLEANUP_KIND),
-                            payload: bytes,
-                            queue_key: None,
-                            dedupe_key: Some(record_id_str.clone()),
-                            not_before_ms: i64::try_from(
-                                std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_millis(),
-                            )
-                            .unwrap_or(i64::MAX),
-                            retry: RetryPolicy::DEFAULT,
-                        };
-                        match js.enqueue(req).await {
-                            Ok(()) | Err(JobStoreError::DuplicateDedupeKey { .. }) => Ok(()),
-                            Err(e) => {
-                                tracing::warn!(error = %e, %record_id_str,
-                                    "forget cleanup enqueue failed; falling back to inline cleanup");
-                                inline_forget_cleanup(&ctx.store, &record_id_str).await
-                            }
-                        }
-                    }
-                    Err(e) => Err(format!("forget cleanup: payload serialization: {e}")),
-                }
-            } else {
-                inline_forget_cleanup(&ctx.store, &record_id_str).await
-            };
-            if let Err(msg) = cleanup_outcome {
+            // If enqueue failed (or was skipped), run cleanup inline now
+            // that forget has committed. Either path satisfies the
+            // contract: by the time we return, summaries are either
+            // tombstoned or have a durable workflow_jobs row promising to
+            // tombstone them.
+            if cleanup_outcome.is_err()
+                && let Err(msg) = inline_forget_cleanup(&ctx.store, &record_id_str).await
+            {
                 return super::signed::aborted(
                     ResponseVerb::Forget,
                     format!("forget cleanup propagation failed: {msg}"),

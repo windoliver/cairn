@@ -682,6 +682,59 @@ impl StoreTx<'_> {
         Ok(exists)
     }
 
+    /// Compute the next per-session turn ordinal for a `turn_summary`
+    /// record. Returns `1` for the first turn in a session; for an
+    /// existing `(session_id, turn_id)` the existing ordinal is returned
+    /// so a re-summarize stamps the same value (idempotent replays).
+    ///
+    /// Used by [`summarize_turn`][cairn_core::pipeline::turn::summarize_turn]
+    /// to feed `extra_frontmatter.trace.sequence` with a value that is
+    /// strictly monotonic per session — required so that
+    /// `list_trace_turns(since=N)` and
+    /// `latest_consolidation_watermark` advance correctly across
+    /// consecutive turns regardless of per-turn event count.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Sqlite`] for SQL failures.
+    pub fn next_turn_ordinal(
+        &self,
+        session_id: &SessionId,
+        turn_id: &str,
+    ) -> Result<u64, StoreError> {
+        // 1. If a summary for this (session, turn) already exists, reuse its
+        //    ordinal so re-summarization is idempotent.
+        let mut existing = self.tx.prepare(
+            "SELECT CAST(json_extract(extra_frontmatter, '$.trace.sequence') AS INTEGER) \
+             FROM records \
+             WHERE trace_event = 'turn_summary' \
+               AND trace_session_id = ?1 AND trace_turn_id = ?2 \
+               AND tombstoned = 0 \
+             LIMIT 1",
+        )?;
+        if let Some(seq) = existing
+            .query_row(params![session_id.as_str(), turn_id], |row| {
+                row.get::<_, Option<i64>>(0)
+            })
+            .optional()?
+            .flatten()
+        {
+            return Ok(u64::try_from(seq.max(1)).unwrap_or(1));
+        }
+        // 2. Otherwise: 1 + max(sequence) across this session's existing
+        //    non-tombstoned summaries.
+        let mut next = self.tx.prepare(
+            "SELECT COALESCE(MAX(CAST(json_extract(extra_frontmatter, \
+                                                   '$.trace.sequence') AS INTEGER)), 0) + 1 \
+             FROM records \
+             WHERE trace_event = 'turn_summary' \
+               AND trace_session_id = ?1 \
+               AND tombstoned = 0",
+        )?;
+        let n: i64 = next.query_row(params![session_id.as_str()], |row| row.get(0))?;
+        Ok(u64::try_from(n.max(1)).unwrap_or(1))
+    }
+
     /// Count non-tombstoned trace records whose `trace_payload_hash`
     /// matches `payload_hash` AND whose scope `(tenant, user, agent)`
     /// matches the given dimensions, excluding the listed `record_id`s.

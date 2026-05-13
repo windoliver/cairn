@@ -92,6 +92,15 @@ pub enum TurnSummaryError {
 ///
 /// Pure: no LLM, no I/O. Same input always produces the same output.
 ///
+/// `turn_ordinal` is a strictly monotonic per-session counter
+/// (1, 2, 3, …) supplied by the caller. It is written into
+/// `extra_frontmatter.trace.sequence` so:
+///   - `list_trace_turns(session, since)` paginates summaries in true
+///     turn order, not by event count,
+///   - `latest_consolidation_watermark` returns a watermark that
+///     advances even when consecutive turns happen to share an event
+///     count (round-2 adversarial review #1).
+///
 /// The returned record carries a zeroed placeholder signature
 /// (`ed25519:000…`); a later signing stage must finalize it before the
 /// store accepts it. This mirrors the pattern used by
@@ -104,6 +113,7 @@ pub fn summarize_turn(
     session_id: &SessionId,
     turn_id: &str,
     events: &[MemoryRecord],
+    turn_ordinal: u64,
 ) -> Result<MemoryRecord, TurnSummaryError> {
     if events.is_empty() {
         return Err(TurnSummaryError::EmptyTurn);
@@ -111,13 +121,11 @@ pub fn summarize_turn(
     let member_ids = validate_and_collect_members(session_id, turn_id, events)?;
     let body = build_summary_body(session_id, turn_id, events)?;
     let id = summary_record_id(session_id, turn_id);
-    // Use the event count as the summary sequence. The `records_trace_seq`
-    // UNIQUE index excludes `turn_summary` rows (migration 0023), so any
-    // non-zero value is safe. Using `events.len()` makes the sequence
-    // meaningful: it equals the number of events covered by this summary
-    // and is always > 0, so `list_trace_turns(since=0)` picks it up
-    // correctly via `trace_sequence > 0`.
-    let summary_sequence = u64::try_from(events.len()).unwrap_or(u64::MAX);
+    // `summary_sequence` uses the caller-supplied turn ordinal (1-based,
+    // strictly monotonic per session). The `records_trace_seq` UNIQUE
+    // index excludes `turn_summary` rows (migration 0023) so the value
+    // does not collide with per-event sequences in the same session.
+    let summary_sequence = turn_ordinal.max(1);
     let extra = build_summary_frontmatter(session_id, turn_id, &id, member_ids, summary_sequence);
     let first = &events[0];
     // Safety: non-empty checked above; last index cannot fail.
@@ -563,7 +571,7 @@ mod tests {
                 "hello",
             ),
         ];
-        let summary = summarize_turn(&s, "turn-1", &events).unwrap();
+        let summary = summarize_turn(&s, "turn-1", &events, 1).unwrap();
         assert_eq!(summary.kind, MemoryKind::Trace);
         assert_eq!(
             summary.extra_frontmatter.get("trace_event").unwrap(),
@@ -605,7 +613,7 @@ mod tests {
             ]),
         );
 
-        let summary = summarize_turn(&s, "turn-1", &[record]).expect("summary");
+        let summary = summarize_turn(&s, "turn-1", &[record], 1).expect("summary");
         assert!(
             !summary.body.contains("compare the tool outputs carefully"),
             "summary must not leak reasoning text: {}",
@@ -627,7 +635,7 @@ mod tests {
     fn summarize_rejects_empty() {
         let s = SessionId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").expect("valid");
         assert_eq!(
-            summarize_turn(&s, "turn-1", &[]).unwrap_err(),
+            summarize_turn(&s, "turn-1", &[], 1).unwrap_err(),
             TurnSummaryError::EmptyTurn
         );
     }
@@ -654,7 +662,7 @@ mod tests {
             ),
         ];
         assert!(matches!(
-            summarize_turn(&s, "turn-1", &events).unwrap_err(),
+            summarize_turn(&s, "turn-1", &events, 1).unwrap_err(),
             TurnSummaryError::CrossTurn
         ));
     }
@@ -681,7 +689,7 @@ mod tests {
             ),
         ];
         assert!(matches!(
-            summarize_turn(&s, "turn-1", &events).unwrap_err(),
+            summarize_turn(&s, "turn-1", &events, 1).unwrap_err(),
             TurnSummaryError::OutOfOrderSequences
         ));
     }

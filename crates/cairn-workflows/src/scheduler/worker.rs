@@ -70,6 +70,10 @@ pub async fn run_worker(
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "heartbeat + watchdog + handler race is linear; extraction loses context"
+)]
 async fn execute_one(
     store: &Arc<dyn JobStore>,
     registry: &HandlerRegistry,
@@ -96,18 +100,25 @@ async fn execute_one(
         }
     };
 
-    // Lease-loss propagation (round-1 adversarial review #4):
-    // The heartbeat task notifies the main path via `lease_lost` whenever
-    // `store.heartbeat` returns an error. The main path races the handler
-    // future against `lease_lost.cancelled()` so a lease that expires
-    // mid-handler causes us to abandon the in-flight execution rather
-    // than letting it commit side effects whose lease no longer exists.
-    // The handler future is dropped at its next .await point — workflow
-    // authors that must guard side effects against replay still rely on
-    // step-level idempotency, but at least we stop *adding* effects once
-    // we know the lease is gone.
+    // Lease-loss propagation:
+    // Two independent triggers cancel `lease_lost` so the main task can
+    // abandon execution before committing side effects whose lease no
+    // longer exists:
+    //
+    // 1. (round-1) Heartbeat task observes `store.heartbeat` failure
+    //    (LeaseLost or backend error) and fires `lost.cancel()`.
+    // 2. (round-2 adversarial review #5) A deadline watchdog races the
+    //    actual `expires_at_ms` of the current lease. The shared
+    //    `deadline_ms` is bumped by the heartbeat task on every
+    //    successful extension; if the heartbeat is stuck (long DB lock,
+    //    runtime starvation) the watchdog still fires when the persisted
+    //    lease expires. Without this the handler could complete side
+    //    effects between expiry and the next heartbeat tick, then have
+    //    `complete()` fail with LeaseLost and let a reaped duplicate
+    //    re-run.
     let hb_token = CancellationToken::new();
     let lease_lost = CancellationToken::new();
+    let deadline_ms = Arc::new(std::sync::atomic::AtomicI64::new(leased.lease.expires_at_ms));
     let hb_handle = {
         let store = store.clone();
         let clock = clock.clone();
@@ -115,6 +126,7 @@ async fn execute_one(
         let job_id = leased.job_id.clone();
         let token = hb_token.clone();
         let lost = lease_lost.clone();
+        let deadline = deadline_ms.clone();
         let interval_ms = u64::try_from(config.heartbeat_every_ms).unwrap_or(10_000);
         let lease_ms = config.lease_ms;
         tokio::spawn(async move {
@@ -124,8 +136,38 @@ async fn execute_one(
                     () = sleep(Duration::from_millis(interval_ms)) => {
                         let now = clock.now_ms();
                         let new_expires = now.saturating_add(lease_ms);
-                        if let Err(e) = store.heartbeat(&job_id, &lease, now, new_expires).await {
-                            warn!(error = %e, job = %job_id, "heartbeat lost");
+                        match store.heartbeat(&job_id, &lease, now, new_expires).await {
+                            Ok(()) => deadline.store(new_expires, std::sync::atomic::Ordering::SeqCst),
+                            Err(e) => {
+                                warn!(error = %e, job = %job_id, "heartbeat lost");
+                                lost.cancel();
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        })
+    };
+
+    // Watchdog: poll the shared deadline at a cadence well under the
+    // heartbeat interval so we catch a stuck heartbeat within ~one tick.
+    let watchdog_handle = {
+        let clock = clock.clone();
+        let lost = lease_lost.clone();
+        let token = hb_token.clone();
+        let deadline = deadline_ms.clone();
+        let poll_ms = u64::try_from(config.heartbeat_every_ms).unwrap_or(10_000) / 4 + 50;
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    () = token.cancelled() => return,
+                    () = lost.cancelled() => return,
+                    () = sleep(Duration::from_millis(poll_ms)) => {
+                        let now = clock.now_ms();
+                        let d = deadline.load(std::sync::atomic::Ordering::SeqCst);
+                        if now >= d {
+                            warn!(now, deadline = d, "lease deadline exceeded — fencing handler");
                             lost.cancel();
                             return;
                         }
@@ -139,11 +181,12 @@ async fn execute_one(
         o = handler.handle(&leased.payload) => o,
         () = cancel.cancelled() => HandlerOutcome::Retry { reason: "scheduler shutdown".into() },
         () = lease_lost.cancelled() => HandlerOutcome::Retry {
-            reason: "heartbeat lost — lease expired or stolen".into(),
+            reason: "heartbeat lost or lease deadline exceeded".into(),
         },
     };
     hb_token.cancel();
     let _ = timeout(Duration::from_secs(1), hb_handle).await;
+    let _ = timeout(Duration::from_secs(1), watchdog_handle).await;
 
     // If the lease is already known lost, skip the complete/fail call —
     // it would fail with LeaseLost anyway and add log noise. The reaper

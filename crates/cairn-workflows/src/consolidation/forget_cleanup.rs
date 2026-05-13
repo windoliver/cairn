@@ -58,6 +58,27 @@ impl ConsolidationForgetCleanupHandler {
         &self,
         payload: ForgetCleanupPayload,
     ) -> Result<HandlerOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        // Precondition gate (round-2 adversarial review #4):
+        // The forget verb enqueues this job BEFORE committing the source
+        // tombstone so that a crash-window between enqueue and commit
+        // cannot leak forgotten content. Until the source itself is
+        // actually tombstoned, we must NOT tombstone summaries — they
+        // legitimately reference an active record. Re-queue with backoff
+        // until the source flips. `MemoryStore::get` returns `Ok(None)`
+        // for both missing and tombstoned rows; either state means the
+        // source is not live and cleanup is safe to proceed.
+        let id = cairn_core::domain::RecordId::parse(payload.forgotten_record_id.clone())
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+        if self.store.get(&id).await?.is_some() {
+            info!(
+                source = %payload.forgotten_record_id,
+                "source still active — cleanup deferred until forget commits"
+            );
+            return Ok(HandlerOutcome::Retry {
+                reason: "source not yet tombstoned".into(),
+            });
+        }
+
         let summaries = self
             .store
             .find_summaries_by_source(&payload.forgotten_record_id)
