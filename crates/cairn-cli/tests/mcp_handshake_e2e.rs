@@ -34,8 +34,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use cairn_core::generated::envelope::{Response, ResponseStatus, ResponseVerb};
-use cairn_mcp::graph_tools::GRAPH_TOOLS;
 use cairn_mcp::generated::TOOLS;
+use cairn_mcp::graph_tools::GRAPH_TOOLS;
 use serde_json::Value;
 use tempfile::TempDir;
 
