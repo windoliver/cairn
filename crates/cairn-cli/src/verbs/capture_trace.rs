@@ -26,7 +26,7 @@ use std::process::ExitCode;
 
 use anyhow::Context as _;
 use cairn_core::config::CairnConfig;
-use cairn_core::domain::capture::CaptureEvent;
+use cairn_core::domain::capture::{CaptureEvent, CapturePayload};
 use cairn_core::domain::trace::{TraceEvent, TraceLink};
 use cairn_core::domain::{CaptureEventId, ScopeTuple, SessionId};
 use cairn_core::generated::common::Ulid as WireUlid;
@@ -306,13 +306,13 @@ async fn run_handler_inner(
                     break;
                 }
             };
-            let raw_text = match String::from_utf8(body_bytes) {
+            let raw_text = match trace_text(event, &body_bytes) {
                 Ok(text) => text,
                 Err(e) => {
                     failed_turns.push((
                         session_str.clone(),
                         turn_str.clone(),
-                        format!("resolve_body: routed body is not valid UTF-8: {e}"),
+                        format!("resolve_body: {e}"),
                     ));
                     group_failed = true;
                     break;
@@ -545,6 +545,27 @@ fn bind_record_scope(record: &mut cairn_core::domain::MemoryRecord, scope_bindin
     if let Some(value) = &scope_binding.agent {
         record.scope.agent = Some(value.clone());
     }
+}
+
+fn trace_text(event: &CaptureEvent, body_bytes: &[u8]) -> anyhow::Result<String> {
+    if matches!(&event.payload, CapturePayload::Voice { .. }) {
+        return voice_transcript_text(body_bytes);
+    }
+    String::from_utf8(body_bytes.to_vec()).context("routed body is not valid UTF-8")
+}
+
+fn voice_transcript_text(body_bytes: &[u8]) -> anyhow::Result<String> {
+    let raw: serde_json::Value =
+        serde_json::from_slice(body_bytes).context("voice payload is not valid JSON")?;
+    let text = raw
+        .get("transcript")
+        .and_then(|transcript| transcript.get("text"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("voice payload missing transcript.text"))?;
+    if text.trim().is_empty() {
+        anyhow::bail!("voice payload transcript.text is empty");
+    }
+    Ok(text.to_owned())
 }
 
 /// Read the payload bytes referenced by `event.payload_ref` from disk

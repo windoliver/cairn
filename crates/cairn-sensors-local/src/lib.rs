@@ -19,6 +19,9 @@ pub mod ide;
 pub mod outcome;
 pub mod policy;
 pub mod terminal;
+pub mod voice;
+#[cfg(feature = "voice-runtime")]
+pub mod voice_runtime;
 
 pub use config::{CaptureBudget, LocalSensorConfig, SensorSettings};
 pub use outcome::{DropReason, EmitOutcome, SensorKind};
@@ -47,7 +50,7 @@ impl SensorIngress for LocalSensorIngress {
     fn capabilities(&self) -> &SensorIngressCapabilities {
         static CAPS: SensorIngressCapabilities = SensorIngressCapabilities {
             batches: true,
-            streaming: false,
+            streaming: true,
             consent_aware: true,
         };
         &CAPS
