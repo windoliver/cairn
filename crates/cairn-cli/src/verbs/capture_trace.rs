@@ -585,6 +585,7 @@ async fn run_handler_inner(
     })
 }
 
+#[allow(clippy::too_many_lines)] // sequential block-projection pipeline; splitting hides dataflow
 async fn run_blocks_handler_inner(
     store: &SqliteMemoryStore,
     vault_root: &Path,
@@ -616,7 +617,9 @@ async fn run_blocks_handler_inner(
     let mut pre_tool_by_id: BTreeMap<String, CaptureEventId> = BTreeMap::new();
 
     for (block_index, block) in blocks.into_iter().enumerate() {
-        let event_dt = captured_at + chrono::Duration::seconds(block_index as i64);
+        let offset_secs = i64::try_from(block_index)
+            .map_err(|_| anyhow::anyhow!("capture_trace: block_index exceeds i64"))?;
+        let event_dt = captured_at + chrono::Duration::seconds(offset_secs);
         let captured_at = timestamp_from_datetime(event_dt)?;
         let stable_event_id = stable_ulid(
             b"cairn:capture-trace:blocks:event:v1\0",

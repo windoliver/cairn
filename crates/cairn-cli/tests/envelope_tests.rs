@@ -654,6 +654,7 @@ fn capture_trace_returns_committed_envelope() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // end-to-end envelope assertion; splitting hides setup/expectation pairing
 fn capture_trace_blocks_returns_committed_envelope_and_hides_reasoning_by_default() {
     let dir = tempfile::tempdir().expect("tempdir");
     cairn_cli::vault::bootstrap(&cairn_cli::vault::BootstrapOpts {
@@ -1216,22 +1217,17 @@ fn capture_trace_rejects_multiple_input_modes() {
         ])
         .output()
         .expect("cairn capture_trace --from --blocks --json");
-    assert_eq!(
-        out.status.code(),
-        Some(64),
-        "clap should reject multiple input modes before dispatch; stderr: {}",
+    assert!(
+        !out.status.success(),
+        "passing --from and --blocks together must be rejected; stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(
-        out.stdout.is_empty(),
-        "clap parse failures should not emit a JSON envelope: {:?}",
-        String::from_utf8_lossy(&out.stdout)
-    );
-    let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
-    assert!(
-        stderr.contains("the argument '--from <PATH>' cannot be used with '--blocks <PATH>'"),
-        "expected clap conflict message, got: {stderr}"
-    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    let envelope: serde_json::Value =
+        serde_json::from_str(&stdout).expect("InvalidArgs envelope on stdout");
+    assert_eq!(envelope["status"], "rejected");
+    assert_eq!(envelope["error"]["code"], "InvalidArgs");
+    assert_eq!(envelope["error"]["data"]["field"], "from|blocks");
 }
 
 #[test]
