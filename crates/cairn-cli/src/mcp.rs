@@ -12,6 +12,11 @@ use std::sync::Arc;
 use cairn_core::config::CairnConfig;
 use cairn_core::domain::ScopeTuple;
 use cairn_core::mcp_auth::{ConfigBackedScope, McpSessionScope};
+use cairn_workflows::{
+    ConsolidationForgetCleanupHandler, ConsolidationHandler, Scheduler, SchedulerConfig,
+    SqliteJobStore, SystemClock,
+};
+use cairn_workflows::scheduler::HandlerRegistryBuilder;
 
 /// Outcome of resolving the `[mcp.stdio]` block into runtime components.
 pub struct ResolvedMcpScope {
@@ -58,6 +63,11 @@ pub(crate) fn store_db_path(vault_root: &std::path::Path) -> std::path::PathBuf 
 ///
 /// Exit codes: 0 success, 69 `EX_UNAVAILABLE` (transport/IO/store), 78 `EX_CONFIG`.
 #[must_use]
+#[allow(
+    clippy::too_many_lines,
+    reason = "opt-in path: vault-binding gate + store open + scheduler boot + MCP serve is \
+              intentionally linear so the startup sequence is visible in one place"
+)]
 pub fn run(
     vault_root: &Path,
     config: &CairnConfig,
@@ -118,25 +128,98 @@ pub fn run(
             // probe_binding is no longer load-bearing on the opt-in
             // path; suppress the unused-variable warning explicitly.
             let _ = probe_binding;
-            let sqlite_store: Arc<cairn_store_sqlite::SqliteMemoryStore> =
-                match rt.block_on(cairn_store_sqlite::open(&store_db_path(vault_root))) {
-                    Ok(s) => Arc::new(s),
+
+            // Open the memory store, boot the scheduler, serve MCP, then
+            // shut the scheduler down — all inside one `block_on` so
+            // `Scheduler::start` (which calls `tokio::spawn`) runs within
+            // the tokio context.
+            let db_path = store_db_path(vault_root);
+            rt.block_on(async move {
+                let sqlite_store: Arc<cairn_store_sqlite::SqliteMemoryStore> =
+                    match cairn_store_sqlite::open(&db_path).await {
+                        Ok(s) => Arc::new(s),
+                        Err(e) => {
+                            eprintln!("cairn mcp: failed to open SQLite store: {e}");
+                            // Return an Err so the outer `match result` prints
+                            // the exit code consistently.
+                            return Err(cairn_mcp::TransportError::Service(
+                                format!("store open: {e}"),
+                            ));
+                        }
+                    };
+
+                // Open a second rusqlite connection to the same DB for the
+                // job store. The async `open` above (tokio-rusqlite) already
+                // ran all migrations (including 0020 which provisions
+                // `workflow_jobs`), so `SqliteJobStore::new` finds the
+                // required schema objects. A dedicated connection avoids
+                // contention with tokio-rusqlite's async connection pool;
+                // `SQLite` WAL mode lets readers and the job-store writer
+                // co-exist without blocking.
+                let jobs_conn = match rusqlite::Connection::open(&db_path) {
+                    Ok(c) => c,
                     Err(e) => {
-                        eprintln!("cairn mcp: failed to open SQLite store: {e}");
-                        return ExitCode::from(69);
+                        eprintln!("cairn mcp: failed to open job-store connection: {e}");
+                        return Err(cairn_mcp::TransportError::Service(
+                            format!("job-store connection: {e}"),
+                        ));
                     }
                 };
-            // Upcast to dyn MemoryStore for the verb layer; keep the concrete
-            // Arc<SqliteMemoryStore> for the graph-tool layer (Plan C Task 19).
-            let store: Arc<dyn cairn_core::contract::memory_store::MemoryStore> =
-                sqlite_store.clone();
-            rt.block_on(cairn_mcp::serve_stdio_with_store(
-                store,
-                sqlite_store,
-                resolver,
-                config.clone(),
-                principal,
-            ))
+                let job_store: Arc<dyn cairn_core::contract::job_store::JobStore> =
+                    match SqliteJobStore::new(jobs_conn) {
+                        Ok(s) => Arc::new(s),
+                        Err(e) => {
+                            eprintln!("cairn mcp: failed to initialize job store: {e}");
+                            return Err(cairn_mcp::TransportError::Service(
+                                format!("job-store init: {e}"),
+                            ));
+                        }
+                    };
+
+                // Build the handler registry with both consolidation handlers.
+                let consolidation_handler =
+                    ConsolidationHandler::new(sqlite_store.clone(), config.consolidation);
+                let forget_cleanup_handler =
+                    ConsolidationForgetCleanupHandler::new(sqlite_store.clone());
+                let registry = HandlerRegistryBuilder::default()
+                    .with(Arc::new(consolidation_handler))
+                    .with(Arc::new(forget_cleanup_handler))
+                    .build();
+
+                // Start the scheduler. `Scheduler::start` spawns tokio tasks
+                // — must be called inside the tokio context (hence this async
+                // block rather than before `block_on`).
+                let incarnation_id = ulid::Ulid::new().to_string();
+                let clock: Arc<dyn cairn_workflows::Clock> = Arc::new(SystemClock);
+                let scheduler = Scheduler::start(
+                    &incarnation_id,
+                    job_store,
+                    &registry,
+                    clock,
+                    SchedulerConfig::p0(),
+                );
+                tracing::info!("scheduler started (incarnation={incarnation_id})");
+
+                // Upcast to dyn MemoryStore for the verb layer; keep the
+                // concrete Arc<SqliteMemoryStore> for the graph-tool layer
+                // (Plan C Task 19).
+                let store: Arc<dyn cairn_core::contract::memory_store::MemoryStore> =
+                    sqlite_store.clone();
+                let serve_result = cairn_mcp::serve_stdio_with_store(
+                    store,
+                    sqlite_store,
+                    resolver,
+                    config.clone(),
+                    principal,
+                )
+                .await;
+
+                // Graceful scheduler shutdown — cancel tasks and await them.
+                tracing::info!("shutting down scheduler");
+                scheduler.shutdown().await;
+
+                serve_result
+            })
         }
         None => {
             // No opt-in: deprecated unwired path. NO SQLite open.

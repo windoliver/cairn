@@ -59,8 +59,8 @@ pub const REPLAY_CHALLENGE_WIRED: bool = false;
 
 /// Rolling-summary `ConsolidationWorkflow` dispatch path (issue #90).
 ///
-/// Held off until the scheduler loop is wired into `cairn-cli`'s
-/// long-running entry points and the trigger calls `enqueue_if_due`
-/// from the `capture_trace` path. Flip in the issue that lands the
-/// dispatch wiring.
-pub const CONSOLIDATION_WORKFLOW_WIRED: bool = false;
+/// Flipped `true` in Task 17: the scheduler is now booted inside
+/// `cairn mcp serve` (the long-lived entry point). `enqueue_if_due` is
+/// called from the `capture_trace` CLI path (Task 16). Both criteria are
+/// met — the capability is now advertised.
+pub const CONSOLIDATION_WORKFLOW_WIRED: bool = true;

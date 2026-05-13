@@ -81,4 +81,10 @@ pipeline:
 mcp:
   stdio:
     single_tenant: false
+consolidation:
+  enabled: true
+  window_size_turns: 8
+  min_turns_for_trigger: 4
+  token_budget: 512
+  salience_floor: 0.4
 ```

@@ -1,6 +1,5 @@
 ---
 source: crates/cairn-cli/tests/plugins_list_snapshot.rs
-assertion_line: 16
 expression: json
 ---
 {
@@ -52,9 +51,9 @@ expression: json
     },
     {
       "capabilities": {
-        "crash_safe": false,
+        "crash_safe": true,
         "cron_schedules": false,
-        "durable": false
+        "durable": true
       },
       "contract": "WorkflowOrchestrator",
       "contract_version_range": {
