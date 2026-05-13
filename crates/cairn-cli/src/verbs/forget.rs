@@ -323,16 +323,12 @@ async fn forget_record(
         .iter()
         .map(|version| Ulid(version.record_id.as_str().to_owned()))
         .collect();
-    let deleted_count = store
-        .with_tx(move |tx| {
-            tx.append_consent_event(&record_event)?;
-            for event in &source_events {
-                tx.append_consent_event(event)?;
-            }
-            tx.purge_target(&target_for_tx)
-        })
-        .await
-        .map_err(|e| ForgetRunError::Other(anyhow::anyhow!("forget transaction: {e:?}")))?;
+    super::admin_snapshot::rewrite_registered_backups(
+        &vault_root,
+        std::slice::from_ref(&target),
+        operation_id,
+    )
+    .map_err(ForgetRunError::Other)?;
 
     if redact_on_forget {
         for group in source_groups.values() {
@@ -346,6 +342,17 @@ async fn forget_record(
             }
         }
     }
+
+    let deleted_count = store
+        .with_tx(move |tx| {
+            tx.append_consent_event(&record_event)?;
+            for event in &source_events {
+                tx.append_consent_event(event)?;
+            }
+            tx.purge_target(&target_for_tx)
+        })
+        .await
+        .map_err(|e| ForgetRunError::Other(anyhow::anyhow!("forget transaction: {e:?}")))?;
 
     Ok(ForgetReceipt {
         deleted_count,
