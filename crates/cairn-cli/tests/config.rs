@@ -61,6 +61,24 @@ fn load_from_file_overrides_name() {
 }
 
 #[test]
+fn source_redact_on_forget_defaults_false() {
+    with_clean_config_env(&[], || {
+        let dir = tempfile::tempdir().unwrap();
+        let config = load(dir.path(), &CliOverrides::default()).unwrap();
+        assert!(!config.source.redact_on_forget);
+    });
+}
+
+#[test]
+fn nested_env_override_sets_source_redact_on_forget() {
+    with_clean_config_env(&[("CAIRN_SOURCE__REDACT_ON_FORGET", Some("true"))], || {
+        let dir = tempfile::tempdir().unwrap();
+        let config = load(dir.path(), &CliOverrides::default()).unwrap();
+        assert!(config.source.redact_on_forget);
+    });
+}
+
+#[test]
 fn env_var_interpolation_sets_api_key() {
     with_clean_config_env(&[], || {
         // Use HOME instead of set_var (set_var is unsafe in Rust edition 2024).

@@ -17,6 +17,7 @@ default = []
 # resolve `search.default_provider = openai` to OpenAi's HTTP embedding
 # endpoint (requires OPENAI_API_KEY). Default builds stay offline / local-only.
 openai = ["dep:cairn-embeddings-openai"]
+voice-runtime = ["cairn-sensors-local/voice-runtime"]
 
 [[bin]]
 name = "cairn"

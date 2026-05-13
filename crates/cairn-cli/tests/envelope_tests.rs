@@ -371,6 +371,32 @@ fn write_full_scope_trace_fixture(vault: &Path, session: &str, turn: &str) -> Pa
     trace_path
 }
 
+#[allow(dead_code)]
+fn assert_aborted_not_found(verb_args: &[&str], target: &str) {
+    let out = {
+        let mut cmd = cli();
+        cmd.args(verb_args);
+        cmd.output()
+            .unwrap_or_else(|e| panic!("failed to run {verb_args:?}: {e}"))
+    };
+    assert_eq!(
+        out.status.code(),
+        Some(78),
+        "verb {verb_args:?} should exit 78 (NotFound aborted), got {:?}",
+        out.status
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+        panic!("verb {verb_args:?} JSON parse failed: {e}\nstdout: {stdout:?}")
+    });
+    assert_eq!(v["contract"], "cairn.mcp.v1", "verb {verb_args:?}");
+    assert_eq!(v["status"], "aborted", "verb {verb_args:?}");
+    assert_eq!(v["error"]["code"], "NotFound", "verb {verb_args:?}");
+    assert_eq!(v["error"]["data"]["target"], target, "verb {verb_args:?}");
+    assert!(v["operation_id"].is_string(), "verb {verb_args:?}");
+    assert!(v["policy_trace"].is_array(), "verb {verb_args:?}");
+}
+
 #[test]
 fn ingest_returns_committed_envelope() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1366,6 +1392,10 @@ fn status_in_bound_vault_advertises_search_and_policy_trace() {
             "stub-only capability {stub_cap} must NOT be advertised; got {caps:?}"
         );
     }
+    assert!(
+        caps.contains("cairn.mcp.v1.forget.record"),
+        "forget.record must be advertised once the runtime path is wired; got {caps:?}"
+    );
 }
 
 #[test]

@@ -13,6 +13,8 @@ pub enum SensorKind {
     Terminal,
     /// Clipboard snapshot sensor.
     Clipboard,
+    /// Voice microphone transcript sensor.
+    Voice,
 }
 
 impl SensorKind {
@@ -24,6 +26,7 @@ impl SensorKind {
             SourceFamily::Ide => Some(Self::Ide),
             SourceFamily::Terminal => Some(Self::Terminal),
             SourceFamily::Clipboard => Some(Self::Clipboard),
+            SourceFamily::Voice => Some(Self::Voice),
             _ => None,
         }
     }

@@ -356,6 +356,15 @@ fn consent_journal_accepts_known_kinds() {
         ("policy_change", "s", None, policy_payload),
         ("remember_intent", hash, None, intent_payload.clone()),
         ("forget_intent", hash, None, intent_payload),
+        (
+            "source_forget",
+            hash,
+            None,
+            format!(
+                "{{\"shape\":\"intent_receipt\",\"target_id_hash\":\"{hash}\",\
+                  \"scope_tier\":\"private\",\"reason_code\":\"record_forget\"}}"
+            ),
+        ),
         ("grant", "s", None, decision_payload.clone()),
         ("revoke", "s", None, decision_payload),
         ("promote_receipt", hash, None, promote_payload),

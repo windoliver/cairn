@@ -61,9 +61,9 @@ impl ProjectedTraceBlocks {
 ///
 /// Hook payloads route by hook name (brief §9.3), including the
 /// `PreCompact` snapshot hook. Terminal payloads with a tool reference
-/// are raw tool output, and proactive payloads whose kind explicitly
-/// names an agent/assistant message become assistant trace messages.
-/// `TurnSummary` is generated post-hoc by
+/// are raw tool output, voice payloads are user utterances, and proactive
+/// payloads whose kind explicitly names an agent/assistant message become
+/// assistant trace messages. `TurnSummary` is generated post-hoc by
 /// [`crate::pipeline::turn::summarize_turn`] and never reaches
 /// `classify`.
 ///
@@ -91,6 +91,7 @@ pub fn classify(event: &CaptureEvent) -> Result<TraceEvent, TraceProjectError> {
         {
             Ok(TraceEvent::ToolOutput)
         }
+        CapturePayload::Voice { .. } => Ok(TraceEvent::UserMessage),
         CapturePayload::Proactive { kind, .. }
             if matches!(kind.as_str(), "agent_message" | "assistant_message") =>
         {
@@ -401,6 +402,25 @@ mod tests {
         event
     }
 
+    fn mk_voice_event() -> CaptureEvent {
+        let mut event = mk_hook_event("UserPromptSubmit");
+        event.sensor_id =
+            Identity::parse("snr:local:voice:default:v1").expect("valid voice sensor");
+        event.actor_chain = vec![ActorChainEntry {
+            role: ChainRole::Author,
+            identity: event.sensor_id.clone(),
+            at: ts(),
+        }];
+        event.payload_ref = "sources/voice/01ARZ3NDEKTSV4RRFFQ69G5FAV.json".into();
+        event.payload = CapturePayload::Voice {
+            speaker_id: "unknown_speaker_01".into(),
+            duration_ms: 2_000,
+            confidence: 0.94,
+        };
+        event.source_family = SourceFamily::Voice;
+        event
+    }
+
     fn mk_proactive_event(kind: &str) -> CaptureEvent {
         let mut event = mk_hook_event("UserPromptSubmit");
         event.sensor_id =
@@ -478,6 +498,14 @@ mod tests {
         assert_eq!(
             classify(&mk_terminal_event(Some("toolu_1"))).unwrap(),
             TraceEvent::ToolOutput
+        );
+    }
+
+    #[test]
+    fn classifies_voice_as_user_message() {
+        assert_eq!(
+            classify(&mk_voice_event()).unwrap(),
+            TraceEvent::UserMessage
         );
     }
 

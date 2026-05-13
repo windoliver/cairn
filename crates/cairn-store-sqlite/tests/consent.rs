@@ -6,7 +6,7 @@ use cairn_core::domain::{
 };
 use cairn_store_sqlite::consent::{
     append, max_rowid, query_by_actor, query_by_op, query_by_scope, query_by_sensor,
-    read_since_rowid,
+    query_source_forgets, read_since_rowid,
 };
 use cairn_store_sqlite::open_in_memory_sync as open_in_memory;
 
@@ -31,6 +31,25 @@ fn forget_event(consent_id: &str, target_hash: &str) -> ConsentEvent {
             reason_code: "user_command".to_owned(),
         },
         decided_at: Rfc3339Timestamp::parse("2026-04-28T12:00:00Z").expect("ts"),
+        expires_at: None,
+    }
+}
+
+fn source_forget_event(consent_id: &str, source_hash: &str) -> ConsentEvent {
+    ConsentEvent {
+        consent_id: consent_id.to_owned(),
+        kind: ConsentKind::SourceForget,
+        actor: Identity::parse("hmn:tafeng").expect("identity"),
+        subject: source_hash.to_owned(),
+        scope: "private".to_owned(),
+        op_id: Some(format!("op-{consent_id}")),
+        sensor_id: None,
+        payload: ConsentPayload::IntentReceipt {
+            target_id_hash: source_hash.to_owned(),
+            scope_tier: MemoryVisibility::Private,
+            reason_code: "record_forget".to_owned(),
+        },
+        decided_at: Rfc3339Timestamp::parse("2026-04-28T12:00:30Z").expect("ts"),
         expires_at: None,
     }
 }
@@ -107,6 +126,19 @@ fn query_by_scope_filters_to_scope() {
     let by_team = query_by_scope(&conn, "team:platform").expect("scope");
     assert_eq!(by_team.len(), 1);
     assert_eq!(by_team[0].consent_id, "c-team");
+}
+
+#[test]
+fn query_source_forgets_returns_only_source_forget_rows() {
+    let conn = open_in_memory().expect("open");
+    let source_forget = source_forget_event("c-source", &h(0xc1));
+    let forget_intent = forget_event("c-forget", &h(0xc2));
+
+    append(&conn, &source_forget).expect("source forget");
+    append(&conn, &forget_intent).expect("forget intent");
+
+    let source_forgets = query_source_forgets(&conn).expect("query");
+    assert_eq!(source_forgets, vec![source_forget]);
 }
 
 #[test]
@@ -340,6 +372,7 @@ fn round_trip_preserves_every_kind() {
         ConsentKind::Grant,
         ConsentKind::Revoke,
         ConsentKind::PromoteReceipt,
+        ConsentKind::SourceForget,
     ];
 
     for (i, kind) in kinds.iter().enumerate() {
@@ -401,7 +434,7 @@ fn round_trip_preserves_every_kind() {
                     expires_at: None,
                 }
             }
-            ConsentKind::RememberIntent | ConsentKind::ForgetIntent => {
+            ConsentKind::RememberIntent | ConsentKind::ForgetIntent | ConsentKind::SourceForget => {
                 let mut e = forget_event(&id, &h(0xff));
                 e.kind = *kind;
                 e

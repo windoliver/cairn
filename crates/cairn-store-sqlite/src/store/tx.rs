@@ -25,7 +25,7 @@ use cairn_core::contract::memory_store::{
 };
 use cairn_core::contract::version::SchemaVersion;
 use cairn_core::domain::{
-    BodyHash, MemoryRecord, RecordId, Session, SessionId, SignedAdmission, TargetId,
+    BodyHash, ConsentEvent, MemoryRecord, RecordId, Session, SessionId, SignedAdmission, TargetId,
 };
 use rusqlite::{OptionalExtension as _, Transaction, params};
 use tracing::instrument;
@@ -170,6 +170,26 @@ impl StoreTx<'_> {
         self.tx.execute(
             "UPDATE records SET active = 0, updated_at = ?1 WHERE record_id = ?2 AND active = 1",
             params![now_ms, id.as_str()],
+        )?;
+        Ok(())
+    }
+
+    /// Synchronous tombstone across every stored version of a target.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Sqlite`] for SQL failures.
+    pub fn tombstone_target(
+        &self,
+        target: &TargetId,
+        reason: TombstoneReason,
+    ) -> Result<(), StoreError> {
+        let now_ms = current_unix_ms();
+        self.tx.execute(
+            "UPDATE records \
+                SET tombstoned = 1, tombstone_reason = ?1, updated_at = ?2 \
+              WHERE target_id = ?3",
+            params![reason.as_db_str(), now_ms, target.as_str()],
         )?;
         Ok(())
     }
@@ -360,6 +380,15 @@ impl StoreTx<'_> {
             ],
         )?;
         Ok(())
+    }
+
+    /// Append one body-free consent journal event inside the open transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if validation or the insert fails.
+    pub fn append_consent_event(&self, event: &ConsentEvent) -> Result<i64, StoreError> {
+        crate::consent::append_in_tx(&self.tx, event)
     }
 
     /// Mint and persist a fresh single-use server challenge for
