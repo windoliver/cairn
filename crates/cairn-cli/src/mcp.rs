@@ -177,8 +177,14 @@ pub fn run(
                     };
 
                 // Build the handler registry with both consolidation handlers.
-                let consolidation_handler =
-                    ConsolidationHandler::new(sqlite_store.clone(), config.consolidation);
+                // The consolidation handler gets a JobStore handle so it can
+                // chain-enqueue follow-up windows after a successful summary
+                // (round-7 adversarial review #1).
+                let consolidation_handler = ConsolidationHandler::with_job_store(
+                    sqlite_store.clone(),
+                    config.consolidation,
+                    job_store.clone(),
+                );
                 let forget_cleanup_handler =
                     ConsolidationForgetCleanupHandler::new(sqlite_store.clone());
                 let registry = HandlerRegistryBuilder::default()

@@ -172,7 +172,11 @@ async fn drain_until(
     let jobs: Arc<dyn JobStore> = Arc::new(SqliteJobStore::new(jobs_conn).expect("job store"));
     let cfg = ConsolidationConfig::default();
     let registry = HandlerRegistryBuilder::default()
-        .with(Arc::new(ConsolidationHandler::new(store.clone(), cfg)))
+        .with(Arc::new(ConsolidationHandler::with_job_store(
+            store.clone(),
+            cfg,
+            jobs.clone(),
+        )))
         .with(Arc::new(ConsolidationForgetCleanupHandler::new(
             store.clone(),
         )))

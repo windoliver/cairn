@@ -41,17 +41,47 @@ const SYSTEM_CONSENT_REF: &str = "consent:system:consolidation-workflow";
 
 /// Handler entry — needs the concrete [`SqliteMemoryStore`] because the
 /// trace-window helper lives on the adapter, not the trait. A future
-/// `TraceReader` trait could pull this back into core.
+/// `TraceReader` trait could pull this back into core. `job_store`
+/// is optional; when present the handler enqueues a follow-up
+/// consolidation job after each successful summary so a single long
+/// capture batch can drain multiple windows even without subsequent
+/// `cairn capture_trace` calls (round-7 adversarial review #1).
 pub struct ConsolidationHandler {
     store: Arc<SqliteMemoryStore>,
     config: ConsolidationConfig,
+    job_store: Option<Arc<dyn cairn_core::contract::job_store::JobStore>>,
 }
 
 impl ConsolidationHandler {
-    /// Construct.
+    /// Construct without a follow-up enqueue path (back-compat for
+    /// callers that don't yet plumb a `JobStore`).
     #[must_use]
     pub fn new(store: Arc<SqliteMemoryStore>, config: ConsolidationConfig) -> Self {
-        Self { store, config }
+        Self {
+            store,
+            config,
+            job_store: None,
+        }
+    }
+
+    /// Construct with a follow-up enqueue path. After every successful
+    /// summary the handler checks whether enough turns remain past the
+    /// new watermark to satisfy `min_turns_for_trigger`; if so it
+    /// enqueues another consolidation job at the advanced watermark.
+    /// Closes the round-7 adversarial review #1 wedge where a single
+    /// long capture batch left every window after the first
+    /// unconsolidated.
+    #[must_use]
+    pub fn with_job_store(
+        store: Arc<SqliteMemoryStore>,
+        config: ConsolidationConfig,
+        job_store: Arc<dyn cairn_core::contract::job_store::JobStore>,
+    ) -> Self {
+        Self {
+            store,
+            config,
+            job_store: Some(job_store),
+        }
     }
 
     /// Return `true` iff every `record_id` in `source_ids` is still
@@ -71,6 +101,10 @@ impl ConsolidationHandler {
         Ok(true)
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "linear pipeline: read window → guard → upsert → re-guard → enqueue follow-up; extraction loses sequence"
+    )]
     async fn run_once(
         &self,
         payload: ConsolidationPayload,
@@ -96,8 +130,19 @@ impl ConsolidationHandler {
             self.config.min_turns_for_trigger,
             self.config.salience_floor,
         ) else {
-            info!(session = %payload.session_id, "no eligible window; deferring");
-            return Ok(HandlerOutcome::Done);
+            // Returning Done here would poison the dedupe slot for this
+            // `(session, since_sequence, scope)` — the workflow_jobs
+            // partial unique index covers state IN ('queued','leased','done'),
+            // so a future capture_trace with the same watermark would get
+            // DuplicateDedupeKey forever (round-7 adversarial review #2).
+            // The index does NOT cover 'failed' rows, so a Permanent
+            // outcome frees the slot. Future enqueues with the same
+            // since_sequence can then create fresh runnable work once
+            // more turns land.
+            info!(session = %payload.session_id, "no eligible window — releasing dedupe slot");
+            return Ok(HandlerOutcome::Permanent {
+                reason: "no eligible window at lease time".into(),
+            });
         };
 
         let draft = compute_rolling_summary(&window, &self.config)?;
@@ -165,6 +210,51 @@ impl ConsolidationHandler {
                 record_id = record_id.as_str(),
                 "rolling summary idempotent (same body hash)"
             );
+        }
+
+        // Follow-up enqueue (round-7 adversarial review #1): a single
+        // long capture batch can produce N > window_size eligible turns
+        // before the scheduler ever boots. The capture-time trigger
+        // only enqueues one job at since_sequence=0. Without re-
+        // enqueueing here, every window after the first would stay
+        // unconsolidated until the next unrelated capture happens.
+        // After a successful summary, peek whether enough turns still
+        // remain past the new watermark to satisfy
+        // `min_turns_for_trigger` and enqueue another job at
+        // since_sequence = draft.last_sequence. Best-effort: enqueue
+        // failures are logged but do not fail this job.
+        if let Some(js) = self.job_store.as_ref() {
+            let new_since = draft.last_sequence;
+            let next_candidates = self
+                .store
+                .list_trace_turns_scoped(
+                    &payload.session_id,
+                    new_since,
+                    self.config.window_size_turns,
+                    payload.bound_scope.as_ref(),
+                )
+                .await
+                .unwrap_or_default();
+            let active = u32::try_from(next_candidates.len()).unwrap_or(u32::MAX);
+            if active >= self.config.min_turns_for_trigger {
+                let now_ms = i64::try_from(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis(),
+                )
+                .unwrap_or(i64::MAX);
+                let _ = crate::consolidation::enqueue_if_due_scoped(
+                    js.as_ref(),
+                    &self.config,
+                    &payload.session_id,
+                    new_since.saturating_add(active),
+                    new_since,
+                    now_ms,
+                    payload.bound_scope.as_ref(),
+                )
+                .await;
+            }
         }
 
         Ok(HandlerOutcome::Done)

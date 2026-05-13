@@ -454,8 +454,6 @@ async fn run_handler_inner(
         }
 
         // Per-turn atomic transaction.
-        // Capture len before the closure moves `projected`.
-        let projected_len = projected.len();
         let session_id_tx = session_id.clone();
         let turn_str_tx = turn_str.clone();
         // Clone scope binding for the move closure. None at single-tenant
@@ -599,12 +597,19 @@ async fn run_handler_inner(
                 .latest_consolidation_watermark_scoped(&session_str, scope_binding)
                 .await
                 .unwrap_or(0);
-            let active_eligible = match store
+            // On query failure, skip enqueue rather than substituting
+            // projected_len (which counts events in THIS turn, not
+            // closed turns since watermark — could falsely satisfy
+            // min_turns_for_trigger off a single 4-event turn and
+            // enqueue a job with no real work, round-7 adversarial
+            // review #3).
+            let active_eligible_opt = store
                 .list_trace_turns_scoped(&session_str, since_sequence, u32::MAX, scope_binding)
                 .await
-            {
-                Ok(headers) => u32::try_from(headers.len()).unwrap_or(u32::MAX),
-                Err(_) => u32::try_from(projected_len).unwrap_or(u32::MAX),
+                .ok()
+                .map(|h| u32::try_from(h.len()).unwrap_or(u32::MAX));
+            let Some(active_eligible) = active_eligible_opt else {
+                continue;
             };
             let turn_count = since_sequence.saturating_add(active_eligible);
             let now_ms = i64::try_from(
