@@ -8,12 +8,12 @@ use cairn_sensors_local::{
 };
 
 #[test]
-fn local_sensor_ingress_advertises_batch_consent_capabilities() {
+fn local_sensor_ingress_advertises_batch_streaming_consent_capabilities() {
     let ingress = LocalSensorIngress;
     let caps = ingress.capabilities();
 
     assert!(caps.batches);
-    assert!(!caps.streaming);
+    assert!(caps.streaming);
     assert!(caps.consent_aware);
 }
 
@@ -25,6 +25,7 @@ fn local_sensor_config_can_disable_every_source() {
     assert!(!config.ide.enabled);
     assert!(!config.terminal.enabled);
     assert!(!config.clipboard.enabled);
+    assert!(!config.voice.enabled);
 }
 
 #[test]
@@ -64,6 +65,10 @@ fn sensor_kind_maps_local_source_families_only() {
     assert_eq!(
         SensorKind::from_source_family(SourceFamily::Clipboard),
         Some(SensorKind::Clipboard)
+    );
+    assert_eq!(
+        SensorKind::from_source_family(SourceFamily::Voice),
+        Some(SensorKind::Voice)
     );
     assert_eq!(SensorKind::from_source_family(SourceFamily::Cli), None);
 }
