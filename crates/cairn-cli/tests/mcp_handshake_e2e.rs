@@ -34,6 +34,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use cairn_core::generated::envelope::{Response, ResponseStatus, ResponseVerb};
+use cairn_mcp::generated::TOOLS;
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -219,6 +220,17 @@ fn run_tools_list_protocol(child: &mut Child) -> Result<(), String> {
         .iter()
         .filter_map(|t| t.get("name").and_then(Value::as_str))
         .collect();
+    let missing: Vec<&str> = TOOLS
+        .iter()
+        .map(|tool| tool.name)
+        .filter(|name| !names.contains(name))
+        .collect();
+
+    if !missing.is_empty() {
+        return Err(format!(
+            "tools/list over real stdio must include every generated core verb; missing {missing:?} from {names:?}"
+        ));
+    }
 
     if cairn_core::status::wiring::REPLAY_CHALLENGE_WIRED {
         if !names.contains(&"handshake") {
