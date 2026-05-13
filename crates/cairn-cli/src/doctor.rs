@@ -1,5 +1,6 @@
 //! Reference-consumer diagnostics.
 
+use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
@@ -83,6 +84,7 @@ struct McpRegistration {
 }
 
 /// Run the `cairn doctor` subcommand tree.
+#[must_use]
 pub fn run(matches: &ArgMatches) -> ExitCode {
     match matches.subcommand() {
         Some(("claude-code", sub)) => run_claude_code(sub),
@@ -92,10 +94,10 @@ pub fn run(matches: &ArgMatches) -> ExitCode {
 
 fn run_claude_code(matches: &ArgMatches) -> ExitCode {
     let json = matches.get_flag("json");
-    let project_dir = matches
-        .get_one::<String>("project-dir")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().expect("cwd available"));
+    let project_dir = matches.get_one::<String>("project-dir").map_or_else(
+        || std::env::current_dir().expect("cwd available"),
+        PathBuf::from,
+    );
     let home_dir = matches
         .get_one::<String>("home-dir")
         .map(PathBuf::from)
@@ -107,55 +109,53 @@ fn run_claude_code(matches: &ArgMatches) -> ExitCode {
 
     let mut stages = Vec::new();
 
-    let registration = match push_stage(
+    let Some(registration) = push_stage(
         &mut stages,
         "mcp_config",
         locate_registration(&project_dir, home_dir.as_deref(), &server_name),
         |reg| format!("found Claude Code MCP registration in {}", reg.source),
         |reg| Some(reg.source.clone()),
-    ) {
-        Some(reg) => reg,
-        None => return finish(json, server_name, project_dir, stages),
+    ) else {
+        return finish(json, server_name, project_dir, stages);
     };
 
-    let resolved_command = match push_stage(
+    let Some(resolved_command) = push_stage(
         &mut stages,
         "binary",
         resolve_command_path(&registration.command),
         |path| format!("resolved MCP command to {}", path.display()),
         |path| Some(path.display().to_string()),
-    ) {
-        Some(path) => path,
-        None => return finish(json, server_name, project_dir, stages),
+    ) else {
+        return finish(json, server_name, project_dir, stages);
     };
 
-    let spawn = match push_stage(
+    let Some(()) = push_stage(
         &mut stages,
         "mcp_registration",
         verify_registration_shape(&registration),
-        |_| {
+        |()| {
             format!(
                 "registration targets stdio Cairn MCP: {} {}",
                 registration.command,
                 registration.args.join(" ")
             )
         },
-        |_| Some(registration.source.clone()),
-    ) {
-        Some(()) => SpawnConfig {
-            command: resolved_command,
-            args: registration.args.clone(),
-            project_dir: project_dir.clone(),
-        },
-        None => return finish(json, server_name, project_dir, stages),
+        |()| Some(registration.source.clone()),
+    ) else {
+        return finish(json, server_name, project_dir, stages);
+    };
+    let spawn = SpawnConfig {
+        command: resolved_command,
+        args: registration.args.clone(),
+        project_dir: project_dir.clone(),
     };
 
     if push_stage(
         &mut stages,
         "mcp_startup",
         probe_mcp_startup(&spawn),
-        |_| "initialized the configured MCP server successfully".to_owned(),
-        |_| None,
+        |()| "initialized the configured MCP server successfully".to_owned(),
+        |()| None,
     )
     .is_none()
     {
@@ -166,8 +166,8 @@ fn run_claude_code(matches: &ArgMatches) -> ExitCode {
         &mut stages,
         "mcp_status_call",
         probe_status_call(&spawn),
-        |_| "called status successfully through the configured MCP server".to_owned(),
-        |_| None,
+        |()| "called status successfully through the configured MCP server".to_owned(),
+        |()| None,
     )
     .is_none()
     {
@@ -221,16 +221,18 @@ fn finish(
 fn render_human(receipt: &DoctorReceipt) -> String {
     let mut out = String::new();
     let summary = if receipt.ok { "ok" } else { "failed" };
-    out.push_str(&format!(
+    let _ = write!(
+        out,
         "cairn doctor claude-code: {summary}\n  project  {}\n  server   {}\n",
         receipt.project_dir.display(),
         receipt.server_name
-    ));
+    );
     for stage in &receipt.stages {
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "  [{}] {}\n    {}\n    remediation: {}\n",
             stage.status, stage.name, stage.detail, stage.remediation
-        ));
+        );
     }
     out.trim_end().to_owned()
 }
@@ -611,13 +613,12 @@ impl ProtocolClient {
             loop {
                 line.clear();
                 match reader.read_line(&mut line) {
-                    Ok(0) => break,
+                    Ok(0) | Err(_) => break,
                     Ok(_) => {
                         if let Ok(mut buf) = sink.lock() {
                             buf.push_str(&line);
                         }
                     }
-                    Err(_) => break,
                 }
             }
         });
@@ -671,8 +672,8 @@ impl ProtocolClient {
         })?;
         stdin
             .write_all(line.as_bytes())
-            .and_then(|_| stdin.write_all(b"\n"))
-            .and_then(|_| stdin.flush())
+            .and_then(|()| stdin.write_all(b"\n"))
+            .and_then(|()| stdin.flush())
             .map_err(|err| {
                 DoctorError::new(
                     format!("failed to write JSON-RPC request to MCP server: {err}"),
