@@ -3,11 +3,13 @@
 use std::io::Write as _;
 use std::path::Path;
 
-use cairn_cli::verbs::capture_trace::{read_jsonl_events, run_handler};
+use cairn_cli::verbs::capture_trace::{read_jsonl_events, run_blocks_handler, run_handler};
 use cairn_core::domain::{
     ActorChainEntry, CaptureEvent, CaptureEventId, CaptureMode, CapturePayload, CaptureRefs,
-    ChainRole, Identity, PayloadHash, Rfc3339Timestamp, SessionId, SourceFamily,
+    ChainRole, Identity, PayloadHash, Rfc3339Timestamp, SessionId, SourceFamily, TerminalContext,
 };
+use sha2::{Digest as _, Sha256};
+use ulid::Ulid;
 
 /// Build a minimal valid `Hook` [`CaptureEvent`] for use in tests.
 ///
@@ -65,6 +67,13 @@ const ULID_H: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAH";
 // ULID for late tool_output event (after the main 4-event turn).
 // Note: Crockford base32 has no I, L, O, U — use K (valid) for the suffix.
 const ULID_LATE: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAK";
+
+const ULID_FULL_USER: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAN";
+const ULID_FULL_AGENT: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAP";
+const ULID_FULL_PRE: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAQ";
+const ULID_FULL_TOOL_OUTPUT: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAR";
+const ULID_FULL_POST: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAS";
+const ULID_FULL_STOP: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAT";
 
 #[tokio::test]
 async fn parses_jsonl_into_events() {
@@ -163,11 +172,28 @@ fn sha256_hex(text: &str) -> String {
 /// `sources/hook/` directory if needed, and return the
 /// `vault_root`-relative path (`"sources/hook/<filename>"`).
 fn write_source(vault: &Path, filename: &str, content: &str) -> String {
-    let dir = vault.join("sources").join("hook");
-    std::fs::create_dir_all(&dir).expect("create sources/hook dir");
+    write_source_for_family(vault, "hook", filename, content)
+}
+
+fn write_source_for_family(vault: &Path, family: &str, filename: &str, content: &str) -> String {
+    let dir = vault.join("sources").join(family);
+    std::fs::create_dir_all(&dir).expect("create sources family dir");
     let abs = dir.join(filename);
     std::fs::write(&abs, content).expect("write source file");
-    format!("sources/hook/{filename}")
+    format!("sources/{family}/{filename}")
+}
+
+fn stable_turn_id_for_blocks(session_id: &str, raw_blocks: &[u8]) -> String {
+    let mut h = Sha256::new();
+    h.update(b"cairn:capture-trace:blocks:import:v1\0");
+    h.update(session_id.as_bytes());
+    h.update([0]);
+    h.update(raw_blocks);
+    h.update([0]);
+    let digest = h.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    format!("trace-blocks-{}", Ulid::from_bytes(bytes))
 }
 
 /// Build a [`CaptureEvent`] for a `Hook` payload. The `payload_ref` and
@@ -215,6 +241,85 @@ fn make_event(
             tool_name: None,
         },
         source_family: SourceFamily::Hook,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn make_terminal_event(
+    event_id: &str,
+    session_id: &str,
+    turn_id: &str,
+    timestamp: &str,
+    tool_id: &str,
+    payload_ref: &str,
+    payload_hash_hex: &str,
+    context: TerminalContext,
+) -> CaptureEvent {
+    let sensor =
+        Identity::parse("snr:local:terminal:default:v1").expect("invariant: valid sensor id");
+    let hash_str = format!("sha256:{payload_hash_hex}");
+    CaptureEvent {
+        event_id: CaptureEventId::parse(event_id).expect("invariant: valid ULID"),
+        sensor_id: sensor.clone(),
+        capture_mode: CaptureMode::Auto,
+        actor_chain: vec![ActorChainEntry {
+            role: ChainRole::Author,
+            identity: sensor,
+            at: Rfc3339Timestamp::parse(timestamp).expect("invariant: valid RFC-3339"),
+        }],
+        refs: Some(CaptureRefs {
+            session_id: Some(session_id.to_owned()),
+            turn_id: Some(turn_id.to_owned()),
+            tool_id: Some(tool_id.to_owned()),
+        }),
+        payload_hash: PayloadHash::parse(&hash_str).expect("invariant: valid sha256 hash"),
+        payload_ref: payload_ref.to_owned(),
+        captured_at: Rfc3339Timestamp::parse(timestamp).expect("invariant: valid RFC-3339"),
+        payload: CapturePayload::Terminal {
+            command: "bash -lc 'cargo test -p cairn-core'".into(),
+            exit_code: Some(0),
+            context: Some(context),
+        },
+        source_family: SourceFamily::Terminal,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn make_agent_event(
+    event_id: &str,
+    session_id: &str,
+    turn_id: &str,
+    timestamp: &str,
+    payload_ref: &str,
+    payload_hash_hex: &str,
+) -> CaptureEvent {
+    let sensor =
+        Identity::parse("snr:local:proactive:codex:v1").expect("invariant: valid sensor id");
+    let author =
+        Identity::parse("agt:codex:gpt-5:main:v1").expect("invariant: valid agent identity");
+    let hash_str = format!("sha256:{payload_hash_hex}");
+    CaptureEvent {
+        event_id: CaptureEventId::parse(event_id).expect("invariant: valid ULID"),
+        sensor_id: sensor,
+        capture_mode: CaptureMode::Proactive,
+        actor_chain: vec![ActorChainEntry {
+            role: ChainRole::Author,
+            identity: author,
+            at: Rfc3339Timestamp::parse(timestamp).expect("invariant: valid RFC-3339"),
+        }],
+        refs: Some(CaptureRefs {
+            session_id: Some(session_id.to_owned()),
+            turn_id: Some(turn_id.to_owned()),
+            tool_id: None,
+        }),
+        payload_hash: PayloadHash::parse(&hash_str).expect("invariant: valid sha256 hash"),
+        payload_ref: payload_ref.to_owned(),
+        captured_at: Rfc3339Timestamp::parse(timestamp).expect("invariant: valid RFC-3339"),
+        payload: CapturePayload::Proactive {
+            kind: "agent_message".into(),
+            rationale: "assistant trace message".into(),
+        },
+        source_family: SourceFamily::Proactive,
     }
 }
 
@@ -815,6 +920,409 @@ async fn capture_trace_single_turn_persists_and_summarizes() {
 #[tokio::test]
 #[allow(
     clippy::expect_used,
+    clippy::too_many_lines,
+    reason = "test: panics surface broken invariants immediately"
+)]
+async fn capture_trace_imports_full_trace_scope_in_one_turn() {
+    let vault = tempfile::tempdir().expect("tempdir");
+    let store = open_test_store_in_memory().await;
+    let jsonl_path = vault.path().join("trace.jsonl");
+
+    let session = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let turn = "turn-full-scope";
+    let tool_id = "toolu_full_scope_01";
+
+    let user_body = "Please run the targeted tests.";
+    let agent_body = "I will run the targeted core tests now.";
+    let pre_body = r#"{"tool":"bash","input":{"command":"cargo test -p cairn-core"}}"#;
+    let terminal_body = "\x1b[32mrunning 3 tests\x1b[0m\nall passed\n";
+    let post_body = r#"{"tool":"bash","exit_code":0}"#;
+    let stop_body = "turn ended";
+
+    let user_ref = write_source(vault.path(), &format!("{ULID_FULL_USER}.txt"), user_body);
+    let agent_ref = write_source_for_family(
+        vault.path(),
+        "proactive",
+        &format!("{ULID_FULL_AGENT}.txt"),
+        agent_body,
+    );
+    let pre_ref = write_source(vault.path(), &format!("{ULID_FULL_PRE}.txt"), pre_body);
+    let terminal_ref = write_source_for_family(
+        vault.path(),
+        "terminal",
+        &format!("{ULID_FULL_TOOL_OUTPUT}.txt"),
+        terminal_body,
+    );
+    let post_ref = write_source(vault.path(), &format!("{ULID_FULL_POST}.txt"), post_body);
+    let stop_ref = write_source(vault.path(), &format!("{ULID_FULL_STOP}.txt"), stop_body);
+
+    let events = vec![
+        make_event(
+            ULID_FULL_USER,
+            "UserPromptSubmit",
+            session,
+            turn,
+            "2026-05-02T02:00:01Z",
+            None,
+            &user_ref,
+            &sha256_hex(user_body),
+        ),
+        make_agent_event(
+            ULID_FULL_AGENT,
+            session,
+            turn,
+            "2026-05-02T02:00:02Z",
+            &agent_ref,
+            &sha256_hex(agent_body),
+        ),
+        make_event(
+            ULID_FULL_PRE,
+            "PreToolUse",
+            session,
+            turn,
+            "2026-05-02T02:00:03Z",
+            Some(tool_id.to_owned()),
+            &pre_ref,
+            &sha256_hex(pre_body),
+        ),
+        make_terminal_event(
+            ULID_FULL_TOOL_OUTPUT,
+            session,
+            turn,
+            "2026-05-02T02:00:04Z",
+            tool_id,
+            &terminal_ref,
+            &sha256_hex(terminal_body),
+            TerminalContext::InteractiveTty,
+        ),
+        make_event(
+            ULID_FULL_POST,
+            "PostToolUse",
+            session,
+            turn,
+            "2026-05-02T02:00:05Z",
+            Some(tool_id.to_owned()),
+            &post_ref,
+            &sha256_hex(post_body),
+        ),
+        make_event(
+            ULID_FULL_STOP,
+            "Stop",
+            session,
+            turn,
+            "2026-05-02T02:00:06Z",
+            None,
+            &stop_ref,
+            &sha256_hex(stop_body),
+        ),
+    ];
+    let mut f = std::fs::File::create(&jsonl_path).expect("create JSONL file");
+    for event in &events {
+        let line = serde_json::to_string(event).expect("serialize event");
+        writeln!(f, "{line}").expect("write JSONL line");
+    }
+
+    let resp = run_handler(&store, vault.path(), &jsonl_path)
+        .await
+        .expect("run_handler should succeed");
+
+    assert!(
+        resp.failed_turns.is_empty(),
+        "expected no failures, got: {:?}",
+        resp.failed_turns
+    );
+
+    let session_id = SessionId::parse(session).expect("valid session_id");
+    store
+        .with_tx(move |tx| {
+            let rows = tx.list_trace_events(&session_id, turn)?;
+            assert_eq!(rows.len(), 6, "expected full six-event turn");
+            let trace_events: Vec<&str> = rows
+                .iter()
+                .map(|r| {
+                    r.extra_frontmatter
+                        .get("trace_event")
+                        .and_then(|v| v.as_str())
+                        .expect("trace_event string")
+                })
+                .collect();
+            assert_eq!(
+                trace_events,
+                vec![
+                    "user_message",
+                    "agent_message",
+                    "pre_tool",
+                    "tool_output",
+                    "post_tool",
+                    "stop"
+                ]
+            );
+
+            let tool_output = rows
+                .iter()
+                .find(|r| {
+                    r.extra_frontmatter
+                        .get("trace_event")
+                        .and_then(|v| v.as_str())
+                        == Some("tool_output")
+                })
+                .expect("tool_output row");
+            assert!(tool_output.body.contains("running 3 tests"));
+            assert!(tool_output.body.contains("all passed"));
+            assert!(
+                !tool_output.body.contains('\x1b'),
+                "interactive terminal body should be squashed before persist"
+            );
+            let parent = tool_output.extra_frontmatter["trace"]["parent_event_id"]
+                .as_str()
+                .expect("tool_output parent_event_id");
+            assert_eq!(parent, ULID_FULL_PRE);
+
+            let post_tool = rows
+                .iter()
+                .find(|r| {
+                    r.extra_frontmatter
+                        .get("trace_event")
+                        .and_then(|v| v.as_str())
+                        == Some("post_tool")
+                })
+                .expect("post_tool row");
+            let parent = post_tool.extra_frontmatter["trace"]["parent_event_id"]
+                .as_str()
+                .expect("post_tool parent_event_id");
+            assert_eq!(parent, ULID_FULL_PRE);
+
+            let agent = rows
+                .iter()
+                .find(|r| {
+                    r.extra_frontmatter
+                        .get("trace_event")
+                        .and_then(|v| v.as_str())
+                        == Some("agent_message")
+                })
+                .expect("agent_message row");
+            assert_eq!(agent.body, agent_body);
+            assert!(
+                tx.turn_summary_exists(&session_id, turn)?,
+                "full turn should create a summary after Stop"
+            );
+            Ok(())
+        })
+        .await
+        .expect("store query should succeed");
+}
+
+#[tokio::test]
+#[allow(
+    clippy::expect_used,
+    reason = "test: panics surface broken invariants immediately"
+)]
+async fn capture_trace_blocks_secret_body_before_persisting_turn() {
+    let vault = tempfile::tempdir().expect("tempdir");
+    let store = open_test_store_in_memory().await;
+    let jsonl_path = vault.path().join("trace.jsonl");
+    let session = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let turn = "turn-secret";
+    let event_id = "01ARZ3NDEKTSV4RRFFQ69G5FAM";
+    let body = "api_key = sk-test-12345678901234567890";
+    let payload_ref = write_source(vault.path(), &format!("{event_id}.txt"), body);
+    let event = make_event(
+        event_id,
+        "UserPromptSubmit",
+        session,
+        turn,
+        "2026-05-02T00:00:01Z",
+        None,
+        &payload_ref,
+        &sha256_hex(body),
+    );
+
+    let mut f = std::fs::File::create(&jsonl_path).expect("create JSONL file");
+    let line = serde_json::to_string(&event).expect("serialize event");
+    writeln!(f, "{line}").expect("write JSONL line");
+
+    let resp = run_handler(&store, vault.path(), &jsonl_path)
+        .await
+        .expect("run_handler should return Ok when a turn is privacy-blocked");
+
+    assert_eq!(
+        resp.failed_turns.len(),
+        1,
+        "secret turn should be rejected exactly once: {:?}",
+        resp.failed_turns
+    );
+    assert_eq!(resp.failed_turns[0].0, session);
+    assert_eq!(resp.failed_turns[0].1, turn);
+    assert!(
+        resp.failed_turns[0].2.contains("privacy filter"),
+        "failure should identify the pre-persist filter: {:?}",
+        resp.failed_turns[0]
+    );
+
+    let session_id = SessionId::parse(session).expect("valid session_id");
+    store
+        .with_tx(move |tx| {
+            let rows = tx.list_trace_events(&session_id, turn)?;
+            assert_eq!(
+                rows.len(),
+                0,
+                "privacy-blocked turn must not persist partial trace rows"
+            );
+            assert!(
+                !tx.turn_summary_exists(&session_id, turn)?,
+                "privacy-blocked turn must not create a summary"
+            );
+            Ok(())
+        })
+        .await
+        .expect("store query should succeed");
+}
+
+#[tokio::test]
+async fn run_blocks_handler_persists_trace_blocks_with_reasoning_signature() {
+    let vault = tempfile::tempdir().expect("tempdir");
+    let store = open_test_store_in_memory().await;
+    let blocks_path = vault.path().join("trace-blocks.json");
+    std::fs::write(
+        &blocks_path,
+        serde_json::json!([
+            {
+                "kind": "reasoning",
+                "text": "private chain of thought",
+                "signature": "sig_trace_blocks_v1"
+            },
+            {
+                "kind": "tool_use",
+                "tool": "Read",
+                "input": {"file": "README.md"},
+                "id": "tool-1"
+            },
+            {
+                "kind": "tool_result",
+                "tool_use_id": "tool-1",
+                "content": "file contents",
+                "is_error": false
+            },
+            {
+                "kind": "text",
+                "text": "final answer"
+            }
+        ])
+        .to_string(),
+    )
+    .expect("write trace blocks json");
+
+    let session = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let raw_blocks = std::fs::read(&blocks_path).expect("read trace blocks bytes");
+    let turn_id = stable_turn_id_for_blocks(session, &raw_blocks);
+    let resp = run_blocks_handler(&store, vault.path(), &blocks_path, session)
+        .await
+        .expect("run_blocks_handler should succeed");
+    assert!(
+        resp.failed_turns.is_empty(),
+        "expected no failures, got: {:?}",
+        resp.failed_turns
+    );
+
+    let session_id = SessionId::parse(session).expect("valid session_id");
+    store
+        .with_tx(move |tx| {
+            let rows = tx.list_trace_events(&session_id, &turn_id)?;
+            assert_eq!(rows.len(), 4, "expected one row per trace block");
+            let row_kinds: Vec<_> = rows.iter().map(|row| row.kind.as_str()).collect();
+            assert_eq!(row_kinds, vec!["reasoning", "trace", "trace", "trace"]);
+            let row_events: Vec<_> = rows
+                .iter()
+                .map(|row| row.extra_frontmatter["trace_event"].as_str().unwrap_or(""))
+                .collect();
+            assert_eq!(
+                row_events,
+                vec!["agent_message", "pre_tool", "tool_output", "agent_message"]
+            );
+
+            let row = &rows[0];
+            assert_eq!(
+                row.extra_frontmatter["trace_event"].as_str(),
+                Some("agent_message")
+            );
+            assert!(
+                row.body.contains("private chain of thought"),
+                "reasoning row should preserve reasoning body"
+            );
+
+            let blocks = row
+                .extra_frontmatter
+                .get("trace_blocks")
+                .and_then(|value| value.as_array())
+                .expect("trace_blocks array");
+            assert_eq!(blocks.len(), 1);
+            assert_eq!(blocks[0]["kind"].as_str(), Some("reasoning"));
+            assert_eq!(blocks[0]["signature"].as_str(), Some("sig_trace_blocks_v1"));
+            assert_eq!(
+                row.extra_frontmatter["trace"]["block_index"].as_u64(),
+                Some(0)
+            );
+
+            let tool_use = &rows[1];
+            assert!(tool_use.body.contains("Read"));
+            assert_eq!(
+                tool_use.extra_frontmatter["trace"]["tool_call_id"].as_str(),
+                Some("tool-1")
+            );
+
+            let tool_result = &rows[2];
+            assert_eq!(
+                tool_result.extra_frontmatter["trace"]["parent_event_id"].as_str(),
+                tool_use.extra_frontmatter["trace"]["capture_event_id"].as_str()
+            );
+
+            let text = &rows[3];
+            assert_eq!(text.body, "final answer");
+            Ok(())
+        })
+        .await
+        .expect("store query should succeed");
+}
+
+#[tokio::test]
+async fn run_blocks_handler_is_idempotent_for_same_input() {
+    let vault = tempfile::tempdir().expect("tempdir");
+    let store = open_test_store_in_memory().await;
+    let blocks_path = vault.path().join("trace-blocks.json");
+    std::fs::write(
+        &blocks_path,
+        serde_json::json!([
+            { "kind": "reasoning", "text": "private chain of thought", "signature": "sig_trace_blocks_v1" },
+            { "kind": "text", "text": "final answer" }
+        ])
+        .to_string(),
+    )
+    .expect("write trace blocks json");
+
+    let session = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let raw_blocks = std::fs::read(&blocks_path).expect("read trace blocks bytes");
+    let turn_id = stable_turn_id_for_blocks(session, &raw_blocks);
+    run_blocks_handler(&store, vault.path(), &blocks_path, session)
+        .await
+        .expect("first import");
+    run_blocks_handler(&store, vault.path(), &blocks_path, session)
+        .await
+        .expect("second import");
+
+    let session_id = SessionId::parse(session).expect("valid session_id");
+    store
+        .with_tx(move |tx| {
+            let rows = tx.list_trace_events(&session_id, &turn_id)?;
+            assert_eq!(rows.len(), 2, "re-import should not duplicate rows");
+            Ok(())
+        })
+        .await
+        .expect("store query should succeed");
+}
+
+#[tokio::test]
+#[allow(
+    clippy::expect_used,
     reason = "test: panics surface broken invariants immediately"
 )]
 async fn in_batch_post_before_pre_resolves_parent() {
@@ -899,6 +1407,34 @@ fn write_late_tool_output_fixture(vault: &Path, jsonl_path: &Path) {
     writeln!(f, "{line}").expect("write JSONL line");
 }
 
+/// Write a single-turn fixture containing a `PreCompact` hook snapshot.
+///
+/// The event belongs to its own turn and intentionally omits a `Stop` hook:
+/// pre-compaction snapshots are lifecycle boundaries, not end-of-turn
+/// summaries. The source file is written under `vault/sources/hook/`.
+fn write_pre_compact_fixture(vault: &Path, jsonl_path: &Path) {
+    let session = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let turn = "turn-pre-compact";
+    let event_id = "01ARZ3NDEKTSV4RRFFQ69G5FAM";
+    let body = "transcript snapshot before compaction";
+    let payload_ref = write_source(vault, &format!("{event_id}.txt"), body);
+
+    let event = make_event(
+        event_id,
+        "PreCompact",
+        session,
+        turn,
+        "2026-05-02T00:00:05Z",
+        None,
+        &payload_ref,
+        &sha256_hex(body),
+    );
+
+    let mut f = std::fs::File::create(jsonl_path).expect("create JSONL file");
+    let line = serde_json::to_string(&event).expect("serialize event");
+    writeln!(f, "{line}").expect("write JSONL line");
+}
+
 // ── Test 1: replay idempotency ────────────────────────────────────────────────
 
 /// Replaying the same JSONL file twice must not create duplicate records.
@@ -966,6 +1502,48 @@ async fn replay_is_idempotent() {
                 );
                 Ok(())
             }
+        })
+        .await
+        .expect("store query should succeed");
+}
+
+#[tokio::test]
+#[allow(
+    clippy::expect_used,
+    reason = "test: panics surface broken invariants immediately"
+)]
+async fn pre_compact_event_is_captured_fail_closed() {
+    let vault = tempfile::tempdir().expect("tempdir");
+    let store = open_test_store_in_memory().await;
+    let jsonl_path = vault.path().join("trace.jsonl");
+
+    write_pre_compact_fixture(vault.path(), &jsonl_path);
+
+    let resp = run_handler(&store, vault.path(), &jsonl_path)
+        .await
+        .expect("run_handler should succeed");
+
+    assert!(
+        resp.failed_turns.is_empty(),
+        "PreCompact should persist cleanly, got failures: {:?}",
+        resp.failed_turns
+    );
+
+    let session_id = SessionId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").expect("valid session_id");
+    store
+        .with_tx(move |tx| {
+            let rows = tx.list_trace_events(&session_id, "turn-pre-compact")?;
+            assert_eq!(rows.len(), 1, "expected one pre-compact trace event");
+            assert_eq!(
+                rows[0].extra_frontmatter["trace_event"].as_str(),
+                Some("pre_compact"),
+                "trace_event should record the pre_compact lifecycle boundary"
+            );
+            assert!(
+                !tx.turn_summary_exists(&session_id, "turn-pre-compact")?,
+                "pre-compact snapshots should not synthesize a turn summary without Stop"
+            );
+            Ok(())
         })
         .await
         .expect("store query should succeed");

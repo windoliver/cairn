@@ -40,6 +40,21 @@ pub const REMEDIATION: &[(&str, &str)] = &[
         "forget.scope ships in v0.3; upgrade to a v0.3+ runtime",
     ),
     (
+        "cairn.mcp.v1.retrieve.session",
+        "retrieve.session is part of the v0.1 core surface; if you see this, \
+         the runtime is reporting a wiring fault — file a bug",
+    ),
+    (
+        "cairn.mcp.v1.retrieve.turn",
+        "retrieve.turn is part of the v0.1 core surface; if you see this, \
+         the runtime is reporting a wiring fault — file a bug",
+    ),
+    (
+        "cairn.mcp.v1.retrieve.tool_call",
+        "retrieve.tool_call is part of the v0.1 core surface; if you see \
+         this, the runtime is reporting a wiring fault — file a bug",
+    ),
+    (
         "cairn.mcp.v1.replay.sequence",
         "signed-intent replay protection requires a wired challenge dispatch \
          path; not available in this build",

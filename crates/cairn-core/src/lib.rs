@@ -16,6 +16,7 @@ pub mod generated;
 pub mod mcp_auth;
 pub mod pipeline;
 pub mod policy_trace;
+pub mod replay;
 pub mod search;
 pub mod status;
 pub mod time;

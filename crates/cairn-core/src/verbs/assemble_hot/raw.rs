@@ -16,7 +16,9 @@ impl TryFrom<AssembleHotDataRaw> for AssembleHotData {
         let data = AssembleHotData {
             bytes: raw.bytes,
             prefix: raw.prefix,
+            recipe: raw.recipe,
             segments: raw.segments,
+            debug: raw.debug,
         };
         validate_base(&data)?;
         validate_segments(&data)?;
@@ -29,7 +31,9 @@ impl From<AssembleHotData> for AssembleHotDataRaw {
         AssembleHotDataRaw {
             bytes: data.bytes,
             prefix: data.prefix,
+            recipe: data.recipe,
             segments: data.segments,
+            debug: data.debug,
         }
     }
 }

@@ -98,6 +98,16 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     // sentinel-rejection trigger.
     ("index", "lock_holders_acquisition_ulid_idx"),
     ("trigger", "lock_holders_reject_sentinel_ulid"),
+    // 0053_wal_payloads
+    ("table", "wal_payloads"),
+    ("trigger", "wal_payloads_kind_matches_wal"),
+    ("trigger", "wal_payloads_scrub_only"),
+    ("trigger", "wal_payloads_no_delete"),
+    // 0058_session_metadata_audit — durable rollback evidence for
+    // in-place session-metadata patches (issue #289 re-loop r6).
+    // Renumbered from 0053 → 0058 during rebase onto main.
+    ("table", "session_metadata_audit"),
+    ("index", "session_metadata_audit_by_session"),
     // 0005_consent
     ("table", "consent_journal"),
     ("index", "consent_journal_subject_scope_idx"),
@@ -253,6 +263,32 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("table", "consent_journal_repair_audit"),
     ("trigger", "consent_journal_repair_audit_immutable"),
     ("trigger", "consent_journal_repair_audit_no_delete"),
+    // 0053_hot_prefix_cache (issue #83): hot-prefix cache + per-class
+    // watermarks for assemble_hot cache invalidation.
+    ("table", "hot_source_watermarks"),
+    ("table", "hot_prefix_cache"),
+];
+
+/// Identity registry objects share `cairn.db` but are owned by
+/// [`crate::identity::SqliteIdentityRegistry`]'s embedded migration. The
+/// store fingerprint verifies the record-store schema only, so these are
+/// allowed sidecar objects rather than drift.
+const IDENTITY_SCHEMA_OBJECTS: &[&str] = &[
+    "identities",
+    "identity_keys",
+    "idx_identity_keys_identity",
+    "vault_meta",
+    "vault_meta_no_update",
+    "vault_meta_no_delete",
+    "identity_receipts",
+    "idx_identity_receipts_target",
+    "idx_identity_receipts_signer",
+    "idx_identity_receipts_pending_eviction",
+    "idx_identity_receipts_pending_key_disable",
+    "pending_rotations",
+    "idx_pending_rotations_identity",
+    "identity_wal",
+    "idx_identity_wal_target",
 ];
 
 fn hash_hex(content: &str) -> String {
@@ -544,6 +580,9 @@ pub(crate) fn verify_schema_fingerprint(
         std::collections::BTreeMap::new();
     for row in rows {
         let (ty, name, sql) = row?;
+        if is_identity_schema_object(&name) {
+            continue;
+        }
         by_name.insert((ty.clone(), name.clone()), sql);
         on_disk_names.insert((ty, name));
     }
@@ -656,6 +695,9 @@ fn expected_ddl_digest(vec_dim: Option<usize>) -> Result<String, StoreError> {
     })?;
     for row in rows {
         let (ty, name, sql) = row?;
+        if is_identity_schema_object(&name) {
+            continue;
+        }
         by_name.insert((ty, name), sql);
     }
     let mut digest = Sha256::new();
@@ -668,4 +710,8 @@ fn expected_ddl_digest(vec_dim: Option<usize>) -> Result<String, StoreError> {
         digest.update(b"\n");
     }
     Ok(finalize_hex(digest))
+}
+
+fn is_identity_schema_object(name: &str) -> bool {
+    IDENTITY_SCHEMA_OBJECTS.contains(&name)
 }

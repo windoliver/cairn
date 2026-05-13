@@ -137,6 +137,7 @@ fn keyword_args(query: &str) -> SearchArgs {
         query: query.to_owned(),
         scope: None,
         explain: Some(false),
+        include_reasoning: None,
     }
 }
 
@@ -150,6 +151,7 @@ fn hybrid_args(query: &str) -> SearchArgs {
         query: query.to_owned(),
         scope: None,
         explain: Some(false),
+        include_reasoning: None,
     }
 }
 
@@ -206,6 +208,7 @@ async fn semantic_dispatch_rejected_without_model_on_disk() {
         query: "hello".to_owned(),
         scope: None,
         explain: Some(false),
+        include_reasoning: None,
     };
     let resp = client()
         .search(&args)
@@ -230,6 +233,7 @@ async fn semantic_rejected_when_local_embeddings_disabled() {
         query: "hello".to_owned(),
         scope: None,
         explain: Some(false),
+        include_reasoning: None,
     };
     let err = sdk.search(&args).await.expect_err("semantic disabled");
     assert!(
@@ -297,6 +301,7 @@ async fn search_semantic_rejected_for_misaligned_provider_model() {
         query: "hello".to_owned(),
         scope: None,
         explain: Some(false),
+        include_reasoning: None,
     };
     let err = sdk
         .search(&args)
@@ -321,6 +326,7 @@ async fn search_hybrid_rejected_for_misaligned_provider_model() {
         query: "hello".to_owned(),
         scope: None,
         explain: Some(false),
+        include_reasoning: None,
     };
     let err = sdk
         .search(&args)

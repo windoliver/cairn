@@ -202,6 +202,8 @@ mod tests {
             consent_lookup: None,
             source_artifacts: crate::verbs::lint::empty_source_artifacts(),
             source_forgets: crate::verbs::lint::empty_source_forgets(),
+            vault_root: None,
+            hot_body_loader: None,
         }
     }
 

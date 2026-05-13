@@ -8,6 +8,7 @@ use std::path::PathBuf;
 const ALLOWED_NO_DISCRIMINATOR: &[&str] = &[
     // Closed string enums:
     "capabilities/capabilities.json#/oneOf",
+    "verbs/ingest.json#/$defs/Args/properties/mode/oneOf",
     "verbs/search.json#/$defs/Args/properties/mode/oneOf",
     "verbs/search.json#/$defs/filter_leaf/oneOf",
     "verbs/search.json#/$defs/filter_leaf_array_contains/properties/value/oneOf",
@@ -21,6 +22,7 @@ const ALLOWED_NO_DISCRIMINATOR: &[&str] = &[
     "verbs/search.json#/$defs/filter_L7/oneOf",
     "verbs/search.json#/$defs/filter_L8/oneOf",
     // XOR-required pattern:
+    "verbs/capture_trace.json#/$defs/Args/oneOf",
     "verbs/ingest.json#/$defs/Args/oneOf",
     "envelope/signed_intent.json#/oneOf",
     // Errors enum is a tagged union on `code` — gets its own discriminator below.

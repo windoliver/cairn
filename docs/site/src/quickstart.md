@@ -52,3 +52,14 @@ the Cairn contract and conventions:
 ```bash
 cargo run -p cairn-cli --locked -- skill install --harness codex
 ```
+
+For the v0.1 reference consumer, verify the Claude Code wiring end to end:
+
+```bash
+cargo run -p cairn-cli --locked -- doctor claude-code --json
+```
+
+Successful doctor output is the reproducibility checklist: it proves the Cairn
+binary is discoverable, Claude Code can find the MCP registration, the
+configured server starts, `status` is callable through the MCP surface, and the
+five expected hook entries are present.

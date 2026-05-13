@@ -1,6 +1,6 @@
-//! Closed gate vocabulary. `Display` emits the stable `snake_case` wire
-//! string used by `PolicyTraceEntry::to_wire` and surfaced verbatim on
-//! the `ResponsePolicyTrace.gate` field.
+//! Closed gate vocabulary. `Display` emits the stable wire string used by
+//! `PolicyTraceEntry::to_wire` and surfaced verbatim on the
+//! `ResponsePolicyTrace.gate` field.
 
 use std::fmt;
 
@@ -31,10 +31,16 @@ pub enum PolicyGate {
     ReadFilterStaleness,
     /// Read-path duplicate filter (brief §5.1; --explain only).
     ReadFilterDedup,
+    /// Search auth-scope gate.
+    SearchScope,
+    /// Search mode/capability gate.
+    SearchCapability,
+    /// Search read-filter aggregation gate.
+    SearchReadFilter,
 }
 
 impl PolicyGate {
-    /// Wire-format identifier (lower `snake_case`). Stable across surfaces.
+    /// Wire-format identifier. Stable across surfaces.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -48,6 +54,9 @@ impl PolicyGate {
             Self::ReadFilterRelevance => "read_filter_relevance",
             Self::ReadFilterStaleness => "read_filter_staleness",
             Self::ReadFilterDedup => "read_filter_dedup",
+            Self::SearchScope => "search.scope",
+            Self::SearchCapability => "search.capability",
+            Self::SearchReadFilter => "search.read_filter",
         }
     }
 }

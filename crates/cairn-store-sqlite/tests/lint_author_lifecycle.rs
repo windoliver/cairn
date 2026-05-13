@@ -566,6 +566,8 @@ async fn run_checks_emits_broken_actor_chain_warning_for_revoked_author() {
         consent_lookup: None,
         source_artifacts: &source_artifacts,
         source_forgets: &source_forgets,
+        vault_root: None,
+        hot_body_loader: None,
     };
 
     let data = run_checks(&inputs).await;

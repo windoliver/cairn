@@ -1,11 +1,12 @@
 ---
 source: crates/cairn-core/tests/assemble_hot_snapshots.rs
-assertion_line: 15
-expression: json
+assertion_line: 53
+expression: "snapshot_for_recipe(\"chat\")"
 ---
 {
   "bytes": 56,
   "prefix": "purpose body\nindex body\npinned\nsalience\nplaybook\nsignal\n",
+  "recipe": "chat",
   "segments": [
     {
       "byte_end": 13,

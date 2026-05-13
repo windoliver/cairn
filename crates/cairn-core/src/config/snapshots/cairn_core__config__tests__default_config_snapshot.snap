@@ -1,6 +1,5 @@
 ---
 source: crates/cairn-core/src/config/mod.rs
-assertion_line: 1184
 expression: json
 ---
 {
@@ -28,7 +27,9 @@ expression: json
         "active_playbook",
         "recent_user_signal"
       ],
-      "max_bytes": 25600
+      "max_bytes": 25600,
+      "pre_compact_recipe": "handoff",
+      "pre_compact_safety_ratio": 0.3
     },
     "retention": {},
     "schema_files": [
@@ -62,6 +63,9 @@ expression: json
     "rerank_topk": 20,
     "max_snippet_chars_per_page": 8000,
     "graph_confidence_min": 0.3
+  },
+  "source": {
+    "redact_on_forget": false
   },
   "sensors": {
     "hooks": {

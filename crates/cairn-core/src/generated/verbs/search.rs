@@ -283,6 +283,9 @@ pub struct SearchArgs {
     pub explain: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filters: Option<SearchArgsFilters>,
+    /// When true, include records whose trace blocks contain reasoning content. Default false keeps reasoning-bearing records out of ordinary search results.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_reasoning: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<i64>,
     pub mode: SearchArgsMode,
@@ -305,6 +308,9 @@ struct RawSearchArgs {
     explain: Option<bool>,
     #[serde(default)]
     filters: Option<SearchArgsFilters>,
+    /// When true, include records whose trace blocks contain reasoning content. Default false keeps reasoning-bearing records out of ordinary search results.
+    #[serde(default)]
+    include_reasoning: Option<bool>,
     #[serde(default)]
     limit: Option<i64>,
     mode: SearchArgsMode,
@@ -326,6 +332,7 @@ impl ::core::convert::TryFrom<RawSearchArgs> for SearchArgs {
             cursor: raw.cursor,
             explain: raw.explain,
             filters: raw.filters,
+            include_reasoning: raw.include_reasoning,
             limit: raw.limit,
             mode: raw.mode,
             query: raw.query,

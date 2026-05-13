@@ -225,6 +225,8 @@ mod tests {
             consent_lookup: None,
             source_artifacts,
             source_forgets: crate::verbs::lint::empty_source_forgets(),
+            vault_root: None,
+            hot_body_loader: None,
         }
     }
 
@@ -314,6 +316,8 @@ mod tests {
             consent_lookup: None,
             source_artifacts: &source_artifacts,
             source_forgets: &source_forgets,
+            vault_root: None,
+            hot_body_loader: None,
         });
         assert!(findings.iter().any(|finding| {
             finding.message.contains("forgotten source hash") && finding.severity == Severity::Error
@@ -354,6 +358,8 @@ mod tests {
             consent_lookup: None,
             source_artifacts: &source_artifacts,
             source_forgets: &source_forgets,
+            vault_root: None,
+            hot_body_loader: None,
         });
         assert!(findings.iter().any(|finding| {
             finding.message.contains("was not redacted") && finding.severity == Severity::Error

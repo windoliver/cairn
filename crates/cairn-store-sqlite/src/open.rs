@@ -121,8 +121,11 @@ fn process_is_alive(pid: i64) -> bool {
 /// Runs WAL boot recovery (issue #55, brief §5.6). Called after migrations
 /// from every public async open path. Errors propagate so a corrupt WAL
 /// fails the open rather than serving requests against partial state.
-async fn run_boot_recovery(conn: &Arc<AsyncConn>) -> Result<(), StoreError> {
-    let cfg = RecoveryConfig::default();
+async fn run_boot_recovery(conn: &Arc<AsyncConn>, incarnation: Arc<str>) -> Result<(), StoreError> {
+    let cfg = RecoveryConfig {
+        enabled: true,
+        bodies: Box::new(crate::record_wal::RecordWalRegistry::new(incarnation)),
+    };
     match recover_pending(conn, &cfg).await {
         Ok(report) => {
             tracing::info!(
@@ -196,10 +199,10 @@ pub async fn open_with_embedder_and_config(
     let dim = embedder.as_ref().map(|e| e.dim());
     let graph_search = bootstrap(&conn, dim).await?;
     let conn = Arc::new(conn);
-    run_boot_recovery(&conn).await?;
-    let incarnation = load_or_init_incarnation(&conn)
+    let incarnation = crate::locks::init_incarnation(&conn)
         .await
         .map_err(|e| StoreError::LockInit(Box::new(e)))?;
+    run_boot_recovery(&conn, Arc::clone(&incarnation)).await?;
     Ok(build_store(
         conn,
         incarnation,
@@ -246,10 +249,10 @@ pub async fn open_in_memory_with_embedder_and_config(
     let dim = embedder.as_ref().map(|e| e.dim());
     let graph_search = bootstrap(&conn, dim).await?;
     let conn = Arc::new(conn);
-    run_boot_recovery(&conn).await?;
-    let incarnation = load_or_init_incarnation(&conn)
+    let incarnation = crate::locks::init_incarnation(&conn)
         .await
         .map_err(|e| StoreError::LockInit(Box::new(e)))?;
+    run_boot_recovery(&conn, Arc::clone(&incarnation)).await?;
     Ok(build_store(
         conn,
         incarnation,

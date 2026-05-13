@@ -44,6 +44,10 @@ pub enum StoreError {
     #[error("wal recovery")]
     Recovery(#[from] crate::wal::RecoveryError),
 
+    /// Record-WAL step runner failed during public apply.
+    #[error("record wal runner")]
+    RecordWalRunner(#[from] crate::wal::RunnerError),
+
     /// Daemon-incarnation initialization failed (issue #56, brief §5.6).
     /// Raised from every public async open path when
     /// `locks::init_incarnation` cannot mint or read back the per-process
@@ -56,6 +60,10 @@ pub enum StoreError {
     /// `result_large_err`).
     #[error("daemon incarnation init")]
     LockInit(#[source] Box<crate::locks::LockError>),
+
+    /// Record-WAL apply could not acquire or assert locks.
+    #[error("record wal lock")]
+    RecordWalLock(#[source] Box<crate::locks::LockError>),
 
     /// `ConsentEvent` failed structural validation (kind/payload mismatch,
     /// malformed hash, etc.) before insert.
@@ -84,6 +92,32 @@ pub enum StoreError {
     NotFound {
         /// The record id that was not found.
         id: String,
+    },
+
+    /// A flush patch targeted a record lineage with no live row.
+    #[error("patch target not found: {target_id}")]
+    PatchTargetMissing {
+        /// The target lineage id that was not found.
+        target_id: String,
+    },
+
+    /// A flush patch requested a substring occurrence that does not exist in
+    /// the current document text.
+    #[error("patch substring not found for {target}: `{needle}` ({occurrence})")]
+    PatchSubstringMissing {
+        /// Human-readable target label (`record:<id>` or `session:<id>`).
+        target: String,
+        /// The substring the caller requested.
+        needle: String,
+        /// Which occurrence form failed (`first`, `all`, `nth(N)`).
+        occurrence: String,
+    },
+
+    /// A flush rename attempted to land on an already-live destination target.
+    #[error("rename destination already exists: {target_id}")]
+    RenameTargetConflict {
+        /// The destination target id that is already live.
+        target_id: String,
     },
 
     /// Method requires a capability the store does not advertise.

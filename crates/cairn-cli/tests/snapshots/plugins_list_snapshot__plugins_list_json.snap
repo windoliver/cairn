@@ -22,9 +22,9 @@ expression: json
     },
     {
       "capabilities": {
-        "batches": false,
-        "consent_aware": false,
-        "streaming": false
+        "batches": true,
+        "consent_aware": true,
+        "streaming": true
       },
       "contract": "SensorIngress",
       "contract_version_range": {

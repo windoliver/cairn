@@ -33,6 +33,32 @@ fn ulid() -> Ulid {
     Ulid("01HZZ0000000000000000000AB".to_owned())
 }
 
+fn ingest_body_args(body: &str) -> IngestArgs {
+    IngestArgs {
+        batch_size: None,
+        body: Some(body.to_owned()),
+        dry_run: None,
+        exclude: None,
+        file: None,
+        folder: None,
+        frontmatter: None,
+        human_review: None,
+        include: None,
+        kind: "note".to_owned(),
+        mode: None,
+        no_cache: None,
+        no_diff: None,
+        recursive: None,
+        session_id: None,
+        tags: None,
+        url: None,
+        jsonl: None,
+        harness: None,
+        session_id_from: None,
+        limit: None,
+    }
+}
+
 #[test]
 fn version_matches_status_server_info() {
     let resp = sdk().status();
@@ -79,6 +105,7 @@ fn verb_response_serializes_as_canonical_envelope() {
             record_id: ulid(),
             session_id: "sess-1".to_owned(),
             plan_ref: None,
+            jsonl_summary: None,
         },
     };
     let value = serde_json::to_value(&resp).expect("serializes");
@@ -129,6 +156,7 @@ fn verb_response_rejects_envelope_invalid_target_combinations() {
             record_id: ulid(),
             session_id: "s".to_owned(),
             plan_ref: None,
+            jsonl_summary: None,
         },
     };
     assert!(serde_json::to_value(&stray).is_err());
@@ -223,18 +251,8 @@ fn handshake_mints_unique_nonces() {
 fn ingest_invalid_args_returns_typed_error() {
     // Violate exactly-one-of: pass body AND file.
     let args = IngestArgs {
-        body: Some("note".to_owned()),
-        dry_run: None,
         file: Some("/tmp/x".to_owned()),
-        folder: None,
-        frontmatter: None,
-        human_review: None,
-        kind: "note".to_owned(),
-        no_cache: None,
-        no_diff: None,
-        session_id: None,
-        tags: None,
-        url: None,
+        ..ingest_body_args("note")
     };
     let err = sdk().ingest(&args).expect_err("must reject");
     match err {
@@ -247,45 +265,19 @@ fn ingest_invalid_args_returns_typed_error() {
 
 #[test]
 fn ingest_valid_args_returns_internal_stub() {
-    let args = IngestArgs {
-        body: Some("note".to_owned()),
-        dry_run: None,
-        file: None,
-        folder: None,
-        frontmatter: None,
-        human_review: None,
-        kind: "note".to_owned(),
-        no_cache: None,
-        no_diff: None,
-        session_id: None,
-        tags: None,
-        url: None,
-    };
+    let args = ingest_body_args("note");
     assert_unimplemented("ingest", sdk().ingest(&args));
 }
 
 #[test]
 #[allow(clippy::too_many_lines)] // table-driven sweep — each case is a single-line builder, not real fn growth
 fn ingest_rejects_schema_minlength_violations() {
-    // The IDL `validate()` only enforces the body/file/url XOR, but the
-    // schema additionally requires non-empty body, file, url, kind,
-    // session_id, and tags[*]. Direct Rust construction must hit the same
-    // floor.
-    let bases = || IngestArgs {
-        body: Some("note".to_owned()),
-        dry_run: None,
-        file: None,
-        folder: None,
-        frontmatter: None,
-        human_review: None,
-        kind: "note".to_owned(),
-        no_cache: None,
-        no_diff: None,
-        session_id: None,
-        tags: None,
-        url: None,
-    };
-    let cases: [(&str, IngestArgs); 16] = [
+    // The IDL `validate()` only enforces the source XOR, but the schema
+    // additionally requires non-empty body, file, folder, url, kind,
+    // session_id, include/exclude/tags items, and a bounded batch_size.
+    // Direct Rust construction must hit the same floor.
+    let bases = || ingest_body_args("note");
+    let cases: [(&str, IngestArgs); 21] = [
         (
             "body",
             IngestArgs {
@@ -306,6 +298,42 @@ fn ingest_rejects_schema_minlength_violations() {
             IngestArgs {
                 body: None,
                 url: Some(String::new()),
+                ..bases()
+            },
+        ),
+        (
+            "folder",
+            IngestArgs {
+                body: None,
+                folder: Some(String::new()),
+                ..bases()
+            },
+        ),
+        (
+            "include",
+            IngestArgs {
+                include: Some(vec![String::new()]),
+                ..bases()
+            },
+        ),
+        (
+            "exclude",
+            IngestArgs {
+                exclude: Some(vec![String::new()]),
+                ..bases()
+            },
+        ),
+        (
+            "batch_size",
+            IngestArgs {
+                batch_size: Some(0),
+                ..bases()
+            },
+        ),
+        (
+            "batch_size",
+            IngestArgs {
+                batch_size: Some(65_536),
                 ..bases()
             },
         ),
@@ -437,18 +465,27 @@ fn ingest_accepts_well_formed_uri_schemes() {
         "cairn+vault://memo",
     ] {
         let args = IngestArgs {
+            batch_size: None,
             body: None,
             dry_run: None,
+            exclude: None,
             file: None,
             folder: None,
             frontmatter: None,
             human_review: None,
+            include: None,
             kind: "note".to_owned(),
+            mode: None,
             no_cache: None,
             no_diff: None,
+            recursive: None,
             session_id: None,
             tags: None,
             url: Some(url.to_owned()),
+            jsonl: None,
+            harness: None,
+            session_id_from: None,
+            limit: None,
         };
         assert_unimplemented("ingest", sdk().ingest(&args));
     }
@@ -467,6 +504,7 @@ async fn search_rejects_empty_query_with_invalid_args() {
         query: String::new(),
         scope: None,
         explain: None,
+        include_reasoning: None,
     };
     match sdk().search(&args).await.expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
@@ -487,6 +525,7 @@ async fn search_rejects_out_of_range_limit_with_invalid_args() {
         query: "hello".to_owned(),
         scope: None,
         explain: None,
+        include_reasoning: None,
     };
     match sdk().search(&args).await.expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
@@ -514,6 +553,7 @@ async fn search_explain_rejects_when_policy_trace_capability_unadvertised() {
         query: "hello".to_owned(),
         scope: None,
         explain: Some(true),
+        include_reasoning: None,
     };
     let err = sdk()
         .search(&args)
@@ -546,6 +586,7 @@ async fn search_explain_false_rejects_unadvertised_keyword_mode() {
         query: "hello".to_owned(),
         scope: None,
         explain: Some(false),
+        include_reasoning: None,
     };
     let err = sdk()
         .search(&args)
@@ -583,6 +624,7 @@ async fn search_rejects_unadvertised_modes_with_capability_unavailable() {
             query: "hello".to_owned(),
             scope: None,
             explain: None,
+            include_reasoning: None,
         };
         let err = sdk()
             .search(&args)
@@ -640,6 +682,45 @@ fn retrieve_profile_requires_user_or_agent() {
     }
 }
 
+#[test]
+fn retrieve_tool_call_rejects_empty_fields_with_invalid_args() {
+    let args = RetrieveArgs::ToolCall {
+        session_id: String::new(),
+        turn_id: "turn-1".to_owned(),
+        tool_call_id: "call-1".to_owned(),
+    };
+    match sdk().retrieve(&args).expect_err("must reject") {
+        SdkError::InvalidArgs { reason } => {
+            assert!(reason.contains("session_id"), "reason: {reason}");
+        }
+        other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+
+    let args = RetrieveArgs::ToolCall {
+        session_id: "session-1".to_owned(),
+        turn_id: String::new(),
+        tool_call_id: "call-1".to_owned(),
+    };
+    match sdk().retrieve(&args).expect_err("must reject") {
+        SdkError::InvalidArgs { reason } => {
+            assert!(reason.contains("turn_id"), "reason: {reason}");
+        }
+        other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+
+    let args = RetrieveArgs::ToolCall {
+        session_id: "session-1".to_owned(),
+        turn_id: "turn-1".to_owned(),
+        tool_call_id: String::new(),
+    };
+    match sdk().retrieve(&args).expect_err("must reject") {
+        SdkError::InvalidArgs { reason } => {
+            assert!(reason.contains("tool_call_id"), "reason: {reason}");
+        }
+        other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn search_rejects_empty_and_filter_with_invalid_args() {
     let args = SearchArgs {
@@ -651,6 +732,7 @@ async fn search_rejects_empty_and_filter_with_invalid_args() {
         query: "hi".to_owned(),
         scope: None,
         explain: None,
+        include_reasoning: None,
     };
     match sdk().search(&args).await.expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
@@ -680,6 +762,7 @@ async fn search_rejects_excessive_filter_depth_with_invalid_args() {
         query: "hi".to_owned(),
         scope: None,
         explain: None,
+        include_reasoning: None,
     };
     match sdk().search(&args).await.expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
@@ -704,6 +787,7 @@ async fn search_rejects_malformed_filter_leaf_with_invalid_args() {
         query: "hi".to_owned(),
         scope: None,
         explain: None,
+        include_reasoning: None,
     };
     match sdk().search(&args).await.expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
@@ -738,6 +822,7 @@ async fn search_accepts_extended_filter_operators() {
             query: "hi".to_owned(),
             scope: None,
             explain: None,
+            include_reasoning: None,
         };
         match sdk()
             .search(&args)
@@ -778,6 +863,7 @@ async fn search_rejects_malformed_extended_filter_operators_with_invalid_args() 
             query: "hi".to_owned(),
             scope: None,
             explain: None,
+            include_reasoning: None,
         };
         match sdk().search(&args).await.expect_err("must reject") {
             SdkError::InvalidArgs { .. } => {}
@@ -799,6 +885,7 @@ async fn search_rejects_malformed_cursor_with_invalid_args() {
         query: "hi".to_owned(),
         scope: None,
         explain: None,
+        include_reasoning: None,
     };
     match sdk().search(&args).await.expect_err("must reject") {
         SdkError::InvalidArgs { reason } => assert!(reason.contains("Cursor"), "reason: {reason}"),
@@ -819,6 +906,7 @@ async fn search_rejects_empty_scope_filter_with_invalid_args() {
         query: "hi".to_owned(),
         scope: Some(empty_scope_filter()),
         explain: None,
+        include_reasoning: None,
     };
     match sdk().search(&args).await.expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
@@ -877,7 +965,9 @@ fn summarize_rejects_empty_record_ids_with_invalid_args() {
 fn assemble_hot_rejects_oversized_budget_with_invalid_args() {
     let args = AssembleHotArgs {
         budget: Some(4_194_305),
+        recipe: None,
         session_id: None,
+        explain: None,
     };
     match sdk().assemble_hot(&args).expect_err("must reject") {
         SdkError::InvalidArgs { reason } => assert!(reason.contains("budget"), "reason: {reason}"),
@@ -888,11 +978,27 @@ fn assemble_hot_rejects_oversized_budget_with_invalid_args() {
 #[test]
 fn capture_trace_rejects_empty_from_with_invalid_args() {
     let args = CaptureTraceArgs {
-        from: String::new(),
+        from: Some(String::new()),
+        blocks: None,
         session_id: None,
     };
     match sdk().capture_trace(&args).expect_err("must reject") {
         SdkError::InvalidArgs { reason } => assert!(reason.contains("from"), "reason: {reason}"),
+        other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+}
+
+#[test]
+fn capture_trace_rejects_from_plus_session_with_invalid_args() {
+    let args = CaptureTraceArgs {
+        from: Some("/tmp/trace.log".to_owned()),
+        blocks: None,
+        session_id: Some("01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned()),
+    };
+    match sdk().capture_trace(&args).expect_err("must reject") {
+        SdkError::InvalidArgs { reason } => {
+            assert!(reason.contains("session_id"), "reason: {reason}");
+        }
         other => panic!("expected InvalidArgs, got {other:?}"),
     }
 }
@@ -943,7 +1049,9 @@ fn assemble_hot_rejects_any_budget_until_loader_lands() {
     // rather than silently drop a knob the caller asked to enforce.
     let args = AssembleHotArgs {
         budget: Some(1024),
+        recipe: None,
         session_id: None,
+        explain: None,
     };
     match sdk().assemble_hot(&args).expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
@@ -958,7 +1066,9 @@ fn assemble_hot_rejects_any_budget_until_loader_lands() {
 fn assemble_hot_rejects_any_session_id_until_loader_lands() {
     let args = AssembleHotArgs {
         budget: None,
+        recipe: None,
         session_id: Some("01J0000000000000000000000A".to_owned()),
+        explain: None,
     };
     match sdk().assemble_hot(&args).expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
@@ -978,7 +1088,9 @@ fn assemble_hot_returns_unimplemented_in_sdk() {
     // probes, so vault-binding cannot diverge).
     let args = AssembleHotArgs {
         budget: None,
+        recipe: None,
         session_id: None,
+        explain: None,
     };
     assert_unimplemented("assemble_hot", sdk().assemble_hot(&args));
 
@@ -994,7 +1106,8 @@ fn assemble_hot_returns_unimplemented_in_sdk() {
 #[test]
 fn capture_trace_returns_internal_stub() {
     let args = CaptureTraceArgs {
-        from: "/tmp/trace.log".to_owned(),
+        from: Some("/tmp/trace.log".to_owned()),
+        blocks: None,
         session_id: None,
     };
     assert_unimplemented("capture_trace", sdk().capture_trace(&args));
@@ -1020,39 +1133,14 @@ fn sdk_error_code_helper_returns_typed_code() {
 
     // Unimplemented and InvalidArgs are SDK-side rejections without a wire
     // round-trip — they have no wire code.
-    let unimpl = sdk()
-        .ingest(&IngestArgs {
-            body: Some("note".to_owned()),
-            dry_run: None,
-            file: None,
-            folder: None,
-            frontmatter: None,
-            human_review: None,
-            kind: "note".to_owned(),
-            no_cache: None,
-            no_diff: None,
-            session_id: None,
-            tags: None,
-            url: None,
-        })
-        .expect_err("stub");
+    let unimpl = sdk().ingest(&ingest_body_args("note")).expect_err("stub");
     assert!(matches!(unimpl, SdkError::Unimplemented { .. }));
     assert_eq!(unimpl.code(), None);
 
     let invalid = sdk()
         .ingest(&IngestArgs {
-            body: Some("a".to_owned()),
-            dry_run: None,
             file: Some("b".to_owned()),
-            folder: None,
-            frontmatter: None,
-            human_review: None,
-            kind: "note".to_owned(),
-            no_cache: None,
-            no_diff: None,
-            session_id: None,
-            tags: None,
-            url: None,
+            ..ingest_body_args("a")
         })
         .expect_err("invalid");
     assert!(matches!(invalid, SdkError::InvalidArgs { .. }));
@@ -1061,7 +1149,18 @@ fn sdk_error_code_helper_returns_typed_code() {
 
 #[test]
 fn forget_rejects_unadvertised_target_with_capability_unavailable() {
-    let err = sdk()
+    let sdk = Sdk::with_store(
+        std::sync::Arc::new(noop_store::NoopStore),
+        cairn_core::config::CairnConfig::default(),
+    );
+    assert!(
+        !sdk.status()
+            .capabilities
+            .contains(&cairn_sdk::generated::common::Capabilities::CairnMcpV1ForgetRecord),
+        "SDK status must not advertise forget.record until SDK dispatch is wired"
+    );
+
+    let err = sdk
         .forget(&ForgetArgs::Record {
             record_id: ulid(),
             dry_run: None,
@@ -1077,42 +1176,38 @@ fn forget_rejects_unadvertised_target_with_capability_unavailable() {
     }
 }
 
-/// Verify that `Sdk::new` (no store wired → no capabilities advertised)
-/// rejects `--mode semantic` with a `CapabilityUnavailable` error that
-/// carries a non-empty `remediation` hint mentioning `local_embeddings`.
-///
-/// This pins the end-to-end wiring from Task 10:
-/// `require_capability` → `cairn_core::status::remediation_for` →
-/// `SdkError::CapabilityUnavailable { remediation: Some(...) }`.
-#[tokio::test]
-async fn sdk_search_semantic_rejects_when_no_store_with_remediation() {
-    let args = SearchArgs {
-        citations: None,
-        cursor: None,
-        explain: None,
-        filters: None,
-        limit: Some(5),
-        mode: SearchArgsMode::Semantic,
-        query: "x".to_owned(),
-        scope: None,
-    };
-    let err = sdk().search(&args).await.expect_err("must reject");
+#[test]
+fn retrieve_capabilities_filtered_until_sdk_dispatch_is_wired() {
+    let sdk = Sdk::with_store(
+        std::sync::Arc::new(noop_store::NoopStore),
+        cairn_core::config::CairnConfig::default(),
+    );
+    let status = sdk.status();
+    for cap in [
+        cairn_sdk::generated::common::Capabilities::CairnMcpV1RetrieveSession,
+        cairn_sdk::generated::common::Capabilities::CairnMcpV1RetrieveTurn,
+        cairn_sdk::generated::common::Capabilities::CairnMcpV1RetrieveToolCall,
+    ] {
+        assert!(
+            !status.capabilities.contains(&cap),
+            "SDK status must not advertise {cap:?} until SDK retrieve dispatch is wired"
+        );
+    }
+
+    let err = sdk
+        .retrieve(&RetrieveArgs::Session {
+            cursor: None,
+            include: None,
+            include_reasoning: None,
+            limit: None,
+            order: None,
+            rehydrate: None,
+            session_id: "session-1".to_owned(),
+        })
+        .expect_err("must fail closed until SDK retrieve dispatch is wired");
     match err {
-        SdkError::CapabilityUnavailable {
-            capability,
-            remediation,
-            ..
-        } => {
-            assert_eq!(
-                capability, "cairn.mcp.v1.search.semantic",
-                "wrong capability id"
-            );
-            let hint = remediation
-                .expect("remediation must be populated for cairn.mcp.v1.search.semantic");
-            assert!(
-                hint.contains("local_embeddings"),
-                "remediation must mention the config toggle 'local_embeddings'; got: {hint:?}"
-            );
+        SdkError::CapabilityUnavailable { capability, .. } => {
+            assert_eq!(capability, "cairn.mcp.v1.retrieve.session");
         }
         other => panic!("expected CapabilityUnavailable, got {other:?}"),
     }

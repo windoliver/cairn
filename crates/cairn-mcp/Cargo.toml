@@ -26,8 +26,11 @@ memchr = { workspace = true }
 
 [dev-dependencies]
 cairn-test-fixtures = { workspace = true }
-tokio = { workspace = true, features = ["rt", "macros"] }
+include_dir = { workspace = true }
 insta = { workspace = true }
+pretty_assertions = { workspace = true }
+rstest = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }
 
 [lints]
 workspace = true

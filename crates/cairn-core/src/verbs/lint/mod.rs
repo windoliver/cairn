@@ -107,6 +107,22 @@ pub struct LintInputs<'a> {
     pub source_artifacts: &'a HashMap<SourceId, SourceArtifact>,
     /// Read-only source-forget receipts keyed by provenance `source_hash`.
     pub source_forgets: &'a HashMap<String, SourceForgetLedger>,
+    /// Vault root for filesystem-backed lint checks (broken source
+    /// links, missing summaries). `None` falls those checks back to
+    /// no-ops so fixture-only tests of unrelated checks remain green.
+    pub vault_root: Option<&'a std::path::Path>,
+    /// Loads step bodies for the dry-run hot-memory walker. `None`
+    /// keeps the over-budget check on the canary path.
+    pub hot_body_loader: Option<
+        &'a (
+                dyn Fn(
+            crate::generated::verbs::assemble_hot::HotRecipeStep,
+        ) -> Result<String, String>
+                    + Send
+                    + Sync
+                    + 'a
+            ),
+    >,
 }
 
 impl std::fmt::Debug for LintInputs<'_> {
@@ -120,6 +136,8 @@ impl std::fmt::Debug for LintInputs<'_> {
             .field("consent_lookup", &self.consent_lookup.is_some())
             .field("source_artifacts", &self.source_artifacts.len())
             .field("source_forgets", &self.source_forgets.len())
+            .field("vault_root", &self.vault_root)
+            .field("hot_body_loader", &self.hot_body_loader.is_some())
             .finish()
     }
 }
@@ -169,6 +187,7 @@ pub async fn run_checks(inputs: &LintInputs<'_>) -> LintData {
     findings.extend(checks::actor_chain::run(inputs));
     findings.extend(checks::provenance::run(inputs));
     findings.extend(checks::schema::run(inputs));
+    findings.extend(checks::trace_reasoning::run(inputs));
     findings.extend(checks::hot_memory::run(inputs));
     findings.extend(checks::index_drift::run(inputs));
     findings.extend(checks::consent::run(inputs).await);
@@ -220,8 +239,11 @@ fn kind_key(k: Kind) -> String {
         Kind::DataGap => "data_gap",
         Kind::MalformedRecord => "malformed_record",
         Kind::BrokenActorChain => "broken_actor_chain",
+        Kind::BrokenSourceLink => "broken_source_link",
         Kind::MissingProvenance => "missing_provenance",
+        Kind::MissingSummary => "missing_summary",
         Kind::StaleSchema => "stale_schema",
+        Kind::StaleProfileLine => "stale_profile_line",
         Kind::HotMemoryOverBudget => "hot_memory_over_budget",
         Kind::IndexDrift => "index_drift",
         Kind::DeferredCheck => "deferred_check",
@@ -318,19 +340,21 @@ mod tests {
             consent_lookup: None,
             source_artifacts: crate::verbs::lint::empty_source_artifacts(),
             source_forgets: crate::verbs::lint::empty_source_forgets(),
+            vault_root: None,
+            hot_body_loader: None,
         };
         let data = run_checks(&inputs).await;
         // Empty records: consent (#253) is wired but has nothing to
         // classify, actor_chain (#256) the same, schema (#258) is
-        // live, and hot_memory (#259) is now a real canary that
-        // emits one Warning DeferredCheck because the default recipe
-        // leans on steps the canary cannot reproduce exactly
-        // (purpose, index, pinned_feedback, active_playbook,
-        // recent_user_signal). Provenance (#257) is live but empty
-        // inputs produce no source-link findings.
+        // live. hot_memory (#259 / #83) is now a real walker — with
+        // no hot_body_loader wired and no vault_root, it still emits
+        // ONE DeferredCheck Info advisory documenting the dormant
+        // missing_summary check. Provenance (#257) remains a stub →
+        // 1 DeferredCheck Info. Final info count is re-derived
+        // empirically by the test assertion below.
         assert_eq!(data.summary.total, data.findings.len() as u64);
         assert_eq!(data.summary.by_severity.error, 0);
-        assert_eq!(data.summary.by_severity.warning, 1);
+        assert_eq!(data.summary.by_severity.warning, 0);
         assert_eq!(
             data.findings
                 .iter()
@@ -338,7 +362,7 @@ mod tests {
                 .count(),
             1
         );
-        assert_eq!(data.summary.by_severity.info, 0);
+        assert_eq!(data.summary.by_severity.info, 2);
     }
 
     #[tokio::test]
@@ -386,6 +410,8 @@ mod tests {
             consent_lookup: None,
             source_artifacts: &source_artifacts,
             source_forgets: crate::verbs::lint::empty_source_forgets(),
+            vault_root: None,
+            hot_body_loader: None,
         };
         let inputs_rev = LintInputs {
             records: &reversed,
@@ -396,11 +422,26 @@ mod tests {
             consent_lookup: None,
             source_artifacts: &source_artifacts,
             source_forgets: crate::verbs::lint::empty_source_forgets(),
+            vault_root: None,
+            hot_body_loader: None,
         };
 
         let fwd = canonicalize(&run_checks(&inputs_fwd).await.findings);
         let rev = canonicalize(&run_checks(&inputs_rev).await.findings);
         assert_eq!(fwd, rev, "run_checks is record-order-dependent");
+    }
+
+    #[test]
+    fn kind_key_includes_new_hot_memory_kinds() {
+        assert_eq!(
+            super::kind_key(Kind::StaleProfileLine),
+            "stale_profile_line"
+        );
+        assert_eq!(
+            super::kind_key(Kind::BrokenSourceLink),
+            "broken_source_link"
+        );
+        assert_eq!(super::kind_key(Kind::MissingSummary), "missing_summary");
     }
 
     #[tokio::test]
@@ -417,6 +458,8 @@ mod tests {
             consent_lookup: None,
             source_artifacts: &source_artifacts,
             source_forgets: crate::verbs::lint::empty_source_forgets(),
+            vault_root: None,
+            hot_body_loader: None,
         };
         let data = run_checks(&inputs).await;
         assert_eq!(data.summary.total, data.findings.len() as u64);
@@ -427,12 +470,15 @@ mod tests {
         // returns no findings for a LegacyEvent record without a
         // ConsentLookup wired. §6.4 schema (#258) is live: record and
         // host both stamp at `SchemaVersion::current()` so `compare`
-        // returns `Same` and no finding fires. hot_memory (#259) is
-        // a real canary now and emits one Warning DeferredCheck for
-        // the default recipe's deferred steps. Provenance (#257) is
-        // satisfied by the matching source-artifact snapshot.
+        // returns `Same` and no finding fires. hot_memory (#259 / #83)
+        // is the real walker now — with no hot_body_loader wired and
+        // no vault_root, it emits ONE DeferredCheck Info for the
+        // dormant missing_summary check. Provenance (#257) remains
+        // a stub plus may emit additional findings depending on the
+        // source-artifact snapshot. Final info count is re-derived
+        // empirically below.
         assert_eq!(data.summary.by_severity.error, 1);
-        assert_eq!(data.summary.by_severity.warning, 1);
+        assert_eq!(data.summary.by_severity.warning, 0);
         assert_eq!(
             data.findings
                 .iter()
@@ -440,6 +486,6 @@ mod tests {
                 .count(),
             1
         );
-        assert_eq!(data.summary.by_severity.info, 0);
+        assert_eq!(data.summary.by_severity.info, 2);
     }
 }

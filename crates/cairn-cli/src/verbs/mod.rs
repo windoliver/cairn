@@ -12,12 +12,16 @@ pub mod assemble_hot;
 pub mod capture_trace;
 pub mod envelope;
 pub mod flush;
+/// Real `flush apply` executor for non-placeholder plans (issue #289).
+pub mod flush_apply;
 pub mod forget;
 pub mod handshake;
 pub mod ingest;
+pub mod ingest_jsonl;
 pub mod lint;
 pub mod retrieve;
 pub mod search;
+pub mod signed;
 pub mod status;
 pub mod summarize;
 
@@ -36,6 +40,13 @@ pub fn with_json(cmd: clap::Command) -> clap::Command {
     )
 }
 
+/// Adjust generated `ingest` CLI requirements that are enforced in the
+/// handler because folder ingest does not need a taxonomy kind.
+#[must_use]
+pub fn with_ingest_runtime_overrides(cmd: clap::Command) -> clap::Command {
+    cmd.mut_arg("kind", |arg| arg.required(false))
+}
+
 /// Add `--fix-markdown` flag to the `lint` subcommand.
 ///
 /// Augments the generated subcommand builder without touching generated files,
@@ -47,6 +58,23 @@ pub fn with_fix_markdown(cmd: clap::Command) -> clap::Command {
             .long("fix-markdown")
             .action(clap::ArgAction::SetTrue)
             .help("Regenerate missing or stale markdown projections for all active records"),
+    )
+}
+
+/// Add `--plan <ULID>` flag to the `lint` subcommand. Lints the named pending
+/// `FlushPlan` instead of running the live-store edge linter — surfaces issues
+/// (e.g. rename target collisions) before `flush apply` runs.
+#[must_use]
+pub fn with_lint_plan(cmd: clap::Command) -> clap::Command {
+    cmd.arg(
+        clap::Arg::new("plan")
+            .long("plan")
+            .value_name("ULID")
+            .action(clap::ArgAction::Set)
+            .help(
+                "Lint the pending FlushPlan with this id (issue #289 — surfaces \
+                 rename target collisions before apply)",
+            ),
     )
 }
 

@@ -108,3 +108,84 @@ async fn hybrid_explain_block_snapshot() {
     insta::assert_snapshot!("search_explain_json", redact_operation_id(&stdout));
     drop(dir);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn keyword_explain_includes_policy_trace_and_dedup_exclusions() {
+    let duplicate = "issue62explaindedup duplicate body";
+    let vault = build_hybrid_test_vault(&[
+        RecordSpec::from_body(duplicate),
+        RecordSpec::from_body(duplicate),
+        RecordSpec::from_body("issue62explaindedup unrelated survivor"),
+    ])
+    .await;
+
+    let root = vault.root.clone();
+    let dir = vault.dir;
+    drop(vault.store);
+    drop(vault.embedder);
+
+    let output = Command::cargo_bin("cairn")
+        .expect("cairn binary")
+        .env("CAIRN_VAULT", &root)
+        .env("CAIRN_MOCK_EMBEDDER", "1")
+        .args([
+            "search",
+            "issue62explaindedup",
+            "--mode",
+            "keyword",
+            "--explain",
+            "--json",
+        ])
+        .output()
+        .expect("run cli");
+    let stdout = String::from_utf8(output.stdout).expect("utf8");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "exit non-zero. stderr: {stderr}\nstdout: {stdout}"
+    );
+
+    let parsed: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("invalid json: {e}\nstdout: {stdout}"));
+    assert_eq!(parsed["status"], "committed");
+    let trace = parsed["policy_trace"]
+        .as_array()
+        .expect("policy_trace array");
+    assert!(
+        trace
+            .iter()
+            .any(|entry| { entry["gate"] == "search.scope" && entry["result"] == "pass" }),
+        "search --explain must trace the scope gate: {parsed}"
+    );
+    assert!(
+        trace
+            .iter()
+            .any(|entry| { entry["gate"] == "search.capability" && entry["result"] == "pass" }),
+        "search --explain must trace the capability gate: {parsed}"
+    );
+    assert!(
+        trace
+            .iter()
+            .any(|entry| { entry["gate"] == "search.read_filter" && entry["result"] == "deny" }),
+        "dedup exclusion must aggregate into search.read_filter=deny: {parsed}"
+    );
+
+    let excluded = parsed["data"]["excluded"]
+        .as_array()
+        .expect("explain search must include data.excluded");
+    assert_eq!(
+        excluded.len(),
+        1,
+        "duplicate visible candidate should produce one exclusion: {parsed}"
+    );
+    assert_eq!(excluded[0]["gate"], "read_filter_dedup");
+    assert_eq!(
+        excluded[0]["detail"], "",
+        "exclusion detail must be the body-free PolicyDetail wire string"
+    );
+    assert!(
+        excluded[0]["target_id"].as_str().is_some(),
+        "exclusion carries a target id"
+    );
+    drop(dir);
+}

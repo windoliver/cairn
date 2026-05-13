@@ -35,6 +35,7 @@ fn record() -> MemoryRecord {
             ..ScopeTuple::default()
         },
         body: "user prefers dark mode".to_owned(),
+        source_ids: vec![SourceId::parse("01HQZX9F5N0000000000000001").expect("valid")],
         provenance: Provenance {
             source_sensor: Identity::parse("snr:local:hook:cc-session:v1").expect("valid"),
             created_at: Rfc3339Timestamp::parse("2026-04-22T14:02:11Z").expect("valid"),
@@ -80,6 +81,8 @@ fn json_round_trip_preserves_all_fields() {
     let back: MemoryRecord = serde_json::from_str(&json).expect("de");
     assert_eq!(r, back);
     back.validate().expect("validates after round-trip");
+    assert_eq!(back.source_ids.len(), 1);
+    assert_eq!(back.source_ids[0].as_str(), "01HQZX9F5N0000000000000001");
 }
 
 /// Markdown frontmatter projection: serialize to JSON, drop `body`, and
@@ -105,6 +108,17 @@ fn frontmatter_projection_preserves_metadata() {
         .insert("body".to_owned(), body);
     let back: MemoryRecord = serde_json::from_value(value).expect("de");
     assert_eq!(r, back);
+}
+
+#[test]
+fn missing_source_ids_rejected_at_deserialize() {
+    let mut json = serde_json::to_value(record()).expect("ser");
+    json.as_object_mut()
+        .expect("object")
+        .remove("source_ids")
+        .expect("source_ids present");
+    let res: Result<MemoryRecord, _> = serde_json::from_value(json);
+    assert!(res.is_err(), "missing source_ids should fail closed");
 }
 
 #[test]
@@ -157,6 +171,7 @@ fn unsupported_visibility_rejected_at_deserialize() {
         "visibility": "internal",
         "scope": {"user": "hmn:tafeng"},
         "body": "x",
+        "source_ids": ["01HQZX9F5N0000000000000001"],
         "provenance": {
             "source_sensor": "snr:local:hook:cc-session:v1",
             "created_at": "2026-04-22T14:02:11Z",
@@ -318,6 +333,7 @@ proptest! {
         prop_assert_eq!(&r, &back);
         // Required fields must still be present after the round-trip.
         prop_assert!(!back.body.is_empty());
+        prop_assert!(!back.source_ids.is_empty());
         prop_assert!(!back.id.as_str().is_empty());
         prop_assert!(!back.signature.as_str().is_empty());
         prop_assert!(!back.actor_chain.is_empty());

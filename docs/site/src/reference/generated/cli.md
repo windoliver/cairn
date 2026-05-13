@@ -20,10 +20,12 @@ Commands:
   capture_trace  cairn.mcp.v1 verb: capture_trace
   lint           cairn.mcp.v1 verb: lint
   forget         cairn.mcp.v1 verb: forget
+  hook           Run a Cairn harness lifecycle hook
   handshake      cairn.mcp.v1 prelude: handshake
   status         cairn.mcp.v1 prelude: status
   plugins        Manage and inspect bundled plugins
   bootstrap      Initialize a vault directory tree with the §3 layout
+  doctor         Reference-consumer diagnostics
   mcp            Start an MCP stdio server. Reads MCP frames from stdin, dispatches to the eight
                  cairn verbs, writes responses to stdout. Blocks until stdin closes.
   vault          Manage the vault registry (brief §3.3)
@@ -56,10 +58,12 @@ Options:
 - [`cairn capture_trace`](commands/capture_trace.md) - cairn.mcp.v1 verb: capture_trace
 - [`cairn lint`](commands/lint.md) - cairn.mcp.v1 verb: lint
 - [`cairn forget`](commands/forget.md) - cairn.mcp.v1 verb: forget
+- [`cairn hook`](commands/hook.md) - Run a Cairn harness lifecycle hook
 - [`cairn handshake`](commands/handshake.md) - cairn.mcp.v1 prelude: handshake
 - [`cairn status`](commands/status.md) - cairn.mcp.v1 prelude: status
 - [`cairn plugins`](commands/plugins.md) - Manage and inspect bundled plugins
 - [`cairn bootstrap`](commands/bootstrap.md) - Initialize a vault directory tree with the §3 layout
+- [`cairn doctor`](commands/doctor.md) - Reference-consumer diagnostics
 - [`cairn mcp`](commands/mcp.md) - Start an MCP stdio server. Reads MCP frames from stdin, dispatches to the eight cairn verbs, writes responses to stdout. Blocks until stdin closes.
 - [`cairn vault`](commands/vault.md) - Manage the vault registry (brief §3.3)
 - [`cairn skill`](commands/skill.md) - Manage the Cairn skill bundle

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::DomainError;
 
-/// Stable identifier for a source artifact under `sources/`.
+/// Stable ULID identifier for a source artifact under `sources/`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
 pub struct SourceId(String);
@@ -13,11 +13,9 @@ impl SourceId {
     /// Parse a source identifier from its wire form.
     pub fn parse(raw: impl Into<String>) -> Result<Self, DomainError> {
         let raw = raw.into();
-        if raw.is_empty() {
-            return Err(DomainError::MissingProvenance {
-                field: "source_ids",
-            });
-        }
+        ulid::Ulid::from_string(&raw).map_err(|_| DomainError::InvalidIdentity {
+            message: format!("source_ids entry is not a ULID: {raw}"),
+        })?;
         Ok(Self(raw))
     }
 

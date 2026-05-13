@@ -1,6 +1,6 @@
 //! Shared clap command tree for the runtime CLI and generated docs.
 
-use crate::{generated, identity, skill, verbs};
+use crate::{doctor, generated, hooks, identity, skill, verbs};
 
 /// Build the `cairn` command tree used by both `main.rs` and `cairn-docgen`.
 #[must_use]
@@ -21,7 +21,9 @@ pub fn build_command() -> clap::Command {
         )
         // Eight core verbs, each with --json added.
         .subcommand(verbs::with_json(verbs::with_resync(
-            verbs::with_flush_modes(generated::verbs::ingest_subcommand()),
+            verbs::with_flush_modes(verbs::with_ingest_runtime_overrides(
+                generated::verbs::ingest_subcommand(),
+            )),
         )))
         .subcommand(verbs::with_json(verbs::with_search_scope(
             generated::verbs::search_subcommand(),
@@ -33,11 +35,12 @@ pub fn build_command() -> clap::Command {
             generated::verbs::capture_trace_subcommand(),
         ))
         .subcommand(verbs::with_json(verbs::with_fix_markdown(
-            verbs::with_fix_folders(generated::verbs::lint_subcommand()),
+            verbs::with_fix_folders(verbs::with_lint_plan(generated::verbs::lint_subcommand())),
         )))
         .subcommand(verbs::with_json(verbs::with_flush_modes(
             generated::verbs::forget_subcommand(),
         )))
+        .subcommand(hooks::command())
         // Protocol preludes.
         .subcommand(verbs::with_json(with_issuer(
             generated::prelude::handshake_subcommand(),
@@ -46,6 +49,7 @@ pub fn build_command() -> clap::Command {
         // Management subcommand (plugins already has --json per sub-subcommand).
         .subcommand(plugins_subcommand())
         .subcommand(bootstrap_subcommand())
+        .subcommand(doctor_subcommand())
         .subcommand(mcp_subcommand())
         .subcommand(vault_subcommand())
         .subcommand(skill_subcommand())
@@ -145,6 +149,45 @@ fn llm_subcommand() -> clap::Command {
                              requests JSON output and validates the response \
                              against the schema (exits 1 on validation failure).",
                         ),
+                )
+                .arg(
+                    clap::Arg::new("json")
+                        .long("json")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Emit JSON receipt instead of human-readable output"),
+                ),
+        )
+}
+
+fn doctor_subcommand() -> clap::Command {
+    clap::Command::new("doctor")
+        .about("Reference-consumer diagnostics")
+        .subcommand_required(true)
+        .arg_required_else_help(true)
+        .subcommand(
+            clap::Command::new("claude-code")
+                .about(
+                    "Verify Claude Code can discover the configured Cairn MCP server, start it, \
+                     call `status`, and find the five expected hook entries without mutating config.",
+                )
+                .arg(
+                    clap::Arg::new("project-dir")
+                        .long("project-dir")
+                        .value_name("PATH")
+                        .help("Project directory used for .mcp.json and .claude/settings*.json lookups"),
+                )
+                .arg(
+                    clap::Arg::new("home-dir")
+                        .long("home-dir")
+                        .value_name("PATH")
+                        .help("Override the user home directory for ~/.claude.json and ~/.claude/settings.json"),
+                )
+                .arg(
+                    clap::Arg::new("server-name")
+                        .long("server-name")
+                        .value_name("NAME")
+                        .default_value(doctor::DEFAULT_SERVER_NAME)
+                        .help("Claude Code MCP server name to verify"),
                 )
                 .arg(
                     clap::Arg::new("json")

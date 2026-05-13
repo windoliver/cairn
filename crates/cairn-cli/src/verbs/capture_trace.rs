@@ -21,18 +21,33 @@
 //! persisted.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::Context as _;
-use cairn_core::domain::capture::CaptureEvent;
-use cairn_core::domain::trace::{TraceEvent, TraceLink};
-use cairn_core::domain::{CaptureEventId, SessionId};
-use cairn_core::generated::envelope::ResponseVerb;
-use cairn_core::pipeline::capture_trace::{classify, project};
-use cairn_core::pipeline::dispatch::{BypassReason, DefaultRegistry, DispatchDecision, dispatch};
+use cairn_core::config::CairnConfig;
+use cairn_core::domain::capture::{
+    CaptureEvent, CaptureMode, CapturePayload, CaptureRefs, PayloadHash, SourceFamily,
+};
+use cairn_core::domain::trace::{TraceBlock, TraceEvent, TraceLink};
+use cairn_core::domain::{
+    ActorChainEntry, CaptureEventId, ChainRole, Identity, Rfc3339Timestamp, ScopeTuple, SessionId,
+};
+use cairn_core::generated::common::Ulid as WireUlid;
+use cairn_core::generated::envelope::{
+    Response, ResponseData, ResponsePolicyTrace, ResponseStatus, ResponseVerb,
+};
+use cairn_core::generated::verbs::capture_trace::{CaptureTraceData, FailedTurn};
+use cairn_core::pipeline::capture_trace::{
+    ProjectedTraceBlocks, classify, project, project_pre_compact_snapshot, project_with_blocks,
+};
+use cairn_core::pipeline::dispatch::{DefaultRegistry, trace_body_bytes};
 use cairn_core::pipeline::extract::body::ResolvedBody;
+use cairn_core::pipeline::filter::{
+    Decision, FilterInputs, RedactionTag, fence, redact, should_memorize,
+};
 use cairn_core::pipeline::turn::summarize_turn;
+use cairn_core::policy_trace::{PolicyGate, PolicyTraceEntry, to_wire};
 use cairn_store_sqlite::SqliteMemoryStore;
 use clap::ArgMatches;
 use sha2::{Digest as _, Sha256};
@@ -42,7 +57,11 @@ use ulid::Ulid;
 
 use crate::identity::{guard::refuse_if_degraded, status::ReconciliationReport};
 
-use super::envelope::{emit_json, human_error, unimplemented_response};
+use super::envelope::{emit_json, human_error, invalid_args_response, new_operation_id};
+
+const DEFAULT_TENANT: &str = "default";
+const CAPTURE_TRACE_ENTITY: &str = "ingest";
+const DIRECT_BLOCKS_TURN_PREFIX: &str = "trace-blocks";
 
 /// Result returned by [`run_handler`] on success.
 #[derive(Debug, serde::Serialize)]
@@ -54,6 +73,8 @@ pub struct CaptureTraceResponse {
     /// A non-empty list means some turns were not persisted. The turns not
     /// listed were persisted successfully.
     pub failed_turns: Vec<(String, String, String)>,
+    /// Body-free policy trace produced by the per-event filter path.
+    pub policy_trace: Vec<ResponsePolicyTrace>,
 }
 
 /// Read newline-delimited JSON [`CaptureEvent`]s from `path`. Blank lines
@@ -121,6 +142,87 @@ pub async fn run_handler(
     vault_root: &Path,
     from: &Path,
 ) -> anyhow::Result<CaptureTraceResponse> {
+    run_handler_inner(store, vault_root, from, None).await
+}
+
+/// Persist a JSONL batch while binding projected rows to a verified vault scope.
+pub async fn run_handler_with_scope(
+    store: &SqliteMemoryStore,
+    vault_root: &Path,
+    from: &Path,
+    scope_binding: ScopeTuple,
+) -> anyhow::Result<CaptureTraceResponse> {
+    run_handler_inner(store, vault_root, from, Some(&scope_binding)).await
+}
+
+/// Persist a direct `Vec<TraceBlock>` capture from a JSON file.
+///
+/// ```rust,no_run
+/// use cairn_cli::verbs::capture_trace::run_blocks_handler;
+///
+/// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+/// let vault = tempfile::tempdir().unwrap();
+/// let store = cairn_store_sqlite::open_in_memory().await.unwrap();
+/// let blocks_path = vault.path().join("trace-blocks.json");
+/// std::fs::write(
+///     &blocks_path,
+///     serde_json::json!([
+///         { "kind": "reasoning", "text": "thinking", "signature": "sig-1" },
+///         { "kind": "tool_use", "tool": "Read", "input": {"file": "README.md"}, "id": "tool-1" },
+///         { "kind": "tool_result", "tool_use_id": "tool-1", "content": "file body", "is_error": false },
+///         { "kind": "text", "text": "final answer" }
+///     ])
+///     .to_string(),
+/// )
+/// .unwrap();
+///
+/// let result = run_blocks_handler(
+///     &store,
+///     vault.path(),
+///     &blocks_path,
+///     "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+/// )
+/// .await
+/// .unwrap();
+/// assert!(result.failed_turns.is_empty());
+/// # });
+/// ```
+pub async fn run_blocks_handler(
+    store: &SqliteMemoryStore,
+    vault_root: &Path,
+    blocks_path: &Path,
+    session_id: &str,
+) -> anyhow::Result<CaptureTraceResponse> {
+    run_blocks_handler_inner(store, vault_root, blocks_path, session_id, None).await
+}
+
+async fn run_blocks_handler_with_scope(
+    store: &SqliteMemoryStore,
+    vault_root: &Path,
+    blocks_path: &Path,
+    session_id: &str,
+    scope_binding: ScopeTuple,
+) -> anyhow::Result<CaptureTraceResponse> {
+    run_blocks_handler_inner(
+        store,
+        vault_root,
+        blocks_path,
+        session_id,
+        Some(&scope_binding),
+    )
+    .await
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "trace import keeps validation, projection, and per-turn atomicity in one ordered transaction flow"
+)]
+async fn run_handler_inner(
+    store: &SqliteMemoryStore,
+    vault_root: &Path,
+    from: &Path,
+    scope_binding: Option<&ScopeTuple>,
+) -> anyhow::Result<CaptureTraceResponse> {
     // §3.5 trust-boundary guard.
     refuse_if_degraded(&ReconciliationReport::default(), vec![])
         .context("capture_trace: vault degraded")?;
@@ -136,6 +238,7 @@ pub async fn run_handler(
     let mut groups: BTreeMap<(String, String), Vec<&CaptureEvent>> = BTreeMap::new();
     let mut failed_turns: Vec<(String, String, String)> = Vec::new();
     let mut poisoned: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut policy_trace_entries: Vec<PolicyTraceEntry> = Vec::new();
 
     for event in &events {
         // Structural envelope validation. Failures land in failed_turns
@@ -219,13 +322,10 @@ pub async fn run_handler(
         let mut needs_parent_from_store: Vec<(usize, String)> = Vec::new();
 
         for event in &group {
-            // Classify the event. P0 only recognizes the four hook payloads
-            // (UserPromptSubmit / PreToolUse / PostToolUse / Stop). Other
-            // shapes (`AgentMessage`, `ToolOutput`) await sensor adapters
-            // (#84). Fail the whole turn on the first unclassifiable event
-            // rather than persisting a partial set: the summary record
-            // would otherwise be built from incomplete data and become
-            // hard-to-detect data loss.
+            // Classify the event. Fail the whole turn on the first
+            // unclassifiable event rather than persisting a partial set:
+            // the summary record would otherwise be built from incomplete
+            // data and become hard-to-detect data loss.
             let classified = match classify(event) {
                 Ok(c) => c,
                 Err(e) => {
@@ -242,53 +342,13 @@ pub async fn run_handler(
                 had_stop = true;
             }
 
-            // Capture → Extract dispatch (issue #217). Every event reaching
-            // this driver passes through the routing decision before we
-            // resolve the body bytes from sources/. P0 trace replay only
-            // accepts hook payloads (classify() rejects everything else),
-            // so the decision is always `Bypass(NonTerminalFamily)` —
-            // raw bytes flow to Extract unchanged. Calling dispatch here
-            // anyway makes the routing path live in production: a future
-            // PR that admits a Terminal payload here cannot bypass the
-            // squash gate, and a malformed envelope is rejected with
-            // `MalformedEnvelope` before we open `sources/`.
-            match dispatch(event, &DefaultRegistry) {
-                DispatchDecision::Bypass(BypassReason::NonTerminalFamily) => {}
-                DispatchDecision::Bypass(BypassReason::MalformedEnvelope) => {
-                    failed_turns.push((
-                        session_str.clone(),
-                        turn_str.clone(),
-                        format!("dispatch {}: malformed envelope", event.event_id),
-                    ));
-                    group_failed = true;
-                    break;
-                }
-                other => {
-                    // classify() already rejected non-hook payloads; reaching
-                    // any other dispatch decision means the classifier and
-                    // dispatch driver disagree about routing. Surface as a
-                    // turn-level failure rather than silently proceeding.
-                    failed_turns.push((
-                        session_str.clone(),
-                        turn_str.clone(),
-                        format!(
-                            "dispatch {}: unexpected decision {other:?} for hook payload",
-                            event.event_id
-                        ),
-                    ));
-                    group_failed = true;
-                    break;
-                }
-            }
-
-            // Resolve body from sources/, then run the standard pre-persist
-            // PII / secret redactor (CLAUDE.md §4.9 "privacy by construction":
-            // raw record bodies must be redacted before they reach storage).
-            // Trace records flow into both per-event rows and turn summaries
-            // built from those rows, so redacting once at the boundary covers
-            // both surfaces.
-            let raw_text = match resolve_body_text(vault_root, event).await {
-                Ok(t) => t,
+            // Resolve body from sources/, route it through the Capture →
+            // Extract dispatch decision, then run the same pre-persist
+            // filter gate used by write-path ingest. A discard rejects the
+            // whole turn before projection so trace rows and summaries cannot
+            // contain partial privacy-blocked content.
+            let raw_bytes = match resolve_body_bytes(vault_root, event).await {
+                Ok(bytes) => bytes,
                 Err(e) => {
                     failed_turns.push((
                         session_str.clone(),
@@ -299,7 +359,53 @@ pub async fn run_handler(
                     break;
                 }
             };
-            let text = cairn_core::pipeline::filter::redact(&raw_text).text;
+            let body_bytes = match trace_body_bytes(event, &raw_bytes, &DefaultRegistry) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    failed_turns.push((
+                        session_str.clone(),
+                        turn_str.clone(),
+                        format!("trace_body {}: {e}", event.event_id),
+                    ));
+                    group_failed = true;
+                    break;
+                }
+            };
+            let raw_text = match trace_text(event, &body_bytes) {
+                Ok(text) => text,
+                Err(e) => {
+                    failed_turns.push((
+                        session_str.clone(),
+                        turn_str.clone(),
+                        format!("resolve_body: {e}"),
+                    ));
+                    group_failed = true;
+                    break;
+                }
+            };
+            let redacted = redact(&raw_text);
+            let fenced = fence(&redacted.text);
+            let blocks_secret = redacted.spans.iter().any(|span| is_secret_tag(span.tag));
+            let inputs = FilterInputs {
+                allow_redacted: !blocks_secret,
+                ..FilterInputs::new(&redacted, &fenced)
+            };
+            let decision = should_memorize(&inputs);
+            policy_trace_entries.extend([
+                PolicyTraceEntry::from(&redacted),
+                PolicyTraceEntry::from(&fenced),
+                PolicyTraceEntry::from(&decision),
+            ]);
+            if let Decision::Discard(reason) = decision {
+                failed_turns.push((
+                    session_str.clone(),
+                    turn_str.clone(),
+                    format!("privacy filter rejected turn: {}", reason.as_str()),
+                ));
+                group_failed = true;
+                break;
+            }
+            let text = fenced.text;
 
             let refs = event
                 .refs
@@ -352,7 +458,11 @@ pub async fn run_handler(
             // `for` iteration scope.
             let resolved = ResolvedBody::from_trace_hook(&text);
 
-            let record = match project(event, classified, &resolved, &link) {
+            let mut record = match if classified == TraceEvent::PreCompact {
+                project_pre_compact_snapshot(event, &resolved, &link)
+            } else {
+                project(event, classified, &resolved, &link)
+            } {
                 Ok(r) => r,
                 Err(e) => {
                     failed_turns.push((
@@ -364,6 +474,10 @@ pub async fn run_handler(
                     break;
                 }
             };
+            if let Some(scope_binding) = scope_binding {
+                bind_record_scope(&mut record, scope_binding);
+            }
+            policy_trace_entries.push(PolicyTraceEntry::pass(PolicyGate::VisibilityFloor));
 
             if needs_store_lookup {
                 let key = tool_call_id.clone().unwrap_or_default();
@@ -473,12 +587,203 @@ pub async fn run_handler(
     Ok(CaptureTraceResponse {
         trace_id: Ulid::new().to_string(),
         failed_turns,
+        policy_trace: to_wire(&policy_trace_entries),
     })
 }
 
+#[allow(clippy::too_many_lines)] // sequential block-projection pipeline; splitting hides dataflow
+async fn run_blocks_handler_inner(
+    store: &SqliteMemoryStore,
+    vault_root: &Path,
+    blocks_path: &Path,
+    session_id_raw: &str,
+    scope_binding: Option<&ScopeTuple>,
+) -> anyhow::Result<CaptureTraceResponse> {
+    refuse_if_degraded(&ReconciliationReport::default(), vec![])
+        .context("capture_trace: vault degraded")?;
+
+    let session_id = SessionId::parse(session_id_raw)
+        .map_err(anyhow::Error::msg)
+        .context("capture_trace: invalid session_id for --blocks")?;
+    let blocks = read_trace_blocks(blocks_path).await?;
+    let raw_blocks = tokio::fs::read(blocks_path)
+        .await
+        .with_context(|| format!("read trace blocks at {}", blocks_path.display()))?;
+    let import_id = stable_ulid(
+        b"cairn:capture-trace:blocks:import:v1\0",
+        &[session_id.as_str().as_bytes(), &raw_blocks],
+    );
+    let turn_id = stable_turn_id(&import_id);
+    let payload_ref = persist_trace_blocks_source(vault_root, &import_id, &raw_blocks).await?;
+    let payload_hash = PayloadHash::parse(format!("sha256:{}", sha256_hex(&raw_blocks)))
+        .map_err(anyhow::Error::msg)?;
+    let captured_at = chrono::Utc::now();
+    let mut policy_trace_entries = Vec::new();
+    let mut projected = Vec::with_capacity(blocks.len());
+    let mut pre_tool_by_id: BTreeMap<String, CaptureEventId> = BTreeMap::new();
+
+    for (block_index, block) in blocks.into_iter().enumerate() {
+        let offset_secs = i64::try_from(block_index)
+            .map_err(|_| anyhow::anyhow!("capture_trace: block_index exceeds i64"))?;
+        let event_dt = captured_at + chrono::Duration::seconds(offset_secs);
+        let captured_at = timestamp_from_datetime(event_dt)?;
+        let stable_event_id = stable_ulid(
+            b"cairn:capture-trace:blocks:event:v1\0",
+            &[
+                session_id.as_str().as_bytes(),
+                import_id.as_bytes(),
+                &block_index.to_le_bytes(),
+            ],
+        );
+        let event = synthetic_block_event(
+            &session_id,
+            &turn_id,
+            &captured_at,
+            &payload_hash,
+            &payload_ref,
+            &stable_event_id,
+            &block,
+        )?;
+
+        let body = block_body(&block);
+        let redacted = redact(&body);
+        let fenced = fence(&redacted.text);
+        let inputs = FilterInputs::new(&redacted, &fenced);
+        let decision = should_memorize(&inputs);
+        policy_trace_entries.extend([
+            PolicyTraceEntry::from(&redacted),
+            PolicyTraceEntry::from(&fenced),
+            PolicyTraceEntry::from(&decision),
+        ]);
+        if let Decision::Discard(reason) = decision {
+            return Ok(CaptureTraceResponse {
+                trace_id: Ulid::new().to_string(),
+                failed_turns: vec![(
+                    session_id.as_str().to_owned(),
+                    turn_id.clone(),
+                    format!("privacy filter rejected turn: {}", reason.as_str()),
+                )],
+                policy_trace: to_wire(&policy_trace_entries),
+            });
+        }
+
+        let classified = classify(&event).map_err(anyhow::Error::msg)?;
+        let parent_event_id = match &block {
+            TraceBlock::ToolResult { tool_use_id, .. } => pre_tool_by_id.get(tool_use_id).cloned(),
+            _ => None,
+        };
+        let tool_call_id = match &block {
+            TraceBlock::ToolUse { id, .. } => Some(id.clone()),
+            TraceBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
+            _ => None,
+        };
+        let link = TraceLink {
+            session_id: session_id.clone(),
+            turn_id: turn_id.clone(),
+            sequence: 0,
+            capture_event_id: event.event_id.clone(),
+            parent_event_id,
+            tool_call_id: tool_call_id.clone(),
+            member_event_ids: Vec::new(),
+        };
+        let resolved = ResolvedBody::from_trace_hook(&fenced.text);
+        let mut record = project_with_blocks(
+            &event,
+            classified,
+            &resolved,
+            &link,
+            &ProjectedTraceBlocks {
+                blocks: vec![block.clone()],
+            },
+        )
+        .map_err(anyhow::Error::msg)
+        .context("capture_trace: project trace block")?;
+        if matches!(block, TraceBlock::Reasoning { .. }) {
+            record.kind = cairn_core::domain::MemoryKind::Reasoning;
+        }
+        if let Some(trace) = record
+            .extra_frontmatter
+            .get_mut("trace")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            trace.insert(
+                "block_index".to_owned(),
+                serde_json::Value::Number(block_index.into()),
+            );
+        }
+        if let Some(scope_binding) = scope_binding {
+            bind_record_scope(&mut record, scope_binding);
+        }
+        policy_trace_entries.push(PolicyTraceEntry::pass(PolicyGate::VisibilityFloor));
+        if let TraceBlock::ToolUse { id, .. } = &block {
+            pre_tool_by_id.insert(id.clone(), event.event_id.clone());
+        }
+        projected.push(record);
+    }
+
+    let session_id_tx = session_id.clone();
+    store
+        .with_tx(move |tx| {
+            tx.renumber_turn_with(&session_id_tx, &turn_id, &projected)?;
+            tx.validate_turn_links(&session_id_tx, &turn_id)?;
+            Ok::<(), cairn_store_sqlite::error::StoreError>(())
+        })
+        .await
+        .map_err(anyhow::Error::msg)
+        .context("capture_trace: persist trace blocks")?;
+
+    Ok(CaptureTraceResponse {
+        trace_id: Ulid::new().to_string(),
+        failed_turns: Vec::new(),
+        policy_trace: to_wire(&policy_trace_entries),
+    })
+}
+
+fn bind_record_scope(record: &mut cairn_core::domain::MemoryRecord, scope_binding: &ScopeTuple) {
+    if let Some(value) = &scope_binding.tenant {
+        record.scope.tenant = Some(value.clone());
+    }
+    if let Some(value) = &scope_binding.workspace {
+        record.scope.workspace = Some(value.clone());
+    }
+    if let Some(value) = &scope_binding.project {
+        record.scope.project = Some(value.clone());
+    }
+    if let Some(value) = &scope_binding.entity {
+        record.scope.entity = Some(value.clone());
+    }
+    if let Some(value) = &scope_binding.user {
+        record.scope.user = Some(value.clone());
+    }
+    if let Some(value) = &scope_binding.agent {
+        record.scope.agent = Some(value.clone());
+    }
+}
+
+fn trace_text(event: &CaptureEvent, body_bytes: &[u8]) -> anyhow::Result<String> {
+    if matches!(&event.payload, CapturePayload::Voice { .. }) {
+        return voice_transcript_text(body_bytes);
+    }
+    String::from_utf8(body_bytes.to_vec()).context("routed body is not valid UTF-8")
+}
+
+fn voice_transcript_text(body_bytes: &[u8]) -> anyhow::Result<String> {
+    let raw: serde_json::Value =
+        serde_json::from_slice(body_bytes).context("voice payload is not valid JSON")?;
+    let text = raw
+        .get("transcript")
+        .and_then(|transcript| transcript.get("text"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("voice payload missing transcript.text"))?;
+    if text.trim().is_empty() {
+        anyhow::bail!("voice payload transcript.text is empty");
+    }
+    Ok(text.to_owned())
+}
+
 /// Read the payload bytes referenced by `event.payload_ref` from disk
-/// (relative to `vault_root`), verify the SHA-256 hash matches
-/// `event.payload_hash`, and return the body as a UTF-8 `String`.
+/// (relative to `vault_root`) and verify the SHA-256 hash matches
+/// `event.payload_hash`.
 ///
 /// The `payload_hash` field may be prefixed with `"sha256:"` — this prefix
 /// is stripped before comparison.
@@ -487,8 +792,7 @@ pub async fn run_handler(
 ///
 /// - I/O error reading the file.
 /// - SHA-256 mismatch between the stored hash and the computed hash.
-/// - Bytes not valid UTF-8.
-async fn resolve_body_text(vault_root: &Path, event: &CaptureEvent) -> anyhow::Result<String> {
+async fn resolve_body_bytes(vault_root: &Path, event: &CaptureEvent) -> anyhow::Result<Vec<u8>> {
     // Trust boundary: `payload_ref` is caller-supplied (the JSONL on disk).
     // A matching `payload_hash` is integrity, not authorization — without a
     // path containment check, a crafted entry like `../../../etc/passwd`
@@ -531,8 +835,7 @@ async fn resolve_body_text(vault_root: &Path, event: &CaptureEvent) -> anyhow::R
         );
     }
 
-    String::from_utf8(bytes)
-        .with_context(|| format!("payload at {} is not valid UTF-8", path.display()))
+    Ok(bytes)
 }
 
 /// Compute the lowercase hex SHA-256 digest of `bytes`.
@@ -542,20 +845,390 @@ fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", h.finalize())
 }
 
+async fn read_trace_blocks(path: &Path) -> anyhow::Result<Vec<TraceBlock>> {
+    let raw = tokio::fs::read_to_string(path)
+        .await
+        .with_context(|| format!("read trace blocks JSON at {}", path.display()))?;
+    serde_json::from_str(&raw).with_context(|| format!("parse trace blocks at {}", path.display()))
+}
+
+async fn persist_trace_blocks_source(
+    vault_root: &Path,
+    event_id: &str,
+    raw_blocks: &[u8],
+) -> anyhow::Result<String> {
+    let dir = vault_root.join("sources").join("trace_blocks");
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .with_context(|| format!("create trace_blocks source dir {}", dir.display()))?;
+    let filename = format!("{event_id}.json");
+    let path = dir.join(&filename);
+    tokio::fs::write(&path, raw_blocks)
+        .await
+        .with_context(|| format!("write trace blocks source {}", path.display()))?;
+    Ok(format!("sources/trace_blocks/{filename}"))
+}
+
+fn timestamp_from_datetime(dt: chrono::DateTime<chrono::Utc>) -> anyhow::Result<Rfc3339Timestamp> {
+    let raw = dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    Rfc3339Timestamp::parse(raw).map_err(anyhow::Error::msg)
+}
+
+fn stable_ulid(domain: &[u8], chunks: &[&[u8]]) -> String {
+    let mut h = Sha256::new();
+    h.update(domain);
+    for chunk in chunks {
+        h.update(chunk);
+        h.update([0]);
+    }
+    let digest = h.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    Ulid::from_bytes(bytes).to_string()
+}
+
+fn stable_turn_id(import_id: &str) -> String {
+    format!("{DIRECT_BLOCKS_TURN_PREFIX}-{import_id}")
+}
+
+fn synthetic_block_event(
+    session_id: &SessionId,
+    turn_id: &str,
+    captured_at: &Rfc3339Timestamp,
+    payload_hash: &PayloadHash,
+    payload_ref: &str,
+    event_id: &str,
+    block: &TraceBlock,
+) -> anyhow::Result<CaptureEvent> {
+    let (sensor_id, capture_mode, actor_identity, payload, source_family, tool_id) = match block {
+        TraceBlock::Reasoning { .. } | TraceBlock::Text { .. } => (
+            Identity::parse("snr:local:proactive:claude-code:v1").map_err(anyhow::Error::msg)?,
+            CaptureMode::Proactive,
+            Identity::parse("agt:claude-code:opus-4-7:main:v1").map_err(anyhow::Error::msg)?,
+            CapturePayload::Proactive {
+                kind: "assistant_message".to_owned(),
+                rationale: "capture_trace --blocks".to_owned(),
+            },
+            SourceFamily::Proactive,
+            None,
+        ),
+        TraceBlock::ToolUse { tool, id, .. } => (
+            Identity::parse("snr:local:hook:cc-session:v1").map_err(anyhow::Error::msg)?,
+            CaptureMode::Auto,
+            Identity::parse("snr:local:hook:cc-session:v1").map_err(anyhow::Error::msg)?,
+            CapturePayload::Hook {
+                hook_name: "PreToolUse".to_owned(),
+                tool_name: Some(tool.clone()),
+            },
+            SourceFamily::Hook,
+            Some(id.clone()),
+        ),
+        TraceBlock::ToolResult { tool_use_id, .. } => (
+            Identity::parse("snr:local:hook:cc-session:v1").map_err(anyhow::Error::msg)?,
+            CaptureMode::Auto,
+            Identity::parse("snr:local:hook:cc-session:v1").map_err(anyhow::Error::msg)?,
+            CapturePayload::Hook {
+                hook_name: "ToolOutput".to_owned(),
+                tool_name: None,
+            },
+            SourceFamily::Hook,
+            Some(tool_use_id.clone()),
+        ),
+    };
+    let event = CaptureEvent {
+        event_id: CaptureEventId::parse(event_id).map_err(anyhow::Error::msg)?,
+        sensor_id: sensor_id.clone(),
+        capture_mode,
+        actor_chain: vec![ActorChainEntry {
+            role: ChainRole::Author,
+            identity: actor_identity,
+            at: captured_at.clone(),
+        }],
+        refs: Some(CaptureRefs {
+            session_id: Some(session_id.as_str().to_owned()),
+            turn_id: Some(turn_id.to_owned()),
+            tool_id,
+        }),
+        payload_hash: payload_hash.clone(),
+        payload_ref: payload_ref.to_owned(),
+        captured_at: captured_at.clone(),
+        payload,
+        source_family,
+    };
+    event.validate().map_err(anyhow::Error::msg)?;
+    Ok(event)
+}
+
+fn block_body(block: &TraceBlock) -> String {
+    match block {
+        TraceBlock::Reasoning { text, .. } | TraceBlock::Text { text } => text.clone(),
+        TraceBlock::ToolUse { tool, input, .. } => {
+            format!(
+                "{tool}\n{}",
+                serde_json::to_string(input).unwrap_or_default()
+            )
+        }
+        TraceBlock::ToolResult { content, .. } => content.clone(),
+    }
+}
+
+enum CaptureTraceInput {
+    Jsonl(PathBuf),
+    Blocks { path: PathBuf, session_id: String },
+}
+
+fn normalize_cli_path(path: &Path) -> PathBuf {
+    match path.to_str().and_then(|raw| raw.strip_prefix('@')) {
+        Some(stripped) => PathBuf::from(stripped),
+        None => path.to_path_buf(),
+    }
+}
+
 /// Run `cairn capture_trace`.
 #[must_use]
-pub fn run(sub: &ArgMatches) -> ExitCode {
+pub fn run(sub: &ArgMatches, vault_root: PathBuf, config: CairnConfig) -> ExitCode {
     let json = sub.get_flag("json");
-    let resp = unimplemented_response(ResponseVerb::CaptureTrace);
+    let input = match (
+        sub.get_one::<PathBuf>("from")
+            .map(|p| normalize_cli_path(p)),
+        sub.get_one::<PathBuf>("blocks")
+            .map(|p| normalize_cli_path(p)),
+        sub.get_one::<String>("session_id").cloned(),
+    ) {
+        (Some(from), None, None) => CaptureTraceInput::Jsonl(from),
+        (None, Some(path), Some(session_id)) => CaptureTraceInput::Blocks { path, session_id },
+        (Some(_), None, Some(_)) => {
+            let resp = invalid_args_response(
+                ResponseVerb::CaptureTrace,
+                "session_id",
+                "session-scoped trace import is not yet supported for JSONL capture_trace",
+            );
+            if json {
+                emit_json(&resp);
+            } else {
+                human_error(
+                    "capture_trace",
+                    "InvalidArgs",
+                    "--session is only supported with --blocks",
+                    &resp.operation_id,
+                );
+            }
+            return ExitCode::from(64);
+        }
+        (None, Some(_), None) => {
+            let resp = invalid_args_response(
+                ResponseVerb::CaptureTrace,
+                "session_id",
+                "required when using --blocks",
+            );
+            if json {
+                emit_json(&resp);
+            } else {
+                human_error(
+                    "capture_trace",
+                    "InvalidArgs",
+                    "--session is required with --blocks",
+                    &resp.operation_id,
+                );
+            }
+            return ExitCode::from(64);
+        }
+        _ => {
+            let resp = invalid_args_response(
+                ResponseVerb::CaptureTrace,
+                "from|blocks",
+                "exactly one input mode is required",
+            );
+            if json {
+                emit_json(&resp);
+            } else {
+                human_error(
+                    "capture_trace",
+                    "InvalidArgs",
+                    "pass exactly one of --from or --blocks",
+                    &resp.operation_id,
+                );
+            }
+            return ExitCode::from(64);
+        }
+    };
+
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            let resp = super::signed::aborted(
+                ResponseVerb::CaptureTrace,
+                format!("runtime initialization: {e}"),
+            );
+            if json {
+                emit_json(&resp);
+            } else {
+                emit_human(&resp);
+            }
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let resp = rt.block_on(run_async(input, vault_root, config));
     if json {
         emit_json(&resp);
     } else {
-        human_error(
-            "capture_trace",
-            "Internal",
-            "store not wired in this P0 build",
-            &resp.operation_id,
-        );
+        emit_human(&resp);
     }
-    ExitCode::FAILURE
+    response_exit_code(&resp)
+}
+
+async fn run_async(input: CaptureTraceInput, vault_root: PathBuf, config: CairnConfig) -> Response {
+    let ctx =
+        match super::signed::open_context(ResponseVerb::CaptureTrace, &vault_root, config).await {
+            Ok(ctx) => ctx,
+            Err(resp) => return resp,
+        };
+    let scope_binding = ScopeTuple {
+        tenant: Some(DEFAULT_TENANT.to_owned()),
+        workspace: Some(ctx.config.vault.name.clone()),
+        entity: Some(CAPTURE_TRACE_ENTITY.to_owned()),
+        ..ScopeTuple::default()
+    };
+    let result = match input {
+        CaptureTraceInput::Jsonl(from) => {
+            run_handler_with_scope(&ctx.store, &ctx.vault_root, &from, scope_binding).await
+        }
+        CaptureTraceInput::Blocks { path, session_id } => {
+            run_blocks_handler_with_scope(
+                &ctx.store,
+                &ctx.vault_root,
+                &path,
+                &session_id,
+                scope_binding,
+            )
+            .await
+        }
+    };
+    match result {
+        Ok(result) => {
+            let failed_turns = public_failed_turns(result.failed_turns);
+            let data = CaptureTraceData {
+                failed_turns,
+                trace_id: WireUlid(result.trace_id),
+            };
+            super::signed::committed(
+                ResponseVerb::CaptureTrace,
+                new_operation_id(),
+                ResponseData::CaptureTrace(data),
+                result.policy_trace,
+            )
+        }
+        Err(e) => super::signed::aborted(ResponseVerb::CaptureTrace, format!("capture_trace: {e}")),
+    }
+}
+
+fn emit_human(resp: &Response) {
+    if let (ResponseStatus::Committed, Some(ResponseData::CaptureTrace(data))) =
+        (&resp.status, resp.data.as_ref())
+    {
+        if data.failed_turns.is_empty() {
+            println!(
+                "capture_trace: trace_id {} (operation_id: {})",
+                data.trace_id.0, resp.operation_id.0
+            );
+        } else {
+            println!(
+                "capture_trace: trace_id {} ({} failed turn(s), operation_id: {})",
+                data.trace_id.0,
+                data.failed_turns.len(),
+                resp.operation_id.0
+            );
+            for turn in &data.failed_turns {
+                println!(
+                    "capture_trace: failed turn session={} turn={} reason={}",
+                    turn.session_id, turn.turn_id, turn.reason
+                );
+            }
+        }
+    } else {
+        let code = resp
+            .error
+            .as_ref()
+            .and_then(|e| e.get("code"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("Internal");
+        let message = resp
+            .error
+            .as_ref()
+            .and_then(|e| e.get("message"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("capture_trace failed");
+        human_error("capture_trace", code, message, &resp.operation_id);
+    }
+}
+
+fn public_failed_turns(failed_turns: Vec<(String, String, String)>) -> Vec<FailedTurn> {
+    failed_turns
+        .into_iter()
+        .map(|(session_id, turn_id, reason)| FailedTurn {
+            reason: public_failed_turn_reason(&reason),
+            session_id: public_failed_turn_ref(session_id),
+            turn_id: public_failed_turn_ref(turn_id),
+        })
+        .collect()
+}
+
+fn public_failed_turn_ref(value: String) -> String {
+    if value.is_empty() {
+        "unknown".to_owned()
+    } else {
+        value
+    }
+}
+
+fn public_failed_turn_reason(reason: &str) -> String {
+    if let Some(code) = reason.strip_prefix("privacy filter rejected turn: ") {
+        return format!("privacy_filter:{code}");
+    }
+    if reason.starts_with("envelope validate:")
+        || reason.starts_with("dispatch ")
+        || reason.contains("missing refs")
+        || reason.contains("missing session_id or turn_id")
+    {
+        return "malformed_capture".to_owned();
+    }
+    if reason.starts_with("resolve_body:") {
+        return "payload_unavailable".to_owned();
+    }
+    if reason.starts_with("classify ") {
+        return "unclassifiable_capture".to_owned();
+    }
+    if reason.starts_with("project:") {
+        return "projection_failed".to_owned();
+    }
+    if reason.contains("PostTool/ToolOutput") || reason.contains("PreTool") {
+        return "trace_link_failed".to_owned();
+    }
+    "turn_failed".to_owned()
+}
+
+fn is_secret_tag(tag: RedactionTag) -> bool {
+    matches!(
+        tag,
+        RedactionTag::AwsAccessKeyId
+            | RedactionTag::GithubToken
+            | RedactionTag::SlackToken
+            | RedactionTag::Jwt
+            | RedactionTag::HexSecret
+            | RedactionTag::OpaqueApiKey
+            | RedactionTag::ContextKeyedSecret
+            | RedactionTag::PrivateKeyBlock
+    )
+}
+
+fn response_exit_code(resp: &Response) -> ExitCode {
+    match resp.status {
+        ResponseStatus::Committed => ExitCode::SUCCESS,
+        ResponseStatus::Rejected => ExitCode::from(64),
+        _ => ExitCode::FAILURE,
+    }
 }

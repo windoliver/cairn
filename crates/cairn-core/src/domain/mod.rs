@@ -33,8 +33,10 @@ pub mod filter;
 pub mod flush_plan;
 pub mod folder;
 pub mod graph;
+pub mod hot_prefix;
 pub mod identity;
 pub mod intent;
+pub mod metrics;
 pub mod projection;
 pub mod provenance;
 pub mod record;
@@ -74,7 +76,7 @@ pub use projection::{
     ConflictOutcome, MarkdownProjector, ParsedProjection, ProjectedFile, ResyncError,
 };
 pub use provenance::Provenance;
-pub use record::{MemoryRecord, RecordId};
+pub use record::{Ed25519Signature, MemoryRecord, RecordId};
 pub use scope::ScopeTuple;
 pub use session::{
     DEFAULT_IDLE_WINDOW_SECS, LastActiveSession, Session, SessionDecision, SessionId,
@@ -85,4 +87,4 @@ pub use target_id::TargetId;
 pub use taxonomy::{MemoryClass, MemoryKind, MemoryVisibility};
 pub use time::{Clock, SystemClock};
 pub use timestamp::Rfc3339Timestamp;
-pub use trace::{TraceEvent, TraceLink, TraceLinkError};
+pub use trace::{TraceBlock, TraceEvent, TraceLink, TraceLinkError};

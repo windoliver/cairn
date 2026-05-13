@@ -12,6 +12,7 @@ pub mod graph;
 pub mod hybrid_vault;
 pub mod intent;
 pub mod keystore;
+pub mod mcp;
 pub mod store;
 pub use fake_consent_lookup::FakeConsentLookup;
 pub use hybrid_vault::{HybridTestVault, RecordSpec, build_hybrid_test_vault};
@@ -50,7 +51,7 @@ pub fn fixture_v0_dir() -> std::path::PathBuf {
     fixtures_dir().join("v0")
 }
 
-use cairn_core::domain::{MemoryRecord, RecordId, TargetId};
+use cairn_core::domain::{MemoryRecord, RecordId, SourceId, TargetId};
 use cairn_store_sqlite::SqliteMemoryStore;
 use tempfile::TempDir;
 
@@ -82,6 +83,7 @@ pub fn sample_record(seed: u64) -> MemoryRecord {
     let id_str = format!("01HQZX9F5N0{suffix}");
     r.id = RecordId::parse(id_str.clone()).expect("seed-derived id");
     r.target_id = TargetId::parse(id_str).expect("seed-derived target");
+    r.source_ids = vec![SourceId::parse("01HQZX9F5N0000000000000001").expect("valid")];
     r.body = format!("seeded body {seed}");
     r
 }

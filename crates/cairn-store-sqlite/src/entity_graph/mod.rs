@@ -38,6 +38,24 @@ pub(crate) const ENTITY_EDGE_PRE_IMAGE_JSON: &str = "json_object(\
     'source_record_id', source_record_id, \
     'body_hash_hex', hex(body_hash))";
 
+pub(crate) fn entity_edge_body_hash_components(
+    confidence_db_str: &str,
+    confidence_score: f32,
+    valid_at: i64,
+    invalid_at: Option<i64>,
+    created_at: i64,
+    source_record_id: Option<&str>,
+) -> [u8; 32] {
+    edge::body_hash_components(
+        confidence_db_str,
+        confidence_score,
+        valid_at,
+        invalid_at,
+        created_at,
+        source_record_id,
+    )
+}
+
 /// Translate a worker-side error into a typed [`StoreError`], preserving
 /// any [`StoreError`] previously wrapped via `tokio_rusqlite::Error::Other`.
 /// Without this, the blanket `From<tokio_rusqlite::Error>` collapses every

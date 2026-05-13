@@ -56,6 +56,8 @@ mod tests {
             consent_lookup: None,
             source_artifacts: crate::verbs::lint::empty_source_artifacts(),
             source_forgets: crate::verbs::lint::empty_source_forgets(),
+            vault_root: None,
+            hot_body_loader: None,
         };
         assert!(run(&li).is_empty());
     }
@@ -72,6 +74,8 @@ mod tests {
             consent_lookup: None,
             source_artifacts: crate::verbs::lint::empty_source_artifacts(),
             source_forgets: crate::verbs::lint::empty_source_forgets(),
+            vault_root: None,
+            hot_body_loader: None,
         };
         let f = run(&li);
         assert_eq!(f.len(), 1);
@@ -98,6 +102,8 @@ mod tests {
             consent_lookup: None,
             source_artifacts: crate::verbs::lint::empty_source_artifacts(),
             source_forgets: crate::verbs::lint::empty_source_forgets(),
+            vault_root: None,
+            hot_body_loader: None,
         };
         let f = run(&li);
         assert_eq!(f.len(), 1);
@@ -116,6 +122,8 @@ mod tests {
             consent_lookup: None,
             source_artifacts: crate::verbs::lint::empty_source_artifacts(),
             source_forgets: crate::verbs::lint::empty_source_forgets(),
+            vault_root: None,
+            hot_body_loader: None,
         };
         assert!(run(&li).is_empty());
     }

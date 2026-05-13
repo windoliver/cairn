@@ -15,7 +15,7 @@
 use cairn_core::domain::{
     ConsentEvent, ConsentKind, ConsentPayload, Identity, Rfc3339Timestamp, SensorLabel,
 };
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 
 use crate::error::StoreError;
 
@@ -31,6 +31,18 @@ use crate::error::StoreError;
 /// firing (unknown kind, body-bearing forget payload, missing iso, …) or
 /// the underlying `SQLite` layer reporting a constraint violation.
 pub fn append(conn: &Connection, event: &ConsentEvent) -> Result<i64, StoreError> {
+    append_inner(conn, event)
+}
+
+/// Insert a `ConsentEvent` into `consent_journal` inside an existing transaction.
+///
+/// # Errors
+/// Returns [`StoreError`] if the insert fails.
+pub fn append_in_tx(tx: &Transaction<'_>, event: &ConsentEvent) -> Result<i64, StoreError> {
+    append_inner(tx, event)
+}
+
+fn append_inner(conn: &Connection, event: &ConsentEvent) -> Result<i64, StoreError> {
     event.validate()?;
     let payload_json =
         serde_json::to_string(&event.payload).map_err(|e| StoreError::VaultPath(e.to_string()))?;
@@ -109,6 +121,14 @@ pub fn query_by_scope(conn: &Connection, scope: &str) -> Result<Vec<ConsentEvent
 /// Returns [`StoreError`] on `SQLite` failures or row-decode errors.
 pub fn query_by_subject(conn: &Connection, subject: &str) -> Result<Vec<ConsentEvent>, StoreError> {
     query_where(conn, "subject = ?", params![subject])
+}
+
+/// All `source_forget` event-kind rows, ordered by `rowid`.
+///
+/// # Errors
+/// Returns [`StoreError`] on `SQLite` failures or row-decode errors.
+pub fn query_source_forgets(conn: &Connection) -> Result<Vec<ConsentEvent>, StoreError> {
+    query_where(conn, "kind = ?", params!["source_forget"])
 }
 
 /// Mirror cursor primitive: every event-kind row with `rowid > since`,
@@ -274,6 +294,7 @@ const fn kind_wire(kind: ConsentKind) -> &'static str {
         ConsentKind::PolicyChange => "policy_change",
         ConsentKind::RememberIntent => "remember_intent",
         ConsentKind::ForgetIntent => "forget_intent",
+        ConsentKind::SourceForget => "source_forget",
         ConsentKind::Grant => "grant",
         ConsentKind::Revoke => "revoke",
         ConsentKind::PromoteReceipt => "promote_receipt",
@@ -287,6 +308,7 @@ fn parse_kind(s: &str) -> Option<ConsentKind> {
         "policy_change" => ConsentKind::PolicyChange,
         "remember_intent" => ConsentKind::RememberIntent,
         "forget_intent" => ConsentKind::ForgetIntent,
+        "source_forget" => ConsentKind::SourceForget,
         "grant" => ConsentKind::Grant,
         "revoke" => ConsentKind::Revoke,
         "promote_receipt" => ConsentKind::PromoteReceipt,
@@ -300,7 +322,10 @@ fn parse_kind(s: &str) -> Option<ConsentKind> {
 /// `'REVOKE'`, everything else as `'GRANT'`.
 const fn kind_to_decision(kind: ConsentKind) -> &'static str {
     match kind {
-        ConsentKind::SensorDisable | ConsentKind::Revoke | ConsentKind::ForgetIntent => "REVOKE",
+        ConsentKind::SensorDisable
+        | ConsentKind::Revoke
+        | ConsentKind::ForgetIntent
+        | ConsentKind::SourceForget => "REVOKE",
         _ => "GRANT",
     }
 }

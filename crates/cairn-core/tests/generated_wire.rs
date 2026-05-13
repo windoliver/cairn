@@ -55,6 +55,79 @@ fn ingest_args_accepts_exactly_one_xor_member() {
 }
 
 #[test]
+fn ingest_args_accept_jsonl_source_and_reject_body_mix() {
+    let ok = serde_json::json!({
+        "kind": "trace",
+        "jsonl": "/tmp/session.jsonl",
+        "harness": "claude-code",
+        "recursive": true,
+        "limit": 10,
+    });
+    let parsed: IngestArgs = serde_json::from_value(ok).unwrap();
+    assert_eq!(parsed.jsonl.as_deref(), Some("/tmp/session.jsonl"));
+    assert_eq!(parsed.harness.as_deref(), Some("claude-code"));
+    assert!(parsed.validate().is_ok());
+
+    let mixed = serde_json::json!({
+        "kind": "trace",
+        "jsonl": "/tmp/session.jsonl",
+        "body": "forbidden mix",
+    });
+    let err = serde_json::from_value::<IngestArgs>(mixed).unwrap_err();
+    assert!(
+        err.to_string().contains("exactly one of"),
+        "expected XOR error, got: {err}"
+    );
+}
+
+#[test]
+fn ingest_args_reject_empty_jsonl_transcript_fields() {
+    let json = serde_json::json!({
+        "kind": "trace",
+        "jsonl": "/tmp/session.jsonl",
+        "harness": "",
+        "session_id_from": "",
+    });
+    let err = serde_json::from_value::<IngestArgs>(json).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("harness: must not be empty")
+            || msg.contains("session_id_from: must not be empty"),
+        "expected transcript field minLength error, got: {msg}"
+    );
+}
+
+#[test]
+fn ingest_args_reject_limit_below_one() {
+    let json = serde_json::json!({
+        "kind": "trace",
+        "jsonl": "/tmp/session.jsonl",
+        "limit": 0,
+    });
+    let err = serde_json::from_value::<IngestArgs>(json).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("limit: must be in [1, 4294967295]"),
+        "expected limit range error, got: {err}"
+    );
+}
+
+#[test]
+fn ingest_args_reject_limit_above_u32_max() {
+    let json = serde_json::json!({
+        "kind": "trace",
+        "jsonl": "/tmp/session.jsonl",
+        "limit": 4_294_967_296_i64,
+    });
+    let err = serde_json::from_value::<IngestArgs>(json).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("limit: must be in [1, 4294967295]"),
+        "expected upper-bound limit error, got: {err}"
+    );
+}
+
+#[test]
 fn signed_intent_rejects_missing_sequence_and_challenge_at_deserialize() {
     // Stripped-down intent missing both `sequence` and `server_challenge`.
     let mut m = signed_intent_minimum();
@@ -1254,6 +1327,33 @@ fn retrieve_session_accepts_valid() {
     });
     let parsed: RetrieveArgs = serde_json::from_value(json).unwrap();
     assert!(matches!(parsed, RetrieveArgs::Session { .. }));
+}
+
+#[test]
+fn retrieve_tool_call_args_accept_valid() {
+    let json = serde_json::json!({
+        "target": "tool_call",
+        "session_id": "s1",
+        "turn_id": "t1",
+        "tool_call_id": "call-1"
+    });
+    let parsed: RetrieveArgs = serde_json::from_value(json).unwrap();
+    assert!(matches!(parsed, RetrieveArgs::ToolCall { .. }));
+}
+
+#[test]
+fn retrieve_tool_call_args_reject_empty_tool_call_id() {
+    let json = serde_json::json!({
+        "target": "tool_call",
+        "session_id": "s1",
+        "turn_id": "t1",
+        "tool_call_id": ""
+    });
+    let err = serde_json::from_value::<RetrieveArgs>(json).unwrap_err();
+    assert!(
+        err.to_string().contains("tool_call_id"),
+        "expected tool_call_id-empty error, got: {err}"
+    );
 }
 
 #[test]
@@ -2509,6 +2609,61 @@ fn retrieve_data_session_rejects_empty_session_id() {
     assert!(
         err.to_string().contains("session_id"),
         "expected DataSession.session_id rejection, got: {err}"
+    );
+}
+
+#[test]
+fn retrieve_tool_call_response_round_trips() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("retrieve"));
+    m.insert("status".into(), serde_json::json!("committed"));
+    m.insert("target".into(), serde_json::json!("tool_call"));
+    m.insert(
+        "data".into(),
+        serde_json::json!({
+            "session_id": "s1",
+            "turn_id": "t1",
+            "tool_call_id": "call-1",
+            "items": [{
+                "turn_id": "t1",
+                "role": "tool",
+                "linkage": {
+                    "record_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                    "trace_event": "pre_tool",
+                    "sequence": 2,
+                    "capture_event_id": "evt-pre",
+                    "tool_call_id": "call-1",
+                    "payload_hash": "sha256:abc"
+                }
+            }]
+        }),
+    );
+    let resp: Response = serde_json::from_value(serde_json::Value::Object(m)).unwrap();
+    assert!(matches!(
+        resp.data,
+        Some(ResponseData::Retrieve(RetrieveData::ToolCall(_)))
+    ));
+}
+
+#[test]
+fn retrieve_data_tool_call_rejects_empty_ids() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("retrieve"));
+    m.insert("status".into(), serde_json::json!("committed"));
+    m.insert("target".into(), serde_json::json!("tool_call"));
+    m.insert(
+        "data".into(),
+        serde_json::json!({
+            "session_id": "s1",
+            "turn_id": "",
+            "tool_call_id": "call-1",
+            "items": []
+        }),
+    );
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("turn_id"),
+        "expected DataToolCall.turn_id rejection, got: {err}"
     );
 }
 

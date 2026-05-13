@@ -3,6 +3,8 @@
 
 use std::process::Command;
 
+use cairn_core::generated::status::StatusResponse;
+
 fn cli() -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_cairn"));
     // Pin CWD to a clean tempdir so the workspace root's transient
@@ -26,14 +28,13 @@ fn status_json_has_required_keys() {
         out.status
     );
     let stdout = String::from_utf8(out.stdout).expect("utf-8");
-    let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
-    assert_eq!(v["contract"], "cairn.mcp.v1");
-    assert!(v["server_info"]["version"].is_string());
-    assert!(v["server_info"]["incarnation"].is_string());
-    assert!(v["server_info"]["started_at"].is_string());
-    assert!(v["server_info"]["build"].is_string());
-    assert!(v["capabilities"].is_array());
-    assert!(v["extensions"].is_array());
+    let response: StatusResponse =
+        serde_json::from_str(stdout.trim()).expect("status must parse as generated type");
+    assert_eq!(response.contract, "cairn.mcp.v1");
+    assert!(!response.server_info.version.is_empty());
+    assert!(!response.server_info.incarnation.0.is_empty());
+    assert!(!response.server_info.started_at.is_empty());
+    assert!(!response.server_info.build.is_empty());
 }
 
 #[test]

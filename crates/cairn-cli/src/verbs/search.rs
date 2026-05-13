@@ -11,15 +11,16 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use cairn_core::config::EmbeddingProvider;
+use cairn_core::domain::filter::validate_filter;
 use cairn_core::generated::envelope::ResponseVerb;
-use cairn_core::generated::verbs::search::SearchArgsMode;
+use cairn_core::generated::verbs::search::{SearchArgsFilters, SearchArgsMode};
 use cairn_embeddings_local::EmbeddingModel;
 use clap::ArgMatches;
 
 use super::envelope::{
     capability_unavailable_response, capability_unavailable_response_with_hint, emit_json,
-    human_error, internal_error_response, invalid_args_response, new_operation_id,
-    not_found_response, unimplemented_response,
+    human_error, internal_error_response, invalid_args_response, invalid_filter_response,
+    new_operation_id, not_found_response, unimplemented_response,
 };
 use super::status;
 
@@ -135,6 +136,7 @@ async fn run_async(
     mode: SearchMode,
 ) -> ExitCode {
     let query = sub.get_one::<String>("query").cloned().unwrap_or_default();
+    let include_reasoning = sub.get_flag("include_reasoning");
     // The generated subcommand registers `limit` as `u32`; map to a usize
     // for downstream args. Floor at 1 to avoid degenerate empty-page calls.
     let limit: usize = sub
@@ -163,6 +165,24 @@ async fn run_async(
         }
         return ExitCode::from(64); // EX_USAGE
     }
+
+    let filter = match parse_filters(sub) {
+        Ok(filter) => filter,
+        Err(reason) => {
+            let resp = invalid_filter_response(ResponseVerb::Search, &reason, Some("filters"));
+            if json {
+                emit_json(&resp);
+            } else {
+                human_error(
+                    "search",
+                    "InvalidFilter",
+                    &format!("filters: {reason}"),
+                    &resp.operation_id,
+                );
+            }
+            return ExitCode::from(64); // EX_USAGE
+        }
+    };
 
     // `vault_root` is the path resolved by `main` through
     // `vault::resolve_vault` (`--vault NAME_OR_PATH > CAIRN_VAULT > CWD
@@ -323,6 +343,7 @@ async fn run_async(
             SearchMode::Hybrid => cairn_core::verbs::search::SearchMode::Hybrid,
         },
         limit,
+        include_reasoning,
         visibility_allowlist: vec![],
         auth_scope: cairn_core::domain::ScopeTuple {
             tenant: sub.get_one::<String>("scope-tenant").cloned(),
@@ -332,6 +353,7 @@ async fn run_async(
             ..Default::default()
         },
         model_label: kind.as_str().to_owned(),
+        filter,
         explain,
     };
 
@@ -368,6 +390,20 @@ async fn run_async(
             }
             ExitCode::from(64) // EX_USAGE
         }
+        Err(cairn_core::verbs::search::SearchError::InvalidFilter { reason }) => {
+            let resp = invalid_filter_response(ResponseVerb::Search, &reason, Some("filters"));
+            if json {
+                emit_json(&resp);
+            } else {
+                human_error(
+                    "search",
+                    "InvalidFilter",
+                    &format!("filters: {reason}"),
+                    &resp.operation_id,
+                );
+            }
+            ExitCode::from(64) // EX_USAGE
+        }
         Err(e) => {
             let msg = format!("{e}");
             let resp = internal_error_response(ResponseVerb::Search, &msg);
@@ -379,6 +415,16 @@ async fn run_async(
             ExitCode::FAILURE
         }
     }
+}
+
+fn parse_filters(sub: &ArgMatches) -> Result<Option<SearchArgsFilters>, String> {
+    let Some(raw) = sub.get_one::<String>("filters") else {
+        return Ok(None);
+    };
+    let parsed =
+        serde_json::from_str::<SearchArgsFilters>(raw).map_err(|e| format!("invalid JSON: {e}"))?;
+    validate_filter(&parsed).map_err(|e| e.to_string())?;
+    Ok(Some(parsed))
 }
 
 /// Render a successful `cairn search` outcome.
@@ -453,10 +499,8 @@ fn render_outcome(
 ///   purely off `score` still see the leg's ordering.
 ///
 /// `trust = Unknown` because P0 has no provenance ledger yet (#62 /
-/// brief §6.4); `citation = None` for the same reason. The CLI and
-/// SDK envelopes diverge on `Hit.score` for now — the SDK helper
-/// (`cairn-sdk::transport::envelope_from_outcome`) still emits `bm25`
-/// and tracks the same fix in #62.
+/// brief §6.4); `citation = None` for the same reason. The SDK and MCP
+/// surfaces mirror this score mapping at their own envelope boundaries.
 fn outcome_envelope(
     outcome: &cairn_core::verbs::search::SearchOutcome,
     mode: SearchMode,
@@ -464,6 +508,7 @@ fn outcome_envelope(
     use cairn_core::generated::common::Ulid;
     use cairn_core::generated::envelope::{Response, ResponseData, ResponseStatus};
     use cairn_core::generated::verbs::search::{Hit, HitTrust, ScoreExplain, SearchData};
+    use cairn_core::policy_trace::{to_wire, to_wire_exclusions};
 
     let hits: Vec<Hit> = outcome
         .candidates
@@ -508,7 +553,10 @@ fn outcome_envelope(
     let data = SearchData {
         hits,
         next_cursor: None,
-        excluded: None,
+        excluded: outcome
+            .excluded
+            .as_ref()
+            .map(|items| to_wire_exclusions(items)),
         score_explain,
         degraded_legs,
     };
@@ -518,7 +566,7 @@ fn outcome_envelope(
         data: Some(ResponseData::Search(data)),
         error: None,
         operation_id: new_operation_id(),
-        policy_trace: Vec::new(),
+        policy_trace: to_wire(&outcome.policy_trace),
         status: ResponseStatus::Committed,
         target: None,
         verb: ResponseVerb::Search,

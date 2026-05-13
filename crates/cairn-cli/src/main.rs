@@ -8,9 +8,10 @@
 use std::io::Write;
 use std::process::ExitCode;
 
-use cairn_cli::{command, identity, plugins, repair, verbs};
+use cairn_cli::{command, doctor, hooks, identity, plugins, repair, verbs};
 use cairn_core::contract::registry::PluginError;
 use clap::ArgMatches;
+
 fn registry_store() -> anyhow::Result<cairn_cli::vault::VaultRegistryStore> {
     let path = if let Ok(p) = std::env::var("CAIRN_REGISTRY") {
         std::path::PathBuf::from(p)
@@ -76,6 +77,7 @@ fn resolve_vault_or_cwd(
     };
     match cairn_cli::vault::resolve_vault(opts) {
         Ok(p) => {
+            verbs::forget::reconcile_pending_source_redactions(&p)?;
             let source = if explicit.is_some() {
                 VaultResolutionSource::Explicit
             } else if cwd
@@ -104,10 +106,9 @@ fn resolve_vault_or_cwd(
                 .downcast_ref::<cairn_cli::vault::VaultError>()
                 .is_some_and(|ve| matches!(ve, cairn_cli::vault::VaultError::NoneResolved));
             if is_none_resolved && explicit.is_none() {
-                Ok((
-                    cwd.unwrap_or_else(|| std::path::PathBuf::from(".")),
-                    VaultResolutionSource::CwdFallback,
-                ))
+                let path = cwd.unwrap_or_else(|| std::path::PathBuf::from("."));
+                verbs::forget::reconcile_pending_source_redactions(&path)?;
+                Ok((path, VaultResolutionSource::CwdFallback))
             } else {
                 Err(e)
             }
@@ -115,7 +116,13 @@ fn resolve_vault_or_cwd(
     }
 }
 
-fn subcommand_needs_vault_guard(active_subcommand: &str) -> bool {
+fn subcommand_needs_vault_guard(subcommand: Option<(&str, &ArgMatches)>) -> bool {
+    let Some((active_subcommand, sub)) = subcommand else {
+        return false;
+    };
+    if active_subcommand == "forget" {
+        return verbs::forget::requires_vault_context(sub);
+    }
     !matches!(
         active_subcommand,
         "vault"
@@ -126,6 +133,7 @@ fn subcommand_needs_vault_guard(active_subcommand: &str) -> bool {
             | "llm"
             | "identity"
             | "flush"
+            | "hook"
             | "repair"
     )
 }
@@ -154,12 +162,11 @@ fn main() -> ExitCode {
         .cloned()
         .or_else(|| std::env::var("CAIRN_VAULT").ok());
 
-    let active_subcommand = matches.subcommand_name().unwrap_or("");
     // admin verbs resolve their own vault path from CAIRN_VAULT / CWD; the
     // registry guard here would reject them when no vault is registered.
     // `identity` manages vault-path internally for each subcommand; exclude
     // from the top-level vault registry guard (which requires a named vault).
-    let needs_vault_guard = subcommand_needs_vault_guard(active_subcommand);
+    let needs_vault_guard = subcommand_needs_vault_guard(matches.subcommand());
 
     if needs_vault_guard {
         let store = match registry_store() {
@@ -198,12 +205,9 @@ fn main() -> ExitCode {
     }
 
     match matches.subcommand() {
-        Some(("ingest", sub)) => match resolve_vault_or_cwd(explicit_vault.as_deref()) {
-            Ok((vault_root, _source)) => verbs::ingest::run(sub, &vault_root),
-            Err(e) => {
-                eprintln!("cairn ingest: vault resolution error — {e:#}");
-                ExitCode::from(78) // EX_CONFIG
-            }
+        Some(("ingest", sub)) => match resolve_vault_and_config(explicit_vault.as_deref()) {
+            Ok((vault_root, _source, config)) => verbs::ingest::run(sub, vault_root, config),
+            Err(code) => code,
         },
         Some(("search", sub)) => match resolve_vault_or_cwd(explicit_vault.as_deref()) {
             // search has its own internal vault-binding gate, so the
@@ -215,25 +219,41 @@ fn main() -> ExitCode {
                 ExitCode::from(78) // EX_CONFIG
             }
         },
-        Some(("retrieve", sub)) => verbs::retrieve::run(sub),
-        Some(("summarize", sub)) => verbs::summarize::run(sub),
+        Some(("retrieve", sub)) => match resolve_vault_and_config(explicit_vault.as_deref()) {
+            Ok((vault_root, _source, config)) => verbs::retrieve::run(sub, vault_root, config),
+            Err(code) => code,
+        },
+        Some(("summarize", sub)) => match resolve_vault_and_config(explicit_vault.as_deref()) {
+            Ok((vault_root, _source, config)) => verbs::summarize::run(sub, vault_root, config),
+            Err(code) => code,
+        },
         Some(("assemble_hot", sub)) => run_assemble_hot(sub, explicit_vault.as_deref()),
-        Some(("capture_trace", sub)) => verbs::capture_trace::run(sub),
+        Some(("capture_trace", sub)) => match resolve_vault_and_config(explicit_vault.as_deref()) {
+            Ok((vault_root, _source, config)) => verbs::capture_trace::run(sub, vault_root, config),
+            Err(code) => code,
+        },
         Some(("lint", sub)) => match resolve_vault_or_cwd(explicit_vault.as_deref()) {
             Ok((vault_root, _source)) => verbs::lint::run(sub, Some(vault_root.as_path())),
             Err(_) => verbs::lint::run(sub, None),
         },
-        Some(("forget", sub)) => match resolve_vault_or_cwd(explicit_vault.as_deref()) {
-            Ok((vault_root, _source)) => verbs::forget::run(sub, &vault_root),
-            Err(e) => {
-                eprintln!("cairn forget: vault resolution error — {e:#}");
-                ExitCode::from(78)
+        Some(("forget", sub)) => {
+            if verbs::forget::requires_vault_context(sub) {
+                match resolve_vault_and_config(explicit_vault.as_deref()) {
+                    Ok((vault_root, _source, config)) => {
+                        verbs::forget::run(sub, vault_root, config)
+                    }
+                    Err(code) => code,
+                }
+            } else {
+                verbs::forget::run_without_context(sub)
             }
-        },
+        }
+        Some(("hook", sub)) => hooks::run(sub),
         Some(("status", sub)) => run_status(sub, explicit_vault.as_deref()),
         Some(("handshake", sub)) => run_handshake(sub, explicit_vault.as_deref()),
         Some(("plugins", sub)) => run_plugins(sub),
         Some(("bootstrap", sub)) => run_bootstrap(sub),
+        Some(("doctor", sub)) => doctor::run(sub),
         Some(("mcp", _sub)) => {
             let (vault_root, source, config) =
                 match resolve_vault_and_config(explicit_vault.as_deref()) {
@@ -540,7 +560,7 @@ fn run_assemble_hot(sub: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode 
                 return ExitCode::from(78); // EX_CONFIG
             }
         };
-    verbs::assemble_hot::run(sub, &config)
+    verbs::assemble_hot::run(sub, vault_root, config)
 }
 
 fn run_admin(matches: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {

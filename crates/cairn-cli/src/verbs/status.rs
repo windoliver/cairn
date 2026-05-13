@@ -911,6 +911,10 @@ mod tests {
             !caps.contains(&Capabilities::CairnMcpV1SearchHybrid),
             "hybrid gates on model presence too (round-2 fix); got {caps:?}"
         );
+        assert!(
+            !caps.contains(&Capabilities::CairnMcpV1SensorsPreCompact),
+            "pre-compact must stay hidden until a runtime caller dispatches the hook; got {caps:?}"
+        );
     }
 
     #[test]

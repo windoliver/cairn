@@ -1,0 +1,10 @@
+{
+  "cases": {
+    "err_unknown_verb": {
+      "kind": "stub"
+    },
+    "err_malformed_args": {
+      "kind": "invalid_args"
+    }
+  }
+}
