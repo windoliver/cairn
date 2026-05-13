@@ -136,7 +136,11 @@ fn status_json_uses_screen_config_file_e2e() {
     match v["sensors"]["screen"]["state"].as_str() {
         Some("enabled") => {
             assert_eq!(v["sensors"]["screen"]["permission"], "granted");
-            assert!(v["sensors"]["screen"]["degradation"].is_null());
+            assert!(
+                v["sensors"]["screen"]["degradation"].is_null()
+                    || v["sensors"]["screen"]["degradation"]["code"]
+                        == "screen.backend_unavailable"
+            );
         }
         Some("permission_missing") => {
             assert_eq!(v["sensors"]["screen"]["permission"], "denied");

@@ -4,12 +4,15 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use cairn_core::config::CairnConfig;
+use cairn_core::domain::{CaptureEvent, CaptureEventId};
 use cairn_sensors_local::screen::{
-    NoopScreenPolicy, ScreenDegradationCode, ScreenError, ScreenSensor, XcapBackendRuntime,
+    ScreenDegradationCode, ScreenError, ScreenEventObservation, ScreenObservation,
+    capture_png_snapshot_configured,
 };
+use cairn_sensors_local::{EmitOutcome, LocalSensorConfig, SensorSettings};
 use clap::{Arg, ArgAction, ArgMatches};
 
-use super::envelope::emit_json;
+use super::envelope::{emit_json, new_operation_id};
 
 /// Build the `cairn screen` subcommand.
 #[must_use]
@@ -52,27 +55,40 @@ fn run_capture(sub: &ArgMatches, config: &CairnConfig) -> ExitCode {
     let output_path = sub
         .get_one::<PathBuf>("output")
         .expect("clap requires --output");
-    let sensor = ScreenSensor::new(XcapBackendRuntime, NoopScreenPolicy);
-
-    match sensor.capture_png_snapshot(&config.sensors.screen, output_path) {
+    match capture_png_snapshot_configured(&config.sensors.screen, output_path) {
         Ok(Some(receipt)) => {
+            let capture_event = match capture_event_for_observation(receipt.observation.clone()) {
+                Ok(event) => event,
+                Err(err) => {
+                    eprintln!("cairn screen capture: failed to build capture event: {err}");
+                    return ExitCode::from(70);
+                }
+            };
             if json {
                 emit_json(&serde_json::json!({
                     "status": "captured",
                     "output_path": receipt.output_path,
                     "width": receipt.width,
                     "height": receipt.height,
-                    "backend": "xcap",
+                    "backend": format!("{:?}", receipt.observation.backend).to_ascii_lowercase(),
                     "ocr_engine": format!("{:?}", receipt.observation.ocr_engine).to_ascii_lowercase(),
                     "sensor_label": receipt.observation.sensor_label,
                     "captured_at": receipt.observation.captured_at,
+                    "app": receipt.observation.app,
+                    "window_title": receipt.observation.window_title,
+                    "url": receipt.observation.url,
+                    "ocr_text_bytes": receipt.observation.text.len(),
+                    "bounding_boxes_count": receipt.observation.bounding_boxes.len(),
+                    "capture_event": capture_event,
                 }));
             } else {
                 println!(
-                    "captured {} ({}x{})",
+                    "captured {} ({}x{}, app={}, ocr_bytes={})",
                     receipt.output_path.display(),
                     receipt.width,
-                    receipt.height
+                    receipt.height,
+                    receipt.observation.app,
+                    receipt.observation.text.len()
                 );
             }
             ExitCode::SUCCESS
@@ -89,6 +105,19 @@ fn run_capture(sub: &ArgMatches, config: &CairnConfig) -> ExitCode {
             eprintln!("cairn screen capture: {err}");
             exit_code_for_screen_error(&err)
         }
+    }
+}
+
+fn capture_event_for_observation(observation: ScreenObservation) -> Result<CaptureEvent, String> {
+    let event_id = CaptureEventId::parse(new_operation_id().0).map_err(|err| err.to_string())?;
+    let event_observation = ScreenEventObservation::from_observation(event_id, observation, None)
+        .map_err(|err| err.to_string())?;
+    let mut local_config = LocalSensorConfig::all_disabled();
+    local_config.screen = SensorSettings::enabled();
+
+    match cairn_sensors_local::screen::emit(&local_config, event_observation) {
+        EmitOutcome::Emitted(event) => Ok(event),
+        EmitOutcome::Dropped { reason, .. } => Err(format!("{reason:?}")),
     }
 }
 

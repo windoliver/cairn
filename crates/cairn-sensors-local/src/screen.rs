@@ -1,19 +1,31 @@
 //! Mockable runtime boundary for local screen capture.
 
 use std::collections::VecDeque;
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-#[cfg(target_os = "macos")]
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use cairn_core::config::{ScreenBackend, ScreenOcrEngine, ScreenSensorConfig};
+use cairn_core::domain::{
+    CaptureEventId, CapturePayload, CaptureRefs, Rfc3339Timestamp, SourceFamily,
+};
 use cairn_core::generated::common::Capabilities;
+use serde_json::json;
+
+use crate::event::build_auto_event;
+use crate::policy::{PolicyAction, sanitize_text_payload};
+use crate::{DropReason, EmitOutcome, LocalSensorConfig, SensorKind};
 
 const FRAME_BUDGET_WINDOW: Duration = Duration::from_mins(1);
 
+/// Bare sensor label body used by the in-process xcap backend.
+pub const XCAP_SENSOR_LABEL_BODY: &str = "local:screen:xcap:v1";
 /// Sensor label used by the in-process xcap backend.
 pub const XCAP_SENSOR_LABEL: &str = "snr:local:screen:xcap:v1";
+/// Bare sensor label body used by the optional screenpipe backend.
+pub const SCREENPIPE_SENSOR_LABEL_BODY: &str = "local:screen:screenpipe:v1";
 /// Sensor label used by the optional screenpipe backend.
 pub const SCREENPIPE_SENSOR_LABEL: &str = "snr:local:screen:screenpipe:v1";
 
@@ -115,6 +127,15 @@ impl ScreenDegradation {
             message: degradation_message(code).to_owned(),
         }
     }
+
+    /// Create a degradation with a backend-specific operator message.
+    #[must_use]
+    pub fn with_message(code: ScreenDegradationCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
 }
 
 /// Result of probing a configured screen backend.
@@ -159,6 +180,25 @@ pub struct BoundingBox {
     pub height: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct ScreenOcrResult {
+    text: String,
+    bounding_boxes: Vec<BoundingBox>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScreenOcrCapture {
+    engine: ResolvedScreenOcrEngine,
+    result: ScreenOcrResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SanitizedScreenFields {
+    text: String,
+    window_title: String,
+    url: Option<String>,
+}
+
 /// Captured screen text and focused-window metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScreenObservation {
@@ -182,6 +222,43 @@ pub struct ScreenObservation {
     pub ocr_engine: ResolvedScreenOcrEngine,
 }
 
+/// Screen observation plus pipeline envelope metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenEventObservation {
+    /// Capture event id assigned by the caller.
+    pub event_id: CaptureEventId,
+    /// Observation capture timestamp.
+    pub captured_at: Rfc3339Timestamp,
+    /// Runtime screen observation.
+    pub observation: ScreenObservation,
+    /// Optional session, turn, and tool references.
+    pub refs: Option<CaptureRefs>,
+}
+
+impl ScreenEventObservation {
+    /// Convert a runtime observation into an event-ready observation.
+    ///
+    /// # Errors
+    /// Returns [`ScreenError::CaptureFailed`] when the runtime timestamp is
+    /// not a valid RFC-3339 timestamp.
+    pub fn from_observation(
+        event_id: CaptureEventId,
+        observation: ScreenObservation,
+        refs: Option<CaptureRefs>,
+    ) -> Result<Self, ScreenError> {
+        let captured_at =
+            Rfc3339Timestamp::parse(observation.captured_at.clone()).map_err(|err| {
+                ScreenError::CaptureFailed(format!("invalid screen timestamp: {err}"))
+            })?;
+        Ok(Self {
+            event_id,
+            captured_at,
+            observation,
+            refs,
+        })
+    }
+}
+
 /// Receipt for a screenshot written to disk by a screen backend.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScreenCaptureReceipt {
@@ -193,6 +270,14 @@ pub struct ScreenCaptureReceipt {
     pub height: u32,
     /// Metadata observation associated with the screenshot.
     pub observation: ScreenObservation,
+}
+
+#[cfg(any(test, feature = "screenpipe-runtime"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScreenpipeFrameCapture {
+    observation: ScreenObservation,
+    frame_id: Option<u64>,
+    file_path: Option<PathBuf>,
 }
 
 /// Errors emitted by the screen runtime boundary.
@@ -267,6 +352,175 @@ impl ScreenPolicy for BasicScreenPolicy {
         }
         Ok(observation)
     }
+}
+
+/// Emit one screen OCR observation as a validated capture event.
+#[must_use]
+pub fn emit(config: &LocalSensorConfig, observation: ScreenEventObservation) -> EmitOutcome {
+    if !config.screen.enabled {
+        return EmitOutcome::Dropped {
+            sensor: SensorKind::Screen,
+            reason: DropReason::Disabled,
+        };
+    }
+
+    let raw_len = observation
+        .observation
+        .text
+        .len()
+        .saturating_add(observation.observation.app.len())
+        .saturating_add(observation.observation.window_title.len())
+        .saturating_add(observation.observation.url.as_ref().map_or(0, String::len))
+        .saturating_add(
+            observation
+                .observation
+                .bounding_boxes
+                .len()
+                .saturating_mul(std::mem::size_of::<BoundingBox>()),
+        );
+    if !config.screen.budget.allows(1, raw_len) {
+        return EmitOutcome::Dropped {
+            sensor: SensorKind::Screen,
+            reason: DropReason::BudgetExceeded,
+        };
+    }
+
+    if observation.observation.app.trim().is_empty() {
+        return EmitOutcome::Dropped {
+            sensor: SensorKind::Screen,
+            reason: DropReason::MalformedObservation("screen app is required".to_owned()),
+        };
+    }
+
+    let Some(sensor_label_body) = sensor_label_body(&observation.observation.sensor_label) else {
+        return EmitOutcome::Dropped {
+            sensor: SensorKind::Screen,
+            reason: DropReason::MalformedObservation(format!(
+                "unknown screen sensor label `{}`",
+                observation.observation.sensor_label
+            )),
+        };
+    };
+
+    let sanitized = match sanitize_screen_fields(&observation.observation) {
+        Ok(sanitized) => sanitized,
+        Err(reason) => {
+            return EmitOutcome::Dropped {
+                sensor: SensorKind::Screen,
+                reason,
+            };
+        }
+    };
+
+    let sanitized_payload = match raw_payload_bytes(
+        &observation.observation,
+        &sanitized.text,
+        &sanitized.window_title,
+        sanitized.url.as_deref(),
+    ) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return EmitOutcome::Dropped {
+                sensor: SensorKind::Screen,
+                reason: DropReason::MalformedObservation(format!(
+                    "screen payload serialization failed: {err}"
+                )),
+            };
+        }
+    };
+
+    let payload = CapturePayload::Screen {
+        app: observation.observation.app,
+        window_title: sanitized.window_title,
+        url: sanitized.url,
+    };
+
+    match build_auto_event(
+        observation.event_id,
+        observation.captured_at,
+        sensor_label_body,
+        payload,
+        SourceFamily::Screen,
+        observation.refs,
+        &sanitized_payload,
+    ) {
+        Ok(event) => EmitOutcome::Emitted(event),
+        Err(err) => EmitOutcome::Dropped {
+            sensor: SensorKind::Screen,
+            reason: DropReason::MalformedObservation(err.to_string()),
+        },
+    }
+}
+
+fn sensor_label_body(sensor_label: &str) -> Option<&'static str> {
+    match sensor_label {
+        XCAP_SENSOR_LABEL => Some(XCAP_SENSOR_LABEL_BODY),
+        SCREENPIPE_SENSOR_LABEL => Some(SCREENPIPE_SENSOR_LABEL_BODY),
+        _ => None,
+    }
+}
+
+fn sanitize_screen_fields(
+    observation: &ScreenObservation,
+) -> Result<SanitizedScreenFields, DropReason> {
+    let text = sanitize_screen_text(&observation.text)?;
+    let window_title = sanitize_screen_text(&observation.window_title)?;
+    let url = observation
+        .url
+        .as_deref()
+        .map(sanitize_screen_text)
+        .transpose()?;
+
+    Ok(SanitizedScreenFields {
+        text,
+        window_title,
+        url,
+    })
+}
+
+fn sanitize_screen_text(text: &str) -> Result<String, DropReason> {
+    match sanitize_text_payload(text) {
+        PolicyAction::Sanitized(text) => Ok(text),
+        PolicyAction::Rejected(reason) => Err(DropReason::PolicyRejected(reason)),
+    }
+}
+
+fn raw_payload_bytes(
+    observation: &ScreenObservation,
+    sanitized_text: &str,
+    sanitized_window_title: &str,
+    sanitized_url: Option<&str>,
+) -> Result<Vec<u8>, serde_json::Error> {
+    let bounding_boxes = observation
+        .bounding_boxes
+        .iter()
+        .map(|box_| {
+            json!({
+                "height": box_.height,
+                "width": box_.width,
+                "x": box_.x,
+                "y": box_.y,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    serde_json::to_vec(&json!({
+        "backend": screen_backend_name(observation.backend),
+        "ocr": {
+            "bounding_boxes": bounding_boxes,
+            "engine": ocr_engine_name(observation.ocr_engine),
+            "text": sanitized_text,
+        },
+        "screen": {
+            "app": observation.app,
+            "url": sanitized_url,
+            "window_title": sanitized_window_title,
+        },
+        "sensor_label": observation.sensor_label,
+        "timing": {
+            "captured_at": observation.captured_at,
+        },
+    }))
 }
 
 /// Mockable screen sensor that composes backend and policy.
@@ -430,6 +684,70 @@ impl ScreenCaptureRuntime for XcapBackendRuntime {
     }
 }
 
+/// Optional screenpipe backend runtime.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ScreenpipeBackendRuntime;
+
+impl ScreenBackendRuntime for ScreenpipeBackendRuntime {
+    fn probe(&self, config: &ScreenSensorConfig) -> ScreenProbe {
+        screenpipe_probe(config)
+    }
+
+    fn capture_snapshot(
+        &self,
+        config: &ScreenSensorConfig,
+    ) -> Result<ScreenObservation, ScreenError> {
+        screenpipe_capture_observation(config)
+    }
+}
+
+impl ScreenCaptureRuntime for ScreenpipeBackendRuntime {
+    fn capture_png_snapshot(
+        &self,
+        config: &ScreenSensorConfig,
+        output_path: &Path,
+    ) -> Result<ScreenCaptureReceipt, ScreenError> {
+        screenpipe_capture_png_snapshot(config, output_path)
+    }
+}
+
+/// Capture one screenshot using the configured primary backend, falling back
+/// from screenpipe to in-process xcap when the primary path is unavailable.
+pub fn capture_png_snapshot_configured(
+    config: &ScreenSensorConfig,
+    output_path: &Path,
+) -> Result<Option<ScreenCaptureReceipt>, ScreenError> {
+    match config.backend {
+        ScreenBackend::Xcap => ScreenSensor::new(XcapBackendRuntime, NoopScreenPolicy)
+            .capture_png_snapshot(config, output_path),
+        ScreenBackend::Screenpipe => {
+            let primary = ScreenSensor::new(ScreenpipeBackendRuntime, NoopScreenPolicy);
+            match primary.capture_png_snapshot(config, output_path) {
+                Ok(receipt) => Ok(receipt),
+                Err(err) if can_fallback_from_screenpipe(&err) => {
+                    let mut fallback_config = config.clone();
+                    fallback_config.backend = ScreenBackend::Xcap;
+                    ScreenSensor::new(XcapBackendRuntime, NoopScreenPolicy)
+                        .capture_png_snapshot(&fallback_config, output_path)
+                }
+                Err(err) => Err(err),
+            }
+        }
+        _ => Err(ScreenError::Unavailable(
+            ScreenDegradationCode::BackendUnavailable,
+        )),
+    }
+}
+
+fn can_fallback_from_screenpipe(err: &ScreenError) -> bool {
+    !matches!(
+        err,
+        ScreenError::Unavailable(
+            ScreenDegradationCode::Disabled | ScreenDegradationCode::PermissionMissing
+        )
+    )
+}
+
 /// Capabilities compiled into this crate for screen capture.
 #[must_use]
 pub fn compiled_capabilities() -> Vec<Capabilities> {
@@ -461,13 +779,7 @@ pub fn probe_config(config: &ScreenSensorConfig) -> ScreenProbe {
 
     match config.backend {
         ScreenBackend::Xcap => XcapBackendRuntime.probe(config),
-        ScreenBackend::Screenpipe => {
-            if cfg!(feature = "screenpipe-runtime") {
-                permission_missing_probe(config.backend, ocr_engine)
-            } else {
-                backend_unavailable_probe(config.backend, ocr_engine)
-            }
-        }
+        ScreenBackend::Screenpipe => screenpipe_probe(config),
         _ => degraded_probe(config.backend, ocr_engine),
     }
 }
@@ -527,15 +839,23 @@ fn xcap_probe(config: &ScreenSensorConfig) -> ScreenProbe {
             .map(|_| ())
             .map_err(screen_error_from_xcap)
     }) {
-        Ok(()) => ScreenProbe {
-            backend: ScreenBackend::Xcap,
-            state: ScreenState::Enabled,
-            mode: ScreenMode::Snapshot,
-            permission: ScreenPermission::Granted,
-            ocr_engine,
-            degradation: None,
-            focused_app: None,
-        },
+        Ok(()) => {
+            let degradation = ocr_probe_degradation(config, ocr_engine);
+            let state = if degradation.is_some() && config.ocr.engine != ScreenOcrEngine::Auto {
+                ScreenState::Degraded
+            } else {
+                ScreenState::Enabled
+            };
+            ScreenProbe {
+                backend: ScreenBackend::Xcap,
+                state,
+                mode: ScreenMode::Snapshot,
+                permission: ScreenPermission::Granted,
+                ocr_engine,
+                degradation,
+                focused_app: focused_window_metadata().map(|metadata| metadata.app),
+            }
+        }
         Err(err) => probe_from_screen_error(ScreenBackend::Xcap, ocr_engine, err.code()),
     }
 }
@@ -548,15 +868,227 @@ fn xcap_probe(config: &ScreenSensorConfig) -> ScreenProbe {
     )
 }
 
+fn ocr_probe_degradation(
+    config: &ScreenSensorConfig,
+    ocr_engine: ResolvedScreenOcrEngine,
+) -> Option<ScreenDegradation> {
+    match ocr_engine {
+        ResolvedScreenOcrEngine::Tesseract if !tesseract_available() => {
+            let message = if config.ocr.engine == ScreenOcrEngine::Auto {
+                "tesseract OCR is unavailable; xcap screenshots will still capture metadata-only observations"
+            } else {
+                "tesseract OCR is unavailable; install tesseract or set sensors.screen.ocr.engine: off"
+            };
+            Some(ScreenDegradation::with_message(
+                ScreenDegradationCode::BackendUnavailable,
+                message,
+            ))
+        }
+        ResolvedScreenOcrEngine::Vision | ResolvedScreenOcrEngine::Winrt => {
+            Some(ScreenDegradation::with_message(
+                ScreenDegradationCode::BackendUnavailable,
+                "requested screen OCR engine is unavailable in this build",
+            ))
+        }
+        ResolvedScreenOcrEngine::Off | ResolvedScreenOcrEngine::Tesseract => None,
+    }
+}
+
+fn tesseract_available() -> bool {
+    Command::new("tesseract")
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(not(feature = "screenpipe-runtime"))]
+fn screenpipe_probe(config: &ScreenSensorConfig) -> ScreenProbe {
+    backend_unavailable_probe(
+        config.backend,
+        ResolvedScreenOcrEngine::from_config(config.ocr.engine),
+    )
+}
+
+#[cfg(feature = "screenpipe-runtime")]
+fn screenpipe_probe(config: &ScreenSensorConfig) -> ScreenProbe {
+    let ocr_engine = ResolvedScreenOcrEngine::from_config(config.ocr.engine);
+    match ensure_screenpipe_ready() {
+        Ok(()) => ScreenProbe {
+            backend: ScreenBackend::Screenpipe,
+            state: ScreenState::Enabled,
+            mode: ScreenMode::Continuous,
+            permission: ScreenPermission::Granted,
+            ocr_engine,
+            degradation: None,
+            focused_app: None,
+        },
+        Err(err) => ScreenProbe {
+            backend: ScreenBackend::Screenpipe,
+            state: ScreenState::Degraded,
+            mode: ScreenMode::Off,
+            permission: ScreenPermission::NotRequested,
+            ocr_engine,
+            degradation: Some(ScreenDegradation::with_message(
+                err.code(),
+                format!(
+                    "screenpipe daemon unavailable at {}; start it with `npx screenpipe@latest record` or set CAIRN_SCREENPIPE_SPAWN=1",
+                    screenpipe_base_url()
+                ),
+            )),
+            focused_app: None,
+        },
+    }
+}
+
+#[cfg(not(feature = "screenpipe-runtime"))]
+fn screenpipe_capture_observation(
+    _config: &ScreenSensorConfig,
+) -> Result<ScreenObservation, ScreenError> {
+    Err(ScreenError::Unavailable(
+        ScreenDegradationCode::BackendUnavailable,
+    ))
+}
+
+#[cfg(feature = "screenpipe-runtime")]
+fn screenpipe_capture_observation(
+    config: &ScreenSensorConfig,
+) -> Result<ScreenObservation, ScreenError> {
+    Ok(screenpipe_capture_frame(config)?.observation)
+}
+
+#[cfg(not(feature = "screenpipe-runtime"))]
+fn screenpipe_capture_png_snapshot(
+    _config: &ScreenSensorConfig,
+    _output_path: &Path,
+) -> Result<ScreenCaptureReceipt, ScreenError> {
+    Err(ScreenError::Unavailable(
+        ScreenDegradationCode::BackendUnavailable,
+    ))
+}
+
+#[cfg(feature = "screenpipe-runtime")]
+fn screenpipe_capture_png_snapshot(
+    config: &ScreenSensorConfig,
+    output_path: &Path,
+) -> Result<ScreenCaptureReceipt, ScreenError> {
+    let capture = screenpipe_capture_frame(config)?;
+    let bytes = if let Some(frame_id) = capture.frame_id {
+        screenpipe_fetch_frame(frame_id)?
+    } else if let Some(file_path) = capture.file_path.as_ref() {
+        if !file_path.is_absolute() {
+            return Err(ScreenError::CaptureFailed(format!(
+                "screenpipe frame path is not absolute: {}",
+                file_path.display()
+            )));
+        }
+        fs::read(file_path).map_err(|err| {
+            ScreenError::CaptureFailed(format!(
+                "screenpipe frame read {}: {err}",
+                file_path.display()
+            ))
+        })?
+    } else {
+        return Err(ScreenError::CaptureFailed(
+            "screenpipe OCR content did not include frame_id or file_path".to_owned(),
+        ));
+    };
+
+    let (width, height) = image_dimensions_from_bytes(&bytes)?;
+    if let Some(parent) = output_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).map_err(|err| ScreenError::CaptureFailed(err.to_string()))?;
+    }
+    fs::write(output_path, &bytes).map_err(|err| ScreenError::CaptureFailed(err.to_string()))?;
+
+    Ok(ScreenCaptureReceipt {
+        output_path: output_path.to_path_buf(),
+        width,
+        height,
+        observation: capture.observation,
+    })
+}
+
+#[cfg(feature = "screenpipe-runtime")]
+fn screenpipe_capture_frame(
+    config: &ScreenSensorConfig,
+) -> Result<ScreenpipeFrameCapture, ScreenError> {
+    ensure_screenpipe_ready()?;
+    let body = screenpipe_runtime_block_on(async {
+        let client = reqwest::Client::new();
+        let url = format!(
+            "{}/search?content_type=vision&limit=1&offset=0&min_length=1",
+            screenpipe_base_url()
+        );
+        let response = client
+            .get(url)
+            .timeout(Duration::from_secs(3))
+            .send()
+            .await
+            .map_err(|err| ScreenError::CaptureFailed(format!("screenpipe search: {err}")))?;
+        let status = response.status();
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|err| ScreenError::CaptureFailed(format!("screenpipe search body: {err}")))?;
+        if !status.is_success() {
+            return Err(ScreenError::CaptureFailed(format!(
+                "screenpipe search returned HTTP {status}: {}",
+                String::from_utf8_lossy(&bytes)
+            )));
+        }
+        Ok(bytes.to_vec())
+    })?;
+    let mut capture = screenpipe_frame_capture_from_search_json(&body)?;
+    capture.observation.ocr_engine = ResolvedScreenOcrEngine::from_config(config.ocr.engine);
+    Ok(capture)
+}
+
+#[cfg(feature = "screenpipe-runtime")]
+fn screenpipe_fetch_frame(frame_id: u64) -> Result<Vec<u8>, ScreenError> {
+    screenpipe_runtime_block_on(async {
+        let client = reqwest::Client::new();
+        let url = format!("{}/frames/{frame_id}", screenpipe_base_url());
+        let response = client
+            .get(url)
+            .timeout(Duration::from_secs(3))
+            .send()
+            .await
+            .map_err(|err| ScreenError::CaptureFailed(format!("screenpipe frame: {err}")))?;
+        let status = response.status();
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|err| ScreenError::CaptureFailed(format!("screenpipe frame body: {err}")))?;
+        if status.is_success() {
+            Ok(bytes.to_vec())
+        } else {
+            Err(ScreenError::CaptureFailed(format!(
+                "screenpipe frame {frame_id} returned HTTP {status}: {}",
+                String::from_utf8_lossy(&bytes)
+            )))
+        }
+    })
+}
+
 #[cfg(target_os = "macos")]
 fn capture_xcap_observation(config: &ScreenSensorConfig) -> Result<ScreenObservation, ScreenError> {
     let monitor = primary_xcap_monitor()?;
     let image = monitor.capture_image().map_err(screen_error_from_xcap)?;
+    let width = image.width();
+    let height = image.height();
+    let output_path = temp_ocr_image_path();
+    image
+        .save(&output_path)
+        .map_err(|err| ScreenError::CaptureFailed(err.to_string()))?;
+    let ocr = recognize_png_ocr(config, &output_path, width, height)?;
+    let _ = fs::remove_file(&output_path);
     Ok(observation_from_monitor(
-        config,
-        &monitor,
-        image.width(),
-        image.height(),
+        config, &monitor, width, height, ocr,
     ))
 }
 
@@ -582,18 +1114,18 @@ fn capture_xcap_png_snapshot(
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
     {
-        std::fs::create_dir_all(parent)
-            .map_err(|err| ScreenError::CaptureFailed(err.to_string()))?;
+        fs::create_dir_all(parent).map_err(|err| ScreenError::CaptureFailed(err.to_string()))?;
     }
     image
         .save(output_path)
         .map_err(|err| ScreenError::CaptureFailed(err.to_string()))?;
+    let ocr = recognize_png_ocr(config, output_path, width, height)?;
 
     Ok(ScreenCaptureReceipt {
         output_path: output_path.to_path_buf(),
         width,
         height,
-        observation: observation_from_monitor(config, &monitor, width, height),
+        observation: observation_from_monitor(config, &monitor, width, height, ocr),
     })
 }
 
@@ -623,23 +1155,180 @@ fn primary_xcap_monitor() -> Result<xcap::Monitor, ScreenError> {
 }
 
 #[cfg(target_os = "macos")]
-fn observation_from_monitor(
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FocusedWindowMetadata {
+    app: String,
+    title: String,
+}
+
+#[cfg(target_os = "macos")]
+fn focused_window_metadata() -> Option<FocusedWindowMetadata> {
+    xcap::Window::all()
+        .ok()?
+        .into_iter()
+        .find(|window| window.is_focused().unwrap_or(false))
+        .map(|window| FocusedWindowMetadata {
+            app: window
+                .app_name()
+                .unwrap_or_else(|_| "unknown".to_owned())
+                .trim()
+                .to_owned(),
+            title: window.title().unwrap_or_default(),
+        })
+        .filter(|metadata| !metadata.app.is_empty())
+}
+
+#[cfg(target_os = "macos")]
+fn temp_ocr_image_path() -> PathBuf {
+    let id = cairn_core::time::new_operation_id().0;
+    std::env::temp_dir().join(format!("cairn-screen-ocr-{id}.png"))
+}
+
+fn recognize_png_ocr(
     config: &ScreenSensorConfig,
+    image_path: &Path,
+    _width: u32,
+    _height: u32,
+) -> Result<ScreenOcrCapture, ScreenError> {
+    let requested = config.ocr.engine;
+    let engine = ResolvedScreenOcrEngine::from_config(requested);
+    match engine {
+        ResolvedScreenOcrEngine::Off => Ok(ScreenOcrCapture {
+            engine,
+            result: ScreenOcrResult::default(),
+        }),
+        ResolvedScreenOcrEngine::Vision | ResolvedScreenOcrEngine::Winrt => Err(
+            ScreenError::Unavailable(ScreenDegradationCode::BackendUnavailable),
+        ),
+        ResolvedScreenOcrEngine::Tesseract => {
+            let result = match recognize_png_with_tesseract(image_path) {
+                Ok(result) => result,
+                Err(_err) if requested == ScreenOcrEngine::Auto => {
+                    return Ok(ScreenOcrCapture {
+                        engine: ResolvedScreenOcrEngine::Off,
+                        result: ScreenOcrResult::default(),
+                    });
+                }
+                Err(err) => return Err(err),
+            };
+            Ok(ScreenOcrCapture { engine, result })
+        }
+    }
+}
+
+fn recognize_png_with_tesseract(image_path: &Path) -> Result<ScreenOcrResult, ScreenError> {
+    let output = Command::new("tesseract")
+        .arg(image_path)
+        .arg("stdout")
+        .arg("--psm")
+        .arg("6")
+        .arg("tsv")
+        .output()
+        .map_err(|err| {
+            if err.kind() == std::io::ErrorKind::NotFound {
+                ScreenError::Unavailable(ScreenDegradationCode::BackendUnavailable)
+            } else {
+                ScreenError::CaptureFailed(format!("failed to run tesseract: {err}"))
+            }
+        })?;
+
+    if !output.status.success() {
+        return Err(ScreenError::CaptureFailed(format!(
+            "tesseract OCR failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    let stdout = std::str::from_utf8(&output.stdout)
+        .map_err(|err| ScreenError::CaptureFailed(format!("tesseract output UTF-8: {err}")))?;
+    ocr_result_from_tesseract_tsv(stdout)
+}
+
+fn ocr_result_from_tesseract_tsv(tsv: &str) -> Result<ScreenOcrResult, ScreenError> {
+    let mut lines = tsv.lines();
+    let header = lines
+        .next()
+        .ok_or_else(|| ScreenError::CaptureFailed("tesseract TSV missing header".to_owned()))?;
+    let columns = header.split('\t').collect::<Vec<_>>();
+    let index = |name: &str| {
+        columns
+            .iter()
+            .position(|column| *column == name)
+            .ok_or_else(|| {
+                ScreenError::CaptureFailed(format!("tesseract TSV missing `{name}` column"))
+            })
+    };
+    let left = index("left")?;
+    let top = index("top")?;
+    let width = index("width")?;
+    let height = index("height")?;
+    let conf = index("conf")?;
+    let text = index("text")?;
+
+    let mut words = Vec::new();
+    let mut bounding_boxes = Vec::new();
+    for line in lines {
+        let fields = line.split('\t').collect::<Vec<_>>();
+        if fields.len() <= text {
+            continue;
+        }
+        let word = fields[text].trim();
+        if word.is_empty() || fields[conf].trim() == "-1" {
+            continue;
+        }
+        let Some(box_) = tesseract_box(&fields, left, top, width, height) else {
+            continue;
+        };
+        words.push(word.to_owned());
+        bounding_boxes.push(box_);
+    }
+
+    Ok(ScreenOcrResult {
+        text: words.join(" "),
+        bounding_boxes,
+    })
+}
+
+fn tesseract_box(
+    fields: &[&str],
+    left: usize,
+    top: usize,
+    width: usize,
+    height: usize,
+) -> Option<BoundingBox> {
+    Some(BoundingBox {
+        x: fields.get(left)?.parse().ok()?,
+        y: fields.get(top)?.parse().ok()?,
+        width: fields.get(width)?.parse().ok()?,
+        height: fields.get(height)?.parse().ok()?,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn observation_from_monitor(
+    _config: &ScreenSensorConfig,
     monitor: &xcap::Monitor,
     width: u32,
     height: u32,
+    ocr: ScreenOcrCapture,
 ) -> ScreenObservation {
     let monitor_name = monitor.name().unwrap_or_else(|_| "screen".to_owned());
+    let focused_window = focused_window_metadata();
     ScreenObservation {
-        text: String::new(),
-        app: "unknown".to_owned(),
-        window_title: format!("{monitor_name} ({width}x{height})"),
+        text: ocr.result.text,
+        app: focused_window
+            .as_ref()
+            .map_or_else(|| "unknown".to_owned(), |window| window.app.clone()),
+        window_title: focused_window.map_or_else(
+            || format!("{monitor_name} ({width}x{height})"),
+            |window| window.title,
+        ),
         url: None,
-        bounding_boxes: Vec::new(),
-        captured_at: unix_timestamp_now(),
+        bounding_boxes: ocr.result.bounding_boxes,
+        captured_at: rfc3339_timestamp_now(),
         sensor_label: XCAP_SENSOR_LABEL.to_owned(),
         backend: ScreenBackend::Xcap,
-        ocr_engine: ResolvedScreenOcrEngine::from_config(config.ocr.engine),
+        ocr_engine: ocr.engine,
     }
 }
 
@@ -695,6 +1384,293 @@ fn degradation_message(code: ScreenDegradationCode) -> &'static str {
     }
 }
 
+fn screen_backend_name(backend: ScreenBackend) -> &'static str {
+    match backend {
+        ScreenBackend::Xcap => "xcap",
+        ScreenBackend::Screenpipe => "screenpipe",
+        _ => "custom",
+    }
+}
+
+fn ocr_engine_name(engine: ResolvedScreenOcrEngine) -> &'static str {
+    match engine {
+        ResolvedScreenOcrEngine::Vision => "vision",
+        ResolvedScreenOcrEngine::Winrt => "winrt",
+        ResolvedScreenOcrEngine::Tesseract => "tesseract",
+        ResolvedScreenOcrEngine::Off => "off",
+    }
+}
+
+#[cfg(test)]
+fn screenpipe_observation_from_search_json(body: &[u8]) -> Result<ScreenObservation, ScreenError> {
+    Ok(screenpipe_frame_capture_from_search_json(body)?.observation)
+}
+
+#[cfg(any(test, feature = "screenpipe-runtime"))]
+fn screenpipe_frame_capture_from_search_json(
+    body: &[u8],
+) -> Result<ScreenpipeFrameCapture, ScreenError> {
+    let value: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|err| ScreenError::CaptureFailed(format!("screenpipe response JSON: {err}")))?;
+    let items = value
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| ScreenError::CaptureFailed("screenpipe response missing data".to_owned()))?;
+    let content = items
+        .iter()
+        .filter(|item| {
+            item.get("type")
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(|ty| ty.eq_ignore_ascii_case("OCR"))
+        })
+        .find_map(|item| item.get("content"))
+        .ok_or_else(|| {
+            ScreenError::CaptureFailed("screenpipe response contained no OCR content".to_owned())
+        })?;
+
+    let text = content
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let app = content
+        .get("app_name")
+        .or_else(|| content.get("app"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|app| !app.trim().is_empty())
+        .unwrap_or("unknown")
+        .to_owned();
+    let window_title = content
+        .get("window_name")
+        .or_else(|| content.get("window_title"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let url = content
+        .get("browser_url")
+        .or_else(|| content.get("url"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|url| !url.trim().is_empty())
+        .map(str::to_owned);
+    let captured_at = content
+        .get("timestamp")
+        .or_else(|| content.get("captured_at"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|timestamp| Rfc3339Timestamp::parse(*timestamp).is_ok())
+        .map_or_else(cairn_core::time::now_rfc3339_seconds, str::to_owned);
+    let frame_id = content.get("frame_id").and_then(json_u64).or_else(|| {
+        content
+            .get("frame")
+            .and_then(|frame| frame.get("id"))
+            .and_then(json_u64)
+    });
+    let file_path = content
+        .get("file_path")
+        .or_else(|| content.get("path"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|path| !path.trim().is_empty())
+        .map(PathBuf::from);
+
+    Ok(ScreenpipeFrameCapture {
+        observation: ScreenObservation {
+            text,
+            app,
+            window_title,
+            url,
+            bounding_boxes: Vec::new(),
+            captured_at,
+            sensor_label: SCREENPIPE_SENSOR_LABEL.to_owned(),
+            backend: ScreenBackend::Screenpipe,
+            ocr_engine: ResolvedScreenOcrEngine::Off,
+        },
+        frame_id,
+        file_path,
+    })
+}
+
+#[cfg(any(test, feature = "screenpipe-runtime"))]
+fn json_u64(value: &serde_json::Value) -> Option<u64> {
+    value.as_u64().or_else(|| value.as_str()?.parse().ok())
+}
+
+#[cfg(any(test, feature = "screenpipe-runtime"))]
+fn image_dimensions_from_bytes(bytes: &[u8]) -> Result<(u32, u32), ScreenError> {
+    if bytes.len() >= 24 && bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        let width = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+        let height = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
+        return Ok((width, height));
+    }
+
+    if bytes.len() >= 4 && bytes.starts_with(&[0xff, 0xd8]) {
+        return jpeg_dimensions_from_bytes(bytes);
+    }
+
+    Err(ScreenError::CaptureFailed(
+        "screenpipe frame was not a PNG or JPEG image".to_owned(),
+    ))
+}
+
+#[cfg(any(test, feature = "screenpipe-runtime"))]
+fn jpeg_dimensions_from_bytes(bytes: &[u8]) -> Result<(u32, u32), ScreenError> {
+    let mut cursor = 2;
+    while cursor + 4 <= bytes.len() {
+        while cursor < bytes.len() && bytes[cursor] == 0xff {
+            cursor += 1;
+        }
+        if cursor >= bytes.len() {
+            break;
+        }
+        let marker = bytes[cursor];
+        cursor += 1;
+
+        if matches!(marker, 0xd8 | 0xd9 | 0x01) || (0xd0..=0xd7).contains(&marker) {
+            continue;
+        }
+        if cursor + 2 > bytes.len() {
+            break;
+        }
+        let segment_len = u16::from_be_bytes([bytes[cursor], bytes[cursor + 1]]) as usize;
+        if segment_len < 2 || cursor + segment_len > bytes.len() {
+            break;
+        }
+        if matches!(
+            marker,
+            0xc0 | 0xc1
+                | 0xc2
+                | 0xc3
+                | 0xc5
+                | 0xc6
+                | 0xc7
+                | 0xc9
+                | 0xca
+                | 0xcb
+                | 0xcd
+                | 0xce
+                | 0xcf
+        ) {
+            if segment_len < 7 {
+                break;
+            }
+            let height = u32::from(u16::from_be_bytes([bytes[cursor + 3], bytes[cursor + 4]]));
+            let width = u32::from(u16::from_be_bytes([bytes[cursor + 5], bytes[cursor + 6]]));
+            return Ok((width, height));
+        }
+        cursor += segment_len;
+    }
+
+    Err(ScreenError::CaptureFailed(
+        "screenpipe JPEG frame missing dimensions".to_owned(),
+    ))
+}
+
+#[cfg(feature = "screenpipe-runtime")]
+fn ensure_screenpipe_ready() -> Result<(), ScreenError> {
+    if screenpipe_health().is_ok() {
+        return Ok(());
+    }
+
+    maybe_spawn_screenpipe()?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(500));
+        if screenpipe_health().is_ok() {
+            return Ok(());
+        }
+    }
+
+    Err(ScreenError::Unavailable(
+        ScreenDegradationCode::BackendUnavailable,
+    ))
+}
+
+#[cfg(feature = "screenpipe-runtime")]
+fn screenpipe_health() -> Result<(), ScreenError> {
+    screenpipe_runtime_block_on(async {
+        let url = format!("{}/health", screenpipe_base_url());
+        let response = reqwest::Client::new()
+            .get(url)
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await
+            .map_err(|err| ScreenError::CaptureFailed(format!("screenpipe health: {err}")))?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(ScreenError::Unavailable(
+                ScreenDegradationCode::BackendUnavailable,
+            ))
+        }
+    })
+}
+
+#[cfg(feature = "screenpipe-runtime")]
+fn maybe_spawn_screenpipe() -> Result<(), ScreenError> {
+    if !screenpipe_spawn_enabled() {
+        return Err(ScreenError::Unavailable(
+            ScreenDegradationCode::BackendUnavailable,
+        ));
+    }
+
+    let mut direct = Command::new("screenpipe");
+    direct
+        .arg("record")
+        .env("SCREENPIPE_NO_REMINDERS", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    match direct.spawn() {
+        Ok(_child) => return Ok(()),
+        Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
+            return Err(ScreenError::CaptureFailed(format!(
+                "failed to start screenpipe: {err}"
+            )));
+        }
+        Err(_) => {}
+    }
+
+    Command::new("npx")
+        .args(["screenpipe@latest", "record"])
+        .env("SCREENPIPE_NO_REMINDERS", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_child| ())
+        .map_err(|err| {
+            if err.kind() == std::io::ErrorKind::NotFound {
+                ScreenError::Unavailable(ScreenDegradationCode::BackendUnavailable)
+            } else {
+                ScreenError::CaptureFailed(format!("failed to start screenpipe via npx: {err}"))
+            }
+        })
+}
+
+#[cfg(feature = "screenpipe-runtime")]
+fn screenpipe_spawn_enabled() -> bool {
+    std::env::var("CAIRN_SCREENPIPE_SPAWN")
+        .ok()
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+}
+
+#[cfg(feature = "screenpipe-runtime")]
+fn screenpipe_base_url() -> String {
+    std::env::var("CAIRN_SCREENPIPE_URL")
+        .unwrap_or_else(|_| "http://localhost:3030".to_owned())
+        .trim_end_matches('/')
+        .to_owned()
+}
+
+#[cfg(feature = "screenpipe-runtime")]
+fn screenpipe_runtime_block_on<T>(
+    future: impl std::future::Future<Output = Result<T, ScreenError>>,
+) -> Result<T, ScreenError> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| ScreenError::CaptureFailed(format!("screenpipe runtime: {err}")))?
+        .block_on(future)
+}
+
 fn truncate_text_to_budget(text: &mut String, max_bytes: u32) {
     let max_bytes = max_bytes as usize;
     if text.len() <= max_bytes {
@@ -709,17 +1685,12 @@ fn truncate_text_to_budget(text: &mut String, max_bytes: u32) {
 }
 
 #[cfg(target_os = "macos")]
-fn unix_timestamp_now() -> String {
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs());
-    format!("unix:{seconds}")
+fn rfc3339_timestamp_now() -> String {
+    cairn_core::time::now_rfc3339_seconds()
 }
 
 fn platform_default_ocr_engine() -> ResolvedScreenOcrEngine {
-    if cfg!(target_os = "macos") {
-        ResolvedScreenOcrEngine::Vision
-    } else if cfg!(target_os = "windows") {
+    if cfg!(target_os = "windows") {
         ResolvedScreenOcrEngine::Winrt
     } else {
         ResolvedScreenOcrEngine::Tesseract
@@ -727,9 +1698,7 @@ fn platform_default_ocr_engine() -> ResolvedScreenOcrEngine {
 }
 
 fn platform_ocr_capability() -> Capabilities {
-    if cfg!(target_os = "macos") {
-        Capabilities::CairnSensorV1ScreenOcrVision
-    } else if cfg!(target_os = "windows") {
+    if cfg!(target_os = "windows") {
         Capabilities::CairnSensorV1ScreenOcrWinrt
     } else {
         Capabilities::CairnSensorV1ScreenOcrTesseract
@@ -739,8 +1708,11 @@ fn platform_ocr_capability() -> Capabilities {
 #[cfg(test)]
 mod tests {
     use cairn_core::config::{ScreenBackend, ScreenSensorConfig};
+    use cairn_core::domain::{CaptureEventId, CapturePayload, Rfc3339Timestamp, SourceFamily};
+    use sha2::{Digest as _, Sha256};
 
     use super::*;
+    use crate::{DropReason, EmitOutcome, LocalSensorConfig, SensorKind, SensorSettings};
 
     #[derive(Clone)]
     struct FakeBackend {
@@ -806,6 +1778,24 @@ mod tests {
             backend: ScreenBackend::Xcap,
             ocr_engine: ResolvedScreenOcrEngine::Tesseract,
         }
+    }
+
+    fn event_id() -> CaptureEventId {
+        CaptureEventId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").expect("valid test ULID")
+    }
+
+    fn captured_at() -> Rfc3339Timestamp {
+        Rfc3339Timestamp::parse("2026-05-12T12:00:00Z").expect("valid test timestamp")
+    }
+
+    fn screen_enabled_local_config() -> LocalSensorConfig {
+        let mut config = LocalSensorConfig::all_disabled();
+        config.screen = SensorSettings::enabled();
+        config
+    }
+
+    fn payload_hash(bytes: &[u8]) -> String {
+        format!("sha256:{:x}", Sha256::digest(bytes))
     }
 
     struct CaptureMustNotRunBackend {
@@ -1068,6 +2058,214 @@ mod tests {
         assert_eq!(
             err,
             ScreenError::CaptureFailed("rejected by policy".to_owned())
+        );
+    }
+
+    #[test]
+    fn screen_observation_emits_valid_capture_event() {
+        let outcome = emit(
+            &screen_enabled_local_config(),
+            ScreenEventObservation {
+                event_id: event_id(),
+                captured_at: captured_at(),
+                observation: fake_observation("meeting notes"),
+                refs: None,
+            },
+        );
+
+        let event = match outcome {
+            EmitOutcome::Emitted(event) => event,
+            other @ EmitOutcome::Dropped { .. } => panic!("expected emitted event, got {other:?}"),
+        };
+
+        assert_eq!(event.source_family, SourceFamily::Screen);
+        assert_eq!(event.sensor_id.as_str(), XCAP_SENSOR_LABEL);
+        assert_eq!(
+            event.payload_ref,
+            "sources/screen/01ARZ3NDEKTSV4RRFFQ69G5FAV.json"
+        );
+        match event.payload {
+            CapturePayload::Screen {
+                ref app,
+                ref window_title,
+                ref url,
+            } => {
+                assert_eq!(app, "Code");
+                assert_eq!(window_title, "screen.rs");
+                assert_eq!(url.as_deref(), Some("file:///tmp/screen.rs"));
+            }
+            other => panic!("expected screen payload, got {other:?}"),
+        }
+        event
+            .validate_for_capture()
+            .expect("screen event validates");
+    }
+
+    #[test]
+    fn screen_emit_redacts_ocr_text_before_payload_hashing() {
+        let mut observation = fake_observation("SCREEN_TOKEN=supersecret");
+        observation.window_title = "PASSWORD=window-secret".to_owned();
+
+        let outcome = emit(
+            &screen_enabled_local_config(),
+            ScreenEventObservation {
+                event_id: event_id(),
+                captured_at: captured_at(),
+                observation: observation.clone(),
+                refs: None,
+            },
+        );
+        let event = outcome.event().expect("event emitted");
+
+        let unredacted = raw_payload_bytes(
+            &observation,
+            "SCREEN_TOKEN=supersecret",
+            "PASSWORD=window-secret",
+            observation.url.as_deref(),
+        )
+        .expect("serialize unredacted fixture");
+        let redacted = raw_payload_bytes(
+            &observation,
+            "SCREEN_TOKEN=[REDACTED]",
+            "PASSWORD=[REDACTED]",
+            observation.url.as_deref(),
+        )
+        .expect("serialize redacted fixture");
+
+        assert_ne!(event.payload_hash.as_str(), payload_hash(&unredacted));
+        assert_eq!(event.payload_hash.as_str(), payload_hash(&redacted));
+    }
+
+    #[test]
+    fn screen_emit_rejects_private_key_ocr_text() {
+        let outcome = emit(
+            &screen_enabled_local_config(),
+            ScreenEventObservation {
+                event_id: event_id(),
+                captured_at: captured_at(),
+                observation: fake_observation("-----BEGIN PRIVATE KEY-----\nsecret"),
+                refs: None,
+            },
+        );
+
+        assert_eq!(
+            outcome,
+            EmitOutcome::Dropped {
+                sensor: SensorKind::Screen,
+                reason: DropReason::PolicyRejected("private key block".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn screen_emit_respects_local_screen_enablement() {
+        let outcome = emit(
+            &LocalSensorConfig::all_disabled(),
+            ScreenEventObservation {
+                event_id: event_id(),
+                captured_at: captured_at(),
+                observation: fake_observation("meeting notes"),
+                refs: None,
+            },
+        );
+
+        assert_eq!(
+            outcome,
+            EmitOutcome::Dropped {
+                sensor: SensorKind::Screen,
+                reason: DropReason::Disabled,
+            }
+        );
+    }
+
+    #[test]
+    fn screenpipe_ocr_json_maps_to_screen_observation() {
+        let body = br#"{
+            "data": [
+                {
+                    "type": "OCR",
+                    "content": {
+                        "text": "build failed in screen.rs",
+                        "timestamp": "2026-05-12T12:00:00Z",
+                        "frame_id": "42",
+                        "file_path": "/tmp/screenpipe-frame.png",
+                        "app_name": "Code",
+                        "window_name": "screen.rs",
+                        "browser_url": "file:///tmp/screen.rs",
+                        "focused": true
+                    }
+                }
+            ],
+            "pagination": { "limit": 1, "offset": 0, "total": 1 }
+        }"#;
+
+        let observation =
+            screenpipe_observation_from_search_json(body).expect("screenpipe OCR response parses");
+
+        assert_eq!(observation.text, "build failed in screen.rs");
+        assert_eq!(observation.app, "Code");
+        assert_eq!(observation.window_title, "screen.rs");
+        assert_eq!(observation.url.as_deref(), Some("file:///tmp/screen.rs"));
+        assert_eq!(observation.sensor_label, SCREENPIPE_SENSOR_LABEL);
+        assert_eq!(observation.backend, ScreenBackend::Screenpipe);
+
+        let capture =
+            screenpipe_frame_capture_from_search_json(body).expect("screenpipe frame parses");
+        assert_eq!(capture.frame_id, Some(42));
+        assert_eq!(
+            capture.file_path.as_deref(),
+            Some(Path::new("/tmp/screenpipe-frame.png"))
+        );
+    }
+
+    #[test]
+    fn screenpipe_frame_dimensions_parse_png_and_jpeg() {
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend_from_slice(&[0, 0, 0, 13]);
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&640_u32.to_be_bytes());
+        png.extend_from_slice(&480_u32.to_be_bytes());
+        assert_eq!(
+            image_dimensions_from_bytes(&png).expect("png dimensions"),
+            (640, 480)
+        );
+
+        let jpeg = [
+            0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x01,
+            0x00, 0x48, 0x00, 0x48, 0x00, 0x00, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x01, 0x2c, 0x02,
+            0x58, 0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01,
+        ];
+        assert_eq!(
+            image_dimensions_from_bytes(&jpeg).expect("jpeg dimensions"),
+            (600, 300)
+        );
+    }
+
+    #[test]
+    fn tesseract_tsv_parses_text_and_boxes() {
+        let tsv = "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n\
+                   5\t1\t1\t1\t1\t1\t10\t20\t30\t40\t88.5\tHello\n\
+                   5\t1\t1\t1\t1\t2\t45\t20\t50\t40\t91.0\tworld\n";
+
+        let result = ocr_result_from_tesseract_tsv(tsv).expect("valid tesseract TSV parses");
+
+        assert_eq!(result.text, "Hello world");
+        assert_eq!(
+            result.bounding_boxes,
+            vec![
+                BoundingBox {
+                    x: 10,
+                    y: 20,
+                    width: 30,
+                    height: 40,
+                },
+                BoundingBox {
+                    x: 45,
+                    y: 20,
+                    width: 50,
+                    height: 40,
+                },
+            ]
         );
     }
 }

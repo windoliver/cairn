@@ -262,9 +262,7 @@ pub fn default_sensor_capabilities() -> Vec<Capabilities> {
 }
 
 fn default_screen_ocr_engine() -> StatusResponseSensorsScreenOcrEngine {
-    if cfg!(target_os = "macos") {
-        StatusResponseSensorsScreenOcrEngine::Vision
-    } else if cfg!(target_os = "windows") {
+    if cfg!(target_os = "windows") {
         StatusResponseSensorsScreenOcrEngine::Winrt
     } else {
         StatusResponseSensorsScreenOcrEngine::Tesseract
@@ -272,9 +270,7 @@ fn default_screen_ocr_engine() -> StatusResponseSensorsScreenOcrEngine {
 }
 
 fn default_screen_ocr_capability() -> Capabilities {
-    if cfg!(target_os = "macos") {
-        Capabilities::CairnSensorV1ScreenOcrVision
-    } else if cfg!(target_os = "windows") {
+    if cfg!(target_os = "windows") {
         Capabilities::CairnSensorV1ScreenOcrWinrt
     } else {
         Capabilities::CairnSensorV1ScreenOcrTesseract

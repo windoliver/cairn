@@ -66,7 +66,9 @@ cargo run -p cairn-cli --locked -- plugins verify
 
 The screen sensor is opt-in. The default backend is the in-process `xcap`
 runtime, which probes desktop capture during `cairn status` when enabled and can
-write a one-shot PNG with `cairn screen capture`.
+write a one-shot PNG with `cairn screen capture`. OCR uses the issue-86
+fallback path, `tesseract`, when it is installed; without it, `ocr.engine: auto`
+captures screenshots and active-window metadata but reports an OCR degradation.
 
 To prepare macOS for live screen capture:
 
@@ -79,6 +81,12 @@ To prepare macOS for live screen capture:
    - **Codex** when running from the Codex desktop app, if it appears there.
    - A packaged **Cairn.app** when one exists.
 3. Quit and reopen the enabled app so macOS applies the permission.
+
+Install OCR when you want captured screen text to enter the normal pipeline:
+
+```bash
+brew install tesseract
+```
 
 Enable the sensor in `.cairn/config.yaml`:
 
@@ -109,6 +117,22 @@ When permission is available, the status probe reports `state: "enabled"` and
 cargo run -p cairn-cli --locked -- screen capture --output /tmp/cairn-screen.png --json
 file /tmp/cairn-screen.png
 ```
+
+The JSON receipt includes a validated `capture_event`; OCR text is policy
+checked and redacted before it contributes to the event payload hash.
+
+To use screenpipe as the opt-in primary path, build the feature and run the
+screenpipe daemon:
+
+```bash
+npx screenpipe@latest record
+cargo run -p cairn-cli --features screenpipe-runtime --locked -- status --json | jq '.sensors.screen'
+```
+
+Set `CAIRN_SCREENPIPE_URL` if the daemon is not on `http://localhost:3030`.
+Set `CAIRN_SCREENPIPE_SPAWN=1` to let the screenpipe backend try
+`screenpipe record` or `npx screenpipe@latest record` when the daemon is not
+already running.
 
 The docs site source lives in `docs/site/`. Generated usage/reference pages are
 committed under `docs/site/src/reference/generated/` and kept fresh by:

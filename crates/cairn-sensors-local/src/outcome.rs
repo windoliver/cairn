@@ -15,6 +15,8 @@ pub enum SensorKind {
     Clipboard,
     /// Voice microphone transcript sensor.
     Voice,
+    /// Screen OCR and active-window sensor.
+    Screen,
 }
 
 impl SensorKind {
@@ -27,6 +29,7 @@ impl SensorKind {
             SourceFamily::Terminal => Some(Self::Terminal),
             SourceFamily::Clipboard => Some(Self::Clipboard),
             SourceFamily::Voice => Some(Self::Voice),
+            SourceFamily::Screen => Some(Self::Screen),
             _ => None,
         }
     }

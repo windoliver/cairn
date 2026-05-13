@@ -5,7 +5,7 @@ expression: v
 ---
 {
   "capabilities": [
-    "cairn.sensor.v1.screen.ocr.vision",
+    "cairn.sensor.v1.screen.ocr.tesseract",
     "cairn.sensor.v1.screen.xcap"
   ],
   "contract": "cairn.mcp.v1",
@@ -65,7 +65,7 @@ expression: v
         "message": "screen sensor is disabled in config"
       },
       "mode": "off",
-      "ocr_engine": "vision",
+      "ocr_engine": "tesseract",
       "permission": "not_requested",
       "state": "disabled"
     }
