@@ -1257,6 +1257,7 @@ fn capture_trace_rejects_multiple_input_modes() {
 }
 
 #[test]
+#[ignore = "session forget is wired by issue #328; capability is no longer Unavailable"]
 fn forget_session_returns_capability_unavailable() {
     assert_rejected_capability_unavailable(
         &[
@@ -1381,7 +1382,6 @@ fn status_in_bound_vault_advertises_search_and_policy_trace() {
         "cairn.mcp.v1.retrieve.folder",
         "cairn.mcp.v1.retrieve.scope",
         "cairn.mcp.v1.retrieve.profile",
-        "cairn.mcp.v1.forget.session",
     ] {
         assert!(
             !caps.contains(stub_cap),
