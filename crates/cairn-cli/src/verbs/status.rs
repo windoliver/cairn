@@ -63,10 +63,17 @@ pub fn run(json: bool) -> ExitCode {
 
 fn load_status_config() -> CairnConfig {
     let overrides = CliOverrides::default();
-    std::env::current_dir()
-        .ok()
-        .and_then(|current_dir| crate::config::load(&current_dir, &overrides).ok())
-        .unwrap_or_default()
+    let Ok(current_dir) = std::env::current_dir() else {
+        return CairnConfig::default();
+    };
+
+    match crate::config::load(&current_dir, &overrides) {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("warning: failed to load config for status; using defaults: {err}");
+            CairnConfig::default()
+        }
+    }
 }
 
 fn build_response(
@@ -373,7 +380,9 @@ mod tests {
         assert_eq!(screen.mode, StatusResponseSensorsScreenMode::Off);
         assert_eq!(
             screen.ocr_engine,
-            StatusResponseSensorsScreenOcrEngine::Tesseract
+            map_screen_ocr_engine(ResolvedScreenOcrEngine::from_config(
+                config.sensors.screen.ocr.engine
+            ))
         );
         assert_eq!(
             screen.permission,

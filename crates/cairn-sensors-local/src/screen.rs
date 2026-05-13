@@ -1,7 +1,13 @@
 //! Mockable runtime boundary for local screen capture.
 
+use std::collections::VecDeque;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
 use cairn_core::config::{ScreenBackend, ScreenOcrEngine, ScreenSensorConfig};
 use cairn_core::generated::common::Capabilities;
+
+const FRAME_BUDGET_WINDOW: Duration = Duration::from_mins(1);
 
 /// Sensor label used by the in-process xcap backend.
 pub const XCAP_SENSOR_LABEL: &str = "snr:local:screen:xcap:v1";
@@ -208,7 +214,7 @@ pub trait ScreenBackendRuntime {
 /// Policy applied after budget enforcement and before observations leave runtime.
 pub trait ScreenPolicy {
     /// Apply redaction or filtering to an observation.
-    fn apply(&self, observation: ScreenObservation) -> ScreenObservation;
+    fn apply(&self, observation: ScreenObservation) -> Result<ScreenObservation, ScreenError>;
 }
 
 /// Policy that leaves observations unchanged.
@@ -216,8 +222,8 @@ pub trait ScreenPolicy {
 pub struct NoopScreenPolicy;
 
 impl ScreenPolicy for NoopScreenPolicy {
-    fn apply(&self, observation: ScreenObservation) -> ScreenObservation {
-        observation
+    fn apply(&self, observation: ScreenObservation) -> Result<ScreenObservation, ScreenError> {
+        Ok(observation)
     }
 }
 
@@ -226,20 +232,21 @@ impl ScreenPolicy for NoopScreenPolicy {
 pub struct BasicScreenPolicy;
 
 impl ScreenPolicy for BasicScreenPolicy {
-    fn apply(&self, mut observation: ScreenObservation) -> ScreenObservation {
+    fn apply(&self, mut observation: ScreenObservation) -> Result<ScreenObservation, ScreenError> {
         if observation.text.to_lowercase().contains("password=") {
             observation.text.clear();
             observation.text.push_str("[redacted]");
         }
-        observation
+        Ok(observation)
     }
 }
 
 /// Mockable screen sensor that composes backend and policy.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ScreenSensor<B, P> {
     backend: B,
     policy: P,
+    frame_timestamps: Mutex<VecDeque<Instant>>,
 }
 
 impl<B, P> ScreenSensor<B, P>
@@ -249,8 +256,12 @@ where
 {
     /// Create a screen sensor from a backend runtime and policy.
     #[must_use]
-    pub const fn new(backend: B, policy: P) -> Self {
-        Self { backend, policy }
+    pub fn new(backend: B, policy: P) -> Self {
+        Self {
+            backend,
+            policy,
+            frame_timestamps: Mutex::new(VecDeque::new()),
+        }
     }
 
     /// Capture a single snapshot, returning `None` when the sensor is disabled.
@@ -271,12 +282,39 @@ where
             ));
         }
 
+        self.admit_frame(config.budget.max_frames_per_minute)?;
+
         let mut observation = self.backend.capture_snapshot(config)?;
+        if !config.allow_apps.is_empty() && !config.allow_apps.contains(&observation.app) {
+            return Ok(None);
+        }
         truncate_text_to_budget(
             &mut observation.text,
             config.budget.max_text_bytes_per_event,
         );
-        Ok(Some(self.policy.apply(observation)))
+        Ok(Some(self.policy.apply(observation)?))
+    }
+
+    fn admit_frame(&self, max_frames_per_minute: u32) -> Result<(), ScreenError> {
+        let now = Instant::now();
+        let mut timestamps = self
+            .frame_timestamps
+            .lock()
+            .map_err(|_| ScreenError::Unavailable(ScreenDegradationCode::Degraded))?;
+
+        while timestamps
+            .front()
+            .is_some_and(|timestamp| now.duration_since(*timestamp) >= FRAME_BUDGET_WINDOW)
+        {
+            timestamps.pop_front();
+        }
+
+        if timestamps.len() >= max_frames_per_minute as usize {
+            return Err(ScreenError::Unavailable(ScreenDegradationCode::Degraded));
+        }
+
+        timestamps.push_back(now);
+        Ok(())
     }
 }
 
@@ -407,6 +445,9 @@ mod tests {
         observation: ScreenObservation,
     }
 
+    #[derive(Debug, Clone, Copy)]
+    struct RejectingPolicy;
+
     impl ScreenBackendRuntime for FakeBackend {
         fn probe(&self, _config: &ScreenSensorConfig) -> ScreenProbe {
             self.probe.clone()
@@ -417,6 +458,12 @@ mod tests {
             _config: &ScreenSensorConfig,
         ) -> Result<ScreenObservation, ScreenError> {
             Ok(self.observation.clone())
+        }
+    }
+
+    impl ScreenPolicy for RejectingPolicy {
+        fn apply(&self, _observation: ScreenObservation) -> Result<ScreenObservation, ScreenError> {
+            Err(ScreenError::CaptureFailed("rejected by policy".to_owned()))
         }
     }
 
@@ -483,6 +530,53 @@ mod tests {
         assert_eq!(result.window_title, "screen.rs");
         assert_eq!(result.sensor_label, XCAP_SENSOR_LABEL);
         assert_eq!(result.bounding_boxes.len(), 1);
+    }
+
+    #[test]
+    fn frame_budget_rejects_second_capture_from_same_sensor() {
+        let mut config = enabled_config();
+        config.budget.max_frames_per_minute = 1;
+        let backend = FakeBackend {
+            probe: fake_probe(),
+            observation: fake_observation("meeting notes"),
+        };
+        let sensor = ScreenSensor::new(backend, NoopScreenPolicy);
+
+        let first = sensor.capture_snapshot(&config).unwrap();
+        assert!(first.is_some());
+
+        let err = sensor.capture_snapshot(&config).unwrap_err();
+        assert_eq!(err.code(), ScreenDegradationCode::Degraded);
+    }
+
+    #[test]
+    fn allow_list_drops_unlisted_apps() {
+        let mut config = enabled_config();
+        config.allow_apps = vec!["Terminal".to_owned()];
+        let backend = FakeBackend {
+            probe: fake_probe(),
+            observation: fake_observation("meeting notes"),
+        };
+        let sensor = ScreenSensor::new(backend, NoopScreenPolicy);
+
+        let result = sensor.capture_snapshot(&config).unwrap();
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn allow_list_keeps_matching_apps() {
+        let mut config = enabled_config();
+        config.allow_apps = vec!["Code".to_owned()];
+        let backend = FakeBackend {
+            probe: fake_probe(),
+            observation: fake_observation("meeting notes"),
+        };
+        let sensor = ScreenSensor::new(backend, NoopScreenPolicy);
+
+        let result = sensor.capture_snapshot(&config).unwrap().unwrap();
+
+        assert_eq!(result.app, "Code");
     }
 
     #[test]
@@ -583,5 +677,21 @@ mod tests {
         let sensor = ScreenSensor::new(backend, BasicScreenPolicy);
         let result = sensor.capture_snapshot(&enabled_config()).unwrap().unwrap();
         assert_eq!(result.text, "[redacted]");
+    }
+
+    #[test]
+    fn rejecting_policy_returns_error() {
+        let backend = FakeBackend {
+            probe: fake_probe(),
+            observation: fake_observation("meeting notes"),
+        };
+        let sensor = ScreenSensor::new(backend, RejectingPolicy);
+
+        let err = sensor.capture_snapshot(&enabled_config()).unwrap_err();
+
+        assert_eq!(
+            err,
+            ScreenError::CaptureFailed("rejected by policy".to_owned())
+        );
     }
 }
