@@ -2,9 +2,12 @@
 
 #![allow(
     dead_code,
-    reason = "Task 2 stages recording planner pieces before runtime ingestion wiring."
+    reason = "Recording planner pieces are staged before runtime ingestion wiring."
 )]
 
+use cairn_core::domain::canonical::canonical_bytes;
+use sha2::{Digest as _, Sha256};
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -29,6 +32,13 @@ struct RecordingPlan {
     file_size: u64,
     skipped_frames: u64,
     segments: Vec<RecordingSegment>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct SegmentPayload {
+    segment_id: String,
+    payload_hash: String,
+    payload_json: Vec<u8>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -143,6 +153,87 @@ fn parse_fixture_plan(raw: &str) -> anyhow::Result<RecordingPlan> {
     })
 }
 
+fn build_segment_payload(
+    plan: &RecordingPlan,
+    segment: &RecordingSegment,
+) -> anyhow::Result<SegmentPayload> {
+    let track_kind = match &segment.kind {
+        SegmentKind::AudioTranscript { .. } => "audio_transcript",
+        SegmentKind::FrameOcr { .. } => "frame_ocr",
+    };
+    let normalized_for_id = normalize_text(&segment.text).to_lowercase();
+    let id_input = format!(
+        "{}\n{}\n{}\n{}\n{}",
+        plan.media_hash, track_kind, segment.start_ms, segment.duration_ms, normalized_for_id
+    );
+    let segment_id = format!(
+        "recseg-{}",
+        hex_prefix(&Sha256::digest(id_input.as_bytes()), 24)
+    );
+
+    let detail = match &segment.kind {
+        SegmentKind::AudioTranscript {
+            speaker_id,
+            confidence,
+        } => serde_json::json!({
+            "speaker_id": speaker_id,
+            "confidence": confidence,
+        }),
+        SegmentKind::FrameOcr { confidence } => serde_json::json!({
+            "confidence": confidence,
+            "timestamp_ms": segment.start_ms,
+        }),
+    };
+    let value = serde_json::json!({
+        "media": {
+            "path": plan.media_path.to_string_lossy(),
+            "sha256": plan.media_hash,
+            "file_size": plan.file_size,
+            "duration_ms": plan.duration_ms,
+        },
+        "segment": {
+            "id": segment_id,
+            "track_kind": track_kind,
+            "start_ms": segment.start_ms,
+            "duration_ms": segment.duration_ms,
+            "text": segment.text,
+            "detail": detail,
+        },
+        "tools": {
+            "ffmpeg": "fixture",
+            "ocr": "fixture"
+        }
+    });
+    let payload_json = canonical_bytes(&value)?;
+    let payload_hash = format!("sha256:{:x}", Sha256::digest(&payload_json));
+
+    Ok(SegmentPayload {
+        segment_id,
+        payload_hash,
+        payload_json,
+    })
+}
+
+fn build_segment_payloads(plan: &RecordingPlan) -> anyhow::Result<Vec<SegmentPayload>> {
+    let mut seen_segment_ids = HashSet::new();
+    let mut payloads = Vec::with_capacity(plan.segments.len());
+
+    for segment in &plan.segments {
+        let payload = build_segment_payload(plan, segment)?;
+        if !seen_segment_ids.insert(payload.segment_id.clone()) {
+            anyhow::bail!(
+                "duplicate recording segment_id {} for media {} at start_ms {}",
+                payload.segment_id,
+                plan.media_hash,
+                segment.start_ms
+            );
+        }
+        payloads.push(payload);
+    }
+
+    Ok(payloads)
+}
+
 impl SegmentKind {
     const fn sort_rank(&self) -> u8 {
         match self {
@@ -161,6 +252,19 @@ fn is_sha256_wire(value: &str) -> bool {
         return false;
     };
     hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn hex_prefix(bytes: &[u8], chars: usize) -> String {
+    let mut out = String::with_capacity(chars);
+    for b in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(&mut out, "{b:02x}");
+        if out.len() >= chars {
+            out.truncate(chars);
+            break;
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -207,6 +311,124 @@ mod tests {
             plan.segments.iter().map(|s| s.start_ms).collect::<Vec<_>>(),
             vec![0, 2000, 3200],
         );
+    }
+
+    #[test]
+    fn segment_payloads_are_deterministic_and_body_safe() {
+        let plan = parse_fixture_plan(FIXTURE).expect("fixture parses");
+        let segment = &plan.segments[0];
+
+        let payload = build_segment_payload(&plan, segment).expect("payload builds");
+        let again = build_segment_payload(&plan, segment).expect("payload builds twice");
+
+        assert_eq!(payload.segment_id, again.segment_id);
+        assert!(payload.segment_id.starts_with("recseg-"));
+        assert_eq!(payload.segment_id.len(), "recseg-".len() + 24);
+        let segment_id_suffix = payload
+            .segment_id
+            .strip_prefix("recseg-")
+            .expect("recseg prefix");
+        assert!(
+            segment_id_suffix
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+            "segment id suffix must be lowercase hex"
+        );
+        assert_eq!(payload.payload_hash, again.payload_hash);
+        assert!(payload.payload_hash.starts_with("sha256:"));
+        assert_eq!(payload.payload_hash.len(), "sha256:".len() + 64);
+        assert!(
+            payload.payload_hash["sha256:".len()..]
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+            "payload hash must be lowercase hex"
+        );
+        assert_eq!(
+            payload.payload_hash,
+            format!("sha256:{:x}", Sha256::digest(&payload.payload_json))
+        );
+        assert_eq!(payload.payload_json, again.payload_json);
+        assert_eq!(payload.segment_id, "recseg-af067ba975f4fc04c20d1743");
+        assert_eq!(
+            payload.payload_json.as_slice(),
+            br#"{"media":{"duration_ms":5200,"file_size":1234,"path":"fixtures/v0/recordings/demo.mp4","sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000087"},"segment":{"detail":{"confidence":0.9100000262260437,"speaker_id":"unknown_speaker_01"},"duration_ms":1800,"id":"recseg-af067ba975f4fc04c20d1743","start_ms":0,"text":"alpha recording launch note","track_kind":"audio_transcript"},"tools":{"ffmpeg":"fixture","ocr":"fixture"}}"#
+        );
+        assert_eq!(
+            payload.payload_hash,
+            "sha256:4c23dd7dcc78517f84748fb146eca9cae2059ef67f93579e9f383c24ecd79edf"
+        );
+
+        let value: serde_json::Value =
+            serde_json::from_slice(&payload.payload_json).expect("payload JSON");
+        assert_eq!(value["media"]["sha256"], plan.media_hash);
+        assert_eq!(value["segment"]["text"], "alpha recording launch note");
+        assert!(
+            value["media"].get("copied_path").is_none(),
+            "payload must not imply media was copied"
+        );
+    }
+
+    #[test]
+    fn duplicate_segment_ids_are_rejected_before_payloads_are_staged() {
+        let plan = RecordingPlan {
+            media_path: PathBuf::from("fixtures/v0/recordings/demo.mp4"),
+            media_hash: "sha256:0000000000000000000000000000000000000000000000000000000000000087"
+                .to_owned(),
+            duration_ms: 5200,
+            file_size: 1234,
+            skipped_frames: 0,
+            segments: vec![
+                RecordingSegment {
+                    start_ms: 1000,
+                    duration_ms: 500,
+                    text: "Alpha  Recording".to_owned(),
+                    kind: SegmentKind::AudioTranscript {
+                        speaker_id: "speaker_01".to_owned(),
+                        confidence: 0.91,
+                    },
+                },
+                RecordingSegment {
+                    start_ms: 1000,
+                    duration_ms: 500,
+                    text: " alpha recording ".to_owned(),
+                    kind: SegmentKind::AudioTranscript {
+                        speaker_id: "speaker_02".to_owned(),
+                        confidence: 0.72,
+                    },
+                },
+            ],
+        };
+
+        let err = build_segment_payloads(&plan).expect_err("duplicate segment ids are rejected");
+        let message = err.to_string();
+        assert!(
+            message.contains("duplicate recording segment_id"),
+            "unexpected error: {message}"
+        );
+        assert!(message.contains("recseg-"), "unexpected error: {message}");
+    }
+
+    #[test]
+    fn frame_payload_uses_segment_start_as_timestamp_and_confidence_detail() {
+        let plan = parse_fixture_plan(FIXTURE).expect("fixture parses");
+        let segment = plan
+            .segments
+            .iter()
+            .find(|segment| matches!(segment.kind, SegmentKind::FrameOcr { .. }))
+            .expect("frame segment");
+
+        let payload = build_segment_payload(&plan, segment).expect("payload builds");
+        let value: serde_json::Value =
+            serde_json::from_slice(&payload.payload_json).expect("payload JSON");
+
+        assert_eq!(value["segment"]["track_kind"], "frame_ocr");
+        assert_eq!(value["segment"]["start_ms"], 2000);
+        assert_eq!(value["segment"]["text"], "screen shows gamma config");
+        let confidence = value["segment"]["detail"]["confidence"]
+            .as_f64()
+            .expect("confidence is numeric");
+        assert!((confidence - 0.82).abs() < 0.000_001);
+        assert_eq!(value["segment"]["detail"]["timestamp_ms"], 2000);
     }
 
     #[test]
