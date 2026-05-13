@@ -10,9 +10,23 @@ set -euo pipefail
 #   - std::fs::write / std::fs::OpenOptions::new().write(true)
 #   - tokio::fs::write
 #   - File::create
-hits=$(grep -rEn \
-  '(^|[^[:alnum:]_])(fs::write|OpenOptions::new\(\)[^;]*\.write\(true\)|File::create)\b' \
-  crates/cairn-core/src/verbs/lint/ || true)
+#
+# Skip lines below `#[cfg(test)]` in each file — by convention the test
+# module is the final item in the file, so everything after that marker
+# is test-only scaffolding (tempdir fixtures, etc.) and not production
+# read/write behaviour of the lint verb itself.
+hits=""
+while IFS= read -r -d '' file; do
+  prod_only=$(awk '/^[[:space:]]*#\[cfg\(test\)\]/{exit} {print}' "$file")
+  file_hits=$(echo "$prod_only" | grep -En \
+    '(^|[^[:alnum:]_])(fs::write|OpenOptions::new\(\)[^;]*\.write\(true\)|File::create)\b' \
+    || true)
+  if [ -n "$file_hits" ]; then
+    while IFS= read -r line; do
+      hits+="${file}:${line}"$'\n'
+    done <<< "$file_hits"
+  fi
+done < <(find crates/cairn-core/src/verbs/lint/ -name '*.rs' -print0)
 
 if [ -n "$hits" ]; then
   echo "lint must never open source files for write — §3 invariant:"

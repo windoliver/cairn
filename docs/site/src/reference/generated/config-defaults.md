@@ -83,6 +83,4 @@ pipeline:
 mcp:
   stdio:
     single_tenant: false
-source:
-  redact_on_forget: false
 ```
