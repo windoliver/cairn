@@ -13,7 +13,10 @@ pub mod consent_mirror;
 pub mod scheduler;
 pub mod sqlite_store;
 
-pub use consolidation::{ConsolidationHandler, ConsolidationPayload, CONSOLIDATION_KIND};
+pub use consolidation::{
+    ConsolidationForgetCleanupHandler, ConsolidationHandler, ConsolidationPayload,
+    ForgetCleanupPayload, CONSOLIDATION_KIND, FORGET_CLEANUP_KIND,
+};
 pub use consent_mirror::{ConsentLogMaterializer, MirrorError};
 pub use scheduler::{Clock, MockClock, Scheduler, SchedulerConfig, SystemClock};
 pub use sqlite_store::{SqliteJobStore, SqliteJobStoreInitError};

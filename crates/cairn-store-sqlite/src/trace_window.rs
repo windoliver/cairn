@@ -3,7 +3,11 @@
 //!
 //! Used by `cairn-workflows::consolidation` to build the candidate
 //! window for [`cairn_core::pipeline::consolidation::pick_window`].
+//!
+//! Also provides [`SqliteMemoryStore::find_summaries_by_source`] for
+//! the forget-cleanup handler (Task 14).
 
+use cairn_core::domain::record::RecordId;
 use cairn_core::pipeline::consolidation::TurnHeader;
 use rusqlite::params;
 
@@ -81,5 +85,57 @@ impl SqliteMemoryStore {
             .collect();
 
         Ok(headers)
+    }
+
+    /// Find the `record_id`s of active, non-tombstoned consolidation-summary
+    /// records whose `extra_frontmatter.consolidation.source_record_ids` JSON
+    /// array contains `source_record_id`.
+    ///
+    /// Used by the forget-cleanup handler to locate orphan-linked summaries
+    /// after their source turn record has been tombstoned with reason `Forget`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Worker`] on background-thread failure or
+    /// [`StoreError::Sqlite`] for surfaced SQL errors.
+    pub async fn find_summaries_by_source(
+        &self,
+        source_record_id: &str,
+    ) -> Result<Vec<RecordId>, StoreError> {
+        let conn = self.require_conn("find_summaries_by_source")?.clone();
+        let source_id = source_record_id.to_owned();
+
+        let raw_ids = conn
+            .call(move |c| {
+                const SQL: &str = "
+                    SELECT record_id
+                    FROM records
+                    WHERE active = 1 AND tombstoned = 0
+                      AND json_extract(extra_frontmatter, '$.consolidation') IS NOT NULL
+                      AND EXISTS (
+                          SELECT 1
+                          FROM json_each(
+                              json_extract(extra_frontmatter,
+                                           '$.consolidation.source_record_ids')
+                          )
+                          WHERE value = ?1
+                      )
+                ";
+                let mut stmt = c.prepare_cached(SQL)?;
+                let rows: Result<Vec<String>, rusqlite::Error> =
+                    stmt.query_map(params![source_id], |row| row.get::<_, String>(0))?
+                        .collect();
+                Ok(rows?)
+            })
+            .await?;
+
+        raw_ids
+            .into_iter()
+            .map(|s| {
+                RecordId::parse(s).map_err(|e| StoreError::Invariant {
+                    what: format!("find_summaries_by_source: invalid record_id in DB: {e}"),
+                })
+            })
+            .collect()
     }
 }
