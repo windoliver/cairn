@@ -62,6 +62,42 @@ cargo run -p cairn-cli --locked -- plugins list
 cargo run -p cairn-cli --locked -- plugins verify
 ```
 
+### Local Screen Sensor Setup
+
+The screen sensor is opt-in and currently exposes config, status, capability
+advertisement, and a mockable runtime boundary. Live xcap screenshot capture is
+not wired yet, so `cairn status --json` can report the configured sensor shape,
+but it will not trigger the macOS permission dialog or emit a real screenshot.
+
+To prepare macOS for the future live screen backend:
+
+1. Open **System Settings > Privacy & Security > Screen & System Audio Recording**
+   ([Apple's screen/audio recording privacy pane](https://support.apple.com/guide/mac-help/mchld6aa7d23/mac)).
+2. Enable the app that launches `cairn`:
+   - **Terminal** when running `cairn` from Terminal.
+   - **iTerm** when running from iTerm.
+   - **Visual Studio Code** when running from the VS Code terminal.
+   - **Codex** when running from the Codex desktop app, if it appears there.
+   - A packaged **Cairn.app** when one exists.
+3. Quit and reopen the enabled app so macOS applies the permission.
+
+You can verify the OS permission outside Cairn with:
+
+```bash
+screencapture -x /tmp/cairn-screen-permission-test.png
+file /tmp/cairn-screen-permission-test.png
+```
+
+You can verify Cairn's current screen status surface with:
+
+```bash
+cargo run -p cairn-cli --locked -- status --json | jq '.sensors.screen'
+```
+
+On the current pre-live-capture implementation, an enabled xcap config may
+still report `state: "permission_missing"` because status intentionally does
+not call desktop capture APIs.
+
 The docs site source lives in `docs/site/`. Generated usage/reference pages are
 committed under `docs/site/src/reference/generated/` and kept fresh by:
 
