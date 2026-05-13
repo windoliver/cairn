@@ -38,7 +38,7 @@ use cairn_core::domain::record::{Ed25519Signature, RecordId};
 use cairn_core::domain::{
     ActorChainEntry, CaptureMode, ChainRole, EvidenceVector, Identity, IdentityKind, MemoryClass,
     MemoryKind, MemoryRecord, MemoryVisibility, Provenance, Rfc3339Timestamp, ScopeTuple,
-    SourceFamily, TargetId,
+    SourceFamily, SourceId, TargetId,
 };
 use cairn_core::generated::common::Ulid;
 use cairn_core::generated::envelope::ResponseVerb;
@@ -57,6 +57,7 @@ use cairn_core::policy_trace::{
     PolicyDetail, PolicyErrorCode, PolicyGate, PolicyOutcome, PolicyTraceEntry, to_wire,
 };
 use clap::ArgMatches;
+use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 
 use crate::identity::{guard::refuse_if_degraded, status::ReconciliationReport};
@@ -609,6 +610,26 @@ fn run_body_ingest(
         Ok(record) => record,
         Err(e) => return emit_internal(json, &format!("build record: {e:#}"), trace),
     };
+    let db_path = vault_root.join(".cairn").join("cairn.db");
+    if source_hash_is_forgotten(&db_path, &record.provenance.source_hash) {
+        let reason = format!(
+            "source hash `{}` has a prior source-forget receipt and cannot be re-ingested",
+            record.provenance.source_hash
+        );
+        let mut resp = invalid_args_response(ResponseVerb::Ingest, "body", &reason);
+        resp.policy_trace = trace;
+        if json {
+            emit_json(&resp);
+        } else {
+            human_error("ingest", "InvalidArgs", &reason, &resp.operation_id);
+        }
+        return ExitCode::from(64);
+    }
+    if let Err(e) =
+        write_source_artifact(vault_root, &record.provenance.source_ids[0], &fenced.text)
+    {
+        return emit_internal(json, &format!("write source artifact: {e:#}"), trace);
+    }
 
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -618,7 +639,6 @@ fn run_body_ingest(
         Err(e) => return emit_internal(json, &format!("runtime build: {e}"), trace),
     };
 
-    let db_path = vault_root.join(".cairn").join("cairn.db");
     let outcome = match rt.block_on(async {
         let store = cairn_store_sqlite::open(&db_path).await?;
         store.upsert(&record).await
@@ -663,6 +683,23 @@ fn run_body_ingest(
         println!("cairn ingest: committed record {}", data.record_id.0);
     }
     ExitCode::SUCCESS
+}
+
+fn source_hash_is_forgotten(db_path: &Path, source_hash: &str) -> bool {
+    let Ok(conn) = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
+        return false;
+    };
+    let Ok(events) = cairn_store_sqlite::consent::query_by_subject(&conn, source_hash) else {
+        return false;
+    };
+    events.into_iter().any(|event| {
+        event.kind == cairn_core::domain::ConsentKind::ForgetIntent
+            && matches!(
+                event.payload,
+                cairn_core::domain::ConsentPayload::IntentReceipt { reason_code, .. }
+                    if reason_code.starts_with("source_forget")
+            )
+    })
 }
 
 fn policy_trace_for_ingest(
@@ -778,6 +815,8 @@ fn build_record(
     let author = Identity::parse(CLI_AUTHOR_ID).map_err(anyhow::Error::msg)?;
     let now = now_timestamp()?;
     let source_hash = format!("sha256:{:x}", Sha256::digest(body.as_bytes()));
+    let source_id =
+        SourceId::parse(format!("sources/cli/{}.txt", id.as_str())).map_err(anyhow::Error::msg)?;
     let record = MemoryRecord {
         id,
         target_id,
@@ -790,6 +829,7 @@ fn build_record(
             source_sensor: Identity::parse(CLI_SENSOR_ID).map_err(anyhow::Error::msg)?,
             created_at: now.clone(),
             originating_agent_id: author.clone(),
+            source_ids: vec![source_id],
             source_hash,
             consent_ref: "consent:cli:p0".to_owned(),
             llm_id_if_any: None,
@@ -811,6 +851,21 @@ fn build_record(
     };
     record.validate().map_err(anyhow::Error::msg)?;
     Ok(record)
+}
+
+fn write_source_artifact(
+    vault_root: &Path,
+    source_id: &SourceId,
+    body: &str,
+) -> anyhow::Result<()> {
+    let path = vault_root.join(source_id.as_str());
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("source artifact missing parent: {}", path.display()))?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("create source dir {}", parent.display()))?;
+    fs::write(&path, body).with_context(|| format!("write source artifact {}", path.display()))?;
+    Ok(())
 }
 
 fn now_timestamp() -> anyhow::Result<Rfc3339Timestamp> {

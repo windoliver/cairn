@@ -21,7 +21,9 @@
 //! [`MemoryStore`]: cairn_core::contract::memory_store::MemoryStore
 
 use cairn_core::contract::memory_store::{Edge, EdgeKey, TombstoneReason, UpsertOutcome};
-use cairn_core::domain::{BodyHash, MemoryRecord, RecordId, SessionId, SignedAdmission};
+use cairn_core::domain::{
+    BodyHash, ConsentEvent, MemoryRecord, RecordId, SessionId, SignedAdmission, TargetId,
+};
 use rusqlite::{OptionalExtension as _, Transaction, params};
 use tracing::instrument;
 
@@ -74,6 +76,38 @@ impl StoreTx<'_> {
             params![reason.as_db_str(), now_ms, id.as_str()],
         )?;
         Ok(())
+    }
+
+    /// Append a validated consent-journal event inside the open transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if validation or the underlying insert fails.
+    pub fn append_consent_event(&self, event: &ConsentEvent) -> Result<(), StoreError> {
+        crate::consent::append(&self.tx, event)?;
+        Ok(())
+    }
+
+    /// Physically purge every version row for `target` and drain dependent
+    /// `edges` rows first so the delete satisfies foreign-key constraints.
+    ///
+    /// Returns the number of `records` rows deleted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Sqlite`] for SQL failures.
+    pub fn purge_target(&self, target: &TargetId) -> Result<u64, StoreError> {
+        self.tx.execute(
+            "DELETE FROM edges \
+              WHERE src IN (SELECT record_id FROM records WHERE target_id = ?1) \
+                 OR dst IN (SELECT record_id FROM records WHERE target_id = ?1)",
+            params![target.as_str()],
+        )?;
+        let deleted = self.tx.execute(
+            "DELETE FROM records WHERE target_id = ?1",
+            params![target.as_str()],
+        )?;
+        Ok(u64::try_from(deleted).unwrap_or(u64::MAX))
     }
 
     /// Mint and persist a fresh single-use server challenge for

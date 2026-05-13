@@ -19,6 +19,7 @@ use crate::wal::{RecoveryConfig, recover_pending};
 
 const PRAGMAS: &str = "PRAGMA journal_mode=WAL;\
      PRAGMA foreign_keys=ON;\
+     PRAGMA trusted_schema=ON;\
      PRAGMA synchronous=NORMAL;\
      PRAGMA busy_timeout=5000;\
      PRAGMA temp_store=MEMORY;\

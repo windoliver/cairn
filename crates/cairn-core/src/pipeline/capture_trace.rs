@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use serde_json::{Map as JsonMap, Value as Json};
 
 use crate::domain::{
-    ChainRole, DomainError, EvidenceVector, Provenance, ScopeTuple, TargetId,
+    ChainRole, DomainError, EvidenceVector, Provenance, ScopeTuple, SourceId, TargetId,
     capture::{CaptureEvent, CapturePayload},
     record::{Ed25519Signature, MemoryRecord, RecordId},
     taxonomy::{MemoryClass, MemoryKind, MemoryVisibility},
@@ -199,6 +199,9 @@ fn provenance_from_event(event: &CaptureEvent) -> Provenance {
         source_sensor: event.sensor_id.clone(),
         created_at: event.captured_at.clone(),
         originating_agent_id,
+        source_ids: vec![
+            SourceId::parse(event.payload_ref.clone()).expect("capture payload_ref is non-empty"),
+        ],
         source_hash: event.payload_hash.as_str().to_owned(),
         consent_ref: "consent:pending".to_owned(),
         llm_id_if_any: None,

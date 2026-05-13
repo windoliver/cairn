@@ -54,6 +54,8 @@ mod tests {
             author_states: crate::verbs::lint::empty_author_states(),
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: None,
+            source_artifacts: crate::verbs::lint::empty_source_artifacts(),
+            source_forgets: crate::verbs::lint::empty_source_forgets(),
         };
         assert!(run(&li).is_empty());
     }
@@ -68,6 +70,8 @@ mod tests {
             author_states: crate::verbs::lint::empty_author_states(),
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: None,
+            source_artifacts: crate::verbs::lint::empty_source_artifacts(),
+            source_forgets: crate::verbs::lint::empty_source_forgets(),
         };
         let f = run(&li);
         assert_eq!(f.len(), 1);
@@ -92,6 +96,8 @@ mod tests {
             author_states: crate::verbs::lint::empty_author_states(),
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: None,
+            source_artifacts: crate::verbs::lint::empty_source_artifacts(),
+            source_forgets: crate::verbs::lint::empty_source_forgets(),
         };
         let f = run(&li);
         assert_eq!(f.len(), 1);
@@ -108,6 +114,8 @@ mod tests {
             author_states: crate::verbs::lint::empty_author_states(),
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: None,
+            source_artifacts: crate::verbs::lint::empty_source_artifacts(),
+            source_forgets: crate::verbs::lint::empty_source_forgets(),
         };
         assert!(run(&li).is_empty());
     }

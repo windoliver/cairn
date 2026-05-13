@@ -7,6 +7,13 @@ fn cli() -> Command {
     Command::new(env!("CARGO_BIN_EXE_cairn"))
 }
 
+fn json_stdout(out: &std::process::Output) -> serde_json::Value {
+    let stdout = String::from_utf8(out.stdout.clone()).expect("utf-8");
+    serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+        panic!("stdout was not valid JSON: {e}\nstdout: {stdout:?}");
+    })
+}
+
 fn assert_aborted_internal(verb_args: &[&str]) {
     let out = {
         let vault = tempfile::tempdir().expect("temp vault");
@@ -225,11 +232,49 @@ fn capture_trace_returns_aborted_internal() {
 }
 
 #[test]
-fn forget_record_returns_capability_unavailable() {
-    assert_rejected_capability_unavailable(
-        &["forget", "--record", "01JXXXXXXXXXXXXXXXXXXXXXXX", "--json"],
-        "cairn.mcp.v1.forget.record",
+fn forget_record_returns_committed_envelope() {
+    let vault = tempfile::tempdir().expect("temp vault");
+    cairn_cli::vault::bootstrap(&cairn_cli::vault::BootstrapOpts {
+        vault_path: vault.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap vault");
+
+    let ingest = cli()
+        .current_dir(vault.path())
+        .args(["ingest", "--kind", "user", "--body", "forget me", "--json"])
+        .output()
+        .expect("cairn ingest");
+    assert_eq!(
+        ingest.status.code(),
+        Some(0),
+        "ingest should commit; stderr: {}",
+        String::from_utf8_lossy(&ingest.stderr)
     );
+    let ingest_json = json_stdout(&ingest);
+    let record_id = ingest_json["data"]["record_id"]
+        .as_str()
+        .expect("record_id string");
+
+    let out = cli()
+        .current_dir(vault.path())
+        .args(["forget", "--record", record_id, "--json"])
+        .output()
+        .expect("cairn forget");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "forget should commit; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    let v: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("forget JSON parse failed: {e}\nstdout: {stdout:?}"));
+    assert_eq!(v["contract"], "cairn.mcp.v1");
+    assert_eq!(v["status"], "committed");
+    assert_eq!(v["verb"], "forget");
+    assert_eq!(v["data"]["deleted_count"], 1);
+    assert!(v["data"]["tombstones"].is_array());
 }
 
 #[test]
@@ -323,7 +368,6 @@ fn status_in_bound_vault_advertises_search_and_policy_trace() {
     for stub_cap in [
         "cairn.mcp.v1.retrieve.session",
         "cairn.mcp.v1.retrieve.full",
-        "cairn.mcp.v1.forget.record",
         "cairn.mcp.v1.forget.session",
     ] {
         assert!(
@@ -331,6 +375,10 @@ fn status_in_bound_vault_advertises_search_and_policy_trace() {
             "stub-only capability {stub_cap} must NOT be advertised; got {caps:?}"
         );
     }
+    assert!(
+        caps.contains("cairn.mcp.v1.forget.record"),
+        "forget.record must be advertised in a bound vault once wiring is live; got {caps:?}"
+    );
 }
 
 #[test]

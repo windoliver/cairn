@@ -189,7 +189,7 @@ mod tests {
     fn sample() -> MemoryRecord {
         use crate::domain::{
             ActorChainEntry, ChainRole, EvidenceVector, Identity, MemoryClass, MemoryKind,
-            MemoryVisibility, Provenance, Rfc3339Timestamp, ScopeTuple, TargetId,
+            MemoryVisibility, Provenance, Rfc3339Timestamp, ScopeTuple, SourceId, TargetId,
             record::{Ed25519Signature, RecordId},
         };
         use std::collections::BTreeMap;
@@ -209,6 +209,7 @@ mod tests {
                 source_sensor: Identity::parse("snr:local:hook:cc-session:v1").expect("valid"),
                 created_at: Rfc3339Timestamp::parse("2026-04-22T14:02:11Z").expect("valid"),
                 originating_agent_id: user.clone(),
+                source_ids: vec![SourceId::parse("src:01HQZX9F5N0000000000000000").expect("valid")],
                 source_hash: format!("sha256:{}", "a".repeat(64)),
                 consent_ref: "consent:01HQZ".to_owned(),
                 llm_id_if_any: None,

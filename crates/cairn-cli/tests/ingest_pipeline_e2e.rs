@@ -53,6 +53,10 @@ fn active_record_json(vault: &Path, record_id: &str) -> serde_json::Value {
     serde_json::from_str(&record_json).expect("record_json parses")
 }
 
+fn source_body(vault: &Path, source_ref: &str) -> String {
+    fs::read_to_string(vault.join(source_ref)).expect("source artifact should exist")
+}
+
 #[test]
 fn ingest_body_commits_record_and_writes_accepted_metric() {
     let vault = tempfile::tempdir().expect("temp vault");
@@ -123,6 +127,23 @@ fn ingest_body_commits_record_and_writes_accepted_metric() {
     assert_eq!(record["scope"]["agent"], "agt:cairn-cli:p0:v1");
     assert_eq!(
         record["body"],
+        "Agent chose SQLite because P0 must stay offline."
+    );
+    let source_ids = record["provenance"]["source_ids"]
+        .as_array()
+        .expect("source_ids array");
+    assert_eq!(
+        source_ids.len(),
+        1,
+        "ingest should emit one source artifact"
+    );
+    let source_ref = source_ids[0].as_str().expect("source ref string");
+    assert!(
+        source_ref.starts_with("sources/cli/"),
+        "expected CLI source artifact path, got {source_ref}"
+    );
+    assert_eq!(
+        source_body(vault.path(), source_ref),
         "Agent chose SQLite because P0 must stay offline."
     );
 }
@@ -210,6 +231,23 @@ fn ingest_file_runs_pipeline_without_leaking_file_body_to_metrics() {
     assert_eq!(record["kind"], "user");
     assert_eq!(
         record["body"],
+        "User prefers compact updates. Body marker should stay out of metrics."
+    );
+    let source_ids = record["provenance"]["source_ids"]
+        .as_array()
+        .expect("source_ids array");
+    assert_eq!(
+        source_ids.len(),
+        1,
+        "ingest should emit one source artifact"
+    );
+    let source_ref = source_ids[0].as_str().expect("source ref string");
+    assert!(
+        source_ref.starts_with("sources/cli/"),
+        "expected CLI source artifact path, got {source_ref}"
+    );
+    assert_eq!(
+        source_body(vault.path(), source_ref),
         "User prefers compact updates. Body marker should stay out of metrics."
     );
 }

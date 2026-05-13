@@ -103,6 +103,14 @@ pub fn query_by_scope(conn: &Connection, scope: &str) -> Result<Vec<ConsentEvent
     query_where(conn, "scope = ?", params![scope])
 }
 
+/// All event-kind rows for a given subject.
+///
+/// # Errors
+/// Returns [`StoreError`] on `SQLite` failures or row-decode errors.
+pub fn query_by_subject(conn: &Connection, subject: &str) -> Result<Vec<ConsentEvent>, StoreError> {
+    query_where(conn, "subject = ?", params![subject])
+}
+
 /// Mirror cursor primitive: every event-kind row with `rowid > since`,
 /// in `rowid` order, paired with its rowid so the caller can advance the
 /// cursor monotonically.

@@ -471,6 +471,8 @@ pub struct VaultConfig {
     pub name: String,
     /// Storage tier.
     pub tier: VaultTier,
+    /// Source-retention policy knobs.
+    pub source: SourceConfig,
     /// Folder layout and enabled kinds.
     pub layout: LayoutConfig,
     /// Hot-memory assembly recipe and budget.
@@ -486,12 +488,22 @@ impl Default for VaultConfig {
         Self {
             name: "my-vault".into(),
             tier: VaultTier::Local,
+            source: SourceConfig::default(),
             layout: LayoutConfig::default(),
             hot_memory: HotMemoryConfig::default(),
             retention: BTreeMap::new(),
             schema_files: vec!["CLAUDE.md".into(), "AGENTS.md".into(), "GEMINI.md".into()],
         }
     }
+}
+
+/// Source-retention policy (§5.6 source forget / redaction).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct SourceConfig {
+    /// When `true`, `forget --record` rewrites immutable source artifacts to a
+    /// body-free redaction marker after recording a source-forget receipt.
+    pub redact_on_forget: bool,
 }
 
 /// Folder names and enabled kinds (§3.1 layout block).
