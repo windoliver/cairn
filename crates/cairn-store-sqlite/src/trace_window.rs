@@ -299,14 +299,109 @@ impl SqliteMemoryStore {
     }
 }
 
-/// Build the `AND json_extract(scope, '$.<dim>') = ?N` predicate
-/// fragment plus the matching bind values for every set dimension of
-/// `bound_scope`. Returns `(empty, empty)` when `bound_scope` is
-/// `None` or has no dimensions set.
-///
-/// The placeholder numbers in the returned SQL fragment are `?N`,
-/// `?N+1`, … starting from `?<fixed-arg-count+1>` — but we use the
-/// nameless `?` form so the call site just appends binds in order.
+/// One session backlog entry returned by
+/// [`SqliteMemoryStore::list_consolidation_backlog`]. The fields are
+/// passed verbatim to `cairn-workflows::consolidation::enqueue_if_due_scoped`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsolidationBacklogEntry {
+    /// Session id of the backlog entry.
+    pub session_id: String,
+    /// Serialized `ScopeTuple` JSON (verbatim from the records row).
+    pub scope_json: String,
+    /// Active eligible `turn_summary` count past `since_sequence`.
+    pub active_eligible: u32,
+    /// Watermark used as `since_sequence`.
+    pub since_sequence: u32,
+}
+
+impl SqliteMemoryStore {
+    /// Scan every `(session, scope)` whose active `turn_summary` count
+    /// past the latest consolidation watermark is at least
+    /// `min_turns_for_trigger`. Used by the startup reconciliation pass
+    /// in `cairn-workflows::consolidation::reconcile` to recover from
+    /// the post-capture crash window (round-9 adversarial review #1).
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Worker`] on background-thread failure or
+    /// [`StoreError::Sqlite`] for surfaced SQL errors.
+    pub async fn list_consolidation_backlog(
+        &self,
+        min_turns_for_trigger: u32,
+    ) -> Result<Vec<ConsolidationBacklogEntry>, StoreError> {
+        let conn = self.require_conn("list_consolidation_backlog")?.clone();
+        let min_turns = i64::from(min_turns_for_trigger);
+        let rows: Vec<(String, String, i64, i64)> = conn
+            .call(move |c| {
+                const SQL: &str = "
+                    WITH watermarks AS (
+                        SELECT
+                            json_extract(scope, '$.session_id') AS session_id,
+                            scope                               AS scope_json,
+                            COALESCE(MAX(CAST(
+                                json_extract(extra_frontmatter,
+                                             '$.consolidation.last_sequence')
+                                AS INTEGER)), 0)                AS watermark
+                        FROM records
+                        WHERE kind = 'reasoning'
+                          AND json_extract(extra_frontmatter, '$.consolidation') IS NOT NULL
+                          AND json_extract(scope, '$.session_id') IS NOT NULL
+                        GROUP BY session_id, scope_json
+                    ),
+                    sessions AS (
+                        SELECT
+                            r.trace_session_id  AS session_id,
+                            r.scope             AS scope_json,
+                            COALESCE(w.watermark, 0) AS watermark
+                        FROM records r
+                        LEFT JOIN watermarks w
+                          ON w.session_id = r.trace_session_id
+                         AND w.scope_json = r.scope
+                        WHERE r.trace_event = 'turn_summary'
+                          AND r.trace_session_id IS NOT NULL
+                          AND r.active = 1 AND r.tombstoned = 0
+                        GROUP BY r.trace_session_id, r.scope, w.watermark
+                    )
+                    SELECT
+                        s.session_id,
+                        s.scope_json,
+                        s.watermark,
+                        (SELECT COUNT(*) FROM records r2
+                         WHERE r2.trace_event = 'turn_summary'
+                           AND r2.trace_session_id = s.session_id
+                           AND r2.scope            = s.scope_json
+                           AND r2.active = 1 AND r2.tombstoned = 0
+                           AND r2.trace_sequence  > s.watermark) AS active_eligible
+                    FROM sessions s
+                    WHERE active_eligible >= ?1
+                ";
+                let mut stmt = c.prepare_cached(SQL)?;
+                let mut out = Vec::new();
+                let mut q = stmt.query(params![min_turns])?;
+                while let Some(row) = q.next()? {
+                    out.push((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ));
+                }
+                Ok(out)
+            })
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(session_id, scope_json, watermark, active_eligible)| {
+                ConsolidationBacklogEntry {
+                    session_id,
+                    scope_json,
+                    active_eligible: u32::try_from(active_eligible.max(0)).unwrap_or(u32::MAX),
+                    since_sequence: u32::try_from(watermark.max(0)).unwrap_or(u32::MAX),
+                }
+            })
+            .collect())
+    }
+}
+
 /// Build the `AND json_extract(scope, '$.<dim>') = ?N` predicate
 /// fragment plus the matching bind values for every set dimension of
 /// `bound_scope`.

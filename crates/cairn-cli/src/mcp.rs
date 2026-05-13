@@ -199,19 +199,50 @@ pub fn run(
                 let clock: Arc<dyn cairn_workflows::Clock> = Arc::new(SystemClock);
                 let scheduler = Scheduler::start(
                     &incarnation_id,
-                    job_store,
+                    job_store.clone(),
                     &registry,
                     clock,
                     SchedulerConfig::p0(),
                 );
                 tracing::info!("scheduler started (incarnation={incarnation_id})");
 
+                // Reconcile any sessions whose turn_summary count
+                // crossed the trigger threshold but lost their enqueue
+                // (capture crashed after the turn committed, or the
+                // JobStore was briefly unavailable). Single-shot
+                // best-effort — failures are logged but do not abort
+                // mcp serve (round-9 adversarial review #1).
+                let reconcile_now = i64::try_from(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis(),
+                )
+                .unwrap_or(i64::MAX);
+                match cairn_workflows::consolidation::reconcile_consolidation_backlog(
+                    sqlite_store.clone(),
+                    job_store,
+                    config.consolidation,
+                    reconcile_now,
+                )
+                .await
+                {
+                    Ok(entries) => tracing::info!(
+                        backlog = entries.len(),
+                        "consolidation reconciliation pass complete"
+                    ),
+                    Err(e) => tracing::warn!(error = %e, "consolidation reconcile failed"),
+                }
+
                 // Upcast to dyn MemoryStore for the verb layer; keep the
                 // concrete Arc<SqliteMemoryStore> for the graph-tool layer
                 // (Plan C Task 19).
                 let store: Arc<dyn cairn_core::contract::memory_store::MemoryStore> =
                     sqlite_store.clone();
-                let serve_result = cairn_mcp::serve_stdio_with_store(
+                // Use the ready variant: a Scheduler is live in this
+                // process so `cairn.workflows.v1.consolidation` is
+                // honored end-to-end (round-9 adversarial review #3).
+                let serve_result = cairn_mcp::serve_stdio_with_store_consolidation_ready(
                     store,
                     sqlite_store,
                     resolver,

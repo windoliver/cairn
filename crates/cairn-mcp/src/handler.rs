@@ -68,6 +68,12 @@ pub struct CairnMcpHandler {
     config: CairnConfig,
     principal: ScopeTuple,
     transport: McpTransport,
+    /// True iff the embedding MCP transport boots a workflow Scheduler
+    /// inside its `block_on` (`single_tenant` arm of `cairn mcp`). Flips
+    /// the consolidation capability in status advertisement; default
+    /// `false` keeps the legacy stdio path from over-advertising
+    /// (round-9 adversarial review #3).
+    consolidation_runtime_ready: bool,
 }
 
 impl Default for CairnMcpHandler {
@@ -100,6 +106,7 @@ impl CairnMcpHandler {
             config: CairnConfig::default(),
             principal: ScopeTuple::default(),
             transport: McpTransport::Stdio,
+            consolidation_runtime_ready: false,
         }
     }
 
@@ -116,6 +123,7 @@ impl CairnMcpHandler {
             config,
             principal: ScopeTuple::default(),
             transport: McpTransport::Stdio,
+            consolidation_runtime_ready: false,
         }
     }
 
@@ -136,6 +144,7 @@ impl CairnMcpHandler {
             config,
             principal,
             transport: McpTransport::Stdio,
+            consolidation_runtime_ready: false,
         }
     }
 
@@ -158,7 +167,19 @@ impl CairnMcpHandler {
             config,
             principal,
             transport: McpTransport::Stdio,
+            consolidation_runtime_ready: false,
         }
+    }
+
+    /// Mark this handler's runtime as having a live workflow scheduler.
+    /// Used by `cairn mcp` after `Scheduler::start` succeeds so the
+    /// MCP `initialize` response correctly advertises
+    /// `cairn.workflows.v1.consolidation` (round-9 adversarial review
+    /// #3).
+    #[must_use]
+    pub fn with_consolidation_runtime_ready(mut self, ready: bool) -> Self {
+        self.consolidation_runtime_ready = ready;
+        self
     }
 
     /// Returns `true` if a store is wired into this handler.
@@ -307,7 +328,7 @@ impl CairnMcpHandler {
             model_present,
             embedding_provider_ready,
             llm_configured: false,
-            consolidation_runtime_ready: false,
+            consolidation_runtime_ready: self.consolidation_runtime_ready,
             contract_phase: cairn_core::status::Phase::V0_1,
         };
 

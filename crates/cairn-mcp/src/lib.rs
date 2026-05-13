@@ -148,6 +148,33 @@ pub async fn serve_stdio_with_store(
     .await
 }
 
+/// Same as [`serve_stdio_with_store`] but also flips the handler's
+/// `consolidation_runtime_ready` flag so the initialize/status
+/// response advertises `cairn.workflows.v1.consolidation`. Used by
+/// `cairn mcp` after `Scheduler::start` succeeds (round-9 adversarial
+/// review #3).
+///
+/// # Errors
+/// Same as [`serve_stdio_with_store`].
+pub async fn serve_stdio_with_store_consolidation_ready(
+    store: Arc<dyn cairn_core::contract::memory_store::MemoryStore>,
+    sqlite_store: Arc<cairn_store_sqlite::SqliteMemoryStore>,
+    scope: Arc<dyn cairn_core::mcp_auth::McpSessionScope>,
+    config: cairn_core::config::CairnConfig,
+    principal: cairn_core::domain::ScopeTuple,
+) -> Result<(), TransportError> {
+    serve_stdio_with_store_io_consolidation_ready(
+        store,
+        sqlite_store,
+        scope,
+        config,
+        principal,
+        tokio::io::stdin(),
+        tokio::io::stdout(),
+    )
+    .await
+}
+
 /// Internal helper — same as [`serve_stdio_with_store`] but accepts arbitrary
 /// `AsyncRead` / `AsyncWrite` so integration tests can drive it in-process.
 ///
@@ -169,13 +196,82 @@ where
     I: AsyncRead + Unpin + Send + 'static,
     O: AsyncWrite + Unpin + Send + 'static,
 {
+    serve_stdio_with_store_io_inner(
+        store,
+        sqlite_store,
+        scope,
+        config,
+        principal,
+        input,
+        output,
+        false,
+    )
+    .await
+}
+
+/// Variant of [`serve_stdio_with_store_io`] that advertises consolidation
+/// as runtime-ready (a Scheduler has been started by the caller).
+///
+/// # Errors
+/// Same as [`serve_stdio_with_store_io`].
+pub async fn serve_stdio_with_store_io_consolidation_ready<I, O>(
+    store: Arc<dyn cairn_core::contract::memory_store::MemoryStore>,
+    sqlite_store: Arc<cairn_store_sqlite::SqliteMemoryStore>,
+    scope: Arc<dyn cairn_core::mcp_auth::McpSessionScope>,
+    config: cairn_core::config::CairnConfig,
+    principal: cairn_core::domain::ScopeTuple,
+    input: I,
+    output: O,
+) -> Result<(), TransportError>
+where
+    I: AsyncRead + Unpin + Send + 'static,
+    O: AsyncWrite + Unpin + Send + 'static,
+{
+    serve_stdio_with_store_io_inner(
+        store,
+        sqlite_store,
+        scope,
+        config,
+        principal,
+        input,
+        output,
+        true,
+    )
+    .await
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "internal helper mirrors the public surface's full param list \
+              plus one runtime-ready flag"
+)]
+async fn serve_stdio_with_store_io_inner<I, O>(
+    store: Arc<dyn cairn_core::contract::memory_store::MemoryStore>,
+    sqlite_store: Arc<cairn_store_sqlite::SqliteMemoryStore>,
+    scope: Arc<dyn cairn_core::mcp_auth::McpSessionScope>,
+    config: cairn_core::config::CairnConfig,
+    principal: cairn_core::domain::ScopeTuple,
+    input: I,
+    output: O,
+    consolidation_runtime_ready: bool,
+) -> Result<(), TransportError>
+where
+    I: AsyncRead + Unpin + Send + 'static,
+    O: AsyncWrite + Unpin + Send + 'static,
+{
     // Relay: filter blank lines from `input`, write surviving frames to the
     // framer-reader half that rmcp reads from.
     let (framer_reader, relay_writer) = tokio::io::duplex(64 * 1024);
     let mut relay_task = tokio::spawn(async move { relay::run_relay(input, relay_writer).await });
 
-    let handler =
-        CairnMcpHandler::with_store_scope_and_sqlite(store, sqlite_store, scope, config, principal);
+    let handler = CairnMcpHandler::with_store_scope_and_sqlite(
+        store,
+        sqlite_store,
+        scope,
+        config,
+        principal,
+    )
+    .with_consolidation_runtime_ready(consolidation_runtime_ready);
 
     // rmcp's `IntoTransport` is implemented for `(R, W)` tuples where R:
     // `AsyncRead + Unpin + Send + 'static` and W: `AsyncWrite + Unpin + Send +

@@ -24,6 +24,7 @@ pub mod repair;
 pub mod replay;
 pub mod store;
 pub mod trace_window;
+pub use trace_window::ConsolidationBacklogEntry;
 pub mod vec_ext;
 mod verify;
 pub mod wal;

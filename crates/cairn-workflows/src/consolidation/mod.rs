@@ -3,7 +3,10 @@
 pub mod forget_cleanup;
 pub mod handler;
 pub mod payload;
+pub mod reconcile;
 pub mod trigger;
+
+pub use reconcile::reconcile_consolidation_backlog;
 
 pub use forget_cleanup::{
     ConsolidationForgetCleanupHandler, FORGET_CLEANUP_KIND, ForgetCleanupPayload,

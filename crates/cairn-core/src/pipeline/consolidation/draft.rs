@@ -81,7 +81,15 @@ pub fn compute_rolling_summary(
         let _ = write!(body, "{:.2}", turn.salience);
         body.push_str(")\n");
         if body.len() > max_chars {
-            body.truncate(max_chars);
+            // String::truncate(byte_idx) panics if byte_idx lands inside
+            // a multi-byte UTF-8 sequence. turn_ids and bodies can be
+            // arbitrary UTF-8, so walk back to the nearest char boundary
+            // before truncating (round-9 adversarial review #4).
+            let mut cut = max_chars.min(body.len());
+            while cut > 0 && !body.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            body.truncate(cut);
             body.push_str("\n…");
             break;
         }
