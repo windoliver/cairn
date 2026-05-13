@@ -162,21 +162,21 @@ fn check_source_ids(
 
     let mut source_ids = provenance.source_ids.clone();
     source_ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-    for source_id in source_ids {
+    for source_id in &source_ids {
         check_source_artifact(record, source_id, inputs, source_forgotten, findings);
     }
 }
 
 fn check_source_artifact(
     record: &LintRecord,
-    source_id: SourceId,
+    source_id: &SourceId,
     inputs: &LintInputs<'_>,
     source_forgotten: bool,
     findings: &mut Vec<Finding>,
 ) {
     let provenance = &record.stored.record.provenance;
     let expected_path = source_id.as_str();
-    let Some(artifact) = inputs.source_artifacts.get(&source_id) else {
+    let Some(artifact) = inputs.source_artifacts.get(source_id) else {
         findings.push(dangling(
             &record.stored.record.id,
             source_id.as_str(),

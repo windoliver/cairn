@@ -436,11 +436,14 @@ mod tests {
     #[test]
     fn deserialize_defaults_source_refs_to_empty() {
         // Records written before #257 land have no `source_refs` key;
-        // they must continue deserializing without error.
+        // they must continue deserializing without error. `source_ids`
+        // is structurally required (#328) so a legacy record still
+        // names at least one source artifact.
         let json = r#"{
             "source_sensor": "snr:local:hook:cc-session:v1",
             "created_at": "2026-04-22T14:02:11Z",
             "originating_agent_id": "agt:claude-code:opus-4-7:main:v1",
+            "source_ids": ["01HQZX9F5N0000000000000001"],
             "source_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "consent_ref": "consent:01HQZ",
             "llm_id_if_any": null
