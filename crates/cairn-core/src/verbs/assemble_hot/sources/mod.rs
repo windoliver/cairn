@@ -8,4 +8,5 @@ pub mod playbook;
 pub mod project;
 pub mod purpose;
 pub mod render;
+pub mod rolling_summary;
 pub mod user_signal;
