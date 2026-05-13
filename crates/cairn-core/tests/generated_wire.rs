@@ -55,6 +55,79 @@ fn ingest_args_accepts_exactly_one_xor_member() {
 }
 
 #[test]
+fn ingest_args_accept_jsonl_source_and_reject_body_mix() {
+    let ok = serde_json::json!({
+        "kind": "trace",
+        "jsonl": "/tmp/session.jsonl",
+        "harness": "claude-code",
+        "recursive": true,
+        "limit": 10,
+    });
+    let parsed: IngestArgs = serde_json::from_value(ok).unwrap();
+    assert_eq!(parsed.jsonl.as_deref(), Some("/tmp/session.jsonl"));
+    assert_eq!(parsed.harness.as_deref(), Some("claude-code"));
+    assert!(parsed.validate().is_ok());
+
+    let mixed = serde_json::json!({
+        "kind": "trace",
+        "jsonl": "/tmp/session.jsonl",
+        "body": "forbidden mix",
+    });
+    let err = serde_json::from_value::<IngestArgs>(mixed).unwrap_err();
+    assert!(
+        err.to_string().contains("exactly one of"),
+        "expected XOR error, got: {err}"
+    );
+}
+
+#[test]
+fn ingest_args_reject_empty_jsonl_transcript_fields() {
+    let json = serde_json::json!({
+        "kind": "trace",
+        "jsonl": "/tmp/session.jsonl",
+        "harness": "",
+        "session_id_from": "",
+    });
+    let err = serde_json::from_value::<IngestArgs>(json).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("harness: must not be empty")
+            || msg.contains("session_id_from: must not be empty"),
+        "expected transcript field minLength error, got: {msg}"
+    );
+}
+
+#[test]
+fn ingest_args_reject_limit_below_one() {
+    let json = serde_json::json!({
+        "kind": "trace",
+        "jsonl": "/tmp/session.jsonl",
+        "limit": 0,
+    });
+    let err = serde_json::from_value::<IngestArgs>(json).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("limit: must be in [1, 4294967295]"),
+        "expected limit range error, got: {err}"
+    );
+}
+
+#[test]
+fn ingest_args_reject_limit_above_u32_max() {
+    let json = serde_json::json!({
+        "kind": "trace",
+        "jsonl": "/tmp/session.jsonl",
+        "limit": 4_294_967_296_i64,
+    });
+    let err = serde_json::from_value::<IngestArgs>(json).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("limit: must be in [1, 4294967295]"),
+        "expected upper-bound limit error, got: {err}"
+    );
+}
+
+#[test]
 fn signed_intent_rejects_missing_sequence_and_challenge_at_deserialize() {
     // Stripped-down intent missing both `sequence` and `server_challenge`.
     let mut m = signed_intent_minimum();
@@ -198,6 +271,20 @@ fn signed_intent_rejects_malformed_operation_id() {
     assert!(
         err.to_string().contains("ULID"),
         "expected ULID error, got: {err}"
+    );
+}
+
+#[test]
+fn signed_intent_rejects_overflow_operation_id() {
+    let mut m = signed_intent_minimum();
+    m.insert(
+        "operation_id".into(),
+        serde_json::json!("81ARZ3NDEKTSV4RRFFQ69G5FAV"),
+    );
+    let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("ULID") || err.to_string().contains("Crockford"),
+        "expected overflow ULID rejection, got: {err}"
     );
 }
 
@@ -1243,6 +1330,33 @@ fn retrieve_session_accepts_valid() {
 }
 
 #[test]
+fn retrieve_tool_call_args_accept_valid() {
+    let json = serde_json::json!({
+        "target": "tool_call",
+        "session_id": "s1",
+        "turn_id": "t1",
+        "tool_call_id": "call-1"
+    });
+    let parsed: RetrieveArgs = serde_json::from_value(json).unwrap();
+    assert!(matches!(parsed, RetrieveArgs::ToolCall { .. }));
+}
+
+#[test]
+fn retrieve_tool_call_args_reject_empty_tool_call_id() {
+    let json = serde_json::json!({
+        "target": "tool_call",
+        "session_id": "s1",
+        "turn_id": "t1",
+        "tool_call_id": ""
+    });
+    let err = serde_json::from_value::<RetrieveArgs>(json).unwrap_err();
+    assert!(
+        err.to_string().contains("tool_call_id"),
+        "expected tool_call_id-empty error, got: {err}"
+    );
+}
+
+#[test]
 fn retrieve_folder_rejects_depth_above_max() {
     let json = serde_json::json!({
         "target": "folder",
@@ -1455,15 +1569,20 @@ fn signed_intent_accepts_fractional_offset_datetime() {
 }
 
 #[test]
-fn signed_intent_accepts_leap_second() {
-    // RFC-3339 §5.6 allows seconds=60.
+fn signed_intent_rejects_unsupported_leap_second() {
+    // Cairn's domain timestamp parser deliberately rejects `:60` until a
+    // real leap-second-aware parser is wired in. The generated wire contract
+    // must fail closed the same way.
     let mut m = signed_intent_minimum();
     m.insert(
         "issued_at".into(),
         serde_json::json!("2026-12-31T23:59:60Z"),
     );
-    let parsed: SignedIntent = serde_json::from_value(serde_json::Value::Object(m)).unwrap();
-    assert_eq!(parsed.issued_at, "2026-12-31T23:59:60Z");
+    let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("issued_at"),
+        "expected issued_at leap-second rejection, got: {err}"
+    );
 }
 
 // ── F1 (round 7): Tagged-union variants reject cross-variant / unknown keys ──
@@ -1877,6 +1996,16 @@ fn retrieve_record_rejects_lowercase_ulid() {
     assert!(
         err.to_string().contains("ULID") || err.to_string().contains("Crockford"),
         "expected lowercase-ULID rejection, got: {err}"
+    );
+}
+
+#[test]
+fn retrieve_record_rejects_overflow_ulid_first_char() {
+    let json = serde_json::json!({"target": "record", "id": "81ARZ3NDEKTSV4RRFFQ69G5FAV"});
+    let err = serde_json::from_value::<RetrieveArgs>(json).unwrap_err();
+    assert!(
+        err.to_string().contains("ULID") || err.to_string().contains("Crockford"),
+        "expected overflow ULID rejection, got: {err}"
     );
 }
 
@@ -2350,7 +2479,7 @@ fn identity_primitive_rejects_empty_body() {
 fn identity_primitive_rejects_invalid_body_chars() {
     use cairn_core::generated::common::Identity;
     // Space is not in [A-Za-z0-9._:-].
-    let err = serde_json::from_value::<Identity>(serde_json::json!("usr:alice bob")).unwrap_err();
+    let err = serde_json::from_value::<Identity>(serde_json::json!("hmn:alice bob")).unwrap_err();
     assert!(
         err.to_string().contains("Identity"),
         "expected Identity rejection, got: {err}"
@@ -2483,6 +2612,61 @@ fn retrieve_data_session_rejects_empty_session_id() {
     );
 }
 
+#[test]
+fn retrieve_tool_call_response_round_trips() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("retrieve"));
+    m.insert("status".into(), serde_json::json!("committed"));
+    m.insert("target".into(), serde_json::json!("tool_call"));
+    m.insert(
+        "data".into(),
+        serde_json::json!({
+            "session_id": "s1",
+            "turn_id": "t1",
+            "tool_call_id": "call-1",
+            "items": [{
+                "turn_id": "t1",
+                "role": "tool",
+                "linkage": {
+                    "record_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                    "trace_event": "pre_tool",
+                    "sequence": 2,
+                    "capture_event_id": "evt-pre",
+                    "tool_call_id": "call-1",
+                    "payload_hash": "sha256:abc"
+                }
+            }]
+        }),
+    );
+    let resp: Response = serde_json::from_value(serde_json::Value::Object(m)).unwrap();
+    assert!(matches!(
+        resp.data,
+        Some(ResponseData::Retrieve(RetrieveData::ToolCall(_)))
+    ));
+}
+
+#[test]
+fn retrieve_data_tool_call_rejects_empty_ids() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("retrieve"));
+    m.insert("status".into(), serde_json::json!("committed"));
+    m.insert("target".into(), serde_json::json!("tool_call"));
+    m.insert(
+        "data".into(),
+        serde_json::json!({
+            "session_id": "s1",
+            "turn_id": "",
+            "tool_call_id": "call-1",
+            "items": []
+        }),
+    );
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("turn_id"),
+        "expected DataToolCall.turn_id rejection, got: {err}"
+    );
+}
+
 // ── F4 (round 9): allow optional error-data fields with primitive validation ──
 
 #[test]
@@ -2577,4 +2761,153 @@ fn error_invalid_filter_rejects_unknown_data_key() {
         err.to_string().contains("unknown key"),
         "expected unknown-key rejection, got: {err}"
     );
+}
+
+#[test]
+fn lint_response_accepts_edge_finding_kinds() {
+    let json = serde_json::json!({
+        "contract": "cairn.mcp.v1",
+        "data": {
+            "summary": {
+                "total": 2,
+                "by_severity": {
+                    "error": 0,
+                    "warning": 1,
+                    "info": 1
+                },
+                "by_kind": {
+                    "contradictory_edge": 1,
+                    "ambiguous_edge": 1
+                },
+                "auto_resolved": 0
+            },
+            "findings": [
+                {
+                    "kind": "contradictory_edge",
+                    "severity": "warning",
+                    "entities": ["edge-a", "edge-b"],
+                    "message": "Two live edges share (source, target, relation)",
+                    "suggested_fix": "Run `cairn lint --fix` to keep the higher-confidence edge"
+                },
+                {
+                    "kind": "ambiguous_edge",
+                    "severity": "info",
+                    "entities": ["edge-c"],
+                    "message": "Live edge has AMBIGUOUS confidence"
+                }
+            ]
+        },
+        "operation_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "policy_trace": [],
+        "status": "committed",
+        "verb": "lint"
+    });
+
+    let response: Response = serde_json::from_value(json).unwrap();
+    let Some(ResponseData::Lint(data)) = response.data else {
+        panic!("expected lint response data");
+    };
+    assert_eq!(data.summary.total, 2);
+    assert_eq!(data.summary.auto_resolved, Some(0));
+    assert_eq!(data.summary.by_severity.warning, 1);
+    assert_eq!(
+        data.summary.by_kind["contradictory_edge"],
+        serde_json::Value::from(1)
+    );
+    assert_eq!(
+        data.summary.by_kind["ambiguous_edge"],
+        serde_json::Value::from(1)
+    );
+    assert_eq!(
+        data.findings[0].entities.as_deref(),
+        Some(&["edge-a".to_string(), "edge-b".to_string()][..])
+    );
+    assert_eq!(
+        data.findings[0].suggested_fix.as_deref(),
+        Some("Run `cairn lint --fix` to keep the higher-confidence edge")
+    );
+}
+// ── F5 (round 9 fixup): CapabilityUnavailable.remediation optional-field validation ──
+
+#[test]
+fn error_capability_unavailable_with_remediation_accepts() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("search"));
+    m.insert("status".into(), serde_json::json!("rejected"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({
+            "code": "CapabilityUnavailable",
+            "message": "semantic search not enabled",
+            "data": {
+                "capability": "cairn.mcp.v1.search.semantic",
+                "remediation": "Enable the sqlite-vec feature flag and rebuild."
+            }
+        }),
+    );
+    let _: Response = serde_json::from_value(serde_json::Value::Object(m))
+        .expect("CapabilityUnavailable with non-empty remediation should accept");
+}
+
+#[test]
+fn error_capability_unavailable_remediation_rejects_empty_string() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("search"));
+    m.insert("status".into(), serde_json::json!("rejected"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({
+            "code": "CapabilityUnavailable",
+            "message": "semantic search not enabled",
+            "data": {
+                "capability": "cairn.mcp.v1.search.semantic",
+                "remediation": ""
+            }
+        }),
+    );
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("remediation"),
+        "expected empty remediation rejection, got: {err}"
+    );
+}
+
+#[test]
+fn error_capability_unavailable_remediation_rejects_non_string() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("search"));
+    m.insert("status".into(), serde_json::json!("rejected"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({
+            "code": "CapabilityUnavailable",
+            "message": "semantic search not enabled",
+            "data": {
+                "capability": "cairn.mcp.v1.search.semantic",
+                "remediation": 42
+            }
+        }),
+    );
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("remediation"),
+        "expected non-string remediation rejection, got: {err}"
+    );
+}
+
+#[test]
+fn error_capability_unavailable_without_remediation_accepts() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("search"));
+    m.insert("status".into(), serde_json::json!("rejected"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({
+            "code": "CapabilityUnavailable",
+            "message": "semantic search not enabled",
+            "data": {"capability": "cairn.mcp.v1.search.semantic"}
+        }),
+    );
+    let _: Response = serde_json::from_value(serde_json::Value::Object(m))
+        .expect("CapabilityUnavailable without remediation (pre-#53 server) should accept");
 }

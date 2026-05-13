@@ -2371,13 +2371,23 @@ Cairn exposes one set of eight verbs through four surfaces. **The CLI is the gro
 | Verb | CLI | MCP | SDK (Rust) |
 |------|-----|-----|------------|
 | 1 | `cairn ingest --kind user --body "..."` | `{verb:"ingest", args:{kind,body,...}}` | `cairn::ingest(IngestArgs {...})` |
-| 2 | `cairn search "query" [--mode semantic]` | `{verb:"search", args:{...}}` | `cairn::search(SearchArgs {...})` |
+| 2 | `cairn search "query" [--mode keyword\|semantic\|hybrid]` | `{verb:"search", args:{...}}` | `cairn::search(SearchArgs {...})` |
 | 3 | `cairn retrieve <record-id>`<br>`cairn retrieve --session <id> [--limit K --order desc --rehydrate]`<br>`cairn retrieve --session <id> --turn <n> [--include tool_calls,reasoning]`<br>`cairn retrieve --folder <path>`<br>`cairn retrieve --scope <expr>`<br>`cairn retrieve --profile [--user <id>] [--agent <id>]` | `{verb:"retrieve", args: RetrieveArgs}` (discriminated union — see §8.0.c) | `cairn::retrieve(RetrieveArgs::{Record,Session,Turn,Folder,Scope,Profile}{…})` |
 | 4 | `cairn summarize <record-ids...> [--persist]` | `{verb:"summarize", args:{...}}` | `cairn::summarize(SumArgs {...})` |
 | 5 | `cairn assemble_hot [--session <id>]` | `{verb:"assemble_hot", args:{...}}` | `cairn::assemble_hot(...)` |
 | 6 | `cairn capture_trace --from <file>` | `{verb:"capture_trace", args:{...}}` | `cairn::capture_trace(...)` |
 | 7 | `cairn lint [--write-report]` | `{verb:"lint", args:{...}}` | `cairn::lint(LintArgs {...})` |
 | 8 | `cairn forget --record <id> \| --session <id>` | `{verb:"forget", args:{mode,...}}` | `cairn::forget(ForgetArgs {...})` |
+
+**Search verb flags (CLI / MCP `args` keys):**
+
+| Flag             | Type                                | Default                          | Notes                                                                                               |
+|------------------|-------------------------------------|----------------------------------|-----------------------------------------------------------------------------------------------------|
+| `--mode`         | `keyword \| semantic \| hybrid`     | `hybrid` (else `keyword`)        | Capability-gated. `semantic` / `hybrid` require `cairn.mcp.v1.search.semantic` / `.hybrid`; absence yields `CapabilityUnavailable` (sysexit 69). |
+| `--rerank-blend` | `f32` ∈ [0.0, 1.0]                  | from `search.rerank_blend` (0.7) | Used when `--mode hybrid`. Blends `α·normalize(rrf) + (1−α)·cos`; pure cosine at 0.0, pure RRF at 1.0. |
+| `--embed`        | `local \| openai`                   | from `search.default_provider`   | OpenAI requires the `openai` Cargo feature compiled into `cairn-cli` and `OPENAI_API_KEY` set; otherwise yields `CapabilityUnavailable`. |
+
+`hybrid` runs FTS5 BM25 + sqlite-vec ANN in parallel via `tokio::try_join!`, fuses with reciprocal-rank fusion (default `rrf_k=60`), then re-ranks the top `rerank_topk` (default `20`) with cosine similarity blended at `--rerank-blend`. Field-weighted BM25 (`kind`, `class`, `scope`, `body` at `[10.0, 10.0, 5.0, 1.0]`) is configured via `search.fts_column_weights`.
 
 **What lives where in the binary:**
 
@@ -2701,7 +2711,7 @@ All sources produce the same `CaptureEvent` schema, signed with the sensor's `Se
 
 | Sensor | Priority | What it captures | Backed by | Privacy |
 |--------|----------|------------------|-----------|---------|
-| Hook sensor | P0 | `SessionStart`, `UserPromptSubmit`, `PostToolUse`, `PreCompact`, `Stop` — harness‑agnostic (CC / Codex / Gemini) | harness hook protocol | harness‑scoped |
+| Hook sensor | P0 | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop` — harness‑agnostic (CC / Codex / Gemini) | harness hook protocol | harness‑scoped |
 | IDE sensor | P0 | file edits, diagnostics, tests run, language server events | LSP client in Rust core | opt‑in per project |
 | Terminal sensor | P0 | captured commands + outputs | shell integration scripts | opt‑in, secret‑scrubbed |
 | Clipboard sensor | P0 | clipboard snapshots | [`arboard`](https://github.com/1Password/arboard) (Apache-2) | opt‑in |
@@ -2783,9 +2793,9 @@ No external product name is baked in; the pipeline is composed from the same loc
 |------|------|-----------------|
 | `SessionStart` | startup / resume | `assemble_hot` builds the prefix; semantic re‑index runs in background |
 | `UserPromptSubmit` | every message | lightweight classifier emits routing hints |
-| `PostToolUse` | after `.md` write | validate frontmatter, wikilinks, orphan status |
-| `PreCompact` | before context compaction | snapshot the transcript to `raw/trace_*.md` for later ACE distillation |
-| `Stop` | end of session | trigger end‑of‑session Dream pass + orphan check |
+| `PreToolUse` | before tool execution | record the planned tool call as a trace event |
+| `PostToolUse` | after tool execution | record the tool result and validate markdown writes when applicable |
+| `Stop` | end of session | persist the stop trace event and enqueue post-turn work |
 
 Hooks are plain scripts executed via `cairn hook <name>` (Rust binary on `$PATH`). A single Cairn binary wires identically into CC's `.claude/settings.json`, Codex's `.codex/hooks.json`, and Gemini's `.gemini/settings.json`.
 
@@ -3064,7 +3074,7 @@ Capture is not naive logging. It fires on these explicit signals (recorded as th
 | Agent said "I don't know" / retrieval returned nothing | `knowledge_gap` |
 | Novel entity / fact / rule encountered | `entity` / `fact` / `rule` |
 | User stated a preference or constraint | `user` |
-| Session boundary (`PreCompact`, `Stop`) | `trace` + `reasoning` |
+| Tool and session boundaries (`PreToolUse`, `PostToolUse`, `Stop`) | `trace` + `reasoning` |
 | Sensor event passed policy gate | `sensor_observation` |
 | Derived user‑behavior signal | `user_signal` |
 
@@ -3838,7 +3848,7 @@ Electron app with an Obsidian‑compatible knowledge graph at `WorkDir/knowledge
 Effect‑ts coding agent with **no persistent memory layer**. "Memory" = `AGENTS.md` / `CLAUDE.md` / `CONTEXT.md` discovered in order + session history in SQLite + a structured compaction summary (`Goal` / `Constraints` / `Progress` / `Decisions`) with `PRUNE_PROTECTED_TOOLS`.
 
 - **Migration**: `cairn import --from opencode` reads `AGENTS.md` + `CLAUDE.md` + last N compaction summaries; seeds `purpose.md` + initial `user` / `rule` / `project` / `strategy_*` records.
-- **Runtime**: OpenCode keeps its Effect runtime, session DB, compaction state machine, and `PRUNE_PROTECTED_TOOLS` intact. Register `cairn mcp` as an MCP server; OpenCode's `PreCompact` hook routes the structured summary into Cairn as typed records; `SessionStart` pulls the hot prefix from Cairn via `assemble_hot`.
+- **Runtime**: OpenCode keeps its Effect runtime, session DB, compaction state machine, and `PRUNE_PROTECTED_TOOLS` intact. Register `cairn mcp` as an MCP server; OpenCode's structured compaction summary routes into Cairn as typed records through `capture_trace`; `SessionStart` pulls the hot prefix from Cairn via `assemble_hot`.
 - **Cairn wins**: adds the cross‑session persistent memory OpenCode lacks without disturbing the compaction flow. Skills become portable (OpenCode's `PRUNE_PROTECTED_TOOLS = ["skill"]` maps to `pinned: true` in Cairn). Structured summary template is preserved via Cairn's `project` + `rule` + `strategy_success` kinds.
 
 ### Koi v1 (this repo, `archive/v1/`) — forge · context‑arena · ACE

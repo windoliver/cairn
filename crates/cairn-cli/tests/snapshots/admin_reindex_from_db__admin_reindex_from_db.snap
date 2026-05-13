@@ -1,0 +1,10 @@
+---
+source: crates/cairn-cli/tests/admin_reindex_from_db.rs
+expression: stdout
+---
+{
+  "fts_rebuilt": 3,
+  "drained": 3,
+  "failed": 0,
+  "remaining": 0
+}

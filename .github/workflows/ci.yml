@@ -108,6 +108,53 @@ jobs:
       - name: scripts/check-core-boundary.sh
         run: ./scripts/check-core-boundary.sh
 
+  os-locks:
+    name: invariant / no OS advisory locks (§5.6)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: scripts/check-no-os-locks.sh
+        run: ./scripts/check-no-os-locks.sh
+
+  filter-smoke:
+    # Exercises §5.2 redact + fence against the *non-dev* dependency
+    # graph. `cargo run --bin` does not activate dev-dependencies, so
+    # this catches the regex feature-unification bug class — where a
+    # missing feature in cairn-core's normal deps is masked at test
+    # time by proptest / insta pulling the feature in transitively
+    # but panics on first call from a downstream binary.
+    name: smoke / cairn-core filter pipeline (no dev-deps)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: filter-smoke
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: cargo run -p cairn-core --bin filter_smoke
+        run: cargo run -p cairn-core --bin filter_smoke --features smoke --locked --release
+
+  cli-mcp-smoke:
+    name: smoke / cairn cli+mcp verb dispatch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: cli-mcp-smoke
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: cargo test -p cairn-cli --test status_snapshot --test handshake_tests --test mcp_handshake_e2e
+        run: cargo test -p cairn-cli --locked --test status_snapshot --test handshake_tests --test mcp_handshake_e2e
+
   plugins-verify:
     name: plugins / cairn plugins verify
     runs-on: ubuntu-latest
@@ -168,3 +215,55 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: cargo run -p cairn-idl --bin cairn-codegen -- --check
         run: cargo run -p cairn-idl --bin cairn-codegen --locked -- --check
+
+  bench-full:
+    # Manual-trigger BrainBench scorecard run against the staged
+    # world-v1 fixture (241 pages). Fetches the BGE model from
+    # HuggingFace on first run; uses OPENAI_API_KEY if supplied as a
+    # repo secret, otherwise the OpenAI column is skipped. Per-PR
+    # coverage of cairn-bench lives in the regular `test` job
+    # (unit tests in report::tests + cache::tests + adapter::tests).
+    name: bench / world-v1 (manual)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: bench-full
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: cairn-bench (full corpus)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "${OPENAI_API_KEY:-}" ]; then
+            cargo run --release -p cairn-bench --features openai --locked -- \
+              --fixture fixtures/v0/brainbench-world-v1 \
+              --out-dir target/bench-full
+          else
+            echo "OPENAI_API_KEY secret not set — running with --skip-openai."
+            cargo run --release -p cairn-bench --locked -- \
+              --fixture fixtures/v0/brainbench-world-v1 \
+              --out-dir target/bench-full --skip-openai
+          fi
+          test -f target/bench-full/report.md
+          test -f target/bench-full/per-query.jsonl
+          echo "::group::report.md"
+          cat target/bench-full/report.md
+          echo "::endgroup::"
+      - name: Upload bench artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: brainbench-${{ github.run_id }}
+          path: |
+            target/bench-full/report.md
+            target/bench-full/per-query.jsonl
+          retention-days: 30

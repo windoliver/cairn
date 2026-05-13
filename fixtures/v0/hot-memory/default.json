@@ -1,9 +1,0 @@
-{
-  "prefix": "## purpose\npurpose text\n",
-  "bytes": 24,
-  "sources": [
-    { "kind": "purpose", "attempted": 1, "included": 1, "omitted": 0, "bytes": 24 }
-  ],
-  "truncation": [],
-  "cache": { "status": "miss", "key": "fixture-default" }
-}

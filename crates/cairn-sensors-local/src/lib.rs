@@ -1,7 +1,7 @@
 //! Local sensors for Cairn — IDE hook, terminal, clipboard, voice, screen.
 //!
-//! P0 scaffold: stub `SensorIngress` impl with all capability flags
-//! `false`. Real capture lands per-sensor in #84 and follow-ups.
+//! Deterministic local sensor ingress advertises batch emission and
+//! consent-aware capture. Real capture lands per-sensor in #84 follow-ups.
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
@@ -10,6 +10,21 @@ use cairn_core::contract::sensor_ingress::{
 };
 use cairn_core::contract::version::{ContractVersion, VersionRange};
 use cairn_core::register_plugin;
+
+pub mod clipboard;
+pub mod config;
+mod event;
+pub mod hook;
+pub mod ide;
+pub mod outcome;
+pub mod policy;
+pub mod terminal;
+pub mod voice;
+#[cfg(feature = "voice-runtime")]
+pub mod voice_runtime;
+
+pub use config::{CaptureBudget, LocalSensorConfig, SensorSettings};
+pub use outcome::{DropReason, EmitOutcome, SensorKind};
 
 /// Stable plugin name. Matches `name = ...` in `plugin.toml`.
 pub const PLUGIN_NAME: &str = "cairn-sensors-local";
@@ -22,7 +37,7 @@ pub const MANIFEST_TOML: &str = include_str!("../plugin.toml");
 pub const ACCEPTED_RANGE: VersionRange =
     VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0));
 
-/// P0 stub `SensorIngress`. All capability flags are `false`.
+/// Deterministic local sensor ingress.
 #[derive(Default)]
 pub struct LocalSensorIngress;
 
@@ -34,9 +49,9 @@ impl SensorIngress for LocalSensorIngress {
 
     fn capabilities(&self) -> &SensorIngressCapabilities {
         static CAPS: SensorIngressCapabilities = SensorIngressCapabilities {
-            batches: false,
-            streaming: false,
-            consent_aware: false,
+            batches: true,
+            streaming: true,
+            consent_aware: true,
         };
         &CAPS
     }

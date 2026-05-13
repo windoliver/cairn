@@ -1,0 +1,8 @@
+{
+  "args": {
+    "mode": "semantic",
+    "query": "x"
+  },
+  "contract": "cairn.mcp.v1",
+  "verb": "search"
+}

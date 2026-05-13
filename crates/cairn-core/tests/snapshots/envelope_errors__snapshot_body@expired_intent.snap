@@ -1,0 +1,13 @@
+---
+source: crates/cairn-core/tests/envelope_errors.rs
+expression: body
+---
+{
+  "code": "ExpiredIntent",
+  "message": "intent expired: issued_at=2026-04-22T14:02:11Z, expires_at=2026-04-22T14:07:11Z, now=2026-04-22T15:00:00Z",
+  "data": {
+    "expires_at": "2026-04-22T14:07:11Z",
+    "issued_at": "2026-04-22T14:02:11Z",
+    "now": "2026-04-22T15:00:00Z"
+  }
+}

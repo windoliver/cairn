@@ -24,13 +24,44 @@ expression: "&c"
       }
     },
     "hot_memory": {
-      "recipe": [
-        "purpose",
-        "index",
-        "pinned_feedback"
-      ],
-      "max_bytes": 8192,
-      "god_node_weight": 0.3
+      "pre_compact_recipe": "handoff",
+      "pre_compact_safety_ratio": 0.3,
+      "default_recipe": "chat",
+      "recipes": {
+        "chat": {
+          "steps": [
+            "purpose",
+            "index",
+            "pinned_feedback"
+          ],
+          "max_bytes": 8192
+        },
+        "debug": {
+          "steps": [
+            "purpose",
+            "pinned_feedback",
+            "top_salience_project",
+            "recent_user_signal"
+          ],
+          "max_bytes": 16384
+        },
+        "handoff": {
+          "steps": [
+            "purpose",
+            "index",
+            "active_playbook",
+            "recent_user_signal"
+          ],
+          "max_bytes": 16384
+        },
+        "wake-up": {
+          "steps": [
+            "purpose",
+            "recent_user_signal"
+          ],
+          "max_bytes": 8192
+        }
+      }
     },
     "retention": {
       "raw/sensor_observation_*.md": "7d",
@@ -50,6 +81,26 @@ expression: "&c"
     "base_url": null,
     "model": null,
     "api_key": null
+  },
+  "search": {
+    "local_embeddings": true,
+    "embedding_model": "bge-small-en-v1.5",
+    "default_mode": "hybrid",
+    "default_provider": "local",
+    "rerank_blend": 0.7,
+    "fts_column_weights": [
+      10.0,
+      10.0,
+      5.0,
+      1.0
+    ],
+    "rrf_k": 60,
+    "rerank_topk": 20,
+    "max_snippet_chars_per_page": 8000,
+    "graph_confidence_min": 0.3
+  },
+  "source": {
+    "redact_on_forget": false
   },
   "sensors": {
     "hooks": {
@@ -83,6 +134,11 @@ expression: "&c"
           }
         }
       ]
+    }
+  },
+  "mcp": {
+    "stdio": {
+      "single_tenant": false
     }
   }
 }

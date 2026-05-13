@@ -18,26 +18,71 @@
 //!   JSON form so a YAML projector reuses the same `serde` derive.
 
 pub mod actor_chain;
+pub mod admission;
+pub mod body_hash;
 pub mod canonical;
+pub mod capture;
+pub mod capture_attribution;
+pub mod capture_manifest;
+pub mod consent;
+pub mod consent_timeline;
 pub mod error;
 pub mod evidence;
 pub mod filter;
+pub mod flush_plan;
+pub mod folder;
+pub mod graph;
+pub mod hot_prefix;
 pub mod identity;
 pub mod intent;
+pub mod metrics;
+pub mod projection;
 pub mod provenance;
 pub mod record;
 pub mod scope;
+pub mod session;
+pub mod source_id;
+pub mod target_id;
 pub mod taxonomy;
+pub mod time;
 pub mod timestamp;
+pub mod trace;
 
-pub use actor_chain::{ActorChainEntry, ChainRole};
+pub use actor_chain::{ActorChainEntry, ChainRole, validate_chain};
+pub use admission::{AdmissionError, SignedAdmission, WalActionKind};
+pub use body_hash::BodyHash;
 pub use canonical::CanonicalRecordHash;
+pub use capture::{
+    CaptureEvent, CaptureEventId, CaptureMode, CapturePayload, CaptureRefs, PayloadHash,
+    SensorLabel, SourceFamily, TerminalContext,
+};
+pub use capture_attribution::attribute;
+pub use capture_manifest::{P0_SENSOR_LABEL_PREFIXES, validate_label};
+pub use consent::{ConsentEvent, ConsentEventError, ConsentKind, ConsentPayload};
+pub use consent_timeline::{
+    ConsentModel, ConsentTimelineEvent, ConsentTimelineEventKind, CoveringGrant,
+};
 pub use error::DomainError;
 pub use evidence::{ConfidenceBand, EvidenceVector};
+pub use flush_plan::{
+    ApplyKind, ExpirationReason, FlushMode, FlushPlan, PersistedPlan, PlanReason, PlanStatus,
+    PlannedMutation,
+};
 pub use identity::{Identity, IdentityKind};
 pub use intent::VerifiedSignedIntent;
+pub use projection::{
+    ConflictOutcome, MarkdownProjector, ParsedProjection, ProjectedFile, ResyncError,
+};
 pub use provenance::Provenance;
-pub use record::MemoryRecord;
+pub use record::{Ed25519Signature, MemoryRecord, RecordId};
 pub use scope::ScopeTuple;
+pub use session::{
+    DEFAULT_IDLE_WINDOW_SECS, LastActiveSession, Session, SessionDecision, SessionId,
+    SessionIdentity, SessionSource, resolve_session,
+};
+pub use source_id::SourceId;
+pub use target_id::TargetId;
 pub use taxonomy::{MemoryClass, MemoryKind, MemoryVisibility};
+pub use time::{Clock, SystemClock};
 pub use timestamp::Rfc3339Timestamp;
+pub use trace::{TraceBlock, TraceEvent, TraceLink, TraceLinkError};

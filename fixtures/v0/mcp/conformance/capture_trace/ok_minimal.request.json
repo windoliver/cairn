@@ -1,0 +1,7 @@
+{
+  "args": {
+    "from": "/tmp/trace.jsonl"
+  },
+  "contract": "cairn.mcp.v1",
+  "verb": "capture_trace"
+}

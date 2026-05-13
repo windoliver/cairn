@@ -21,6 +21,7 @@ Shorter companion docs:
 
 - `docs/design/architecture.md` — crate topology and plugin boundary
 - `docs/design/2026-04-23-rust-workspace-scaffold-design.md` — workspace scaffold rationale
+- `docs/design/traceability.md` — design-section to issue map; update in any PR that materially changes the brief
 - `README.md` — public-facing intro + P0 scope
 
 **Rule of thumb for agents:** before proposing a data model, API shape, or
@@ -44,12 +45,13 @@ credentials required.
 ## 3. Workspace topology
 
 Rust workspace, edition 2024, resolver 3, toolchain pinned to `1.95.0`
-(`rust-toolchain.toml`). Eight crates under `crates/`:
+(`rust-toolchain.toml`). Crates under `crates/`:
 
 | Crate | Role |
 |---|---|
 | `cairn-core` | Traits, generated types, pure pipeline functions, error enums. **No I/O. No adapter deps.** |
 | `cairn-cli` | Terminal entry point (`cairn` binary). Wires adapters into the verb layer. |
+| `cairn-sdk` | Typed in-process SDK surface over the eight verbs + `status`/`handshake`. Depends on `cairn-core` only. |
 | `cairn-mcp` | MCP adapter (stdio/HTTP). ~300 LOC wrapper over verbs. |
 | `cairn-store-sqlite` | SQLite + FTS5 + sqlite-vec record store. |
 | `cairn-sensors-local` | Local sensors (hooks, IDE, terminal, clipboard, voice, screen). |
@@ -83,6 +85,14 @@ in review — call it out explicitly if an issue requires it.
    WAL state machine (§5.6 of the brief). No direct DB mutations.
 6. **Fail closed on capability.** If a mode isn't advertised in `status`, the
    verb rejects with `CapabilityUnavailable`. Never silently downgrade.
+   - Capability advertisement decisions live in **`cairn-core::status::advertise`**
+     (issue #53). All four surfaces (CLI, MCP, SDK, skill) read from this one
+     function. Adding a new capability is a row in that table; flipping it on
+     is a `wiring::*_WIRED` constant change in the issue that lands the
+     dispatch path.
+   - Remediation hints for `CapabilityUnavailable.data.remediation` come from
+     `cairn-core::status::REMEDIATION` — keep the table in sync when the
+     advertise table grows.
 7. **`#![forbid(unsafe_code)]`** is workspace-level. Do not add `unsafe`.
 8. **No `unwrap()` / `expect()` in `cairn-core`** (deny-linted). Return
    typed errors. `expect("reason")` is tolerated in bins/tests only, and the
@@ -316,6 +326,8 @@ cargo test --doc --workspace --locked
 cargo run -p cairn-idl --bin cairn-codegen --locked -- --check
 
 # docs.yml
+cargo run -p cairn-cli --bin cairn-docgen --locked -- --check
+mdbook build docs/site
 RUSTDOCFLAGS="-D warnings -D rustdoc::broken-intra-doc-links" \
   cargo doc --workspace --no-deps --document-private-items --locked
 
@@ -333,6 +345,11 @@ cargo publish --dry-run --locked --allow-dirty -p cairn-core
 A PR that touches generated code must also re-run `cargo run -p cairn-idl
 --bin cairn-codegen` and commit the result.
 
+A PR that touches CLI flags, config defaults, bundled plugins, IDL/MCP
+metadata, workspace package membership, or user-facing docs must also re-run
+`cargo run -p cairn-cli --bin cairn-docgen -- --write` and commit the generated
+Markdown under `docs/site/src/reference/generated/`.
+
 ---
 
 ## 9. Commit & PR etiquette
@@ -348,8 +365,8 @@ A PR that touches generated code must also re-run `cargo run -p cairn-idl
 - **MSRV:** declared in `[workspace.package] rust-version = "1.95.0"`. Bumping
   MSRV is a minor-version release and must be called out in the PR + changelog.
 - **Publish order** (when we ship to crates.io): leaf crates first —
-  `cairn-idl`, `cairn-core`, `cairn-test-fixtures` — then adapters
-  (`cairn-store-sqlite`, `cairn-sensors-local`, `cairn-mcp`,
+  `cairn-idl`, `cairn-core`, `cairn-test-fixtures` — then `cairn-sdk`,
+  then adapters (`cairn-store-sqlite`, `cairn-sensors-local`, `cairn-mcp`,
   `cairn-workflows`), finally `cairn-cli`. Dry-run with
   `cargo publish --dry-run`.
 
@@ -367,6 +384,7 @@ cairn/
 ├── crates/
 │   ├── cairn-core/                 ← traits, pure pipeline, errors (no I/O)
 │   ├── cairn-cli/                  ← `cairn` binary
+│   ├── cairn-sdk/                  ← typed in-process SDK over the verbs
 │   ├── cairn-mcp/                  ← MCP stdio/http adapter
 │   ├── cairn-store-sqlite/         ← SQLite + FTS5 + sqlite-vec
 │   ├── cairn-sensors-local/        ← hooks/IDE/term/clipboard/voice/screen
@@ -378,6 +396,7 @@ cairn/
 │   ├── design/
 │   │   ├── design-brief.md         ← SOURCE OF TRUTH
 │   │   ├── architecture.md         ← crate topology summary
+│   │   ├── traceability.md         ← design-section → issue map
 │   │   └── 2026-04-23-rust-workspace-scaffold-design.md
 │   └── superpowers/
 ├── scripts/

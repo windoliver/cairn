@@ -35,7 +35,6 @@ fn v0_directory_structure_exists() {
         "envelopes",
         "search-filters",
         "manifests",
-        "hot-memory",
     ] {
         let p = base.join(sub);
         assert!(p.is_dir(), "fixtures/v0/{sub} must be a directory: {p:?}");
@@ -177,26 +176,6 @@ fn filter_or_with_not_deserializes() {
 fn search_args_keyword_deserializes() {
     let a: SearchArgs = load_json(filters_dir().join("search-args-keyword.json"));
     insta::assert_json_snapshot!("search_args_keyword", &a);
-}
-
-// ── Hot memory ───────────────────────────────────────────────────────────────
-
-use cairn_core::generated::verbs::assemble_hot::AssembleHotData;
-
-fn hot_memory_dir() -> std::path::PathBuf {
-    v0().join("hot-memory")
-}
-
-#[test]
-fn hot_memory_default_deserializes() {
-    let h: AssembleHotData = load_json(hot_memory_dir().join("default.json"));
-    insta::assert_json_snapshot!("hot_memory_default", &h);
-}
-
-#[test]
-fn hot_memory_truncated_deserializes() {
-    let h: AssembleHotData = load_json(hot_memory_dir().join("truncated.json"));
-    insta::assert_json_snapshot!("hot_memory_truncated", &h);
 }
 
 // ── Plugin manifests ──────────────────────────────────────────────────────────

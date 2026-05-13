@@ -37,7 +37,7 @@
     },
     "target": {
       "type": "string",
-      "enum": ["record", "session", "turn", "folder", "scope", "profile"],
+      "enum": ["record", "session", "turn", "tool_call", "folder", "scope", "profile"],
       "description": "Retrieve-only discriminator echoing the requested target. Required when verb=retrieve; forbidden otherwise. Lets validators bind the per-target retrieve Data shape to the caller's request."
     },
     "policy_trace": {
@@ -97,6 +97,12 @@
                   { "properties": { "target": { "const": "turn" } },      "required": ["target"] }
                 ]},
       "then": { "properties": { "data": { "$ref": "../verbs/retrieve.json#/$defs/DataTurn" } } } },
+    { "if":   { "allOf": [
+                  { "properties": { "verb":   { "const": "retrieve" } },      "required": ["verb"] },
+                  { "properties": { "status": { "const": "committed" } },     "required": ["status"] },
+                  { "properties": { "target": { "const": "tool_call" } },     "required": ["target"] }
+                ]},
+      "then": { "properties": { "data": { "$ref": "../verbs/retrieve.json#/$defs/DataToolCall" } } } },
     { "if":   { "allOf": [
                   { "properties": { "verb":   { "const": "retrieve" } },  "required": ["verb"] },
                   { "properties": { "status": { "const": "committed" } }, "required": ["status"] },

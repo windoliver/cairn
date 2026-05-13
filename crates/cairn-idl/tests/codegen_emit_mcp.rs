@@ -176,11 +176,7 @@ fn input_schema_args_for_required_verbs_advertises_required() {
     // The Args sub-schema MUST advertise the requirement so MCP clients
     // reject `{}` rather than passing it through silently.
     let files = emit_mcp::emit(&doc()).unwrap();
-    for (verb, expected_required_or_one_of) in [
-        ("ingest", "kind"),
-        ("summarize", "record_ids"),
-        ("capture_trace", "from"),
-    ] {
+    for (verb, expected_required_or_one_of) in [("ingest", "kind"), ("summarize", "record_ids")] {
         let suffix = format!("crates/cairn-mcp/src/generated/schemas/verbs/{verb}.input.json");
         let f = files.iter().find(|f| f.path.ends_with(&suffix)).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&f.bytes).unwrap();
@@ -209,17 +205,19 @@ fn input_schema_for_oneof_verbs_keeps_dispatch() {
     // cannot send `{}` and get past validation.
     let files = emit_mcp::emit(&doc()).unwrap();
 
-    // ingest: Args has its own oneOf at the Args level.
-    let ingest = files
-        .iter()
-        .find(|f| f.path.ends_with("schemas/verbs/ingest.input.json"))
-        .unwrap();
-    let parsed: serde_json::Value = serde_json::from_slice(&ingest.bytes).unwrap();
-    let args = parsed.pointer("/$defs/Args").unwrap();
-    assert!(
-        args.get("oneOf").is_some(),
-        "ingest Args must keep its oneOf XOR dispatch"
-    );
+    // ingest, capture_trace: Args has its own oneOf at the Args level.
+    for verb in ["ingest", "capture_trace"] {
+        let f = files
+            .iter()
+            .find(|f| f.path.ends_with(format!("schemas/verbs/{verb}.input.json")))
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&f.bytes).unwrap();
+        let args = parsed.pointer("/$defs/Args").unwrap();
+        assert!(
+            args.get("oneOf").is_some(),
+            "{verb} Args must keep its oneOf XOR dispatch"
+        );
+    }
 
     // forget / retrieve: Args itself is a oneOf over $defs/Args* subtypes.
     for verb in ["forget", "retrieve"] {
@@ -260,6 +258,31 @@ fn tool_decl_input_schema_points_at_input_file() {
             "ToolDecl for {verb} must include_bytes! the .input.json companion"
         );
     }
+}
+
+#[test]
+fn search_capability_overrides_include_explain_true() {
+    // `x-cairn-capability-when-true` on `search.explain` must propagate into
+    // the generated ToolDecl so the MCP transport can gate `explain: true`
+    // without special-casing it in transport code.
+    let files = emit_mcp::emit(&doc()).unwrap();
+    let mod_rs = files
+        .iter()
+        .find(|f| f.path.ends_with("crates/cairn-mcp/src/generated/mod.rs"))
+        .unwrap();
+    let body = std::str::from_utf8(&mod_rs.bytes).unwrap();
+    assert!(
+        body.contains("\"explain=true\""),
+        "search ToolDecl must include capability_override for explain=true; mod.rs snippet:\n{}",
+        body.lines()
+            .filter(|l| l.contains("explain") || l.contains("capability_override"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    assert!(
+        body.contains("cairn.mcp.v1.policy_trace"),
+        "explain=true capability must be cairn.mcp.v1.policy_trace"
+    );
 }
 
 #[test]

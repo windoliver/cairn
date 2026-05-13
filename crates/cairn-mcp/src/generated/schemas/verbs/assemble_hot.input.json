@@ -9,28 +9,19 @@
           "minimum": 0,
           "type": "integer"
         },
+        "explain": {
+          "description": "When true, the response carries a `debug` payload describing per-step inclusion + typed exclusion reasons. Defaults to false; older callers omit it.",
+          "type": "boolean"
+        },
+        "recipe": {
+          "minLength": 1,
+          "type": "string"
+        },
         "session_id": {
           "minLength": 1,
           "type": "string"
         }
       },
-      "type": "object"
-    },
-    "CacheInfo": {
-      "additionalProperties": false,
-      "properties": {
-        "key": {
-          "minLength": 1,
-          "type": "string"
-        },
-        "status": {
-          "$ref": "#/$defs/HotCacheStatus"
-        }
-      },
-      "required": [
-        "status",
-        "key"
-      ],
       "type": "object"
     },
     "Data": {
@@ -41,124 +32,185 @@
           "minimum": 0,
           "type": "integer"
         },
-        "cache": {
-          "$ref": "#/$defs/CacheInfo"
+        "debug": {
+          "$ref": "#/$defs/HotMemoryDebug",
+          "description": "Optional inclusion/exclusion trace per recipe step. Absent unless the caller requested debug output via Args.explain. Wire-compatible addition for cairn.mcp.v1: older consumers ignore unknown fields."
         },
         "prefix": {
           "description": "Assembled hot-memory text ready to inject into the agent prompt. May be empty when no hot-memory is available.",
           "type": "string"
         },
-        "sources": {
-          "items": {
-            "$ref": "#/$defs/SourceSummary"
-          },
-          "type": "array"
+        "recipe": {
+          "description": "Name of the hot-memory recipe preset that produced this assembled prefix. Optional for wire compat with legacy producers; new producers always emit it.",
+          "minLength": 1,
+          "type": "string"
         },
-        "truncation": {
+        "segments": {
+          "description": "Recipe-step segments covering [0, bytes) contiguously, in declaration order. Three-state contract: (1) FIELD ABSENT ON THE WIRE — legacy cairn.mcp.v1 producer that predates this feature; consumers MUST treat prefix as opaque. (2) \"segments\": [] — new producer ran with NO recipe configured; the producer explicitly opts into the new contract but had nothing to emit. REQUIRED INVARIANT: prefix == \"\" AND bytes == 0. (3) \"segments\": [...] — new producer with a configured recipe; len() mirrors HotMemoryConfig.recipe.len() 1:1, including N zero-length entries when the recipe ran with no content. The Rust binding distinguishes (1) from (2) via Option<Vec<HotSegment>> (None vs Some(vec![])); JSON-only consumers distinguish them by field presence. NOTE: there is intentionally NO default: [] here — schema-aware tooling that materialized defaults would rewrite legacy-absent into canonical-empty and trip the EmptySegmentsRequiresEmptyPrefix invariant. Forward-compat depends on absence staying absence.",
           "items": {
-            "$ref": "#/$defs/TruncationDecision"
+            "$ref": "#/$defs/HotSegment"
           },
-          "type": "array"
+          "maxItems": 64,
+          "type": "array",
+          "x-cairn-reject-null": true
         }
       },
       "required": [
         "prefix",
-        "bytes",
-        "sources",
-        "truncation",
-        "cache"
+        "bytes"
+      ],
+      "type": "object",
+      "x-cairn-validate": true
+    },
+    "HotExclusion": {
+      "additionalProperties": false,
+      "properties": {
+        "reason": {
+          "$ref": "#/$defs/HotExclusionReason"
+        },
+        "record_id": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "record_id",
+        "reason"
       ],
       "type": "object"
     },
-    "HotCacheStatus": {
+    "HotExclusionReason": {
       "enum": [
-        "hit",
-        "miss",
-        "refreshed"
+        "tombstoned",
+        "forgotten_scope",
+        "below_confidence_floor",
+        "out_of_scope",
+        "visibility_denied",
+        "outside_recency_window",
+        "beyond_top_k",
+        "not_pinned",
+        "empty_body"
       ],
       "type": "string"
     },
-    "HotSourceKind": {
+    "HotInclusion": {
+      "additionalProperties": false,
+      "properties": {
+        "note": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "record_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "score": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "record_id",
+        "score",
+        "note"
+      ],
+      "type": "object"
+    },
+    "HotMemoryDebug": {
+      "additionalProperties": false,
+      "properties": {
+        "steps": {
+          "items": {
+            "$ref": "#/$defs/HotStepTrace"
+          },
+          "maxItems": 64,
+          "type": "array"
+        }
+      },
+      "required": [
+        "steps"
+      ],
+      "type": "object"
+    },
+    "HotRecipeStep": {
+      "description": "Frozen for the lifetime of cairn.mcp.v1. Adding a recipe step requires bumping to cairn.mcp.v2.",
       "enum": [
         "purpose",
-        "profile",
-        "pinned",
-        "high_salience",
-        "project_state",
-        "rolling_summary",
-        "playbook",
+        "index",
+        "pinned_feedback",
+        "top_salience_project",
+        "active_playbook",
         "recent_user_signal"
       ],
       "type": "string"
     },
-    "SourceSummary": {
+    "HotSegment": {
       "additionalProperties": false,
       "properties": {
-        "attempted": {
-          "minimum": 0,
-          "type": "integer"
-        },
-        "bytes": {
+        "byte_end": {
           "maximum": 4194304,
           "minimum": 0,
           "type": "integer"
         },
-        "included": {
+        "byte_start": {
+          "maximum": 4194304,
           "minimum": 0,
           "type": "integer"
         },
-        "kind": {
-          "$ref": "#/$defs/HotSourceKind"
+        "content_hash": {
+          "description": "Lowercase hex SHA-256 of prefix[byte_start..byte_end].as_bytes(). Wrappers in non-UTF-8 string-typed languages (JS/Java UTF-16) MUST encode prefix to UTF-8 bytes before slicing — naïve String.slice() uses code units and will corrupt non-ASCII segments.",
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
         },
-        "omitted": {
-          "minimum": 0,
-          "type": "integer"
+        "stability": {
+          "$ref": "#/$defs/SegmentStability"
+        },
+        "step": {
+          "$ref": "#/$defs/HotRecipeStep"
         }
       },
       "required": [
-        "kind",
-        "attempted",
-        "included",
-        "omitted",
-        "bytes"
+        "step",
+        "byte_start",
+        "byte_end",
+        "stability",
+        "content_hash"
       ],
       "type": "object"
     },
-    "TruncationDecision": {
+    "HotStepTrace": {
       "additionalProperties": false,
       "properties": {
-        "attempted_bytes": {
-          "maximum": 4294967295,
-          "minimum": 0,
-          "type": "integer"
+        "excluded": {
+          "items": {
+            "$ref": "#/$defs/HotExclusion"
+          },
+          "type": "array"
         },
-        "included_bytes": {
-          "maximum": 4194304,
-          "minimum": 0,
-          "type": "integer"
+        "included": {
+          "items": {
+            "$ref": "#/$defs/HotInclusion"
+          },
+          "type": "array"
         },
-        "kind": {
-          "$ref": "#/$defs/HotSourceKind"
-        },
-        "reason": {
-          "enum": [
-            "budget_exhausted",
-            "section_truncated",
-            "record_omitted"
-          ],
-          "type": "string"
-        },
-        "record_id": {
-          "$ref": "../common/primitives.json#/$defs/Ulid"
+        "step": {
+          "$ref": "#/$defs/HotRecipeStep"
         }
       },
       "required": [
-        "kind",
-        "reason",
-        "attempted_bytes",
-        "included_bytes"
+        "step",
+        "included",
+        "excluded"
       ],
       "type": "object"
+    },
+    "SegmentStability": {
+      "description": "Cache-lifetime hint per segment. Frozen for the lifetime of cairn.mcp.v1.",
+      "enum": [
+        "stable_1h",
+        "stable_5m",
+        "volatile"
+      ],
+      "type": "string"
     }
   },
   "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/assemble_hot.input.json",

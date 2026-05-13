@@ -6,11 +6,10 @@
 
 use cairn_core::contract::{
     AgentProvider, AgentProviderCapabilities, ContractKind, ContractVersion, FrontendAdapter,
-    FrontendAdapterCapabilities, HotMemoryInvalidationScope, HotMemoryRequest, LLMProvider,
-    LLMProviderCapabilities, MCPServer, MCPServerCapabilities, MemoryStore,
-    MemoryStoreCapabilities, MemoryStoreError, PluginError, PluginManifest, PluginName,
-    PluginRegistry, SensorIngress, SensorIngressCapabilities, VersionRange, WorkflowOrchestrator,
-    WorkflowOrchestratorCapabilities,
+    FrontendAdapterCapabilities, LLMProvider, LLMProviderCapabilities, MCPServer,
+    MCPServerCapabilities, MemoryStore, MemoryStoreCapabilities, PluginError, PluginManifest,
+    PluginName, PluginRegistry, SensorIngress, SensorIngressCapabilities, VersionRange,
+    WorkflowOrchestrator, WorkflowOrchestratorCapabilities,
 };
 
 #[test]
@@ -37,18 +36,13 @@ fn capability_structs_default() {
 }
 
 #[test]
-fn memory_store_hot_memory_types_exported() {
-    let _: HotMemoryRequest = HotMemoryRequest {
-        session_id: None,
-        agent_id: None,
-        budget_bytes: 1024,
-        config_fingerprint: "config".to_owned(),
-        god_node_weight: 0.3,
-        source_kinds: cairn_core::hot_memory::default_source_order(),
-    };
-    let _: HotMemoryInvalidationScope = HotMemoryInvalidationScope::Vault;
-    let _: MemoryStoreError = MemoryStoreError::query("query failed");
-    let _: MemoryStoreError = MemoryStoreError::cache("cache failed");
+fn frontend_contract_types_are_reachable() {
+    use cairn_core::contract::{FrontendFieldClass, FrontendFieldPolicy, FrontendReconcileError};
+
+    let _: FrontendAdapterCapabilities = FrontendAdapterCapabilities::default();
+    let _: FrontendFieldClass = FrontendFieldClass::UserContent;
+    let _ = FrontendFieldPolicy::is_mutable_from_frontend("body");
+    let _: FrontendReconcileError = FrontendReconcileError::UnsignedIntent;
 }
 
 mod compile_only {

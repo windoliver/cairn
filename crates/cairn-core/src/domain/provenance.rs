@@ -295,7 +295,7 @@ mod tests {
     #[test]
     fn allows_originating_agent_as_human() {
         let mut p = sample();
-        p.originating_agent_id = Identity::parse("usr:tafeng").expect("valid");
+        p.originating_agent_id = Identity::parse("hmn:tafeng").expect("valid");
         p.validate().expect("human originator allowed");
     }
 
