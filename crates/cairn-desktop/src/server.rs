@@ -87,14 +87,17 @@ async fn graph(State(state): State<DesktopServerState>) -> Json<crate::model::De
 
 #[derive(Debug, Deserialize)]
 struct SearchQuery {
-    q: String,
+    q: Option<String>,
 }
 
 async fn search(
     State(state): State<DesktopServerState>,
     Query(query): Query<SearchQuery>,
 ) -> Json<Vec<crate::model::DesktopSearchResult>> {
-    Json(state.repo.search(&query.q))
+    let Some(q) = query.q.filter(|q| !q.trim().is_empty()) else {
+        return Json(Vec::new());
+    };
+    Json(state.repo.search(&q))
 }
 
 async fn lint(

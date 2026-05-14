@@ -189,3 +189,27 @@ async fn smoke_loads_all_desktop_alpha_surfaces() {
         assert_eq!(response.status(), StatusCode::OK, "{path}");
     }
 }
+
+#[tokio::test]
+async fn search_without_query_returns_empty_results() {
+    let app = router(DesktopRepository::from_fixture(
+        DesktopFixture::load_default().expect("fixture"),
+    ));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/search")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let json: Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json.as_array().expect("array").len(), 0);
+}
