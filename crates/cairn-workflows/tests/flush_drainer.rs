@@ -337,6 +337,58 @@ async fn drainer_skips_checkpointed_plan_ids_after_restart() {
     );
 }
 
+#[tokio::test]
+async fn file_checkpoint_open_skips_torn_final_record_after_crash() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("workflow-checkpoints.jsonl");
+    std::fs::write(
+        &path,
+        concat!(
+            "{\"workflow\":\"expire\",\"operation_id\":\"01HQZK000000000000000000R1\"}\n",
+            "{\"workflow\":\"expire\",\"operation_id\":\"01HQZK000000000000000"
+        ),
+    )
+    .expect("write checkpoint");
+
+    let checkpoint = FileWorkflowCheckpointStore::open(&path).expect("open checkpoint");
+
+    assert!(
+        checkpoint
+            .is_applied("expire", &ulid("01HQZK000000000000000000R1"))
+            .await
+            .expect("read complete record")
+    );
+    assert!(
+        !checkpoint
+            .is_applied("expire", &ulid("01HQZK000000000000000000R2"))
+            .await
+            .expect("read missing record")
+    );
+}
+
+#[tokio::test]
+async fn file_checkpoint_open_rejects_corrupt_complete_record() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("workflow-checkpoints.jsonl");
+    std::fs::write(
+        &path,
+        concat!(
+            "{\"workflow\":\"expire\",\"operation_id\":\"01HQZK000000000000000000R1\"}\n",
+            "{\"workflow\":\"expire\",\"operation_id\":}\n"
+        ),
+    )
+    .expect("write checkpoint");
+
+    let Err(err) = FileWorkflowCheckpointStore::open(&path) else {
+        panic!("complete corrupt checkpoint line should fail");
+    };
+
+    assert!(
+        err.to_string()
+            .contains("parse workflow checkpoint record failed")
+    );
+}
+
 proptest! {
     #[test]
     fn drainer_resume_checkpoint_property((total, drained_before_restart) in (1usize..8).prop_flat_map(|total| (Just(total), 0usize..=total))) {

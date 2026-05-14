@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead as _, BufReader, Write as _};
+use std::io::{Read as _, Write as _};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -175,7 +175,7 @@ impl FileWorkflowCheckpointStore {
     /// read, or parsed.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, WorkflowError> {
         let path = path.as_ref();
-        let read_file = OpenOptions::new()
+        let mut read_file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
@@ -185,20 +185,36 @@ impl FileWorkflowCheckpointStore {
                 workflow: "checkpoint",
                 message: format!("open workflow checkpoint file failed: {source}"),
             })?;
-        let mut applied = BTreeSet::new();
-        for line in BufReader::new(read_file).lines() {
-            let line = line.map_err(|source| WorkflowError::Internal {
+        let mut contents = String::new();
+        read_file
+            .read_to_string(&mut contents)
+            .map_err(|source| WorkflowError::Internal {
                 workflow: "checkpoint",
                 message: format!("read workflow checkpoint file failed: {source}"),
             })?;
+        let lines: Vec<&str> = contents.lines().collect();
+        let ended_cleanly = contents.is_empty() || contents.ends_with('\n');
+        let mut applied = BTreeSet::new();
+        for (index, line) in lines.iter().enumerate() {
             if line.trim().is_empty() {
                 continue;
             }
-            let record: FileCheckpointRecord =
-                serde_json::from_str(&line).map_err(|source| WorkflowError::Internal {
+            let record: FileCheckpointRecord = match serde_json::from_str(line) {
+                Ok(record) => record,
+                Err(_) if index + 1 == lines.len() && !ended_cleanly => break,
+                Err(source) => {
+                    return Err(WorkflowError::Internal {
+                        workflow: "checkpoint",
+                        message: format!("parse workflow checkpoint record failed: {source}"),
+                    });
+                }
+            };
+            if record.workflow.is_empty() || record.operation_id.is_empty() {
+                return Err(WorkflowError::Internal {
                     workflow: "checkpoint",
-                    message: format!("parse workflow checkpoint record failed: {source}"),
-                })?;
+                    message: "parse workflow checkpoint record failed: empty field".to_owned(),
+                });
+            }
             applied.insert((record.workflow, record.operation_id));
         }
         let file = OpenOptions::new()
