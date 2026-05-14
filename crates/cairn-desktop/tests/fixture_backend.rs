@@ -64,6 +64,14 @@ fn repository_searches_titles_tags_and_body() {
 }
 
 #[test]
+fn repository_search_returns_empty_results_for_blank_query() {
+    let repo = DesktopRepository::from_fixture(DesktopFixture::load_default().expect("fixture"));
+
+    assert!(repo.search("").is_empty());
+    assert!(repo.search("   ").is_empty());
+}
+
+#[test]
 fn repository_reconcile_accepts_body_edit() {
     let repo = DesktopRepository::from_fixture(DesktopFixture::load_default().expect("fixture"));
     let mut field_diff = BTreeMap::new();
