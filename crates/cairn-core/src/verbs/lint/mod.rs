@@ -188,6 +188,7 @@ pub async fn run_checks(inputs: &LintInputs<'_>) -> LintData {
     findings.extend(checks::provenance::run(inputs));
     findings.extend(checks::schema::run(inputs));
     findings.extend(checks::trace_reasoning::run(inputs));
+    findings.extend(checks::taxonomy_conventions::run(inputs));
     findings.extend(checks::hot_memory::run(inputs));
     findings.extend(checks::index_drift::run(inputs));
     findings.extend(checks::consent::run(inputs).await);
@@ -238,10 +239,12 @@ fn kind_key(k: Kind) -> String {
         Kind::AmbiguousEdge => "ambiguous_edge",
         Kind::DataGap => "data_gap",
         Kind::MalformedRecord => "malformed_record",
+        Kind::MisclassifiedProfile => "misclassified_profile",
         Kind::BrokenActorChain => "broken_actor_chain",
         Kind::BrokenSourceLink => "broken_source_link",
         Kind::MissingProvenance => "missing_provenance",
         Kind::MissingSummary => "missing_summary",
+        Kind::OrphanInsight => "orphan_insight",
         Kind::StaleSchema => "stale_schema",
         Kind::StaleProfileLine => "stale_profile_line",
         Kind::HotMemoryOverBudget => "hot_memory_over_budget",
@@ -249,6 +252,7 @@ fn kind_key(k: Kind) -> String {
         Kind::DeferredCheck => "deferred_check",
         Kind::ProjectionDrift => "projection_drift",
         Kind::ProjectionMissing => "projection_missing",
+        Kind::WrongClassForKind => "wrong_class_for_kind",
     }
     .to_owned()
 }

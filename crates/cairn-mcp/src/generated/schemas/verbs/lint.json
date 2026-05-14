@@ -136,15 +136,18 @@
         "hot_memory_over_budget",
         "index_drift",
         "malformed_record",
+        "misclassified_profile",
         "missing_concept",
         "missing_provenance",
         "missing_summary",
         "orphan",
+        "orphan_insight",
         "projection_drift",
         "projection_missing",
         "stale",
         "stale_profile_line",
-        "stale_schema"
+        "stale_schema",
+        "wrong_class_for_kind"
       ],
       "type": "string"
     },
