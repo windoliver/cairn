@@ -100,12 +100,17 @@ pub fn prepare_ingest_body(args: &IngestArgs, issuer: &str) -> Result<PreparedIn
 fn validate_body_only_args(args: &IngestArgs) -> Result<(), DomainError> {
     if args.body.is_none() {
         return Err(DomainError::MalformedCapture {
-            message: "prepare_ingest_body requires args.body; file, folder, and url sources are handled by adapters before this helper".to_owned(),
+            message: "prepare_ingest_body requires args.body; file, folder, url, jsonl, and recording sources are handled by adapters before this helper".to_owned(),
         });
     }
-    if args.file.is_some() || args.folder.is_some() || args.url.is_some() {
+    if args.file.is_some()
+        || args.folder.is_some()
+        || args.url.is_some()
+        || args.jsonl.is_some()
+        || args.recording.is_some()
+    {
         return Err(DomainError::MalformedCapture {
-            message: "prepare_ingest_body accepts body-only ingest args; file, folder, and url must be resolved before calling this helper".to_owned(),
+            message: "prepare_ingest_body accepts body-only ingest args; file, folder, url, jsonl, and recording must be resolved before calling this helper".to_owned(),
         });
     }
     Ok(())

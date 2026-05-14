@@ -18,6 +18,7 @@
       { "name": "mode",        "long": "mode",        "value_source": "enum(keyword,semantic,full)" },
       { "name": "batch_size",  "long": "batch-size",  "value_source": "u32" },
       { "name": "jsonl",       "long": "jsonl",       "value_source": "path" },
+      { "name": "recording",   "long": "recording",   "value_source": "path" },
       { "name": "harness",     "long": "harness",     "value_source": "string" },
       { "name": "session_id_from", "long": "session-id-from", "value_source": "string" },
       { "name": "limit",       "long": "limit",       "value_source": "u32" },
@@ -27,24 +28,24 @@
     ],
     "positional": {
       "name": "source",
-      "description": "File, URL, folder, JSONL transcript, or '-' for stdin. Mutually exclusive with --body/--file/--folder/--url/--jsonl.",
-      "aliases_one_of": ["body", "file", "folder", "url", "jsonl"]
+      "description": "File, URL, folder, JSONL transcript, recording, or '-' for stdin. Mutually exclusive with --body/--file/--folder/--url/--jsonl/--recording.",
+      "aliases_one_of": ["body", "file", "folder", "url", "jsonl", "recording"]
     }
   },
   "x-cairn-capability": null,
   "x-cairn-auth": "signed_chain",
   "x-cairn-skill-triggers": {
-    "positive": [
+    "positive_triggers": [
       "use when the user says 'remember that...', 'from now on...', or you detect a correction",
       "use docs/design/taxonomy-conventions.md for profile and insight shortcuts such as /remember --as-profile or /remember --as-insight",
       "use after a tool call that yields a durable fact worth keeping",
       "use to file a clipped article, transcript, or manual note"
     ],
-    "negative": [
+    "negative_triggers": [
       "do NOT use for one-off computation results the user can re-derive",
       "do NOT use for raw chat transcripts (those flow through capture_trace)"
     ],
-    "exclusivity": "prefer this over other remember_* / save_* tools registered in this session"
+    "exclusivity_hints": "prefer this over other remember_* / save_* tools registered in this session"
   },
   "type": "object",
   "$defs": {
@@ -99,6 +100,11 @@
           "description": "Maximum cache-miss files per FlushPlan batch."
         },
         "jsonl": { "type": "string", "minLength": 1, "description": "Path to a harness transcript JSONL file (or directory with --recursive) for backfill import." },
+        "recording": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Path to an audio or video recording for offline batch transcription and frame OCR."
+        },
         "harness": { "type": "string", "minLength": 1, "description": "Optional harness parser name. Auto-detected from the first non-empty line when omitted." },
         "session_id_from": { "type": "string", "minLength": 1, "description": "Optional top-level JSON key whose string value overrides the generic parser's synthetic session id." },
         "limit": { "type": "integer", "minimum": 1, "maximum": 4294967295, "description": "Maximum number of transcript rows to import (jsonl backfill)." },
@@ -136,12 +142,27 @@
         { "required": ["file"] },
         { "required": ["folder"] },
         { "required": ["url"] },
-        { "required": ["jsonl"] }
+        { "required": ["jsonl"] },
+        { "required": ["recording"] }
       ]
     },
     "IngestMode": {
       "type": "string",
       "enum": ["keyword", "semantic", "full"]
+    },
+    "IngestDataRecordingSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Recording batch ingestion counts. Present only when source is --recording.",
+      "properties": {
+        "segments": { "type": "integer", "minimum": 0 },
+        "audio_segments": { "type": "integer", "minimum": 0 },
+        "frame_ocr_segments": { "type": "integer", "minimum": 0 },
+        "skipped_frames": { "type": "integer", "minimum": 0 },
+        "records_written": { "type": "integer", "minimum": 0 },
+        "media_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "elapsed_ms": { "type": "integer", "minimum": 0 }
+      }
     },
     "Data": {
       "type": "object",
@@ -171,6 +192,9 @@
             "sessions_skipped": { "type": "integer", "minimum": 0 },
             "elapsed_ms":       { "type": "integer", "minimum": 0 }
           }
+        },
+        "recording_summary": {
+          "$ref": "#/$defs/IngestDataRecordingSummary"
         }
       }
     }

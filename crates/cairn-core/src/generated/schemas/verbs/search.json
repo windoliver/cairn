@@ -1052,12 +1052,12 @@
   },
   "x-cairn-contract": "cairn.mcp.v1",
   "x-cairn-skill-triggers": {
-    "exclusivity": "this is the canonical search surface for the active vault",
-    "negative": [
+    "exclusivity_hints": "this is the canonical search surface for the active vault",
+    "negative_triggers": [
       "do NOT use when the user just asked a computation question",
       "do NOT use to fetch a known record id — call retrieve instead"
     ],
-    "positive": [
+    "positive_triggers": [
       "use when you need to recall prior memories by topic, speaker, or time",
       "use to ground an answer in stored evidence instead of parametric guessing"
     ]

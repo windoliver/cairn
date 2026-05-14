@@ -379,6 +379,93 @@
       "type": "array",
       "uniqueItems": true
     },
+    "sensors": {
+      "additionalProperties": false,
+      "properties": {
+        "screen": {
+          "additionalProperties": false,
+          "properties": {
+            "backend": {
+              "enum": [
+                "xcap",
+                "screenpipe"
+              ],
+              "type": "string"
+            },
+            "degradation": {
+              "additionalProperties": false,
+              "properties": {
+                "code": {
+                  "enum": [
+                    "screen.disabled",
+                    "screen.permission_missing",
+                    "screen.backend_unavailable",
+                    "screen.degraded"
+                  ],
+                  "type": "string"
+                },
+                "message": {
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "code",
+                "message"
+              ],
+              "type": "object"
+            },
+            "mode": {
+              "enum": [
+                "off",
+                "snapshot",
+                "continuous"
+              ],
+              "type": "string"
+            },
+            "ocr_engine": {
+              "enum": [
+                "vision",
+                "winrt",
+                "tesseract",
+                "off"
+              ],
+              "type": "string"
+            },
+            "permission": {
+              "enum": [
+                "not_requested",
+                "granted",
+                "denied",
+                "revoked"
+              ],
+              "type": "string"
+            },
+            "state": {
+              "enum": [
+                "disabled",
+                "permission_missing",
+                "degraded",
+                "enabled"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "backend",
+            "state",
+            "mode",
+            "ocr_engine",
+            "permission"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "screen"
+      ],
+      "type": "object"
+    },
     "server_info": {
       "additionalProperties": false,
       "properties": {
@@ -416,7 +503,8 @@
     "contract",
     "server_info",
     "capabilities",
-    "extensions"
+    "extensions",
+    "sensors"
   ],
   "title": "Cairn status response",
   "type": "object",

@@ -7,6 +7,7 @@
 //!   not wired).
 //! - SDK responses serialize into the same envelope shape the CLI emits.
 
+use cairn_core::status::default_sensor_capabilities;
 use cairn_sdk::error::ErrorCode;
 use cairn_sdk::generated::common::{Cursor, ScopeFilter, Ulid};
 use cairn_sdk::generated::envelope::ResponseVerb;
@@ -53,6 +54,7 @@ fn ingest_body_args(body: &str) -> IngestArgs {
         tags: None,
         url: None,
         jsonl: None,
+        recording: None,
         harness: None,
         session_id_from: None,
         limit: None,
@@ -106,6 +108,7 @@ fn verb_response_serializes_as_canonical_envelope() {
             session_id: "sess-1".to_owned(),
             plan_ref: None,
             jsonl_summary: None,
+            recording_summary: None,
         },
     };
     let value = serde_json::to_value(&resp).expect("serializes");
@@ -157,6 +160,7 @@ fn verb_response_rejects_envelope_invalid_target_combinations() {
             session_id: "s".to_owned(),
             plan_ref: None,
             jsonl_summary: None,
+            recording_summary: None,
         },
     };
     assert!(serde_json::to_value(&stray).is_err());
@@ -199,18 +203,7 @@ fn verb_response_emits_target_for_retrieve_envelope() {
 #[test]
 fn sdk_new_advertises_no_capabilities() {
     let resp = sdk().status();
-    // `Sdk::new` has no store wired: every verb returns
-    // SdkError::Unimplemented, so advertising any capability would
-    // mislead clients negotiating from `status`. The shared
-    // `advertised_capabilities` helper enforces fail-closed gating —
-    // `Sdk::with_store` is the surface that opts capabilities back in
-    // (see `sdk_with_store_advertises_caps_from_store_and_config`).
-    assert!(
-        resp.capabilities.is_empty(),
-        "Sdk::new must advertise an empty capabilities list (no backing \
-         store → every verb returns Unimplemented); got {:?}",
-        resp.capabilities
-    );
+    assert_eq!(resp.capabilities, default_sensor_capabilities());
     assert!(resp.extensions.is_empty());
 }
 
@@ -273,11 +266,11 @@ fn ingest_valid_args_returns_internal_stub() {
 #[allow(clippy::too_many_lines)] // table-driven sweep — each case is a single-line builder, not real fn growth
 fn ingest_rejects_schema_minlength_violations() {
     // The IDL `validate()` only enforces the source XOR, but the schema
-    // additionally requires non-empty body, file, folder, url, kind,
+    // additionally requires non-empty body, file, folder, url, recording, kind,
     // session_id, include/exclude/tags items, and a bounded batch_size.
     // Direct Rust construction must hit the same floor.
     let bases = || ingest_body_args("note");
-    let cases: [(&str, IngestArgs); 21] = [
+    let cases: [(&str, IngestArgs); 22] = [
         (
             "body",
             IngestArgs {
@@ -306,6 +299,14 @@ fn ingest_rejects_schema_minlength_violations() {
             IngestArgs {
                 body: None,
                 folder: Some(String::new()),
+                ..bases()
+            },
+        ),
+        (
+            "recording",
+            IngestArgs {
+                body: None,
+                recording: Some(String::new()),
                 ..bases()
             },
         ),
@@ -455,6 +456,21 @@ fn ingest_rejects_schema_minlength_violations() {
 }
 
 #[test]
+fn ingest_recording_conflicts_with_other_sources() {
+    let args = IngestArgs {
+        recording: Some("meeting.mp4".to_owned()),
+        ..ingest_body_args("note")
+    };
+    match sdk().ingest(&args).expect_err("must reject") {
+        SdkError::InvalidArgs { reason } => {
+            assert!(reason.contains("exactly one of"), "reason: {reason}");
+            assert!(reason.contains("recording"), "reason: {reason}");
+        }
+        other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+}
+
+#[test]
 fn ingest_accepts_well_formed_uri_schemes() {
     // Sanity-check that the URI floor admits real schemes — `http`, `https`,
     // `file`, `cairn+vault` — so we don't accidentally regress to body-only.
@@ -483,6 +499,7 @@ fn ingest_accepts_well_formed_uri_schemes() {
             tags: None,
             url: Some(url.to_owned()),
             jsonl: None,
+            recording: None,
             harness: None,
             session_id_from: None,
             limit: None,

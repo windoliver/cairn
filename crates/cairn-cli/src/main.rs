@@ -135,6 +135,7 @@ fn subcommand_needs_vault_guard(subcommand: Option<(&str, &ArgMatches)>) -> bool
             | "identity"
             | "flush"
             | "hook"
+            | "screen"
             | "repair"
     )
 }
@@ -312,6 +313,10 @@ fn main() -> ExitCode {
         }
         Some(("hook", sub)) => hooks::run(sub),
         Some(("status", sub)) => run_status(sub, explicit_vault.as_deref()),
+        Some(("screen", sub)) => match resolve_vault_and_config(explicit_vault.as_deref()) {
+            Ok((_vault_root, _source, config)) => verbs::screen::run(sub, &config),
+            Err(code) => code,
+        },
         Some(("handshake", sub)) => run_handshake(sub, explicit_vault.as_deref()),
         Some(("plugins", sub)) => run_plugins(sub),
         Some(("bootstrap", sub)) => run_bootstrap(sub),
@@ -905,6 +910,19 @@ fn run_plugins(matches: &ArgMatches) -> ExitCode {
                 plugins::list::render_human(&registry)
             };
             let _ = writeln!(stdout, "{}", text.trim_end_matches('\n'));
+            ExitCode::SUCCESS
+        }
+        Some(("describe", sub)) => {
+            let mut stdout = std::io::stdout().lock();
+            if sub.get_flag("mcp") {
+                for (idx, tool) in cairn_mcp::generated::TOOLS.iter().enumerate() {
+                    if idx > 0 {
+                        let _ = writeln!(stdout);
+                    }
+                    let _ = writeln!(stdout, "# {}", tool.name);
+                    let _ = writeln!(stdout, "{}", tool.description);
+                }
+            }
             ExitCode::SUCCESS
         }
         Some(("verify", sub)) => {

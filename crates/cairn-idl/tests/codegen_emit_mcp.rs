@@ -82,6 +82,94 @@ fn tool_decl_description_includes_skill_triggers() {
 }
 
 #[test]
+fn verb_tool_descriptions_use_issue_159_metadata_names() {
+    for verb in [
+        "ingest",
+        "search",
+        "retrieve",
+        "summarize",
+        "assemble_hot",
+        "capture_trace",
+        "lint",
+        "forget",
+    ] {
+        let path = std::path::Path::new(cairn_idl::SCHEMA_DIR)
+            .join("verbs")
+            .join(format!("{verb}.json"));
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let schema: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let triggers = schema
+            .get("x-cairn-skill-triggers")
+            .and_then(serde_json::Value::as_object)
+            .unwrap_or_else(|| panic!("{verb}: missing x-cairn-skill-triggers"));
+
+        assert!(
+            triggers
+                .get("positive_triggers")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|items| !items.is_empty()),
+            "{verb}: missing non-empty positive_triggers"
+        );
+        assert!(
+            triggers
+                .get("negative_triggers")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|items| !items.is_empty()),
+            "{verb}: missing non-empty negative_triggers"
+        );
+        assert!(
+            triggers
+                .get("exclusivity_hints")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|hint| !hint.is_empty()),
+            "{verb}: missing non-empty exclusivity_hints"
+        );
+        assert!(
+            !triggers.contains_key("positive")
+                && !triggers.contains_key("negative")
+                && !triggers.contains_key("exclusivity"),
+            "{verb}: legacy trigger keys should not remain in canonical IDL"
+        );
+    }
+}
+
+#[test]
+fn tool_decl_descriptions_are_single_paragraph_prompts() {
+    let files = emit_mcp::emit(&doc()).unwrap();
+    let mod_rs = files
+        .iter()
+        .find(|f| f.path.ends_with("crates/cairn-mcp/src/generated/mod.rs"))
+        .unwrap();
+    let body = std::str::from_utf8(&mod_rs.bytes).unwrap();
+
+    assert!(
+        !body.contains("POSITIVE — use when") && !body.contains("NEGATIVE — do not use when"),
+        "MCP descriptions should be rendered as coherent prompt paragraphs, not sectioned lists"
+    );
+    assert!(
+        body.contains("Use when the user says 'remember that...'")
+            && body.contains("Do not use for raw chat transcripts")
+            && body.contains("Exclusivity: prefer this over other remember_* / save_* tools"),
+        "rendered description should still include positive, negative, and exclusivity guidance"
+    );
+}
+
+#[test]
+fn tool_decl_descriptions_do_not_embed_trailing_newlines() {
+    let files = emit_mcp::emit(&doc()).unwrap();
+    let mod_rs = files
+        .iter()
+        .find(|f| f.path.ends_with("crates/cairn-mcp/src/generated/mod.rs"))
+        .unwrap();
+    let body = std::str::from_utf8(&mod_rs.bytes).unwrap();
+
+    assert!(
+        !body.contains(".\n\"#,"),
+        "ToolDecl.description must not embed a trailing newline; printers own presentation newlines"
+    );
+}
+
+#[test]
 fn supporting_schema_groups_are_emitted_alongside_verbs() {
     // Cross-file `$ref` paths inside verb schemas (e.g.
     // `../common/scope_filter.json`) need the sibling schema groups to ship

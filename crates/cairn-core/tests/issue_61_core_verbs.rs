@@ -17,6 +17,16 @@ mod issue_61_core_verbs {
     use super::*;
 
     #[test]
+    fn ingest_args_deserialize_rejects_empty_recording() {
+        let err = serde_json::from_value::<IngestArgs>(serde_json::json!({
+            "kind": "reference",
+            "recording": ""
+        }))
+        .expect_err("empty recording path must reject");
+        assert!(err.to_string().contains("recording"), "{err}");
+    }
+
+    #[test]
     fn ingest_redacts_and_fences_before_record_draft() {
         let args = IngestArgs {
             batch_size: None,
@@ -37,6 +47,7 @@ mod issue_61_core_verbs {
             tags: Some(vec!["issue-61".to_owned()]),
             url: None,
             jsonl: None,
+            recording: None,
             harness: None,
             session_id_from: None,
             limit: None,
@@ -101,6 +112,7 @@ mod issue_61_core_verbs {
             tags: None,
             url: None,
             jsonl: None,
+            recording: None,
             harness: None,
             session_id_from: None,
             limit: None,
@@ -140,6 +152,7 @@ mod issue_61_core_verbs {
             tags: None,
             url: None,
             jsonl: None,
+            recording: None,
             harness: None,
             session_id_from: None,
             limit: None,
@@ -170,6 +183,7 @@ mod issue_61_core_verbs {
             tags: None,
             url: None,
             jsonl: None,
+            recording: None,
             harness: None,
             session_id_from: None,
             limit: None,
@@ -180,6 +194,39 @@ mod issue_61_core_verbs {
         args.body = None;
         let err = prepare_ingest_body(&args, "agt:test:writer:v1").unwrap_err();
         assert!(matches!(err, DomainError::MalformedCapture { .. }));
+    }
+
+    #[test]
+    fn ingest_body_helper_rejects_recording_source_conflict() {
+        let args = IngestArgs {
+            batch_size: None,
+            body: Some("body text".to_owned()),
+            dry_run: None,
+            exclude: None,
+            file: None,
+            folder: None,
+            frontmatter: None,
+            human_review: None,
+            include: None,
+            kind: "reference".to_owned(),
+            mode: None,
+            no_cache: None,
+            no_diff: None,
+            recursive: None,
+            session_id: None,
+            tags: None,
+            url: None,
+            jsonl: None,
+            recording: Some("meeting.mp4".to_owned()),
+            harness: None,
+            session_id_from: None,
+            limit: None,
+        };
+        let err = prepare_ingest_body(&args, "agt:test:writer:v1").unwrap_err();
+        let DomainError::MalformedCapture { message } = err else {
+            panic!("expected malformed capture");
+        };
+        assert!(message.contains("recording"), "{message}");
     }
 
     #[test]
@@ -436,92 +483,50 @@ mod issue_61_core_verbs {
     #[cfg(unix)]
     #[test]
     fn hot_source_loader_rejects_symlinked_markdown() {
-        let unique = format!(
-            "cairn-hot-loader-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        );
-        let root = std::env::temp_dir().join(&unique);
-        let outside = std::env::temp_dir().join(format!("{unique}-outside.md"));
-        std::fs::create_dir_all(&root).expect("create temp vault root");
+        let root = tempfile::tempdir().expect("create temp vault root");
+        let outside_dir = tempfile::tempdir().expect("create outside dir");
+        let outside = outside_dir.path().join("outside.md");
         std::fs::write(&outside, "outside secret").expect("write outside file");
-        std::os::unix::fs::symlink(&outside, root.join("purpose.md")).expect("create symlink");
+        std::os::unix::fs::symlink(&outside, root.path().join("purpose.md"))
+            .expect("create symlink");
 
-        let err = read_vault_markdown_file(&root, std::path::Path::new("purpose.md"), 1024)
+        let err = read_vault_markdown_file(root.path(), std::path::Path::new("purpose.md"), 1024)
             .expect_err("symlinked source should be rejected");
 
         assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
-        let _ = std::fs::remove_file(root.join("purpose.md"));
-        let _ = std::fs::remove_file(outside);
-        let _ = std::fs::remove_dir(root);
     }
 
     #[test]
     fn hot_source_loader_caps_oversized_markdown() {
-        let unique = format!(
-            "cairn-hot-loader-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        );
-        let root = std::env::temp_dir().join(&unique);
-        std::fs::create_dir_all(&root).expect("create temp vault root");
-        std::fs::write(root.join("purpose.md"), "12345").expect("write oversized source");
+        let root = tempfile::tempdir().expect("create temp vault root");
+        std::fs::write(root.path().join("purpose.md"), "12345").expect("write oversized source");
 
-        let body = read_vault_markdown_file(&root, std::path::Path::new("purpose.md"), 4)
+        let body = read_vault_markdown_file(root.path(), std::path::Path::new("purpose.md"), 4)
             .expect("oversized source should be capped");
 
         assert_eq!(body, "1234");
-        let _ = std::fs::remove_file(root.join("purpose.md"));
-        let _ = std::fs::remove_dir(root);
     }
 
     #[test]
     fn hot_source_loader_cap_preserves_utf8_boundary() {
-        let unique = format!(
-            "cairn-hot-loader-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        );
-        let root = std::env::temp_dir().join(&unique);
-        std::fs::create_dir_all(&root).expect("create temp vault root");
-        std::fs::write(root.join("purpose.md"), "ééé").expect("write utf-8 source");
+        let root = tempfile::tempdir().expect("create temp vault root");
+        std::fs::write(root.path().join("purpose.md"), "ééé").expect("write utf-8 source");
 
-        let body = read_vault_markdown_file(&root, std::path::Path::new("purpose.md"), 3)
+        let body = read_vault_markdown_file(root.path(), std::path::Path::new("purpose.md"), 3)
             .expect("source should be capped on a UTF-8 boundary");
 
         assert_eq!(body, "é");
-        let _ = std::fs::remove_file(root.join("purpose.md"));
-        let _ = std::fs::remove_dir(root);
     }
 
     #[test]
     fn hot_source_loader_rejects_directory_source() {
-        let unique = format!(
-            "cairn-hot-loader-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        );
-        let root = std::env::temp_dir().join(&unique);
-        std::fs::create_dir_all(root.join("purpose.md")).expect("create directory source");
+        let root = tempfile::tempdir().expect("create temp vault root");
+        std::fs::create_dir_all(root.path().join("purpose.md")).expect("create directory source");
 
-        let err = read_vault_markdown_file(&root, std::path::Path::new("purpose.md"), 1024)
+        let err = read_vault_markdown_file(root.path(), std::path::Path::new("purpose.md"), 1024)
             .expect_err("directory source should be rejected");
 
         assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
-        let _ = std::fs::remove_dir(root.join("purpose.md"));
-        let _ = std::fs::remove_dir(root);
     }
 
     fn sample_core_record(
@@ -547,6 +552,7 @@ mod issue_61_core_verbs {
             tags: None,
             url: None,
             jsonl: None,
+            recording: None,
             harness: None,
             session_id_from: None,
             limit: None,

@@ -230,6 +230,7 @@ async fn persist_summary(
         mode: None,
         no_cache: None,
         no_diff: None,
+        recording: None,
         recursive: None,
         session_id: None,
         tags: Some(vec!["summary".to_owned()]),

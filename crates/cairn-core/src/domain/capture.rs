@@ -241,8 +241,8 @@ pub enum CaptureMode {
     /// Author of the resulting record is the sensor's [`Identity`].
     Auto,
     /// Mode B — user explicitly invoked the skill / `cairn ingest` (e.g.
-    /// "remember that …"). Author is the human; the agent (if any) is the
-    /// delegator.
+    /// "remember that …" or `cairn ingest --recording`). Author is the
+    /// human; the agent (if any) is the delegator.
     Explicit,
     /// Mode C — agent decided to record (novel entity, correction, success
     /// strategy). Author is the agent identity.
@@ -489,11 +489,9 @@ pub enum CapturePayload {
         url: Option<String>,
     },
     /// Aligned segment from a batch recording (brief §9.1.a). The
-    /// source recording file is referenced by the envelope-level
-    /// `payload_ref` (and bound to `payload_hash`); this variant only
-    /// carries the segment offsets within that file. Keeping a single
-    /// canonical source reference prevents drift between the hashed
-    /// bytes and the bytes a downstream batch extractor reopens.
+    /// envelope-level `payload_ref` points to the derived per-segment
+    /// JSON payload (and is bound to `payload_hash`); this variant only
+    /// carries the segment offsets from the original recording.
     RecordingBatch {
         /// Segment start offset within the recording, in milliseconds.
         segment_start_ms: u64,
@@ -1161,8 +1159,10 @@ const fn mode_allows_family(mode: CaptureMode, family: SourceFamily) -> bool {
                 | SourceFamily::Voice
                 | SourceFamily::Screen
                 | SourceFamily::RecordingBatch,
-        ) | (CaptureMode::Explicit, SourceFamily::Cli | SourceFamily::Mcp)
-            | (CaptureMode::Proactive, SourceFamily::Proactive)
+        ) | (
+            CaptureMode::Explicit,
+            SourceFamily::Cli | SourceFamily::Mcp | SourceFamily::RecordingBatch,
+        ) | (CaptureMode::Proactive, SourceFamily::Proactive)
     )
 }
 
@@ -1223,9 +1223,9 @@ fn validate_payload_ref(raw: &str) -> Result<(), DomainError> {
     validate_vault_relative_path("payload_ref", raw)
 }
 
-/// Shared vault-relative path validator used by both `payload_ref` and
-/// per-payload path fields like `RecordingBatch.recording_path`. See the
-/// [`validate_payload_ref`] doc-comment for the accepted shape.
+/// Shared vault-relative path validator used by `payload_ref` and any
+/// future per-payload path fields. See the [`validate_payload_ref`]
+/// doc-comment for the accepted shape.
 fn validate_vault_relative_path(field: &'static str, raw: &str) -> Result<(), DomainError> {
     if raw.is_empty() {
         return Err(DomainError::EmptyField { field });

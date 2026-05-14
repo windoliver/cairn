@@ -1018,7 +1018,7 @@ pub struct SensorsConfig {
     /// IDE sensor configuration.
     pub ide: SensorToggle,
     /// Screen sensor configuration.
-    pub screen: SensorToggle,
+    pub screen: ScreenSensorConfig,
     /// Slack sensor configuration.
     pub slack: SlackSensorConfig,
 }
@@ -1028,7 +1028,7 @@ impl Default for SensorsConfig {
         Self {
             hooks: SensorToggle { enabled: true },
             ide: SensorToggle { enabled: true },
-            screen: SensorToggle { enabled: false },
+            screen: ScreenSensorConfig::default(),
             slack: SlackSensorConfig::default(),
         }
     }
@@ -1040,6 +1040,94 @@ impl Default for SensorsConfig {
 pub struct SensorToggle {
     /// Whether this sensor is enabled.
     pub enabled: bool,
+}
+
+/// Screen sensor backend selection (brief §9.1, ADR 0003).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum ScreenBackend {
+    /// In-process xcap capture path. Default P0 backend.
+    #[default]
+    Xcap,
+    /// Optional screenpipe subprocess path behind `screenpipe-runtime`.
+    Screenpipe,
+}
+
+/// Screen OCR engine requested in config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum ScreenOcrEngine {
+    /// Resolve to the platform default at runtime.
+    #[default]
+    Auto,
+    /// Apple Vision OCR.
+    Vision,
+    /// Windows Runtime OCR.
+    Winrt,
+    /// Tesseract OCR.
+    Tesseract,
+    /// Capture metadata without OCR text.
+    Off,
+}
+
+/// OCR-specific screen sensor configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct ScreenOcrConfig {
+    /// Requested OCR engine.
+    pub engine: ScreenOcrEngine,
+}
+
+/// Capture budgets enforced before screen observations enter policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ScreenCaptureBudget {
+    /// Maximum frames accepted per minute.
+    pub max_frames_per_minute: u32,
+    /// Maximum OCR text bytes retained per event.
+    pub max_text_bytes_per_event: u32,
+}
+
+impl Default for ScreenCaptureBudget {
+    fn default() -> Self {
+        Self {
+            max_frames_per_minute: 12,
+            max_text_bytes_per_event: 16_384,
+        }
+    }
+}
+
+/// Screen sensor configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ScreenSensorConfig {
+    /// Whether the screen sensor may capture.
+    pub enabled: bool,
+    /// Capture backend.
+    pub backend: ScreenBackend,
+    /// OCR engine configuration.
+    pub ocr: ScreenOcrConfig,
+    /// Focused apps allowed for capture. Empty means no app restriction.
+    pub allow_apps: Vec<String>,
+    /// Whether password fields are blurred or dropped before policy.
+    pub blur_password_fields: bool,
+    /// Capture budget limits.
+    pub budget: ScreenCaptureBudget,
+}
+
+impl Default for ScreenSensorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            backend: ScreenBackend::Xcap,
+            ocr: ScreenOcrConfig::default(),
+            allow_apps: Vec::new(),
+            blur_password_fields: true,
+            budget: ScreenCaptureBudget::default(),
+        }
+    }
 }
 
 /// Slack sensor configuration.
@@ -1186,7 +1274,7 @@ pub fn provider_model_aligned(config: &CairnConfig) -> bool {
 ///
 /// The verb layer calls `config.capabilities(embedding_provider_ready)` before dispatching to
 /// gate features that require capabilities that may not be present.
-// Six orthogonal capability flags; a bitflags type would obscure the intent.
+// Orthogonal capability flags; a bitflags type would obscure the intent.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilitySet {
@@ -1202,6 +1290,8 @@ pub struct CapabilitySet {
     pub llm_extract: bool,
     /// True iff the pipeline chain contains an `agent` worker.
     pub agent_extract: bool,
+    /// True iff config explicitly enables screen capture.
+    pub screen_capture_enabled: bool,
     /// False for `sqlite` (P0). P1+ stores may advertise this.
     pub graph_edges: bool,
     /// True iff `cairn.mcp.v1.policy_trace` capability is advertised.
@@ -1329,6 +1419,19 @@ impl CairnConfig {
             }
         }
 
+        if self.sensors.screen.budget.max_frames_per_minute == 0 {
+            return Err(ConfigError::InvalidBudget {
+                field: "sensors.screen.budget.max_frames_per_minute",
+                value: 0_u64,
+            });
+        }
+        if self.sensors.screen.budget.max_text_bytes_per_event == 0 {
+            return Err(ConfigError::InvalidBudget {
+                field: "sensors.screen.budget.max_text_bytes_per_event",
+                value: 0_u64,
+            });
+        }
+
         // 5. LLM extractor in chain requires an LLM provider
         let has_llm_worker = self
             .pipeline
@@ -1402,6 +1505,7 @@ impl CairnConfig {
             hybrid_search: semantic,
             llm_extract: llm_on,
             agent_extract,
+            screen_capture_enabled: self.sensors.screen.enabled,
             graph_edges: !matches!(self.store.kind, StoreKind::Sqlite), // P0: sqlite always false; P1+ gates on store capability
             // P0 always advertises policy_trace; a future config knob
             // (`search.disable_explain: true`) can opt out for environments
@@ -1624,6 +1728,27 @@ mod tests {
     #[test]
     fn default_screen_sensor_is_disabled() {
         assert!(!CairnConfig::default().sensors.screen.enabled);
+    }
+
+    #[test]
+    fn default_screen_config_is_safe_and_off() {
+        let screen = &CairnConfig::default().sensors.screen;
+        assert!(!screen.enabled);
+        assert_eq!(screen.backend, ScreenBackend::Xcap);
+        assert_eq!(screen.ocr.engine, ScreenOcrEngine::Auto);
+        assert!(screen.allow_apps.is_empty());
+        assert!(screen.blur_password_fields);
+        assert_eq!(screen.budget.max_frames_per_minute, 12);
+        assert_eq!(screen.budget.max_text_bytes_per_event, 16_384);
+    }
+
+    #[test]
+    fn screen_toggle_shape_still_deserializes() {
+        let json = r#"{"sensors":{"screen":{"enabled":false}}}"#;
+        let config: CairnConfig = serde_json::from_str(json).unwrap();
+        assert!(!config.sensors.screen.enabled);
+        assert_eq!(config.sensors.screen.backend, ScreenBackend::Xcap);
+        assert_eq!(config.sensors.screen.ocr.engine, ScreenOcrEngine::Auto);
     }
 
     #[test]
@@ -1902,6 +2027,34 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_zero_screen_frame_budget() {
+        let mut config = CairnConfig::default();
+        config.sensors.screen.budget.max_frames_per_minute = 0;
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidBudget {
+                field: "sensors.screen.budget.max_frames_per_minute",
+                value: 0
+            }
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_zero_screen_text_budget() {
+        let mut config = CairnConfig::default();
+        config.sensors.screen.budget.max_text_bytes_per_event = 0;
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidBudget {
+                field: "sensors.screen.budget.max_text_bytes_per_event",
+                value: 0
+            }
+        ));
+    }
+
+    #[test]
     fn validate_rejects_llm_worker_without_provider() {
         let mut config = CairnConfig::default();
         config.pipeline.extract.chain.push(ExtractorEntry {
@@ -2059,6 +2212,10 @@ mod tests {
         );
         assert!(!caps.llm_extract, "no LLM → no llm_extract");
         assert!(!caps.agent_extract, "default chain has no agent worker");
+        assert!(
+            !caps.screen_capture_enabled,
+            "screen capture is off by default"
+        );
         assert!(!caps.graph_edges, "sqlite → no graph edges");
         assert!(caps.policy_trace, "policy_trace always true at P0");
     }
@@ -2104,6 +2261,14 @@ mod tests {
         });
         let caps = config.capabilities(false);
         assert!(caps.agent_extract);
+    }
+
+    #[test]
+    fn capabilities_screen_capture_enabled_when_config_enabled() {
+        let mut config = CairnConfig::default();
+        config.sensors.screen.enabled = true;
+        let caps = config.capabilities(false);
+        assert!(caps.screen_capture_enabled);
     }
 
     #[test]

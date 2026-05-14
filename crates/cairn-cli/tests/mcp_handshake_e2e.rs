@@ -40,7 +40,7 @@ use serde_json::Value;
 use tempfile::TempDir;
 
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(15);
-const FRAME_DEADLINE: Duration = Duration::from_secs(15);
+const FRAME_DEADLINE: Duration = Duration::from_secs(90);
 
 fn cli_bin() -> &'static str {
     env!("CARGO_BIN_EXE_cairn")
@@ -137,6 +137,11 @@ fn cairn_mcp_subprocess_lists_unique_core_verbs_and_expected_graph_tools() {
     run_mcp_subprocess("e2e-cli-graph", run_graph_tools_protocol);
 }
 
+#[test]
+fn cairn_mcp_subprocess_advertises_generated_tool_descriptions_byte_for_byte() {
+    run_mcp_subprocess("e2e-cli-descriptions", run_tool_description_protocol);
+}
+
 fn run_mcp_subprocess(tenant: &str, protocol: fn(&mut Child) -> Result<(), String>) {
     let vault = synth_vault(tenant);
     let child = Command::new(cli_bin())
@@ -220,7 +225,7 @@ fn run_tools_list_protocol(child: &mut Child) -> Result<(), String> {
     }
 
     client.send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#)?;
-    let list_resp = client.recv()?;
+    let list_resp = client.recv("tools/list")?;
     let names: Vec<&str> = list_resp
         .pointer("/result/tools")
         .and_then(Value::as_array)
@@ -269,7 +274,7 @@ fn run_typed_envelope_protocol(child: &mut Child) -> Result<(), String> {
     client.send(
         r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search","arguments":{"query":"hello"}}}"#,
     )?;
-    let invalid_search = client.recv()?;
+    let invalid_search = client.recv("invalid search args")?;
     let invalid_search = typed_error_envelope(
         &invalid_search,
         "invalid search args",
@@ -290,7 +295,7 @@ fn run_typed_envelope_protocol(child: &mut Child) -> Result<(), String> {
     client.send(
         r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"retrieve","arguments":{"target":"record"}}}"#,
     )?;
-    let invalid_retrieve = client.recv()?;
+    let invalid_retrieve = client.recv("invalid retrieve args")?;
     let invalid_retrieve = typed_error_envelope(
         &invalid_retrieve,
         "invalid retrieve args",
@@ -312,7 +317,7 @@ fn run_typed_envelope_protocol(child: &mut Child) -> Result<(), String> {
     client.send(
         r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"retrieve","arguments":{"target":"record","id":"01ARZ3NDEKTSV4RRFFQ69G5FAV"}}}"#,
     )?;
-    let unwired_retrieve = client.recv()?;
+    let unwired_retrieve = client.recv("valid unwired retrieve")?;
     let unwired_retrieve = typed_error_envelope(
         &unwired_retrieve,
         "valid unwired retrieve",
@@ -346,7 +351,7 @@ fn run_assemble_hot_protocol(child: &mut Child) -> Result<(), String> {
     client.send(
         r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"assemble_hot","arguments":{"budget":64}}}"#,
     )?;
-    let call_resp = client.recv()?;
+    let call_resp = client.recv("assemble_hot")?;
     let is_error = call_resp
         .pointer("/result/isError")
         .and_then(Value::as_bool)
@@ -401,7 +406,7 @@ fn run_graph_tools_protocol(child: &mut Child) -> Result<(), String> {
     client.initialize("cli-e2e-graph")?;
 
     client.send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#)?;
-    let list_resp = client.recv()?;
+    let list_resp = client.recv("tools/list graph tools")?;
     let names: Vec<&str> = list_resp
         .pointer("/result/tools")
         .and_then(Value::as_array)
@@ -437,6 +442,47 @@ fn run_graph_tools_protocol(child: &mut Child) -> Result<(), String> {
         return Err(format!(
             "single-tenant stdio tools/list must advertise the expected graph tool set; got {actual_graph:?}, expected {expected_graph:?}"
         ));
+    }
+
+    client.close_stdin();
+    Ok(())
+}
+
+fn run_tool_description_protocol(child: &mut Child) -> Result<(), String> {
+    let mut client = ProtocolClient::new(child)?;
+    client.initialize("cli-e2e-descriptions")?;
+
+    client.send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#)?;
+    let list_resp = client.recv("tools/list descriptions")?;
+    let tools = list_resp
+        .pointer("/result/tools")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            format!(
+                "tools/list response missing tools array: {list_resp}\nstderr: {}",
+                client.stderr_so_far()
+            )
+        })?;
+
+    for decl in TOOLS {
+        let advertised = tools
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some(decl.name))
+            .ok_or_else(|| format!("tools/list omitted {}", decl.name))?;
+        let description = advertised.get("description").and_then(Value::as_str);
+        if description != Some(decl.description) {
+            return Err(format!(
+                "real cairn mcp subprocess description drifted for {}; got {description:?}, expected {:?}",
+                decl.name, decl.description
+            ));
+        }
+        let description = description.expect("checked Some above");
+        if description.contains('\n') || description.trim() != description {
+            return Err(format!(
+                "real cairn mcp subprocess description for {} must be one trimmed paragraph; got {description:?}",
+                decl.name
+            ));
+        }
     }
 
     client.close_stdin();
@@ -495,8 +541,8 @@ impl ProtocolClient {
         send_frame(stdin, json)
     }
 
-    fn recv(&self) -> Result<Value, String> {
-        recv_frame(&self.rx_out, &|| self.stderr_so_far())
+    fn recv(&self, label: &str) -> Result<Value, String> {
+        recv_frame(label, &self.rx_out, &|| self.stderr_so_far())
     }
 
     fn initialize(&mut self, client_name: &str) -> Result<Value, String> {
@@ -514,7 +560,7 @@ impl ProtocolClient {
             },
         });
         self.send(&init.to_string())?;
-        let resp = self.recv()?;
+        let resp = self.recv("initialize")?;
         self.send(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)?;
         Ok(resp)
     }
@@ -540,12 +586,13 @@ fn send_frame(stdin: &mut impl Write, json: &str) -> Result<(), String> {
 }
 
 fn recv_frame(
+    label: &str,
     rx: &mpsc::Receiver<Value>,
     stderr_so_far: &dyn Fn() -> String,
 ) -> Result<Value, String> {
     rx.recv_timeout(FRAME_DEADLINE).map_err(|e| {
         format!(
-            "timed out waiting for response frame: {e}\n--- captured stderr ---\n{}",
+            "timed out waiting for {label} response frame: {e}\n--- captured stderr ---\n{}",
             stderr_so_far()
         )
     })

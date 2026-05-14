@@ -147,8 +147,11 @@ pub struct CliPositional {
 /// Skill triggers extracted from `x-cairn-skill-triggers`.
 #[derive(Debug, Clone, Default)]
 pub struct SkillBlock {
+    /// Positive trigger examples from `positive_triggers`.
     pub positive: Vec<String>,
+    /// Negative trigger examples from `negative_triggers`.
     pub negative: Vec<String>,
+    /// Exclusivity hint from `exclusivity_hints`.
     pub exclusivity: Option<String>,
 }
 
@@ -1578,7 +1581,7 @@ fn parse_skill_block(verb_value: &Value) -> SkillBlock {
     };
     SkillBlock {
         positive: block
-            .get("positive")
+            .get("positive_triggers")
             .and_then(Value::as_array)
             .map(|a| {
                 a.iter()
@@ -1587,7 +1590,7 @@ fn parse_skill_block(verb_value: &Value) -> SkillBlock {
             })
             .unwrap_or_default(),
         negative: block
-            .get("negative")
+            .get("negative_triggers")
             .and_then(Value::as_array)
             .map(|a| {
                 a.iter()
@@ -1596,7 +1599,7 @@ fn parse_skill_block(verb_value: &Value) -> SkillBlock {
             })
             .unwrap_or_default(),
         exclusivity: block
-            .get("exclusivity")
+            .get("exclusivity_hints")
             .and_then(Value::as_str)
             .map(String::from),
     }

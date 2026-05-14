@@ -1,8 +1,8 @@
 # Five-Hook Harness Integration Design — Issue #79
 
-**Date:** 2026-05-08  
-**Issue:** [#79 — Implement five-hook command handlers for harness integration](https://github.com/windoliver/cairn/issues/79)  
-**Brief sections:** §5.0 End-to-end turn journey · §9.3 Five-hook lifecycle · §19.a KISS v0.1 subset  
+**Date:** 2026-05-08
+**Issue:** [#79 — Implement five-hook command handlers for harness integration](https://github.com/windoliver/cairn/issues/79)
+**Brief sections:** §5.0 End-to-end turn journey · §9.3 Five-hook lifecycle · §19.a KISS v0.1 subset
 **Status:** Approved
 
 ---

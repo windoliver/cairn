@@ -12,9 +12,10 @@ Manage and inspect bundled plugins
 Usage: plugins <COMMAND>
 
 Commands:
-  list    List loaded plugins
-  verify  Run the conformance suite against every loaded plugin
-  help    Print this message or the help of the given subcommand(s)
+  list      List loaded plugins
+  describe  Print rendered plugin-facing descriptions
+  verify    Run the conformance suite against every loaded plugin
+  help      Print this message or the help of the given subcommand(s)
 
 Options:
   -h, --help
@@ -24,4 +25,5 @@ Options:
 ## Subcommands
 
 - [`cairn plugins list`](plugins-list.md) - List loaded plugins
+- [`cairn plugins describe`](plugins-describe.md) - Print rendered plugin-facing descriptions
 - [`cairn plugins verify`](plugins-verify.md) - Run the conformance suite against every loaded plugin

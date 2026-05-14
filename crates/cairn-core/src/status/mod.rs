@@ -37,6 +37,12 @@ pub use remediation::{REMEDIATION, remediation_for};
 
 use crate::config::CapabilitySet;
 use crate::generated::common::Capabilities;
+use crate::generated::status::{
+    StatusResponseSensors, StatusResponseSensorsScreen, StatusResponseSensorsScreenBackend,
+    StatusResponseSensorsScreenDegradation, StatusResponseSensorsScreenDegradationCode,
+    StatusResponseSensorsScreenMode, StatusResponseSensorsScreenOcrEngine,
+    StatusResponseSensorsScreenPermission, StatusResponseSensorsScreenState,
+};
 
 /// Contract-version phase the runtime is operating at. Pins which capabilities
 /// can ever appear in `status.capabilities` regardless of runtime wiring —
@@ -243,6 +249,53 @@ pub fn advertise(gates: &CapabilityGates) -> Vec<Capabilities> {
     }
 
     out
+}
+
+/// Default sensor status for surfaces that do not host local sensor runtimes.
+#[must_use]
+pub fn default_sensors_status() -> StatusResponseSensors {
+    StatusResponseSensors {
+        screen: StatusResponseSensorsScreen {
+            backend: StatusResponseSensorsScreenBackend::Xcap,
+            degradation: Some(StatusResponseSensorsScreenDegradation {
+                code: StatusResponseSensorsScreenDegradationCode::ScreenDisabled,
+                message: "screen sensor is disabled in config".to_owned(),
+            }),
+            mode: StatusResponseSensorsScreenMode::Off,
+            ocr_engine: default_screen_ocr_engine(),
+            permission: StatusResponseSensorsScreenPermission::NotRequested,
+            state: StatusResponseSensorsScreenState::Disabled,
+        },
+    }
+}
+
+/// Default compiled sensor capabilities for surfaces that do not host local
+/// sensor runtimes.
+#[must_use]
+pub fn default_sensor_capabilities() -> Vec<Capabilities> {
+    let mut capabilities = vec![
+        Capabilities::CairnSensorV1ScreenXcap,
+        default_screen_ocr_capability(),
+    ];
+    capabilities.sort_by_key(|capability| serde_json::to_string(capability).unwrap_or_default());
+    capabilities.dedup();
+    capabilities
+}
+
+fn default_screen_ocr_engine() -> StatusResponseSensorsScreenOcrEngine {
+    if cfg!(target_os = "windows") {
+        StatusResponseSensorsScreenOcrEngine::Winrt
+    } else {
+        StatusResponseSensorsScreenOcrEngine::Tesseract
+    }
+}
+
+fn default_screen_ocr_capability() -> Capabilities {
+    if cfg!(target_os = "windows") {
+        Capabilities::CairnSensorV1ScreenOcrWinrt
+    } else {
+        Capabilities::CairnSensorV1ScreenOcrTesseract
+    }
 }
 
 #[cfg(test)]

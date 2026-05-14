@@ -151,6 +151,27 @@ fn search_mode_enum_exposes_per_variant_capability() {
 }
 
 #[test]
+fn ingest_args_generated_validation_rejects_empty_recording() {
+    let files = emit_sdk::emit(&doc()).unwrap();
+    let ingest = files
+        .iter()
+        .find(|f| {
+            f.path
+                .ends_with("crates/cairn-core/src/generated/verbs/ingest.rs")
+        })
+        .unwrap();
+    let body = std::str::from_utf8(&ingest.bytes).unwrap();
+    assert!(
+        body.contains("if let Some(v) = &raw.recording {"),
+        "IngestArgs deserialization must validate recording minLength"
+    );
+    assert!(
+        body.contains("return Err(\"recording: must not be empty\");"),
+        "IngestArgs deserialization must reject empty recording values"
+    );
+}
+
+#[test]
 fn retrieve_args_tagged_union_exposes_per_variant_capability() {
     let files = emit_sdk::emit(&doc()).unwrap();
     let retrieve = files

@@ -1349,8 +1349,12 @@ fn status_in_unbound_dir_advertises_no_capabilities() {
         .unwrap_or_else(|e| panic!("status JSON parse failed: {e}\nstdout: {stdout:?}"));
     let caps = v["capabilities"].as_array().expect("capabilities array");
     assert!(
-        caps.is_empty(),
-        "unbound vault must advertise no capabilities; got {caps:?}"
+        caps.iter().any(|cap| cap == "cairn.sensor.v1.screen.xcap"),
+        "unbound vault should still advertise compiled screen sensor capabilities; got {caps:?}"
+    );
+    assert!(
+        !caps.iter().any(|cap| cap == "cairn.mcp.v1.search.keyword"),
+        "unbound vault must not advertise store-backed search capabilities; got {caps:?}"
     );
 }
 

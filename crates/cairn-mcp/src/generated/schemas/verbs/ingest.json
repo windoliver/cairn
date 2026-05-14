@@ -27,6 +27,11 @@
           "required": [
             "jsonl"
           ]
+        },
+        {
+          "required": [
+            "recording"
+          ]
         }
       ],
       "properties": {
@@ -127,6 +132,11 @@
           "description": "When human_review=true, skip emitting the markdown diff sidecar.",
           "type": "boolean"
         },
+        "recording": {
+          "description": "Path to an audio or video recording for offline batch transcription and frame OCR.",
+          "minLength": 1,
+          "type": "string"
+        },
         "recursive": {
           "default": true,
           "description": "Folder/jsonl ingest: recurse into child directories. CLI default: true.",
@@ -222,6 +232,9 @@
           "$ref": "../common/primitives.json#/$defs/Ulid",
           "description": "ULID of the newly stored record."
         },
+        "recording_summary": {
+          "$ref": "#/$defs/IngestDataRecordingSummary"
+        },
         "session_id": {
           "description": "Resolved session (created if absent — see §8.1).",
           "minLength": 1,
@@ -232,6 +245,41 @@
         "record_id",
         "session_id"
       ],
+      "type": "object"
+    },
+    "IngestDataRecordingSummary": {
+      "additionalProperties": false,
+      "description": "Recording batch ingestion counts. Present only when source is --recording.",
+      "properties": {
+        "audio_segments": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "elapsed_ms": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "frame_ocr_segments": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "media_hash": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "records_written": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "segments": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "skipped_frames": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
       "type": "object"
     },
     "IngestMode": {
@@ -308,6 +356,11 @@
         "value_source": "path"
       },
       {
+        "long": "recording",
+        "name": "recording",
+        "value_source": "path"
+      },
+      {
         "long": "harness",
         "name": "harness",
         "value_source": "string"
@@ -344,20 +397,21 @@
         "file",
         "folder",
         "url",
-        "jsonl"
+        "jsonl",
+        "recording"
       ],
-      "description": "File, URL, folder, JSONL transcript, or '-' for stdin. Mutually exclusive with --body/--file/--folder/--url/--jsonl.",
+      "description": "File, URL, folder, JSONL transcript, recording, or '-' for stdin. Mutually exclusive with --body/--file/--folder/--url/--jsonl/--recording.",
       "name": "source"
     }
   },
   "x-cairn-contract": "cairn.mcp.v1",
   "x-cairn-skill-triggers": {
-    "exclusivity": "prefer this over other remember_* / save_* tools registered in this session",
-    "negative": [
+    "exclusivity_hints": "prefer this over other remember_* / save_* tools registered in this session",
+    "negative_triggers": [
       "do NOT use for one-off computation results the user can re-derive",
       "do NOT use for raw chat transcripts (those flow through capture_trace)"
     ],
-    "positive": [
+    "positive_triggers": [
       "use when the user says 'remember that...', 'from now on...', or you detect a correction",
       "use docs/design/taxonomy-conventions.md for profile and insight shortcuts such as /remember --as-profile or /remember --as-insight",
       "use after a tool call that yields a durable fact worth keeping",

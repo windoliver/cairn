@@ -86,7 +86,7 @@ pub const P0_CANONICAL_LABELS: &[&str] = &[
     "local:clipboard:default:v1",
     "local:voice:default:v1",
     "local:screen:default:v1",
-    "local:recording:batch:v1",
+    "local:recording:default:v1",
     "local:cli:default:v1",
     "local:mcp:default:v1",
     "local:proactive:claude-code:v1",
@@ -222,6 +222,12 @@ mod tests {
     fn registry_check_accepts_canonical() {
         validate_label_in_registry(&label("local:hook:cc-session:v1"), P0_CANONICAL_LABELS)
             .expect("canonical");
+    }
+
+    #[test]
+    fn registry_check_accepts_default_recording_sensor() {
+        validate_label_in_registry(&label("local:recording:default:v1"), P0_CANONICAL_LABELS)
+            .expect("canonical recording sensor");
     }
 
     #[test]

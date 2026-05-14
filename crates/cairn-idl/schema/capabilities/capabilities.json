@@ -25,6 +25,11 @@
     { "const": "cairn.mcp.v1.extension.sessiontree", "x-cairn-since": "v0.3" },
     { "const": "cairn.mcp.v1.policy_trace",          "x-cairn-since": "v0.1" },
     { "const": "cairn.mcp.v1.sensors.pre_compact",   "x-cairn-since": "v0.1" },
+    { "const": "cairn.sensor.v1.screen.xcap",        "x-cairn-since": "v0.1" },
+    { "const": "cairn.sensor.v1.screen.screenpipe",  "x-cairn-since": "v0.1" },
+    { "const": "cairn.sensor.v1.screen.ocr.vision",  "x-cairn-since": "v0.1" },
+    { "const": "cairn.sensor.v1.screen.ocr.winrt",   "x-cairn-since": "v0.1" },
+    { "const": "cairn.sensor.v1.screen.ocr.tesseract", "x-cairn-since": "v0.1" },
     { "const": "cairn.mcp.v1.replay.sequence",       "x-cairn-since": "v0.1" },
     { "const": "cairn.mcp.v1.replay.challenge",      "x-cairn-since": "v0.1" },
     { "const": "cairn.workflows.v1.consolidation",   "x-cairn-since": "v0.1" }

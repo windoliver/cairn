@@ -15,14 +15,23 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use cairn_core::config::{CairnConfig, EmbeddingModelKind};
+use cairn_core::config::{CairnConfig, EmbeddingModelKind, ScreenBackend};
 use cairn_core::domain::identity::keys::VaultId;
 use cairn_core::generated::common::Capabilities;
 use cairn_core::generated::status::{
     StatusResponse, StatusResponseMcpGraphTools, StatusResponseMcpGraphToolsProbeBasis,
-    StatusResponseMcpGraphToolsReason, StatusResponseMcpGraphToolsState, StatusResponseServerInfo,
+    StatusResponseMcpGraphToolsReason, StatusResponseMcpGraphToolsState, StatusResponseSensors,
+    StatusResponseSensorsScreen, StatusResponseSensorsScreenBackend,
+    StatusResponseSensorsScreenDegradation, StatusResponseSensorsScreenDegradationCode,
+    StatusResponseSensorsScreenMode, StatusResponseSensorsScreenOcrEngine,
+    StatusResponseSensorsScreenPermission, StatusResponseSensorsScreenState,
+    StatusResponseServerInfo,
 };
 use cairn_core::pipeline::dispatch::{DefaultRegistry, pipeline_dispatch_advertisement};
+use cairn_sensors_local::screen::{
+    self, ResolvedScreenOcrEngine, ScreenDegradationCode, ScreenMode, ScreenPermission,
+    ScreenProbe, ScreenState,
+};
 
 use super::envelope::{emit_json, new_operation_id};
 
@@ -156,6 +165,8 @@ pub fn run_with_context(
 
     let incarnation = new_operation_id();
     let started_at = chrono_like_now();
+    let fallback_config = CairnConfig::default();
+    let status_config = config.unwrap_or(&fallback_config);
 
     let bound = matches!(binding, Some(VaultBinding::Bound));
     let caps = compute_capabilities(vault_root, config, bound);
@@ -204,6 +215,7 @@ pub fn run_with_context(
         },
         capabilities: caps,
         extensions: vec![],
+        sensors: map_screen_probe(&screen::probe_config(&status_config.sensors.screen)),
         // Advertise the live routing policy (issue #217). The
         // `capture_trace` verb dispatches through the same
         // `DefaultRegistry` (see `crates/cairn-cli/src/verbs/capture_trace.rs`
@@ -242,6 +254,11 @@ pub fn run_with_context(
             // No config — report unavailable with config-only probe
             println!("{}", render_mcp_graph_line(&ResolvedAvailability::NoVault));
         }
+        println!(
+            "screen:      {} {}",
+            status_screen_backend_label(resp.sensors.screen.backend),
+            status_screen_state_label(resp.sensors.screen.state)
+        );
     }
     // suppress unused warning when config is None
     let _ = probe_basis_for_json;
@@ -264,47 +281,55 @@ fn compute_capabilities(
     config: Option<&CairnConfig>,
     bound: bool,
 ) -> Vec<Capabilities> {
-    let Some(config) = config else {
-        // No config available — return empty list (P0 stub path).
-        return vec![];
+    let mut caps = if let Some(config) = config {
+        let model_present = vault_root.is_some_and(|root| {
+            let models_root = root.join(".cairn").join("models");
+            let cache = cairn_embeddings_local::ModelCache::new(&models_root);
+            let kind: EmbeddingModelKind = config.search.embedding_model;
+            cache.is_present(kind)
+        });
+
+        // For local providers: embedding_provider_ready == model_present.
+        // For cloud providers (OpenAI): requires the `openai` Cargo feature AND
+        // OPENAI_API_KEY to be set. A stale local model file on disk with a cloud
+        // provider configured must NOT advertise semantic/hybrid (Finding 3, #53).
+        let embedding_provider_ready =
+            compute_embedding_provider_ready(config, model_present, vault_root);
+
+        // Consolidation runtime readiness mirrors the gates the `cairn mcp`
+        // boot path actually checks before constructing a Scheduler: the
+        // config must enable consolidation AND the deployment must be
+        // running in single_tenant mode with a bound principal (the only
+        // arm that constructs the SqliteJobStore + handlers). Without all
+        // three, status must not advertise the capability (round-8
+        // adversarial review #2).
+        let consolidation_runtime_ready = config.consolidation.enabled
+            && config.mcp.stdio.single_tenant
+            && config.mcp.stdio.principal.is_some();
+
+        cairn_core::status::advertise(&cairn_core::status::CapabilityGates {
+            config: config.capabilities(embedding_provider_ready),
+            // CLI status path stays read-only and never opens the SQLite store.
+            // The bound-vault structural backstop in advertise() drives the FTS gate.
+            store: None,
+            vault_bound: bound,
+            model_present,
+            embedding_provider_ready,
+            llm_configured: false,
+            consolidation_runtime_ready,
+            contract_phase: CLI_CONTRACT_PHASE,
+        })
+    } else {
+        // No config available — return only compiled local sensor capabilities.
+        vec![]
     };
 
-    let model_present = vault_root.is_some_and(|root| {
-        let models_root = root.join(".cairn").join("models");
-        let cache = cairn_embeddings_local::ModelCache::new(&models_root);
-        let kind: EmbeddingModelKind = config.search.embedding_model;
-        cache.is_present(kind)
-    });
-
-    // For local providers: embedding_provider_ready == model_present.
-    // For cloud providers (OpenAI): requires the `openai` Cargo feature AND
-    // OPENAI_API_KEY to be set. A stale local model file on disk with a cloud
-    // provider configured must NOT advertise semantic/hybrid (Finding 3, #53).
-    let embedding_provider_ready =
-        compute_embedding_provider_ready(config, model_present, vault_root);
-
-    // Consolidation runtime readiness mirrors the gates the `cairn mcp`
-    // boot path actually checks before constructing a Scheduler: the
-    // config must enable consolidation AND the deployment must be
-    // running in single_tenant mode with a bound principal (the only
-    // arm that constructs the SqliteJobStore + handlers). Without all
-    // three, status must not advertise the capability (round-8
-    // adversarial review #2).
-    let consolidation_runtime_ready = config.consolidation.enabled
-        && config.mcp.stdio.single_tenant
-        && config.mcp.stdio.principal.is_some();
-    cairn_core::status::advertise(&cairn_core::status::CapabilityGates {
-        config: config.capabilities(embedding_provider_ready),
-        // CLI status path stays read-only and never opens the SQLite store.
-        // The bound-vault structural backstop in advertise() drives the FTS gate.
-        store: None,
-        vault_bound: bound,
-        model_present,
-        embedding_provider_ready,
-        llm_configured: false,
-        consolidation_runtime_ready,
-        contract_phase: CLI_CONTRACT_PHASE,
-    })
+    for capability in screen::compiled_capabilities() {
+        if !caps.contains(&capability) {
+            caps.push(capability);
+        }
+    }
+    caps
 }
 
 /// Probe MCP graph-tools availability from the given config and optional vault root.
@@ -433,6 +458,107 @@ fn compute_embedding_provider_ready(
     vault_root: Option<&Path>,
 ) -> bool {
     super::embedding_provider_ready(config, model_present, vault_root)
+}
+
+fn map_screen_probe(probe: &ScreenProbe) -> StatusResponseSensors {
+    StatusResponseSensors {
+        screen: StatusResponseSensorsScreen {
+            backend: map_screen_backend(probe.backend),
+            degradation: probe.degradation.as_ref().map(|degradation| {
+                StatusResponseSensorsScreenDegradation {
+                    code: map_screen_degradation_code(degradation.code),
+                    message: degradation.message.clone(),
+                }
+            }),
+            mode: map_screen_mode(probe.mode),
+            ocr_engine: map_screen_ocr_engine(probe.ocr_engine),
+            permission: map_screen_permission(probe.permission),
+            state: map_screen_state(probe.state),
+        },
+    }
+}
+
+fn map_screen_backend(backend: ScreenBackend) -> StatusResponseSensorsScreenBackend {
+    if matches!(backend, ScreenBackend::Screenpipe) {
+        StatusResponseSensorsScreenBackend::Screenpipe
+    } else {
+        // The current status schema is closed; unknown config backends are
+        // reported as xcap while `probe_config` separately degrades them.
+        StatusResponseSensorsScreenBackend::Xcap
+    }
+}
+
+fn status_screen_backend_label(backend: StatusResponseSensorsScreenBackend) -> &'static str {
+    if matches!(backend, StatusResponseSensorsScreenBackend::Screenpipe) {
+        "screenpipe"
+    } else {
+        "xcap"
+    }
+}
+
+fn status_screen_state_label(state: StatusResponseSensorsScreenState) -> &'static str {
+    match state {
+        StatusResponseSensorsScreenState::Disabled => "disabled",
+        StatusResponseSensorsScreenState::Enabled => "enabled",
+        StatusResponseSensorsScreenState::PermissionMissing => "permission_missing",
+        _ => "degraded",
+    }
+}
+
+fn map_screen_state(state: ScreenState) -> StatusResponseSensorsScreenState {
+    match state {
+        ScreenState::Disabled => StatusResponseSensorsScreenState::Disabled,
+        ScreenState::Enabled => StatusResponseSensorsScreenState::Enabled,
+        ScreenState::PermissionMissing => StatusResponseSensorsScreenState::PermissionMissing,
+        ScreenState::Degraded => StatusResponseSensorsScreenState::Degraded,
+    }
+}
+
+fn map_screen_mode(mode: ScreenMode) -> StatusResponseSensorsScreenMode {
+    match mode {
+        ScreenMode::Off => StatusResponseSensorsScreenMode::Off,
+        ScreenMode::Snapshot => StatusResponseSensorsScreenMode::Snapshot,
+        ScreenMode::Continuous => StatusResponseSensorsScreenMode::Continuous,
+    }
+}
+
+fn map_screen_ocr_engine(
+    ocr_engine: ResolvedScreenOcrEngine,
+) -> StatusResponseSensorsScreenOcrEngine {
+    match ocr_engine {
+        ResolvedScreenOcrEngine::Vision => StatusResponseSensorsScreenOcrEngine::Vision,
+        ResolvedScreenOcrEngine::Winrt => StatusResponseSensorsScreenOcrEngine::Winrt,
+        ResolvedScreenOcrEngine::Tesseract => StatusResponseSensorsScreenOcrEngine::Tesseract,
+        ResolvedScreenOcrEngine::Off => StatusResponseSensorsScreenOcrEngine::Off,
+    }
+}
+
+fn map_screen_permission(permission: ScreenPermission) -> StatusResponseSensorsScreenPermission {
+    match permission {
+        ScreenPermission::NotRequested => StatusResponseSensorsScreenPermission::NotRequested,
+        ScreenPermission::Granted => StatusResponseSensorsScreenPermission::Granted,
+        ScreenPermission::Denied => StatusResponseSensorsScreenPermission::Denied,
+        ScreenPermission::Revoked => StatusResponseSensorsScreenPermission::Revoked,
+    }
+}
+
+fn map_screen_degradation_code(
+    code: ScreenDegradationCode,
+) -> StatusResponseSensorsScreenDegradationCode {
+    match code {
+        ScreenDegradationCode::Disabled => {
+            StatusResponseSensorsScreenDegradationCode::ScreenDisabled
+        }
+        ScreenDegradationCode::PermissionMissing => {
+            StatusResponseSensorsScreenDegradationCode::ScreenPermissionMissing
+        }
+        ScreenDegradationCode::BackendUnavailable => {
+            StatusResponseSensorsScreenDegradationCode::ScreenBackendUnavailable
+        }
+        ScreenDegradationCode::Degraded => {
+            StatusResponseSensorsScreenDegradationCode::ScreenDegraded
+        }
+    }
 }
 
 /// True if `capability` is in the current `status.capabilities` list.
@@ -869,37 +995,52 @@ mod tests {
     }
 
     #[test]
-    fn compute_capabilities_no_config_returns_empty() {
+    fn compute_capabilities_no_config_returns_compiled_screen_caps() {
         let caps = compute_capabilities(None, None, false);
-        assert!(caps.is_empty(), "no config → no capabilities");
-    }
-
-    #[test]
-    fn compute_capabilities_default_config_no_vault_returns_empty() {
-        let config = CairnConfig::default();
-        // No vault_root + bound=false → vault-presence gate fails
-        // closed → empty list. Mirrors `Sdk::new` (no store): the
-        // runtime cannot honor any capability without a real vault
-        // behind it.
-        let caps = compute_capabilities(None, Some(&config), false);
         assert!(
-            caps.is_empty(),
-            "no vault root → no capabilities; got {caps:?}"
+            caps.contains(&Capabilities::CairnSensorV1ScreenXcap),
+            "no config still advertises compiled screen sensor capabilities"
+        );
+        assert!(
+            caps.iter()
+                .all(|cap| !matches!(cap, Capabilities::CairnMcpV1SearchKeyword)),
+            "no config must not advertise store-backed capabilities; got {caps:?}"
         );
     }
 
     #[test]
-    fn compute_capabilities_unbound_vault_dir_returns_empty() {
+    fn compute_capabilities_default_config_no_vault_returns_compiled_screen_caps() {
+        let config = CairnConfig::default();
+        // No vault_root + bound=false → vault-presence gate fails
+        // closed for store-backed capabilities, but compiled local
+        // screen sensor capabilities are independent of vault binding.
+        let caps = compute_capabilities(None, Some(&config), false);
+        assert!(
+            caps.contains(&Capabilities::CairnSensorV1ScreenXcap),
+            "no vault root → compiled screen caps only; got {caps:?}"
+        );
+        assert!(
+            !caps.contains(&Capabilities::CairnMcpV1SearchKeyword),
+            "no vault root must not advertise search; got {caps:?}"
+        );
+    }
+
+    #[test]
+    fn compute_capabilities_unbound_vault_dir_returns_compiled_screen_caps() {
         // A tempdir without `.cairn/vault.id` is not a Cairn vault.
         // Caller passes `bound=false`; the CLI's status surface must
-        // return empty capabilities so clients do not negotiate against
-        // a non-existent backend.
+        // return only compiled local sensor capabilities so clients do
+        // not negotiate against a non-existent store backend.
         let config = CairnConfig::default();
         let tmp = tempfile::tempdir().unwrap();
         let caps = compute_capabilities(Some(tmp.path()), Some(&config), false);
         assert!(
-            caps.is_empty(),
-            "tempdir without vault.id → empty caps; got {caps:?}"
+            caps.contains(&Capabilities::CairnSensorV1ScreenXcap),
+            "tempdir without vault.id → compiled screen caps only; got {caps:?}"
+        );
+        assert!(
+            !caps.contains(&Capabilities::CairnMcpV1SearchKeyword),
+            "tempdir without vault.id must not advertise search; got {caps:?}"
         );
     }
 

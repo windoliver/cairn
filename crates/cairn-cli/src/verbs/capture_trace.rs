@@ -43,7 +43,8 @@ use cairn_core::generated::envelope::{
 };
 use cairn_core::generated::verbs::capture_trace::{CaptureTraceData, FailedTurn};
 use cairn_core::pipeline::capture_trace::{
-    ProjectedTraceBlocks, classify, project, project_pre_compact_snapshot, project_with_blocks,
+    ProjectedTraceBlocks, classify as core_classify, project, project_pre_compact_snapshot,
+    project_with_blocks,
 };
 use cairn_core::pipeline::dispatch::{DefaultRegistry, trace_body_bytes};
 use cairn_core::pipeline::extract::body::ResolvedBody;
@@ -137,12 +138,6 @@ pub async fn read_jsonl_events(path: impl AsRef<Path>) -> anyhow::Result<Vec<Cap
 /// Returns an error only for unrecoverable setup failures (e.g. the JSONL
 /// file cannot be read, or envelope validation fails for all events). Per-turn
 /// failures are reported in [`CaptureTraceResponse::failed_turns`].
-#[allow(
-    clippy::too_many_lines,
-    reason = "CLI verb dispatcher: guard → parse → group → per-turn persist. \
-              Each step is linear; extracting sub-functions would hide the \
-              sequential flow without reducing complexity."
-)]
 pub async fn run_handler(
     store: &SqliteMemoryStore,
     vault_root: &Path,
@@ -170,6 +165,48 @@ pub async fn run_handler_with_scope(
         store,
         vault_root,
         from,
+        Some(&scope_binding),
+        None,
+        &ConsolidationConfig::default(),
+    )
+    .await
+}
+
+/// Persist an already-materialized batch of capture events.
+///
+/// This is used by import paths that have already staged and hashed payload
+/// files. Behavior matches [`run_handler`] except the events are supplied
+/// directly instead of read from JSONL. The vault guard runs before any
+/// persistence work.
+pub async fn run_events_handler(
+    store: &SqliteMemoryStore,
+    vault_root: &Path,
+    events: Vec<CaptureEvent>,
+) -> anyhow::Result<CaptureTraceResponse> {
+    capture_trace_guard()?;
+    run_events_handler_inner_no_guard(
+        store,
+        vault_root,
+        events,
+        None,
+        None,
+        &ConsolidationConfig::default(),
+    )
+    .await
+}
+
+/// Persist an already-materialized batch while binding projected rows to a verified vault scope.
+pub async fn run_events_handler_with_scope(
+    store: &SqliteMemoryStore,
+    vault_root: &Path,
+    events: Vec<CaptureEvent>,
+    scope_binding: ScopeTuple,
+) -> anyhow::Result<CaptureTraceResponse> {
+    capture_trace_guard()?;
+    run_events_handler_inner_no_guard(
+        store,
+        vault_root,
+        events,
         Some(&scope_binding),
         None,
         &ConsolidationConfig::default(),
@@ -247,12 +284,36 @@ async fn run_handler_inner(
     job_store: Option<&dyn JobStore>,
     consolidation_config: &ConsolidationConfig,
 ) -> anyhow::Result<CaptureTraceResponse> {
-    // §3.5 trust-boundary guard.
-    refuse_if_degraded(&ReconciliationReport::default(), vec![])
-        .context("capture_trace: vault degraded")?;
-
+    capture_trace_guard()?;
     let events = read_jsonl_events(from).await?;
+    run_events_handler_inner_no_guard(
+        store,
+        vault_root,
+        events,
+        scope_binding,
+        job_store,
+        consolidation_config,
+    )
+    .await
+}
 
+fn capture_trace_guard() -> anyhow::Result<()> {
+    refuse_if_degraded(&ReconciliationReport::default(), vec![])
+        .context("capture_trace: vault degraded")
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "trace import keeps validation, projection, and per-turn atomicity in one ordered transaction flow"
+)]
+async fn run_events_handler_inner_no_guard(
+    store: &SqliteMemoryStore,
+    vault_root: &Path,
+    events: Vec<CaptureEvent>,
+    scope_binding: Option<&ScopeTuple>,
+    job_store: Option<&dyn JobStore>,
+    consolidation_config: &ConsolidationConfig,
+) -> anyhow::Result<CaptureTraceResponse> {
     // Group by (session_id, turn_id). Events missing either ref, or
     // failing structural validation, are reported as failed and skipped
     // rather than aborting the whole import. Per-turn atomicity: a turn
@@ -329,7 +390,7 @@ async fn run_handler_inner(
         // persisted in prior transactions and would mis-fire here).
         let mut last_pre_tool: BTreeMap<String, CaptureEventId> = BTreeMap::new();
         for event in &group {
-            if !matches!(classify(event), Ok(TraceEvent::PreTool)) {
+            if !matches!(classify_trace_event(event), Ok(TraceEvent::PreTool)) {
                 continue;
             }
             let Some(refs) = event.refs.as_ref() else {
@@ -350,7 +411,7 @@ async fn run_handler_inner(
             // unclassifiable event rather than persisting a partial set:
             // the summary record would otherwise be built from incomplete
             // data and become hard-to-detect data loss.
-            let classified = match classify(event) {
+            let classified = match classify_trace_event(event) {
                 Ok(c) => c,
                 Err(e) => {
                     failed_turns.push((
@@ -826,7 +887,7 @@ async fn run_blocks_handler_inner(
             });
         }
 
-        let classified = classify(&event).map_err(anyhow::Error::msg)?;
+        let classified = core_classify(&event).map_err(anyhow::Error::msg)?;
         let parent_event_id = match &block {
             TraceBlock::ToolResult { tool_use_id, .. } => pre_tool_by_id.get(tool_use_id).cloned(),
             _ => None,
@@ -920,10 +981,20 @@ fn bind_record_scope(record: &mut cairn_core::domain::MemoryRecord, scope_bindin
 }
 
 fn trace_text(event: &CaptureEvent, body_bytes: &[u8]) -> anyhow::Result<String> {
-    if matches!(&event.payload, CapturePayload::Voice { .. }) {
-        return voice_transcript_text(body_bytes);
+    match &event.payload {
+        CapturePayload::Voice { .. } => voice_transcript_text(body_bytes),
+        CapturePayload::RecordingBatch { .. } => recording_segment_text(body_bytes),
+        _ => String::from_utf8(body_bytes.to_vec()).context("routed body is not valid UTF-8"),
     }
-    String::from_utf8(body_bytes.to_vec()).context("routed body is not valid UTF-8")
+}
+
+fn classify_trace_event(
+    event: &CaptureEvent,
+) -> Result<TraceEvent, cairn_core::pipeline::capture_trace::TraceProjectError> {
+    match &event.payload {
+        CapturePayload::RecordingBatch { .. } => Ok(TraceEvent::UserMessage),
+        _ => core_classify(event),
+    }
 }
 
 fn voice_transcript_text(body_bytes: &[u8]) -> anyhow::Result<String> {
@@ -936,6 +1007,20 @@ fn voice_transcript_text(body_bytes: &[u8]) -> anyhow::Result<String> {
         .ok_or_else(|| anyhow::anyhow!("voice payload missing transcript.text"))?;
     if text.trim().is_empty() {
         anyhow::bail!("voice payload transcript.text is empty");
+    }
+    Ok(text.to_owned())
+}
+
+fn recording_segment_text(body_bytes: &[u8]) -> anyhow::Result<String> {
+    let raw: serde_json::Value =
+        serde_json::from_slice(body_bytes).context("recording payload is not valid JSON")?;
+    let text = raw
+        .get("segment")
+        .and_then(|segment| segment.get("text"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("recording payload missing segment.text"))?;
+    if text.trim().is_empty() {
+        anyhow::bail!("recording payload segment.text is empty");
     }
     Ok(text.to_owned())
 }
