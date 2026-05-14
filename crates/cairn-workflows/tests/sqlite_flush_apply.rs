@@ -208,6 +208,76 @@ async fn sqlite_apply_preflights_upsert_prior_versions() {
 }
 
 #[tokio::test]
+async fn sqlite_apply_preflights_invalid_upsert_records_before_any_mutation() {
+    let store = Arc::new(memstore().await);
+    let apply = SqliteFlushPlanApply::new(store.clone());
+    let inserted = sample_record(12_001);
+    let mut invalid = sample_record(12_002);
+    invalid.body.clear();
+
+    let mut plan = sample_plan("01HQZK000000000000000000H2", FlushMode::Autonomous);
+    plan.mutations = vec![
+        PlannedMutation::Upsert {
+            record: Box::new(inserted.clone()),
+            prior_version: None,
+        },
+        PlannedMutation::Upsert {
+            record: Box::new(invalid),
+            prior_version: None,
+        },
+    ];
+
+    apply
+        .apply("consolidate", plan)
+        .await
+        .expect_err("invalid record should fail before first upsert");
+
+    assert!(
+        store
+            .get(&inserted.id)
+            .await
+            .expect("get inserted")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn sqlite_apply_preflights_invalid_promote_records_before_any_mutation() {
+    let store = Arc::new(memstore().await);
+    let apply = SqliteFlushPlanApply::new(store.clone());
+    let inserted = sample_record(12_003);
+    let mut promoted = sample_record(12_004);
+    promoted.kind = MemoryKind::Reference;
+    store.upsert(&promoted).await.expect("seed promoted target");
+
+    let mut plan = sample_plan("01HQZK000000000000000000H3", FlushMode::Autonomous);
+    plan.mutations = vec![
+        PlannedMutation::Upsert {
+            record: Box::new(inserted.clone()),
+            prior_version: None,
+        },
+        PlannedMutation::Promote {
+            from: promoted.target_id.clone(),
+            to_kind: MemoryKind::SensorObservation,
+            evidence: vec![],
+        },
+    ];
+
+    apply
+        .apply("promote", plan)
+        .await
+        .expect_err("invalid promote should fail before first upsert");
+
+    assert!(
+        store
+            .get(&inserted.id)
+            .await
+            .expect("get inserted")
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn sqlite_apply_rejects_new_upsert_when_target_already_exists() {
     let store = Arc::new(memstore().await);
     let apply = SqliteFlushPlanApply::new(store.clone());
@@ -285,7 +355,7 @@ async fn sqlite_apply_preserves_upsert_store_errors_as_apply_errors() {
         .expect_err("invalid record should surface store error");
 
     assert!(matches!(err, WorkflowError::Apply { .. }));
-    assert!(err.to_string().contains("invalid record"));
+    assert!(err.to_string().contains("required field `body`"));
 }
 
 #[tokio::test]

@@ -70,7 +70,13 @@ async fn preflight(
                 record,
                 prior_version,
             } => {
+                record
+                    .validate()
+                    .map_err(|source| WorkflowError::apply(workflow, plan, source))?;
                 ensure_upsert_version(store, workflow, plan, record, *prior_version).await?;
+            }
+            PlannedMutation::Promote { from, to_kind, .. } => {
+                ensure_promote_valid(store, workflow, plan, from, *to_kind).await?;
             }
             PlannedMutation::Delete {
                 target,
@@ -314,6 +320,30 @@ async fn ensure_upsert_version(
             },
         )),
     }
+}
+
+async fn ensure_promote_valid(
+    store: &SqliteMemoryStore,
+    workflow: &'static str,
+    plan: &FlushPlan,
+    target: &TargetId,
+    to_kind: cairn_core::domain::MemoryKind,
+) -> Result<(), WorkflowError> {
+    let Some(active) = store
+        .get_active_by_target(target)
+        .await
+        .map_err(|source| apply_boxed_error(workflow, plan, source))?
+    else {
+        return Ok(());
+    };
+    if active.record.kind == to_kind {
+        return Ok(());
+    }
+    let mut promoted = active.record;
+    promoted.kind = to_kind;
+    promoted
+        .validate()
+        .map_err(|source| WorkflowError::apply(workflow, plan, source))
 }
 
 fn check_delete_version(

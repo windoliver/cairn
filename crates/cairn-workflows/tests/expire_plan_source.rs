@@ -44,6 +44,13 @@ async fn expire_plan_source_emits_expire_plan_for_low_salience_records() {
             reason: ExpirationReason::SalienceBelowThreshold,
         } if *target == low.target_id
     ));
+    assert!(matches!(
+        plans[0].reason,
+        PlanReason::Expire {
+            ttl_expired: false,
+            salience_below: Some(salience),
+        } if (salience - low.salience).abs() < f32::EPSILON
+    ));
 }
 
 #[tokio::test]

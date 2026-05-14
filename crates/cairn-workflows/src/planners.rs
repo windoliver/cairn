@@ -227,7 +227,7 @@ impl ExpirePlanSource {
             }],
             reason: PlanReason::Expire {
                 ttl_expired: false,
-                salience_below: Some(self.salience_threshold),
+                salience_below: Some(record.salience),
             },
             source_events: Vec::new(),
             target_hashes: std::collections::BTreeMap::new(),
