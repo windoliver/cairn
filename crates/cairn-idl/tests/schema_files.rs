@@ -640,6 +640,11 @@ fn every_typed_field_asserts_bounds_or_is_allowlisted() {
             "verbs/retrieve.json",
             "/$defs/ProfileHalf/properties/historical_summary",
         ),
+        // SummarizeData.narrative is intentionally empty for offline
+        // rule-based summarize; LLM-backed summaries populate it when
+        // JSON-mode narrative generation is available. A minLength: 1
+        // would break the documented offline fallback for issue #312.
+        ("verbs/summarize.json", "/$defs/Data/properties/narrative"),
     ]
     .iter()
     .map(|(f, p)| (f.to_string(), p.to_string()))

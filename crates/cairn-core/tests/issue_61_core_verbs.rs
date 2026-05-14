@@ -1,17 +1,24 @@
 //! Core ingest verb regression tests for issue 61.
 
+use std::sync::Mutex;
+
+use cairn_core::contract::{
+    CompletionOutput, CompletionRequest, ContractVersion, LLMProvider, LLMProviderCapabilities,
+    LlmError, VersionRange,
+};
 use cairn_core::domain::{DomainError, MemoryKind};
 use cairn_core::generated::envelope::RetrieveData;
 use cairn_core::generated::verbs::assemble_hot::HotRecipeStep;
 use cairn_core::generated::verbs::ingest::IngestArgs;
 use cairn_core::generated::verbs::retrieve::TurnItemRole;
+use cairn_core::generated::verbs::summarize::{ConceptKind, ConfidenceTag};
 use cairn_core::pipeline::filter::Decision;
 use cairn_core::verbs::assemble_hot::loader::{read_vault_markdown_file, trim_bodies_to_budget};
 use cairn_core::verbs::ingest::{PreparedIngest, prepare_ingest_body};
 use cairn_core::verbs::retrieve::{
     profile_data, record_data, tool_call_data, turn_data_with_options,
 };
-use cairn_core::verbs::summarize::render_summary;
+use cairn_core::verbs::summarize::{render_summary, render_summary_data, summarize_with_llm};
 
 mod issue_61_core_verbs {
     use super::*;
@@ -467,6 +474,380 @@ mod issue_61_core_verbs {
         assert_eq!(first, second);
         assert!(first.contains("Alpha detail"));
         assert!(first.contains("Beta detail"));
+    }
+
+    #[test]
+    fn summarize_data_includes_offline_facts_concepts_and_empty_narrative() {
+        let mut a = sample_core_record(
+            "Alpha detail for the project",
+            serde_json::json!({"source": "summary-test"}),
+        );
+        a.tags = vec!["customer-alpha".to_owned()];
+        let b = sample_core_record(
+            "Beta detail for the project",
+            serde_json::json!({"source": "summary-test"}),
+        );
+
+        let data = render_summary_data(&[b.clone(), a.clone()]);
+
+        assert!(data.digest.contains("Alpha detail for the project"));
+        assert!(data.digest.contains("Beta detail for the project"));
+        assert_eq!(data.narrative, "");
+        assert!(data.facts.iter().any(|fact| {
+            fact.object == "Alpha detail for the project"
+                && fact.predicate == "states"
+                && fact.confidence == ConfidenceTag::Extracted
+                && fact
+                    .source_record_ids
+                    .iter()
+                    .any(|id| id.0 == a.id.as_str())
+        }));
+        assert!(
+            data.concepts
+                .iter()
+                .any(|concept| { concept.name == "project" && concept.kind == ConceptKind::Topic })
+        );
+        assert!(
+            data.concepts.iter().any(|concept| {
+                concept.name == "customer-alpha" && concept.kind == ConceptKind::Topic
+            }),
+            "offline concepts should include source record tags: {:?}",
+            data.concepts
+        );
+    }
+
+    #[test]
+    fn summarize_data_handles_empty_offline_input() {
+        let data = render_summary_data(&[]);
+
+        assert_eq!(data.digest, "0 records summarized");
+        assert!(data.facts.is_empty());
+        assert!(data.concepts.is_empty());
+        assert_eq!(data.narrative, "");
+        assert_eq!(data.persisted_record_id, None);
+    }
+
+    struct RetrySummarizer {
+        attempts: Mutex<u8>,
+        record_id: String,
+    }
+
+    #[async_trait::async_trait]
+    impl LLMProvider for RetrySummarizer {
+        fn name(&self) -> &'static str {
+            "retry-summarizer"
+        }
+
+        fn capabilities(&self) -> &LLMProviderCapabilities {
+            static CAPS: LLMProviderCapabilities = LLMProviderCapabilities {
+                json_mode: true,
+                streaming: false,
+                tool_calls: false,
+            };
+            &CAPS
+        }
+
+        fn supported_contract_versions(&self) -> VersionRange {
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+        }
+
+        async fn complete(&self, req: &CompletionRequest) -> Result<CompletionOutput, LlmError> {
+            assert!(req.schema.is_some(), "summarize must request JSON schema");
+            let mut attempts = self.attempts.lock().expect("test mutex");
+            *attempts += 1;
+            if *attempts == 1 {
+                assert!(
+                    !req.prompt.contains("produce all four fields"),
+                    "first attempt should use the base prompt"
+                );
+                return Err(LlmError::InvalidJsonOutput {
+                    detail: "missing narrative".to_owned(),
+                    raw: "{}".to_owned(),
+                });
+            }
+            assert!(
+                req.prompt.contains("produce all four fields"),
+                "retry prompt must remind the provider to populate every field"
+            );
+            Ok(CompletionOutput::Json(serde_json::json!({
+                "digest": "Alpha digest",
+                "facts": [{
+                    "subject": "Alpha",
+                    "predicate": "states",
+                    "object": "Alpha detail for the project",
+                    "confidence": "extracted",
+                    "source_record_ids": [self.record_id],
+                }],
+                "concepts": [{
+                    "name": "project",
+                    "kind": "topic",
+                    "salience": 1.0,
+                }],
+                "narrative": "Alpha narrative",
+            })))
+        }
+    }
+
+    #[tokio::test]
+    async fn summarize_llm_retries_once_and_returns_triple_form() {
+        let record = sample_core_record(
+            "Alpha detail for the project",
+            serde_json::json!({"source": "summary-test"}),
+        );
+        let provider = RetrySummarizer {
+            attempts: Mutex::new(0),
+            record_id: record.id.as_str().to_owned(),
+        };
+
+        let data = summarize_with_llm(&provider, &[record])
+            .await
+            .expect("llm summary");
+
+        assert_eq!(data.digest, "Alpha digest");
+        assert_eq!(data.narrative, "Alpha narrative");
+        assert_eq!(data.facts[0].object, "Alpha detail for the project");
+        assert_eq!(data.concepts[0].name, "project");
+        assert_eq!(*provider.attempts.lock().expect("test mutex"), 2);
+    }
+
+    struct ValidSummarizer {
+        attempts: Mutex<u8>,
+        record_id: String,
+    }
+
+    #[async_trait::async_trait]
+    impl LLMProvider for ValidSummarizer {
+        fn name(&self) -> &'static str {
+            "valid-summarizer"
+        }
+
+        fn capabilities(&self) -> &LLMProviderCapabilities {
+            static CAPS: LLMProviderCapabilities = LLMProviderCapabilities {
+                json_mode: true,
+                streaming: false,
+                tool_calls: false,
+            };
+            &CAPS
+        }
+
+        fn supported_contract_versions(&self) -> VersionRange {
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+        }
+
+        async fn complete(&self, req: &CompletionRequest) -> Result<CompletionOutput, LlmError> {
+            assert!(req.schema.is_some(), "summarize must request JSON schema");
+            let mut attempts = self.attempts.lock().expect("test mutex");
+            *attempts += 1;
+            assert!(
+                !req.prompt.contains("produce all four fields"),
+                "valid first response should not need the retry prompt"
+            );
+            Ok(CompletionOutput::Json(serde_json::json!({
+                "digest": "Alpha digest",
+                "facts": [{
+                    "subject": "Alpha",
+                    "predicate": "states",
+                    "object": "Alpha detail for the project",
+                    "confidence": "extracted",
+                    "source_record_ids": [self.record_id],
+                }],
+                "concepts": [{
+                    "name": "project",
+                    "kind": "topic",
+                    "salience": 1.0,
+                }],
+                "narrative": "Alpha narrative",
+            })))
+        }
+    }
+
+    #[tokio::test]
+    async fn summarize_llm_valid_json_uses_single_call() {
+        let record = sample_core_record(
+            "Alpha detail for the project",
+            serde_json::json!({"source": "summary-test"}),
+        );
+        let provider = ValidSummarizer {
+            attempts: Mutex::new(0),
+            record_id: record.id.as_str().to_owned(),
+        };
+
+        let data = summarize_with_llm(&provider, &[record])
+            .await
+            .expect("llm summary");
+
+        assert_eq!(data.digest, "Alpha digest");
+        assert_eq!(*provider.attempts.lock().expect("test mutex"), 1);
+    }
+
+    struct NoJsonModeSummarizer;
+
+    #[async_trait::async_trait]
+    impl LLMProvider for NoJsonModeSummarizer {
+        fn name(&self) -> &'static str {
+            "no-json-mode-summarizer"
+        }
+
+        fn capabilities(&self) -> &LLMProviderCapabilities {
+            static CAPS: LLMProviderCapabilities = LLMProviderCapabilities {
+                json_mode: false,
+                streaming: false,
+                tool_calls: false,
+            };
+            &CAPS
+        }
+
+        fn supported_contract_versions(&self) -> VersionRange {
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+        }
+
+        async fn complete(&self, _req: &CompletionRequest) -> Result<CompletionOutput, LlmError> {
+            panic!("summarize must fail before calling a provider without JSON mode");
+        }
+    }
+
+    #[tokio::test]
+    async fn summarize_llm_requires_json_mode() {
+        let record = sample_core_record(
+            "Alpha detail for the project",
+            serde_json::json!({"source": "summary-test"}),
+        );
+
+        let err = summarize_with_llm(&NoJsonModeSummarizer, &[record])
+            .await
+            .expect_err("summarize requires JSON mode");
+
+        assert!(matches!(
+            err,
+            LlmError::CapabilityMissing { ref capability } if capability == "json_mode"
+        ));
+    }
+
+    struct PartialSummarizer {
+        attempts: Mutex<u8>,
+    }
+
+    #[async_trait::async_trait]
+    impl LLMProvider for PartialSummarizer {
+        fn name(&self) -> &'static str {
+            "partial-summarizer"
+        }
+
+        fn capabilities(&self) -> &LLMProviderCapabilities {
+            static CAPS: LLMProviderCapabilities = LLMProviderCapabilities {
+                json_mode: true,
+                streaming: false,
+                tool_calls: false,
+            };
+            &CAPS
+        }
+
+        fn supported_contract_versions(&self) -> VersionRange {
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+        }
+
+        async fn complete(&self, req: &CompletionRequest) -> Result<CompletionOutput, LlmError> {
+            let mut attempts = self.attempts.lock().expect("test mutex");
+            *attempts += 1;
+            if *attempts == 2 {
+                assert!(
+                    req.prompt.contains("produce all four fields"),
+                    "retry prompt must request the complete schema"
+                );
+            }
+            Ok(CompletionOutput::Json(serde_json::json!({
+                "digest": "missing the other required fields"
+            })))
+        }
+    }
+
+    #[tokio::test]
+    async fn summarize_llm_rejects_partial_json_after_one_retry() {
+        let record = sample_core_record(
+            "Alpha detail for the project",
+            serde_json::json!({"source": "summary-test"}),
+        );
+        let provider = PartialSummarizer {
+            attempts: Mutex::new(0),
+        };
+
+        let err = summarize_with_llm(&provider, &[record])
+            .await
+            .expect_err("partial summary must fail after retry budget");
+
+        assert!(matches!(err, LlmError::InvalidJsonOutput { .. }));
+        assert_eq!(*provider.attempts.lock().expect("test mutex"), 2);
+    }
+
+    struct InvalidSalienceSummarizer {
+        attempts: Mutex<u8>,
+        record_id: String,
+    }
+
+    #[async_trait::async_trait]
+    impl LLMProvider for InvalidSalienceSummarizer {
+        fn name(&self) -> &'static str {
+            "invalid-salience-summarizer"
+        }
+
+        fn capabilities(&self) -> &LLMProviderCapabilities {
+            static CAPS: LLMProviderCapabilities = LLMProviderCapabilities {
+                json_mode: true,
+                streaming: false,
+                tool_calls: false,
+            };
+            &CAPS
+        }
+
+        fn supported_contract_versions(&self) -> VersionRange {
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+        }
+
+        async fn complete(&self, req: &CompletionRequest) -> Result<CompletionOutput, LlmError> {
+            let mut attempts = self.attempts.lock().expect("test mutex");
+            *attempts += 1;
+            if *attempts == 2 {
+                assert!(
+                    req.prompt.contains("produce all four fields"),
+                    "schema failure retry should request the complete schema"
+                );
+            }
+            Ok(CompletionOutput::Json(serde_json::json!({
+                "digest": "Alpha digest",
+                "facts": [{
+                    "subject": "Alpha",
+                    "predicate": "states",
+                    "object": "Alpha detail for the project",
+                    "confidence": "extracted",
+                    "source_record_ids": [self.record_id],
+                }],
+                "concepts": [{
+                    "name": "project",
+                    "kind": "topic",
+                    "salience": 1.25,
+                }],
+                "narrative": "Alpha narrative",
+            })))
+        }
+    }
+
+    #[tokio::test]
+    async fn summarize_llm_rejects_schema_invalid_json_after_one_retry() {
+        let record = sample_core_record(
+            "Alpha detail for the project",
+            serde_json::json!({"source": "summary-test"}),
+        );
+        let provider = InvalidSalienceSummarizer {
+            attempts: Mutex::new(0),
+            record_id: record.id.as_str().to_owned(),
+        };
+
+        let err = summarize_with_llm(&provider, &[record])
+            .await
+            .expect_err("schema-invalid summary must fail after retry budget");
+
+        assert!(matches!(err, LlmError::InvalidJsonOutput { .. }));
+        assert_eq!(*provider.attempts.lock().expect("test mutex"), 2);
     }
 
     #[test]

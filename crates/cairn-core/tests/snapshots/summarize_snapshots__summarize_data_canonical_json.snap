@@ -1,0 +1,32 @@
+---
+source: crates/cairn-core/tests/summarize_snapshots.rs
+assertion_line: 39
+expression: "serde_json::to_string_pretty(&data).unwrap()"
+---
+{
+  "concepts": [
+    {
+      "kind": "entity",
+      "name": "Alpha",
+      "salience": 1.0
+    },
+    {
+      "kind": "topic",
+      "name": "project",
+      "salience": 0.5
+    }
+  ],
+  "digest": "Alpha project status",
+  "facts": [
+    {
+      "confidence": "extracted",
+      "object": "Alpha detail for the project",
+      "predicate": "states",
+      "source_record_ids": [
+        "01HQZX9F5N0000000000000001"
+      ],
+      "subject": "Alpha"
+    }
+  ],
+  "narrative": "Alpha is the current project focus."
+}

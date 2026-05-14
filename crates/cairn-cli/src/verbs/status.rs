@@ -315,7 +315,7 @@ fn compute_capabilities(
             vault_bound: bound,
             model_present,
             embedding_provider_ready,
-            llm_configured: false,
+            llm_configured: config.llm.provider.is_some(),
             consolidation_runtime_ready,
             contract_phase: CLI_CONTRACT_PHASE,
         })
@@ -441,7 +441,7 @@ fn capabilities_for_config(config: &CairnConfig, model_present: bool) -> Vec<Cap
         // the gate runs only when caller is in a vault.
         model_present,
         embedding_provider_ready,
-        llm_configured: false,
+        llm_configured: config.llm.provider.is_some(),
         consolidation_runtime_ready,
         contract_phase: CLI_CONTRACT_PHASE,
     })
@@ -1070,6 +1070,26 @@ mod tests {
         assert!(
             !caps.contains(&Capabilities::CairnMcpV1SensorsPreCompact),
             "pre-compact must stay hidden until a runtime caller dispatches the hook; got {caps:?}"
+        );
+    }
+
+    #[test]
+    fn compute_capabilities_bound_vault_with_llm_includes_summarize_narrative() {
+        let mut config = CairnConfig::default();
+        config.llm.provider = Some(cairn_core::config::LlmProvider::OpenaiCompatible);
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".cairn")).unwrap();
+        std::fs::write(
+            tmp.path().join(".cairn").join("vault.id"),
+            b"01HZZ0000000000000000000AB\n",
+        )
+        .unwrap();
+
+        let caps = compute_capabilities(Some(tmp.path()), Some(&config), true);
+
+        assert!(
+            caps.contains(&Capabilities::CairnMcpV1SummarizeNarrative),
+            "summarize.narrative present once v0.2 CLI has an LLM provider configured; got {caps:?}"
         );
     }
 
