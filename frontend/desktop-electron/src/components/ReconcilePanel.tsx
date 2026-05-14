@@ -61,6 +61,7 @@ export function ReconcilePanel({
         setPreviewState(null);
         setApplyStatus("Applied");
       } else {
+        setPreviewState(null);
         setApplyStatus(
           result.rejectedFields.map((field) => field.message).join(", ") ||
             "Reconcile apply rejected",

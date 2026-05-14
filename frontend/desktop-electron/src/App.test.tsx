@@ -389,6 +389,37 @@ describe("App", () => {
     expect(screen.queryByText("Applied")).not.toBeInTheDocument();
   });
 
+  it("clears reconcile readiness when apply is rejected", async () => {
+    const user = userEvent.setup();
+    api.previewReconcile.mockResolvedValueOnce({
+      accepted: true,
+      targetId: "rec-alpha-001",
+      expectedVersion: 2,
+      mutableDiff: { body: "Markdown body" },
+      rejectedFields: [],
+    });
+    api.applyReconcile.mockResolvedValueOnce({
+      accepted: false,
+      record: null,
+      rejectedFields: [
+        {
+          field: "version",
+          code: "version_conflict",
+          message: "Record version changed before apply",
+        },
+      ],
+    });
+
+    render(<App api={api} />);
+
+    await screen.findAllByText("Project memory scaffold");
+    await user.click(screen.getByRole("button", { name: "Review reconcile" }));
+    await user.click(await screen.findByRole("button", { name: "Apply reconcile" }));
+
+    expect(await screen.findByText("Record version changed before apply")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Apply reconcile" })).not.toBeInTheDocument();
+  });
+
   it("applies a reviewed reconcile edit through the backend client", async () => {
     const user = userEvent.setup();
     api.previewReconcile.mockResolvedValueOnce({
