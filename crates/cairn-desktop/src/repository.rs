@@ -195,6 +195,13 @@ impl DesktopRepository {
                                 .to_string(),
                     });
                 }
+                MutableFieldValidation::DuplicateTag => {
+                    rejected_fields.push(DesktopRejectedField {
+                        field,
+                        code: "duplicate_tag".to_string(),
+                        message: "Tags must be unique in the desktop fixture".to_string(),
+                    });
+                }
                 MutableFieldValidation::UnknownWikilinkTarget => {
                     rejected_fields.push(DesktopRejectedField {
                         field,
@@ -302,6 +309,7 @@ impl DesktopRepository {
 enum MutableFieldValidation {
     Accepted,
     InvalidShape,
+    DuplicateTag,
     UnknownWikilinkTarget,
     DuplicateWikilinkTarget,
     Immutable,
@@ -314,7 +322,17 @@ fn validate_mutable_field(
 ) -> MutableFieldValidation {
     match field {
         "body" if value.is_string() => MutableFieldValidation::Accepted,
-        "tags" if string_array(value).is_some() => MutableFieldValidation::Accepted,
+        "tags" => {
+            let Some(tags) = string_array(value) else {
+                return MutableFieldValidation::InvalidShape;
+            };
+            let unique_tags: BTreeSet<_> = tags.iter().collect();
+            if unique_tags.len() != tags.len() {
+                MutableFieldValidation::DuplicateTag
+            } else {
+                MutableFieldValidation::Accepted
+            }
+        }
         "wikilinks" => {
             let Some(links) = string_array(value) else {
                 return MutableFieldValidation::InvalidShape;
