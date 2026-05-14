@@ -39,7 +39,7 @@ type AppState = {
 };
 
 export function App({
-  api = new DesktopApiClient(import.meta.env.VITE_CAIRN_DESKTOP_API ?? "http://127.0.0.1:4000"),
+  api = new DesktopApiClient(resolveDesktopApiBaseUrl()),
 }: {
   api?: DesktopApi;
 }) {
@@ -118,4 +118,8 @@ export function App({
       </section>
     </main>
   );
+}
+
+export function resolveDesktopApiBaseUrl(): string {
+  return window.cairnDesktop?.apiBaseUrl ?? import.meta.env.VITE_CAIRN_DESKTOP_API ?? "http://127.0.0.1:4000";
 }

@@ -2,7 +2,7 @@ import "@testing-library/jest-dom/vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import { App } from "./App";
+import { App, resolveDesktopApiBaseUrl } from "./App";
 
 const api = {
   vault: vi.fn().mockResolvedValue({
@@ -71,6 +71,15 @@ const api = {
 };
 
 describe("App", () => {
+  it("prefers the Electron preload API base URL when available", () => {
+    Object.defineProperty(window, "cairnDesktop", {
+      configurable: true,
+      value: { apiBaseUrl: "http://127.0.0.1:49152" },
+    });
+
+    expect(resolveDesktopApiBaseUrl()).toBe("http://127.0.0.1:49152");
+  });
+
   it("renders the vault inspector and loaded record", async () => {
     render(<App api={api} />);
 
