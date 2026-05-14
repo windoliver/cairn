@@ -68,7 +68,7 @@ pub async fn enqueue_if_due(
 }
 
 /// Same as [`enqueue_if_due`] but binds the consolidation job to a
-/// caller-verified [`ScopeTuple`]. The handler will use this scope to
+/// caller-verified [`cairn_core::domain::ScopeTuple`]. The handler will use this scope to
 /// filter `list_trace_turns` and the watermark query so the job
 /// cannot read or summarize records outside the issuer's authorized
 /// scope (round-4 adversarial review #1).
