@@ -29,6 +29,7 @@ fn gates(bound: bool, model_present: bool, store: Option<StoreCaps>) -> Capabili
         // cloud-provider decoupling construct gates directly (see below).
         embedding_provider_ready: model_present,
         llm_configured: false,
+        consolidation_runtime_ready: false,
         contract_phase: Phase::V0_1,
     }
 }
@@ -157,6 +158,29 @@ fn replay_capabilities_held_back() {
 }
 
 #[test]
+fn consolidation_capability_requires_wiring_and_runtime_ready() {
+    // Gates with runtime NOT ready: cap must be absent regardless of
+    // the compile-time wiring constant (round-8 adversarial review #2).
+    let mut g = gates(true, true, None);
+    g.consolidation_runtime_ready = false;
+    let caps = advertise(&g);
+    assert!(
+        !caps.contains(&Capabilities::CairnWorkflowsV1Consolidation),
+        "must not advertise consolidation when runtime is not ready"
+    );
+
+    // Gates with runtime ready: cap presence mirrors the wiring const.
+    g.consolidation_runtime_ready = true;
+    let caps = advertise(&g);
+    let has_it = caps.contains(&Capabilities::CairnWorkflowsV1Consolidation);
+    assert_eq!(
+        has_it,
+        wiring::CONSOLIDATION_WORKFLOW_WIRED,
+        "with runtime_ready=true, advertise mirrors CONSOLIDATION_WORKFLOW_WIRED"
+    );
+}
+
+#[test]
 fn pre_compact_capability_tracks_wiring_constant() {
     let g = gates(true, true, None);
     let caps = advertise(&g);
@@ -226,6 +250,17 @@ mod remediation_tests {
     }
 
     #[test]
+    fn consolidation_remediation_present() {
+        let hint = REMEDIATION
+            .iter()
+            .find(|(code, _)| *code == "consolidation.unavailable");
+        assert!(
+            hint.is_some(),
+            "remediation hint for consolidation must exist"
+        );
+    }
+
+    #[test]
     fn remediation_table_has_no_empty_strings() {
         for (cap, hint) in REMEDIATION {
             assert!(!cap.is_empty(), "empty capability key");
@@ -264,6 +299,7 @@ mod remediation_tests {
             embedding_provider_ready: true,
             llm_configured: false,
             contract_phase: Phase::V0_1,
+            consolidation_runtime_ready: false,
         };
 
         for cap in advertise(&gates) {
@@ -279,6 +315,10 @@ mod remediation_tests {
             if cap_str == "cairn.mcp.v1.search.keyword"
                 || cap_str == "cairn.mcp.v1.policy_trace"
                 || cap_str == "cairn.mcp.v1.sensors.pre_compact"
+                // Consolidation uses error code "consolidation.unavailable",
+                // not the wire string, so it is not in the REMEDIATION table
+                // under the capability's wire name.
+                || cap_str == "cairn.workflows.v1.consolidation"
             {
                 continue;
             }
@@ -342,6 +382,7 @@ mod prop_tests {
                     model_present: model,
                     embedding_provider_ready: embed_ready,
                     llm_configured: llm,
+                    consolidation_runtime_ready: false,
                     contract_phase: phase,
                 }
             })
@@ -416,6 +457,7 @@ fn openai_provider_without_key_drops_semantic_and_hybrid() {
         // Cloud provider not ready (feature flag off or API key missing)
         embedding_provider_ready: false,
         llm_configured: false,
+        consolidation_runtime_ready: false,
         contract_phase: Phase::V0_1,
     };
     let caps = advertise(&g);
@@ -463,6 +505,7 @@ mod exhaustiveness {
             Capabilities::CairnMcpV1RetrieveProfile => "retrieve.profile",
             Capabilities::CairnMcpV1ReplaySequence => "replay.sequence",
             Capabilities::CairnMcpV1ReplayChallenge => "replay.challenge",
+            Capabilities::CairnWorkflowsV1Consolidation => "workflows.consolidation",
             // Extension capabilities advertise via status.extensions, not
             // status.capabilities — they ride a separate code path.
             Capabilities::CairnMcpV1ExtensionAggregate => "ext.aggregate",
@@ -500,6 +543,7 @@ mod exhaustiveness {
             Capabilities::CairnMcpV1RetrieveProfile,
             Capabilities::CairnMcpV1ReplaySequence,
             Capabilities::CairnMcpV1ReplayChallenge,
+            Capabilities::CairnWorkflowsV1Consolidation,
             Capabilities::CairnMcpV1ExtensionAggregate,
             Capabilities::CairnMcpV1ExtensionAdmin,
             Capabilities::CairnMcpV1ExtensionFederation,

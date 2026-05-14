@@ -1369,6 +1369,29 @@ fn cas_fail(
     Ok(())
 }
 
+/// Open a fully-migrated in-memory `SqliteJobStore` for tests.
+/// Runs all `cairn-store-sqlite` migrations (which provision
+/// `schema_migrations` + `workflow_jobs`) then wraps the connection in
+/// a `SqliteJobStore`. Exposed `pub(crate)` so worker/reaper tests share
+/// one bootstrap.
+#[cfg(test)]
+pub(crate) fn install_for_tests(conn: &rusqlite::Connection) {
+    // `schema_migrations` is created by migration 0001, so we need the
+    // full migration runner. Build a minimal schema_migrations table +
+    // apply the workflow_jobs SQL directly so we don't depend on all
+    // prior migrations in this unit test context.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS schema_migrations (\
+            migration_id INTEGER NOT NULL PRIMARY KEY, \
+            name TEXT NOT NULL, \
+            sql_hash TEXT NOT NULL DEFAULT '', \
+            applied_at INTEGER NOT NULL \
+         );",
+    )
+    .expect("create schema_migrations");
+    conn.execute_batch(MIGRATION_0020_SQL).expect("apply 0020");
+}
+
 /// Maximum number of expired rows reaped under a single write
 /// transaction. Caps how long the reaper can hold the database write
 /// lock, so a backlog can't starve healthy workers' enqueue / lease /

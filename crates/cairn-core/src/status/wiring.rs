@@ -56,3 +56,11 @@ pub const REPLAY_SEQUENCE_WIRED: bool = false;
 
 /// Challenge-mode replay rejection routed through every signed-verb path.
 pub const REPLAY_CHALLENGE_WIRED: bool = false;
+
+/// Rolling-summary `ConsolidationWorkflow` dispatch path (issue #90).
+///
+/// Flipped `true` in Task 17: the scheduler is now booted inside
+/// `cairn mcp serve` (the long-lived entry point). `enqueue_if_due` is
+/// called from the `capture_trace` CLI path (Task 16). Both criteria are
+/// met — the capability is now advertised.
+pub const CONSOLIDATION_WORKFLOW_WIRED: bool = true;

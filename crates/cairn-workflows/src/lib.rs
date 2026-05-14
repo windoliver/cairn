@@ -9,9 +9,16 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod consent_mirror;
+pub mod consolidation;
+pub mod scheduler;
 pub mod sqlite_store;
 
 pub use consent_mirror::{ConsentLogMaterializer, MirrorError};
+pub use consolidation::{
+    CONSOLIDATION_KIND, ConsolidationForgetCleanupHandler, ConsolidationHandler,
+    ConsolidationPayload, FORGET_CLEANUP_KIND, ForgetCleanupPayload,
+};
+pub use scheduler::{Clock, MockClock, Scheduler, SchedulerConfig, SystemClock};
 pub use sqlite_store::{SqliteJobStore, SqliteJobStoreInitError};
 
 use cairn_core::contract::version::{ContractVersion, VersionRange};
@@ -31,13 +38,12 @@ pub const MANIFEST_TOML: &str = include_str!("../plugin.toml");
 pub const ACCEPTED_RANGE: VersionRange =
     VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0));
 
-/// In-process `WorkflowOrchestrator`. The persistence half (durable
-/// `SQLite` job table + lease state machine) lands in this PR via
-/// [`SqliteJobStore`]; the scheduler loop (worker pool, reaper,
-/// heartbeat) and startup wiring land in the follow-up. Capability bits
-/// stay `false` until that follow-up because nothing here actually
-/// executes leased jobs yet — flipping them earlier would let callers
-/// route work into a runner that never runs.
+/// In-process `WorkflowOrchestrator`. The scheduler loop (worker pool,
+/// reaper, heartbeat) and `SqliteJobStore` persistence are now fully
+/// wired into `cairn mcp serve` (Task 17). Capability bits reflect the
+/// live runtime: jobs are durably persisted in `SQLite` WAL mode and
+/// crash-recovered on the next `cairn mcp serve` start via the lease
+/// reaper.
 #[derive(Default)]
 pub struct InProcessOrchestrator;
 
@@ -49,8 +55,8 @@ impl WorkflowOrchestrator for InProcessOrchestrator {
 
     fn capabilities(&self) -> &WorkflowOrchestratorCapabilities {
         static CAPS: WorkflowOrchestratorCapabilities = WorkflowOrchestratorCapabilities {
-            durable: false,
-            crash_safe: false,
+            durable: true,
+            crash_safe: true,
             cron_schedules: false,
         };
         &CAPS

@@ -583,6 +583,7 @@ async fn build_explain_debug(
         pinned_candidates: &pinned_refs,
         project_candidates: &project_refs,
         playbook_candidates: &playbook_refs,
+        rolling_summary_candidates: &[],
         user_signal_candidates: &signal_refs,
         now,
         scope: auth.scope.clone(),

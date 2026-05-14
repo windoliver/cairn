@@ -113,6 +113,11 @@ const M0058_SESSION_METADATA_AUDIT: &str = include_str!("sql/0058_session_metada
 // Renumbered from 0054 → 0059 during rebase onto main.
 const M0059_SESSION_METADATA_AUDIT_SEQ: &str =
     include_str!("sql/0059_session_metadata_audit_seq.sql");
+// Issue #90 e2e validation follow-up — widen consent_journal scope char class
+// to include uppercase letters (ULID session_id values are uppercase
+// Crockford base32). The Rust `validate_scope` has always allowed
+// `[A-Za-z0-9._:=,-]`; migration 0011 used `[a-z0-9._:=,-]` by mistake.
+const M0060_CONSENT_SCOPE_UPPERCASE: &str = include_str!("sql/0060_consent_scope_uppercase.sql");
 
 /// Canonical SQL for migration 0020 (`workflow_jobs`). Re-exported so
 /// downstream crates (notably `cairn-workflows`, which hashes the
@@ -286,6 +291,11 @@ pub(crate) const MIGRATION_SOURCES: &[(i64, &str, &str)] = &[
         "0059_session_metadata_audit_seq",
         M0059_SESSION_METADATA_AUDIT_SEQ,
     ),
+    (
+        60,
+        "0060_consent_scope_uppercase",
+        M0060_CONSENT_SCOPE_UPPERCASE,
+    ),
 ];
 
 /// All migrations, in order. Returns a fresh `Migrations` set on every call
@@ -346,5 +356,6 @@ pub fn migrations() -> Migrations<'static> {
         M::up(M0057_HOT_SOURCE_WATERMARKS_EXTRAS),
         M::up(M0058_SESSION_METADATA_AUDIT),
         M::up(M0059_SESSION_METADATA_AUDIT_SEQ),
+        M::up(M0060_CONSENT_SCOPE_UPPERCASE),
     ])
 }

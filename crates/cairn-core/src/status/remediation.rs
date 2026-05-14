@@ -64,6 +64,12 @@ pub const REMEDIATION: &[(&str, &str)] = &[
         "signed-intent replay protection requires a wired challenge dispatch \
          path; not available in this build",
     ),
+    (
+        "consolidation.unavailable",
+        "Rolling-summary ConsolidationWorkflow is disabled or its scheduler is not running. \
+         Check that `consolidation.enabled = true` in .cairn/config.yaml and that the \
+         long-running `cairn mcp serve` host is up so the scheduler can lease jobs.",
+    ),
 ];
 
 /// Operator-facing remediation hint for `capability`, or `None` when no hint

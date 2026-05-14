@@ -34,6 +34,7 @@
 
 pub mod canonical;
 pub mod capture_trace;
+pub mod consolidation;
 pub mod dispatch;
 pub mod entity_resolve;
 pub mod explain;

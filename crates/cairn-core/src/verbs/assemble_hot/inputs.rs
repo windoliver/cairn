@@ -20,6 +20,13 @@ use crate::domain::taxonomy::MemoryVisibility;
 ///   caller is the only authority for it.
 /// * `project_candidates`: `kind = project`.
 /// * `playbook_candidates`: `kind = playbook`.
+/// * `rolling_summary_candidates`: `kind = reasoning ∧ scope.session_id
+///   set`, produced by the `ConsolidationWorkflow` (issue #90, brief
+///   §5.3). The source-side ranker picks the newest summary per session.
+///   This slot is not yet wired into a `HotRecipeStep` — that requires a
+///   protocol version bump to `cairn.mcp.v2` (IDL schema comment).
+///   Callers populate it today; the `sources::rolling_summary` module
+///   is ready to consume it once the IDL is extended.
 /// * `user_signal_candidates`: `kind = user_signal`.
 /// * `purpose_md` / `index_md`: pre-read file content.
 ///
@@ -38,6 +45,14 @@ pub struct HotMemoryInputs<'a> {
     pub project_candidates: &'a [&'a MemoryRecord],
     /// `playbook`-kind candidates.
     pub playbook_candidates: &'a [&'a MemoryRecord],
+    /// Rolling-summary `reasoning` records produced by the
+    /// `ConsolidationWorkflow` (issue #90, brief §5.3).
+    ///
+    /// Not yet wired into a `HotRecipeStep` — requires a protocol-version
+    /// bump to `cairn.mcp.v2`. The source-side selection logic is in
+    /// [`super::sources::rolling_summary`] and is ready once the IDL is
+    /// extended.
+    pub rolling_summary_candidates: &'a [&'a MemoryRecord],
     /// `user_signal`-kind candidates.
     pub user_signal_candidates: &'a [&'a MemoryRecord],
     /// Reference instant. Recency windows are computed against this.
@@ -69,6 +84,7 @@ mod tests {
             pinned_candidates: &recs,
             project_candidates: &[],
             playbook_candidates: &[],
+            rolling_summary_candidates: &[],
             user_signal_candidates: &[],
             now,
             scope,

@@ -1,5 +1,8 @@
 //! Typed config structs for `.cairn/config.yaml` (brief §3.1, §4.1, §5.2.a).
 
+pub mod consolidation;
+pub use consolidation::{ConsolidationConfig, ConsolidationConfigError};
+
 pub mod mcp;
 pub use mcp::{McpConfig, McpStdioConfig};
 
@@ -86,6 +89,15 @@ pub enum ConfigError {
     /// A retention key glob is malformed.
     #[error("invalid retention key pattern: {0}")]
     InvalidRetentionKey(String),
+    /// `[consolidation]` block rejected its own semantic invariants
+    /// (zero window, sub-floor token budget, or salience outside
+    /// `[0, SALIENCE_FLOOR_MAX]`).
+    #[error("[consolidation] {source}")]
+    InvalidConsolidation {
+        /// Underlying validation error.
+        #[source]
+        source: consolidation::ConsolidationConfigError,
+    },
     /// The pipeline chain contains an `llm` worker but no `llm.provider` is set.
     #[error("pipeline chain has llm worker but llm.provider is not configured")]
     LlmExtractorWithoutProvider,
@@ -487,6 +499,9 @@ pub struct CairnConfig {
     pub pipeline: PipelineConfig,
     /// MCP transport configuration (issue #190).
     pub mcp: McpConfig,
+    /// Rolling-summary consolidation workflow configuration (brief §5.3, §10.0).
+    #[serde(default)]
+    pub consolidation: ConsolidationConfig,
 }
 
 // ── Source ────────────────────────────────────────────────────────────────
@@ -1442,6 +1457,15 @@ impl CairnConfig {
                 }
             }
         }
+
+        // Round-9 adversarial review #2: ConsolidationConfig had its own
+        // validate() but the loader never called it. A vault config
+        // with salience_floor=0.6 (or window_size_turns=0) would parse
+        // cleanly and silently break the consolidation pipeline at
+        // runtime.
+        self.consolidation
+            .validate()
+            .map_err(|source| ConfigError::InvalidConsolidation { source })?;
 
         Ok(())
     }
