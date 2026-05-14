@@ -202,6 +202,14 @@ impl DesktopRepository {
                         message: "Wikilink target was not found in the desktop fixture".to_string(),
                     });
                 }
+                MutableFieldValidation::DuplicateWikilinkTarget => {
+                    rejected_fields.push(DesktopRejectedField {
+                        field,
+                        code: "duplicate_wikilink_target".to_string(),
+                        message: "Wikilink targets must be unique in the desktop fixture"
+                            .to_string(),
+                    });
+                }
                 MutableFieldValidation::Immutable => {
                     rejected_fields.push(DesktopRejectedField {
                         field,
@@ -295,6 +303,7 @@ enum MutableFieldValidation {
     Accepted,
     InvalidShape,
     UnknownWikilinkTarget,
+    DuplicateWikilinkTarget,
     Immutable,
 }
 
@@ -310,7 +319,10 @@ fn validate_mutable_field(
             let Some(links) = string_array(value) else {
                 return MutableFieldValidation::InvalidShape;
             };
-            if links.iter().all(|link| record_ids.contains(link)) {
+            let unique_links: BTreeSet<_> = links.iter().collect();
+            if unique_links.len() != links.len() {
+                MutableFieldValidation::DuplicateWikilinkTarget
+            } else if links.iter().all(|link| record_ids.contains(link)) {
                 MutableFieldValidation::Accepted
             } else {
                 MutableFieldValidation::UnknownWikilinkTarget
