@@ -3,6 +3,7 @@
 use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
+#[cfg(any(target_os = "macos", feature = "screenpipe-runtime"))]
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
