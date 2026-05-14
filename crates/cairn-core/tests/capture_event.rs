@@ -417,8 +417,8 @@ fn empty_proactive_rationale_rejected() {
 #[test]
 fn zero_recording_duration_rejected() {
     let mut ev = auto_event();
-    ev.sensor_id = Identity::parse("snr:local:recording:batch:v1").expect("valid");
-    ev.actor_chain = vec![entry(ChainRole::Author, "snr:local:recording:batch:v1")];
+    ev.sensor_id = Identity::parse("snr:local:recording:default:v1").expect("valid");
+    ev.actor_chain = vec![entry(ChainRole::Author, "snr:local:recording:default:v1")];
     ev.source_family = SourceFamily::RecordingBatch;
     ev.payload_ref = "sources/recording/x.mp4".into();
     ev.payload = CapturePayload::RecordingBatch {
@@ -590,11 +590,11 @@ fn captureeventid_accepts_max_valid_first_char() {
 
 #[test]
 fn recording_payload_ref_must_be_vault_relative() {
-    // The source recording is now bound to the envelope-level
+    // The per-segment derived JSON is bound to the envelope-level
     // `payload_ref` — its trust boundary is the same shared check.
     let mut ev = auto_event();
-    ev.sensor_id = Identity::parse("snr:local:recording:batch:v1").expect("valid");
-    ev.actor_chain = vec![entry(ChainRole::Author, "snr:local:recording:batch:v1")];
+    ev.sensor_id = Identity::parse("snr:local:recording:default:v1").expect("valid");
+    ev.actor_chain = vec![entry(ChainRole::Author, "snr:local:recording:default:v1")];
     ev.source_family = SourceFamily::RecordingBatch;
     ev.payload = CapturePayload::RecordingBatch {
         segment_start_ms: 0,

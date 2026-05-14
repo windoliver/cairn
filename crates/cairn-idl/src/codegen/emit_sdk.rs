@@ -2609,7 +2609,7 @@ fn write_untagged_union_deserialize(
 /// rest of the generated verb surface:
 ///
 /// - `kind`: minLength 1
-/// - `body` / `file` / `folder` / `url` / `jsonl`: minLength 1
+/// - `body` / `file` / `folder` / `url` / `jsonl` / `recording`: minLength 1
 /// - `harness` / `session_id` / `session_id_from`: minLength 1
 /// - `tags[*]`: minLength 1
 /// - `limit`: minimum 1
@@ -2621,6 +2621,7 @@ fn write_ingest_args_extra_checks(w: &mut RustWriter) {
         "folder",
         "url",
         "jsonl",
+        "recording",
         "harness",
         "session_id",
         "session_id_from",

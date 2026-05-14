@@ -1141,6 +1141,7 @@ fn non_retrieve_committed_response_round_trips_without_target() {
             record_id: fixed_ulid(),
             session_id: "default".to_owned(),
             jsonl_summary: None,
+            recording_summary: None,
         }),
         vec![],
     );
@@ -1201,6 +1202,7 @@ fn committed_rejects_mismatched_verb_and_data() {
             record_id: fixed_ulid(),
             session_id: "default".to_owned(),
             jsonl_summary: None,
+            recording_summary: None,
         }),
         vec![],
     );
@@ -1256,6 +1258,7 @@ fn insert_session_record(vault: &Path, body: &str) -> String {
         tags: None,
         url: None,
         jsonl: None,
+        recording: None,
         harness: None,
         session_id_from: None,
         limit: None,

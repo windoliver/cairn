@@ -5,6 +5,26 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Recording batch ingestion counts. Present only when source is --recording.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IngestDataRecordingSummary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_segments: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_ocr_segments: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub records_written: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segments: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped_frames: Option<u64>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -62,6 +82,9 @@ pub struct IngestArgs {
     /// When human_review=true, skip emitting the markdown diff sidecar.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_diff: Option<bool>,
+    /// Path to an audio or video recording for offline batch transcription and frame OCR.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording: Option<String>,
     /// Folder/jsonl ingest: recurse into child directories. CLI default: true.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recursive: Option<bool>,
@@ -79,7 +102,7 @@ pub struct IngestArgs {
 impl IngestArgs {
     /// Enforce exactly-one-of presence across each XOR group declared in the IDL `oneOf`.
     pub fn validate(&self) -> Result<(), &'static str> {
-        if (self.body.is_some() as u8 + self.file.is_some() as u8 + self.folder.is_some() as u8 + self.jsonl.is_some() as u8 + self.url.is_some() as u8) != 1 { return Err("exactly one of [body, file, folder, jsonl, url] is required"); }
+        if (self.body.is_some() as u8 + self.file.is_some() as u8 + self.folder.is_some() as u8 + self.jsonl.is_some() as u8 + self.recording.is_some() as u8 + self.url.is_some() as u8) != 1 { return Err("exactly one of [body, file, folder, jsonl, recording, url] is required"); }
         Ok(())
     }
 }
@@ -133,6 +156,9 @@ struct RawIngestArgs {
     /// When human_review=true, skip emitting the markdown diff sidecar.
     #[serde(default)]
     no_diff: Option<bool>,
+    /// Path to an audio or video recording for offline batch transcription and frame OCR.
+    #[serde(default)]
+    recording: Option<String>,
     /// Folder/jsonl ingest: recurse into child directories. CLI default: true.
     #[serde(default)]
     recursive: Option<bool>,
@@ -150,7 +176,7 @@ struct RawIngestArgs {
 impl ::core::convert::TryFrom<RawIngestArgs> for IngestArgs {
     type Error = &'static str;
     fn try_from(raw: RawIngestArgs) -> Result<Self, Self::Error> {
-        if (raw.body.is_some() as u8 + raw.file.is_some() as u8 + raw.folder.is_some() as u8 + raw.jsonl.is_some() as u8 + raw.url.is_some() as u8) != 1 { return Err("exactly one of [body, file, folder, jsonl, url] is required"); }
+        if (raw.body.is_some() as u8 + raw.file.is_some() as u8 + raw.folder.is_some() as u8 + raw.jsonl.is_some() as u8 + raw.recording.is_some() as u8 + raw.url.is_some() as u8) != 1 { return Err("exactly one of [body, file, folder, jsonl, recording, url] is required"); }
         if raw.kind.is_empty() { return Err("kind: must not be empty"); }
         if let Some(v) = &raw.body {
             if v.is_empty() { return Err("body: must not be empty"); }
@@ -166,6 +192,9 @@ impl ::core::convert::TryFrom<RawIngestArgs> for IngestArgs {
         }
         if let Some(v) = &raw.jsonl {
             if v.is_empty() { return Err("jsonl: must not be empty"); }
+        }
+        if let Some(v) = &raw.recording {
+            if v.is_empty() { return Err("recording: must not be empty"); }
         }
         if let Some(v) = &raw.harness {
             if v.is_empty() { return Err("harness: must not be empty"); }
@@ -201,6 +230,7 @@ impl ::core::convert::TryFrom<RawIngestArgs> for IngestArgs {
             mode: raw.mode,
             no_cache: raw.no_cache,
             no_diff: raw.no_diff,
+            recording: raw.recording,
             recursive: raw.recursive,
             session_id: raw.session_id,
             session_id_from: raw.session_id_from,
@@ -259,6 +289,8 @@ pub struct IngestData {
     pub plan_ref: Option<String>,
     /// ULID of the newly stored record.
     pub record_id: crate::generated::common::Ulid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_summary: Option<IngestDataRecordingSummary>,
     /// Resolved session (created if absent — see §8.1).
     pub session_id: String,
 }
