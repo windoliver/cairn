@@ -110,7 +110,13 @@ export function App({
 
   function applyRecord(record: DesktopRecordDetail) {
     selectionSequence.current += 1;
-    setState((current) => ({ ...current, selected: record }));
+    setState((current) => ({
+      ...current,
+      records: current.records.map((summary) =>
+        summary.id === record.id ? recordToSummary(record) : summary,
+      ),
+      selected: record,
+    }));
   }
 
   if (state.error) {
@@ -144,4 +150,16 @@ export function App({
 
 export function resolveDesktopApiBaseUrl(): string {
   return window.cairnDesktop?.apiBaseUrl ?? import.meta.env.VITE_CAIRN_DESKTOP_API ?? "http://127.0.0.1:4000";
+}
+
+function recordToSummary(record: DesktopRecordDetail): DesktopRecordSummary {
+  return {
+    id: record.id,
+    title: record.title,
+    folderId: record.folderId,
+    kind: record.kind,
+    tags: record.tags,
+    version: record.version,
+    confidence: record.confidence,
+  };
 }

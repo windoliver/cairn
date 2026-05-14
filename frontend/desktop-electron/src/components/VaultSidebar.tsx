@@ -30,7 +30,9 @@ export function VaultSidebar({
                 onClick={() => onSelectRecord(record.id)}
               >
                 <span>{record.title}</span>
-                <small>{record.kind}</small>
+                <small>
+                  {record.kind} · v{record.version} · {record.tags.join(", ")}
+                </small>
               </button>
             ))}
         </section>
