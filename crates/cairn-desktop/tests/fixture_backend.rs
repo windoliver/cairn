@@ -168,6 +168,25 @@ fn repository_reconcile_apply_persists_tags_and_wikilinks() {
 }
 
 #[test]
+fn repository_reconcile_rejects_unknown_wikilink_target() {
+    let repo = DesktopRepository::from_fixture(DesktopFixture::load_default().expect("fixture"));
+    let mut field_diff = BTreeMap::new();
+    field_diff.insert("wikilinks".to_string(), json!(["rec-alpha-missing"]));
+
+    let preview = repo.preview_reconcile(DesktopReconcilePreviewRequest {
+        target_id: "rec-alpha-001".to_string(),
+        expected_version: 2,
+        backend_hash: "sha256:fixture-alpha-001".to_string(),
+        field_diff,
+    });
+
+    assert!(!preview.accepted);
+    assert!(preview.mutable_diff.is_empty());
+    assert_eq!(preview.rejected_fields[0].field, "wikilinks");
+    assert_eq!(preview.rejected_fields[0].code, "unknown_wikilink_target");
+}
+
+#[test]
 fn repository_reconcile_rejects_immutable_field() {
     let repo = DesktopRepository::from_fixture(DesktopFixture::load_default().expect("fixture"));
     let mut field_diff = BTreeMap::new();

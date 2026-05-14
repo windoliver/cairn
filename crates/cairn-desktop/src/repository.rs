@@ -1,7 +1,7 @@
 //! In-memory fixture repository for the desktop GUI alpha.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 
@@ -173,25 +173,43 @@ impl DesktopRepository {
             );
         }
 
+        let record_ids: BTreeSet<_> = self
+            .fixture()
+            .records
+            .iter()
+            .map(|record| record.id.clone())
+            .collect();
         let mut mutable_diff = BTreeMap::new();
         let mut rejected_fields = Vec::new();
         for (field, value) in request.field_diff {
-            if is_supported_mutable_field(&field, &value) {
-                mutable_diff.insert(field, value);
-            } else if FrontendFieldPolicy::is_mutable_from_frontend(&field) {
-                rejected_fields.push(DesktopRejectedField {
-                    field,
-                    code: "invalid_field_shape".to_string(),
-                    message: "Mutable field has an unsupported value shape for the desktop alpha"
-                        .to_string(),
-                });
-            } else {
-                rejected_fields.push(DesktopRejectedField {
-                    field,
-                    code: "immutable_field_changed".to_string(),
-                    message: "Field is owned by the backend and cannot be changed by the GUI"
-                        .to_string(),
-                });
+            match validate_mutable_field(&field, &value, &record_ids) {
+                MutableFieldValidation::Accepted => {
+                    mutable_diff.insert(field, value);
+                }
+                MutableFieldValidation::InvalidShape => {
+                    rejected_fields.push(DesktopRejectedField {
+                        field,
+                        code: "invalid_field_shape".to_string(),
+                        message:
+                            "Mutable field has an unsupported value shape for the desktop alpha"
+                                .to_string(),
+                    });
+                }
+                MutableFieldValidation::UnknownWikilinkTarget => {
+                    rejected_fields.push(DesktopRejectedField {
+                        field,
+                        code: "unknown_wikilink_target".to_string(),
+                        message: "Wikilink target was not found in the desktop fixture".to_string(),
+                    });
+                }
+                MutableFieldValidation::Immutable => {
+                    rejected_fields.push(DesktopRejectedField {
+                        field,
+                        code: "immutable_field_changed".to_string(),
+                        message: "Field is owned by the backend and cannot be changed by the GUI"
+                            .to_string(),
+                    });
+                }
             }
         }
 
@@ -266,11 +284,36 @@ impl DesktopRepository {
     }
 }
 
-fn is_supported_mutable_field(field: &str, value: &serde_json::Value) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MutableFieldValidation {
+    Accepted,
+    InvalidShape,
+    UnknownWikilinkTarget,
+    Immutable,
+}
+
+fn validate_mutable_field(
+    field: &str,
+    value: &serde_json::Value,
+    record_ids: &BTreeSet<String>,
+) -> MutableFieldValidation {
     match field {
-        "body" => value.is_string(),
-        "tags" | "wikilinks" => string_array(value).is_some(),
-        _ => false,
+        "body" if value.is_string() => MutableFieldValidation::Accepted,
+        "tags" if string_array(value).is_some() => MutableFieldValidation::Accepted,
+        "wikilinks" => {
+            let Some(links) = string_array(value) else {
+                return MutableFieldValidation::InvalidShape;
+            };
+            if links.iter().all(|link| record_ids.contains(link)) {
+                MutableFieldValidation::Accepted
+            } else {
+                MutableFieldValidation::UnknownWikilinkTarget
+            }
+        }
+        _ if FrontendFieldPolicy::is_mutable_from_frontend(field) => {
+            MutableFieldValidation::InvalidShape
+        }
+        _ => MutableFieldValidation::Immutable,
     }
 }
 
