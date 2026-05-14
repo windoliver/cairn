@@ -15,13 +15,13 @@
     ]
   },
   "x-cairn-skill-triggers": {
-    "positive": [
+    "positive_triggers": [
       "use to persist a reasoning trajectory / transcript for later ACE distillation"
     ],
-    "negative": [
+    "negative_triggers": [
       "do NOT use for durable facts about the user or world — call ingest"
     ],
-    "exclusivity": "this is the canonical trace-capture surface"
+    "exclusivity_hints": "this is the canonical trace-capture surface"
   },
   "type": "object",
   "$defs": {

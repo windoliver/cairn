@@ -85,11 +85,11 @@
   },
   "x-cairn-contract": "cairn.mcp.v1",
   "x-cairn-skill-triggers": {
-    "exclusivity": "this is the canonical summarize surface",
-    "negative": [
+    "exclusivity_hints": "this is the canonical summarize surface",
+    "negative_triggers": [
       "do NOT use to answer a general question — call search first"
     ],
-    "positive": [
+    "positive_triggers": [
       "use to roll up a list of known record ids into a single synthesis"
     ]
   },

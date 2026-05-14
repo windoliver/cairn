@@ -246,11 +246,11 @@
   },
   "x-cairn-contract": "cairn.mcp.v1",
   "x-cairn-skill-triggers": {
-    "exclusivity": "this is the canonical hot-prefix surface",
-    "negative": [
+    "exclusivity_hints": "this is the canonical hot-prefix surface",
+    "negative_triggers": [
       "do NOT call in a tight inner loop — one call per turn"
     ],
-    "positive": [
+    "positive_triggers": [
       "use at the start of every turn to load the hot-memory prefix for this agent/session"
     ]
   },

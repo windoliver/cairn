@@ -912,6 +912,19 @@ fn run_plugins(matches: &ArgMatches) -> ExitCode {
             let _ = writeln!(stdout, "{}", text.trim_end_matches('\n'));
             ExitCode::SUCCESS
         }
+        Some(("describe", sub)) => {
+            let mut stdout = std::io::stdout().lock();
+            if sub.get_flag("mcp") {
+                for (idx, tool) in cairn_mcp::generated::TOOLS.iter().enumerate() {
+                    if idx > 0 {
+                        let _ = writeln!(stdout);
+                    }
+                    let _ = writeln!(stdout, "# {}", tool.name);
+                    let _ = writeln!(stdout, "{}", tool.description);
+                }
+            }
+            ExitCode::SUCCESS
+        }
         Some(("verify", sub)) => {
             let strict = sub.get_flag("strict");
             let json = sub.get_flag("json");

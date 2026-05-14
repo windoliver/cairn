@@ -11,14 +11,14 @@
     "note": "top-level CLI shape; per-target flags are defined on each $defs.Args* sub-type"
   },
   "x-cairn-skill-triggers": {
-    "positive": [
+    "positive_triggers": [
       "use when you already have a record id, session id, turn id, folder path, scope, or need the user profile",
       "use before summarize to pull source material into context"
     ],
-    "negative": [
+    "negative_triggers": [
       "do NOT use for free-text lookup — call search instead"
     ],
-    "exclusivity": "this is the canonical by-id retrieval surface"
+    "exclusivity_hints": "this is the canonical by-id retrieval surface"
   },
   "type": "object",
   "$defs": {

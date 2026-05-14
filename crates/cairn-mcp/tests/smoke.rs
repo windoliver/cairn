@@ -392,6 +392,56 @@ async fn wire_tools_list_returns_eight_verbs() {
     }
 }
 
+/// The descriptions visible to MCP hosts must be the IDL-generated strings
+/// byte-for-byte, so tool-routing prompt text cannot drift in the transport.
+#[tokio::test]
+async fn wire_tools_list_descriptions_match_generated_output() {
+    use rmcp::ServiceExt as _;
+
+    let (server_half, client_half) = tokio::io::duplex(65_536);
+    let _server_task = tokio::spawn(async move {
+        CairnMcpHandler::new()
+            .serve(server_half)
+            .await
+            .expect("server init")
+            .waiting()
+            .await
+            .ok();
+    });
+
+    let (client_read, mut client_write) = tokio::io::split(client_half);
+    let mut client_reader = BufReader::new(client_read);
+
+    do_initialize(&mut client_write, &mut client_reader).await;
+
+    send_frame(
+        &mut client_write,
+        r#"{"jsonrpc":"2.0","id":22,"method":"tools/list"}"#,
+    )
+    .await;
+
+    let tools_resp = recv_frame(&mut client_reader).await;
+    let tools = tools_resp
+        .pointer("/result/tools")
+        .and_then(serde_json::Value::as_array)
+        .expect("result.tools must be a JSON array");
+
+    for decl in TOOLS {
+        let advertised = tools
+            .iter()
+            .find(|tool| tool.get("name").and_then(serde_json::Value::as_str) == Some(decl.name))
+            .unwrap_or_else(|| panic!("tools/list omitted {}", decl.name));
+        assert_eq!(
+            advertised
+                .get("description")
+                .and_then(serde_json::Value::as_str),
+            Some(decl.description),
+            "tools/list description drifted for {}",
+            decl.name
+        );
+    }
+}
+
 /// Calling an unknown verb via `tools/call` must return a successful JSON-RPC
 /// response with `is_error = true` in the tool result (MCP error-in-result
 /// convention), not a JSON-RPC error frame.

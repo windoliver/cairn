@@ -182,12 +182,12 @@
   },
   "x-cairn-contract": "cairn.mcp.v1",
   "x-cairn-skill-triggers": {
-    "exclusivity": "this is the single delete surface — there is no other delete path",
-    "negative": [
+    "exclusivity_hints": "this is the single delete surface — there is no other delete path",
+    "negative_triggers": [
       "do NOT use to 'mark as resolved' — that belongs to an ingest with kind:feedback",
       "do NOT use on a draft the user wants to edit — that belongs to ingest with version bump"
     ],
-    "positive": [
+    "positive_triggers": [
       "use when the user asks to delete or forget a specific record / session / scope",
       "use as part of a compliance-driven forget-me flow"
     ]

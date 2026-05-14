@@ -465,6 +465,19 @@ fn plugins_subcommand() -> clap::Command {
             ),
         )
         .subcommand(
+            clap::Command::new("describe")
+                .about("Print rendered plugin-facing descriptions")
+                .arg(
+                    clap::Arg::new("mcp")
+                        .long("mcp")
+                        .required(true)
+                        .action(clap::ArgAction::SetTrue)
+                        .help(
+                            "Print the MCP tool descriptions exactly as tools/list advertises them",
+                        ),
+                ),
+        )
+        .subcommand(
             clap::Command::new("verify")
                 .about("Run the conformance suite against every loaded plugin")
                 .arg(

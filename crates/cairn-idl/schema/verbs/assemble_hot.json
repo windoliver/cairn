@@ -16,9 +16,9 @@
     ]
   },
   "x-cairn-skill-triggers": {
-    "positive": ["use at the start of every turn to load the hot-memory prefix for this agent/session"],
-    "negative": ["do NOT call in a tight inner loop — one call per turn"],
-    "exclusivity": "this is the canonical hot-prefix surface"
+    "positive_triggers": ["use at the start of every turn to load the hot-memory prefix for this agent/session"],
+    "negative_triggers": ["do NOT call in a tight inner loop — one call per turn"],
+    "exclusivity_hints": "this is the canonical hot-prefix surface"
   },
   "type": "object",
   "$defs": {

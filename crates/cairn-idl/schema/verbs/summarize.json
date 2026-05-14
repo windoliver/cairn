@@ -16,13 +16,13 @@
     ]
   },
   "x-cairn-skill-triggers": {
-    "positive": [
+    "positive_triggers": [
       "use to roll up a list of known record ids into a single synthesis"
     ],
-    "negative": [
+    "negative_triggers": [
       "do NOT use to answer a general question — call search first"
     ],
-    "exclusivity": "this is the canonical summarize surface"
+    "exclusivity_hints": "this is the canonical summarize surface"
   },
   "type": "object",
   "$defs": {

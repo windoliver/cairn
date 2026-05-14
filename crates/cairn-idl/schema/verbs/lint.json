@@ -14,13 +14,13 @@
     ]
   },
   "x-cairn-skill-triggers": {
-    "positive": [
+    "positive_triggers": [
       "use to check vault health — contradictions, orphans, stale claims, missing concept pages, malformed records, broken actor chains, schema drift, hot-memory budget, derived-index drift"
     ],
-    "negative": [
+    "negative_triggers": [
       "do NOT call per turn — run on a cadence (daily / on PR)"
     ],
-    "exclusivity": "this is the canonical vault-health surface"
+    "exclusivity_hints": "this is the canonical vault-health surface"
   },
   "type": "object",
   "$defs": {

@@ -132,6 +132,58 @@ fn plugins_list_emits_alphabetical_rows() {
 }
 
 #[test]
+fn plugins_describe_mcp_prints_rendered_tool_descriptions() {
+    let output = Command::new(cairn_binary())
+        .args(["plugins", "describe", "--mcp"])
+        .output()
+        .expect("spawn cairn binary");
+
+    assert!(
+        output.status.success(),
+        "cairn plugins describe --mcp must exit 0; got {:?}, stderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
+    for tool in cairn_mcp::generated::TOOLS {
+        assert!(
+            stdout.contains(tool.description),
+            "describe output must include the rendered description for {}",
+            tool.name
+        );
+    }
+}
+
+#[test]
+fn plugins_describe_mcp_output_is_exactly_generated_and_diff_friendly() {
+    let output = Command::new(cairn_binary())
+        .args(["plugins", "describe", "--mcp"])
+        .output()
+        .expect("spawn cairn binary");
+
+    assert!(
+        output.status.success(),
+        "cairn plugins describe --mcp must exit 0; got {:?}, stderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
+    let mut expected = cairn_mcp::generated::TOOLS
+        .iter()
+        .map(|tool| format!("# {}\n{}", tool.name, tool.description))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    expected.push('\n');
+
+    assert_eq!(
+        stdout, expected,
+        "describe --mcp should be a stable, newline-terminated projection of generated TOOLS"
+    );
+}
+
+#[test]
 fn plugins_list_json_reports_mcp_stdio_capability_e2e() {
     let output = Command::new(cairn_binary())
         .args(["plugins", "list", "--json"])
