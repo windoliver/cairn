@@ -79,6 +79,42 @@ async fn reconcile_preview_rejects_immutable_field_over_http() {
 }
 
 #[tokio::test]
+async fn reconcile_apply_returns_updated_record_over_http() {
+    let app = router(DesktopRepository::from_fixture(
+        DesktopFixture::load_default().expect("fixture"),
+    ));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/reconcile/apply")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "targetId": "rec-alpha-001",
+                        "expectedVersion": 2,
+                        "backendHash": "sha256:fixture-alpha-001",
+                        "fieldDiff": { "body": "Applied fixture body" }
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let json: Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["accepted"], true);
+    assert_eq!(json["record"]["body"], "Applied fixture body");
+    assert_eq!(json["record"]["version"], 3);
+}
+
+#[tokio::test]
 async fn smoke_loads_all_desktop_alpha_surfaces() {
     let app = router(DesktopRepository::from_fixture(
         DesktopFixture::load_default().expect("fixture"),

@@ -69,6 +69,14 @@ export type DesktopReconcilePreview = {
   rejectedFields: DesktopRejectedField[];
 };
 
+export type DesktopReconcileApplyRequest = DesktopReconcilePreviewRequest;
+
+export type DesktopReconcileApplyResult = {
+  accepted: boolean;
+  record: DesktopRecordDetail | null;
+  rejectedFields: DesktopRejectedField[];
+};
+
 export type DesktopApiError = Error & {
   code: string;
   status: number;

@@ -6,9 +6,11 @@ import { ReconcilePanel } from "./ReconcilePanel";
 export function RecordDetail({
   record,
   api,
+  onRecordApplied,
 }: {
   record: DesktopRecordDetail | null;
   api: DesktopApi;
+  onRecordApplied: (record: DesktopRecordDetail) => void;
 }) {
   const [draft, setDraft] = useState("");
 
@@ -33,7 +35,12 @@ export function RecordDetail({
         value={body}
         onChange={(event) => setDraft(event.target.value)}
       />
-      <ReconcilePanel api={api} record={record} draftBody={body} />
+      <ReconcilePanel
+        api={api}
+        record={record}
+        draftBody={body}
+        onRecordApplied={onRecordApplied}
+      />
     </section>
   );
 }

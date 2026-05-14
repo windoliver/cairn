@@ -17,7 +17,15 @@ import "./styles.css";
 
 export type DesktopApi = Pick<
   DesktopApiClient,
-  "vault" | "folders" | "records" | "record" | "graph" | "lint" | "search" | "previewReconcile"
+  | "vault"
+  | "folders"
+  | "records"
+  | "record"
+  | "graph"
+  | "lint"
+  | "search"
+  | "previewReconcile"
+  | "applyReconcile"
 >;
 
 type AppState = {
@@ -97,7 +105,11 @@ export function App({
         onSelectRecord={(id) => void selectRecord(id)}
       />
       <section className="workspace">
-        <RecordDetail record={state.selected} api={api} />
+        <RecordDetail
+          record={state.selected}
+          api={api}
+          onRecordApplied={(record) => setState((current) => ({ ...current, selected: record }))}
+        />
         <div className="lowerPanels">
           <GraphPanel graph={state.graph} />
           <SearchPanel api={api} onSelectRecord={(id) => void selectRecord(id)} />

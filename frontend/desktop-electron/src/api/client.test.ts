@@ -41,4 +41,33 @@ describe("DesktopApiClient", () => {
       code: "record_not_found",
     });
   });
+
+  it("applies reconcile requests through the backend", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ accepted: true, record: { id: "rec-alpha-001" }, rejectedFields: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const client = new DesktopApiClient("http://127.0.0.1:4000");
+    const result = await client.applyReconcile({
+      targetId: "rec-alpha-001",
+      expectedVersion: 2,
+      backendHash: "sha256:fixture-alpha-001",
+      fieldDiff: { body: "Applied body" },
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith("http://127.0.0.1:4000/api/v1/reconcile/apply", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        targetId: "rec-alpha-001",
+        expectedVersion: 2,
+        backendHash: "sha256:fixture-alpha-001",
+        fieldDiff: { body: "Applied body" },
+      }),
+    });
+    expect(result.accepted).toBe(true);
+  });
 });

@@ -5,6 +5,8 @@ import type {
   DesktopLintFinding,
   DesktopRecordDetail,
   DesktopRecordSummary,
+  DesktopReconcileApplyRequest,
+  DesktopReconcileApplyResult,
   DesktopReconcilePreview,
   DesktopReconcilePreviewRequest,
   DesktopSearchResult,
@@ -44,6 +46,10 @@ export class DesktopApiClient {
 
   previewReconcile(request: DesktopReconcilePreviewRequest): Promise<DesktopReconcilePreview> {
     return this.post("/api/v1/reconcile/preview", request);
+  }
+
+  applyReconcile(request: DesktopReconcileApplyRequest): Promise<DesktopReconcileApplyResult> {
+    return this.post("/api/v1/reconcile/apply", request);
   }
 
   private async get<T>(path: string): Promise<T> {
