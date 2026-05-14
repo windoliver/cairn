@@ -66,6 +66,8 @@ pub struct LocalSensorConfig {
     pub clipboard: SensorSettings,
     /// Voice sensor settings.
     pub voice: SensorSettings,
+    /// Screen OCR and active-window sensor settings.
+    pub screen: SensorSettings,
 }
 
 impl LocalSensorConfig {
@@ -78,6 +80,7 @@ impl LocalSensorConfig {
             terminal: SensorSettings::disabled(),
             clipboard: SensorSettings::disabled(),
             voice: SensorSettings::disabled(),
+            screen: SensorSettings::disabled(),
         }
     }
 }
@@ -90,6 +93,7 @@ impl Default for LocalSensorConfig {
             terminal: SensorSettings::disabled(),
             clipboard: SensorSettings::disabled(),
             voice: SensorSettings::disabled(),
+            screen: SensorSettings::disabled(),
         }
     }
 }

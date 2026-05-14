@@ -84,6 +84,92 @@ pub struct StatusResponsePipelineDispatch {
     pub tool_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatusResponseSensorsScreenBackend {
+    Xcap,
+    Screenpipe,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatusResponseSensorsScreenDegradationCode {
+    #[serde(rename = "screen.disabled")]
+    ScreenDisabled,
+    #[serde(rename = "screen.permission_missing")]
+    ScreenPermissionMissing,
+    #[serde(rename = "screen.backend_unavailable")]
+    ScreenBackendUnavailable,
+    #[serde(rename = "screen.degraded")]
+    ScreenDegraded,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusResponseSensorsScreenDegradation {
+    pub code: StatusResponseSensorsScreenDegradationCode,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatusResponseSensorsScreenMode {
+    Off,
+    Snapshot,
+    Continuous,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatusResponseSensorsScreenOcrEngine {
+    Vision,
+    Winrt,
+    Tesseract,
+    Off,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatusResponseSensorsScreenPermission {
+    NotRequested,
+    Granted,
+    Denied,
+    Revoked,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatusResponseSensorsScreenState {
+    Disabled,
+    PermissionMissing,
+    Degraded,
+    Enabled,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusResponseSensorsScreen {
+    pub backend: StatusResponseSensorsScreenBackend,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub degradation: Option<StatusResponseSensorsScreenDegradation>,
+    pub mode: StatusResponseSensorsScreenMode,
+    pub ocr_engine: StatusResponseSensorsScreenOcrEngine,
+    pub permission: StatusResponseSensorsScreenPermission,
+    pub state: StatusResponseSensorsScreenState,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusResponseSensors {
+    pub screen: StatusResponseSensorsScreen,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StatusResponseServerInfo {
@@ -105,6 +191,7 @@ pub struct StatusResponse {
     /// Per-(source_family, tool_id) routing decisions for the Capture → Extract pipeline (issue #217). Each entry tells clients whether captured payloads flow through `squash` (lossy compaction) or `bypass` (raw bytes). Entries MUST be sorted lexicographically by (source_family, tool_id ?? "") for byte-stable status responses across an incarnation (brief §8.0.a). Optional and additive — not in `required[]` so a pre-#217 server's response (no field) deserializes against this schema.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pipeline_dispatch: Option<Vec<StatusResponsePipelineDispatch>>,
+    pub sensors: StatusResponseSensors,
     pub server_info: StatusResponseServerInfo,
 }
 

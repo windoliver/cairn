@@ -94,6 +94,7 @@ memchr = "2"
 smallvec = "1"
 cpal = "0.17.3"
 sherpa-onnx = { version = "1.13.1", default-features = false, features = ["static"] }
+xcap = "0.9.4"
 
 # Path + version on intra-workspace deps so `cargo publish` can rewrite the
 # path to a registry version without losing the constraint. The version

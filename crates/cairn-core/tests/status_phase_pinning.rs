@@ -15,6 +15,7 @@ fn full_caps_set() -> CapabilitySet {
         hybrid_search: true,
         llm_extract: false,
         agent_extract: false,
+        screen_capture_enabled: false,
         graph_edges: false,
         policy_trace: true,
         replay_sequence: true,

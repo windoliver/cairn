@@ -1,5 +1,6 @@
 ---
 source: crates/cairn-cli/tests/status_snapshot_insta.rs
+assertion_line: 71
 expression: v
 ---
 {
@@ -10,7 +11,9 @@ expression: v
     "cairn.mcp.v1.forget.session",
     "cairn.mcp.v1.retrieve.session",
     "cairn.mcp.v1.retrieve.turn",
-    "cairn.mcp.v1.retrieve.tool_call"
+    "cairn.mcp.v1.retrieve.tool_call",
+    "cairn.sensor.v1.screen.ocr.tesseract",
+    "cairn.sensor.v1.screen.xcap"
   ],
   "contract": "cairn.mcp.v1",
   "extensions": [],
@@ -61,6 +64,19 @@ expression: v
       "source_family": "voice"
     }
   ],
+  "sensors": {
+    "screen": {
+      "backend": "xcap",
+      "degradation": {
+        "code": "screen.disabled",
+        "message": "screen sensor is disabled in config"
+      },
+      "mode": "off",
+      "ocr_engine": "tesseract",
+      "permission": "not_requested",
+      "state": "disabled"
+    }
+  },
   "server_info": {
     "build": "<masked>",
     "incarnation": "<masked>",

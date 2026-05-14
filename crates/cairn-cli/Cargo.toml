@@ -18,6 +18,7 @@ default = []
 # endpoint (requires OPENAI_API_KEY). Default builds stay offline / local-only.
 openai = ["dep:cairn-embeddings-openai"]
 voice-runtime = ["cairn-sensors-local/voice-runtime"]
+screenpipe-runtime = ["cairn-sensors-local/screenpipe-runtime"]
 
 [[bin]]
 name = "cairn"

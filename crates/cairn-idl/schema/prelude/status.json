@@ -5,7 +5,7 @@
   "x-cairn-contract": "cairn.mcp.v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["contract", "server_info", "capabilities", "extensions"],
+  "required": ["contract", "server_info", "capabilities", "extensions", "sensors"],
   "properties": {
     "contract": { "const": "cairn.mcp.v1" },
     "mcp_graph_tools": {
@@ -49,6 +49,57 @@
       "type": "array",
       "uniqueItems": true,
       "items": { "$ref": "../extensions/registry.json#/$defs/namespace" }
+    },
+    "sensors": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["screen"],
+      "properties": {
+        "screen": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["backend", "state", "mode", "ocr_engine", "permission"],
+          "properties": {
+            "backend": {
+              "type": "string",
+              "enum": ["xcap", "screenpipe"]
+            },
+            "state": {
+              "type": "string",
+              "enum": ["disabled", "permission_missing", "degraded", "enabled"]
+            },
+            "mode": {
+              "type": "string",
+              "enum": ["off", "snapshot", "continuous"]
+            },
+            "ocr_engine": {
+              "type": "string",
+              "enum": ["vision", "winrt", "tesseract", "off"]
+            },
+            "permission": {
+              "type": "string",
+              "enum": ["not_requested", "granted", "denied", "revoked"]
+            },
+            "degradation": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "message"],
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "enum": [
+                    "screen.disabled",
+                    "screen.permission_missing",
+                    "screen.backend_unavailable",
+                    "screen.degraded"
+                  ]
+                },
+                "message": { "type": "string", "minLength": 1 }
+              }
+            }
+          }
+        }
+      }
     },
     "pipeline_dispatch": {
       "type": "array",

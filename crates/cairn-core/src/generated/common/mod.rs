@@ -63,6 +63,16 @@ pub enum Capabilities {
     CairnMcpV1PolicyTrace,
     #[serde(rename = "cairn.mcp.v1.sensors.pre_compact")]
     CairnMcpV1SensorsPreCompact,
+    #[serde(rename = "cairn.sensor.v1.screen.xcap")]
+    CairnSensorV1ScreenXcap,
+    #[serde(rename = "cairn.sensor.v1.screen.screenpipe")]
+    CairnSensorV1ScreenScreenpipe,
+    #[serde(rename = "cairn.sensor.v1.screen.ocr.vision")]
+    CairnSensorV1ScreenOcrVision,
+    #[serde(rename = "cairn.sensor.v1.screen.ocr.winrt")]
+    CairnSensorV1ScreenOcrWinrt,
+    #[serde(rename = "cairn.sensor.v1.screen.ocr.tesseract")]
+    CairnSensorV1ScreenOcrTesseract,
     #[serde(rename = "cairn.mcp.v1.replay.sequence")]
     CairnMcpV1ReplaySequence,
     #[serde(rename = "cairn.mcp.v1.replay.challenge")]

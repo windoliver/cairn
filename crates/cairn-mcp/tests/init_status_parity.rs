@@ -15,6 +15,7 @@ use std::sync::Arc;
 use cairn_core::config::CairnConfig;
 use cairn_core::domain::ScopeTuple;
 use cairn_core::mcp_auth::{McpAuthContext, McpSessionScope, ScopeResolutionError};
+use cairn_core::status::default_sensor_capabilities;
 use cairn_mcp::CairnMcpHandler;
 use cairn_test_fixtures::graph::tiny_graph as tiny_graph_async;
 use rmcp::ServiceExt as _;
@@ -307,16 +308,14 @@ async fn initialize_extensions_array_empty_under_default_config() {
 // ── Sanity: unwired handler still advertises a status block ────────────────
 
 /// Even an unwired handler emits the cairn.status block in initialize so
-/// negotiating clients can see contract version + (empty) capability set.
+/// negotiating clients can see contract version + compiled local sensor
+/// capabilities that do not require a store binding.
 #[test]
 fn unwired_status_response_is_well_formed() {
     let handler = CairnMcpHandler::new();
     let status = handler.status_response();
     assert_eq!(status.contract, "cairn.mcp.v1");
-    assert!(
-        status.capabilities.is_empty(),
-        "unwired handler must advertise zero capabilities"
-    );
+    assert_eq!(status.capabilities, default_sensor_capabilities());
     assert!(
         status.extensions.is_empty(),
         "unwired handler must advertise zero extensions"

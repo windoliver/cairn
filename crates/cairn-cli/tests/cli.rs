@@ -1143,6 +1143,20 @@ fn unknown_argument_fails_closed() {
 }
 
 #[test]
+fn screen_capture_help_lists_output_flag() {
+    let out = cli()
+        .args(["screen", "capture", "--help"])
+        .output()
+        .expect("cairn screen capture --help");
+    assert!(out.status.success(), "exit: {:?}", out.status);
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    assert!(
+        stdout.contains("--output"),
+        "screen capture --help must list --output flag; got: {stdout}",
+    );
+}
+
+#[test]
 fn bootstrap_emits_json_with_flag() {
     let dir = tempfile::tempdir().unwrap();
     let out = cli()

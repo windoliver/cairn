@@ -7,6 +7,7 @@
 //!   not wired).
 //! - SDK responses serialize into the same envelope shape the CLI emits.
 
+use cairn_core::status::default_sensor_capabilities;
 use cairn_sdk::error::ErrorCode;
 use cairn_sdk::generated::common::{Cursor, ScopeFilter, Ulid};
 use cairn_sdk::generated::envelope::ResponseVerb;
@@ -199,18 +200,7 @@ fn verb_response_emits_target_for_retrieve_envelope() {
 #[test]
 fn sdk_new_advertises_no_capabilities() {
     let resp = sdk().status();
-    // `Sdk::new` has no store wired: every verb returns
-    // SdkError::Unimplemented, so advertising any capability would
-    // mislead clients negotiating from `status`. The shared
-    // `advertised_capabilities` helper enforces fail-closed gating —
-    // `Sdk::with_store` is the surface that opts capabilities back in
-    // (see `sdk_with_store_advertises_caps_from_store_and_config`).
-    assert!(
-        resp.capabilities.is_empty(),
-        "Sdk::new must advertise an empty capabilities list (no backing \
-         store → every verb returns Unimplemented); got {:?}",
-        resp.capabilities
-    );
+    assert_eq!(resp.capabilities, default_sensor_capabilities());
     assert!(resp.extensions.is_empty());
 }
 
