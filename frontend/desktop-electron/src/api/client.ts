@@ -74,25 +74,47 @@ export class DesktopApiClient {
 async function readJson<T>(response: Response): Promise<T> {
   const body = await parseJsonBody(response);
   if (response.ok) {
-    return body as T;
+    if (!body.ok) {
+      throw desktopApiError(
+        "Desktop API response was not valid JSON",
+        "desktop_api_error",
+        response.status,
+      );
+    }
+    return body.value as T;
   }
-  const errorBody = isObject(body) ? body : {};
-  const error = new Error(
+  const errorBody = body.ok && isObject(body.value) ? body.value : {};
+  throw desktopApiError(
     typeof errorBody.message === "string" ? errorBody.message : "Desktop API request failed",
-  ) as DesktopApiError;
-  error.code = typeof errorBody.code === "string" ? errorBody.code : "desktop_api_error";
-  error.status = response.status;
-  throw error;
+    typeof errorBody.code === "string" ? errorBody.code : "desktop_api_error",
+    response.status,
+  );
 }
 
-async function parseJsonBody(response: Response): Promise<unknown> {
+type JsonBody =
+  | {
+      ok: true;
+      value: unknown;
+    }
+  | {
+      ok: false;
+    };
+
+async function parseJsonBody(response: Response): Promise<JsonBody> {
   try {
-    return await response.json();
+    return { ok: true, value: await response.json() };
   } catch {
-    return null;
+    return { ok: false };
   }
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function desktopApiError(message: string, code: string, status: number): DesktopApiError {
+  const error = new Error(message) as DesktopApiError;
+  error.code = code;
+  error.status = status;
+  return error;
 }

@@ -72,6 +72,22 @@ describe("DesktopApiClient", () => {
     });
   });
 
+  it("throws structured errors for invalid json successful requests", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response("not-json", {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const client = new DesktopApiClient("http://127.0.0.1:4000");
+    await expect(client.records()).rejects.toMatchObject({
+      code: "desktop_api_error",
+      status: 200,
+      message: "Desktop API response was not valid JSON",
+    });
+  });
+
   it("applies reconcile requests through the backend", async () => {
     fetchMock.mockResolvedValueOnce(
       new Response(JSON.stringify({ accepted: true, record: { id: "rec-alpha-001" }, rejectedFields: [] }), {
