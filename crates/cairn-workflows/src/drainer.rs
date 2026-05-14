@@ -237,11 +237,11 @@ impl WorkflowCheckpointStore for FileWorkflowCheckpointStore {
     ) -> Result<(), WorkflowError> {
         let key = (workflow.to_owned(), plan_id.0.clone());
         {
-            let mut applied = self.applied.lock().map_err(|_| WorkflowError::Internal {
+            let applied = self.applied.lock().map_err(|_| WorkflowError::Internal {
                 workflow,
                 message: "workflow checkpoint lock poisoned".to_owned(),
             })?;
-            if !applied.insert(key) {
+            if applied.contains(&key) {
                 return Ok(());
             }
         }
@@ -265,7 +265,14 @@ impl WorkflowCheckpointStore for FileWorkflowCheckpointStore {
         file.flush().map_err(|source| WorkflowError::Internal {
             workflow,
             message: format!("flush workflow checkpoint record failed: {source}"),
-        })
+        })?;
+
+        let mut applied = self.applied.lock().map_err(|_| WorkflowError::Internal {
+            workflow,
+            message: "workflow checkpoint lock poisoned".to_owned(),
+        })?;
+        applied.insert(key);
+        Ok(())
     }
 }
 

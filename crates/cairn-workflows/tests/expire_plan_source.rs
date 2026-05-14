@@ -103,6 +103,33 @@ async fn expire_plan_source_paginates_past_first_store_page() {
 }
 
 #[tokio::test]
+async fn expire_plan_source_reuses_operation_ids_for_same_candidates() {
+    let store = Arc::new(FixtureStore::new());
+    let mut low = sample_record(9);
+    low.salience = 0.1;
+    store.upsert(&low).await.expect("seed low salience");
+
+    let source = ExpirePlanSource::new(
+        store,
+        Identity::parse("agt:cairn-workflows:expire:v1").expect("valid issuer"),
+        0.2,
+    );
+
+    let first = source
+        .plan("expire", &WorkflowContext::default())
+        .await
+        .expect("first plan");
+    let second = source
+        .plan("expire", &WorkflowContext::default())
+        .await
+        .expect("second plan");
+
+    assert_eq!(first.len(), 1);
+    assert_eq!(second.len(), 1);
+    assert_eq!(first[0].operation_id, second[0].operation_id);
+}
+
+#[tokio::test]
 async fn promote_plan_source_emits_promote_plan_for_confident_non_target_kind() {
     let store = Arc::new(memstore().await);
     let mut candidate = sample_record(4);
@@ -149,6 +176,35 @@ async fn promote_plan_source_emits_promote_plan_for_confident_non_target_kind() 
 }
 
 #[tokio::test]
+async fn promote_plan_source_reuses_operation_ids_for_same_candidates() {
+    let store = Arc::new(memstore().await);
+    let mut candidate = sample_record(10);
+    candidate.kind = MemoryKind::Reference;
+    candidate.confidence = 0.95;
+    store.upsert(&candidate).await.expect("seed candidate");
+
+    let source = PromotePlanSource::new(
+        store,
+        Identity::parse("agt:cairn-workflows:promote:v1").expect("valid issuer"),
+        MemoryKind::Fact,
+        0.9,
+    );
+
+    let first = source
+        .plan("promote", &WorkflowContext::default())
+        .await
+        .expect("first plan");
+    let second = source
+        .plan("promote", &WorkflowContext::default())
+        .await
+        .expect("second plan");
+
+    assert_eq!(first.len(), 1);
+    assert_eq!(second.len(), 1);
+    assert_eq!(first[0].operation_id, second[0].operation_id);
+}
+
+#[tokio::test]
 async fn consolidate_plan_source_expires_duplicate_bodies_but_keeps_best_record() {
     let store = Arc::new(memstore().await);
     let mut keeper = sample_record(6);
@@ -185,4 +241,37 @@ async fn consolidate_plan_source_expires_duplicate_bodies_but_keeps_best_record(
             reason: ExpirationReason::SupersededByCanonical,
         } if target == &duplicate.target_id
     ));
+}
+
+#[tokio::test]
+async fn consolidate_plan_source_reuses_operation_ids_for_same_duplicates() {
+    let store = Arc::new(memstore().await);
+    let mut keeper = sample_record(11);
+    keeper.body = "shared body".to_owned();
+    keeper.confidence = 0.9;
+    keeper.salience = 0.8;
+    let mut duplicate = sample_record(12);
+    duplicate.body = "shared body".to_owned();
+    duplicate.confidence = 0.6;
+    duplicate.salience = 0.4;
+    store.upsert(&keeper).await.expect("seed keeper");
+    store.upsert(&duplicate).await.expect("seed duplicate");
+
+    let source = ConsolidatePlanSource::new(
+        store,
+        Identity::parse("agt:cairn-workflows:consolidate:v1").expect("valid issuer"),
+    );
+
+    let first = source
+        .plan("consolidate", &WorkflowContext::default())
+        .await
+        .expect("first plan");
+    let second = source
+        .plan("consolidate", &WorkflowContext::default())
+        .await
+        .expect("second plan");
+
+    assert_eq!(first.len(), 1);
+    assert_eq!(second.len(), 1);
+    assert_eq!(first[0].operation_id, second[0].operation_id);
 }

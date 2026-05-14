@@ -11,6 +11,7 @@ use cairn_core::domain::flush_plan::{
 use cairn_core::domain::{Identity, MemoryKind, MemoryRecord};
 use cairn_core::generated::common::Ulid;
 use chrono::{Duration, SecondsFormat};
+use sha2::{Digest, Sha256};
 
 use crate::drainer::{WorkflowContext, WorkflowError};
 use crate::workflows::WorkflowPlanSource;
@@ -215,7 +216,13 @@ impl ExpirePlanSource {
         let issued_at = now_rfc3339();
         let expires_at = expires_at_rfc3339();
         FlushPlan {
-            operation_id: new_ulid(),
+            operation_id: stable_plan_ulid(&[
+                "expire",
+                record.target_id.as_str(),
+                record.id.as_str(),
+                &record.salience.to_bits().to_string(),
+                &self.salience_threshold.to_bits().to_string(),
+            ]),
             issued_at,
             issuer: self.issuer.clone(),
             principal: None,
@@ -243,7 +250,15 @@ impl PromotePlanSource {
         let issued_at = now_rfc3339();
         let expires_at = expires_at_rfc3339();
         FlushPlan {
-            operation_id: new_ulid(),
+            operation_id: stable_plan_ulid(&[
+                "promote",
+                record.target_id.as_str(),
+                record.id.as_str(),
+                record.kind.as_str(),
+                self.to_kind.as_str(),
+                &record.confidence.to_bits().to_string(),
+                &self.confidence_threshold.to_bits().to_string(),
+            ]),
             issued_at,
             issuer: self.issuer.clone(),
             principal: None,
@@ -268,11 +283,19 @@ impl PromotePlanSource {
 }
 
 impl ConsolidatePlanSource {
-    fn plan_for_duplicate(&self, duplicate: &MemoryRecord, _keeper: &MemoryRecord) -> FlushPlan {
+    fn plan_for_duplicate(&self, duplicate: &MemoryRecord, keeper: &MemoryRecord) -> FlushPlan {
         let issued_at = now_rfc3339();
         let expires_at = expires_at_rfc3339();
         FlushPlan {
-            operation_id: new_ulid(),
+            operation_id: stable_plan_ulid(&[
+                "consolidate",
+                duplicate.target_id.as_str(),
+                duplicate.id.as_str(),
+                keeper.target_id.as_str(),
+                keeper.id.as_str(),
+                &duplicate.confidence.to_bits().to_string(),
+                &duplicate.salience.to_bits().to_string(),
+            ]),
             issued_at,
             issuer: self.issuer.clone(),
             principal: None,
@@ -333,8 +356,16 @@ fn compare_consolidation_candidate(left: &MemoryRecord, right: &MemoryRecord) ->
         .then_with(|| left.target_id.as_str().cmp(right.target_id.as_str()))
 }
 
-fn new_ulid() -> Ulid {
-    Ulid(ulid::Ulid::new().to_string())
+fn stable_plan_ulid(parts: &[&str]) -> Ulid {
+    let mut hasher = Sha256::new();
+    for part in parts {
+        hasher.update((part.len() as u64).to_be_bytes());
+        hasher.update(part.as_bytes());
+    }
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    Ulid(ulid::Ulid::from_bytes(bytes).to_string())
 }
 
 fn now_rfc3339() -> String {
