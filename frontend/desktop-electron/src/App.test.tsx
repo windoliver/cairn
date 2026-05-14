@@ -157,6 +157,52 @@ describe("App", () => {
     expect(fetchMock).toHaveBeenCalledTimes(6);
   });
 
+  it("shows record selection failures inline", async () => {
+    const user = userEvent.setup();
+    api.records.mockResolvedValueOnce([
+      {
+        id: "rec-alpha-001",
+        title: "Project memory scaffold",
+        folderId: "folder-core",
+        kind: "skill",
+        tags: ["alpha"],
+        version: 2,
+        confidence: 0.86,
+      },
+      {
+        id: "rec-alpha-002",
+        title: "Second memory",
+        folderId: "folder-core",
+        kind: "profile",
+        tags: ["alpha"],
+        version: 1,
+        confidence: 0.72,
+      },
+    ]);
+    api.record
+      .mockResolvedValueOnce({
+        id: "rec-alpha-001",
+        title: "Project memory scaffold",
+        folderId: "folder-core",
+        body: "Markdown body",
+        kind: "skill",
+        tags: ["alpha"],
+        version: 2,
+        backendHash: "sha256:fixture-alpha-001",
+        confidence: 0.86,
+        sourceHash: "sha256:source-alpha-001",
+        links: ["rec-alpha-002"],
+      })
+      .mockRejectedValueOnce(new Error("Record detail unavailable"));
+
+    render(<App api={api} />);
+
+    await screen.findAllByText("Project memory scaffold");
+    await user.click(screen.getByRole("button", { name: /Second memory/ }));
+
+    expect(await screen.findByText("Record detail unavailable")).toBeInTheDocument();
+  });
+
   it("reviews a reconcile edit through the backend client", async () => {
     const user = userEvent.setup();
     api.previewReconcile.mockResolvedValueOnce({

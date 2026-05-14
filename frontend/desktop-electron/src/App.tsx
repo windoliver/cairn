@@ -90,8 +90,15 @@ export function App({
   const recordsByFolder = useMemo(() => state.records, [state.records]);
 
   async function selectRecord(id: string) {
-    const selected = await api.record(id);
-    setState((current) => ({ ...current, selected }));
+    try {
+      const selected = await api.record(id);
+      setState((current) => ({ ...current, selected, error: null }));
+    } catch (error) {
+      setState((current) => ({
+        ...current,
+        error: error instanceof Error ? error.message : "Failed to load record detail",
+      }));
+    }
   }
 
   if (state.error) {
