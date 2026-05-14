@@ -594,6 +594,52 @@ describe("App", () => {
     expect(screen.queryByDisplayValue("Stale second body")).not.toBeInTheDocument();
     expect(screen.getByDisplayValue("Applied first body")).toBeInTheDocument();
   });
+
+  it("keeps newer draft edits when an older reconcile apply resolves later", async () => {
+    const user = userEvent.setup();
+    let resolveApply: (result: Awaited<ReturnType<typeof api.applyReconcile>>) => void;
+    const applyResult = new Promise<Awaited<ReturnType<typeof api.applyReconcile>>>((resolve) => {
+      resolveApply = resolve;
+    });
+    api.previewReconcile.mockResolvedValueOnce({
+      accepted: true,
+      targetId: "rec-alpha-001",
+      expectedVersion: 2,
+      mutableDiff: { body: "Markdown body" },
+      rejectedFields: [],
+    });
+    api.applyReconcile.mockReturnValueOnce(applyResult);
+
+    render(<App api={api} />);
+
+    const body = await screen.findByLabelText("Record body");
+    await user.click(screen.getByRole("button", { name: "Review reconcile" }));
+    await user.click(await screen.findByRole("button", { name: "Apply reconcile" }));
+    await user.type(body, " newer");
+
+    await act(async () => {
+      resolveApply!({
+        accepted: true,
+        record: {
+          id: "rec-alpha-001",
+          title: "Project memory scaffold",
+          folderId: "folder-core",
+          body: "Applied older body",
+          kind: "skill",
+          tags: ["alpha"],
+          version: 3,
+          backendHash: "sha256:fixture-alpha-001-applied",
+          confidence: 0.86,
+          sourceHash: "sha256:source-alpha-001",
+          links: ["rec-alpha-002"],
+        },
+        rejectedFields: [],
+      });
+    });
+
+    expect(screen.getByDisplayValue("Markdown body newer")).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("Applied older body")).not.toBeInTheDocument();
+  });
 });
 
 function jsonResponse(body: unknown): Response {

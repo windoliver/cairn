@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { DesktopApi } from "../App";
 import type { DesktopRecordDetail, DesktopReconcilePreview } from "../api/types";
 
@@ -27,6 +27,8 @@ export function ReconcilePanel({
   const [applyStatus, setApplyStatus] = useState<string | null>(null);
   const [requestErrorState, setRequestErrorState] = useState<RequestErrorState | null>(null);
   const currentRequestKey = requestKey(record, draftBody);
+  const latestRequestKey = useRef(currentRequestKey);
+  latestRequestKey.current = currentRequestKey;
   const preview = previewState?.key === currentRequestKey ? previewState.preview : null;
   const requestError =
     requestErrorState?.key === currentRequestKey ? requestErrorState.message : null;
@@ -56,6 +58,9 @@ export function ReconcilePanel({
   async function apply() {
     try {
       const result = await api.applyReconcile(request());
+      if (latestRequestKey.current !== currentRequestKey) {
+        return;
+      }
       if (result.accepted && result.record) {
         onRecordApplied(result.record);
         setPreviewState(null);
@@ -69,6 +74,9 @@ export function ReconcilePanel({
       }
       setRequestErrorState(null);
     } catch (error) {
+      if (latestRequestKey.current !== currentRequestKey) {
+        return;
+      }
       setApplyStatus(null);
       setRequestErrorState({ key: currentRequestKey, message: errorMessage(error) });
     }
