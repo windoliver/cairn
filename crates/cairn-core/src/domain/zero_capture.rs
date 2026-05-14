@@ -101,6 +101,20 @@ pub enum ZeroCaptureDecisionCode {
     EmitNudge,
 }
 
+impl ZeroCaptureDecisionCode {
+    /// Stable `snake_case` label for report text and other human-readable surfaces.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NoMeaningfulActivity => "no_meaningful_activity",
+            Self::WritesPresent => "writes_present",
+            Self::DisabledByConfig => "disabled_by_config",
+            Self::PolicyBlocked => "policy_blocked",
+            Self::EmitNudge => "emit_nudge",
+        }
+    }
+}
+
 /// Body-free report shape for future `lint` or dogfood reporting.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ZeroCaptureReport {
@@ -163,10 +177,7 @@ impl ZeroCaptureReportSummary {
 impl ZeroCaptureReport {
     /// Build a report from a previously computed decision.
     #[must_use]
-    pub fn from_decision(
-        input: &ZeroCaptureAuditInput,
-        decision: &ZeroCaptureDecision,
-    ) -> Self {
+    pub fn from_decision(input: &ZeroCaptureAuditInput, decision: &ZeroCaptureDecision) -> Self {
         let decision = match decision {
             ZeroCaptureDecision::NoNudge { reason } => match reason {
                 ZeroCaptureSuppression::NoMeaningfulActivity => {
@@ -215,9 +226,9 @@ pub fn render_zero_capture_report(reports: &[ZeroCaptureReport]) -> String {
     for report in reports {
         let _ = writeln!(
             out,
-            "- session: {}\n  - decision: {:?}\n  - activity_count: {}\n  - successful_write_count: {}",
+            "- session: {}\n  - decision: {}\n  - activity_count: {}\n  - successful_write_count: {}",
             report.session_id,
-            report.decision,
+            report.decision.as_str(),
             report.activity_count,
             report.successful_write_count
         );
@@ -358,10 +369,7 @@ mod tests {
 
     #[test]
     fn summary_counts_reports_by_decision() {
-        let emit = ZeroCaptureReport::from_decision(
-            &input(),
-            &decide_zero_capture_nudge(&input()),
-        );
+        let emit = ZeroCaptureReport::from_decision(&input(), &decide_zero_capture_nudge(&input()));
         let mut writes_input = input();
         writes_input.successful_ingest_writes = 1;
         let writes = ZeroCaptureReport::from_decision(
@@ -377,14 +385,13 @@ mod tests {
 
     #[test]
     fn markdown_report_renders_summary_and_sessions() {
-        let report = ZeroCaptureReport::from_decision(
-            &input(),
-            &decide_zero_capture_nudge(&input()),
-        );
+        let report =
+            ZeroCaptureReport::from_decision(&input(), &decide_zero_capture_nudge(&input()));
         let markdown = render_zero_capture_report(&[report]);
         assert!(markdown.contains("# Zero-capture report"));
         assert!(markdown.contains("- emit_nudge: 1"));
         assert!(markdown.contains("session: 01ARZ3NDEKTSV4RRFFQ69G5FAV"));
+        assert!(markdown.contains("decision: emit_nudge"));
         assert!(markdown.contains("successful_write_count: 0"));
     }
 }

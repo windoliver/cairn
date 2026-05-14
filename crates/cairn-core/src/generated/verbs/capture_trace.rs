@@ -16,7 +16,17 @@ pub struct CaptureTraceArgs {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct CaptureTraceDataFailedTurns {
+    pub reason: String,
+    pub session_id: String,
+    pub turn_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CaptureTraceData {
+    /// Per-turn failures that did not abort the overall import.
+    pub failed_turns: Vec<CaptureTraceDataFailedTurns>,
     pub trace_id: crate::generated::common::Ulid,
 }
 

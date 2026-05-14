@@ -674,6 +674,19 @@ async fn multi_turn_each_summarized_independently() {
         })
         .await
         .expect("store query should succeed");
+
+    let metrics_path = vault.path().join(".cairn/metrics.jsonl");
+    let metrics = std::fs::read_to_string(&metrics_path).expect("read metrics");
+    let audits: Vec<serde_json::Value> = metrics
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("parse metric row"))
+        .filter(|row: &serde_json::Value| row["event"] == "zero_capture_audit")
+        .collect();
+    assert_eq!(audits.len(), 2, "expected one audit per closed turn");
+    assert_eq!(audits[0]["decision"], "writes_present");
+    assert_eq!(audits[0]["successful_capture_trace_writes"], 4);
+    assert_eq!(audits[1]["decision"], "writes_present");
+    assert_eq!(audits[1]["successful_capture_trace_writes"], 8);
 }
 
 #[tokio::test]
@@ -810,6 +823,142 @@ async fn capture_trace_single_turn_persists_and_summarizes() {
         })
         .await
         .expect("store query should succeed");
+
+    let metrics_path = vault.path().join(".cairn/metrics.jsonl");
+    let metrics = std::fs::read_to_string(&metrics_path).expect("read metrics");
+    let rows: Vec<serde_json::Value> = metrics
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("parse metric row"))
+        .collect();
+    let audit = rows
+        .iter()
+        .find(|row| row["event"] == "zero_capture_audit")
+        .expect("zero_capture_audit row");
+    assert_eq!(audit["session_id"], "01ARZ3NDEKTSV4RRFFQ69G5FAV");
+    assert_eq!(audit["successful_capture_trace_writes"], 4);
+    assert_eq!(audit["decision"], "writes_present");
+}
+
+#[tokio::test]
+#[allow(
+    clippy::expect_used,
+    reason = "test: panics surface broken invariants immediately"
+)]
+async fn capture_trace_ignores_malformed_unrelated_metrics_rows() {
+    let vault = tempfile::tempdir().expect("tempdir");
+    let store = open_test_store_in_memory().await;
+    let jsonl_path = vault.path().join("trace.jsonl");
+    let cairn_dir = vault.path().join(".cairn");
+    std::fs::create_dir_all(&cairn_dir).expect("create .cairn");
+    std::fs::write(cairn_dir.join("metrics.jsonl"), "not json\n")
+        .expect("write malformed unrelated metric row");
+
+    write_fixture(vault.path(), &jsonl_path);
+
+    let resp = run_handler(&store, vault.path(), &jsonl_path)
+        .await
+        .expect("run_handler should succeed");
+
+    assert!(
+        resp.failed_turns.is_empty(),
+        "unrelated malformed metrics rows should not fail trace auditing: {:?}",
+        resp.failed_turns
+    );
+    let metrics = std::fs::read_to_string(cairn_dir.join("metrics.jsonl")).expect("read metrics");
+    assert!(
+        metrics.contains(r#""event":"zero_capture_audit""#),
+        "zero-capture audit should still be appended: {metrics}"
+    );
+}
+
+#[tokio::test]
+#[allow(
+    clippy::expect_used,
+    reason = "test: panics surface broken invariants immediately"
+)]
+async fn capture_trace_ignores_malformed_diagnostic_that_mentions_accepted() {
+    let vault = tempfile::tempdir().expect("tempdir");
+    let store = open_test_store_in_memory().await;
+    let jsonl_path = vault.path().join("trace.jsonl");
+    let cairn_dir = vault.path().join(".cairn");
+    std::fs::create_dir_all(&cairn_dir).expect("create .cairn");
+    std::fs::write(
+        cairn_dir.join("metrics.jsonl"),
+        r#"{"event":"diagnostic","message":"accepted row truncated""#,
+    )
+    .expect("write malformed diagnostic metric row");
+
+    write_fixture(vault.path(), &jsonl_path);
+
+    let resp = run_handler(&store, vault.path(), &jsonl_path)
+        .await
+        .expect("run_handler should succeed");
+
+    assert!(
+        resp.failed_turns.is_empty(),
+        "diagnostic rows that only mention accepted should not fail trace auditing: {:?}",
+        resp.failed_turns
+    );
+}
+
+#[tokio::test]
+#[allow(
+    clippy::expect_used,
+    reason = "test: panics surface broken invariants immediately"
+)]
+async fn capture_trace_ignores_malformed_prefix_event_names() {
+    let vault = tempfile::tempdir().expect("tempdir");
+    let store = open_test_store_in_memory().await;
+    let jsonl_path = vault.path().join("trace.jsonl");
+    let cairn_dir = vault.path().join(".cairn");
+    std::fs::create_dir_all(&cairn_dir).expect("create .cairn");
+    std::fs::write(
+        cairn_dir.join("metrics.jsonl"),
+        r#"{"event":"accepted_debug""#,
+    )
+    .expect("write malformed prefix metric row");
+
+    write_fixture(vault.path(), &jsonl_path);
+
+    let resp = run_handler(&store, vault.path(), &jsonl_path)
+        .await
+        .expect("run_handler should succeed");
+
+    assert!(
+        resp.failed_turns.is_empty(),
+        "event names that only prefix accepted should not fail trace auditing: {:?}",
+        resp.failed_turns
+    );
+}
+
+#[tokio::test]
+#[allow(
+    clippy::expect_used,
+    reason = "test: panics surface broken invariants immediately"
+)]
+async fn capture_trace_reports_malformed_accepted_metrics_rows() {
+    let vault = tempfile::tempdir().expect("tempdir");
+    let store = open_test_store_in_memory().await;
+    let jsonl_path = vault.path().join("trace.jsonl");
+    let cairn_dir = vault.path().join(".cairn");
+    std::fs::create_dir_all(&cairn_dir).expect("create .cairn");
+    std::fs::write(cairn_dir.join("metrics.jsonl"), r#"{"event":"accepted""#)
+        .expect("write malformed accepted metric row");
+
+    write_fixture(vault.path(), &jsonl_path);
+
+    let resp = run_handler(&store, vault.path(), &jsonl_path)
+        .await
+        .expect("run_handler should report per-turn metric read failure");
+
+    assert_eq!(resp.failed_turns.len(), 1);
+    assert!(
+        resp.failed_turns[0]
+            .2
+            .contains("zero_capture_audit metric read"),
+        "expected metric read failure, got {:?}",
+        resp.failed_turns
+    );
 }
 
 #[tokio::test]

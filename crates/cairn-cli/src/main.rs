@@ -10,6 +10,7 @@ use std::process::ExitCode;
 
 use cairn_cli::{command, identity, plugins, repair, verbs};
 use cairn_core::contract::registry::PluginError;
+use cairn_core::generated::envelope::ResponseVerb;
 use clap::ArgMatches;
 fn registry_store() -> anyhow::Result<cairn_cli::vault::VaultRegistryStore> {
     let path = if let Ok(p) = std::env::var("CAIRN_REGISTRY") {
@@ -155,6 +156,10 @@ fn main() -> ExitCode {
         .or_else(|| std::env::var("CAIRN_VAULT").ok());
 
     let active_subcommand = matches.subcommand_name().unwrap_or("");
+    let capture_trace_json = matches
+        .subcommand()
+        .and_then(|(name, sub)| (name == "capture_trace").then(|| sub.get_flag("json")))
+        .unwrap_or(false);
     // admin verbs resolve their own vault path from CAIRN_VAULT / CWD; the
     // registry guard here would reject them when no vault is registered.
     // `identity` manages vault-path internally for each subcommand; exclude
@@ -165,7 +170,16 @@ fn main() -> ExitCode {
         let store = match registry_store() {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("cairn: registry path error — {e:#}");
+                let message = format!("registry path error — {e:#}");
+                if active_subcommand == "capture_trace" && capture_trace_json {
+                    let response = verbs::envelope::internal_error_response(
+                        ResponseVerb::CaptureTrace,
+                        &message,
+                    );
+                    verbs::envelope::emit_json(&response);
+                } else {
+                    eprintln!("cairn: {message}");
+                }
                 return ExitCode::from(78);
             }
         };
@@ -188,7 +202,16 @@ fn main() -> ExitCode {
                     .downcast_ref::<cairn_cli::vault::VaultError>()
                     .is_some_and(|ve| matches!(ve, cairn_cli::vault::VaultError::NotFound { .. }));
                 if is_not_found {
-                    eprintln!("cairn: {e:#}");
+                    if active_subcommand == "capture_trace" && capture_trace_json {
+                        let response = verbs::envelope::not_found_response(
+                            ResponseVerb::CaptureTrace,
+                            "vault",
+                            &format!("{e:#}"),
+                        );
+                        verbs::envelope::emit_json(&response);
+                    } else {
+                        eprintln!("cairn: {e:#}");
+                    }
                     return ExitCode::from(78); // EX_CONFIG
                 }
                 // NoneResolved and other errors are tolerated until the store is wired (#9).
@@ -218,7 +241,33 @@ fn main() -> ExitCode {
         Some(("retrieve", sub)) => verbs::retrieve::run(sub),
         Some(("summarize", sub)) => verbs::summarize::run(sub),
         Some(("assemble_hot", sub)) => run_assemble_hot(sub, explicit_vault.as_deref()),
-        Some(("capture_trace", sub)) => verbs::capture_trace::run(sub),
+        Some(("capture_trace", sub)) => match resolve_vault_or_cwd(explicit_vault.as_deref()) {
+            Ok((vault_root, _source)) => {
+                if let Some(rc) = enforce_vault_binding_json(
+                    "capture_trace",
+                    ResponseVerb::CaptureTrace,
+                    sub.get_flag("json"),
+                    &vault_root,
+                ) {
+                    rc
+                } else {
+                    verbs::capture_trace::run(sub, &vault_root)
+                }
+            }
+            Err(e) => {
+                let message = format!("vault resolution error — {e:#}");
+                if sub.get_flag("json") {
+                    let response = verbs::envelope::internal_error_response(
+                        ResponseVerb::CaptureTrace,
+                        &message,
+                    );
+                    verbs::envelope::emit_json(&response);
+                } else {
+                    eprintln!("cairn capture_trace: {message}");
+                }
+                ExitCode::from(78)
+            }
+        },
         Some(("lint", sub)) => match resolve_vault_or_cwd(explicit_vault.as_deref()) {
             Ok((vault_root, _source)) => verbs::lint::run(sub, Some(vault_root.as_path())),
             Err(_) => verbs::lint::run(sub, None),
@@ -585,6 +634,9 @@ fn run_admin(matches: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
             ),
         },
         Some(("reindex", sub)) => verbs::admin_reindex::run(sub, &vault_root, &config),
+        Some(("zero-capture-report", sub)) => {
+            verbs::admin_zero_capture_report::run(sub, &vault_root)
+        }
         _ => unreachable!(
             "clap subcommand_required(true) on admin ensures a subcommand is always present"
         ),
@@ -611,6 +663,41 @@ fn enforce_vault_binding(verb: &str, vault_root: &std::path::Path) -> Option<Exi
         }
         verbs::status::VaultBinding::Invalid(reason) => {
             eprintln!("cairn {verb}: vault binding error — {reason}");
+            Some(ExitCode::from(78)) // EX_CONFIG
+        }
+    }
+}
+
+fn enforce_vault_binding_json(
+    verb: &str,
+    response_verb: ResponseVerb,
+    json: bool,
+    vault_root: &std::path::Path,
+) -> Option<ExitCode> {
+    match verbs::status::probe_vault_binding(vault_root) {
+        verbs::status::VaultBinding::Bound => None,
+        verbs::status::VaultBinding::Unbound => {
+            let message = format!(
+                "no Cairn vault at {} — run `cairn bootstrap` first",
+                vault_root.display()
+            );
+            if json {
+                let response =
+                    verbs::envelope::not_found_response(response_verb, "vault", &message);
+                verbs::envelope::emit_json(&response);
+            } else {
+                eprintln!("cairn {verb}: {message}");
+            }
+            Some(ExitCode::from(78)) // EX_CONFIG
+        }
+        verbs::status::VaultBinding::Invalid(reason) => {
+            let message = format!("vault binding error — {reason}");
+            if json {
+                let response = verbs::envelope::internal_error_response(response_verb, &message);
+                verbs::envelope::emit_json(&response);
+            } else {
+                eprintln!("cairn {verb}: {message}");
+            }
             Some(ExitCode::from(78)) // EX_CONFIG
         }
     }

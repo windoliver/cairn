@@ -6,6 +6,7 @@ use cairn_core::config::{CairnConfig, EmbeddingProvider};
 
 pub mod admin_model_fetch;
 pub mod admin_reindex;
+pub mod admin_zero_capture_report;
 pub mod assemble_hot;
 pub mod capture_trace;
 pub mod envelope;

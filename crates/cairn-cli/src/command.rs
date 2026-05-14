@@ -306,7 +306,7 @@ fn vault_subcommand() -> clap::Command {
 
 fn admin_subcommand() -> clap::Command {
     clap::Command::new("admin")
-        .about("Administrative operations (model management, reindex)")
+        .about("Administrative operations (model management, reindex, reporting)")
         .subcommand_required(true)
         .arg_required_else_help(true)
         .subcommand(
@@ -331,6 +331,16 @@ fn admin_subcommand() -> clap::Command {
                                 .action(clap::ArgAction::SetTrue)
                                 .help("Emit JSON output"),
                         ),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("zero-capture-report")
+                .about("Render a zero-capture dogfood report from vault metrics")
+                .arg(
+                    clap::Arg::new("json")
+                        .long("json")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Emit JSON summary plus session rows"),
                 ),
         )
         .subcommand(

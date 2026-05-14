@@ -2,17 +2,19 @@
 
 # cairn admin
 
-Administrative operations (model management, reindex)
+Administrative operations (model management, reindex, reporting)
 
 ## Help
 
 ```text
-Administrative operations (model management, reindex)
+Administrative operations (model management, reindex, reporting)
 
 Usage: admin <COMMAND>
 
 Commands:
   model    Embedding model management
+  zero-capture-report
+          Render a zero-capture dogfood report from vault metrics
   reindex  Re-embed records into the ANN index
   help     Print this message or the help of the given subcommand(s)
 
@@ -24,4 +26,5 @@ Options:
 ## Subcommands
 
 - [`cairn admin model`](admin-model.md) - Embedding model management
+- [`cairn admin zero-capture-report`](admin-zero-capture-report.md) - Render a zero-capture dogfood report from vault metrics
 - [`cairn admin reindex`](admin-reindex.md) - Re-embed records into the ANN index

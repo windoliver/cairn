@@ -220,8 +220,97 @@ fn assemble_hot_returns_committed_envelope() {
 }
 
 #[test]
-fn capture_trace_returns_aborted_internal() {
-    assert_aborted_internal(&["capture_trace", "--from", "/dev/null", "--json"]);
+fn capture_trace_returns_committed_envelope() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    cairn_cli::vault::bootstrap(&cairn_cli::vault::BootstrapOpts {
+        vault_path: dir.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap vault");
+    let trace_path = dir.path().join("trace.jsonl");
+    std::fs::write(&trace_path, "").expect("write empty trace");
+
+    let out = cli()
+        .current_dir(dir.path())
+        .args([
+            "capture_trace",
+            "--from",
+            trace_path.to_str().expect("utf-8 trace path"),
+            "--json",
+        ])
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run capture_trace: {e}"));
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "capture_trace should exit 0 (committed), got {:?}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    let resp: cairn_core::generated::envelope::Response = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("capture_trace envelope parse failed: {e}\nstdout: {stdout:?}"));
+    assert_eq!(resp.contract, "cairn.mcp.v1");
+    assert!(matches!(
+        resp.status,
+        cairn_core::generated::envelope::ResponseStatus::Committed
+    ));
+    assert!(matches!(
+        resp.verb,
+        cairn_core::generated::envelope::ResponseVerb::CaptureTrace
+    ));
+    let data = resp.data.expect("committed capture_trace must have data");
+    let cairn_core::generated::envelope::ResponseData::CaptureTrace(payload) = data else {
+        panic!("data must be CaptureTrace variant");
+    };
+    assert!(payload.trace_id.0.len() == 26, "trace_id must be a ULID");
+    assert!(
+        payload.failed_turns.is_empty(),
+        "empty trace import should not report failed turns"
+    );
+}
+
+#[test]
+fn capture_trace_json_surfaces_failed_turns() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    cairn_cli::vault::bootstrap(&cairn_cli::vault::BootstrapOpts {
+        vault_path: dir.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap vault");
+    let trace_path = dir.path().join("trace.jsonl");
+    std::fs::write(
+        &trace_path,
+        r#"{"event_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","sensor_id":"snr:local:hook:cc-session:v1","capture_mode":"auto","actor_chain":[{"role":"author","identity":"snr:local:hook:cc-session:v1","at":"2026-05-02T00:00:01Z"}],"payload_hash":"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","payload_ref":"sources/hook/missing-refs.txt","captured_at":"2026-05-02T00:00:01Z","payload":{"source_family":"hook","hook_name":"Stop"},"source_family":"hook"}
+"#,
+    )
+    .expect("write trace with missing refs");
+
+    let out = cli()
+        .current_dir(dir.path())
+        .args([
+            "capture_trace",
+            "--from",
+            trace_path.to_str().expect("utf-8 trace path"),
+            "--json",
+        ])
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run capture_trace: {e}"));
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "capture_trace partial import should exit 0; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    let resp: cairn_core::generated::envelope::Response = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("capture_trace envelope parse failed: {e}\nstdout: {stdout:?}"));
+    let data = resp.data.expect("committed capture_trace must have data");
+    let cairn_core::generated::envelope::ResponseData::CaptureTrace(payload) = data else {
+        panic!("data must be CaptureTrace variant");
+    };
+    assert_eq!(payload.failed_turns.len(), 1);
+    assert_eq!(payload.failed_turns[0].reason, "event missing refs");
 }
 
 #[test]
