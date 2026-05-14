@@ -16,6 +16,7 @@ use cairn_core::generated::envelope::{
     Response, ResponseData, ResponsePolicyTrace, ResponseStatus, ResponseVerb,
 };
 use cairn_core::generated::verbs::ingest::{IngestData, IngestDataRecordingSummary};
+use cairn_sensors_local::voice::{VoiceAudioChunk, VoiceDeviceMetadata, VoiceTranscriber};
 use clap::ArgMatches;
 use sha2::{Digest as _, Sha256};
 use std::collections::HashSet;
@@ -695,6 +696,157 @@ fn command_program_display(plan: &CommandPlan) -> String {
     plan.program.to_string_lossy().into_owned()
 }
 
+fn wav_bytes_to_chunks(
+    bytes: &[u8],
+    event_seed: &str,
+    captured_at: &str,
+) -> anyhow::Result<Vec<VoiceAudioChunk>> {
+    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        anyhow::bail!("extracted audio is not a RIFF/WAVE file");
+    }
+
+    let event_id = CaptureEventId::parse(event_seed)
+        .with_context(|| format!("invalid recording audio event id `{event_seed}`"))?;
+    let captured_at = Rfc3339Timestamp::parse(captured_at)
+        .with_context(|| format!("invalid recording audio captured_at `{captured_at}`"))?;
+    let mut offset = 12_usize;
+    let mut sample_rate = None;
+    let mut channels = None;
+    let mut bits_per_sample = None;
+    let mut data = None;
+
+    while offset + 8 <= bytes.len() {
+        let id = &bytes[offset..offset + 4];
+        let len = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into()?) as usize;
+        offset += 8;
+        if offset + len > bytes.len() {
+            anyhow::bail!("WAV chunk length exceeds file size");
+        }
+
+        match id {
+            b"fmt " => {
+                if len < 16 {
+                    anyhow::bail!("WAV fmt chunk too short");
+                }
+                let audio_format = u16::from_le_bytes(bytes[offset..offset + 2].try_into()?);
+                if audio_format != 1 {
+                    anyhow::bail!("only PCM WAV audio is supported");
+                }
+                channels = Some(u16::from_le_bytes(
+                    bytes[offset + 2..offset + 4].try_into()?,
+                ));
+                sample_rate = Some(u32::from_le_bytes(
+                    bytes[offset + 4..offset + 8].try_into()?,
+                ));
+                bits_per_sample = Some(u16::from_le_bytes(
+                    bytes[offset + 14..offset + 16].try_into()?,
+                ));
+            }
+            b"data" => data = Some(&bytes[offset..offset + len]),
+            _ => {}
+        }
+
+        offset += len + (len % 2);
+    }
+
+    let sample_rate = sample_rate.ok_or_else(|| anyhow::anyhow!("WAV missing fmt sample rate"))?;
+    if sample_rate == 0 {
+        anyhow::bail!("WAV sample rate must be greater than zero");
+    }
+    let channels = channels.ok_or_else(|| anyhow::anyhow!("WAV missing channel count"))?;
+    if channels != 1 {
+        anyhow::bail!("recording audio extraction must produce mono WAV");
+    }
+    if bits_per_sample != Some(16) {
+        anyhow::bail!("only 16-bit PCM WAV is supported");
+    }
+    let data = data.ok_or_else(|| anyhow::anyhow!("WAV missing data chunk"))?;
+    if data.len() % 2 != 0 {
+        anyhow::bail!("16-bit PCM data length must be even");
+    }
+
+    let mut samples = Vec::with_capacity(data.len() / 2);
+    for pair in data.chunks_exact(2) {
+        let sample = i16::from_le_bytes([pair[0], pair[1]]);
+        samples.push(f32::from(sample) / 32768.0);
+    }
+    if samples.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let duration_ms = u64::try_from(samples.len())
+        .map_err(|_| anyhow::anyhow!("WAV sample count is too large"))?
+        .checked_mul(1000)
+        .ok_or_else(|| anyhow::anyhow!("WAV duration milliseconds overflow"))?
+        / u64::from(sample_rate);
+    Ok(vec![VoiceAudioChunk {
+        event_id,
+        captured_at: captured_at.clone(),
+        started_at: captured_at,
+        duration_ms,
+        samples,
+        device: VoiceDeviceMetadata {
+            name: "recording file".to_owned(),
+            host: "ffmpeg".to_owned(),
+            sample_rate_hz: sample_rate,
+            channels,
+        },
+        refs: None,
+    }])
+}
+
+fn transcribe_chunks<T: VoiceTranscriber>(
+    chunks: &[VoiceAudioChunk],
+    transcriber: &T,
+) -> anyhow::Result<Vec<RecordingSegment>> {
+    let mut segments = Vec::new();
+    let mut cursor_ms = 0_u64;
+    for chunk in chunks {
+        let transcript = transcriber
+            .transcribe(chunk)
+            .map_err(|e| anyhow::anyhow!("recording audio transcription failed: {e}"))?;
+        let text = normalize_text(&transcript.text);
+        let duration_ms = chunk.duration_ms.max(1);
+        if !text.is_empty() {
+            segments.push(RecordingSegment {
+                start_ms: cursor_ms,
+                duration_ms,
+                text,
+                kind: SegmentKind::AudioTranscript {
+                    speaker_id: transcript.speaker_id,
+                    confidence: transcript.confidence,
+                },
+            });
+        }
+        cursor_ms = cursor_ms.saturating_add(duration_ms);
+    }
+    Ok(segments)
+}
+
+#[cfg(feature = "voice-runtime")]
+fn build_sherpa_transcriber_from_env()
+-> anyhow::Result<cairn_sensors_local::voice_runtime::SherpaOnnxTranscriber> {
+    use cairn_sensors_local::voice_runtime::{SherpaOnnxTranscriber, SherpaOnnxTranscriberConfig};
+
+    let model = std::env::var_os("CAIRN_SHERPA_MODEL").ok_or_else(|| {
+        anyhow::anyhow!("CAIRN_SHERPA_MODEL must point to a SenseVoice ONNX model")
+    })?;
+    let tokens = std::env::var_os("CAIRN_SHERPA_TOKENS")
+        .ok_or_else(|| anyhow::anyhow!("CAIRN_SHERPA_TOKENS must point to sherpa tokens.txt"))?;
+    let config =
+        SherpaOnnxTranscriberConfig::sense_voice(PathBuf::from(model), PathBuf::from(tokens));
+
+    SherpaOnnxTranscriber::from_config(config)
+        .map_err(|e| anyhow::anyhow!("load sherpa-onnx transcriber: {e}"))
+}
+
+#[cfg(not(feature = "voice-runtime"))]
+fn build_sherpa_transcriber_from_env() -> anyhow::Result<()> {
+    anyhow::bail!(
+        "recording audio transcription requires building cairn-cli with --features voice-runtime"
+    )
+}
+
 fn parse_fixture_plan(raw: &str) -> anyhow::Result<RecordingPlan> {
     let fixture: FixturePlan = serde_json::from_str(raw)?;
     if !is_sha256_wire(&fixture.media_sha256) {
@@ -963,11 +1115,80 @@ fn hex_prefix(bytes: &[u8], chars: usize) -> String {
 mod tests {
     use super::*;
     use cairn_core::domain::{CaptureMode, ChainRole, SourceId};
+    use cairn_sensors_local::voice::{VoiceAudioChunk, VoiceTranscriber, VoiceTranscript};
     #[cfg(unix)]
     use std::os::unix::ffi::OsStringExt as _;
 
     fn os(value: &str) -> OsString {
         OsString::from(value)
+    }
+
+    fn pcm16_wav_bytes(sample_rate: u32, channels: u16, samples: &[i16]) -> Vec<u8> {
+        let data_len = samples.len() * 2;
+        let byte_rate = sample_rate * u32::from(channels) * 2;
+        let block_align = channels * 2;
+        let mut wav = Vec::with_capacity(44 + data_len);
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + u32::try_from(data_len).expect("data len")).to_le_bytes());
+        wav.extend_from_slice(b"WAVE");
+        wav.extend_from_slice(b"fmt ");
+        wav.extend_from_slice(&16_u32.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&channels.to_le_bytes());
+        wav.extend_from_slice(&sample_rate.to_le_bytes());
+        wav.extend_from_slice(&byte_rate.to_le_bytes());
+        wav.extend_from_slice(&block_align.to_le_bytes());
+        wav.extend_from_slice(&16_u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&u32::try_from(data_len).expect("data len").to_le_bytes());
+        for sample in samples {
+            wav.extend_from_slice(&sample.to_le_bytes());
+        }
+        wav
+    }
+
+    fn pcm_wav_bytes_with_bits(
+        sample_rate: u32,
+        channels: u16,
+        bits_per_sample: u16,
+        data: &[u8],
+    ) -> Vec<u8> {
+        let bytes_per_sample = bits_per_sample / 8;
+        let byte_rate = sample_rate * u32::from(channels) * u32::from(bytes_per_sample);
+        let block_align = channels * bytes_per_sample;
+        let mut wav = Vec::with_capacity(44 + data.len());
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + u32::try_from(data.len()).expect("data len")).to_le_bytes());
+        wav.extend_from_slice(b"WAVE");
+        wav.extend_from_slice(b"fmt ");
+        wav.extend_from_slice(&16_u32.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&channels.to_le_bytes());
+        wav.extend_from_slice(&sample_rate.to_le_bytes());
+        wav.extend_from_slice(&byte_rate.to_le_bytes());
+        wav.extend_from_slice(&block_align.to_le_bytes());
+        wav.extend_from_slice(&bits_per_sample.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&u32::try_from(data.len()).expect("data len").to_le_bytes());
+        wav.extend_from_slice(data);
+        wav
+    }
+
+    fn test_chunk(duration_ms: u64) -> VoiceAudioChunk {
+        VoiceAudioChunk {
+            event_id: CaptureEventId::parse("01ARZ3NDEKTSV4RRFFQ69G5FE0").expect("event id"),
+            captured_at: Rfc3339Timestamp::parse("2026-05-13T12:00:00Z").expect("captured at"),
+            started_at: Rfc3339Timestamp::parse("2026-05-13T12:00:00Z").expect("started at"),
+            duration_ms,
+            samples: vec![0.0],
+            device: cairn_sensors_local::voice::VoiceDeviceMetadata {
+                name: "recording file".to_owned(),
+                host: "ffmpeg".to_owned(),
+                sample_rate_hz: 16_000,
+                channels: 1,
+            },
+            refs: None,
+        }
     }
 
     const FIXTURE: &str = r#"{
@@ -985,6 +1206,163 @@ mod tests {
         {"timestamp_ms": 4200, "duration_ms": 1000, "confidence": 0.70, "text": "   "}
       ]
     }"#;
+
+    #[test]
+    fn wav_reader_yields_voice_audio_chunks() {
+        let wav = pcm16_wav_bytes(16_000, 1, &[0_i16, 16_384, -16_384, i16::MAX]);
+        let chunks =
+            wav_bytes_to_chunks(&wav, "01ARZ3NDEKTSV4RRFFQ69G5FE0", "2026-05-13T12:00:00Z")
+                .expect("wav chunks");
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].event_id.as_str(), "01ARZ3NDEKTSV4RRFFQ69G5FE0");
+        assert_eq!(chunks[0].captured_at.as_str(), "2026-05-13T12:00:00Z");
+        assert_eq!(chunks[0].started_at.as_str(), "2026-05-13T12:00:00Z");
+        assert_eq!(chunks[0].device.sample_rate_hz, 16_000);
+        assert_eq!(chunks[0].device.channels, 1);
+        assert_eq!(chunks[0].duration_ms, 0);
+        assert_eq!(chunks[0].samples.len(), 4);
+        assert_eq!(chunks[0].samples[0], 0.0);
+        assert!((chunks[0].samples[1] - 0.5).abs() < 0.001);
+        assert!((chunks[0].samples[2] + 0.5).abs() < 0.001);
+        assert!(chunks[0].samples[3] <= 1.0);
+    }
+
+    #[test]
+    fn wav_reader_rejects_malformed_or_non_wav_bytes() {
+        for (bytes, expected) in [
+            (b"not a wave".to_vec(), "not a RIFF/WAVE file"),
+            (
+                {
+                    let mut wav = pcm16_wav_bytes(16_000, 1, &[0_i16]);
+                    wav[40..44].copy_from_slice(&10_000_u32.to_le_bytes());
+                    wav.truncate(44);
+                    wav
+                },
+                "WAV chunk length exceeds file size",
+            ),
+        ] {
+            let err =
+                wav_bytes_to_chunks(&bytes, "01ARZ3NDEKTSV4RRFFQ69G5FE0", "2026-05-13T12:00:00Z")
+                    .expect_err("wav should reject");
+            let message = format!("{err:#}");
+            assert!(
+                message.contains(expected),
+                "expected `{expected}` in {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn wav_reader_rejects_unsupported_channels_or_bit_depth() {
+        let stereo = pcm16_wav_bytes(16_000, 2, &[0_i16, 1_i16]);
+        let stereo_err = wav_bytes_to_chunks(
+            &stereo,
+            "01ARZ3NDEKTSV4RRFFQ69G5FE0",
+            "2026-05-13T12:00:00Z",
+        )
+        .expect_err("stereo should reject");
+        assert!(
+            format!("{stereo_err:#}").contains("must produce mono WAV"),
+            "unexpected error: {stereo_err:#}"
+        );
+
+        let pcm8 = pcm_wav_bytes_with_bits(16_000, 1, 8, &[0_u8, 128_u8]);
+        let bit_depth_err =
+            wav_bytes_to_chunks(&pcm8, "01ARZ3NDEKTSV4RRFFQ69G5FE0", "2026-05-13T12:00:00Z")
+                .expect_err("8-bit PCM should reject");
+        assert!(
+            format!("{bit_depth_err:#}").contains("only 16-bit PCM WAV is supported"),
+            "unexpected error: {bit_depth_err:#}"
+        );
+    }
+
+    #[test]
+    fn wav_reader_returns_no_chunks_for_zero_samples() {
+        let wav = pcm16_wav_bytes(16_000, 1, &[]);
+        let chunks =
+            wav_bytes_to_chunks(&wav, "01ARZ3NDEKTSV4RRFFQ69G5FE0", "2026-05-13T12:00:00Z")
+                .expect("empty wav parses");
+
+        assert!(chunks.is_empty());
+    }
+
+    #[test]
+    fn wav_reader_rejects_odd_pcm_data_length() {
+        let wav = pcm_wav_bytes_with_bits(16_000, 1, 16, &[0_u8]);
+        let err = wav_bytes_to_chunks(&wav, "01ARZ3NDEKTSV4RRFFQ69G5FE0", "2026-05-13T12:00:00Z")
+            .expect_err("odd PCM byte length should reject");
+        let message = format!("{err:#}");
+
+        assert!(
+            message.contains("16-bit PCM data length must be even"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn transcribe_chunks_maps_non_empty_transcripts_to_audio_segments() {
+        struct MockTranscriber {
+            transcripts: Vec<VoiceTranscript>,
+            next: std::cell::Cell<usize>,
+        }
+
+        impl VoiceTranscriber for MockTranscriber {
+            fn transcribe(&self, _chunk: &VoiceAudioChunk) -> Result<VoiceTranscript, String> {
+                let index = self.next.get();
+                self.next.set(index + 1);
+                self.transcripts
+                    .get(index)
+                    .cloned()
+                    .ok_or_else(|| format!("missing transcript {index}"))
+            }
+        }
+
+        let chunks = vec![test_chunk(0), test_chunk(250), test_chunk(100)];
+        let transcriber = MockTranscriber {
+            transcripts: vec![
+                VoiceTranscript {
+                    speaker_id: "speaker-a".to_owned(),
+                    text: " alpha   launch ".to_owned(),
+                    confidence: 0.91,
+                },
+                VoiceTranscript {
+                    speaker_id: "speaker-b".to_owned(),
+                    text: "   ".to_owned(),
+                    confidence: 0.5,
+                },
+                VoiceTranscript {
+                    speaker_id: "speaker-c".to_owned(),
+                    text: "beta follow up".to_owned(),
+                    confidence: 0.86,
+                },
+            ],
+            next: std::cell::Cell::new(0),
+        };
+
+        let segments = transcribe_chunks(&chunks, &transcriber).expect("transcribes chunks");
+
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].start_ms, 0);
+        assert_eq!(segments[0].duration_ms, 1);
+        assert_eq!(segments[0].text, "alpha launch");
+        assert_eq!(segments[1].start_ms, 251);
+        assert_eq!(segments[1].duration_ms, 100);
+        assert_eq!(segments[1].text, "beta follow up");
+        assert_eq!(
+            segments
+                .iter()
+                .map(|segment| match &segment.kind {
+                    SegmentKind::AudioTranscript {
+                        speaker_id,
+                        confidence,
+                    } => (speaker_id.as_str(), *confidence),
+                    SegmentKind::FrameOcr { .. } => panic!("expected audio transcript"),
+                })
+                .collect::<Vec<_>>(),
+            vec![("speaker-a", 0.91), ("speaker-c", 0.86)]
+        );
+    }
 
     #[test]
     fn ffmpeg_commands_are_constructed_without_shell_interpolation() {
