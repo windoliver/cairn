@@ -460,7 +460,29 @@ async fn run_pin(record_id_raw: String, vault_root: PathBuf) -> Response {
             return super::signed::aborted(ResponseVerb::Forget, format!("open store: {e}"));
         }
     };
+    match store.get(&record_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return not_found_response(
+                ResponseVerb::Forget,
+                "record",
+                &format!("record not found: {}", record_id.as_str()),
+            );
+        }
+        Err(e) => {
+            return super::signed::aborted(ResponseVerb::Forget, format!("get record: {e}"));
+        }
+    }
     if let Err(e) = store.pin_record(&record_id, true).await {
+        if let Some(cairn_store_sqlite::StoreError::NotFound { id }) =
+            e.downcast_ref::<cairn_store_sqlite::StoreError>()
+        {
+            return not_found_response(
+                ResponseVerb::Forget,
+                "record",
+                &format!("record not found: {id}"),
+            );
+        }
         return super::signed::aborted(ResponseVerb::Forget, format!("pin record: {e}"));
     }
     Response {
@@ -471,7 +493,7 @@ async fn run_pin(record_id_raw: String, vault_root: PathBuf) -> Response {
         target: None,
         data: Some(ResponseData::Forget(ForgetData {
             deleted_count: 0,
-            tombstones: Some(vec![Ulid(record_id.as_str().to_owned())]),
+            tombstones: None,
             plan_ref: None,
         })),
         policy_trace: Vec::<ResponsePolicyTrace>::new(),

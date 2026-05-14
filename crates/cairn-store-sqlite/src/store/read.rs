@@ -63,12 +63,18 @@ impl SqliteMemoryStore {
 
         let record = conn
             .call(move |c| {
-                let row: Option<(String, String)> = c
+                let row: Option<(String, f64, String)> = c
                     .query_row(
-                        "SELECT record_json, consent_model FROM records \
+                        "SELECT record_json, salience, consent_model FROM records \
                           WHERE record_id = ?1 AND tombstoned = 0 AND cow_staged = 0",
                         params![key],
-                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, f64>(1)?,
+                                row.get::<_, String>(2)?,
+                            ))
+                        },
                     )
                     .map(Some)
                     .or_else(|e| match e {
@@ -77,9 +83,10 @@ impl SqliteMemoryStore {
                     })?;
                 match row {
                     None => Ok::<_, tokio_rusqlite::Error>(None),
-                    Some((json, consent_model)) => {
+                    Some((json, salience, consent_model)) => {
                         let mut r = record_from_json(&json)
                             .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
+                        overlay_hot_salience(&mut r, salience);
                         // Hydrate consent_model from the hot column —
                         // it's `#[serde(skip)]` on MemoryRecord so it
                         // doesn't ride through record_json (Issue #253).
@@ -156,6 +163,7 @@ impl SqliteMemoryStore {
                             row.get::<_, i64>(1)?,
                             row.get::<_, String>(2)?,
                             row.get::<_, String>(3)?,
+                            row.get::<_, f64>(4)?,
                         ))
                     })?
                     .collect::<Result<Vec<_>, _>>()?;
@@ -163,12 +171,15 @@ impl SqliteMemoryStore {
                 let has_more = rows.len() > limit;
                 let mut records = Vec::with_capacity(rows.len().min(limit));
                 let mut last: Option<(i64, String)> = None;
-                for (i, (json, updated_at, rid, consent_model)) in rows.into_iter().enumerate() {
+                for (i, (json, updated_at, rid, consent_model, salience)) in
+                    rows.into_iter().enumerate()
+                {
                     if i >= limit {
                         break;
                     }
                     let mut r = record_from_json(&json)
                         .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
+                    overlay_hot_salience(&mut r, salience);
                     r.consent_model = Some(
                         crate::store::upsert::parse_consent_model(&consent_model)
                             .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?,
@@ -447,7 +458,8 @@ fn project_version_row(row: VersionRowTuple) -> Result<RecordVersion, StoreError
 
 /// Compose the SQL string + bound parameters for a single `list` page.
 ///
-/// The query selects `record_json`, `updated_at`, and `record_id` from
+/// The query selects `record_json`, `updated_at`, `record_id`, and mutable
+/// hot-column metadata from
 /// active, non-tombstoned rows; AND-combines the optional kind/class
 /// filters and the visibility allowlist (empty = no restriction); applies
 /// the optional keyset cursor; and over-fetches by one row so the caller
@@ -462,7 +474,7 @@ fn build_list_query(
     limit: usize,
 ) -> Result<(String, Vec<rusqlite::types::Value>), StoreError> {
     let mut sql = String::from(
-        "SELECT record_json, updated_at, record_id, consent_model FROM records \
+        "SELECT record_json, updated_at, record_id, consent_model, salience FROM records \
           WHERE active = 1 AND tombstoned = 0 AND cow_staged = 0",
     );
     let mut p: Vec<rusqlite::types::Value> = Vec::new();
@@ -513,6 +525,14 @@ fn build_list_query(
     })?;
     p.push(bound.into());
     Ok((sql, p))
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "SQLite REAL is f64, but salience is a bounded f32 domain value"
+)]
+fn overlay_hot_salience(record: &mut MemoryRecord, salience: f64) {
+    record.salience = salience as f32;
 }
 
 fn push_scope_filter(

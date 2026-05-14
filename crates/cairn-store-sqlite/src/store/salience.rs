@@ -38,31 +38,26 @@ impl SqliteMemoryStore {
             for id in ids {
                 let row = tx
                     .query_row(
-                        "SELECT record_json, salience FROM records \
+                        "SELECT salience FROM records \
                          WHERE record_id = ?1 AND active = 1 AND tombstoned = 0 AND cow_staged = 0",
                         params![id],
-                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?)),
+                        |row| row.get::<_, f64>(0),
                     )
                     .map(Some)
                     .or_else(|e| match e {
                         rusqlite::Error::QueryReturnedNoRows => Ok(None),
                         other => Err(other),
                     })?;
-                let Some((json, old_salience)) = row else {
+                let Some(old_salience) = row else {
                     continue;
                 };
-                let mut record = record_from_json(&json)
-                    .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
                 let old = stored_salience_to_f32(old_salience);
                 let new = apply_access(old);
-                record.salience = new;
-                let record_json = serde_json::to_string(&record)
-                    .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
                 tx.execute(
                     "UPDATE records \
-                     SET record_json = ?2, salience = ?3, last_accessed_at_ms = ?4, updated_at = ?4 \
+                     SET salience = ?2, last_accessed_at_ms = ?3 \
                      WHERE record_id = ?1 AND active = 1 AND tombstoned = 0 AND cow_staged = 0",
-                    params![id, record_json, f64::from(new), accessed_at_ms],
+                    params![id, f64::from(new), accessed_at_ms],
                 )?;
                 let record_id = RecordId::parse(id).map_err(|e| {
                     tokio_rusqlite::Error::Other(Box::new(StoreError::Invariant {
@@ -93,14 +88,17 @@ impl SqliteMemoryStore {
         let id = record_id.as_str().to_owned();
         let value = i64::from(pinned);
         conn.call(move |c| {
-            c.execute(
-                "UPDATE records SET pinned = ?2 WHERE record_id = ?1 AND tombstoned = 0",
+            let changed = c.execute(
+                "UPDATE records SET pinned = ?2 \
+                 WHERE record_id = ?1 AND active = 1 AND tombstoned = 0 AND cow_staged = 0",
                 params![id, value],
             )?;
-            Ok(())
+            if changed == 0 {
+                return Ok::<_, tokio_rusqlite::Error>(Err(StoreError::NotFound { id }));
+            }
+            Ok(Ok(()))
         })
-        .await
-        .map_err(StoreError::from)
+        .await?
     }
 
     pub(crate) async fn do_decay_salience_batch(
@@ -146,18 +144,20 @@ impl SqliteMemoryStore {
                 processed = processed.saturating_add(1);
                 let old = stored_salience_to_f32(salience);
                 let new = decay_salience(old, policy.decay_rate, days);
-                let mut record = record_from_json(&json)
-                    .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
-                record.salience = new;
-                let record_json = serde_json::to_string(&record)
-                    .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
                 tx.execute(
-                    "UPDATE records SET record_json = ?2, salience = ?3 WHERE record_id = ?1",
-                    params![id, record_json, f64::from(new)],
+                    "UPDATE records SET salience = ?2 WHERE record_id = ?1",
+                    params![id, f64::from(new)],
                 )?;
+                let record = record_from_json(&json)
+                    .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
                 if new < policy.eviction_threshold
                     && days > policy.min_age_days
-                    && source_forget_permitted(&tx, &record, now_ms)?
+                    && source_forget_permitted(
+                        &tx,
+                        &record.provenance.source_hash,
+                        &record.scope.canonical_wire(),
+                        now_ms,
+                    )?
                 {
                     let record_id = RecordId::parse(id).map_err(|e| {
                         tokio_rusqlite::Error::Other(Box::new(StoreError::Invariant {
@@ -185,14 +185,14 @@ impl SqliteMemoryStore {
 
 fn source_forget_permitted(
     tx: &Transaction<'_>,
-    record: &cairn_core::domain::MemoryRecord,
+    source_hash: &str,
+    scope: &str,
     now_ms: i64,
 ) -> Result<bool, rusqlite::Error> {
-    let source_hash = record.provenance.source_hash.trim();
+    let source_hash = source_hash.trim();
     if source_hash.is_empty() {
         return Ok(false);
     }
-    let scope = record.scope.canonical_wire();
     let latest_kind = tx
         .query_row(
             "SELECT kind \

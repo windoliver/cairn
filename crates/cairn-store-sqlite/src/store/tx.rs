@@ -84,21 +84,28 @@ impl StoreTx<'_> {
         &self,
         target: &TargetId,
     ) -> Result<Option<StoredRecord>, StoreError> {
-        let row: Option<(String, i64, Option<i64>, Option<i64>)> = self
+        let row: Option<(String, f64, i64, Option<i64>, Option<i64>)> = self
             .tx
             .query_row(
-                "SELECT record_json, version, schema_version_major, schema_version_minor \
+                "SELECT record_json, salience, version, schema_version_major, schema_version_minor \
                    FROM records \
                   WHERE target_id = ?1 AND active = 1 AND tombstoned = 0 \
                   LIMIT 1",
                 params![target.as_str()],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
             .optional()?;
-        let Some((record_json, version_i64, schema_major, schema_minor)) = row else {
+        let Some((record_json, salience, version_i64, schema_major, schema_minor)) = row else {
             return Ok(None);
         };
-        let record = record_from_json(&record_json)?;
+        let mut record = record_from_json(&record_json)?;
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "SQLite REAL is f64, but salience is a bounded f32 domain value"
+        )]
+        {
+            record.salience = salience as f32;
+        }
         let version = u32::try_from(version_i64).map_err(|_| StoreError::Invariant {
             what: format!("stored version overflows u32: {version_i64}"),
         })?;
