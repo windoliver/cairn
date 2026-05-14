@@ -269,11 +269,11 @@ fn recording_rejects_missing_fixture_runtime_with_actionable_invalid_args() {
         response["error"]["code"], "InvalidArgs",
         "envelope: {response}"
     );
+    let message = response["error"]["message"].as_str().unwrap_or_default();
     assert!(
-        response["error"]["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("real recording runtime is not wired"),
+        message.contains("ffprobe")
+            || message.contains("voice-runtime")
+            || message.contains("tesseract"),
         "envelope: {response}"
     );
     assert_no_recording_payloads(vault.path());

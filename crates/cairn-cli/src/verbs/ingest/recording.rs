@@ -103,7 +103,7 @@ struct CaptureBatch {
     payloads: Vec<StagedPayload>,
 }
 
-/// Run deterministic fixture-mode recording ingest.
+/// Run recording ingest, using deterministic fixture mode when configured.
 #[must_use]
 pub fn run(
     _sub: &ArgMatches,
@@ -119,58 +119,24 @@ pub fn run(
     }
 
     if !recording_path.exists() {
-        let reason = format!(
-            "path does not exist: {}; cairn ingest --recording is not implemented yet without CAIRN_RECORDING_FIXTURE_JSON",
-            recording_path.display()
-        );
+        let reason = format!("path does not exist: {}", recording_path.display());
         return emit_invalid(json, &reason);
     }
 
-    let fixture_path = match std::env::var_os("CAIRN_RECORDING_FIXTURE_JSON") {
-        Some(path) if !path.is_empty() => PathBuf::from(path),
-        _ => {
-            return emit_invalid(
-                json,
-                "real recording runtime is not wired; set CAIRN_RECORDING_FIXTURE_JSON for deterministic fixture mode",
-            );
-        }
-    };
-
-    let fixture_raw = match std::fs::read_to_string(&fixture_path) {
-        Ok(raw) => raw,
-        Err(e) => {
-            return emit_invalid(
-                json,
-                &format!(
-                    "failed to read CAIRN_RECORDING_FIXTURE_JSON {}: {e}",
-                    fixture_path.display()
-                ),
-            );
-        }
-    };
-    let plan = match parse_fixture_plan(&fixture_raw) {
+    let plan = match build_recording_plan(recording_path) {
         Ok(plan) => plan,
         Err(e) => {
-            return emit_invalid(
-                json,
-                &format!(
-                    "failed to parse CAIRN_RECORDING_FIXTURE_JSON {}: {e:#}",
-                    fixture_path.display()
-                ),
-            );
+            return emit_invalid(json, &format!("{e:#}"));
         }
     };
-    if let Err(e) = validate_fixture_media_path(recording_path, &plan.media_path) {
-        return emit_invalid(json, &format!("{e:#}"));
-    }
     let batch = match build_capture_batch(&plan) {
         Ok(batch) => batch,
         Err(e) => {
-            return emit_invalid(json, &format!("failed to plan recording fixture: {e:#}"));
+            return emit_invalid(json, &format!("failed to plan recording ingest: {e:#}"));
         }
     };
     if batch.events.is_empty() {
-        return emit_invalid(json, "recording fixture produced no ingestible segments");
+        return emit_invalid(json, "recording produced no ingestible segments");
     }
 
     let summary_counts = SummaryCounts::from_plan(&plan);
@@ -189,7 +155,7 @@ pub fn run(
         Err(e) => return emit_internal(json, &format!("runtime build: {e}")),
     };
 
-    let result = rt.block_on(async { import_fixture_batch(vault_root, batch).await });
+    let result = rt.block_on(async { import_recording_batch(vault_root, batch).await });
     let policy_trace = match result {
         Ok(policy_trace) => policy_trace,
         Err(e) => return emit_internal(json, &format!("{e:#}")),
@@ -266,7 +232,7 @@ impl SummaryCounts {
     }
 }
 
-async fn import_fixture_batch(
+async fn import_recording_batch(
     vault_root: &Path,
     batch: CaptureBatch,
 ) -> anyhow::Result<Vec<ResponsePolicyTrace>> {
@@ -279,7 +245,7 @@ async fn import_fixture_batch(
                 .await?;
         if !response.failed_turns.is_empty() {
             anyhow::bail!(
-                "capture import failed for recording fixture: {:?}",
+                "capture import failed for recording ingest: {:?}",
                 response.failed_turns
             );
         }
@@ -920,6 +886,105 @@ fn build_sherpa_transcriber_from_env() -> anyhow::Result<()> {
     anyhow::bail!(
         "recording audio transcription requires building cairn-cli with --features voice-runtime"
     )
+}
+
+fn build_recording_plan(recording_path: &Path) -> anyhow::Result<RecordingPlan> {
+    if let Some(fixture_path) = std::env::var_os("CAIRN_RECORDING_FIXTURE_JSON")
+        && !fixture_path.as_os_str().is_empty()
+    {
+        let fixture_path = PathBuf::from(fixture_path);
+        let fixture_raw = std::fs::read_to_string(&fixture_path).with_context(|| {
+            format!(
+                "failed to read CAIRN_RECORDING_FIXTURE_JSON {}",
+                fixture_path.display()
+            )
+        })?;
+        let plan = parse_fixture_plan(&fixture_raw).with_context(|| {
+            format!(
+                "failed to parse CAIRN_RECORDING_FIXTURE_JSON {}",
+                fixture_path.display()
+            )
+        })?;
+        validate_fixture_media_path(recording_path, &plan.media_path)?;
+        return Ok(plan);
+    }
+
+    build_real_runtime_plan(recording_path)
+}
+
+fn build_real_runtime_plan(recording_path: &Path) -> anyhow::Result<RecordingPlan> {
+    validate_supported_recording_extension(recording_path)?;
+
+    let temp = tempfile::tempdir().context("create recording runtime temp directory")?;
+    let ffmpeg = build_ffmpeg_plan(recording_path, temp.path());
+    let probe =
+        run_command_capture_stdout(&ffmpeg.probe).context("probe recording with ffprobe")?;
+    let metadata = parse_ffprobe_json(&probe)?;
+    let media_hash = sha256_file(recording_path)
+        .with_context(|| format!("hash recording media {}", recording_path.display()))?;
+
+    let mut segments = Vec::new();
+    let mut skipped_frames = 0_u64;
+
+    if metadata.has_audio {
+        run_command_no_stdout(&ffmpeg.audio).context("extract recording audio with ffmpeg")?;
+        let wav_path = temp.path().join("audio.wav");
+        let wav = std::fs::read(&wav_path)
+            .with_context(|| format!("read extracted recording audio {}", wav_path.display()))?;
+        let chunks =
+            wav_bytes_to_chunks(&wav, "01ARZ3NDEKTSV4RRFFQ69G5FE1", RECORDING_CAPTURED_AT)?;
+
+        #[cfg(feature = "voice-runtime")]
+        {
+            let transcriber = build_sherpa_transcriber_from_env()?;
+            segments.extend(transcribe_chunks(&chunks, &transcriber)?);
+        }
+        #[cfg(not(feature = "voice-runtime"))]
+        {
+            let _ = chunks;
+            build_sherpa_transcriber_from_env()?;
+        }
+    }
+
+    if metadata.has_video {
+        run_command_no_stdout(&ffmpeg.frames).context("extract recording frames with ffmpeg")?;
+        let mut observations = Vec::new();
+        for entry in std::fs::read_dir(temp.path()).context("read extracted recording frames")? {
+            let path = entry?.path();
+            if path.extension().and_then(OsStr::to_str) != Some("png") {
+                continue;
+            }
+            let text = run_tesseract_ocr(&path)?;
+            observations.push(FrameOcrObservation {
+                timestamp_ms: frame_timestamp_ms_from_name(&path),
+                duration_ms: 1000,
+                confidence: 1.0,
+                text,
+            });
+        }
+        let (ocr_segments, skipped) = frame_observations_to_segments(observations);
+        skipped_frames = skipped;
+        segments.extend(ocr_segments);
+    }
+
+    segments.sort_by_key(|segment| (segment.start_ms, segment.kind.sort_rank()));
+    if segments.is_empty() {
+        anyhow::bail!("recording produced no transcript or OCR segments");
+    }
+
+    Ok(RecordingPlan {
+        media_path: recording_path.to_path_buf(),
+        media_hash,
+        duration_ms: metadata.duration_ms,
+        file_size: metadata.file_size,
+        skipped_frames,
+        segments,
+    })
+}
+
+fn sha256_file(path: &Path) -> anyhow::Result<String> {
+    let bytes = std::fs::read(path)?;
+    Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
 }
 
 fn parse_fixture_plan(raw: &str) -> anyhow::Result<RecordingPlan> {
