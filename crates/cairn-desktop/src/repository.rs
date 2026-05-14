@@ -172,8 +172,15 @@ impl DesktopRepository {
         let mut mutable_diff = BTreeMap::new();
         let mut rejected_fields = Vec::new();
         for (field, value) in request.field_diff {
-            if FrontendFieldPolicy::is_mutable_from_frontend(&field) {
+            if is_supported_mutable_field(&field, &value) {
                 mutable_diff.insert(field, value);
+            } else if FrontendFieldPolicy::is_mutable_from_frontend(&field) {
+                rejected_fields.push(DesktopRejectedField {
+                    field,
+                    code: "invalid_field_shape".to_string(),
+                    message: "Mutable field has an unsupported value shape for the desktop alpha"
+                        .to_string(),
+                });
             } else {
                 rejected_fields.push(DesktopRejectedField {
                     field,
@@ -252,6 +259,14 @@ impl DesktopRepository {
 
     fn fixture_mut(&self) -> RwLockWriteGuard<'_, DesktopFixture> {
         self.fixture.write().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+fn is_supported_mutable_field(field: &str, value: &serde_json::Value) -> bool {
+    match field {
+        "body" => value.is_string(),
+        "tags" | "wikilinks" => string_array(value).is_some(),
+        _ => false,
     }
 }
 
