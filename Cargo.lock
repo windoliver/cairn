@@ -717,6 +717,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "cairn-desktop"
+version = "0.0.1"
+dependencies = [
+ "cairn-core",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "cairn-embeddings-local"
 version = "0.0.1"
 dependencies = [
