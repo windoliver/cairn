@@ -48,11 +48,44 @@
     "Data": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["summary"],
+      "required": ["digest", "facts", "concepts", "narrative"],
       "properties": {
-        "summary":            { "type": "string", "minLength": 1 },
+        "digest":             { "type": "string", "minLength": 1, "description": "Short title-style summary for human-readable lists." },
+        "facts":              { "type": "array", "items": { "$ref": "#/$defs/SummaryFact" } },
+        "concepts":           { "type": "array", "items": { "$ref": "#/$defs/SummaryConcept" } },
+        "narrative":          { "type": "string", "description": "Free-form prose narrative. Empty when no LLM-backed narrative is available." },
         "persisted_record_id":{ "$ref": "../common/primitives.json#/$defs/Ulid", "description": "Present when persist was true." }
       }
+    },
+    "SummaryFact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["subject", "predicate", "object", "confidence", "source_record_ids"],
+      "properties": {
+        "subject":           { "type": "string", "minLength": 1, "description": "Entity name or pronoun resolution." },
+        "predicate":         { "type": "string", "minLength": 1 },
+        "object":            { "type": "string", "minLength": 1 },
+        "confidence":        { "$ref": "#/$defs/ConfidenceTag" },
+        "source_record_ids": { "type": "array", "items": { "$ref": "../common/primitives.json#/$defs/Ulid" } }
+      }
+    },
+    "SummaryConcept": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "kind", "salience"],
+      "properties": {
+        "name":     { "type": "string", "minLength": 1 },
+        "kind":     { "$ref": "#/$defs/ConceptKind" },
+        "salience": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "ConfidenceTag": {
+      "type": "string",
+      "enum": ["extracted", "inferred", "ambiguous"]
+    },
+    "ConceptKind": {
+      "type": "string",
+      "enum": ["entity", "topic", "decision", "constraint"]
     }
   }
 }

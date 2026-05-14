@@ -22,6 +22,10 @@ pub const REMEDIATION: &[(&str, &str)] = &[
          cairn embed download to materialize the embedding model",
     ),
     (
+        "cairn.mcp.v1.summarize.narrative",
+        "configure an LLM provider with JSON-mode support to enable narrative summaries",
+    ),
+    (
         "cairn.mcp.v1.policy_trace",
         "policy_trace is enabled by default; check .cairn/config.yaml for \
          an explicit override that disabled it",

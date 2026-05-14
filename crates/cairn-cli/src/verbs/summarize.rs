@@ -10,6 +10,7 @@ use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use cairn_core::config::CairnConfig;
+use cairn_core::contract::LlmError;
 use cairn_core::contract::identity_registry::IdentityVisibility;
 use cairn_core::contract::memory_store::{ListArgs, MemoryStore};
 use cairn_core::domain::canonical::{
@@ -28,9 +29,7 @@ use cairn_core::generated::envelope::{
     SignedIntentScopeTier,
 };
 use cairn_core::generated::verbs::ingest::IngestArgs;
-use cairn_core::generated::verbs::summarize::{
-    SummarizeArgs, SummarizeArgsCitations, SummarizeData,
-};
+use cairn_core::generated::verbs::summarize::{SummarizeArgs, SummarizeData};
 use clap::ArgMatches;
 use sha2::Digest as _;
 
@@ -106,11 +105,9 @@ async fn run_async(args: SummarizeArgs, vault_root: PathBuf, config: CairnConfig
         Ok(records) => records,
         Err(resp) => return merge_policy_trace(read_policy_trace(&auth, &[]), resp),
     };
-    let citations = !matches!(args.citations, Some(SummarizeArgsCitations::Off));
-    let summary = cairn_core::verbs::summarize::render_summary(&records, citations);
-    let mut data = SummarizeData {
-        persisted_record_id: None,
-        summary,
+    let mut data = match summarize_data(&ctx.config, &records).await {
+        Ok(data) => data,
+        Err(resp) => return resp,
     };
     let mut policy_trace = read_policy_trace(&auth, &records);
 
@@ -127,6 +124,25 @@ async fn run_async(args: SummarizeArgs, vault_root: PathBuf, config: CairnConfig
         ResponseData::Summarize(data),
         policy_trace,
     )
+}
+
+async fn summarize_data(
+    config: &CairnConfig,
+    records: &[MemoryRecord],
+) -> Result<SummarizeData, Response> {
+    if config.llm.provider.is_none() {
+        return Ok(cairn_core::verbs::summarize::render_summary_data(records));
+    }
+
+    let provider = cairn_llm_openai_compat::build_llm_provider(&config.llm)
+        .map_err(|err| summarize_llm_error(&err))?;
+    cairn_core::verbs::summarize::summarize_with_llm(provider.as_ref(), records)
+        .await
+        .map_err(|err| summarize_llm_error(&err))
+}
+
+fn summarize_llm_error(err: &LlmError) -> Response {
+    super::signed::aborted(ResponseVerb::Summarize, format!("summarize llm: {err}"))
 }
 
 async fn load_source_records(
@@ -214,9 +230,14 @@ async fn persist_summary(
     auth: &ReadAuthorization,
     data: &mut SummarizeData,
 ) -> Result<Vec<ResponsePolicyTrace>, Response> {
+    let body = if data.narrative.is_empty() {
+        data.digest.clone()
+    } else {
+        data.narrative.clone()
+    };
     let ingest_args = IngestArgs {
         batch_size: None,
-        body: Some(data.summary.clone()),
+        body: Some(body),
         dry_run: None,
         exclude: None,
         file: None,
@@ -645,7 +666,11 @@ fn emit_human(resp: &Response) {
     if let (ResponseStatus::Committed, Some(ResponseData::Summarize(data))) =
         (&resp.status, resp.data.as_ref())
     {
-        println!("{}", data.summary);
+        if data.narrative.is_empty() {
+            println!("{}", data.digest);
+        } else {
+            println!("{}", data.narrative);
+        }
     } else {
         let code = resp
             .error

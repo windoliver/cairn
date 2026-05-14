@@ -9,6 +9,7 @@
     { "const": "cairn.mcp.v1.search.keyword",    "x-cairn-since": "v0.1" },
     { "const": "cairn.mcp.v1.search.semantic",   "x-cairn-since": "v0.1" },
     { "const": "cairn.mcp.v1.search.hybrid",     "x-cairn-since": "v0.1" },
+    { "const": "cairn.mcp.v1.summarize.narrative", "x-cairn-since": "v0.2" },
     { "const": "cairn.mcp.v1.retrieve.record",   "x-cairn-since": "v0.1" },
     { "const": "cairn.mcp.v1.retrieve.session",  "x-cairn-since": "v0.1" },
     { "const": "cairn.mcp.v1.retrieve.turn",     "x-cairn-since": "v0.1" },

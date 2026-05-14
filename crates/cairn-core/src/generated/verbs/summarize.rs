@@ -8,6 +8,44 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
+pub enum ConceptKind {
+    Entity,
+    Topic,
+    Decision,
+    Constraint,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ConfidenceTag {
+    Extracted,
+    Inferred,
+    Ambiguous,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SummaryConcept {
+    pub kind: ConceptKind,
+    pub name: String,
+    pub salience: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SummaryFact {
+    pub confidence: ConfidenceTag,
+    pub object: String,
+    pub predicate: String,
+    pub source_record_ids: Vec<crate::generated::common::Ulid>,
+    /// Entity name or pronoun resolution.
+    pub subject: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum SummarizeArgsCitations {
     On,
     Compact,
@@ -31,10 +69,15 @@ pub struct SummarizeArgs {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SummarizeData {
+    pub concepts: Vec<SummaryConcept>,
+    /// Short title-style summary for human-readable lists.
+    pub digest: String,
+    pub facts: Vec<SummaryFact>,
+    /// Free-form prose narrative. Empty when no LLM-backed narrative is available.
+    pub narrative: String,
     /// Present when persist was true.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persisted_record_id: Option<crate::generated::common::Ulid>,
-    pub summary: String,
 }
 
 pub const ARGS_SCHEMA: &[u8] = include_bytes!("../schemas/verbs/summarize.json");

@@ -649,6 +649,26 @@ pub struct HotMemoryRecipePreset {
     pub max_bytes: u32,
 }
 
+/// Triple-form summarize view a built-in hot-memory recipe prefers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HotMemorySummaryReference {
+    /// Dense structured fact triples from `SummarizeData::facts`.
+    Facts,
+    /// Free-form prose from `SummarizeData::narrative`.
+    Narrative,
+}
+
+impl HotMemorySummaryReference {
+    /// Return the stable config/documentation path for this view.
+    #[must_use]
+    pub fn as_path(self) -> &'static str {
+        match self {
+            Self::Facts => "summarize.facts",
+            Self::Narrative => "summarize.narrative",
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HotMemoryRecipePresetWire {
@@ -682,6 +702,9 @@ pub struct ResolvedHotMemoryRecipe<'a> {
     pub steps: &'a [HotMemoryRecipeStep],
     /// Effective byte budget for the recipe.
     pub max_bytes: u32,
+    /// Preferred triple-form summary view for built-in recipes that consume
+    /// summarized hot-memory inputs.
+    pub summary_reference: Option<HotMemorySummaryReference>,
 }
 
 impl Default for HotMemoryConfig {
@@ -724,6 +747,7 @@ impl HotMemoryConfig {
                 name: name.to_owned(),
                 steps: &recipe.steps,
                 max_bytes: recipe.max_bytes,
+                summary_reference: hot_memory_summary_reference(name),
             });
         }
         // Legacy fallback: only fires when the recipes table is
@@ -738,6 +762,7 @@ impl HotMemoryConfig {
                 name: name.to_owned(),
                 steps: &self.recipe,
                 max_bytes: self.max_bytes,
+                summary_reference: hot_memory_summary_reference(name),
             });
         }
         None
@@ -747,6 +772,14 @@ impl HotMemoryConfig {
     #[must_use]
     pub fn recipe_names(&self) -> Vec<&str> {
         self.recipes.keys().map(String::as_str).collect()
+    }
+}
+
+fn hot_memory_summary_reference(name: &str) -> Option<HotMemorySummaryReference> {
+    match name {
+        "chat" => Some(HotMemorySummaryReference::Narrative),
+        "debug" => Some(HotMemorySummaryReference::Facts),
+        _ => None,
     }
 }
 
@@ -1924,6 +1957,26 @@ mod tests {
         assert_eq!(with_flag.steps, default.steps);
         assert_eq!(with_flag.max_bytes, default.max_bytes);
         assert_eq!(with_flag.name, default.name);
+    }
+
+    #[test]
+    fn builtin_recipes_reference_triple_form_summary_views() {
+        let cfg = HotMemoryConfig::default();
+
+        let chat = cfg.resolve_recipe(Some("chat")).expect("chat resolves");
+        assert_eq!(
+            chat.summary_reference
+                .map(HotMemorySummaryReference::as_path),
+            Some("summarize.narrative")
+        );
+
+        let debug = cfg.resolve_recipe(Some("debug")).expect("debug resolves");
+        assert_eq!(
+            debug
+                .summary_reference
+                .map(HotMemorySummaryReference::as_path),
+            Some("summarize.facts")
+        );
     }
 
     #[test]

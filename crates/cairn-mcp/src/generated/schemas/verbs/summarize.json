@@ -34,20 +34,115 @@
       ],
       "type": "object"
     },
+    "ConceptKind": {
+      "enum": [
+        "entity",
+        "topic",
+        "decision",
+        "constraint"
+      ],
+      "type": "string"
+    },
+    "ConfidenceTag": {
+      "enum": [
+        "extracted",
+        "inferred",
+        "ambiguous"
+      ],
+      "type": "string"
+    },
     "Data": {
       "additionalProperties": false,
       "properties": {
+        "concepts": {
+          "items": {
+            "$ref": "#/$defs/SummaryConcept"
+          },
+          "type": "array"
+        },
+        "digest": {
+          "description": "Short title-style summary for human-readable lists.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "facts": {
+          "items": {
+            "$ref": "#/$defs/SummaryFact"
+          },
+          "type": "array"
+        },
+        "narrative": {
+          "description": "Free-form prose narrative. Empty when no LLM-backed narrative is available.",
+          "type": "string"
+        },
         "persisted_record_id": {
           "$ref": "../common/primitives.json#/$defs/Ulid",
           "description": "Present when persist was true."
+        }
+      },
+      "required": [
+        "digest",
+        "facts",
+        "concepts",
+        "narrative"
+      ],
+      "type": "object"
+    },
+    "SummaryConcept": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/ConceptKind"
         },
-        "summary": {
+        "name": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "salience": {
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        }
+      },
+      "required": [
+        "name",
+        "kind",
+        "salience"
+      ],
+      "type": "object"
+    },
+    "SummaryFact": {
+      "additionalProperties": false,
+      "properties": {
+        "confidence": {
+          "$ref": "#/$defs/ConfidenceTag"
+        },
+        "object": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "predicate": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "source_record_ids": {
+          "items": {
+            "$ref": "../common/primitives.json#/$defs/Ulid"
+          },
+          "type": "array"
+        },
+        "subject": {
+          "description": "Entity name or pronoun resolution.",
           "minLength": 1,
           "type": "string"
         }
       },
       "required": [
-        "summary"
+        "subject",
+        "predicate",
+        "object",
+        "confidence",
+        "source_record_ids"
       ],
       "type": "object"
     }

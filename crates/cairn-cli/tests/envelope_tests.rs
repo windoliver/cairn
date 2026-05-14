@@ -591,11 +591,34 @@ fn summarize_returns_committed_envelope() {
     assert_eq!(v["verb"], "summarize");
     assert!(v["error"].is_null());
     assert!(
-        v["data"]["summary"]
+        v["data"]["digest"]
             .as_str()
-            .expect("summary")
+            .expect("digest")
             .contains("summarize envelope body")
     );
+    assert!(
+        v["data"]["facts"]
+            .as_array()
+            .expect("facts")
+            .iter()
+            .any(
+                |fact| fact["object"].as_str() == Some("summarize envelope body")
+                    && fact["confidence"].as_str() == Some("extracted")
+                    && fact["source_record_ids"]
+                        .as_array()
+                        .expect("source ids")
+                        .iter()
+                        .any(|id| id.as_str() == Some(record_id))
+            )
+    );
+    assert!(
+        v["data"]["concepts"]
+            .as_array()
+            .expect("concepts")
+            .iter()
+            .any(|concept| concept["name"].as_str() == Some("summarize"))
+    );
+    assert_eq!(v["data"]["narrative"].as_str().expect("narrative"), "");
     assert!(v["operation_id"].is_string());
     assert!(v["policy_trace"].is_array());
 }

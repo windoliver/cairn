@@ -74,6 +74,7 @@ pub const CAPABILITIES: &[&str] = &[
     "cairn.mcp.v1.search.keyword",
     "cairn.mcp.v1.search.semantic",
     "cairn.mcp.v1.search.hybrid",
+    "cairn.mcp.v1.summarize.narrative",
     "cairn.mcp.v1.retrieve.record",
     "cairn.mcp.v1.retrieve.session",
     "cairn.mcp.v1.retrieve.turn",
