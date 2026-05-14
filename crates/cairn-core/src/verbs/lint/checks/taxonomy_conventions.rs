@@ -161,6 +161,7 @@ mod tests {
     fn lint_record(record_id: &str, kind: MemoryKind, class: MemoryClass) -> LintRecord {
         let mut record = sample_record();
         record.id = crate::domain::record::RecordId::parse(record_id).expect("valid record id");
+        record.target_id = crate::domain::TargetId::parse(record_id).expect("valid target id");
         record.kind = kind;
         record.class = class;
         record.visibility = MemoryVisibility::Private;
@@ -251,5 +252,132 @@ mod tests {
 
         assert_eq!(findings.len(), 1);
         insta::assert_json_snapshot!(findings);
+    }
+
+    #[test]
+    fn canonical_class_table_accepts_every_kind_without_warning() {
+        let cfg = CairnConfig::default();
+        let cases = [
+            (MemoryKind::User, MemoryClass::Semantic),
+            (MemoryKind::Feedback, MemoryClass::Episodic),
+            (MemoryKind::Project, MemoryClass::Semantic),
+            (MemoryKind::Reference, MemoryClass::Semantic),
+            (MemoryKind::Fact, MemoryClass::Semantic),
+            (MemoryKind::Belief, MemoryClass::Semantic),
+            (MemoryKind::Opinion, MemoryClass::Semantic),
+            (MemoryKind::Event, MemoryClass::Episodic),
+            (MemoryKind::Entity, MemoryClass::Semantic),
+            (MemoryKind::Workflow, MemoryClass::Procedural),
+            (MemoryKind::Rule, MemoryClass::Procedural),
+            (MemoryKind::StrategySuccess, MemoryClass::Procedural),
+            (MemoryKind::StrategyFailure, MemoryClass::Procedural),
+            (MemoryKind::Trace, MemoryClass::Episodic),
+            (MemoryKind::Reasoning, MemoryClass::Episodic),
+            (MemoryKind::Playbook, MemoryClass::Procedural),
+            (MemoryKind::SensorObservation, MemoryClass::Episodic),
+            (MemoryKind::UserSignal, MemoryClass::Episodic),
+            (MemoryKind::KnowledgeGap, MemoryClass::Semantic),
+        ];
+        let records: Vec<_> = cases
+            .iter()
+            .enumerate()
+            .map(|(i, (kind, class))| {
+                lint_record(&format!("01ARZ3NDEKTSV4RRFFQ69G5F{i:02}"), *kind, *class)
+            })
+            .collect();
+
+        let findings = run(&inputs(&records, &cfg));
+
+        assert!(
+            !findings
+                .iter()
+                .any(|f| matches!(f.kind, Kind::WrongClassForKind)),
+            "canonical kind/class pairs should not warn: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn profile_well_known_ids_only_duplicate_same_non_empty_actor() {
+        let cfg = CairnConfig::default();
+        let mut alice_one = lint_record(
+            "01ARZ3NDEKTSV4RRFFQ69G5F00",
+            MemoryKind::User,
+            MemoryClass::Semantic,
+        );
+        alice_one.stored.record.extra_frontmatter.insert(
+            "well_known_id".to_owned(),
+            serde_json::json!("profile:hmn:alice"),
+        );
+        let mut alice_two = lint_record(
+            "01ARZ3NDEKTSV4RRFFQ69G5F01",
+            MemoryKind::User,
+            MemoryClass::Semantic,
+        );
+        alice_two.stored.record.extra_frontmatter.insert(
+            "well_known_id".to_owned(),
+            serde_json::json!("profile:hmn:alice"),
+        );
+        let mut bob = lint_record(
+            "01ARZ3NDEKTSV4RRFFQ69G5F02",
+            MemoryKind::User,
+            MemoryClass::Semantic,
+        );
+        bob.stored.record.extra_frontmatter.insert(
+            "well_known_id".to_owned(),
+            serde_json::json!("profile:hmn:bob"),
+        );
+        let mut empty_actor = lint_record(
+            "01ARZ3NDEKTSV4RRFFQ69G5F03",
+            MemoryKind::User,
+            MemoryClass::Semantic,
+        );
+        empty_actor
+            .stored
+            .record
+            .extra_frontmatter
+            .insert("well_known_id".to_owned(), serde_json::json!("profile:"));
+        let mut non_string = lint_record(
+            "01ARZ3NDEKTSV4RRFFQ69G5F04",
+            MemoryKind::User,
+            MemoryClass::Semantic,
+        );
+        non_string
+            .stored
+            .record
+            .extra_frontmatter
+            .insert("well_known_id".to_owned(), serde_json::json!(42));
+        let records = [alice_one, alice_two, bob, empty_actor, non_string];
+
+        let findings = run(&inputs(&records, &cfg));
+        let profile_findings: Vec<_> = findings
+            .iter()
+            .filter(|f| matches!(f.kind, Kind::MisclassifiedProfile))
+            .collect();
+
+        assert_eq!(profile_findings.len(), 1, "{findings:?}");
+        assert!(
+            profile_findings[0].message.contains("profile:hmn:alice"),
+            "{profile_findings:?}"
+        );
+    }
+
+    #[test]
+    fn belief_with_source_ids_is_not_orphan_insight() {
+        let cfg = CairnConfig::default();
+        let belief = lint_record(
+            "01ARZ3NDEKTSV4RRFFQ69G5F00",
+            MemoryKind::Belief,
+            MemoryClass::Semantic,
+        );
+        let records = [belief];
+
+        let findings = run(&inputs(&records, &cfg));
+
+        assert!(
+            !findings
+                .iter()
+                .any(|f| matches!(f.kind, Kind::OrphanInsight)),
+            "belief records with provenance.source_ids should not warn: {findings:?}"
+        );
     }
 }
