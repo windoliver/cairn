@@ -487,11 +487,24 @@ pub struct CairnConfig {
     pub mcp: McpConfig,
 }
 
-/// Source-file policy (§3 source forget notes).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+// ── Source ────────────────────────────────────────────────────────────────
+
+/// Source-link policy controlling how `forget` and lint treat sources
+/// under the vault (issue #257; brief §3, §5.6).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SourceConfig {
-    /// When true, `forget` rewrites matching source files to metadata-only stubs.
+    /// When true, `forget` MUST redact the raw bytes of any forgotten
+    /// source file in-place (overwriting body, keeping only hash +
+    /// metadata) at the same time it writes the consent-journal row.
+    ///
+    /// The lint rule `source_redact_on_forget_honored` asserts the
+    /// invariant after the fact: every `consent_journal` `SourceForget`
+    /// row has a content-redacted source file in `<vault>/sources/`.
+    /// Mismatch is `source_redact_skipped`.
+    ///
+    /// Default `false`: P0 operators can ship without the policy and
+    /// lint stays quiet. Turning it on is a deliberate policy bump.
     pub redact_on_forget: bool,
 }
 

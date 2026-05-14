@@ -694,6 +694,7 @@ fn build_record(
             source_hash,
             consent_ref: "consent:cli:p0".to_owned(),
             llm_id_if_any: None,
+            source_refs: Vec::new(),
         },
         updated_at: updated_at.clone(),
         evidence: EvidenceVector::default(),

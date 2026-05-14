@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::domain::source_ref::{SourceRef, validate_source_refs};
 use crate::domain::{DomainError, Identity, IdentityKind, Rfc3339Timestamp, SourceId};
 
 /// Mandatory provenance frontmatter on every [`crate::domain::MemoryRecord`].
@@ -40,6 +41,25 @@ pub struct Provenance {
     /// serialized so consumers can distinguish "explicit no-LLM
     /// provenance" from a missing/truncated record.
     pub llm_id_if_any: Option<String>,
+    /// Logical links to every source the record was derived from
+    /// (brief §6.5 — "Provenance is mandatory"; issue #257 lifts this
+    /// from a scalar to a vector).
+    ///
+    /// Additive on the wire: defaults to an empty vector when absent
+    /// from a serialized record, so pre-#257 records keep parsing.
+    /// Empty vectors are accepted by [`Provenance::validate`] — the
+    /// emptiness check is a lint concern (`source_link_missing`), not
+    /// a domain-level structural error.
+    ///
+    /// Non-empty vectors carry a sorted-unique invariant enforced by
+    /// [`validate_source_refs`]: entries are sorted ascending by `id`
+    /// (lex order, byte-wise) and `id`s are unique within the vector.
+    /// Additionally, `source_refs[0].hash == source_hash` (the
+    /// scalar primary remains stable; legacy readers that only see
+    /// `source_hash` get a deterministic primary identity, not an
+    /// arbitrary one).
+    #[serde(default)]
+    pub source_refs: Vec<SourceRef>,
 }
 
 #[derive(Deserialize)]
@@ -61,6 +81,8 @@ struct ProvenanceWire {
         reason = "load-bearing: distinguishes missing key from explicit null"
     )]
     llm_id_if_any: Option<Option<String>>,
+    #[serde(default)]
+    source_refs: Vec<SourceRef>,
 }
 
 #[allow(
@@ -95,6 +117,7 @@ impl<'de> Deserialize<'de> for Provenance {
             source_hash: raw.source_hash,
             consent_ref: raw.consent_ref,
             llm_id_if_any,
+            source_refs: raw.source_refs,
         })
     }
 }
@@ -135,6 +158,14 @@ impl Provenance {
         {
             return Err(DomainError::MissingProvenance {
                 field: "llm_id_if_any",
+            });
+        }
+        validate_source_refs(&self.source_refs)?;
+        if let Some(first) = self.source_refs.first()
+            && first.hash != self.source_hash
+        {
+            return Err(DomainError::MissingProvenance {
+                field: "source_refs[0].hash (must equal source_hash)",
             });
         }
         Ok(())
@@ -190,6 +221,7 @@ mod tests {
             source_hash: format!("sha256:{}", "a".repeat(64)),
             consent_ref: "consent:01HQZ".to_owned(),
             llm_id_if_any: None,
+            source_refs: Vec::new(),
         }
     }
 
@@ -391,5 +423,119 @@ mod tests {
         p.validate().expect("sha512 valid");
         p.source_hash = format!("blake3:{}", "a".repeat(64));
         p.validate().expect("blake3 valid");
+    }
+
+    #[test]
+    fn empty_source_refs_is_accepted_at_domain_level() {
+        // Lint rule `source_link_missing` flags this; domain validator
+        // permits it so historical and synthetic records still construct.
+        let p = sample();
+        p.validate().expect("empty source_refs allowed");
+    }
+
+    #[test]
+    fn deserialize_defaults_source_refs_to_empty() {
+        // Records written before #257 land have no `source_refs` key;
+        // they must continue deserializing without error. `source_ids`
+        // is structurally required (#328) so a legacy record still
+        // names at least one source artifact.
+        let json = r#"{
+            "source_sensor": "snr:local:hook:cc-session:v1",
+            "created_at": "2026-04-22T14:02:11Z",
+            "originating_agent_id": "agt:claude-code:opus-4-7:main:v1",
+            "source_ids": ["01HQZX9F5N0000000000000001"],
+            "source_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "consent_ref": "consent:01HQZ",
+            "llm_id_if_any": null
+        }"#;
+        let p: Provenance = serde_json::from_str(json).expect("legacy form accepted");
+        assert!(p.source_refs.is_empty());
+        p.validate().expect("legacy record validates");
+    }
+
+    #[test]
+    fn populated_source_refs_round_trips() {
+        let primary_hash = format!("sha256:{}", "a".repeat(64));
+        let mut p = sample();
+        p.source_hash = primary_hash.clone();
+        p.source_refs = vec![
+            SourceRef {
+                id: "sources/log/a.md".into(),
+                hash: primary_hash,
+            },
+            SourceRef {
+                id: "sources/log/b.md".into(),
+                hash: format!("sha256:{}", "b".repeat(64)),
+            },
+        ];
+        p.validate().expect("valid");
+        let j = serde_json::to_string(&p).expect("ser");
+        let back: Provenance = serde_json::from_str(&j).expect("de");
+        assert_eq!(p, back);
+    }
+
+    #[test]
+    fn rejects_primary_drift_between_source_refs_and_source_hash() {
+        let mut p = sample();
+        p.source_refs = vec![SourceRef {
+            id: "sources/log/a.md".into(),
+            hash: format!("sha256:{}", "f".repeat(64)),
+        }];
+        // source_hash is "sha256:aaaa…" but primary source_ref claims "sha256:ffff…".
+        let err = p.validate().unwrap_err();
+        assert!(
+            matches!(
+                err,
+                DomainError::MissingProvenance {
+                    field: "source_refs[0].hash (must equal source_hash)"
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_unsorted_source_refs() {
+        let mut p = sample();
+        p.source_hash = format!("sha256:{}", "b".repeat(64));
+        p.source_refs = vec![
+            SourceRef {
+                id: "sources/log/b.md".into(),
+                hash: format!("sha256:{}", "b".repeat(64)),
+            },
+            SourceRef {
+                id: "sources/log/a.md".into(),
+                hash: format!("sha256:{}", "a".repeat(64)),
+            },
+        ];
+        let err = p.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            DomainError::MissingProvenance {
+                field: "source_refs (unsorted)"
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_duplicate_source_ref_ids() {
+        let mut p = sample();
+        p.source_refs = vec![
+            SourceRef {
+                id: "sources/log/a.md".into(),
+                hash: format!("sha256:{}", "a".repeat(64)),
+            },
+            SourceRef {
+                id: "sources/log/a.md".into(),
+                hash: format!("sha256:{}", "b".repeat(64)),
+            },
+        ];
+        let err = p.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            DomainError::MissingProvenance {
+                field: "source_refs[].id (duplicate)"
+            }
+        ));
     }
 }

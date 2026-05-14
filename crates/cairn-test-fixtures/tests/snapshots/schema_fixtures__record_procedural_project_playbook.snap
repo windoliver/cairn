@@ -1,5 +1,6 @@
 ---
 source: crates/cairn-test-fixtures/tests/schema_fixtures.rs
+assertion_line: 73
 expression: "&r"
 ---
 {
@@ -25,7 +26,8 @@ expression: "&r"
     ],
     "source_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
     "consent_ref": "consent:01HQZ",
-    "llm_id_if_any": null
+    "llm_id_if_any": null,
+    "source_refs": []
   },
   "updated_at": "2026-04-26T00:00:00Z",
   "evidence": {

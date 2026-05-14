@@ -130,12 +130,13 @@ pub fn run(
             // Arc<SqliteMemoryStore> for the graph-tool layer (Plan C Task 19).
             let store: Arc<dyn cairn_core::contract::memory_store::MemoryStore> =
                 sqlite_store.clone();
-            rt.block_on(cairn_mcp::serve_stdio_with_store(
+            rt.block_on(cairn_mcp::serve_stdio_with_store_at_vault(
                 store,
                 sqlite_store,
                 resolver,
                 config.clone(),
                 principal,
+                vault_root.to_path_buf(),
             ))
         }
         None => {

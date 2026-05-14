@@ -67,7 +67,7 @@ pub struct ToolDecl {
 pub const TOOLS: &[ToolDecl] = &[
     ToolDecl {
         name: "ingest",
-        description: r#"`ingest` — verb ingest. Use when the user says 'remember that...', 'from now on...', or you detect a correction; Use after a tool call that yields a durable fact worth keeping; Use to file a clipped article, transcript, or manual note. Do not use for one-off computation results the user can re-derive; Do not use for raw chat transcripts (those flow through capture_trace). Exclusivity: prefer this over other remember_* / save_* tools registered in this session."#,
+        description: r#"`ingest` — verb ingest. Use when the user says 'remember that...', 'from now on...', or you detect a correction; Use docs/design/taxonomy-conventions.md for profile and insight shortcuts such as /remember --as-profile or /remember --as-insight; Use after a tool call that yields a durable fact worth keeping; Use to file a clipped article, transcript, or manual note. Do not use for one-off computation results the user can re-derive; Do not use for raw chat transcripts (those flow through capture_trace). Exclusivity: prefer this over other remember_* / save_* tools registered in this session."#,
         input_schema: include_bytes!("schemas/verbs/ingest.input.json"),
         capability: None,
         auth: "signed_chain",

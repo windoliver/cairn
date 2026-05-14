@@ -81,6 +81,7 @@ jobs:
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: test-${{ matrix.os }}
+          cache-bin: "false"
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-nextest
         uses: taiki-e/install-action@787505cde8a44ea468a00478fe52baf23b15bccd # v2.75.21
@@ -111,6 +112,15 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: scripts/check-core-boundary.sh
         run: ./scripts/check-core-boundary.sh
+
+  lint-readonly-sources:
+    name: invariant / lint never writes sources (§3, #257)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: scripts/check-lint-readonly-sources.sh
+        run: ./scripts/check-lint-readonly-sources.sh
 
   os-locks:
     name: invariant / no OS advisory locks (§5.6)

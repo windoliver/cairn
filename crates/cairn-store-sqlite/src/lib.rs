@@ -10,6 +10,7 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod consent;
+pub mod consent_reader;
 pub mod consent_timeline;
 pub mod entity_graph;
 pub mod error;
@@ -27,6 +28,7 @@ pub mod vec_ext;
 mod verify;
 pub mod wal;
 
+pub use consent_reader::SqliteConsentJournalReader;
 pub use error::StoreError;
 pub use hot_prefix::SqliteHotPrefixCache;
 pub use identity::SqliteIdentityRegistry;

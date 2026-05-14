@@ -359,6 +359,7 @@
     ],
     "positive_triggers": [
       "use when the user says 'remember that...', 'from now on...', or you detect a correction",
+      "use docs/design/taxonomy-conventions.md for profile and insight shortcuts such as /remember --as-profile or /remember --as-insight",
       "use after a tool call that yields a durable fact worth keeping",
       "use to file a clipped article, transcript, or manual note"
     ]

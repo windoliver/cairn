@@ -281,6 +281,8 @@ mod tests {
             source_forgets: crate::verbs::lint::empty_source_forgets(),
             vault_root: None,
             hot_body_loader: None,
+            source_resolver: crate::verbs::lint::empty_source_resolver(),
+            consent_journal: crate::verbs::lint::empty_consent_journal(),
         };
         let findings = run(&inputs).await;
         assert_eq!(findings.len(), 1);
@@ -306,6 +308,8 @@ mod tests {
             source_forgets: crate::verbs::lint::empty_source_forgets(),
             vault_root: None,
             hot_body_loader: None,
+            source_resolver: crate::verbs::lint::empty_source_resolver(),
+            consent_journal: crate::verbs::lint::empty_consent_journal(),
         };
         let f = run(&inputs).await;
         // No per-record finding (LegacyEvent skipped) but exactly one
@@ -332,6 +336,8 @@ mod tests {
             source_forgets: crate::verbs::lint::empty_source_forgets(),
             vault_root: None,
             hot_body_loader: None,
+            source_resolver: crate::verbs::lint::empty_source_resolver(),
+            consent_journal: crate::verbs::lint::empty_consent_journal(),
         };
         let f = run(&inputs).await;
         assert_eq!(f.len(), 1);
@@ -371,6 +377,8 @@ mod tests {
             source_forgets: crate::verbs::lint::empty_source_forgets(),
             vault_root: None,
             hot_body_loader: None,
+            source_resolver: crate::verbs::lint::empty_source_resolver(),
+            consent_journal: crate::verbs::lint::empty_consent_journal(),
         };
         let f = run(&inputs).await;
         assert_eq!(f.len(), 1);
@@ -420,6 +428,8 @@ mod tests {
             source_forgets: crate::verbs::lint::empty_source_forgets(),
             vault_root: None,
             hot_body_loader: None,
+            source_resolver: crate::verbs::lint::empty_source_resolver(),
+            consent_journal: crate::verbs::lint::empty_consent_journal(),
         };
         let f = run(&inputs).await;
         assert_eq!(f.len(), 1);
@@ -472,6 +482,8 @@ mod tests {
             source_forgets: crate::verbs::lint::empty_source_forgets(),
             vault_root: None,
             hot_body_loader: None,
+            source_resolver: crate::verbs::lint::empty_source_resolver(),
+            consent_journal: crate::verbs::lint::empty_consent_journal(),
         };
         let f = run(&inputs).await;
         assert_eq!(f.len(), 1);
@@ -517,6 +529,8 @@ mod tests {
             source_forgets: crate::verbs::lint::empty_source_forgets(),
             vault_root: None,
             hot_body_loader: None,
+            source_resolver: crate::verbs::lint::empty_source_resolver(),
+            consent_journal: crate::verbs::lint::empty_consent_journal(),
         };
         let f = run(&inputs).await;
         assert_eq!(f.len(), 1);
@@ -565,6 +579,8 @@ mod tests {
             source_forgets: crate::verbs::lint::empty_source_forgets(),
             vault_root: None,
             hot_body_loader: None,
+            source_resolver: crate::verbs::lint::empty_source_resolver(),
+            consent_journal: crate::verbs::lint::empty_consent_journal(),
         };
         assert!(run(&inputs).await.is_empty());
     }
@@ -584,6 +600,8 @@ mod tests {
             source_forgets: crate::verbs::lint::empty_source_forgets(),
             vault_root: None,
             hot_body_loader: None,
+            source_resolver: crate::verbs::lint::empty_source_resolver(),
+            consent_journal: crate::verbs::lint::empty_consent_journal(),
         };
         let f = run(&inputs).await;
         assert_eq!(f.len(), 1, "expected one error finding, got {f:?}");
@@ -613,6 +631,8 @@ mod tests {
             source_forgets: crate::verbs::lint::empty_source_forgets(),
             vault_root: None,
             hot_body_loader: None,
+            source_resolver: crate::verbs::lint::empty_source_resolver(),
+            consent_journal: crate::verbs::lint::empty_consent_journal(),
         };
         assert!(run(&inputs).await.is_empty());
     }
