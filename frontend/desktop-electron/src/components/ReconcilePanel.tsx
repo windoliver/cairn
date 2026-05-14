@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { DesktopApi } from "../App";
 import type { DesktopRecordDetail, DesktopReconcilePreview } from "../api/types";
 
@@ -47,6 +47,11 @@ export function ReconcilePanel({
   const applyStatus =
     applyStatusState?.key === currentRequestKey ? applyStatusState.message : null;
   const isApplyPending = pendingApplyState?.key === currentRequestKey;
+
+  useEffect(() => {
+    latestApplySequence.current += 1;
+    setPendingApplyState(null);
+  }, [currentRequestKey]);
 
   function request() {
     return {

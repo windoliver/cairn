@@ -525,6 +525,67 @@ describe("App", () => {
     expect(await screen.findByText("Applied")).toBeInTheDocument();
   });
 
+  it("clears stale pending apply state when the draft changes away and back", async () => {
+    const user = userEvent.setup();
+    let resolveApply: (result: Awaited<ReturnType<typeof api.applyReconcile>>) => void;
+    const applyResult = new Promise<Awaited<ReturnType<typeof api.applyReconcile>>>((resolve) => {
+      resolveApply = resolve;
+    });
+    api.previewReconcile
+      .mockResolvedValueOnce({
+        accepted: true,
+        targetId: "rec-alpha-001",
+        expectedVersion: 2,
+        mutableDiff: { body: "Markdown body" },
+        rejectedFields: [],
+      })
+      .mockResolvedValueOnce({
+        accepted: true,
+        targetId: "rec-alpha-001",
+        expectedVersion: 2,
+        mutableDiff: { body: "Markdown body" },
+        rejectedFields: [],
+      });
+    api.applyReconcile.mockReturnValueOnce(applyResult);
+
+    render(<App api={api} />);
+
+    const body = await screen.findByLabelText("Record body");
+    await user.click(screen.getByRole("button", { name: "Review reconcile" }));
+    const applyButton = await screen.findByRole("button", { name: "Apply reconcile" });
+    await user.click(applyButton);
+
+    await user.type(body, " changed");
+    await user.clear(body);
+    await user.type(body, "Markdown body");
+    await user.click(screen.getByRole("button", { name: "Review reconcile" }));
+
+    expect(await screen.findByRole("button", { name: "Apply reconcile" })).toBeEnabled();
+
+    await act(async () => {
+      resolveApply!({
+        accepted: true,
+        record: {
+          id: "rec-alpha-001",
+          title: "Project memory scaffold",
+          folderId: "folder-core",
+          body: "Applied stale body",
+          kind: "skill",
+          tags: ["alpha"],
+          version: 3,
+          backendHash: "sha256:fixture-alpha-001-applied",
+          confidence: 0.86,
+          sourceHash: "sha256:source-alpha-001",
+          links: ["rec-alpha-002"],
+        },
+        rejectedFields: [],
+      });
+    });
+
+    expect(screen.getByDisplayValue("Markdown body")).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("Applied stale body")).not.toBeInTheDocument();
+  });
+
   it("clears reconcile readiness when apply is rejected", async () => {
     const user = userEvent.setup();
     api.previewReconcile.mockResolvedValueOnce({
