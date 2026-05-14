@@ -533,6 +533,8 @@ async fn run_checks_emits_broken_actor_chain_warning_for_revoked_author() {
         .collect();
     let states = prefetch_author_states(&store, &registry).await;
     let cfg = CairnConfig::default();
+    let resolver = stub_resolver::EmptySourceResolver;
+    let journal = stub_resolver::EmptyConsentJournal;
     let source_artifacts: HashMap<_, _> = lint_records
         .iter()
         .flat_map(|record| {
@@ -568,6 +570,8 @@ async fn run_checks_emits_broken_actor_chain_warning_for_revoked_author() {
         source_forgets: &source_forgets,
         vault_root: None,
         hot_body_loader: None,
+        source_resolver: &resolver,
+        consent_journal: &journal,
     };
 
     let data = run_checks(&inputs).await;
@@ -838,4 +842,46 @@ async fn pre_request_writes_remain_legitimate_after_terminal_purge() {
         ChainStatus::Revoked,
         "pre-purge-request writes must remain pre-withdrawal Revoked under terminal Purged",
     );
+}
+
+mod stub_resolver {
+    use std::collections::HashSet;
+
+    use cairn_core::contract::consent_journal::ConsentJournalReader;
+    use cairn_core::contract::source_resolver::{SourceResolver, SourceResolverError};
+    use cairn_core::contract::{MalformedSourceForget, SourceForget};
+
+    pub struct EmptySourceResolver;
+
+    impl SourceResolver for EmptySourceResolver {
+        fn exists(&self, _id: &str) -> bool {
+            false
+        }
+        fn read(&self, _id: &str) -> Result<Vec<u8>, SourceResolverError> {
+            Err(SourceResolverError::NotFound)
+        }
+        fn locator(&self, id: &str) -> String {
+            format!("empty:{id}")
+        }
+    }
+
+    pub struct EmptyConsentJournal;
+
+    impl ConsentJournalReader for EmptyConsentJournal {
+        fn forgotten_source_bytes_hashes(&self) -> HashSet<String> {
+            HashSet::new()
+        }
+        fn forgotten_source_forgets(&self) -> Vec<SourceForget> {
+            Vec::new()
+        }
+        fn malformed_source_forget_rows(&self) -> Vec<MalformedSourceForget> {
+            Vec::new()
+        }
+        fn malformed_source_forget_rows_for_source(
+            &self,
+            _source_bytes_hash: &str,
+        ) -> Vec<MalformedSourceForget> {
+            Vec::new()
+        }
+    }
 }

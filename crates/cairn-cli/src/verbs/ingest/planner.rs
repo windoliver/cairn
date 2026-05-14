@@ -232,6 +232,7 @@ fn build_record_for_file(
             source_hash: format!("{SOURCE_HASH_PREFIX}{}", file.body_hash),
             consent_ref: "consent:folder-ingest".to_owned(),
             llm_id_if_any: None,
+            source_refs: Vec::new(),
         },
         updated_at: issued_at.clone(),
         evidence: EvidenceVector::default(),

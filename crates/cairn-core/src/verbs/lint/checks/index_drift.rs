@@ -58,6 +58,8 @@ mod tests {
             source_forgets: crate::verbs::lint::empty_source_forgets(),
             vault_root: None,
             hot_body_loader: None,
+            source_resolver: crate::verbs::lint::empty_source_resolver(),
+            consent_journal: crate::verbs::lint::empty_consent_journal(),
         };
         assert!(run(&li).is_empty());
     }
@@ -76,6 +78,8 @@ mod tests {
             source_forgets: crate::verbs::lint::empty_source_forgets(),
             vault_root: None,
             hot_body_loader: None,
+            source_resolver: crate::verbs::lint::empty_source_resolver(),
+            consent_journal: crate::verbs::lint::empty_consent_journal(),
         };
         let f = run(&li);
         assert_eq!(f.len(), 1);
@@ -104,6 +108,8 @@ mod tests {
             source_forgets: crate::verbs::lint::empty_source_forgets(),
             vault_root: None,
             hot_body_loader: None,
+            source_resolver: crate::verbs::lint::empty_source_resolver(),
+            consent_journal: crate::verbs::lint::empty_consent_journal(),
         };
         let f = run(&li);
         assert_eq!(f.len(), 1);
@@ -124,6 +130,8 @@ mod tests {
             source_forgets: crate::verbs::lint::empty_source_forgets(),
             vault_root: None,
             hot_body_loader: None,
+            source_resolver: crate::verbs::lint::empty_source_resolver(),
+            consent_journal: crate::verbs::lint::empty_consent_journal(),
         };
         assert!(run(&li).is_empty());
     }

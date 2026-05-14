@@ -288,6 +288,10 @@ fn provenance_from_event(event: &CaptureEvent) -> Result<Provenance, TraceProjec
         source_hash: event.payload_hash.as_str().to_owned(),
         consent_ref: "consent:pending".to_owned(),
         llm_id_if_any: None,
+        source_refs: vec![crate::domain::SourceRef {
+            id: event.payload_ref.clone(),
+            hash: event.payload_hash.as_str().to_owned(),
+        }],
     })
 }
 
