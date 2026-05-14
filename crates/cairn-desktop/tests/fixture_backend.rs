@@ -76,6 +76,32 @@ fn fixture_rejects_link_to_unknown_record() {
 }
 
 #[test]
+fn fixture_rejects_duplicate_record_links() {
+    let mut fixture = DesktopFixture::load_default().expect("fixture loads");
+    fixture.records[0].links = vec!["rec-alpha-002".to_string(), "rec-alpha-002".to_string()];
+    let dir = tempdir().expect("temp dir");
+    let path = dir.path().join("vault.json");
+    fs::write(&path, serde_json::to_vec(&fixture).expect("fixture json")).expect("write fixture");
+
+    let err = DesktopFixture::load_from_path(&path).expect_err("duplicate link rejected");
+
+    assert!(err.to_string().contains("duplicate link"));
+}
+
+#[test]
+fn fixture_rejects_duplicate_record_tags() {
+    let mut fixture = DesktopFixture::load_default().expect("fixture loads");
+    fixture.records[0].tags = vec!["alpha".to_string(), "alpha".to_string()];
+    let dir = tempdir().expect("temp dir");
+    let path = dir.path().join("vault.json");
+    fs::write(&path, serde_json::to_vec(&fixture).expect("fixture json")).expect("write fixture");
+
+    let err = DesktopFixture::load_from_path(&path).expect_err("duplicate tag rejected");
+
+    assert!(err.to_string().contains("duplicate tag"));
+}
+
+#[test]
 fn fixture_rejects_lint_finding_for_unknown_record() {
     let mut fixture = DesktopFixture::load_default().expect("fixture loads");
     fixture.lint_findings[0].record_id = Some("rec-alpha-missing".to_string());
@@ -86,6 +112,19 @@ fn fixture_rejects_lint_finding_for_unknown_record() {
     let err = DesktopFixture::load_from_path(&path).expect_err("unknown lint record rejected");
 
     assert!(err.to_string().contains("rec-alpha-missing"));
+}
+
+#[test]
+fn fixture_rejects_duplicate_lint_finding_ids() {
+    let mut fixture = DesktopFixture::load_default().expect("fixture loads");
+    fixture.lint_findings.push(fixture.lint_findings[0].clone());
+    let dir = tempdir().expect("temp dir");
+    let path = dir.path().join("vault.json");
+    fs::write(&path, serde_json::to_vec(&fixture).expect("fixture json")).expect("write fixture");
+
+    let err = DesktopFixture::load_from_path(&path).expect_err("duplicate lint rejected");
+
+    assert!(err.to_string().contains("duplicate lint finding id"));
 }
 
 #[test]
@@ -117,6 +156,46 @@ fn fixture_rejects_duplicate_folder_ids() {
     let err = DesktopFixture::load_from_path(&path).expect_err("duplicate folder rejected");
 
     assert!(err.to_string().contains("duplicate folder id"));
+}
+
+#[test]
+fn fixture_rejects_folder_with_unknown_parent() {
+    let mut fixture = DesktopFixture::load_default().expect("fixture loads");
+    fixture.folders[1].parent_id = Some("folder-missing".to_string());
+    let dir = tempdir().expect("temp dir");
+    let path = dir.path().join("vault.json");
+    fs::write(&path, serde_json::to_vec(&fixture).expect("fixture json")).expect("write fixture");
+
+    let err = DesktopFixture::load_from_path(&path).expect_err("unknown folder parent rejected");
+
+    assert!(err.to_string().contains("folder-missing"));
+}
+
+#[test]
+fn fixture_rejects_folder_with_self_parent() {
+    let mut fixture = DesktopFixture::load_default().expect("fixture loads");
+    fixture.folders[1].parent_id = Some(fixture.folders[1].id.clone());
+    let dir = tempdir().expect("temp dir");
+    let path = dir.path().join("vault.json");
+    fs::write(&path, serde_json::to_vec(&fixture).expect("fixture json")).expect("write fixture");
+
+    let err = DesktopFixture::load_from_path(&path).expect_err("self parent rejected");
+
+    assert!(err.to_string().contains("parentId itself"));
+}
+
+#[test]
+fn fixture_rejects_folder_parent_cycle() {
+    let mut fixture = DesktopFixture::load_default().expect("fixture loads");
+    fixture.folders[0].parent_id = Some(fixture.folders[1].id.clone());
+    fixture.folders[1].parent_id = Some(fixture.folders[0].id.clone());
+    let dir = tempdir().expect("temp dir");
+    let path = dir.path().join("vault.json");
+    fs::write(&path, serde_json::to_vec(&fixture).expect("fixture json")).expect("write fixture");
+
+    let err = DesktopFixture::load_from_path(&path).expect_err("folder cycle rejected");
+
+    assert!(err.to_string().contains("parent cycle"));
 }
 
 #[test]

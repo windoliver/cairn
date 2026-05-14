@@ -1,7 +1,7 @@
 //! Fixture loading for the desktop GUI alpha.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -91,6 +91,38 @@ impl DesktopFixture {
                 });
             }
         }
+        let folder_parents: BTreeMap<_, _> = self
+            .folders
+            .iter()
+            .map(|folder| (&folder.id, folder.parent_id.as_ref()))
+            .collect();
+        for folder in &self.folders {
+            if let Some(parent_id) = &folder.parent_id {
+                if parent_id == &folder.id {
+                    return Err(DesktopError::Fixture {
+                        message: format!("folder {} references parentId itself", folder.id),
+                    });
+                }
+                if !folder_ids.contains(parent_id) {
+                    return Err(DesktopError::Fixture {
+                        message: format!(
+                            "folder {} references unknown parentId {}",
+                            folder.id, parent_id
+                        ),
+                    });
+                }
+            }
+            let mut ancestors = BTreeSet::new();
+            let mut next_parent = folder.parent_id.as_ref();
+            while let Some(parent_id) = next_parent {
+                if !ancestors.insert(parent_id) {
+                    return Err(DesktopError::Fixture {
+                        message: format!("folder {} has a parent cycle", folder.id),
+                    });
+                }
+                next_parent = folder_parents.get(parent_id).and_then(|parent| *parent);
+            }
+        }
         let mut record_ids = BTreeSet::new();
         for record in &self.records {
             if !record_ids.insert(&record.id) {
@@ -108,7 +140,21 @@ impl DesktopFixture {
                     ),
                 });
             }
+            let mut tag_ids = BTreeSet::new();
+            for tag in &record.tags {
+                if !tag_ids.insert(tag) {
+                    return Err(DesktopError::Fixture {
+                        message: format!("record {} has duplicate tag {}", record.id, tag),
+                    });
+                }
+            }
+            let mut link_ids = BTreeSet::new();
             for link in &record.links {
+                if !link_ids.insert(link) {
+                    return Err(DesktopError::Fixture {
+                        message: format!("record {} has duplicate link {}", record.id, link),
+                    });
+                }
                 if !record_ids.contains(link) {
                     return Err(DesktopError::Fixture {
                         message: format!("record {} links to unknown record {}", record.id, link),
@@ -116,7 +162,13 @@ impl DesktopFixture {
                 }
             }
         }
+        let mut lint_ids = BTreeSet::new();
         for finding in &self.lint_findings {
+            if !lint_ids.insert(&finding.id) {
+                return Err(DesktopError::Fixture {
+                    message: format!("duplicate lint finding id {}", finding.id),
+                });
+            }
             if let Some(record_id) = &finding.record_id {
                 if !record_ids.contains(record_id) {
                     return Err(DesktopError::Fixture {
