@@ -142,6 +142,28 @@ fn repository_reconcile_apply_persists_body_edit() {
 }
 
 #[test]
+fn repository_reconcile_apply_leaves_noop_edit_version_unchanged() {
+    let repo = DesktopRepository::from_fixture(DesktopFixture::load_default().expect("fixture"));
+    let original = repo.record("rec-alpha-001").expect("record");
+    let mut field_diff = BTreeMap::new();
+    field_diff.insert("body".to_string(), json!(original.body));
+
+    let result = repo.apply_reconcile(DesktopReconcileApplyRequest {
+        preview: DesktopReconcilePreviewRequest {
+            target_id: "rec-alpha-001".to_string(),
+            expected_version: original.version,
+            backend_hash: original.backend_hash.clone(),
+            field_diff,
+        },
+    });
+
+    assert!(result.accepted);
+    let record = repo.record("rec-alpha-001").expect("record persisted");
+    assert_eq!(record.version, original.version);
+    assert_eq!(record.backend_hash, original.backend_hash);
+}
+
+#[test]
 fn repository_reconcile_apply_persists_tags_and_wikilinks() {
     let repo = DesktopRepository::from_fixture(DesktopFixture::load_default().expect("fixture"));
     let mut field_diff = BTreeMap::new();
