@@ -500,6 +500,46 @@ struct FrameObservation {
     text: String,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct FrameOcrObservation {
+    timestamp_ms: u64,
+    duration_ms: u64,
+    confidence: f32,
+    text: String,
+}
+
+fn frame_observations_to_segments(
+    mut observations: Vec<FrameOcrObservation>,
+) -> (Vec<RecordingSegment>, u64) {
+    let mut skipped = 0_u64;
+    let mut previous: Option<String> = None;
+    let mut segments = Vec::new();
+
+    observations.sort_by_key(|observation| observation.timestamp_ms);
+    for observation in observations {
+        let text = normalize_text(&observation.text);
+        if text.is_empty() || observation.duration_ms == 0 {
+            skipped += 1;
+            continue;
+        }
+        if previous.as_deref() == Some(text.as_str()) {
+            skipped += 1;
+            continue;
+        }
+        previous = Some(text.clone());
+        segments.push(RecordingSegment {
+            start_ms: observation.timestamp_ms,
+            duration_ms: observation.duration_ms,
+            text,
+            kind: SegmentKind::FrameOcr {
+                confidence: observation.confidence,
+            },
+        });
+    }
+
+    (segments, skipped)
+}
+
 fn build_ffmpeg_plan(input: &Path, temp_dir: &Path) -> FfmpegPlan {
     let audio_out = temp_dir.join("audio.wav");
     let frames_out = temp_dir.join("frame-%06d.png");
@@ -694,6 +734,41 @@ fn run_command_no_stdout(plan: &CommandPlan) -> anyhow::Result<()> {
 
 fn command_program_display(plan: &CommandPlan) -> String {
     plan.program.to_string_lossy().into_owned()
+}
+
+fn run_tesseract_ocr(frame_path: &Path) -> anyhow::Result<String> {
+    run_tesseract_ocr_with_program(frame_path, OsString::from("tesseract"))
+}
+
+fn run_tesseract_ocr_with_program(frame_path: &Path, program: OsString) -> anyhow::Result<String> {
+    let plan = CommandPlan {
+        program,
+        args: vec![command_path_arg(frame_path), OsString::from("stdout")],
+    };
+    run_command_capture_stdout(&plan)
+        .with_context(|| format!("tesseract OCR failed for {}", frame_path.display()))
+}
+
+fn frame_timestamp_ms_from_name(path: &Path) -> u64 {
+    if path.extension().and_then(OsStr::to_str) != Some("png") {
+        return 0;
+    }
+
+    let Some(stem) = path.file_stem().and_then(OsStr::to_str) else {
+        return 0;
+    };
+    let Some(digits) = stem.strip_prefix("frame-") else {
+        return 0;
+    };
+    if digits.len() != 6 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return 0;
+    }
+
+    digits
+        .parse::<u64>()
+        .unwrap_or(0)
+        .saturating_sub(1)
+        .saturating_mul(1000)
 }
 
 fn wav_bytes_to_chunks(
@@ -1595,6 +1670,203 @@ mod tests {
 
         assert!(
             message.contains("/bin/sh emitted non-UTF8 stdout"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn ocr_outputs_become_deduped_frame_segments() {
+        let frames = vec![
+            FrameOcrObservation {
+                timestamp_ms: 1000,
+                duration_ms: 1000,
+                confidence: 1.0,
+                text: " screen shows gamma config ".to_owned(),
+            },
+            FrameOcrObservation {
+                timestamp_ms: 2000,
+                duration_ms: 1000,
+                confidence: 0.9,
+                text: "screen shows gamma config".to_owned(),
+            },
+            FrameOcrObservation {
+                timestamp_ms: 3000,
+                duration_ms: 1000,
+                confidence: 1.0,
+                text: String::new(),
+            },
+            FrameOcrObservation {
+                timestamp_ms: 4000,
+                duration_ms: 1000,
+                confidence: 0.8,
+                text: "delta dashboard".to_owned(),
+            },
+        ];
+
+        let (segments, skipped) = frame_observations_to_segments(frames);
+
+        assert_eq!(skipped, 2);
+        assert_eq!(
+            segments
+                .iter()
+                .map(|segment| segment.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["screen shows gamma config", "delta dashboard"]
+        );
+        assert_eq!(
+            segments.iter().map(|s| s.start_ms).collect::<Vec<_>>(),
+            vec![1000, 4000]
+        );
+        assert!(matches!(
+            segments[0].kind,
+            SegmentKind::FrameOcr { confidence } if confidence == 1.0
+        ));
+    }
+
+    #[test]
+    fn frame_observation_conversion_skips_empty_and_zero_duration_frames() {
+        let frames = vec![
+            FrameOcrObservation {
+                timestamp_ms: 1000,
+                duration_ms: 0,
+                confidence: 0.7,
+                text: "zero duration".to_owned(),
+            },
+            FrameOcrObservation {
+                timestamp_ms: 2000,
+                duration_ms: 1000,
+                confidence: 0.6,
+                text: " \n\t ".to_owned(),
+            },
+            FrameOcrObservation {
+                timestamp_ms: 3000,
+                duration_ms: 500,
+                confidence: 0.8,
+                text: "kept".to_owned(),
+            },
+        ];
+
+        let (segments, skipped) = frame_observations_to_segments(frames);
+
+        assert_eq!(skipped, 2);
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].text, "kept");
+        assert_eq!(segments[0].duration_ms, 500);
+    }
+
+    #[test]
+    fn frame_observation_conversion_preserves_non_adjacent_repeats() {
+        let frames = vec![
+            FrameOcrObservation {
+                timestamp_ms: 1000,
+                duration_ms: 1000,
+                confidence: 0.8,
+                text: "same".to_owned(),
+            },
+            FrameOcrObservation {
+                timestamp_ms: 2000,
+                duration_ms: 1000,
+                confidence: 0.7,
+                text: "different".to_owned(),
+            },
+            FrameOcrObservation {
+                timestamp_ms: 3000,
+                duration_ms: 1000,
+                confidence: 0.6,
+                text: " same ".to_owned(),
+            },
+        ];
+
+        let (segments, skipped) = frame_observations_to_segments(frames);
+
+        assert_eq!(skipped, 0);
+        assert_eq!(
+            segments
+                .iter()
+                .map(|segment| segment.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["same", "different", "same"]
+        );
+    }
+
+    #[test]
+    fn frame_observation_conversion_sorts_chronologically_before_dedupe() {
+        let frames = vec![
+            FrameOcrObservation {
+                timestamp_ms: 3000,
+                duration_ms: 1000,
+                confidence: 0.8,
+                text: "later".to_owned(),
+            },
+            FrameOcrObservation {
+                timestamp_ms: 1000,
+                duration_ms: 1000,
+                confidence: 0.7,
+                text: "earlier".to_owned(),
+            },
+        ];
+
+        let (segments, skipped) = frame_observations_to_segments(frames);
+
+        assert_eq!(skipped, 0);
+        assert_eq!(
+            segments
+                .iter()
+                .map(|segment| (segment.start_ms, segment.text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(1000, "earlier"), (3000, "later")]
+        );
+    }
+
+    #[test]
+    fn frame_timestamp_ms_from_fixed_pattern_name() {
+        assert_eq!(
+            frame_timestamp_ms_from_name(Path::new("/tmp/frames/frame-000001.png")),
+            0
+        );
+        assert_eq!(
+            frame_timestamp_ms_from_name(Path::new("/tmp/frames/frame-000000.png")),
+            0
+        );
+        assert_eq!(
+            frame_timestamp_ms_from_name(Path::new("/tmp/frames/frame-000042.png")),
+            41_000
+        );
+    }
+
+    #[test]
+    fn malformed_frame_timestamp_names_default_to_zero() {
+        for path in [
+            Path::new("/tmp/frames/frame.png"),
+            Path::new("/tmp/frames/frame-abc123.png"),
+            Path::new("/tmp/frames/not-frame-000007.png"),
+            Path::new("/tmp/frames/frame-000007.jpg"),
+            Path::new("/tmp/frames/frame-00007.png"),
+        ] {
+            assert_eq!(
+                frame_timestamp_ms_from_name(path),
+                0,
+                "malformed name should default to zero: {}",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn tesseract_ocr_reports_missing_command_with_context() {
+        let err = run_tesseract_ocr_with_program(
+            Path::new("frame-000001.png"),
+            OsString::from("cairn-definitely-missing-tesseract-ocr-task-11"),
+        )
+        .expect_err("missing tesseract command should fail");
+        let message = format!("{err:#}");
+
+        assert!(
+            message.contains("tesseract OCR"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains("failed to run cairn-definitely-missing-tesseract-ocr-task-11"),
             "unexpected error: {message}"
         );
     }
