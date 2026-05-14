@@ -199,7 +199,7 @@ fn ingest_help_lists_recording_flag() {
 }
 
 #[test]
-fn ingest_recording_counts_as_source_but_is_not_implemented() {
+fn ingest_recording_counts_as_source_and_validates_missing_path() {
     let out = cli()
         .args([
             "ingest",
@@ -213,8 +213,8 @@ fn ingest_recording_counts_as_source_but_is_not_implemented() {
     assert_eq!(out.status.code(), Some(64));
     let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
     assert!(
-        stderr.contains("--recording is not implemented yet"),
-        "recording should be counted as the selected source, stderr: {stderr}",
+        stderr.contains("path does not exist: meeting.mp4"),
+        "recording should be counted as the selected source before path validation, stderr: {stderr}",
     );
 }
 
@@ -331,8 +331,8 @@ fn ingest_recording_dry_run_does_not_succeed() {
     assert_eq!(out.status.code(), Some(64));
     let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
     assert!(
-        stderr.contains("--recording is not implemented yet"),
-        "recording dry-run should reach recording not-implemented path, stderr: {stderr}",
+        stderr.contains("path does not exist: meeting.mp4"),
+        "recording dry-run should route through recording validation, stderr: {stderr}",
     );
 }
 

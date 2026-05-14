@@ -371,8 +371,7 @@ async fn write_one_payload(
 
     if let Err(e) = write_result {
         let _ = tokio::fs::remove_file(&tmp_path).await;
-        return Err(e)
-            .map_err(anyhow::Error::from)
+        return Err(anyhow::Error::from(e))
             .with_context(|| format!("write payload {}", path.display()));
     }
 
@@ -1212,7 +1211,7 @@ fn build_capture_batch(plan: &RecordingPlan) -> anyhow::Result<CaptureBatch> {
     {
         let event_id = deterministic_event_id(&segment_payload.segment_id)?;
         let captured_at = segment_captured_at(segment, ordinal)?;
-        let payload_ref = format!("sources/recordings/{}/{}.json", recording_dir, event_id);
+        let payload_ref = format!("sources/recordings/{recording_dir}/{event_id}.json");
         let event = CaptureEvent::try_new(
             event_id,
             sensor.clone(),
@@ -1418,7 +1417,7 @@ mod tests {
         assert_eq!(chunks[0].device.channels, 1);
         assert_eq!(chunks[0].duration_ms, 0);
         assert_eq!(chunks[0].samples.len(), 4);
-        assert_eq!(chunks[0].samples[0], 0.0);
+        assert!(chunks[0].samples[0].abs() < f32::EPSILON);
         assert!((chunks[0].samples[1] - 0.5).abs() < 0.001);
         assert!((chunks[0].samples[2] + 0.5).abs() < 0.001);
         assert!(chunks[0].samples[3] <= 1.0);
@@ -1838,10 +1837,12 @@ mod tests {
             segments.iter().map(|s| s.start_ms).collect::<Vec<_>>(),
             vec![1000, 4000]
         );
-        assert!(matches!(
-            segments[0].kind,
-            SegmentKind::FrameOcr { confidence } if confidence == 1.0
-        ));
+        match &segments[0].kind {
+            SegmentKind::FrameOcr { confidence } => {
+                assert!((*confidence - 1.0).abs() < f32::EPSILON);
+            }
+            SegmentKind::AudioTranscript { .. } => panic!("expected frame segment"),
+        }
     }
 
     #[test]
@@ -2133,6 +2134,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "single fixture assertion keeps the recording event, payload, and source-link contract together"
+    )]
     fn recording_plan_builds_valid_capture_events_and_payload_refs() {
         let plan = parse_fixture_plan(FIXTURE).expect("fixture parses");
         let batch = build_capture_batch(&plan).expect("batch builds");
@@ -2625,12 +2630,14 @@ mod tests {
                 confidence,
             } => {
                 assert_eq!(speaker_id, "speaker_99");
-                assert_eq!(*confidence, 0.91);
+                assert!((*confidence - 0.91).abs() < f32::EPSILON);
             }
             SegmentKind::FrameOcr { .. } => panic!("expected audio segment"),
         }
         match &plan.segments[1].kind {
-            SegmentKind::FrameOcr { confidence } => assert_eq!(*confidence, 0.82),
+            SegmentKind::FrameOcr { confidence } => {
+                assert!((*confidence - 0.82).abs() < f32::EPSILON);
+            }
             SegmentKind::AudioTranscript { .. } => panic!("expected frame segment"),
         }
     }
