@@ -367,6 +367,41 @@ async fn file_checkpoint_open_skips_torn_final_record_after_crash() {
 }
 
 #[tokio::test]
+async fn file_checkpoint_open_truncates_torn_final_record_before_append() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("workflow-checkpoints.jsonl");
+    std::fs::write(
+        &path,
+        concat!(
+            "{\"workflow\":\"expire\",\"operation_id\":\"01HQZK000000000000000000R1\"}\n",
+            "{\"workflow\":\"expire\",\"operation_id\":\"01HQZK000000000000000"
+        ),
+    )
+    .expect("write checkpoint");
+
+    let checkpoint = FileWorkflowCheckpointStore::open(&path).expect("open checkpoint");
+    checkpoint
+        .mark_applied("expire", &ulid("01HQZK000000000000000000R2"))
+        .await
+        .expect("append after recovery");
+
+    let reopened = FileWorkflowCheckpointStore::open(&path).expect("reopen checkpoint");
+
+    assert!(
+        reopened
+            .is_applied("expire", &ulid("01HQZK000000000000000000R1"))
+            .await
+            .expect("read first complete record")
+    );
+    assert!(
+        reopened
+            .is_applied("expire", &ulid("01HQZK000000000000000000R2"))
+            .await
+            .expect("read appended record")
+    );
+}
+
+#[tokio::test]
 async fn file_checkpoint_open_rejects_corrupt_complete_record() {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("workflow-checkpoints.jsonl");

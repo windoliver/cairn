@@ -192,16 +192,19 @@ impl FileWorkflowCheckpointStore {
                 workflow: "checkpoint",
                 message: format!("read workflow checkpoint file failed: {source}"),
             })?;
-        let lines: Vec<&str> = contents.lines().collect();
-        let ended_cleanly = contents.is_empty() || contents.ends_with('\n');
         let mut applied = BTreeSet::new();
-        for (index, line) in lines.iter().enumerate() {
+        let mut valid_len = 0;
+        for line in contents.split_inclusive('\n') {
+            let line_ended = line.ends_with('\n');
+            let record_len = line.len();
+            let line = line.trim_end_matches('\n');
             if line.trim().is_empty() {
+                valid_len += record_len;
                 continue;
             }
             let record: FileCheckpointRecord = match serde_json::from_str(line) {
                 Ok(record) => record,
-                Err(_) if index + 1 == lines.len() && !ended_cleanly => break,
+                Err(_) if !line_ended => break,
                 Err(source) => {
                     return Err(WorkflowError::Internal {
                         workflow: "checkpoint",
@@ -216,6 +219,21 @@ impl FileWorkflowCheckpointStore {
                 });
             }
             applied.insert((record.workflow, record.operation_id));
+            valid_len += record_len;
+        }
+        if valid_len < contents.len() {
+            read_file
+                .set_len(
+                    u64::try_from(valid_len).map_err(|_| WorkflowError::Internal {
+                        workflow: "checkpoint",
+                        message: "workflow checkpoint valid prefix length overflowed u64"
+                            .to_owned(),
+                    })?,
+                )
+                .map_err(|source| WorkflowError::Internal {
+                    workflow: "checkpoint",
+                    message: format!("truncate torn workflow checkpoint record failed: {source}"),
+                })?;
         }
         let file = OpenOptions::new()
             .append(true)
