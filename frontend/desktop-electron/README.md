@@ -18,6 +18,12 @@ Start the renderer:
 npm run dev
 ```
 
+Launch Electron against the dev renderer:
+
+```bash
+NODE_ENV=development npm run electron
+```
+
 Run checks:
 
 ```bash
