@@ -8,10 +8,10 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use cairn_core::contract::memory_store::{
-    Edge, EdgeDir, EdgeKey, GraphNeighborsArgs, HybridSearchArgs, HybridSearchPage, IndexStats,
-    KeywordSearchArgs, KeywordSearchPage, ListArgs, ListPage, MemoryStore, MemoryStoreCapabilities,
-    RecordVersion, SemanticSearchArgs, SemanticSearchPage, StoreError, TombstoneReason,
-    UpsertOutcome,
+    AccessUpdate, DecayBatchOutcome, DecayPolicy, Edge, EdgeDir, EdgeKey, GraphNeighborsArgs,
+    HybridSearchArgs, HybridSearchPage, IndexStats, KeywordSearchArgs, KeywordSearchPage, ListArgs,
+    ListPage, MemoryStore, MemoryStoreCapabilities, RecordVersion, SemanticSearchArgs,
+    SemanticSearchPage, StoreError, TombstoneReason, UpsertOutcome,
 };
 use cairn_core::contract::version::VersionRange;
 use cairn_core::domain::consent_timeline::ConsentModel;
@@ -161,6 +161,42 @@ impl MemoryStore for SqliteMemoryStore {
             return not_initialized("list_consent_models");
         }
         self.do_list_consent_models().await.map_err(Into::into)
+    }
+
+    async fn record_access(
+        &self,
+        record_ids: &[RecordId],
+        accessed_at_ms: i64,
+        reason: &str,
+    ) -> Result<Vec<AccessUpdate>, StoreError> {
+        if self.conn.is_none() {
+            return not_initialized("record_access");
+        }
+        self.do_record_access(record_ids, accessed_at_ms, reason)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn pin_record(&self, record_id: &RecordId, pinned: bool) -> Result<(), StoreError> {
+        if self.conn.is_none() {
+            return not_initialized("pin_record");
+        }
+        self.do_pin_record(record_id, pinned)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn decay_salience_batch(
+        &self,
+        now_ms: i64,
+        policy: DecayPolicy,
+    ) -> Result<DecayBatchOutcome, StoreError> {
+        if self.conn.is_none() {
+            return not_initialized("decay_salience_batch");
+        }
+        self.do_decay_salience_batch(now_ms, policy)
+            .await
+            .map_err(Into::into)
     }
 
     fn as_consent_lookup(

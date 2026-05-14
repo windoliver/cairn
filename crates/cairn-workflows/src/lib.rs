@@ -12,6 +12,7 @@ pub mod consent_mirror;
 pub mod consolidation;
 pub mod drainer;
 pub mod planners;
+pub mod salience_decay;
 pub mod scheduler;
 pub mod sqlite_apply;
 pub mod sqlite_store;

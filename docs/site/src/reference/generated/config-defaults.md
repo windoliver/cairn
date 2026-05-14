@@ -31,6 +31,11 @@ vault:
     max_bytes: 25600
     pre_compact_recipe: handoff
     pre_compact_safety_ratio: 0.3
+  salience:
+    decay_rate: 0.05
+    eviction_threshold: 0.1
+    min_age_days: 30
+    batch_limit: 500
   retention: {}
   schema_files:
   - CLAUDE.md

@@ -3,6 +3,8 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
+use cairn_core::contract::memory_store::MemoryStore;
+use cairn_core::domain::{RecordId, TargetId};
 use cairn_core::generated::envelope::{
     Response, ResponseData, ResponseStatus, ResponseVerb, RetrieveData,
 };
@@ -77,6 +79,147 @@ fn forget_record_wal_operation_id(vault: &Path) -> String {
         |row| row.get(0),
     )
     .expect("forget_record wal op")
+}
+
+fn pinned_value(vault: &Path, record_id: &str) -> i64 {
+    let conn = rusqlite::Connection::open(vault.join(".cairn/cairn.db")).expect("open cairn db");
+    conn.query_row(
+        "SELECT pinned FROM records WHERE record_id = ?1",
+        [record_id],
+        |row| row.get(0),
+    )
+    .expect("pinned value")
+}
+
+fn seed_record_direct(vault: &Path, body: &str) -> String {
+    let db = vault.join(".cairn/cairn.db");
+    let body = body.to_owned();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    rt.block_on(async move {
+        let store = cairn_store_sqlite::open(db).await.expect("open store");
+        let mut record = cairn_core::domain::record::tests_export::sample_record();
+        let id = "01HQZX9F5N0000000000000313";
+        record.id = RecordId::parse(id).expect("valid id");
+        record.target_id = TargetId::parse(id).expect("valid target");
+        record.body = body;
+        store.upsert(&record).await.expect("seed record");
+        id.to_owned()
+    })
+}
+
+fn seed_superseded_record_direct(vault: &Path) -> (String, String) {
+    let db = vault.join(".cairn/cairn.db");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    rt.block_on(async move {
+        let store = cairn_store_sqlite::open(db).await.expect("open store");
+        let mut record = cairn_core::domain::record::tests_export::sample_record();
+        let id = "01HQZX9F5N0000000000000323";
+        record.id = RecordId::parse(id).expect("valid id");
+        record.target_id = TargetId::parse(id).expect("valid target");
+        "issue313 old superseded pin target".clone_into(&mut record.body);
+        let first = store.upsert(&record).await.expect("seed v1");
+
+        "issue313 active successor pin target".clone_into(&mut record.body);
+        let second = store.upsert(&record).await.expect("seed v2");
+        assert_ne!(first.record_id, second.record_id);
+        (
+            first.record_id.as_str().to_owned(),
+            second.record_id.as_str().to_owned(),
+        )
+    })
+}
+
+#[test]
+fn forget_pin_marks_record_without_deleting_it() {
+    let dir = tempfile::tempdir().expect("temp vault");
+    bootstrap_vault(dir.path());
+
+    let record_id = seed_record_direct(
+        dir.path(),
+        "issue313pinunique record should remain readable",
+    );
+
+    let out = run_in_vault(dir.path(), &["forget", "--pin", &record_id, "--json"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "forget --pin should commit\nstderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert_eq!(pinned_value(dir.path(), &record_id), 1);
+    assert_eq!(hit_count(dir.path(), "issue313pinunique"), 1);
+    let response: Value = serde_json::from_slice(&out.stdout).expect("pin response json");
+    assert!(
+        response
+            .pointer("/data/tombstones")
+            .is_none_or(serde_json::Value::is_null),
+        "pinning should not report tombstones: {response}",
+    );
+}
+
+#[test]
+fn forget_pin_rejects_superseded_record_id() {
+    let dir = tempfile::tempdir().expect("temp vault");
+    bootstrap_vault(dir.path());
+
+    let (old_record_id, active_record_id) = seed_superseded_record_direct(dir.path());
+
+    let out = run_in_vault(dir.path(), &["forget", "--pin", &old_record_id, "--json"]);
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "forget --pin old version should fail\nstderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let response: Value =
+        serde_json::from_slice(&out.stdout).expect("superseded pin response json");
+    assert_eq!(response["status"], "aborted");
+    assert_eq!(response["error"]["code"], "NotFound");
+    assert_eq!(pinned_value(dir.path(), &old_record_id), 0);
+    assert_eq!(pinned_value(dir.path(), &active_record_id), 0);
+
+    let out = run_in_vault(
+        dir.path(),
+        &["forget", "--pin", &active_record_id, "--json"],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "forget --pin active successor should commit\nstderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert_eq!(pinned_value(dir.path(), &active_record_id), 1);
+}
+
+#[test]
+fn forget_pin_rejects_missing_record() {
+    let dir = tempfile::tempdir().expect("temp vault");
+    bootstrap_vault(dir.path());
+
+    let out = run_in_vault(
+        dir.path(),
+        &["forget", "--pin", "01HQZX9F5N0000000000000BAD", "--json"],
+    );
+
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "forget --pin missing record should fail\nstderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let response: Value = serde_json::from_slice(&out.stdout).expect("missing pin response json");
+    assert_eq!(response["status"], "aborted");
+    assert_eq!(response["error"]["code"], "NotFound");
 }
 
 #[test]

@@ -126,6 +126,16 @@ impl SqliteMemoryStore {
         &self,
         args: &KeywordSearchArgs<'_>,
     ) -> Result<KeywordSearchPage, StoreError> {
+        let page = self.do_search_keyword_untracked(args).await?;
+        self.record_search_access(&page.candidates, "keyword search")
+            .await;
+        Ok(page)
+    }
+
+    pub(crate) async fn do_search_keyword_untracked(
+        &self,
+        args: &KeywordSearchArgs<'_>,
+    ) -> Result<KeywordSearchPage, StoreError> {
         // Validate weights up-front so a misconfigured store fails before
         // we burn a worker round-trip. The check is cheap (4 floats) and
         // surfaces the bug as `Invariant` rather than as an FTS5 runtime
@@ -195,6 +205,30 @@ impl SqliteMemoryStore {
             .await
             .map_err(unpack_worker_err)?;
         Ok(page)
+    }
+
+    pub(crate) async fn record_search_access(
+        &self,
+        candidates: &[SearchCandidate],
+        failure_context: &'static str,
+    ) {
+        let record_ids: Vec<_> = candidates
+            .iter()
+            .map(|candidate| candidate.record_id.clone())
+            .collect();
+        if !record_ids.is_empty() {
+            let accessed_at_ms = current_unix_ms();
+            if let Err(error) = self
+                .do_record_access(&record_ids, accessed_at_ms, "search")
+                .await
+            {
+                tracing::warn!(
+                    error = %error,
+                    records = record_ids.len(),
+                    "workflow.access_tracker failed after {failure_context}"
+                );
+            }
+        }
     }
 }
 
@@ -565,6 +599,16 @@ impl SqliteMemoryStore {
         fields(verb = "search_semantic", limit = args.limit),
     )]
     pub(crate) async fn do_search_semantic(
+        &self,
+        args: &SemanticSearchArgs<'_>,
+    ) -> Result<SemanticSearchPage, StoreError> {
+        let page = self.do_search_semantic_untracked(args).await?;
+        self.record_search_access(&page.candidates, "semantic search")
+            .await;
+        Ok(page)
+    }
+
+    pub(crate) async fn do_search_semantic_untracked(
         &self,
         args: &SemanticSearchArgs<'_>,
     ) -> Result<SemanticSearchPage, StoreError> {

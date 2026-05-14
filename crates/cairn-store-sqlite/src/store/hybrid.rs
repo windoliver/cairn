@@ -3,9 +3,9 @@
 //! Pipeline:
 //!
 //! 1. Capability gate — `caps.vector` must be true and an embedder must be wired.
-//! 2. Run [`SqliteMemoryStore::do_search_keyword`] and
-//!    [`SqliteMemoryStore::do_search_semantic`] in parallel via
-//!    [`tokio::try_join!`]. Each leg over-fetches (`limit = 50`) so RRF has a
+//! 2. Run [`SqliteMemoryStore::do_search_keyword_untracked`] and
+//!    [`SqliteMemoryStore::do_search_semantic_untracked`] in parallel via
+//!    [`tokio::join!`]. Each leg over-fetches (`limit = 50`) so RRF has a
 //!    healthy candidate pool to fuse.
 //! 3. Embed the query a second time on the blocking pool for the cosine
 //!    re-rank pass. (`do_search_semantic` already embedded once internally;
@@ -114,8 +114,8 @@ impl SqliteMemoryStore {
         // requirement — if FTS5 fails, there's nothing meaningful to
         // rerank.
         let (kw_res, sem_res) = tokio::join!(
-            self.do_search_keyword(&kw_args),
-            self.do_search_semantic(&sem_args),
+            self.do_search_keyword_untracked(&kw_args),
+            self.do_search_semantic_untracked(&sem_args),
         );
         let keyword = kw_res?;
         let mut leg_degradations: Vec<DegradedLeg> = Vec::new();
@@ -216,6 +216,8 @@ impl SqliteMemoryStore {
             .filter_map(|r| by_id.remove(&r.record_id))
             .take(args.limit)
             .collect();
+        self.record_search_access(&candidates, "hybrid search")
+            .await;
 
         let explain = args
             .with_explain
@@ -389,8 +391,8 @@ impl SqliteMemoryStore {
         // independently; we union the surviving source(s) and report any
         // loss as a per-`GraphSource` degradation entry.
         let (kw_res, sem_res) = tokio::join!(
-            self.do_search_keyword(&kw_seed_args),
-            self.do_search_semantic(&sem_seed_args),
+            self.do_search_keyword_untracked(&kw_seed_args),
+            self.do_search_semantic_untracked(&sem_seed_args),
         );
 
         let kw_ok = match kw_res {
@@ -657,7 +659,7 @@ async fn hydrate_graph_only(
 
 /// Build SQL + bound params for the graph-only hydration query. Reapplies
 /// the same authorization (`auth_scope`), narrowing-filter, supersession,
-/// and visibility predicates as the lexical legs so any bug or race in
+/// COW staging, and visibility predicates as the lexical legs so any bug or race in
 /// `graph_search.rs` cannot leak rows that fail those checks back into
 /// the page.
 fn build_graph_only_query(
@@ -685,10 +687,10 @@ fn build_graph_only_query(
         .unwrap_or_default();
     let sql = format!(
         "SELECT r.record_id, r.target_id, r.scope, r.kind, r.class, r.visibility, \
-                r.updated_at, r.confidence, r.salience, r.created_at, r.body \
+                r.updated_at, r.confidence, r.salience, r.created_at, r.record_json \
            FROM records r \
           WHERE r.record_id IN ({id_placeholders}) \
-            AND r.active = 1 AND r.tombstoned = 0{visibility_clause}{scope_sql}{filter_clause} \
+            AND r.active = 1 AND r.tombstoned = 0 AND r.cow_staged = 0{visibility_clause}{scope_sql}{filter_clause} \
             AND {}",
         crate::store::search::SUPERSESSION_NOT_EXISTS_CLAUSE
     );
@@ -730,7 +732,7 @@ fn map_graph_only_row(
     let confidence: f64 = row.get(7)?;
     let salience: f64 = row.get(8)?;
     let created_at: i64 = row.get(9)?;
-    let body: String = row.get(10)?;
+    let record_json: String = row.get(10)?;
 
     let record_id = record_id_from_str(&rec_str).map_err(|e| {
         invariant(format!(
@@ -768,7 +770,7 @@ fn map_graph_only_row(
         salience: salience as f32,
         staleness_seconds: (now_ms - created_at) / 1000,
         snippet: String::new(),
-        record_json: body,
+        record_json,
         semantic_distance: None,
     })
 }
@@ -806,5 +808,28 @@ mod tests {
         blob.extend_from_slice(&[0xAB, 0xCD, 0xEF]); // 3 trailing bytes
         let back = blob_to_f32_vec(&blob);
         assert_eq!(back, v);
+    }
+
+    #[test]
+    fn graph_only_hydration_hides_cow_staged_rows() {
+        let (sql, _) = build_graph_only_query(
+            &["01HQZX9F5N0000000000000001".to_owned()],
+            &[],
+            &cairn_core::domain::ScopeTuple::default(),
+            None,
+        );
+
+        assert!(
+            sql.contains("r.cow_staged = 0"),
+            "graph-only hydration must match keyword/semantic visibility predicates: {sql}"
+        );
+        assert!(
+            sql.contains("r.record_json"),
+            "graph-only hydration must return canonical record_json, not body text: {sql}"
+        );
+        assert!(
+            !sql.contains("r.body"),
+            "graph-only hydration must not put body text in SearchCandidate.record_json: {sql}"
+        );
     }
 }

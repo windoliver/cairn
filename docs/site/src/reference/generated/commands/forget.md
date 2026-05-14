@@ -9,7 +9,7 @@ cairn.mcp.v1 verb: forget
 ```text
 cairn.mcp.v1 verb: forget
 
-Usage: forget [OPTIONS] <--record <STRING>|--session <STRING>|--scope <JSON>>
+Usage: forget [OPTIONS] <--record <STRING>|--session <STRING>|--scope <JSON>|--pin <ULID>>
 
 Options:
       --record <STRING>
@@ -29,6 +29,9 @@ Options:
 
       --no-diff
           Skip the markdown diff sidecar in human-review mode
+
+      --pin <ULID>
+          Pin a record so salience-decay eviction will not forget it
 
       --json
           Emit machine-readable JSON response envelope to stdout

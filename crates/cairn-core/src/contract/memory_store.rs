@@ -460,6 +460,33 @@ pub trait MemoryStore: Send + Sync {
         let _ = (entity_id, record_id);
         Err("capability unavailable: bitemporal_graph".into())
     }
+
+    /// Strengthen active records after a successful read hit.
+    async fn record_access(
+        &self,
+        record_ids: &[RecordId],
+        accessed_at_ms: i64,
+        reason: &str,
+    ) -> Result<Vec<AccessUpdate>, StoreError> {
+        let _ = (record_ids, accessed_at_ms, reason);
+        Err("capability unavailable: salience_access".into())
+    }
+
+    /// Flip the durable pin flag used by salience decay and auto-eviction.
+    async fn pin_record(&self, record_id: &RecordId, pinned: bool) -> Result<(), StoreError> {
+        let _ = (record_id, pinned);
+        Err("capability unavailable: salience_access".into())
+    }
+
+    /// Decay a batch of active records and return auto-eviction candidates.
+    async fn decay_salience_batch(
+        &self,
+        now_ms: i64,
+        policy: DecayPolicy,
+    ) -> Result<DecayBatchOutcome, StoreError> {
+        let _ = (now_ms, policy);
+        Err("capability unavailable: salience_access".into())
+    }
 }
 
 /// Static identity descriptor for a [`MemoryStore`] plugin (§4.1).
@@ -555,6 +582,56 @@ pub struct UpsertOutcome {
     pub content_changed: bool,
     /// Body hash of the previous active version, if any.
     pub prior_hash: Option<BodyHash>,
+}
+
+/// One salience update performed after a read hit.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccessUpdate {
+    /// Record that was strengthened.
+    pub record_id: RecordId,
+    /// Salience before the access boost.
+    pub old_salience: f32,
+    /// Salience after the access boost.
+    pub new_salience: f32,
+    /// Timestamp written to `last_accessed_at_ms`.
+    pub last_accessed_at_ms: i64,
+    /// Read path that caused the update.
+    pub reason: String,
+}
+
+/// Salience decay and auto-eviction policy.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DecayPolicy {
+    /// Exponential forgetting-curve rate.
+    pub decay_rate: f32,
+    /// Threshold below which old records may auto-evict.
+    pub eviction_threshold: f32,
+    /// Minimum age before eviction is allowed.
+    pub min_age_days: u32,
+    /// Maximum active records to inspect in this batch.
+    pub batch_limit: u32,
+}
+
+/// Record that passed salience threshold and age checks after decay.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EvictionCandidate {
+    /// Candidate record id.
+    pub record_id: RecordId,
+    /// Salience before decay.
+    pub old_salience: f32,
+    /// Salience after decay.
+    pub new_salience: f32,
+    /// Age used for the guardrail decision.
+    pub age_days: u32,
+}
+
+/// Result of a salience decay batch.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecayBatchOutcome {
+    /// Number of non-pinned records processed.
+    pub records_processed: u32,
+    /// Records eligible for forget-path auto-eviction.
+    pub eviction_candidates: Vec<EvictionCandidate>,
 }
 
 /// Filter args for `list`. All `Option` fields are AND-combined.

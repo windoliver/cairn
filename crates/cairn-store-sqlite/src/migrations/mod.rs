@@ -118,6 +118,8 @@ const M0059_SESSION_METADATA_AUDIT_SEQ: &str =
 // Crockford base32). The Rust `validate_scope` has always allowed
 // `[A-Za-z0-9._:=,-]`; migration 0011 used `[a-z0-9._:=,-]` by mistake.
 const M0060_CONSENT_SCOPE_UPPERCASE: &str = include_str!("sql/0060_consent_scope_uppercase.sql");
+// Issue #313 — salience access tracking and decay guardrails.
+const M0061_SALIENCE_ACCESS: &str = include_str!("sql/0061_salience_access.sql");
 
 /// Canonical SQL for migration 0020 (`workflow_jobs`). Re-exported so
 /// downstream crates (notably `cairn-workflows`, which hashes the
@@ -296,6 +298,7 @@ pub(crate) const MIGRATION_SOURCES: &[(i64, &str, &str)] = &[
         "0060_consent_scope_uppercase",
         M0060_CONSENT_SCOPE_UPPERCASE,
     ),
+    (61, "0061_salience_access", M0061_SALIENCE_ACCESS),
 ];
 
 /// All migrations, in order. Returns a fresh `Migrations` set on every call
@@ -357,5 +360,6 @@ pub fn migrations() -> Migrations<'static> {
         M::up(M0058_SESSION_METADATA_AUDIT),
         M::up(M0059_SESSION_METADATA_AUDIT_SEQ),
         M::up(M0060_CONSENT_SCOPE_UPPERCASE),
+        M::up(M0061_SALIENCE_ACCESS),
     ])
 }

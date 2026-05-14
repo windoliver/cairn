@@ -9,6 +9,7 @@ pub(crate) mod projection;
 pub(crate) mod read;
 pub(crate) mod reindex;
 pub(crate) mod reindex_from_db;
+pub(crate) mod salience;
 pub(crate) mod scope_predicate;
 pub(crate) mod search;
 pub mod sessions;
