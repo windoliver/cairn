@@ -215,12 +215,24 @@ impl DesktopRepository {
             .find(|record| record.id == preview.target_id);
         let mut updated_record = None;
         if let Some(record) = record {
+            let mut changed = false;
             if let Some(body) = preview
                 .mutable_diff
                 .get("body")
                 .and_then(serde_json::Value::as_str)
             {
                 record.body = body.to_string();
+                changed = true;
+            }
+            if let Some(tags) = preview.mutable_diff.get("tags").and_then(string_array) {
+                record.tags = tags;
+                changed = true;
+            }
+            if let Some(links) = preview.mutable_diff.get("wikilinks").and_then(string_array) {
+                record.links = links;
+                changed = true;
+            }
+            if changed {
                 record.version += 1;
                 record.backend_hash = format!("sha256:{}-v{}", record.id, record.version);
             }
@@ -241,6 +253,14 @@ impl DesktopRepository {
     fn fixture_mut(&self) -> RwLockWriteGuard<'_, DesktopFixture> {
         self.fixture.write().unwrap_or_else(PoisonError::into_inner)
     }
+}
+
+fn string_array(value: &serde_json::Value) -> Option<Vec<String>> {
+    value
+        .as_array()?
+        .iter()
+        .map(|value| value.as_str().map(str::to_string))
+        .collect()
 }
 
 fn rejected_preview(

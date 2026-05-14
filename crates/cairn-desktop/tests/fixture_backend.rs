@@ -104,6 +104,32 @@ fn repository_reconcile_apply_persists_body_edit() {
 }
 
 #[test]
+fn repository_reconcile_apply_persists_tags_and_wikilinks() {
+    let repo = DesktopRepository::from_fixture(DesktopFixture::load_default().expect("fixture"));
+    let mut field_diff = BTreeMap::new();
+    field_diff.insert("tags".to_string(), json!(["alpha", "reviewed"]));
+    field_diff.insert(
+        "wikilinks".to_string(),
+        json!(["rec-alpha-002", "rec-alpha-003"]),
+    );
+
+    let result = repo.apply_reconcile(DesktopReconcileApplyRequest {
+        preview: DesktopReconcilePreviewRequest {
+            target_id: "rec-alpha-001".to_string(),
+            expected_version: 2,
+            backend_hash: "sha256:fixture-alpha-001".to_string(),
+            field_diff,
+        },
+    });
+
+    assert!(result.accepted);
+    let record = repo.record("rec-alpha-001").expect("record persisted");
+    assert_eq!(record.tags, ["alpha", "reviewed"]);
+    assert_eq!(record.links, ["rec-alpha-002", "rec-alpha-003"]);
+    assert_eq!(record.version, 3);
+}
+
+#[test]
 fn repository_reconcile_rejects_immutable_field() {
     let repo = DesktopRepository::from_fixture(DesktopFixture::load_default().expect("fixture"));
     let mut field_diff = BTreeMap::new();
