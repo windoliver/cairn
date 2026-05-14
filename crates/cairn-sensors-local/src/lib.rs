@@ -18,6 +18,7 @@ pub mod hook;
 pub mod ide;
 pub mod outcome;
 pub mod policy;
+pub mod screen;
 pub mod terminal;
 pub mod voice;
 #[cfg(feature = "voice-runtime")]

@@ -62,6 +62,27 @@ fn plugins_verify_json_exercises_local_sensor_registration_e2e() {
 }
 
 #[test]
+fn plugins_verify_json_reports_mcp_stdio_runtime_e2e() {
+    let output = Command::new(cairn_binary())
+        .args(["plugins", "verify", "--json"])
+        .output()
+        .expect("spawn cairn binary");
+
+    assert!(output.status.success(), "exit: {:?}", output.status);
+
+    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+    let plugins = v["plugins"].as_array().expect("plugins array");
+    let mcp = plugins
+        .iter()
+        .find(|plugin| plugin["name"] == "cairn-mcp")
+        .expect("cairn-mcp plugin present");
+
+    assert_case_status(mcp, "manifest_features_match_capabilities", "ok");
+    assert_case_status(mcp, "initialize_and_list_tools", "ok");
+}
+
+#[test]
 fn plugins_verify_strict_exits_69_with_pendings() {
     let output = Command::new(cairn_binary())
         .args(["plugins", "verify", "--strict"])
@@ -160,6 +181,27 @@ fn plugins_describe_mcp_output_is_exactly_generated_and_diff_friendly() {
         stdout, expected,
         "describe --mcp should be a stable, newline-terminated projection of generated TOOLS"
     );
+}
+
+#[test]
+fn plugins_list_json_reports_mcp_stdio_capability_e2e() {
+    let output = Command::new(cairn_binary())
+        .args(["plugins", "list", "--json"])
+        .output()
+        .expect("spawn cairn binary");
+    assert!(output.status.success(), "exit: {:?}", output.status);
+
+    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+    let plugins = v["plugins"].as_array().expect("plugins array");
+    let mcp = plugins
+        .iter()
+        .find(|plugin| plugin["name"] == "cairn-mcp")
+        .expect("cairn-mcp plugin present");
+
+    assert_eq!(mcp["capabilities"]["stdio"], true);
+    assert_eq!(mcp["capabilities"]["sse"], false);
+    assert_eq!(mcp["capabilities"]["http_streamable"], false);
 }
 
 fn assert_case_status(plugin: &serde_json::Value, case_id: &str, expected: &str) {

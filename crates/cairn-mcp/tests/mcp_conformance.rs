@@ -550,6 +550,7 @@ fn default_p0_gates() -> CapabilityGates {
             hybrid_search: false,
             llm_extract: false,
             agent_extract: false,
+            screen_capture_enabled: false,
             graph_edges: false,
             policy_trace: false,
             replay_sequence: false,

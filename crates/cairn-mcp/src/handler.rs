@@ -379,6 +379,10 @@ impl CairnMcpHandler {
                 )
             });
         }
+        capabilities.extend(cairn_core::status::default_sensor_capabilities());
+        capabilities
+            .sort_by_key(|capability| serde_json::to_string(capability).unwrap_or_default());
+        capabilities.dedup();
 
         StatusResponse {
             contract: "cairn.mcp.v1".to_owned(),
@@ -390,6 +394,7 @@ impl CairnMcpHandler {
             },
             capabilities,
             extensions: vec![],
+            sensors: cairn_core::status::default_sensors_status(),
             pipeline_dispatch: Some(pipeline_dispatch_advertisement(&DefaultRegistry)),
             // Mirror the SDK's `Sdk::status` and CLI's no-vault path so
             // CLI/SDK/MCP three-way parity holds. Until MCP exposes a

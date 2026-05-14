@@ -67,9 +67,20 @@ sensors:
     enabled: true
   screen:
     enabled: false
+    backend: xcap
+    ocr:
+      engine: auto
+    allow_apps: []
+    blur_password_fields: true
+    budget:
+      max_frames_per_minute: 12
+      max_text_bytes_per_event: 16384
   slack:
     enabled: false
     scope: []
+reference_consumer:
+  zero_capture_nudge:
+    enabled: true
 workflows:
   orchestrator: local
 pipeline:

@@ -1,7 +1,7 @@
 //! Integration tests for the cairn-cli config loader (brief §3.1, §6.5).
 
 use cairn_cli::config::{CliOverrides, load};
-use cairn_core::config::{CairnConfig, LlmProvider, StoreKind};
+use cairn_core::config::{CairnConfig, LlmProvider, ScreenBackend, StoreKind};
 
 fn write_yaml(vault: &std::path::Path, content: &str) {
     let dir = vault.join(".cairn");
@@ -124,6 +124,18 @@ fn cairn_env_override_wins_over_file() {
         // CAIRN_STORE__KIND=sqlite overrides the file's nexus-sandbox
         assert_eq!(config.store.kind, StoreKind::Sqlite);
     });
+}
+
+#[test]
+fn cairn_env_override_sets_screen_backend() {
+    with_clean_config_env(
+        &[("CAIRN_SENSORS__SCREEN__BACKEND", Some("screenpipe"))],
+        || {
+            let dir = tempfile::tempdir().unwrap();
+            let config = load(dir.path(), &CliOverrides::default()).unwrap();
+            assert_eq!(config.sensors.screen.backend, ScreenBackend::Screenpipe);
+        },
+    );
 }
 
 #[test]

@@ -30,8 +30,9 @@ Commands:
                  cairn verbs, writes responses to stdout. Blocks until stdin closes.
   vault          Manage the vault registry (brief §3.3)
   skill          Manage the Cairn skill bundle
-  admin          Administrative operations (model management, reindex, backup substrate)
+  admin          Administrative operations (model management, reindex, reporting, backup substrate)
   llm            LLM provider diagnostics (ADR 0001)
+  screen         Screen sensor diagnostics
   repair         Operator repair commands for blocked vault state
   identity       Manage vault identities (§3.5 / §4.1)
   flush          Manage human-review FlushPlans (brief §5.5)
@@ -67,8 +68,9 @@ Options:
 - [`cairn mcp`](commands/mcp.md) - Start an MCP stdio server. Reads MCP frames from stdin, dispatches to the eight cairn verbs, writes responses to stdout. Blocks until stdin closes.
 - [`cairn vault`](commands/vault.md) - Manage the vault registry (brief §3.3)
 - [`cairn skill`](commands/skill.md) - Manage the Cairn skill bundle
-- [`cairn admin`](commands/admin.md) - Administrative operations (model management, reindex, backup substrate)
+- [`cairn admin`](commands/admin.md) - Administrative operations (model management, reindex, reporting, backup substrate)
 - [`cairn llm`](commands/llm.md) - LLM provider diagnostics (ADR 0001)
+- [`cairn screen`](commands/screen.md) - Screen sensor diagnostics
 - [`cairn repair`](commands/repair.md) - Operator repair commands for blocked vault state
 - [`cairn identity`](commands/identity.md) - Manage vault identities (§3.5 / §4.1)
 - [`cairn flush`](commands/flush.md) - Manage human-review FlushPlans (brief §5.5)

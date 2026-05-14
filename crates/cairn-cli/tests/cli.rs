@@ -13,8 +13,11 @@
 //! - bundled `plugin.toml` parse failure → 78 (`EX_CONFIG`); registry
 //!   rejection → 69 (`EX_UNAVAILABLE`).
 
+use std::io::Write as _;
 use std::path::Path;
 use std::process::Command;
+
+use sha2::{Digest, Sha256};
 
 /// Path to the built CLI binary. Cargo sets `CARGO_BIN_EXE_<name>` for every
 /// binary in the current crate at test-compile time.
@@ -64,6 +67,86 @@ fn seed_consent_journal_repair_vault() -> tempfile::TempDir {
           (rowid, consent_id, subject, scope, decision, granted_by, decided_at) \
          VALUES (0, 'repair-cli', 'sub', 'private', 'GRANT', 'hmn:t', 0)",
     )
+}
+
+fn seed_zero_capture_metrics_vault(body: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    cairn_cli::vault::bootstrap(&cairn_cli::vault::BootstrapOpts {
+        vault_path: dir.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap vault");
+    let cairn_dir = dir.path().join(".cairn");
+    std::fs::write(cairn_dir.join("metrics.jsonl"), body).expect("write metrics.jsonl");
+    dir
+}
+
+fn write_stop_trace_fixture(vault: &Path) -> std::path::PathBuf {
+    let sources_dir = vault.join("sources").join("hook");
+    std::fs::create_dir_all(&sources_dir).expect("create hook sources");
+    let inputs = [
+        (
+            "01ARZ3NDEKTSV4RRFFQ69G5FAA",
+            "UserPromptSubmit",
+            None,
+            "2026-05-02T00:00:01Z",
+            "user asks for a summary",
+        ),
+        (
+            "01ARZ3NDEKTSV4RRFFQ69G5FAB",
+            "PreToolUse",
+            Some("tool-call-1"),
+            "2026-05-02T00:00:02Z",
+            r#"{"tool":"Read","input":{"file_path":"README.md"}}"#,
+        ),
+        (
+            "01ARZ3NDEKTSV4RRFFQ69G5FAC",
+            "PostToolUse",
+            Some("tool-call-1"),
+            "2026-05-02T00:00:03Z",
+            "tool returned README contents",
+        ),
+        (
+            "01ARZ3NDEKTSV4RRFFQ69G5FAD",
+            "Stop",
+            None,
+            "2026-05-02T00:00:04Z",
+            "session ended",
+        ),
+    ];
+    let trace_path = vault.join("trace.jsonl");
+    let mut file = std::fs::File::create(&trace_path).expect("create trace jsonl");
+    for (event_id, hook_name, tool_id, captured_at, body) in inputs {
+        let file_name = format!("{event_id}.txt");
+        let payload_path = sources_dir.join(&file_name);
+        std::fs::write(&payload_path, body).expect("write hook payload");
+        let hash = format!("sha256:{:x}", Sha256::digest(body.as_bytes()));
+        let event = serde_json::json!({
+            "event_id": event_id,
+            "sensor_id": "snr:local:hook:cc-session:v1",
+            "capture_mode": "auto",
+            "actor_chain": [{
+                "role": "author",
+                "identity": "snr:local:hook:cc-session:v1",
+                "at": captured_at
+            }],
+            "refs": {
+                "session_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                "turn_id": "turn-1",
+                "tool_id": tool_id
+            },
+            "payload_hash": hash,
+            "payload_ref": format!("sources/hook/{file_name}"),
+            "captured_at": captured_at,
+            "payload": {
+                "source_family": "hook",
+                "hook_name": hook_name
+            },
+            "source_family": "hook"
+        });
+        writeln!(file, "{event}").expect("write trace event");
+    }
+    trace_path
 }
 
 #[test]
@@ -292,6 +375,181 @@ fn repair_consent_journal_delete_non_blocker_exits_65() {
 }
 
 #[test]
+fn admin_zero_capture_report_renders_markdown() {
+    let vault = seed_zero_capture_metrics_vault(
+        r#"{"event":"zero_capture_audit","session_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","activity_count":3,"successful_ingest_writes":0,"successful_capture_trace_writes":0,"successful_write_count":0,"decision":"emit_nudge"}
+"#,
+    );
+    let out = cli()
+        .args([
+            "--vault",
+            vault.path().to_str().expect("utf-8 vault path"),
+            "admin",
+            "zero-capture-report",
+        ])
+        .output()
+        .expect("cairn admin zero-capture-report");
+    assert!(
+        out.status.success(),
+        "exit: {:?}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    assert!(stdout.contains("# Zero-capture report"));
+    assert!(stdout.contains("- emit_nudge: 1"));
+    assert!(stdout.contains("decision: emit_nudge"));
+}
+
+#[test]
+fn admin_zero_capture_report_json_emits_summary_and_reports() {
+    let vault = seed_zero_capture_metrics_vault(
+        r#"{"event":"accepted","record_id":"01ARZ3NDEKTSV4RRFFQ69G5FAA","kind":"user","class":"semantic","visibility":"private","scope":{"session_id":"ignored"},"source_family":"cli","capture_mode":"explicit","rank":1}
+{"event":"zero_capture_audit","session_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","activity_count":3,"successful_ingest_writes":0,"successful_capture_trace_writes":0,"successful_write_count":0,"decision":"emit_nudge"}
+{"event":"zero_capture_audit","session_id":"01ARZ3NDEKTSV4RRFFQ69G5FAW","activity_count":0,"successful_ingest_writes":0,"successful_capture_trace_writes":0,"successful_write_count":0,"decision":"no_meaningful_activity"}
+"#,
+    );
+    let out = cli()
+        .args([
+            "--vault",
+            vault.path().to_str().expect("utf-8 vault path"),
+            "admin",
+            "zero-capture-report",
+            "--json",
+        ])
+        .output()
+        .expect("cairn admin zero-capture-report --json");
+    assert!(
+        out.status.success(),
+        "exit: {:?}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("report json should parse");
+    assert_eq!(parsed["summary"]["total"], 2);
+    assert_eq!(parsed["summary"]["emit_nudge"], 1);
+    assert_eq!(parsed["summary"]["no_meaningful_activity"], 1);
+    assert_eq!(parsed["reports"][0]["decision"], "emit_nudge");
+}
+
+#[test]
+fn admin_zero_capture_report_skips_malformed_unrelated_metrics_rows() {
+    let vault = seed_zero_capture_metrics_vault(
+        r#"not json
+{"event":"zero_capture_audit","session_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","activity_count":3,"successful_ingest_writes":0,"successful_capture_trace_writes":0,"successful_write_count":0,"decision":"emit_nudge"}
+"#,
+    );
+    let out = cli()
+        .args([
+            "--vault",
+            vault.path().to_str().expect("utf-8 vault path"),
+            "admin",
+            "zero-capture-report",
+            "--json",
+        ])
+        .output()
+        .expect("cairn admin zero-capture-report --json");
+    assert!(
+        out.status.success(),
+        "exit: {:?}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("report json should parse");
+    assert_eq!(parsed["summary"]["total"], 1);
+    assert_eq!(parsed["summary"]["emit_nudge"], 1);
+}
+
+#[test]
+fn admin_zero_capture_report_skips_malformed_diagnostic_that_mentions_audit() {
+    let vault = seed_zero_capture_metrics_vault(
+        r#"{"event":"diagnostic","message":"zero_capture_audit row truncated"
+{"event":"zero_capture_audit","session_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","activity_count":3,"successful_ingest_writes":0,"successful_capture_trace_writes":0,"successful_write_count":0,"decision":"emit_nudge"}
+"#,
+    );
+    let out = cli()
+        .args([
+            "--vault",
+            vault.path().to_str().expect("utf-8 vault path"),
+            "admin",
+            "zero-capture-report",
+            "--json",
+        ])
+        .output()
+        .expect("cairn admin zero-capture-report --json");
+    assert!(
+        out.status.success(),
+        "exit: {:?}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("report json should parse");
+    assert_eq!(parsed["summary"]["total"], 1);
+}
+
+#[test]
+fn admin_zero_capture_report_skips_malformed_prefix_event_names() {
+    let vault = seed_zero_capture_metrics_vault(
+        r#"{"event":"zero_capture_audit_debug"
+{"event":"zero_capture_audit","session_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","activity_count":3,"successful_ingest_writes":0,"successful_capture_trace_writes":0,"successful_write_count":0,"decision":"emit_nudge"}
+"#,
+    );
+    let out = cli()
+        .args([
+            "--vault",
+            vault.path().to_str().expect("utf-8 vault path"),
+            "admin",
+            "zero-capture-report",
+            "--json",
+        ])
+        .output()
+        .expect("cairn admin zero-capture-report --json");
+    assert!(
+        out.status.success(),
+        "exit: {:?}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("report json should parse");
+    assert_eq!(parsed["summary"]["total"], 1);
+}
+
+#[test]
+fn admin_zero_capture_report_rejects_malformed_audit_metrics_rows() {
+    let vault = seed_zero_capture_metrics_vault(r#"{"event":"zero_capture_audit""#);
+    let out = cli()
+        .args([
+            "--vault",
+            vault.path().to_str().expect("utf-8 vault path"),
+            "admin",
+            "zero-capture-report",
+            "--json",
+        ])
+        .output()
+        .expect("cairn admin zero-capture-report --json");
+    assert_eq!(
+        out.status.code(),
+        Some(65),
+        "malformed zero_capture_audit rows must fail; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("InvalidInput"),
+        "stderr should include InvalidInput JSON: {stderr}"
+    );
+}
+
+#[test]
 fn no_args_prints_help_and_fails_closed() {
     // Generated `command()` sets subcommand_required(true) and
     // arg_required_else_help(true), so a bare `cairn` invocation is a clap
@@ -303,6 +561,333 @@ fn no_args_prints_help_and_fails_closed() {
     assert!(
         stderr.contains("ingest"),
         "help text missing verb listing: {stderr:?}",
+    );
+}
+
+#[test]
+fn capture_trace_empty_file_exits_zero() {
+    let vault = tempfile::tempdir().expect("temp vault");
+    cairn_cli::vault::bootstrap(&cairn_cli::vault::BootstrapOpts {
+        vault_path: vault.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap vault");
+    let trace_path = vault.path().join("trace.jsonl");
+    std::fs::write(&trace_path, "").expect("write empty trace");
+
+    let out = cli()
+        .args([
+            "--vault",
+            vault.path().to_str().expect("utf-8 vault"),
+            "capture_trace",
+            "--from",
+            trace_path.to_str().expect("utf-8 trace path"),
+        ])
+        .output()
+        .expect("cairn capture_trace --from <empty>");
+    assert!(
+        out.status.success(),
+        "capture_trace should succeed for empty import; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn capture_trace_unbound_vault_exits_ex_config() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let trace_path = dir.path().join("trace.jsonl");
+    std::fs::write(&trace_path, "").expect("write empty trace");
+
+    let out = cli()
+        .current_dir(dir.path())
+        .args([
+            "capture_trace",
+            "--from",
+            trace_path.to_str().expect("utf-8 trace path"),
+        ])
+        .output()
+        .expect("cairn capture_trace --from <empty>");
+    assert_eq!(
+        out.status.code(),
+        Some(78),
+        "capture_trace must fail closed outside a bound vault; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn capture_trace_unbound_vault_json_emits_envelope() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let trace_path = dir.path().join("trace.jsonl");
+    std::fs::write(&trace_path, "").expect("write empty trace");
+
+    let out = cli()
+        .current_dir(dir.path())
+        .args([
+            "capture_trace",
+            "--from",
+            trace_path.to_str().expect("utf-8 trace path"),
+            "--json",
+        ])
+        .output()
+        .expect("cairn capture_trace --json --from <empty>");
+    assert_eq!(
+        out.status.code(),
+        Some(78),
+        "capture_trace must fail closed outside a bound vault; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    let response: cairn_core::generated::envelope::Response = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("capture_trace error envelope parse failed: {e}\n{stdout}"));
+    assert!(matches!(
+        response.status,
+        cairn_core::generated::envelope::ResponseStatus::Aborted
+    ));
+    assert_eq!(
+        response
+            .error
+            .as_ref()
+            .and_then(|error| error.get("code"))
+            .and_then(serde_json::Value::as_str),
+        Some("NotFound")
+    );
+}
+
+#[test]
+fn capture_trace_missing_named_vault_json_emits_envelope() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let trace_path = dir.path().join("trace.jsonl");
+    let registry_path = dir.path().join("vaults.toml");
+    std::fs::write(&trace_path, "").expect("write empty trace");
+    cairn_cli::vault::VaultRegistryStore::new(registry_path.clone())
+        .save(&cairn_core::config::VaultRegistry::default())
+        .expect("seed empty registry");
+
+    let out = cli()
+        .current_dir(dir.path())
+        .env("CAIRN_REGISTRY", &registry_path)
+        .args([
+            "--vault",
+            "missing-vault",
+            "capture_trace",
+            "--from",
+            trace_path.to_str().expect("utf-8 trace path"),
+            "--json",
+        ])
+        .output()
+        .expect("cairn --vault missing-vault capture_trace --json");
+    assert_eq!(
+        out.status.code(),
+        Some(78),
+        "capture_trace must fail closed for missing named vault; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    let response: cairn_core::generated::envelope::Response = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("capture_trace error envelope parse failed: {e}\n{stdout}"));
+    assert!(matches!(
+        response.verb,
+        cairn_core::generated::envelope::ResponseVerb::CaptureTrace
+    ));
+    assert_eq!(
+        response
+            .error
+            .as_ref()
+            .and_then(|error| error.get("code"))
+            .and_then(serde_json::Value::as_str),
+        Some("NotFound")
+    );
+}
+
+#[test]
+fn capture_trace_malformed_registry_json_emits_envelope() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let trace_path = dir.path().join("trace.jsonl");
+    let registry_path = dir.path().join("vaults.toml");
+    std::fs::write(&trace_path, "").expect("write empty trace");
+    std::fs::write(&registry_path, "not valid toml").expect("write malformed registry");
+
+    let out = cli()
+        .current_dir(dir.path())
+        .env("CAIRN_REGISTRY", &registry_path)
+        .args([
+            "--vault",
+            "missing-vault",
+            "capture_trace",
+            "--from",
+            trace_path.to_str().expect("utf-8 trace path"),
+            "--json",
+        ])
+        .output()
+        .expect("cairn --vault missing-vault capture_trace --json");
+    assert_eq!(
+        out.status.code(),
+        Some(78),
+        "capture_trace must fail closed for malformed registry; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    let response: cairn_core::generated::envelope::Response = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("capture_trace error envelope parse failed: {e}\n{stdout}"));
+    assert!(matches!(
+        response.verb,
+        cairn_core::generated::envelope::ResponseVerb::CaptureTrace
+    ));
+    assert_eq!(
+        response
+            .error
+            .as_ref()
+            .and_then(|error| error.get("code"))
+            .and_then(serde_json::Value::as_str),
+        Some("Internal")
+    );
+}
+
+#[test]
+fn capture_trace_registry_path_error_json_emits_envelope() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let trace_path = dir.path().join("trace.jsonl");
+    std::fs::write(&trace_path, "").expect("write empty trace");
+
+    let out = cli()
+        .current_dir(dir.path())
+        .env_remove("CAIRN_REGISTRY")
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("HOME")
+        .args([
+            "--vault",
+            "missing-vault",
+            "capture_trace",
+            "--from",
+            trace_path.to_str().expect("utf-8 trace path"),
+            "--json",
+        ])
+        .output()
+        .expect("cairn --vault missing-vault capture_trace --json without registry env");
+    assert_eq!(
+        out.status.code(),
+        Some(78),
+        "capture_trace must fail closed for registry path errors; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    let response: cairn_core::generated::envelope::Response = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("capture_trace error envelope parse failed: {e}\n{stdout}"));
+    assert!(matches!(
+        response.verb,
+        cairn_core::generated::envelope::ResponseVerb::CaptureTrace
+    ));
+    assert_eq!(
+        response
+            .error
+            .as_ref()
+            .and_then(|error| error.get("code"))
+            .and_then(serde_json::Value::as_str),
+        Some("Internal")
+    );
+}
+
+#[test]
+fn capture_trace_e2e_skips_malformed_prefix_metric_event() {
+    let vault = tempfile::tempdir().expect("temp vault");
+    cairn_cli::vault::bootstrap(&cairn_cli::vault::BootstrapOpts {
+        vault_path: vault.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap vault");
+    let trace_path = write_stop_trace_fixture(vault.path());
+    std::fs::write(
+        vault.path().join(".cairn").join("metrics.jsonl"),
+        r#"{"event":"accepted_debug""#,
+    )
+    .expect("write malformed prefix metric row");
+
+    let out = cli()
+        .args([
+            "--vault",
+            vault.path().to_str().expect("utf-8 vault"),
+            "capture_trace",
+            "--from",
+            trace_path.to_str().expect("utf-8 trace path"),
+            "--json",
+        ])
+        .output()
+        .expect("cairn capture_trace --json");
+    assert!(
+        out.status.success(),
+        "capture_trace should succeed; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("capture_trace envelope should parse");
+    assert_eq!(parsed["status"], "committed");
+    assert_eq!(
+        parsed["data"]["failed_turns"]
+            .as_array()
+            .expect("failed_turns array")
+            .len(),
+        0
+    );
+    let metrics = std::fs::read_to_string(vault.path().join(".cairn").join("metrics.jsonl"))
+        .expect("read metrics");
+    assert!(
+        metrics.contains(r#""event":"zero_capture_audit""#),
+        "audit row should be appended despite malformed prefix row: {metrics}"
+    );
+}
+
+#[test]
+fn capture_trace_e2e_reports_malformed_exact_accepted_metric() {
+    let vault = tempfile::tempdir().expect("temp vault");
+    cairn_cli::vault::bootstrap(&cairn_cli::vault::BootstrapOpts {
+        vault_path: vault.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap vault");
+    let trace_path = write_stop_trace_fixture(vault.path());
+    std::fs::write(
+        vault.path().join(".cairn").join("metrics.jsonl"),
+        r#"{"event":"accepted""#,
+    )
+    .expect("write malformed accepted metric row");
+
+    let out = cli()
+        .args([
+            "--vault",
+            vault.path().to_str().expect("utf-8 vault"),
+            "capture_trace",
+            "--from",
+            trace_path.to_str().expect("utf-8 trace path"),
+            "--json",
+        ])
+        .output()
+        .expect("cairn capture_trace --json");
+    assert!(
+        out.status.success(),
+        "capture_trace should surface per-turn failures in committed response; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("capture_trace envelope should parse");
+    let failed_turns = parsed["data"]["failed_turns"]
+        .as_array()
+        .expect("failed_turns array");
+    assert_eq!(failed_turns.len(), 1);
+    assert!(
+        failed_turns[0]["reason"]
+            .as_str()
+            .expect("failure reason")
+            .contains("turn_failed"),
+        "unexpected failed_turns: {failed_turns:?}"
+    );
+    let metrics = std::fs::read_to_string(vault.path().join(".cairn").join("metrics.jsonl"))
+        .expect("read metrics");
+    assert!(
+        !metrics.contains(r#""event":"zero_capture_audit""#),
+        "audit row should not be appended when accepted metric parsing fails: {metrics}"
     );
 }
 
@@ -554,6 +1139,20 @@ fn unknown_argument_fails_closed() {
     assert!(
         stderr.contains("unexpected argument"),
         "stderr missing clap usage marker: {stderr:?}",
+    );
+}
+
+#[test]
+fn screen_capture_help_lists_output_flag() {
+    let out = cli()
+        .args(["screen", "capture", "--help"])
+        .output()
+        .expect("cairn screen capture --help");
+    assert!(out.status.success(), "exit: {:?}", out.status);
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    assert!(
+        stdout.contains("--output"),
+        "screen capture --help must list --output flag; got: {stdout}",
     );
 }
 
