@@ -317,15 +317,14 @@ pub fn run(
 ) -> ExitCode {
     let json = sub.get_flag("json");
 
-    // Task 1 exposes --recording at the contract/CLI layer before runtime
-    // recording ingest exists. Validate it before any early source dispatch
-    // (folder/jsonl/flush/resync) so it cannot route through another adapter.
-    if sub.get_one::<PathBuf>("recording").is_some() {
+    // Validate recording before any early source dispatch (folder/jsonl/flush/resync)
+    // so it cannot route through another adapter.
+    if let Some(recording_path) = sub.get_one::<PathBuf>("recording") {
         let source_count = ingest_source_count(sub);
         if source_count != 1 {
             return emit_ingest_source_conflict(source_count);
         }
-        return emit_recording_not_implemented(json);
+        return recording::run(sub, json, recording_path, &vault_root, config);
     }
 
     if let Some(requested_folder) = sub.get_one::<PathBuf>("folder") {
@@ -999,7 +998,9 @@ fn ingest_args_from_matches(sub: &ArgMatches, body: String) -> IngestArgs {
             }),
         no_cache: Some(sub.get_flag("no_cache")).filter(|b| *b),
         no_diff: Some(sub.get_flag("no-diff")).filter(|b| *b),
-        recording: None,
+        recording: sub
+            .get_one::<PathBuf>("recording")
+            .map(|p| p.to_string_lossy().into_owned()),
         recursive: Some(sub.get_flag("recursive")).filter(|b| *b),
         session_id: sub.get_one::<String>("session_id").cloned(),
         tags: sub
@@ -1052,17 +1053,6 @@ fn emit_ingest_source_conflict(source_count: u8) -> ExitCode {
     eprintln!(
         "cairn ingest: exactly one of [source, --body, --file, --folder, --url, --jsonl, --recording] is required (got {source_count})"
     );
-    ExitCode::from(64)
-}
-
-fn emit_recording_not_implemented(json: bool) -> ExitCode {
-    let reason = "cairn ingest --recording is not implemented yet";
-    let resp = invalid_args_response(ResponseVerb::Ingest, "recording", reason);
-    if json {
-        emit_json(&resp);
-    } else {
-        human_error("ingest", "InvalidArgs", reason, &resp.operation_id);
-    }
     ExitCode::from(64)
 }
 

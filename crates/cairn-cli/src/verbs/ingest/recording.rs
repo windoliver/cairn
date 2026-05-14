@@ -5,15 +5,28 @@
     reason = "Recording planner pieces are staged before runtime ingestion wiring."
 )]
 
+use anyhow::Context as _;
 use cairn_core::domain::canonical::canonical_bytes;
 use cairn_core::domain::{
     ActorChainEntry, CaptureEvent, CaptureEventId, CaptureMode, CapturePayload, CaptureRefs,
     ChainRole, Identity, PayloadHash, Rfc3339Timestamp, SourceFamily,
 };
+use cairn_core::generated::common::Ulid as WireUlid;
+use cairn_core::generated::envelope::{
+    Response, ResponseData, ResponsePolicyTrace, ResponseStatus, ResponseVerb,
+};
+use cairn_core::generated::verbs::ingest::{IngestData, IngestDataRecordingSummary};
+use clap::ArgMatches;
 use sha2::{Digest as _, Sha256};
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+use std::time::Instant;
 use ulid::Ulid;
+
+use crate::verbs::envelope::{
+    emit_json, human_error, internal_error_response, invalid_args_response, new_operation_id,
+};
 
 /// Design sensor identity for user-triggered batch recording ingest.
 const RECORDING_SENSOR_ID: &str = "snr:local:recording:default:v1";
@@ -62,6 +75,311 @@ struct StagedPayload {
 struct CaptureBatch {
     events: Vec<CaptureEvent>,
     payloads: Vec<StagedPayload>,
+}
+
+/// Run deterministic fixture-mode recording ingest.
+#[must_use]
+pub fn run(
+    _sub: &ArgMatches,
+    json: bool,
+    recording_path: &Path,
+    vault_root: &Path,
+    _config: cairn_core::config::CairnConfig,
+) -> ExitCode {
+    let started = Instant::now();
+
+    if !recording_path.exists() {
+        let reason = format!(
+            "path does not exist: {}; cairn ingest --recording is not implemented yet without CAIRN_RECORDING_FIXTURE_JSON",
+            recording_path.display()
+        );
+        return emit_invalid(json, &reason);
+    }
+
+    let fixture_path = match std::env::var_os("CAIRN_RECORDING_FIXTURE_JSON") {
+        Some(path) if !path.is_empty() => PathBuf::from(path),
+        _ => {
+            return emit_invalid(
+                json,
+                "cairn ingest --recording is not implemented yet for real media runtime; set CAIRN_RECORDING_FIXTURE_JSON for deterministic fixture mode",
+            );
+        }
+    };
+
+    let fixture_raw = match std::fs::read_to_string(&fixture_path) {
+        Ok(raw) => raw,
+        Err(e) => {
+            return emit_invalid(
+                json,
+                &format!(
+                    "failed to read CAIRN_RECORDING_FIXTURE_JSON {}: {e}",
+                    fixture_path.display()
+                ),
+            );
+        }
+    };
+    let plan = match parse_fixture_plan(&fixture_raw) {
+        Ok(plan) => plan,
+        Err(e) => {
+            return emit_invalid(
+                json,
+                &format!(
+                    "failed to parse CAIRN_RECORDING_FIXTURE_JSON {}: {e:#}",
+                    fixture_path.display()
+                ),
+            );
+        }
+    };
+    let batch = match build_capture_batch(&plan) {
+        Ok(batch) => batch,
+        Err(e) => {
+            return emit_invalid(json, &format!("failed to plan recording fixture: {e:#}"));
+        }
+    };
+    if batch.events.is_empty() {
+        return emit_invalid(json, "recording fixture produced no ingestible segments");
+    }
+
+    let summary_counts = SummaryCounts::from_plan(&plan);
+    let record_id = WireUlid(batch.events[0].event_id.as_str().to_owned());
+    let session_id = batch.events[0]
+        .refs
+        .as_ref()
+        .and_then(|refs| refs.session_id.clone())
+        .unwrap_or_else(|| RECORDING_SESSION_ID.to_owned());
+
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => return emit_internal(json, &format!("runtime build: {e}")),
+    };
+
+    let result = rt.block_on(async { import_fixture_batch(vault_root, batch).await });
+    let policy_trace = match result {
+        Ok(policy_trace) => policy_trace,
+        Err(e) => return emit_internal(json, &format!("{e:#}")),
+    };
+
+    let resp = Response {
+        contract: "cairn.mcp.v1".to_owned(),
+        data: Some(ResponseData::Ingest(IngestData {
+            cache_hits: None,
+            cache_misses: None,
+            cache_writes: None,
+            files_processed: None,
+            jsonl_summary: None,
+            plan_ref: None,
+            record_id,
+            recording_summary: Some(IngestDataRecordingSummary {
+                audio_segments: Some(summary_counts.audio_segments),
+                elapsed_ms: Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)),
+                frame_ocr_segments: Some(summary_counts.frame_ocr_segments),
+                media_hash: Some(plan.media_hash.clone()),
+                records_written: Some(summary_counts.segments),
+                segments: Some(summary_counts.segments),
+                skipped_frames: Some(plan.skipped_frames),
+            }),
+            session_id,
+        })),
+        error: None,
+        operation_id: new_operation_id(),
+        policy_trace,
+        status: ResponseStatus::Committed,
+        target: None,
+        verb: ResponseVerb::Ingest,
+    };
+
+    if json {
+        emit_json(&resp);
+    } else if let Some(ResponseData::Ingest(data)) = resp.data.as_ref()
+        && let Some(summary) = data.recording_summary.as_ref()
+    {
+        println!(
+            "cairn ingest --recording: committed {} segments from {}",
+            summary.segments.unwrap_or(0),
+            summary.media_hash.as_deref().unwrap_or("unknown media")
+        );
+    }
+
+    ExitCode::SUCCESS
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SummaryCounts {
+    segments: u64,
+    audio_segments: u64,
+    frame_ocr_segments: u64,
+}
+
+impl SummaryCounts {
+    fn from_plan(plan: &RecordingPlan) -> Self {
+        let audio_segments = plan
+            .segments
+            .iter()
+            .filter(|segment| matches!(segment.kind, SegmentKind::AudioTranscript { .. }))
+            .count();
+        let frame_ocr_segments = plan
+            .segments
+            .iter()
+            .filter(|segment| matches!(segment.kind, SegmentKind::FrameOcr { .. }))
+            .count();
+        Self {
+            segments: u64::try_from(plan.segments.len()).unwrap_or(u64::MAX),
+            audio_segments: u64::try_from(audio_segments).unwrap_or(u64::MAX),
+            frame_ocr_segments: u64::try_from(frame_ocr_segments).unwrap_or(u64::MAX),
+        }
+    }
+}
+
+async fn import_fixture_batch(
+    vault_root: &Path,
+    batch: CaptureBatch,
+) -> anyhow::Result<Vec<ResponsePolicyTrace>> {
+    let written = write_payloads(vault_root, &batch.payloads).await?;
+    let import_result = async {
+        let db_path = vault_root.join(".cairn").join("cairn.db");
+        let store = cairn_store_sqlite::open(&db_path).await?;
+        let response =
+            crate::verbs::capture_trace::run_events_handler(&store, vault_root, batch.events)
+                .await?;
+        if !response.failed_turns.is_empty() {
+            anyhow::bail!(
+                "capture import failed for recording fixture: {:?}",
+                response.failed_turns
+            );
+        }
+        Ok::<_, anyhow::Error>(response.policy_trace)
+    }
+    .await;
+
+    if import_result.is_err() {
+        cleanup_created_payloads(vault_root, &written.created_paths).await;
+    }
+
+    import_result
+}
+
+#[derive(Debug, Default)]
+struct PayloadWriteSet {
+    created_paths: Vec<PathBuf>,
+}
+
+async fn write_payloads(
+    vault_root: &Path,
+    payloads: &[StagedPayload],
+) -> anyhow::Result<PayloadWriteSet> {
+    let mut written = PayloadWriteSet::default();
+    for payload in payloads {
+        let path = vault_root.join(&payload.vault_relative_path);
+        if let Err(e) = write_one_payload(&path, &payload.bytes, &mut written).await {
+            cleanup_created_payloads(vault_root, &written.created_paths).await;
+            return Err(e);
+        }
+    }
+    Ok(written)
+}
+
+async fn write_one_payload(
+    path: &Path,
+    bytes: &[u8],
+    written: &mut PayloadWriteSet,
+) -> anyhow::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("payload path has no parent: {}", path.display()))?;
+    tokio::fs::create_dir_all(parent).await?;
+
+    if tokio::fs::try_exists(path).await? {
+        let metadata = tokio::fs::metadata(path).await?;
+        if !metadata.is_file() {
+            anyhow::bail!("payload path is not a file: {}", path.display());
+        }
+        let existing = tokio::fs::read(path).await?;
+        if existing == bytes {
+            return Ok(());
+        }
+        anyhow::bail!(
+            "payload path already exists with different content: {}",
+            path.display()
+        );
+    }
+
+    let tmp_path = temp_payload_path(path)?;
+    let write_result = async {
+        tokio::fs::write(&tmp_path, bytes).await?;
+        tokio::fs::rename(&tmp_path, path).await?;
+        Ok::<_, std::io::Error>(())
+    }
+    .await;
+
+    if let Err(e) = write_result {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(e)
+            .map_err(anyhow::Error::from)
+            .with_context(|| format!("write payload {}", path.display()));
+    }
+
+    written.created_paths.push(path.to_path_buf());
+    Ok(())
+}
+
+fn temp_payload_path(path: &Path) -> anyhow::Result<PathBuf> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("payload path has no parent: {}", path.display()))?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("payload path has no UTF-8 filename: {}", path.display()))?;
+    Ok(parent.join(format!(".{file_name}.{}.tmp", Ulid::new())))
+}
+
+async fn cleanup_created_payloads(vault_root: &Path, paths: &[PathBuf]) {
+    for path in paths.iter().rev() {
+        let _ = tokio::fs::remove_file(path).await;
+        cleanup_empty_payload_dirs(vault_root, path.parent()).await;
+    }
+}
+
+async fn cleanup_empty_payload_dirs(vault_root: &Path, start: Option<&Path>) {
+    let mut current = start;
+    while let Some(dir) = current {
+        if dir == vault_root || !dir.starts_with(vault_root) {
+            break;
+        }
+        if tokio::fs::remove_dir(dir).await.is_err() {
+            break;
+        }
+        current = dir.parent();
+    }
+}
+
+fn recording_dir(plan: &RecordingPlan) -> &str {
+    plan.media_hash
+        .strip_prefix("sha256:")
+        .unwrap_or(plan.media_hash.as_str())
+}
+
+fn emit_invalid(json: bool, reason: &str) -> ExitCode {
+    let resp = invalid_args_response(ResponseVerb::Ingest, "recording", reason);
+    if json {
+        emit_json(&resp);
+    } else {
+        human_error("ingest", "InvalidArgs", reason, &resp.operation_id);
+    }
+    ExitCode::from(64)
+}
+
+fn emit_internal(json: bool, message: &str) -> ExitCode {
+    let resp = internal_error_response(ResponseVerb::Ingest, message);
+    if json {
+        emit_json(&resp);
+    } else {
+        human_error("ingest", "Internal", message, &resp.operation_id);
+    }
+    ExitCode::FAILURE
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -279,18 +597,11 @@ fn build_capture_batch(plan: &RecordingPlan) -> anyhow::Result<CaptureBatch> {
             event_id,
             sensor.clone(),
             CaptureMode::Explicit,
-            vec![
-                ActorChainEntry {
-                    role: ChainRole::Author,
-                    identity: author.clone(),
-                    at: captured_at.clone(),
-                },
-                ActorChainEntry {
-                    role: ChainRole::Sensor,
-                    identity: sensor.clone(),
-                    at: captured_at.clone(),
-                },
-            ],
+            vec![ActorChainEntry {
+                role: ChainRole::Author,
+                identity: author.clone(),
+                at: captured_at.clone(),
+            }],
             Some(CaptureRefs {
                 session_id: Some(RECORDING_SESSION_ID.to_owned()),
                 turn_id: Some(turn_id.clone()),
@@ -571,12 +882,7 @@ mod tests {
                 "hmn:recording-ingest"
             );
             assert_eq!(event.actor_chain[0].at, event.captured_at);
-            assert_eq!(event.actor_chain[1].role, ChainRole::Sensor);
-            assert_eq!(
-                event.actor_chain[1].identity.as_str(),
-                "snr:local:recording:default:v1"
-            );
-            assert_eq!(event.actor_chain[1].at, event.captured_at);
+            assert_eq!(event.actor_chain.len(), 1);
             let payload_stem = staged
                 .vault_relative_path
                 .rsplit('/')
@@ -727,6 +1033,58 @@ mod tests {
             "unexpected error: {message}"
         );
         assert!(message.contains("recseg-"), "unexpected error: {message}");
+    }
+
+    #[test]
+    fn payload_write_failure_keeps_existing_payload_and_removes_new_files() {
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        rt.block_on(async {
+            let vault = tempfile::tempdir().expect("temp vault");
+            let existing_rel = "sources/recordings/hash/existing.json";
+            let created_rel = "sources/recordings/hash/created.json";
+            let failing_rel = "sources/recordings/hash/failing.json";
+            let existing_path = vault.path().join(existing_rel);
+            std::fs::create_dir_all(existing_path.parent().expect("existing parent"))
+                .expect("create existing parent");
+            std::fs::write(&existing_path, b"existing bytes").expect("write existing");
+            std::fs::create_dir_all(vault.path().join(failing_rel))
+                .expect("create directory at failing payload path");
+
+            let payloads = vec![
+                StagedPayload {
+                    vault_relative_path: existing_rel.to_owned(),
+                    bytes: b"existing bytes".to_vec(),
+                },
+                StagedPayload {
+                    vault_relative_path: created_rel.to_owned(),
+                    bytes: b"created bytes".to_vec(),
+                },
+                StagedPayload {
+                    vault_relative_path: failing_rel.to_owned(),
+                    bytes: b"new bytes".to_vec(),
+                },
+            ];
+
+            let err = write_payloads(vault.path(), &payloads)
+                .await
+                .expect_err("directory target should fail payload write");
+            assert!(
+                err.to_string().contains("payload path is not a file"),
+                "unexpected error: {err:#}"
+            );
+            assert_eq!(
+                std::fs::read(&existing_path).expect("read existing"),
+                b"existing bytes"
+            );
+            assert!(
+                !vault.path().join(created_rel).exists(),
+                "newly created payload should be removed after failure"
+            );
+            assert!(
+                vault.path().join(failing_rel).is_dir(),
+                "pre-existing directory at failed path should not be removed"
+            );
+        });
     }
 
     #[test]

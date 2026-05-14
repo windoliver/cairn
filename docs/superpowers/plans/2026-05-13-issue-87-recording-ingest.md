@@ -1069,7 +1069,7 @@ pub fn run(
                 })),
                 operation_id: new_operation_id(),
                 policy_trace: Vec::<ResponsePolicyTrace>::new(),
-                status: ResponseStatus::Aborted,
+                status: ResponseStatus::Rejected,
                 target: None,
                 verb: ResponseVerb::Ingest,
             };
@@ -1224,7 +1224,7 @@ fn recording_rejects_unsupported_extension_without_db_writes() {
 
     assert_eq!(out.status.code(), Some(64));
     let value: Value = serde_json::from_slice(&out.stdout).expect("response JSON");
-    assert_eq!(value["status"], "aborted");
+    assert_eq!(value["status"], "rejected");
     assert!(
         value["error"]["message"]
             .as_str()
@@ -1257,7 +1257,7 @@ fn recording_rejects_missing_fixture_runtime_without_db_writes() {
 
     assert_eq!(out.status.code(), Some(64));
     let value: Value = serde_json::from_slice(&out.stdout).expect("response JSON");
-    assert_eq!(value["status"], "aborted");
+    assert_eq!(value["status"], "rejected");
     assert!(
         value["error"]["message"]
             .as_str()
