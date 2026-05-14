@@ -28,6 +28,20 @@ describe("DesktopApiClient", () => {
     expect(records[0].id).toBe("rec-alpha-001");
   });
 
+  it("normalizes trailing slashes in the backend base URL", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify([{ id: "rec-alpha-001", title: "Project memory scaffold" }]), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const client = new DesktopApiClient("http://127.0.0.1:4000/");
+    await client.records();
+
+    expect(fetchMock).toHaveBeenCalledWith("http://127.0.0.1:4000/api/v1/records");
+  });
+
   it("throws structured errors for failed requests", async () => {
     fetchMock.mockResolvedValueOnce(
       new Response(JSON.stringify({ code: "record_not_found", message: "Record was not found" }), {
