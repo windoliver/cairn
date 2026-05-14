@@ -6,9 +6,11 @@ type SearchApi = Pick<DesktopApi, "search">;
 
 export function SearchPanel({
   api,
+  selectedId,
   onSelectRecord,
 }: {
   api: SearchApi;
+  selectedId?: string | null;
   onSelectRecord: (id: string) => void;
 }) {
   const [query, setQuery] = useState("");
@@ -48,11 +50,28 @@ export function SearchPanel({
         aria-label="Search records"
         value={query}
         onChange={(event) => void runSearch(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" && results[0]) {
+            onSelectRecord(results[0].recordId);
+          }
+        }}
       />
       {error && <p>{error}</p>}
+      {query.trim() && !error && results.length > 0 && (
+        <p className="searchStatus">
+          {results.length} {results.length === 1 ? "result" : "results"}
+        </p>
+      )}
       {results.map((result) => (
-        <button key={result.recordId} type="button" onClick={() => onSelectRecord(result.recordId)}>
-          {result.title}
+        <button
+          aria-current={result.recordId === selectedId ? "true" : undefined}
+          className={result.recordId === selectedId ? "searchResult selected" : "searchResult"}
+          key={result.recordId}
+          type="button"
+          onClick={() => onSelectRecord(result.recordId)}
+        >
+          <span>{result.title}</span>
+          <small>{result.snippet}</small>
         </button>
       ))}
     </section>

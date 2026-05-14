@@ -158,7 +158,11 @@ export function App({
         />
         <div className="lowerPanels">
           <GraphPanel graph={state.graph} />
-          <SearchPanel api={api} onSelectRecord={(id) => void selectRecord(id)} />
+          <SearchPanel
+            api={api}
+            selectedId={selectedId}
+            onSelectRecord={(id) => void selectRecord(id)}
+          />
           <LintPanel findings={state.lint} />
         </div>
       </section>

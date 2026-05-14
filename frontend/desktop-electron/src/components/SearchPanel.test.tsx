@@ -83,4 +83,40 @@ describe("SearchPanel", () => {
 
     expect(await screen.findByText("Fresh result")).toBeInTheDocument();
   });
+
+  it("shows result feedback and highlights the selected search result", async () => {
+    const user = userEvent.setup();
+    const api = {
+      search: vi.fn().mockResolvedValue([
+        { recordId: "rec-alpha-002", title: "Reconcile review", snippet: "backend validation", score: 1 },
+      ]),
+    };
+
+    render(<SearchPanel api={api} selectedId="rec-alpha-002" onSelectRecord={vi.fn()} />);
+
+    await user.type(screen.getByLabelText("Search records"), "reconcile");
+
+    expect(await screen.findByText("1 result")).toBeInTheDocument();
+    expect(screen.getByText("backend validation")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Reconcile review/ })).toHaveAttribute("aria-current", "true");
+  });
+
+  it("opens the first search result when Enter is pressed", async () => {
+    const user = userEvent.setup();
+    const onSelectRecord = vi.fn();
+    const api = {
+      search: vi.fn().mockResolvedValue([
+        { recordId: "rec-alpha-002", title: "Reconcile review", snippet: "backend validation", score: 1 },
+      ]),
+    };
+
+    render(<SearchPanel api={api} selectedId={null} onSelectRecord={onSelectRecord} />);
+
+    const input = screen.getByLabelText("Search records");
+    await user.type(input, "reconcile");
+    await screen.findByText("1 result");
+    await user.keyboard("{Enter}");
+
+    expect(onSelectRecord).toHaveBeenCalledWith("rec-alpha-002");
+  });
 });

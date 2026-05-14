@@ -62,6 +62,37 @@ textarea {
   border-color: #9fbea8;
 }
 
+.searchStatus {
+  color: #57636b;
+  font-size: 13px;
+  margin: 8px 0;
+}
+
+.searchResult {
+  align-items: flex-start;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: inherit;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+  padding: 8px;
+  text-align: left;
+  width: 100%;
+}
+
+.searchResult.selected {
+  background: #e9f2ec;
+  border-color: #9fbea8;
+}
+
+.searchResult small {
+  color: #57636b;
+}
+
 .workspace {
   display: grid;
   grid-template-rows: minmax(360px, 1fr) 280px;
