@@ -18,7 +18,7 @@ async function createWindow() {
     },
   });
 
-  const devUrl = process.env.VITE_DEV_SERVER_URL ?? "http://localhost:5173";
+  const devUrl = process.env.VITE_DEV_SERVER_URL ?? "http://127.0.0.1:5173";
   if (process.env.NODE_ENV === "development") {
     await win.loadURL(devUrl);
   } else {

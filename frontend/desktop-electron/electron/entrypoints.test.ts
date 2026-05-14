@@ -17,4 +17,13 @@ describe("Electron entrypoints", () => {
     expect(mainSource).toContain("preload.mjs");
     expect(mainSource).not.toContain("preload.ts");
   });
+
+  it("uses an explicit IPv4 loopback dev server URL", () => {
+    const mainPath = resolve(packageRoot, packageJson.main);
+    const mainSource = readFileSync(mainPath, "utf8");
+    const viteSource = readFileSync(resolve(packageRoot, "vite.config.ts"), "utf8");
+
+    expect(mainSource).toContain("http://127.0.0.1:5173");
+    expect(viteSource).toContain("host: \"127.0.0.1\"");
+  });
 });
