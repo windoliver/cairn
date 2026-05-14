@@ -70,6 +70,9 @@ sensors:
   slack:
     enabled: false
     scope: []
+reference_consumer:
+  zero_capture_nudge:
+    enabled: true
 workflows:
   orchestrator: local
 pipeline:

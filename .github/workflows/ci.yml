@@ -61,6 +61,7 @@ jobs:
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: lint
+          cache-bin: "false"
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: cargo clippy --workspace --all-targets -- -D warnings
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
@@ -81,6 +82,7 @@ jobs:
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: test-${{ matrix.os }}
+          cache-bin: "false"
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-nextest
         uses: taiki-e/install-action@787505cde8a44ea468a00478fe52baf23b15bccd # v2.75.21
@@ -104,6 +106,7 @@ jobs:
         with:
           shared-key: core-boundary
           cache-targets: "false"
+          cache-bin: "false"
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: scripts/check-core-boundary.sh
         run: ./scripts/check-core-boundary.sh
@@ -144,6 +147,7 @@ jobs:
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: filter-smoke
+          cache-bin: "false"
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: cargo run -p cairn-core --bin filter_smoke
         run: cargo run -p cairn-core --bin filter_smoke --features smoke --locked --release
@@ -160,6 +164,7 @@ jobs:
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: cli-mcp-smoke
+          cache-bin: "false"
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: cargo test -p cairn-cli --test status_snapshot --test handshake_tests --test mcp_handshake_e2e
         run: cargo test -p cairn-cli --locked --test status_snapshot --test handshake_tests --test mcp_handshake_e2e
@@ -176,6 +181,7 @@ jobs:
         uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
         with:
           shared-key: plugins-verify
+          cache-bin: "false"
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: cairn plugins verify (default mode)
         run: cargo run -p cairn-cli --locked -- plugins verify
@@ -205,6 +211,7 @@ jobs:
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: build-${{ matrix.os }}
+          cache-bin: "false"
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: cargo check --workspace --all-targets
         run: cargo check --workspace --all-targets --locked
@@ -221,6 +228,7 @@ jobs:
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: codegen-drift
+          cache-bin: "false"
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: cargo run -p cairn-idl --bin cairn-codegen -- --check
         run: cargo run -p cairn-idl --bin cairn-codegen --locked -- --check
@@ -246,6 +254,7 @@ jobs:
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: bench-full
+          cache-bin: "false"
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: cairn-bench (full corpus)
         env:

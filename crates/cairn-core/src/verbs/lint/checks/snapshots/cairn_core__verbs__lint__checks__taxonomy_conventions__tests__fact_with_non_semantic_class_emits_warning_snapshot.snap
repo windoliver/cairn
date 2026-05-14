@@ -1,0 +1,16 @@
+---
+source: crates/cairn-core/src/verbs/lint/checks/taxonomy_conventions.rs
+assertion_line: 248
+expression: findings
+---
+[
+  {
+    "kind": "wrong_class_for_kind",
+    "message": "record 01ARZ3NDEKTSV4RRFFQ69G5FAA has kind `fact` with class `episodic`; canonical class is `semantic` per docs/design/taxonomy-conventions.md",
+    "severity": "warning",
+    "suggested_fix": "reclassify this record as `semantic`",
+    "target": {
+      "record_id": "01ARZ3NDEKTSV4RRFFQ69G5FAA"
+    }
+  }
+]
