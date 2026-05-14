@@ -227,6 +227,7 @@ pub fn run_with_context(
         // makes the two sides un-divergeable.
         pipeline_dispatch: Some(pipeline_dispatch_advertisement(&DefaultRegistry)),
         mcp_graph_tools: mcp_graph_tools_field,
+        workflows: None,
     };
 
     if json {

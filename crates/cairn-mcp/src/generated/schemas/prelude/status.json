@@ -497,6 +497,46 @@
         "incarnation"
       ],
       "type": "object"
+    },
+    "workflows": {
+      "description": "Runtime workflow-drainer progress for `cairn.admin.v1` status (issue #291). Each entry reports one workflow class; entries are sorted by workflow name for byte-stable status responses.",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "drained_plans": {
+            "description": "Plans drained successfully, including idempotent already-applied plans.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "last_applied_at": {
+            "description": "Most recent successful plan-drain timestamp for this workflow.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "pending_plans": {
+            "description": "Plans produced but not yet drained, usually because cancellation stopped between plans.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "workflow": {
+            "description": "Stable workflow class name.",
+            "enum": [
+              "consolidate",
+              "promote",
+              "expire"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "workflow",
+          "drained_plans",
+          "pending_plans"
+        ],
+        "type": "object"
+      },
+      "type": "array",
+      "uniqueItems": true
     }
   },
   "required": [
