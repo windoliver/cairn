@@ -717,7 +717,9 @@ impl StoreTx<'_> {
             params![session_id.as_str()],
             |row| row.get(0),
         )?;
-        Ok(count as u64)
+        u64::try_from(count).map_err(|_| StoreError::Invariant {
+            what: format!("negative trace event count for session {session_id}"),
+        })
     }
 
     /// Verify referential invariants among trace records for a turn (spec

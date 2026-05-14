@@ -625,7 +625,6 @@ async fn run_handler_inner(
                     turn_str.clone(),
                     format!("zero_capture_audit metric append: {e:#}"),
                 ));
-                continue;
             }
         }
     }
