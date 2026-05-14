@@ -6,6 +6,9 @@ expression: json
   "vault": {
     "name": "my-vault",
     "tier": "local",
+    "source": {
+      "redact_on_forget": false
+    },
     "layout": {
       "sources": "sources",
       "records": "raw",
@@ -80,6 +83,11 @@ expression: json
     "slack": {
       "enabled": false,
       "scope": []
+    }
+  },
+  "reference_consumer": {
+    "zero_capture_nudge": {
+      "enabled": true
     }
   },
   "workflows": {

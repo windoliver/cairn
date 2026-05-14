@@ -433,6 +433,24 @@ mod cli_vault_list {
     }
 
     #[test]
+    fn list_does_not_require_top_level_json_flag() {
+        let (_a, _b, reg_dir) = reg_with_two_vaults();
+        let out = cairn()
+            .env(
+                "CAIRN_REGISTRY",
+                reg_dir.path().join("vaults.toml").to_str().unwrap(),
+            )
+            .args(["vault", "list"])
+            .output()
+            .expect("cairn vault list");
+        assert!(
+            out.status.success(),
+            "vault list must not panic before dispatch; stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
     fn list_marks_default() {
         let (_a, _b, reg_dir) = reg_with_two_vaults();
         let out = cairn()

@@ -19,6 +19,7 @@
 
 pub mod actor_chain;
 pub mod admission;
+pub mod backup;
 pub mod body_hash;
 pub mod canonical;
 pub mod capture;
@@ -42,14 +43,17 @@ pub mod record;
 pub mod scope;
 pub mod session;
 pub mod source_id;
+pub mod source_ref;
 pub mod target_id;
 pub mod taxonomy;
 pub mod time;
 pub mod timestamp;
 pub mod trace;
+pub mod zero_capture;
 
 pub use actor_chain::{ActorChainEntry, ChainRole, validate_chain};
 pub use admission::{AdmissionError, SignedAdmission, WalActionKind};
+pub use backup::{BackupRegistryEntry, RewritePlan, ShreddedBackupEntry};
 pub use body_hash::BodyHash;
 pub use canonical::CanonicalRecordHash;
 pub use capture::{
@@ -81,8 +85,14 @@ pub use session::{
     SessionIdentity, SessionSource, resolve_session,
 };
 pub use source_id::SourceId;
+pub use source_ref::{SourceRef, validate_source_refs};
 pub use target_id::TargetId;
 pub use taxonomy::{MemoryClass, MemoryKind, MemoryVisibility};
 pub use time::{Clock, SystemClock};
 pub use timestamp::Rfc3339Timestamp;
 pub use trace::{TraceBlock, TraceEvent, TraceLink, TraceLinkError};
+pub use zero_capture::{
+    ZeroCaptureAuditInput, ZeroCaptureDecision, ZeroCaptureDecisionCode, ZeroCaptureNudge,
+    ZeroCaptureReport, ZeroCaptureReportSummary, ZeroCaptureSuppression, ZeroCaptureTrigger,
+    decide_zero_capture_nudge, render_zero_capture_report,
+};

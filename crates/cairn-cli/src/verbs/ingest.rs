@@ -65,7 +65,6 @@ const DEFAULT_TENANT: &str = "default";
 const INGEST_ENTITY: &str = "ingest";
 const INGEST_CHALLENGE_TTL_MS: i64 = 5 * 60 * 1_000;
 const STDIN_LIMIT_BYTES: u64 = 4 * 1024 * 1024;
-
 mod apply;
 mod cache;
 mod extract;

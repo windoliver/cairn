@@ -21,6 +21,8 @@
 //! persisted.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs::{self, OpenOptions};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -32,6 +34,7 @@ use cairn_core::domain::capture::{
 use cairn_core::domain::trace::{TraceBlock, TraceEvent, TraceLink};
 use cairn_core::domain::{
     ActorChainEntry, CaptureEventId, ChainRole, Identity, Rfc3339Timestamp, ScopeTuple, SessionId,
+    ZeroCaptureAuditInput, ZeroCaptureReport, ZeroCaptureTrigger, decide_zero_capture_nudge,
 };
 use cairn_core::generated::common::Ulid as WireUlid;
 use cairn_core::generated::envelope::{
@@ -610,12 +613,54 @@ async fn run_events_handler_inner_no_guard(
                         })?;
                     tx.upsert_trace(&summary)?;
                 }
-                Ok::<(), cairn_store_sqlite::error::StoreError>(())
+                tx.count_trace_events_for_session(&session_id_tx)
             })
             .await;
 
-        if let Err(e) = result {
-            failed_turns.push((session_str, turn_str, e.to_string()));
+        let successful_capture_trace_writes = match result {
+            Ok(count) => count,
+            Err(e) => {
+                failed_turns.push((session_str, turn_str, e.to_string()));
+                continue;
+            }
+        };
+
+        if had_stop {
+            let successful_ingest_writes =
+                match count_successful_ingest_writes(vault_root, &session_str) {
+                    Ok(count) => count,
+                    Err(e) => {
+                        failed_turns.push((
+                            session_str.clone(),
+                            turn_str.clone(),
+                            format!("zero_capture_audit metric read: {e:#}"),
+                        ));
+                        continue;
+                    }
+                };
+            let input = ZeroCaptureAuditInput {
+                session_id: session_id.clone(),
+                activity_count: group.len() as u64,
+                successful_ingest_writes,
+                successful_capture_trace_writes,
+                nudges_enabled: true,
+                reminder_allowed: true,
+                trigger: ZeroCaptureTrigger::Stop,
+            };
+            let decision = decide_zero_capture_nudge(&input);
+            let report = ZeroCaptureReport::from_decision(&input, &decision);
+            if let Err(e) = append_zero_capture_audit_metric(
+                vault_root,
+                &report,
+                successful_ingest_writes,
+                successful_capture_trace_writes,
+            ) {
+                failed_turns.push((
+                    session_str.clone(),
+                    turn_str.clone(),
+                    format!("zero_capture_audit metric append: {e:#}"),
+                ));
+            }
         }
     }
 
@@ -902,6 +947,102 @@ fn sha256_hex(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(bytes);
     format!("{:x}", h.finalize())
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ZeroCaptureAuditMetricRow {
+    event: &'static str,
+    session_id: String,
+    activity_count: u64,
+    successful_ingest_writes: u64,
+    successful_capture_trace_writes: u64,
+    successful_write_count: u64,
+    decision: String,
+}
+
+fn count_successful_ingest_writes(vault_root: &Path, session_id: &str) -> anyhow::Result<u64> {
+    let metrics_path = vault_root.join(".cairn").join("metrics.jsonl");
+    if !metrics_path.exists() {
+        return Ok(0);
+    }
+    let body = fs::read_to_string(&metrics_path)
+        .with_context(|| format!("read {}", metrics_path.display()))?;
+    let mut count = 0_u64;
+    for line in body.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let row = match serde_json::from_str::<serde_json::Value>(line) {
+            Ok(row) => row,
+            Err(e) if metrics_line_sets_event(line, "accepted") => {
+                return Err(e).context("parse accepted metrics.jsonl line");
+            }
+            Err(_) => continue,
+        };
+        let event = row.get("event").and_then(serde_json::Value::as_str);
+        if event != Some("accepted") {
+            continue;
+        }
+        let scope_session = row
+            .get("scope")
+            .and_then(|v| v.get("session_id"))
+            .and_then(serde_json::Value::as_str);
+        let Some(scope_session) = scope_session else {
+            anyhow::bail!("accepted metrics row missing scope.session_id");
+        };
+        if scope_session == session_id {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+fn metrics_line_sets_event(line: &str, event: &str) -> bool {
+    let Some(after_key) = line.split_once("\"event\"").map(|(_, rest)| rest) else {
+        return false;
+    };
+    let after_key = after_key.trim_start();
+    let Some(after_colon) = after_key.strip_prefix(':') else {
+        return false;
+    };
+    let after_colon = after_colon.trim_start();
+    let Some(after_quote) = after_colon.strip_prefix('"') else {
+        return false;
+    };
+    let Some(after_event) = after_quote.strip_prefix(event) else {
+        return false;
+    };
+    after_event.is_empty() || after_event.starts_with('"')
+}
+
+fn append_zero_capture_audit_metric(
+    vault_root: &Path,
+    report: &ZeroCaptureReport,
+    successful_ingest_writes: u64,
+    successful_capture_trace_writes: u64,
+) -> anyhow::Result<()> {
+    let cairn_dir = vault_root.join(".cairn");
+    fs::create_dir_all(&cairn_dir)
+        .with_context(|| format!("create metrics dir {}", cairn_dir.display()))?;
+    let metrics_path = cairn_dir.join("metrics.jsonl");
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&metrics_path)
+        .with_context(|| format!("open {}", metrics_path.display()))?;
+    let row = ZeroCaptureAuditMetricRow {
+        event: "zero_capture_audit",
+        session_id: report.session_id.to_string(),
+        activity_count: report.activity_count,
+        successful_ingest_writes,
+        successful_capture_trace_writes,
+        successful_write_count: report.successful_write_count,
+        decision: report.decision.as_str().to_owned(),
+    };
+    serde_json::to_writer(&mut file, &row).context("serialize zero-capture metric row")?;
+    file.write_all(b"\n")
+        .with_context(|| format!("write {}", metrics_path.display()))?;
+    Ok(())
 }
 
 async fn read_trace_blocks(path: &Path) -> anyhow::Result<Vec<TraceBlock>> {

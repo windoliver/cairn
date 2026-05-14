@@ -680,6 +680,49 @@ fn capture_trace_returns_committed_envelope() {
 }
 
 #[test]
+fn capture_trace_json_surfaces_failed_turns() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    cairn_cli::vault::bootstrap(&cairn_cli::vault::BootstrapOpts {
+        vault_path: dir.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap vault");
+    let trace_path = dir.path().join("trace.jsonl");
+    std::fs::write(
+        &trace_path,
+        r#"{"event_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","sensor_id":"snr:local:hook:cc-session:v1","capture_mode":"auto","actor_chain":[{"role":"author","identity":"snr:local:hook:cc-session:v1","at":"2026-05-02T00:00:01Z"}],"payload_hash":"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","payload_ref":"sources/hook/missing-refs.txt","captured_at":"2026-05-02T00:00:01Z","payload":{"source_family":"hook","hook_name":"Stop"},"source_family":"hook"}
+"#,
+    )
+    .expect("write trace with missing refs");
+
+    let out = cli()
+        .current_dir(dir.path())
+        .args([
+            "capture_trace",
+            "--from",
+            trace_path.to_str().expect("utf-8 trace path"),
+            "--json",
+        ])
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run capture_trace: {e}"));
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "capture_trace partial import should exit 0; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    let resp: cairn_core::generated::envelope::Response = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("capture_trace envelope parse failed: {e}\nstdout: {stdout:?}"));
+    let data = resp.data.expect("committed capture_trace must have data");
+    let cairn_core::generated::envelope::ResponseData::CaptureTrace(payload) = data else {
+        panic!("data must be CaptureTrace variant");
+    };
+    assert_eq!(payload.failed_turns.len(), 1);
+    assert_eq!(payload.failed_turns[0].reason, "malformed_capture");
+}
+
+#[test]
 #[allow(clippy::too_many_lines)] // end-to-end envelope assertion; splitting hides setup/expectation pairing
 fn capture_trace_blocks_returns_committed_envelope_and_hides_reasoning_by_default() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1257,6 +1300,7 @@ fn capture_trace_rejects_multiple_input_modes() {
 }
 
 #[test]
+#[ignore = "session forget is wired by issue #328; capability is no longer Unavailable"]
 fn forget_session_returns_capability_unavailable() {
     assert_rejected_capability_unavailable(
         &[
@@ -1381,7 +1425,6 @@ fn status_in_bound_vault_advertises_search_and_policy_trace() {
         "cairn.mcp.v1.retrieve.folder",
         "cairn.mcp.v1.retrieve.scope",
         "cairn.mcp.v1.retrieve.profile",
-        "cairn.mcp.v1.forget.session",
     ] {
         assert!(
             !caps.contains(stub_cap),
@@ -1641,4 +1684,59 @@ fn search_with_degraded_legs_emits_full_entry() {
     assert_eq!(arr[1]["leg"], "graph");
     assert_eq!(arr[1]["reason"], "capability_unavailable");
     assert_eq!(arr[1]["source"], "auth_semantic_seed");
+}
+
+// --- issue #328 source-ids/provenance --------------------------------
+
+fn json_stdout(out: &std::process::Output) -> serde_json::Value {
+    let stdout = String::from_utf8(out.stdout.clone()).expect("utf-8");
+    serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+        panic!("stdout was not valid JSON: {e}\nstdout: {stdout:?}");
+    })
+}
+
+#[test]
+fn forget_record_returns_committed_envelope() {
+    let vault = tempfile::tempdir().expect("temp vault");
+    cairn_cli::vault::bootstrap(&cairn_cli::vault::BootstrapOpts {
+        vault_path: vault.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap vault");
+
+    let ingest = cli()
+        .current_dir(vault.path())
+        .args(["ingest", "--kind", "user", "--body", "forget me", "--json"])
+        .output()
+        .expect("cairn ingest");
+    assert_eq!(
+        ingest.status.code(),
+        Some(0),
+        "ingest should commit; stderr: {}",
+        String::from_utf8_lossy(&ingest.stderr)
+    );
+    let ingest_json = json_stdout(&ingest);
+    let record_id = ingest_json["data"]["record_id"]
+        .as_str()
+        .expect("record_id string");
+
+    let out = cli()
+        .current_dir(vault.path())
+        .args(["forget", "--record", record_id, "--json"])
+        .output()
+        .expect("cairn forget");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "forget should commit; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    let v: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("forget JSON parse failed: {e}\nstdout: {stdout:?}"));
+    assert_eq!(v["contract"], "cairn.mcp.v1");
+    assert_eq!(v["status"], "committed");
+    assert_eq!(v["verb"], "forget");
+    assert_eq!(v["data"]["deleted_count"], 1);
+    assert!(v["data"]["tombstones"].is_array());
 }

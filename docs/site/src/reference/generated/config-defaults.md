@@ -8,6 +8,8 @@ Generated from `CairnConfig::default()`.
 vault:
   name: my-vault
   tier: local
+  source:
+    redact_on_forget: false
   layout:
     sources: sources
     records: raw
@@ -68,6 +70,9 @@ sensors:
   slack:
     enabled: false
     scope: []
+reference_consumer:
+  zero_capture_nudge:
+    enabled: true
 workflows:
   orchestrator: local
 pipeline:

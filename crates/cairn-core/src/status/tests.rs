@@ -143,10 +143,8 @@ fn forget_session_pinned_to_v0_2_phase() {
     let caps_v0_1 = advertise(&g);
     g.contract_phase = Phase::V0_2;
     let caps_v0_2 = advertise(&g);
-    // Wiring flag is false so neither phase advertises today; structural
-    // assertion: V0_1 cannot ever advertise forget.session even if wired.
     assert!(!caps_v0_1.contains(&Capabilities::CairnMcpV1ForgetSession));
-    assert!(!caps_v0_2.contains(&Capabilities::CairnMcpV1ForgetSession));
+    assert!(caps_v0_2.contains(&Capabilities::CairnMcpV1ForgetSession));
 }
 
 #[test]

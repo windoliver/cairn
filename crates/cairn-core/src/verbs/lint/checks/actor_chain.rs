@@ -200,8 +200,12 @@ mod tests {
             author_states,
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: None,
+            source_artifacts: crate::verbs::lint::empty_source_artifacts(),
+            source_forgets: crate::verbs::lint::empty_source_forgets(),
             vault_root: None,
             hot_body_loader: None,
+            source_resolver: crate::verbs::lint::empty_source_resolver(),
+            consent_journal: crate::verbs::lint::empty_consent_journal(),
         }
     }
 
