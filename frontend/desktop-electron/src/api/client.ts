@@ -57,17 +57,25 @@ export class DesktopApiClient {
   }
 
   private async get<T>(path: string): Promise<T> {
-    const response = await fetch(`${this.baseUrl}${path}`);
+    const response = await requestJson(`${this.baseUrl}${path}`);
     return readJson<T>(response);
   }
 
   private async post<T>(path: string, body: unknown): Promise<T> {
-    const response = await fetch(`${this.baseUrl}${path}`, {
+    const response = await requestJson(`${this.baseUrl}${path}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
     return readJson<T>(response);
+  }
+}
+
+async function requestJson(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  try {
+    return init ? await fetch(input, init) : await fetch(input);
+  } catch {
+    throw desktopApiError("Desktop API request failed", "desktop_api_error", 0);
   }
 }
 

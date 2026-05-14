@@ -72,6 +72,17 @@ describe("DesktopApiClient", () => {
     });
   });
 
+  it("throws structured errors for network failures", async () => {
+    fetchMock.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+
+    const client = new DesktopApiClient("http://127.0.0.1:4000");
+    await expect(client.record("rec-alpha-001")).rejects.toMatchObject({
+      code: "desktop_api_error",
+      status: 0,
+      message: "Desktop API request failed",
+    });
+  });
+
   it("throws structured errors for invalid json successful requests", async () => {
     fetchMock.mockResolvedValueOnce(
       new Response("not-json", {

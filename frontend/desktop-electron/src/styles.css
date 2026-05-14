@@ -19,6 +19,7 @@ textarea {
   display: grid;
   grid-template-columns: 280px minmax(0, 1fr);
   min-height: 100vh;
+  position: relative;
 }
 
 .sidebar {
@@ -135,7 +136,15 @@ textarea {
   padding: 8px;
 }
 
-.appError {
-  display: grid;
-  place-items: center;
+.appErrorBanner {
+  background: #fff2f0;
+  border: 1px solid #d99a92;
+  border-radius: 6px;
+  color: #7a2d25;
+  margin: 0;
+  padding: 8px 10px;
+  position: absolute;
+  right: 16px;
+  top: 12px;
+  z-index: 1;
 }

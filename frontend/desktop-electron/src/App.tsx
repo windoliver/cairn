@@ -68,9 +68,18 @@ export function App({
           api.graph(),
           api.lint(),
         ]);
-        const selected = records[0] ? await api.record(records[0].id) : null;
+        let selected: DesktopRecordDetail | null = null;
+        let error: string | null = null;
+        if (records[0]) {
+          try {
+            selected = await api.record(records[0].id);
+          } catch (recordError) {
+            error =
+              recordError instanceof Error ? recordError.message : "Failed to load record detail";
+          }
+        }
         if (!cancelled) {
-          setState({ vault, folders, records, selected, graph, lint, error: null });
+          setState({ vault, folders, records, selected, graph, lint, error });
         }
       } catch (error) {
         if (!cancelled) {
@@ -116,15 +125,13 @@ export function App({
         summary.id === record.id ? recordToSummary(record) : summary,
       ),
       selected: record,
+      error: null,
     }));
-  }
-
-  if (state.error) {
-    return <main className="app appError">{state.error}</main>;
   }
 
   return (
     <main className="app">
+      {state.error && <p className="appErrorBanner">{state.error}</p>}
       <VaultSidebar
         vault={state.vault}
         folders={state.folders}
