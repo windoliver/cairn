@@ -45,10 +45,16 @@ export function ReconcilePanel({
   async function review() {
     try {
       const next = await api.previewReconcile(request());
+      if (latestRequestKey.current !== currentRequestKey) {
+        return;
+      }
       setPreviewState({ key: currentRequestKey, preview: next });
       setApplyStatus(null);
       setRequestErrorState(null);
     } catch (error) {
+      if (latestRequestKey.current !== currentRequestKey) {
+        return;
+      }
       setPreviewState(null);
       setApplyStatus(null);
       setRequestErrorState({ key: currentRequestKey, message: errorMessage(error) });
