@@ -8,9 +8,10 @@ use cairn_core::generated::common::Ulid;
 use cairn_core::generated::status::StatusResponseWorkflowsWorkflow;
 use cairn_test_fixtures::flush_plan::sample_plan;
 use cairn_workflows::{
-    DrainStats, FlushPlanApply, FlushPlanApplyOutcome, Workflow, WorkflowContext, WorkflowDrainer,
-    WorkflowError,
+    DrainStats, FileWorkflowCheckpointStore, FlushPlanApply, FlushPlanApplyOutcome, Workflow,
+    WorkflowCheckpointStore, WorkflowContext, WorkflowDrainer, WorkflowError,
 };
+use proptest::prelude::*;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
@@ -287,6 +288,103 @@ async fn drainer_rejects_unknown_workflow_names_before_status_recording() {
 
 fn plan(id: &str) -> FlushPlan {
     sample_plan(id, cairn_core::domain::FlushMode::Autonomous)
+}
+
+#[tokio::test]
+async fn drainer_skips_checkpointed_plan_ids_after_restart() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("workflow-checkpoints.jsonl");
+    let checkpoint = Arc::new(FileWorkflowCheckpointStore::open(&path).expect("open checkpoint"));
+    checkpoint
+        .mark_applied("expire", &ulid("01HQZK000000000000000000R1"))
+        .await
+        .expect("seed checkpoint");
+    let apply = Arc::new(RecordingApply::default());
+    let drainer =
+        WorkflowDrainer::new_with_checkpoint(WorkflowContext::default(), apply.clone(), checkpoint);
+
+    let stats = drainer
+        .run(Arc::new(StaticWorkflow {
+            name: "expire",
+            plans: vec![
+                plan("01HQZK000000000000000000R1"),
+                plan("01HQZK000000000000000000R2"),
+            ],
+        }))
+        .await
+        .expect("drain succeeds");
+
+    assert_eq!(stats.planned, 2);
+    assert_eq!(stats.applied, 1);
+    assert_eq!(stats.already_applied, 1);
+    assert_eq!(
+        *apply.applied.lock().expect("poisoned"),
+        vec![ulid("01HQZK000000000000000000R2")]
+    );
+
+    let reopened = FileWorkflowCheckpointStore::open(&path).expect("reopen checkpoint");
+    assert!(
+        reopened
+            .is_applied("expire", &ulid("01HQZK000000000000000000R1"))
+            .await
+            .expect("read first")
+    );
+    assert!(
+        reopened
+            .is_applied("expire", &ulid("01HQZK000000000000000000R2"))
+            .await
+            .expect("read second")
+    );
+}
+
+proptest! {
+    #[test]
+    fn drainer_resume_checkpoint_property((total, drained_before_restart) in (1usize..8).prop_flat_map(|total| (Just(total), 0usize..=total))) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async move {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let path = dir.path().join("workflow-checkpoints.jsonl");
+            let checkpoint = Arc::new(FileWorkflowCheckpointStore::open(&path).expect("open checkpoint"));
+            let plans: Vec<_> = (0..total)
+                .map(|index| plan(&format!("01HQZK000000000000000P{index:02}")))
+                .collect();
+            for plan in plans.iter().take(drained_before_restart) {
+                checkpoint
+                    .mark_applied("expire", &plan.operation_id)
+                    .await
+                    .expect("seed checkpoint");
+            }
+            let apply = Arc::new(RecordingApply::default());
+            let drainer = WorkflowDrainer::new_with_checkpoint(
+                WorkflowContext::default(),
+                apply.clone(),
+                Arc::new(FileWorkflowCheckpointStore::open(&path).expect("reopen checkpoint")),
+            );
+
+            let stats = drainer
+                .run(Arc::new(StaticWorkflow {
+                    name: "expire",
+                    plans: plans.clone(),
+                }))
+                .await
+                .expect("drain succeeds");
+
+            prop_assert_eq!(stats.planned, total);
+            prop_assert_eq!(stats.already_applied, drained_before_restart);
+            prop_assert_eq!(stats.applied, total - drained_before_restart);
+            let applied = apply.applied.lock().expect("poisoned").clone();
+            let expected: Vec<_> = plans
+                .iter()
+                .skip(drained_before_restart)
+                .map(|plan| plan.operation_id.clone())
+                .collect();
+            prop_assert_eq!(applied, expected);
+            Ok(())
+        })?;
+    }
 }
 
 fn ulid(id: &str) -> Ulid {

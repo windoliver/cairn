@@ -88,6 +88,7 @@ fn mutation_target(mutation: &PlannedMutation) -> Option<&str> {
     match mutation {
         PlannedMutation::Upsert { record, .. } => Some(record.target_id.as_str()),
         PlannedMutation::Delete { target, .. }
+        | PlannedMutation::Promote { from: target, .. }
         | PlannedMutation::Expire { target, .. }
         | PlannedMutation::ForgetRecord { target } => Some(target.as_str()),
         _ => None,
@@ -121,6 +122,9 @@ async fn apply_one(
         PlannedMutation::Expire { target, .. } => {
             expire_active_target(store, workflow, plan, target).await
         }
+        PlannedMutation::Promote { from, to_kind, .. } => {
+            promote_active_target(store, workflow, plan, from, *to_kind).await
+        }
         PlannedMutation::ForgetRecord { target } => {
             forget_active_target(store, workflow, plan, target).await
         }
@@ -137,6 +141,7 @@ fn is_supported(mutation: &PlannedMutation) -> bool {
         mutation,
         PlannedMutation::Upsert { .. }
             | PlannedMutation::Expire { .. }
+            | PlannedMutation::Promote { .. }
             | PlannedMutation::ForgetRecord { .. }
             | PlannedMutation::Delete { .. }
     )
@@ -220,6 +225,33 @@ async fn expire_active_target(
         .await
         .map(|()| FlushPlanApplyOutcome::Applied)
         .map_err(|e| WorkflowError::apply(workflow, plan, e))
+}
+
+async fn promote_active_target(
+    store: &SqliteMemoryStore,
+    workflow: &'static str,
+    plan: &FlushPlan,
+    target: &TargetId,
+    to_kind: cairn_core::domain::MemoryKind,
+) -> Result<FlushPlanApplyOutcome, WorkflowError> {
+    let Some(active) = store
+        .get_active_by_target(target)
+        .await
+        .map_err(|source| apply_boxed_error(workflow, plan, source))?
+    else {
+        return Ok(FlushPlanApplyOutcome::AlreadyApplied);
+    };
+    if active.record.kind == to_kind {
+        return Ok(FlushPlanApplyOutcome::AlreadyApplied);
+    }
+
+    let mut promoted = active.record;
+    promoted.kind = to_kind;
+    store
+        .upsert(&promoted)
+        .await
+        .map(|_| FlushPlanApplyOutcome::Applied)
+        .map_err(|source| apply_boxed_error(workflow, plan, source))
 }
 
 async fn ensure_delete_version(

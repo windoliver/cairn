@@ -23,10 +23,11 @@ pub use consolidation::{
     ConsolidationPayload, FORGET_CLEANUP_KIND, ForgetCleanupPayload,
 };
 pub use drainer::{
-    DrainStats, FlushPlanApply, FlushPlanApplyOutcome, Workflow, WorkflowContext, WorkflowDrainer,
-    WorkflowError, WorkflowStatusSnapshot,
+    DrainStats, FileWorkflowCheckpointStore, FlushPlanApply, FlushPlanApplyOutcome, Workflow,
+    WorkflowCheckpointStore, WorkflowContext, WorkflowDrainer, WorkflowError,
+    WorkflowStatusSnapshot,
 };
-pub use planners::ExpirePlanSource;
+pub use planners::{ConsolidatePlanSource, ExpirePlanSource, PromotePlanSource};
 pub use scheduler::{Clock, MockClock, Scheduler, SchedulerConfig, SystemClock};
 pub use sqlite_apply::SqliteFlushPlanApply;
 pub use sqlite_store::{SqliteJobStore, SqliteJobStoreInitError};

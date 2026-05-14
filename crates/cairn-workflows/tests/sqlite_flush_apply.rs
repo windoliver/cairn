@@ -4,7 +4,8 @@
 use std::sync::Arc;
 
 use cairn_core::contract::memory_store::MemoryStore as _;
-use cairn_core::domain::{ExpirationReason, FlushMode, PlannedMutation};
+use cairn_core::domain::flush_plan::PatchTarget;
+use cairn_core::domain::{ExpirationReason, FlushMode, MemoryKind, PlannedMutation};
 use cairn_test_fixtures::{flush_plan::sample_plan, memstore, sample_record};
 use cairn_workflows::{FlushPlanApply, FlushPlanApplyOutcome, SqliteFlushPlanApply, WorkflowError};
 
@@ -13,20 +14,21 @@ async fn sqlite_apply_rejects_unsupported_mutation_without_partial_success() {
     let apply =
         SqliteFlushPlanApply::new(Arc::new(cairn_store_sqlite::SqliteMemoryStore::default()));
     let mut plan = sample_plan("01HQZK000000000000000000A1", FlushMode::Autonomous);
-    plan.mutations = vec![PlannedMutation::Promote {
-        from: cairn_core::domain::TargetId::parse("01HQZX9F5N0000000000000000").unwrap(),
-        to_kind: cairn_core::domain::MemoryKind::Fact,
-        evidence: vec![],
+    plan.mutations = vec![PlannedMutation::Patch {
+        target: PatchTarget::Record(
+            cairn_core::domain::TargetId::parse("01HQZX9F5N0000000000000000").unwrap(),
+        ),
+        str_replace: vec![],
     }];
 
     let err = apply
         .apply("promote", plan)
         .await
-        .expect_err("promote is not wired to store apply yet");
+        .expect_err("patch is not wired to store apply yet");
 
     assert!(
         err.to_string()
-            .contains("unsupported mutation kind `promote`")
+            .contains("unsupported mutation kind `patch`")
     );
 }
 
@@ -56,21 +58,20 @@ async fn sqlite_apply_preflights_all_mutations_before_applying_any() {
             record: Box::new(record.clone()),
             prior_version: None,
         },
-        PlannedMutation::Promote {
-            from: record.target_id.clone(),
-            to_kind: cairn_core::domain::MemoryKind::Fact,
-            evidence: vec![],
+        PlannedMutation::Patch {
+            target: PatchTarget::Record(record.target_id.clone()),
+            str_replace: vec![],
         },
     ];
 
     let err = apply
         .apply("promote", plan)
         .await
-        .expect_err("unsupported promote should fail before upsert");
+        .expect_err("unsupported patch should fail before upsert");
 
     assert!(
         err.to_string()
-            .contains("unsupported mutation kind `promote`")
+            .contains("unsupported mutation kind `patch`")
     );
     assert!(store.get(&record.id).await.expect("get").is_none());
 }
@@ -363,4 +364,37 @@ async fn sqlite_apply_reports_applied_when_any_mutation_changes_state() {
 
     assert_eq!(outcome, FlushPlanApplyOutcome::Applied);
     assert!(store.get(&inserted.id).await.expect("get").is_some());
+}
+
+#[tokio::test]
+async fn sqlite_apply_promotes_active_record_kind_idempotently() {
+    let store = Arc::new(memstore().await);
+    let apply = SqliteFlushPlanApply::new(store.clone());
+    let mut record = sample_record(20);
+    record.kind = MemoryKind::Reference;
+    store.upsert(&record).await.expect("seed record");
+
+    let mut plan = sample_plan("01HQZK000000000000000000H1", FlushMode::Autonomous);
+    plan.mutations = vec![PlannedMutation::Promote {
+        from: record.target_id.clone(),
+        to_kind: MemoryKind::Fact,
+        evidence: vec![],
+    }];
+
+    let first = apply
+        .apply("promote", plan.clone())
+        .await
+        .expect("first promote");
+
+    assert_eq!(first, FlushPlanApplyOutcome::Applied);
+    let promoted = store
+        .get_active_by_target(&record.target_id)
+        .await
+        .expect("active")
+        .expect("record remains active");
+    assert_eq!(promoted.record.kind, MemoryKind::Fact);
+
+    let second = apply.apply("promote", plan).await.expect("second promote");
+
+    assert_eq!(second, FlushPlanApplyOutcome::AlreadyApplied);
 }

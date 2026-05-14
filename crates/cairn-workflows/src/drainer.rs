@@ -4,12 +4,17 @@
 //! This module owns the common apply loop so cancellation, idempotency, and
 //! telemetry live in one place before concrete workflow planners are wired.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs::{File, OpenOptions};
+use std::io::{BufRead as _, BufReader, Write as _};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use cairn_core::domain::FlushPlan;
+use cairn_core::generated::common::Ulid;
 use cairn_core::generated::status::{StatusResponseWorkflows, StatusResponseWorkflowsWorkflow};
 use chrono::SecondsFormat;
+use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument as _;
 
@@ -109,6 +114,161 @@ pub trait FlushPlanApply: Send + Sync {
     ) -> Result<FlushPlanApplyOutcome, WorkflowError>;
 }
 
+/// Durable checkpoint for workflow plan ids that have drained successfully.
+#[async_trait::async_trait]
+pub trait WorkflowCheckpointStore: Send + Sync {
+    /// Return true when `plan_id` has already drained for `workflow`.
+    async fn is_applied(
+        &self,
+        workflow: &'static str,
+        plan_id: &Ulid,
+    ) -> Result<bool, WorkflowError>;
+
+    /// Mark `plan_id` as drained for `workflow`.
+    async fn mark_applied(
+        &self,
+        workflow: &'static str,
+        plan_id: &Ulid,
+    ) -> Result<(), WorkflowError>;
+}
+
+#[derive(Default)]
+struct NoopWorkflowCheckpointStore;
+
+#[async_trait::async_trait]
+impl WorkflowCheckpointStore for NoopWorkflowCheckpointStore {
+    async fn is_applied(
+        &self,
+        _workflow: &'static str,
+        _plan_id: &Ulid,
+    ) -> Result<bool, WorkflowError> {
+        Ok(false)
+    }
+
+    async fn mark_applied(
+        &self,
+        _workflow: &'static str,
+        _plan_id: &Ulid,
+    ) -> Result<(), WorkflowError> {
+        Ok(())
+    }
+}
+
+/// Append-only JSONL checkpoint store for workflow plan ids.
+pub struct FileWorkflowCheckpointStore {
+    applied: Mutex<BTreeSet<(String, String)>>,
+    file: Mutex<File>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct FileCheckpointRecord {
+    workflow: String,
+    operation_id: String,
+}
+
+impl FileWorkflowCheckpointStore {
+    /// Open or create a workflow checkpoint file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WorkflowError::Internal`] when the file cannot be opened,
+    /// read, or parsed.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, WorkflowError> {
+        let path = path.as_ref();
+        let read_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .map_err(|source| WorkflowError::Internal {
+                workflow: "checkpoint",
+                message: format!("open workflow checkpoint file failed: {source}"),
+            })?;
+        let mut applied = BTreeSet::new();
+        for line in BufReader::new(read_file).lines() {
+            let line = line.map_err(|source| WorkflowError::Internal {
+                workflow: "checkpoint",
+                message: format!("read workflow checkpoint file failed: {source}"),
+            })?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let record: FileCheckpointRecord =
+                serde_json::from_str(&line).map_err(|source| WorkflowError::Internal {
+                    workflow: "checkpoint",
+                    message: format!("parse workflow checkpoint record failed: {source}"),
+                })?;
+            applied.insert((record.workflow, record.operation_id));
+        }
+        let file = OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(path)
+            .map_err(|source| WorkflowError::Internal {
+                workflow: "checkpoint",
+                message: format!("append workflow checkpoint file failed: {source}"),
+            })?;
+        Ok(Self {
+            applied: Mutex::new(applied),
+            file: Mutex::new(file),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl WorkflowCheckpointStore for FileWorkflowCheckpointStore {
+    async fn is_applied(
+        &self,
+        workflow: &'static str,
+        plan_id: &Ulid,
+    ) -> Result<bool, WorkflowError> {
+        let applied = self.applied.lock().map_err(|_| WorkflowError::Internal {
+            workflow,
+            message: "workflow checkpoint lock poisoned".to_owned(),
+        })?;
+        Ok(applied.contains(&(workflow.to_owned(), plan_id.0.clone())))
+    }
+
+    async fn mark_applied(
+        &self,
+        workflow: &'static str,
+        plan_id: &Ulid,
+    ) -> Result<(), WorkflowError> {
+        let key = (workflow.to_owned(), plan_id.0.clone());
+        {
+            let mut applied = self.applied.lock().map_err(|_| WorkflowError::Internal {
+                workflow,
+                message: "workflow checkpoint lock poisoned".to_owned(),
+            })?;
+            if !applied.insert(key) {
+                return Ok(());
+            }
+        }
+
+        let record = FileCheckpointRecord {
+            workflow: workflow.to_owned(),
+            operation_id: plan_id.0.clone(),
+        };
+        let line = serde_json::to_string(&record).map_err(|source| WorkflowError::Internal {
+            workflow,
+            message: format!("encode workflow checkpoint record failed: {source}"),
+        })?;
+        let mut file = self.file.lock().map_err(|_| WorkflowError::Internal {
+            workflow,
+            message: "workflow checkpoint file lock poisoned".to_owned(),
+        })?;
+        writeln!(file, "{line}").map_err(|source| WorkflowError::Internal {
+            workflow,
+            message: format!("write workflow checkpoint record failed: {source}"),
+        })?;
+        file.flush().map_err(|source| WorkflowError::Internal {
+            workflow,
+            message: format!("flush workflow checkpoint record failed: {source}"),
+        })
+    }
+}
+
 /// Summary of one drain run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DrainStats {
@@ -149,6 +309,7 @@ struct WorkflowStatusState {
 pub struct WorkflowDrainer {
     ctx: WorkflowContext,
     apply: Arc<dyn FlushPlanApply>,
+    checkpoint: Arc<dyn WorkflowCheckpointStore>,
     status: Arc<Mutex<BTreeMap<&'static str, WorkflowStatusState>>>,
 }
 
@@ -156,9 +317,20 @@ impl WorkflowDrainer {
     /// Create a drainer around shared context and a concrete apply adapter.
     #[must_use]
     pub fn new(ctx: WorkflowContext, apply: Arc<dyn FlushPlanApply>) -> Self {
+        Self::new_with_checkpoint(ctx, apply, Arc::new(NoopWorkflowCheckpointStore))
+    }
+
+    /// Create a drainer with a durable plan checkpoint store.
+    #[must_use]
+    pub fn new_with_checkpoint(
+        ctx: WorkflowContext,
+        apply: Arc<dyn FlushPlanApply>,
+        checkpoint: Arc<dyn WorkflowCheckpointStore>,
+    ) -> Self {
         Self {
             ctx,
             apply,
+            checkpoint,
             status: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
@@ -227,10 +399,18 @@ impl WorkflowDrainer {
                 break;
             }
 
+            if self.checkpoint.is_applied(name, &plan.operation_id).await? {
+                already_applied += 1;
+                self.record_plan_drained(name);
+                continue;
+            }
+
+            let operation_id = plan.operation_id.clone();
             match self.apply_one(name, plan).await? {
                 FlushPlanApplyOutcome::Applied => applied += 1,
                 FlushPlanApplyOutcome::AlreadyApplied => already_applied += 1,
             }
+            self.checkpoint.mark_applied(name, &operation_id).await?;
             self.record_plan_drained(name);
         }
 
