@@ -72,12 +72,27 @@ export class DesktopApiClient {
 }
 
 async function readJson<T>(response: Response): Promise<T> {
-  const body = await response.json();
+  const body = await parseJsonBody(response);
   if (response.ok) {
     return body as T;
   }
-  const error = new Error(body.message ?? "Desktop API request failed") as DesktopApiError;
-  error.code = body.code ?? "desktop_api_error";
+  const errorBody = isObject(body) ? body : {};
+  const error = new Error(
+    typeof errorBody.message === "string" ? errorBody.message : "Desktop API request failed",
+  ) as DesktopApiError;
+  error.code = typeof errorBody.code === "string" ? errorBody.code : "desktop_api_error";
   error.status = response.status;
   throw error;
+}
+
+async function parseJsonBody(response: Response): Promise<unknown> {
+  try {
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }

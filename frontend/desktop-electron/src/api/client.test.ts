@@ -56,6 +56,22 @@ describe("DesktopApiClient", () => {
     });
   });
 
+  it("throws structured errors for non-json failed requests", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response("gateway unavailable", {
+        status: 502,
+        headers: { "content-type": "text/plain" },
+      }),
+    );
+
+    const client = new DesktopApiClient("http://127.0.0.1:4000");
+    await expect(client.record("rec-alpha-001")).rejects.toMatchObject({
+      code: "desktop_api_error",
+      status: 502,
+      message: "Desktop API request failed",
+    });
+  });
+
   it("applies reconcile requests through the backend", async () => {
     fetchMock.mockResolvedValueOnce(
       new Response(JSON.stringify({ accepted: true, record: { id: "rec-alpha-001" }, rejectedFields: [] }), {
