@@ -30,13 +30,17 @@ export function VaultSidebar({
                 onClick={() => onSelectRecord(record.id)}
               >
                 <span>{record.title}</span>
-                <small>
-                  {record.kind} · v{record.version} · {record.tags.join(", ")}
-                </small>
+                <small>{recordSummaryMeta(record)}</small>
               </button>
             ))}
         </section>
       ))}
     </aside>
   );
+}
+
+function recordSummaryMeta(record: DesktopRecordSummary): string {
+  return [record.kind, `v${record.version}`, record.tags.join(", ")]
+    .filter(Boolean)
+    .join(" · ");
 }
