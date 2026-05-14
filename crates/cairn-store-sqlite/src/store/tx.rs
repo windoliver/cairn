@@ -698,6 +698,30 @@ impl StoreTx<'_> {
         .collect()
     }
 
+    /// Count active, non-tombstoned, non-summary trace events for a session.
+    ///
+    /// This is used by consumers that need session-scoped write counts
+    /// without reconstructing per-turn slices.
+    pub fn count_trace_events_for_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<u64, StoreError> {
+        let count: i64 = self.tx.query_row(
+            "SELECT COUNT(*) \
+               FROM records \
+              WHERE trace_session_id = ?1 \
+                AND trace_event IS NOT NULL \
+                AND trace_event != 'turn_summary' \
+                AND active = 1 \
+                AND tombstoned = 0",
+            params![session_id.as_str()],
+            |row| row.get(0),
+        )?;
+        u64::try_from(count).map_err(|_| StoreError::Invariant {
+            what: format!("negative trace event count for session {session_id}"),
+        })
+    }
+
     /// Verify referential invariants among trace records for a turn (spec
     /// §4 "Referential"). Call after writing all events for the turn,
     /// before committing.

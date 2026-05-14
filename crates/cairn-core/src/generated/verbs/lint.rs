@@ -35,10 +35,12 @@ pub enum Kind {
     HotMemoryOverBudget,
     IndexDrift,
     MalformedRecord,
+    MisclassifiedProfile,
     MissingConcept,
     MissingProvenance,
     MissingSummary,
     Orphan,
+    OrphanInsight,
     ProjectionDrift,
     ProjectionMissing,
     SourceAfterForget,
@@ -51,6 +53,7 @@ pub enum Kind {
     Stale,
     StaleProfileLine,
     StaleSchema,
+    WrongClassForKind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

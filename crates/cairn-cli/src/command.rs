@@ -350,105 +350,105 @@ fn vault_subcommand() -> clap::Command {
 
 fn admin_subcommand() -> clap::Command {
     clap::Command::new("admin")
-        .about("Administrative operations (model management, reindex, backup substrate)")
+        .about("Administrative operations (model management, reindex, reporting, backup substrate)")
+        .subcommand_required(true)
+        .arg_required_else_help(true)
+        .subcommand(admin_model_subcommand())
+        .subcommand(admin_zero_capture_report_subcommand())
+        .subcommand(admin_reindex_subcommand())
+        .subcommand(admin_snapshot_subcommand())
+        .subcommand(admin_restore_subcommand())
+}
+
+fn admin_model_subcommand() -> clap::Command {
+    clap::Command::new("model")
+        .about("Embedding model management")
         .subcommand_required(true)
         .arg_required_else_help(true)
         .subcommand(
-            clap::Command::new("model")
-                .about("Embedding model management")
-                .subcommand_required(true)
-                .arg_required_else_help(true)
-                .subcommand(
-                    clap::Command::new("fetch")
-                        .about(
-                            "Download the configured embedding model (~25 MB) from HuggingFace Hub",
-                        )
-                        .arg(
-                            clap::Arg::new("force")
-                                .long("force")
-                                .action(clap::ArgAction::SetTrue)
-                                .help("Re-fetch even if model files are already on disk"),
-                        )
-                        .arg(
-                            clap::Arg::new("json")
-                                .long("json")
-                                .action(clap::ArgAction::SetTrue)
-                                .help("Emit JSON output"),
-                        ),
+            clap::Command::new("fetch")
+                .about("Download the configured embedding model (~25 MB) from HuggingFace Hub")
+                .arg(
+                    clap::Arg::new("force")
+                        .long("force")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Re-fetch even if model files are already on disk"),
+                )
+                .arg(json_arg("Emit JSON output")),
+        )
+}
+
+fn admin_zero_capture_report_subcommand() -> clap::Command {
+    clap::Command::new("zero-capture-report")
+        .about("Render a zero-capture dogfood report from vault metrics")
+        .arg(json_arg("Emit JSON summary plus session rows"))
+}
+
+fn admin_reindex_subcommand() -> clap::Command {
+    clap::Command::new("reindex")
+        .about("Re-embed records into the ANN index")
+        .arg(
+            clap::Arg::new("semantic")
+                .long("semantic")
+                .action(clap::ArgAction::SetTrue)
+                .help("Reindex semantic (ANN) vectors"),
+        )
+        .arg(
+            clap::Arg::new("all")
+                .long("all")
+                .action(clap::ArgAction::SetTrue)
+                .help("Enqueue ALL active records before draining (use after model swap)"),
+        )
+        .arg(
+            clap::Arg::new("from-db")
+                .long("from-db")
+                .action(clap::ArgAction::SetTrue)
+                .help(
+                    "Rebuild FTS5 + vector indexes from the authoritative records table \
+                     (use after derived indexes are deleted or corrupted).",
                 ),
         )
-        .subcommand(
-            clap::Command::new("reindex")
-                .about("Re-embed records into the ANN index")
-                .arg(
-                    clap::Arg::new("semantic")
-                        .long("semantic")
-                        .action(clap::ArgAction::SetTrue)
-                        .help("Reindex semantic (ANN) vectors"),
-                )
-                .arg(
-                    clap::Arg::new("all")
-                        .long("all")
-                        .action(clap::ArgAction::SetTrue)
-                        .help("Enqueue ALL active records before draining (use after model swap)"),
-                )
-                .arg(
-                    clap::Arg::new("from-db")
-                        .long("from-db")
-                        .action(clap::ArgAction::SetTrue)
-                        .help(
-                            "Rebuild FTS5 + vector indexes from the authoritative records table \
-                             (use after derived indexes are deleted or corrupted).",
-                        ),
-                )
-                .arg(
-                    clap::Arg::new("json")
-                        .long("json")
-                        .action(clap::ArgAction::SetTrue)
-                        .help("Emit JSON output"),
-                ),
+        .arg(json_arg("Emit JSON output"))
+}
+
+fn admin_snapshot_subcommand() -> clap::Command {
+    clap::Command::new("snapshot")
+        .about("Prepare a vault backup snapshot")
+        .arg(
+            clap::Arg::new("backup")
+                .long("backup")
+                .required(true)
+                .value_name("PATH")
+                .help("Destination path for the prepared backup"),
         )
-        .subcommand(
-            clap::Command::new("snapshot")
-                .about("Prepare a vault backup snapshot")
-                .arg(
-                    clap::Arg::new("backup")
-                        .long("backup")
-                        .required(true)
-                        .value_name("PATH")
-                        .help("Destination path for the prepared backup"),
-                )
-                .arg(
-                    clap::Arg::new("json")
-                        .long("json")
-                        .action(clap::ArgAction::SetTrue)
-                        .help("Emit JSON output"),
-                ),
+        .arg(json_arg("Emit JSON output"))
+}
+
+fn admin_restore_subcommand() -> clap::Command {
+    clap::Command::new("restore")
+        .about("Prepare a restore operation from a backup")
+        .arg(
+            clap::Arg::new("from")
+                .long("from")
+                .required(true)
+                .value_name("PATH")
+                .help("Source backup path to restore from"),
         )
-        .subcommand(
-            clap::Command::new("restore")
-                .about("Prepare a restore operation from a backup")
-                .arg(
-                    clap::Arg::new("from")
-                        .long("from")
-                        .required(true)
-                        .value_name("PATH")
-                        .help("Source backup path to restore from"),
-                )
-                .arg(
-                    clap::Arg::new("into")
-                        .long("into")
-                        .required(true)
-                        .value_name("PATH")
-                        .help("Destination vault path to restore into"),
-                )
-                .arg(
-                    clap::Arg::new("json")
-                        .long("json")
-                        .action(clap::ArgAction::SetTrue)
-                        .help("Emit JSON output"),
-                ),
+        .arg(
+            clap::Arg::new("into")
+                .long("into")
+                .required(true)
+                .value_name("PATH")
+                .help("Destination vault path to restore into"),
         )
+        .arg(json_arg("Emit JSON output"))
+}
+
+fn json_arg(help: &'static str) -> clap::Arg {
+    clap::Arg::new("json")
+        .long("json")
+        .action(clap::ArgAction::SetTrue)
+        .help(help)
 }
 
 fn plugins_subcommand() -> clap::Command {
