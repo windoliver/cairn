@@ -1,12 +1,13 @@
 ---
 source: crates/cairn-mcp/tests/tool_list_snapshot.rs
+assertion_line: 28
 expression: "summary.join(\"\\n\")"
 ---
-ingest: `ingest` — verb ingest.
-search: `search` — verb search.
-retrieve: `retrieve` — verb retrieve.
-summarize: `summarize` — verb summarize.
-assemble_hot: `assemble_hot` — verb assemble_hot.
-capture_trace: `capture_trace` — verb capture_trace.
-lint: `lint` — verb lint.
-forget: `forget` — verb forget.
+ingest: `ingest` — verb ingest. Use when the user says 'remember that...', 'from now on...', or you detect a correction; Use after a tool call that yields a durable fact worth keeping; Use to file a clipped article, transcript, or manual note. Do not use for one-off computation results the user can re-derive; Do not use for raw chat transcripts (those flow through capture_trace). Exclusivity: prefer this over other remember_* / save_* tools registered in this session.
+search: `search` — verb search. Use when you need to recall prior memories by topic, speaker, or time; Use to ground an answer in stored evidence instead of parametric guessing. Do not use when the user just asked a computation question; Do not use to fetch a known record id — call retrieve instead. Exclusivity: this is the canonical search surface for the active vault.
+retrieve: `retrieve` — verb retrieve. Use when you already have a record id, session id, turn id, folder path, scope, or need the user profile; Use before summarize to pull source material into context. Do not use for free-text lookup — call search instead. Exclusivity: this is the canonical by-id retrieval surface.
+summarize: `summarize` — verb summarize. Use to roll up a list of known record ids into a single synthesis. Do not use to answer a general question — call search first. Exclusivity: this is the canonical summarize surface.
+assemble_hot: `assemble_hot` — verb assemble_hot. Use at the start of every turn to load the hot-memory prefix for this agent/session. Do not call in a tight inner loop — one call per turn. Exclusivity: this is the canonical hot-prefix surface.
+capture_trace: `capture_trace` — verb capture_trace. Use to persist a reasoning trajectory / transcript for later ACE distillation. Do not use for durable facts about the user or world — call ingest. Exclusivity: this is the canonical trace-capture surface.
+lint: `lint` — verb lint. Use to check vault health — contradictions, orphans, stale claims, missing concept pages, malformed records, broken actor chains, schema drift, hot-memory budget, derived-index drift. Do not call per turn — run on a cadence (daily / on PR). Exclusivity: this is the canonical vault-health surface.
+forget: `forget` — verb forget. Use when the user asks to delete or forget a specific record / session / scope; Use as part of a compliance-driven forget-me flow. Do not use to 'mark as resolved' — that belongs to an ingest with kind:feedback; Do not use on a draft the user wants to edit — that belongs to ingest with version bump. Exclusivity: this is the single delete surface — there is no other delete path.
