@@ -34,6 +34,7 @@ export function ReconcilePanel({
   const currentRequestKey = requestKey(record, draftBody);
   const latestRequestKey = useRef(currentRequestKey);
   const latestReviewSequence = useRef(0);
+  const latestApplySequence = useRef(0);
   latestRequestKey.current = currentRequestKey;
   const preview = previewState?.key === currentRequestKey ? previewState.preview : null;
   const requestError =
@@ -78,9 +79,14 @@ export function ReconcilePanel({
   }
 
   async function apply() {
+    const sequence = latestApplySequence.current + 1;
+    latestApplySequence.current = sequence;
     try {
       const result = await api.applyReconcile(request());
-      if (latestRequestKey.current !== currentRequestKey) {
+      if (
+        latestApplySequence.current !== sequence ||
+        latestRequestKey.current !== currentRequestKey
+      ) {
         return;
       }
       if (result.accepted && result.record) {
@@ -101,7 +107,10 @@ export function ReconcilePanel({
       }
       setRequestErrorState(null);
     } catch (error) {
-      if (latestRequestKey.current !== currentRequestKey) {
+      if (
+        latestApplySequence.current !== sequence ||
+        latestRequestKey.current !== currentRequestKey
+      ) {
         return;
       }
       setApplyStatusState(null);

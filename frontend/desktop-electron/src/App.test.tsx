@@ -478,6 +478,60 @@ describe("App", () => {
     expect(screen.queryByText("Applied")).not.toBeInTheDocument();
   });
 
+  it("ignores stale reconcile apply failures after a newer same-draft rejection", async () => {
+    const user = userEvent.setup();
+    let rejectFirst: (error: Error) => void;
+    let resolveSecond: (result: Awaited<ReturnType<typeof api.applyReconcile>>) => void;
+    const firstApply = new Promise<Awaited<ReturnType<typeof api.applyReconcile>>>(
+      (_resolve, reject) => {
+        rejectFirst = reject;
+      },
+    );
+    const secondApply = new Promise<Awaited<ReturnType<typeof api.applyReconcile>>>(
+      (resolve) => {
+        resolveSecond = resolve;
+      },
+    );
+    api.previewReconcile.mockResolvedValueOnce({
+      accepted: true,
+      targetId: "rec-alpha-001",
+      expectedVersion: 2,
+      mutableDiff: { body: "Markdown body" },
+      rejectedFields: [],
+    });
+    api.applyReconcile.mockReturnValueOnce(firstApply).mockReturnValueOnce(secondApply);
+
+    render(<App api={api} />);
+
+    await screen.findAllByText("Project memory scaffold");
+    await user.click(screen.getByRole("button", { name: "Review reconcile" }));
+    const applyButton = await screen.findByRole("button", { name: "Apply reconcile" });
+    await user.click(applyButton);
+    await user.click(applyButton);
+
+    await act(async () => {
+      resolveSecond!({
+        accepted: false,
+        record: null,
+        rejectedFields: [
+          {
+            field: "version",
+            code: "version_conflict",
+            message: "Latest apply rejected",
+          },
+        ],
+      });
+    });
+    expect(await screen.findByText("Latest apply rejected")).toBeInTheDocument();
+
+    await act(async () => {
+      rejectFirst!(new Error("Stale apply failed"));
+    });
+
+    expect(screen.getByText("Latest apply rejected")).toBeInTheDocument();
+    expect(screen.queryByText("Stale apply failed")).not.toBeInTheDocument();
+  });
+
   it("clears reconcile readiness when apply is rejected", async () => {
     const user = userEvent.setup();
     api.previewReconcile.mockResolvedValueOnce({
