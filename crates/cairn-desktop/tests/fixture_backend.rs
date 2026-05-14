@@ -50,6 +50,102 @@ fn fixture_rejects_record_count_mismatch() {
 }
 
 #[test]
+fn fixture_rejects_record_with_unknown_folder() {
+    let mut fixture = DesktopFixture::load_default().expect("fixture loads");
+    fixture.records[0].folder_id = "folder-missing".to_string();
+    let dir = tempdir().expect("temp dir");
+    let path = dir.path().join("vault.json");
+    fs::write(&path, serde_json::to_vec(&fixture).expect("fixture json")).expect("write fixture");
+
+    let err = DesktopFixture::load_from_path(&path).expect_err("unknown folder rejected");
+
+    assert!(err.to_string().contains("folder-missing"));
+}
+
+#[test]
+fn fixture_rejects_link_to_unknown_record() {
+    let mut fixture = DesktopFixture::load_default().expect("fixture loads");
+    fixture.records[0].links = vec!["rec-alpha-missing".to_string()];
+    let dir = tempdir().expect("temp dir");
+    let path = dir.path().join("vault.json");
+    fs::write(&path, serde_json::to_vec(&fixture).expect("fixture json")).expect("write fixture");
+
+    let err = DesktopFixture::load_from_path(&path).expect_err("unknown link rejected");
+
+    assert!(err.to_string().contains("rec-alpha-missing"));
+}
+
+#[test]
+fn fixture_rejects_lint_finding_for_unknown_record() {
+    let mut fixture = DesktopFixture::load_default().expect("fixture loads");
+    fixture.lint_findings[0].record_id = Some("rec-alpha-missing".to_string());
+    let dir = tempdir().expect("temp dir");
+    let path = dir.path().join("vault.json");
+    fs::write(&path, serde_json::to_vec(&fixture).expect("fixture json")).expect("write fixture");
+
+    let err = DesktopFixture::load_from_path(&path).expect_err("unknown lint record rejected");
+
+    assert!(err.to_string().contains("rec-alpha-missing"));
+}
+
+#[test]
+fn fixture_rejects_duplicate_record_ids() {
+    let mut fixture = DesktopFixture::load_default().expect("fixture loads");
+    fixture.records[1].id = fixture.records[0].id.clone();
+    let dir = tempdir().expect("temp dir");
+    let path = dir.path().join("vault.json");
+    fs::write(&path, serde_json::to_vec(&fixture).expect("fixture json")).expect("write fixture");
+
+    let err = DesktopFixture::load_from_path(&path).expect_err("duplicate record rejected");
+
+    assert!(err.to_string().contains("duplicate record id"));
+}
+
+#[test]
+fn fixture_rejects_duplicate_folder_ids() {
+    let mut fixture = DesktopFixture::load_default().expect("fixture loads");
+    fixture.folders[1].id = fixture.folders[0].id.clone();
+    fixture
+        .records
+        .iter_mut()
+        .filter(|record| record.folder_id == "folder-ops")
+        .for_each(|record| record.folder_id = "folder-core".to_string());
+    let dir = tempdir().expect("temp dir");
+    let path = dir.path().join("vault.json");
+    fs::write(&path, serde_json::to_vec(&fixture).expect("fixture json")).expect("write fixture");
+
+    let err = DesktopFixture::load_from_path(&path).expect_err("duplicate folder rejected");
+
+    assert!(err.to_string().contains("duplicate folder id"));
+}
+
+#[test]
+fn fixture_rejects_reconcile_example_for_unknown_record() {
+    let mut fixture = DesktopFixture::load_default().expect("fixture loads");
+    fixture.reconcile_examples.mutable_record_id = "rec-alpha-missing".to_string();
+    let dir = tempdir().expect("temp dir");
+    let path = dir.path().join("vault.json");
+    fs::write(&path, serde_json::to_vec(&fixture).expect("fixture json")).expect("write fixture");
+
+    let err = DesktopFixture::load_from_path(&path).expect_err("unknown reconcile record rejected");
+
+    assert!(err.to_string().contains("rec-alpha-missing"));
+}
+
+#[test]
+fn fixture_rejects_mutable_field_as_immutable_example() {
+    let mut fixture = DesktopFixture::load_default().expect("fixture loads");
+    fixture.reconcile_examples.immutable_field = "body".to_string();
+    let dir = tempdir().expect("temp dir");
+    let path = dir.path().join("vault.json");
+    fs::write(&path, serde_json::to_vec(&fixture).expect("fixture json")).expect("write fixture");
+
+    let err = DesktopFixture::load_from_path(&path).expect_err("mutable example rejected");
+
+    assert!(err.to_string().contains("immutableField"));
+}
+
+#[test]
 fn repository_derives_graph_edges_from_fixture_links() {
     let repo = DesktopRepository::from_fixture(DesktopFixture::load_default().expect("fixture"));
     let graph = repo.graph();

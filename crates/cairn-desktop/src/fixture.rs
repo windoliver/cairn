@@ -1,11 +1,14 @@
 //! Fixture loading for the desktop GUI alpha.
 
 use std::{
+    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
 };
 
 use serde::{Deserialize, Serialize};
+
+use cairn_core::contract::frontend_adapter::FrontendFieldPolicy;
 
 use crate::{
     error::{DesktopError, DesktopResult},
@@ -77,6 +80,67 @@ impl DesktopFixture {
                     "vault folderCount {} does not match {} loaded folders",
                     self.vault.folder_count,
                     self.folders.len()
+                ),
+            });
+        }
+        let mut folder_ids = BTreeSet::new();
+        for folder in &self.folders {
+            if !folder_ids.insert(&folder.id) {
+                return Err(DesktopError::Fixture {
+                    message: format!("duplicate folder id {}", folder.id),
+                });
+            }
+        }
+        let mut record_ids = BTreeSet::new();
+        for record in &self.records {
+            if !record_ids.insert(&record.id) {
+                return Err(DesktopError::Fixture {
+                    message: format!("duplicate record id {}", record.id),
+                });
+            }
+        }
+        for record in &self.records {
+            if !folder_ids.contains(&record.folder_id) {
+                return Err(DesktopError::Fixture {
+                    message: format!(
+                        "record {} references unknown folderId {}",
+                        record.id, record.folder_id
+                    ),
+                });
+            }
+            for link in &record.links {
+                if !record_ids.contains(link) {
+                    return Err(DesktopError::Fixture {
+                        message: format!("record {} links to unknown record {}", record.id, link),
+                    });
+                }
+            }
+        }
+        for finding in &self.lint_findings {
+            if let Some(record_id) = &finding.record_id {
+                if !record_ids.contains(record_id) {
+                    return Err(DesktopError::Fixture {
+                        message: format!(
+                            "lint finding {} references unknown recordId {}",
+                            finding.id, record_id
+                        ),
+                    });
+                }
+            }
+        }
+        if !record_ids.contains(&self.reconcile_examples.mutable_record_id) {
+            return Err(DesktopError::Fixture {
+                message: format!(
+                    "reconcile example references unknown record {}",
+                    self.reconcile_examples.mutable_record_id
+                ),
+            });
+        }
+        if FrontendFieldPolicy::is_mutable_from_frontend(&self.reconcile_examples.immutable_field) {
+            return Err(DesktopError::Fixture {
+                message: format!(
+                    "reconcile example immutableField {} is mutable from the frontend",
+                    self.reconcile_examples.immutable_field
                 ),
             });
         }
