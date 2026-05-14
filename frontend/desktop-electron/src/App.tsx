@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { DesktopApiClient } from "./api/client";
 import type {
   DesktopFolder,
@@ -55,6 +55,7 @@ export function App({
     lint: [],
     error: null,
   });
+  const selectionSequence = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -90,14 +91,20 @@ export function App({
   const recordsByFolder = useMemo(() => state.records, [state.records]);
 
   async function selectRecord(id: string) {
+    const sequence = selectionSequence.current + 1;
+    selectionSequence.current = sequence;
     try {
       const selected = await api.record(id);
-      setState((current) => ({ ...current, selected, error: null }));
+      if (selectionSequence.current === sequence) {
+        setState((current) => ({ ...current, selected, error: null }));
+      }
     } catch (error) {
-      setState((current) => ({
-        ...current,
-        error: error instanceof Error ? error.message : "Failed to load record detail",
-      }));
+      if (selectionSequence.current === sequence) {
+        setState((current) => ({
+          ...current,
+          error: error instanceof Error ? error.message : "Failed to load record detail",
+        }));
+      }
     }
   }
 

@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App, resolveDesktopApiBaseUrl } from "./App";
@@ -201,6 +201,88 @@ describe("App", () => {
     await user.click(screen.getByRole("button", { name: /Second memory/ }));
 
     expect(await screen.findByText("Record detail unavailable")).toBeInTheDocument();
+  });
+
+  it("keeps the newest selected record when record detail responses arrive out of order", async () => {
+    const user = userEvent.setup();
+    let resolveSecond: (record: Awaited<ReturnType<typeof api.record>>) => void;
+    const secondRecord = new Promise<Awaited<ReturnType<typeof api.record>>>((resolve) => {
+      resolveSecond = resolve;
+    });
+    api.records.mockResolvedValueOnce([
+      {
+        id: "rec-alpha-001",
+        title: "Project memory scaffold",
+        folderId: "folder-core",
+        kind: "skill",
+        tags: ["alpha"],
+        version: 2,
+        confidence: 0.86,
+      },
+      {
+        id: "rec-alpha-002",
+        title: "Second memory",
+        folderId: "folder-core",
+        kind: "profile",
+        tags: ["alpha"],
+        version: 1,
+        confidence: 0.72,
+      },
+    ]);
+    api.record
+      .mockResolvedValueOnce({
+        id: "rec-alpha-001",
+        title: "Project memory scaffold",
+        folderId: "folder-core",
+        body: "Markdown body",
+        kind: "skill",
+        tags: ["alpha"],
+        version: 2,
+        backendHash: "sha256:fixture-alpha-001",
+        confidence: 0.86,
+        sourceHash: "sha256:source-alpha-001",
+        links: ["rec-alpha-002"],
+      })
+      .mockReturnValueOnce(secondRecord)
+      .mockResolvedValueOnce({
+        id: "rec-alpha-001",
+        title: "Project memory scaffold",
+        folderId: "folder-core",
+        body: "Fresh Markdown body",
+        kind: "skill",
+        tags: ["alpha"],
+        version: 2,
+        backendHash: "sha256:fixture-alpha-001",
+        confidence: 0.86,
+        sourceHash: "sha256:source-alpha-001",
+        links: ["rec-alpha-002"],
+      });
+
+    render(<App api={api} />);
+
+    await screen.findByDisplayValue("Markdown body");
+    await user.click(screen.getByRole("button", { name: /Second memory/ }));
+    await user.click(screen.getByRole("button", { name: /Project memory scaffold/ }));
+    expect(await screen.findByDisplayValue("Fresh Markdown body")).toBeInTheDocument();
+
+    await act(async () => {
+      resolveSecond!({
+        id: "rec-alpha-002",
+        title: "Second memory",
+        folderId: "folder-core",
+        body: "Stale second body",
+        kind: "profile",
+        tags: ["alpha"],
+        version: 1,
+        backendHash: "sha256:fixture-alpha-002",
+        confidence: 0.72,
+        sourceHash: "sha256:source-alpha-002",
+        links: ["rec-alpha-001"],
+      });
+    });
+
+    expect(screen.queryByDisplayValue("Stale second body")).not.toBeInTheDocument();
+    expect(screen.getByDisplayValue("Fresh Markdown body")).toBeInTheDocument();
   });
 
   it("reviews a reconcile edit through the backend client", async () => {
