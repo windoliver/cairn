@@ -17,6 +17,10 @@ type ApplyStatusState = {
   message: string;
 };
 
+type PendingState = {
+  key: string;
+};
+
 export function ReconcilePanel({
   api,
   record,
@@ -31,6 +35,7 @@ export function ReconcilePanel({
   const [previewState, setPreviewState] = useState<PreviewState | null>(null);
   const [applyStatusState, setApplyStatusState] = useState<ApplyStatusState | null>(null);
   const [requestErrorState, setRequestErrorState] = useState<RequestErrorState | null>(null);
+  const [pendingApplyState, setPendingApplyState] = useState<PendingState | null>(null);
   const currentRequestKey = requestKey(record, draftBody);
   const latestRequestKey = useRef(currentRequestKey);
   const latestReviewSequence = useRef(0);
@@ -41,6 +46,7 @@ export function ReconcilePanel({
     requestErrorState?.key === currentRequestKey ? requestErrorState.message : null;
   const applyStatus =
     applyStatusState?.key === currentRequestKey ? applyStatusState.message : null;
+  const isApplyPending = pendingApplyState?.key === currentRequestKey;
 
   function request() {
     return {
@@ -79,8 +85,12 @@ export function ReconcilePanel({
   }
 
   async function apply() {
+    if (isApplyPending) {
+      return;
+    }
     const sequence = latestApplySequence.current + 1;
     latestApplySequence.current = sequence;
+    setPendingApplyState({ key: currentRequestKey });
     try {
       const result = await api.applyReconcile(request());
       if (
@@ -89,6 +99,7 @@ export function ReconcilePanel({
       ) {
         return;
       }
+      setPendingApplyState(null);
       if (result.accepted && result.record) {
         onRecordApplied(result.record);
         setPreviewState(null);
@@ -113,6 +124,7 @@ export function ReconcilePanel({
       ) {
         return;
       }
+      setPendingApplyState(null);
       setApplyStatusState(null);
       setRequestErrorState({ key: currentRequestKey, message: errorMessage(error) });
     }
@@ -131,7 +143,7 @@ export function ReconcilePanel({
               : preview.rejectedFields.map((field) => field.message).join(", ")}
           </p>
           {preview.accepted && (
-            <button type="button" onClick={() => void apply()}>
+            <button type="button" disabled={isApplyPending} onClick={() => void apply()}>
               Apply reconcile
             </button>
           )}

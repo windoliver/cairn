@@ -478,20 +478,12 @@ describe("App", () => {
     expect(screen.queryByText("Applied")).not.toBeInTheDocument();
   });
 
-  it("ignores stale reconcile apply failures after a newer same-draft rejection", async () => {
+  it("does not submit duplicate reconcile applies while apply is pending", async () => {
     const user = userEvent.setup();
-    let rejectFirst: (error: Error) => void;
-    let resolveSecond: (result: Awaited<ReturnType<typeof api.applyReconcile>>) => void;
-    const firstApply = new Promise<Awaited<ReturnType<typeof api.applyReconcile>>>(
-      (_resolve, reject) => {
-        rejectFirst = reject;
-      },
-    );
-    const secondApply = new Promise<Awaited<ReturnType<typeof api.applyReconcile>>>(
-      (resolve) => {
-        resolveSecond = resolve;
-      },
-    );
+    let resolveApply: (result: Awaited<ReturnType<typeof api.applyReconcile>>) => void;
+    const applyResult = new Promise<Awaited<ReturnType<typeof api.applyReconcile>>>((resolve) => {
+      resolveApply = resolve;
+    });
     api.previewReconcile.mockResolvedValueOnce({
       accepted: true,
       targetId: "rec-alpha-001",
@@ -499,7 +491,7 @@ describe("App", () => {
       mutableDiff: { body: "Markdown body" },
       rejectedFields: [],
     });
-    api.applyReconcile.mockReturnValueOnce(firstApply).mockReturnValueOnce(secondApply);
+    api.applyReconcile.mockReturnValueOnce(applyResult);
 
     render(<App api={api} />);
 
@@ -509,27 +501,28 @@ describe("App", () => {
     await user.click(applyButton);
     await user.click(applyButton);
 
+    expect(api.applyReconcile).toHaveBeenCalledTimes(1);
+
     await act(async () => {
-      resolveSecond!({
-        accepted: false,
-        record: null,
-        rejectedFields: [
-          {
-            field: "version",
-            code: "version_conflict",
-            message: "Latest apply rejected",
-          },
-        ],
+      resolveApply!({
+        accepted: true,
+        record: {
+          id: "rec-alpha-001",
+          title: "Project memory scaffold",
+          folderId: "folder-core",
+          body: "Applied Markdown body",
+          kind: "skill",
+          tags: ["alpha"],
+          version: 3,
+          backendHash: "sha256:fixture-alpha-001-applied",
+          confidence: 0.86,
+          sourceHash: "sha256:source-alpha-001",
+          links: ["rec-alpha-002"],
+        },
+        rejectedFields: [],
       });
     });
-    expect(await screen.findByText("Latest apply rejected")).toBeInTheDocument();
-
-    await act(async () => {
-      rejectFirst!(new Error("Stale apply failed"));
-    });
-
-    expect(screen.getByText("Latest apply rejected")).toBeInTheDocument();
-    expect(screen.queryByText("Stale apply failed")).not.toBeInTheDocument();
+    expect(await screen.findByText("Applied")).toBeInTheDocument();
   });
 
   it("clears reconcile readiness when apply is rejected", async () => {
