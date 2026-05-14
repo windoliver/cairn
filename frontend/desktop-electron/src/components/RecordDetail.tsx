@@ -16,7 +16,7 @@ export function RecordDetail({
 
   useEffect(() => {
     setDraft(null);
-  }, [record?.id]);
+  }, [record?.id, record?.version, record?.backendHash]);
 
   if (!record) {
     return <section className="recordDetail">Loading record...</section>;

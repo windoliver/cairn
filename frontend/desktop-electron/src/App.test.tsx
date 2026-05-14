@@ -431,6 +431,44 @@ describe("App", () => {
       fieldDiff: { body: "Markdown body" },
     });
   });
+
+  it("shows the applied backend body when reconcile updates the same record", async () => {
+    const user = userEvent.setup();
+    api.previewReconcile.mockResolvedValueOnce({
+      accepted: true,
+      targetId: "rec-alpha-001",
+      expectedVersion: 2,
+      mutableDiff: { body: "Markdown body changed" },
+      rejectedFields: [],
+    });
+    api.applyReconcile.mockResolvedValueOnce({
+      accepted: true,
+      record: {
+        id: "rec-alpha-001",
+        title: "Project memory scaffold",
+        folderId: "folder-core",
+        body: "Normalized backend body",
+        kind: "skill",
+        tags: ["alpha"],
+        version: 3,
+        backendHash: "sha256:fixture-alpha-001-normalized",
+        confidence: 0.86,
+        sourceHash: "sha256:source-alpha-001",
+        links: ["rec-alpha-002"],
+      },
+      rejectedFields: [],
+    });
+
+    render(<App api={api} />);
+
+    const body = await screen.findByLabelText("Record body");
+    await user.type(body, " changed");
+    await user.click(screen.getByRole("button", { name: "Review reconcile" }));
+    await user.click(await screen.findByRole("button", { name: "Apply reconcile" }));
+
+    expect(await screen.findByDisplayValue("Normalized backend body")).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("Markdown body changed")).not.toBeInTheDocument();
+  });
 });
 
 function jsonResponse(body: unknown): Response {
