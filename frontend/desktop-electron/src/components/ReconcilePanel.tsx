@@ -7,6 +7,11 @@ type PreviewState = {
   preview: DesktopReconcilePreview;
 };
 
+type RequestErrorState = {
+  key: string;
+  message: string;
+};
+
 export function ReconcilePanel({
   api,
   record,
@@ -20,8 +25,11 @@ export function ReconcilePanel({
 }) {
   const [previewState, setPreviewState] = useState<PreviewState | null>(null);
   const [applyStatus, setApplyStatus] = useState<string | null>(null);
+  const [requestErrorState, setRequestErrorState] = useState<RequestErrorState | null>(null);
   const currentRequestKey = requestKey(record, draftBody);
   const preview = previewState?.key === currentRequestKey ? previewState.preview : null;
+  const requestError =
+    requestErrorState?.key === currentRequestKey ? requestErrorState.message : null;
 
   function request() {
     return {
@@ -33,18 +41,35 @@ export function ReconcilePanel({
   }
 
   async function review() {
-    const next = await api.previewReconcile(request());
-    setPreviewState({ key: currentRequestKey, preview: next });
-    setApplyStatus(null);
+    try {
+      const next = await api.previewReconcile(request());
+      setPreviewState({ key: currentRequestKey, preview: next });
+      setApplyStatus(null);
+      setRequestErrorState(null);
+    } catch (error) {
+      setPreviewState(null);
+      setApplyStatus(null);
+      setRequestErrorState({ key: currentRequestKey, message: errorMessage(error) });
+    }
   }
 
   async function apply() {
-    const result = await api.applyReconcile(request());
-    if (result.accepted && result.record) {
-      onRecordApplied(result.record);
-      setApplyStatus("Applied");
-    } else {
-      setApplyStatus(result.rejectedFields.map((field) => field.message).join(", "));
+    try {
+      const result = await api.applyReconcile(request());
+      if (result.accepted && result.record) {
+        onRecordApplied(result.record);
+        setPreviewState(null);
+        setApplyStatus("Applied");
+      } else {
+        setApplyStatus(
+          result.rejectedFields.map((field) => field.message).join(", ") ||
+            "Reconcile apply rejected",
+        );
+      }
+      setRequestErrorState(null);
+    } catch (error) {
+      setApplyStatus(null);
+      setRequestErrorState({ key: currentRequestKey, message: errorMessage(error) });
     }
   }
 
@@ -67,6 +92,7 @@ export function ReconcilePanel({
           )}
         </>
       )}
+      {requestError && <p>{requestError}</p>}
       {applyStatus && <p>{applyStatus}</p>}
     </section>
   );
@@ -74,4 +100,8 @@ export function ReconcilePanel({
 
 function requestKey(record: DesktopRecordDetail, draftBody: string): string {
   return JSON.stringify([record.id, record.version, record.backendHash, draftBody]);
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "Desktop reconcile request failed";
 }

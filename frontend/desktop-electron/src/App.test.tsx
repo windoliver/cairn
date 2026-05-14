@@ -227,6 +227,40 @@ describe("App", () => {
     expect(screen.queryByText("Ready to apply")).not.toBeInTheDocument();
   });
 
+  it("shows reconcile review request failures inline", async () => {
+    const user = userEvent.setup();
+    api.previewReconcile.mockRejectedValueOnce(new Error("Preview service unavailable"));
+
+    render(<App api={api} />);
+
+    await screen.findAllByText("Project memory scaffold");
+    await user.click(screen.getByRole("button", { name: "Review reconcile" }));
+
+    expect(await screen.findByText("Preview service unavailable")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Apply reconcile" })).not.toBeInTheDocument();
+  });
+
+  it("shows reconcile apply request failures inline", async () => {
+    const user = userEvent.setup();
+    api.previewReconcile.mockResolvedValueOnce({
+      accepted: true,
+      targetId: "rec-alpha-001",
+      expectedVersion: 2,
+      mutableDiff: { body: "Markdown body" },
+      rejectedFields: [],
+    });
+    api.applyReconcile.mockRejectedValueOnce(new Error("Apply service unavailable"));
+
+    render(<App api={api} />);
+
+    await screen.findAllByText("Project memory scaffold");
+    await user.click(screen.getByRole("button", { name: "Review reconcile" }));
+    await user.click(await screen.findByRole("button", { name: "Apply reconcile" }));
+
+    expect(await screen.findByText("Apply service unavailable")).toBeInTheDocument();
+    expect(screen.queryByText("Applied")).not.toBeInTheDocument();
+  });
+
   it("applies a reviewed reconcile edit through the backend client", async () => {
     const user = userEvent.setup();
     api.previewReconcile.mockResolvedValueOnce({
