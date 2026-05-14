@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { DesktopApi } from "../App";
 import type { DesktopRecordDetail } from "../api/types";
 import { ReconcilePanel } from "./ReconcilePanel";
@@ -12,13 +12,17 @@ export function RecordDetail({
   api: DesktopApi;
   onRecordApplied: (record: DesktopRecordDetail) => void;
 }) {
-  const [draft, setDraft] = useState("");
+  const [draft, setDraft] = useState<string | null>(null);
+
+  useEffect(() => {
+    setDraft(null);
+  }, [record?.id]);
 
   if (!record) {
     return <section className="recordDetail">Loading record...</section>;
   }
 
-  const body = draft || record.body;
+  const body = draft ?? record.body;
 
   return (
     <section className="recordDetail">

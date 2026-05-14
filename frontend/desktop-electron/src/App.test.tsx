@@ -114,6 +114,30 @@ describe("App", () => {
     });
   });
 
+  it("preserves an empty body draft in reconcile requests", async () => {
+    const user = userEvent.setup();
+    api.previewReconcile.mockResolvedValueOnce({
+      accepted: true,
+      targetId: "rec-alpha-001",
+      expectedVersion: 2,
+      mutableDiff: { body: "" },
+      rejectedFields: [],
+    });
+
+    render(<App api={api} />);
+
+    const body = await screen.findByLabelText("Record body");
+    await user.clear(body);
+    await user.click(screen.getByRole("button", { name: "Review reconcile" }));
+
+    expect(api.previewReconcile).toHaveBeenCalledWith({
+      targetId: "rec-alpha-001",
+      expectedVersion: 2,
+      backendHash: "sha256:fixture-alpha-001",
+      fieldDiff: { body: "" },
+    });
+  });
+
   it("applies a reviewed reconcile edit through the backend client", async () => {
     const user = userEvent.setup();
     api.previewReconcile.mockResolvedValueOnce({
