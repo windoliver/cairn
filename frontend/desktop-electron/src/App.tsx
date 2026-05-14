@@ -108,6 +108,11 @@ export function App({
     }
   }
 
+  function applyRecord(record: DesktopRecordDetail) {
+    selectionSequence.current += 1;
+    setState((current) => ({ ...current, selected: record }));
+  }
+
   if (state.error) {
     return <main className="app appError">{state.error}</main>;
   }
@@ -125,7 +130,7 @@ export function App({
         <RecordDetail
           record={state.selected}
           api={api}
-          onRecordApplied={(record) => setState((current) => ({ ...current, selected: record }))}
+          onRecordApplied={applyRecord}
         />
         <div className="lowerPanels">
           <GraphPanel graph={state.graph} />

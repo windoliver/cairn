@@ -469,6 +469,100 @@ describe("App", () => {
     expect(await screen.findByDisplayValue("Normalized backend body")).toBeInTheDocument();
     expect(screen.queryByDisplayValue("Markdown body changed")).not.toBeInTheDocument();
   });
+
+  it("keeps an applied record when an older selection response resolves later", async () => {
+    const user = userEvent.setup();
+    let resolveSecond: (record: Awaited<ReturnType<typeof api.record>>) => void;
+    const secondRecord = new Promise<Awaited<ReturnType<typeof api.record>>>((resolve) => {
+      resolveSecond = resolve;
+    });
+    api.records.mockResolvedValueOnce([
+      {
+        id: "rec-alpha-001",
+        title: "Project memory scaffold",
+        folderId: "folder-core",
+        kind: "skill",
+        tags: ["alpha"],
+        version: 2,
+        confidence: 0.86,
+      },
+      {
+        id: "rec-alpha-002",
+        title: "Second memory",
+        folderId: "folder-core",
+        kind: "profile",
+        tags: ["alpha"],
+        version: 1,
+        confidence: 0.72,
+      },
+    ]);
+    api.record
+      .mockResolvedValueOnce({
+        id: "rec-alpha-001",
+        title: "Project memory scaffold",
+        folderId: "folder-core",
+        body: "Markdown body",
+        kind: "skill",
+        tags: ["alpha"],
+        version: 2,
+        backendHash: "sha256:fixture-alpha-001",
+        confidence: 0.86,
+        sourceHash: "sha256:source-alpha-001",
+        links: ["rec-alpha-002"],
+      })
+      .mockReturnValueOnce(secondRecord);
+    api.previewReconcile.mockResolvedValueOnce({
+      accepted: true,
+      targetId: "rec-alpha-001",
+      expectedVersion: 2,
+      mutableDiff: { body: "Markdown body" },
+      rejectedFields: [],
+    });
+    api.applyReconcile.mockResolvedValueOnce({
+      accepted: true,
+      record: {
+        id: "rec-alpha-001",
+        title: "Project memory scaffold",
+        folderId: "folder-core",
+        body: "Applied first body",
+        kind: "skill",
+        tags: ["alpha"],
+        version: 3,
+        backendHash: "sha256:fixture-alpha-001-applied",
+        confidence: 0.86,
+        sourceHash: "sha256:source-alpha-001",
+        links: ["rec-alpha-002"],
+      },
+      rejectedFields: [],
+    });
+
+    render(<App api={api} />);
+
+    await screen.findByDisplayValue("Markdown body");
+    await user.click(screen.getByRole("button", { name: /Second memory/ }));
+    await user.click(screen.getByRole("button", { name: "Review reconcile" }));
+    await user.click(await screen.findByRole("button", { name: "Apply reconcile" }));
+    expect(await screen.findByDisplayValue("Applied first body")).toBeInTheDocument();
+
+    await act(async () => {
+      resolveSecond!({
+        id: "rec-alpha-002",
+        title: "Second memory",
+        folderId: "folder-core",
+        body: "Stale second body",
+        kind: "profile",
+        tags: ["alpha"],
+        version: 1,
+        backendHash: "sha256:fixture-alpha-002",
+        confidence: 0.72,
+        sourceHash: "sha256:source-alpha-002",
+        links: ["rec-alpha-001"],
+      });
+    });
+
+    expect(screen.queryByDisplayValue("Stale second body")).not.toBeInTheDocument();
+    expect(screen.getByDisplayValue("Applied first body")).toBeInTheDocument();
+  });
 });
 
 function jsonResponse(body: unknown): Response {
