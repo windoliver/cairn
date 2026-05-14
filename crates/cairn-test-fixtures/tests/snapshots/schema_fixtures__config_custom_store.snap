@@ -66,6 +66,12 @@ expression: "&c"
         }
       }
     },
+    "salience": {
+      "decay_rate": 0.05,
+      "eviction_threshold": 0.1,
+      "min_age_days": 30,
+      "batch_limit": 500
+    },
     "retention": {
       "raw/sensor_observation_*.md": "7d",
       "raw/trace_*.md": "30d"
