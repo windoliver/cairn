@@ -39,10 +39,13 @@ type AppState = {
 };
 
 export function App({
-  api = new DesktopApiClient(resolveDesktopApiBaseUrl()),
+  api: providedApi,
 }: {
   api?: DesktopApi;
 }) {
+  const defaultApi = useMemo(() => new DesktopApiClient(resolveDesktopApiBaseUrl()), []);
+  const api = providedApi ?? defaultApi;
+
   const [state, setState] = useState<AppState>({
     vault: null,
     folders: [],

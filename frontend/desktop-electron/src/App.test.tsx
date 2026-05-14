@@ -1,7 +1,7 @@
 import "@testing-library/jest-dom/vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { App, resolveDesktopApiBaseUrl } from "./App";
 
 const api = {
@@ -70,6 +70,12 @@ const api = {
   applyReconcile: vi.fn(),
 };
 
+afterEach(() => {
+  vi.clearAllMocks();
+  vi.unstubAllGlobals();
+  delete window.cairnDesktop;
+});
+
 describe("App", () => {
   it("prefers the Electron preload API base URL when available", () => {
     Object.defineProperty(window, "cairnDesktop", {
@@ -88,6 +94,67 @@ describe("App", () => {
     expect(screen.getByText("Markdown body")).toBeInTheDocument();
     expect(screen.getByText("Graph")).toBeInTheDocument();
     expect(screen.getByText("Lint")).toBeInTheDocument();
+  });
+
+  it("uses a stable default API client across rerenders", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = input.toString();
+      if (url.endsWith("/api/v1/vault")) {
+        return jsonResponse({
+          id: "desktop-alpha",
+          name: "Desktop Alpha Fixture",
+          root: "fixtures/desktop-gui-alpha",
+          recordCount: 1,
+          folderCount: 1,
+        });
+      }
+      if (url.endsWith("/api/v1/folders")) {
+        return jsonResponse([{ id: "folder-core", name: "Core Memories", parentId: null }]);
+      }
+      if (url.endsWith("/api/v1/records")) {
+        return jsonResponse([
+          {
+            id: "rec-alpha-001",
+            title: "Project memory scaffold",
+            folderId: "folder-core",
+            kind: "skill",
+            tags: ["alpha"],
+            version: 2,
+            confidence: 0.86,
+          },
+        ]);
+      }
+      if (url.endsWith("/api/v1/records/rec-alpha-001")) {
+        return jsonResponse({
+          id: "rec-alpha-001",
+          title: "Project memory scaffold",
+          folderId: "folder-core",
+          body: "Markdown body",
+          kind: "skill",
+          tags: ["alpha"],
+          version: 2,
+          backendHash: "sha256:fixture-alpha-001",
+          confidence: 0.86,
+          sourceHash: "sha256:source-alpha-001",
+          links: ["rec-alpha-002"],
+        });
+      }
+      if (url.endsWith("/api/v1/graph")) {
+        return jsonResponse({ nodes: [], edges: [] });
+      }
+      if (url.endsWith("/api/v1/lint")) {
+        return jsonResponse([]);
+      }
+      throw new Error(`Unexpected fetch ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+
+    await screen.findByText("Desktop Alpha Fixture");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(fetchMock).toHaveBeenCalledTimes(6);
   });
 
   it("reviews a reconcile edit through the backend client", async () => {
@@ -181,3 +248,9 @@ describe("App", () => {
     });
   });
 });
+
+function jsonResponse(body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    headers: { "content-type": "application/json" },
+  });
+}
