@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { SearchPanel } from "./SearchPanel";
@@ -48,5 +48,39 @@ describe("SearchPanel", () => {
 
     expect(await screen.findByText("Fresh result")).toBeInTheDocument();
     expect(screen.queryByText("Stale result")).not.toBeInTheDocument();
+  });
+
+  it("clears stale results while a newer search is pending", async () => {
+    const user = userEvent.setup();
+    let resolveSecond: (value: Array<{ recordId: string; title: string; snippet: string; score: number }>) => void;
+    const secondSearch = new Promise<Array<{ recordId: string; title: string; snippet: string; score: number }>>(
+      (resolve) => {
+        resolveSecond = resolve;
+      },
+    );
+    const api = {
+      search: vi
+        .fn()
+        .mockResolvedValueOnce([
+          { recordId: "rec-alpha-001", title: "Old result", snippet: "old", score: 1 },
+        ])
+        .mockReturnValueOnce(secondSearch),
+    };
+
+    render(<SearchPanel api={api} onSelectRecord={vi.fn()} />);
+
+    const input = screen.getByLabelText("Search records");
+    await user.type(input, "a");
+    expect(await screen.findByText("Old result")).toBeInTheDocument();
+
+    await user.type(input, "b");
+
+    expect(screen.queryByText("Old result")).not.toBeInTheDocument();
+
+    await act(async () => {
+      resolveSecond!([{ recordId: "rec-alpha-002", title: "Fresh result", snippet: "fresh", score: 1 }]);
+    });
+
+    expect(await screen.findByText("Fresh result")).toBeInTheDocument();
   });
 });

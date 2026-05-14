@@ -25,6 +25,8 @@ export function SearchPanel({
       setError(null);
       return;
     }
+    setResults([]);
+    setError(null);
     try {
       const nextResults = await api.search(nextQuery);
       if (searchSequence.current === sequence) {
