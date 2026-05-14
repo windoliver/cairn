@@ -33,6 +33,7 @@ export function ReconcilePanel({
   const [requestErrorState, setRequestErrorState] = useState<RequestErrorState | null>(null);
   const currentRequestKey = requestKey(record, draftBody);
   const latestRequestKey = useRef(currentRequestKey);
+  const latestReviewSequence = useRef(0);
   latestRequestKey.current = currentRequestKey;
   const preview = previewState?.key === currentRequestKey ? previewState.preview : null;
   const requestError =
@@ -50,16 +51,24 @@ export function ReconcilePanel({
   }
 
   async function review() {
+    const sequence = latestReviewSequence.current + 1;
+    latestReviewSequence.current = sequence;
     try {
       const next = await api.previewReconcile(request());
-      if (latestRequestKey.current !== currentRequestKey) {
+      if (
+        latestReviewSequence.current !== sequence ||
+        latestRequestKey.current !== currentRequestKey
+      ) {
         return;
       }
       setPreviewState({ key: currentRequestKey, preview: next });
       setApplyStatusState(null);
       setRequestErrorState(null);
     } catch (error) {
-      if (latestRequestKey.current !== currentRequestKey) {
+      if (
+        latestReviewSequence.current !== sequence ||
+        latestRequestKey.current !== currentRequestKey
+      ) {
         return;
       }
       setPreviewState(null);

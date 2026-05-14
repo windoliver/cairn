@@ -403,6 +403,47 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "Apply reconcile" })).toBeInTheDocument();
   });
 
+  it("ignores stale reconcile review failures for the same draft", async () => {
+    const user = userEvent.setup();
+    let rejectFirst: (error: Error) => void;
+    let resolveSecond: (preview: Awaited<ReturnType<typeof api.previewReconcile>>) => void;
+    const firstPreview = new Promise<Awaited<ReturnType<typeof api.previewReconcile>>>(
+      (_resolve, reject) => {
+        rejectFirst = reject;
+      },
+    );
+    const secondPreview = new Promise<Awaited<ReturnType<typeof api.previewReconcile>>>(
+      (resolve) => {
+        resolveSecond = resolve;
+      },
+    );
+    api.previewReconcile.mockReturnValueOnce(firstPreview).mockReturnValueOnce(secondPreview);
+
+    render(<App api={api} />);
+
+    await screen.findAllByText("Project memory scaffold");
+    await user.click(screen.getByRole("button", { name: "Review reconcile" }));
+    await user.click(screen.getByRole("button", { name: "Review reconcile" }));
+
+    await act(async () => {
+      resolveSecond!({
+        accepted: true,
+        targetId: "rec-alpha-001",
+        expectedVersion: 2,
+        mutableDiff: { body: "Markdown body" },
+        rejectedFields: [],
+      });
+    });
+    expect(await screen.findByText("Ready to apply")).toBeInTheDocument();
+
+    await act(async () => {
+      rejectFirst!(new Error("Stale preview failed"));
+    });
+
+    expect(screen.getByText("Ready to apply")).toBeInTheDocument();
+    expect(screen.queryByText("Stale preview failed")).not.toBeInTheDocument();
+  });
+
   it("shows reconcile review request failures inline", async () => {
     const user = userEvent.setup();
     api.previewReconcile.mockRejectedValueOnce(new Error("Preview service unavailable"));
