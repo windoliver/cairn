@@ -13,6 +13,7 @@ export function SearchPanel({
 }) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<DesktopSearchResult[]>([]);
+  const [error, setError] = useState<string | null>(null);
   const searchSequence = useRef(0);
 
   async function runSearch(nextQuery: string) {
@@ -21,11 +22,20 @@ export function SearchPanel({
     searchSequence.current = sequence;
     if (!nextQuery.trim()) {
       setResults([]);
+      setError(null);
       return;
     }
-    const nextResults = await api.search(nextQuery);
-    if (searchSequence.current === sequence) {
-      setResults(nextResults);
+    try {
+      const nextResults = await api.search(nextQuery);
+      if (searchSequence.current === sequence) {
+        setResults(nextResults);
+        setError(null);
+      }
+    } catch (error) {
+      if (searchSequence.current === sequence) {
+        setResults([]);
+        setError(error instanceof Error ? error.message : "Search request failed");
+      }
     }
   }
 
@@ -37,6 +47,7 @@ export function SearchPanel({
         value={query}
         onChange={(event) => void runSearch(event.target.value)}
       />
+      {error && <p>{error}</p>}
       {results.map((result) => (
         <button key={result.recordId} type="button" onClick={() => onSelectRecord(result.recordId)}>
           {result.title}

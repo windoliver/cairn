@@ -5,6 +5,20 @@ import { describe, expect, it, vi } from "vitest";
 import { SearchPanel } from "./SearchPanel";
 
 describe("SearchPanel", () => {
+  it("shows search request failures inline", async () => {
+    const user = userEvent.setup();
+    const api = {
+      search: vi.fn().mockRejectedValueOnce(new Error("Search service unavailable")),
+    };
+
+    render(<SearchPanel api={api} onSelectRecord={vi.fn()} />);
+
+    await user.type(screen.getByLabelText("Search records"), "a");
+
+    expect(await screen.findByText("Search service unavailable")).toBeInTheDocument();
+    expect(api.search).toHaveBeenCalledWith("a");
+  });
+
   it("keeps the newest search results when responses arrive out of order", async () => {
     const user = userEvent.setup();
     let resolveFirst: (value: Array<{ recordId: string; title: string; snippet: string; score: number }>) => void;
