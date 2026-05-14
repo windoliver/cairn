@@ -923,6 +923,7 @@ dependencies = [
  "cairn-core",
  "cairn-store-sqlite",
  "cairn-test-fixtures",
+ "chrono",
  "fs4",
  "rusqlite",
  "serde",

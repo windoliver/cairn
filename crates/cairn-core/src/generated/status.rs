@@ -180,6 +180,29 @@ pub struct StatusResponseServerInfo {
     pub version: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatusResponseWorkflowsWorkflow {
+    Consolidate,
+    Promote,
+    Expire,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusResponseWorkflows {
+    /// Plans drained successfully, including idempotent already-applied plans.
+    pub drained_plans: u64,
+    /// Most recent successful plan-drain timestamp for this workflow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_applied_at: Option<String>,
+    /// Plans produced but not yet drained, usually because cancellation stopped between plans.
+    pub pending_plans: u64,
+    /// Stable workflow class name.
+    pub workflow: StatusResponseWorkflowsWorkflow,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StatusResponse {
@@ -193,6 +216,9 @@ pub struct StatusResponse {
     pub pipeline_dispatch: Option<Vec<StatusResponsePipelineDispatch>>,
     pub sensors: StatusResponseSensors,
     pub server_info: StatusResponseServerInfo,
+    /// Runtime workflow-drainer progress for `cairn.admin.v1` status (issue #291). Each entry reports one workflow class; entries are sorted by workflow name for byte-stable status responses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflows: Option<Vec<StatusResponseWorkflows>>,
 }
 
 pub const SCHEMA: &[u8] = include_bytes!("schemas/prelude/status.json");
