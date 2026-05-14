@@ -457,6 +457,26 @@ fn repository_reconcile_rejects_immutable_field() {
 }
 
 #[test]
+fn repository_reconcile_rejects_mixed_diff_atomically() {
+    let repo = DesktopRepository::from_fixture(DesktopFixture::load_default().expect("fixture"));
+    let mut field_diff = BTreeMap::new();
+    field_diff.insert("body".to_string(), json!("Updated fixture body"));
+    field_diff.insert("confidence".to_string(), json!(0.99));
+
+    let preview = repo.preview_reconcile(DesktopReconcilePreviewRequest {
+        target_id: "rec-alpha-001".to_string(),
+        expected_version: 2,
+        backend_hash: "sha256:fixture-alpha-001".to_string(),
+        field_diff,
+    });
+
+    assert!(!preview.accepted);
+    assert!(preview.mutable_diff.is_empty());
+    assert_eq!(preview.rejected_fields[0].field, "confidence");
+    assert_eq!(preview.rejected_fields[0].code, "immutable_field_changed");
+}
+
+#[test]
 fn repository_reconcile_rejects_version_conflict() {
     let repo = DesktopRepository::from_fixture(DesktopFixture::load_default().expect("fixture"));
     let mut field_diff = BTreeMap::new();

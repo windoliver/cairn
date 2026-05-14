@@ -228,6 +228,10 @@ impl DesktopRepository {
             }
         }
 
+        if !rejected_fields.is_empty() {
+            mutable_diff.clear();
+        }
+
         DesktopReconcilePreview {
             accepted: rejected_fields.is_empty(),
             target_id: request.target_id,
