@@ -4,7 +4,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn cli() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_cairn"))
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_cairn"));
+    cmd.env_remove("CAIRN_VAULT");
+    cmd.env_remove("CAIRN_REGISTRY");
+    cmd.env_remove("CAIRN_ISSUER");
+    cmd
 }
 
 fn fixtures_dir() -> PathBuf {
@@ -26,6 +30,22 @@ fn json_stdout(out: &std::process::Output) -> serde_json::Value {
     serde_json::from_str(stdout.trim()).unwrap_or_else(|err| {
         panic!("stdout was not valid JSON: {err}\nstdout: {stdout:?}");
     })
+}
+
+fn run_json_ok(vault: &Path, args: &[&str]) -> serde_json::Value {
+    let out = cli()
+        .current_dir(vault)
+        .args(args)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run cairn {args:?}: {e}"));
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "cairn {args:?} failed\nstderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    json_stdout(&out)
 }
 
 fn keyword_search_hits(vault: &Path, query: &str) -> Vec<serde_json::Value> {
@@ -186,6 +206,98 @@ fn recording_fixture_ingests_ordered_audio_and_ocr_segments() {
     assert_eq!(
         keyword_search_hits(vault.path(), "beta follow up action").len(),
         1
+    );
+}
+
+#[test]
+fn recording_derived_record_forget_removes_search_and_retrieve_text() {
+    let vault = tempfile::tempdir().expect("temp vault");
+    bootstrap_vault(vault.path());
+    let fixtures = fixtures_dir();
+    let media = fixtures.join("demo.mp4");
+    let fixture_json = fixtures.join("recording-fixture.json");
+    let transcript = "alpha recording launch note";
+
+    let ingest = cli()
+        .current_dir(vault.path())
+        .env("CAIRN_RECORDING_FIXTURE_JSON", &fixture_json)
+        .args([
+            "ingest",
+            "--kind",
+            "transcript",
+            "--recording",
+            media.to_str().expect("utf-8 media path"),
+            "--json",
+        ])
+        .output()
+        .expect("cairn ingest --recording");
+    assert_eq!(
+        ingest.status.code(),
+        Some(0),
+        "recording ingest failed; stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&ingest.stdout),
+        String::from_utf8_lossy(&ingest.stderr)
+    );
+
+    let hits = keyword_search_hits(vault.path(), transcript);
+    assert_eq!(
+        hits.len(),
+        1,
+        "expected exactly one derived recording hit: {hits:?}"
+    );
+    let record_id = hits[0]["record_id"]
+        .as_str()
+        .expect("hit record_id")
+        .to_owned();
+
+    let before_retrieve = run_json_ok(vault.path(), &["retrieve", &record_id, "--json"]);
+    assert_eq!(
+        before_retrieve["status"], "committed",
+        "envelope: {before_retrieve}"
+    );
+    assert_eq!(
+        before_retrieve["data"]["record_id"], record_id,
+        "envelope: {before_retrieve}"
+    );
+    assert!(
+        before_retrieve["data"]["body"]
+            .as_str()
+            .is_some_and(|body| body.contains(transcript)),
+        "retrieve before forget must expose the live recording transcript: {before_retrieve}"
+    );
+
+    let forget = run_json_ok(vault.path(), &["forget", "--record", &record_id, "--json"]);
+    assert_eq!(forget["status"], "committed", "envelope: {forget}");
+
+    assert!(
+        keyword_search_hits(vault.path(), transcript).is_empty(),
+        "search after forget must not surface recording transcript"
+    );
+    let retrieve_out = cli()
+        .current_dir(vault.path())
+        .args(["retrieve", &record_id, "--json"])
+        .output()
+        .expect("retrieve after forget");
+    assert_eq!(
+        retrieve_out.status.code(),
+        Some(0),
+        "retrieve after forget should commit with empty record data\nstderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&retrieve_out.stderr),
+        String::from_utf8_lossy(&retrieve_out.stdout)
+    );
+    let retrieve = json_stdout(&retrieve_out);
+    assert_eq!(retrieve["status"], "committed", "envelope: {retrieve}");
+    assert_eq!(
+        retrieve["data"]["record_id"], record_id,
+        "envelope: {retrieve}"
+    );
+    assert!(
+        retrieve["data"]["body"].is_null(),
+        "retrieve after forget must return empty body: {retrieve}"
+    );
+    assert!(
+        !retrieve.to_string().contains(transcript),
+        "retrieve after forget must not leak recording text: {retrieve}"
     );
 }
 

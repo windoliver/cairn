@@ -6,10 +6,13 @@
 )]
 
 use anyhow::Context as _;
+use cairn_core::config::CairnConfig;
+use cairn_core::contract::identity_registry::IdentityVisibility;
 use cairn_core::domain::canonical::canonical_bytes;
+use cairn_core::domain::identity::{keys::IdentityRevision, provision::ProvisionInput};
 use cairn_core::domain::{
     ActorChainEntry, CaptureEvent, CaptureEventId, CaptureMode, CapturePayload, CaptureRefs,
-    ChainRole, Identity, PayloadHash, Rfc3339Timestamp, SourceFamily,
+    ChainRole, Identity, PayloadHash, Rfc3339Timestamp, ScopeTuple, SourceFamily,
 };
 use cairn_core::generated::common::Ulid as WireUlid;
 use cairn_core::generated::envelope::{
@@ -110,7 +113,7 @@ pub fn run(
     json: bool,
     recording_path: &Path,
     vault_root: &Path,
-    _config: cairn_core::config::CairnConfig,
+    config: CairnConfig,
 ) -> ExitCode {
     let started = Instant::now();
 
@@ -155,7 +158,7 @@ pub fn run(
         Err(e) => return emit_internal(json, &format!("runtime build: {e}")),
     };
 
-    let result = rt.block_on(async { import_recording_batch(vault_root, batch).await });
+    let result = rt.block_on(async { import_recording_batch(vault_root, config, batch).await });
     let policy_trace = match result {
         Ok(policy_trace) => policy_trace,
         Err(e) => return emit_internal(json, &format!("{e:#}")),
@@ -234,15 +237,29 @@ impl SummaryCounts {
 
 async fn import_recording_batch(
     vault_root: &Path,
+    config: CairnConfig,
     batch: CaptureBatch,
 ) -> anyhow::Result<Vec<ResponsePolicyTrace>> {
-    let written = write_payloads(vault_root, &batch.payloads).await?;
+    let ctx = crate::verbs::signed::open_context(ResponseVerb::Ingest, vault_root, config)
+        .await
+        .map_err(signed_context_error)?;
+    ensure_recording_issuer(&ctx).await?;
+    let scope_binding = ScopeTuple {
+        tenant: Some(super::DEFAULT_TENANT.to_owned()),
+        workspace: Some(ctx.config.vault.name.clone()),
+        entity: Some(super::INGEST_ENTITY.to_owned()),
+        ..ScopeTuple::default()
+    };
+
+    let written = write_payloads(&ctx.vault_root, &batch.payloads).await?;
     let import_result = async {
-        let db_path = vault_root.join(".cairn").join("cairn.db");
-        let store = cairn_store_sqlite::open(&db_path).await?;
-        let response =
-            crate::verbs::capture_trace::run_events_handler(&store, vault_root, batch.events)
-                .await?;
+        let response = crate::verbs::capture_trace::run_events_handler_with_scope(
+            &ctx.store,
+            &ctx.vault_root,
+            batch.events,
+            scope_binding,
+        )
+        .await?;
         if !response.failed_turns.is_empty() {
             anyhow::bail!(
                 "capture import failed for recording ingest: {:?}",
@@ -254,10 +271,49 @@ async fn import_recording_batch(
     .await;
 
     if import_result.is_err() {
-        cleanup_created_payloads(vault_root, &written.created_paths).await;
+        cleanup_created_payloads(&ctx.vault_root, &written.created_paths).await;
     }
 
     import_result
+}
+
+async fn ensure_recording_issuer(
+    ctx: &crate::verbs::signed::OpenedVerbContext,
+) -> anyhow::Result<()> {
+    let issuer = Identity::parse(super::DEFAULT_INGEST_ISSUER.to_owned())
+        .context("parse default recording ingest issuer")?;
+    let existing = ctx
+        .identity
+        .registry
+        .get_identity(&issuer, IdentityVisibility::Operational)
+        .await
+        .context("identity lookup")?;
+    if existing.is_some() {
+        return Ok(());
+    }
+
+    let mut rng = rand_core::OsRng;
+    let input = ProvisionInput {
+        vault_id: ctx.identity.vault_id.clone(),
+        id: issuer.clone(),
+        kind: issuer.kind(),
+        revision: IdentityRevision::FIRST,
+    };
+    ctx.identity
+        .provision(issuer.kind(), input, &mut rng)
+        .await
+        .context("default recording ingest issuer provision")?;
+    Ok(())
+}
+
+fn signed_context_error(response: Response) -> anyhow::Error {
+    let error = response
+        .error
+        .map_or_else(|| "none".to_owned(), |error| error.to_string());
+    anyhow::anyhow!(
+        "signed context open: status={:?} error={error}",
+        response.status
+    )
 }
 
 #[derive(Debug, Default)]
