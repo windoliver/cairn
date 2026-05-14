@@ -479,6 +479,8 @@ pub struct CairnConfig {
     pub source: SourceConfig,
     /// Sensor enablement.
     pub sensors: SensorsConfig,
+    /// Reference-consumer behavior toggles.
+    pub reference_consumer: ReferenceConsumerConfig,
     /// Workflow orchestrator selection.
     pub workflows: WorkflowsConfig,
     /// Pipeline stage configuration.
@@ -969,6 +971,28 @@ pub struct LlmConfig {
 }
 
 // ── Sensors ───────────────────────────────────────────────────────────────
+
+/// Reference-consumer behavior toggles.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct ReferenceConsumerConfig {
+    /// Zero-capture reminder behavior.
+    pub zero_capture_nudge: ZeroCaptureNudgeConfig,
+}
+
+/// Zero-capture reminder configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ZeroCaptureNudgeConfig {
+    /// Whether the reminder behavior is enabled.
+    pub enabled: bool,
+}
+
+impl Default for ZeroCaptureNudgeConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
 
 /// Sensor enablement (§3.1 sensors block).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1564,6 +1588,16 @@ mod tests {
     }
 
     #[test]
+    fn default_zero_capture_nudge_is_enabled() {
+        assert!(
+            CairnConfig::default()
+                .reference_consumer
+                .zero_capture_nudge
+                .enabled
+        );
+    }
+
+    #[test]
     fn default_screen_sensor_is_disabled() {
         assert!(!CairnConfig::default().sensors.screen.enabled);
     }
@@ -1936,6 +1970,9 @@ mod tests {
             "screen": { "enabled": false },
             "slack": { "enabled": false, "scope": [] }
           },
+          "reference_consumer": {
+            "zero_capture_nudge": { "enabled": false }
+          },
           "workflows": { "orchestrator": "local" },
           "pipeline": { "extract": { "chain": [{ "worker": "regex", "kinds": [] }] } }
         }"#;
@@ -1944,6 +1981,7 @@ mod tests {
         assert_eq!(config.vault.layout.sources, "inbox");
         assert_eq!(config.vault.layout.enabled_kinds.len(), 2);
         assert!(!config.sensors.ide.enabled);
+        assert!(!config.reference_consumer.zero_capture_nudge.enabled);
     }
 
     #[test]
