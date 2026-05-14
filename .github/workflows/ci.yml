@@ -87,7 +87,11 @@ jobs:
         with:
           tool: cargo-nextest
       - name: cargo nextest run --workspace
-        run: cargo nextest run --workspace --locked --no-fail-fast
+        # macOS runners can leave the `cargo` shim resolving through
+        # rustup-init after install-action updates ~/.cargo/bin. Call the
+        # installed nextest binary directly; install-action verifies this
+        # exact entrypoint before the step runs.
+        run: cargo-nextest nextest run --workspace --locked --no-fail-fast
       - name: cargo test --doc --workspace
         run: cargo test --doc --workspace --locked
 
