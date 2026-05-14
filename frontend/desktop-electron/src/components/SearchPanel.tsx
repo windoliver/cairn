@@ -1,20 +1,32 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { DesktopApi } from "../App";
 import type { DesktopSearchResult } from "../api/types";
+
+type SearchApi = Pick<DesktopApi, "search">;
 
 export function SearchPanel({
   api,
   onSelectRecord,
 }: {
-  api: DesktopApi;
+  api: SearchApi;
   onSelectRecord: (id: string) => void;
 }) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<DesktopSearchResult[]>([]);
+  const searchSequence = useRef(0);
 
   async function runSearch(nextQuery: string) {
     setQuery(nextQuery);
-    setResults(nextQuery.trim() ? await api.search(nextQuery) : []);
+    const sequence = searchSequence.current + 1;
+    searchSequence.current = sequence;
+    if (!nextQuery.trim()) {
+      setResults([]);
+      return;
+    }
+    const nextResults = await api.search(nextQuery);
+    if (searchSequence.current === sequence) {
+      setResults(nextResults);
+    }
   }
 
   return (
