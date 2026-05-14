@@ -51,7 +51,19 @@ pub async fn reconcile_consolidation_backlog(
         .list_consolidation_backlog(config.min_turns_for_trigger)
         .await?;
     for entry in &entries {
-        let bound_scope: Option<ScopeTuple> = serde_json::from_str(&entry.scope_json).ok();
+        // Normalize the persisted scope to match capture-time bound_scope
+        // (round-10 adversarial review #1). Turn-summary records are
+        // written with `session_id` injected into their scope, but
+        // capture-time enqueues pass the verb's caller-scope which has
+        // no session_id. If we reused the persisted shape here, the
+        // canonical_wire fingerprint (and therefore the dedupe key +
+        // stable target_id) would differ, letting reconcile create a
+        // second job for an already-queued window. Strip session_id so
+        // the two paths produce the same dedupe key.
+        let mut bound_scope: Option<ScopeTuple> = serde_json::from_str(&entry.scope_json).ok();
+        if let Some(scope) = bound_scope.as_mut() {
+            scope.session_id = None;
+        }
         match enqueue_if_due_scoped(
             job_store.as_ref(),
             &config,

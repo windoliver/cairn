@@ -81,6 +81,18 @@ pub enum ConsolidationConfigError {
         /// Required minimum.
         floor: u32,
     },
+    /// `min_turns_for_trigger > window_size_turns` — the handler can
+    /// never collect enough candidates to fire continuation enqueue.
+    #[error(
+        "consolidation.min_turns_for_trigger ({min_turns_for_trigger}) \
+         must be \u{2264} window_size_turns ({window_size_turns})"
+    )]
+    MinExceedsWindow {
+        /// Configured trigger threshold.
+        min_turns_for_trigger: u32,
+        /// Configured window cap.
+        window_size_turns: u32,
+    },
     /// `salience_floor` outside the currently-supported range.
     #[error(
         "consolidation.salience_floor {actual} outside [0, {max}] — real \
@@ -128,6 +140,18 @@ impl ConsolidationConfig {
             return Err(ConsolidationConfigError::SalienceOutOfRange {
                 actual: self.salience_floor,
                 max: Self::SALIENCE_FLOOR_MAX,
+            });
+        }
+        // The handler's follow-up enqueue checks the next window by
+        // reading at most `window_size_turns` candidates and comparing
+        // that count to `min_turns_for_trigger`. If `min > window`,
+        // continuation can never fire even when dozens of eligible turns
+        // remain (round-10 adversarial review #3). Reject such configs
+        // outright.
+        if self.min_turns_for_trigger > self.window_size_turns {
+            return Err(ConsolidationConfigError::MinExceedsWindow {
+                min_turns_for_trigger: self.min_turns_for_trigger,
+                window_size_turns: self.window_size_turns,
             });
         }
         Ok(())

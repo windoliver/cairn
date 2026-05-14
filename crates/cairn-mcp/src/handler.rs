@@ -328,7 +328,14 @@ impl CairnMcpHandler {
             model_present,
             embedding_provider_ready,
             llm_configured: false,
-            consolidation_runtime_ready: self.consolidation_runtime_ready,
+            // Tie advertisement to BOTH the scheduler-runtime flag AND
+            // the config opt-in. The scheduler can be alive while
+            // consolidation.enabled=false (the trigger short-circuits
+            // to `Disabled` and the handler emits no summaries) — in
+            // that state advertising the capability would lie to
+            // callers (round-10 adversarial review #2).
+            consolidation_runtime_ready: self.consolidation_runtime_ready
+                && self.config.consolidation.enabled,
             contract_phase: cairn_core::status::Phase::V0_1,
         };
 
