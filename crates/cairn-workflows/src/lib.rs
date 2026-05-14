@@ -10,13 +10,28 @@
 
 pub mod consent_mirror;
 pub mod consolidation;
+pub mod dream;
+pub mod evaluation;
+pub mod expiration;
 pub mod scheduler;
 pub mod sqlite_store;
+pub mod synthetic;
+
+#[cfg(test)]
+mod test_support;
 
 pub use consent_mirror::{ConsentLogMaterializer, MirrorError};
 pub use consolidation::{
     CONSOLIDATION_KIND, ConsolidationForgetCleanupHandler, ConsolidationHandler,
     ConsolidationPayload, FORGET_CLEANUP_KIND, ForgetCleanupPayload,
+};
+pub use dream::{DREAM_KIND, DreamHandler, DreamPayload};
+pub use evaluation::{
+    CheckOutcome, EVALUATION_KIND, EvaluationHandler, EvaluationPayload, EvaluationReport,
+    GoldenCheck, OrphanCheck, TombstoneConsistencyCheck, default_checks as default_golden_checks,
+};
+pub use expiration::{
+    EXPIRATION_KIND, ExpirationHandler, ExpirationPayload, ExpirationSweepReport,
 };
 pub use scheduler::{Clock, MockClock, Scheduler, SchedulerConfig, SystemClock};
 pub use sqlite_store::{SqliteJobStore, SqliteJobStoreInitError};

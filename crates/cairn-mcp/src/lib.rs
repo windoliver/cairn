@@ -202,7 +202,56 @@ pub async fn serve_stdio_with_store_consolidation_ready(
         vault_root,
         tokio::io::stdin(),
         tokio::io::stdout(),
-        true,
+        WorkflowReadiness {
+            consolidation: true,
+            ..WorkflowReadiness::default()
+        },
+    )
+    .await
+}
+
+/// Per-workflow runtime-readiness flags. Passed by `cairn mcp serve`
+/// after [`crate::scheduler::Scheduler::start`](
+/// cairn_workflows::Scheduler::start) registers each handler. Each
+/// flag flips its matching capability advertisement in
+/// `status.capabilities` and the MCP `initialize` response.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WorkflowReadiness {
+    /// `cairn.workflows.v1.consolidation` advertised.
+    pub consolidation: bool,
+    /// `cairn.workflows.v1.dream` advertised (issue #91).
+    pub dream: bool,
+    /// `cairn.workflows.v1.expiration` advertised (issue #91).
+    pub expiration: bool,
+    /// `cairn.workflows.v1.evaluation` advertised (issue #91).
+    pub evaluation: bool,
+}
+
+/// Run the MCP stdio server with explicit per-workflow runtime-readiness
+/// flags. Supersedes [`serve_stdio_with_store_consolidation_ready`] now
+/// that issue #91 adds three more capability gates.
+///
+/// # Errors
+/// Same as [`serve_stdio_with_store`].
+pub async fn serve_stdio_with_store_workflows_ready(
+    store: Arc<dyn cairn_core::contract::memory_store::MemoryStore>,
+    sqlite_store: Arc<cairn_store_sqlite::SqliteMemoryStore>,
+    scope: Arc<dyn cairn_core::mcp_auth::McpSessionScope>,
+    config: cairn_core::config::CairnConfig,
+    principal: cairn_core::domain::ScopeTuple,
+    vault_root: Option<PathBuf>,
+    readiness: WorkflowReadiness,
+) -> Result<(), TransportError> {
+    serve_stdio_with_store_io_inner(
+        store,
+        sqlite_store,
+        scope,
+        config,
+        principal,
+        vault_root,
+        tokio::io::stdin(),
+        tokio::io::stdout(),
+        readiness,
     )
     .await
 }
@@ -237,7 +286,7 @@ where
         None,
         input,
         output,
-        false,
+        WorkflowReadiness::default(),
     )
     .await
 }
@@ -275,7 +324,7 @@ where
         Some(vault_root),
         input,
         output,
-        false,
+        WorkflowReadiness::default(),
     )
     .await
 }
@@ -283,7 +332,7 @@ where
 #[allow(
     clippy::too_many_arguments,
     reason = "shared transport helper carries explicit wiring without hiding ownership; \
-              vault_root and consolidation_runtime_ready are independent gates"
+              vault_root and the workflow-readiness flags are independent gates"
 )]
 async fn serve_stdio_with_store_io_inner<I, O>(
     store: Arc<dyn cairn_core::contract::memory_store::MemoryStore>,
@@ -294,7 +343,7 @@ async fn serve_stdio_with_store_io_inner<I, O>(
     vault_root: Option<PathBuf>,
     input: I,
     output: O,
-    consolidation_runtime_ready: bool,
+    readiness: WorkflowReadiness,
 ) -> Result<(), TransportError>
 where
     I: AsyncRead + Unpin + Send + 'static,
@@ -317,7 +366,10 @@ where
     } else {
         CairnMcpHandler::with_store_scope_and_sqlite(store, sqlite_store, scope, config, principal)
     }
-    .with_consolidation_runtime_ready(consolidation_runtime_ready);
+    .with_consolidation_runtime_ready(readiness.consolidation)
+    .with_dream_runtime_ready(readiness.dream)
+    .with_expiration_runtime_ready(readiness.expiration)
+    .with_evaluation_runtime_ready(readiness.evaluation);
 
     // rmcp's `IntoTransport` is implemented for `(R, W)` tuples where R:
     // `AsyncRead + Unpin + Send + 'static` and W: `AsyncWrite + Unpin + Send +

@@ -566,6 +566,9 @@ fn default_p0_gates() -> CapabilityGates {
         llm_configured: false,
         contract_phase: Phase::V0_1,
         consolidation_runtime_ready: false,
+        dream_runtime_ready: false,
+        expiration_runtime_ready: false,
+        evaluation_runtime_ready: false,
     }
 }
 

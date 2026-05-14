@@ -38,6 +38,26 @@ pub enum MetricEvent {
         /// Snapshot of every source-class watermark at assembly time.
         watermarks: SourceWatermarks,
     },
+    /// Emitted at the end of each `EvaluationWorkflow` sweep (issue
+    /// #91, brief §15). Drives release gating — CI rejects merges
+    /// whose `failed` count grows beyond the previous baseline.
+    #[serde(rename = "evaluation_completed")]
+    EvaluationCompleted {
+        /// Wall-clock millis since UNIX epoch — captured at the
+        /// start of the sweep so retries against the same payload
+        /// emit the same metric.
+        ts_ms: i64,
+        /// `report_target_id` of the synthesized `Reasoning` record
+        /// the handler upserted (when `write_report_record = true`).
+        /// Empty when the report-record arm was disabled.
+        report_target_id: String,
+        /// Total number of `GoldenCheck`s executed this sweep.
+        checks_run: u32,
+        /// Subset of `checks_run` that returned `CheckOutcome::Passed`.
+        passed: u32,
+        /// Subset of `checks_run` that returned `CheckOutcome::Failed`.
+        failed: u32,
+    },
 }
 
 #[cfg(test)]
@@ -61,7 +81,36 @@ mod tests {
         let json = serde_json::to_string(&event).expect("serialize");
         assert!(json.contains("\"event\":\"hot_prefix_assembled\""));
         let back: MetricEvent = serde_json::from_str(&json).expect("deserialize");
-        let MetricEvent::HotPrefixAssembled { latency_ms, .. } = back;
-        assert_eq!(latency_ms, 12);
+        match back {
+            MetricEvent::HotPrefixAssembled { latency_ms, .. } => assert_eq!(latency_ms, 12),
+            _ => panic!("expected HotPrefixAssembled"),
+        }
+    }
+
+    #[test]
+    fn evaluation_completed_round_trips_through_json() {
+        let event = MetricEvent::EvaluationCompleted {
+            ts_ms: 1_700_000_000_000,
+            report_target_id: "01JTESTID0000000000000000".into(),
+            checks_run: 2,
+            passed: 2,
+            failed: 0,
+        };
+        let json = serde_json::to_string(&event).expect("serialize");
+        assert!(json.contains("\"event\":\"evaluation_completed\""));
+        let back: MetricEvent = serde_json::from_str(&json).expect("deserialize");
+        match back {
+            MetricEvent::EvaluationCompleted {
+                checks_run,
+                passed,
+                failed,
+                ..
+            } => {
+                assert_eq!(checks_run, 2);
+                assert_eq!(passed, 2);
+                assert_eq!(failed, 0);
+            }
+            _ => panic!("expected EvaluationCompleted"),
+        }
     }
 }

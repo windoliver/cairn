@@ -64,3 +64,30 @@ pub const REPLAY_CHALLENGE_WIRED: bool = false;
 /// called from the `capture_trace` CLI path (Task 16). Both criteria are
 /// met — the capability is now advertised.
 pub const CONSOLIDATION_WORKFLOW_WIRED: bool = true;
+
+/// `DreamWorkflow` (LLM-only minimum) dispatch path (issue #91, brief §10.1).
+///
+/// Flipped `true` in the issue #91 wiring commit: `cairn mcp serve`
+/// registers `DreamHandler` on the scheduler. Runtime advertisement
+/// still requires `dream.enabled = true` in config plus a configured
+/// `LLMProvider` — the handler returns `Permanent` when no provider is
+/// wired, but the capability gate (this constant AND `gates.dream_runtime_ready`)
+/// already keeps the capability hidden on default deployments.
+pub const DREAM_WORKFLOW_WIRED: bool = true;
+
+/// `ExpirationWorkflow` (soft-retirement via `TombstoneReason::Expire`)
+/// dispatch path (issue #91, brief §10.0).
+///
+/// Flipped `true` in the issue #91 wiring commit. Brief §10 places this
+/// workflow on the v0.1 roadmap; the minimum path here is
+/// `MemoryStore::tombstone(_, Expire)` — full WAL-`expire` integration
+/// is deferred to §5.6.
+pub const EXPIRATION_WORKFLOW_WIRED: bool = true;
+
+/// `EvaluationWorkflow` (golden-check report + metrics) dispatch path
+/// (issue #91, brief §15).
+///
+/// Flipped `true` in the issue #91 wiring commit. Runtime advertisement
+/// still requires `evaluation.enabled = true` in config plus a
+/// single-tenant `cairn mcp serve` host.
+pub const EVALUATION_WORKFLOW_WIRED: bool = true;

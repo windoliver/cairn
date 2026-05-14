@@ -81,6 +81,16 @@ pub struct CairnMcpHandler {
     /// `false` keeps the legacy stdio path from over-advertising
     /// (round-9 adversarial review #3).
     consolidation_runtime_ready: bool,
+    /// True iff `DreamHandler` is registered on the live scheduler.
+    /// Issue #91, brief §10.1. Default `false` so the legacy stdio path
+    /// does not over-advertise.
+    dream_runtime_ready: bool,
+    /// True iff `ExpirationHandler` is registered on the live scheduler.
+    /// Issue #91, brief §10.0.
+    expiration_runtime_ready: bool,
+    /// True iff `EvaluationHandler` is registered on the live scheduler.
+    /// Issue #91, brief §15.
+    evaluation_runtime_ready: bool,
 }
 
 impl Default for CairnMcpHandler {
@@ -116,6 +126,9 @@ impl CairnMcpHandler {
             principal: ScopeTuple::default(),
             transport: McpTransport::Stdio,
             consolidation_runtime_ready: false,
+            dream_runtime_ready: false,
+            expiration_runtime_ready: false,
+            evaluation_runtime_ready: false,
         }
     }
 
@@ -134,6 +147,9 @@ impl CairnMcpHandler {
             principal: ScopeTuple::default(),
             transport: McpTransport::Stdio,
             consolidation_runtime_ready: false,
+            dream_runtime_ready: false,
+            expiration_runtime_ready: false,
+            evaluation_runtime_ready: false,
         }
     }
 
@@ -156,6 +172,9 @@ impl CairnMcpHandler {
             principal,
             transport: McpTransport::Stdio,
             consolidation_runtime_ready: false,
+            dream_runtime_ready: false,
+            expiration_runtime_ready: false,
+            evaluation_runtime_ready: false,
         }
     }
 
@@ -180,6 +199,9 @@ impl CairnMcpHandler {
             principal,
             transport: McpTransport::Stdio,
             consolidation_runtime_ready: false,
+            dream_runtime_ready: false,
+            expiration_runtime_ready: false,
+            evaluation_runtime_ready: false,
         }
     }
 
@@ -204,6 +226,9 @@ impl CairnMcpHandler {
             principal,
             transport: McpTransport::Stdio,
             consolidation_runtime_ready: false,
+            dream_runtime_ready: false,
+            expiration_runtime_ready: false,
+            evaluation_runtime_ready: false,
         }
     }
 
@@ -215,6 +240,35 @@ impl CairnMcpHandler {
     #[must_use]
     pub fn with_consolidation_runtime_ready(mut self, ready: bool) -> Self {
         self.consolidation_runtime_ready = ready;
+        self
+    }
+
+    /// Flip [`DreamWorkflow`](cairn_core::generated::common::Capabilities::CairnWorkflowsV1Dream)
+    /// advertisement on once the live scheduler has registered the
+    /// `DreamHandler` (issue #91, brief §10.1).
+    #[must_use]
+    pub fn with_dream_runtime_ready(mut self, ready: bool) -> Self {
+        self.dream_runtime_ready = ready;
+        self
+    }
+
+    /// Flip
+    /// [`ExpirationWorkflow`](cairn_core::generated::common::Capabilities::CairnWorkflowsV1Expiration)
+    /// advertisement on once the live scheduler has registered the
+    /// `ExpirationHandler` (issue #91, brief §10.0).
+    #[must_use]
+    pub fn with_expiration_runtime_ready(mut self, ready: bool) -> Self {
+        self.expiration_runtime_ready = ready;
+        self
+    }
+
+    /// Flip
+    /// [`EvaluationWorkflow`](cairn_core::generated::common::Capabilities::CairnWorkflowsV1Evaluation)
+    /// advertisement on once the live scheduler has registered the
+    /// `EvaluationHandler` (issue #91, brief §15).
+    #[must_use]
+    pub fn with_evaluation_runtime_ready(mut self, ready: bool) -> Self {
+        self.evaluation_runtime_ready = ready;
         self
     }
 
@@ -372,6 +426,11 @@ impl CairnMcpHandler {
             // callers (round-10 adversarial review #2).
             consolidation_runtime_ready: self.consolidation_runtime_ready
                 && self.config.consolidation.enabled,
+            dream_runtime_ready: self.dream_runtime_ready && self.config.dream.enabled,
+            expiration_runtime_ready: self.expiration_runtime_ready
+                && self.config.expiration.enabled,
+            evaluation_runtime_ready: self.evaluation_runtime_ready
+                && self.config.evaluation.enabled,
             contract_phase: cairn_core::status::Phase::V0_1,
         };
 

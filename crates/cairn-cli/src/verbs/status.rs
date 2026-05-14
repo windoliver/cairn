@@ -303,9 +303,15 @@ fn compute_capabilities(
         // arm that constructs the SqliteJobStore + handlers). Without all
         // three, status must not advertise the capability (round-8
         // adversarial review #2).
-        let consolidation_runtime_ready = config.consolidation.enabled
-            && config.mcp.stdio.single_tenant
-            && config.mcp.stdio.principal.is_some();
+        let single_tenant_ready =
+            config.mcp.stdio.single_tenant && config.mcp.stdio.principal.is_some();
+        let consolidation_runtime_ready = config.consolidation.enabled && single_tenant_ready;
+        // Issue #91: dream/expiration/evaluation runtime readiness mirrors the
+        // boot-path gating used for consolidation (config opt-in + single-tenant
+        // mcp serve + bound principal).
+        let dream_runtime_ready = config.dream.enabled && single_tenant_ready;
+        let expiration_runtime_ready = config.expiration.enabled && single_tenant_ready;
+        let evaluation_runtime_ready = config.evaluation.enabled && single_tenant_ready;
 
         cairn_core::status::advertise(&cairn_core::status::CapabilityGates {
             config: config.capabilities(embedding_provider_ready),
@@ -317,6 +323,9 @@ fn compute_capabilities(
             embedding_provider_ready,
             llm_configured: false,
             consolidation_runtime_ready,
+            dream_runtime_ready,
+            expiration_runtime_ready,
+            evaluation_runtime_ready,
             contract_phase: CLI_CONTRACT_PHASE,
         })
     } else {
@@ -431,9 +440,12 @@ fn probe_mcp_graph_tools(
 /// passing through `cairn-core::status::advertise()`.
 fn capabilities_for_config(config: &CairnConfig, model_present: bool) -> Vec<Capabilities> {
     let embedding_provider_ready = compute_embedding_provider_ready(config, model_present, None);
-    let consolidation_runtime_ready = config.consolidation.enabled
-        && config.mcp.stdio.single_tenant
-        && config.mcp.stdio.principal.is_some();
+    let single_tenant_ready =
+        config.mcp.stdio.single_tenant && config.mcp.stdio.principal.is_some();
+    let consolidation_runtime_ready = config.consolidation.enabled && single_tenant_ready;
+    let dream_runtime_ready = config.dream.enabled && single_tenant_ready;
+    let expiration_runtime_ready = config.expiration.enabled && single_tenant_ready;
+    let evaluation_runtime_ready = config.evaluation.enabled && single_tenant_ready;
     cairn_core::status::advertise(&cairn_core::status::CapabilityGates {
         config: config.capabilities(embedding_provider_ready),
         store: None,
@@ -443,6 +455,9 @@ fn capabilities_for_config(config: &CairnConfig, model_present: bool) -> Vec<Cap
         embedding_provider_ready,
         llm_configured: false,
         consolidation_runtime_ready,
+        dream_runtime_ready,
+        expiration_runtime_ready,
+        evaluation_runtime_ready,
         contract_phase: CLI_CONTRACT_PHASE,
     })
 }
