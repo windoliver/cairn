@@ -13,8 +13,8 @@ Usage: ingest [OPTIONS] [source]
 
 Arguments:
   [source]
-          File, URL, folder, JSONL transcript, or '-' for stdin. Mutually exclusive with
-          --body/--file/--folder/--url/--jsonl.
+          File, URL, folder, JSONL transcript, recording, or '-' for stdin. Mutually exclusive with
+          --body/--file/--folder/--url/--jsonl/--recording.
 
 Options:
       --kind <STRING>
@@ -48,6 +48,9 @@ Options:
 
 
       --jsonl <PATH>
+
+
+      --recording <PATH>
 
 
       --harness <STRING>
