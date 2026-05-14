@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
-use std::io::{Read as _, Write as _};
+use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -233,6 +233,25 @@ impl FileWorkflowCheckpointStore {
                 .map_err(|source| WorkflowError::Internal {
                     workflow: "checkpoint",
                     message: format!("truncate torn workflow checkpoint record failed: {source}"),
+                })?;
+        } else if valid_len > 0 && !contents.ends_with('\n') {
+            read_file
+                .seek(SeekFrom::End(0))
+                .map_err(|source| WorkflowError::Internal {
+                    workflow: "checkpoint",
+                    message: format!("seek workflow checkpoint file failed: {source}"),
+                })?;
+            read_file
+                .write_all(b"\n")
+                .map_err(|source| WorkflowError::Internal {
+                    workflow: "checkpoint",
+                    message: format!("terminate workflow checkpoint record failed: {source}"),
+                })?;
+            read_file
+                .flush()
+                .map_err(|source| WorkflowError::Internal {
+                    workflow: "checkpoint",
+                    message: format!("flush workflow checkpoint terminator failed: {source}"),
                 })?;
         }
         let file = OpenOptions::new()
