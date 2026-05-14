@@ -157,7 +157,10 @@ impl ConsolidationHandler {
         // Pre-upsert source-liveness check. Best-effort cheap pass that
         // catches the common case where forget completed before we
         // started building the record.
-        if !self.all_sources_still_active(&draft.source_record_ids).await? {
+        if !self
+            .all_sources_still_active(&draft.source_record_ids)
+            .await?
+        {
             info!(
                 session = %payload.session_id,
                 "source(s) tombstoned before upsert; retrying with fresh window"
@@ -185,7 +188,10 @@ impl ConsolidationHandler {
         // forgotten source" holds at-rest, even if briefly violated
         // mid-flight. The forget-cleanup handler's next run will also
         // tombstone us as belt-and-suspenders.
-        if !self.all_sources_still_active(&draft.source_record_ids).await? {
+        if !self
+            .all_sources_still_active(&draft.source_record_ids)
+            .await?
+        {
             warn!(
                 session = %payload.session_id,
                 record_id = record_id.as_str(),
@@ -325,6 +331,13 @@ fn build_summary_record(
     // source_hash: SHA-256 of the record body so the provenance is
     // self-consistent. We compute it here from the draft body.
     let source_hash = sha256_hex(draft.body.as_bytes());
+    // Provenance.source_ids must be non-empty (main #357 enforces this in
+    // Provenance::validate). Consolidation summaries are synthesized —
+    // there's no upstream `sources/` document. Use the summary's stable
+    // target_id (already a ULID derived from
+    // "summary:{scope}:{session}:{last_sequence}") as a self-source
+    // marker so the field is satisfied without lying about provenance.
+    let self_source = cairn_core::domain::SourceId::parse(target_id.as_str().to_owned())?;
     let provenance = Provenance {
         source_sensor: sensor_id,
         created_at: now_ts.clone(),
@@ -332,6 +345,8 @@ fn build_summary_record(
         source_hash: format!("sha256:{source_hash}"),
         consent_ref: SYSTEM_CONSENT_REF.to_owned(),
         llm_id_if_any: None,
+        source_ids: vec![self_source.clone()],
+        source_refs: Vec::new(),
     };
 
     // --- Actor chain (P0: single Author entry) ---
@@ -391,6 +406,9 @@ fn build_summary_record(
         actor_chain,
         signature,
         tags: Vec::new(),
+        // Synthesized record — no upstream sources/ docs to link
+        // (matches the empty Provenance.source_ids above).
+        source_ids: Vec::new(),
         extra_frontmatter,
         consent_model: None,
     })
@@ -528,7 +546,8 @@ mod tests {
         let h = ConsolidationHandler::new(store.clone(), cfg);
         let payload = ConsolidationPayload {
             session_id: SESSION_S1.to_owned(),
-            since_sequence: 0, bound_scope: None,
+            since_sequence: 0,
+            bound_scope: None,
         };
         let outcome = h.handle(&payload.to_bytes().expect("encode")).await;
         assert_eq!(outcome, HandlerOutcome::Done);
@@ -558,7 +577,8 @@ mod tests {
         let h = ConsolidationHandler::new(store.clone(), ConsolidationConfig::default());
         let payload = ConsolidationPayload {
             session_id: SESSION_S2.to_owned(),
-            since_sequence: 0, bound_scope: None,
+            since_sequence: 0,
+            bound_scope: None,
         };
         let bytes = payload.to_bytes().expect("encode");
 

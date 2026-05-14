@@ -118,7 +118,9 @@ async fn execute_one(
     //    re-run.
     let hb_token = CancellationToken::new();
     let lease_lost = CancellationToken::new();
-    let deadline_ms = Arc::new(std::sync::atomic::AtomicI64::new(leased.lease.expires_at_ms));
+    let deadline_ms = Arc::new(std::sync::atomic::AtomicI64::new(
+        leased.lease.expires_at_ms,
+    ));
     let hb_handle = {
         let store = store.clone();
         let clock = clock.clone();

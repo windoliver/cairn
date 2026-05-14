@@ -891,10 +891,7 @@ impl StoreTx<'_> {
                 ("entity", s.entity.as_deref()),
             ] {
                 if let Some(v) = value {
-                    let _ = write!(
-                        extra_where,
-                        " AND json_extract(scope, '$.{name}') = ?{idx}"
-                    );
+                    let _ = write!(extra_where, " AND json_extract(scope, '$.{name}') = ?{idx}");
                     binds.push(v.to_owned());
                     idx += 1;
                 }
@@ -928,9 +925,7 @@ impl StoreTx<'_> {
             .map(std::convert::AsRef::as_ref)
             .collect();
         if let Some(seq) = existing
-            .query_row(existing_refs.as_slice(), |row| {
-                row.get::<_, Option<i64>>(0)
-            })
+            .query_row(existing_refs.as_slice(), |row| row.get::<_, Option<i64>>(0))
             .optional()?
             .flatten()
         {

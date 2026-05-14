@@ -119,8 +119,9 @@ pub async fn enqueue_if_due_scoped(
     } else {
         format!(":{}", hash_fingerprint(&scope_fp))
     };
-    let job_id =
-        JobId::new(format!("consolidate:{session_id}:{since_sequence}{scope_fp_short}"));
+    let job_id = JobId::new(format!(
+        "consolidate:{session_id}:{since_sequence}{scope_fp_short}"
+    ));
     let req = EnqueueRequest {
         job_id: job_id.clone(),
         kind: JobKind::new(CONSOLIDATION_KIND),

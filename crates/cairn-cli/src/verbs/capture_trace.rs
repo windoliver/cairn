@@ -611,8 +611,10 @@ async fn run_handler_inner(
                         turn_ordinal,
                         scope_binding_tx.as_ref(),
                     )
-                    .map_err(|e| cairn_store_sqlite::error::StoreError::Invariant {
-                        what: format!("summarize_turn: {e}"),
+                    .map_err(|e| {
+                        cairn_store_sqlite::error::StoreError::Invariant {
+                            what: format!("summarize_turn: {e}"),
+                        }
                     })?;
                     tx.upsert_trace(&summary)?;
                 }

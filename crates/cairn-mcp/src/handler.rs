@@ -928,6 +928,9 @@ async fn build_mcp_explain_debug(
         MemoryVisibility::Project,
     ];
 
+    // No rolling-summary candidates threaded through MCP yet —
+    // assemble_hot's recipe step for them lands behind a v2 IDL bump.
+    let rolling_summary_refs: &[&MemoryRecord] = &[];
     let inputs = cairn_core::verbs::assemble_hot::HotMemoryInputs {
         purpose_md: &purpose_md,
         index_md: &index_md,
@@ -935,6 +938,7 @@ async fn build_mcp_explain_debug(
         project_candidates: &project_refs,
         playbook_candidates: &playbook_refs,
         user_signal_candidates: &signal_refs,
+        rolling_summary_candidates: rolling_summary_refs,
         now: now_timestamp(),
         scope: principal.clone(),
         authorized_visibility: &authorized_visibility,

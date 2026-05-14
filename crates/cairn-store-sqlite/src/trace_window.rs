@@ -390,14 +390,14 @@ impl SqliteMemoryStore {
             .await?;
         Ok(rows
             .into_iter()
-            .map(|(session_id, scope_json, watermark, active_eligible)| {
-                ConsolidationBacklogEntry {
+            .map(
+                |(session_id, scope_json, watermark, active_eligible)| ConsolidationBacklogEntry {
                     session_id,
                     scope_json,
                     active_eligible: u32::try_from(active_eligible.max(0)).unwrap_or(u32::MAX),
                     since_sequence: u32::try_from(watermark.max(0)).unwrap_or(u32::MAX),
-                }
-            })
+                },
+            )
             .collect())
     }
 }

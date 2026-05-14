@@ -29,7 +29,7 @@ fn gates(bound: bool, model_present: bool, store: Option<StoreCaps>) -> Capabili
         embedding_provider_ready: model_present,
         llm_configured: false,
         consolidation_runtime_ready: false,
-            contract_phase: Phase::V0_1,
+        contract_phase: Phase::V0_1,
     }
 }
 
@@ -380,7 +380,7 @@ mod prop_tests {
                     embedding_provider_ready: embed_ready,
                     llm_configured: llm,
                     consolidation_runtime_ready: false,
-            contract_phase: phase,
+                    contract_phase: phase,
                 }
             })
     }
@@ -455,7 +455,7 @@ fn openai_provider_without_key_drops_semantic_and_hybrid() {
         embedding_provider_ready: false,
         llm_configured: false,
         consolidation_runtime_ready: false,
-            contract_phase: Phase::V0_1,
+        contract_phase: Phase::V0_1,
     };
     let caps = advertise(&g);
     assert!(

@@ -238,9 +238,7 @@ pub fn advertise(gates: &CapabilityGates) -> Vec<Capabilities> {
     // Without (3), default-stdio MCP deployments could advertise
     // consolidation while their queued jobs never drain (round-8
     // adversarial review #2).
-    if wiring::CONSOLIDATION_WORKFLOW_WIRED
-        && gates.consolidation_runtime_ready
-    {
+    if wiring::CONSOLIDATION_WORKFLOW_WIRED && gates.consolidation_runtime_ready {
         out.push(Capabilities::CairnWorkflowsV1Consolidation);
     }
 
