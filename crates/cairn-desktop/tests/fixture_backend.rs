@@ -95,3 +95,39 @@ fn repository_reconcile_rejects_immutable_field() {
     assert_eq!(preview.rejected_fields[0].field, "confidence");
     assert_eq!(preview.rejected_fields[0].code, "immutable_field_changed");
 }
+
+#[test]
+fn repository_reconcile_rejects_version_conflict() {
+    let repo = DesktopRepository::from_fixture(DesktopFixture::load_default().expect("fixture"));
+    let mut field_diff = BTreeMap::new();
+    field_diff.insert("body".to_string(), json!("Updated fixture body"));
+
+    let preview = repo.preview_reconcile(DesktopReconcilePreviewRequest {
+        target_id: "rec-alpha-001".to_string(),
+        expected_version: 1,
+        backend_hash: "sha256:fixture-alpha-001".to_string(),
+        field_diff,
+    });
+
+    assert!(!preview.accepted);
+    assert_eq!(preview.rejected_fields[0].field, "version");
+    assert_eq!(preview.rejected_fields[0].code, "version_conflict");
+}
+
+#[test]
+fn repository_reconcile_rejects_target_hash_mismatch() {
+    let repo = DesktopRepository::from_fixture(DesktopFixture::load_default().expect("fixture"));
+    let mut field_diff = BTreeMap::new();
+    field_diff.insert("body".to_string(), json!("Updated fixture body"));
+
+    let preview = repo.preview_reconcile(DesktopReconcilePreviewRequest {
+        target_id: "rec-alpha-001".to_string(),
+        expected_version: 2,
+        backend_hash: "sha256:wrong-hash".to_string(),
+        field_diff,
+    });
+
+    assert!(!preview.accepted);
+    assert_eq!(preview.rejected_fields[0].field, "backendHash");
+    assert_eq!(preview.rejected_fields[0].code, "target_hash_mismatch");
+}

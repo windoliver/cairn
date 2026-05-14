@@ -101,9 +101,32 @@ textarea {
   overflow: auto;
 }
 
-.graphList {
-  display: grid;
-  gap: 6px;
+.graphCanvas {
+  border: 1px solid #d8ddd4;
+  border-radius: 6px;
+  display: block;
+  height: 170px;
+  width: 100%;
+}
+
+.graphEdge {
+  stroke: #82958c;
+  stroke-width: 2;
+}
+
+.graphNode {
+  fill: #f8fbf9;
+  stroke: #51745d;
+  stroke-width: 2;
+}
+
+.graphNode-procedural {
+  stroke: #886c3d;
+}
+
+.graphLabel {
+  fill: #263238;
+  font-size: 10px;
 }
 
 .lintFinding {
