@@ -13,6 +13,7 @@ pub mod consolidation;
 pub mod drainer;
 pub mod planners;
 pub mod scheduler;
+pub mod salience_decay;
 pub mod sqlite_apply;
 pub mod sqlite_store;
 pub mod workflows;

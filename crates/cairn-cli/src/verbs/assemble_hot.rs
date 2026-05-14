@@ -14,7 +14,9 @@ use cairn_core::contract::memory_store::{ListArgs, MemoryStore};
 use cairn_core::domain::canonical::canonical_bytes_signed_intent;
 use cairn_core::domain::consent_timeline::ConsentModel;
 use cairn_core::domain::identity::keys::SecretHandle;
-use cairn_core::domain::{Identity, MemoryKind, MemoryRecord, MemoryVisibility, ScopeTuple};
+use cairn_core::domain::{
+    Identity, MemoryKind, MemoryRecord, MemoryVisibility, RecordId, ScopeTuple,
+};
 use cairn_core::generated::common::{Ed25519Signature, Ulid};
 use cairn_core::generated::envelope::{
     RequestArgs, RequestVerb, Response, ResponseData, ResponsePolicyTrace,
@@ -95,14 +97,16 @@ struct LoadedHotBodies {
     records: Vec<LoadedRecordTrace>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct LoadedRecordTrace {
+    record_id: RecordId,
     consent_model: Option<ConsentModel>,
 }
 
 impl From<&MemoryRecord> for LoadedRecordTrace {
     fn from(record: &MemoryRecord) -> Self {
         Self {
+            record_id: record.id.clone(),
             consent_model: record.consent_model,
         }
     }
@@ -277,6 +281,7 @@ async fn run_async(args: AssembleHotArgs, vault_root: PathBuf, config: CairnConf
         Err(resp) => return merge_policy_trace(read_policy_trace(&auth, 0, &[]), resp),
     };
     let policy_trace = read_policy_trace(&auth, loaded.files, &loaded.records);
+    record_access(&ctx.store, &loaded.records, "assemble_hot").await;
 
     let vault_id = std::fs::read_to_string(ctx.vault_root.join(".cairn/vault.id"))
         .unwrap_or_default()
@@ -1107,6 +1112,30 @@ fn read_sequence() -> u64 {
         .unwrap_or_default()
         .as_millis();
     u64::try_from(millis).unwrap_or(u64::MAX)
+}
+
+fn current_unix_ms_i64() -> i64 {
+    i64::try_from(read_sequence()).unwrap_or(i64::MAX)
+}
+
+async fn record_access(
+    store: &cairn_store_sqlite::SqliteMemoryStore,
+    records: &[LoadedRecordTrace],
+    reason: &str,
+) {
+    if records.is_empty() {
+        return;
+    }
+    let record_ids = records
+        .iter()
+        .map(|record| record.record_id.clone())
+        .collect::<Vec<_>>();
+    if let Err(e) = store
+        .record_access(&record_ids, current_unix_ms_i64(), reason)
+        .await
+    {
+        tracing::warn!(error = %e, reason, "record access tracking failed");
+    }
 }
 
 /// Sync, filesystem-only body loader used by the lint walker. Returns

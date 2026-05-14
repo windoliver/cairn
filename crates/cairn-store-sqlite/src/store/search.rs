@@ -194,6 +194,24 @@ impl SqliteMemoryStore {
             })
             .await
             .map_err(unpack_worker_err)?;
+        let record_ids: Vec<_> = page
+            .candidates
+            .iter()
+            .map(|candidate| candidate.record_id.clone())
+            .collect();
+        if !record_ids.is_empty() {
+            let accessed_at_ms = current_unix_ms();
+            if let Err(error) = self
+                .do_record_access(&record_ids, accessed_at_ms, "search")
+                .await
+            {
+                tracing::warn!(
+                    error = %error,
+                    records = record_ids.len(),
+                    "workflow.access_tracker failed after keyword search"
+                );
+            }
+        }
         Ok(page)
     }
 }

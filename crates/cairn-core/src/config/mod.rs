@@ -541,6 +541,8 @@ pub struct VaultConfig {
     pub layout: LayoutConfig,
     /// Hot-memory assembly recipe and budget.
     pub hot_memory: HotMemoryConfig,
+    /// Access-frequency salience strengthening and decay policy.
+    pub salience: SalienceConfig,
     /// Glob-keyed retention policies. Value: `"forever"` or `"<N>d"`.
     pub retention: BTreeMap<String, String>,
     /// Schema files to include in the vault.
@@ -555,8 +557,34 @@ impl Default for VaultConfig {
             source: SourceConfig::default(),
             layout: LayoutConfig::default(),
             hot_memory: HotMemoryConfig::default(),
+            salience: SalienceConfig::default(),
             retention: BTreeMap::new(),
             schema_files: vec!["CLAUDE.md".into(), "AGENTS.md".into(), "GEMINI.md".into()],
+        }
+    }
+}
+
+/// Salience lifecycle policy (§5.1, §10, issue #313).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SalienceConfig {
+    /// Exponential decay rate used by the daily decay workflow.
+    pub decay_rate: f32,
+    /// Salience threshold below which old records may auto-evict.
+    pub eviction_threshold: f32,
+    /// Minimum record age in days before auto-eviction can consider it.
+    pub min_age_days: u32,
+    /// Maximum records processed by one decay batch.
+    pub batch_limit: u32,
+}
+
+impl Default for SalienceConfig {
+    fn default() -> Self {
+        Self {
+            decay_rate: 0.05,
+            eviction_threshold: 0.10,
+            min_age_days: 30,
+            batch_limit: 500,
         }
     }
 }
@@ -1790,6 +1818,15 @@ mod tests {
             CairnConfig::default().workflows.orchestrator,
             OrchestratorKind::Local
         );
+    }
+
+    #[test]
+    fn default_salience_config_matches_issue_313() {
+        let cfg = CairnConfig::default();
+        assert_eq!(cfg.vault.salience.decay_rate, 0.05);
+        assert_eq!(cfg.vault.salience.eviction_threshold, 0.10);
+        assert_eq!(cfg.vault.salience.min_age_days, 30);
+        assert_eq!(cfg.vault.salience.batch_limit, 500);
     }
 
     #[test]

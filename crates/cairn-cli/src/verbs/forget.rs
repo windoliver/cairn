@@ -58,6 +58,8 @@ fn requested_capability(sub: &ArgMatches) -> &'static str {
         "cairn.mcp.v1.forget.session"
     } else if sub.get_one::<String>("scope").is_some() {
         "cairn.mcp.v1.forget.scope"
+    } else if sub.get_one::<String>("pin_record_id").is_some() {
+        "cairn.mcp.v1.forget.record"
     } else {
         "cairn.mcp.v1.forget.record"
     }
@@ -100,6 +102,24 @@ pub fn run(sub: &ArgMatches, vault_root: PathBuf, config: CairnConfig) -> ExitCo
         return run_session(session_id, &vault_root, &config, json);
     }
 
+    if let Some(record_id) = sub.get_one::<String>("pin_record_id") {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                let resp =
+                    super::signed::aborted(ResponseVerb::Forget, format!("runtime build: {e}"));
+                emit_response(&resp, json, record_id);
+                return ExitCode::FAILURE;
+            }
+        };
+        let resp = rt.block_on(run_pin(record_id.clone(), vault_root));
+        emit_response(&resp, json, record_id);
+        return response_exit_code(&resp);
+    }
+
     let Some(record_id) = sub.get_one::<String>("record_id") else {
         return run_without_context(sub);
     };
@@ -125,7 +145,9 @@ pub fn requires_vault_context(sub: &ArgMatches) -> bool {
     if sub.get_flag("dry-run") || sub.get_flag("human-review") {
         return false;
     }
-    sub.get_one::<String>("record_id").is_some() || sub.get_one::<String>("session_id").is_some()
+    sub.get_one::<String>("record_id").is_some()
+        || sub.get_one::<String>("pin_record_id").is_some()
+        || sub.get_one::<String>("session_id").is_some()
 }
 
 /// Run `cairn forget` modes that do not open the vault store.
@@ -425,6 +447,38 @@ async fn inline_forget_cleanup(
             .map_err(|e| format!("tombstone summary {}: {e}", summary_id.as_str()))?;
     }
     Ok(())
+}
+
+async fn run_pin(record_id_raw: String, vault_root: PathBuf) -> Response {
+    let record_id = match RecordId::parse(record_id_raw) {
+        Ok(record_id) => record_id,
+        Err(e) => return super::signed::rejected_from_domain(ResponseVerb::Forget, e),
+    };
+    let operation_id = new_operation_id();
+    let store_path = vault_root.join(".cairn/cairn.db");
+    let store = match cairn_store_sqlite::open(&store_path).await {
+        Ok(store) => store,
+        Err(e) => {
+            return super::signed::aborted(ResponseVerb::Forget, format!("open store: {e}"));
+        }
+    };
+    if let Err(e) = store.pin_record(&record_id, true).await {
+        return super::signed::aborted(ResponseVerb::Forget, format!("pin record: {e}"));
+    }
+    Response {
+        contract: "cairn.mcp.v1".into(),
+        status: ResponseStatus::Committed,
+        verb: ResponseVerb::Forget,
+        operation_id,
+        target: None,
+        data: Some(ResponseData::Forget(ForgetData {
+            deleted_count: 0,
+            tombstones: Some(vec![Ulid(record_id.as_str().to_owned())]),
+            plan_ref: None,
+        })),
+        policy_trace: Vec::<ResponsePolicyTrace>::new(),
+        error: None,
+    }
 }
 
 #[derive(Debug, Clone)]

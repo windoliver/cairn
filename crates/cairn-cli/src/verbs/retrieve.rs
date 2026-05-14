@@ -212,12 +212,16 @@ async fn retrieve_record(
     args.limit = 1;
     match list_records(store, args).await {
         Ok(mut records) => match records.pop() {
-            Some(record) => committed(
-                auth,
-                cairn_core::verbs::retrieve::record_data(&record),
-                std::slice::from_ref(&record),
-                None,
-            ),
+            Some(record) => {
+                committed_after_access(
+                    store,
+                    auth,
+                    cairn_core::verbs::retrieve::record_data(&record),
+                    std::slice::from_ref(&record),
+                    None,
+                )
+                .await
+            }
             None => committed(
                 auth,
                 cairn_core::verbs::retrieve::missing_record_data(Ulid(id)),
@@ -240,12 +244,14 @@ async fn retrieve_folder(
         Err(resp) => return resp,
     };
     records.retain(|record| folder_matches(record, &path, depth));
-    committed(
+    committed_after_access(
+        store,
         auth,
         cairn_core::verbs::retrieve::folder_data(path, depth, &records),
         &records,
         None,
     )
+    .await
 }
 
 async fn retrieve_scope(
@@ -266,12 +272,14 @@ async fn retrieve_scope(
         Err(resp) => return resp,
     };
     records.retain(|record| scope_matches(record, &scope));
-    committed(
+    committed_after_access(
+        store,
         auth,
         cairn_core::verbs::retrieve::scope_data(scope, &records, None),
         &records,
         None,
     )
+    .await
 }
 
 async fn retrieve_session(
@@ -324,7 +332,8 @@ async fn retrieve_session(
         .into_iter()
         .flat_map(|group| group.records)
         .collect::<Vec<_>>();
-    committed(
+    committed_after_access(
+        store,
         auth,
         cairn_core::verbs::retrieve::session_data_with_options(
             session_id,
@@ -336,6 +345,7 @@ async fn retrieve_session(
         &records,
         Some(&budget_report),
     )
+    .await
 }
 
 async fn retrieve_turn(
@@ -374,7 +384,8 @@ async fn retrieve_turn(
         include_reasoning,
         include_tool_calls,
     );
-    committed(
+    committed_after_access(
+        store,
         auth,
         cairn_core::verbs::retrieve::turn_data_with_options(
             session_id,
@@ -386,6 +397,7 @@ async fn retrieve_turn(
         &records,
         Some(&budget_report),
     )
+    .await
 }
 
 async fn retrieve_tool_call(
@@ -411,12 +423,14 @@ async fn retrieve_tool_call(
     });
     sort_trace_records(&mut records, Some(RetrieveArgsSessionOrder::Asc));
     let (records, budget_report) = trim_records_to_budget(records, read_budget_chars, false, true);
-    committed(
+    committed_after_access(
+        store,
         auth,
         cairn_core::verbs::retrieve::tool_call_data(session_id, turn_id, tool_call_id, &records),
         &records,
         Some(&budget_report),
     )
+    .await
 }
 
 async fn retrieve_profile(
@@ -434,12 +448,14 @@ async fn retrieve_profile(
         Ok(records) => records,
         Err(resp) => return resp,
     };
-    committed(
+    committed_after_access(
+        store,
         auth,
         cairn_core::verbs::retrieve::profile_data(user, agent, &records),
         &records,
         None,
     )
+    .await
 }
 
 async fn list_records(
@@ -464,6 +480,34 @@ fn committed(
         data,
         read_policy_trace(auth, records, budget),
     )
+}
+
+async fn committed_after_access(
+    store: &SqliteMemoryStore,
+    auth: &ReadAuthorization,
+    data: RetrieveData,
+    records: &[MemoryRecord],
+    budget: Option<&BudgetReport>,
+) -> Response {
+    record_access(store, records, "retrieve").await;
+    committed(auth, data, records, budget)
+}
+
+async fn record_access(store: &SqliteMemoryStore, records: &[MemoryRecord], reason: &str) {
+    if records.is_empty() {
+        return;
+    }
+    let record_ids = records
+        .iter()
+        .map(|record| record.id.clone())
+        .collect::<Vec<_>>();
+    let accessed_at_ms = current_unix_ms_i64();
+    if let Err(e) = store
+        .record_access(&record_ids, accessed_at_ms, reason)
+        .await
+    {
+        tracing::warn!(error = %e, reason, "record access tracking failed");
+    }
 }
 
 async fn signed_read_authorization(
@@ -1411,4 +1455,8 @@ fn read_sequence() -> u64 {
         .unwrap_or_default()
         .as_millis();
     u64::try_from(millis).unwrap_or(u64::MAX)
+}
+
+fn current_unix_ms_i64() -> i64 {
+    i64::try_from(read_sequence()).unwrap_or(i64::MAX)
 }
