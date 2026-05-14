@@ -12,6 +12,11 @@ type RequestErrorState = {
   message: string;
 };
 
+type ApplyStatusState = {
+  key: string;
+  message: string;
+};
+
 export function ReconcilePanel({
   api,
   record,
@@ -24,7 +29,7 @@ export function ReconcilePanel({
   onRecordApplied: (record: DesktopRecordDetail) => void;
 }) {
   const [previewState, setPreviewState] = useState<PreviewState | null>(null);
-  const [applyStatus, setApplyStatus] = useState<string | null>(null);
+  const [applyStatusState, setApplyStatusState] = useState<ApplyStatusState | null>(null);
   const [requestErrorState, setRequestErrorState] = useState<RequestErrorState | null>(null);
   const currentRequestKey = requestKey(record, draftBody);
   const latestRequestKey = useRef(currentRequestKey);
@@ -32,6 +37,8 @@ export function ReconcilePanel({
   const preview = previewState?.key === currentRequestKey ? previewState.preview : null;
   const requestError =
     requestErrorState?.key === currentRequestKey ? requestErrorState.message : null;
+  const applyStatus =
+    applyStatusState?.key === currentRequestKey ? applyStatusState.message : null;
 
   function request() {
     return {
@@ -49,14 +56,14 @@ export function ReconcilePanel({
         return;
       }
       setPreviewState({ key: currentRequestKey, preview: next });
-      setApplyStatus(null);
+      setApplyStatusState(null);
       setRequestErrorState(null);
     } catch (error) {
       if (latestRequestKey.current !== currentRequestKey) {
         return;
       }
       setPreviewState(null);
-      setApplyStatus(null);
+      setApplyStatusState(null);
       setRequestErrorState({ key: currentRequestKey, message: errorMessage(error) });
     }
   }
@@ -70,20 +77,25 @@ export function ReconcilePanel({
       if (result.accepted && result.record) {
         onRecordApplied(result.record);
         setPreviewState(null);
-        setApplyStatus("Applied");
+        setApplyStatusState({
+          key: requestKey(result.record, result.record.body),
+          message: "Applied",
+        });
       } else {
         setPreviewState(null);
-        setApplyStatus(
-          result.rejectedFields.map((field) => field.message).join(", ") ||
+        setApplyStatusState({
+          key: currentRequestKey,
+          message:
+            result.rejectedFields.map((field) => field.message).join(", ") ||
             "Reconcile apply rejected",
-        );
+        });
       }
       setRequestErrorState(null);
     } catch (error) {
       if (latestRequestKey.current !== currentRequestKey) {
         return;
       }
-      setApplyStatus(null);
+      setApplyStatusState(null);
       setRequestErrorState({ key: currentRequestKey, message: errorMessage(error) });
     }
   }

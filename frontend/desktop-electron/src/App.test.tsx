@@ -549,6 +549,45 @@ describe("App", () => {
     expect(screen.queryByDisplayValue("Markdown body changed")).not.toBeInTheDocument();
   });
 
+  it("clears applied status when the applied draft changes again", async () => {
+    const user = userEvent.setup();
+    api.previewReconcile.mockResolvedValueOnce({
+      accepted: true,
+      targetId: "rec-alpha-001",
+      expectedVersion: 2,
+      mutableDiff: { body: "Markdown body" },
+      rejectedFields: [],
+    });
+    api.applyReconcile.mockResolvedValueOnce({
+      accepted: true,
+      record: {
+        id: "rec-alpha-001",
+        title: "Project memory scaffold",
+        folderId: "folder-core",
+        body: "Applied Markdown body",
+        kind: "skill",
+        tags: ["alpha"],
+        version: 3,
+        backendHash: "sha256:fixture-alpha-001-applied",
+        confidence: 0.86,
+        sourceHash: "sha256:source-alpha-001",
+        links: ["rec-alpha-002"],
+      },
+      rejectedFields: [],
+    });
+
+    render(<App api={api} />);
+
+    await screen.findAllByText("Project memory scaffold");
+    await user.click(screen.getByRole("button", { name: "Review reconcile" }));
+    await user.click(await screen.findByRole("button", { name: "Apply reconcile" }));
+    expect(await screen.findByText("Applied")).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText("Record body"), " changed");
+
+    expect(screen.queryByText("Applied")).not.toBeInTheDocument();
+  });
+
   it("keeps an applied record when an older selection response resolves later", async () => {
     const user = userEvent.setup();
     let resolveSecond: (record: Awaited<ReturnType<typeof api.record>>) => void;
