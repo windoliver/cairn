@@ -155,6 +155,21 @@ fn tool_decl_descriptions_are_single_paragraph_prompts() {
 }
 
 #[test]
+fn tool_decl_descriptions_do_not_embed_trailing_newlines() {
+    let files = emit_mcp::emit(&doc()).unwrap();
+    let mod_rs = files
+        .iter()
+        .find(|f| f.path.ends_with("crates/cairn-mcp/src/generated/mod.rs"))
+        .unwrap();
+    let body = std::str::from_utf8(&mod_rs.bytes).unwrap();
+
+    assert!(
+        !body.contains(".\n\"#,"),
+        "ToolDecl.description must not embed a trailing newline; printers own presentation newlines"
+    );
+}
+
+#[test]
 fn supporting_schema_groups_are_emitted_alongside_verbs() {
     // Cross-file `$ref` paths inside verb schemas (e.g.
     // `../common/scope_filter.json`) need the sibling schema groups to ship

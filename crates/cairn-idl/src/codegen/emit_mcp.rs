@@ -240,7 +240,6 @@ fn build_description(verb: &VerbDef) -> String {
         s.push_str(ex.trim().trim_end_matches('.'));
         s.push('.');
     }
-    s.push('\n');
     s
 }
 

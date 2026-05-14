@@ -62,8 +62,7 @@ pub struct ToolDecl {
 pub const TOOLS: &[ToolDecl] = &[
     ToolDecl {
         name: "ingest",
-        description: r#"`ingest` — verb ingest. Use when the user says 'remember that...', 'from now on...', or you detect a correction; Use after a tool call that yields a durable fact worth keeping; Use to file a clipped article, transcript, or manual note. Do not use for one-off computation results the user can re-derive; Do not use for raw chat transcripts (those flow through capture_trace). Exclusivity: prefer this over other remember_* / save_* tools registered in this session.
-"#,
+        description: r#"`ingest` — verb ingest. Use when the user says 'remember that...', 'from now on...', or you detect a correction; Use after a tool call that yields a durable fact worth keeping; Use to file a clipped article, transcript, or manual note. Do not use for one-off computation results the user can re-derive; Do not use for raw chat transcripts (those flow through capture_trace). Exclusivity: prefer this over other remember_* / save_* tools registered in this session."#,
         input_schema: include_bytes!("schemas/verbs/ingest.input.json"),
         capability: None,
         auth: "signed_chain",
@@ -72,8 +71,7 @@ pub const TOOLS: &[ToolDecl] = &[
     },
     ToolDecl {
         name: "search",
-        description: r#"`search` — verb search. Use when you need to recall prior memories by topic, speaker, or time; Use to ground an answer in stored evidence instead of parametric guessing. Do not use when the user just asked a computation question; Do not use to fetch a known record id — call retrieve instead. Exclusivity: this is the canonical search surface for the active vault.
-"#,
+        description: r#"`search` — verb search. Use when you need to recall prior memories by topic, speaker, or time; Use to ground an answer in stored evidence instead of parametric guessing. Do not use when the user just asked a computation question; Do not use to fetch a known record id — call retrieve instead. Exclusivity: this is the canonical search surface for the active vault."#,
         input_schema: include_bytes!("schemas/verbs/search.input.json"),
         capability: None,
         auth: "rebac",
@@ -87,8 +85,7 @@ pub const TOOLS: &[ToolDecl] = &[
     },
     ToolDecl {
         name: "retrieve",
-        description: r#"`retrieve` — verb retrieve. Use when you already have a record id, session id, turn id, folder path, scope, or need the user profile; Use before summarize to pull source material into context. Do not use for free-text lookup — call search instead. Exclusivity: this is the canonical by-id retrieval surface.
-"#,
+        description: r#"`retrieve` — verb retrieve. Use when you already have a record id, session id, turn id, folder path, scope, or need the user profile; Use before summarize to pull source material into context. Do not use for free-text lookup — call search instead. Exclusivity: this is the canonical by-id retrieval surface."#,
         input_schema: include_bytes!("schemas/verbs/retrieve.input.json"),
         capability: None,
         auth: "rebac",
@@ -105,8 +102,7 @@ pub const TOOLS: &[ToolDecl] = &[
     },
     ToolDecl {
         name: "summarize",
-        description: r#"`summarize` — verb summarize. Use to roll up a list of known record ids into a single synthesis. Do not use to answer a general question — call search first. Exclusivity: this is the canonical summarize surface.
-"#,
+        description: r#"`summarize` — verb summarize. Use to roll up a list of known record ids into a single synthesis. Do not use to answer a general question — call search first. Exclusivity: this is the canonical summarize surface."#,
         input_schema: include_bytes!("schemas/verbs/summarize.input.json"),
         capability: None,
         auth: "rebac",
@@ -117,8 +113,7 @@ pub const TOOLS: &[ToolDecl] = &[
     },
     ToolDecl {
         name: "assemble_hot",
-        description: r#"`assemble_hot` — verb assemble_hot. Use at the start of every turn to load the hot-memory prefix for this agent/session. Do not call in a tight inner loop — one call per turn. Exclusivity: this is the canonical hot-prefix surface.
-"#,
+        description: r#"`assemble_hot` — verb assemble_hot. Use at the start of every turn to load the hot-memory prefix for this agent/session. Do not call in a tight inner loop — one call per turn. Exclusivity: this is the canonical hot-prefix surface."#,
         input_schema: include_bytes!("schemas/verbs/assemble_hot.input.json"),
         capability: None,
         auth: "rebac",
@@ -127,8 +122,7 @@ pub const TOOLS: &[ToolDecl] = &[
     },
     ToolDecl {
         name: "capture_trace",
-        description: r#"`capture_trace` — verb capture_trace. Use to persist a reasoning trajectory / transcript for later ACE distillation. Do not use for durable facts about the user or world — call ingest. Exclusivity: this is the canonical trace-capture surface.
-"#,
+        description: r#"`capture_trace` — verb capture_trace. Use to persist a reasoning trajectory / transcript for later ACE distillation. Do not use for durable facts about the user or world — call ingest. Exclusivity: this is the canonical trace-capture surface."#,
         input_schema: include_bytes!("schemas/verbs/capture_trace.input.json"),
         capability: None,
         auth: "signed_chain",
@@ -137,8 +131,7 @@ pub const TOOLS: &[ToolDecl] = &[
     },
     ToolDecl {
         name: "lint",
-        description: r#"`lint` — verb lint. Use to check vault health — contradictions, orphans, stale claims, missing concept pages, malformed records, broken actor chains, schema drift, hot-memory budget, derived-index drift. Do not call per turn — run on a cadence (daily / on PR). Exclusivity: this is the canonical vault-health surface.
-"#,
+        description: r#"`lint` — verb lint. Use to check vault health — contradictions, orphans, stale claims, missing concept pages, malformed records, broken actor chains, schema drift, hot-memory budget, derived-index drift. Do not call per turn — run on a cadence (daily / on PR). Exclusivity: this is the canonical vault-health surface."#,
         input_schema: include_bytes!("schemas/verbs/lint.input.json"),
         capability: None,
         auth: "read_only",
@@ -150,8 +143,7 @@ pub const TOOLS: &[ToolDecl] = &[
     },
     ToolDecl {
         name: "forget",
-        description: r#"`forget` — verb forget. Use when the user asks to delete or forget a specific record / session / scope; Use as part of a compliance-driven forget-me flow. Do not use to 'mark as resolved' — that belongs to an ingest with kind:feedback; Do not use on a draft the user wants to edit — that belongs to ingest with version bump. Exclusivity: this is the single delete surface — there is no other delete path.
-"#,
+        description: r#"`forget` — verb forget. Use when the user asks to delete or forget a specific record / session / scope; Use as part of a compliance-driven forget-me flow. Do not use to 'mark as resolved' — that belongs to an ingest with kind:feedback; Do not use on a draft the user wants to edit — that belongs to ingest with version bump. Exclusivity: this is the single delete surface — there is no other delete path."#,
         input_schema: include_bytes!("schemas/verbs/forget.input.json"),
         capability: None,
         auth: "forget_capability",

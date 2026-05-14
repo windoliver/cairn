@@ -815,7 +815,7 @@ fn run_plugins(matches: &ArgMatches) -> ExitCode {
                         let _ = writeln!(stdout);
                     }
                     let _ = writeln!(stdout, "# {}", tool.name);
-                    let _ = write!(stdout, "{}", tool.description);
+                    let _ = writeln!(stdout, "{}", tool.description);
                 }
             }
             ExitCode::SUCCESS
