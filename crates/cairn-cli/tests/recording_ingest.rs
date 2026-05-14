@@ -84,6 +84,14 @@ fn recording_payload_files(vault: &Path) -> Vec<PathBuf> {
     regular_files_under(&vault.join("sources/recordings"))
 }
 
+fn assert_no_recording_payloads(vault: &Path) {
+    let payloads = recording_payload_files(vault);
+    assert!(
+        payloads.is_empty(),
+        "rejected recording ingest must not write derived payloads: {payloads:?}"
+    );
+}
+
 fn vault_contains_exact_bytes(root: &Path, bytes: &[u8]) -> bool {
     regular_files_under(root)
         .into_iter()
@@ -182,7 +190,54 @@ fn recording_fixture_ingests_ordered_audio_and_ocr_segments() {
 }
 
 #[test]
-fn recording_without_fixture_env_rejects_with_actionable_invalid_args() {
+fn recording_rejects_unsupported_extension_before_fixture_reads() {
+    let vault = tempfile::tempdir().expect("temp vault");
+    bootstrap_vault(vault.path());
+    let unsupported = vault.path().join("note.txt");
+    std::fs::write(&unsupported, "not media").expect("write unsupported recording");
+    let missing_fixture = vault.path().join("missing-fixture.json");
+
+    let out = cli()
+        .current_dir(vault.path())
+        .env("CAIRN_RECORDING_FIXTURE_JSON", &missing_fixture)
+        .args([
+            "ingest",
+            "--kind",
+            "transcript",
+            "--recording",
+            unsupported.to_str().expect("utf-8 unsupported path"),
+            "--json",
+        ])
+        .output()
+        .expect("cairn ingest --recording unsupported extension");
+
+    assert_eq!(
+        out.status.code(),
+        Some(64),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let response = json_stdout(&out);
+    assert_eq!(response["status"], "rejected", "envelope: {response}");
+    assert_eq!(
+        response["error"]["code"], "InvalidArgs",
+        "envelope: {response}"
+    );
+    let message = response["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("unsupported recording format"),
+        "envelope: {response}"
+    );
+    assert!(
+        message.contains("mp4, m4a, mp3, mkv, webm, wav"),
+        "envelope: {response}"
+    );
+    assert_no_recording_payloads(vault.path());
+}
+
+#[test]
+fn recording_rejects_missing_fixture_runtime_with_actionable_invalid_args() {
     let vault = tempfile::tempdir().expect("temp vault");
     bootstrap_vault(vault.path());
     let media = fixtures_dir().join("demo.mp4");
@@ -218,8 +273,126 @@ fn recording_without_fixture_env_rejects_with_actionable_invalid_args() {
         response["error"]["message"]
             .as_str()
             .unwrap_or_default()
-            .contains("CAIRN_RECORDING_FIXTURE_JSON"),
+            .contains("real recording runtime is not wired"),
         "envelope: {response}"
+    );
+    assert_no_recording_payloads(vault.path());
+}
+
+#[test]
+fn recording_rejects_corrupt_fixture_before_payload_or_record_writes() {
+    let vault = tempfile::tempdir().expect("temp vault");
+    bootstrap_vault(vault.path());
+    let media = fixtures_dir().join("demo.mp4");
+    let corrupt_fixture = vault.path().join("corrupt-recording-fixture.json");
+    std::fs::write(&corrupt_fixture, "{ not json").expect("write corrupt fixture");
+
+    let out = cli()
+        .current_dir(vault.path())
+        .env("CAIRN_RECORDING_FIXTURE_JSON", &corrupt_fixture)
+        .args([
+            "ingest",
+            "--kind",
+            "transcript",
+            "--recording",
+            media.to_str().expect("utf-8 media path"),
+            "--json",
+        ])
+        .output()
+        .expect("cairn ingest --recording corrupt fixture");
+
+    assert_eq!(
+        out.status.code(),
+        Some(64),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let response = json_stdout(&out);
+    assert_eq!(response["status"], "rejected", "envelope: {response}");
+    assert_eq!(
+        response["error"]["code"], "InvalidArgs",
+        "envelope: {response}"
+    );
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("failed to parse CAIRN_RECORDING_FIXTURE_JSON"),
+        "envelope: {response}"
+    );
+    assert_no_recording_payloads(vault.path());
+    assert!(
+        keyword_search_hits(vault.path(), "alpha recording launch note").is_empty(),
+        "corrupt fixture text must not become searchable"
+    );
+}
+
+#[test]
+fn recording_rejects_fixture_media_mismatch_before_payload_or_record_writes() {
+    let vault = tempfile::tempdir().expect("temp vault");
+    bootstrap_vault(vault.path());
+    let media = fixtures_dir().join("demo.mp4");
+    let mismatched_fixture = vault.path().join("mismatched-recording-fixture.json");
+    std::fs::write(
+        &mismatched_fixture,
+        r#"{
+          "media_path": "fixtures/v0/recordings/other.mp4",
+          "media_sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000087",
+          "duration_ms": 5200,
+          "file_size": 1234,
+          "audio": [
+            {
+              "start_ms": 0,
+              "duration_ms": 1800,
+              "speaker_id": "unknown_speaker_01",
+              "confidence": 0.91,
+              "text": "mismatch should never commit"
+            }
+          ],
+          "frames": []
+        }"#,
+    )
+    .expect("write mismatched fixture");
+
+    let out = cli()
+        .current_dir(vault.path())
+        .env("CAIRN_RECORDING_FIXTURE_JSON", &mismatched_fixture)
+        .args([
+            "ingest",
+            "--kind",
+            "transcript",
+            "--recording",
+            media.to_str().expect("utf-8 media path"),
+            "--json",
+        ])
+        .output()
+        .expect("cairn ingest --recording mismatched fixture");
+
+    assert_eq!(
+        out.status.code(),
+        Some(64),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let response = json_stdout(&out);
+    assert_eq!(response["status"], "rejected", "envelope: {response}");
+    assert_eq!(
+        response["error"]["code"], "InvalidArgs",
+        "envelope: {response}"
+    );
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("recording fixture media_path does not match"),
+        "envelope: {response}"
+    );
+    assert_no_recording_payloads(vault.path());
+    assert!(
+        keyword_search_hits(vault.path(), "mismatch should never commit").is_empty(),
+        "mismatched fixture text must not become searchable"
     );
 }
 

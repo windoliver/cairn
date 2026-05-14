@@ -33,6 +33,7 @@ const RECORDING_SENSOR_ID: &str = "snr:local:recording:default:v1";
 const RECORDING_AUTHOR_ID: &str = "hmn:recording-ingest";
 const RECORDING_CAPTURED_AT: &str = "2026-05-13T00:00:00Z";
 const RECORDING_SESSION_ID: &str = "recording-batch";
+const SUPPORTED_RECORDING_FORMATS: &str = "mp4, m4a, mp3, mkv, webm, wav";
 
 #[derive(Debug, Clone, PartialEq)]
 enum SegmentKind {
@@ -88,6 +89,10 @@ pub fn run(
 ) -> ExitCode {
     let started = Instant::now();
 
+    if let Err(e) = validate_supported_recording_extension(recording_path) {
+        return emit_invalid(json, &format!("{e:#}"));
+    }
+
     if !recording_path.exists() {
         let reason = format!(
             "path does not exist: {}; cairn ingest --recording is not implemented yet without CAIRN_RECORDING_FIXTURE_JSON",
@@ -101,7 +106,7 @@ pub fn run(
         _ => {
             return emit_invalid(
                 json,
-                "cairn ingest --recording is not implemented yet for real media runtime; set CAIRN_RECORDING_FIXTURE_JSON for deterministic fixture mode",
+                "real recording runtime is not wired; set CAIRN_RECORDING_FIXTURE_JSON for deterministic fixture mode",
             );
         }
     };
@@ -130,6 +135,9 @@ pub fn run(
             );
         }
     };
+    if let Err(e) = validate_fixture_media_path(recording_path, &plan.media_path) {
+        return emit_invalid(json, &format!("{e:#}"));
+    }
     let batch = match build_capture_batch(&plan) {
         Ok(batch) => batch,
         Err(e) => {
@@ -380,6 +388,50 @@ fn emit_internal(json: bool, message: &str) -> ExitCode {
         human_error("ingest", "Internal", message, &resp.operation_id);
     }
     ExitCode::FAILURE
+}
+
+fn validate_supported_recording_extension(path: &Path) -> anyhow::Result<()> {
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "unsupported recording format: missing extension; supported: {SUPPORTED_RECORDING_FORMATS}"
+            )
+        })?;
+
+    match ext.as_str() {
+        "mp4" | "m4a" | "mp3" | "mkv" | "webm" | "wav" => Ok(()),
+        other => anyhow::bail!(
+            "unsupported recording format `{other}`; supported: {SUPPORTED_RECORDING_FORMATS}"
+        ),
+    }
+}
+
+fn validate_fixture_media_path(
+    recording_path: &Path,
+    fixture_media_path: &Path,
+) -> anyhow::Result<()> {
+    if recording_path == fixture_media_path || recording_path.ends_with(fixture_media_path) {
+        return Ok(());
+    }
+
+    if fixture_media_path.is_absolute()
+        && let (Ok(recording), Ok(fixture)) = (
+            std::fs::canonicalize(recording_path),
+            std::fs::canonicalize(fixture_media_path),
+        )
+        && recording == fixture
+    {
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "recording fixture media_path does not match --recording path: fixture {}, recording {}",
+        fixture_media_path.display(),
+        recording_path.display()
+    )
 }
 
 #[derive(Debug, serde::Deserialize)]
