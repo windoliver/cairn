@@ -54,11 +54,22 @@ fn repository_derives_graph_edges_from_fixture_links() {
 fn repository_searches_titles_tags_and_body() {
     let repo = DesktopRepository::from_fixture(DesktopFixture::load_default().expect("fixture"));
     let results = repo.search("reconcile");
+    let padded_results = repo.search("  reconcile  ");
 
     assert!(
         results
             .iter()
             .any(|result| result.record_id == "rec-alpha-002")
+    );
+    assert_eq!(
+        results
+            .iter()
+            .map(|result| &result.record_id)
+            .collect::<Vec<_>>(),
+        padded_results
+            .iter()
+            .map(|result| &result.record_id)
+            .collect::<Vec<_>>()
     );
     assert!(results[0].score >= results.last().expect("result").score);
 }

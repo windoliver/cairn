@@ -107,7 +107,8 @@ impl DesktopRepository {
     /// Return deterministic fixture search results.
     #[must_use]
     pub fn search(&self, query: &str) -> Vec<DesktopSearchResult> {
-        if query.trim().is_empty() {
+        let query = query.trim();
+        if query.is_empty() {
             return Vec::new();
         }
         let query = query.to_lowercase();
