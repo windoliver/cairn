@@ -1,9 +1,9 @@
 # Screen Sensor Design — Issue #86
 
-**Date:** 2026-05-12  
-**Issue:** [#86 — Implement screen capture via screenpipe primary and xcap/tesseract fallback](https://github.com/windoliver/cairn/issues/86)  
-**Brief sections:** §8.0.a Status · §9.1 Source families · §14 Privacy & consent · §19 v0.1 sequencing  
-**ADR:** [ADR 0003 — Screen sensor packaging and opt-in model for P0](../../design/decisions/0003-screen-sensor-packaging.md)  
+**Date:** 2026-05-12
+**Issue:** [#86 — Implement screen capture via screenpipe primary and xcap/tesseract fallback](https://github.com/windoliver/cairn/issues/86)
+**Brief sections:** §8.0.a Status · §9.1 Source families · §14 Privacy & consent · §19 v0.1 sequencing
+**ADR:** [ADR 0003 — Screen sensor packaging and opt-in model for P0](../../design/decisions/0003-screen-sensor-packaging.md)
 **Status:** Approved
 
 ---

@@ -4,8 +4,8 @@ use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cairn_core::config::{ScreenBackend, ScreenOcrEngine, ScreenSensorConfig};
 use cairn_core::domain::{
@@ -523,12 +523,197 @@ fn raw_payload_bytes(
     }))
 }
 
+fn should_drop_for_password_fields(
+    config: &ScreenSensorConfig,
+    observation: &ScreenObservation,
+) -> bool {
+    config.blur_password_fields
+        && (contains_password_field_marker(&observation.text)
+            || contains_password_field_marker(&observation.window_title)
+            || observation
+                .url
+                .as_deref()
+                .is_some_and(contains_password_field_marker))
+}
+
+fn contains_password_field_marker(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    [
+        "password=",
+        "password:",
+        "\"password\"",
+        "'password'",
+        "type=\"password\"",
+        "type='password'",
+        "type=password",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
+fn should_drop_capture_artifact(
+    config: &ScreenSensorConfig,
+    observation: &ScreenObservation,
+) -> bool {
+    should_drop_for_password_fields(config, observation)
+        || (config.blur_password_fields && observation.ocr_engine == ResolvedScreenOcrEngine::Off)
+}
+
+fn remove_capture_artifact(output_path: &Path) -> Result<(), ScreenError> {
+    if !output_path.exists() {
+        return Ok(());
+    }
+
+    fs::remove_file(output_path).map_err(|err| {
+        ScreenError::CaptureFailed(format!(
+            "failed to remove dropped screen capture {}: {err}",
+            output_path.display()
+        ))
+    })
+}
+
+#[cfg(any(test, feature = "screenpipe-runtime"))]
+fn apply_screen_ocr_config(config: &ScreenSensorConfig, observation: &mut ScreenObservation) {
+    let ocr_engine = ResolvedScreenOcrEngine::from_config(config.ocr.engine);
+    observation.ocr_engine = ocr_engine;
+    if ocr_engine == ResolvedScreenOcrEngine::Off {
+        observation.text.clear();
+        observation.bounding_boxes.clear();
+    }
+}
+
 /// Mockable screen sensor that composes backend and policy.
 #[derive(Debug)]
 pub struct ScreenSensor<B, P> {
     backend: B,
     policy: P,
-    frame_timestamps: Mutex<VecDeque<Instant>>,
+    frame_budget: SharedFrameBudget,
+}
+
+#[derive(Debug, Clone)]
+enum SharedFrameBudget {
+    InMemory(Arc<Mutex<VecDeque<Instant>>>),
+    Persistent(PathBuf),
+}
+
+impl Default for SharedFrameBudget {
+    fn default() -> Self {
+        Self::InMemory(Arc::new(Mutex::new(VecDeque::new())))
+    }
+}
+
+impl SharedFrameBudget {
+    #[cfg(test)]
+    fn persistent_at(path: PathBuf) -> Self {
+        Self::Persistent(path)
+    }
+
+    fn persistent(key: &str) -> Self {
+        Self::Persistent(persistent_frame_budget_path(key))
+    }
+
+    fn admit(&self, max_frames_per_minute: u32) -> Result<(), ScreenError> {
+        match self {
+            Self::InMemory(frame_timestamps) => {
+                Self::admit_in_memory(frame_timestamps, max_frames_per_minute)
+            }
+            Self::Persistent(path) => Self::admit_persistent(path, max_frames_per_minute),
+        }
+    }
+
+    fn admit_in_memory(
+        frame_timestamps: &Mutex<VecDeque<Instant>>,
+        max_frames_per_minute: u32,
+    ) -> Result<(), ScreenError> {
+        let now = Instant::now();
+        let mut timestamps = frame_timestamps
+            .lock()
+            .map_err(|_| ScreenError::Unavailable(ScreenDegradationCode::Degraded))?;
+
+        while timestamps
+            .front()
+            .is_some_and(|timestamp| now.duration_since(*timestamp) >= FRAME_BUDGET_WINDOW)
+        {
+            timestamps.pop_front();
+        }
+
+        if timestamps.len() >= max_frames_per_minute as usize {
+            return Err(ScreenError::Unavailable(ScreenDegradationCode::Degraded));
+        }
+
+        timestamps.push_back(now);
+        Ok(())
+    }
+
+    fn admit_persistent(path: &Path, max_frames_per_minute: u32) -> Result<(), ScreenError> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|err| ScreenError::CaptureFailed(format!("system clock before epoch: {err}")))?
+            .as_millis();
+        let window = FRAME_BUDGET_WINDOW.as_millis();
+        let mut timestamps = read_persistent_frame_timestamps(path)?
+            .into_iter()
+            .filter(|timestamp| now.saturating_sub(*timestamp) < window)
+            .collect::<Vec<_>>();
+
+        if timestamps.len() >= max_frames_per_minute as usize {
+            return Err(ScreenError::Unavailable(ScreenDegradationCode::Degraded));
+        }
+
+        timestamps.push(now);
+        write_persistent_frame_timestamps(path, &timestamps)
+    }
+}
+
+fn persistent_frame_budget_path(key: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("cairn-screen-frame-budget-{key}.txt"))
+}
+
+fn read_persistent_frame_timestamps(path: &Path) -> Result<Vec<u128>, ScreenError> {
+    match fs::read_to_string(path) {
+        Ok(contents) => Ok(contents
+            .lines()
+            .filter_map(|line| line.trim().parse::<u128>().ok())
+            .collect()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(err) => Err(ScreenError::CaptureFailed(format!(
+            "failed to read screen frame budget {}: {err}",
+            path.display()
+        ))),
+    }
+}
+
+fn write_persistent_frame_timestamps(path: &Path, timestamps: &[u128]) -> Result<(), ScreenError> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).map_err(|err| {
+            ScreenError::CaptureFailed(format!(
+                "failed to create screen frame budget directory {}: {err}",
+                parent.display()
+            ))
+        })?;
+    }
+
+    let contents = timestamps
+        .iter()
+        .map(u128::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let temp_path = path.with_extension("tmp");
+    fs::write(&temp_path, format!("{contents}\n")).map_err(|err| {
+        ScreenError::CaptureFailed(format!(
+            "failed to write screen frame budget {}: {err}",
+            temp_path.display()
+        ))
+    })?;
+    fs::rename(&temp_path, path).map_err(|err| {
+        ScreenError::CaptureFailed(format!(
+            "failed to update screen frame budget {}: {err}",
+            path.display()
+        ))
+    })
 }
 
 impl<B, P> ScreenSensor<B, P>
@@ -539,10 +724,14 @@ where
     /// Create a screen sensor from a backend runtime and policy.
     #[must_use]
     pub fn new(backend: B, policy: P) -> Self {
+        Self::with_frame_budget(backend, policy, SharedFrameBudget::default())
+    }
+
+    fn with_frame_budget(backend: B, policy: P, frame_budget: SharedFrameBudget) -> Self {
         Self {
             backend,
             policy,
-            frame_timestamps: Mutex::new(VecDeque::new()),
+            frame_budget,
         }
     }
 
@@ -579,6 +768,9 @@ where
         if !config.allow_apps.is_empty() && !config.allow_apps.contains(&observation.app) {
             return Ok(None);
         }
+        if should_drop_for_password_fields(config, &observation) {
+            return Ok(None);
+        }
         truncate_text_to_budget(
             &mut observation.text,
             config.budget.max_text_bytes_per_event,
@@ -587,25 +779,7 @@ where
     }
 
     fn admit_frame(&self, max_frames_per_minute: u32) -> Result<(), ScreenError> {
-        let now = Instant::now();
-        let mut timestamps = self
-            .frame_timestamps
-            .lock()
-            .map_err(|_| ScreenError::Unavailable(ScreenDegradationCode::Degraded))?;
-
-        while timestamps
-            .front()
-            .is_some_and(|timestamp| now.duration_since(*timestamp) >= FRAME_BUDGET_WINDOW)
-        {
-            timestamps.pop_front();
-        }
-
-        if timestamps.len() >= max_frames_per_minute as usize {
-            return Err(ScreenError::Unavailable(ScreenDegradationCode::Degraded));
-        }
-
-        timestamps.push_back(now);
-        Ok(())
+        self.frame_budget.admit(max_frames_per_minute)
     }
 }
 
@@ -646,6 +820,10 @@ where
 
         let mut receipt = self.backend.capture_png_snapshot(config, output_path)?;
         if !config.allow_apps.is_empty() && !config.allow_apps.contains(&receipt.observation.app) {
+            return Ok(None);
+        }
+        if should_drop_capture_artifact(config, &receipt.observation) {
+            remove_capture_artifact(&receipt.output_path)?;
             return Ok(None);
         }
         truncate_text_to_budget(
@@ -718,17 +896,29 @@ pub fn capture_png_snapshot_configured(
     output_path: &Path,
 ) -> Result<Option<ScreenCaptureReceipt>, ScreenError> {
     match config.backend {
-        ScreenBackend::Xcap => ScreenSensor::new(XcapBackendRuntime, NoopScreenPolicy)
-            .capture_png_snapshot(config, output_path),
+        ScreenBackend::Xcap => ScreenSensor::with_frame_budget(
+            XcapBackendRuntime,
+            NoopScreenPolicy,
+            configured_frame_budget(ScreenBackend::Xcap),
+        )
+        .capture_png_snapshot(config, output_path),
         ScreenBackend::Screenpipe => {
-            let primary = ScreenSensor::new(ScreenpipeBackendRuntime, NoopScreenPolicy);
+            let primary = ScreenSensor::with_frame_budget(
+                ScreenpipeBackendRuntime,
+                NoopScreenPolicy,
+                configured_frame_budget(ScreenBackend::Screenpipe),
+            );
             match primary.capture_png_snapshot(config, output_path) {
                 Ok(receipt) => Ok(receipt),
                 Err(err) if can_fallback_from_screenpipe(&err) => {
                     let mut fallback_config = config.clone();
                     fallback_config.backend = ScreenBackend::Xcap;
-                    ScreenSensor::new(XcapBackendRuntime, NoopScreenPolicy)
-                        .capture_png_snapshot(&fallback_config, output_path)
+                    ScreenSensor::with_frame_budget(
+                        XcapBackendRuntime,
+                        NoopScreenPolicy,
+                        configured_frame_budget(ScreenBackend::Xcap),
+                    )
+                    .capture_png_snapshot(&fallback_config, output_path)
                 }
                 Err(err) => Err(err),
             }
@@ -736,6 +926,13 @@ pub fn capture_png_snapshot_configured(
         _ => Err(ScreenError::Unavailable(
             ScreenDegradationCode::BackendUnavailable,
         )),
+    }
+}
+
+fn configured_frame_budget(backend: ScreenBackend) -> SharedFrameBudget {
+    match backend {
+        ScreenBackend::Screenpipe => SharedFrameBudget::persistent("screenpipe"),
+        _ => SharedFrameBudget::persistent("xcap"),
     }
 }
 
@@ -1046,7 +1243,7 @@ fn screenpipe_capture_frame(
         Ok(bytes.to_vec())
     })?;
     let mut capture = screenpipe_frame_capture_from_search_json(&body)?;
-    capture.observation.ocr_engine = ResolvedScreenOcrEngine::from_config(config.ocr.engine);
+    apply_screen_ocr_config(config, &mut capture.observation);
     Ok(capture)
 }
 
@@ -1503,65 +1700,8 @@ fn image_dimensions_from_bytes(bytes: &[u8]) -> Result<(u32, u32), ScreenError> 
         return Ok((width, height));
     }
 
-    if bytes.len() >= 4 && bytes.starts_with(&[0xff, 0xd8]) {
-        return jpeg_dimensions_from_bytes(bytes);
-    }
-
     Err(ScreenError::CaptureFailed(
-        "screenpipe frame was not a PNG or JPEG image".to_owned(),
-    ))
-}
-
-#[cfg(any(test, feature = "screenpipe-runtime"))]
-fn jpeg_dimensions_from_bytes(bytes: &[u8]) -> Result<(u32, u32), ScreenError> {
-    let mut cursor = 2;
-    while cursor + 4 <= bytes.len() {
-        while cursor < bytes.len() && bytes[cursor] == 0xff {
-            cursor += 1;
-        }
-        if cursor >= bytes.len() {
-            break;
-        }
-        let marker = bytes[cursor];
-        cursor += 1;
-
-        if matches!(marker, 0xd8 | 0xd9 | 0x01) || (0xd0..=0xd7).contains(&marker) {
-            continue;
-        }
-        if cursor + 2 > bytes.len() {
-            break;
-        }
-        let segment_len = u16::from_be_bytes([bytes[cursor], bytes[cursor + 1]]) as usize;
-        if segment_len < 2 || cursor + segment_len > bytes.len() {
-            break;
-        }
-        if matches!(
-            marker,
-            0xc0 | 0xc1
-                | 0xc2
-                | 0xc3
-                | 0xc5
-                | 0xc6
-                | 0xc7
-                | 0xc9
-                | 0xca
-                | 0xcb
-                | 0xcd
-                | 0xce
-                | 0xcf
-        ) {
-            if segment_len < 7 {
-                break;
-            }
-            let height = u32::from(u16::from_be_bytes([bytes[cursor + 3], bytes[cursor + 4]]));
-            let width = u32::from(u16::from_be_bytes([bytes[cursor + 5], bytes[cursor + 6]]));
-            return Ok((width, height));
-        }
-        cursor += segment_len;
-    }
-
-    Err(ScreenError::CaptureFailed(
-        "screenpipe JPEG frame missing dimensions".to_owned(),
+        "screenpipe frame was not a PNG image".to_owned(),
     ))
 }
 
@@ -1709,7 +1849,7 @@ fn platform_ocr_capability() -> Capabilities {
 
 #[cfg(test)]
 mod tests {
-    use cairn_core::config::{ScreenBackend, ScreenSensorConfig};
+    use cairn_core::config::{ScreenBackend, ScreenOcrEngine, ScreenSensorConfig};
     use cairn_core::domain::{CaptureEventId, CapturePayload, Rfc3339Timestamp, SourceFamily};
     use sha2::{Digest as _, Sha256};
 
@@ -1887,6 +2027,57 @@ mod tests {
     }
 
     #[test]
+    fn blur_password_fields_drops_text_snapshot_before_policy() {
+        let backend = FakeBackend {
+            probe: fake_probe(),
+            observation: fake_observation("password=abc123"),
+        };
+        let sensor = ScreenSensor::new(backend, NoopScreenPolicy);
+
+        let result = sensor.capture_snapshot(&enabled_config()).unwrap();
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn blur_password_fields_removes_png_artifact_and_drops_capture() {
+        let backend = FakeBackend {
+            probe: fake_probe(),
+            observation: fake_observation("password=abc123"),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let output_path = dir.path().join("snapshot.png");
+        let sensor = ScreenSensor::new(backend, NoopScreenPolicy);
+
+        let result = sensor
+            .capture_png_snapshot(&enabled_config(), &output_path)
+            .unwrap();
+
+        assert!(result.is_none());
+        assert!(!output_path.exists());
+    }
+
+    #[test]
+    fn blur_password_fields_drops_png_when_ocr_is_off() {
+        let mut observation = fake_observation("meeting notes");
+        observation.ocr_engine = ResolvedScreenOcrEngine::Off;
+        let backend = FakeBackend {
+            probe: fake_probe(),
+            observation,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let output_path = dir.path().join("snapshot.png");
+        let sensor = ScreenSensor::new(backend, NoopScreenPolicy);
+
+        let result = sensor
+            .capture_png_snapshot(&enabled_config(), &output_path)
+            .unwrap();
+
+        assert!(result.is_none());
+        assert!(!output_path.exists());
+    }
+
+    #[test]
     fn frame_budget_rejects_second_capture_from_same_sensor() {
         let mut config = enabled_config();
         config.budget.max_frames_per_minute = 1;
@@ -1900,6 +2091,48 @@ mod tests {
         assert!(first.is_some());
 
         let err = sensor.capture_snapshot(&config).unwrap_err();
+        assert_eq!(err.code(), ScreenDegradationCode::Degraded);
+    }
+
+    #[test]
+    fn shared_frame_budget_rejects_across_sensor_instances() {
+        let mut config = enabled_config();
+        config.budget.max_frames_per_minute = 1;
+        let frame_budget = SharedFrameBudget::default();
+        let first_sensor = ScreenSensor::with_frame_budget(
+            FakeBackend {
+                probe: fake_probe(),
+                observation: fake_observation("first"),
+            },
+            NoopScreenPolicy,
+            frame_budget.clone(),
+        );
+        let second_sensor = ScreenSensor::with_frame_budget(
+            FakeBackend {
+                probe: fake_probe(),
+                observation: fake_observation("second"),
+            },
+            NoopScreenPolicy,
+            frame_budget,
+        );
+
+        let first = first_sensor.capture_snapshot(&config).unwrap();
+        assert!(first.is_some());
+
+        let err = second_sensor.capture_snapshot(&config).unwrap_err();
+        assert_eq!(err.code(), ScreenDegradationCode::Degraded);
+    }
+
+    #[test]
+    fn persistent_frame_budget_rejects_across_budget_instances() {
+        let dir = tempfile::tempdir().unwrap();
+        let budget_path = dir.path().join("screen-budget");
+        let first_budget = SharedFrameBudget::persistent_at(budget_path.clone());
+        let second_budget = SharedFrameBudget::persistent_at(budget_path);
+
+        first_budget.admit(1).unwrap();
+
+        let err = second_budget.admit(1).unwrap_err();
         assert_eq!(err.code(), ScreenDegradationCode::Degraded);
     }
 
@@ -1992,10 +2225,8 @@ mod tests {
         };
         let probe = probe_config(&config);
         if cfg!(feature = "screenpipe-runtime") {
-            assert_ne!(
-                probe.degradation_code(),
-                Some(ScreenDegradationCode::BackendUnavailable)
-            );
+            assert_eq!(probe.backend, ScreenBackend::Screenpipe);
+            assert_ne!(probe.state, ScreenState::Disabled);
         } else {
             assert_eq!(probe.state, ScreenState::Degraded);
             assert_eq!(
@@ -2038,12 +2269,14 @@ mod tests {
 
     #[test]
     fn policy_redacts_password_text() {
+        let mut config = enabled_config();
+        config.blur_password_fields = false;
         let backend = FakeBackend {
             probe: fake_probe(),
             observation: fake_observation("password=abc123"),
         };
         let sensor = ScreenSensor::new(backend, BasicScreenPolicy);
-        let result = sensor.capture_snapshot(&enabled_config()).unwrap().unwrap();
+        let result = sensor.capture_snapshot(&config).unwrap().unwrap();
         assert_eq!(result.text, "[redacted]");
     }
 
@@ -2221,7 +2454,37 @@ mod tests {
     }
 
     #[test]
-    fn screenpipe_frame_dimensions_parse_png_and_jpeg() {
+    fn screenpipe_configured_ocr_off_drops_text_from_search_json() {
+        let body = br#"{
+            "data": [
+                {
+                    "type": "OCR",
+                    "content": {
+                        "text": "secret project notes",
+                        "timestamp": "2026-05-12T12:00:00Z",
+                        "frame_id": "42",
+                        "app_name": "Code",
+                        "window_name": "screen.rs"
+                    }
+                }
+            ],
+            "pagination": { "limit": 1, "offset": 0, "total": 1 }
+        }"#;
+        let mut config = enabled_config();
+        config.backend = ScreenBackend::Screenpipe;
+        config.ocr.engine = ScreenOcrEngine::Off;
+        let mut capture =
+            screenpipe_frame_capture_from_search_json(body).expect("screenpipe frame parses");
+
+        apply_screen_ocr_config(&config, &mut capture.observation);
+
+        assert_eq!(capture.observation.text, "");
+        assert!(capture.observation.bounding_boxes.is_empty());
+        assert_eq!(capture.observation.ocr_engine, ResolvedScreenOcrEngine::Off);
+    }
+
+    #[test]
+    fn screenpipe_frame_dimensions_parse_png_and_reject_jpeg() {
         let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
         png.extend_from_slice(&[0, 0, 0, 13]);
         png.extend_from_slice(b"IHDR");
@@ -2237,9 +2500,10 @@ mod tests {
             0x00, 0x48, 0x00, 0x48, 0x00, 0x00, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x01, 0x2c, 0x02,
             0x58, 0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01,
         ];
+        let err = image_dimensions_from_bytes(&jpeg).expect_err("jpeg should not satisfy PNG API");
         assert_eq!(
-            image_dimensions_from_bytes(&jpeg).expect("jpeg dimensions"),
-            (600, 300)
+            err,
+            ScreenError::CaptureFailed("screenpipe frame was not a PNG image".to_owned())
         );
     }
 
