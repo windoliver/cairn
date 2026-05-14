@@ -19,6 +19,9 @@ use cairn_core::generated::verbs::ingest::{IngestData, IngestDataRecordingSummar
 use clap::ArgMatches;
 use sha2::{Digest as _, Sha256};
 use std::collections::HashSet;
+use std::ffi::{OsStr, OsString};
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
@@ -57,6 +60,27 @@ struct RecordingPlan {
     file_size: u64,
     skipped_frames: u64,
     segments: Vec<RecordingSegment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CommandPlan {
+    program: OsString,
+    args: Vec<OsString>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FfmpegPlan {
+    probe: CommandPlan,
+    audio: CommandPlan,
+    frames: CommandPlan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MediaProbe {
+    duration_ms: u64,
+    file_size: u64,
+    has_audio: bool,
+    has_video: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -475,6 +499,202 @@ struct FrameObservation {
     text: String,
 }
 
+fn build_ffmpeg_plan(input: &Path, temp_dir: &Path) -> FfmpegPlan {
+    let audio_out = temp_dir.join("audio.wav");
+    let frames_out = temp_dir.join("frame-%06d.png");
+    let input_arg = command_path_arg(input);
+
+    FfmpegPlan {
+        probe: CommandPlan {
+            program: OsString::from("ffprobe"),
+            args: vec![
+                OsString::from("-nostdin"),
+                OsString::from("-v"),
+                OsString::from("error"),
+                OsString::from("-show_format"),
+                OsString::from("-show_streams"),
+                OsString::from("-of"),
+                OsString::from("json"),
+                input_arg.clone(),
+            ],
+        },
+        audio: CommandPlan {
+            program: OsString::from("ffmpeg"),
+            args: vec![
+                OsString::from("-nostdin"),
+                OsString::from("-hide_banner"),
+                OsString::from("-loglevel"),
+                OsString::from("error"),
+                OsString::from("-y"),
+                OsString::from("-i"),
+                input_arg.clone(),
+                OsString::from("-vn"),
+                OsString::from("-acodec"),
+                OsString::from("pcm_s16le"),
+                OsString::from("-ac"),
+                OsString::from("1"),
+                OsString::from("-ar"),
+                OsString::from("16000"),
+                audio_out.into_os_string(),
+            ],
+        },
+        frames: CommandPlan {
+            program: OsString::from("ffmpeg"),
+            args: vec![
+                OsString::from("-nostdin"),
+                OsString::from("-hide_banner"),
+                OsString::from("-loglevel"),
+                OsString::from("error"),
+                OsString::from("-y"),
+                OsString::from("-i"),
+                input_arg,
+                OsString::from("-vf"),
+                OsString::from("fps=1"),
+                frames_out.into_os_string(),
+            ],
+        },
+    }
+}
+
+fn command_path_arg(path: &Path) -> OsString {
+    if path.is_relative() && path_first_component_starts_with_dash(path) {
+        return PathBuf::from(".").join(path).into_os_string();
+    }
+    path.as_os_str().to_owned()
+}
+
+fn path_first_component_starts_with_dash(path: &Path) -> bool {
+    let Some(std::path::Component::Normal(first)) = path.components().next() else {
+        return false;
+    };
+    os_str_starts_with_dash(first)
+}
+
+#[cfg(unix)]
+fn os_str_starts_with_dash(value: &OsStr) -> bool {
+    value.as_bytes().first() == Some(&b'-')
+}
+
+#[cfg(not(unix))]
+fn os_str_starts_with_dash(value: &OsStr) -> bool {
+    value.to_string_lossy().starts_with('-')
+}
+
+fn parse_ffprobe_json(raw: &str) -> anyhow::Result<MediaProbe> {
+    let value: serde_json::Value = serde_json::from_str(raw).context("malformed ffprobe JSON")?;
+    let duration_raw = value
+        .pointer("/format/duration")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("ffprobe output missing format.duration"))?;
+    let duration_ms = parse_duration_ms(duration_raw)
+        .with_context(|| format!("invalid format.duration `{duration_raw}`"))?;
+    let size_raw = value
+        .pointer("/format/size")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("ffprobe output missing format.size"))?;
+    let file_size = size_raw
+        .parse::<u64>()
+        .with_context(|| format!("invalid format.size `{size_raw}`"))?;
+    let streams = value
+        .get("streams")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("ffprobe output missing streams"))?;
+    let has_audio = streams.iter().any(|stream| {
+        stream.get("codec_type").and_then(serde_json::Value::as_str) == Some("audio")
+    });
+    let has_video = streams.iter().any(|stream| {
+        stream.get("codec_type").and_then(serde_json::Value::as_str) == Some("video")
+    });
+
+    if !has_audio && !has_video {
+        anyhow::bail!("ffprobe output contains no audio or video streams");
+    }
+
+    Ok(MediaProbe {
+        duration_ms,
+        file_size,
+        has_audio,
+        has_video,
+    })
+}
+
+fn parse_duration_ms(raw: &str) -> anyhow::Result<u64> {
+    if raw.is_empty() || raw.starts_with('-') {
+        anyhow::bail!("duration must be a non-negative seconds string");
+    }
+
+    let (whole, fractional) = raw.split_once('.').unwrap_or((raw, ""));
+    if whole.is_empty()
+        || !whole.bytes().all(|b| b.is_ascii_digit())
+        || !fractional.bytes().all(|b| b.is_ascii_digit())
+    {
+        anyhow::bail!("duration must contain only decimal digits");
+    }
+
+    let whole_ms = whole
+        .parse::<u64>()?
+        .checked_mul(1000)
+        .ok_or_else(|| anyhow::anyhow!("duration milliseconds overflow"))?;
+    let mut fractional_ms = 0_u64;
+    let mut place = 100_u64;
+    for digit in fractional.bytes().take(3) {
+        fractional_ms += u64::from(digit - b'0') * place;
+        place /= 10;
+    }
+    if fractional
+        .as_bytes()
+        .get(3)
+        .is_some_and(|digit| *digit >= b'5')
+    {
+        fractional_ms += 1;
+    }
+
+    whole_ms
+        .checked_add(fractional_ms)
+        .ok_or_else(|| anyhow::anyhow!("duration milliseconds overflow"))
+}
+
+fn run_command_capture_stdout(plan: &CommandPlan) -> anyhow::Result<String> {
+    let output = std::process::Command::new(&plan.program)
+        .args(&plan.args)
+        .output()
+        .map_err(|e| anyhow::anyhow!("failed to run {}: {e}", command_program_display(plan)))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "{} failed with status {:?}: {}",
+            command_program_display(plan),
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    String::from_utf8(output.stdout).map_err(|e| {
+        anyhow::anyhow!(
+            "{} emitted non-UTF8 stdout: {e}",
+            command_program_display(plan)
+        )
+    })
+}
+
+fn run_command_no_stdout(plan: &CommandPlan) -> anyhow::Result<()> {
+    let output = std::process::Command::new(&plan.program)
+        .args(&plan.args)
+        .output()
+        .map_err(|e| anyhow::anyhow!("failed to run {}: {e}", command_program_display(plan)))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "{} failed with status {:?}: {}",
+            command_program_display(plan),
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
+}
+
+fn command_program_display(plan: &CommandPlan) -> String {
+    plan.program.to_string_lossy().into_owned()
+}
+
 fn parse_fixture_plan(raw: &str) -> anyhow::Result<RecordingPlan> {
     let fixture: FixturePlan = serde_json::from_str(raw)?;
     if !is_sha256_wire(&fixture.media_sha256) {
@@ -743,6 +963,12 @@ fn hex_prefix(bytes: &[u8], chars: usize) -> String {
 mod tests {
     use super::*;
     use cairn_core::domain::{CaptureMode, ChainRole, SourceId};
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStringExt as _;
+
+    fn os(value: &str) -> OsString {
+        OsString::from(value)
+    }
 
     const FIXTURE: &str = r#"{
       "media_path": "fixtures/v0/recordings/demo.mp4",
@@ -759,6 +985,300 @@ mod tests {
         {"timestamp_ms": 4200, "duration_ms": 1000, "confidence": 0.70, "text": "   "}
       ]
     }"#;
+
+    #[test]
+    fn ffmpeg_commands_are_constructed_without_shell_interpolation() {
+        let input = PathBuf::from("/tmp/demo file; $(touch nope).mp4");
+        let temp = PathBuf::from("/tmp/cairn-recording");
+        let commands = build_ffmpeg_plan(&input, &temp);
+
+        assert_eq!(commands.probe.program, os("ffprobe"));
+        assert_eq!(
+            commands.probe.args,
+            vec![
+                os("-nostdin"),
+                os("-v"),
+                os("error"),
+                os("-show_format"),
+                os("-show_streams"),
+                os("-of"),
+                os("json"),
+                input.as_os_str().to_owned(),
+            ],
+            "ffprobe should receive safe, distinct arguments"
+        );
+        assert_eq!(commands.audio.program, os("ffmpeg"));
+        assert!(
+            commands.audio.args.contains(&os("-nostdin")),
+            "ffmpeg audio command should not read stdin"
+        );
+        assert!(commands.audio.args.contains(&os("-i")));
+        assert!(
+            commands.audio.args.contains(&input.as_os_str().to_owned()),
+            "input path should be passed as its own argument"
+        );
+        assert!(
+            commands
+                .audio
+                .args
+                .contains(&temp.join("audio.wav").into_os_string()),
+            "audio extraction target should be under temp dir"
+        );
+        assert_eq!(commands.frames.program, os("ffmpeg"));
+        assert!(
+            commands.frames.args.contains(&os("-nostdin")),
+            "ffmpeg frame command should not read stdin"
+        );
+        assert!(
+            commands.frames.args.contains(&input.as_os_str().to_owned()),
+            "frame extraction input path should be passed as its own argument"
+        );
+        assert!(
+            commands.frames.args.iter().any(|arg| arg == &os("fps=1")),
+            "P0 frame sampling should default to fps=1"
+        );
+        assert!(
+            commands
+                .frames
+                .args
+                .contains(&temp.join("frame-%06d.png").into_os_string()),
+            "frame target pattern should be under temp dir"
+        );
+    }
+
+    #[test]
+    fn command_plan_prefixes_relative_dash_paths_before_media_tools() {
+        let input = PathBuf::from("-show_format.mp4");
+        let temp = PathBuf::from("tmp");
+        let commands = build_ffmpeg_plan(&input, &temp);
+        let safe_input = PathBuf::from(".").join(&input).into_os_string();
+
+        assert_eq!(
+            commands.probe.args.last().expect("probe input arg"),
+            &safe_input,
+            "ffprobe input should not be parsed as an option"
+        );
+        assert!(
+            commands.audio.args.iter().any(|arg| arg == &safe_input),
+            "ffmpeg audio input should use the protected path arg"
+        );
+        assert!(
+            commands.frames.args.iter().any(|arg| arg == &safe_input),
+            "ffmpeg frame input should use the protected path arg"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_plan_preserves_non_utf8_path_bytes() {
+        let input_os = std::ffi::OsString::from_vec(b"/tmp/demo-\xFF.mp4".to_vec());
+        let input = PathBuf::from(&input_os);
+        let temp = PathBuf::from("/tmp/cairn-recording");
+        let commands = build_ffmpeg_plan(&input, &temp);
+
+        assert!(
+            commands
+                .probe
+                .args
+                .iter()
+                .any(|arg| arg.as_os_str().as_bytes() == input_os.as_bytes()),
+            "probe argv should preserve non-UTF8 input bytes"
+        );
+        assert!(
+            commands
+                .audio
+                .args
+                .iter()
+                .any(|arg| arg.as_os_str().as_bytes() == input_os.as_bytes()),
+            "audio argv should preserve non-UTF8 input bytes"
+        );
+        assert!(
+            commands
+                .frames
+                .args
+                .iter()
+                .any(|arg| arg.as_os_str().as_bytes() == input_os.as_bytes()),
+            "frame argv should preserve non-UTF8 input bytes"
+        );
+    }
+
+    #[test]
+    fn ffprobe_json_extracts_duration_size_and_stream_presence() {
+        let raw = r#"{
+          "format": {"duration": "5.200000", "size": "1234"},
+          "streams": [
+            {"codec_type": "audio"},
+            {"codec_type": "video"}
+          ]
+        }"#;
+        let meta = parse_ffprobe_json(raw).expect("metadata parses");
+
+        assert_eq!(meta.duration_ms, 5200);
+        assert_eq!(meta.file_size, 1234);
+        assert!(meta.has_audio);
+        assert!(meta.has_video);
+    }
+
+    #[test]
+    fn ffprobe_duration_rounds_to_nearest_millisecond() {
+        for (duration, expected_ms) in [
+            ("1.9994", 1999),
+            ("1.9995", 2000),
+            ("0.0004", 0),
+            ("0.0005", 1),
+            ("5.200000", 5200),
+        ] {
+            let raw = format!(
+                r#"{{
+                  "format": {{"duration": "{duration}", "size": "1234"}},
+                  "streams": [{{"codec_type": "audio"}}]
+                }}"#
+            );
+            let meta = parse_ffprobe_json(&raw).expect("metadata parses");
+
+            assert_eq!(
+                meta.duration_ms, expected_ms,
+                "unexpected duration_ms for {duration}"
+            );
+        }
+    }
+
+    #[test]
+    fn ffprobe_duration_overflow_is_rejected() {
+        let raw = format!(
+            r#"{{
+              "format": {{"duration": "{}.9995", "size": "1234"}},
+              "streams": [{{"codec_type": "audio"}}]
+            }}"#,
+            u64::MAX / 1000
+        );
+        let err = parse_ffprobe_json(&raw).expect_err("duration should overflow u64 millis");
+        let message = format!("{err:#}");
+
+        assert!(
+            message.contains("duration milliseconds overflow"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn command_helper_reports_missing_command() {
+        let plan = CommandPlan {
+            program: os("cairn-definitely-missing-command-task-9"),
+            args: Vec::new(),
+        };
+        let err = run_command_capture_stdout(&plan).expect_err("missing command should fail");
+        let message = format!("{err:#}");
+
+        assert!(
+            message.contains("failed to run cairn-definitely-missing-command-task-9"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_helper_captures_utf8_stdout() {
+        let plan = CommandPlan {
+            program: os("/bin/sh"),
+            args: vec![os("-c"), os("printf 'recording ok'")],
+        };
+
+        let stdout = run_command_capture_stdout(&plan).expect("stdout captures");
+
+        assert_eq!(stdout, "recording ok");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_helper_reports_nonzero_status_with_stderr() {
+        let plan = CommandPlan {
+            program: os("/bin/sh"),
+            args: vec![os("-c"), os("printf 'planned failure' >&2; exit 7")],
+        };
+        let err = run_command_no_stdout(&plan).expect_err("nonzero exit should fail");
+        let message = format!("{err:#}");
+
+        assert!(
+            message.contains("/bin/sh failed with status Some(7): planned failure"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_helper_reports_non_utf8_stdout() {
+        let plan = CommandPlan {
+            program: os("/bin/sh"),
+            args: vec![os("-c"), os("printf '\\377'")],
+        };
+        let err = run_command_capture_stdout(&plan).expect_err("non-UTF8 stdout should fail");
+        let message = format!("{err:#}");
+
+        assert!(
+            message.contains("/bin/sh emitted non-UTF8 stdout"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn ffprobe_json_reports_single_track_media() {
+        let audio_only = parse_ffprobe_json(
+            r#"{
+              "format": {"duration": "1.999", "size": "42"},
+              "streams": [{"codec_type": "audio"}]
+            }"#,
+        )
+        .expect("audio-only metadata parses");
+        assert_eq!(audio_only.duration_ms, 1999);
+        assert!(audio_only.has_audio);
+        assert!(!audio_only.has_video);
+
+        let video_only = parse_ffprobe_json(
+            r#"{
+              "format": {"duration": "2.001", "size": "84"},
+              "streams": [{"codec_type": "video"}]
+            }"#,
+        )
+        .expect("video-only metadata parses");
+        assert_eq!(video_only.duration_ms, 2001);
+        assert!(!video_only.has_audio);
+        assert!(video_only.has_video);
+    }
+
+    #[test]
+    fn ffprobe_json_rejects_malformed_or_unusable_metadata() {
+        for (raw, expected) in [
+            ("not-json", "malformed ffprobe JSON"),
+            (
+                r#"{"format": {"size": "1234"}, "streams": [{"codec_type": "audio"}]}"#,
+                "missing format.duration",
+            ),
+            (
+                r#"{"format": {"duration": "abc", "size": "1234"}, "streams": [{"codec_type": "audio"}]}"#,
+                "invalid format.duration",
+            ),
+            (
+                r#"{"format": {"duration": "1.0"}, "streams": [{"codec_type": "audio"}]}"#,
+                "missing format.size",
+            ),
+            (
+                r#"{"format": {"duration": "1.0", "size": "large"}, "streams": [{"codec_type": "audio"}]}"#,
+                "invalid format.size",
+            ),
+            (
+                r#"{"format": {"duration": "1.0", "size": "10"}, "streams": []}"#,
+                "contains no audio or video streams",
+            ),
+        ] {
+            let err = parse_ffprobe_json(raw).expect_err("metadata should be rejected");
+            let message = format!("{err:#}");
+            assert!(
+                message.contains(expected),
+                "expected `{expected}` in error, got: {message}"
+            );
+        }
+    }
 
     #[test]
     fn fixture_parser_orders_audio_and_deduped_ocr_segments() {
