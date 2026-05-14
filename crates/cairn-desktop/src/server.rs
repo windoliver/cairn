@@ -1,6 +1,6 @@
 //! Local HTTP server for the desktop GUI alpha.
 
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
 
 use axum::{
     Json, Router,
@@ -16,6 +16,12 @@ use crate::{
     model::{DesktopReconcileApplyRequest, DesktopReconcilePreviewRequest},
     repository::DesktopRepository,
 };
+
+/// Default localhost address used by the desktop renderer and preload bridge.
+#[must_use]
+pub fn default_desktop_server_addr() -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 1], 4000))
+}
 
 /// Shared server state.
 #[derive(Debug, Clone)]

@@ -1,8 +1,10 @@
 //! Development server for the Cairn desktop GUI alpha.
 
-use std::net::SocketAddr;
-
-use cairn_desktop::{fixture::DesktopFixture, repository::DesktopRepository, server::router};
+use cairn_desktop::{
+    fixture::DesktopFixture,
+    repository::DesktopRepository,
+    server::{default_desktop_server_addr, router},
+};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
@@ -12,7 +14,7 @@ async fn main() -> anyhow::Result<()> {
 
     let fixture = DesktopFixture::load_default()?;
     let app = router(DesktopRepository::from_fixture(fixture));
-    let addr = SocketAddr::from(([127, 0, 0, 1], 0));
+    let addr = default_desktop_server_addr();
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let actual = listener.local_addr()?;
     println!("cairn-desktop listening on http://{actual}");

@@ -4,9 +4,22 @@ use axum::{
     body::{Body, to_bytes},
     http::{Method, Request, StatusCode},
 };
-use cairn_desktop::{fixture::DesktopFixture, repository::DesktopRepository, server::router};
+use cairn_desktop::{
+    fixture::DesktopFixture,
+    repository::DesktopRepository,
+    server::{default_desktop_server_addr, router},
+};
 use serde_json::{Value, json};
+use std::net::SocketAddr;
 use tower::ServiceExt;
+
+#[test]
+fn desktop_server_default_addr_matches_renderer_default() {
+    assert_eq!(
+        default_desktop_server_addr(),
+        SocketAddr::from(([127, 0, 0, 1], 4000))
+    );
+}
 
 #[tokio::test]
 async fn health_and_records_endpoints_return_fixture_data() {
