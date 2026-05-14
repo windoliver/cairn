@@ -53,9 +53,34 @@ impl DesktopFixture {
         let body = fs::read_to_string(path).map_err(|source| DesktopError::Fixture {
             message: format!("failed to read {}: {source}", path.display()),
         })?;
-        serde_json::from_str(&body).map_err(|source| DesktopError::Fixture {
-            message: format!("failed to parse {}: {source}", path.display()),
-        })
+        let fixture: Self =
+            serde_json::from_str(&body).map_err(|source| DesktopError::Fixture {
+                message: format!("failed to parse {}: {source}", path.display()),
+            })?;
+        fixture.validate()?;
+        Ok(fixture)
+    }
+
+    fn validate(&self) -> DesktopResult<()> {
+        if self.vault.record_count != self.records.len() {
+            return Err(DesktopError::Fixture {
+                message: format!(
+                    "vault recordCount {} does not match {} loaded records",
+                    self.vault.record_count,
+                    self.records.len()
+                ),
+            });
+        }
+        if self.vault.folder_count != self.folders.len() {
+            return Err(DesktopError::Fixture {
+                message: format!(
+                    "vault folderCount {} does not match {} loaded folders",
+                    self.vault.folder_count,
+                    self.folders.len()
+                ),
+            });
+        }
+        Ok(())
     }
 }
 

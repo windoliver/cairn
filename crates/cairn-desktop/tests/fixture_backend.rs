@@ -6,7 +6,8 @@ use cairn_desktop::{
     repository::DesktopRepository,
 };
 use serde_json::json;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fs};
+use tempfile::tempdir;
 
 #[test]
 fn fixture_loads_alpha_vault_records_and_folders() {
@@ -33,6 +34,19 @@ fn fixture_contains_lint_and_reconcile_examples() {
         "rec-alpha-001"
     );
     assert_eq!(fixture.reconcile_examples.immutable_field, "confidence");
+}
+
+#[test]
+fn fixture_rejects_record_count_mismatch() {
+    let mut fixture = DesktopFixture::load_default().expect("fixture loads");
+    fixture.vault.record_count += 1;
+    let dir = tempdir().expect("temp dir");
+    let path = dir.path().join("vault.json");
+    fs::write(&path, serde_json::to_vec(&fixture).expect("fixture json")).expect("write fixture");
+
+    let err = DesktopFixture::load_from_path(&path).expect_err("mismatched count rejected");
+
+    assert!(err.to_string().contains("recordCount"));
 }
 
 #[test]
