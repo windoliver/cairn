@@ -1,0 +1,8 @@
+{
+  "args": {
+    "mode": "session",
+    "session_id": "01HQZX9F5N0000000000000000"
+  },
+  "contract": "cairn.mcp.v1",
+  "verb": "forget"
+}

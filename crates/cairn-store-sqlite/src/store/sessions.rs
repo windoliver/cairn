@@ -954,7 +954,7 @@ fn resolve_explicit_in_tx(
 
 /// Decode a `SessionRow` tuple to the typed [`Session`] domain struct,
 /// surfacing structural failures as [`InTxError::Invariant`].
-fn session_from_row(row: SessionRow) -> Result<Session, InTxError> {
+pub(crate) fn session_from_row(row: SessionRow) -> Result<Session, InTxError> {
     let (
         sid,
         user,
@@ -999,7 +999,7 @@ fn session_from_row(row: SessionRow) -> Result<Session, InTxError> {
 /// retryable conflicts from terminal failures so the outer loop can choose
 /// to spin or surface the error.
 #[derive(Debug)]
-enum InTxError {
+pub(crate) enum InTxError {
     /// Partial unique index `sessions_one_active_per_identity_idx` rejected
     /// the INSERT — a concurrent caller won the race. Caller should
     /// rollback and retry.
@@ -1173,7 +1173,7 @@ fn resolve_or_create_in_tx(
 
 /// Row shape for `SELECT * FROM sessions WHERE session_id = ?` — broken
 /// out so [`read_session_by_id`] doesn't trip clippy's `type_complexity`.
-type SessionRow = (
+pub(crate) type SessionRow = (
     String,         // session_id
     String,         // user_id
     String,         // agent_id
@@ -1187,7 +1187,7 @@ type SessionRow = (
     Option<i64>,    // ended_at
 );
 
-fn read_session_by_id(
+pub(crate) fn read_session_by_id(
     tx: &rusqlite::Transaction<'_>,
     id_str: &str,
 ) -> Result<Option<Session>, InTxError> {

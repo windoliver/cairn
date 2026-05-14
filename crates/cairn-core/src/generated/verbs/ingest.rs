@@ -5,13 +5,28 @@
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum IngestMode {
+    Keyword,
+    Semantic,
+    Full,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct IngestArgs {
+    /// Maximum cache-miss files per FlushPlan batch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_size: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
     /// If true, produce a FlushPlan and emit it without writing to MemoryStore (brief §5.5). Mutually exclusive with human_review.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dry_run: Option<bool>,
+    /// Exclude glob patterns for folder ingest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclude: Option<Vec<String>>,
     /// Path on the local filesystem.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
@@ -21,19 +36,40 @@ pub struct IngestArgs {
     /// Extra YAML frontmatter fields to store alongside the body.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frontmatter: Option<serde_json::Value>,
+    /// Optional harness parser name. Auto-detected from the first non-empty line when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
     /// If true, persist a FlushPlan under .cairn/flush/pending/ for explicit `cairn flush apply` (brief §5.5). Mutually exclusive with dry_run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub human_review: Option<bool>,
+    /// Include glob patterns for folder ingest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include: Option<Vec<String>>,
+    /// Path to a harness transcript JSONL file (or directory with --recursive) for backfill import.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jsonl: Option<String>,
     /// Memory taxonomy kind (19 possible values — see §3 taxonomy). Validated beyond JSON Schema by the classifier.
     pub kind: String,
+    /// Maximum number of transcript rows to import (jsonl backfill).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+    /// Folder ingest extraction mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<IngestMode>,
     /// Bypass extraction cache lookup for folder ingest, but still write refreshed cache entries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_cache: Option<bool>,
     /// When human_review=true, skip emitting the markdown diff sidecar.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_diff: Option<bool>,
+    /// Folder/jsonl ingest: recurse into child directories. CLI default: true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recursive: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// Optional top-level JSON key whose string value overrides the generic parser's synthetic session id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id_from: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -43,7 +79,7 @@ pub struct IngestArgs {
 impl IngestArgs {
     /// Enforce exactly-one-of presence across each XOR group declared in the IDL `oneOf`.
     pub fn validate(&self) -> Result<(), &'static str> {
-        if (self.body.is_some() as u8 + self.file.is_some() as u8 + self.folder.is_some() as u8 + self.url.is_some() as u8) != 1 { return Err("exactly one of [body, file, folder, url] is required"); }
+        if (self.body.is_some() as u8 + self.file.is_some() as u8 + self.folder.is_some() as u8 + self.jsonl.is_some() as u8 + self.url.is_some() as u8) != 1 { return Err("exactly one of [body, file, folder, jsonl, url] is required"); }
         Ok(())
     }
 }
@@ -51,11 +87,17 @@ impl IngestArgs {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawIngestArgs {
+    /// Maximum cache-miss files per FlushPlan batch.
+    #[serde(default)]
+    batch_size: Option<i64>,
     #[serde(default)]
     body: Option<String>,
     /// If true, produce a FlushPlan and emit it without writing to MemoryStore (brief §5.5). Mutually exclusive with human_review.
     #[serde(default)]
     dry_run: Option<bool>,
+    /// Exclude glob patterns for folder ingest.
+    #[serde(default)]
+    exclude: Option<Vec<String>>,
     /// Path on the local filesystem.
     #[serde(default)]
     file: Option<String>,
@@ -65,19 +107,40 @@ struct RawIngestArgs {
     /// Extra YAML frontmatter fields to store alongside the body.
     #[serde(default)]
     frontmatter: Option<serde_json::Value>,
+    /// Optional harness parser name. Auto-detected from the first non-empty line when omitted.
+    #[serde(default)]
+    harness: Option<String>,
     /// If true, persist a FlushPlan under .cairn/flush/pending/ for explicit `cairn flush apply` (brief §5.5). Mutually exclusive with dry_run.
     #[serde(default)]
     human_review: Option<bool>,
+    /// Include glob patterns for folder ingest.
+    #[serde(default)]
+    include: Option<Vec<String>>,
+    /// Path to a harness transcript JSONL file (or directory with --recursive) for backfill import.
+    #[serde(default)]
+    jsonl: Option<String>,
     /// Memory taxonomy kind (19 possible values — see §3 taxonomy). Validated beyond JSON Schema by the classifier.
     kind: String,
+    /// Maximum number of transcript rows to import (jsonl backfill).
+    #[serde(default)]
+    limit: Option<i64>,
+    /// Folder ingest extraction mode.
+    #[serde(default)]
+    mode: Option<IngestMode>,
     /// Bypass extraction cache lookup for folder ingest, but still write refreshed cache entries.
     #[serde(default)]
     no_cache: Option<bool>,
     /// When human_review=true, skip emitting the markdown diff sidecar.
     #[serde(default)]
     no_diff: Option<bool>,
+    /// Folder/jsonl ingest: recurse into child directories. CLI default: true.
+    #[serde(default)]
+    recursive: Option<bool>,
     #[serde(default)]
     session_id: Option<String>,
+    /// Optional top-level JSON key whose string value overrides the generic parser's synthetic session id.
+    #[serde(default)]
+    session_id_from: Option<String>,
     #[serde(default)]
     tags: Option<Vec<String>>,
     #[serde(default)]
@@ -87,18 +150,60 @@ struct RawIngestArgs {
 impl ::core::convert::TryFrom<RawIngestArgs> for IngestArgs {
     type Error = &'static str;
     fn try_from(raw: RawIngestArgs) -> Result<Self, Self::Error> {
-        if (raw.body.is_some() as u8 + raw.file.is_some() as u8 + raw.folder.is_some() as u8 + raw.url.is_some() as u8) != 1 { return Err("exactly one of [body, file, folder, url] is required"); }
+        if (raw.body.is_some() as u8 + raw.file.is_some() as u8 + raw.folder.is_some() as u8 + raw.jsonl.is_some() as u8 + raw.url.is_some() as u8) != 1 { return Err("exactly one of [body, file, folder, jsonl, url] is required"); }
+        if raw.kind.is_empty() { return Err("kind: must not be empty"); }
+        if let Some(v) = &raw.body {
+            if v.is_empty() { return Err("body: must not be empty"); }
+        }
+        if let Some(v) = &raw.file {
+            if v.is_empty() { return Err("file: must not be empty"); }
+        }
+        if let Some(v) = &raw.folder {
+            if v.is_empty() { return Err("folder: must not be empty"); }
+        }
+        if let Some(v) = &raw.url {
+            if v.is_empty() { return Err("url: must not be empty"); }
+        }
+        if let Some(v) = &raw.jsonl {
+            if v.is_empty() { return Err("jsonl: must not be empty"); }
+        }
+        if let Some(v) = &raw.harness {
+            if v.is_empty() { return Err("harness: must not be empty"); }
+        }
+        if let Some(v) = &raw.session_id {
+            if v.is_empty() { return Err("session_id: must not be empty"); }
+        }
+        if let Some(v) = &raw.session_id_from {
+            if v.is_empty() { return Err("session_id_from: must not be empty"); }
+        }
+        if let Some(v) = &raw.tags {
+            for item in v {
+                if item.is_empty() { return Err("tags: items must not be empty"); }
+            }
+        }
+        if let Some(lim) = raw.limit {
+            if !(1..=4_294_967_295_i64).contains(&lim) { return Err("limit: must be in [1, 4294967295]"); }
+        }
         Ok(Self {
+            batch_size: raw.batch_size,
             body: raw.body,
             dry_run: raw.dry_run,
+            exclude: raw.exclude,
             file: raw.file,
             folder: raw.folder,
             frontmatter: raw.frontmatter,
+            harness: raw.harness,
             human_review: raw.human_review,
+            include: raw.include,
+            jsonl: raw.jsonl,
             kind: raw.kind,
+            limit: raw.limit,
+            mode: raw.mode,
             no_cache: raw.no_cache,
             no_diff: raw.no_diff,
+            recursive: raw.recursive,
             session_id: raw.session_id,
+            session_id_from: raw.session_id_from,
             tags: raw.tags,
             url: raw.url,
         })
@@ -111,6 +216,24 @@ impl<'de> ::serde::Deserialize<'de> for IngestArgs {
         let raw = RawIngestArgs::deserialize(deserializer)?;
         Self::try_from(raw).map_err(::serde::de::Error::custom)
     }
+}
+
+/// JSONL transcript backfill counts. Present only when source is --jsonl.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IngestDataJsonlSummary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files_scanned: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub records_written: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sessions_parsed: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sessions_skipped: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turns_parsed: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -128,6 +251,9 @@ pub struct IngestData {
     /// Folder ingest file count when source is --folder.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub files_processed: Option<u64>,
+    /// JSONL transcript backfill counts. Present only when source is --jsonl.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jsonl_summary: Option<IngestDataJsonlSummary>,
     /// Path under .cairn/flush/pending/ when human_review=true; absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_ref: Option<String>,

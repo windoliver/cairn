@@ -625,6 +625,21 @@ fn every_typed_field_asserts_bounds_or_is_allowlisted() {
         // (PolicyDetail::None) is intentional and meaningful, so a
         // minLength assertion would be wrong here.
         ("common/record_exclusion.json", "/properties/detail"),
+        // ProfileHalf.summary / .historical_summary are the rolling
+        // DreamWorkflow narratives (brief §7.1). At P0 they are
+        // intentionally emitted as empty strings — populating them is
+        // P1 work owned by ConsolidationWorkflow. A minLength: 1 here
+        // would force callers to invent placeholder text every time
+        // the narratives haven't been generated yet, defeating the
+        // P0/P1 split.
+        (
+            "verbs/retrieve.json",
+            "/$defs/ProfileHalf/properties/summary",
+        ),
+        (
+            "verbs/retrieve.json",
+            "/$defs/ProfileHalf/properties/historical_summary",
+        ),
     ]
     .iter()
     .map(|(f, p)| (f.to_string(), p.to_string()))

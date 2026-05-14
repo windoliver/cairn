@@ -26,6 +26,7 @@ pub struct Finding {
 #[non_exhaustive]
 pub enum Kind {
     BrokenActorChain,
+    BrokenSourceLink,
     ContradictoryEdge,
     Contradiction,
     DataGap,
@@ -36,10 +37,19 @@ pub enum Kind {
     MalformedRecord,
     MissingConcept,
     MissingProvenance,
+    MissingSummary,
     Orphan,
     ProjectionDrift,
     ProjectionMissing,
+    SourceAfterForget,
+    SourceAfterForgetUnknownVersion,
+    SourceHashMismatch,
+    SourceLinkDangling,
+    SourceLinkLegacyDuplicate,
+    SourceLinkMissing,
+    SourceRedactSkipped,
     Stale,
+    StaleProfileLine,
     StaleSchema,
 }
 

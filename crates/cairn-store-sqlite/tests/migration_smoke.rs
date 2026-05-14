@@ -8,6 +8,59 @@ fn migration_0002_applies_cleanly() {
     assert!(r.is_ok(), "{:?}", r.err());
 }
 
+/// Identity shares the store DB, so its migration guard must validate the
+/// identity-owned objects directly instead of trusting `SQLite` `user_version`.
+#[test]
+fn migration_0002_rejects_identity_schema_drift() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db = tmp.path().join("cairn.db");
+    let registry = cairn_store_sqlite::SqliteIdentityRegistry::open(&db).expect("open registry");
+    drop(registry);
+
+    let conn = rusqlite::Connection::open(&db).expect("open db");
+    conn.execute_batch("DROP TRIGGER vault_meta_no_update")
+        .expect("drop trigger");
+    drop(conn);
+
+    let Err(err) = cairn_store_sqlite::SqliteIdentityRegistry::open(&db) else {
+        panic!("schema drift must reject");
+    };
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("identity schema mismatch"),
+        "unexpected error: {msg}"
+    );
+}
+
+/// Unexpected identity-owned objects are drift too, not harmless sidecars.
+#[test]
+fn migration_0002_rejects_extra_identity_schema_object() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db = tmp.path().join("cairn.db");
+    let registry = cairn_store_sqlite::SqliteIdentityRegistry::open(&db).expect("open registry");
+    drop(registry);
+
+    let conn = rusqlite::Connection::open(&db).expect("open db");
+    conn.execute_batch(
+        "CREATE TRIGGER identities_extra_guard \
+           BEFORE INSERT ON identities \
+         BEGIN \
+           SELECT 1; \
+         END;",
+    )
+    .expect("create extra trigger");
+    drop(conn);
+
+    let Err(err) = cairn_store_sqlite::SqliteIdentityRegistry::open(&db) else {
+        panic!("extra schema object must reject");
+    };
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("identity schema mismatch"),
+        "unexpected error: {msg}"
+    );
+}
+
 /// Verify that migration 0022 adds the expected generated columns and indices
 /// for trace records (issue #77, spec §6.1).
 #[test]

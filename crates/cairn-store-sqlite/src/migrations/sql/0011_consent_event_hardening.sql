@@ -63,6 +63,7 @@ CREATE TRIGGER consent_journal_payload_shape_matches_kind
         'policy_change',
         'remember_intent',
         'forget_intent',
+        'source_forget',
         'grant',
         'revoke',
         'promote_receipt'
@@ -76,7 +77,7 @@ CREATE TRIGGER consent_journal_payload_shape_matches_kind
            AND json_extract(NEW.payload_json, '$.shape') = 'sensor_toggle')
      OR (NEW.kind = 'policy_change'
            AND json_extract(NEW.payload_json, '$.shape') = 'policy_delta')
-     OR (NEW.kind IN ('remember_intent', 'forget_intent')
+     OR (NEW.kind IN ('remember_intent', 'forget_intent', 'source_forget')
            AND json_extract(NEW.payload_json, '$.shape') = 'intent_receipt')
      OR (NEW.kind IN ('grant', 'revoke')
            AND json_extract(NEW.payload_json, '$.shape') = 'decision')
@@ -181,7 +182,7 @@ DROP TRIGGER IF EXISTS consent_journal_hash_kind_subject_shape;
 CREATE TRIGGER consent_journal_hash_kind_subject_shape
   BEFORE INSERT ON consent_journal
   FOR EACH ROW
-  WHEN NEW.kind IN ('forget_intent', 'remember_intent', 'promote_receipt')
+  WHEN NEW.kind IN ('forget_intent', 'remember_intent', 'source_forget', 'promote_receipt')
    AND NEW.subject IS NOT NULL
    AND NOT (
         (substr(NEW.subject, 1, 7) = 'sha256:'
@@ -201,7 +202,7 @@ DROP TRIGGER IF EXISTS consent_journal_hash_kind_target_id_hash_shape;
 CREATE TRIGGER consent_journal_hash_kind_target_id_hash_shape
   BEFORE INSERT ON consent_journal
   FOR EACH ROW
-  WHEN NEW.kind IN ('forget_intent', 'remember_intent', 'promote_receipt')
+  WHEN NEW.kind IN ('forget_intent', 'remember_intent', 'source_forget', 'promote_receipt')
    AND NEW.payload_json IS NOT NULL
    AND json_valid(NEW.payload_json) = 1
    AND (
@@ -258,7 +259,7 @@ CREATE TRIGGER consent_journal_payload_required_fields
              OR json_type(NEW.payload_json, '$.from_code') IS NOT 'text'
              OR json_type(NEW.payload_json, '$.to_code') IS NOT 'text'
            ))
-     OR (NEW.kind IN ('remember_intent', 'forget_intent')
+     OR (NEW.kind IN ('remember_intent', 'forget_intent', 'source_forget')
            AND (
                 json_type(NEW.payload_json, '$.scope_tier') IS NOT 'text'
              OR json_extract(NEW.payload_json, '$.scope_tier') NOT IN
@@ -462,7 +463,7 @@ CREATE TRIGGER consent_journal_payload_scalar_domains
    AND (
         -- reason_code (sensor + intent kinds): closed lower-snake class.
         (NEW.kind IN ('sensor_enable', 'sensor_disable',
-                      'remember_intent', 'forget_intent')
+                      'remember_intent', 'forget_intent', 'source_forget')
            AND json_type(NEW.payload_json, '$.reason_code') = 'text'
            AND (
                 length(json_extract(NEW.payload_json, '$.reason_code')) > 64

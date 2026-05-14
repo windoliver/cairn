@@ -35,12 +35,12 @@ use crate::domain::{DomainError, MemoryRecord};
 pub struct CanonicalRecordHash(String);
 
 impl CanonicalRecordHash {
-    /// Hash the canonical signed-payload form of `record`. The encoding
-    /// sorts every object's keys lexicographically, emits no whitespace,
-    /// and **excludes** the top-level `signature` field — see module
-    /// docs for the rationale. The result depends only on the record's
-    /// signed content, not on the serializer's struct-field order or
-    /// hash-map iteration order.
+    /// Hash the RFC 8785 JSON Canonicalization Scheme signed-payload form of
+    /// `record`. The encoding sorts every object's keys lexicographically,
+    /// emits no whitespace, uses ECMAScript-compatible primitive formatting,
+    /// and **excludes** the top-level `signature` field — see module docs for
+    /// the rationale. The result depends only on the record's signed content,
+    /// not on the serializer's struct-field order or hash-map iteration order.
     pub fn compute(record: &MemoryRecord) -> Result<Self, DomainError> {
         let mut value = serde_json::to_value(record).map_err(|e| DomainError::InvalidIdentity {
             message: format!("canonical serialize failed: {e}"),
@@ -48,9 +48,11 @@ impl CanonicalRecordHash {
         if let Some(obj) = value.as_object_mut() {
             obj.remove("signature");
         }
-        let mut buf = String::new();
-        write_canonical(&value, &mut buf);
-        let digest = Sha256::digest(buf.as_bytes());
+        let bytes =
+            serde_json_canonicalizer::to_vec(&value).map_err(|e| DomainError::InvalidIdentity {
+                message: format!("canonical serialize failed: {e}"),
+            })?;
+        let digest = Sha256::digest(&bytes);
         let mut hex = String::with_capacity(64);
         for byte in digest {
             use std::fmt::Write;
@@ -76,67 +78,15 @@ impl std::fmt::Display for CanonicalRecordHash {
     }
 }
 
-/// Append the canonical JSON encoding of `value` to `out`. Object keys
-/// are sorted lexicographically; arrays preserve order; strings reuse
-/// `serde_json`'s escape rules so the output round-trips through any
-/// JSON parser.
-fn write_canonical(value: &serde_json::Value, out: &mut String) {
-    use serde_json::Value;
-    match value {
-        Value::Null => out.push_str("null"),
-        Value::Bool(true) => out.push_str("true"),
-        Value::Bool(false) => out.push_str("false"),
-        Value::Number(n) => out.push_str(&n.to_string()),
-        Value::String(s) => append_json_string(s, out),
-        Value::Array(items) => {
-            out.push('[');
-            for (i, item) in items.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                write_canonical(item, out);
-            }
-            out.push(']');
-        }
-        Value::Object(map) => {
-            let mut keys: Vec<&String> = map.keys().collect();
-            keys.sort();
-            out.push('{');
-            for (i, k) in keys.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                append_json_string(k, out);
-                out.push(':');
-                if let Some(v) = map.get(*k) {
-                    write_canonical(v, out);
-                }
-            }
-            out.push('}');
-        }
-    }
-}
-
-fn append_json_string(s: &str, out: &mut String) {
-    // serde_json's `to_string` on a String produces a JSON-encoded
-    // quoted string; reuse it so escape semantics match what every
-    // other JSON consumer reads.
-    let encoded = serde_json::to_string(&s.to_owned()).unwrap_or_else(|_| String::from("\"\""));
-    out.push_str(&encoded);
-}
-
 /// Serialize a value to canonical bytes for inspection in tests or
 /// storage adapters. Adapters should compute the hash via
 /// [`CanonicalRecordHash::compute`] rather than re-implement the
 /// canonicalizer. Returns an error when the value isn't serializable to
 /// JSON (e.g., a non-string-keyed map).
 pub fn canonical_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, DomainError> {
-    let json = serde_json::to_value(value).map_err(|e| DomainError::InvalidIdentity {
+    serde_json_canonicalizer::to_vec(value).map_err(|e| DomainError::InvalidIdentity {
         message: format!("canonical serialize failed: {e}"),
-    })?;
-    let mut buf = String::new();
-    write_canonical(&json, &mut buf);
-    Ok(buf.into_bytes())
+    })
 }
 
 /// Canonical signed-payload bytes for a record. Excludes the
@@ -150,9 +100,9 @@ pub fn canonical_bytes_signed_payload(record: &MemoryRecord) -> Result<Vec<u8>, 
     if let Some(obj) = value.as_object_mut() {
         obj.remove("signature");
     }
-    let mut buf = String::new();
-    write_canonical(&value, &mut buf);
-    Ok(buf.into_bytes())
+    serde_json_canonicalizer::to_vec(&value).map_err(|e| DomainError::InvalidIdentity {
+        message: format!("canonical serialize failed: {e}"),
+    })
 }
 
 /// Encode `intent` to canonical-JSON bytes with the `signature` field
@@ -177,9 +127,11 @@ pub fn canonical_bytes_signed_intent(
             message: "SignedIntent did not serialize to a JSON object".into(),
         })?;
     map.remove("signature");
-    let mut buf = String::new();
-    write_canonical(&value, &mut buf);
-    Ok(buf.into_bytes())
+    serde_json_canonicalizer::to_vec(&value).map_err(|e| {
+        crate::domain::DomainError::InvalidIdentity {
+            message: format!("canonical serialize failed: {e}"),
+        }
+    })
 }
 
 #[cfg(test)]
@@ -189,7 +141,7 @@ mod tests {
     fn sample() -> MemoryRecord {
         use crate::domain::{
             ActorChainEntry, ChainRole, EvidenceVector, Identity, MemoryClass, MemoryKind,
-            MemoryVisibility, Provenance, Rfc3339Timestamp, ScopeTuple, TargetId,
+            MemoryVisibility, Provenance, Rfc3339Timestamp, ScopeTuple, SourceId, TargetId,
             record::{Ed25519Signature, RecordId},
         };
         use std::collections::BTreeMap;
@@ -205,13 +157,16 @@ mod tests {
                 ..ScopeTuple::default()
             },
             body: "user prefers dark mode".to_owned(),
+            source_ids: vec![SourceId::parse("01HQZX9F5N0000000000000001").expect("valid")],
             provenance: Provenance {
                 source_sensor: Identity::parse("snr:local:hook:cc-session:v1").expect("valid"),
                 created_at: Rfc3339Timestamp::parse("2026-04-22T14:02:11Z").expect("valid"),
                 originating_agent_id: user.clone(),
+                source_ids: vec![SourceId::parse("01HQZX9F5N0000000000000000").expect("valid")],
                 source_hash: format!("sha256:{}", "a".repeat(64)),
                 consent_ref: "consent:01HQZ".to_owned(),
                 llm_id_if_any: None,
+                source_refs: Vec::new(),
             },
             updated_at: Rfc3339Timestamp::parse("2026-04-22T14:05:11Z").expect("valid"),
             evidence: EvidenceVector {
@@ -319,6 +274,20 @@ mod tests {
         let class_pos = s.find("\"class\"").expect("class present");
         assert!(actor_pos < body_pos);
         assert!(body_pos < class_pos);
+    }
+
+    #[test]
+    fn canonical_bytes_match_jcs_basic_shape() {
+        let value = serde_json::json!({
+            "c": 120,
+            "b": false,
+            "a": "Hello!"
+        });
+
+        assert_eq!(
+            canonical_bytes(&value).expect("canonical"),
+            br#"{"a":"Hello!","b":false,"c":120}"#
+        );
     }
 
     #[test]

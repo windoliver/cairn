@@ -1211,7 +1211,7 @@ fn build_verb(file: &RawFile) -> Result<VerbDef, CodegenError> {
     // Retrieve's `Data` is a oneOf without a discriminator (the dispatch lives
     // on the response envelope's `target` field), so the generic walker above
     // falls through to `RustType::Json` and harvests no refs. Force-include the
-    // six per-target Data sub-types so the response envelope can dispatch
+    // per-target Data sub-types so the response envelope can dispatch
     // typed payloads against them. See response.json's per-target if/then arms.
     if id == "retrieve" {
         for sub in [
@@ -1219,8 +1219,10 @@ fn build_verb(file: &RawFile) -> Result<VerbDef, CodegenError> {
             "DataProfile",
             "DataSession",
             "DataTurn",
+            "DataToolCall",
             "DataFolder",
             "DataScope",
+            "TraceLinkage",
         ] {
             wanted.insert(sub.to_string());
         }

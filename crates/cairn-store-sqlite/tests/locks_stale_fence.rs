@@ -103,3 +103,50 @@ async fn incarnation_change_invalidates_prior_holders() {
         .unwrap_err();
     assert!(matches!(err, LockError::Fenced { .. }));
 }
+
+#[tokio::test]
+async fn assert_live_in_tx_blocks_stale_holder_inside_existing_transaction() {
+    let store = open_in_memory().await.unwrap();
+    let conn = Arc::clone(store.raw_conn_for_admin().unwrap());
+    let inc = store.incarnation().cloned().unwrap();
+    let resource = ResourceKey::entity("t1", "default", "rec-tx");
+
+    let h_a = acquire(
+        &conn,
+        &resource,
+        LockMode::Exclusive,
+        "holder_a_tx",
+        Duration::from_millis(80),
+        &inc,
+        "writer_a_tx",
+    )
+    .await
+    .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let _h_b = acquire(
+        &conn,
+        &resource,
+        LockMode::Exclusive,
+        "holder_b_tx",
+        Duration::from_secs(5),
+        &inc,
+        "writer_b_tx",
+    )
+    .await
+    .unwrap();
+
+    let err = conn
+        .call(move |c| {
+            let tx = c.transaction()?;
+            let result = h_a.assert_live_in_tx(&tx);
+            drop(tx);
+            Ok::<_, tokio_rusqlite::Error>(result)
+        })
+        .await
+        .unwrap()
+        .unwrap_err();
+
+    assert!(matches!(err, LockError::Fenced { .. }));
+}

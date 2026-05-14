@@ -7,26 +7,70 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CaptureTraceArgs {
-    /// Path to the trace log or transcript file.
-    pub from: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CaptureTraceDataFailedTurns {
+pub struct FailedTurn {
     pub reason: String,
     pub session_id: String,
     pub turn_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CaptureTraceArgs {
+    /// Path to a JSON file containing a Vec<TraceBlock>. Accepts optional @path syntax.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocks: Option<String>,
+    /// Path to the trace log or transcript file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+}
+
+impl CaptureTraceArgs {
+    /// Enforce exactly-one-of presence across each XOR group declared in the IDL `oneOf`.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if (self.blocks.is_some() as u8 + self.from.is_some() as u8 + self.session_id.is_some() as u8) != 1 { return Err("exactly one of [blocks, from, session_id] is required"); }
+        Ok(())
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCaptureTraceArgs {
+    /// Path to a JSON file containing a Vec<TraceBlock>. Accepts optional @path syntax.
+    #[serde(default)]
+    blocks: Option<String>,
+    /// Path to the trace log or transcript file.
+    #[serde(default)]
+    from: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+}
+
+impl ::core::convert::TryFrom<RawCaptureTraceArgs> for CaptureTraceArgs {
+    type Error = &'static str;
+    fn try_from(raw: RawCaptureTraceArgs) -> Result<Self, Self::Error> {
+        if (raw.blocks.is_some() as u8 + raw.from.is_some() as u8 + raw.session_id.is_some() as u8) != 1 { return Err("exactly one of [blocks, from, session_id] is required"); }
+        Ok(Self {
+            blocks: raw.blocks,
+            from: raw.from,
+            session_id: raw.session_id,
+        })
+    }
+}
+
+impl<'de> ::serde::Deserialize<'de> for CaptureTraceArgs {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: ::serde::Deserializer<'de> {
+        let raw = RawCaptureTraceArgs::deserialize(deserializer)?;
+        Self::try_from(raw).map_err(::serde::de::Error::custom)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CaptureTraceData {
-    /// Per-turn failures that did not abort the overall import.
-    pub failed_turns: Vec<CaptureTraceDataFailedTurns>,
+    /// Per-turn failures that were skipped while other turns in the trace import committed.
+    pub failed_turns: Vec<FailedTurn>,
     pub trace_id: crate::generated::common::Ulid,
 }
 

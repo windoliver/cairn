@@ -560,10 +560,14 @@ pub struct UpsertOutcome {
 /// Filter args for `list`. All `Option` fields are AND-combined.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ListArgs {
+    /// Restrict to the supplied record ids. Empty = no id filter.
+    pub record_ids: Vec<RecordId>,
     /// Restrict to a single `MemoryKind`.
     pub kind: Option<MemoryKind>,
     /// Restrict to a single `MemoryClass`.
     pub class: Option<MemoryClass>,
+    /// Restrict to records whose scope contains every set dimension.
+    pub scope: Option<ScopeTuple>,
     /// Visibility values the caller is allowed to see; empty = no filter.
     pub visibility_allowlist: Vec<MemoryVisibility>,
     /// Maximum number of records to return in this page.

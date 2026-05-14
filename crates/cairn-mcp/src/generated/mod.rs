@@ -127,6 +127,7 @@ EXCLUSIVITY: this is the canonical by-id retrieval surface
             CapabilityOverride { path: "target=record", capability: "cairn.mcp.v1.retrieve.record" },
             CapabilityOverride { path: "target=session", capability: "cairn.mcp.v1.retrieve.session" },
             CapabilityOverride { path: "target=turn", capability: "cairn.mcp.v1.retrieve.turn" },
+            CapabilityOverride { path: "target=tool_call", capability: "cairn.mcp.v1.retrieve.tool_call" },
             CapabilityOverride { path: "target=folder", capability: "cairn.mcp.v1.retrieve.folder" },
             CapabilityOverride { path: "target=scope", capability: "cairn.mcp.v1.retrieve.scope" },
             CapabilityOverride { path: "target=profile", capability: "cairn.mcp.v1.retrieve.profile" },

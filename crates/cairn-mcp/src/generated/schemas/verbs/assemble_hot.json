@@ -9,6 +9,14 @@
           "minimum": 0,
           "type": "integer"
         },
+        "explain": {
+          "description": "When true, the response carries a `debug` payload describing per-step inclusion + typed exclusion reasons. Defaults to false; older callers omit it.",
+          "type": "boolean"
+        },
+        "recipe": {
+          "minLength": 1,
+          "type": "string"
+        },
         "session_id": {
           "minLength": 1,
           "type": "string"
@@ -24,8 +32,17 @@
           "minimum": 0,
           "type": "integer"
         },
+        "debug": {
+          "$ref": "#/$defs/HotMemoryDebug",
+          "description": "Optional inclusion/exclusion trace per recipe step. Absent unless the caller requested debug output via Args.explain. Wire-compatible addition for cairn.mcp.v1: older consumers ignore unknown fields."
+        },
         "prefix": {
           "description": "Assembled hot-memory text ready to inject into the agent prompt. May be empty when no hot-memory is available.",
+          "type": "string"
+        },
+        "recipe": {
+          "description": "Name of the hot-memory recipe preset that produced this assembled prefix. Optional for wire compat with legacy producers; new producers always emit it.",
+          "minLength": 1,
           "type": "string"
         },
         "segments": {
@@ -44,6 +61,75 @@
       ],
       "type": "object",
       "x-cairn-validate": true
+    },
+    "HotExclusion": {
+      "additionalProperties": false,
+      "properties": {
+        "reason": {
+          "$ref": "#/$defs/HotExclusionReason"
+        },
+        "record_id": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "record_id",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "HotExclusionReason": {
+      "enum": [
+        "tombstoned",
+        "forgotten_scope",
+        "below_confidence_floor",
+        "out_of_scope",
+        "visibility_denied",
+        "outside_recency_window",
+        "beyond_top_k",
+        "not_pinned",
+        "empty_body"
+      ],
+      "type": "string"
+    },
+    "HotInclusion": {
+      "additionalProperties": false,
+      "properties": {
+        "note": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "record_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "score": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "record_id",
+        "score",
+        "note"
+      ],
+      "type": "object"
+    },
+    "HotMemoryDebug": {
+      "additionalProperties": false,
+      "properties": {
+        "steps": {
+          "items": {
+            "$ref": "#/$defs/HotStepTrace"
+          },
+          "maxItems": 64,
+          "type": "array"
+        }
+      },
+      "required": [
+        "steps"
+      ],
+      "type": "object"
     },
     "HotRecipeStep": {
       "description": "Frozen for the lifetime of cairn.mcp.v1. Adding a recipe step requires bumping to cairn.mcp.v2.",
@@ -91,6 +177,32 @@
       ],
       "type": "object"
     },
+    "HotStepTrace": {
+      "additionalProperties": false,
+      "properties": {
+        "excluded": {
+          "items": {
+            "$ref": "#/$defs/HotExclusion"
+          },
+          "type": "array"
+        },
+        "included": {
+          "items": {
+            "$ref": "#/$defs/HotInclusion"
+          },
+          "type": "array"
+        },
+        "step": {
+          "$ref": "#/$defs/HotRecipeStep"
+        }
+      },
+      "required": [
+        "step",
+        "included",
+        "excluded"
+      ],
+      "type": "object"
+    },
     "SegmentStability": {
       "description": "Cache-lifetime hint per segment. Frozen for the lifetime of cairn.mcp.v1.",
       "enum": [
@@ -111,6 +223,11 @@
     "command": "assemble_hot",
     "flags": [
       {
+        "long": "recipe",
+        "name": "recipe",
+        "value_source": "string"
+      },
+      {
         "long": "session",
         "name": "session_id",
         "value_source": "string"
@@ -119,6 +236,11 @@
         "long": "budget",
         "name": "budget",
         "value_source": "u32"
+      },
+      {
+        "long": "explain",
+        "name": "explain",
+        "value_source": "bool"
       }
     ]
   },

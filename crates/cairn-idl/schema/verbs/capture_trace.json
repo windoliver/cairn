@@ -10,6 +10,7 @@
     "command": "capture_trace",
     "flags": [
       { "name": "from",       "long": "from",    "value_source": "path" },
+      { "name": "blocks",     "long": "blocks",  "value_source": "path" },
       { "name": "session_id", "long": "session", "value_source": "string" }
     ]
   },
@@ -27,11 +28,15 @@
     "Args": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["from"],
       "properties": {
         "from":       { "type": "string", "minLength": 1, "description": "Path to the trace log or transcript file." },
+        "blocks":     { "type": "string", "minLength": 1, "description": "Path to a JSON file containing a Vec<TraceBlock>. Accepts optional @path syntax." },
         "session_id": { "type": "string", "minLength": 1 }
-      }
+      },
+      "oneOf": [
+        { "required": ["from"] },
+        { "required": ["blocks", "session_id"] }
+      ]
     },
     "Data": {
       "type": "object",
@@ -41,18 +46,19 @@
         "trace_id": { "$ref": "../common/primitives.json#/$defs/Ulid" },
         "failed_turns": {
           "type": "array",
-          "description": "Per-turn failures that did not abort the overall import.",
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["session_id", "turn_id", "reason"],
-            "properties": {
-              "session_id": { "type": "string" },
-              "turn_id": { "type": "string" },
-              "reason": { "type": "string", "minLength": 1 }
-            }
-          }
+          "items": { "$ref": "#/$defs/FailedTurn" },
+          "description": "Per-turn failures that were skipped while other turns in the trace import committed."
         }
+      }
+    },
+    "FailedTurn": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id", "turn_id", "reason"],
+      "properties": {
+        "session_id": { "type": "string", "minLength": 1 },
+        "turn_id": { "type": "string", "minLength": 1 },
+        "reason": { "type": "string", "minLength": 1 }
       }
     }
   }

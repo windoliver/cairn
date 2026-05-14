@@ -2,7 +2,25 @@
   "$defs": {
     "Args": {
       "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "from"
+          ]
+        },
+        {
+          "required": [
+            "blocks",
+            "session_id"
+          ]
+        }
+      ],
       "properties": {
+        "blocks": {
+          "description": "Path to a JSON file containing a Vec<TraceBlock>. Accepts optional @path syntax.",
+          "minLength": 1,
+          "type": "string"
+        },
         "from": {
           "description": "Path to the trace log or transcript file.",
           "minLength": 1,
@@ -13,36 +31,15 @@
           "type": "string"
         }
       },
-      "required": [
-        "from"
-      ],
       "type": "object"
     },
     "Data": {
       "additionalProperties": false,
       "properties": {
         "failed_turns": {
-          "description": "Per-turn failures that did not abort the overall import.",
+          "description": "Per-turn failures that were skipped while other turns in the trace import committed.",
           "items": {
-            "additionalProperties": false,
-            "properties": {
-              "reason": {
-                "minLength": 1,
-                "type": "string"
-              },
-              "session_id": {
-                "type": "string"
-              },
-              "turn_id": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "session_id",
-              "turn_id",
-              "reason"
-            ],
-            "type": "object"
+            "$ref": "#/$defs/FailedTurn"
           },
           "type": "array"
         },
@@ -53,6 +50,29 @@
       "required": [
         "trace_id",
         "failed_turns"
+      ],
+      "type": "object"
+    },
+    "FailedTurn": {
+      "additionalProperties": false,
+      "properties": {
+        "reason": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "session_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "turn_id": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "turn_id",
+        "reason"
       ],
       "type": "object"
     }

@@ -1,10 +1,12 @@
 //! End-to-end CLI smoke tests. Invokes the built `cairn` binary and asserts
-//! the current verb behaviour: wired verbs commit, unwired verbs fail closed.
+//! the P0 CLI behaviour: help succeeds, usage errors return sysexits, and
+//! wired verbs emit valid JSON envelopes.
 //!
 //! The CLI tree is generated from the IDL by `cairn-codegen`; the store is
-//! wired incrementally. Exit-code contract (spec §5.2):
-//! - unwired verb stubs → exit 1, stderr contains `Internal`, or `--json`
-//!   → stdout contains `"status":"aborted"`.
+//! Exit-code contract (spec §5.2):
+//! - committed verb paths exit 0 and emit `"status":"committed"`.
+//! - remaining simple verb stubs exit 1, stderr contains `Internal`, or
+//!   `--json` emits `"status":"aborted"`.
 //! - clap usage errors (unknown flag, unknown subcommand, missing required
 //!   `ArgGroup`, bare invocation with `subcommand_required`) → 64
 //!   (`EX_USAGE`).
@@ -21,6 +23,28 @@ use sha2::{Digest, Sha256};
 /// binary in the current crate at test-compile time.
 fn cli() -> Command {
     Command::new(env!("CARGO_BIN_EXE_cairn"))
+}
+
+fn seed_default_identity(vault: &Path) {
+    let out = cli()
+        .current_dir(vault)
+        .args([
+            "ingest",
+            "--kind",
+            "reference",
+            "--body",
+            "identity seed",
+            "--json",
+        ])
+        .output()
+        .expect("seed default identity");
+    assert!(
+        out.status.success(),
+        "identity seed failed: {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 fn seed_consent_journal_vault(seed_sql: &str) -> tempfile::TempDir {
@@ -60,35 +84,68 @@ fn seed_zero_capture_metrics_vault(body: &str) -> tempfile::TempDir {
 fn write_stop_trace_fixture(vault: &Path) -> std::path::PathBuf {
     let sources_dir = vault.join("sources").join("hook");
     std::fs::create_dir_all(&sources_dir).expect("create hook sources");
-    let body = "session ended";
-    let payload_path = sources_dir.join("stop.txt");
-    std::fs::write(&payload_path, body).expect("write stop payload");
-    let hash = format!("sha256:{:x}", Sha256::digest(body.as_bytes()));
-    let event = serde_json::json!({
-        "event_id": "01ARZ3NDEKTSV4RRFFQ69G5FAD",
-        "sensor_id": "snr:local:hook:cc-session:v1",
-        "capture_mode": "auto",
-        "actor_chain": [{
-            "role": "author",
-            "identity": "snr:local:hook:cc-session:v1",
-            "at": "2026-05-02T00:00:04Z"
-        }],
-        "refs": {
-            "session_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-            "turn_id": "turn-1"
-        },
-        "payload_hash": hash,
-        "payload_ref": "sources/hook/stop.txt",
-        "captured_at": "2026-05-02T00:00:04Z",
-        "payload": {
-            "source_family": "hook",
-            "hook_name": "Stop"
-        },
-        "source_family": "hook"
-    });
+    let inputs = [
+        (
+            "01ARZ3NDEKTSV4RRFFQ69G5FAA",
+            "UserPromptSubmit",
+            None,
+            "2026-05-02T00:00:01Z",
+            "user asks for a summary",
+        ),
+        (
+            "01ARZ3NDEKTSV4RRFFQ69G5FAB",
+            "PreToolUse",
+            Some("tool-call-1"),
+            "2026-05-02T00:00:02Z",
+            r#"{"tool":"Read","input":{"file_path":"README.md"}}"#,
+        ),
+        (
+            "01ARZ3NDEKTSV4RRFFQ69G5FAC",
+            "PostToolUse",
+            Some("tool-call-1"),
+            "2026-05-02T00:00:03Z",
+            "tool returned README contents",
+        ),
+        (
+            "01ARZ3NDEKTSV4RRFFQ69G5FAD",
+            "Stop",
+            None,
+            "2026-05-02T00:00:04Z",
+            "session ended",
+        ),
+    ];
     let trace_path = vault.join("trace.jsonl");
     let mut file = std::fs::File::create(&trace_path).expect("create trace jsonl");
-    writeln!(file, "{event}").expect("write stop event");
+    for (event_id, hook_name, tool_id, captured_at, body) in inputs {
+        let file_name = format!("{event_id}.txt");
+        let payload_path = sources_dir.join(&file_name);
+        std::fs::write(&payload_path, body).expect("write hook payload");
+        let hash = format!("sha256:{:x}", Sha256::digest(body.as_bytes()));
+        let event = serde_json::json!({
+            "event_id": event_id,
+            "sensor_id": "snr:local:hook:cc-session:v1",
+            "capture_mode": "auto",
+            "actor_chain": [{
+                "role": "author",
+                "identity": "snr:local:hook:cc-session:v1",
+                "at": captured_at
+            }],
+            "refs": {
+                "session_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                "turn_id": "turn-1",
+                "tool_id": tool_id
+            },
+            "payload_hash": hash,
+            "payload_ref": format!("sources/hook/{file_name}"),
+            "captured_at": captured_at,
+            "payload": {
+                "source_family": "hook",
+                "hook_name": hook_name
+            },
+            "source_family": "hook"
+        });
+        writeln!(file, "{event}").expect("write trace event");
+    }
     trace_path
 }
 
@@ -105,7 +162,7 @@ fn prints_version_with_flag() {
 }
 
 #[test]
-fn help_flag_lists_all_eight_verbs() {
+fn help_flag_lists_core_commands() {
     let out = cli().arg("--help").output().expect("cairn --help");
     assert!(out.status.success(), "exit: {:?}", out.status);
     let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
@@ -118,6 +175,7 @@ fn help_flag_lists_all_eight_verbs() {
         "capture_trace",
         "lint",
         "forget",
+        "hook",
     ] {
         assert!(
             stdout.contains(verb),
@@ -152,6 +210,35 @@ fn repair_consent_journal_help_lists_delete_options() {
         assert!(
             stdout.contains(needle),
             "repair help missing {needle}: {stdout}",
+        );
+    }
+}
+
+#[test]
+fn search_and_retrieve_help_list_include_reasoning_flag() {
+    for command in [["search", "--help"], ["retrieve", "--help"]] {
+        let out = cli().args(command).output().expect("verb --help");
+        assert!(out.status.success(), "exit: {:?}", out.status);
+        let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+        assert!(
+            stdout.contains("--include-reasoning"),
+            "help output missing --include-reasoning for {command:?}: {stdout}",
+        );
+    }
+}
+
+#[test]
+fn capture_trace_help_lists_blocks_flag() {
+    let out = cli()
+        .args(["capture_trace", "--help"])
+        .output()
+        .expect("capture_trace --help");
+    assert!(out.status.success(), "exit: {:?}", out.status);
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    for needle in ["--blocks", "--from", "--session"] {
+        assert!(
+            stdout.contains(needle),
+            "capture_trace help missing {needle}: {stdout}",
         );
     }
 }
@@ -478,38 +565,6 @@ fn no_args_prints_help_and_fails_closed() {
 }
 
 #[test]
-fn simple_verb_human_mode_exits_one_with_internal() {
-    // After dispatch wiring: verbs with no store adapter exit 1 (generic failure)
-    // and print "Internal" to stderr in human mode.
-    // `ingest` is excluded: bare `cairn ingest` has no source → exit 64 (usage error).
-    // `retrieve` and `forget` are excluded: required ArgGroup → exit 64 (usage error).
-    // `search` is excluded: missing required CLI args exit 64 (EX_USAGE);
-    // see `search_missing_query_exits_64` below.
-    // `assemble_hot` is excluded: verb is now wired (exits 0); see
-    //   `assemble_hot_exits_zero_and_emits_committed_envelope` below.
-    // `capture_trace` is excluded: verb is now wired; see
-    //   `capture_trace_empty_file_exits_zero` below.
-    for args in [&["summarize", "01ARYZ6S41TSV4RRFFQ69G5FAV"][..], &["lint"]] {
-        let verb = args[0];
-        let out = cli().args(args).output().expect("cairn <verb>");
-        assert!(
-            !out.status.success(),
-            "verb {verb} exited OK — should fail with Internal"
-        );
-        assert_eq!(
-            out.status.code(),
-            Some(1),
-            "verb {verb} wrong exit code (want 1)"
-        );
-        let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
-        assert!(
-            stderr.contains("Internal"),
-            "verb {verb} stderr missing Internal error code: {stderr:?}",
-        );
-    }
-}
-
-#[test]
 fn capture_trace_empty_file_exits_zero() {
     let vault = tempfile::tempdir().expect("temp vault");
     cairn_cli::vault::bootstrap(&cairn_cli::vault::BootstrapOpts {
@@ -825,7 +880,7 @@ fn capture_trace_e2e_reports_malformed_exact_accepted_metric() {
         failed_turns[0]["reason"]
             .as_str()
             .expect("failure reason")
-            .contains("zero_capture_audit metric read"),
+            .contains("turn_failed"),
         "unexpected failed_turns: {failed_turns:?}"
     );
     let metrics = std::fs::read_to_string(vault.path().join(".cairn").join("metrics.jsonl"))
@@ -838,8 +893,8 @@ fn capture_trace_e2e_reports_malformed_exact_accepted_metric() {
 
 #[test]
 fn assemble_hot_exits_zero_and_emits_committed_envelope() {
-    // `assemble_hot` is wired: stub-body assembler returns a committed
-    // Response with six zero-length segments (default recipe). Exit 0.
+    // `assemble_hot` is wired to real hot-memory sources and returns a
+    // committed Response with six segments for the default recipe. Exit 0.
     // The verb fails closed on a non-vault directory, so bootstrap a
     // tempdir vault and run from inside it.
     let dir = tempfile::tempdir().expect("tempdir");
@@ -848,6 +903,7 @@ fn assemble_hot_exits_zero_and_emits_committed_envelope() {
         force: false,
     })
     .expect("bootstrap vault");
+    seed_default_identity(dir.path());
     let out = cli()
         .current_dir(dir.path())
         .args(["assemble_hot", "--json"])
@@ -895,13 +951,13 @@ fn search_missing_query_exits_64() {
 }
 
 #[test]
-fn ingest_json_mode_emits_committed_envelope() {
-    let vault = tempfile::tempdir().expect("temp vault");
+fn simple_verb_json_mode_emits_committed_ingest_envelope() {
+    let vault = tempfile::tempdir().expect("vault");
     cairn_cli::vault::bootstrap(&cairn_cli::vault::BootstrapOpts {
         vault_path: vault.path().to_path_buf(),
         force: false,
     })
-    .expect("bootstrap vault");
+    .expect("bootstrap");
     let out = cli()
         .current_dir(vault.path())
         .args(["ingest", "--kind", "user", "--body", "hi", "--json"])
@@ -910,7 +966,8 @@ fn ingest_json_mode_emits_committed_envelope() {
     assert_eq!(
         out.status.code(),
         Some(0),
-        "ingest should commit; stderr: {}",
+        "exit: {:?}; stderr={}",
+        out.status,
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8(out.stdout).expect("utf-8");
@@ -919,6 +976,7 @@ fn ingest_json_mode_emits_committed_envelope() {
     assert_eq!(v["contract"], "cairn.mcp.v1");
     assert_eq!(v["status"], "committed");
     assert!(v["data"]["record_id"].is_string());
+    assert!(v["policy_trace"].is_array());
 }
 
 #[test]

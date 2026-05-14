@@ -8,10 +8,11 @@
 use std::io::Write;
 use std::process::ExitCode;
 
-use cairn_cli::{command, identity, plugins, repair, verbs};
+use cairn_cli::{command, doctor, hooks, identity, plugins, repair, verbs};
 use cairn_core::contract::registry::PluginError;
 use cairn_core::generated::envelope::ResponseVerb;
 use clap::ArgMatches;
+
 fn registry_store() -> anyhow::Result<cairn_cli::vault::VaultRegistryStore> {
     let path = if let Ok(p) = std::env::var("CAIRN_REGISTRY") {
         std::path::PathBuf::from(p)
@@ -77,6 +78,7 @@ fn resolve_vault_or_cwd(
     };
     match cairn_cli::vault::resolve_vault(opts) {
         Ok(p) => {
+            verbs::forget::reconcile_pending_source_redactions(&p)?;
             let source = if explicit.is_some() {
                 VaultResolutionSource::Explicit
             } else if cwd
@@ -105,10 +107,9 @@ fn resolve_vault_or_cwd(
                 .downcast_ref::<cairn_cli::vault::VaultError>()
                 .is_some_and(|ve| matches!(ve, cairn_cli::vault::VaultError::NoneResolved));
             if is_none_resolved && explicit.is_none() {
-                Ok((
-                    cwd.unwrap_or_else(|| std::path::PathBuf::from(".")),
-                    VaultResolutionSource::CwdFallback,
-                ))
+                let path = cwd.unwrap_or_else(|| std::path::PathBuf::from("."));
+                verbs::forget::reconcile_pending_source_redactions(&path)?;
+                Ok((path, VaultResolutionSource::CwdFallback))
             } else {
                 Err(e)
             }
@@ -116,7 +117,13 @@ fn resolve_vault_or_cwd(
     }
 }
 
-fn subcommand_needs_vault_guard(active_subcommand: &str) -> bool {
+fn subcommand_needs_vault_guard(subcommand: Option<(&str, &ArgMatches)>) -> bool {
+    let Some((active_subcommand, sub)) = subcommand else {
+        return false;
+    };
+    if active_subcommand == "forget" {
+        return verbs::forget::requires_vault_context(sub);
+    }
     !matches!(
         active_subcommand,
         "vault"
@@ -127,6 +134,7 @@ fn subcommand_needs_vault_guard(active_subcommand: &str) -> bool {
             | "llm"
             | "identity"
             | "flush"
+            | "hook"
             | "repair"
     )
 }
@@ -164,7 +172,7 @@ fn main() -> ExitCode {
     // registry guard here would reject them when no vault is registered.
     // `identity` manages vault-path internally for each subcommand; exclude
     // from the top-level vault registry guard (which requires a named vault).
-    let needs_vault_guard = subcommand_needs_vault_guard(active_subcommand);
+    let needs_vault_guard = subcommand_needs_vault_guard(matches.subcommand());
 
     if needs_vault_guard {
         let store = match registry_store() {
@@ -201,6 +209,9 @@ fn main() -> ExitCode {
                 let is_not_found = e
                     .downcast_ref::<cairn_cli::vault::VaultError>()
                     .is_some_and(|ve| matches!(ve, cairn_cli::vault::VaultError::NotFound { .. }));
+                let is_none_resolved = e
+                    .downcast_ref::<cairn_cli::vault::VaultError>()
+                    .is_some_and(|ve| matches!(ve, cairn_cli::vault::VaultError::NoneResolved));
                 if is_not_found {
                     if active_subcommand == "capture_trace" && capture_trace_json {
                         let response = verbs::envelope::not_found_response(
@@ -214,6 +225,14 @@ fn main() -> ExitCode {
                     }
                     return ExitCode::from(78); // EX_CONFIG
                 }
+                if active_subcommand == "capture_trace" && capture_trace_json && !is_none_resolved {
+                    let response = verbs::envelope::internal_error_response(
+                        ResponseVerb::CaptureTrace,
+                        &format!("{e:#}"),
+                    );
+                    verbs::envelope::emit_json(&response);
+                    return ExitCode::from(78);
+                }
                 // NoneResolved and other errors are tolerated until the store is wired (#9).
                 let _e = e;
             }
@@ -221,12 +240,9 @@ fn main() -> ExitCode {
     }
 
     match matches.subcommand() {
-        Some(("ingest", sub)) => match resolve_vault_or_cwd(explicit_vault.as_deref()) {
-            Ok((vault_root, _source)) => verbs::ingest::run(sub, &vault_root),
-            Err(e) => {
-                eprintln!("cairn ingest: vault resolution error — {e:#}");
-                ExitCode::from(78) // EX_CONFIG
-            }
+        Some(("ingest", sub)) => match resolve_vault_and_config(explicit_vault.as_deref()) {
+            Ok((vault_root, _source, config)) => verbs::ingest::run(sub, vault_root, config),
+            Err(code) => code,
         },
         Some(("search", sub)) => match resolve_vault_or_cwd(explicit_vault.as_deref()) {
             // search has its own internal vault-binding gate, so the
@@ -238,12 +254,34 @@ fn main() -> ExitCode {
                 ExitCode::from(78) // EX_CONFIG
             }
         },
-        Some(("retrieve", sub)) => verbs::retrieve::run(sub),
-        Some(("summarize", sub)) => verbs::summarize::run(sub),
+        Some(("retrieve", sub)) => match resolve_vault_and_config(explicit_vault.as_deref()) {
+            Ok((vault_root, _source, config)) => verbs::retrieve::run(sub, vault_root, config),
+            Err(code) => code,
+        },
+        Some(("summarize", sub)) => match resolve_vault_and_config(explicit_vault.as_deref()) {
+            Ok((vault_root, _source, config)) => verbs::summarize::run(sub, vault_root, config),
+            Err(code) => code,
+        },
         Some(("assemble_hot", sub)) => run_assemble_hot(sub, explicit_vault.as_deref()),
-        Some(("capture_trace", sub)) => match resolve_vault_or_cwd(explicit_vault.as_deref()) {
-            Ok((vault_root, _source)) => {
-                if let Some(rc) = enforce_vault_binding_json(
+        Some(("capture_trace", sub)) => match resolve_vault_and_config(explicit_vault.as_deref()) {
+            Ok((vault_root, source, config)) => {
+                if source == VaultResolutionSource::CwdFallback {
+                    let message = format!(
+                        "no Cairn vault at {} — run `cairn bootstrap` first",
+                        vault_root.display()
+                    );
+                    if sub.get_flag("json") {
+                        let response = verbs::envelope::not_found_response(
+                            ResponseVerb::CaptureTrace,
+                            "vault",
+                            &message,
+                        );
+                        verbs::envelope::emit_json(&response);
+                    } else {
+                        eprintln!("cairn capture_trace: {message}");
+                    }
+                    ExitCode::from(78)
+                } else if let Some(rc) = enforce_vault_binding_json(
                     "capture_trace",
                     ResponseVerb::CaptureTrace,
                     sub.get_flag("json"),
@@ -251,32 +289,33 @@ fn main() -> ExitCode {
                 ) {
                     rc
                 } else {
-                    verbs::capture_trace::run(sub, &vault_root)
+                    verbs::capture_trace::run(sub, vault_root, config)
                 }
             }
-            Err(e) => {
-                let message = format!("vault resolution error — {e:#}");
-                if sub.get_flag("json") {
-                    let response = verbs::envelope::internal_error_response(
-                        ResponseVerb::CaptureTrace,
-                        &message,
-                    );
-                    verbs::envelope::emit_json(&response);
-                } else {
-                    eprintln!("cairn capture_trace: {message}");
-                }
-                ExitCode::from(78)
-            }
+            Err(code) => code,
         },
         Some(("lint", sub)) => match resolve_vault_or_cwd(explicit_vault.as_deref()) {
             Ok((vault_root, _source)) => verbs::lint::run(sub, Some(vault_root.as_path())),
             Err(_) => verbs::lint::run(sub, None),
         },
-        Some(("forget", sub)) => verbs::forget::run(sub),
+        Some(("forget", sub)) => {
+            if verbs::forget::requires_vault_context(sub) {
+                match resolve_vault_and_config(explicit_vault.as_deref()) {
+                    Ok((vault_root, _source, config)) => {
+                        verbs::forget::run(sub, vault_root, config)
+                    }
+                    Err(code) => code,
+                }
+            } else {
+                verbs::forget::run_without_context(sub)
+            }
+        }
+        Some(("hook", sub)) => hooks::run(sub),
         Some(("status", sub)) => run_status(sub, explicit_vault.as_deref()),
         Some(("handshake", sub)) => run_handshake(sub, explicit_vault.as_deref()),
         Some(("plugins", sub)) => run_plugins(sub),
         Some(("bootstrap", sub)) => run_bootstrap(sub),
+        Some(("doctor", sub)) => doctor::run(sub),
         Some(("mcp", _sub)) => {
             let (vault_root, source, config) =
                 match resolve_vault_and_config(explicit_vault.as_deref()) {
@@ -583,7 +622,7 @@ fn run_assemble_hot(sub: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode 
                 return ExitCode::from(78); // EX_CONFIG
             }
         };
-    verbs::assemble_hot::run(sub, &config)
+    verbs::assemble_hot::run(sub, vault_root, config)
 }
 
 fn run_admin(matches: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
@@ -615,32 +654,38 @@ fn run_admin(matches: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
         return rc;
     }
 
-    let config =
-        match cairn_cli::config::load(&vault_root, &cairn_cli::config::CliOverrides::default()) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("cairn admin: config error — {e:#}");
-                return ExitCode::from(78); // EX_CONFIG
-            }
-        };
-
     match matches.subcommand() {
         Some(("model", sub)) => match sub.subcommand() {
-            Some(("fetch", fetch_sub)) => {
-                verbs::admin_model_fetch::run(fetch_sub, &vault_root, &config)
-            }
+            Some(("fetch", fetch_sub)) => match load_admin_config(&vault_root) {
+                Ok(config) => verbs::admin_model_fetch::run(fetch_sub, &vault_root, &config),
+                Err(code) => code,
+            },
             _ => unreachable!(
                 "clap subcommand_required(true) on admin model ensures a subcommand is always present"
             ),
         },
-        Some(("reindex", sub)) => verbs::admin_reindex::run(sub, &vault_root, &config),
+        Some(("reindex", sub)) => match load_admin_config(&vault_root) {
+            Ok(config) => verbs::admin_reindex::run(sub, &vault_root, &config),
+            Err(code) => code,
+        },
         Some(("zero-capture-report", sub)) => {
             verbs::admin_zero_capture_report::run(sub, &vault_root)
         }
+        Some(("snapshot", sub)) => verbs::admin_snapshot::run(sub, &vault_root),
+        Some(("restore", sub)) => verbs::admin_restore::run(sub, &vault_root),
         _ => unreachable!(
             "clap subcommand_required(true) on admin ensures a subcommand is always present"
         ),
     }
+}
+
+fn load_admin_config(
+    vault_root: &std::path::Path,
+) -> Result<cairn_core::config::CairnConfig, ExitCode> {
+    cairn_cli::config::load(vault_root, &cairn_cli::config::CliOverrides::default()).map_err(|e| {
+        eprintln!("cairn admin: config error — {e:#}");
+        ExitCode::from(78) // EX_CONFIG
+    })
 }
 
 /// Apply the file-only vault-binding gate (`probe_vault_binding`) and

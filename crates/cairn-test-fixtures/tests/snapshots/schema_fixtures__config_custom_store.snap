@@ -1,12 +1,14 @@
 ---
 source: crates/cairn-test-fixtures/tests/schema_fixtures.rs
-assertion_line: 110
 expression: "&c"
 ---
 {
   "vault": {
     "name": "my-vault",
     "tier": "local",
+    "source": {
+      "redact_on_forget": false
+    },
     "layout": {
       "sources": "sources",
       "records": "raw",
@@ -25,12 +27,44 @@ expression: "&c"
       }
     },
     "hot_memory": {
-      "recipe": [
-        "purpose",
-        "index",
-        "pinned_feedback"
-      ],
-      "max_bytes": 8192
+      "pre_compact_recipe": "handoff",
+      "pre_compact_safety_ratio": 0.3,
+      "default_recipe": "chat",
+      "recipes": {
+        "chat": {
+          "steps": [
+            "purpose",
+            "index",
+            "pinned_feedback"
+          ],
+          "max_bytes": 8192
+        },
+        "debug": {
+          "steps": [
+            "purpose",
+            "pinned_feedback",
+            "top_salience_project",
+            "recent_user_signal"
+          ],
+          "max_bytes": 16384
+        },
+        "handoff": {
+          "steps": [
+            "purpose",
+            "index",
+            "active_playbook",
+            "recent_user_signal"
+          ],
+          "max_bytes": 16384
+        },
+        "wake-up": {
+          "steps": [
+            "purpose",
+            "recent_user_signal"
+          ],
+          "max_bytes": 8192
+        }
+      }
     },
     "retention": {
       "raw/sensor_observation_*.md": "7d",
@@ -67,6 +101,9 @@ expression: "&c"
     "rerank_topk": 20,
     "max_snippet_chars_per_page": 8000,
     "graph_confidence_min": 0.3
+  },
+  "source": {
+    "redact_on_forget": false
   },
   "sensors": {
     "hooks": {

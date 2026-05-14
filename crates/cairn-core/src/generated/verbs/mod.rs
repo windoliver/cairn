@@ -77,6 +77,7 @@ pub const CAPABILITIES: &[&str] = &[
     "cairn.mcp.v1.retrieve.record",
     "cairn.mcp.v1.retrieve.session",
     "cairn.mcp.v1.retrieve.turn",
+    "cairn.mcp.v1.retrieve.tool_call",
     "cairn.mcp.v1.retrieve.folder",
     "cairn.mcp.v1.retrieve.scope",
     "cairn.mcp.v1.retrieve.profile",
@@ -88,6 +89,7 @@ pub const CAPABILITIES: &[&str] = &[
     "cairn.mcp.v1.extension.federation",
     "cairn.mcp.v1.extension.sessiontree",
     "cairn.mcp.v1.policy_trace",
+    "cairn.mcp.v1.sensors.pre_compact",
     "cairn.mcp.v1.replay.sequence",
     "cairn.mcp.v1.replay.challenge",
 ];

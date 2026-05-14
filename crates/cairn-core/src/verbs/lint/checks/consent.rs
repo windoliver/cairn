@@ -277,6 +277,12 @@ mod tests {
             author_states: crate::verbs::lint::empty_author_states(),
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: Some(&lookup),
+            source_artifacts: crate::verbs::lint::empty_source_artifacts(),
+            source_forgets: crate::verbs::lint::empty_source_forgets(),
+            vault_root: None,
+            hot_body_loader: None,
+            source_resolver: crate::verbs::lint::empty_source_resolver(),
+            consent_journal: crate::verbs::lint::empty_consent_journal(),
         };
         let findings = run(&inputs).await;
         assert_eq!(findings.len(), 1);
@@ -298,6 +304,12 @@ mod tests {
             author_states: crate::verbs::lint::empty_author_states(),
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: Some(&lookup),
+            source_artifacts: crate::verbs::lint::empty_source_artifacts(),
+            source_forgets: crate::verbs::lint::empty_source_forgets(),
+            vault_root: None,
+            hot_body_loader: None,
+            source_resolver: crate::verbs::lint::empty_source_resolver(),
+            consent_journal: crate::verbs::lint::empty_consent_journal(),
         };
         let f = run(&inputs).await;
         // No per-record finding (LegacyEvent skipped) but exactly one
@@ -320,6 +332,12 @@ mod tests {
             author_states: crate::verbs::lint::empty_author_states(),
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: Some(&lookup),
+            source_artifacts: crate::verbs::lint::empty_source_artifacts(),
+            source_forgets: crate::verbs::lint::empty_source_forgets(),
+            vault_root: None,
+            hot_body_loader: None,
+            source_resolver: crate::verbs::lint::empty_source_resolver(),
+            consent_journal: crate::verbs::lint::empty_consent_journal(),
         };
         let f = run(&inputs).await;
         assert_eq!(f.len(), 1);
@@ -355,6 +373,12 @@ mod tests {
             author_states: crate::verbs::lint::empty_author_states(),
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: Some(&lookup),
+            source_artifacts: crate::verbs::lint::empty_source_artifacts(),
+            source_forgets: crate::verbs::lint::empty_source_forgets(),
+            vault_root: None,
+            hot_body_loader: None,
+            source_resolver: crate::verbs::lint::empty_source_resolver(),
+            consent_journal: crate::verbs::lint::empty_consent_journal(),
         };
         let f = run(&inputs).await;
         assert_eq!(f.len(), 1);
@@ -400,6 +424,12 @@ mod tests {
             author_states: crate::verbs::lint::empty_author_states(),
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: Some(&lookup),
+            source_artifacts: crate::verbs::lint::empty_source_artifacts(),
+            source_forgets: crate::verbs::lint::empty_source_forgets(),
+            vault_root: None,
+            hot_body_loader: None,
+            source_resolver: crate::verbs::lint::empty_source_resolver(),
+            consent_journal: crate::verbs::lint::empty_consent_journal(),
         };
         let f = run(&inputs).await;
         assert_eq!(f.len(), 1);
@@ -448,6 +478,12 @@ mod tests {
             author_states: crate::verbs::lint::empty_author_states(),
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: Some(&lookup),
+            source_artifacts: crate::verbs::lint::empty_source_artifacts(),
+            source_forgets: crate::verbs::lint::empty_source_forgets(),
+            vault_root: None,
+            hot_body_loader: None,
+            source_resolver: crate::verbs::lint::empty_source_resolver(),
+            consent_journal: crate::verbs::lint::empty_consent_journal(),
         };
         let f = run(&inputs).await;
         assert_eq!(f.len(), 1);
@@ -489,6 +525,12 @@ mod tests {
             author_states: crate::verbs::lint::empty_author_states(),
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: Some(&lookup),
+            source_artifacts: crate::verbs::lint::empty_source_artifacts(),
+            source_forgets: crate::verbs::lint::empty_source_forgets(),
+            vault_root: None,
+            hot_body_loader: None,
+            source_resolver: crate::verbs::lint::empty_source_resolver(),
+            consent_journal: crate::verbs::lint::empty_consent_journal(),
         };
         let f = run(&inputs).await;
         assert_eq!(f.len(), 1);
@@ -533,6 +575,12 @@ mod tests {
             author_states: crate::verbs::lint::empty_author_states(),
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: Some(&lookup),
+            source_artifacts: crate::verbs::lint::empty_source_artifacts(),
+            source_forgets: crate::verbs::lint::empty_source_forgets(),
+            vault_root: None,
+            hot_body_loader: None,
+            source_resolver: crate::verbs::lint::empty_source_resolver(),
+            consent_journal: crate::verbs::lint::empty_consent_journal(),
         };
         assert!(run(&inputs).await.is_empty());
     }
@@ -548,6 +596,12 @@ mod tests {
             author_states: crate::verbs::lint::empty_author_states(),
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: None,
+            source_artifacts: crate::verbs::lint::empty_source_artifacts(),
+            source_forgets: crate::verbs::lint::empty_source_forgets(),
+            vault_root: None,
+            hot_body_loader: None,
+            source_resolver: crate::verbs::lint::empty_source_resolver(),
+            consent_journal: crate::verbs::lint::empty_consent_journal(),
         };
         let f = run(&inputs).await;
         assert_eq!(f.len(), 1, "expected one error finding, got {f:?}");
@@ -573,6 +627,12 @@ mod tests {
             author_states: crate::verbs::lint::empty_author_states(),
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: None,
+            source_artifacts: crate::verbs::lint::empty_source_artifacts(),
+            source_forgets: crate::verbs::lint::empty_source_forgets(),
+            vault_root: None,
+            hot_body_loader: None,
+            source_resolver: crate::verbs::lint::empty_source_resolver(),
+            consent_journal: crate::verbs::lint::empty_consent_journal(),
         };
         assert!(run(&inputs).await.is_empty());
     }

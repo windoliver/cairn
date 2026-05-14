@@ -15,7 +15,7 @@ fn fresh_in_memory_opens_to_head() {
             r.get(0)
         })
         .expect("query head");
-    assert_eq!(head, 52);
+    assert_eq!(head, 59);
 }
 
 #[test]
@@ -31,7 +31,7 @@ fn fresh_vault_opens_and_reopens_idempotent() {
             r.get(0)
         })
         .expect("query head");
-    assert_eq!(head, 52);
+    assert_eq!(head, 59);
 }
 
 #[test]
@@ -356,6 +356,15 @@ fn consent_journal_accepts_known_kinds() {
         ("policy_change", "s", None, policy_payload),
         ("remember_intent", hash, None, intent_payload.clone()),
         ("forget_intent", hash, None, intent_payload),
+        (
+            "source_forget",
+            hash,
+            None,
+            format!(
+                "{{\"shape\":\"intent_receipt\",\"target_id_hash\":\"{hash}\",\
+                  \"scope_tier\":\"private\",\"reason_code\":\"record_forget\"}}"
+            ),
+        ),
         ("grant", "s", None, decision_payload.clone()),
         ("revoke", "s", None, decision_payload),
         ("promote_receipt", hash, None, promote_payload),

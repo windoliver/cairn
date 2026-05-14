@@ -252,10 +252,10 @@ The same split Karpathy's LLM‑Wiki pattern prescribes: the LLM compiles and ma
 1. A source lands in `sources/` (drag‑drop, web clip, source sensor).
 2. `Capture → Extract → Filter → Classify → Store` writes one or more records into `raw/`.
 3. `ConsolidationWorkflow` + `PromotionWorkflow` merge / compress / promote records into `wiki/` pages and `skills/` procedures.
-4. `wiki/` pages link to `raw/` records (via frontmatter `source_ids`) which link to `sources/` documents (via frontmatter `origin`). The trail is auditable end to end.
+4. `wiki/` pages link to `raw/` records (via `provenance.source_ids` in frontmatter) which link to `sources/` documents (via frontmatter `origin`). The trail is auditable end to end.
 5. `EvaluationWorkflow` + `lint` detect orphans, contradictions, stale claims, and data gaps across all three layers.
 
-**Memory file format.** YAML frontmatter (id, kind, class, visibility, scope, confidence, salience, created, updated, origin, source_ids, provenance, tags, links) + markdown body. Pure functions read/write the frontmatter; LLM calls author the body. Humans rarely edit `raw/` or `wiki/` directly — when they do, the next `ConsolidationWorkflow` pass reconciles.
+**Memory file format.** YAML frontmatter (id, kind, class, visibility, scope, confidence, salience, created, updated, origin, provenance `{source_sensor, created_at, llm_id_if_any, originating_agent_id, source_ids, source_hash, consent_ref}`, tags, links) + markdown body. Pure functions read/write the frontmatter; LLM calls author the body. Humans rarely edit `raw/` or `wiki/` directly — when they do, the next `ConsolidationWorkflow` pass reconciles.
 
 **Git is first‑class.** The vault is a git repo. Version history, branching, and collaboration come free. Humans curate sources + schema; the LLM edits records + wiki; merge conflicts are resolved by `ConsolidationWorkflow`.
 
@@ -2262,7 +2262,7 @@ Confidence is a single scalar; **Evidence** is the multi‑factor vector that dr
 
 ### 6.5 Provenance (mandatory on every record)
 
-`{source_sensor, created_at, llm_id_if_any, originating_agent_id, source_hash, consent_ref}` — always present. Never optional.
+`{source_sensor, created_at, llm_id_if_any, originating_agent_id, source_ids, source_hash, consent_ref}` — always present. Never optional. `source_ids` is the source-document pointer set; `source_hash` is the content-addressable evidence hash for the bytes the record was derived from.
 
 ---
 
@@ -2711,7 +2711,7 @@ All sources produce the same `CaptureEvent` schema, signed with the sensor's `Se
 
 | Sensor | Priority | What it captures | Backed by | Privacy |
 |--------|----------|------------------|-----------|---------|
-| Hook sensor | P0 | `SessionStart`, `UserPromptSubmit`, `PostToolUse`, `PreCompact`, `Stop` — harness‑agnostic (CC / Codex / Gemini) | harness hook protocol | harness‑scoped |
+| Hook sensor | P0 | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop` — harness‑agnostic (CC / Codex / Gemini) | harness hook protocol | harness‑scoped |
 | IDE sensor | P0 | file edits, diagnostics, tests run, language server events | LSP client in Rust core | opt‑in per project |
 | Terminal sensor | P0 | captured commands + outputs | shell integration scripts | opt‑in, secret‑scrubbed |
 | Clipboard sensor | P0 | clipboard snapshots | [`arboard`](https://github.com/1Password/arboard) (Apache-2) | opt‑in |
@@ -2793,9 +2793,9 @@ No external product name is baked in; the pipeline is composed from the same loc
 |------|------|-----------------|
 | `SessionStart` | startup / resume | `assemble_hot` builds the prefix; semantic re‑index runs in background |
 | `UserPromptSubmit` | every message | lightweight classifier emits routing hints |
-| `PostToolUse` | after `.md` write | validate frontmatter, wikilinks, orphan status |
-| `PreCompact` | before context compaction | snapshot the transcript to `raw/trace_*.md` for later ACE distillation |
-| `Stop` | end of session | trigger end‑of‑session Dream pass + orphan check |
+| `PreToolUse` | before tool execution | record the planned tool call as a trace event |
+| `PostToolUse` | after tool execution | record the tool result and validate markdown writes when applicable |
+| `Stop` | end of session | persist the stop trace event and enqueue post-turn work |
 
 Hooks are plain scripts executed via `cairn hook <name>` (Rust binary on `$PATH`). A single Cairn binary wires identically into CC's `.claude/settings.json`, Codex's `.codex/hooks.json`, and Gemini's `.gemini/settings.json`.
 
@@ -3074,7 +3074,7 @@ Capture is not naive logging. It fires on these explicit signals (recorded as th
 | Agent said "I don't know" / retrieval returned nothing | `knowledge_gap` |
 | Novel entity / fact / rule encountered | `entity` / `fact` / `rule` |
 | User stated a preference or constraint | `user` |
-| Session boundary (`PreCompact`, `Stop`) | `trace` + `reasoning` |
+| Tool and session boundaries (`PreToolUse`, `PostToolUse`, `Stop`) | `trace` + `reasoning` |
 | Sensor event passed policy gate | `sensor_observation` |
 | Derived user‑behavior signal | `user_signal` |
 
@@ -3848,7 +3848,7 @@ Electron app with an Obsidian‑compatible knowledge graph at `WorkDir/knowledge
 Effect‑ts coding agent with **no persistent memory layer**. "Memory" = `AGENTS.md` / `CLAUDE.md` / `CONTEXT.md` discovered in order + session history in SQLite + a structured compaction summary (`Goal` / `Constraints` / `Progress` / `Decisions`) with `PRUNE_PROTECTED_TOOLS`.
 
 - **Migration**: `cairn import --from opencode` reads `AGENTS.md` + `CLAUDE.md` + last N compaction summaries; seeds `purpose.md` + initial `user` / `rule` / `project` / `strategy_*` records.
-- **Runtime**: OpenCode keeps its Effect runtime, session DB, compaction state machine, and `PRUNE_PROTECTED_TOOLS` intact. Register `cairn mcp` as an MCP server; OpenCode's `PreCompact` hook routes the structured summary into Cairn as typed records; `SessionStart` pulls the hot prefix from Cairn via `assemble_hot`.
+- **Runtime**: OpenCode keeps its Effect runtime, session DB, compaction state machine, and `PRUNE_PROTECTED_TOOLS` intact. Register `cairn mcp` as an MCP server; OpenCode's structured compaction summary routes into Cairn as typed records through `capture_trace`; `SessionStart` pulls the hot prefix from Cairn via `assemble_hot`.
 - **Cairn wins**: adds the cross‑session persistent memory OpenCode lacks without disturbing the compaction flow. Skills become portable (OpenCode's `PRUNE_PROTECTED_TOOLS = ["skill"]` maps to `pinned: true` in Cairn). Structured summary template is preserved via Cairn's `project` + `rule` + `strategy_success` kinds.
 
 ### Koi v1 (this repo, `archive/v1/`) — forge · context‑arena · ACE

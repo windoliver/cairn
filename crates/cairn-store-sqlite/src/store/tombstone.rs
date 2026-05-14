@@ -49,12 +49,23 @@ impl SqliteMemoryStore {
 
         conn.call(move |c| {
             let now_ms = current_unix_ms();
-            c.execute(
+            let tx = c.transaction()?;
+            tx.execute(
                 "UPDATE records \
                     SET tombstoned = 1, tombstone_reason = ?1, updated_at = ?2 \
                   WHERE record_id = ?3",
                 params![reason_str, now_ms, key],
             )?;
+            // Hot-prefix forget hard-gate (issue #83): bump every source-class
+            // watermark atomically with the tombstone so the cache never serves
+            // a forgotten record on its next read. WHERE clause omitted on
+            // purpose — every row is bumped.
+            tx.execute(
+                "UPDATE hot_source_watermarks SET watermark = watermark + 1, \
+                 updated_at_ms = ?1",
+                params![now_ms],
+            )?;
+            tx.commit()?;
             Ok::<_, tokio_rusqlite::Error>(())
         })
         .await?;

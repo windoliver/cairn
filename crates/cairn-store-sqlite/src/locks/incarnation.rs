@@ -183,6 +183,31 @@ pub async fn current_incarnation(conn: &Arc<Connection>) -> Result<Arc<str>, Loc
     row.map(Arc::from).ok_or(LockError::NoIncarnation)
 }
 
+/// Read the current incarnation and owning process id from the singleton.
+///
+/// # Errors
+/// `LockError::Db` on connection failure.
+/// `LockError::NoIncarnation` if the singleton row is missing.
+pub async fn current_incarnation_owner(
+    conn: &Arc<Connection>,
+) -> Result<(Arc<str>, i64), LockError> {
+    let row: Option<(String, i64)> = conn
+        .call(|c| {
+            match c.query_row(
+                "SELECT incarnation_id, pid FROM daemon_incarnation WHERE id = 1",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            ) {
+                Ok(value) => Ok::<_, tokio_rusqlite::Error>(Some(value)),
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(e) => Err(e.into()),
+            }
+        })
+        .await?;
+    row.map(|(incarnation, pid)| (Arc::from(incarnation), pid))
+        .ok_or(LockError::NoIncarnation)
+}
+
 // LockError is an `enum` whose `Held` / `Fenced` variants are deliberately
 // rich for caller diagnostics; `result_large_err` flags this size at private
 // helper boundaries even though the surrounding public API already returns it.

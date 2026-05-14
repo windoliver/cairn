@@ -36,23 +36,33 @@ fn search_with_filter(filter: serde_json::Value) -> SearchArgs {
         query: "q".to_owned(),
         scope: None,
         explain: None,
+        include_reasoning: None,
     }
 }
 
 fn ingest_with_url(url: String) -> IngestArgs {
     IngestArgs {
+        batch_size: None,
         body: None,
         dry_run: None,
+        exclude: None,
         file: None,
         folder: None,
         frontmatter: None,
         human_review: None,
+        include: None,
         kind: "note".to_owned(),
+        mode: None,
         no_cache: None,
         no_diff: None,
+        recursive: None,
         session_id: None,
         tags: None,
         url: Some(url),
+        jsonl: None,
+        harness: None,
+        session_id_from: None,
+        limit: None,
     }
 }
 
@@ -217,24 +227,36 @@ proptest! {
     fn ingest_xor_arity_zero_or_more_than_one_rejects(
         has_body in any::<bool>(),
         has_file in any::<bool>(),
+        has_folder in any::<bool>(),
         has_url in any::<bool>(),
     ) {
-        let count =
-            usize::from(has_body) + usize::from(has_file) + usize::from(has_url);
+        let count = usize::from(has_body)
+            + usize::from(has_file)
+            + usize::from(has_folder)
+            + usize::from(has_url);
         prop_assume!(count != 1);
         let args = IngestArgs {
+            batch_size: None,
             body: has_body.then(|| "b".to_owned()),
             dry_run: None,
+            exclude: None,
             file: has_file.then(|| "/f".to_owned()),
-            folder: None,
+            folder: has_folder.then(|| "/folder".to_owned()),
             frontmatter: None,
             human_review: None,
+            include: None,
             kind: "note".to_owned(),
+            mode: None,
             no_cache: None,
             no_diff: None,
+            recursive: None,
             session_id: None,
             tags: None,
             url: has_url.then(|| "http://example.com/x".to_owned()),
+            jsonl: None,
+            harness: None,
+            session_id_from: None,
+            limit: None,
         };
         let err = sdk().ingest(&args).expect_err("must reject");
         prop_assert!(is_invalid_args(&err));
@@ -249,18 +271,27 @@ proptest! {
 #[tokio::test]
 async fn ingest_dry_run_and_human_review_both_true_rejects() {
     let args = IngestArgs {
+        batch_size: None,
         body: Some("hello".to_owned()),
         dry_run: Some(true),
+        exclude: None,
         file: None,
         folder: None,
         frontmatter: None,
         human_review: Some(true),
+        include: None,
         kind: "note".to_owned(),
+        mode: None,
         no_cache: None,
         no_diff: None,
+        recursive: None,
         session_id: None,
         tags: None,
         url: None,
+        jsonl: None,
+        harness: None,
+        session_id_from: None,
+        limit: None,
     };
     let err = sdk().ingest(&args).expect_err("must reject double-mode");
     assert!(
@@ -311,6 +342,7 @@ async fn empty_scope_filter_rejects() {
             workspace: None,
         }),
         explain: None,
+        include_reasoning: None,
     };
     assert!(matches!(
         sdk().search(&args).await.expect_err("must reject"),
@@ -334,6 +366,7 @@ proptest! {
             query: "q".to_owned(),
             scope: None,
             explain: None,
+            include_reasoning: None,
         };
         prop_assert!(is_invalid_args(&search_sync(&args).expect_err("must reject")));
     }

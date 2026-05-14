@@ -8,6 +8,8 @@ Generated from `CairnConfig::default()`.
 vault:
   name: my-vault
   tier: local
+  source:
+    redact_on_forget: false
   layout:
     sources: sources
     records: raw
@@ -27,6 +29,8 @@ vault:
     - active_playbook
     - recent_user_signal
     max_bytes: 25600
+    pre_compact_recipe: handoff
+    pre_compact_safety_ratio: 0.3
   retention: {}
   schema_files:
   - CLAUDE.md
@@ -54,6 +58,8 @@ search:
   rerank_topk: 20
   max_snippet_chars_per_page: 8000
   graph_confidence_min: 0.3
+source:
+  redact_on_forget: false
 sensors:
   hooks:
     enabled: true
@@ -64,6 +70,9 @@ sensors:
   slack:
     enabled: false
     scope: []
+reference_consumer:
+  zero_capture_nudge:
+    enabled: true
 workflows:
   orchestrator: local
 pipeline:

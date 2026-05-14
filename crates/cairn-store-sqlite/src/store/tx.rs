@@ -20,8 +20,13 @@
 //!
 //! [`MemoryStore`]: cairn_core::contract::memory_store::MemoryStore
 
-use cairn_core::contract::memory_store::{Edge, EdgeKey, TombstoneReason, UpsertOutcome};
-use cairn_core::domain::{BodyHash, MemoryRecord, RecordId, SessionId, SignedAdmission};
+use cairn_core::contract::memory_store::{
+    Edge, EdgeKey, EdgeKind, StoredRecord, TombstoneReason, UpsertOutcome,
+};
+use cairn_core::contract::version::SchemaVersion;
+use cairn_core::domain::{
+    BodyHash, ConsentEvent, MemoryRecord, RecordId, Session, SessionId, SignedAdmission, TargetId,
+};
 use rusqlite::{OptionalExtension as _, Transaction, params};
 use tracing::instrument;
 
@@ -29,8 +34,12 @@ use crate::error::StoreError;
 use crate::replay::challenge::MintedChallenge;
 use crate::replay::{ReplayError, WalPrepareInputs};
 use crate::store::projection::{ProjectedRow, record_from_json};
+use crate::store::sessions::{InTxError, read_session_by_id};
 use crate::store::upsert::upsert_in_tx;
 use crate::store::{SqliteMemoryStore, current_unix_ms};
+
+/// `(tenant, workspace)` partition tuple for a given session id.
+pub type SessionScopePartition = (Option<String>, Option<String>);
 
 /// Transactional handle exposed to closures passed to
 /// [`SqliteMemoryStore::with_tx`]. Methods are synchronous because the
@@ -41,6 +50,83 @@ pub struct StoreTx<'a> {
 }
 
 impl StoreTx<'_> {
+    /// Round 9 review fix: returns `true` if any row (active or
+    /// tombstoned) in the records table has ever owned this `target_id`.
+    /// `flush apply rename` uses this to reject destinations that would
+    /// hijack a retired lineage and merge unrelated histories under one
+    /// target.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Sqlite`] on SQL failures.
+    pub fn target_id_ever_used(&self, target: &TargetId) -> Result<bool, StoreError> {
+        let row: Option<i64> = self
+            .tx
+            .query_row(
+                "SELECT 1 FROM records WHERE target_id = ?1 LIMIT 1",
+                params![target.as_str()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(row.is_some())
+    }
+
+    /// Snapshot-read the active, non-tombstoned row for one target inside the
+    /// caller's transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Sqlite`] for SQL failures, [`StoreError::Codec`]
+    /// when the stored `record_json` cannot be deserialized, and
+    /// [`StoreError::Invariant`] when version or schema-version columns carry
+    /// structurally invalid values.
+    pub fn get_active_by_target(
+        &self,
+        target: &TargetId,
+    ) -> Result<Option<StoredRecord>, StoreError> {
+        let row: Option<(String, i64, Option<i64>, Option<i64>)> = self
+            .tx
+            .query_row(
+                "SELECT record_json, version, schema_version_major, schema_version_minor \
+                   FROM records \
+                  WHERE target_id = ?1 AND active = 1 AND tombstoned = 0 \
+                  LIMIT 1",
+                params![target.as_str()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+        let Some((record_json, version_i64, schema_major, schema_minor)) = row else {
+            return Ok(None);
+        };
+        let record = record_from_json(&record_json)?;
+        let version = u32::try_from(version_i64).map_err(|_| StoreError::Invariant {
+            what: format!("stored version overflows u32: {version_i64}"),
+        })?;
+        let schema_version = match (schema_major, schema_minor) {
+            (Some(major), Some(minor)) => Some(SchemaVersion {
+                major: u32::try_from(major).map_err(|_| StoreError::Invariant {
+                    what: format!("schema_version_major out of u32 range: {major}"),
+                })?,
+                minor: u32::try_from(minor).map_err(|_| StoreError::Invariant {
+                    what: format!("schema_version_minor out of u32 range: {minor}"),
+                })?,
+            }),
+            (None, None) => None,
+            (major, minor) => {
+                return Err(StoreError::Invariant {
+                    what: format!(
+                        "records.schema_version_(major,minor) inconsistent: ({major:?}, {minor:?})"
+                    ),
+                });
+            }
+        };
+        Ok(Some(StoredRecord {
+            record,
+            version,
+            schema_version,
+        }))
+    }
+
     /// Synchronous upsert against the open transaction. Delegates to the
     /// same internal `upsert_in_tx` helper that
     /// `SqliteMemoryStore::do_upsert` uses, so this and the async trait
@@ -74,6 +160,355 @@ impl StoreTx<'_> {
             params![reason.as_db_str(), now_ms, id.as_str()],
         )?;
         Ok(())
+    }
+
+    /// Physically purge every version row for `target` and drain dependent
+    /// `edges` rows first so the delete satisfies foreign-key constraints.
+    ///
+    /// Returns the number of `records` rows deleted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Sqlite`] for SQL failures.
+    pub fn purge_target(&self, target: &TargetId) -> Result<u64, StoreError> {
+        self.tx.execute(
+            "DELETE FROM edges \
+              WHERE src IN (SELECT record_id FROM records WHERE target_id = ?1) \
+                 OR dst IN (SELECT record_id FROM records WHERE target_id = ?1)",
+            params![target.as_str()],
+        )?;
+        let deleted = self.tx.execute(
+            "DELETE FROM records WHERE target_id = ?1",
+            params![target.as_str()],
+        )?;
+        Ok(u64::try_from(deleted).unwrap_or(u64::MAX))
+    }
+
+    /// List distinct `target_id`s attached to records in the given session.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Sqlite`] for query failures, or
+    /// [`StoreError::Invariant`] if a persisted `target_id` no longer parses
+    /// as a valid [`TargetId`].
+    pub fn list_target_ids_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<TargetId>, StoreError> {
+        let mut stmt = self.tx.prepare(
+            "SELECT DISTINCT target_id
+               FROM records
+              WHERE json_extract(scope, '$.session_id') = ?1
+              ORDER BY target_id",
+        )?;
+        let mut rows = stmt.query([session_id])?;
+        let mut targets = Vec::new();
+        while let Some(row) = rows.next()? {
+            let target_id: String = row.get(0)?;
+            let target = TargetId::parse(target_id).map_err(|error| StoreError::Invariant {
+                what: format!("records.target_id round-trip failed: {error}"),
+            })?;
+            targets.push(target);
+        }
+        Ok(targets)
+    }
+
+    /// List distinct `(tenant, workspace)` partitions for a session id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Sqlite`] for query failures.
+    pub fn list_session_scope_partitions(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<SessionScopePartition>, StoreError> {
+        let mut stmt = self.tx.prepare(
+            "SELECT DISTINCT \
+                json_extract(scope, '$.tenant') AS tenant, \
+                json_extract(scope, '$.workspace') AS workspace \
+               FROM records \
+              WHERE json_extract(scope, '$.session_id') = ?1 \
+              ORDER BY tenant, workspace",
+        )?;
+        let mut rows = stmt.query([session_id])?;
+        let mut scopes = Vec::new();
+        while let Some(row) = rows.next()? {
+            let tenant: Option<String> = row.get(0)?;
+            let workspace: Option<String> = row.get(1)?;
+            scopes.push((tenant, workspace));
+        }
+        Ok(scopes)
+    }
+
+    /// List distinct `target_id`s attached to records in one session scope partition.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Sqlite`] for query failures, or
+    /// [`StoreError::Invariant`] if a persisted `target_id` no longer parses
+    /// as a valid [`TargetId`].
+    pub fn list_target_ids_for_session_scope(
+        &self,
+        session_id: &str,
+        tenant: Option<&str>,
+        workspace: Option<&str>,
+    ) -> Result<Vec<TargetId>, StoreError> {
+        let mut stmt = self.tx.prepare(
+            "SELECT DISTINCT target_id
+               FROM records
+               WHERE json_extract(scope, '$.session_id') = ?1
+                 AND (
+                       (?2 IS NULL AND json_extract(scope, '$.tenant') IS NULL)
+                    OR json_extract(scope, '$.tenant') = ?2
+                 )
+                 AND (
+                       (?3 IS NULL AND json_extract(scope, '$.workspace') IS NULL)
+                    OR json_extract(scope, '$.workspace') = ?3
+                 )
+               ORDER BY target_id",
+        )?;
+        let mut rows = stmt.query(params![session_id, tenant, workspace])?;
+        let mut targets = Vec::new();
+        while let Some(row) = rows.next()? {
+            let target_id: String = row.get(0)?;
+            let target = TargetId::parse(target_id).map_err(|error| StoreError::Invariant {
+                what: format!("records.target_id round-trip failed: {error}"),
+            })?;
+            targets.push(target);
+        }
+        Ok(targets)
+    }
+
+    /// Mark a specific active row inactive without deleting its historical
+    /// version record.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Sqlite`] for SQL failures.
+    pub fn deactivate_record(&self, id: &RecordId) -> Result<(), StoreError> {
+        let now_ms = current_unix_ms();
+        self.tx.execute(
+            "UPDATE records SET active = 0, updated_at = ?1 WHERE record_id = ?2 AND active = 1",
+            params![now_ms, id.as_str()],
+        )?;
+        Ok(())
+    }
+
+    /// Synchronous tombstone across every stored version of a target.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Sqlite`] for SQL failures.
+    pub fn tombstone_target(
+        &self,
+        target: &TargetId,
+        reason: TombstoneReason,
+    ) -> Result<(), StoreError> {
+        let now_ms = current_unix_ms();
+        self.tx.execute(
+            "UPDATE records \
+                SET tombstoned = 1, tombstone_reason = ?1, updated_at = ?2 \
+              WHERE target_id = ?3",
+            params![reason.as_db_str(), now_ms, target.as_str()],
+        )?;
+        Ok(())
+    }
+
+    /// Read one explicit session row inside the caller's transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::SessionNotFound`] when no row exists,
+    /// [`StoreError::SessionEnded`] when the row is closed, and the usual
+    /// [`StoreError`] variants for SQL / codec / invariant failures.
+    pub fn get_live_session(&self, session_id: &SessionId) -> Result<Session, StoreError> {
+        let id_str = session_id.as_str();
+        let Some(session) = read_session_by_id(&self.tx, id_str).map_err(|e| match e {
+            InTxError::Sqlite(err) => StoreError::Sqlite(err),
+            InTxError::Codec(err) => StoreError::Codec(err),
+            InTxError::Invariant(what) => StoreError::Invariant { what },
+            InTxError::Terminal(err) => err,
+            InTxError::UniqueViolation | InTxError::StaleSnapshot => StoreError::Invariant {
+                what: "unexpected retry-only session read state".into(),
+            },
+        })?
+        else {
+            return Err(StoreError::SessionNotFound {
+                session_id: id_str.to_owned(),
+            });
+        };
+        if let Some(ended_at_unix_ms) = session.ended_at_unix_ms {
+            return Err(StoreError::SessionEnded {
+                session_id: id_str.to_owned(),
+                ended_at_unix_ms,
+            });
+        }
+        Ok(session)
+    }
+
+    /// Persist session metadata fields in place and treat the patch as session
+    /// activity by bumping `last_activity_at`. Use this for in-band user
+    /// edits; for out-of-band review-time mutations (e.g. `flush apply`)
+    /// call [`Self::update_session_metadata_preserve_activity`] so the
+    /// session resolver does not see review activity as a fresh user
+    /// signal.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Codec`] when tag serialization fails and
+    /// [`StoreError::Sqlite`] for SQL failures.
+    pub fn update_session_metadata(&self, session: &Session) -> Result<(), StoreError> {
+        self.update_session_metadata_inner(session, true)
+    }
+
+    /// Re-loop r8 finding 2: variant of [`Self::update_session_metadata`]
+    /// that preserves the existing `last_activity_at`. Out-of-band
+    /// flush-apply edits must not resurrect or prolong an idle session
+    /// for the purposes of `find_active_session` / resolver auto-pick.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Codec`] when tag serialization fails and
+    /// [`StoreError::Sqlite`] for SQL failures.
+    pub fn update_session_metadata_preserve_activity(
+        &self,
+        session: &Session,
+    ) -> Result<(), StoreError> {
+        self.update_session_metadata_inner(session, false)
+    }
+
+    fn update_session_metadata_inner(
+        &self,
+        session: &Session,
+        bump_activity: bool,
+    ) -> Result<(), StoreError> {
+        let tags_json = if session.tags.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&session.tags)?)
+        };
+        if bump_activity {
+            let now_ms = current_unix_ms();
+            self.tx.execute(
+                "UPDATE sessions \
+                    SET title = ?1, channel = ?2, priority = ?3, tags = ?4, \
+                        last_activity_at = ?5 \
+                  WHERE session_id = ?6 AND ended_at IS NULL",
+                params![
+                    session.title.as_str(),
+                    session.channel.as_deref(),
+                    session.priority.as_deref(),
+                    tags_json,
+                    now_ms,
+                    session.id.as_str(),
+                ],
+            )?;
+        } else {
+            self.tx.execute(
+                "UPDATE sessions \
+                    SET title = ?1, channel = ?2, priority = ?3, tags = ?4 \
+                  WHERE session_id = ?5 AND ended_at IS NULL",
+                params![
+                    session.title.as_str(),
+                    session.channel.as_deref(),
+                    session.priority.as_deref(),
+                    tags_json,
+                    session.id.as_str(),
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Append a row to `session_metadata_audit` capturing the
+    /// pre-mutation and post-mutation session document JSON inside the
+    /// same transaction as the in-place `UPDATE sessions ...`. Provides
+    /// durable rollback evidence for `flush apply` session patches
+    /// (issue #289 re-loop r6). Pre/post are serialized by the caller
+    /// so they can use whatever canonical document shape the planner
+    /// recognized.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Sqlite`] on SQL failures.
+    pub fn append_session_metadata_audit<T>(
+        &self,
+        session_id: &SessionId,
+        operation_id: &str,
+        mutation_seq: i64,
+        pre_state: &T,
+        post_state: &T,
+    ) -> Result<(), StoreError>
+    where
+        T: serde::Serialize,
+    {
+        let pre_json = serde_json::to_string(pre_state)?;
+        let post_json = serde_json::to_string(post_state)?;
+        let now_ms = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+        )
+        .unwrap_or(i64::MAX);
+        self.tx.execute(
+            "INSERT INTO session_metadata_audit \
+                 (operation_id, session_id, mutation_seq, pre_state, post_state, applied_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                operation_id,
+                session_id.as_str(),
+                mutation_seq,
+                pre_json,
+                post_json,
+                now_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Copy every non-`updates` edge attached to `old_id` onto `new_id`.
+    /// Round 7/8 review fix: the previous version also deleted the
+    /// source rows, which irrecoverably erased the predecessor's graph
+    /// history. Now copies are additive — `new_id` gains the same edges
+    /// for live traversal while `old_id` retains its original
+    /// relationships so audit/rollback tooling can still reconstruct the
+    /// pre-rename neighbourhood. Uses `INSERT OR IGNORE` so an
+    /// already-existing edge on `new_id` is not silently overwritten.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Sqlite`] for SQL failures.
+    pub fn rewrite_non_updates_edges(
+        &self,
+        old_id: &RecordId,
+        new_id: &RecordId,
+    ) -> Result<(), StoreError> {
+        self.tx.execute(
+            "INSERT OR IGNORE INTO edges (src, dst, kind, weight) \
+             SELECT CASE WHEN src = ?1 THEN ?2 ELSE src END, \
+                    CASE WHEN dst = ?1 THEN ?2 ELSE dst END, \
+                    kind, \
+                    weight \
+               FROM edges \
+              WHERE kind != ?3 \
+                AND (src = ?1 OR dst = ?1)",
+            params![
+                old_id.as_str(),
+                new_id.as_str(),
+                EdgeKind::Updates.as_db_str()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Append one body-free consent journal event inside the open transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if validation or the insert fails.
+    pub fn append_consent_event(&self, event: &ConsentEvent) -> Result<i64, StoreError> {
+        crate::consent::append_in_tx(&self.tx, event)
     }
 
     /// Mint and persist a fresh single-use server challenge for
@@ -132,6 +567,35 @@ impl StoreTx<'_> {
             &inputs,
             now_ms,
         )
+    }
+
+    /// Transition the prepared WAL row for an admitted envelope to
+    /// `COMMITTED`.
+    ///
+    /// Call this in the same transaction as the mutation authorized by
+    /// [`Self::prepare_wal_with_replay`]. If the transition fails, the
+    /// caller's transaction should return `Err` so both the mutation and
+    /// prepared WAL row roll back together.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Sqlite`] for SQL failures or
+    /// [`StoreError::Invariant`] when the row was not in `PREPARED`.
+    pub fn commit_prepared_wal(&self, admission: &SignedAdmission) -> Result<(), StoreError> {
+        let op_id = &admission.intent().as_inner().operation_id.0;
+        let now_ms = current_unix_ms();
+        let rows = self.tx.execute(
+            "UPDATE wal_ops \
+                SET state = 'COMMITTED', updated_at = ?2 \
+              WHERE operation_id = ?1 AND state = 'PREPARED'",
+            params![op_id, now_ms],
+        )?;
+        if rows != 1 {
+            return Err(StoreError::Invariant {
+                what: format!("prepared WAL op {op_id} could not be committed"),
+            });
+        }
+        Ok(())
     }
 
     /// In-crate test-only escape hatch: admit a raw, unverified

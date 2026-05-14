@@ -6,9 +6,10 @@
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use cairn_core::domain::flush_plan::store::{Bucket, bucket_dir, plan_path};
-use cairn_core::domain::flush_plan::{ApplyKind, PersistedPlan, PlanStatus};
+use cairn_core::domain::flush_plan::{ApplyKind, FlushPlan, PersistedPlan, PlanStatus};
 
 /// Validate that `s` is a canonical 26-char Crockford-base32 ULID
 /// (uppercase, no `I L O U`, leading char `0..=7`). Mirrors the
@@ -16,7 +17,7 @@ use cairn_core::domain::flush_plan::{ApplyKind, PersistedPlan, PlanStatus};
 /// the CLI cannot turn an unvalidated CLI argument into a filesystem
 /// path component (`/`, `..`, absolute path) before the embedded
 /// `operation_id` gate has a chance to run.
-fn is_valid_ulid_str(s: &str) -> bool {
+pub(crate) fn is_valid_ulid_str(s: &str) -> bool {
     if s.len() != 26 {
         return false;
     }
@@ -38,6 +39,8 @@ fn is_valid_ulid_str(s: &str) -> bool {
     })
 }
 use clap::{Arg, ArgAction, ArgMatches, Command};
+
+use super::flush_apply;
 
 /// Build the `flush` subcommand group.
 #[must_use]
@@ -170,6 +173,19 @@ fn apply(vault: &Path, m: &ArgMatches) -> ExitCode {
         }
     };
 
+    // Re-loop r7: hold an exclusive fs2 lock on the owned claim while
+    // this process is the live publisher. The orphan-resume code in
+    // `claim_pending` uses `try_lock_exclusive` on the claim file as
+    // a liveness proof — without this hold, a concurrent retry could
+    // seize the claim mid-publish. Drop on early returns.
+    let _claim_lock = match acquire_claim_lock(&claim) {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("cairn flush apply: could not acquire liveness lock: {e}");
+            rollback_claim(vault, &claim, &ulid);
+            return ExitCode::from(70);
+        }
+    };
     let bytes = match std::fs::read(&claim) {
         Ok(b) => b,
         Err(e) => {
@@ -238,38 +254,267 @@ fn apply(vault: &Path, m: &ArgMatches) -> ExitCode {
         return ExitCode::from(65);
     }
 
-    // Phase 1 — drift check. Without a wired MemoryStore in this PR, the
-    // check is a no-op pass-through. When #9 lands (the WAL state machine),
-    // replace this with a real `MemoryStore::get_active_by_target` +
-    // body-hash comparison against `persisted.plan.target_hash(&target)`.
-
-    // Phase 2 — apply. Same story: no MemoryStore wired here. The mutation
-    // walk is a no-op for now; this is the shape the WAL apply will take.
-
-    // Honest no-op: warn the operator that this binary moves the plan but
-    // does NOT execute mutations against MemoryStore. Persisted status
-    // captures `apply_kind = MetadataOnly` so the audit trail is truthful.
-    eprintln!(
-        "cairn flush apply: WARNING — MemoryStore mutations are not yet wired (#9). \
-         Plan {id} will be marked applied for audit only; no records were written."
-    );
+    // Issue #289 review (re-loop r2) finding 1: fail closed on
+    // unsupported mutation kinds. Previously a mixed plan (Patch +
+    // Upsert, say) would silently take the metadata-only path and
+    // publish Applied without executing the reviewed Patch — that is
+    // data loss, not reduced coverage. Non-placeholder plans must
+    // contain only `Patch`/`Rename` to advance through the real
+    // executor; anything else stays pending until a follow-up wires
+    // the remaining variants.
+    // Re-loop r9 finding 1: a non-placeholder plan with no mutations
+    // would otherwise execute an empty tx and publish
+    // `ApplyKind::Full`, producing a misleading "fully applied" audit
+    // record for a no-op (or planner-corruption) plan. Refuse.
+    if !persisted.plan.placeholder && persisted.plan.mutations.is_empty() {
+        eprintln!(
+            "cairn flush apply: plan {id} is non-placeholder but has no mutations. \
+             Refusing to publish `ApplyKind::Full` for an empty plan — re-issue with \
+             actual mutations or mark the plan placeholder."
+        );
+        rollback_claim(vault, &claim, &ulid);
+        return ExitCode::from(65);
+    }
+    if !persisted.plan.placeholder
+        && let Some(unsupported) = persisted
+            .plan
+            .mutations
+            .iter()
+            .find(|m| !is_real_apply_supported(m))
+    {
+        eprintln!(
+            "cairn flush apply: plan {id} contains mutation kind \
+             `{}` which is not yet wired by issue #289's real executor. \
+             Refusing to apply — the plan stays pending until a follow-up \
+             implements the remaining `PlannedMutation` variants. (Auto- \
+             publishing as metadata-only would drop the reviewed Patch/Rename \
+             mutations.)",
+            unsupported_kind_name(unsupported),
+        );
+        rollback_claim(vault, &claim, &ulid);
+        return ExitCode::from(65);
+    }
     if persisted.plan.placeholder {
+        eprintln!(
+            "cairn flush apply: WARNING — MemoryStore mutations are not yet wired (#9). \
+             Plan {id} will be marked applied for audit only; no records were written."
+        );
         eprintln!(
             "cairn flush apply: NOTE — plan {id} was produced by the CLI stub planner \
              (`cairn-cli::ingest_plan_stub`) and does NOT reflect a real ingest/forget \
              pipeline run. Treat as a placeholder for testing the lifecycle only."
         );
+        persisted.status = PlanStatus::Applied {
+            at: now_rfc3339(),
+            apply_kind: ApplyKind::MetadataOnly,
+        };
+    } else {
+        // Sidecar (issue #289 review round 1): if a prior apply attempt
+        // crashed between the SQLite commit and `publish_terminal`, the
+        // sidecar `<claim>.committed` is on disk. Replaying the mutations
+        // against the already-mutated store would double-apply (Rename
+        // would now hit `RenameTargetConflict`, Patch would fail drift,
+        // etc). When the sidecar is present we skip apply and proceed
+        // straight to publish — the DB side is durable.
+        // Round 5 review fix: probe the sidecar at a per-plan canonical
+        // path so resume after `process_owned_claim` (which renames the
+        // claim to a `*.in-flight.<pid>` path) still sees it. Previously
+        // we passed the live `claim` path, which made the sidecar key
+        // shift when ownership transferred, defeating crash recovery.
+        let committed_sidecar = committed_sidecar_path_for(vault, &ulid);
+        let stranded = stranded_marker_path(vault, &ulid);
+        if committed_sidecar.exists() {
+            eprintln!(
+                "cairn flush apply: detected committed-sidecar for {id}; \
+                 DB mutations from a prior attempt are durable, resuming publish only."
+            );
+        } else if stranded.exists() {
+            // Round 3 review fix: the stranded marker is the durable
+            // signal "SQLite mutations committed but sidecar write
+            // failed". A simple refusal would dead-end the plan (the
+            // pending file is already inside the claim path), so treat
+            // the marker as equivalent to the committed sidecar:
+            // skip apply, proceed to publish, and remove the marker
+            // after `publish_terminal` succeeds.
+            eprintln!(
+                "cairn flush apply: detected stranded marker for {id} ({}); \
+                 DB mutations from a prior attempt are durable, resuming publish only.",
+                stranded.display(),
+            );
+        } else if let Err(e) = apply_real_plan(vault, &persisted.plan) {
+            eprintln!("cairn flush apply: apply failed: {e:#}");
+            rollback_claim(vault, &claim, &ulid);
+            return ExitCode::from(70);
+        } else if let Err(e) = write_committed_sidecar(&committed_sidecar) {
+            // DB is mutated but the recovery sidecar is missing. Plant the
+            // stranded marker (issue #289 review round 2) so the apply
+            // entry point refuses to re-execute mutations on retry. If
+            // marker placement also fails, surface both errors — manual
+            // intervention is required.
+            let stranded = stranded_marker_path(vault, &ulid);
+            if let Err(me) = write_stranded_marker(&stranded) {
+                eprintln!(
+                    "cairn flush apply: SQLite mutations committed but committed-sidecar \
+                     write failed: {e}; ALSO failed to plant stranded marker at {}: {me}. \
+                     DO NOT retry without manual recovery.",
+                    stranded.display(),
+                );
+            } else {
+                eprintln!(
+                    "cairn flush apply: SQLite mutations committed but committed-sidecar \
+                     write failed: {e}. Planted stranded marker at {}; a subsequent \
+                     `flush apply {id}` will detect the marker and resume to publish \
+                     without replaying mutations.",
+                    stranded.display(),
+                );
+            }
+            return ExitCode::from(70);
+        }
+        persisted.status = PlanStatus::Applied {
+            at: now_rfc3339(),
+            apply_kind: ApplyKind::Full,
+        };
     }
-    persisted.status = PlanStatus::Applied {
-        at: now_rfc3339(),
-        apply_kind: ApplyKind::MetadataOnly,
-    };
     if let Err(e) = publish_terminal(vault, &claim, &applied, &persisted, &ulid) {
         eprintln!("cairn flush apply: publish failed: {e}");
         return ExitCode::from(70); // EX_SOFTWARE
     }
     emit_apply_ok(json, id, "applied");
     ExitCode::SUCCESS
+}
+
+/// Issue #289 only wires `Patch` and `Rename` through the real executor.
+/// Plans containing any other variant are refused so mixed plans do not
+/// silently drop reviewed mutations on the floor.
+fn is_real_apply_supported(m: &cairn_core::domain::flush_plan::PlannedMutation) -> bool {
+    use cairn_core::domain::flush_plan::PlannedMutation;
+    matches!(
+        m,
+        PlannedMutation::Patch { .. } | PlannedMutation::Rename { .. }
+    )
+}
+
+fn unsupported_kind_name(m: &cairn_core::domain::flush_plan::PlannedMutation) -> &'static str {
+    use cairn_core::domain::flush_plan::PlannedMutation;
+    match m {
+        PlannedMutation::Upsert { .. } => "Upsert",
+        PlannedMutation::Delete { .. } => "Delete",
+        PlannedMutation::Promote { .. } => "Promote",
+        PlannedMutation::Expire { .. } => "Expire",
+        PlannedMutation::ForgetSession { .. } => "ForgetSession",
+        PlannedMutation::ForgetRecord { .. } => "ForgetRecord",
+        PlannedMutation::Evolve { .. } => "Evolve",
+        PlannedMutation::Patch { .. } | PlannedMutation::Rename { .. } => "<supported>",
+        _ => "<unknown>",
+    }
+}
+
+/// Acquire an exclusive fs2 lock on the owned claim file. The returned
+/// `File` keeps the lock until it drops. See `orphan_is_dead` for the
+/// matching liveness probe used by orphan recovery.
+fn acquire_claim_lock(claim: &Path) -> std::io::Result<std::fs::File> {
+    use fs2::FileExt as _;
+    let f = std::fs::OpenOptions::new().read(true).open(claim)?;
+    f.try_lock_exclusive()?;
+    Ok(f)
+}
+
+/// Re-loop r7 finding 2: returns `true` iff the orphan file's previous
+/// owner is provably dead — i.e. we can acquire an exclusive fs2 lock
+/// on it without blocking. A live publisher in
+/// `apply_real_plan`/`publish_terminal` holds the same lock, so
+/// `try_lock_exclusive` fails fast against an in-progress publish
+/// instead of racing it.
+fn orphan_is_dead(orphan: &Path) -> bool {
+    use fs2::FileExt as _;
+    let Ok(f) = std::fs::OpenOptions::new().read(true).open(orphan) else {
+        return false;
+    };
+    let acquired = f.try_lock_exclusive().is_ok();
+    if acquired {
+        let _ = f.unlock();
+    }
+    acquired
+}
+
+/// Stranded marker path (issue #289 review round 2/3). Planted in the
+/// `applied/` directory when `SQLite` mutations have committed but the
+/// committed-sidecar could not be written. Functions as an alternate
+/// "DB durable, publish pending" signal: a subsequent `flush apply` for
+/// the same id detects the marker and resumes straight to publish
+/// instead of replaying mutations. Removed by `publish_terminal` once
+/// the terminal hard-link is durable.
+fn stranded_marker_path(vault: &Path, ulid: &cairn_core::generated::common::Ulid) -> PathBuf {
+    use cairn_core::domain::flush_plan::store::{Bucket, plan_path};
+    plan_path(vault, Bucket::Applied, ulid).with_extension("json.stranded")
+}
+
+/// Write the stranded marker durably so a crash mid-write cannot leave
+/// an ambiguous half-written file. fsync the parent so the rename
+/// survives.
+fn write_stranded_marker(path: &Path) -> std::io::Result<()> {
+    use std::io::Write as _;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(format!(".tmp.{}", std::process::id()));
+    let tmp = PathBuf::from(tmp);
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(b"stranded: committed-sidecar write failed; manual recovery required\n")?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)?;
+    if let Some(parent) = path.parent() {
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+/// Sidecar path used to mark "`SQLite` mutations committed, publish still
+/// pending" — see issue #289 review rounds 1/5. Keyed on the canonical
+/// per-plan in-flight path (NOT the pid-suffixed owned-claim path) so
+/// resume after `process_owned_claim` still finds it. Removed by
+/// `publish_terminal`.
+fn committed_sidecar_path_for(vault: &Path, ulid: &cairn_core::generated::common::Ulid) -> PathBuf {
+    use cairn_core::domain::flush_plan::store::{Bucket, plan_path};
+    let canonical = plan_path(vault, Bucket::Applied, ulid).with_extension("json.in-flight");
+    let mut p = canonical.as_os_str().to_owned();
+    p.push(".committed");
+    PathBuf::from(p)
+}
+
+/// Atomically write the committed-sidecar file. fsyncs the file and its
+/// parent directory so a crash here cannot leave an "almost-written"
+/// sidecar that's later truncated.
+fn write_committed_sidecar(path: &Path) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(format!(".tmp.{}", std::process::id()));
+    let tmp = PathBuf::from(tmp);
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(b"committed\n")?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)?;
+    if let Some(parent) = path.parent() {
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+fn apply_real_plan(vault: &Path, plan: &FlushPlan) -> anyhow::Result<()> {
+    let db_path = crate::mcp::store_db_path(vault);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async move {
+        let sqlite = Arc::new(cairn_store_sqlite::open(&db_path).await?);
+        let store: Arc<dyn cairn_core::contract::memory_store::MemoryStore> = sqlite.clone();
+        flush_apply::apply_real_plan(&store, &sqlite, plan).await
+    })
 }
 
 #[allow(
@@ -525,6 +770,32 @@ fn claim_pending(
     if !pending.exists()
         && let Some(orphan) = find_orphan_owned_claim(&claim, ulid)
     {
+        // Issue #289 re-loop r5: if a prior attempt durably committed
+        // SQLite mutations (committed-sidecar or stranded marker
+        // present), the orphan IS provably dead — its crash already
+        // happened post-commit. Auto-resume by renaming the orphan
+        // back to the canonical claim path so the caller can finish
+        // publish. Without this, a post-commit crash strands the plan
+        // until manual filesystem repair, even though the recovery
+        // signal is already on disk.
+        let committed_sidecar = committed_sidecar_path_for(vault, ulid);
+        let stranded = stranded_marker_path(vault, ulid);
+        if (committed_sidecar.exists() || stranded.exists()) && orphan_is_dead(&orphan) {
+            match std::fs::rename(&orphan, &claim) {
+                Ok(()) => {
+                    // Fall through to the canonical `claim.exists()`
+                    // branch on next call (or the re-attempt below).
+                    // Re-execute the same exclusive-ownership rename
+                    // the caller used above.
+                    let owned = process_owned_claim(&claim);
+                    return match std::fs::rename(&claim, &owned) {
+                        Ok(()) => ClaimOutcome::Claimed(owned),
+                        Err(e) => ClaimOutcome::Err(e),
+                    };
+                }
+                Err(e) => return ClaimOutcome::Err(e),
+            }
+        }
         return ClaimOutcome::Err(std::io::Error::other(format!(
             "stranded in-flight claim for {0} at {1}; auto-recovery is disabled. \
              Verify the owning process is dead, then manually rename it back to \
@@ -649,6 +920,16 @@ fn publish_terminal(
     }
     // Claim file is no longer needed (terminal is the canonical record).
     let _ = std::fs::remove_file(claim);
+    // The committed-sidecar (issue #289 review round 1) only meant
+    // "publish still pending"; once the terminal hard-link is durable the
+    // sidecar must go so a future, separate apply on a fresh claim does
+    // not mistake it for an already-applied operation.
+    let _ = std::fs::remove_file(committed_sidecar_path_for(vault, ulid));
+    // Round 3 review fix: the stranded marker (planted when a prior
+    // sidecar write failed) is also a "publish pending" artifact —
+    // remove it once the terminal hard-link is durable so a future
+    // unrelated apply does not auto-resume off a stale marker.
+    let _ = std::fs::remove_file(stranded_marker_path(vault, ulid));
     let _ = std::fs::remove_file(cairn_core::domain::flush_plan::store::diff_path(
         vault, ulid,
     ));

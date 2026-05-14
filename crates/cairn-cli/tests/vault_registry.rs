@@ -12,6 +12,10 @@ fn make_vault(dir: &tempfile::TempDir) -> PathBuf {
     path
 }
 
+fn non_vault_root_child() -> PathBuf {
+    PathBuf::from(format!("/__cairn_test_no_vault_{}", std::process::id()))
+}
+
 // ── Registry CRUD ────────────────────────────────────────────────────────────
 
 #[test]
@@ -166,7 +170,7 @@ fn walk_up_skips_dir_without_cairn() {
 
     let err = resolve_vault(ResolveOpts {
         explicit: None,
-        cwd: Some(PathBuf::from("/tmp")),
+        cwd: Some(non_vault_root_child()),
         store: &store,
     })
     .unwrap_err();
@@ -196,7 +200,7 @@ fn registry_default_used_as_fallback() {
 
     let resolved = resolve_vault(ResolveOpts {
         explicit: None,
-        cwd: Some(PathBuf::from("/tmp")),
+        cwd: Some(non_vault_root_child()),
         store: &store,
     })
     .unwrap();

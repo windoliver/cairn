@@ -41,8 +41,9 @@ impl SqliteMemoryStore {
     /// Inherent `get` implementation; the trait method
     /// [`MemoryStore::get`] guards `self.conn` then delegates here.
     ///
-    /// Tombstoned rows are filtered at the SQL boundary (`tombstoned = 0`)
-    /// so callers see `Ok(None)` for both missing and soft-deleted rows.
+    /// Tombstoned and internal COW staging rows are filtered at the SQL
+    /// boundary so callers see `Ok(None)` for missing, soft-deleted, and
+    /// not-yet-activated rows.
     ///
     /// [`MemoryStore::get`]: cairn_core::contract::memory_store::MemoryStore::get
     ///
@@ -65,7 +66,7 @@ impl SqliteMemoryStore {
                 let row: Option<(String, String)> = c
                     .query_row(
                         "SELECT record_json, consent_model FROM records \
-                          WHERE record_id = ?1 AND tombstoned = 0",
+                          WHERE record_id = ?1 AND tombstoned = 0 AND cow_staged = 0",
                         params![key],
                         |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
                     )
@@ -121,6 +122,12 @@ impl SqliteMemoryStore {
         let limit = args.limit.clamp(1, LIST_LIMIT_MAX);
         let kind = args.kind.map(|k| k.as_str().to_owned());
         let class = args.class.map(|c| c.as_str().to_owned());
+        let record_ids: Vec<String> = args
+            .record_ids
+            .iter()
+            .map(|id| id.as_str().to_owned())
+            .collect();
+        let scope = args.scope.clone();
         let visibilities: Vec<String> = args
             .visibility_allowlist
             .iter()
@@ -131,8 +138,10 @@ impl SqliteMemoryStore {
         let page = conn
             .call(move |c| {
                 let (sql, p) = build_list_query(
+                    &record_ids,
                     kind.as_deref(),
                     class.as_deref(),
+                    scope.as_ref(),
                     &visibilities,
                     cursor.as_ref(),
                     limit,
@@ -194,9 +203,10 @@ impl SqliteMemoryStore {
     /// Inherent `versions` implementation; the trait method
     /// [`MemoryStore::versions`] guards `self.conn` then delegates here.
     ///
-    /// Returns the full per-target history ordered `version ASC` (oldest
-    /// first). Includes both active and inactive rows AND tombstoned rows;
-    /// the contract requires audit-grade visibility for the lifecycle
+    /// Returns the committed per-target history ordered `version ASC` (oldest
+    /// first). Includes both active and inactive rows AND tombstoned rows,
+    /// but excludes internal COW staging rows until activation commits them;
+    /// the contract requires audit-grade visibility for committed lifecycle
     /// workflows (brief §10).
     ///
     /// [`MemoryStore::versions`]: cairn_core::contract::memory_store::MemoryStore::versions
@@ -226,7 +236,9 @@ impl SqliteMemoryStore {
                     "SELECT record_id, target_id, version, created_at, updated_at, \
                             active, tombstoned, tombstone_reason, body_hash, \
                             schema_version_major, schema_version_minor \
-                       FROM records WHERE target_id = ?1 ORDER BY version ASC",
+                       FROM records \
+                      WHERE target_id = ?1 AND cow_staged = 0 \
+                      ORDER BY version ASC",
                 )?;
                 let rows = stmt
                     .query_map(params![key], |row| {
@@ -441,17 +453,27 @@ fn project_version_row(row: VersionRowTuple) -> Result<RecordVersion, StoreError
 /// the optional keyset cursor; and over-fetches by one row so the caller
 /// can detect end-of-stream via `rows.len() > limit`.
 fn build_list_query(
+    record_ids: &[String],
     kind: Option<&str>,
     class: Option<&str>,
+    scope: Option<&cairn_core::domain::ScopeTuple>,
     visibilities: &[String],
     cursor: Option<&ListCursor>,
     limit: usize,
 ) -> Result<(String, Vec<rusqlite::types::Value>), StoreError> {
     let mut sql = String::from(
         "SELECT record_json, updated_at, record_id, consent_model FROM records \
-          WHERE active = 1 AND tombstoned = 0",
+          WHERE active = 1 AND tombstoned = 0 AND cow_staged = 0",
     );
     let mut p: Vec<rusqlite::types::Value> = Vec::new();
+    if !record_ids.is_empty() {
+        sql.push_str(" AND record_id IN (");
+        sql.push_str(&vec!["?"; record_ids.len()].join(","));
+        sql.push(')');
+        for id in record_ids {
+            p.push(id.clone().into());
+        }
+    }
     if let Some(k) = kind {
         sql.push_str(" AND kind = ?");
         p.push(k.to_owned().into());
@@ -468,6 +490,15 @@ fn build_list_query(
             p.push(v.clone().into());
         }
     }
+    if let Some(scope) = scope {
+        push_scope_filter(&mut sql, &mut p, "tenant", scope.tenant.as_deref());
+        push_scope_filter(&mut sql, &mut p, "workspace", scope.workspace.as_deref());
+        push_scope_filter(&mut sql, &mut p, "project", scope.project.as_deref());
+        push_scope_filter(&mut sql, &mut p, "session_id", scope.session_id.as_deref());
+        push_scope_filter(&mut sql, &mut p, "entity", scope.entity.as_deref());
+        push_scope_filter(&mut sql, &mut p, "user", scope.user.as_deref());
+        push_scope_filter(&mut sql, &mut p, "agent", scope.agent.as_deref());
+    }
     if let Some(cur) = cursor {
         sql.push_str(" AND (updated_at, record_id) < (?, ?)");
         p.push(cur.updated_at.into());
@@ -482,6 +513,20 @@ fn build_list_query(
     })?;
     p.push(bound.into());
     Ok((sql, p))
+}
+
+fn push_scope_filter(
+    sql: &mut String,
+    params: &mut Vec<rusqlite::types::Value>,
+    field: &str,
+    value: Option<&str>,
+) {
+    if let Some(value) = value {
+        sql.push_str(" AND json_extract(scope, '$.");
+        sql.push_str(field);
+        sql.push_str("') = ?");
+        params.push(value.to_owned().into());
+    }
 }
 
 #[cfg(test)]

@@ -47,20 +47,34 @@ impl From<tokio_rusqlite::Error> for RecoveryError {
 
 /// Maps each [`WalKind`] to the [`StepBody`] that should run its steps.
 /// Implementations are owned by sibling issues #57 / #58.
+#[async_trait::async_trait]
 pub trait StepBodyRegistry: Send + Sync {
-    /// Returns the body for the given kind, or `None` if no body is
-    /// registered. `None` causes `Resume` and `AbortAndCompensate` to be
-    /// skipped with a structured warn.
-    fn body_for(&self, kind: WalKind) -> Option<Arc<dyn StepBody>>;
+    /// Returns the body for `kind` and `op_id`.
+    ///
+    /// Recovery registries may load durable payloads and reacquire locks
+    /// before returning a body that can run synchronously inside runner
+    /// transactions.
+    async fn body_for(
+        &self,
+        conn: &Arc<Connection>,
+        kind: WalKind,
+        op_id: &OperationId,
+    ) -> Result<Option<Arc<dyn StepBody>>, RecoveryError>;
 }
 
 /// Empty registry — every kind returns `None`. Used as the default while
 /// #57/#58 are in flight; lets terminal-finalize cases run without a body.
 pub struct EmptyRegistry;
 
+#[async_trait::async_trait]
 impl StepBodyRegistry for EmptyRegistry {
-    fn body_for(&self, _kind: WalKind) -> Option<Arc<dyn StepBody>> {
-        None
+    async fn body_for(
+        &self,
+        _conn: &Arc<Connection>,
+        _kind: WalKind,
+        _op_id: &OperationId,
+    ) -> Result<Option<Arc<dyn StepBody>>, RecoveryError> {
+        Ok(None)
     }
 }
 
@@ -332,7 +346,7 @@ async fn handle_resume(
     config: &RecoveryConfig,
     report: &mut RecoveryReport,
 ) -> Result<(), RecoveryError> {
-    let Some(body) = config.bodies.body_for(snapshot.kind) else {
+    let Some(body) = config.bodies.body_for(conn, snapshot.kind, op_id).await? else {
         warn!(
             op_id = %op_id,
             kind = ?snapshot.kind,

@@ -47,7 +47,7 @@ pub trait StepBody: Send + Sync {
     /// schedule a retry (up to [`MAX_STEP_ATTEMPTS`]).
     fn run(
         &self,
-        tx: &Transaction<'_>,
+        tx: &mut Transaction<'_>,
         op_id: &OperationId,
         step: &StepDef,
     ) -> Result<(), StepBodyError>;
@@ -127,23 +127,19 @@ async fn run_one_step(
         return Ok(());
     }
 
-    // 2. Up to MAX_STEP_ATTEMPTS attempts with backoff. Note `attempt` is
-    // a per-invocation loop counter used only to schedule the backoff
-    // sleep; the durable `wal_steps.attempts` column is incremented
-    // inside `try_one_attempt` and is lifetime-cumulative across runner
-    // re-entries (so `decide_recovery` can compare it against
-    // `MAX_STEP_ATTEMPTS`).
-    for attempt in 1..=MAX_STEP_ATTEMPTS {
+    // 2. Retry until the durable, lifetime-cumulative attempts count reaches
+    // MAX_STEP_ATTEMPTS. The loop counter is only for local backoff timing.
+    for attempt in 1.. {
         match try_one_attempt(conn, op_id, step, body).await? {
             AttemptOutcome::Done => return Ok(()),
-            AttemptOutcome::Failed if attempt < MAX_STEP_ATTEMPTS => {
-                tokio::time::sleep(backoff_for(attempt)).await;
-            }
-            AttemptOutcome::Failed => {
+            AttemptOutcome::Failed { attempts } if attempts >= MAX_STEP_ATTEMPTS => {
                 return Err(RunnerError::Exhausted {
                     op_id: op_id.clone(),
                     step_ord: step.ord,
                 });
+            }
+            AttemptOutcome::Failed { .. } => {
+                tokio::time::sleep(backoff_for(attempt)).await;
             }
         }
     }
@@ -157,7 +153,7 @@ async fn run_one_step(
 #[derive(Debug, Clone, Copy)]
 enum AttemptOutcome {
     Done,
-    Failed,
+    Failed { attempts: u32 },
 }
 
 /// Backoff durations per brief §5.6 retry policy: 100 ms / 400 ms / 1600 ms.
@@ -217,7 +213,7 @@ async fn try_one_attempt(
             // Phase 1: open a transaction, upsert the wal_steps row to
             // PENDING, run the body. Commit on Ok; drop (rollback) on Err.
             let body_result: Result<(), StepBodyError> = {
-                let tx = c.transaction()?;
+                let mut tx = c.transaction()?;
                 // `attempts` is lifetime-cumulative across runner re-entries.
                 // For a brand-new row we INSERT with `1`; on conflict we
                 // increment the existing value rather than overwriting with
@@ -237,7 +233,7 @@ async fn try_one_attempt(
                        started_at = COALESCE(wal_steps.started_at, ?4)",
                     rusqlite::params![op, step_owned.ord, step_owned.name, now],
                 )?;
-                let r = body.run(&tx, &op_id_for_body, &step_owned);
+                let r = body.run(&mut tx, &op_id_for_body, &step_owned);
                 if r.is_ok() {
                     let finished = now_ms();
                     tx.execute(
@@ -291,7 +287,13 @@ async fn try_one_attempt(
                             finished
                         ],
                     )?;
-                    Ok::<_, tokio_rusqlite::Error>(AttemptOutcome::Failed)
+                    let attempts = c.query_row(
+                        "SELECT attempts FROM wal_steps \
+                         WHERE operation_id = ?1 AND step_ord = ?2",
+                        rusqlite::params![op, step_owned.ord],
+                        |row| row.get::<_, u32>(0),
+                    )?;
+                    Ok::<_, tokio_rusqlite::Error>(AttemptOutcome::Failed { attempts })
                 }
             }
         })

@@ -28,6 +28,9 @@ Options:
       --rehydrate
 
 
+      --include-reasoning
+
+
       --include <ENUM>
           [possible values: tool_calls, reasoning]
 
@@ -35,6 +38,9 @@ Options:
 
 
       --turn <STRING>
+
+
+      --tool-call <STRING>
 
 
       --folder <STRING>
