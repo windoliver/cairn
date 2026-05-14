@@ -77,3 +77,31 @@ async fn reconcile_preview_rejects_immutable_field_over_http() {
     assert_eq!(json["accepted"], false);
     assert_eq!(json["rejectedFields"][0]["code"], "immutable_field_changed");
 }
+
+#[tokio::test]
+async fn smoke_loads_all_desktop_alpha_surfaces() {
+    let app = router(DesktopRepository::from_fixture(
+        DesktopFixture::load_default().expect("fixture"),
+    ));
+
+    for path in [
+        "/api/v1/vault",
+        "/api/v1/folders",
+        "/api/v1/records",
+        "/api/v1/graph",
+        "/api/v1/search?q=alpha",
+        "/api/v1/lint",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+    }
+}

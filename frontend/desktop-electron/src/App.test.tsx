@@ -1,5 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 
@@ -77,5 +78,29 @@ describe("App", () => {
     expect(screen.getByText("Markdown body")).toBeInTheDocument();
     expect(screen.getByText("Graph")).toBeInTheDocument();
     expect(screen.getByText("Lint")).toBeInTheDocument();
+  });
+
+  it("reviews a reconcile edit through the backend client", async () => {
+    const user = userEvent.setup();
+    api.previewReconcile.mockResolvedValueOnce({
+      accepted: true,
+      targetId: "rec-alpha-001",
+      expectedVersion: 2,
+      mutableDiff: { body: "Markdown body" },
+      rejectedFields: [],
+    });
+
+    render(<App api={api} />);
+
+    await screen.findAllByText("Project memory scaffold");
+    await user.click(screen.getByRole("button", { name: "Review reconcile" }));
+
+    expect(await screen.findByText("Ready to apply")).toBeInTheDocument();
+    expect(api.previewReconcile).toHaveBeenCalledWith({
+      targetId: "rec-alpha-001",
+      expectedVersion: 2,
+      backendHash: "sha256:fixture-alpha-001",
+      fieldDiff: { body: "Markdown body" },
+    });
   });
 });
