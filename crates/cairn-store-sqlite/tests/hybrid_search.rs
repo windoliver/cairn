@@ -41,7 +41,7 @@ async fn remove_vector(store: &cairn_store_sqlite::SqliteMemoryStore, record_id:
         .map(|_| ())
     })
     .await
-    .expect("remove vector")
+    .expect("remove vector");
 }
 
 #[tokio::test]
@@ -309,10 +309,10 @@ async fn hybrid_does_not_track_access_for_graph_seed_only_records() {
         hot_salience(&store, &a.id).await > f64::from(a.salience),
         "hybrid should strengthen the returned record",
     );
-    assert_eq!(
-        hot_salience(&store, &b.id).await,
-        f64::from(b.salience),
-        "hybrid must not strengthen records used only for graph seeding",
+    let b_salience = hot_salience(&store, &b.id).await;
+    assert!(
+        (b_salience - f64::from(b.salience)).abs() < f64::EPSILON,
+        "hybrid must not strengthen records used only for graph seeding: got {b_salience}",
     );
 }
 

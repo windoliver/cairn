@@ -83,8 +83,8 @@ async fn record_access_strengthens_salience_and_stamps_last_access() {
 
     let after = salience_row(&store, &rec.id).await;
     assert!((after.0 - 0.525).abs() < 0.000_001);
-    assert_eq!(
-        after.1, before.1,
+    assert!(
+        (after.1 - before.1).abs() < f64::EPSILON,
         "signed record_json salience must not be rewritten"
     );
     assert_eq!(after.2, before.2, "read access must not change updated_at");
@@ -126,8 +126,8 @@ async fn keyword_search_strengthens_returned_records() {
     assert_eq!(page.candidates.len(), 1);
     let row = salience_row(&store, &rec.id).await;
     assert!(row.0 > 0.5);
-    assert_eq!(
-        row.1, 0.5,
+    assert!(
+        (row.1 - 0.5).abs() < f64::EPSILON,
         "keyword search must not rewrite signed record_json"
     );
 }
@@ -210,8 +210,8 @@ async fn decay_updates_hot_salience_without_rewriting_signed_json() {
     assert_eq!(outcome.records_processed, 1);
     let after = salience_row(&store, &rec.id).await;
     assert!(after.0 < before.0, "hot salience should decay");
-    assert_eq!(
-        after.1, before.1,
+    assert!(
+        (after.1 - before.1).abs() < f64::EPSILON,
         "signed record_json salience must stay stable"
     );
     let hydrated = store.get(&rec.id).await.expect("get").expect("record");

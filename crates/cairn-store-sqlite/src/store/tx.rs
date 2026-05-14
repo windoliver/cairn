@@ -41,6 +41,8 @@ use crate::store::{SqliteMemoryStore, current_unix_ms};
 /// `(tenant, workspace)` partition tuple for a given session id.
 pub type SessionScopePartition = (Option<String>, Option<String>);
 
+type ActiveRecordRow = (String, f64, i64, Option<i64>, Option<i64>);
+
 /// Transactional handle exposed to closures passed to
 /// [`SqliteMemoryStore::with_tx`]. Methods are synchronous because the
 /// closure already runs on the DB worker thread; awaiting from inside
@@ -84,7 +86,7 @@ impl StoreTx<'_> {
         &self,
         target: &TargetId,
     ) -> Result<Option<StoredRecord>, StoreError> {
-        let row: Option<(String, f64, i64, Option<i64>, Option<i64>)> = self
+        let row: Option<ActiveRecordRow> = self
             .tx
             .query_row(
                 "SELECT record_json, salience, version, schema_version_major, schema_version_minor \

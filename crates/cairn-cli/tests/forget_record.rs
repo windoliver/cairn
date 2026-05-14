@@ -122,10 +122,10 @@ fn seed_superseded_record_direct(vault: &Path) -> (String, String) {
         let id = "01HQZX9F5N0000000000000323";
         record.id = RecordId::parse(id).expect("valid id");
         record.target_id = TargetId::parse(id).expect("valid target");
-        record.body = "issue313 old superseded pin target".to_owned();
+        "issue313 old superseded pin target".clone_into(&mut record.body);
         let first = store.upsert(&record).await.expect("seed v1");
 
-        record.body = "issue313 active successor pin target".to_owned();
+        "issue313 active successor pin target".clone_into(&mut record.body);
         let second = store.upsert(&record).await.expect("seed v2");
         assert_ne!(first.record_id, second.record_id);
         (
