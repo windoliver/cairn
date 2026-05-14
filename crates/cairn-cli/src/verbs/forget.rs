@@ -58,8 +58,6 @@ fn requested_capability(sub: &ArgMatches) -> &'static str {
         "cairn.mcp.v1.forget.session"
     } else if sub.get_one::<String>("scope").is_some() {
         "cairn.mcp.v1.forget.scope"
-    } else if sub.get_one::<String>("pin_record_id").is_some() {
-        "cairn.mcp.v1.forget.record"
     } else {
         "cairn.mcp.v1.forget.record"
     }

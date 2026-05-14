@@ -1823,8 +1823,8 @@ mod tests {
     #[test]
     fn default_salience_config_matches_issue_313() {
         let cfg = CairnConfig::default();
-        assert_eq!(cfg.vault.salience.decay_rate, 0.05);
-        assert_eq!(cfg.vault.salience.eviction_threshold, 0.10);
+        assert!((cfg.vault.salience.decay_rate - 0.05).abs() < f32::EPSILON);
+        assert!((cfg.vault.salience.eviction_threshold - 0.10).abs() < f32::EPSILON);
         assert_eq!(cfg.vault.salience.min_age_days, 30);
         assert_eq!(cfg.vault.salience.batch_limit, 500);
     }

@@ -19,6 +19,10 @@ pub fn decay_salience(salience: f32, decay_rate: f32, days_since_last_access: u3
     } else {
         0.0
     };
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "salience is stored as f32, and the forgetting curve intentionally operates in that domain"
+    )]
     let exponent = -rate * days_since_last_access as f32;
     (s * exponent.exp()).clamp(0.0, 1.0)
 }

@@ -5,13 +5,21 @@ use cairn_core::contract::memory_store::{
 };
 use cairn_core::domain::RecordId;
 use cairn_core::pipeline::salience::{apply_access, decay_salience};
-use rusqlite::params;
+use rusqlite::{OptionalExtension, Transaction, params};
 
 use crate::error::StoreError;
 use crate::store::SqliteMemoryStore;
 use crate::store::projection::record_from_json;
 
 const MILLIS_PER_DAY: i64 = 86_400_000;
+
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "SQLite REAL is f64, but salience is a bounded f32 domain value"
+)]
+fn stored_salience_to_f32(value: f64) -> f32 {
+    value as f32
+}
 
 impl SqliteMemoryStore {
     pub(crate) async fn do_record_access(
@@ -45,7 +53,7 @@ impl SqliteMemoryStore {
                 };
                 let mut record = record_from_json(&json)
                     .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
-                let old = old_salience as f32;
+                let old = stored_salience_to_f32(old_salience);
                 let new = apply_access(old);
                 record.salience = new;
                 let record_json = serde_json::to_string(&record)
@@ -136,7 +144,7 @@ impl SqliteMemoryStore {
                     continue;
                 }
                 processed = processed.saturating_add(1);
-                let old = salience as f32;
+                let old = stored_salience_to_f32(salience);
                 let new = decay_salience(old, policy.decay_rate, days);
                 let mut record = record_from_json(&json)
                     .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
@@ -147,7 +155,10 @@ impl SqliteMemoryStore {
                     "UPDATE records SET record_json = ?2, salience = ?3 WHERE record_id = ?1",
                     params![id, record_json, f64::from(new)],
                 )?;
-                if new < policy.eviction_threshold && days > policy.min_age_days {
+                if new < policy.eviction_threshold
+                    && days > policy.min_age_days
+                    && source_forget_permitted(&tx, &record, now_ms)?
+                {
                     let record_id = RecordId::parse(id).map_err(|e| {
                         tokio_rusqlite::Error::Other(Box::new(StoreError::Invariant {
                             what: format!("invalid stored record_id during salience decay: {e}"),
@@ -170,4 +181,32 @@ impl SqliteMemoryStore {
         .await
         .map_err(StoreError::from)
     }
+}
+
+fn source_forget_permitted(
+    tx: &Transaction<'_>,
+    record: &cairn_core::domain::MemoryRecord,
+    now_ms: i64,
+) -> Result<bool, rusqlite::Error> {
+    let source_hash = record.provenance.source_hash.trim();
+    if source_hash.is_empty() {
+        return Ok(false);
+    }
+    let scope = record.scope.canonical_wire();
+    let latest_kind = tx
+        .query_row(
+            "SELECT kind \
+             FROM consent_journal \
+             WHERE subject = ?1 \
+               AND scope = ?2 \
+               AND kind IN ('grant', 'revoke') \
+               AND decided_at <= ?3 \
+               AND (expires_at IS NULL OR expires_at > ?3) \
+             ORDER BY decided_at DESC, rowid DESC \
+             LIMIT 1",
+            params![source_hash, scope, now_ms],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    Ok(matches!(latest_kind.as_deref(), Some("grant")))
 }
