@@ -15,17 +15,22 @@
 use std::path::Path;
 use std::process::ExitCode;
 
+use anyhow::Context as _;
 use cairn_core::config::{CairnConfig, EmbeddingModelKind, ScreenBackend};
 use cairn_core::domain::identity::keys::VaultId;
+use cairn_core::domain::{BudgetObservation, LocalSensorName, SensorGateReason};
 use cairn_core::generated::common::Capabilities;
 use cairn_core::generated::status::{
     StatusResponse, StatusResponseMcpGraphTools, StatusResponseMcpGraphToolsProbeBasis,
     StatusResponseMcpGraphToolsReason, StatusResponseMcpGraphToolsState, StatusResponseSensors,
-    StatusResponseSensorsScreen, StatusResponseSensorsScreenBackend,
-    StatusResponseSensorsScreenDegradation, StatusResponseSensorsScreenDegradationCode,
-    StatusResponseSensorsScreenMode, StatusResponseSensorsScreenOcrEngine,
-    StatusResponseSensorsScreenPermission, StatusResponseSensorsScreenState,
-    StatusResponseServerInfo,
+    StatusResponseSensorsLocal, StatusResponseSensorsLocalBudget,
+    StatusResponseSensorsLocalConsent, StatusResponseSensorsLocalGate,
+    StatusResponseSensorsLocalLastDropReason, StatusResponseSensorsLocalRetention,
+    StatusResponseSensorsLocalSensor, StatusResponseSensorsScreen,
+    StatusResponseSensorsScreenBackend, StatusResponseSensorsScreenDegradation,
+    StatusResponseSensorsScreenDegradationCode, StatusResponseSensorsScreenMode,
+    StatusResponseSensorsScreenOcrEngine, StatusResponseSensorsScreenPermission,
+    StatusResponseSensorsScreenState, StatusResponseServerInfo,
 };
 use cairn_core::pipeline::dispatch::{DefaultRegistry, pipeline_dispatch_advertisement};
 use cairn_sensors_local::screen::{
@@ -170,6 +175,13 @@ pub fn run_with_context(
 
     let bound = matches!(binding, Some(VaultBinding::Bound));
     let caps = compute_capabilities(vault_root, config, bound);
+    let local_sensor_status = match map_local_sensor_status(vault_root, status_config, bound) {
+        Ok(rows) => rows,
+        Err(error) => {
+            eprintln!("cairn status: sensor status error — {error:#}");
+            return ExitCode::from(78); // EX_CONFIG
+        }
+    };
 
     // ── MCP graph-tools availability (issue #190 Plan A) ─────────────
     // The probe only runs against a *bound* vault: an unbound CWD has
@@ -215,7 +227,10 @@ pub fn run_with_context(
         },
         capabilities: caps,
         extensions: vec![],
-        sensors: map_screen_probe(&screen::probe_config(&status_config.sensors.screen)),
+        sensors: map_screen_probe(
+            &screen::probe_config(&status_config.sensors.screen),
+            Some(local_sensor_status),
+        ),
         // Advertise the live routing policy (issue #217). The
         // `capture_trace` verb dispatches through the same
         // `DefaultRegistry` (see `crates/cairn-cli/src/verbs/capture_trace.rs`
@@ -444,8 +459,188 @@ fn compute_embedding_provider_ready(
     super::embedding_provider_ready(config, model_present, vault_root)
 }
 
-fn map_screen_probe(probe: &ScreenProbe) -> StatusResponseSensors {
+fn map_local_sensor_status(
+    vault_root: Option<&Path>,
+    config: &CairnConfig,
+    bound: bool,
+) -> anyhow::Result<Vec<StatusResponseSensorsLocal>> {
+    let consent_states = if let Some(root) = vault_root.filter(|_| bound) {
+        let db_path = root.join(".cairn").join("cairn.db");
+        if db_path.exists() {
+            block_on(read_local_sensor_consent_states(root))?
+        } else {
+            vec![crate::sensor_gate::SensorConsentState::Missing; LocalSensorName::ALL.len()]
+        }
+    } else {
+        vec![crate::sensor_gate::SensorConsentState::Missing; LocalSensorName::ALL.len()]
+    };
+    let last_drops = vault_root
+        .map(crate::sensor_gate::read_sensor_drop_metrics)
+        .transpose()?
+        .unwrap_or_default();
+
+    let rows = LocalSensorName::ALL
+        .into_iter()
+        .zip(consent_states)
+        .map(|(sensor, consent)| {
+            let enabled = crate::sensor_gate::sensor_enabled(config, sensor);
+            let gate = status_gate(config, consent, sensor);
+            StatusResponseSensorsLocal {
+                budget: status_budget(config, sensor),
+                consent: status_consent(consent),
+                enabled,
+                gate,
+                last_drop_reason: last_drops
+                    .iter()
+                    .rev()
+                    .find(|drop| drop.sensor == sensor)
+                    .and_then(|drop| status_last_drop_reason(drop.reason)),
+                retention: status_retention(config, sensor),
+                sensor: status_sensor(sensor),
+            }
+        })
+        .collect();
+    Ok(rows)
+}
+
+async fn read_local_sensor_consent_states(
+    vault_root: &Path,
+) -> anyhow::Result<Vec<crate::sensor_gate::SensorConsentState>> {
+    let db_path = vault_root.join(".cairn").join("cairn.db");
+    let store = cairn_store_sqlite::open(&db_path)
+        .await
+        .map_err(anyhow::Error::from)
+        .with_context(|| format!("open {}", db_path.display()))?;
+    let mut states = Vec::with_capacity(LocalSensorName::ALL.len());
+    for sensor in LocalSensorName::ALL {
+        states.push(crate::sensor_gate::latest_sensor_consent(&store, sensor).await?);
+    }
+    Ok(states)
+}
+
+fn block_on<T>(future: impl std::future::Future<Output = anyhow::Result<T>>) -> anyhow::Result<T> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("build async runtime")?
+        .block_on(future)
+}
+
+fn status_gate(
+    config: &CairnConfig,
+    consent: crate::sensor_gate::SensorConsentState,
+    sensor: LocalSensorName,
+) -> StatusResponseSensorsLocalGate {
+    match crate::sensor_gate::evaluate_sensor_gate(
+        config,
+        consent,
+        sensor,
+        BudgetObservation { items: 0, bytes: 0 },
+    ) {
+        Ok(()) => StatusResponseSensorsLocalGate::Allowed,
+        Err(SensorGateReason::Disabled) => StatusResponseSensorsLocalGate::Disabled,
+        Err(SensorGateReason::PrivacyDenied) => StatusResponseSensorsLocalGate::PrivacyDenied,
+        Err(SensorGateReason::BudgetExceeded) => StatusResponseSensorsLocalGate::BudgetExceeded,
+    }
+}
+
+fn status_budget(
+    config: &CairnConfig,
+    sensor: LocalSensorName,
+) -> StatusResponseSensorsLocalBudget {
+    match sensor {
+        LocalSensorName::Screen => StatusResponseSensorsLocalBudget {
+            max_bytes: Some(i64::from(
+                config.sensors.screen.budget.max_text_bytes_per_event,
+            )),
+            max_items: Some(i64::from(
+                config.sensors.screen.budget.max_frames_per_minute,
+            )),
+        },
+        LocalSensorName::Hook => shared_budget(&config.sensors.hooks.budget),
+        LocalSensorName::Ide => shared_budget(&config.sensors.ide.budget),
+        LocalSensorName::Terminal => shared_budget(&config.sensors.terminal.budget),
+        LocalSensorName::Clipboard => shared_budget(&config.sensors.clipboard.budget),
+        LocalSensorName::Voice => shared_budget(&config.sensors.voice.budget),
+        LocalSensorName::Recording => shared_budget(&config.sensors.recording.budget),
+    }
+}
+
+fn shared_budget(
+    budget: &cairn_core::config::SensorCaptureBudget,
+) -> StatusResponseSensorsLocalBudget {
+    StatusResponseSensorsLocalBudget {
+        max_bytes: budget.max_bytes.and_then(|value| i64::try_from(value).ok()),
+        max_items: budget.max_items.and_then(|value| i64::try_from(value).ok()),
+    }
+}
+
+fn status_retention(
+    config: &CairnConfig,
+    sensor: LocalSensorName,
+) -> StatusResponseSensorsLocalRetention {
+    let max_days = match sensor {
+        LocalSensorName::Hook => config.sensors.hooks.retention.max_days,
+        LocalSensorName::Ide => config.sensors.ide.retention.max_days,
+        LocalSensorName::Terminal => config.sensors.terminal.retention.max_days,
+        LocalSensorName::Clipboard => config.sensors.clipboard.retention.max_days,
+        LocalSensorName::Voice => config.sensors.voice.retention.max_days,
+        LocalSensorName::Screen => config.sensors.screen.retention.max_days,
+        LocalSensorName::Recording => config.sensors.recording.retention.max_days,
+    };
+    StatusResponseSensorsLocalRetention {
+        max_days: max_days.map(i64::from),
+    }
+}
+
+fn status_consent(
+    consent: crate::sensor_gate::SensorConsentState,
+) -> StatusResponseSensorsLocalConsent {
+    match consent {
+        crate::sensor_gate::SensorConsentState::Enabled => {
+            StatusResponseSensorsLocalConsent::Enabled
+        }
+        crate::sensor_gate::SensorConsentState::Disabled => {
+            StatusResponseSensorsLocalConsent::Disabled
+        }
+        crate::sensor_gate::SensorConsentState::Missing => {
+            StatusResponseSensorsLocalConsent::Missing
+        }
+    }
+}
+
+fn status_sensor(sensor: LocalSensorName) -> StatusResponseSensorsLocalSensor {
+    match sensor {
+        LocalSensorName::Hook => StatusResponseSensorsLocalSensor::Hook,
+        LocalSensorName::Ide => StatusResponseSensorsLocalSensor::Ide,
+        LocalSensorName::Terminal => StatusResponseSensorsLocalSensor::Terminal,
+        LocalSensorName::Clipboard => StatusResponseSensorsLocalSensor::Clipboard,
+        LocalSensorName::Voice => StatusResponseSensorsLocalSensor::Voice,
+        LocalSensorName::Screen => StatusResponseSensorsLocalSensor::Screen,
+        LocalSensorName::Recording => StatusResponseSensorsLocalSensor::Recording,
+    }
+}
+
+fn status_last_drop_reason(
+    reason: SensorGateReason,
+) -> Option<StatusResponseSensorsLocalLastDropReason> {
+    match reason {
+        SensorGateReason::Disabled => Some(StatusResponseSensorsLocalLastDropReason::Disabled),
+        SensorGateReason::PrivacyDenied => {
+            Some(StatusResponseSensorsLocalLastDropReason::PrivacyDenied)
+        }
+        SensorGateReason::BudgetExceeded => {
+            Some(StatusResponseSensorsLocalLastDropReason::BudgetExceeded)
+        }
+    }
+}
+
+fn map_screen_probe(
+    probe: &ScreenProbe,
+    local: Option<Vec<StatusResponseSensorsLocal>>,
+) -> StatusResponseSensors {
     StatusResponseSensors {
+        local,
         screen: StatusResponseSensorsScreen {
             backend: map_screen_backend(probe.backend),
             degradation: probe.degradation.as_ref().map(|degradation| {

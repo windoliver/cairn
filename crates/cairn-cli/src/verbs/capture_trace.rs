@@ -33,8 +33,9 @@ use cairn_core::domain::capture::{
 };
 use cairn_core::domain::trace::{TraceBlock, TraceEvent, TraceLink};
 use cairn_core::domain::{
-    ActorChainEntry, CaptureEventId, ChainRole, Identity, Rfc3339Timestamp, ScopeTuple, SessionId,
-    ZeroCaptureAuditInput, ZeroCaptureReport, ZeroCaptureTrigger, decide_zero_capture_nudge,
+    ActorChainEntry, BudgetObservation, CaptureEventId, ChainRole, Identity, LocalSensorName,
+    Rfc3339Timestamp, ScopeTuple, SensorGateReason, SessionId, ZeroCaptureAuditInput,
+    ZeroCaptureReport, ZeroCaptureTrigger, decide_zero_capture_nudge,
 };
 use cairn_core::generated::common::Ulid as WireUlid;
 use cairn_core::generated::envelope::{
@@ -51,7 +52,7 @@ use cairn_core::pipeline::filter::{
     Decision, FilterInputs, RedactionTag, fence, redact, should_memorize,
 };
 use cairn_core::pipeline::turn::summarize_turn;
-use cairn_core::policy_trace::{PolicyGate, PolicyTraceEntry, to_wire};
+use cairn_core::policy_trace::{PolicyErrorCode, PolicyGate, PolicyTraceEntry, to_wire};
 use cairn_store_sqlite::SqliteMemoryStore;
 use clap::ArgMatches;
 use sha2::{Digest as _, Sha256};
@@ -60,6 +61,9 @@ use tokio::io::{AsyncBufReadExt as _, BufReader};
 use ulid::Ulid;
 
 use crate::identity::{guard::refuse_if_degraded, status::ReconciliationReport};
+use crate::sensor_gate::{
+    SensorDropBudgetMetric, SensorDropMetric, SensorGateStage, append_sensor_drop_metric,
+};
 
 use super::envelope::{emit_json, human_error, invalid_args_response, new_operation_id};
 
@@ -140,7 +144,7 @@ pub async fn run_handler(
     vault_root: &Path,
     from: &Path,
 ) -> anyhow::Result<CaptureTraceResponse> {
-    run_handler_inner(store, vault_root, from, None).await
+    run_handler_inner(store, vault_root, from, None, None).await
 }
 
 /// Persist a JSONL batch while binding projected rows to a verified vault scope.
@@ -150,7 +154,24 @@ pub async fn run_handler_with_scope(
     from: &Path,
     scope_binding: ScopeTuple,
 ) -> anyhow::Result<CaptureTraceResponse> {
-    run_handler_inner(store, vault_root, from, Some(&scope_binding)).await
+    run_handler_inner(store, vault_root, from, Some(&scope_binding), None).await
+}
+
+async fn run_handler_with_scope_and_config(
+    store: &SqliteMemoryStore,
+    vault_root: &Path,
+    from: &Path,
+    scope_binding: ScopeTuple,
+    sensor_config: &CairnConfig,
+) -> anyhow::Result<CaptureTraceResponse> {
+    run_handler_inner(
+        store,
+        vault_root,
+        from,
+        Some(&scope_binding),
+        Some(sensor_config),
+    )
+    .await
 }
 
 /// Persist an already-materialized batch of capture events.
@@ -165,7 +186,7 @@ pub async fn run_events_handler(
     events: Vec<CaptureEvent>,
 ) -> anyhow::Result<CaptureTraceResponse> {
     capture_trace_guard()?;
-    run_events_handler_inner_no_guard(store, vault_root, events, None).await
+    run_events_handler_inner_no_guard(store, vault_root, events, None, None).await
 }
 
 /// Persist an already-materialized batch while binding projected rows to a verified vault scope.
@@ -176,7 +197,7 @@ pub async fn run_events_handler_with_scope(
     scope_binding: ScopeTuple,
 ) -> anyhow::Result<CaptureTraceResponse> {
     capture_trace_guard()?;
-    run_events_handler_inner_no_guard(store, vault_root, events, Some(&scope_binding)).await
+    run_events_handler_inner_no_guard(store, vault_root, events, Some(&scope_binding), None).await
 }
 
 /// Persist a direct `Vec<TraceBlock>` capture from a JSON file.
@@ -246,10 +267,11 @@ async fn run_handler_inner(
     vault_root: &Path,
     from: &Path,
     scope_binding: Option<&ScopeTuple>,
+    sensor_config: Option<&CairnConfig>,
 ) -> anyhow::Result<CaptureTraceResponse> {
     capture_trace_guard()?;
     let events = read_jsonl_events(from).await?;
-    run_events_handler_inner_no_guard(store, vault_root, events, scope_binding).await
+    run_events_handler_inner_no_guard(store, vault_root, events, scope_binding, sensor_config).await
 }
 
 fn capture_trace_guard() -> anyhow::Result<()> {
@@ -266,6 +288,7 @@ async fn run_events_handler_inner_no_guard(
     vault_root: &Path,
     events: Vec<CaptureEvent>,
     scope_binding: Option<&ScopeTuple>,
+    sensor_config: Option<&CairnConfig>,
 ) -> anyhow::Result<CaptureTraceResponse> {
     // Group by (session_id, turn_id). Events missing either ref, or
     // failing structural validation, are reported as failed and skipped
@@ -378,6 +401,34 @@ async fn run_events_handler_inner_no_guard(
             };
             if classified == TraceEvent::Stop {
                 had_stop = true;
+            }
+
+            if let Some(config) = sensor_config {
+                match evaluate_capture_trace_sensor_gate(store, vault_root, config, event).await {
+                    Ok(Some(reason)) => {
+                        policy_trace_entries.push(PolicyTraceEntry::error(
+                            PolicyGate::SensorConsent,
+                            PolicyErrorCode::from_static(reason.as_str()),
+                        ));
+                        failed_turns.push((
+                            session_str.clone(),
+                            turn_str.clone(),
+                            format!("sensor_gate:{}", reason.as_str()),
+                        ));
+                        group_failed = true;
+                        break;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        failed_turns.push((
+                            session_str.clone(),
+                            turn_str.clone(),
+                            format!("sensor_gate: {error:#}"),
+                        ));
+                        group_failed = true;
+                        break;
+                    }
+                }
             }
 
             // Resolve body from sources/, route it through the Capture →
@@ -942,6 +993,84 @@ async fn resolve_body_bytes(vault_root: &Path, event: &CaptureEvent) -> anyhow::
     Ok(bytes)
 }
 
+async fn evaluate_capture_trace_sensor_gate(
+    store: &SqliteMemoryStore,
+    vault_root: &Path,
+    config: &CairnConfig,
+    event: &CaptureEvent,
+) -> anyhow::Result<Option<SensorGateReason>> {
+    let Some(sensor) = LocalSensorName::from_source_family(event.source_family) else {
+        return Ok(None);
+    };
+    let consent = crate::sensor_gate::latest_sensor_consent(store, sensor).await?;
+    let observation = BudgetObservation {
+        items: 1,
+        bytes: payload_metadata_len(vault_root, event).await.unwrap_or(0),
+    };
+    match crate::sensor_gate::evaluate_sensor_gate(config, consent, sensor, observation) {
+        Ok(()) => Ok(None),
+        Err(reason) => {
+            append_capture_trace_drop_metric(
+                vault_root,
+                config,
+                event,
+                sensor,
+                reason,
+                observation,
+            )?;
+            Ok(Some(reason))
+        }
+    }
+}
+
+fn append_capture_trace_drop_metric(
+    vault_root: &Path,
+    config: &CairnConfig,
+    event: &CaptureEvent,
+    sensor: LocalSensorName,
+    reason: SensorGateReason,
+    observation: BudgetObservation,
+) -> anyhow::Result<()> {
+    let budget = (reason == SensorGateReason::BudgetExceeded)
+        .then(|| {
+            crate::sensor_gate::sensor_budget(config, sensor).map(|budget| SensorDropBudgetMetric {
+                max_items: budget.max_items,
+                max_bytes: budget.max_bytes,
+                observed_items: observation.items,
+                observed_bytes: observation.bytes,
+            })
+        })
+        .flatten();
+    let refs = event.refs.as_ref();
+    let metric = SensorDropMetric {
+        event: crate::sensor_gate::SENSOR_DROP_EVENT,
+        sensor,
+        source_family: Some(event.source_family),
+        reason,
+        stage: SensorGateStage::PreExtraction,
+        operation_id: Some(event.event_id.as_str().to_owned()),
+        session_id: refs.and_then(|refs| refs.session_id.clone()),
+        turn_id: refs.and_then(|refs| refs.turn_id.clone()),
+        budget,
+    };
+    append_sensor_drop_metric(vault_root, &metric)
+}
+
+async fn payload_metadata_len(vault_root: &Path, event: &CaptureEvent) -> Option<u64> {
+    let raw_path = vault_root.join(&event.payload_ref);
+    let canon_sources = tokio::fs::canonicalize(vault_root.join("sources"))
+        .await
+        .ok()?;
+    let canon_path = tokio::fs::canonicalize(&raw_path).await.ok()?;
+    if !canon_path.starts_with(canon_sources) {
+        return None;
+    }
+    tokio::fs::metadata(canon_path)
+        .await
+        .ok()
+        .map(|metadata| metadata.len())
+}
+
 /// Compute the lowercase hex SHA-256 digest of `bytes`.
 fn sha256_hex(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
@@ -1295,7 +1424,14 @@ async fn run_async(input: CaptureTraceInput, vault_root: PathBuf, config: CairnC
     };
     let result = match input {
         CaptureTraceInput::Jsonl(from) => {
-            run_handler_with_scope(&ctx.store, &ctx.vault_root, &from, scope_binding).await
+            run_handler_with_scope_and_config(
+                &ctx.store,
+                &ctx.vault_root,
+                &from,
+                scope_binding,
+                &ctx.config,
+            )
+            .await
         }
         CaptureTraceInput::Blocks { path, session_id } => {
             run_blocks_handler_with_scope(
@@ -1386,6 +1522,9 @@ fn public_failed_turn_ref(value: String) -> String {
 }
 
 fn public_failed_turn_reason(reason: &str) -> String {
+    if reason.starts_with("sensor_gate:") {
+        return reason.to_owned();
+    }
     if let Some(code) = reason.strip_prefix("privacy filter rejected turn: ") {
         return format!("privacy_filter:{code}");
     }

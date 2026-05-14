@@ -39,6 +39,28 @@ fn seed_default_identity(vault: &Path) {
     );
 }
 
+fn enable_local_sensor(vault: &Path, sensor: &str) {
+    let out = cli()
+        .current_dir(vault)
+        .args([
+            "sensor",
+            "enable",
+            sensor,
+            "--reason",
+            "operator_on",
+            "--json",
+        ])
+        .output()
+        .unwrap_or_else(|err| panic!("cairn sensor enable {sensor}: {err}"));
+    assert!(
+        out.status.success(),
+        "sensor enable {sensor} failed: {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 fn assert_rejected_capability_unavailable(verb_args: &[&str], capability: &str) {
     let out = {
         let mut cmd = cli();
@@ -945,6 +967,8 @@ fn capture_trace_cli_imports_full_trace_scope_e2e() {
     .expect("bootstrap vault");
     let session = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
     let turn = "turn-cli-full-scope";
+    enable_local_sensor(dir.path(), "hook");
+    enable_local_sensor(dir.path(), "terminal");
     let trace_path = write_full_scope_trace_fixture(dir.path(), session, turn);
 
     let out = cli()
@@ -1095,6 +1119,7 @@ fn capture_trace_committed_envelope_exposes_failed_turns() {
     .expect("bootstrap vault");
     let session = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
     let turn = "turn-secret";
+    enable_local_sensor(dir.path(), "hook");
     let trace_path = write_capture_trace_event(
         dir.path(),
         session,
@@ -1154,6 +1179,7 @@ fn capture_trace_human_mode_reports_partial_failures() {
         force: false,
     })
     .expect("bootstrap vault");
+    enable_local_sensor(dir.path(), "hook");
     let trace_path = write_capture_trace_event(
         dir.path(),
         "01ARZ3NDEKTSV4RRFFQ69G5FAV",

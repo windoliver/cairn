@@ -999,11 +999,19 @@ impl Default for ZeroCaptureNudgeConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct SensorsConfig {
     /// Hook sensor configuration.
-    pub hooks: SensorToggle,
+    pub hooks: LocalSensorRuntimeConfig,
     /// IDE sensor configuration.
-    pub ide: SensorToggle,
+    pub ide: LocalSensorRuntimeConfig,
+    /// Terminal sensor configuration.
+    pub terminal: LocalSensorRuntimeConfig,
+    /// Clipboard sensor configuration.
+    pub clipboard: LocalSensorRuntimeConfig,
+    /// Voice sensor configuration.
+    pub voice: LocalSensorRuntimeConfig,
     /// Screen sensor configuration.
     pub screen: ScreenSensorConfig,
+    /// Batch recording ingest sensor configuration.
+    pub recording: LocalSensorRuntimeConfig,
     /// Slack sensor configuration.
     pub slack: SlackSensorConfig,
 }
@@ -1011,15 +1019,77 @@ pub struct SensorsConfig {
 impl Default for SensorsConfig {
     fn default() -> Self {
         Self {
-            hooks: SensorToggle { enabled: true },
-            ide: SensorToggle { enabled: true },
+            hooks: LocalSensorRuntimeConfig::enabled(),
+            ide: LocalSensorRuntimeConfig::enabled(),
+            terminal: LocalSensorRuntimeConfig::disabled(),
+            clipboard: LocalSensorRuntimeConfig::disabled(),
+            voice: LocalSensorRuntimeConfig::disabled(),
             screen: ScreenSensorConfig::default(),
+            recording: LocalSensorRuntimeConfig::disabled(),
             slack: SlackSensorConfig::default(),
         }
     }
 }
 
-/// Simple on/off toggle for a sensor.
+/// Source-side event budget enforced before local sensor extraction.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SensorCaptureBudget {
+    /// Maximum observations accepted for one capture attempt.
+    pub max_items: Option<u64>,
+    /// Maximum raw bytes accepted for one capture attempt.
+    pub max_bytes: Option<u64>,
+}
+
+/// Retention defaults attached to a local sensor family.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SensorRetentionConfig {
+    /// Maximum days retained for this sensor's captures. `None` inherits vault policy.
+    pub max_days: Option<u32>,
+}
+
+/// Shared configuration for deterministic local sensors.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LocalSensorRuntimeConfig {
+    /// Whether this sensor may capture, subject to consent and budget gates.
+    pub enabled: bool,
+    /// Source-side budget.
+    pub budget: SensorCaptureBudget,
+    /// Sensor-specific retention default.
+    pub retention: SensorRetentionConfig,
+}
+
+impl LocalSensorRuntimeConfig {
+    /// Enabled settings with unlimited source budget and inherited retention.
+    #[must_use]
+    pub fn enabled() -> Self {
+        Self {
+            enabled: true,
+            budget: SensorCaptureBudget::default(),
+            retention: SensorRetentionConfig::default(),
+        }
+    }
+
+    /// Disabled settings with unlimited source budget and inherited retention.
+    #[must_use]
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            budget: SensorCaptureBudget::default(),
+            retention: SensorRetentionConfig::default(),
+        }
+    }
+}
+
+impl Default for LocalSensorRuntimeConfig {
+    fn default() -> Self {
+        Self::disabled()
+    }
+}
+
+/// Simple on/off toggle for legacy non-local sensors.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SensorToggle {
@@ -1100,6 +1170,8 @@ pub struct ScreenSensorConfig {
     pub blur_password_fields: bool,
     /// Capture budget limits.
     pub budget: ScreenCaptureBudget,
+    /// Sensor-specific retention default.
+    pub retention: SensorRetentionConfig,
 }
 
 impl Default for ScreenSensorConfig {
@@ -1111,6 +1183,7 @@ impl Default for ScreenSensorConfig {
             allow_apps: Vec::new(),
             blur_password_fields: true,
             budget: ScreenCaptureBudget::default(),
+            retention: SensorRetentionConfig::default(),
         }
     }
 }
@@ -1416,6 +1489,46 @@ impl CairnConfig {
                 value: 0_u64,
             });
         }
+        validate_local_sensor_runtime_config(
+            &self.sensors.hooks,
+            "sensors.hooks.budget.max_items",
+            "sensors.hooks.budget.max_bytes",
+            "sensors.hooks.retention.max_days",
+        )?;
+        validate_local_sensor_runtime_config(
+            &self.sensors.ide,
+            "sensors.ide.budget.max_items",
+            "sensors.ide.budget.max_bytes",
+            "sensors.ide.retention.max_days",
+        )?;
+        validate_local_sensor_runtime_config(
+            &self.sensors.terminal,
+            "sensors.terminal.budget.max_items",
+            "sensors.terminal.budget.max_bytes",
+            "sensors.terminal.retention.max_days",
+        )?;
+        validate_local_sensor_runtime_config(
+            &self.sensors.clipboard,
+            "sensors.clipboard.budget.max_items",
+            "sensors.clipboard.budget.max_bytes",
+            "sensors.clipboard.retention.max_days",
+        )?;
+        validate_local_sensor_runtime_config(
+            &self.sensors.voice,
+            "sensors.voice.budget.max_items",
+            "sensors.voice.budget.max_bytes",
+            "sensors.voice.retention.max_days",
+        )?;
+        validate_local_sensor_runtime_config(
+            &self.sensors.recording,
+            "sensors.recording.budget.max_items",
+            "sensors.recording.budget.max_bytes",
+            "sensors.recording.retention.max_days",
+        )?;
+        validate_optional_nonzero_u32(
+            self.sensors.screen.retention.max_days,
+            "sensors.screen.retention.max_days",
+        )?;
 
         // 5. LLM extractor in chain requires an LLM provider
         let has_llm_worker = self
@@ -1568,6 +1681,37 @@ impl CairnConfig {
     }
 }
 
+fn validate_local_sensor_runtime_config(
+    cfg: &LocalSensorRuntimeConfig,
+    max_items_field: &'static str,
+    max_bytes_field: &'static str,
+    max_days_field: &'static str,
+) -> Result<(), ConfigError> {
+    validate_optional_nonzero_u64(cfg.budget.max_items, max_items_field)?;
+    validate_optional_nonzero_u64(cfg.budget.max_bytes, max_bytes_field)?;
+    validate_optional_nonzero_u32(cfg.retention.max_days, max_days_field)
+}
+
+fn validate_optional_nonzero_u64(
+    value: Option<u64>,
+    field: &'static str,
+) -> Result<(), ConfigError> {
+    if value == Some(0) {
+        return Err(ConfigError::InvalidBudget { field, value: 0 });
+    }
+    Ok(())
+}
+
+fn validate_optional_nonzero_u32(
+    value: Option<u32>,
+    field: &'static str,
+) -> Result<(), ConfigError> {
+    if value == Some(0) {
+        return Err(ConfigError::InvalidBudget { field, value: 0 });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1689,6 +1833,44 @@ mod tests {
     #[test]
     fn default_hooks_sensor_is_enabled() {
         assert!(CairnConfig::default().sensors.hooks.enabled);
+    }
+
+    #[test]
+    fn local_sensor_defaults_require_consent_but_preserve_existing_enablement() {
+        let config = CairnConfig::default();
+        assert!(config.sensors.hooks.enabled);
+        assert!(config.sensors.ide.enabled);
+        assert!(!config.sensors.terminal.enabled);
+        assert!(!config.sensors.clipboard.enabled);
+        assert!(!config.sensors.voice.enabled);
+        assert!(!config.sensors.screen.enabled);
+        assert!(!config.sensors.recording.enabled);
+        assert_eq!(config.sensors.hooks.budget.max_items, None);
+        assert_eq!(config.sensors.hooks.budget.max_bytes, None);
+        assert_eq!(config.sensors.hooks.retention.max_days, None);
+    }
+
+    #[test]
+    fn rejects_zero_local_sensor_budget_and_retention() {
+        let mut config = CairnConfig::default();
+        config.sensors.terminal.budget.max_items = Some(0);
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::InvalidBudget {
+                field: "sensors.terminal.budget.max_items",
+                value: 0
+            })
+        ));
+
+        let mut config = CairnConfig::default();
+        config.sensors.recording.retention.max_days = Some(0);
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::InvalidBudget {
+                field: "sensors.recording.retention.max_days",
+                value: 0
+            })
+        ));
     }
 
     #[test]

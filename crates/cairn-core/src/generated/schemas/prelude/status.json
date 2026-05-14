@@ -382,6 +382,90 @@
     "sensors": {
       "additionalProperties": false,
       "properties": {
+        "local": {
+          "description": "Per-local-sensor config, consent, and gate state. Optional and additive for issue #88.",
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "budget": {
+                "additionalProperties": false,
+                "properties": {
+                  "max_bytes": {
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "max_items": {
+                    "minimum": 1,
+                    "type": "integer"
+                  }
+                },
+                "type": "object"
+              },
+              "consent": {
+                "enum": [
+                  "enabled",
+                  "disabled",
+                  "missing"
+                ],
+                "type": "string"
+              },
+              "enabled": {
+                "type": "boolean"
+              },
+              "gate": {
+                "enum": [
+                  "allowed",
+                  "disabled",
+                  "privacy_denied",
+                  "budget_exceeded"
+                ],
+                "type": "string"
+              },
+              "last_drop_reason": {
+                "enum": [
+                  "disabled",
+                  "privacy_denied",
+                  "budget_exceeded",
+                  "policy_rejected",
+                  "malformed_observation"
+                ],
+                "type": "string"
+              },
+              "retention": {
+                "additionalProperties": false,
+                "properties": {
+                  "max_days": {
+                    "minimum": 1,
+                    "type": "integer"
+                  }
+                },
+                "type": "object"
+              },
+              "sensor": {
+                "enum": [
+                  "hook",
+                  "ide",
+                  "terminal",
+                  "clipboard",
+                  "voice",
+                  "screen",
+                  "recording"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "sensor",
+              "enabled",
+              "consent",
+              "gate",
+              "budget",
+              "retention"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
         "screen": {
           "additionalProperties": false,
           "properties": {

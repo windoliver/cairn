@@ -12,7 +12,8 @@ use cairn_core::domain::canonical::canonical_bytes;
 use cairn_core::domain::identity::{keys::IdentityRevision, provision::ProvisionInput};
 use cairn_core::domain::{
     ActorChainEntry, CaptureEvent, CaptureEventId, CaptureMode, CapturePayload, CaptureRefs,
-    ChainRole, Identity, PayloadHash, Rfc3339Timestamp, ScopeTuple, SourceFamily,
+    ChainRole, Identity, LocalSensorName, PayloadHash, Rfc3339Timestamp, ScopeTuple,
+    SensorGateReason, SourceFamily,
 };
 use cairn_core::generated::common::Ulid as WireUlid;
 use cairn_core::generated::envelope::{
@@ -31,6 +32,10 @@ use std::process::ExitCode;
 use std::time::Instant;
 use ulid::Ulid;
 
+use crate::sensor_gate::{
+    SensorDropBudgetMetric, SensorDropMetric, SensorGateStage, append_sensor_drop_metric,
+    latest_sensor_consent_for_vault,
+};
 use crate::verbs::envelope::{
     emit_json, human_error, internal_error_response, invalid_args_response, new_operation_id,
 };
@@ -126,6 +131,22 @@ pub fn run(
         return emit_invalid(json, &reason);
     }
 
+    let media_size = match std::fs::metadata(recording_path) {
+        Ok(metadata) => metadata.len(),
+        Err(e) => {
+            return emit_invalid(
+                json,
+                &format!(
+                    "failed to read recording metadata {}: {e}",
+                    recording_path.display()
+                ),
+            );
+        }
+    };
+    if let Err(exit_code) = enforce_recording_sensor_gate(json, vault_root, &config, media_size) {
+        return exit_code;
+    }
+
     let plan = match build_recording_plan(recording_path) {
         Ok(plan) => plan,
         Err(e) => {
@@ -206,6 +227,81 @@ pub fn run(
     }
 
     ExitCode::SUCCESS
+}
+
+fn enforce_recording_sensor_gate(
+    json: bool,
+    vault_root: &Path,
+    config: &CairnConfig,
+    media_size: u64,
+) -> Result<(), ExitCode> {
+    if !vault_root.join(".cairn").join("vault.id").exists() {
+        return Ok(());
+    }
+    let observation = cairn_core::domain::BudgetObservation {
+        items: 1,
+        bytes: media_size,
+    };
+    let consent = match block_on(latest_sensor_consent_for_vault(
+        vault_root,
+        LocalSensorName::Recording,
+    )) {
+        Ok(consent) => consent,
+        Err(error) => {
+            return Err(emit_internal(
+                json,
+                &format!("failed to load recording sensor consent: {error:#}"),
+            ));
+        }
+    };
+    match crate::sensor_gate::evaluate_sensor_gate(
+        config,
+        consent,
+        LocalSensorName::Recording,
+        observation,
+    ) {
+        Ok(()) => Ok(()),
+        Err(reason) => {
+            let budget = (reason == SensorGateReason::BudgetExceeded)
+                .then(|| {
+                    crate::sensor_gate::sensor_budget(config, LocalSensorName::Recording).map(
+                        |budget| SensorDropBudgetMetric {
+                            max_items: budget.max_items,
+                            max_bytes: budget.max_bytes,
+                            observed_items: observation.items,
+                            observed_bytes: observation.bytes,
+                        },
+                    )
+                })
+                .flatten();
+            let metric = SensorDropMetric {
+                event: crate::sensor_gate::SENSOR_DROP_EVENT,
+                sensor: LocalSensorName::Recording,
+                source_family: Some(SourceFamily::RecordingBatch),
+                reason,
+                stage: SensorGateStage::PreExtraction,
+                operation_id: Some(new_operation_id().0),
+                session_id: Some(RECORDING_SESSION_ID.to_owned()),
+                turn_id: None,
+                budget,
+            };
+            if let Err(error) = append_sensor_drop_metric(vault_root, &metric) {
+                return Err(emit_internal(
+                    json,
+                    &format!("failed to write recording sensor drop metric: {error:#}"),
+                ));
+            }
+            Err(emit_sensor_denied(json, reason))
+        }
+    }
+}
+
+fn block_on<T>(future: impl std::future::Future<Output = anyhow::Result<T>>) -> anyhow::Result<T> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(anyhow::Error::from)?
+        .block_on(future)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -424,6 +520,20 @@ fn emit_invalid(json: bool, reason: &str) -> ExitCode {
         human_error("ingest", "InvalidArgs", reason, &resp.operation_id);
     }
     ExitCode::from(64)
+}
+
+fn emit_sensor_denied(json: bool, reason: SensorGateReason) -> ExitCode {
+    let message = format!("sensor_gate:{}", reason.as_str());
+    let resp = invalid_args_response(ResponseVerb::Ingest, "recording", &message);
+    if json {
+        emit_json(&resp);
+    } else {
+        human_error("ingest", "Unauthorized", &message, &resp.operation_id);
+    }
+    match reason {
+        SensorGateReason::Disabled => ExitCode::from(78),
+        SensorGateReason::PrivacyDenied | SensorGateReason::BudgetExceeded => ExitCode::from(77),
+    }
 }
 
 fn emit_internal(json: bool, message: &str) -> ExitCode {

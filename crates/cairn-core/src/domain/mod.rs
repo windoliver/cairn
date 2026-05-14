@@ -41,6 +41,7 @@ pub mod projection;
 pub mod provenance;
 pub mod record;
 pub mod scope;
+pub mod sensor_policy;
 pub mod session;
 pub mod source_id;
 pub mod source_ref;
@@ -80,6 +81,7 @@ pub use projection::{
 pub use provenance::Provenance;
 pub use record::{Ed25519Signature, MemoryRecord, RecordId};
 pub use scope::ScopeTuple;
+pub use sensor_policy::{BudgetObservation, LocalSensorName, SensorGateReason};
 pub use session::{
     DEFAULT_IDLE_WINDOW_SECS, LastActiveSession, Session, SessionDecision, SessionId,
     SessionIdentity, SessionSource, resolve_session,

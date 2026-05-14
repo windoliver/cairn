@@ -65,6 +65,67 @@ expression: v
     }
   ],
   "sensors": {
+    "local": [
+      {
+        "budget": {},
+        "consent": "missing",
+        "enabled": true,
+        "gate": "privacy_denied",
+        "retention": {},
+        "sensor": "hook"
+      },
+      {
+        "budget": {},
+        "consent": "missing",
+        "enabled": true,
+        "gate": "privacy_denied",
+        "retention": {},
+        "sensor": "ide"
+      },
+      {
+        "budget": {},
+        "consent": "missing",
+        "enabled": false,
+        "gate": "disabled",
+        "retention": {},
+        "sensor": "terminal"
+      },
+      {
+        "budget": {},
+        "consent": "missing",
+        "enabled": false,
+        "gate": "disabled",
+        "retention": {},
+        "sensor": "clipboard"
+      },
+      {
+        "budget": {},
+        "consent": "missing",
+        "enabled": false,
+        "gate": "disabled",
+        "retention": {},
+        "sensor": "voice"
+      },
+      {
+        "budget": {
+          "max_bytes": 16384,
+          "max_items": 12
+        },
+        "consent": "missing",
+        "enabled": false,
+        "gate": "disabled",
+        "retention": {},
+        "sensor": "screen"
+      },
+      {
+        "budget": {},
+        "consent": "missing",
+        "enabled": false,
+        "gate": "disabled",
+        "retention": {},
+        "sensor": "recording"
+      }
+    ],
     "screen": {
       "backend": "xcap",
       "degradation": {

@@ -6,12 +6,18 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use anyhow::Context as _;
+use cairn_core::domain::{BudgetObservation, LocalSensorName, SensorGateReason, SourceFamily};
 use cairn_core::generated::common::Ulid;
 use cairn_core::generated::errors::ErrorCode;
 use clap::ArgMatches;
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::sensor_gate::{
+    SensorDropBudgetMetric, SensorDropMetric, SensorGateStage, append_sensor_drop_metric,
+    latest_sensor_consent_for_vault,
+};
 use crate::verbs::envelope::{emit_json, new_operation_id};
 
 mod artifact;
@@ -169,6 +175,17 @@ impl HookError {
         }
     }
 
+    /// Build an unauthorized hook error.
+    #[must_use]
+    pub fn unauthorized(message: impl Into<String>) -> Self {
+        Self {
+            code: ErrorCode::Unauthorized,
+            message: message.into(),
+            retry_guidance: "enable the hook sensor with `cairn sensor enable hook --reason <code>` and retry the same command"
+                .to_owned(),
+        }
+    }
+
     fn with_retry_guidance(self, retry_guidance: impl Into<String>) -> Self {
         Self {
             retry_guidance: retry_guidance.into(),
@@ -255,6 +272,21 @@ pub fn run(matches: &ArgMatches) -> ExitCode {
     let vault_path = matches
         .get_one::<PathBuf>("vault-path")
         .map_or_else(|| PathBuf::from("."), Clone::clone);
+    match enforce_hook_sensor_gate(&vault_path, &operation_id, &payload) {
+        Ok(()) => {}
+        Err(HookGateOutcome::Denied(reason)) => {
+            return emit_failure(
+                hook.as_str(),
+                operation_id,
+                HookError::unauthorized(format!("hook sensor denied capture: {}", reason.as_str())),
+                json,
+                77,
+            );
+        }
+        Err(HookGateOutcome::Error(err)) => {
+            return emit_failure(hook.as_str(), operation_id, err, json, 1);
+        }
+    }
     let routing_hints = if hook == HookName::UserPromptSubmit {
         Some(user_prompt_submit::routing_hints(&payload))
     } else {
@@ -302,6 +334,94 @@ fn load_payload(matches: &ArgMatches) -> Result<Value, HookError> {
             "hook payload must be a JSON object",
         ))
     }
+}
+
+enum HookGateOutcome {
+    Denied(SensorGateReason),
+    Error(HookError),
+}
+
+fn enforce_hook_sensor_gate(
+    vault_path: &std::path::Path,
+    operation_id: &Ulid,
+    payload: &Value,
+) -> Result<(), HookGateOutcome> {
+    if !vault_path.join(".cairn").join("vault.id").exists() {
+        return Ok(());
+    }
+    let config = crate::config::load(vault_path, &crate::config::CliOverrides::default()).map_err(
+        |error| {
+            HookGateOutcome::Error(HookError::internal(
+                format!("failed to load hook sensor config: {error:#}"),
+                "repair .cairn/config.yaml and retry the same hook command",
+            ))
+        },
+    )?;
+    let consent = block_on(latest_sensor_consent_for_vault(
+        vault_path,
+        LocalSensorName::Hook,
+    ))
+    .map_err(|error| {
+        HookGateOutcome::Error(HookError::internal(
+            format!("failed to load hook sensor consent: {error:#}"),
+            "repair the consent journal and retry the same hook command",
+        ))
+    })?;
+    let bytes = serde_json::to_vec(payload)
+        .map(|body| u64::try_from(body.len()).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+    let observation = BudgetObservation { items: 1, bytes };
+    match crate::sensor_gate::evaluate_sensor_gate(
+        &config,
+        consent,
+        LocalSensorName::Hook,
+        observation,
+    ) {
+        Ok(()) => Ok(()),
+        Err(reason) => {
+            let budget = (reason == SensorGateReason::BudgetExceeded)
+                .then(|| {
+                    crate::sensor_gate::sensor_budget(&config, LocalSensorName::Hook).map(
+                        |budget| SensorDropBudgetMetric {
+                            max_items: budget.max_items,
+                            max_bytes: budget.max_bytes,
+                            observed_items: observation.items,
+                            observed_bytes: observation.bytes,
+                        },
+                    )
+                })
+                .flatten();
+            let metric = SensorDropMetric {
+                event: crate::sensor_gate::SENSOR_DROP_EVENT,
+                sensor: LocalSensorName::Hook,
+                source_family: Some(SourceFamily::Hook),
+                reason,
+                stage: SensorGateStage::PreArtifact,
+                operation_id: Some(operation_id.0.clone()),
+                session_id: payload
+                    .get("session_id")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+                turn_id: None,
+                budget,
+            };
+            append_sensor_drop_metric(vault_path, &metric).map_err(|error| {
+                HookGateOutcome::Error(HookError::internal(
+                    format!("failed to write hook sensor drop metric: {error:#}"),
+                    "repair .cairn/metrics.jsonl and retry the same hook command",
+                ))
+            })?;
+            Err(HookGateOutcome::Denied(reason))
+        }
+    }
+}
+
+fn block_on<T>(future: impl std::future::Future<Output = anyhow::Result<T>>) -> anyhow::Result<T> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("build async runtime")?
+        .block_on(future)
 }
 
 /// Read a required non-empty string field from a hook payload.

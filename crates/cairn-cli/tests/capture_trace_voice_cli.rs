@@ -151,10 +151,32 @@ fn write_capture_trace_fixture(vault: &Path) -> std::path::PathBuf {
     jsonl_path
 }
 
+fn enable_voice_sensor(vault: &Path, config_home: &Path) {
+    let out = cli(config_home)
+        .current_dir(vault)
+        .args([
+            "sensor",
+            "enable",
+            "voice",
+            "--reason",
+            "operator_on",
+            "--json",
+        ])
+        .output()
+        .expect("cairn sensor enable voice");
+    assert!(
+        out.status.success(),
+        "sensor enable voice failed\nstderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
 #[tokio::test]
 async fn capture_trace_cli_imports_voice_transcript_end_to_end() {
     let vault = fresh_vault();
     let config_home = tempfile::tempdir().expect("temp config home");
+    enable_voice_sensor(vault.path(), config_home.path());
     let jsonl_path = write_capture_trace_fixture(vault.path());
 
     let out = cli(config_home.path())

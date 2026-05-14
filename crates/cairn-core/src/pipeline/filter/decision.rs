@@ -45,6 +45,8 @@ pub enum DiscardReason {
     InjectionBlocked,
     /// Vault `_policy.yaml` denies this kind/source/visibility combo.
     PolicyBlocked,
+    /// Local sensor consent or privacy gate denied capture.
+    PrivacyDenied,
     /// Content-hash matches an existing record.
     Duplicate,
 }
@@ -61,6 +63,7 @@ impl DiscardReason {
             Self::PiiBlocked => "pii_blocked",
             Self::InjectionBlocked => "injection_blocked",
             Self::PolicyBlocked => "policy_blocked",
+            Self::PrivacyDenied => "privacy_denied",
             Self::Duplicate => "duplicate",
         }
     }

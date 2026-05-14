@@ -23,6 +23,7 @@ pub mod lint;
 pub mod retrieve;
 pub mod screen;
 pub mod search;
+pub mod sensor;
 pub mod signed;
 pub mod status;
 pub mod summarize;
