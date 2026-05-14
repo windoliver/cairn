@@ -2,6 +2,11 @@ import { useState } from "react";
 import type { DesktopApi } from "../App";
 import type { DesktopRecordDetail, DesktopReconcilePreview } from "../api/types";
 
+type PreviewState = {
+  key: string;
+  preview: DesktopReconcilePreview;
+};
+
 export function ReconcilePanel({
   api,
   record,
@@ -13,8 +18,10 @@ export function ReconcilePanel({
   draftBody: string;
   onRecordApplied: (record: DesktopRecordDetail) => void;
 }) {
-  const [preview, setPreview] = useState<DesktopReconcilePreview | null>(null);
+  const [previewState, setPreviewState] = useState<PreviewState | null>(null);
   const [applyStatus, setApplyStatus] = useState<string | null>(null);
+  const currentRequestKey = requestKey(record, draftBody);
+  const preview = previewState?.key === currentRequestKey ? previewState.preview : null;
 
   function request() {
     return {
@@ -27,7 +34,7 @@ export function ReconcilePanel({
 
   async function review() {
     const next = await api.previewReconcile(request());
-    setPreview(next);
+    setPreviewState({ key: currentRequestKey, preview: next });
     setApplyStatus(null);
   }
 
@@ -63,4 +70,8 @@ export function ReconcilePanel({
       {applyStatus && <p>{applyStatus}</p>}
     </section>
   );
+}
+
+function requestKey(record: DesktopRecordDetail, draftBody: string): string {
+  return JSON.stringify([record.id, record.version, record.backendHash, draftBody]);
 }

@@ -205,6 +205,28 @@ describe("App", () => {
     });
   });
 
+  it("clears reconcile readiness when the reviewed draft changes", async () => {
+    const user = userEvent.setup();
+    api.previewReconcile.mockResolvedValueOnce({
+      accepted: true,
+      targetId: "rec-alpha-001",
+      expectedVersion: 2,
+      mutableDiff: { body: "Markdown body" },
+      rejectedFields: [],
+    });
+
+    render(<App api={api} />);
+
+    const body = await screen.findByLabelText("Record body");
+    await user.click(screen.getByRole("button", { name: "Review reconcile" }));
+    expect(await screen.findByText("Ready to apply")).toBeInTheDocument();
+
+    await user.type(body, " changed");
+
+    expect(screen.queryByRole("button", { name: "Apply reconcile" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Ready to apply")).not.toBeInTheDocument();
+  });
+
   it("applies a reviewed reconcile edit through the backend client", async () => {
     const user = userEvent.setup();
     api.previewReconcile.mockResolvedValueOnce({
