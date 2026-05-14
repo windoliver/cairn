@@ -168,6 +168,21 @@ describe("App", () => {
     expect(screen.getByText("Graph")).toBeInTheDocument();
   });
 
+  it("retries the initial desktop API load after the backend becomes available", async () => {
+    const user = userEvent.setup();
+    api.vault.mockRejectedValueOnce(new Error("Desktop API request failed"));
+
+    render(<App api={api} />);
+
+    expect(await screen.findByText("Desktop API request failed")).toBeInTheDocument();
+    expect(screen.getByText("Loading vault")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Retry desktop API" }));
+
+    expect(await screen.findByText("Desktop Alpha Fixture")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("Markdown body")).toBeInTheDocument();
+  });
+
   it("shows record selection failures inline", async () => {
     const user = userEvent.setup();
     api.records.mockResolvedValueOnce([

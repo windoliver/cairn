@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DesktopApiClient } from "./api/client";
 import type {
   DesktopFolder,
@@ -56,45 +56,49 @@ export function App({
     error: null,
   });
   const selectionSequence = useRef(0);
+  const loadSequence = useRef(0);
 
-  useEffect(() => {
-    let cancelled = false;
-    async function load() {
-      try {
-        const [vault, folders, records, graph, lint] = await Promise.all([
-          api.vault(),
-          api.folders(),
-          api.records(),
-          api.graph(),
-          api.lint(),
-        ]);
-        let selected: DesktopRecordDetail | null = null;
-        let error: string | null = null;
-        if (records[0]) {
-          try {
-            selected = await api.record(records[0].id);
-          } catch (recordError) {
-            error =
-              recordError instanceof Error ? recordError.message : "Failed to load record detail";
-          }
-        }
-        if (!cancelled) {
-          setState({ vault, folders, records, selected, graph, lint, error });
-        }
-      } catch (error) {
-        if (!cancelled) {
-          setState((current) => ({
-            ...current,
-            error: error instanceof Error ? error.message : "Failed to load desktop data",
-          }));
+  const loadDesktopData = useCallback(async () => {
+    const sequence = loadSequence.current + 1;
+    loadSequence.current = sequence;
+    setState((current) => ({ ...current, error: null }));
+    try {
+      const [vault, folders, records, graph, lint] = await Promise.all([
+        api.vault(),
+        api.folders(),
+        api.records(),
+        api.graph(),
+        api.lint(),
+      ]);
+      let selected: DesktopRecordDetail | null = null;
+      let error: string | null = null;
+      if (records[0]) {
+        try {
+          selected = await api.record(records[0].id);
+        } catch (recordError) {
+          error =
+            recordError instanceof Error ? recordError.message : "Failed to load record detail";
         }
       }
+      if (loadSequence.current === sequence) {
+        setState({ vault, folders, records, selected, graph, lint, error });
+      }
+    } catch (error) {
+      if (loadSequence.current === sequence) {
+        setState((current) => ({
+          ...current,
+          error: error instanceof Error ? error.message : "Failed to load desktop data",
+        }));
+      }
     }
-    void load();
-    return () => {
-      cancelled = true;
-    };
   }, [api]);
+
+  useEffect(() => {
+    void loadDesktopData();
+    return () => {
+      loadSequence.current += 1;
+    };
+  }, [loadDesktopData]);
 
   const selectedId = state.selected?.id ?? null;
   const recordsByFolder = useMemo(() => state.records, [state.records]);
@@ -131,7 +135,14 @@ export function App({
 
   return (
     <main className="app">
-      {state.error && <p className="appErrorBanner">{state.error}</p>}
+      {state.error && (
+        <div className="appErrorBanner">
+          <span>{state.error}</span>
+          <button type="button" onClick={() => void loadDesktopData()}>
+            Retry desktop API
+          </button>
+        </div>
+      )}
       <VaultSidebar
         vault={state.vault}
         folders={state.folders}
