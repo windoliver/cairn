@@ -16,5 +16,5 @@ pub use fence::{
     wait_for_drain as wait_for_reader_drain,
 };
 pub use handle::{LockHandle, release_by_holder};
-pub use incarnation::{current_incarnation, init_incarnation};
+pub use incarnation::{current_incarnation, current_incarnation_owner, init_incarnation};
 pub use kinds::{LockMode, LockScope, ResourceKey};

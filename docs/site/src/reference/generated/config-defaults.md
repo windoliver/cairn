@@ -8,6 +8,8 @@ Generated from `CairnConfig::default()`.
 vault:
   name: my-vault
   tier: local
+  source:
+    redact_on_forget: false
   layout:
     sources: sources
     records: raw
@@ -56,6 +58,8 @@ search:
   rerank_topk: 20
   max_snippet_chars_per_page: 8000
   graph_confidence_min: 0.3
+source:
+  redact_on_forget: false
 sensors:
   hooks:
     enabled: true

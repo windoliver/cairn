@@ -8,7 +8,7 @@
 use std::io::Write;
 use std::process::ExitCode;
 
-use cairn_cli::{command, hooks, identity, plugins, repair, verbs};
+use cairn_cli::{command, doctor, hooks, identity, plugins, repair, verbs};
 use cairn_core::contract::registry::PluginError;
 use clap::ArgMatches;
 
@@ -77,6 +77,7 @@ fn resolve_vault_or_cwd(
     };
     match cairn_cli::vault::resolve_vault(opts) {
         Ok(p) => {
+            verbs::forget::reconcile_pending_source_redactions(&p)?;
             let source = if explicit.is_some() {
                 VaultResolutionSource::Explicit
             } else if cwd
@@ -105,10 +106,9 @@ fn resolve_vault_or_cwd(
                 .downcast_ref::<cairn_cli::vault::VaultError>()
                 .is_some_and(|ve| matches!(ve, cairn_cli::vault::VaultError::NoneResolved));
             if is_none_resolved && explicit.is_none() {
-                Ok((
-                    cwd.unwrap_or_else(|| std::path::PathBuf::from(".")),
-                    VaultResolutionSource::CwdFallback,
-                ))
+                let path = cwd.unwrap_or_else(|| std::path::PathBuf::from("."));
+                verbs::forget::reconcile_pending_source_redactions(&path)?;
+                Ok((path, VaultResolutionSource::CwdFallback))
             } else {
                 Err(e)
             }
@@ -253,6 +253,7 @@ fn main() -> ExitCode {
         Some(("handshake", sub)) => run_handshake(sub, explicit_vault.as_deref()),
         Some(("plugins", sub)) => run_plugins(sub),
         Some(("bootstrap", sub)) => run_bootstrap(sub),
+        Some(("doctor", sub)) => doctor::run(sub),
         Some(("mcp", _sub)) => {
             let (vault_root, source, config) =
                 match resolve_vault_and_config(explicit_vault.as_deref()) {
@@ -591,29 +592,35 @@ fn run_admin(matches: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
         return rc;
     }
 
-    let config =
-        match cairn_cli::config::load(&vault_root, &cairn_cli::config::CliOverrides::default()) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("cairn admin: config error — {e:#}");
-                return ExitCode::from(78); // EX_CONFIG
-            }
-        };
-
     match matches.subcommand() {
         Some(("model", sub)) => match sub.subcommand() {
-            Some(("fetch", fetch_sub)) => {
-                verbs::admin_model_fetch::run(fetch_sub, &vault_root, &config)
-            }
+            Some(("fetch", fetch_sub)) => match load_admin_config(&vault_root) {
+                Ok(config) => verbs::admin_model_fetch::run(fetch_sub, &vault_root, &config),
+                Err(code) => code,
+            },
             _ => unreachable!(
                 "clap subcommand_required(true) on admin model ensures a subcommand is always present"
             ),
         },
-        Some(("reindex", sub)) => verbs::admin_reindex::run(sub, &vault_root, &config),
+        Some(("reindex", sub)) => match load_admin_config(&vault_root) {
+            Ok(config) => verbs::admin_reindex::run(sub, &vault_root, &config),
+            Err(code) => code,
+        },
+        Some(("snapshot", sub)) => verbs::admin_snapshot::run(sub, &vault_root),
+        Some(("restore", sub)) => verbs::admin_restore::run(sub, &vault_root),
         _ => unreachable!(
             "clap subcommand_required(true) on admin ensures a subcommand is always present"
         ),
     }
+}
+
+fn load_admin_config(
+    vault_root: &std::path::Path,
+) -> Result<cairn_core::config::CairnConfig, ExitCode> {
+    cairn_cli::config::load(vault_root, &cairn_cli::config::CliOverrides::default()).map_err(|e| {
+        eprintln!("cairn admin: config error — {e:#}");
+        ExitCode::from(78) // EX_CONFIG
+    })
 }
 
 /// Apply the file-only vault-binding gate (`probe_vault_binding`) and

@@ -143,6 +143,10 @@ fn ingest_body_commits_record_through_signed_store() {
     assert_eq!(record["scope"]["agent"], "agt:cairn-cli:default:writer:v1");
     assert_eq!(record["scope"]["entity"], "ingest");
     assert_eq!(record["body"], body);
+    let source_ids = record["source_ids"].as_array().expect("source_ids array");
+    assert_eq!(source_ids.len(), 1, "ingest should populate one source id");
+    let source_id = source_ids[0].as_str().expect("source id string");
+    assert_eq!(source_id.len(), 26, "source id must be ULID-shaped");
 }
 
 #[test]
@@ -233,6 +237,10 @@ fn ingest_file_runs_signed_pipeline_without_leaking_file_body() {
         record["body"],
         "User prefers compact updates. Body marker should stay out of metrics."
     );
+    let source_ids = record["source_ids"].as_array().expect("source_ids array");
+    assert_eq!(source_ids.len(), 1, "ingest should populate one source id");
+    let source_id = source_ids[0].as_str().expect("source id string");
+    assert_eq!(source_id.len(), 26, "source id must be ULID-shaped");
 }
 
 #[test]

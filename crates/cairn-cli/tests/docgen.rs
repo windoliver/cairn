@@ -87,6 +87,7 @@ fn docgen_command_tree_matches_runtime() {
         "status",
         "plugins",
         "bootstrap",
+        "doctor",
     ] {
         assert!(
             names.contains(&expected),

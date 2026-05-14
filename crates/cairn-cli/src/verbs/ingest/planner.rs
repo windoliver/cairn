@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use cairn_core::domain::{
     ActorChainEntry, ChainRole, EvidenceVector, FlushMode, FlushPlan, Identity, MemoryClass,
     MemoryKind, MemoryRecord, MemoryVisibility, PlanReason, PlannedMutation, Provenance, RecordId,
-    Rfc3339Timestamp, ScopeTuple, TargetId,
+    Rfc3339Timestamp, ScopeTuple, SourceId, TargetId,
 };
 use cairn_core::generated::common::Ulid;
 use sha2::{Digest, Sha256};
@@ -219,13 +219,20 @@ fn build_record_for_file(
         visibility: MemoryVisibility::Private,
         scope: folder_ingest_scope(),
         body: file.body.clone(),
+        source_ids: vec![SourceId::parse(
+            deterministic_record_ulid(&file.cache_key, "source").0,
+        )?],
         provenance: Provenance {
             source_sensor: Identity::parse(FOLDER_INGEST_SENSOR)?,
             created_at: issued_at.clone(),
             originating_agent_id: author.clone(),
+            source_ids: vec![SourceId::parse(
+                deterministic_record_ulid(&file.cache_key, "source").0,
+            )?],
             source_hash: format!("{SOURCE_HASH_PREFIX}{}", file.body_hash),
             consent_ref: "consent:folder-ingest".to_owned(),
             llm_id_if_any: None,
+            source_refs: Vec::new(),
         },
         updated_at: issued_at.clone(),
         evidence: EvidenceVector::default(),

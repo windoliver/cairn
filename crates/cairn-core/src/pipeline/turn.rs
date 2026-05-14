@@ -161,11 +161,13 @@ pub fn summarize_turn_with_scope(
         source_sensor: first.provenance.source_sensor.clone(),
         created_at: first.provenance.created_at.clone(),
         originating_agent_id: first.provenance.originating_agent_id.clone(),
+        source_ids: first.provenance.source_ids.clone(),
         // Summary has no raw source bytes — zeroed SHA256 sentinel mirrors
         // the all-zeros pattern used for the placeholder signature below.
         source_hash: format!("sha256:{}", "0".repeat(64)),
         consent_ref: "consent:pending".to_owned(),
         llm_id_if_any: None,
+        source_refs: Vec::new(),
     };
     let scope = if let Some(base) = bound_scope {
         ScopeTuple {
@@ -193,6 +195,7 @@ pub fn summarize_turn_with_scope(
         visibility: MemoryVisibility::Private,
         scope,
         body,
+        source_ids: first.source_ids.clone(),
         provenance,
         updated_at: last.updated_at.clone(),
         evidence: EvidenceVector::default(),

@@ -21,7 +21,7 @@ pub mod verb_envelope;
 pub use error::TransportError;
 pub use handler::CairnMcpHandler;
 
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use cairn_core::contract::mcp_server::{CONTRACT_VERSION, MCPServer, MCPServerCapabilities};
 use cairn_core::contract::version::{ContractVersion, VersionRange};
@@ -148,11 +148,40 @@ pub async fn serve_stdio_with_store(
     .await
 }
 
-/// Same as [`serve_stdio_with_store`] but also flips the handler's
-/// `consolidation_runtime_ready` flag so the initialize/status
-/// response advertises `cairn.workflows.v1.consolidation`. Used by
-/// `cairn mcp` after `Scheduler::start` succeeds (round-9 adversarial
-/// review #3).
+/// Plan C entry point with a vault root for file-backed verbs such as
+/// `assemble_hot`.
+///
+/// This keeps the historical [`serve_stdio_with_store`] signature available
+/// for tests and embedders that only need search/graph dispatch, while the
+/// CLI can opt into the fully wired source-loading path.
+pub async fn serve_stdio_with_store_at_vault(
+    store: Arc<dyn cairn_core::contract::memory_store::MemoryStore>,
+    sqlite_store: Arc<cairn_store_sqlite::SqliteMemoryStore>,
+    scope: Arc<dyn cairn_core::mcp_auth::McpSessionScope>,
+    config: cairn_core::config::CairnConfig,
+    principal: cairn_core::domain::ScopeTuple,
+    vault_root: PathBuf,
+) -> Result<(), TransportError> {
+    serve_stdio_with_store_io_at_vault(
+        store,
+        sqlite_store,
+        scope,
+        config,
+        principal,
+        vault_root,
+        tokio::io::stdin(),
+        tokio::io::stdout(),
+    )
+    .await
+}
+
+/// Same as [`serve_stdio_with_store_at_vault`] but also flips the handler's
+/// `consolidation_runtime_ready` flag so the initialize/status response
+/// advertises `cairn.workflows.v1.consolidation`. Used by `cairn mcp`
+/// after `Scheduler::start` succeeds (round-9 adversarial review #3).
+///
+/// `vault_root` may be `None` if the caller does not need file-backed
+/// verbs (`assemble_hot`); otherwise pass the bound vault root.
 ///
 /// # Errors
 /// Same as [`serve_stdio_with_store`].
@@ -162,15 +191,18 @@ pub async fn serve_stdio_with_store_consolidation_ready(
     scope: Arc<dyn cairn_core::mcp_auth::McpSessionScope>,
     config: cairn_core::config::CairnConfig,
     principal: cairn_core::domain::ScopeTuple,
+    vault_root: Option<PathBuf>,
 ) -> Result<(), TransportError> {
-    serve_stdio_with_store_io_consolidation_ready(
+    serve_stdio_with_store_io_inner(
         store,
         sqlite_store,
         scope,
         config,
         principal,
+        vault_root,
         tokio::io::stdin(),
         tokio::io::stdout(),
+        true,
     )
     .await
 }
@@ -202,6 +234,7 @@ where
         scope,
         config,
         principal,
+        None,
         input,
         output,
         false,
@@ -209,17 +242,23 @@ where
     .await
 }
 
-/// Variant of [`serve_stdio_with_store_io`] that advertises consolidation
-/// as runtime-ready (a Scheduler has been started by the caller).
+/// Internal helper — same as [`serve_stdio_with_store_at_vault`] but accepts
+/// arbitrary `AsyncRead` / `AsyncWrite` so integration tests can drive it
+/// in-process.
 ///
 /// # Errors
-/// Same as [`serve_stdio_with_store_io`].
-pub async fn serve_stdio_with_store_io_consolidation_ready<I, O>(
+/// Same as [`serve_stdio_with_store_at_vault`].
+#[allow(
+    clippy::too_many_arguments,
+    reason = "transport test hook mirrors serve_stdio_with_store plus IO endpoints"
+)]
+pub async fn serve_stdio_with_store_io_at_vault<I, O>(
     store: Arc<dyn cairn_core::contract::memory_store::MemoryStore>,
     sqlite_store: Arc<cairn_store_sqlite::SqliteMemoryStore>,
     scope: Arc<dyn cairn_core::mcp_auth::McpSessionScope>,
     config: cairn_core::config::CairnConfig,
     principal: cairn_core::domain::ScopeTuple,
+    vault_root: PathBuf,
     input: I,
     output: O,
 ) -> Result<(), TransportError>
@@ -233,17 +272,18 @@ where
         scope,
         config,
         principal,
+        Some(vault_root),
         input,
         output,
-        true,
+        false,
     )
     .await
 }
 
 #[allow(
     clippy::too_many_arguments,
-    reason = "internal helper mirrors the public surface's full param list \
-              plus one runtime-ready flag"
+    reason = "shared transport helper carries explicit wiring without hiding ownership; \
+              vault_root and consolidation_runtime_ready are independent gates"
 )]
 async fn serve_stdio_with_store_io_inner<I, O>(
     store: Arc<dyn cairn_core::contract::memory_store::MemoryStore>,
@@ -251,6 +291,7 @@ async fn serve_stdio_with_store_io_inner<I, O>(
     scope: Arc<dyn cairn_core::mcp_auth::McpSessionScope>,
     config: cairn_core::config::CairnConfig,
     principal: cairn_core::domain::ScopeTuple,
+    vault_root: Option<PathBuf>,
     input: I,
     output: O,
     consolidation_runtime_ready: bool,
@@ -264,13 +305,18 @@ where
     let (framer_reader, relay_writer) = tokio::io::duplex(64 * 1024);
     let mut relay_task = tokio::spawn(async move { relay::run_relay(input, relay_writer).await });
 
-    let handler = CairnMcpHandler::with_store_scope_and_sqlite(
-        store,
-        sqlite_store,
-        scope,
-        config,
-        principal,
-    )
+    let handler = if let Some(vault_root) = vault_root {
+        CairnMcpHandler::with_store_scope_sqlite_and_vault(
+            store,
+            sqlite_store,
+            scope,
+            config,
+            principal,
+            vault_root,
+        )
+    } else {
+        CairnMcpHandler::with_store_scope_and_sqlite(store, sqlite_store, scope, config, principal)
+    }
     .with_consolidation_runtime_ready(consolidation_runtime_ready);
 
     // rmcp's `IntoTransport` is implemented for `(R, W)` tuples where R:

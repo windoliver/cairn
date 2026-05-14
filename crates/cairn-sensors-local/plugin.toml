@@ -13,5 +13,5 @@ patch = 0
 
 [features]
 batches = true
-streaming = false
+streaming = true
 consent_aware = true

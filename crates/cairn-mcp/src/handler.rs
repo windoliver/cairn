@@ -5,9 +5,11 @@
 //! store is wired via [`CairnMcpHandler::with_store`]) or through
 //! [`dispatch_stub`] for verbs whose dispatch has not yet landed.
 
-use std::sync::Arc;
-
-use std::collections::BTreeMap;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use rmcp::{
     RoleServer, ServerHandler,
@@ -19,8 +21,12 @@ use rmcp::{
 };
 
 use cairn_core::config::CairnConfig;
-use cairn_core::contract::memory_store::MemoryStore;
-use cairn_core::domain::ScopeTuple;
+use cairn_core::contract::memory_store::{ListArgs, MemoryStore};
+use cairn_core::domain::{
+    MemoryKind, MemoryRecord, MemoryVisibility, Rfc3339Timestamp, ScopeTuple,
+};
+use cairn_core::generated::envelope::{ResponseData, ResponseVerb};
+use cairn_core::generated::verbs::assemble_hot::{AssembleHotArgs, HotMemoryDebug};
 use cairn_core::mcp_auth::{McpAuthContext, McpGraphAvailability, McpTransport};
 
 use cairn_store_sqlite::SqliteMemoryStore;
@@ -64,6 +70,7 @@ fn capability_unavailable_result(name: &str) -> CallToolResult {
 pub struct CairnMcpHandler {
     store: Option<Arc<dyn MemoryStore>>,
     sqlite_store: Option<Arc<SqliteMemoryStore>>,
+    vault_root: Option<PathBuf>,
     scope: Option<Arc<dyn cairn_core::mcp_auth::McpSessionScope>>,
     config: CairnConfig,
     principal: ScopeTuple,
@@ -87,6 +94,7 @@ impl std::fmt::Debug for CairnMcpHandler {
         f.debug_struct("CairnMcpHandler")
             .field("store_wired", &self.store.is_some())
             .field("sqlite_store_wired", &self.sqlite_store.is_some())
+            .field("vault_root_wired", &self.vault_root.is_some())
             .field("scope_wired", &self.scope.is_some())
             // config omitted: may contain sensitive keys (embedding model paths,
             // provider credentials). Use finish_non_exhaustive to signal the
@@ -102,6 +110,7 @@ impl CairnMcpHandler {
         Self {
             store: None,
             sqlite_store: None,
+            vault_root: None,
             scope: None,
             config: CairnConfig::default(),
             principal: ScopeTuple::default(),
@@ -119,6 +128,7 @@ impl CairnMcpHandler {
         Self {
             store: Some(store),
             sqlite_store: None,
+            vault_root: None,
             scope: None,
             config,
             principal: ScopeTuple::default(),
@@ -140,6 +150,7 @@ impl CairnMcpHandler {
         Self {
             store: Some(store),
             sqlite_store: None,
+            vault_root: None,
             scope: Some(scope),
             config,
             principal,
@@ -163,6 +174,31 @@ impl CairnMcpHandler {
         Self {
             store: Some(store),
             sqlite_store: Some(sqlite_store),
+            vault_root: None,
+            scope: Some(scope),
+            config,
+            principal,
+            transport: McpTransport::Stdio,
+            consolidation_runtime_ready: false,
+        }
+    }
+
+    /// Create a handler wired to the store, graph layer, scope resolver,
+    /// principal, and vault root. This enables store/file-backed core verbs
+    /// such as `assemble_hot` in addition to search and graph tools.
+    #[must_use]
+    pub fn with_store_scope_sqlite_and_vault(
+        store: Arc<dyn MemoryStore>,
+        sqlite_store: Arc<SqliteMemoryStore>,
+        scope: Arc<dyn cairn_core::mcp_auth::McpSessionScope>,
+        config: CairnConfig,
+        principal: ScopeTuple,
+        vault_root: PathBuf,
+    ) -> Self {
+        Self {
+            store: Some(store),
+            sqlite_store: Some(sqlite_store),
+            vault_root: Some(vault_root),
             scope: Some(scope),
             config,
             principal,
@@ -590,6 +626,10 @@ impl ServerHandler for CairnMcpHandler {
 
             let request_verb = crate::verb_envelope::core_verb_for_tool(name.as_ref());
             let store = self.store.clone();
+            let sqlite_store = self.sqlite_store.clone();
+            let scope = self.scope.clone();
+            let vault_root = self.vault_root.clone();
+            let principal = self.principal.clone();
             let config = self.config.clone();
 
             let Some(request_verb) = request_verb else {
@@ -620,9 +660,480 @@ impl ServerHandler for CairnMcpHandler {
                 return Ok(handle_search(store, config, args).await);
             }
 
+            if name.as_ref() == "assemble_hot"
+                && let (Some(sqlite_store), Some(scope), Some(vault_root)) =
+                    (sqlite_store, scope, vault_root)
+            {
+                let cairn_core::generated::envelope::RequestArgs::AssembleHot(args) = typed_args
+                else {
+                    let response = crate::verb_envelope::invalid_args_response(
+                        crate::verb_envelope::response_verb(request_verb),
+                        "args",
+                        "expected assemble_hot arguments",
+                    );
+                    return Ok(crate::verb_envelope::call_result_from_response(&response));
+                };
+                let ctx = McpAuthContext::new(&principal, &request_id);
+                let allowed_scopes = match scope.allowed_scopes(&ctx) {
+                    Ok(scopes) if !scopes.is_empty() => scopes,
+                    Ok(_) | Err(_) => {
+                        return Ok(capability_unavailable_result(&name));
+                    }
+                };
+                return Ok(handle_assemble_hot(
+                    sqlite_store,
+                    vault_root,
+                    config,
+                    principal,
+                    allowed_scopes,
+                    args,
+                )
+                .await);
+            }
+
             Ok(dispatch_stub(&name))
         }
     }
+}
+
+/// Dispatch `assemble_hot` against a wired `SQLite` store and vault root.
+///
+/// This is the MCP equivalent of the CLI's source-loading path: it resolves
+/// the requested recipe from config, reads markdown sources from the same
+/// vault root that the server opened, queries authorized record scopes from
+/// the wired store, and returns the generated response envelope.
+#[allow(
+    clippy::too_many_lines,
+    reason = "linear MCP arg -> source load -> core assembler -> envelope flow"
+)]
+async fn handle_assemble_hot(
+    store: Arc<SqliteMemoryStore>,
+    vault_root: PathBuf,
+    mut config: CairnConfig,
+    principal: ScopeTuple,
+    allowed_scopes: Vec<ScopeTuple>,
+    args: AssembleHotArgs,
+) -> CallToolResult {
+    let requested_recipe = args.recipe.as_deref();
+    let Some(resolved) = config.vault.hot_memory.resolve_recipe(requested_recipe) else {
+        let requested = requested_recipe.unwrap_or(&config.vault.hot_memory.default_recipe);
+        let response = crate::verb_envelope::invalid_args_response(
+            ResponseVerb::AssembleHot,
+            "recipe",
+            &format!("unknown recipe {requested:?}"),
+        );
+        return crate::verb_envelope::call_result_from_response(&response);
+    };
+    let resolved_name = resolved.name.clone();
+    let resolved_steps = resolved.steps.to_vec();
+    let resolved_max = resolved.max_bytes;
+    config.vault.hot_memory.default_recipe = resolved_name;
+    config.vault.hot_memory.recipe = resolved_steps;
+    config.vault.hot_memory.max_bytes = resolved_max;
+
+    if args
+        .budget
+        .is_some_and(|b| b > cairn_core::verbs::assemble_hot::segments::MAX_BYTES)
+    {
+        let response = crate::verb_envelope::invalid_args_response(
+            ResponseVerb::AssembleHot,
+            "budget",
+            "budget exceeds hard cap",
+        );
+        return crate::verb_envelope::call_result_from_response(&response);
+    }
+
+    let budget = effective_assemble_budget(&config, args.budget);
+    let bodies = match load_hot_bodies_for_mcp(
+        store.as_ref(),
+        &vault_root,
+        &config,
+        &allowed_scopes,
+        args.session_id.as_deref(),
+        budget,
+    )
+    .await
+    {
+        Ok(bodies) => bodies,
+        Err(response) => return crate::verb_envelope::call_result_from_response(&response),
+    };
+
+    let mut data = match cairn_core::verbs::assemble_hot::assemble_hot_from_bodies(
+        &config.vault.hot_memory,
+        bodies,
+        Some(budget),
+    ) {
+        Ok(data) => data,
+        Err(e) => {
+            let response = crate::verb_envelope::aborted_internal(
+                ResponseVerb::AssembleHot,
+                &format!("assemble_hot: {e}"),
+            );
+            return crate::verb_envelope::call_result_from_response(&response);
+        }
+    };
+
+    if args.explain.unwrap_or(false) {
+        match build_mcp_explain_debug(
+            store.as_ref(),
+            &vault_root,
+            &config,
+            &principal,
+            &allowed_scopes,
+            args.session_id.as_deref(),
+            budget,
+        )
+        .await
+        {
+            Ok(debug) => data.debug = Some(debug),
+            Err(response) => return crate::verb_envelope::call_result_from_response(&response),
+        }
+    }
+
+    let response = crate::verb_envelope::committed(
+        ResponseVerb::AssembleHot,
+        ResponseData::AssembleHot(data),
+        Vec::new(),
+    );
+    crate::verb_envelope::call_result_from_response(&response)
+}
+
+async fn load_hot_bodies_for_mcp(
+    store: &SqliteMemoryStore,
+    vault_root: &Path,
+    config: &CairnConfig,
+    allowed_scopes: &[ScopeTuple],
+    session_id: Option<&str>,
+    budget: u64,
+) -> Result<Vec<String>, cairn_core::generated::envelope::Response> {
+    let mut bodies = Vec::with_capacity(config.vault.hot_memory.recipe.len());
+    let mut used_bytes = 0_u64;
+
+    for step in &config.vault.hot_memory.recipe {
+        let remaining = budget.saturating_sub(used_bytes);
+        let mut body = match step {
+            cairn_core::config::HotMemoryRecipeStep::Purpose => {
+                read_hot_file(vault_root, Path::new("purpose.md"), remaining)?
+            }
+            cairn_core::config::HotMemoryRecipeStep::Index => {
+                read_hot_file(vault_root, Path::new("index.md"), remaining)?
+            }
+            cairn_core::config::HotMemoryRecipeStep::PinnedFeedback => {
+                let records = load_records_for_kinds(
+                    store,
+                    allowed_scopes,
+                    &[MemoryKind::User, MemoryKind::Feedback],
+                    None,
+                    16,
+                )
+                .await?;
+                let records = records
+                    .into_iter()
+                    .filter(is_pinned_record)
+                    .collect::<Vec<_>>();
+                render_records_section("Pinned Feedback", &records, remaining)
+            }
+            cairn_core::config::HotMemoryRecipeStep::TopSalienceProject => {
+                let mut records =
+                    load_records_for_kinds(store, allowed_scopes, &[MemoryKind::Project], None, 32)
+                        .await?;
+                records.sort_by(|a, b| {
+                    b.salience
+                        .partial_cmp(&a.salience)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                records.truncate(6);
+                render_records_section("Project Memory", &records, remaining)
+            }
+            cairn_core::config::HotMemoryRecipeStep::ActivePlaybook => {
+                let mut records = load_records_for_kinds(
+                    store,
+                    allowed_scopes,
+                    &[MemoryKind::Playbook],
+                    None,
+                    16,
+                )
+                .await?;
+                records.sort_by(|a, b| b.updated_at.as_str().cmp(a.updated_at.as_str()));
+                records.truncate(1);
+                render_records_section("Active Playbook", &records, remaining)
+            }
+            cairn_core::config::HotMemoryRecipeStep::RecentUserSignal => {
+                let mut records = load_records_for_kinds(
+                    store,
+                    allowed_scopes,
+                    &[MemoryKind::UserSignal],
+                    session_id,
+                    16,
+                )
+                .await?;
+                records.sort_by(|a, b| b.updated_at.as_str().cmp(a.updated_at.as_str()));
+                records.truncate(5);
+                render_records_section("Recent User Signal", &records, remaining)
+            }
+            _ => {
+                return Err(crate::verb_envelope::aborted_internal(
+                    ResponseVerb::AssembleHot,
+                    "unsupported hot-memory recipe step",
+                ));
+            }
+        };
+        truncate_body_to_budget(&mut body, remaining);
+        used_bytes = used_bytes.saturating_add(body.len() as u64);
+        bodies.push(body);
+    }
+
+    Ok(bodies)
+}
+
+async fn build_mcp_explain_debug(
+    store: &SqliteMemoryStore,
+    vault_root: &Path,
+    config: &CairnConfig,
+    principal: &ScopeTuple,
+    allowed_scopes: &[ScopeTuple],
+    session_id: Option<&str>,
+    budget: u64,
+) -> Result<HotMemoryDebug, cairn_core::generated::envelope::Response> {
+    let purpose_md = read_optional_hot_file(vault_root, Path::new("purpose.md"), budget)?;
+    let index_md = read_optional_hot_file(vault_root, Path::new("index.md"), budget)?;
+    let pinned_records = load_records_for_kinds(
+        store,
+        allowed_scopes,
+        &[MemoryKind::User, MemoryKind::Feedback],
+        None,
+        64,
+    )
+    .await?;
+    let project_records =
+        load_records_for_kinds(store, allowed_scopes, &[MemoryKind::Project], None, 64).await?;
+    let playbook_records =
+        load_records_for_kinds(store, allowed_scopes, &[MemoryKind::Playbook], None, 64).await?;
+    let signal_records = load_records_for_kinds(
+        store,
+        allowed_scopes,
+        &[MemoryKind::UserSignal],
+        session_id,
+        64,
+    )
+    .await?;
+
+    let pinned_refs: Vec<&MemoryRecord> = pinned_records.iter().collect();
+    let project_refs: Vec<&MemoryRecord> = project_records.iter().collect();
+    let playbook_refs: Vec<&MemoryRecord> = playbook_records.iter().collect();
+    let signal_refs: Vec<&MemoryRecord> = signal_records.iter().collect();
+    let authorized_visibility = [
+        MemoryVisibility::Private,
+        MemoryVisibility::Session,
+        MemoryVisibility::Project,
+    ];
+
+    let inputs = cairn_core::verbs::assemble_hot::HotMemoryInputs {
+        purpose_md: &purpose_md,
+        index_md: &index_md,
+        pinned_candidates: &pinned_refs,
+        project_candidates: &project_refs,
+        playbook_candidates: &playbook_refs,
+        user_signal_candidates: &signal_refs,
+        now: now_timestamp(),
+        scope: principal.clone(),
+        authorized_visibility: &authorized_visibility,
+        include_debug: true,
+    };
+
+    let mut explain_cfg = config.vault.hot_memory.clone();
+    if let Ok(budget_u32) = u32::try_from(budget) {
+        explain_cfg.max_bytes = budget_u32.min(explain_cfg.max_bytes);
+    }
+
+    cairn_core::verbs::assemble_hot::assemble_hot_with_inputs(&inputs, &explain_cfg)
+        .map(|data| data.debug.unwrap_or(HotMemoryDebug { steps: Vec::new() }))
+        .map_err(|e| {
+            crate::verb_envelope::aborted_internal(
+                ResponseVerb::AssembleHot,
+                &format!("explain assemble: {e}"),
+            )
+        })
+}
+
+async fn load_records_for_kinds(
+    store: &SqliteMemoryStore,
+    allowed_scopes: &[ScopeTuple],
+    kinds: &[MemoryKind],
+    session_id: Option<&str>,
+    limit: usize,
+) -> Result<Vec<MemoryRecord>, cairn_core::generated::envelope::Response> {
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for scope in allowed_scopes {
+        for kind in kinds {
+            let mut query_scope = scope.clone();
+            if matches!(*kind, MemoryKind::UserSignal) {
+                query_scope.session_id = session_id.map(str::to_owned);
+            }
+            for visibility in [
+                MemoryVisibility::Private,
+                MemoryVisibility::Session,
+                MemoryVisibility::Project,
+            ] {
+                let page = store
+                    .list(&ListArgs {
+                        kind: Some(*kind),
+                        scope: Some(query_scope.clone()),
+                        visibility_allowlist: vec![visibility],
+                        limit,
+                        ..ListArgs::default()
+                    })
+                    .await
+                    .map_err(|e| {
+                        crate::verb_envelope::aborted_internal(
+                            ResponseVerb::AssembleHot,
+                            &format!("store list: {e}"),
+                        )
+                    })?;
+                for record in page.records {
+                    if session_id.is_some()
+                        && matches!(record.kind, MemoryKind::UserSignal)
+                        && record.scope.session_id.as_deref() != session_id
+                    {
+                        continue;
+                    }
+                    if seen.insert(record.id.as_str().to_owned()) {
+                        out.push(record);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+fn effective_assemble_budget(config: &CairnConfig, budget_override: Option<u64>) -> u64 {
+    budget_override
+        .unwrap_or_else(|| u64::from(config.vault.hot_memory.max_bytes))
+        .min(u64::from(config.vault.hot_memory.max_bytes))
+        .min(cairn_core::verbs::assemble_hot::segments::MAX_BYTES)
+}
+
+#[allow(
+    clippy::result_large_err,
+    reason = "MCP boundary helpers return complete generated response envelopes"
+)]
+fn read_hot_file(
+    vault_root: &Path,
+    relative_path: &Path,
+    budget: u64,
+) -> Result<String, cairn_core::generated::envelope::Response> {
+    cairn_core::verbs::assemble_hot::loader::read_vault_markdown_file(
+        vault_root,
+        relative_path,
+        budget,
+    )
+    .map_err(|e| {
+        crate::verb_envelope::aborted_internal(
+            ResponseVerb::AssembleHot,
+            &format!("read {}: {e}", relative_path.display()),
+        )
+    })
+}
+
+#[allow(
+    clippy::result_large_err,
+    reason = "MCP boundary helpers return complete generated response envelopes"
+)]
+fn read_optional_hot_file(
+    vault_root: &Path,
+    relative_path: &Path,
+    budget: u64,
+) -> Result<String, cairn_core::generated::envelope::Response> {
+    match cairn_core::verbs::assemble_hot::loader::read_vault_markdown_file(
+        vault_root,
+        relative_path,
+        budget,
+    ) {
+        Ok(s) => Ok(s),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(crate::verb_envelope::aborted_internal(
+            ResponseVerb::AssembleHot,
+            &format!("read {}: {e}", relative_path.display()),
+        )),
+    }
+}
+
+fn truncate_body_to_budget(body: &mut String, budget: u64) {
+    if body.len() as u64 <= budget {
+        return;
+    }
+    let mut end = usize::try_from(budget).unwrap_or(0).min(body.len());
+    while !body.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    body.truncate(end);
+}
+
+fn render_records_section(title: &str, records: &[MemoryRecord], budget: u64) -> String {
+    if records.is_empty() || budget == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    push_capped(&mut out, &format!("# {title}\n"), budget);
+    for record in records {
+        if out.len() as u64 >= budget {
+            break;
+        }
+        push_capped(&mut out, "- ", budget);
+        let mut first = true;
+        for word in record.body.split_whitespace() {
+            if out.len() as u64 >= budget {
+                break;
+            }
+            if !first {
+                push_capped(&mut out, " ", budget);
+            }
+            push_capped(&mut out, word, budget);
+            first = false;
+        }
+        push_capped(&mut out, "\n", budget);
+    }
+    out
+}
+
+fn push_capped(out: &mut String, text: &str, budget: u64) {
+    let remaining = budget.saturating_sub(out.len() as u64);
+    if remaining == 0 {
+        return;
+    }
+    if text.len() as u64 <= remaining {
+        out.push_str(text);
+        return;
+    }
+    let mut end = usize::try_from(remaining).unwrap_or(0).min(text.len());
+    while !text.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    out.push_str(&text[..end]);
+}
+
+fn is_pinned_record(record: &MemoryRecord) -> bool {
+    record.tags.iter().any(|tag| tag == "pinned")
+        || record
+            .extra_frontmatter
+            .get("pinned")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+}
+
+#[allow(
+    clippy::expect_used,
+    reason = "1970-01-01T00:00:00Z is a fixed valid RFC3339 literal"
+)]
+fn now_timestamp() -> Rfc3339Timestamp {
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    Rfc3339Timestamp::parse(now).unwrap_or_else(|_| {
+        Rfc3339Timestamp::parse("1970-01-01T00:00:00Z").expect("fixed RFC3339 literal is valid")
+    })
 }
 
 /// Dispatch the `search` tool against a wired store.

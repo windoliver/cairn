@@ -1,6 +1,6 @@
 //! Shared clap command tree for the runtime CLI and generated docs.
 
-use crate::{generated, hooks, identity, skill, verbs};
+use crate::{doctor, generated, hooks, identity, skill, verbs};
 
 /// Build the `cairn` command tree used by both `main.rs` and `cairn-docgen`.
 #[must_use]
@@ -49,6 +49,7 @@ pub fn build_command() -> clap::Command {
         // Management subcommand (plugins already has --json per sub-subcommand).
         .subcommand(plugins_subcommand())
         .subcommand(bootstrap_subcommand())
+        .subcommand(doctor_subcommand())
         .subcommand(mcp_subcommand())
         .subcommand(vault_subcommand())
         .subcommand(skill_subcommand())
@@ -148,6 +149,45 @@ fn llm_subcommand() -> clap::Command {
                              requests JSON output and validates the response \
                              against the schema (exits 1 on validation failure).",
                         ),
+                )
+                .arg(
+                    clap::Arg::new("json")
+                        .long("json")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Emit JSON receipt instead of human-readable output"),
+                ),
+        )
+}
+
+fn doctor_subcommand() -> clap::Command {
+    clap::Command::new("doctor")
+        .about("Reference-consumer diagnostics")
+        .subcommand_required(true)
+        .arg_required_else_help(true)
+        .subcommand(
+            clap::Command::new("claude-code")
+                .about(
+                    "Verify Claude Code can discover the configured Cairn MCP server, start it, \
+                     call `status`, and find the five expected hook entries without mutating config.",
+                )
+                .arg(
+                    clap::Arg::new("project-dir")
+                        .long("project-dir")
+                        .value_name("PATH")
+                        .help("Project directory used for .mcp.json and .claude/settings*.json lookups"),
+                )
+                .arg(
+                    clap::Arg::new("home-dir")
+                        .long("home-dir")
+                        .value_name("PATH")
+                        .help("Override the user home directory for ~/.claude.json and ~/.claude/settings.json"),
+                )
+                .arg(
+                    clap::Arg::new("server-name")
+                        .long("server-name")
+                        .value_name("NAME")
+                        .default_value(doctor::DEFAULT_SERVER_NAME)
+                        .help("Claude Code MCP server name to verify"),
                 )
                 .arg(
                     clap::Arg::new("json")
@@ -309,7 +349,7 @@ fn vault_subcommand() -> clap::Command {
 
 fn admin_subcommand() -> clap::Command {
     clap::Command::new("admin")
-        .about("Administrative operations (model management, reindex)")
+        .about("Administrative operations (model management, reindex, backup substrate)")
         .subcommand_required(true)
         .arg_required_else_help(true)
         .subcommand(
@@ -359,6 +399,47 @@ fn admin_subcommand() -> clap::Command {
                             "Rebuild FTS5 + vector indexes from the authoritative records table \
                              (use after derived indexes are deleted or corrupted).",
                         ),
+                )
+                .arg(
+                    clap::Arg::new("json")
+                        .long("json")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Emit JSON output"),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("snapshot")
+                .about("Prepare a vault backup snapshot")
+                .arg(
+                    clap::Arg::new("backup")
+                        .long("backup")
+                        .required(true)
+                        .value_name("PATH")
+                        .help("Destination path for the prepared backup"),
+                )
+                .arg(
+                    clap::Arg::new("json")
+                        .long("json")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Emit JSON output"),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("restore")
+                .about("Prepare a restore operation from a backup")
+                .arg(
+                    clap::Arg::new("from")
+                        .long("from")
+                        .required(true)
+                        .value_name("PATH")
+                        .help("Source backup path to restore from"),
+                )
+                .arg(
+                    clap::Arg::new("into")
+                        .long("into")
+                        .required(true)
+                        .value_name("PATH")
+                        .help("Destination vault path to restore into"),
                 )
                 .arg(
                     clap::Arg::new("json")

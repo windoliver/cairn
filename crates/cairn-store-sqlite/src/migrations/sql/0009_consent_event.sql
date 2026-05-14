@@ -55,6 +55,7 @@ CREATE TRIGGER consent_journal_kind_domain
         'policy_change',
         'remember_intent',
         'forget_intent',
+        'source_forget',
         'grant',
         'revoke',
         'promote_receipt'

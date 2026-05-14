@@ -27,15 +27,21 @@ use std::process::ExitCode;
 use anyhow::Context as _;
 use cairn_core::config::{CairnConfig, ConsolidationConfig};
 use cairn_core::contract::job_store::JobStore;
-use cairn_core::domain::capture::CaptureEvent;
-use cairn_core::domain::trace::{TraceEvent, TraceLink};
-use cairn_core::domain::{CaptureEventId, ScopeTuple, SessionId};
+use cairn_core::domain::capture::{
+    CaptureEvent, CaptureMode, CapturePayload, CaptureRefs, PayloadHash, SourceFamily,
+};
+use cairn_core::domain::trace::{TraceBlock, TraceEvent, TraceLink};
+use cairn_core::domain::{
+    ActorChainEntry, CaptureEventId, ChainRole, Identity, Rfc3339Timestamp, ScopeTuple, SessionId,
+};
 use cairn_core::generated::common::Ulid as WireUlid;
 use cairn_core::generated::envelope::{
     Response, ResponseData, ResponsePolicyTrace, ResponseStatus, ResponseVerb,
 };
 use cairn_core::generated::verbs::capture_trace::{CaptureTraceData, FailedTurn};
-use cairn_core::pipeline::capture_trace::{classify, project, project_pre_compact_snapshot};
+use cairn_core::pipeline::capture_trace::{
+    ProjectedTraceBlocks, classify, project, project_pre_compact_snapshot, project_with_blocks,
+};
 use cairn_core::pipeline::dispatch::{DefaultRegistry, trace_body_bytes};
 use cairn_core::pipeline::extract::body::ResolvedBody;
 use cairn_core::pipeline::filter::{
@@ -58,6 +64,7 @@ use super::envelope::{emit_json, human_error, invalid_args_response, new_operati
 
 const DEFAULT_TENANT: &str = "default";
 const CAPTURE_TRACE_ENTITY: &str = "ingest";
+const DIRECT_BLOCKS_TURN_PREFIX: &str = "trace-blocks";
 
 /// Result returned by [`run_handler`] on success.
 #[derive(Debug, serde::Serialize)]
@@ -163,6 +170,64 @@ pub async fn run_handler_with_scope(
         Some(&scope_binding),
         None,
         &ConsolidationConfig::default(),
+    )
+    .await
+}
+
+/// Persist a direct `Vec<TraceBlock>` capture from a JSON file.
+///
+/// ```rust,no_run
+/// use cairn_cli::verbs::capture_trace::run_blocks_handler;
+///
+/// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+/// let vault = tempfile::tempdir().unwrap();
+/// let store = cairn_store_sqlite::open_in_memory().await.unwrap();
+/// let blocks_path = vault.path().join("trace-blocks.json");
+/// std::fs::write(
+///     &blocks_path,
+///     serde_json::json!([
+///         { "kind": "reasoning", "text": "thinking", "signature": "sig-1" },
+///         { "kind": "tool_use", "tool": "Read", "input": {"file": "README.md"}, "id": "tool-1" },
+///         { "kind": "tool_result", "tool_use_id": "tool-1", "content": "file body", "is_error": false },
+///         { "kind": "text", "text": "final answer" }
+///     ])
+///     .to_string(),
+/// )
+/// .unwrap();
+///
+/// let result = run_blocks_handler(
+///     &store,
+///     vault.path(),
+///     &blocks_path,
+///     "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+/// )
+/// .await
+/// .unwrap();
+/// assert!(result.failed_turns.is_empty());
+/// # });
+/// ```
+pub async fn run_blocks_handler(
+    store: &SqliteMemoryStore,
+    vault_root: &Path,
+    blocks_path: &Path,
+    session_id: &str,
+) -> anyhow::Result<CaptureTraceResponse> {
+    run_blocks_handler_inner(store, vault_root, blocks_path, session_id, None).await
+}
+
+async fn run_blocks_handler_with_scope(
+    store: &SqliteMemoryStore,
+    vault_root: &Path,
+    blocks_path: &Path,
+    session_id: &str,
+    scope_binding: ScopeTuple,
+) -> anyhow::Result<CaptureTraceResponse> {
+    run_blocks_handler_inner(
+        store,
+        vault_root,
+        blocks_path,
+        session_id,
+        Some(&scope_binding),
     )
     .await
 }
@@ -327,13 +392,13 @@ async fn run_handler_inner(
                     break;
                 }
             };
-            let raw_text = match String::from_utf8(body_bytes) {
+            let raw_text = match trace_text(event, &body_bytes) {
                 Ok(text) => text,
                 Err(e) => {
                     failed_turns.push((
                         session_str.clone(),
                         turn_str.clone(),
-                        format!("resolve_body: routed body is not valid UTF-8: {e}"),
+                        format!("resolve_body: {e}"),
                     ));
                     group_failed = true;
                     break;
@@ -639,6 +704,154 @@ async fn run_handler_inner(
     })
 }
 
+#[allow(clippy::too_many_lines)] // sequential block-projection pipeline; splitting hides dataflow
+async fn run_blocks_handler_inner(
+    store: &SqliteMemoryStore,
+    vault_root: &Path,
+    blocks_path: &Path,
+    session_id_raw: &str,
+    scope_binding: Option<&ScopeTuple>,
+) -> anyhow::Result<CaptureTraceResponse> {
+    refuse_if_degraded(&ReconciliationReport::default(), vec![])
+        .context("capture_trace: vault degraded")?;
+
+    let session_id = SessionId::parse(session_id_raw)
+        .map_err(anyhow::Error::msg)
+        .context("capture_trace: invalid session_id for --blocks")?;
+    let blocks = read_trace_blocks(blocks_path).await?;
+    let raw_blocks = tokio::fs::read(blocks_path)
+        .await
+        .with_context(|| format!("read trace blocks at {}", blocks_path.display()))?;
+    let import_id = stable_ulid(
+        b"cairn:capture-trace:blocks:import:v1\0",
+        &[session_id.as_str().as_bytes(), &raw_blocks],
+    );
+    let turn_id = stable_turn_id(&import_id);
+    let payload_ref = persist_trace_blocks_source(vault_root, &import_id, &raw_blocks).await?;
+    let payload_hash = PayloadHash::parse(format!("sha256:{}", sha256_hex(&raw_blocks)))
+        .map_err(anyhow::Error::msg)?;
+    let captured_at = chrono::Utc::now();
+    let mut policy_trace_entries = Vec::new();
+    let mut projected = Vec::with_capacity(blocks.len());
+    let mut pre_tool_by_id: BTreeMap<String, CaptureEventId> = BTreeMap::new();
+
+    for (block_index, block) in blocks.into_iter().enumerate() {
+        let offset_secs = i64::try_from(block_index)
+            .map_err(|_| anyhow::anyhow!("capture_trace: block_index exceeds i64"))?;
+        let event_dt = captured_at + chrono::Duration::seconds(offset_secs);
+        let captured_at = timestamp_from_datetime(event_dt)?;
+        let stable_event_id = stable_ulid(
+            b"cairn:capture-trace:blocks:event:v1\0",
+            &[
+                session_id.as_str().as_bytes(),
+                import_id.as_bytes(),
+                &block_index.to_le_bytes(),
+            ],
+        );
+        let event = synthetic_block_event(
+            &session_id,
+            &turn_id,
+            &captured_at,
+            &payload_hash,
+            &payload_ref,
+            &stable_event_id,
+            &block,
+        )?;
+
+        let body = block_body(&block);
+        let redacted = redact(&body);
+        let fenced = fence(&redacted.text);
+        let inputs = FilterInputs::new(&redacted, &fenced);
+        let decision = should_memorize(&inputs);
+        policy_trace_entries.extend([
+            PolicyTraceEntry::from(&redacted),
+            PolicyTraceEntry::from(&fenced),
+            PolicyTraceEntry::from(&decision),
+        ]);
+        if let Decision::Discard(reason) = decision {
+            return Ok(CaptureTraceResponse {
+                trace_id: Ulid::new().to_string(),
+                failed_turns: vec![(
+                    session_id.as_str().to_owned(),
+                    turn_id.clone(),
+                    format!("privacy filter rejected turn: {}", reason.as_str()),
+                )],
+                policy_trace: to_wire(&policy_trace_entries),
+            });
+        }
+
+        let classified = classify(&event).map_err(anyhow::Error::msg)?;
+        let parent_event_id = match &block {
+            TraceBlock::ToolResult { tool_use_id, .. } => pre_tool_by_id.get(tool_use_id).cloned(),
+            _ => None,
+        };
+        let tool_call_id = match &block {
+            TraceBlock::ToolUse { id, .. } => Some(id.clone()),
+            TraceBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
+            _ => None,
+        };
+        let link = TraceLink {
+            session_id: session_id.clone(),
+            turn_id: turn_id.clone(),
+            sequence: 0,
+            capture_event_id: event.event_id.clone(),
+            parent_event_id,
+            tool_call_id: tool_call_id.clone(),
+            member_event_ids: Vec::new(),
+        };
+        let resolved = ResolvedBody::from_trace_hook(&fenced.text);
+        let mut record = project_with_blocks(
+            &event,
+            classified,
+            &resolved,
+            &link,
+            &ProjectedTraceBlocks {
+                blocks: vec![block.clone()],
+            },
+        )
+        .map_err(anyhow::Error::msg)
+        .context("capture_trace: project trace block")?;
+        if matches!(block, TraceBlock::Reasoning { .. }) {
+            record.kind = cairn_core::domain::MemoryKind::Reasoning;
+        }
+        if let Some(trace) = record
+            .extra_frontmatter
+            .get_mut("trace")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            trace.insert(
+                "block_index".to_owned(),
+                serde_json::Value::Number(block_index.into()),
+            );
+        }
+        if let Some(scope_binding) = scope_binding {
+            bind_record_scope(&mut record, scope_binding);
+        }
+        policy_trace_entries.push(PolicyTraceEntry::pass(PolicyGate::VisibilityFloor));
+        if let TraceBlock::ToolUse { id, .. } = &block {
+            pre_tool_by_id.insert(id.clone(), event.event_id.clone());
+        }
+        projected.push(record);
+    }
+
+    let session_id_tx = session_id.clone();
+    store
+        .with_tx(move |tx| {
+            tx.renumber_turn_with(&session_id_tx, &turn_id, &projected)?;
+            tx.validate_turn_links(&session_id_tx, &turn_id)?;
+            Ok::<(), cairn_store_sqlite::error::StoreError>(())
+        })
+        .await
+        .map_err(anyhow::Error::msg)
+        .context("capture_trace: persist trace blocks")?;
+
+    Ok(CaptureTraceResponse {
+        trace_id: Ulid::new().to_string(),
+        failed_turns: Vec::new(),
+        policy_trace: to_wire(&policy_trace_entries),
+    })
+}
+
 fn bind_record_scope(record: &mut cairn_core::domain::MemoryRecord, scope_binding: &ScopeTuple) {
     if let Some(value) = &scope_binding.tenant {
         record.scope.tenant = Some(value.clone());
@@ -658,6 +871,27 @@ fn bind_record_scope(record: &mut cairn_core::domain::MemoryRecord, scope_bindin
     if let Some(value) = &scope_binding.agent {
         record.scope.agent = Some(value.clone());
     }
+}
+
+fn trace_text(event: &CaptureEvent, body_bytes: &[u8]) -> anyhow::Result<String> {
+    if matches!(&event.payload, CapturePayload::Voice { .. }) {
+        return voice_transcript_text(body_bytes);
+    }
+    String::from_utf8(body_bytes.to_vec()).context("routed body is not valid UTF-8")
+}
+
+fn voice_transcript_text(body_bytes: &[u8]) -> anyhow::Result<String> {
+    let raw: serde_json::Value =
+        serde_json::from_slice(body_bytes).context("voice payload is not valid JSON")?;
+    let text = raw
+        .get("transcript")
+        .and_then(|transcript| transcript.get("text"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("voice payload missing transcript.text"))?;
+    if text.trim().is_empty() {
+        anyhow::bail!("voice payload transcript.text is empty");
+    }
+    Ok(text.to_owned())
 }
 
 /// Read the payload bytes referenced by `event.payload_ref` from disk
@@ -724,42 +958,213 @@ fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", h.finalize())
 }
 
+async fn read_trace_blocks(path: &Path) -> anyhow::Result<Vec<TraceBlock>> {
+    let raw = tokio::fs::read_to_string(path)
+        .await
+        .with_context(|| format!("read trace blocks JSON at {}", path.display()))?;
+    serde_json::from_str(&raw).with_context(|| format!("parse trace blocks at {}", path.display()))
+}
+
+async fn persist_trace_blocks_source(
+    vault_root: &Path,
+    event_id: &str,
+    raw_blocks: &[u8],
+) -> anyhow::Result<String> {
+    let dir = vault_root.join("sources").join("trace_blocks");
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .with_context(|| format!("create trace_blocks source dir {}", dir.display()))?;
+    let filename = format!("{event_id}.json");
+    let path = dir.join(&filename);
+    tokio::fs::write(&path, raw_blocks)
+        .await
+        .with_context(|| format!("write trace blocks source {}", path.display()))?;
+    Ok(format!("sources/trace_blocks/{filename}"))
+}
+
+fn timestamp_from_datetime(dt: chrono::DateTime<chrono::Utc>) -> anyhow::Result<Rfc3339Timestamp> {
+    let raw = dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    Rfc3339Timestamp::parse(raw).map_err(anyhow::Error::msg)
+}
+
+fn stable_ulid(domain: &[u8], chunks: &[&[u8]]) -> String {
+    let mut h = Sha256::new();
+    h.update(domain);
+    for chunk in chunks {
+        h.update(chunk);
+        h.update([0]);
+    }
+    let digest = h.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    Ulid::from_bytes(bytes).to_string()
+}
+
+fn stable_turn_id(import_id: &str) -> String {
+    format!("{DIRECT_BLOCKS_TURN_PREFIX}-{import_id}")
+}
+
+fn synthetic_block_event(
+    session_id: &SessionId,
+    turn_id: &str,
+    captured_at: &Rfc3339Timestamp,
+    payload_hash: &PayloadHash,
+    payload_ref: &str,
+    event_id: &str,
+    block: &TraceBlock,
+) -> anyhow::Result<CaptureEvent> {
+    let (sensor_id, capture_mode, actor_identity, payload, source_family, tool_id) = match block {
+        TraceBlock::Reasoning { .. } | TraceBlock::Text { .. } => (
+            Identity::parse("snr:local:proactive:claude-code:v1").map_err(anyhow::Error::msg)?,
+            CaptureMode::Proactive,
+            Identity::parse("agt:claude-code:opus-4-7:main:v1").map_err(anyhow::Error::msg)?,
+            CapturePayload::Proactive {
+                kind: "assistant_message".to_owned(),
+                rationale: "capture_trace --blocks".to_owned(),
+            },
+            SourceFamily::Proactive,
+            None,
+        ),
+        TraceBlock::ToolUse { tool, id, .. } => (
+            Identity::parse("snr:local:hook:cc-session:v1").map_err(anyhow::Error::msg)?,
+            CaptureMode::Auto,
+            Identity::parse("snr:local:hook:cc-session:v1").map_err(anyhow::Error::msg)?,
+            CapturePayload::Hook {
+                hook_name: "PreToolUse".to_owned(),
+                tool_name: Some(tool.clone()),
+            },
+            SourceFamily::Hook,
+            Some(id.clone()),
+        ),
+        TraceBlock::ToolResult { tool_use_id, .. } => (
+            Identity::parse("snr:local:hook:cc-session:v1").map_err(anyhow::Error::msg)?,
+            CaptureMode::Auto,
+            Identity::parse("snr:local:hook:cc-session:v1").map_err(anyhow::Error::msg)?,
+            CapturePayload::Hook {
+                hook_name: "ToolOutput".to_owned(),
+                tool_name: None,
+            },
+            SourceFamily::Hook,
+            Some(tool_use_id.clone()),
+        ),
+    };
+    let event = CaptureEvent {
+        event_id: CaptureEventId::parse(event_id).map_err(anyhow::Error::msg)?,
+        sensor_id: sensor_id.clone(),
+        capture_mode,
+        actor_chain: vec![ActorChainEntry {
+            role: ChainRole::Author,
+            identity: actor_identity,
+            at: captured_at.clone(),
+        }],
+        refs: Some(CaptureRefs {
+            session_id: Some(session_id.as_str().to_owned()),
+            turn_id: Some(turn_id.to_owned()),
+            tool_id,
+        }),
+        payload_hash: payload_hash.clone(),
+        payload_ref: payload_ref.to_owned(),
+        captured_at: captured_at.clone(),
+        payload,
+        source_family,
+    };
+    event.validate().map_err(anyhow::Error::msg)?;
+    Ok(event)
+}
+
+fn block_body(block: &TraceBlock) -> String {
+    match block {
+        TraceBlock::Reasoning { text, .. } | TraceBlock::Text { text } => text.clone(),
+        TraceBlock::ToolUse { tool, input, .. } => {
+            format!(
+                "{tool}\n{}",
+                serde_json::to_string(input).unwrap_or_default()
+            )
+        }
+        TraceBlock::ToolResult { content, .. } => content.clone(),
+    }
+}
+
+enum CaptureTraceInput {
+    Jsonl(PathBuf),
+    Blocks { path: PathBuf, session_id: String },
+}
+
+fn normalize_cli_path(path: &Path) -> PathBuf {
+    match path.to_str().and_then(|raw| raw.strip_prefix('@')) {
+        Some(stripped) => PathBuf::from(stripped),
+        None => path.to_path_buf(),
+    }
+}
+
 /// Run `cairn capture_trace`.
 #[must_use]
 pub fn run(sub: &ArgMatches, vault_root: PathBuf, config: CairnConfig) -> ExitCode {
     let json = sub.get_flag("json");
-    let Some(from) = sub.get_one::<PathBuf>("from").cloned() else {
-        let resp = invalid_args_response(ResponseVerb::CaptureTrace, "from", "required");
-        if json {
-            emit_json(&resp);
-        } else {
-            human_error(
-                "capture_trace",
-                "InvalidArgs",
-                "--from is required",
-                &resp.operation_id,
+    let input = match (
+        sub.get_one::<PathBuf>("from")
+            .map(|p| normalize_cli_path(p)),
+        sub.get_one::<PathBuf>("blocks")
+            .map(|p| normalize_cli_path(p)),
+        sub.get_one::<String>("session_id").cloned(),
+    ) {
+        (Some(from), None, None) => CaptureTraceInput::Jsonl(from),
+        (None, Some(path), Some(session_id)) => CaptureTraceInput::Blocks { path, session_id },
+        (Some(_), None, Some(_)) => {
+            let resp = invalid_args_response(
+                ResponseVerb::CaptureTrace,
+                "session_id",
+                "session-scoped trace import is not yet supported for JSONL capture_trace",
             );
+            if json {
+                emit_json(&resp);
+            } else {
+                human_error(
+                    "capture_trace",
+                    "InvalidArgs",
+                    "--session is only supported with --blocks",
+                    &resp.operation_id,
+                );
+            }
+            return ExitCode::from(64);
         }
-        return ExitCode::from(64);
+        (None, Some(_), None) => {
+            let resp = invalid_args_response(
+                ResponseVerb::CaptureTrace,
+                "session_id",
+                "required when using --blocks",
+            );
+            if json {
+                emit_json(&resp);
+            } else {
+                human_error(
+                    "capture_trace",
+                    "InvalidArgs",
+                    "--session is required with --blocks",
+                    &resp.operation_id,
+                );
+            }
+            return ExitCode::from(64);
+        }
+        _ => {
+            let resp = invalid_args_response(
+                ResponseVerb::CaptureTrace,
+                "from|blocks",
+                "exactly one input mode is required",
+            );
+            if json {
+                emit_json(&resp);
+            } else {
+                human_error(
+                    "capture_trace",
+                    "InvalidArgs",
+                    "pass exactly one of --from or --blocks",
+                    &resp.operation_id,
+                );
+            }
+            return ExitCode::from(64);
+        }
     };
-    if sub.get_one::<String>("session_id").is_some() {
-        let resp = invalid_args_response(
-            ResponseVerb::CaptureTrace,
-            "session_id",
-            "session-scoped trace import is not yet supported",
-        );
-        if json {
-            emit_json(&resp);
-        } else {
-            human_error(
-                "capture_trace",
-                "InvalidArgs",
-                "--session is not yet supported for capture_trace",
-                &resp.operation_id,
-            );
-        }
-        return ExitCode::from(64);
-    }
 
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -780,7 +1185,7 @@ pub fn run(sub: &ArgMatches, vault_root: PathBuf, config: CairnConfig) -> ExitCo
         }
     };
 
-    let resp = rt.block_on(run_async(from, vault_root, config));
+    let resp = rt.block_on(run_async(input, vault_root, config));
     if json {
         emit_json(&resp);
     } else {
@@ -789,7 +1194,7 @@ pub fn run(sub: &ArgMatches, vault_root: PathBuf, config: CairnConfig) -> ExitCo
     response_exit_code(&resp)
 }
 
-async fn run_async(from: PathBuf, vault_root: PathBuf, config: CairnConfig) -> Response {
+async fn run_async(input: CaptureTraceInput, vault_root: PathBuf, config: CairnConfig) -> Response {
     let ctx =
         match super::signed::open_context(ResponseVerb::CaptureTrace, &vault_root, config).await {
             Ok(ctx) => ctx,
@@ -803,16 +1208,30 @@ async fn run_async(from: PathBuf, vault_root: PathBuf, config: CairnConfig) -> R
     };
     let consolidation_config = ctx.config.consolidation;
     let job_store_ref = ctx.job_store.as_deref();
-    match run_handler_inner(
-        &ctx.store,
-        &ctx.vault_root,
-        &from,
-        Some(&scope_binding),
-        job_store_ref,
-        &consolidation_config,
-    )
-    .await
-    {
+    let result = match input {
+        CaptureTraceInput::Jsonl(from) => {
+            run_handler_inner(
+                &ctx.store,
+                &ctx.vault_root,
+                &from,
+                Some(&scope_binding),
+                job_store_ref,
+                &consolidation_config,
+            )
+            .await
+        }
+        CaptureTraceInput::Blocks { path, session_id } => {
+            run_blocks_handler_with_scope(
+                &ctx.store,
+                &ctx.vault_root,
+                &path,
+                &session_id,
+                scope_binding,
+            )
+            .await
+        }
+    };
+    match result {
         Ok(result) => {
             let failed_turns = public_failed_turns(result.failed_turns);
             let data = CaptureTraceData {

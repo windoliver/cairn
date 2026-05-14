@@ -32,6 +32,7 @@
 //! - §14 Privacy and Consent (pre-persist redaction, deny-by-default,
 //!   per-sensor opt-in, append-only audit)
 
+pub mod canonical;
 pub mod capture_trace;
 pub mod consolidation;
 pub mod dispatch;

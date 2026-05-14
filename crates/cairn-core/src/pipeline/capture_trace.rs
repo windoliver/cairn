@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use serde_json::{Map as JsonMap, Value as Json};
 
 use crate::domain::{
-    ChainRole, DomainError, EvidenceVector, Provenance, ScopeTuple, TargetId,
+    ChainRole, DomainError, EvidenceVector, Provenance, ScopeTuple, SourceId, TargetId,
     capture::{CaptureEvent, CapturePayload},
     record::{Ed25519Signature, MemoryRecord, RecordId},
     taxonomy::{MemoryClass, MemoryKind, MemoryVisibility},
@@ -61,9 +61,9 @@ impl ProjectedTraceBlocks {
 ///
 /// Hook payloads route by hook name (brief §9.3), including the
 /// `PreCompact` snapshot hook. Terminal payloads with a tool reference
-/// are raw tool output, and proactive payloads whose kind explicitly
-/// names an agent/assistant message become assistant trace messages.
-/// `TurnSummary` is generated post-hoc by
+/// are raw tool output, voice payloads are user utterances, and proactive
+/// payloads whose kind explicitly names an agent/assistant message become
+/// assistant trace messages. `TurnSummary` is generated post-hoc by
 /// [`crate::pipeline::turn::summarize_turn`] and never reaches
 /// `classify`.
 ///
@@ -91,6 +91,7 @@ pub fn classify(event: &CaptureEvent) -> Result<TraceEvent, TraceProjectError> {
         {
             Ok(TraceEvent::ToolOutput)
         }
+        CapturePayload::Voice { .. } => Ok(TraceEvent::UserMessage),
         CapturePayload::Proactive { kind, .. }
             if matches!(kind.as_str(), "agent_message" | "assistant_message") =>
         {
@@ -217,7 +218,8 @@ pub fn project_with_blocks(
         visibility: MemoryVisibility::Private,
         scope,
         body,
-        provenance: provenance_from_event(event),
+        source_ids: vec![source_id_from_payload_ref(&event.payload_ref)?],
+        provenance: provenance_from_event(event)?,
         updated_at: event.captured_at.clone(),
         evidence: EvidenceVector::default(),
         salience: 0.5,
@@ -246,6 +248,17 @@ pub fn project_pre_compact_snapshot(
     project(event, TraceEvent::PreCompact, resolved_body, link)
 }
 
+fn source_id_from_payload_ref(payload_ref: &str) -> Result<SourceId, TraceProjectError> {
+    let stem = payload_ref
+        .rsplit('/')
+        .next()
+        .and_then(|name| name.rsplit_once('.').map(|(stem, _)| stem).or(Some(name)))
+        .ok_or(DomainError::EmptyField {
+            field: "source_ids",
+        })?;
+    SourceId::parse(stem.to_owned()).map_err(TraceProjectError::from)
+}
+
 /// Build a [`Provenance`] from a [`CaptureEvent`].
 ///
 /// - `source_sensor` = `event.sensor_id` (always a `snr:` identity on a
@@ -260,21 +273,26 @@ pub fn project_pre_compact_snapshot(
 ///   consent journal integration lands in a later task.
 /// - `llm_id_if_any` = `None` — trace records are captured verbatim,
 ///   not produced by an LLM.
-fn provenance_from_event(event: &CaptureEvent) -> Provenance {
+fn provenance_from_event(event: &CaptureEvent) -> Result<Provenance, TraceProjectError> {
     let originating_agent_id = event
         .actor_chain
         .iter()
         .find(|e| e.role == ChainRole::Author)
         .map_or_else(|| event.sensor_id.clone(), |e| e.identity.clone());
 
-    Provenance {
+    Ok(Provenance {
         source_sensor: event.sensor_id.clone(),
         created_at: event.captured_at.clone(),
         originating_agent_id,
+        source_ids: vec![source_id_from_payload_ref(&event.payload_ref)?],
         source_hash: event.payload_hash.as_str().to_owned(),
         consent_ref: "consent:pending".to_owned(),
         llm_id_if_any: None,
-    }
+        source_refs: vec![crate::domain::SourceRef {
+            id: event.payload_ref.clone(),
+            hash: event.payload_hash.as_str().to_owned(),
+        }],
+    })
 }
 
 /// Return a syntactically valid but content-free Ed25519 signature
@@ -389,6 +407,25 @@ mod tests {
         event
     }
 
+    fn mk_voice_event() -> CaptureEvent {
+        let mut event = mk_hook_event("UserPromptSubmit");
+        event.sensor_id =
+            Identity::parse("snr:local:voice:default:v1").expect("valid voice sensor");
+        event.actor_chain = vec![ActorChainEntry {
+            role: ChainRole::Author,
+            identity: event.sensor_id.clone(),
+            at: ts(),
+        }];
+        event.payload_ref = "sources/voice/01ARZ3NDEKTSV4RRFFQ69G5FAV.json".into();
+        event.payload = CapturePayload::Voice {
+            speaker_id: "unknown_speaker_01".into(),
+            duration_ms: 2_000,
+            confidence: 0.94,
+        };
+        event.source_family = SourceFamily::Voice;
+        event
+    }
+
     fn mk_proactive_event(kind: &str) -> CaptureEvent {
         let mut event = mk_hook_event("UserPromptSubmit");
         event.sensor_id =
@@ -466,6 +503,14 @@ mod tests {
         assert_eq!(
             classify(&mk_terminal_event(Some("toolu_1"))).unwrap(),
             TraceEvent::ToolOutput
+        );
+    }
+
+    #[test]
+    fn classifies_voice_as_user_message() {
+        assert_eq!(
+            classify(&mk_voice_event()).unwrap(),
+            TraceEvent::UserMessage
         );
     }
 

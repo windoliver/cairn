@@ -22,6 +22,7 @@ const ALLOWED_NO_DISCRIMINATOR: &[&str] = &[
     "verbs/search.json#/$defs/filter_L7/oneOf",
     "verbs/search.json#/$defs/filter_L8/oneOf",
     // XOR-required pattern:
+    "verbs/capture_trace.json#/$defs/Args/oneOf",
     "verbs/ingest.json#/$defs/Args/oneOf",
     "envelope/signed_intent.json#/oneOf",
     // Errors enum is a tagged union on `code` — gets its own discriminator below.

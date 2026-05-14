@@ -19,6 +19,7 @@
 
 pub mod actor_chain;
 pub mod admission;
+pub mod backup;
 pub mod body_hash;
 pub mod canonical;
 pub mod capture;
@@ -41,6 +42,8 @@ pub mod provenance;
 pub mod record;
 pub mod scope;
 pub mod session;
+pub mod source_id;
+pub mod source_ref;
 pub mod target_id;
 pub mod taxonomy;
 pub mod time;
@@ -49,6 +52,7 @@ pub mod trace;
 
 pub use actor_chain::{ActorChainEntry, ChainRole, validate_chain};
 pub use admission::{AdmissionError, SignedAdmission, WalActionKind};
+pub use backup::{BackupRegistryEntry, RewritePlan, ShreddedBackupEntry};
 pub use body_hash::BodyHash;
 pub use canonical::CanonicalRecordHash;
 pub use capture::{
@@ -79,6 +83,8 @@ pub use session::{
     DEFAULT_IDLE_WINDOW_SECS, LastActiveSession, Session, SessionDecision, SessionId,
     SessionIdentity, SessionSource, resolve_session,
 };
+pub use source_id::SourceId;
+pub use source_ref::{SourceRef, validate_source_refs};
 pub use target_id::TargetId;
 pub use taxonomy::{MemoryClass, MemoryKind, MemoryVisibility};
 pub use time::{Clock, SystemClock};

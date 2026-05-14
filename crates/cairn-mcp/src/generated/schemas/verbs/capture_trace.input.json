@@ -2,7 +2,25 @@
   "$defs": {
     "Args": {
       "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "from"
+          ]
+        },
+        {
+          "required": [
+            "blocks",
+            "session_id"
+          ]
+        }
+      ],
       "properties": {
+        "blocks": {
+          "description": "Path to a JSON file containing a Vec<TraceBlock>. Accepts optional @path syntax.",
+          "minLength": 1,
+          "type": "string"
+        },
         "from": {
           "description": "Path to the trace log or transcript file.",
           "minLength": 1,
@@ -13,9 +31,6 @@
           "type": "string"
         }
       },
-      "required": [
-        "from"
-      ],
       "type": "object"
     },
     "Data": {

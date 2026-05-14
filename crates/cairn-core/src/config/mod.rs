@@ -487,6 +487,8 @@ pub struct CairnConfig {
     pub llm: LlmConfig,
     /// Search and embedding availability.
     pub search: SearchConfig,
+    /// Source-file forget/redaction policy.
+    pub source: SourceConfig,
     /// Sensor enablement.
     pub sensors: SensorsConfig,
     /// Workflow orchestrator selection.
@@ -500,6 +502,27 @@ pub struct CairnConfig {
     pub consolidation: ConsolidationConfig,
 }
 
+// ── Source ────────────────────────────────────────────────────────────────
+
+/// Source-link policy controlling how `forget` and lint treat sources
+/// under the vault (issue #257; brief §3, §5.6).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SourceConfig {
+    /// When true, `forget` MUST redact the raw bytes of any forgotten
+    /// source file in-place (overwriting body, keeping only hash +
+    /// metadata) at the same time it writes the consent-journal row.
+    ///
+    /// The lint rule `source_redact_on_forget_honored` asserts the
+    /// invariant after the fact: every `consent_journal` `SourceForget`
+    /// row has a content-redacted source file in `<vault>/sources/`.
+    /// Mismatch is `source_redact_skipped`.
+    ///
+    /// Default `false`: P0 operators can ship without the policy and
+    /// lint stays quiet. Turning it on is a deliberate policy bump.
+    pub redact_on_forget: bool,
+}
+
 // ── Vault ─────────────────────────────────────────────────────────────────
 
 /// Vault-level configuration (§3.1).
@@ -510,6 +533,8 @@ pub struct VaultConfig {
     pub name: String,
     /// Storage tier.
     pub tier: VaultTier,
+    /// Source-retention policy knobs.
+    pub source: SourceConfig,
     /// Folder layout and enabled kinds.
     pub layout: LayoutConfig,
     /// Hot-memory assembly recipe and budget.
@@ -525,6 +550,7 @@ impl Default for VaultConfig {
         Self {
             name: "my-vault".into(),
             tier: VaultTier::Local,
+            source: SourceConfig::default(),
             layout: LayoutConfig::default(),
             hot_memory: HotMemoryConfig::default(),
             retention: BTreeMap::new(),

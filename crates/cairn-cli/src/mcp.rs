@@ -236,18 +236,21 @@ pub fn run(
 
                 // Upcast to dyn MemoryStore for the verb layer; keep the
                 // concrete Arc<SqliteMemoryStore> for the graph-tool layer
-                // (Plan C Task 19).
+                // (Plan C Task 19). Use the consolidation-ready entry
+                // point with `Some(vault_root)` so we get both:
+                //   - file-backed verbs (`assemble_hot`) via vault_root
+                //     (main #353 wiring)
+                //   - consolidation capability advertisement once the
+                //     scheduler is live (round-9 adversarial review #3)
                 let store: Arc<dyn cairn_core::contract::memory_store::MemoryStore> =
                     sqlite_store.clone();
-                // Use the ready variant: a Scheduler is live in this
-                // process so `cairn.workflows.v1.consolidation` is
-                // honored end-to-end (round-9 adversarial review #3).
                 let serve_result = cairn_mcp::serve_stdio_with_store_consolidation_ready(
                     store,
                     sqlite_store,
                     resolver,
                     config.clone(),
                     principal,
+                    Some(vault_root.to_path_buf()),
                 )
                 .await;
 

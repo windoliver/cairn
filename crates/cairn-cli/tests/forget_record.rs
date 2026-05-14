@@ -253,6 +253,7 @@ fn assert_capability_unavailable(vault: Option<&Path>, args: &[&str], capability
 }
 
 #[test]
+#[ignore = "session forget is now wired (#328); test asserts pre-merge unavailable behavior"]
 fn forget_session_and_scope_remain_capability_unavailable() {
     assert_capability_unavailable(
         None,
@@ -272,6 +273,7 @@ fn forget_session_and_scope_remain_capability_unavailable() {
 }
 
 #[test]
+#[ignore = "session forget is now wired (#328); test asserts pre-merge unavailable behavior"]
 fn forget_session_and_scope_ignore_malformed_vault_config() {
     let dir = tempfile::tempdir().expect("temp vault");
     bootstrap_vault(dir.path());
@@ -299,6 +301,7 @@ fn forget_session_and_scope_ignore_malformed_vault_config() {
 }
 
 #[test]
+#[ignore = "session forget is now wired (#328); test asserts pre-merge unavailable behavior"]
 fn forget_session_and_scope_ignore_invalid_explicit_vault() {
     assert_capability_unavailable(
         None,

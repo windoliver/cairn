@@ -45,6 +45,7 @@ pub(crate) async fn acquire_for_record(
             LockScope::Vault => (LockMode::Exclusive, "lineage"),
             LockScope::Entity => (LockMode::Exclusive, "entity"),
             LockScope::Session => (LockMode::Shared, "session"),
+            LockScope::SessionNamespace => (LockMode::Shared, "session_namespace"),
         };
         handles.push(
             acquire(

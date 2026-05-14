@@ -29,6 +29,8 @@
 //! them here would require bypassing `MemoryStore::upsert`'s
 //! validation via raw SQL — duplicative without buying real coverage.
 
+use std::collections::HashMap;
+
 use cairn_core::contract::identity_registry::{
     IdentityRegistry, IdentityVisibility, PurgeAcknowledgement, PurgeReason,
 };
@@ -506,7 +508,9 @@ async fn run_checks_emits_broken_actor_chain_warning_for_revoked_author() {
     use cairn_core::config::CairnConfig;
     use cairn_core::contract::memory_store::IndexStats;
     use cairn_core::generated::verbs::lint::{Kind, Severity};
-    use cairn_core::verbs::lint::{ConsentModel, LintInputs, LintRecord, run_checks};
+    use cairn_core::verbs::lint::{
+        ConsentModel, LintInputs, LintRecord, SourceArtifact, SourceArtifactState, run_checks,
+    };
 
     let (store, registry, _dir) = setup().await;
 
@@ -529,6 +533,32 @@ async fn run_checks_emits_broken_actor_chain_warning_for_revoked_author() {
         .collect();
     let states = prefetch_author_states(&store, &registry).await;
     let cfg = CairnConfig::default();
+    let resolver = stub_resolver::EmptySourceResolver;
+    let journal = stub_resolver::EmptyConsentJournal;
+    let source_artifacts: HashMap<_, _> = lint_records
+        .iter()
+        .flat_map(|record| {
+            record
+                .stored
+                .record
+                .provenance
+                .source_ids
+                .iter()
+                .cloned()
+                .map(move |source_id| {
+                    (
+                        source_id,
+                        SourceArtifact {
+                            path: "sources/test/sample.txt".to_owned(),
+                            state: SourceArtifactState::Present {
+                                sha256: record.stored.record.provenance.source_hash.clone(),
+                            },
+                        },
+                    )
+                })
+        })
+        .collect();
+    let source_forgets = HashMap::new();
     let inputs = LintInputs {
         records: &lint_records,
         config: &cfg,
@@ -536,8 +566,12 @@ async fn run_checks_emits_broken_actor_chain_warning_for_revoked_author() {
         author_states: &states,
         unresolvable_authors: &std::collections::HashSet::new(),
         consent_lookup: None,
+        source_artifacts: &source_artifacts,
+        source_forgets: &source_forgets,
         vault_root: None,
         hot_body_loader: None,
+        source_resolver: &resolver,
+        consent_journal: &journal,
     };
 
     let data = run_checks(&inputs).await;
@@ -808,4 +842,46 @@ async fn pre_request_writes_remain_legitimate_after_terminal_purge() {
         ChainStatus::Revoked,
         "pre-purge-request writes must remain pre-withdrawal Revoked under terminal Purged",
     );
+}
+
+mod stub_resolver {
+    use std::collections::HashSet;
+
+    use cairn_core::contract::consent_journal::ConsentJournalReader;
+    use cairn_core::contract::source_resolver::{SourceResolver, SourceResolverError};
+    use cairn_core::contract::{MalformedSourceForget, SourceForget};
+
+    pub struct EmptySourceResolver;
+
+    impl SourceResolver for EmptySourceResolver {
+        fn exists(&self, _id: &str) -> bool {
+            false
+        }
+        fn read(&self, _id: &str) -> Result<Vec<u8>, SourceResolverError> {
+            Err(SourceResolverError::NotFound)
+        }
+        fn locator(&self, id: &str) -> String {
+            format!("empty:{id}")
+        }
+    }
+
+    pub struct EmptyConsentJournal;
+
+    impl ConsentJournalReader for EmptyConsentJournal {
+        fn forgotten_source_bytes_hashes(&self) -> HashSet<String> {
+            HashSet::new()
+        }
+        fn forgotten_source_forgets(&self) -> Vec<SourceForget> {
+            Vec::new()
+        }
+        fn malformed_source_forget_rows(&self) -> Vec<MalformedSourceForget> {
+            Vec::new()
+        }
+        fn malformed_source_forget_rows_for_source(
+            &self,
+            _source_bytes_hash: &str,
+        ) -> Vec<MalformedSourceForget> {
+            Vec::new()
+        }
+    }
 }
