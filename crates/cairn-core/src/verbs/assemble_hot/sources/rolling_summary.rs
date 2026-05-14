@@ -23,7 +23,7 @@ use crate::verbs::assemble_hot::inputs::HotMemoryInputs;
 use super::render::render_record_block;
 
 /// Maximum number of rolling summaries selected per session.
-const MAX_PER_SESSION: usize = 1;
+pub const MAX_PER_SESSION: usize = 1;
 
 /// Select at most [`MAX_PER_SESSION`] admissible `reasoning` records per
 /// session, newest-first, from `inputs.rolling_summary_candidates`.
