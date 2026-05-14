@@ -108,6 +108,15 @@ jobs:
       - name: scripts/check-core-boundary.sh
         run: ./scripts/check-core-boundary.sh
 
+  lint-readonly-sources:
+    name: invariant / lint never writes sources (§3, #257)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: scripts/check-lint-readonly-sources.sh
+        run: ./scripts/check-lint-readonly-sources.sh
+
   os-locks:
     name: invariant / no OS advisory locks (§5.6)
     runs-on: ubuntu-latest

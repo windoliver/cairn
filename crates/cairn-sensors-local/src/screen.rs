@@ -758,6 +758,8 @@ pub fn compiled_capabilities() -> Vec<Capabilities> {
     if cfg!(feature = "screenpipe-runtime") {
         capabilities.push(Capabilities::CairnSensorV1ScreenScreenpipe);
     }
+    capabilities.sort_by_key(|capability| serde_json::to_string(capability).unwrap_or_default());
+    capabilities.dedup();
     capabilities
 }
 

@@ -35,6 +35,8 @@ use cairn_sensors_local::screen::{
 
 use super::envelope::{emit_json, new_operation_id};
 
+const CLI_CONTRACT_PHASE: cairn_core::status::Phase = cairn_core::status::Phase::V0_2;
+
 /// Outcome of probing `<vault>/.cairn/vault.id` for the capability gate.
 #[derive(Debug, PartialEq, Eq)]
 pub enum VaultBinding {
@@ -303,16 +305,18 @@ fn compute_capabilities(
             model_present,
             embedding_provider_ready,
             llm_configured: false,
-            contract_phase: cairn_core::status::Phase::V0_1,
+            contract_phase: CLI_CONTRACT_PHASE,
         })
     } else {
         // No config available — return only compiled local sensor capabilities.
         vec![]
     };
 
-    caps.extend(screen::compiled_capabilities());
-    caps.sort_by_key(|capability| serde_json::to_string(capability).unwrap_or_default());
-    caps.dedup();
+    for capability in screen::compiled_capabilities() {
+        if !caps.contains(&capability) {
+            caps.push(capability);
+        }
+    }
     caps
 }
 
@@ -423,7 +427,7 @@ fn capabilities_for_config(config: &CairnConfig, model_present: bool) -> Vec<Cap
         model_present,
         embedding_provider_ready,
         llm_configured: false,
-        contract_phase: cairn_core::status::Phase::V0_1,
+        contract_phase: CLI_CONTRACT_PHASE,
     })
 }
 

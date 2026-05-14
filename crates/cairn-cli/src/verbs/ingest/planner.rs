@@ -226,9 +226,13 @@ fn build_record_for_file(
             source_sensor: Identity::parse(FOLDER_INGEST_SENSOR)?,
             created_at: issued_at.clone(),
             originating_agent_id: author.clone(),
+            source_ids: vec![SourceId::parse(
+                deterministic_record_ulid(&file.cache_key, "source").0,
+            )?],
             source_hash: format!("{SOURCE_HASH_PREFIX}{}", file.body_hash),
             consent_ref: "consent:folder-ingest".to_owned(),
             llm_id_if_any: None,
+            source_refs: Vec::new(),
         },
         updated_at: issued_at.clone(),
         evidence: EvidenceVector::default(),

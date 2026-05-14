@@ -74,6 +74,8 @@ mcp:\n  \
       tenant: {tenant}\n"
     );
     std::fs::write(cairn_dir.join("config.yaml"), config).expect("write config.yaml");
+    std::fs::write(dir.path().join("purpose.md"), "mcp e2e purpose").expect("write purpose.md");
+    std::fs::write(dir.path().join("index.md"), "mcp e2e index").expect("write index.md");
     dir
 }
 
@@ -123,6 +125,11 @@ fn cairn_mcp_subprocess_advertises_handshake_per_wiring_flag() {
 #[test]
 fn cairn_mcp_subprocess_returns_typed_envelopes_for_core_verb_calls() {
     run_mcp_subprocess("e2e-cli-typed", run_typed_envelope_protocol);
+}
+
+#[test]
+fn cairn_mcp_subprocess_assemble_hot_commits_prefix() {
+    run_mcp_subprocess("e2e-cli-assemble", run_assemble_hot_protocol);
 }
 
 #[test]
@@ -328,6 +335,63 @@ fn run_typed_envelope_protocol(child: &mut Child) -> Result<(), String> {
     }
 
     // Drop stdin so the server starts shutting down.
+    client.close_stdin();
+    Ok(())
+}
+
+fn run_assemble_hot_protocol(child: &mut Child) -> Result<(), String> {
+    let mut client = ProtocolClient::new(child)?;
+    client.initialize("cli-e2e-assemble")?;
+
+    client.send(
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"assemble_hot","arguments":{"budget":64}}}"#,
+    )?;
+    let call_resp = client.recv()?;
+    let is_error = call_resp
+        .pointer("/result/isError")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if is_error {
+        return Err(format!("assemble_hot should commit; got {call_resp}"));
+    }
+
+    let text = first_text_content(&call_resp)
+        .ok_or_else(|| format!("assemble_hot response missing text content: {call_resp}"))?;
+    let envelope: Value = serde_json::from_str(text)
+        .map_err(|e| format!("assemble_hot text must parse as JSON: {e}; text={text}"))?;
+    if envelope["contract"] != "cairn.mcp.v1"
+        || envelope["verb"] != "assemble_hot"
+        || envelope["status"] != "committed"
+    {
+        return Err(format!(
+            "assemble_hot must return committed cairn envelope; got {envelope}"
+        ));
+    }
+    let prefix = envelope
+        .pointer("/data/prefix")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !prefix.contains("mcp e2e purpose") {
+        return Err(format!(
+            "assemble_hot prefix should include purpose.md content; got {envelope}"
+        ));
+    }
+    if envelope
+        .pointer("/data/bytes")
+        .and_then(Value::as_u64)
+        .is_none_or(|bytes| bytes > 64)
+    {
+        return Err(format!(
+            "assemble_hot bytes should respect requested budget; got {envelope}"
+        ));
+    }
+    if !envelope
+        .pointer("/data/segments")
+        .is_some_and(Value::is_array)
+    {
+        return Err(format!("assemble_hot must emit segments; got {envelope}"));
+    }
+
     client.close_stdin();
     Ok(())
 }

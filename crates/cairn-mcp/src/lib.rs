@@ -21,7 +21,7 @@ pub mod verb_envelope;
 pub use error::TransportError;
 pub use handler::CairnMcpHandler;
 
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use cairn_core::contract::mcp_server::{CONTRACT_VERSION, MCPServer, MCPServerCapabilities};
 use cairn_core::contract::version::{ContractVersion, VersionRange};
@@ -148,6 +148,33 @@ pub async fn serve_stdio_with_store(
     .await
 }
 
+/// Plan C entry point with a vault root for file-backed verbs such as
+/// `assemble_hot`.
+///
+/// This keeps the historical [`serve_stdio_with_store`] signature available
+/// for tests and embedders that only need search/graph dispatch, while the
+/// CLI can opt into the fully wired source-loading path.
+pub async fn serve_stdio_with_store_at_vault(
+    store: Arc<dyn cairn_core::contract::memory_store::MemoryStore>,
+    sqlite_store: Arc<cairn_store_sqlite::SqliteMemoryStore>,
+    scope: Arc<dyn cairn_core::mcp_auth::McpSessionScope>,
+    config: cairn_core::config::CairnConfig,
+    principal: cairn_core::domain::ScopeTuple,
+    vault_root: PathBuf,
+) -> Result<(), TransportError> {
+    serve_stdio_with_store_io_at_vault(
+        store,
+        sqlite_store,
+        scope,
+        config,
+        principal,
+        vault_root,
+        tokio::io::stdin(),
+        tokio::io::stdout(),
+    )
+    .await
+}
+
 /// Internal helper — same as [`serve_stdio_with_store`] but accepts arbitrary
 /// `AsyncRead` / `AsyncWrite` so integration tests can drive it in-process.
 ///
@@ -169,13 +196,91 @@ where
     I: AsyncRead + Unpin + Send + 'static,
     O: AsyncWrite + Unpin + Send + 'static,
 {
+    serve_stdio_with_store_io_inner(
+        store,
+        sqlite_store,
+        scope,
+        config,
+        principal,
+        None,
+        input,
+        output,
+    )
+    .await
+}
+
+/// Internal helper — same as [`serve_stdio_with_store_at_vault`] but accepts
+/// arbitrary `AsyncRead` / `AsyncWrite` so integration tests can drive it
+/// in-process.
+///
+/// # Errors
+/// Same as [`serve_stdio_with_store_at_vault`].
+#[allow(
+    clippy::too_many_arguments,
+    reason = "transport test hook mirrors serve_stdio_with_store plus IO endpoints"
+)]
+pub async fn serve_stdio_with_store_io_at_vault<I, O>(
+    store: Arc<dyn cairn_core::contract::memory_store::MemoryStore>,
+    sqlite_store: Arc<cairn_store_sqlite::SqliteMemoryStore>,
+    scope: Arc<dyn cairn_core::mcp_auth::McpSessionScope>,
+    config: cairn_core::config::CairnConfig,
+    principal: cairn_core::domain::ScopeTuple,
+    vault_root: PathBuf,
+    input: I,
+    output: O,
+) -> Result<(), TransportError>
+where
+    I: AsyncRead + Unpin + Send + 'static,
+    O: AsyncWrite + Unpin + Send + 'static,
+{
+    serve_stdio_with_store_io_inner(
+        store,
+        sqlite_store,
+        scope,
+        config,
+        principal,
+        Some(vault_root),
+        input,
+        output,
+    )
+    .await
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "shared transport helper carries explicit wiring without hiding ownership"
+)]
+async fn serve_stdio_with_store_io_inner<I, O>(
+    store: Arc<dyn cairn_core::contract::memory_store::MemoryStore>,
+    sqlite_store: Arc<cairn_store_sqlite::SqliteMemoryStore>,
+    scope: Arc<dyn cairn_core::mcp_auth::McpSessionScope>,
+    config: cairn_core::config::CairnConfig,
+    principal: cairn_core::domain::ScopeTuple,
+    vault_root: Option<PathBuf>,
+    input: I,
+    output: O,
+) -> Result<(), TransportError>
+where
+    I: AsyncRead + Unpin + Send + 'static,
+    O: AsyncWrite + Unpin + Send + 'static,
+{
     // Relay: filter blank lines from `input`, write surviving frames to the
     // framer-reader half that rmcp reads from.
     let (framer_reader, relay_writer) = tokio::io::duplex(64 * 1024);
     let mut relay_task = tokio::spawn(async move { relay::run_relay(input, relay_writer).await });
 
-    let handler =
-        CairnMcpHandler::with_store_scope_and_sqlite(store, sqlite_store, scope, config, principal);
+    let handler = if let Some(vault_root) = vault_root {
+        CairnMcpHandler::with_store_scope_sqlite_and_vault(
+            store,
+            sqlite_store,
+            scope,
+            config,
+            principal,
+            vault_root,
+        )
+    } else {
+        CairnMcpHandler::with_store_scope_and_sqlite(store, sqlite_store, scope, config, principal)
+    };
 
     // rmcp's `IntoTransport` is implemented for `(R, W)` tuples where R:
     // `AsyncRead + Unpin + Send + 'static` and W: `AsyncWrite + Unpin + Send +
