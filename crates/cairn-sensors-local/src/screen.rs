@@ -180,12 +180,14 @@ pub struct BoundingBox {
     pub height: u32,
 }
 
+#[cfg(any(target_os = "macos", test))]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct ScreenOcrResult {
     text: String,
     bounding_boxes: Vec<BoundingBox>,
 }
 
+#[cfg(target_os = "macos")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ScreenOcrCapture {
     engine: ResolvedScreenOcrEngine,
@@ -983,6 +985,7 @@ pub fn probe_config(config: &ScreenSensorConfig) -> ScreenProbe {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn permission_missing_probe(
     backend: ScreenBackend,
     ocr_engine: ResolvedScreenOcrEngine,
@@ -1067,6 +1070,7 @@ fn xcap_probe(config: &ScreenSensorConfig) -> ScreenProbe {
     )
 }
 
+#[cfg(target_os = "macos")]
 fn ocr_probe_degradation(
     config: &ScreenSensorConfig,
     ocr_engine: ResolvedScreenOcrEngine,
@@ -1093,6 +1097,7 @@ fn ocr_probe_degradation(
     }
 }
 
+#[cfg(target_os = "macos")]
 fn tesseract_available() -> bool {
     Command::new("tesseract")
         .arg("--version")
@@ -1383,6 +1388,7 @@ fn temp_ocr_image_path() -> PathBuf {
     std::env::temp_dir().join(format!("cairn-screen-ocr-{id}.png"))
 }
 
+#[cfg(target_os = "macos")]
 fn recognize_png_ocr(
     config: &ScreenSensorConfig,
     image_path: &Path,
@@ -1415,6 +1421,7 @@ fn recognize_png_ocr(
     }
 }
 
+#[cfg(target_os = "macos")]
 fn recognize_png_with_tesseract(image_path: &Path) -> Result<ScreenOcrResult, ScreenError> {
     let output = Command::new("tesseract")
         .arg(image_path)
@@ -1443,6 +1450,7 @@ fn recognize_png_with_tesseract(image_path: &Path) -> Result<ScreenOcrResult, Sc
     ocr_result_from_tesseract_tsv(stdout)
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn ocr_result_from_tesseract_tsv(tsv: &str) -> Result<ScreenOcrResult, ScreenError> {
     let mut lines = tsv.lines();
     let header = lines
@@ -1488,6 +1496,7 @@ fn ocr_result_from_tesseract_tsv(tsv: &str) -> Result<ScreenOcrResult, ScreenErr
     })
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn tesseract_box(
     fields: &[&str],
     left: usize,

@@ -205,6 +205,7 @@ jobs:
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: build-${{ matrix.os }}
+          cache-bin: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: cargo check --workspace --all-targets
         run: cargo check --workspace --all-targets --locked
