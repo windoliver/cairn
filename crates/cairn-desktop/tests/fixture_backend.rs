@@ -1,7 +1,10 @@
 //! Fixture-backed desktop backend tests.
 
 use cairn_desktop::fixture::DesktopFixture;
-use cairn_desktop::{model::DesktopReconcilePreviewRequest, repository::DesktopRepository};
+use cairn_desktop::{
+    model::{DesktopReconcileApplyRequest, DesktopReconcilePreviewRequest},
+    repository::DesktopRepository,
+};
 use serde_json::json;
 use std::collections::BTreeMap;
 
@@ -76,6 +79,28 @@ fn repository_reconcile_accepts_body_edit() {
     assert!(preview.accepted);
     assert_eq!(preview.mutable_diff["body"], json!("Updated fixture body"));
     assert!(preview.rejected_fields.is_empty());
+}
+
+#[test]
+fn repository_reconcile_apply_persists_body_edit() {
+    let repo = DesktopRepository::from_fixture(DesktopFixture::load_default().expect("fixture"));
+    let mut field_diff = BTreeMap::new();
+    field_diff.insert("body".to_string(), json!("Persisted fixture body"));
+
+    let result = repo.apply_reconcile(DesktopReconcileApplyRequest {
+        preview: DesktopReconcilePreviewRequest {
+            target_id: "rec-alpha-001".to_string(),
+            expected_version: 2,
+            backend_hash: "sha256:fixture-alpha-001".to_string(),
+            field_diff,
+        },
+    });
+
+    assert!(result.accepted);
+    let record = repo.record("rec-alpha-001").expect("record persisted");
+    assert_eq!(record.body, "Persisted fixture body");
+    assert_eq!(record.version, 3);
+    assert_ne!(record.backend_hash, "sha256:fixture-alpha-001");
 }
 
 #[test]

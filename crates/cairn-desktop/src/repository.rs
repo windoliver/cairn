@@ -1,6 +1,9 @@
 //! In-memory fixture repository for the desktop GUI alpha.
 
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard},
+};
 
 use cairn_core::contract::frontend_adapter::FrontendFieldPolicy;
 
@@ -17,32 +20,34 @@ use crate::{
 /// Fixture-backed repository used by the desktop alpha.
 #[derive(Debug, Clone)]
 pub struct DesktopRepository {
-    fixture: DesktopFixture,
+    fixture: Arc<RwLock<DesktopFixture>>,
 }
 
 impl DesktopRepository {
     /// Build a repository from a fixture.
     #[must_use]
     pub fn from_fixture(fixture: DesktopFixture) -> Self {
-        Self { fixture }
+        Self {
+            fixture: Arc::new(RwLock::new(fixture)),
+        }
     }
 
     /// Return the loaded vault summary.
     #[must_use]
     pub fn vault(&self) -> DesktopVaultSummary {
-        self.fixture.vault.clone()
+        self.fixture().vault.clone()
     }
 
     /// Return all folders.
     #[must_use]
     pub fn folders(&self) -> Vec<DesktopFolder> {
-        self.fixture.folders.clone()
+        self.fixture().folders.clone()
     }
 
     /// Return record summaries.
     #[must_use]
     pub fn records(&self) -> Vec<DesktopRecordSummary> {
-        self.fixture
+        self.fixture()
             .records
             .iter()
             .map(|record| DesktopRecordSummary {
@@ -60,7 +65,7 @@ impl DesktopRepository {
     /// Return one record detail by id.
     #[must_use]
     pub fn record(&self, id: &str) -> Option<DesktopRecordDetail> {
-        self.fixture
+        self.fixture()
             .records
             .iter()
             .find(|record| record.id == id)
@@ -71,7 +76,7 @@ impl DesktopRepository {
     #[must_use]
     pub fn graph(&self) -> DesktopGraph {
         let nodes = self
-            .fixture
+            .fixture()
             .records
             .iter()
             .map(|record| DesktopGraphNode {
@@ -83,7 +88,7 @@ impl DesktopRepository {
             .collect();
 
         let edges = self
-            .fixture
+            .fixture()
             .records
             .iter()
             .flat_map(|record| {
@@ -104,7 +109,7 @@ impl DesktopRepository {
     pub fn search(&self, query: &str) -> Vec<DesktopSearchResult> {
         let query = query.to_lowercase();
         let mut results: Vec<_> = self
-            .fixture
+            .fixture()
             .records
             .iter()
             .filter_map(|record| {
@@ -130,7 +135,7 @@ impl DesktopRepository {
     /// Return fixture lint findings.
     #[must_use]
     pub fn lint_findings(&self) -> Vec<DesktopLintFinding> {
-        self.fixture.lint_findings.clone()
+        self.fixture().lint_findings.clone()
     }
 
     /// Preview a reconcile request without mutating backend state.
@@ -203,8 +208,13 @@ impl DesktopRepository {
             };
         }
 
-        let mut record = self.record(&preview.target_id);
-        if let Some(record) = &mut record {
+        let mut fixture = self.fixture_mut();
+        let record = fixture
+            .records
+            .iter_mut()
+            .find(|record| record.id == preview.target_id);
+        let mut updated_record = None;
+        if let Some(record) = record {
             if let Some(body) = preview
                 .mutable_diff
                 .get("body")
@@ -212,14 +222,24 @@ impl DesktopRepository {
             {
                 record.body = body.to_string();
                 record.version += 1;
+                record.backend_hash = format!("sha256:{}-v{}", record.id, record.version);
             }
+            updated_record = Some(record.clone());
         }
 
         DesktopReconcileApplyResult {
-            accepted: record.is_some(),
-            record,
+            accepted: updated_record.is_some(),
+            record: updated_record,
             rejected_fields: Vec::new(),
         }
+    }
+
+    fn fixture(&self) -> RwLockReadGuard<'_, DesktopFixture> {
+        self.fixture.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn fixture_mut(&self) -> RwLockWriteGuard<'_, DesktopFixture> {
+        self.fixture.write().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
