@@ -8,6 +8,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cairn_core::contract::job_store::{FailDisposition, FailureClass, JobStore, LeasedJob};
+use cairn_core::contract::metrics::MetricsSink;
+use cairn_core::domain::metrics::MetricEvent;
 use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, instrument, warn};
@@ -37,7 +39,7 @@ impl Default for WorkerConfig {
 }
 
 /// Run one worker forever (until `cancel` fires).
-#[instrument(skip(store, registry, clock, cancel), fields(owner = %owner))]
+#[instrument(skip(store, registry, clock, cancel, metrics), fields(owner = %owner))]
 pub async fn run_worker(
     owner: String,
     store: Arc<dyn JobStore>,
@@ -45,6 +47,7 @@ pub async fn run_worker(
     clock: Arc<dyn Clock>,
     cancel: CancellationToken,
     config: WorkerConfig,
+    metrics: Arc<dyn MetricsSink>,
 ) {
     loop {
         if cancel.is_cancelled() {
@@ -66,7 +69,10 @@ pub async fn run_worker(
                 continue;
             }
         };
-        execute_one(&store, &registry, &clock, &cancel, &leased, &config).await;
+        execute_one(
+            &store, &registry, &clock, &cancel, &leased, &config, &metrics,
+        )
+        .await;
     }
 }
 
@@ -81,22 +87,56 @@ async fn execute_one(
     cancel: &CancellationToken,
     leased: &LeasedJob,
     config: &WorkerConfig,
+    metrics: &Arc<dyn MetricsSink>,
 ) {
+    // Started emission — spec §4.6 / §4.13: the lease commit has
+    // already landed (caller observed `Ok(Some(_))`), so emit before
+    // any further store mutation. Sink errors are intentionally
+    // swallowed; a missing metric must never abort a real job.
+    let started_at_ms = clock.now_ms();
+    let _ = metrics
+        .emit(MetricEvent::WorkflowJobStarted {
+            ts_ms: started_at_ms,
+            job_id: leased.job_id.to_string(),
+            kind: leased.kind.to_string(),
+            attempts: leased.attempts,
+            queue_lag_ms: started_at_ms.saturating_sub(leased.not_before_ms),
+            dedupe_key: leased.dedupe_key.clone(),
+        })
+        .await;
+
     let handler = match registry.lookup(&leased.kind) {
         Ok(h) => h,
         Err(e) => {
             warn!(error = %e, job = %leased.job_id, "no handler; permanent fail");
             let now = clock.now_ms();
-            let _ = store
+            let reason = e.to_string();
+            let fail_res = store
                 .fail(
                     &leased.job_id,
                     &leased.lease,
                     FailDisposition::Permanent,
                     FailureClass::Validation,
-                    &e.to_string(),
+                    &reason,
                     now,
                 )
                 .await;
+            if fail_res.is_ok() {
+                // Emit AFTER the fail commit lands (spec §4.13). Validation
+                // is non-retryable so `will_retry_at_ms` is None.
+                let _ = metrics
+                    .emit(MetricEvent::WorkflowJobFailed {
+                        ts_ms: now,
+                        job_id: leased.job_id.to_string(),
+                        kind: leased.kind.to_string(),
+                        attempts: leased.attempts,
+                        disposition: "permanent".into(),
+                        failure_class: FailureClass::Validation.as_str().to_owned(),
+                        last_error: reason,
+                        will_retry_at_ms: None,
+                    })
+                    .await;
+            }
             return;
         }
     };
@@ -204,8 +244,28 @@ async fn execute_one(
     }
 
     let now = clock.now_ms();
-    let result = match outcome {
-        HandlerOutcome::Done => store.complete(&leased.job_id, &leased.lease, now).await,
+    match outcome {
+        HandlerOutcome::Done => {
+            match store.complete(&leased.job_id, &leased.lease, now).await {
+                Ok(()) => {
+                    // Emit AFTER the complete commit lands (spec §4.13).
+                    let duration_ms = u64::try_from(now.saturating_sub(started_at_ms).max(0))
+                        .unwrap_or(u64::MAX);
+                    let _ = metrics
+                        .emit(MetricEvent::WorkflowJobCompleted {
+                            ts_ms: now,
+                            job_id: leased.job_id.to_string(),
+                            kind: leased.kind.to_string(),
+                            attempts: leased.attempts,
+                            duration_ms,
+                        })
+                        .await;
+                }
+                Err(e) => {
+                    error!(error = %e, job = %leased.job_id, "worker finalize failed");
+                }
+            }
+        }
         HandlerOutcome::Retry { reason, class } => {
             // Handlers must not return scheduler-only classes; the
             // shutdown arm uses Transient and the lease-loss arm uses
@@ -223,7 +283,7 @@ async fn execute_one(
             } else {
                 FailDisposition::Retry
             };
-            store
+            let fail_res = store
                 .fail(
                     &leased.job_id,
                     &leased.lease,
@@ -232,14 +292,30 @@ async fn execute_one(
                     &reason,
                     now,
                 )
-                .await
+                .await;
+            match fail_res {
+                Ok(()) => {
+                    emit_failed(
+                        metrics,
+                        leased,
+                        disposition,
+                        class,
+                        &reason,
+                        now,
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    error!(error = %e, job = %leased.job_id, "worker finalize failed");
+                }
+            }
         }
         HandlerOutcome::Permanent { reason, class } => {
             debug_assert!(
                 !class.is_scheduler_only(),
                 "handler returned scheduler-only class {class:?} on Permanent",
             );
-            store
+            let fail_res = store
                 .fail(
                     &leased.job_id,
                     &leased.lease,
@@ -248,12 +324,65 @@ async fn execute_one(
                     &reason,
                     now,
                 )
-                .await
+                .await;
+            match fail_res {
+                Ok(()) => {
+                    emit_failed(
+                        metrics,
+                        leased,
+                        FailDisposition::Permanent,
+                        class,
+                        &reason,
+                        now,
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    error!(error = %e, job = %leased.job_id, "worker finalize failed");
+                }
+            }
         }
-    };
-    if let Err(e) = result {
-        error!(error = %e, job = %leased.job_id, "worker finalize failed");
     }
+}
+
+/// Emit a `WorkflowJobFailed` after a successful `store.fail` call.
+/// Computes `will_retry_at_ms` from the policy when the store kept
+/// the row in `Queued`; `None` when the row terminated.
+async fn emit_failed(
+    metrics: &Arc<dyn MetricsSink>,
+    leased: &LeasedJob,
+    disposition: FailDisposition,
+    class: FailureClass,
+    reason: &str,
+    now_ms: i64,
+) {
+    let will_terminate = matches!(disposition, FailDisposition::Permanent)
+        || class.forces_permanent()
+        || leased.attempts >= leased.retry.max_attempts;
+    let will_retry_at_ms = if will_terminate {
+        None
+    } else {
+        // Next retry uses attempts+1 (the next execution try).
+        let next_attempt = leased.attempts.saturating_add(1);
+        let delay = i64::from(leased.retry.delay_for_attempt(next_attempt));
+        Some(now_ms.saturating_add(delay))
+    };
+    let disposition_str = match disposition {
+        FailDisposition::Retry => "retry",
+        FailDisposition::Permanent => "permanent",
+    };
+    let _ = metrics
+        .emit(MetricEvent::WorkflowJobFailed {
+            ts_ms: now_ms,
+            job_id: leased.job_id.to_string(),
+            kind: leased.kind.to_string(),
+            attempts: leased.attempts,
+            disposition: disposition_str.to_owned(),
+            failure_class: class.as_str().to_owned(),
+            last_error: reason.to_owned(),
+            will_retry_at_ms,
+        })
+        .await;
 }
 
 #[cfg(test)]
@@ -314,6 +443,8 @@ mod tests {
             heartbeat_every_ms: 10_000,
             idle_poll_ms: 50,
         };
+        let metrics: Arc<dyn cairn_core::contract::metrics::MetricsSink> =
+            Arc::new(cairn_core::contract::metrics::NoopMetricsSink);
         let handle = tokio::spawn(run_worker(
             "w-1".into(),
             store.clone(),
@@ -321,6 +452,7 @@ mod tests {
             clock.clone(),
             token,
             config,
+            metrics,
         ));
         // Poll until the handler has been called, with a generous timeout.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -340,7 +472,7 @@ mod tests {
     // otherwise keep disposition `Retry`. The class itself is always
     // forwarded to the store unchanged.
     use cairn_core::contract::job_store::{
-        EnqueueRequest as ER, FailureClass, JobStoreError, LeaseToken,
+        EnqueueRequest as ER, FailureClass, JobStoreError, LeaseToken, ReclaimedRow,
     };
     use rstest::rstest;
     use std::sync::Mutex;
@@ -406,8 +538,8 @@ mod tests {
             }
             Ok(())
         }
-        async fn reap_expired(&self, _: i64) -> Result<usize, JobStoreError> {
-            Ok(0)
+        async fn reap_expired(&self, _: i64) -> Result<Vec<ReclaimedRow>, JobStoreError> {
+            Ok(Vec::new())
         }
     }
 
@@ -455,13 +587,20 @@ mod tests {
                 expires_at_ms: 30_000,
             },
             failure_class: None,
+            not_before_ms: 0,
+            dedupe_key: None,
         };
         let config = WorkerConfig {
             lease_ms: 30_000,
             heartbeat_every_ms: 10_000,
             idle_poll_ms: 50,
         };
-        execute_one(&store_dyn, &registry, &clock, &cancel, &leased, &config).await;
+        let metrics: Arc<dyn cairn_core::contract::metrics::MetricsSink> =
+            Arc::new(cairn_core::contract::metrics::NoopMetricsSink);
+        execute_one(
+            &store_dyn, &registry, &clock, &cancel, &leased, &config, &metrics,
+        )
+        .await;
         let fails = match store_cap.fails.lock() {
             Ok(g) => g.clone(),
             Err(p) => p.into_inner().clone(),

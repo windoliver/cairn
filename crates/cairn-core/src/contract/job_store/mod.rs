@@ -212,6 +212,27 @@ pub struct LeasedJob {
     /// attempts and successfully completed retries. Set by the store
     /// when a previously-failed row is re-leased.
     pub failure_class: Option<FailureClass>,
+    /// Earliest time the row became lease-eligible. Epoch
+    /// milliseconds. Surfaced so the scheduler can compute
+    /// `queue_lag_ms = now_ms − not_before_ms` for the
+    /// `WorkflowJobStarted` metric (issue #92, spec §4.6).
+    pub not_before_ms: i64,
+    /// Step-level idempotency key persisted at enqueue time, if any.
+    /// Forwarded verbatim from `EnqueueRequest::dedupe_key`.
+    pub dedupe_key: Option<String>,
+}
+
+/// One row that the reaper moved out of `leased`. Surfaced so the
+/// scheduler can emit a `WorkflowJobFailed` metric per reclaimed
+/// lease (issue #92, spec §4.6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReclaimedRow {
+    /// Job identifier of the reclaimed row.
+    pub job_id: JobId,
+    /// Workflow kind of the reclaimed row.
+    pub kind: JobKind,
+    /// Worker-visible attempts after the reap mutation lands.
+    pub attempts: u32,
 }
 
 /// Disposition for [`JobStore::fail`].
@@ -375,12 +396,14 @@ pub trait JobStore: Send + Sync {
 
     /// Reclaim leased rows whose `lease_expires_at <= now_ms`. Used by
     /// the scheduler's reaper loop and on startup to recover orphans
-    /// from a prior incarnation. Returns the number of rows reclaimed.
+    /// from a prior incarnation. Returns one [`ReclaimedRow`] per
+    /// reclaimed lease so callers can emit per-row metrics (issue
+    /// #92, spec §4.6).
     ///
     /// # Errors
     ///
     /// Backend failure only.
-    async fn reap_expired(&self, now_ms: i64) -> Result<usize, JobStoreError>;
+    async fn reap_expired(&self, now_ms: i64) -> Result<Vec<ReclaimedRow>, JobStoreError>;
 }
 
 // `Rfc3339Timestamp` is used elsewhere in the contract surface; bring it

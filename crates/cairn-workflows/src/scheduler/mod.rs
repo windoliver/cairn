@@ -13,12 +13,13 @@ pub use reaper::{ReaperConfig, run_reaper};
 pub use worker::{WorkerConfig, run_worker};
 
 use cairn_core::contract::job_store::JobStore;
+use cairn_core::contract::metrics::{MetricsSink, NoopMetricsSink};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 /// Bundle of all scheduler tunables.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Clone)]
 pub struct SchedulerConfig {
     /// Worker tunables (shared across workers).
     pub worker: WorkerConfig,
@@ -26,12 +27,28 @@ pub struct SchedulerConfig {
     pub reaper: ReaperConfig,
     /// How many concurrent workers to spawn.
     pub worker_count: u32,
+    /// Metrics sink for `WorkflowJob{Started,Completed,Failed}`
+    /// emissions (issue #92, spec §4.6). Defaults to
+    /// [`NoopMetricsSink`] — callers wire a real sink (e.g.
+    /// `JsonlMetricsSink`) when persistence is desired.
+    pub metrics: Arc<dyn MetricsSink>,
+}
+
+impl Default for SchedulerConfig {
+    fn default() -> Self {
+        Self {
+            worker: WorkerConfig::default(),
+            reaper: ReaperConfig::default(),
+            worker_count: 1,
+            metrics: Arc::new(NoopMetricsSink),
+        }
+    }
 }
 
 impl SchedulerConfig {
-    /// P0 default — 2 workers, 30s leases, 5s reap interval.
+    /// P0 default — 2 workers, 30s leases, 5s reap interval, no-op metrics.
     #[must_use]
-    pub const fn p0() -> Self {
+    pub fn p0() -> Self {
         Self {
             worker: WorkerConfig {
                 lease_ms: 30_000,
@@ -40,6 +57,7 @@ impl SchedulerConfig {
             },
             reaper: ReaperConfig { interval_ms: 5_000 },
             worker_count: 2,
+            metrics: Arc::new(NoopMetricsSink),
         }
     }
 }
@@ -72,11 +90,17 @@ impl Scheduler {
         config: SchedulerConfig,
     ) -> Self {
         let now = clock.now_ms();
-        if let Err(e) = store.reap_expired(now).await {
-            tracing::warn!(
-                error = %e,
-                "startup reap failed; periodic reaper will recover"
-            );
+        match store.reap_expired(now).await {
+            Ok(rows) if !rows.is_empty() => {
+                tracing::info!(reclaimed = rows.len(), "startup reap reclaimed orphans");
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "startup reap failed; periodic reaper will recover"
+                );
+            }
         }
         let cancel = CancellationToken::new();
         let tracker = TaskTracker::new();
@@ -86,10 +110,12 @@ impl Scheduler {
             let s = store.clone();
             let r = registry.clone();
             let c = clock.clone();
-            tracker.spawn(worker::run_worker(owner, s, r, c, t, config.worker));
+            let m = config.metrics.clone();
+            tracker.spawn(worker::run_worker(owner, s, r, c, t, config.worker, m));
         }
         let t = cancel.clone();
-        tracker.spawn(reaper::run_reaper(store, clock, t, config.reaper));
+        let m = config.metrics.clone();
+        tracker.spawn(reaper::run_reaper(store, clock, t, config.reaper, m));
         tracker.close();
         Self { cancel, tracker }
     }

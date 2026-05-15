@@ -302,7 +302,8 @@ async fn reap_expired_recovers_orphans_after_restart() {
         let store = SqliteJobStore::new(conn).expect("init store");
         // Time has advanced past lease expiry.
         let reclaimed = store.reap_expired(10_000).await.expect("reap");
-        assert_eq!(reclaimed, 1);
+        assert_eq!(reclaimed.len(), 1);
+        assert_eq!(reclaimed[0].job_id.as_str(), "j-orphan");
         // Reaper applies per-row backoff; jump past it before re-leasing.
         let after_backoff = 1_000_000_i64;
         let leased = store
@@ -388,7 +389,7 @@ async fn reap_terminates_exhausted_orphans_instead_of_requeueing() {
     drop(leased); // simulate crash after starting
 
     let reclaimed = store.reap_expired(10_000).await.expect("reap");
-    assert_eq!(reclaimed, 1);
+    assert_eq!(reclaimed.len(), 1);
 
     // The exhausted job must NOT be leasable; the next lease must go to
     // `normal`.
@@ -646,7 +647,7 @@ async fn started_orphan_reap_honors_backoff() {
     // so backoff should be base_backoff_ms = 5000 — meaning
     // next_run_at = 200 + 5000 = 5200.
     let reclaimed = store.reap_expired(200).await.expect("reap");
-    assert_eq!(reclaimed, 1);
+    assert_eq!(reclaimed.len(), 1);
 
     // Before backoff elapsed, must NOT be eligible.
     assert!(

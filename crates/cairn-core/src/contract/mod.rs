@@ -70,7 +70,7 @@ pub use identity_registry::{
 };
 pub use job_store::{
     EnqueueRequest, FailDisposition, FailureClass, JobId, JobKind, JobPayload, JobState, JobStore,
-    JobStoreError, LeaseToken, LeasedJob, RetryPolicy,
+    JobStoreError, LeaseToken, LeasedJob, ReclaimedRow, RetryPolicy,
 };
 pub use keystore::{Keystore, KeystoreError};
 pub use llm_provider::{

@@ -54,6 +54,7 @@ async fn start_reaps_expired_lease_before_workers_run() {
         reaper: ReaperConfig {
             interval_ms: 60_000,
         },
+        ..SchedulerConfig::default()
     };
     let registry = HandlerRegistry::default();
     // Pick a wall-clock far past the lease expiry (1_000 + 100 = 1_100)
@@ -88,6 +89,7 @@ async fn start_succeeds_even_when_no_orphans_exist() {
         reaper: ReaperConfig {
             interval_ms: 60_000,
         },
+        ..SchedulerConfig::default()
     };
     let registry = HandlerRegistry::default();
     let clock: Arc<dyn Clock> = Arc::new(MockClock::at(1));

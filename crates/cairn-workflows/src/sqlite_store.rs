@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 
 use cairn_core::contract::{
     EnqueueRequest, FailDisposition, FailureClass, JobId, JobKind, JobStore, JobStoreError,
-    LeaseToken, LeasedJob, RetryPolicy,
+    LeaseToken, LeasedJob, ReclaimedRow, RetryPolicy,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
@@ -967,7 +967,7 @@ impl JobStore for SqliteJobStore {
         .map_err(|e| JobStoreError::Backend(format!("spawn_blocking join: {e}")))?
     }
 
-    async fn reap_expired(&self, now_ms: i64) -> Result<usize, JobStoreError> {
+    async fn reap_expired(&self, now_ms: i64) -> Result<Vec<ReclaimedRow>, JobStoreError> {
         // Drain in batches, releasing the store mutex between each so
         // concurrent heartbeats / completions / enqueues on this same
         // SqliteJobStore don't queue behind the entire backlog. Each
@@ -975,10 +975,10 @@ impl JobStore for SqliteJobStore {
         // healthy worker can interleave between batches and avoid
         // missing its lease deadline even when the reaper has many
         // expired rows to process.
-        let mut total = 0usize;
+        let mut reclaimed: Vec<ReclaimedRow> = Vec::new();
         loop {
             let conn = Arc::clone(&self.conn);
-            let processed = tokio::task::spawn_blocking(move || {
+            let batch = tokio::task::spawn_blocking(move || {
                 let mut guard = match conn.lock() {
                     Ok(g) => g,
                     Err(p) => p.into_inner(),
@@ -987,7 +987,8 @@ impl JobStore for SqliteJobStore {
             })
             .await
             .map_err(|e| JobStoreError::Backend(format!("spawn_blocking join: {e}")))??;
-            total = total.saturating_add(processed);
+            let processed = batch.len();
+            reclaimed.extend(batch);
             if processed == 0 || i64::try_from(processed).unwrap_or(i64::MAX) < REAP_BATCH_SIZE {
                 break;
             }
@@ -995,13 +996,14 @@ impl JobStore for SqliteJobStore {
             // scheduled before we re-acquire the connection mutex.
             tokio::task::yield_now().await;
         }
-        Ok(total)
+        Ok(reclaimed)
     }
 }
 
 // ---- pure SQL helpers (sync, exercised both directly in tests and via the trait) ----
 
-// (job_id, kind, payload, attempts, max_attempts, base, mult, cap, failure_class)
+// (job_id, kind, payload, attempts, max_attempts, base, mult, cap,
+//  failure_class, next_run_at, dedupe_key)
 type LeaseRow = (
     String,
     String,
@@ -1012,11 +1014,14 @@ type LeaseRow = (
     i64,
     i64,
     Option<String>,
+    i64,
+    Option<String>,
 );
 // (attempts, max_attempts, base, mult, cap, lease_started)
 type FailRow = (i64, i64, i64, i64, i64, i64);
-// (job_id, attempts, delivery_count, max_attempts, base, mult, cap, lease_started)
-type ReapRow = (String, i64, i64, i64, i64, i64, i64, i64);
+// (job_id, kind, attempts, delivery_count, max_attempts, base, mult, cap,
+//  lease_started)
+type ReapRow = (String, String, i64, i64, i64, i64, i64, i64, i64);
 
 fn insert_job(conn: &mut Connection, req: &EnqueueRequest) -> Result<(), JobStoreError> {
     // Use SQLite's wall clock for `enqueued_at`/`updated_at` so the
@@ -1110,7 +1115,7 @@ fn atomic_lease(
         .query_row(
             "SELECT job_id, kind, payload, attempts, max_attempts, \
                     base_backoff_ms, backoff_multiplier, max_backoff_ms, \
-                    failure_class \
+                    failure_class, next_run_at, dedupe_key \
                FROM workflow_jobs AS j \
               WHERE state = 'queued' AND next_run_at <= ? \
                 AND (queue_key IS NULL OR ( \
@@ -1139,14 +1144,27 @@ fn atomic_lease(
                     r.get::<_, i64>(6)?,
                     r.get::<_, i64>(7)?,
                     r.get::<_, Option<String>>(8)?,
+                    r.get::<_, i64>(9)?,
+                    r.get::<_, Option<String>>(10)?,
                 ))
             },
         )
         .optional()
         .map_err(|e| JobStoreError::Backend(e.to_string()))?;
 
-    let Some((job_id, kind, payload, attempts, max_attempts, base, mult, cap, failure_class_raw)) =
-        candidate
+    let Some((
+        job_id,
+        kind,
+        payload,
+        attempts,
+        max_attempts,
+        base,
+        mult,
+        cap,
+        failure_class_raw,
+        not_before_ms,
+        dedupe_key,
+    )) = candidate
     else {
         return Ok(None);
     };
@@ -1217,6 +1235,8 @@ fn atomic_lease(
             expires_at_ms: new_expires,
         },
         failure_class,
+        not_before_ms,
+        dedupe_key,
     }))
 }
 
@@ -1534,7 +1554,7 @@ pub fn install_for_tests(conn: &rusqlite::Connection) {
 /// The reaper sweeps in successive batches until none remain.
 const REAP_BATCH_SIZE: i64 = 64;
 
-fn reap_batch(conn: &mut Connection, now_ms: i64) -> Result<usize, JobStoreError> {
+fn reap_batch(conn: &mut Connection, now_ms: i64) -> Result<Vec<ReclaimedRow>, JobStoreError> {
     // BEGIN IMMEDIATE acquires a write lock up front so a
     // concurrent leaser/reaper on a separate connection retries via
     // `busy_timeout` instead of failing later with a stale-snapshot
@@ -1543,11 +1563,11 @@ fn reap_batch(conn: &mut Connection, now_ms: i64) -> Result<usize, JobStoreError
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|e| JobStoreError::Backend(e.to_string()))?;
-    let mut count = 0usize;
+    let mut reclaimed: Vec<ReclaimedRow> = Vec::new();
     {
         let mut stmt = tx
             .prepare(
-                "SELECT job_id, attempts, delivery_count, max_attempts, \
+                "SELECT job_id, kind, attempts, delivery_count, max_attempts, \
                         base_backoff_ms, backoff_multiplier, max_backoff_ms, lease_started \
                    FROM workflow_jobs \
                   WHERE state = 'leased' AND lease_expires_at <= ? \
@@ -1559,13 +1579,14 @@ fn reap_batch(conn: &mut Connection, now_ms: i64) -> Result<usize, JobStoreError
             .query_map(params![now_ms, REAP_BATCH_SIZE], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
-                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(1)?,
                     r.get::<_, i64>(2)?,
                     r.get::<_, i64>(3)?,
                     r.get::<_, i64>(4)?,
                     r.get::<_, i64>(5)?,
                     r.get::<_, i64>(6)?,
                     r.get::<_, i64>(7)?,
+                    r.get::<_, i64>(8)?,
                 ))
                 .map(|t: ReapRow| t)
             })
@@ -1573,7 +1594,9 @@ fn reap_batch(conn: &mut Connection, now_ms: i64) -> Result<usize, JobStoreError
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| JobStoreError::Backend(e.to_string()))?;
 
-        for (job_id, attempts, delivery_count, max_attempts, base, mult, cap, started) in rows {
+        for (job_id, kind, attempts, delivery_count, max_attempts, base, mult, cap, started) in
+            rows
+        {
             let policy = retry_from_row(max_attempts, base, mult, cap);
             // For started=1, heartbeat already bumped `attempts` — reap
             // doesn't bump again. For started=0, the lease counts as a
@@ -1626,10 +1649,23 @@ fn reap_batch(conn: &mut Connection, now_ms: i64) -> Result<usize, JobStoreError
                 )
                 .map_err(|e| JobStoreError::Backend(e.to_string()))?;
             }
-            count += 1;
+            // Worker-visible attempts after reap: started orphans keep
+            // their heartbeat-bumped counter; never-started crashes
+            // (lease_started = 0) are surfaced as attempts+1 — the
+            // delivery the orphan got and didn't finish.
+            let surfaced_attempts = if started == 0 {
+                u32::try_from(attempts.saturating_add(1)).unwrap_or(u32::MAX)
+            } else {
+                u32::try_from(attempts).unwrap_or(u32::MAX)
+            };
+            reclaimed.push(ReclaimedRow {
+                job_id: JobId::new(job_id),
+                kind: JobKind::new(kind),
+                attempts: surfaced_attempts,
+            });
         }
     }
     tx.commit()
         .map_err(|e| JobStoreError::Backend(e.to_string()))?;
-    Ok(count)
+    Ok(reclaimed)
 }

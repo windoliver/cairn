@@ -225,7 +225,7 @@ pub fn run(
                 };
                 let evaluation_handler = EvaluationHandler::new(
                     store_dyn.clone(),
-                    metrics_sink,
+                    metrics_sink.clone(),
                     default_golden_checks(),
                     config.evaluation.clone(),
                 );
@@ -243,12 +243,19 @@ pub fn run(
                 // block rather than before `block_on`).
                 let incarnation_id = ulid::Ulid::new().to_string();
                 let clock: Arc<dyn cairn_workflows::Clock> = Arc::new(SystemClock);
+                // Route WorkflowJob{Started,Completed,Failed} into the
+                // same JsonlMetricsSink that handles evaluation events
+                // (issue #92, spec §4.6).
+                let sched_config = SchedulerConfig {
+                    metrics: metrics_sink.clone(),
+                    ..SchedulerConfig::p0()
+                };
                 let scheduler = Scheduler::start(
                     &incarnation_id,
                     job_store.clone(),
                     &registry,
                     clock,
-                    SchedulerConfig::p0(),
+                    sched_config,
                 )
                 .await;
                 tracing::info!("scheduler started (incarnation={incarnation_id})");
