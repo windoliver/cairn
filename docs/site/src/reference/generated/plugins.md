@@ -6,6 +6,9 @@ Generated from the bundled plugin registry.
 
 | Name | Contract | Version Range | Source | Capabilities |
 |---|---|---|---|---|
+| `cairn-frontend-logseq` | `FrontendAdapter` | `[0.1.0, 0.2.0)` | `bundled:cairn-frontend-logseq` | `{"frontmatter":true,"graph_view":true,"live_plugin":true,"max_frontmatter_fields":14,"sidecar_files":true}` |
+| `cairn-frontend-obsidian` | `FrontendAdapter` | `[0.1.0, 0.2.0)` | `bundled:cairn-frontend-obsidian` | `{"frontmatter":true,"graph_view":true,"live_plugin":true,"max_frontmatter_fields":16,"sidecar_files":true}` |
+| `cairn-frontend-vscode` | `FrontendAdapter` | `[0.1.0, 0.2.0)` | `bundled:cairn-frontend-vscode` | `{"frontmatter":true,"graph_view":false,"live_plugin":true,"max_frontmatter_fields":12,"sidecar_files":true}` |
 | `cairn-mcp` | `MCPServer` | `[0.1.0, 0.2.0)` | `bundled:cairn-mcp` | `{"extensions":false,"http_streamable":false,"sse":false,"stdio":true}` |
 | `cairn-sensors-local` | `SensorIngress` | `[0.1.0, 0.2.0)` | `bundled:cairn-sensors-local` | `{"batches":true,"consent_aware":true,"streaming":true}` |
 | `cairn-store-sqlite` | `MemoryStore` | `[0.5.0, 0.6.0)` | `bundled:cairn-store-sqlite` | `{"fts":true,"graph_edges":true,"per_record_consent_model":true,"transactions":true,"vector":false}` |

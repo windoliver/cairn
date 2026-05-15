@@ -35,6 +35,9 @@ cairn-embeddings-openai = { workspace = true, optional = true }
 cairn-idl = { workspace = true }
 cairn-keychain = { workspace = true }
 cairn-mcp = { workspace = true }
+cairn-frontend-logseq = { workspace = true }
+cairn-frontend-obsidian = { workspace = true }
+cairn-frontend-vscode = { workspace = true }
 cairn-store-sqlite = { workspace = true }
 cairn-sensors-local = { workspace = true }
 cairn-workflows = { workspace = true }
