@@ -12,7 +12,7 @@ pub use handler::{
 pub use reaper::{ReaperConfig, run_reaper};
 pub use worker::{WorkerConfig, run_worker};
 
-use cairn_core::contract::job_store::JobStore;
+use cairn_core::contract::job_store::{FailureClass, JobStore};
 use cairn_core::contract::metrics::{MetricsSink, NoopMetricsSink};
 use cairn_core::domain::metrics::MetricEvent;
 use std::sync::Arc;
@@ -82,6 +82,20 @@ impl Scheduler {
     /// `worker_count = 0` is honored verbatim — no worker tasks are
     /// spawned. This is useful for tests that want to exercise the
     /// startup reap in isolation from the worker loop.
+    ///
+    /// # Invocation contract
+    ///
+    /// Call `Scheduler::start` **at most once per `incarnation_id`**
+    /// within a single process. Two concurrent schedulers sharing
+    /// the same `incarnation_id` violate the brief §8.0.a wire-compat
+    /// guarantee (their `status` snapshots can diverge) and will
+    /// race on lease ownership keys. Reusing an `incarnation_id`
+    /// across schedulers in series (one shut down before the next
+    /// starts) is supported. P0 enforces this by convention — the
+    /// daemon constructs the scheduler exactly once on `cairn mcp`
+    /// startup. A runtime double-start guard is deferred to a later
+    /// issue; if you need it in tests, scope your `incarnation_id` to
+    /// the test name.
     #[must_use = "Scheduler must be retained (and `shutdown()` called) or its workers leak"]
     pub async fn start(
         incarnation_id: &str,
@@ -102,6 +116,11 @@ impl Scheduler {
                 // §4.13). Best-effort: a sink error is ignored, same
                 // as the periodic reaper.
                 for r in rows {
+                    let (disposition, will_retry_at_ms) = if r.terminated {
+                        ("permanent", None)
+                    } else {
+                        ("retry", Some(now))
+                    };
                     let _ = config
                         .metrics
                         .emit(MetricEvent::WorkflowJobFailed {
@@ -109,10 +128,10 @@ impl Scheduler {
                             job_id: r.job_id.to_string(),
                             kind: r.kind.to_string(),
                             attempts: r.attempts,
-                            disposition: "retry".into(),
-                            failure_class: "lease_lost".into(),
+                            disposition: disposition.into(),
+                            failure_class: FailureClass::LeaseLost.as_str().into(),
                             last_error: "startup reap reclaimed expired lease".into(),
-                            will_retry_at_ms: Some(now),
+                            will_retry_at_ms,
                         })
                         .await;
                 }

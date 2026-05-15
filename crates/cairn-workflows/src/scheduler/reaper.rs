@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use cairn_core::contract::job_store::JobStore;
+use cairn_core::contract::job_store::{FailureClass, JobStore};
 use cairn_core::contract::metrics::MetricsSink;
 use cairn_core::domain::metrics::MetricEvent;
 use tokio::time::sleep;
@@ -48,17 +48,25 @@ pub async fn run_reaper(
                         // Emit AFTER the reap commit lands (spec §4.13).
                         // One Failed metric per reclaimed row — the row
                         // is now queued (or terminal-failed) so the
-                        // mutation has already been persisted.
+                        // mutation has already been persisted. The
+                        // `terminated` flag distinguishes the two
+                        // outcomes so the wire-level disposition
+                        // matches the on-disk state (issue #92).
                         for r in rows {
+                            let (disposition, will_retry_at_ms) = if r.terminated {
+                                ("permanent", None)
+                            } else {
+                                ("retry", Some(now))
+                            };
                             let _ = metrics.emit(MetricEvent::WorkflowJobFailed {
                                 ts_ms: now,
                                 job_id: r.job_id.to_string(),
                                 kind: r.kind.to_string(),
                                 attempts: r.attempts,
-                                disposition: "retry".into(),
-                                failure_class: "lease_lost".into(),
+                                disposition: disposition.into(),
+                                failure_class: FailureClass::LeaseLost.as_str().into(),
                                 last_error: "reaper reclaimed expired lease".into(),
-                                will_retry_at_ms: Some(now),
+                                will_retry_at_ms,
                             }).await;
                         }
                     }

@@ -94,13 +94,23 @@ async fn execute_one(
     // any further store mutation. Sink errors are intentionally
     // swallowed; a missing metric must never abort a real job.
     let started_at_ms = clock.now_ms();
+    // `not_before_ms == 0` is the "no scheduling constraint, lag is
+    // unknown" sentinel — `now_ms - 0` is the full Unix epoch and a
+    // garbage number on the wire. Clamp to 0 so dashboards never see
+    // a 1.7e12 spike when an enqueue site forgot to stamp the field
+    // (issue #92, spec §4.6).
+    let queue_lag_ms = if leased.not_before_ms == 0 {
+        0
+    } else {
+        started_at_ms.saturating_sub(leased.not_before_ms)
+    };
     let _ = metrics
         .emit(MetricEvent::WorkflowJobStarted {
             ts_ms: started_at_ms,
             job_id: leased.job_id.to_string(),
             kind: leased.kind.to_string(),
             attempts: leased.attempts,
-            queue_lag_ms: started_at_ms.saturating_sub(leased.not_before_ms),
+            queue_lag_ms,
             dedupe_key: leased.dedupe_key.clone(),
         })
         .await;
@@ -359,9 +369,20 @@ async fn emit_failed(
         let delay = i64::from(leased.retry.delay_for_attempt(next_attempt));
         Some(now_ms.saturating_add(delay))
     };
-    let disposition_str = match disposition {
-        FailDisposition::Retry => "retry",
-        FailDisposition::Permanent => "permanent",
+    // Wire disposition reflects the row's on-disk state after the
+    // store.fail commit landed: a row that just terminated (because
+    // attempts hit the cap, the disposition was Permanent, or the
+    // class forces permanent) must report `"permanent"` even when
+    // the worker asked for `Retry` — otherwise the metric claims a
+    // retry will occur for a row that's now `state = 'failed'`
+    // (issue #92, e2e gap).
+    let disposition_str = if will_terminate {
+        "permanent"
+    } else {
+        match disposition {
+            FailDisposition::Retry => "retry",
+            FailDisposition::Permanent => "permanent",
+        }
     };
     let _ = metrics
         .emit(MetricEvent::WorkflowJobFailed {

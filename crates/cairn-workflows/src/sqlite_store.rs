@@ -1665,6 +1665,7 @@ fn reap_batch(conn: &mut Connection, now_ms: i64) -> Result<Vec<ReclaimedRow>, J
                 job_id: JobId::new(job_id),
                 kind: JobKind::new(kind),
                 attempts: surfaced_attempts,
+                terminated: exhausted,
             });
         }
     }

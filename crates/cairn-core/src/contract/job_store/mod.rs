@@ -233,6 +233,14 @@ pub struct ReclaimedRow {
     pub kind: JobKind,
     /// Worker-visible attempts after the reap mutation lands.
     pub attempts: u32,
+    /// `true` when the reaper terminated the row (transitioned it to
+    /// `state = 'failed'` because `attempts >= max_attempts` or the
+    /// poison-delivery guard tripped); `false` when the row was
+    /// requeued for another lease. The scheduler uses this flag to
+    /// choose the right `WorkflowJobFailed.disposition` (`"permanent"`
+    /// vs `"retry"`) so the metric on the wire matches the row's
+    /// actual on-disk state (issue #92, spec §4.6).
+    pub terminated: bool,
 }
 
 /// Disposition for [`JobStore::fail`].
