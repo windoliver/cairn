@@ -14,6 +14,7 @@ pub use worker::{WorkerConfig, run_worker};
 
 use cairn_core::contract::job_store::JobStore;
 use cairn_core::contract::metrics::{MetricsSink, NoopMetricsSink};
+use cairn_core::domain::metrics::MetricEvent;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -93,6 +94,28 @@ impl Scheduler {
         match store.reap_expired(now).await {
             Ok(rows) if !rows.is_empty() => {
                 tracing::info!(reclaimed = rows.len(), "startup reap reclaimed orphans");
+                // Emit a WorkflowJobFailed event per reclaimed row so
+                // `.cairn/metrics.jsonl` records the lease_lost
+                // transition regardless of whether the orphan was
+                // caught by the startup reap or a later periodic tick.
+                // Mirrors the emission in `run_reaper` (spec §4.6,
+                // §4.13). Best-effort: a sink error is ignored, same
+                // as the periodic reaper.
+                for r in rows {
+                    let _ = config
+                        .metrics
+                        .emit(MetricEvent::WorkflowJobFailed {
+                            ts_ms: now,
+                            job_id: r.job_id.to_string(),
+                            kind: r.kind.to_string(),
+                            attempts: r.attempts,
+                            disposition: "retry".into(),
+                            failure_class: "lease_lost".into(),
+                            last_error: "startup reap reclaimed expired lease".into(),
+                            will_retry_at_ms: Some(now),
+                        })
+                        .await;
+                }
             }
             Ok(_) => {}
             Err(e) => {
