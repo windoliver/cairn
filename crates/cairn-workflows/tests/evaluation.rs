@@ -113,17 +113,54 @@ async fn replays_produce_byte_identical_report() {
     assert_eq!(a.passed, b.passed);
     assert_eq!(a.failed, b.failed);
 
-    // Brief §15 release gating: exactly one canonical
-    // `EvaluationCompleted` per logical sweep. The second run hits
-    // the report-record dedupe path and intentionally skips the
-    // metric emit so CI gauges remain stable across handler retries
-    // (round-1 adversarial review #3).
+    // Brief §15 release gating semantics: at-least-once metric
+    // emission with deterministic `report_target_id`. Downstream
+    // consumers dedupe on `(report_target_id, ts_ms)` — the
+    // alternative (skip-on-replay) loses the metric permanently
+    // when the first emit fails (round-2 adversarial review #1).
     let events = sink.snapshot().await;
+    assert_eq!(events.len(), 2, "two replays produce two metric lines");
+    let target_ids: std::collections::BTreeSet<String> = events
+        .iter()
+        .filter_map(|e| match e {
+            MetricEvent::EvaluationCompleted {
+                report_target_id, ..
+            } => Some(report_target_id.clone()),
+            _ => None,
+        })
+        .collect();
     assert_eq!(
-        events.len(),
+        target_ids.len(),
         1,
-        "exactly one canonical metric for two replays of the same payload"
+        "both replays carry the same report_target_id so downstream can dedupe"
     );
+}
+
+#[tokio::test]
+async fn unknown_check_id_returns_permanent() {
+    // Round-2 adversarial review #3: a typo'd / removed check id
+    // must NOT silently produce a successful zero-check sweep.
+    let store = Arc::new(memstore().await);
+    let sink = Arc::new(CapturingMetricsSink::new());
+    let dyn_store: Arc<dyn MemoryStore> = store.clone();
+    let handler = EvaluationHandler::new(
+        dyn_store,
+        sink.clone() as Arc<dyn MetricsSink>,
+        default_golden_checks(),
+        EvaluationConfig {
+            enabled: true,
+            ..EvaluationConfig::default()
+        },
+    );
+    let payload = EvaluationPayload {
+        ts_ms: 0,
+        check_ids: vec!["this-check-does-not-exist".into()],
+        bound_scope: None,
+    };
+    let bytes = payload.to_bytes().expect("encode");
+    let outcome = handler.handle(&bytes).await;
+    assert!(matches!(outcome, HandlerOutcome::Permanent { .. }));
+    assert!(sink.snapshot().await.is_empty());
 }
 
 #[tokio::test]

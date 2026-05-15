@@ -70,23 +70,56 @@ impl EvaluationHandler {
         }
     }
 
-    fn select_checks(&self, payload: &EvaluationPayload) -> Vec<Arc<dyn GoldenCheck>> {
-        let allow: Option<Vec<String>> = if !payload.check_ids.is_empty() {
-            Some(payload.check_ids.clone())
+    /// Resolve the check allow-list against the registered set.
+    /// Returns `Err` with a stable string if any requested id is
+    /// unknown — the handler escalates that to `Permanent` so a
+    /// typo'd / removed id cannot silently produce a green sweep
+    /// (round-2 adversarial review #3). When neither payload nor
+    /// config nominates an allow-list, every registered check
+    /// runs.
+    fn select_checks(
+        &self,
+        payload: &EvaluationPayload,
+    ) -> Result<Vec<Arc<dyn GoldenCheck>>, String> {
+        let allow: Option<&[String]> = if !payload.check_ids.is_empty() {
+            Some(payload.check_ids.as_slice())
         } else if !self.config.checks.is_empty() {
-            Some(self.config.checks.clone())
+            Some(self.config.checks.as_slice())
         } else {
             None
         };
-        match allow {
-            Some(ids) => self
-                .checks
-                .iter()
-                .filter(|c| ids.iter().any(|id| id == c.id()))
-                .cloned()
-                .collect(),
-            None => self.checks.clone(),
+        let Some(ids) = allow else {
+            // No allow-list — fall back to the full registry. Empty
+            // registry is itself a misconfiguration; let the empty
+            // check below reject it.
+            let all = self.checks.clone();
+            if all.is_empty() {
+                return Err("evaluation: no GoldenChecks registered".into());
+            }
+            return Ok(all);
+        };
+
+        let unknown: Vec<&str> = ids
+            .iter()
+            .filter(|id| !self.checks.iter().any(|c| c.id() == id.as_str()))
+            .map(String::as_str)
+            .collect();
+        if !unknown.is_empty() {
+            return Err(format!(
+                "evaluation: unknown check ids {:?}",
+                unknown.join(",")
+            ));
         }
+        let selected: Vec<_> = self
+            .checks
+            .iter()
+            .filter(|c| ids.iter().any(|id| id == c.id()))
+            .cloned()
+            .collect();
+        if selected.is_empty() {
+            return Err("evaluation: allow-list resolved to zero checks".into());
+        }
+        Ok(selected)
     }
 
     /// Run the sweep and return the summary. Used directly from tests
@@ -98,7 +131,9 @@ impl EvaluationHandler {
         &self,
         payload: &EvaluationPayload,
     ) -> Result<EvaluationReport, Box<dyn std::error::Error + Send + Sync>> {
-        let checks = self.select_checks(payload);
+        let checks = self
+            .select_checks(payload)
+            .map_err(|e| Box::<dyn std::error::Error + Send + Sync>::from(e))?;
         let mut passed = 0_u32;
         let mut failed = 0_u32;
         let mut findings: Vec<(String, CheckOutcome)> = Vec::with_capacity(checks.len());
@@ -120,41 +155,32 @@ impl EvaluationHandler {
         findings.sort_by(|a, b| a.0.cmp(&b.0));
 
         let checks_run = u32::try_from(findings.len()).unwrap_or(u32::MAX);
-        let (report_target_id, report_was_new) = if self.config.write_report_record {
+        let (report_target_id, _report_was_new) = if self.config.write_report_record {
             let (id, new) = self.upsert_report_record(payload, &findings).await?;
             (Some(id), new)
         } else {
             (None, true)
         };
 
-        // Brief §15 release gating wants one canonical
-        // `EvaluationCompleted` per logical sweep (same payload =
-        // same outcome). Skip the emit when the report record was a
-        // body-hash idempotent replay — the prior successful run
-        // already produced that line in `metrics.jsonl` (round-1
-        // adversarial review #3).
-        if report_was_new {
-            let metric = MetricEvent::EvaluationCompleted {
-                ts_ms: payload.ts_ms,
-                report_target_id: report_target_id.clone().unwrap_or_default(),
-                checks_run,
-                passed,
-                failed,
-            };
-            // Surface sink failures as Retry so the scheduler re-runs
-            // the sweep — silently dropping the metric would let a
-            // CI gate miss a regression (round-1 adversarial review
-            // #3 "lossy on emit failure").
-            self.metrics.emit(metric).await.map_err(|e| {
-                warn!(error = %e, "evaluation: metrics sink emit failed");
-                Box::new(e) as Box<dyn std::error::Error + Send + Sync>
-            })?;
-        } else {
-            info!(
-                target_id = ?report_target_id,
-                "evaluation: report already present, skipping metric emit (idempotent replay)"
-            );
-        }
+        // Brief §15 release gating semantics: at-least-once metric
+        // emission with deterministic `report_target_id`. Always
+        // emit, always retry on sink failure — round-2 adversarial
+        // review #1 showed that gating on
+        // `upsert_outcome.content_changed` permanently loses the
+        // metric when emit fails on the *first* run (next run sees
+        // dedupe and skips). Downstream gating queries DISTINCT on
+        // `(report_target_id, ts_ms)` to collapse duplicates.
+        let metric = MetricEvent::EvaluationCompleted {
+            ts_ms: payload.ts_ms,
+            report_target_id: report_target_id.clone().unwrap_or_default(),
+            checks_run,
+            passed,
+            failed,
+        };
+        self.metrics.emit(metric).await.map_err(|e| {
+            warn!(error = %e, "evaluation: metrics sink emit failed");
+            Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+        })?;
 
         info!(checks_run, passed, failed, "evaluation: sweep complete");
         Ok(EvaluationReport {
@@ -290,6 +316,13 @@ impl JobHandler for EvaluationHandler {
             return HandlerOutcome::Permanent {
                 reason: "evaluation.enabled = false in config".into(),
             };
+        }
+
+        // Reject mis-configured allow-lists permanently — a typo'd
+        // check id won't fix itself across retries (round-2
+        // adversarial review #3).
+        if let Err(e) = self.select_checks(&payload) {
+            return HandlerOutcome::Permanent { reason: e };
         }
 
         match self.run_once(&payload).await {

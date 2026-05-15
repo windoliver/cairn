@@ -8,8 +8,48 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use cairn_core::contract::memory_store::MemoryStore;
+use cairn_core::contract::memory_store::{ListArgs, MemoryStore};
 use cairn_core::domain::ScopeTuple;
+use cairn_core::domain::record::MemoryRecord;
+
+/// Maximum records a single sweep traverses before it bails with a
+/// `Failed` outcome. Brief §15 release gating prefers a loud failure
+/// over a silent "first page only" green light (round-2 adversarial
+/// review #4). Bump the cap when vaults grow.
+const CHECK_PAGINATION_CAP: usize = 100_000;
+const CHECK_PAGE_SIZE: usize = 1_000;
+
+/// Walk every active record matching `scope`, paginating through the
+/// `MemoryStore::list` cursor. Returns `Err` when the cap is reached
+/// so the caller can downgrade to `Failed` rather than silently
+/// report `Passed` on truncated input.
+async fn collect_all_records(
+    store: &dyn MemoryStore,
+    scope: Option<&ScopeTuple>,
+) -> Result<Vec<MemoryRecord>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut out: Vec<MemoryRecord> = Vec::new();
+    let mut cursor = None;
+    loop {
+        let args = ListArgs {
+            limit: CHECK_PAGE_SIZE,
+            scope: scope.cloned(),
+            cursor: cursor.clone(),
+            ..ListArgs::default()
+        };
+        let page = store.list(&args).await?;
+        out.extend(page.records);
+        if out.len() > CHECK_PAGINATION_CAP {
+            return Err(format!(
+                "golden-check pagination cap exceeded ({CHECK_PAGINATION_CAP} records)"
+            )
+            .into());
+        }
+        match page.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => return Ok(out),
+        }
+    }
+}
 
 /// Outcome of one golden check execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,14 +118,9 @@ impl GoldenCheck for OrphanCheck {
         store: &dyn MemoryStore,
         scope: Option<&ScopeTuple>,
     ) -> Result<CheckOutcome, Box<dyn std::error::Error + Send + Sync>> {
-        let args = cairn_core::contract::memory_store::ListArgs {
-            limit: 10_000,
-            scope: scope.cloned(),
-            ..cairn_core::contract::memory_store::ListArgs::default()
-        };
-        let page = store.list(&args).await?;
+        let records = collect_all_records(store, scope).await?;
         let mut bad_ids: Vec<String> = Vec::new();
-        for r in &page.records {
+        for r in &records {
             if r.provenance.source_ids.is_empty() {
                 bad_ids.push(r.id.as_str().to_owned());
             }
@@ -118,25 +153,21 @@ impl GoldenCheck for TombstoneConsistencyCheck {
         store: &dyn MemoryStore,
         scope: Option<&ScopeTuple>,
     ) -> Result<CheckOutcome, Box<dyn std::error::Error + Send + Sync>> {
-        let args = cairn_core::contract::memory_store::ListArgs {
-            limit: 10_000,
-            scope: scope.cloned(),
-            ..cairn_core::contract::memory_store::ListArgs::default()
-        };
-        let stored = store.list_active_stored(&args).await?;
-        // The trait contract already guarantees we never see
-        // tombstoned rows here; we re-assert by checking the
-        // version's `tombstoned` flag is false for every returned
-        // row. Mismatches indicate an adapter-level bug.
-        for rec in &stored {
-            let history = store.versions(&rec.record.target_id).await?;
-            if let Some(v) = history.iter().rev().find(|v| v.record_id == rec.record.id)
+        // The trait contract already guarantees `list` never returns
+        // tombstoned rows; we re-assert by checking the version's
+        // `tombstoned` flag is false for every returned row.
+        // Paginated to keep large vaults from silently passing on
+        // first-page-only data (round-2 adversarial review #4).
+        let records = collect_all_records(store, scope).await?;
+        for rec in &records {
+            let history = store.versions(&rec.target_id).await?;
+            if let Some(v) = history.iter().rev().find(|v| v.record_id == rec.id)
                 && v.tombstoned
             {
                 return Ok(CheckOutcome::Failed {
                     details: format!(
                         "active list returned tombstoned record {}",
-                        rec.record.id.as_str()
+                        rec.id.as_str()
                     ),
                 });
             }

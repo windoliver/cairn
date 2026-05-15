@@ -74,32 +74,53 @@ impl DreamHandler {
             return Err("no llm provider configured".into());
         };
 
-        // Read a bounded window of recent records, optionally scoped.
-        let args = ListArgs {
-            scope: payload.bound_scope.clone(),
-            limit: self.config.window_size_records as usize,
-            ..ListArgs::default()
-        };
-        let page = self.store.list(&args).await?;
-        // Exclude prior dream outputs from the input window — without
-        // this filter, a successful first run plants a Reasoning
-        // record carrying `extras.dream`, and a replay would see it in
-        // the window, shift `target_key`, and produce a new target
-        // instead of dedupe (round-1 adversarial review #2).
-        let filtered: Vec<_> = page
-            .records
-            .iter()
-            .filter(|r| {
-                !r.extra_frontmatter
-                    .get("dream")
-                    .is_some_and(|v| {
-                        v.get("produced_by")
-                            .and_then(|p| p.as_str())
-                            == Some("cairn-workflows::DreamHandler")
-                    })
-            })
-            .cloned()
-            .collect();
+        // Collect `window_size_records` *non-dream* records, paging
+        // through `list` until we either reach the cap or exhaust
+        // the store. Without this, a single capped page that
+        // happens to contain the most-recent prior dream record
+        // would silently shrink the source set, shift the
+        // sources-hash in `target_key`, and produce a new target on
+        // replay (round-2 adversarial review #2).
+        let window_cap = self.config.window_size_records as usize;
+        // Sanity cap on total pages scanned: each page is
+        // `window_size_records` rows, and we walk at most
+        // `DREAM_FETCH_PAGE_CAP` pages before bailing — keeps a
+        // dream-heavy vault from monopolising the worker.
+        const DREAM_FETCH_PAGE_CAP: usize = 64;
+        let mut filtered: Vec<cairn_core::domain::record::MemoryRecord> =
+            Vec::with_capacity(window_cap);
+        let mut cursor = None;
+        for _ in 0..DREAM_FETCH_PAGE_CAP {
+            let args = ListArgs {
+                scope: payload.bound_scope.clone(),
+                limit: window_cap.max(1),
+                cursor: cursor.clone(),
+                ..ListArgs::default()
+            };
+            let page = self.store.list(&args).await?;
+            if page.records.is_empty() {
+                break;
+            }
+            for r in page.records {
+                if r.extra_frontmatter.get("dream").is_some_and(|v| {
+                    v.get("produced_by").and_then(|p| p.as_str())
+                        == Some("cairn-workflows::DreamHandler")
+                }) {
+                    continue;
+                }
+                filtered.push(r);
+                if filtered.len() >= window_cap {
+                    break;
+                }
+            }
+            if filtered.len() >= window_cap {
+                break;
+            }
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
         if filtered.is_empty() {
             info!(key = %payload.key, "dream: no records in window — nothing to distill");
             return Ok(());
