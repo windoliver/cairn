@@ -19,7 +19,7 @@ fn session_record(record_id: &str, target_id: &str, body: &str, session_id: &str
     let mut record = sample_record();
     record.id = RecordId::parse(record_id).expect("valid record id");
     record.target_id = TargetId::parse(target_id).expect("valid target id");
-    record.body = body.to_owned();
+    body.clone_into(&mut record.body);
     record.scope = ScopeTuple {
         session_id: Some(session_id.to_owned()),
         user: record.scope.user.clone(),
@@ -37,7 +37,7 @@ fn consolidation_summary_record(
     let mut record = sample_record();
     record.id = RecordId::parse(record_id).expect("valid record id");
     record.target_id = TargetId::parse(target_id).expect("valid target id");
-    record.body = "derived consolidation summary".to_owned();
+    "derived consolidation summary".clone_into(&mut record.body);
     record.scope = ScopeTuple {
         user: Some("hmn:summaryfixture".to_owned()),
         ..ScopeTuple::default()

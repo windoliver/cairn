@@ -4,7 +4,7 @@
 
 use std::{fs, path::Path, process::Command};
 
-use cairn_core::contract::memory_store::MemoryStore as _;
+use cairn_core::contract::memory_store::{ListArgs, MemoryStore as _};
 use cairn_core::domain::projection::MarkdownProjector;
 use cairn_core::domain::{RecordId, ScopeTuple, TargetId};
 use cairn_store_sqlite::consent::query_source_forgets;
@@ -89,7 +89,7 @@ async fn active_projection_path(vault: &Path, record_id: &str) -> std::path::Pat
         .await
         .expect("open store");
     let stored = store
-        .list_active_stored(&Default::default())
+        .list_active_stored(&ListArgs::default())
         .await
         .expect("list active stored")
         .into_iter()

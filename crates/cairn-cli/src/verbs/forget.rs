@@ -22,7 +22,7 @@ use std::process::ExitCode;
 use anyhow::Context as _;
 use cairn_core::config::CairnConfig;
 use cairn_core::contract::job_store::{EnqueueRequest, JobId, JobKind, JobStoreError, RetryPolicy};
-use cairn_core::contract::memory_store::{MemoryStore, TombstoneReason};
+use cairn_core::contract::memory_store::{ListArgs, MemoryStore, TombstoneReason};
 use cairn_core::domain::{ConsentEvent, ConsentKind, ConsentPayload, RecordId, Rfc3339Timestamp};
 use cairn_core::generated::common::Ulid;
 use cairn_core::generated::envelope::ResponseVerb;
@@ -917,7 +917,7 @@ async fn session_projection_paths_for_forget(
     };
 
     let active = store
-        .list_active_stored(&Default::default())
+        .list_active_stored(&ListArgs::default())
         .await
         .map_err(|e| ForgetSessionError::Other(anyhow::anyhow!("list projections: {e}")))?;
     let projector = cairn_core::domain::projection::MarkdownProjector;

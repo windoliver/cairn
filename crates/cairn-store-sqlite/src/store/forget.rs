@@ -53,6 +53,11 @@ pub struct ForgetSessionOutcome {
     pub projection_paths: Vec<PathBuf>,
 }
 
+struct SessionScopePartition {
+    tenant: Option<String>,
+    workspace: Option<String>,
+}
+
 async fn apply_forget_session(
     store: &SqliteMemoryStore,
     session_id: &str,
@@ -79,29 +84,12 @@ async fn apply_forget_session(
     .map_err(|e| StoreError::RecordWalLock(Box::new(e)))?;
 
     let result = async {
-        let partitions = {
-            let session = session_id.to_owned();
-            store
-                .with_tx(move |tx| tx.list_session_scope_partitions(&session))
-                .await?
-        };
-        let [(tenant, workspace)] = partitions.as_slice() else {
-            return if partitions.is_empty() {
-                Err(StoreError::NotFound {
-                    id: session_id.to_owned(),
-                })
-            } else {
-                Err(StoreError::Invariant {
-                    what: format!("forget_session `{session_id}` spans multiple scope partitions"),
-                })
-            };
-        };
-
+        let partition = session_scope_partition(store, session_id).await?;
         let session_lock = crate::locks::acquire(
             &conn,
             &crate::locks::ResourceKey::session(
-                session_lock_component(tenant.as_deref()),
-                session_lock_component(workspace.as_deref()),
+                session_lock_component(partition.tenant.as_deref()),
+                session_lock_component(partition.workspace.as_deref()),
                 session_id,
             ),
             crate::locks::LockMode::Exclusive,
@@ -113,51 +101,7 @@ async fn apply_forget_session(
         .await
         .map_err(|e| StoreError::RecordWalLock(Box::new(e)))?;
 
-        let body_result = {
-            let session = session_id.to_owned();
-            let tenant = tenant.clone();
-            let workspace = workspace.clone();
-            let op_for_tx = op_id.clone();
-            store
-                .with_tx(move |tx| {
-                    let mut target_ids = tx.list_target_ids_for_session_scope(
-                        &session,
-                        tenant.as_deref(),
-                        workspace.as_deref(),
-                    )?;
-                    if target_ids.is_empty() {
-                        return Err(StoreError::NotFound { id: session });
-                    }
-                    let source_record_ids = tx.record_ids_for_targets(&target_ids)?;
-                    target_ids.extend(tx.summary_targets_for_source_records(&source_record_ids)?);
-                    target_ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
-                    target_ids.dedup_by(|left, right| left.as_str() == right.as_str());
-                    let tombstones = tx.record_ids_for_targets(&target_ids)?;
-                    let projection_paths = tx.projection_paths_for_targets(&target_ids)?;
-                    issue_forget_session_prepared(
-                        &tx.tx,
-                        &op_for_tx,
-                        &session,
-                        tenant.as_deref(),
-                        workspace.as_deref(),
-                        &target_ids,
-                        tombstones.len(),
-                    )?;
-                    let fence_resource =
-                        session_fence_resource(tenant.as_deref(), workspace.as_deref(), &session);
-                    insert_session_reader_fence(&tx.tx, &op_for_tx, &fence_resource)?;
-                    let deleted_count = tx.purge_targets_with_indexes(&target_ids)?;
-                    clear_session_reader_fence(&tx.tx, &op_for_tx, &fence_resource)?;
-                    finalize(&tx.tx, &op_for_tx, OpState::Committed, "applied")?;
-                    Ok(ForgetSessionOutcome {
-                        deleted_count,
-                        tombstones,
-                        operation_id: op_for_tx,
-                        projection_paths,
-                    })
-                })
-                .await
-        };
+        let body_result = commit_forget_session(store, session_id, &op_id, partition).await;
 
         let release_result = session_lock
             .release()
@@ -178,6 +122,84 @@ async fn apply_forget_session(
         (Ok(outcome), Ok(())) => Ok(outcome),
         (Err(error), Ok(())) | (_, Err(error)) => Err(error),
     }
+}
+
+async fn session_scope_partition(
+    store: &SqliteMemoryStore,
+    session_id: &str,
+) -> Result<SessionScopePartition, StoreError> {
+    let partitions = {
+        let session = session_id.to_owned();
+        store
+            .with_tx(move |tx| tx.list_session_scope_partitions(&session))
+            .await?
+    };
+    let [(tenant, workspace)] = partitions.as_slice() else {
+        return if partitions.is_empty() {
+            Err(StoreError::NotFound {
+                id: session_id.to_owned(),
+            })
+        } else {
+            Err(StoreError::Invariant {
+                what: format!("forget_session `{session_id}` spans multiple scope partitions"),
+            })
+        };
+    };
+    Ok(SessionScopePartition {
+        tenant: tenant.clone(),
+        workspace: workspace.clone(),
+    })
+}
+
+async fn commit_forget_session(
+    store: &SqliteMemoryStore,
+    session_id: &str,
+    op_id: &OperationId,
+    partition: SessionScopePartition,
+) -> Result<ForgetSessionOutcome, StoreError> {
+    let session = session_id.to_owned();
+    let tenant = partition.tenant;
+    let workspace = partition.workspace;
+    let op_for_tx = op_id.clone();
+    store
+        .with_tx(move |tx| {
+            let mut target_ids = tx.list_target_ids_for_session_scope(
+                &session,
+                tenant.as_deref(),
+                workspace.as_deref(),
+            )?;
+            if target_ids.is_empty() {
+                return Err(StoreError::NotFound { id: session });
+            }
+            let source_record_ids = tx.record_ids_for_targets(&target_ids)?;
+            target_ids.extend(tx.summary_targets_for_source_records(&source_record_ids)?);
+            target_ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+            target_ids.dedup_by(|left, right| left.as_str() == right.as_str());
+            let tombstones = tx.record_ids_for_targets(&target_ids)?;
+            let projection_paths = tx.projection_paths_for_targets(&target_ids)?;
+            issue_forget_session_prepared(
+                &tx.tx,
+                &op_for_tx,
+                &session,
+                tenant.as_deref(),
+                workspace.as_deref(),
+                &target_ids,
+                tombstones.len(),
+            )?;
+            let fence_resource =
+                session_fence_resource(tenant.as_deref(), workspace.as_deref(), &session);
+            insert_session_reader_fence(&tx.tx, &op_for_tx, &fence_resource)?;
+            let deleted_count = tx.purge_targets_with_indexes(&target_ids)?;
+            clear_session_reader_fence(&tx.tx, &op_for_tx, &fence_resource)?;
+            finalize(&tx.tx, &op_for_tx, OpState::Committed, "applied")?;
+            Ok(ForgetSessionOutcome {
+                deleted_count,
+                tombstones,
+                operation_id: op_for_tx,
+                projection_paths,
+            })
+        })
+        .await
 }
 
 fn new_forget_session_operation_id() -> Result<OperationId, StoreError> {
