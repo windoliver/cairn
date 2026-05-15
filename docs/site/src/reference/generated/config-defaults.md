@@ -88,6 +88,11 @@ reference_consumer:
     enabled: true
 workflows:
   orchestrator: local
+  lint:
+    max_dead_letter_listed: 10
+    stuck_queue_threshold_ms: 600000
+    stale_dream_threshold_ms: 86400000
+    overdue_threshold_ms: 172800000
 pipeline:
   extract:
     chain:
