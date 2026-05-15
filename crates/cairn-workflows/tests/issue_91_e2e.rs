@@ -157,9 +157,16 @@ async fn three_workflows_drain_through_one_scheduler() {
     .to_bytes()
     .expect("eval payload");
 
+    // Round-9 adversarial review #1 introduced a post-upsert
+    // source-liveness recheck on dream that self-tombstones the
+    // dream record if any source is tombstoned during commit. To
+    // test all three workflows on the same source set deterministi-
+    // cally, we enqueue dream + evaluation first, wait for them to
+    // produce their synthetic records, THEN enqueue the expiration
+    // sweep. Production deployments serialize via DreamPayload's
+    // `recommended_queue_key`; we mirror that here by sequencing.
     for (job_id, kind, payload) in [
         ("e2e-dream", DREAM_KIND, dream_payload),
-        ("e2e-exp", EXPIRATION_KIND, exp_payload),
         ("e2e-eval", EVALUATION_KIND, eval_payload),
     ] {
         jobs.enqueue(EnqueueRequest {
@@ -175,17 +182,16 @@ async fn three_workflows_drain_through_one_scheduler() {
         .unwrap_or_else(|e| panic!("enqueue {kind}: {e}"));
     }
 
-    // Poll for the three observable side effects + the evaluation
-    // metric, with a generous deadline so a slow CI host doesn't
-    // flake. We wait for the metric inside the loop (rather than after
-    // `scheduler.shutdown()`) so the worker's `tokio::select!` cannot
-    // cancel an in-flight `metrics.emit` when we tear it down.
-    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    // Poll until dream + eval publish their records and the metric
+    // fires. We assert these BEFORE enqueuing expiration so the
+    // race window between dream upsert and source tombstone is
+    // closed by sequencing rather than by hope.
+    let deadline_phase1 =
+        std::time::Instant::now() + Duration::from_secs(15);
     let mut seen_dream = false;
     let mut seen_eval = false;
-    let mut seen_expire_drain = false;
     let mut seen_metric = false;
-    while std::time::Instant::now() < deadline {
+    while std::time::Instant::now() < deadline_phase1 {
         let listed = mem
             .list(&ListArgs {
                 limit: 50,
@@ -198,18 +204,48 @@ async fn three_workflows_drain_through_one_scheduler() {
             .records
             .iter()
             .any(|r| r.body.starts_with("# Evaluation report"));
+        seen_metric = metrics
+            .snapshot()
+            .await
+            .iter()
+            .any(|e| matches!(e, MetricEvent::EvaluationCompleted { .. }));
+        if seen_dream && seen_eval && seen_metric {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Now enqueue the expiration sweep.
+    jobs.enqueue(EnqueueRequest {
+        job_id: JobId::new("e2e-exp"),
+        kind: JobKind::new(EXPIRATION_KIND),
+        payload: exp_payload,
+        queue_key: None,
+        dedupe_key: None,
+        not_before_ms: 0,
+        retry: RetryPolicy::DEFAULT,
+    })
+    .await
+    .expect("enqueue expiration");
+
+    let deadline_phase2 =
+        std::time::Instant::now() + Duration::from_secs(15);
+    let mut seen_expire_drain = false;
+    while std::time::Instant::now() < deadline_phase2 {
+        let listed = mem
+            .list(&ListArgs {
+                limit: 50,
+                ..ListArgs::default()
+            })
+            .await
+            .expect("list");
         let surviving_seeds = listed
             .records
             .iter()
             .filter(|r| r.body.starts_with("seeded body"))
             .count();
         seen_expire_drain = surviving_seeds == 0;
-        seen_metric = metrics
-            .snapshot()
-            .await
-            .iter()
-            .any(|e| matches!(e, MetricEvent::EvaluationCompleted { .. }));
-        if seen_dream && seen_eval && seen_expire_drain && seen_metric {
+        if seen_expire_drain {
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;

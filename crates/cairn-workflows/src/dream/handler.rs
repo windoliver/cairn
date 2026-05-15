@@ -21,7 +21,7 @@ use std::sync::Arc;
 use cairn_core::config::DreamConfig;
 use cairn_core::contract::job_store::{JobKind, JobPayload};
 use cairn_core::contract::llm_provider::{CompletionOutput, CompletionRequest, LLMProvider};
-use cairn_core::contract::memory_store::{ListArgs, MemoryStore};
+use cairn_core::contract::memory_store::{ListArgs, MemoryStore, TombstoneReason};
 use cairn_core::domain::{
     ScopeTuple,
     taxonomy::{MemoryClass, MemoryKind},
@@ -275,6 +275,39 @@ impl DreamHandler {
         })?;
 
         let outcome = self.store.upsert(&record).await?;
+
+        // Post-upsert source-liveness recheck (round-9 adversarial
+        // review #1): the pre-upsert check above is racy — a
+        // concurrent `cairn forget --record` or expiration sweep
+        // can tombstone one of our source records AFTER we
+        // verified it but BEFORE the upsert commits. Without this
+        // recheck, the dream record would persist as an active
+        // reasoning record whose `extras.dream.source_record_ids`
+        // references retired content — and worse, surface that
+        // content into hot reads. Mirror the consolidation
+        // pattern: recheck after commit, tombstone our own row
+        // with `TombstoneReason::Forget` if any source
+        // disappeared. (A future dream forget-cleanup handler —
+        // parallel to `ConsolidationForgetCleanupHandler` — will
+        // also tombstone us as belt-and-suspenders when the forget
+        // verb fires; that's deferred to a follow-up that also
+        // wires the cleanup into `cairn-cli/src/verbs/forget.rs`.)
+        for id_str in &source_record_ids {
+            let id = cairn_core::domain::RecordId::parse(id_str.clone())?;
+            if self.store.get(&id).await?.is_none() {
+                warn!(
+                    key = %payload.key,
+                    record_id = outcome.record_id.as_str(),
+                    source_id = id_str.as_str(),
+                    "dream: source tombstoned during upsert — tombstoning own record"
+                );
+                self.store
+                    .tombstone(&outcome.record_id, TombstoneReason::Forget)
+                    .await?;
+                return Ok(());
+            }
+        }
+
         if outcome.content_changed {
             info!(key = %payload.key, "dream: upserted distillation record");
         } else {
