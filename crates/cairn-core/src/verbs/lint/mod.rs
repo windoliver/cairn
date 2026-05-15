@@ -325,6 +325,10 @@ fn kind_key(k: Kind) -> String {
         Kind::SourceLinkLegacyDuplicate => "source_link_legacy_duplicate",
         Kind::SourceLinkMissing => "source_link_missing",
         Kind::SourceRedactSkipped => "source_redact_skipped",
+        Kind::WorkflowDeadLetter => "workflow_dead_letter",
+        Kind::WorkflowOverdue => "workflow_overdue",
+        Kind::WorkflowStaleSummary => "workflow_stale_summary",
+        Kind::WorkflowStuck => "workflow_stuck",
     }
     .to_owned()
 }
