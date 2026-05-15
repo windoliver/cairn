@@ -60,6 +60,8 @@ mod tests {
             hot_body_loader: None,
             source_resolver: crate::verbs::lint::empty_source_resolver(),
             consent_journal: crate::verbs::lint::empty_consent_journal(),
+            workflow_jobs: None,
+            now_ms: 0,
         };
         assert!(run(&li).is_empty());
     }
@@ -80,6 +82,8 @@ mod tests {
             hot_body_loader: None,
             source_resolver: crate::verbs::lint::empty_source_resolver(),
             consent_journal: crate::verbs::lint::empty_consent_journal(),
+            workflow_jobs: None,
+            now_ms: 0,
         };
         let f = run(&li);
         assert_eq!(f.len(), 1);
@@ -110,6 +114,8 @@ mod tests {
             hot_body_loader: None,
             source_resolver: crate::verbs::lint::empty_source_resolver(),
             consent_journal: crate::verbs::lint::empty_consent_journal(),
+            workflow_jobs: None,
+            now_ms: 0,
         };
         let f = run(&li);
         assert_eq!(f.len(), 1);
@@ -132,6 +138,8 @@ mod tests {
             hot_body_loader: None,
             source_resolver: crate::verbs::lint::empty_source_resolver(),
             consent_journal: crate::verbs::lint::empty_consent_journal(),
+            workflow_jobs: None,
+            now_ms: 0,
         };
         assert!(run(&li).is_empty());
     }

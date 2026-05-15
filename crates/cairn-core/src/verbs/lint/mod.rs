@@ -130,6 +130,13 @@ pub struct LintInputs<'a> {
     pub source_resolver: &'a (dyn SourceResolver + 'a),
     /// Read-only forget-related view of `consent_journal`.
     pub consent_journal: &'a (dyn ConsentJournalReader + 'a),
+    /// Read-only adapter for `workflow_jobs` (issue #92, spec §4.8).
+    /// `None` keeps the `workflow_health` check on the no-op path so
+    /// fixture-only tests of unrelated checks stay green.
+    pub workflow_jobs: Option<&'a (dyn crate::contract::workflow_jobs::WorkflowJobsReader + 'a)>,
+    /// Wall-clock for time-based lint checks. The CLI passes
+    /// `SystemClock::now_ms()`; tests pass a synthetic value.
+    pub now_ms: i64,
 }
 
 impl std::fmt::Debug for LintInputs<'_> {
@@ -147,6 +154,8 @@ impl std::fmt::Debug for LintInputs<'_> {
             .field("hot_body_loader", &self.hot_body_loader.is_some())
             .field("source_resolver", &"<dyn SourceResolver>")
             .field("consent_journal", &"<dyn ConsentJournalReader>")
+            .field("workflow_jobs", &self.workflow_jobs.is_some())
+            .field("now_ms", &self.now_ms)
             .finish()
     }
 }
@@ -244,6 +253,94 @@ pub(crate) fn empty_source_forgets() -> &'static HashMap<String, SourceForgetLed
     M.get_or_init(HashMap::new)
 }
 
+/// In-process fake of [`crate::contract::workflow_jobs::WorkflowJobsReader`]
+/// for unit tests of the `workflow_health` check (issue #92, spec §4.10).
+///
+/// Builder-style helpers seed the relevant slice of state; unset fields
+/// return the trait's "empty" sentinel.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct MockWorkflowJobsReader {
+    pub dead_letter: Vec<crate::contract::workflow_jobs::DeadLetterRow>,
+    pub oldest_queued_age: Option<i64>,
+    pub longest_lease: Option<i64>,
+    pub last_success: std::collections::HashMap<String, i64>,
+}
+
+#[cfg(test)]
+impl MockWorkflowJobsReader {
+    pub fn with_dead_letter(mut self, row: crate::contract::workflow_jobs::DeadLetterRow) -> Self {
+        self.dead_letter.push(row);
+        self
+    }
+
+    pub fn with_oldest_queued_age(mut self, age_ms: i64) -> Self {
+        self.oldest_queued_age = Some(age_ms);
+        self
+    }
+
+    pub fn with_last_success(mut self, kind: &str, ms: i64) -> Self {
+        self.last_success.insert(kind.to_string(), ms);
+        self
+    }
+}
+
+#[cfg(test)]
+impl crate::contract::workflow_jobs::WorkflowJobsReader for MockWorkflowJobsReader {
+    fn dead_letter_count(&self, _: Option<&crate::contract::job_store::JobKind>) -> usize {
+        self.dead_letter.len()
+    }
+    fn oldest_queued_age_ms(
+        &self,
+        _: Option<&crate::contract::job_store::JobKind>,
+        _: i64,
+    ) -> Option<i64> {
+        self.oldest_queued_age
+    }
+    fn longest_held_lease_ms(&self, _: i64) -> Option<i64> {
+        self.longest_lease
+    }
+    fn last_success_ms(&self, kind: &crate::contract::job_store::JobKind) -> Option<i64> {
+        self.last_success.get(kind.as_str()).copied()
+    }
+    fn dead_letter_rows(
+        &self,
+        limit: usize,
+    ) -> Vec<crate::contract::workflow_jobs::DeadLetterRow> {
+        self.dead_letter.iter().take(limit).cloned().collect()
+    }
+}
+
+/// Construct a `LintInputs` populated only with the workflow_jobs reader
+/// and a synthetic `now_ms`. Used by `workflow_health` unit tests so each
+/// case stays one line and the rest of the input slots stay on the
+/// process-wide empty sentinels.
+#[cfg(test)]
+pub(crate) fn empty_lint_inputs_with_reader<'a>(
+    reader: &'a dyn crate::contract::workflow_jobs::WorkflowJobsReader,
+    now_ms: i64,
+) -> LintInputs<'a> {
+    use std::sync::OnceLock;
+    static CFG: OnceLock<CairnConfig> = OnceLock::new();
+    let cfg = CFG.get_or_init(CairnConfig::default);
+    LintInputs {
+        records: &[],
+        config: cfg,
+        index_stats: crate::contract::memory_store::IndexStats::new(0, 0),
+        author_states: empty_author_states(),
+        unresolvable_authors: empty_unresolvable_authors(),
+        consent_lookup: None,
+        source_artifacts: empty_source_artifacts(),
+        source_forgets: empty_source_forgets(),
+        vault_root: None,
+        hot_body_loader: None,
+        source_resolver: empty_source_resolver(),
+        consent_journal: empty_consent_journal(),
+        workflow_jobs: Some(reader),
+        now_ms,
+    }
+}
+
 /// Run every check, aggregate findings, return the canonical `LintData`.
 pub async fn run_checks(inputs: &LintInputs<'_>) -> LintData {
     let mut findings: Vec<Finding> = Vec::new();
@@ -256,6 +353,7 @@ pub async fn run_checks(inputs: &LintInputs<'_>) -> LintData {
     findings.extend(checks::salience::run(inputs));
     findings.extend(checks::hot_memory::run(inputs));
     findings.extend(checks::index_drift::run(inputs));
+    findings.extend(checks::workflow_health::run(inputs));
     findings.extend(checks::consent::run(inputs).await);
     let summary = summarize(&findings);
     LintData {
@@ -424,6 +522,8 @@ mod tests {
             hot_body_loader: None,
             source_resolver: crate::verbs::lint::empty_source_resolver(),
             consent_journal: crate::verbs::lint::empty_consent_journal(),
+            workflow_jobs: None,
+            now_ms: 0,
         };
         let data = run_checks(&inputs).await;
         // Empty records: consent (#253) is wired but has nothing to
@@ -493,6 +593,8 @@ mod tests {
             hot_body_loader: None,
             source_resolver: crate::verbs::lint::empty_source_resolver(),
             consent_journal: crate::verbs::lint::empty_consent_journal(),
+            workflow_jobs: None,
+            now_ms: 0,
         };
         let inputs_rev = LintInputs {
             records: &reversed,
@@ -507,6 +609,8 @@ mod tests {
             hot_body_loader: None,
             source_resolver: crate::verbs::lint::empty_source_resolver(),
             consent_journal: crate::verbs::lint::empty_consent_journal(),
+            workflow_jobs: None,
+            now_ms: 0,
         };
 
         let fwd = canonicalize(&run_checks(&inputs_fwd).await.findings);
@@ -545,6 +649,8 @@ mod tests {
             hot_body_loader: None,
             source_resolver: crate::verbs::lint::empty_source_resolver(),
             consent_journal: crate::verbs::lint::empty_consent_journal(),
+            workflow_jobs: None,
+            now_ms: 0,
         };
         let data = run_checks(&inputs).await;
         assert_eq!(data.summary.total, data.findings.len() as u64);

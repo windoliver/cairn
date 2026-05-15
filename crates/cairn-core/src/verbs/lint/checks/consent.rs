@@ -283,6 +283,8 @@ mod tests {
             hot_body_loader: None,
             source_resolver: crate::verbs::lint::empty_source_resolver(),
             consent_journal: crate::verbs::lint::empty_consent_journal(),
+            workflow_jobs: None,
+            now_ms: 0,
         };
         let findings = run(&inputs).await;
         assert_eq!(findings.len(), 1);
@@ -310,6 +312,8 @@ mod tests {
             hot_body_loader: None,
             source_resolver: crate::verbs::lint::empty_source_resolver(),
             consent_journal: crate::verbs::lint::empty_consent_journal(),
+            workflow_jobs: None,
+            now_ms: 0,
         };
         let f = run(&inputs).await;
         // No per-record finding (LegacyEvent skipped) but exactly one
@@ -338,6 +342,8 @@ mod tests {
             hot_body_loader: None,
             source_resolver: crate::verbs::lint::empty_source_resolver(),
             consent_journal: crate::verbs::lint::empty_consent_journal(),
+            workflow_jobs: None,
+            now_ms: 0,
         };
         let f = run(&inputs).await;
         assert_eq!(f.len(), 1);
@@ -379,6 +385,8 @@ mod tests {
             hot_body_loader: None,
             source_resolver: crate::verbs::lint::empty_source_resolver(),
             consent_journal: crate::verbs::lint::empty_consent_journal(),
+            workflow_jobs: None,
+            now_ms: 0,
         };
         let f = run(&inputs).await;
         assert_eq!(f.len(), 1);
@@ -430,6 +438,8 @@ mod tests {
             hot_body_loader: None,
             source_resolver: crate::verbs::lint::empty_source_resolver(),
             consent_journal: crate::verbs::lint::empty_consent_journal(),
+            workflow_jobs: None,
+            now_ms: 0,
         };
         let f = run(&inputs).await;
         assert_eq!(f.len(), 1);
@@ -484,6 +494,8 @@ mod tests {
             hot_body_loader: None,
             source_resolver: crate::verbs::lint::empty_source_resolver(),
             consent_journal: crate::verbs::lint::empty_consent_journal(),
+            workflow_jobs: None,
+            now_ms: 0,
         };
         let f = run(&inputs).await;
         assert_eq!(f.len(), 1);
@@ -531,6 +543,8 @@ mod tests {
             hot_body_loader: None,
             source_resolver: crate::verbs::lint::empty_source_resolver(),
             consent_journal: crate::verbs::lint::empty_consent_journal(),
+            workflow_jobs: None,
+            now_ms: 0,
         };
         let f = run(&inputs).await;
         assert_eq!(f.len(), 1);
@@ -581,6 +595,8 @@ mod tests {
             hot_body_loader: None,
             source_resolver: crate::verbs::lint::empty_source_resolver(),
             consent_journal: crate::verbs::lint::empty_consent_journal(),
+            workflow_jobs: None,
+            now_ms: 0,
         };
         assert!(run(&inputs).await.is_empty());
     }
@@ -602,6 +618,8 @@ mod tests {
             hot_body_loader: None,
             source_resolver: crate::verbs::lint::empty_source_resolver(),
             consent_journal: crate::verbs::lint::empty_consent_journal(),
+            workflow_jobs: None,
+            now_ms: 0,
         };
         let f = run(&inputs).await;
         assert_eq!(f.len(), 1, "expected one error finding, got {f:?}");
@@ -633,6 +651,8 @@ mod tests {
             hot_body_loader: None,
             source_resolver: crate::verbs::lint::empty_source_resolver(),
             consent_journal: crate::verbs::lint::empty_consent_journal(),
+            workflow_jobs: None,
+            now_ms: 0,
         };
         assert!(run(&inputs).await.is_empty());
     }

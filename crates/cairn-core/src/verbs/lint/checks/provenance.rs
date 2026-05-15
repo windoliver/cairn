@@ -666,6 +666,8 @@ mod tests {
             hot_body_loader: None,
             source_resolver: resolver,
             consent_journal: journal,
+            workflow_jobs: None,
+            now_ms: 0,
         }
     }
 

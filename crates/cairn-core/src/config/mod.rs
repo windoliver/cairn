@@ -1248,12 +1248,45 @@ pub struct SlackSensorConfig {
 pub struct WorkflowsConfig {
     /// Which workflow orchestrator is active.
     pub orchestrator: OrchestratorKind,
+    /// Lint thresholds for the `workflow_health` check (issue #92, spec §4.11).
+    pub lint: WorkflowsLintConfig,
 }
 
 impl Default for WorkflowsConfig {
     fn default() -> Self {
         Self {
             orchestrator: OrchestratorKind::Local,
+            lint: WorkflowsLintConfig::default(),
+        }
+    }
+}
+
+/// Thresholds for the `workflow_health` lint check (issue #92, spec §4.11).
+///
+/// Phase-4 lands a minimal struct with hard-coded defaults; Phase 5 wires
+/// YAML deserialization onto the same field names. The struct is already
+/// `Serialize`/`Deserialize` so Phase 5 only has to add a docs/test pass —
+/// the schema is stable from this point.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WorkflowsLintConfig {
+    /// Max number of dead-letter rows surfaced as Error findings.
+    pub max_dead_letter_listed: u32,
+    /// Oldest-queued-row age threshold for `WorkflowStuck` finding, ms.
+    pub stuck_queue_threshold_ms: i64,
+    /// `dream.light` last-success staleness threshold, ms.
+    pub stale_dream_threshold_ms: i64,
+    /// `expire.*` / `evaluate.*` last-success staleness threshold, ms.
+    pub overdue_threshold_ms: i64,
+}
+
+impl Default for WorkflowsLintConfig {
+    fn default() -> Self {
+        Self {
+            max_dead_letter_listed: 10,
+            stuck_queue_threshold_ms: 600_000,
+            stale_dream_threshold_ms: 86_400_000,
+            overdue_threshold_ms: 172_800_000,
         }
     }
 }

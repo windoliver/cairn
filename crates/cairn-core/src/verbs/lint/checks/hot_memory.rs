@@ -196,6 +196,8 @@ mod tests {
             hot_body_loader: Some(&loader),
             source_resolver: crate::verbs::lint::empty_source_resolver(),
             consent_journal: crate::verbs::lint::empty_consent_journal(),
+            workflow_jobs: None,
+            now_ms: 0,
         };
         let findings = run(&inputs);
         // Post codex round-1 fix: with a loader wired the walker emits
@@ -239,6 +241,8 @@ mod tests {
             hot_body_loader: Some(&loader),
             source_resolver: crate::verbs::lint::empty_source_resolver(),
             consent_journal: crate::verbs::lint::empty_consent_journal(),
+            workflow_jobs: None,
+            now_ms: 0,
         };
         let findings = run(&inputs);
         assert!(
@@ -276,6 +280,8 @@ mod tests {
             hot_body_loader: None,
             source_resolver: crate::verbs::lint::empty_source_resolver(),
             consent_journal: crate::verbs::lint::empty_consent_journal(),
+            workflow_jobs: None,
+            now_ms: 0,
         };
         let findings = run(&inputs);
         let kinds: Vec<Kind> = findings.iter().map(|f| f.kind).collect();

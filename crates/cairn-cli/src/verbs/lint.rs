@@ -1281,6 +1281,8 @@ pub async fn lint_handler(
         hot_body_loader: Some(&hot_body_loader),
         source_resolver: &source_resolver,
         consent_journal: &consent_journal,
+        workflow_jobs: None,
+        now_ms: 0,
     };
     let mut data = run_checks(&inputs).await;
 
