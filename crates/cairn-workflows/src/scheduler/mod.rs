@@ -119,7 +119,11 @@ impl Scheduler {
                     let (disposition, will_retry_at_ms) = if r.terminated {
                         ("permanent", None)
                     } else {
-                        ("retry", Some(now))
+                        // Use the row's persisted next_run_at so the
+                        // metric agrees with the on-disk backoff
+                        // schedule (fall back to `now` if the adapter
+                        // didn't surface one).
+                        ("retry", r.next_run_at_ms.or(Some(now)))
                     };
                     let _ = config
                         .metrics

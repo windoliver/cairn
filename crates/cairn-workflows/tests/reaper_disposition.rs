@@ -338,3 +338,77 @@ async fn reap_expired_surfaces_terminated_flag_per_row() {
         "exhausted row MUST be terminated: {doomed:?}"
     );
 }
+
+/// Regression for Codex adversarial-review HIGH finding: a terminal
+/// reap (exhausted retries → `state = 'failed'`) must also stamp the
+/// dead-letter columns (`failure_class`, `dead_letter_at_ms`) so the
+/// row is visible to `WorkflowJobsReader::dead_letter_rows` and, via
+/// it, the `workflow_health` lint check. Without this stamp the
+/// reaper-terminated row would silently miss the lint surface even
+/// though the `WorkflowJobFailed("permanent")` metric event fires —
+/// violating the spec §4.10 contract that "repeated failures become
+/// visible and actionable" through BOTH metrics AND lint.
+#[tokio::test]
+async fn terminal_reap_stamps_dead_letter_columns() {
+    use cairn_core::contract::workflow_jobs::WorkflowJobsReader;
+    // Use a tmpfile so the reader can open its own connection — both
+    // the JobStore writer and the WorkflowJobsReader (which lint
+    // consumes) must observe the same row through the same file.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("cairn.db");
+    let conn = Connection::open(&db_path).expect("open file db");
+    cairn_workflows::sqlite_store::install_for_tests(&conn);
+    let store = Arc::new(SqliteJobStore::new(conn).expect("init store"));
+    let dyn_store: Arc<dyn JobStore> = store.clone();
+
+    dyn_store
+        .enqueue(EnqueueRequest {
+            job_id: JobId::new("j-terminal-reap"),
+            kind: JobKind::new("kind.reaped"),
+            payload: vec![],
+            queue_key: None,
+            dedupe_key: None,
+            not_before_ms: 0,
+            retry: RetryPolicy {
+                max_attempts: 1,
+                ..RetryPolicy::DEFAULT
+            },
+        })
+        .await
+        .expect("enqueue");
+    let leased = dyn_store
+        .lease("w", 1_000, 50)
+        .await
+        .expect("lease")
+        .expect("leased some");
+    // Heartbeat so attempts == 1 == max_attempts → next reap terminates.
+    dyn_store
+        .heartbeat(&leased.job_id, &leased.lease, 1_010, 1_100)
+        .await
+        .expect("hb");
+    drop(leased);
+
+    let reclaimed = dyn_store.reap_expired(10_000).await.expect("reap");
+    assert_eq!(reclaimed.len(), 1);
+    assert!(reclaimed[0].terminated, "must be terminal: {reclaimed:?}");
+    assert!(
+        reclaimed[0].next_run_at_ms.is_none(),
+        "terminal reaps must surface no next_run_at: {reclaimed:?}"
+    );
+
+    let reader_conn = rusqlite::Connection::open(&db_path).expect("reopen");
+    let reader = cairn_store_sqlite::SqliteWorkflowJobsReader::new(reader_conn);
+    let rows = reader.dead_letter_rows(10);
+    assert_eq!(
+        rows.len(),
+        1,
+        "terminal reap must produce exactly one dead-letter row: {rows:?}"
+    );
+    assert_eq!(rows[0].job_id.as_str(), "j-terminal-reap");
+    assert_eq!(rows[0].failure_class, FailureClass::LeaseLost);
+    assert!(
+        rows[0].dead_letter_at_ms > 0,
+        "dead_letter_at_ms must be populated: {rows:?}"
+    );
+    assert_eq!(reader.dead_letter_count(None), 1);
+}

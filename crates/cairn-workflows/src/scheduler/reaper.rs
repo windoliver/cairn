@@ -56,7 +56,12 @@ pub async fn run_reaper(
                             let (disposition, will_retry_at_ms) = if r.terminated {
                                 ("permanent", None)
                             } else {
-                                ("retry", Some(now))
+                                // Use the row's persisted next_run_at so
+                                // the metric agrees with the on-disk
+                                // backoff schedule (fall back to `now`
+                                // if the adapter didn't surface one,
+                                // preserving prior behavior).
+                                ("retry", r.next_run_at_ms.or(Some(now)))
                             };
                             let _ = metrics.emit(MetricEvent::WorkflowJobFailed {
                                 ts_ms: now,

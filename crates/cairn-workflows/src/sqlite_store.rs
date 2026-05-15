@@ -1617,18 +1617,14 @@ fn reap_batch(conn: &mut Connection, now_ms: i64) -> Result<Vec<ReclaimedRow>, J
             //     above any plausible execution budget.
             let delivery_cap = max_attempts.saturating_mul(POISON_DELIVERY_MULTIPLIER);
             let exhausted = attempts >= max_attempts || delivery_count >= delivery_cap;
-            if exhausted {
-                tx.execute(
-                    "UPDATE workflow_jobs \
-                        SET state = 'failed', lease_owner = NULL, lease_nonce = NULL, \
-                            lease_started = NULL, lease_expires_at = NULL, \
-                            last_error = COALESCE(last_error, \
-                                'lease expired with retry budget exhausted'), \
-                            updated_at = ? \
-                      WHERE job_id = ? AND state = 'leased'",
-                    params![now_ms, job_id],
-                )
-                .map_err(|e| JobStoreError::Backend(e.to_string()))?;
+            // Compute the row's next_run_at NOW so we can both persist
+            // it (requeue branch) and surface it on the ReclaimedRow so
+            // the reaper's WorkflowJobFailed metric reports a value
+            // that agrees with the DB. Terminal reaps don't requeue,
+            // but we still surface `None` so callers know there is no
+            // retry to wait for.
+            let next_run_at = if exhausted {
+                None
             } else {
                 // Apply per-row backoff. Use delivery_count for
                 // never-started retries (so repeated pre-heartbeat
@@ -1641,14 +1637,37 @@ fn reap_batch(conn: &mut Connection, now_ms: i64) -> Result<Vec<ReclaimedRow>, J
                     u32::try_from(attempts).unwrap_or(u32::MAX)
                 };
                 let delay = u64::from(policy.delay_for_attempt(attempt_for_delay));
-                let next_run = now_ms.saturating_add(i64::try_from(delay).unwrap_or(i64::MAX));
+                Some(now_ms.saturating_add(i64::try_from(delay).unwrap_or(i64::MAX)))
+            };
+            if exhausted {
+                // Terminal reap: stamp the dead-letter columns so the
+                // workflow_health lint check (which keys on
+                // dead_letter_at_ms IS NOT NULL) sees this row. Without
+                // these columns, an exhausted-reap row goes to
+                // state='failed' silently and the metric event is the
+                // only operator-visible signal — and the spec requires
+                // both the metric AND the lint finding.
+                tx.execute(
+                    "UPDATE workflow_jobs \
+                        SET state = 'failed', lease_owner = NULL, lease_nonce = NULL, \
+                            lease_started = NULL, lease_expires_at = NULL, \
+                            last_error = COALESCE(last_error, \
+                                'lease expired with retry budget exhausted'), \
+                            failure_class = 'lease_lost', \
+                            dead_letter_at_ms = ?, \
+                            updated_at = ? \
+                      WHERE job_id = ? AND state = 'leased'",
+                    params![now_ms, now_ms, job_id],
+                )
+                .map_err(|e| JobStoreError::Backend(e.to_string()))?;
+            } else {
                 tx.execute(
                     "UPDATE workflow_jobs \
                         SET state = 'queued', lease_owner = NULL, lease_nonce = NULL, \
                             lease_started = NULL, lease_expires_at = NULL, \
                             next_run_at = ?, updated_at = ? \
                       WHERE job_id = ? AND state = 'leased'",
-                    params![next_run, now_ms, job_id],
+                    params![next_run_at, now_ms, job_id],
                 )
                 .map_err(|e| JobStoreError::Backend(e.to_string()))?;
             }
@@ -1666,6 +1685,7 @@ fn reap_batch(conn: &mut Connection, now_ms: i64) -> Result<Vec<ReclaimedRow>, J
                 kind: JobKind::new(kind),
                 attempts: surfaced_attempts,
                 terminated: exhausted,
+                next_run_at_ms: next_run_at,
             });
         }
     }

@@ -364,9 +364,13 @@ async fn emit_failed(
     let will_retry_at_ms = if will_terminate {
         None
     } else {
-        // Next retry uses attempts+1 (the next execution try).
-        let next_attempt = leased.attempts.saturating_add(1);
-        let delay = i64::from(leased.retry.delay_for_attempt(next_attempt));
+        // Match `SqliteJobStore::cas_fail`'s effective-attempt calc:
+        // after a successful first heartbeat (the only path where we
+        // get here, since pre-heartbeat crashes go through the reaper),
+        // the store uses `delay_for_attempt(attempts)` — i.e. the
+        // attempt that just failed, NOT attempts+1. Using +1 here would
+        // overshoot the persisted `next_run_at` by one backoff step.
+        let delay = i64::from(leased.retry.delay_for_attempt(leased.attempts));
         Some(now_ms.saturating_add(delay))
     };
     // Wire disposition reflects the row's on-disk state after the

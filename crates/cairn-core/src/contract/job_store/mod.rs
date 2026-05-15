@@ -241,6 +241,12 @@ pub struct ReclaimedRow {
     /// vs `"retry"`) so the metric on the wire matches the row's
     /// actual on-disk state (issue #92, spec §4.6).
     pub terminated: bool,
+    /// For requeued rows, the `next_run_at` value the reaper wrote to
+    /// `workflow_jobs` (epoch ms). `None` for terminal reaps (the row
+    /// will never run again). The scheduler forwards this verbatim
+    /// into `WorkflowJobFailed.will_retry_at_ms` so the metric agrees
+    /// with the persisted backoff schedule (issue #92, spec §4.6).
+    pub next_run_at_ms: Option<i64>,
 }
 
 /// Disposition for [`JobStore::fail`].
