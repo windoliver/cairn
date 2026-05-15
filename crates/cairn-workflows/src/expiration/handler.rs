@@ -75,19 +75,22 @@ impl ExpirationHandler {
     ) -> Result<ExpirationSweepReport, Box<dyn std::error::Error + Send + Sync>> {
         let mut report = ExpirationSweepReport::default();
         let mut cursor = None;
-        // Hard cap on records inspected per sweep — keeps a single job
-        // from monopolising the worker pool. Subsequent sweeps drain
-        // any leftover backlog.
+        // Hard cap on records *inspected* per sweep — keeps a single
+        // job from monopolising the worker pool (round-5 adversarial
+        // review #3). Previously this cap was on
+        // `report.tombstoned()`, which in a vault of mostly-fresh
+        // records never tripped and let one job page through the
+        // entire tenant. Subsequent sweeps drain any leftover
+        // backlog.
         let cap = self.config.batch_size as usize;
+        let mut inspected: usize = 0;
 
-        loop {
-            if report.tombstoned() as usize >= cap {
-                break;
-            }
+        while inspected < cap {
+            let remaining = cap.saturating_sub(inspected);
             let args = ListArgs {
                 scope: payload.bound_scope.clone(),
                 cursor: cursor.clone(),
-                limit: cap,
+                limit: remaining.max(1),
                 ..ListArgs::default()
             };
             let page = self.store.list(&args).await?;
@@ -97,7 +100,8 @@ impl ExpirationHandler {
             for record in &page.records {
                 self.process_record(record, payload.now_ms, &mut report)
                     .await?;
-                if report.tombstoned() as usize >= cap {
+                inspected = inspected.saturating_add(1);
+                if inspected >= cap {
                     break;
                 }
             }
@@ -110,6 +114,7 @@ impl ExpirationHandler {
             ttl = report.ttl_expired,
             salience = report.salience_below,
             kept = report.kept,
+            inspected,
             "expiration: sweep complete"
         );
         Ok(report)

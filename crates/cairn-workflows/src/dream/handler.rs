@@ -90,6 +90,7 @@ impl DreamHandler {
         let mut filtered: Vec<cairn_core::domain::record::MemoryRecord> =
             Vec::with_capacity(window_cap);
         let mut cursor = None;
+        let mut cursor_exhausted = false;
         for _ in 0..DREAM_FETCH_PAGE_CAP {
             let args = ListArgs {
                 scope: payload.bound_scope.clone(),
@@ -99,6 +100,7 @@ impl DreamHandler {
             };
             let page = self.store.list(&args).await?;
             if page.records.is_empty() {
+                cursor_exhausted = true;
                 break;
             }
             for r in page.records {
@@ -118,12 +120,26 @@ impl DreamHandler {
             }
             match page.next_cursor {
                 Some(next) => cursor = Some(next),
-                None => break,
+                None => {
+                    cursor_exhausted = true;
+                    break;
+                }
             }
         }
+        // Round-5 adversarial review #2: distinguish "no eligible
+        // records exist" (legitimately Ok) from "we hit the page cap
+        // before reaching enough non-dream sources" (a transient
+        // condition that should retry — otherwise a dream-heavy
+        // vault can permanently skip its next window).
         if filtered.is_empty() {
-            info!(key = %payload.key, "dream: no records in window — nothing to distill");
-            return Ok(());
+            if cursor_exhausted {
+                info!(key = %payload.key, "dream: no records in window — nothing to distill");
+                return Ok(());
+            }
+            return Err(format!(
+                "dream: page cap ({DREAM_FETCH_PAGE_CAP}) exhausted before finding a non-dream source"
+            )
+            .into());
         }
 
         let mut source_record_ids: Vec<String> =
@@ -187,6 +203,29 @@ impl DreamHandler {
                 "produced_by":        "cairn-workflows::DreamHandler",
             }),
         );
+
+        // Post-LLM recheck (round-5 adversarial review #1): two
+        // workers leasing same-target jobs can both miss the
+        // pre-LLM `get_active_by_target` and race to upsert. The
+        // recheck here narrows the TOCTOU window from "duration of
+        // LLM call" to "duration of one store roundtrip" by
+        // dropping our LLM output when a peer already published.
+        //
+        // Full atomicity needs either (a) an
+        // `insert_if_no_active_target` store primitive, or (b)
+        // enqueuing dream jobs with `queue_key = target_id` so the
+        // scheduler serializes peers. Both are deferred to a
+        // follow-up — at the minimum-path level this recheck plus
+        // the pre-LLM check eliminates the common case (sequential
+        // retry after handler completion failure).
+        if self.store.get_active_by_target(&target_id).await?.is_some() {
+            warn!(
+                key = %payload.key,
+                target_id = target_id.as_str(),
+                "dream: peer published while we were calling LLM — dropping output to avoid version churn"
+            );
+            return Ok(());
+        }
 
         let scope = scope_for(&payload);
         let record = build_synthetic_record(SyntheticRecordSpec {
