@@ -165,11 +165,37 @@ impl ExpirationHandler {
 
         // Continuation enqueue. Only fires when the cap stopped us
         // before the cursor naturally exhausted AND a JobStore is
-        // wired.
+        // wired (round-6 adversarial review #1).
+        //
+        // Dedupe identity (round-7 adversarial review #1): the
+        // `job_id` folds in *every* dimension that distinguishes one
+        // logical sweep handoff from another — `now_ms`, the
+        // canonical bound-scope wire, and the cursor position. Two
+        // independent sweeps that happen to share a cursor but
+        // differ in `now_ms` or `bound_scope` get distinct ids and
+        // do not collide; a re-enqueue from a retry after the same
+        // sweep crashed at the same cursor gets the same id and the
+        // store's `dedupe_key` makes it a no-op.
+        //
+        // Enqueue *failures* propagate as `Err` so the scheduler
+        // retries the parent sweep — silently warning would drop a
+        // logical continuation, starving old records exactly the
+        // way round-6 #1 was trying to prevent.
         if !cursor_exhausted
             && let Some(jobs) = self.job_store.as_ref()
             && let Some(next_cursor) = cursor.as_ref()
         {
+            let scope_wire = payload
+                .bound_scope
+                .as_ref()
+                .map(cairn_core::domain::ScopeTuple::canonical_wire)
+                .unwrap_or_default();
+            let job_id = JobId::new(format!(
+                "expiration:continuation:{scope_wire}:{now_ms}:{at}:{rid}",
+                now_ms = payload.now_ms,
+                at = next_cursor.updated_at,
+                rid = next_cursor.record_id.as_str(),
+            ));
             let continuation = ExpirationPayload {
                 now_ms: payload.now_ms,
                 bound_scope: payload.bound_scope.clone(),
@@ -178,32 +204,31 @@ impl ExpirationHandler {
                     record_id: next_cursor.record_id.as_str().to_owned(),
                 }),
             };
-            match continuation.to_bytes() {
-                Ok(bytes) => {
-                    let job_id = JobId::new(format!(
-                        "expiration:continuation:{}:{}",
-                        next_cursor.updated_at,
-                        next_cursor.record_id.as_str()
-                    ));
-                    let req = EnqueueRequest {
-                        job_id: job_id.clone(),
-                        kind: JobKind::new(EXPIRATION_KIND),
-                        payload: bytes,
-                        queue_key: None,
-                        // `dedupe_key` mirrors the deterministic
-                        // `job_id` so a duplicate continuation
-                        // enqueue (e.g., on handler retry after a
-                        // crash post-continuation-enqueue) is a
-                        // no-op rather than a duplicate sweep.
-                        dedupe_key: Some(job_id.as_str().to_owned()),
-                        not_before_ms: 0,
-                        retry: RetryPolicy::DEFAULT,
-                    };
-                    if let Err(e) = jobs.enqueue(req).await {
-                        warn!(error = %e, "expiration: continuation enqueue failed");
-                    }
+            let bytes = continuation.to_bytes()?;
+            let req = EnqueueRequest {
+                job_id: job_id.clone(),
+                kind: JobKind::new(EXPIRATION_KIND),
+                payload: bytes,
+                queue_key: None,
+                dedupe_key: Some(job_id.as_str().to_owned()),
+                not_before_ms: 0,
+                retry: RetryPolicy::DEFAULT,
+            };
+            match jobs.enqueue(req).await {
+                Ok(()) => {}
+                // Idempotent re-enqueue from a handler retry: the
+                // continuation is already queued / leased / done.
+                // Treat as success and let the existing job drive
+                // the next sweep.
+                Err(
+                    cairn_core::contract::job_store::JobStoreError::DuplicateDedupeKey { .. },
+                ) => {
+                    info!(
+                        job_id = job_id.as_str(),
+                        "expiration: continuation already enqueued (dedupe hit)"
+                    );
                 }
-                Err(e) => warn!(error = %e, "expiration: continuation payload encode failed"),
+                Err(e) => return Err(Box::new(e)),
             }
         }
 

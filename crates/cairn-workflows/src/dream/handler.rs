@@ -126,14 +126,23 @@ impl DreamHandler {
                 }
             }
         }
-        // Round-5 adversarial review #2 + round-6 #2: distinguish
-        // (i) "no eligible records exist" (legitimately Ok) from
-        // (ii) "page cap fired before we gathered enough non-dream
-        // sources" (a transient condition that should retry — a
-        // dream-heavy vault must not permanently distill from a
-        // truncated input). Treat ANY cap-with-partial-window state
-        // as Err, not just the empty case.
+        // Round-5 adversarial review #2 + round-6 #2 + round-7 #3:
+        // distinguish (i) "no eligible records exist" (legitimately
+        // Ok) from (ii) "page cap fired before we gathered enough
+        // non-dream sources" (a transient condition that should
+        // retry — a dream-heavy vault must not permanently distill
+        // from a truncated input). Treat ANY cap-with-partial-window
+        // state as Err, not just the empty case. Emit a `warn!` so
+        // operators see the cap firing in workflow logs before the
+        // scheduler classifies the retry.
         if !cursor_exhausted && filtered.len() < window_cap {
+            warn!(
+                key = %payload.key,
+                got = filtered.len(),
+                want = window_cap,
+                page_cap = DREAM_FETCH_PAGE_CAP,
+                "dream: page cap fired with partial window — returning Err to retry"
+            );
             return Err(format!(
                 "dream: page cap ({DREAM_FETCH_PAGE_CAP}) fired with only \
                  {got}/{want} non-dream sources collected",

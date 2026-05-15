@@ -25,6 +25,35 @@ pub struct DreamPayload {
 }
 
 impl DreamPayload {
+    /// Recommended `EnqueueRequest::queue_key` for this payload.
+    ///
+    /// Enqueuers SHOULD pass this string as `queue_key` so the
+    /// scheduler serializes every dream job for a given
+    /// `(scope, key)` pair. Without scheduler-level serialization,
+    /// two workers handling concurrent same-target jobs race the
+    /// pre- and post-LLM existence checks in
+    /// [`crate::dream::handler::DreamHandler`] and can publish
+    /// conflicting version chains for the same deterministic
+    /// `target_id`. The pre/post checks narrow the window but
+    /// cannot close it without serialization at enqueue
+    /// (round-5 and round-7 adversarial reviews #1 / #2).
+    ///
+    /// The key intentionally omits `sources_hash`: the active set
+    /// of sources is computed inside the handler, so the enqueuer
+    /// cannot know the eventual `target_id`. Serializing on
+    /// `(scope, key)` is a sufficient guard — two windows over the
+    /// same logical key drain in order rather than racing each
+    /// other.
+    #[must_use]
+    pub fn recommended_queue_key(&self) -> String {
+        let scope_wire = self
+            .bound_scope
+            .as_ref()
+            .map(cairn_core::domain::ScopeTuple::canonical_wire)
+            .unwrap_or_default();
+        format!("dream:{scope_wire}:{key}", key = self.key)
+    }
+
     /// Serialize to `JobPayload`.
     ///
     /// # Errors
@@ -75,5 +104,30 @@ mod tests {
     fn unknown_fields_rejected() {
         let bytes = br#"{"key":"sess-1","x":1}"#;
         assert!(DreamPayload::from_bytes(bytes).is_err());
+    }
+
+    #[test]
+    fn queue_key_distinguishes_by_scope() {
+        let a = DreamPayload {
+            key: "k".into(),
+            bound_scope: None,
+        }
+        .recommended_queue_key();
+        let b = DreamPayload {
+            key: "k".into(),
+            bound_scope: Some(ScopeTuple {
+                tenant: Some("acme".into()),
+                ..ScopeTuple::default()
+            }),
+        }
+        .recommended_queue_key();
+        assert_ne!(a, b, "scope must split the queue key");
+        // Same scope + key → same queue key.
+        let c = DreamPayload {
+            key: "k".into(),
+            bound_scope: None,
+        }
+        .recommended_queue_key();
+        assert_eq!(a, c);
     }
 }
