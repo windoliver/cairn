@@ -12,7 +12,7 @@ use serde_json::{Map as JsonMap, Value as Json};
 use crate::domain::capture::CaptureEvent;
 use crate::domain::record::{Ed25519Signature, MemoryRecord};
 use crate::domain::taxonomy::{MemoryClass, MemoryKind, MemoryVisibility};
-use crate::domain::trace::{TraceEvent, summary_record_id};
+use crate::domain::trace::TraceEvent;
 use crate::domain::{EvidenceVector, Provenance, ScopeTuple, SessionId, TargetId};
 use crate::pipeline::capture_trace::TRACE_BODY_CAP;
 
@@ -92,6 +92,15 @@ pub enum TurnSummaryError {
 ///
 /// Pure: no LLM, no I/O. Same input always produces the same output.
 ///
+/// `turn_ordinal` is a strictly monotonic per-session counter
+/// (1, 2, 3, …) supplied by the caller. It is written into
+/// `extra_frontmatter.trace.sequence` so:
+///   - `list_trace_turns(session, since)` paginates summaries in true
+///     turn order, not by event count,
+///   - `latest_consolidation_watermark` returns a watermark that
+///     advances even when consecutive turns happen to share an event
+///     count (round-2 adversarial review #1).
+///
 /// The returned record carries a zeroed placeholder signature
 /// (`ed25519:000…`); a later signing stage must finalize it before the
 /// store accepts it. This mirrors the pattern used by
@@ -104,14 +113,47 @@ pub fn summarize_turn(
     session_id: &SessionId,
     turn_id: &str,
     events: &[MemoryRecord],
+    turn_ordinal: u64,
+) -> Result<MemoryRecord, TurnSummaryError> {
+    summarize_turn_with_scope(session_id, turn_id, events, turn_ordinal, None)
+}
+
+/// Same as [`summarize_turn`] but also carries the caller's bound scope
+/// (tenant / workspace / user / agent) through to the summary record's
+/// scope. The supplied scope's `session_id` is overwritten with
+/// `session_id` to keep the canonical key consistent with the trace
+/// records' own scope. Used by `cairn capture_trace` so per-tenant
+/// `cairn forget` and `latest_consolidation_watermark` queries can
+/// safely filter by both tenant and session without mixing data across
+/// tenants that happen to share a session id (round-3 adversarial
+/// review #2).
+///
+/// `bound_scope = None` is the single-tenant P0 default — summary
+/// scope becomes `{ session_id: <id> }` and behavior matches the old
+/// `summarize_turn`.
+///
+/// # Errors
+///
+/// See [`TurnSummaryError`].
+pub fn summarize_turn_with_scope(
+    session_id: &SessionId,
+    turn_id: &str,
+    events: &[MemoryRecord],
+    turn_ordinal: u64,
+    bound_scope: Option<&ScopeTuple>,
 ) -> Result<MemoryRecord, TurnSummaryError> {
     if events.is_empty() {
         return Err(TurnSummaryError::EmptyTurn);
     }
     let member_ids = validate_and_collect_members(session_id, turn_id, events)?;
     let body = build_summary_body(session_id, turn_id, events)?;
-    let id = summary_record_id(session_id, turn_id);
-    let extra = build_summary_frontmatter(session_id, turn_id, &id, member_ids);
+    let id = crate::domain::trace::summary_record_id_scoped(bound_scope, session_id, turn_id);
+    // `summary_sequence` uses the caller-supplied turn ordinal (1-based,
+    // strictly monotonic per session). The `records_trace_seq` UNIQUE
+    // index excludes `turn_summary` rows (migration 0023) so the value
+    // does not collide with per-event sequences in the same session.
+    let summary_sequence = turn_ordinal.max(1);
+    let extra = build_summary_frontmatter(session_id, turn_id, &id, member_ids, summary_sequence);
     let first = &events[0];
     // Safety: non-empty checked above; last index cannot fail.
     let last = &events[events.len() - 1];
@@ -127,9 +169,16 @@ pub fn summarize_turn(
         llm_id_if_any: None,
         source_refs: Vec::new(),
     };
-    let scope = ScopeTuple {
-        session_id: Some(session_id.as_str().to_owned()),
-        ..ScopeTuple::default()
+    let scope = if let Some(base) = bound_scope {
+        ScopeTuple {
+            session_id: Some(session_id.as_str().to_owned()),
+            ..base.clone()
+        }
+    } else {
+        ScopeTuple {
+            session_id: Some(session_id.as_str().to_owned()),
+            ..ScopeTuple::default()
+        }
     };
     let target_id = TargetId::parse(id.as_str())
         .unwrap_or_else(|_| unreachable!("summary_record_id always yields a valid ULID"));
@@ -286,11 +335,20 @@ fn trace_blocks_excerpt(value: &Json) -> Option<String> {
 }
 
 /// Build the `extra_frontmatter` map for a turn-summary record.
+///
+/// `summary_sequence` is the turn's event count (i.e., `events.len()`).
+/// This value is stored as `trace.sequence` so that
+/// `SqliteMemoryStore::list_trace_turns`'s `trace_sequence > since_sequence`
+/// predicate correctly includes summary records when `since_sequence = 0`.
+/// The `records_trace_seq` UNIQUE index excludes `turn_summary` rows
+/// (migration 0023 `WHERE trace_event != 'turn_summary'`), so the value
+/// does not conflict with per-event sequences.
 fn build_summary_frontmatter(
     session_id: &SessionId,
     turn_id: &str,
     id: &crate::domain::record::RecordId,
     member_ids: Vec<String>,
+    summary_sequence: u64,
 ) -> BTreeMap<String, Json> {
     let mut trace_obj = JsonMap::new();
     trace_obj.insert(
@@ -298,10 +356,11 @@ fn build_summary_frontmatter(
         Json::String(session_id.as_str().to_owned()),
     );
     trace_obj.insert("turn_id".into(), Json::String(turn_id.to_owned()));
-    // sequence = 0: summaries are out-of-band from the monotonic event
-    // sequence. The unique-seq SQLite index excludes summary records, so
-    // 0 is the designated sentinel and easy to filter on.
-    trace_obj.insert("sequence".into(), Json::Number(0_u64.into()));
+    // sequence = event count: makes this summary visible to
+    // `list_trace_turns(since=0)` via `trace_sequence > 0`.
+    // The records_trace_seq index excludes turn_summary rows so there
+    // is no UNIQUE collision with per-event sequences.
+    trace_obj.insert("sequence".into(), Json::Number(summary_sequence.into()));
     // capture_event_id for the summary equals its own deterministic record
     // id — synthetic, no underlying CaptureEvent.
     trace_obj.insert(
@@ -549,7 +608,7 @@ mod tests {
                 "hello",
             ),
         ];
-        let summary = summarize_turn(&s, "turn-1", &events).unwrap();
+        let summary = summarize_turn(&s, "turn-1", &events, 1).unwrap();
         assert_eq!(summary.kind, MemoryKind::Trace);
         assert_eq!(
             summary.extra_frontmatter.get("trace_event").unwrap(),
@@ -560,7 +619,10 @@ mod tests {
         assert_eq!(members.len(), 2);
         assert_eq!(members[0], "01ARZ3NDEKTSV4RRFFQ69G5FAA");
         assert_eq!(members[1], "01ARZ3NDEKTSV4RRFFQ69G5FAB");
-        assert_eq!(summary.id, summary_record_id(&s, "turn-1"));
+        assert_eq!(
+            summary.id,
+            crate::domain::trace::summary_record_id(&s, "turn-1")
+        );
     }
 
     #[test]
@@ -591,7 +653,7 @@ mod tests {
             ]),
         );
 
-        let summary = summarize_turn(&s, "turn-1", &[record]).expect("summary");
+        let summary = summarize_turn(&s, "turn-1", &[record], 1).expect("summary");
         assert!(
             !summary.body.contains("compare the tool outputs carefully"),
             "summary must not leak reasoning text: {}",
@@ -613,7 +675,7 @@ mod tests {
     fn summarize_rejects_empty() {
         let s = SessionId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").expect("valid");
         assert_eq!(
-            summarize_turn(&s, "turn-1", &[]).unwrap_err(),
+            summarize_turn(&s, "turn-1", &[], 1).unwrap_err(),
             TurnSummaryError::EmptyTurn
         );
     }
@@ -640,7 +702,7 @@ mod tests {
             ),
         ];
         assert!(matches!(
-            summarize_turn(&s, "turn-1", &events).unwrap_err(),
+            summarize_turn(&s, "turn-1", &events, 1).unwrap_err(),
             TurnSummaryError::CrossTurn
         ));
     }
@@ -667,7 +729,7 @@ mod tests {
             ),
         ];
         assert!(matches!(
-            summarize_turn(&s, "turn-1", &events).unwrap_err(),
+            summarize_turn(&s, "turn-1", &events, 1).unwrap_err(),
             TurnSummaryError::OutOfOrderSequences
         ));
     }

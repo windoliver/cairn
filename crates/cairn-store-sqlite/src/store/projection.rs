@@ -1,8 +1,9 @@
 //! `MemoryRecord` ↔ row projection.
 //!
-//! One side is the canonical `record_json` blob; the other side is the
-//! denormalized hot columns. Every upsert writes both; every read returns
-//! both for callers that want to skip JSON deserialization.
+//! One side is the canonical signed `record_json` blob; the other side is the
+//! denormalized hot columns. Upserts project both from the same
+//! [`MemoryRecord`]; store-owned mutable columns such as salience may later
+//! diverge and are overlaid onto hydrated records on read.
 //!
 //! The taxonomy wire forms (`kind`, `class`, `visibility`) are sourced from
 //! the [`MemoryKind::as_str`][k] / [`MemoryClass::as_str`][c] /
@@ -35,9 +36,10 @@ use crate::error::StoreError;
 /// Every field maps 1:1 to a column in the `records_latest` /
 /// `records_versions` schema. `from_record` produces the value an upsert
 /// statement binds; `record_from_json` is the inverse (canonical hydration
-/// from `record_json`). The hot columns are denormalized for indexed reads
-/// — they MUST stay in sync with `record_json`, and the
-/// `hot_columns_match_json` proptest pins that invariant.
+/// from `record_json`). The hot columns are denormalized for indexed reads.
+/// The `hot_columns_match_json` proptest pins the initial upsert projection;
+/// later access/decay updates may intentionally make mutable hot columns
+/// (currently salience) newer than the signed JSON blob.
 #[derive(Debug, Clone)]
 pub(crate) struct ProjectedRow {
     /// ULID of the version row (`records_versions.record_id`).

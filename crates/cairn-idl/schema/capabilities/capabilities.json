@@ -9,6 +9,7 @@
     { "const": "cairn.mcp.v1.search.keyword",    "x-cairn-since": "v0.1" },
     { "const": "cairn.mcp.v1.search.semantic",   "x-cairn-since": "v0.1" },
     { "const": "cairn.mcp.v1.search.hybrid",     "x-cairn-since": "v0.1" },
+    { "const": "cairn.mcp.v1.summarize.narrative", "x-cairn-since": "v0.2" },
     { "const": "cairn.mcp.v1.retrieve.record",   "x-cairn-since": "v0.1" },
     { "const": "cairn.mcp.v1.retrieve.session",  "x-cairn-since": "v0.1" },
     { "const": "cairn.mcp.v1.retrieve.turn",     "x-cairn-since": "v0.1" },
@@ -31,7 +32,8 @@
     { "const": "cairn.sensor.v1.screen.ocr.winrt",   "x-cairn-since": "v0.1" },
     { "const": "cairn.sensor.v1.screen.ocr.tesseract", "x-cairn-since": "v0.1" },
     { "const": "cairn.mcp.v1.replay.sequence",       "x-cairn-since": "v0.1" },
-    { "const": "cairn.mcp.v1.replay.challenge",      "x-cairn-since": "v0.1" }
+    { "const": "cairn.mcp.v1.replay.challenge",      "x-cairn-since": "v0.1" },
+    { "const": "cairn.workflows.v1.consolidation",   "x-cairn-since": "v0.1" }
   ],
   "x-cairn-mandatory-surfaces": [
     { "surface": "prelude.status",        "since": "v0.1", "reason": "Required for version / incarnation probe before any signed intent." },

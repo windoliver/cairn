@@ -204,6 +204,7 @@ impl<T: Transport> Sdk<T> {
                 probe_basis: StatusResponseMcpGraphToolsProbeBasis::ConfigOnly,
                 error: None,
             }),
+            workflows: None,
         }
     }
 
@@ -247,6 +248,7 @@ impl<T: Transport> Sdk<T> {
             model_present,
             embedding_provider_ready,
             llm_configured: false,
+            consolidation_runtime_ready: false,
             contract_phase: cairn_core::status::Phase::V0_1,
         }
     }

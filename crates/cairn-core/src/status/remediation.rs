@@ -22,6 +22,10 @@ pub const REMEDIATION: &[(&str, &str)] = &[
          cairn embed download to materialize the embedding model",
     ),
     (
+        "cairn.mcp.v1.summarize.narrative",
+        "configure an LLM provider with JSON-mode support to enable narrative summaries",
+    ),
+    (
         "cairn.mcp.v1.policy_trace",
         "policy_trace is enabled by default; check .cairn/config.yaml for \
          an explicit override that disabled it",
@@ -63,6 +67,12 @@ pub const REMEDIATION: &[(&str, &str)] = &[
         "cairn.mcp.v1.replay.challenge",
         "signed-intent replay protection requires a wired challenge dispatch \
          path; not available in this build",
+    ),
+    (
+        "consolidation.unavailable",
+        "Rolling-summary ConsolidationWorkflow is disabled or its scheduler is not running. \
+         Check that `consolidation.enabled = true` in .cairn/config.yaml and that the \
+         long-running `cairn mcp serve` host is up so the scheduler can lease jobs.",
     ),
 ];
 

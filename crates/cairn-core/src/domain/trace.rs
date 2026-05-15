@@ -174,10 +174,36 @@ impl TraceLink {
 /// upserts are idempotent across replays. The result is a legal
 /// [`RecordId`] (26-char Crockford ULID) so it round-trips through every
 /// store/IDL path that already accepts `RecordId`.
+///
+/// Convenience wrapper around [`summary_record_id_scoped`] with no scope —
+/// equivalent to the prior single-tenant behavior.
 #[must_use]
 pub fn summary_record_id(session_id: &SessionId, turn_id: &str) -> RecordId {
+    summary_record_id_scoped(None, session_id, turn_id)
+}
+
+/// Scope-aware variant of [`summary_record_id`]. Same `(scope, session_id,
+/// turn_id)` always maps to the same id; different bound scopes that
+/// share `(session_id, turn_id)` produce DIFFERENT ids, so two tenants
+/// using the same session/turn id cannot collide on the store's
+/// one-active-row-per-target-id invariant (round-6 adversarial review
+/// #2). `scope = None` reduces to the prior single-tenant id and
+/// preserves identity for already-emitted summaries.
+#[must_use]
+pub fn summary_record_id_scoped(
+    scope: Option<&crate::domain::ScopeTuple>,
+    session_id: &SessionId,
+    turn_id: &str,
+) -> RecordId {
     let mut h = Sha256::new();
     h.update(b"cairn:trace:turnsum\0");
+    if let Some(s) = scope {
+        let wire = s.canonical_wire();
+        if !wire.is_empty() {
+            h.update(wire.as_bytes());
+            h.update(b"\0");
+        }
+    }
     h.update(session_id.as_str().as_bytes());
     h.update(b"\0");
     h.update(turn_id.as_bytes());
@@ -185,8 +211,6 @@ pub fn summary_record_id(session_id: &SessionId, turn_id: &str) -> RecordId {
     let mut bytes = [0_u8; 16];
     bytes.copy_from_slice(&digest[..16]);
     let ulid = Ulid::from_bytes(bytes);
-    // invariant: Ulid::to_string() always produces 26 valid Crockford-base32
-    // characters by construction; RecordId::parse cannot fail on this input.
     RecordId::parse(ulid.to_string())
         .unwrap_or_else(|_| unreachable!("ulid::to_string always yields valid RecordId"))
 }

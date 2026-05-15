@@ -242,6 +242,7 @@ pub fn run_with_context(
         // makes the two sides un-divergeable.
         pipeline_dispatch: Some(pipeline_dispatch_advertisement(&DefaultRegistry)),
         mcp_graph_tools: mcp_graph_tools_field,
+        workflows: None,
     };
 
     if json {
@@ -311,6 +312,17 @@ fn compute_capabilities(
         let embedding_provider_ready =
             compute_embedding_provider_ready(config, model_present, vault_root);
 
+        // Consolidation runtime readiness mirrors the gates the `cairn mcp`
+        // boot path actually checks before constructing a Scheduler: the
+        // config must enable consolidation AND the deployment must be
+        // running in single_tenant mode with a bound principal (the only
+        // arm that constructs the SqliteJobStore + handlers). Without all
+        // three, status must not advertise the capability (round-8
+        // adversarial review #2).
+        let consolidation_runtime_ready = config.consolidation.enabled
+            && config.mcp.stdio.single_tenant
+            && config.mcp.stdio.principal.is_some();
+
         cairn_core::status::advertise(&cairn_core::status::CapabilityGates {
             config: config.capabilities(embedding_provider_ready),
             // CLI status path stays read-only and never opens the SQLite store.
@@ -319,7 +331,8 @@ fn compute_capabilities(
             vault_bound: bound,
             model_present,
             embedding_provider_ready,
-            llm_configured: false,
+            llm_configured: config.llm.provider.is_some(),
+            consolidation_runtime_ready,
             contract_phase: CLI_CONTRACT_PHASE,
         })
     } else {
@@ -434,6 +447,9 @@ fn probe_mcp_graph_tools(
 /// passing through `cairn-core::status::advertise()`.
 fn capabilities_for_config(config: &CairnConfig, model_present: bool) -> Vec<Capabilities> {
     let embedding_provider_ready = compute_embedding_provider_ready(config, model_present, None);
+    let consolidation_runtime_ready = config.consolidation.enabled
+        && config.mcp.stdio.single_tenant
+        && config.mcp.stdio.principal.is_some();
     cairn_core::status::advertise(&cairn_core::status::CapabilityGates {
         config: config.capabilities(embedding_provider_ready),
         store: None,
@@ -441,7 +457,8 @@ fn capabilities_for_config(config: &CairnConfig, model_present: bool) -> Vec<Cap
         // the gate runs only when caller is in a vault.
         model_present,
         embedding_provider_ready,
-        llm_configured: false,
+        llm_configured: config.llm.provider.is_some(),
+        consolidation_runtime_ready,
         contract_phase: CLI_CONTRACT_PHASE,
     })
 }
@@ -1249,6 +1266,26 @@ mod tests {
         assert!(
             !caps.contains(&Capabilities::CairnMcpV1SensorsPreCompact),
             "pre-compact must stay hidden until a runtime caller dispatches the hook; got {caps:?}"
+        );
+    }
+
+    #[test]
+    fn compute_capabilities_bound_vault_with_llm_includes_summarize_narrative() {
+        let mut config = CairnConfig::default();
+        config.llm.provider = Some(cairn_core::config::LlmProvider::OpenaiCompatible);
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".cairn")).unwrap();
+        std::fs::write(
+            tmp.path().join(".cairn").join("vault.id"),
+            b"01HZZ0000000000000000000AB\n",
+        )
+        .unwrap();
+
+        let caps = compute_capabilities(Some(tmp.path()), Some(&config), true);
+
+        assert!(
+            caps.contains(&Capabilities::CairnMcpV1SummarizeNarrative),
+            "summarize.narrative present once v0.2 CLI has an LLM provider configured; got {caps:?}"
         );
     }
 

@@ -19,6 +19,7 @@ cairn-core = { workspace = true }
 # when packaged for publish.
 cairn-store-sqlite = { workspace = true }
 async-trait = { workspace = true }
+chrono = { workspace = true }
 fs4 = { workspace = true }
 rusqlite = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
@@ -27,12 +28,16 @@ sha2 = { workspace = true }
 ulid = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
+tokio-util = { workspace = true, features = ["rt"] }
+tracing = { workspace = true }
 
 [dev-dependencies]
 cairn-store-sqlite = { workspace = true, features = ["test-helpers"] }
 cairn-test-fixtures = { workspace = true }
+proptest = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time", "test-util"] }
+tokio-util = { workspace = true }
 
 [lints]
 workspace = true

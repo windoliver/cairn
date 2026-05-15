@@ -25,7 +25,8 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use cairn_core::config::CairnConfig;
-use cairn_core::contract::memory_store::MemoryStore;
+use cairn_core::contract::job_store::{EnqueueRequest, JobId, JobKind, JobStoreError, RetryPolicy};
+use cairn_core::contract::memory_store::{MemoryStore, TombstoneReason};
 use cairn_core::domain::{
     ConsentEvent, ConsentKind, ConsentPayload, Identity, MemoryRecord, RecordId, Rfc3339Timestamp,
     SourceId,
@@ -36,6 +37,7 @@ use cairn_core::generated::envelope::{
     Response, ResponseData, ResponsePolicyTrace, ResponseStatus,
 };
 use cairn_core::generated::verbs::forget::ForgetData;
+use cairn_workflows::consolidation::{FORGET_CLEANUP_KIND, ForgetCleanupPayload};
 use clap::ArgMatches;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
@@ -98,6 +100,24 @@ pub fn run(sub: &ArgMatches, vault_root: PathBuf, config: CairnConfig) -> ExitCo
         return run_session(session_id, &vault_root, &config, json);
     }
 
+    if let Some(record_id) = sub.get_one::<String>("pin_record_id") {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                let resp =
+                    super::signed::aborted(ResponseVerb::Forget, format!("runtime build: {e}"));
+                emit_response(&resp, json, record_id);
+                return ExitCode::FAILURE;
+            }
+        };
+        let resp = rt.block_on(run_pin(record_id.clone(), vault_root));
+        emit_response(&resp, json, record_id);
+        return response_exit_code(&resp);
+    }
+
     let Some(record_id) = sub.get_one::<String>("record_id") else {
         return run_without_context(sub);
     };
@@ -123,7 +143,9 @@ pub fn requires_vault_context(sub: &ArgMatches) -> bool {
     if sub.get_flag("dry-run") || sub.get_flag("human-review") {
         return false;
     }
-    sub.get_one::<String>("record_id").is_some() || sub.get_one::<String>("session_id").is_some()
+    sub.get_one::<String>("record_id").is_some()
+        || sub.get_one::<String>("pin_record_id").is_some()
+        || sub.get_one::<String>("session_id").is_some()
 }
 
 /// Run `cairn forget` modes that do not open the vault store.
@@ -183,11 +205,30 @@ async fn run_record(record_id_raw: String, vault_root: PathBuf, config: CairnCon
         Ok(ctx) => ctx,
         Err(resp) => return resp,
     };
+    // Crash-window guard (round-2 adversarial review #4):
+    // Order operations so a crash between any pair leaves either a
+    // consistent state or a durable promise to repair:
+    //   1. Snapshot source seeds (main #353): captures hashes from the
+    //      pre-tombstone version graph for the source_forget consent
+    //      events emitted post-commit.
+    //   2. Prepare source-file redactions (main #353): stages backups
+    //      so a WAL failure can roll them back.
+    //   3. Enqueue consolidation cleanup intent durably (HEAD): so
+    //      summaries referencing this record are scheduled for
+    //      tombstoning even if the process crashes after step 4.
+    //   4. Call `store.forget_record` (WAL commit).
+    //   5. Stage + apply source-file redactions (main).
+    //   6. Append source_forget consent events (main).
+    //   7. If cleanup enqueue failed in step 3, run inline cleanup
+    //      (HEAD).
+    //
+    // The cleanup handler gates on "source is actually tombstoned"
+    // (see `ConsolidationForgetCleanupHandler`), so a speculative
+    // enqueue (step 3) without a follow-up commit (step 4) is harmless:
+    // the handler retries until either step 4 commits or the retry
+    // budget is exhausted.
 
-    // Snapshot every version's source_hash + originating_agent BEFORE
-    // the WAL tombstone runs — after `forget_record` returns, the rows
-    // may already be drained from the primary table by the
-    // `primary.purge` step.
+    // ── Step 1: source seeds ─────────────────────────────────────────
     let source_event_seeds = match collect_source_event_seeds(&ctx.store, &record_id).await {
         Ok(seeds) => seeds,
         Err(e) => {
@@ -198,9 +239,7 @@ async fn run_record(record_id_raw: String, vault_root: PathBuf, config: CairnCon
         }
     };
 
-    // Prepare source-file redactions (and stage backups for crash
-    // recovery) BEFORE the WAL commits. If the WAL fails, we restore
-    // the originals from the staged manifest.
+    // ── Step 2: prepare redactions ───────────────────────────────────
     let source_hashes: BTreeSet<String> = source_event_seeds
         .iter()
         .map(|seed| seed.source_hash.clone())
@@ -220,6 +259,45 @@ async fn run_record(record_id_raw: String, vault_root: PathBuf, config: CairnCon
         Vec::new()
     };
 
+    // ── Step 3: enqueue consolidation cleanup intent ─────────────────
+    let record_id_str = record_id.as_str().to_owned();
+    let cleanup_outcome: Result<(), String> = if let Some(js) = ctx.job_store.as_deref() {
+        let payload = ForgetCleanupPayload {
+            forgotten_record_id: record_id_str.clone(),
+        };
+        match payload.to_bytes() {
+            Ok(bytes) => {
+                let req = EnqueueRequest {
+                    job_id: JobId::new(format!("forget-cleanup:{record_id_str}")),
+                    kind: JobKind::new(FORGET_CLEANUP_KIND),
+                    payload: bytes,
+                    queue_key: None,
+                    dedupe_key: Some(record_id_str.clone()),
+                    not_before_ms: i64::try_from(
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis(),
+                    )
+                    .unwrap_or(i64::MAX),
+                    retry: RetryPolicy::DEFAULT,
+                };
+                match js.enqueue(req).await {
+                    Ok(()) | Err(JobStoreError::DuplicateDedupeKey { .. }) => Ok(()),
+                    Err(e) => {
+                        tracing::warn!(error = %e, %record_id_str,
+                            "forget cleanup enqueue failed before forget commit; \
+                             will perform inline cleanup after forget succeeds");
+                        Err(format!("enqueue failed (will retry inline): {e}"))
+                    }
+                }
+            }
+            Err(e) => Err(format!("forget cleanup: payload serialization: {e}")),
+        }
+    } else {
+        Err("no job store; inline cleanup pending".into())
+    };
+
     match ctx.store.forget_record(&record_id).await {
         Ok(outcome) => {
             let operation_id = match response_operation_id(&outcome.operation_id) {
@@ -228,8 +306,7 @@ async fn run_record(record_id_raw: String, vault_root: PathBuf, config: CairnCon
             };
             let op_id_str = operation_id.0.clone();
 
-            // Stage backups + apply redactions before the consent
-            // append; cleanup happens after the events commit.
+            // ── Step 5: stage backups + apply source redactions ─────
             let manifest_dir = if config.source.redact_on_forget {
                 match stage_pending_redactions(
                     &vault_root,
@@ -261,8 +338,7 @@ async fn run_record(record_id_raw: String, vault_root: PathBuf, config: CairnCon
                 );
             }
 
-            // Append body-free `source_forget` consent events inside a
-            // single transaction so the journal is consistent.
+            // ── Step 6: append source_forget consent events ─────────
             let events = match build_source_forget_events(&source_event_seeds, &op_id_str) {
                 Ok(events) => events,
                 Err(e) => {
@@ -307,6 +383,22 @@ async fn run_record(record_id_raw: String, vault_root: PathBuf, config: CairnCon
                 );
             }
 
+            // ── Step 7: inline cleanup fallback (HEAD) ──────────────
+            // If step 3's enqueue failed (or was skipped because no
+            // job store is wired), run the consolidation cleanup
+            // inline now that forget has committed. Either path
+            // satisfies the contract: by the time we return,
+            // summaries either are tombstoned or have a durable
+            // workflow_jobs row promising to tombstone them.
+            if cleanup_outcome.is_err()
+                && let Err(msg) = inline_forget_cleanup(&ctx.store, &record_id_str).await
+            {
+                return super::signed::aborted(
+                    ResponseVerb::Forget,
+                    format!("forget cleanup propagation failed: {msg}"),
+                );
+            }
+
             let data = ForgetData {
                 deleted_count: outcome.deleted_count,
                 plan_ref: None,
@@ -331,6 +423,81 @@ async fn run_record(record_id_raw: String, vault_root: PathBuf, config: CairnCon
             &format!("record not found: {id}"),
         ),
         Err(e) => super::signed::aborted(ResponseVerb::Forget, format!("store forget: {e}")),
+    }
+}
+
+/// Synchronously tombstone every active rolling summary whose
+/// `extra_frontmatter.consolidation.source_record_ids` array contains
+/// `forgotten_record_id`. Used as a fallback when the cleanup job
+/// cannot be durably enqueued (round-1 adversarial review #1).
+async fn inline_forget_cleanup(
+    store: &cairn_store_sqlite::SqliteMemoryStore,
+    forgotten_record_id: &str,
+) -> Result<(), String> {
+    let summaries = store
+        .find_summaries_by_source(forgotten_record_id)
+        .await
+        .map_err(|e| format!("find_summaries_by_source: {e}"))?;
+    for summary_id in summaries {
+        store
+            .tombstone(&summary_id, TombstoneReason::Forget)
+            .await
+            .map_err(|e| format!("tombstone summary {}: {e}", summary_id.as_str()))?;
+    }
+    Ok(())
+}
+
+async fn run_pin(record_id_raw: String, vault_root: PathBuf) -> Response {
+    let record_id = match RecordId::parse(record_id_raw) {
+        Ok(record_id) => record_id,
+        Err(e) => return super::signed::rejected_from_domain(ResponseVerb::Forget, e),
+    };
+    let operation_id = new_operation_id();
+    let store_path = vault_root.join(".cairn/cairn.db");
+    let store = match cairn_store_sqlite::open(&store_path).await {
+        Ok(store) => store,
+        Err(e) => {
+            return super::signed::aborted(ResponseVerb::Forget, format!("open store: {e}"));
+        }
+    };
+    match store.get(&record_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return not_found_response(
+                ResponseVerb::Forget,
+                "record",
+                &format!("record not found: {}", record_id.as_str()),
+            );
+        }
+        Err(e) => {
+            return super::signed::aborted(ResponseVerb::Forget, format!("get record: {e}"));
+        }
+    }
+    if let Err(e) = store.pin_record(&record_id, true).await {
+        if let Some(cairn_store_sqlite::StoreError::NotFound { id }) =
+            e.downcast_ref::<cairn_store_sqlite::StoreError>()
+        {
+            return not_found_response(
+                ResponseVerb::Forget,
+                "record",
+                &format!("record not found: {id}"),
+            );
+        }
+        return super::signed::aborted(ResponseVerb::Forget, format!("pin record: {e}"));
+    }
+    Response {
+        contract: "cairn.mcp.v1".into(),
+        status: ResponseStatus::Committed,
+        verb: ResponseVerb::Forget,
+        operation_id,
+        target: None,
+        data: Some(ResponseData::Forget(ForgetData {
+            deleted_count: 0,
+            tombstones: None,
+            plan_ref: None,
+        })),
+        policy_trace: Vec::<ResponsePolicyTrace>::new(),
+        error: None,
     }
 }
 
@@ -1145,4 +1312,43 @@ fn rewrite_source_redaction_marker(
         path: source_id.as_str().to_owned(),
         message: error.to_string(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Smoke-test the `ForgetCleanupPayload` serialization and `EnqueueRequest`
+    /// construction that the `run_record` forget-cleanup path uses (round-1
+    /// adversarial review #1). End-to-end enqueue coverage lives in the
+    /// integration tests at `tests/forget_propagation.rs`.
+    #[test]
+    #[allow(
+        clippy::expect_used,
+        reason = "test: panics surface broken invariants immediately"
+    )]
+    fn forget_cleanup_payload_round_trips() {
+        let record_id_str = "01ARZ3NDEKTSV4RRFFQ69G5FAX".to_owned();
+        let payload = ForgetCleanupPayload {
+            forgotten_record_id: record_id_str.clone(),
+        };
+        let bytes = payload.to_bytes().expect("serialize payload");
+
+        let req = EnqueueRequest {
+            job_id: JobId::new(format!("forget-cleanup:{record_id_str}")),
+            kind: JobKind::new(FORGET_CLEANUP_KIND),
+            payload: bytes,
+            queue_key: None,
+            dedupe_key: Some(record_id_str.clone()),
+            not_before_ms: 1_000,
+            retry: RetryPolicy::DEFAULT,
+        };
+
+        assert_eq!(
+            req.job_id.as_str(),
+            &format!("forget-cleanup:{record_id_str}")
+        );
+        assert_eq!(req.kind.as_str(), FORGET_CLEANUP_KIND);
+        assert_eq!(req.dedupe_key.as_deref(), Some(record_id_str.as_str()));
+    }
 }

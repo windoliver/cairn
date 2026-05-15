@@ -175,6 +175,38 @@ pub async fn serve_stdio_with_store_at_vault(
     .await
 }
 
+/// Same as [`serve_stdio_with_store_at_vault`] but also flips the handler's
+/// `consolidation_runtime_ready` flag so the initialize/status response
+/// advertises `cairn.workflows.v1.consolidation`. Used by `cairn mcp`
+/// after `Scheduler::start` succeeds (round-9 adversarial review #3).
+///
+/// `vault_root` may be `None` if the caller does not need file-backed
+/// verbs (`assemble_hot`); otherwise pass the bound vault root.
+///
+/// # Errors
+/// Same as [`serve_stdio_with_store`].
+pub async fn serve_stdio_with_store_consolidation_ready(
+    store: Arc<dyn cairn_core::contract::memory_store::MemoryStore>,
+    sqlite_store: Arc<cairn_store_sqlite::SqliteMemoryStore>,
+    scope: Arc<dyn cairn_core::mcp_auth::McpSessionScope>,
+    config: cairn_core::config::CairnConfig,
+    principal: cairn_core::domain::ScopeTuple,
+    vault_root: Option<PathBuf>,
+) -> Result<(), TransportError> {
+    serve_stdio_with_store_io_inner(
+        store,
+        sqlite_store,
+        scope,
+        config,
+        principal,
+        vault_root,
+        tokio::io::stdin(),
+        tokio::io::stdout(),
+        true,
+    )
+    .await
+}
+
 /// Internal helper — same as [`serve_stdio_with_store`] but accepts arbitrary
 /// `AsyncRead` / `AsyncWrite` so integration tests can drive it in-process.
 ///
@@ -205,6 +237,7 @@ where
         None,
         input,
         output,
+        false,
     )
     .await
 }
@@ -242,13 +275,15 @@ where
         Some(vault_root),
         input,
         output,
+        false,
     )
     .await
 }
 
 #[allow(
     clippy::too_many_arguments,
-    reason = "shared transport helper carries explicit wiring without hiding ownership"
+    reason = "shared transport helper carries explicit wiring without hiding ownership; \
+              vault_root and consolidation_runtime_ready are independent gates"
 )]
 async fn serve_stdio_with_store_io_inner<I, O>(
     store: Arc<dyn cairn_core::contract::memory_store::MemoryStore>,
@@ -259,6 +294,7 @@ async fn serve_stdio_with_store_io_inner<I, O>(
     vault_root: Option<PathBuf>,
     input: I,
     output: O,
+    consolidation_runtime_ready: bool,
 ) -> Result<(), TransportError>
 where
     I: AsyncRead + Unpin + Send + 'static,
@@ -280,7 +316,8 @@ where
         )
     } else {
         CairnMcpHandler::with_store_scope_and_sqlite(store, sqlite_store, scope, config, principal)
-    };
+    }
+    .with_consolidation_runtime_ready(consolidation_runtime_ready);
 
     // rmcp's `IntoTransport` is implemented for `(R, W)` tuples where R:
     // `AsyncRead + Unpin + Send + 'static` and W: `AsyncWrite + Unpin + Send +

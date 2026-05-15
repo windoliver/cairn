@@ -41,6 +41,8 @@ use crate::store::{SqliteMemoryStore, current_unix_ms};
 /// `(tenant, workspace)` partition tuple for a given session id.
 pub type SessionScopePartition = (Option<String>, Option<String>);
 
+type ActiveRecordRow = (String, f64, i64, Option<i64>, Option<i64>);
+
 /// Transactional handle exposed to closures passed to
 /// [`SqliteMemoryStore::with_tx`]. Methods are synchronous because the
 /// closure already runs on the DB worker thread; awaiting from inside
@@ -84,21 +86,28 @@ impl StoreTx<'_> {
         &self,
         target: &TargetId,
     ) -> Result<Option<StoredRecord>, StoreError> {
-        let row: Option<(String, i64, Option<i64>, Option<i64>)> = self
+        let row: Option<ActiveRecordRow> = self
             .tx
             .query_row(
-                "SELECT record_json, version, schema_version_major, schema_version_minor \
+                "SELECT record_json, salience, version, schema_version_major, schema_version_minor \
                    FROM records \
                   WHERE target_id = ?1 AND active = 1 AND tombstoned = 0 \
                   LIMIT 1",
                 params![target.as_str()],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
             .optional()?;
-        let Some((record_json, version_i64, schema_major, schema_minor)) = row else {
+        let Some((record_json, salience, version_i64, schema_major, schema_minor)) = row else {
             return Ok(None);
         };
-        let record = record_from_json(&record_json)?;
+        let mut record = record_from_json(&record_json)?;
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "SQLite REAL is f64, but salience is a bounded f32 domain value"
+        )]
+        {
+            record.salience = salience as f32;
+        }
         let version = u32::try_from(version_i64).map_err(|_| StoreError::Invariant {
             what: format!("stored version overflows u32: {version_i64}"),
         })?;
@@ -853,6 +862,133 @@ impl StoreTx<'_> {
             .optional()?
             .is_some();
         Ok(exists)
+    }
+
+    /// Compute the next per-session turn ordinal for a `turn_summary`
+    /// record. Returns `1` for the first turn in a session; for an
+    /// existing `(session_id, turn_id)` the existing ordinal is returned
+    /// so a re-summarize stamps the same value (idempotent replays).
+    ///
+    /// Used by [`summarize_turn`][cairn_core::pipeline::turn::summarize_turn]
+    /// to feed `extra_frontmatter.trace.sequence` with a value that is
+    /// strictly monotonic per session — required so that
+    /// `list_trace_turns(since=N)` and
+    /// `latest_consolidation_watermark` advance correctly across
+    /// consecutive turns regardless of per-turn event count.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Sqlite`] for SQL failures.
+    pub fn next_turn_ordinal(
+        &self,
+        session_id: &SessionId,
+        turn_id: &str,
+    ) -> Result<u64, StoreError> {
+        self.next_turn_ordinal_scoped(session_id, turn_id, None)
+    }
+
+    /// Scope-aware variant of [`Self::next_turn_ordinal`].
+    ///
+    /// The ordinal space is per `(session_id, bound_scope)` — two
+    /// scopes that share a session must NOT share an ordinal counter,
+    /// or one tenant's forget/replay can stomp the other's monotonic
+    /// progress (round-6 adversarial review #2).
+    ///
+    /// `bound_scope = None` reduces to the prior session-only behavior.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Sqlite`] for SQL failures.
+    pub fn next_turn_ordinal_scoped(
+        &self,
+        session_id: &SessionId,
+        turn_id: &str,
+        bound_scope: Option<&cairn_core::domain::ScopeTuple>,
+    ) -> Result<u64, StoreError> {
+        use std::fmt::Write as _;
+
+        fn scope_clauses(
+            bound_scope: Option<&cairn_core::domain::ScopeTuple>,
+            first_idx: usize,
+        ) -> (String, Vec<String>) {
+            let mut extra_where = String::new();
+            let mut binds: Vec<String> = Vec::new();
+            let Some(s) = bound_scope else {
+                return (extra_where, binds);
+            };
+            let mut idx = first_idx;
+            for (name, value) in [
+                ("tenant", s.tenant.as_deref()),
+                ("workspace", s.workspace.as_deref()),
+                ("user", s.user.as_deref()),
+                ("agent", s.agent.as_deref()),
+                ("entity", s.entity.as_deref()),
+            ] {
+                if let Some(v) = value {
+                    let _ = write!(extra_where, " AND json_extract(scope, '$.{name}') = ?{idx}");
+                    binds.push(v.to_owned());
+                    idx += 1;
+                }
+            }
+            (extra_where, binds)
+        }
+
+        // 1. If a summary for this exact (session, turn, scope) already
+        //    exists, reuse its ordinal (idempotent replays).
+        //    Placeholders: ?1=session, ?2=turn, scope dims at ?3..
+        let (lookup_where, lookup_scope_binds) = scope_clauses(bound_scope, 3);
+        let lookup_sql = format!(
+            "SELECT CAST(json_extract(extra_frontmatter, '$.trace.sequence') AS INTEGER) \
+             FROM records \
+             WHERE trace_event = 'turn_summary' \
+               AND trace_session_id = ?1 AND trace_turn_id = ?2 \
+               {lookup_where} \
+             ORDER BY tombstoned ASC \
+             LIMIT 1"
+        );
+        let mut existing = self.tx.prepare(&lookup_sql)?;
+        let mut existing_binds: Vec<Box<dyn rusqlite::ToSql>> = vec![
+            Box::new(session_id.as_str().to_owned()),
+            Box::new(turn_id.to_owned()),
+        ];
+        for v in &lookup_scope_binds {
+            existing_binds.push(Box::new(v.clone()));
+        }
+        let existing_refs: Vec<&dyn rusqlite::ToSql> = existing_binds
+            .iter()
+            .map(std::convert::AsRef::as_ref)
+            .collect();
+        if let Some(seq) = existing
+            .query_row(existing_refs.as_slice(), |row| row.get::<_, Option<i64>>(0))
+            .optional()?
+            .flatten()
+        {
+            return Ok(u64::try_from(seq.max(1)).unwrap_or(1));
+        }
+
+        // 2. Otherwise: 1 + MAX(sequence) over this (session, scope)'s
+        //    existing summaries — INCLUDING tombstoned rows so the
+        //    counter is strictly monotonic across forget round-trips
+        //    (round-5 adversarial review #2).
+        //    Placeholders: ?1=session, scope dims at ?2..
+        let (next_where, next_scope_binds) = scope_clauses(bound_scope, 2);
+        let next_sql = format!(
+            "SELECT COALESCE(MAX(CAST(json_extract(extra_frontmatter, \
+                                                   '$.trace.sequence') AS INTEGER)), 0) + 1 \
+             FROM records \
+             WHERE trace_event = 'turn_summary' \
+               AND trace_session_id = ?1 \
+               {next_where}"
+        );
+        let mut next = self.tx.prepare(&next_sql)?;
+        let mut next_binds: Vec<Box<dyn rusqlite::ToSql>> =
+            vec![Box::new(session_id.as_str().to_owned())];
+        for v in &next_scope_binds {
+            next_binds.push(Box::new(v.clone()));
+        }
+        let next_refs: Vec<&dyn rusqlite::ToSql> =
+            next_binds.iter().map(std::convert::AsRef::as_ref).collect();
+        let n: i64 = next.query_row(next_refs.as_slice(), |row| row.get(0))?;
+        Ok(u64::try_from(n.max(1)).unwrap_or(1))
     }
 
     /// Count non-tombstoned trace records whose `trace_payload_hash`

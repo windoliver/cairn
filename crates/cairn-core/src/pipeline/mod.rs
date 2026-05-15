@@ -34,6 +34,7 @@
 
 pub mod canonical;
 pub mod capture_trace;
+pub mod consolidation;
 pub mod dispatch;
 pub mod entity_resolve;
 pub mod explain;
@@ -43,6 +44,7 @@ pub mod filter;
 pub mod lint;
 pub mod pre_compact;
 pub mod profile;
+pub mod salience;
 pub(crate) mod squash;
 pub mod turn;
 

@@ -132,6 +132,7 @@ mod tests {
             pinned_candidates: records,
             project_candidates: &[],
             playbook_candidates: &[],
+            rolling_summary_candidates: &[],
             user_signal_candidates: &[],
             now: Rfc3339Timestamp::parse(now).expect("valid"),
             scope: ScopeTuple::default(),

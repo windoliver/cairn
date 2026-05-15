@@ -253,6 +253,7 @@ pub async fn run_checks(inputs: &LintInputs<'_>) -> LintData {
     findings.extend(checks::schema::run(inputs));
     findings.extend(checks::trace_reasoning::run(inputs));
     findings.extend(checks::taxonomy_conventions::run(inputs));
+    findings.extend(checks::salience::run(inputs));
     findings.extend(checks::hot_memory::run(inputs));
     findings.extend(checks::index_drift::run(inputs));
     findings.extend(checks::consent::run(inputs).await);

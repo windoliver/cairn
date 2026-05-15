@@ -178,6 +178,22 @@ pub fn with_flush_modes(cmd: clap::Command) -> clap::Command {
     )
 }
 
+/// Add `--pin <ULID>` to `forget` without changing the wire-level IDL.
+///
+/// Pinning is an operator convenience over record metadata: it prevents
+/// salience-decay eviction, but it is not a protocol forget request.
+#[must_use]
+pub fn with_forget_pin(cmd: clap::Command) -> clap::Command {
+    cmd.arg(
+        clap::Arg::new("pin_record_id")
+            .long("pin")
+            .value_name("ULID")
+            .action(clap::ArgAction::Set)
+            .help("Pin a record so salience-decay eviction will not forget it"),
+    )
+    .mut_group("forget_target", |group| group.arg("pin_record_id"))
+}
+
 /// Stub planner used until the full ingest / forget pipelines land (#9).
 /// Builds a minimal placeholder `FlushPlan` from the CLI args and either
 /// prints it (`dry_run`) or persists it under `.cairn/flush/pending/`

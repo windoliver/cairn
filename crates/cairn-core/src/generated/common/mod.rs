@@ -31,6 +31,8 @@ pub enum Capabilities {
     CairnMcpV1SearchSemantic,
     #[serde(rename = "cairn.mcp.v1.search.hybrid")]
     CairnMcpV1SearchHybrid,
+    #[serde(rename = "cairn.mcp.v1.summarize.narrative")]
+    CairnMcpV1SummarizeNarrative,
     #[serde(rename = "cairn.mcp.v1.retrieve.record")]
     CairnMcpV1RetrieveRecord,
     #[serde(rename = "cairn.mcp.v1.retrieve.session")]
@@ -77,6 +79,8 @@ pub enum Capabilities {
     CairnMcpV1ReplaySequence,
     #[serde(rename = "cairn.mcp.v1.replay.challenge")]
     CairnMcpV1ReplayChallenge,
+    #[serde(rename = "cairn.workflows.v1.consolidation")]
+    CairnWorkflowsV1Consolidation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
