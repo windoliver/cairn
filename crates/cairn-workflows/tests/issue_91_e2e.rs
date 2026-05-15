@@ -150,6 +150,7 @@ async fn three_workflows_drain_through_one_scheduler() {
     let eval_payload = EvaluationPayload {
         ts_ms: 1_700_000_000_000,
         check_ids: vec![],
+        bound_scope: None,
     }
     .to_bytes()
     .expect("eval payload");

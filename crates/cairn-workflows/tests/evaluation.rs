@@ -34,6 +34,7 @@ async fn sweep_emits_metric_and_report_record() {
     let payload = EvaluationPayload {
         ts_ms: 1_700_000_000_000,
         check_ids: vec![],
+        bound_scope: None,
     };
     let bytes = payload.to_bytes().expect("encode");
     let outcome = handler.handle(&bytes).await;
@@ -102,6 +103,7 @@ async fn replays_produce_byte_identical_report() {
     let payload = EvaluationPayload {
         ts_ms: 1_700_000_000_000,
         check_ids: vec![],
+        bound_scope: None,
     };
 
     let a = handler.run_once(&payload).await.expect("first sweep");
@@ -111,8 +113,17 @@ async fn replays_produce_byte_identical_report() {
     assert_eq!(a.passed, b.passed);
     assert_eq!(a.failed, b.failed);
 
+    // Brief §15 release gating: exactly one canonical
+    // `EvaluationCompleted` per logical sweep. The second run hits
+    // the report-record dedupe path and intentionally skips the
+    // metric emit so CI gauges remain stable across handler retries
+    // (round-1 adversarial review #3).
     let events = sink.snapshot().await;
-    assert_eq!(events.len(), 2, "one metric per sweep");
+    assert_eq!(
+        events.len(),
+        1,
+        "exactly one canonical metric for two replays of the same payload"
+    );
 }
 
 #[tokio::test]
@@ -132,6 +143,7 @@ async fn disabled_config_returns_permanent_and_emits_nothing() {
     let payload = EvaluationPayload {
         ts_ms: 0,
         check_ids: vec![],
+        bound_scope: None,
     };
     let bytes = payload.to_bytes().expect("encode");
     let outcome = handler.handle(&bytes).await;

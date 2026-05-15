@@ -81,12 +81,31 @@ impl DreamHandler {
             ..ListArgs::default()
         };
         let page = self.store.list(&args).await?;
-        if page.records.is_empty() {
+        // Exclude prior dream outputs from the input window — without
+        // this filter, a successful first run plants a Reasoning
+        // record carrying `extras.dream`, and a replay would see it in
+        // the window, shift `target_key`, and produce a new target
+        // instead of dedupe (round-1 adversarial review #2).
+        let filtered: Vec<_> = page
+            .records
+            .iter()
+            .filter(|r| {
+                !r.extra_frontmatter
+                    .get("dream")
+                    .is_some_and(|v| {
+                        v.get("produced_by")
+                            .and_then(|p| p.as_str())
+                            == Some("cairn-workflows::DreamHandler")
+                    })
+            })
+            .cloned()
+            .collect();
+        if filtered.is_empty() {
             info!(key = %payload.key, "dream: no records in window — nothing to distill");
             return Ok(());
         }
 
-        let prompt = render_dream_prompt(&payload.key, &page.records);
+        let prompt = render_dream_prompt(&payload.key, &filtered);
         let req = CompletionRequest::builder().prompt(prompt).build();
         let body = match llm.complete(&req).await? {
             CompletionOutput::Text(s) => s,
@@ -97,19 +116,32 @@ impl DreamHandler {
             other => format!("{other:?}"),
         };
 
-        let source_record_ids: Vec<String> = page
-            .records
-            .iter()
-            .map(|r| r.id.as_str().to_owned())
-            .collect();
-        let target_key = format!("dream:{}:{}", payload.key, source_record_ids.len());
+        let mut source_record_ids: Vec<String> =
+            filtered.iter().map(|r| r.id.as_str().to_owned()).collect();
+        source_record_ids.sort();
+        // `target_key` folds in (a) the caller's bound scope so two
+        // tenants sharing a `payload.key` cannot supersede each
+        // other's dream record, and (b) a hash of the sorted source
+        // ids so a replay against a different input window produces
+        // a different target (round-1 adversarial review #2).
+        let scope_wire = payload
+            .bound_scope
+            .as_ref()
+            .map(ScopeTuple::canonical_wire)
+            .unwrap_or_default();
+        let sources_hash =
+            crate::synthetic::sha256_hex(source_record_ids.join(",").as_bytes());
+        let target_key = format!(
+            "dream:{scope_wire}:{key}:{sources_hash}",
+            key = payload.key
+        );
 
         let mut extras = std::collections::BTreeMap::new();
         extras.insert(
             "dream".to_owned(),
             serde_json::json!({
                 "source_record_ids": source_record_ids,
-                "window_size":        page.records.len(),
+                "window_size":        filtered.len(),
                 "produced_by":        "cairn-workflows::DreamHandler",
             }),
         );

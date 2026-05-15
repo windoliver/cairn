@@ -104,7 +104,9 @@ impl EvaluationHandler {
         let mut findings: Vec<(String, CheckOutcome)> = Vec::with_capacity(checks.len());
 
         for check in &checks {
-            let outcome = check.run(self.store.as_ref()).await?;
+            let outcome = check
+                .run(self.store.as_ref(), payload.bound_scope.as_ref())
+                .await?;
             match &outcome {
                 CheckOutcome::Passed => passed = passed.saturating_add(1),
                 CheckOutcome::Failed { .. } => failed = failed.saturating_add(1),
@@ -118,21 +120,40 @@ impl EvaluationHandler {
         findings.sort_by(|a, b| a.0.cmp(&b.0));
 
         let checks_run = u32::try_from(findings.len()).unwrap_or(u32::MAX);
-        let report_target_id = if self.config.write_report_record {
-            Some(self.upsert_report_record(payload, &findings).await?)
+        let (report_target_id, report_was_new) = if self.config.write_report_record {
+            let (id, new) = self.upsert_report_record(payload, &findings).await?;
+            (Some(id), new)
         } else {
-            None
+            (None, true)
         };
 
-        let metric = MetricEvent::EvaluationCompleted {
-            ts_ms: payload.ts_ms,
-            report_target_id: report_target_id.clone().unwrap_or_default(),
-            checks_run,
-            passed,
-            failed,
-        };
-        if let Err(e) = self.metrics.emit(metric).await {
-            warn!(error = %e, "evaluation: metrics sink emit failed");
+        // Brief §15 release gating wants one canonical
+        // `EvaluationCompleted` per logical sweep (same payload =
+        // same outcome). Skip the emit when the report record was a
+        // body-hash idempotent replay — the prior successful run
+        // already produced that line in `metrics.jsonl` (round-1
+        // adversarial review #3).
+        if report_was_new {
+            let metric = MetricEvent::EvaluationCompleted {
+                ts_ms: payload.ts_ms,
+                report_target_id: report_target_id.clone().unwrap_or_default(),
+                checks_run,
+                passed,
+                failed,
+            };
+            // Surface sink failures as Retry so the scheduler re-runs
+            // the sweep — silently dropping the metric would let a
+            // CI gate miss a regression (round-1 adversarial review
+            // #3 "lossy on emit failure").
+            self.metrics.emit(metric).await.map_err(|e| {
+                warn!(error = %e, "evaluation: metrics sink emit failed");
+                Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+            })?;
+        } else {
+            info!(
+                target_id = ?report_target_id,
+                "evaluation: report already present, skipping metric emit (idempotent replay)"
+            );
         }
 
         info!(checks_run, passed, failed, "evaluation: sweep complete");
@@ -144,11 +165,17 @@ impl EvaluationHandler {
         })
     }
 
+    /// Upsert the synthesized `Reasoning` report record.
+    ///
+    /// Returns `(target_id_str, was_new)`. `was_new = false` means the
+    /// store deduped against the prior body hash for this target — a
+    /// replay of an already-completed sweep — and the caller should
+    /// skip metric emission.
     async fn upsert_report_record(
         &self,
         payload: &EvaluationPayload,
         findings: &[(String, CheckOutcome)],
-    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(String, bool), Box<dyn std::error::Error + Send + Sync>> {
         // Build a deterministic Markdown body. Same findings → same
         // bytes → same body hash → store dedupes on idempotent
         // replays.
@@ -173,12 +200,19 @@ impl EvaluationHandler {
             .map(|(id, _)| id.as_str())
             .collect::<Vec<_>>()
             .join(",");
-        // `target_key` includes the calendar day from `ts_ms` so a
-        // sweep run twice on the same day with the same check set
+        // `target_key` includes (a) the canonical bound scope so two
+        // tenants running the same check set on the same day get
+        // distinct targets, and (b) the calendar day from `ts_ms` so
+        // a sweep run twice on the same day with the same check set
         // hits the same target_id and the store body-hash dedupe
-        // makes it a no-op.
+        // makes it a no-op (round-1 adversarial review #4).
+        let scope_wire = payload
+            .bound_scope
+            .as_ref()
+            .map(ScopeTuple::canonical_wire)
+            .unwrap_or_default();
         let day = payload.ts_ms / 86_400_000;
-        let target_key = format!("evaluation:{day}:{key_basis}");
+        let target_key = format!("evaluation:{scope_wire}:{day}:{key_basis}");
         let target_id = stable_target_id(&target_key)?;
         let target_id_str = target_id.as_str().to_owned();
 
@@ -192,15 +226,23 @@ impl EvaluationHandler {
             }),
         );
 
-        // Evaluation report records are global — there's no obvious
-        // tenant/session to stamp. `ScopeTuple::validate` rejects an
-        // empty tuple, so we always set the `agent` dimension to the
-        // workflow's identity. Brief §6.5 validation passes; the
-        // record is still findable by every scope filter the verb
-        // layer applies (none narrow on `agent` by default).
-        let scope = ScopeTuple {
-            agent: Some(EVAL_AGENT_ID.to_owned()),
-            ..ScopeTuple::default()
+        // Stamp the report with the caller's `bound_scope` so a
+        // tenant-scoped read sees its own report, never another
+        // tenant's. `ScopeTuple::validate` rejects empty tuples, so
+        // for the single-tenant P0 path (no scope) fall back to the
+        // workflow agent dim (round-1 adversarial review #4).
+        let scope = match payload.bound_scope.as_ref() {
+            Some(base) => {
+                let mut s = base.clone();
+                if s.agent.is_none() {
+                    s.agent = Some(EVAL_AGENT_ID.to_owned());
+                }
+                s
+            }
+            None => ScopeTuple {
+                agent: Some(EVAL_AGENT_ID.to_owned()),
+                ..ScopeTuple::default()
+            },
         };
         let record = build_synthetic_record(SyntheticRecordSpec {
             kind: MemoryKind::Reasoning,
@@ -224,7 +266,7 @@ impl EvaluationHandler {
                 "evaluation: report record idempotent replay"
             );
         }
-        Ok(target_id_str)
+        Ok((target_id_str, outcome.content_changed))
     }
 }
 
@@ -286,6 +328,7 @@ mod tests {
         let p = EvaluationPayload {
             ts_ms: 0,
             check_ids: vec![],
+            bound_scope: None,
         };
         let bytes = p.to_bytes().expect("encode");
         let outcome = h.handle(&bytes).await;
@@ -310,6 +353,7 @@ mod tests {
         let payload = EvaluationPayload {
             ts_ms: 1_700_000_000_000,
             check_ids: vec![],
+            bound_scope: None,
         };
         let report = h.run_once(&payload).await.expect("run_once");
         assert_eq!(report.checks_run, 2);

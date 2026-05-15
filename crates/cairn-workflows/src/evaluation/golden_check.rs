@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use cairn_core::contract::memory_store::MemoryStore;
+use cairn_core::domain::ScopeTuple;
 
 /// Outcome of one golden check execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,7 +43,10 @@ pub trait GoldenCheck: Send + Sync {
     /// record.
     fn id(&self) -> &str;
 
-    /// Execute the check against the supplied store.
+    /// Execute the check against the supplied store, narrowed by
+    /// `scope` when present. Implementations MUST pass `scope` into
+    /// every store read so a multi-tenant sweep cannot leak records
+    /// across the binding (round-1 adversarial review #4).
     ///
     /// # Errors
     /// Implementations propagate any `MemoryStore` failure as a
@@ -53,6 +57,7 @@ pub trait GoldenCheck: Send + Sync {
     async fn run(
         &self,
         store: &dyn MemoryStore,
+        scope: Option<&ScopeTuple>,
     ) -> Result<CheckOutcome, Box<dyn std::error::Error + Send + Sync>>;
 }
 
@@ -71,9 +76,11 @@ impl GoldenCheck for OrphanCheck {
     async fn run(
         &self,
         store: &dyn MemoryStore,
+        scope: Option<&ScopeTuple>,
     ) -> Result<CheckOutcome, Box<dyn std::error::Error + Send + Sync>> {
         let args = cairn_core::contract::memory_store::ListArgs {
             limit: 10_000,
+            scope: scope.cloned(),
             ..cairn_core::contract::memory_store::ListArgs::default()
         };
         let page = store.list(&args).await?;
@@ -109,9 +116,11 @@ impl GoldenCheck for TombstoneConsistencyCheck {
     async fn run(
         &self,
         store: &dyn MemoryStore,
+        scope: Option<&ScopeTuple>,
     ) -> Result<CheckOutcome, Box<dyn std::error::Error + Send + Sync>> {
         let args = cairn_core::contract::memory_store::ListArgs {
             limit: 10_000,
+            scope: scope.cloned(),
             ..cairn_core::contract::memory_store::ListArgs::default()
         };
         let stored = store.list_active_stored(&args).await?;
