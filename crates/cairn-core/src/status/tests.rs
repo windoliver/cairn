@@ -30,6 +30,9 @@ fn gates(bound: bool, model_present: bool, store: Option<StoreCaps>) -> Capabili
         embedding_provider_ready: model_present,
         llm_configured: false,
         consolidation_runtime_ready: false,
+        dream_runtime_ready: false,
+        expiration_runtime_ready: false,
+        evaluation_runtime_ready: false,
         contract_phase: Phase::V0_1,
     }
 }
@@ -210,6 +213,77 @@ fn consolidation_capability_requires_wiring_and_runtime_ready() {
 }
 
 #[test]
+fn dream_capability_requires_wiring_runtime_ready_and_llm_provider() {
+    // Runtime not ready: cap absent.
+    let mut g = gates(true, true, None);
+    g.dream_runtime_ready = false;
+    g.llm_configured = true;
+    let caps = advertise(&g);
+    assert!(
+        !caps.contains(&Capabilities::CairnWorkflowsV1Dream),
+        "must not advertise dream when runtime is not ready"
+    );
+
+    // Runtime ready but no LLM: cap absent (brief §15 fail-closed —
+    // DreamHandler returns Permanent without an LLMProvider).
+    g.dream_runtime_ready = true;
+    g.llm_configured = false;
+    let caps = advertise(&g);
+    assert!(
+        !caps.contains(&Capabilities::CairnWorkflowsV1Dream),
+        "must not advertise dream when no LLMProvider is configured"
+    );
+
+    // Both gates on: cap presence mirrors the wiring const.
+    g.dream_runtime_ready = true;
+    g.llm_configured = true;
+    let caps = advertise(&g);
+    assert_eq!(
+        caps.contains(&Capabilities::CairnWorkflowsV1Dream),
+        wiring::DREAM_WORKFLOW_WIRED,
+        "with runtime_ready + llm_configured, advertise mirrors DREAM_WORKFLOW_WIRED"
+    );
+}
+
+#[test]
+fn expiration_capability_requires_wiring_and_runtime_ready() {
+    let mut g = gates(true, true, None);
+    g.expiration_runtime_ready = false;
+    let caps = advertise(&g);
+    assert!(
+        !caps.contains(&Capabilities::CairnWorkflowsV1Expiration),
+        "must not advertise expiration when runtime is not ready"
+    );
+
+    g.expiration_runtime_ready = true;
+    let caps = advertise(&g);
+    assert_eq!(
+        caps.contains(&Capabilities::CairnWorkflowsV1Expiration),
+        wiring::EXPIRATION_WORKFLOW_WIRED,
+        "with runtime_ready=true, advertise mirrors EXPIRATION_WORKFLOW_WIRED"
+    );
+}
+
+#[test]
+fn evaluation_capability_requires_wiring_and_runtime_ready() {
+    let mut g = gates(true, true, None);
+    g.evaluation_runtime_ready = false;
+    let caps = advertise(&g);
+    assert!(
+        !caps.contains(&Capabilities::CairnWorkflowsV1Evaluation),
+        "must not advertise evaluation when runtime is not ready"
+    );
+
+    g.evaluation_runtime_ready = true;
+    let caps = advertise(&g);
+    assert_eq!(
+        caps.contains(&Capabilities::CairnWorkflowsV1Evaluation),
+        wiring::EVALUATION_WORKFLOW_WIRED,
+        "with runtime_ready=true, advertise mirrors EVALUATION_WORKFLOW_WIRED"
+    );
+}
+
+#[test]
 fn pre_compact_capability_tracks_wiring_constant() {
     let g = gates(true, true, None);
     let caps = advertise(&g);
@@ -290,6 +364,30 @@ mod remediation_tests {
     }
 
     #[test]
+    fn dream_remediation_present() {
+        let hint = REMEDIATION
+            .iter()
+            .find(|(code, _)| *code == "dream.unavailable");
+        assert!(hint.is_some(), "remediation hint for dream must exist");
+    }
+
+    #[test]
+    fn expiration_remediation_present() {
+        let hint = REMEDIATION
+            .iter()
+            .find(|(code, _)| *code == "expiration.unavailable");
+        assert!(hint.is_some(), "remediation hint for expiration must exist");
+    }
+
+    #[test]
+    fn evaluation_remediation_present() {
+        let hint = REMEDIATION
+            .iter()
+            .find(|(code, _)| *code == "evaluation.unavailable");
+        assert!(hint.is_some(), "remediation hint for evaluation must exist");
+    }
+
+    #[test]
     fn remediation_table_has_no_empty_strings() {
         for (cap, hint) in REMEDIATION {
             assert!(!cap.is_empty(), "empty capability key");
@@ -326,9 +424,12 @@ mod remediation_tests {
             vault_bound: true,
             model_present: true,
             embedding_provider_ready: true,
-            llm_configured: false,
+            llm_configured: true,
             contract_phase: Phase::V0_1,
             consolidation_runtime_ready: false,
+            dream_runtime_ready: false,
+            expiration_runtime_ready: false,
+            evaluation_runtime_ready: false,
         };
 
         for cap in advertise(&gates) {
@@ -344,10 +445,12 @@ mod remediation_tests {
             if cap_str == "cairn.mcp.v1.search.keyword"
                 || cap_str == "cairn.mcp.v1.policy_trace"
                 || cap_str == "cairn.mcp.v1.sensors.pre_compact"
-                // Consolidation uses error code "consolidation.unavailable",
-                // not the wire string, so it is not in the REMEDIATION table
-                // under the capability's wire name.
+                // Workflow caps use error codes "<name>.unavailable" (not the
+                // wire string) in the REMEDIATION table.
                 || cap_str == "cairn.workflows.v1.consolidation"
+                || cap_str == "cairn.workflows.v1.dream"
+                || cap_str == "cairn.workflows.v1.expiration"
+                || cap_str == "cairn.workflows.v1.evaluation"
             {
                 continue;
             }
@@ -412,6 +515,9 @@ mod prop_tests {
                     embedding_provider_ready: embed_ready,
                     llm_configured: llm,
                     consolidation_runtime_ready: false,
+                    dream_runtime_ready: false,
+                    expiration_runtime_ready: false,
+                    evaluation_runtime_ready: false,
                     contract_phase: phase,
                 }
             })
@@ -487,6 +593,9 @@ fn openai_provider_without_key_drops_semantic_and_hybrid() {
         embedding_provider_ready: false,
         llm_configured: false,
         consolidation_runtime_ready: false,
+        dream_runtime_ready: false,
+        expiration_runtime_ready: false,
+        evaluation_runtime_ready: false,
         contract_phase: Phase::V0_1,
     };
     let caps = advertise(&g);
@@ -536,6 +645,9 @@ mod exhaustiveness {
             Capabilities::CairnMcpV1ReplaySequence => "replay.sequence",
             Capabilities::CairnMcpV1ReplayChallenge => "replay.challenge",
             Capabilities::CairnWorkflowsV1Consolidation => "workflows.consolidation",
+            Capabilities::CairnWorkflowsV1Dream => "workflows.dream",
+            Capabilities::CairnWorkflowsV1Expiration => "workflows.expiration",
+            Capabilities::CairnWorkflowsV1Evaluation => "workflows.evaluation",
             // Extension capabilities advertise via status.extensions, not
             // status.capabilities — they ride a separate code path.
             Capabilities::CairnMcpV1ExtensionAggregate => "ext.aggregate",
@@ -575,6 +687,9 @@ mod exhaustiveness {
             Capabilities::CairnMcpV1ReplaySequence,
             Capabilities::CairnMcpV1ReplayChallenge,
             Capabilities::CairnWorkflowsV1Consolidation,
+            Capabilities::CairnWorkflowsV1Dream,
+            Capabilities::CairnWorkflowsV1Expiration,
+            Capabilities::CairnWorkflowsV1Evaluation,
             Capabilities::CairnMcpV1ExtensionAggregate,
             Capabilities::CairnMcpV1ExtensionAdmin,
             Capabilities::CairnMcpV1ExtensionFederation,

@@ -247,8 +247,11 @@ impl<T: Transport> Sdk<T> {
             vault_bound: self.store.is_some(),
             model_present,
             embedding_provider_ready,
-            llm_configured: false,
+            llm_configured: self.config.llm.provider.is_some(),
             consolidation_runtime_ready: false,
+            dream_runtime_ready: false,
+            expiration_runtime_ready: false,
+            evaluation_runtime_ready: false,
             contract_phase: cairn_core::status::Phase::V0_1,
         }
     }

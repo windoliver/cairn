@@ -81,6 +81,12 @@ pub enum Capabilities {
     CairnMcpV1ReplayChallenge,
     #[serde(rename = "cairn.workflows.v1.consolidation")]
     CairnWorkflowsV1Consolidation,
+    #[serde(rename = "cairn.workflows.v1.dream")]
+    CairnWorkflowsV1Dream,
+    #[serde(rename = "cairn.workflows.v1.expiration")]
+    CairnWorkflowsV1Expiration,
+    #[serde(rename = "cairn.workflows.v1.evaluation")]
+    CairnWorkflowsV1Evaluation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]

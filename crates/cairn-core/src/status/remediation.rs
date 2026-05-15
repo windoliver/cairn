@@ -74,6 +74,27 @@ pub const REMEDIATION: &[(&str, &str)] = &[
          Check that `consolidation.enabled = true` in .cairn/config.yaml and that the \
          long-running `cairn mcp serve` host is up so the scheduler can lease jobs.",
     ),
+    (
+        "dream.unavailable",
+        "DreamWorkflow is disabled or its scheduler is not running. \
+         Check that `dream.enabled = true` in .cairn/config.yaml, that an \
+         `LLMProvider` plugin is configured, and that `cairn mcp serve` is \
+         hosting the scheduler.",
+    ),
+    (
+        "expiration.unavailable",
+        "ExpirationWorkflow is disabled or its scheduler is not running. \
+         Check that `expiration.enabled = true` in .cairn/config.yaml and \
+         that `cairn mcp serve` is hosting the scheduler so the sweep can \
+         tombstone TTL/salience-expired records.",
+    ),
+    (
+        "evaluation.unavailable",
+        "EvaluationWorkflow is disabled or its scheduler is not running. \
+         Check that `evaluation.enabled = true` in .cairn/config.yaml and \
+         that `cairn mcp serve` is hosting the scheduler so the golden \
+         checks can run and emit report records.",
+    ),
 ];
 
 /// Operator-facing remediation hint for `capability`, or `None` when no hint

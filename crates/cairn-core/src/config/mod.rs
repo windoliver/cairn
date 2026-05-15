@@ -3,6 +3,15 @@
 pub mod consolidation;
 pub use consolidation::{ConsolidationConfig, ConsolidationConfigError};
 
+pub mod dream;
+pub use dream::{DreamConfig, DreamConfigError};
+
+pub mod evaluation;
+pub use evaluation::{EvaluationConfig, EvaluationConfigError};
+
+pub mod expiration;
+pub use expiration::{ExpirationConfig, ExpirationConfigError};
+
 pub mod mcp;
 pub use mcp::{McpConfig, McpStdioConfig};
 
@@ -97,6 +106,27 @@ pub enum ConfigError {
         /// Underlying validation error.
         #[source]
         source: consolidation::ConsolidationConfigError,
+    },
+    /// `[dream]` block rejected its own semantic invariants (issue #91).
+    #[error("[dream] {source}")]
+    InvalidDream {
+        /// Underlying validation error.
+        #[source]
+        source: dream::DreamConfigError,
+    },
+    /// `[expiration]` block rejected its own semantic invariants (issue #91).
+    #[error("[expiration] {source}")]
+    InvalidExpiration {
+        /// Underlying validation error.
+        #[source]
+        source: expiration::ExpirationConfigError,
+    },
+    /// `[evaluation]` block rejected its own semantic invariants (issue #91).
+    #[error("[evaluation] {source}")]
+    InvalidEvaluation {
+        /// Underlying validation error.
+        #[source]
+        source: evaluation::EvaluationConfigError,
     },
     /// The pipeline chain contains an `llm` worker but no `llm.provider` is set.
     #[error("pipeline chain has llm worker but llm.provider is not configured")]
@@ -502,6 +532,15 @@ pub struct CairnConfig {
     /// Rolling-summary consolidation workflow configuration (brief §5.3, §10.0).
     #[serde(default)]
     pub consolidation: ConsolidationConfig,
+    /// Minimum-path `DreamWorkflow` configuration (issue #91, brief §10.1).
+    #[serde(default)]
+    pub dream: DreamConfig,
+    /// Minimum-path `ExpirationWorkflow` configuration (issue #91, brief §10.0).
+    #[serde(default)]
+    pub expiration: ExpirationConfig,
+    /// Minimum-path `EvaluationWorkflow` configuration (issue #91, brief §15).
+    #[serde(default)]
+    pub evaluation: EvaluationConfig,
 }
 
 // ── Source ────────────────────────────────────────────────────────────────
@@ -1527,6 +1566,18 @@ impl CairnConfig {
         self.consolidation
             .validate()
             .map_err(|source| ConfigError::InvalidConsolidation { source })?;
+
+        // Issue #91: new workflow config blocks must satisfy their own
+        // semantic invariants before they can run.
+        self.dream
+            .validate()
+            .map_err(|source| ConfigError::InvalidDream { source })?;
+        self.expiration
+            .validate()
+            .map_err(|source| ConfigError::InvalidExpiration { source })?;
+        self.evaluation
+            .validate()
+            .map_err(|source| ConfigError::InvalidEvaluation { source })?;
 
         Ok(())
     }

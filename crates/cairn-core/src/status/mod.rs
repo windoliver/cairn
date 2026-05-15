@@ -139,6 +139,21 @@ pub struct CapabilityGates {
     /// Defaults to `false` for back-compat with callers that don't yet
     /// populate the field.
     pub consolidation_runtime_ready: bool,
+    /// True when (a) `dream.enabled = true` in the active config AND
+    /// (b) the surface boots the workflow scheduler with the
+    /// `DreamHandler` registered (`cairn mcp serve --single-tenant`).
+    /// Issue #91, brief §10.1. Mirrors the consolidation gate; held
+    /// independently so a deployment with consolidation but no LLM
+    /// provider does not advertise dream.
+    pub dream_runtime_ready: bool,
+    /// True when (a) `expiration.enabled = true` in the active config
+    /// AND (b) the surface registers `ExpirationHandler` on the
+    /// scheduler. Issue #91, brief §10.0.
+    pub expiration_runtime_ready: bool,
+    /// True when (a) `evaluation.enabled = true` in the active config
+    /// AND (b) the surface registers `EvaluationHandler` on the
+    /// scheduler. Issue #91, brief §15.
+    pub evaluation_runtime_ready: bool,
 }
 
 impl CapabilityGates {
@@ -251,6 +266,20 @@ pub fn advertise(gates: &CapabilityGates) -> Vec<Capabilities> {
     // adversarial review #2).
     if wiring::CONSOLIDATION_WORKFLOW_WIRED && gates.consolidation_runtime_ready {
         out.push(Capabilities::CairnWorkflowsV1Consolidation);
+    }
+    // Dream additionally requires an `LLMProvider` (brief §10.2). Brief §15
+    // fail-closed: advertising a capability the runtime cannot honor is a
+    // violation, and `DreamHandler` short-circuits to `Permanent` when no
+    // provider is wired. Hold the capability back in that case even when
+    // `dream.enabled = true` in config.
+    if wiring::DREAM_WORKFLOW_WIRED && gates.dream_runtime_ready && gates.llm_configured {
+        out.push(Capabilities::CairnWorkflowsV1Dream);
+    }
+    if wiring::EXPIRATION_WORKFLOW_WIRED && gates.expiration_runtime_ready {
+        out.push(Capabilities::CairnWorkflowsV1Expiration);
+    }
+    if wiring::EVALUATION_WORKFLOW_WIRED && gates.evaluation_runtime_ready {
+        out.push(Capabilities::CairnWorkflowsV1Evaluation);
     }
 
     out
