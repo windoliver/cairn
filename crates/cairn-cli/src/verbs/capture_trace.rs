@@ -63,6 +63,7 @@ use ulid::Ulid;
 use crate::identity::{guard::refuse_if_degraded, status::ReconciliationReport};
 use crate::sensor_gate::{
     SensorDropBudgetMetric, SensorDropMetric, SensorGateStage, append_sensor_drop_metric,
+    safe_metric_ref,
 };
 
 use super::envelope::{emit_json, human_error, invalid_args_response, new_operation_id};
@@ -1049,8 +1050,8 @@ fn append_capture_trace_drop_metric(
         reason,
         stage: SensorGateStage::PreExtraction,
         operation_id: Some(event.event_id.as_str().to_owned()),
-        session_id: refs.and_then(|refs| refs.session_id.clone()),
-        turn_id: refs.and_then(|refs| refs.turn_id.clone()),
+        session_id: refs.and_then(|refs| safe_metric_ref(refs.session_id.as_deref())),
+        turn_id: refs.and_then(|refs| safe_metric_ref(refs.turn_id.as_deref())),
         budget,
     };
     append_sensor_drop_metric(vault_root, &metric)
@@ -1522,8 +1523,14 @@ fn public_failed_turn_ref(value: String) -> String {
 }
 
 fn public_failed_turn_reason(reason: &str) -> String {
-    if reason.starts_with("sensor_gate:") {
-        return reason.to_owned();
+    match reason {
+        "sensor_gate:disabled" | "sensor_gate:privacy_denied" | "sensor_gate:budget_exceeded" => {
+            return reason.to_owned();
+        }
+        _ if reason.starts_with("sensor_gate:") => {
+            return "turn_failed".to_owned();
+        }
+        _ => {}
     }
     if let Some(code) = reason.strip_prefix("privacy filter rejected turn: ") {
         return format!("privacy_filter:{code}");
@@ -1569,5 +1576,24 @@ fn response_exit_code(resp: &Response) -> ExitCode {
         ResponseStatus::Committed => ExitCode::SUCCESS,
         ResponseStatus::Rejected => ExitCode::from(64),
         _ => ExitCode::FAILURE,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::public_failed_turn_reason;
+
+    #[test]
+    fn public_failed_turn_reason_redacts_internal_sensor_gate_errors() {
+        assert_eq!(
+            public_failed_turn_reason("sensor_gate:privacy_denied"),
+            "sensor_gate:privacy_denied"
+        );
+        assert_eq!(
+            public_failed_turn_reason(
+                "sensor_gate: failed to open /tmp/private-vault/.cairn/cairn.db: disk I/O error"
+            ),
+            "turn_failed"
+        );
     }
 }

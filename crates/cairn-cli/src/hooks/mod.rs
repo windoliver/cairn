@@ -16,7 +16,7 @@ use serde_json::Value;
 
 use crate::sensor_gate::{
     SensorDropBudgetMetric, SensorDropMetric, SensorGateStage, append_sensor_drop_metric,
-    latest_sensor_consent_for_vault,
+    latest_sensor_consent_for_vault, safe_metric_ref,
 };
 use crate::verbs::envelope::{emit_json, new_operation_id};
 
@@ -398,10 +398,7 @@ fn enforce_hook_sensor_gate(
                 reason,
                 stage: SensorGateStage::PreArtifact,
                 operation_id: Some(operation_id.0.clone()),
-                session_id: payload
-                    .get("session_id")
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned),
+                session_id: safe_metric_ref(payload.get("session_id").and_then(Value::as_str)),
                 turn_id: None,
                 budget,
             };

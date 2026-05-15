@@ -364,6 +364,47 @@ fn hook_without_consent_writes_no_trace_artifact() {
 }
 
 #[test]
+fn hook_denied_metric_drops_unsafe_session_id() {
+    let vault = tempfile::tempdir().expect("tempdir");
+    bootstrap_vault(vault.path());
+    let unsafe_session_id = "SECRET USER TEXT";
+
+    let out = cli()
+        .args([
+            "hook",
+            "UserPromptSubmit",
+            "--vault-path",
+            vault.path().to_str().expect("utf-8 vault path"),
+            "--payload",
+            &format!(r#"{{"session_id":"{unsafe_session_id}","prompt":"remember this"}}"#),
+            "--json",
+        ])
+        .output()
+        .expect("cairn hook UserPromptSubmit");
+
+    assert_eq!(
+        out.status.code(),
+        Some(77),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let metrics_path = vault.path().join(".cairn/metrics.jsonl");
+    let metrics = std::fs::read_to_string(&metrics_path)
+        .unwrap_or_else(|err| panic!("read {}: {err}", metrics_path.display()));
+    assert!(
+        !metrics.contains(unsafe_session_id),
+        "denied hook metric leaked unsafe session_id: {metrics}"
+    );
+    let drops = sensor_drop_metrics(vault.path());
+    let hook_drop = drops
+        .iter()
+        .find(|row| row["sensor"] == "hook" && row["stage"] == "pre_artifact")
+        .unwrap_or_else(|| panic!("missing hook drop metric: {drops:?}"));
+    assert_eq!(hook_drop.get("session_id"), None);
+}
+
+#[test]
 fn screen_without_consent_writes_no_png() {
     let vault = tempfile::tempdir().expect("tempdir");
     bootstrap_vault(vault.path());
@@ -508,6 +549,53 @@ fn capture_trace_denies_local_sensor_before_body_resolution() {
         !vault_contains_exact_bytes_outside_sources(vault.path(), body),
         "denied terminal body must not be projected outside sources/"
     );
+}
+
+#[test]
+fn capture_trace_denied_metric_drops_unsafe_turn_id() {
+    let vault = tempfile::tempdir().expect("tempdir");
+    bootstrap_vault(vault.path());
+    set_terminal_config_enabled(vault.path());
+    let body = b"SENTINEL_TERMINAL_BODY";
+    let unsafe_turn_id = "SECRET USER TEXT";
+    let payload_ref = write_source(vault.path(), "terminal", "unsafe-turn", body);
+    let event = terminal_tool_output_event(
+        "01ARZ3NDEKTSV4RRFFQ69G5FC0",
+        "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        unsafe_turn_id,
+        "tool-terminal-gate",
+        &payload_ref,
+        body,
+    );
+    let jsonl = vault.path().join("unsafe-turn-events.jsonl");
+    std::fs::write(
+        &jsonl,
+        format!(
+            "{}\n",
+            serde_json::to_string(&event).expect("serialize capture event")
+        ),
+    )
+    .expect("write event jsonl");
+
+    let response = run_capture_trace_json(vault.path(), &jsonl);
+    assert_eq!(response["status"], "committed");
+    assert_eq!(
+        response["data"]["failed_turns"][0]["reason"],
+        "sensor_gate:privacy_denied"
+    );
+    let metrics_path = vault.path().join(".cairn/metrics.jsonl");
+    let metrics = std::fs::read_to_string(&metrics_path)
+        .unwrap_or_else(|err| panic!("read {}: {err}", metrics_path.display()));
+    assert!(
+        !metrics.contains(unsafe_turn_id),
+        "denied capture_trace metric leaked unsafe turn_id: {metrics}"
+    );
+    let drops = sensor_drop_metrics(vault.path());
+    let terminal_drop = drops
+        .iter()
+        .find(|row| row["sensor"] == "terminal" && row["stage"] == "pre_extraction")
+        .unwrap_or_else(|| panic!("missing terminal drop metric: {drops:?}"));
+    assert_eq!(terminal_drop.get("turn_id"), None);
 }
 
 #[test]

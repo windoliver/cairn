@@ -116,6 +116,7 @@ impl<'de> Deserialize<'de> for SensorDropMetric {
 
 /// Constant discriminator for sensor drop metrics.
 pub const SENSOR_DROP_EVENT: &str = "sensor_drop";
+const MAX_SENSOR_METRIC_REF_LEN: usize = 128;
 
 /// Latest consent state for a sensor family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -192,6 +193,14 @@ pub fn read_sensor_drop_metrics(vault_root: &Path) -> anyhow::Result<Vec<SensorD
         rows.push(row);
     }
     Ok(rows)
+}
+
+/// Keep optional metric references to machine-generated identifier shapes.
+#[must_use]
+pub fn safe_metric_ref(value: Option<&str>) -> Option<String> {
+    value
+        .filter(|value| is_safe_metric_ref(value))
+        .map(ToOwned::to_owned)
 }
 
 /// Resolve the latest consent-journal state for a local sensor family.
@@ -328,6 +337,54 @@ fn metrics_line_sets_event(line: &str, event: &str) -> bool {
     after_event.is_empty() || after_event.starts_with('"')
 }
 
+fn is_safe_metric_ref(value: &str) -> bool {
+    if value.is_empty() || value.len() > MAX_SENSOR_METRIC_REF_LEN {
+        return false;
+    }
+    if !value.bytes().all(is_sensor_metric_ref_char) {
+        return false;
+    }
+    is_crockford_ulid(value) || has_metric_ref_prefix(value)
+}
+
+fn has_metric_ref_prefix(value: &str) -> bool {
+    ["sess-", "session-", "turn-", "tool-", "generic-"]
+        .iter()
+        .any(|prefix| {
+            value
+                .strip_prefix(prefix)
+                .is_some_and(|rest| !rest.is_empty())
+        })
+}
+
+fn is_sensor_metric_ref_char(byte: u8) -> bool {
+    matches!(
+        byte,
+        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b':' | b'-'
+    )
+}
+
+fn is_crockford_ulid(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 26
+        && matches!(bytes[0], b'0'..=b'7')
+        && bytes[1..].iter().copied().all(is_crockford_base32)
+}
+
+const fn is_crockford_base32(byte: u8) -> bool {
+    matches!(
+        byte,
+        b'0'..=b'9'
+            | b'A'..=b'H'
+            | b'J'
+            | b'K'
+            | b'M'
+            | b'N'
+            | b'P'..=b'T'
+            | b'V'..=b'Z'
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use cairn_core::domain::{LocalSensorName, SensorGateReason, SourceFamily};
@@ -367,5 +424,20 @@ mod tests {
         }
         let decoded: SensorDropMetric = serde_json::from_str(&json).expect("decode metric");
         assert_eq!(decoded.reason, SensorGateReason::PrivacyDenied);
+    }
+
+    #[test]
+    fn safe_metric_ref_keeps_only_machine_identifier_shapes() {
+        assert_eq!(
+            safe_metric_ref(Some("01ARZ3NDEKTSV4RRFFQ69G5FAV")).as_deref(),
+            Some("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+        );
+        assert_eq!(
+            safe_metric_ref(Some("turn-terminal-gate")).as_deref(),
+            Some("turn-terminal-gate")
+        );
+        assert_eq!(safe_metric_ref(Some("SECRET USER TEXT")), None);
+        assert_eq!(safe_metric_ref(Some("remember_this")), None);
+        assert_eq!(safe_metric_ref(Some("")), None);
     }
 }
