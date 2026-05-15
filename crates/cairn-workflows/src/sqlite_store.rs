@@ -28,6 +28,12 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 /// do not change this one, so the check is forward-compatible.
 const MIGRATION_0020_SQL: &str = cairn_store_sqlite::migrations::WORKFLOW_JOBS_MIGRATION_SQL;
 
+/// Additive migration 0062 SQL (dead-letter + completion columns).
+/// Re-exported through the package API for the same self-containment
+/// reason as [`MIGRATION_0020_SQL`].
+const MIGRATION_0062_SQL: &str =
+    cairn_store_sqlite::migrations::WORKFLOW_DEAD_LETTER_MIGRATION_SQL;
+
 /// Multiplier applied to `max_attempts` to derive a hard ceiling on
 /// raw lease deliveries (started or not). Prevents pre-heartbeat crash
 /// loops from looping forever while keeping `max_attempts` as a clean
@@ -199,6 +205,40 @@ impl SqliteJobStore {
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+        })
+    }
+
+    /// Test-only single-row inspection helper used by fixtures that
+    /// need to peek at columns not exposed by the `JobStore` trait
+    /// (e.g. `failure_class`, `dead_letter_at_ms`, `completed_at_ms`).
+    /// Runs `sql` and returns the row as a `(state, opt-text,
+    /// opt-int)` triple — shape chosen to match the dead-letter
+    /// fixture in `tests/dead_letter_fixture.rs`.
+    ///
+    /// Not part of the public `JobStore` contract; not intended for
+    /// production code paths. Production callers should add a
+    /// dedicated read method that returns a typed row.
+    ///
+    /// # Errors
+    ///
+    /// Surfaces `rusqlite::Error` for any backend failure (lock
+    /// poisoning is recovered via `Mutex::into_inner` on the poisoned
+    /// guard, matching the production paths in this module).
+    #[doc(hidden)]
+    pub fn raw_inspect(
+        &self,
+        sql: &str,
+    ) -> rusqlite::Result<(String, Option<String>, Option<i64>)> {
+        let guard = match self.conn.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        guard.query_row(sql, [], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, Option<i64>>(2)?,
+            ))
         })
     }
 }
@@ -898,13 +938,13 @@ impl JobStore for SqliteJobStore {
         job_id: &JobId,
         lease: &LeaseToken,
         disposition: FailDisposition,
-        _class: FailureClass,
+        class: FailureClass,
         last_error: &str,
         now_ms: i64,
     ) -> Result<(), JobStoreError> {
-        // Phase 1 accepts `class` for the new contract but does not yet
-        // persist it; migration 0062 + Phase 2 wires the column. The
-        // helper signature mirrors the trait for forward compatibility.
+        // `failure_class` is written on every fail() (retry and
+        // terminal); `dead_letter_at_ms` is written only on the
+        // terminal branch (spec §4.5). See `cas_fail`.
         let conn = Arc::clone(&self.conn);
         let job_id = job_id.clone();
         let lease = lease.clone();
@@ -919,7 +959,7 @@ impl JobStore for SqliteJobStore {
                 &job_id,
                 &lease,
                 disposition,
-                _class,
+                class,
                 &last_error,
                 now_ms,
             )
@@ -962,7 +1002,18 @@ impl JobStore for SqliteJobStore {
 
 // ---- pure SQL helpers (sync, exercised both directly in tests and via the trait) ----
 
-type LeaseRow = (String, String, Vec<u8>, i64, i64, i64, i64, i64);
+// (job_id, kind, payload, attempts, max_attempts, base, mult, cap, failure_class)
+type LeaseRow = (
+    String,
+    String,
+    Vec<u8>,
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+    Option<String>,
+);
 // (attempts, max_attempts, base, mult, cap, lease_started)
 type FailRow = (i64, i64, i64, i64, i64, i64);
 // (job_id, attempts, delivery_count, max_attempts, base, mult, cap, lease_started)
@@ -1059,7 +1110,8 @@ fn atomic_lease(
     let candidate: Option<LeaseRow> = tx
         .query_row(
             "SELECT job_id, kind, payload, attempts, max_attempts, \
-                    base_backoff_ms, backoff_multiplier, max_backoff_ms \
+                    base_backoff_ms, backoff_multiplier, max_backoff_ms, \
+                    failure_class \
                FROM workflow_jobs AS j \
               WHERE state = 'queued' AND next_run_at <= ? \
                 AND (queue_key IS NULL OR ( \
@@ -1087,13 +1139,16 @@ fn atomic_lease(
                     r.get::<_, i64>(5)?,
                     r.get::<_, i64>(6)?,
                     r.get::<_, i64>(7)?,
+                    r.get::<_, Option<String>>(8)?,
                 ))
             },
         )
         .optional()
         .map_err(|e| JobStoreError::Backend(e.to_string()))?;
 
-    let Some((job_id, kind, payload, attempts, max_attempts, base, mult, cap)) = candidate else {
+    let Some((job_id, kind, payload, attempts, max_attempts, base, mult, cap, failure_class_raw)) =
+        candidate
+    else {
         return Ok(None);
     };
 
@@ -1135,6 +1190,22 @@ fn atomic_lease(
     let new_attempts = u32::try_from(attempts.saturating_add(1)).unwrap_or(u32::MAX);
     let retry = retry_from_row(max_attempts, base, mult, cap);
 
+    // Parse the persisted `failure_class` snake-case string back into
+    // the typed enum. An unknown value is logged at `warn` and
+    // surfaced as `None` so a future-version row with a class this
+    // binary doesn't recognize doesn't fail the lease — the lint
+    // hot-path keeps working from the raw column.
+    let failure_class = failure_class_raw.and_then(|raw| match raw.parse::<FailureClass>() {
+        Ok(c) => Some(c),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "failure_class column held unknown variant; surfacing as None"
+            );
+            None
+        }
+    });
+
     Ok(Some(LeasedJob {
         job_id: JobId::new(job_id),
         kind: JobKind::new(kind),
@@ -1146,9 +1217,7 @@ fn atomic_lease(
             nonce,
             expires_at_ms: new_expires,
         },
-        // Phase 2 persists `failure_class` on `fail()`; for now we
-        // read it as `None` since the column does not yet exist.
-        failure_class: None,
+        failure_class,
     }))
 }
 
@@ -1242,17 +1311,28 @@ fn cas_complete(
 ) -> Result<(), JobStoreError> {
     // `complete` implies the worker started executing — bump attempts
     // if no heartbeat already did so, then transition to terminal Done.
+    // Also stamp `completed_at_ms` so the lint last-success lookup can
+    // resolve per-kind completion times without scanning all rows
+    // (spec §4.9).
     let updated = conn
         .execute(
             "UPDATE workflow_jobs \
                 SET state = 'done', lease_owner = NULL, lease_nonce = NULL, \
                     lease_started = NULL, lease_expires_at = NULL, \
                     attempts = CASE WHEN lease_started = 0 THEN attempts + 1 ELSE attempts END, \
+                    completed_at_ms = ?, \
                     updated_at = ? \
               WHERE job_id = ? AND state = 'leased' \
                 AND lease_owner = ? AND lease_nonce = ? \
                 AND lease_expires_at > ?",
-            params![now_ms, job_id.as_str(), lease.owner, lease.nonce, now_ms],
+            params![
+                now_ms,
+                now_ms,
+                job_id.as_str(),
+                lease.owner,
+                lease.nonce,
+                now_ms
+            ],
         )
         .map_err(|e| JobStoreError::Backend(e.to_string()))?;
     if updated == 0 {
@@ -1268,7 +1348,7 @@ fn cas_fail(
     job_id: &JobId,
     lease: &LeaseToken,
     disposition: FailDisposition,
-    _class: FailureClass,
+    class: FailureClass,
     last_error: &str,
     now_ms: i64,
 ) -> Result<(), JobStoreError> {
@@ -1320,50 +1400,13 @@ fn cas_fail(
     let terminal = matches!(disposition, FailDisposition::Permanent) || exhausted;
 
     let res = if terminal {
-        tx.execute(
-            "UPDATE workflow_jobs \
-                SET state = 'failed', lease_owner = NULL, lease_nonce = NULL, \
-                    lease_started = NULL, lease_expires_at = NULL, \
-                    attempts = CASE WHEN lease_started = 0 THEN attempts + 1 ELSE attempts END, \
-                    last_error = ?, updated_at = ? \
-              WHERE job_id = ? AND state = 'leased' \
-                AND lease_owner = ? AND lease_nonce = ? \
-                AND lease_expires_at > ?",
-            params![
-                last_error,
-                now_ms,
-                job_id.as_str(),
-                lease.owner,
-                lease.nonce,
-                now_ms,
-            ],
-        )
+        exec_fail_terminal(&tx, job_id, lease, class, last_error, now_ms)
     } else {
-        // Use the per-row retry policy, not RetryPolicy::DEFAULT, so a
-        // caller's custom backoff actually applies after restart.
         let policy = retry_from_row(max_attempts, base, mult, cap);
         let attempt_for_delay = u32::try_from(effective_attempts).unwrap_or(u32::MAX);
         let delay = u64::from(policy.delay_for_attempt(attempt_for_delay));
         let next_run = now_ms.saturating_add(i64::try_from(delay).unwrap_or(i64::MAX));
-        tx.execute(
-            "UPDATE workflow_jobs \
-                SET state = 'queued', lease_owner = NULL, lease_nonce = NULL, \
-                    lease_started = NULL, lease_expires_at = NULL, \
-                    attempts = CASE WHEN lease_started = 0 THEN attempts + 1 ELSE attempts END, \
-                    last_error = ?, next_run_at = ?, updated_at = ? \
-              WHERE job_id = ? AND state = 'leased' \
-                AND lease_owner = ? AND lease_nonce = ? \
-                AND lease_expires_at > ?",
-            params![
-                last_error,
-                next_run,
-                now_ms,
-                job_id.as_str(),
-                lease.owner,
-                lease.nonce,
-                now_ms,
-            ],
-        )
+        exec_fail_retry(&tx, job_id, lease, class, last_error, next_run, now_ms)
     };
     let updated = res.map_err(|e| JobStoreError::Backend(e.to_string()))?;
     if updated == 0 {
@@ -1378,17 +1421,100 @@ fn cas_fail(
     Ok(())
 }
 
-/// Open a fully-migrated in-memory `SqliteJobStore` for tests.
-/// Runs all `cairn-store-sqlite` migrations (which provision
-/// `schema_migrations` + `workflow_jobs`) then wraps the connection in
-/// a `SqliteJobStore`. Exposed `pub(crate)` so worker/reaper tests share
-/// one bootstrap.
-#[cfg(test)]
-pub(crate) fn install_for_tests(conn: &rusqlite::Connection) {
-    // `schema_migrations` is created by migration 0001, so we need the
-    // full migration runner. Build a minimal schema_migrations table +
-    // apply the workflow_jobs SQL directly so we don't depend on all
-    // prior migrations in this unit test context.
+/// Terminal branch of `cas_fail` — flips state to `'failed'` and
+/// records both the failure class and the dead-letter timestamp so
+/// the lint hot-path index can enumerate dead-letter rows without
+/// scanning all of `workflow_jobs` (spec §4.5).
+fn exec_fail_terminal(
+    tx: &rusqlite::Transaction<'_>,
+    job_id: &JobId,
+    lease: &LeaseToken,
+    class: FailureClass,
+    last_error: &str,
+    now_ms: i64,
+) -> rusqlite::Result<usize> {
+    tx.execute(
+        "UPDATE workflow_jobs \
+            SET state = 'failed', lease_owner = NULL, lease_nonce = NULL, \
+                lease_started = NULL, lease_expires_at = NULL, \
+                attempts = CASE WHEN lease_started = 0 THEN attempts + 1 ELSE attempts END, \
+                last_error = ?, \
+                failure_class = ?, \
+                dead_letter_at_ms = ?, \
+                updated_at = ? \
+          WHERE job_id = ? AND state = 'leased' \
+            AND lease_owner = ? AND lease_nonce = ? \
+            AND lease_expires_at > ?",
+        params![
+            last_error,
+            class.as_str(),
+            now_ms,
+            now_ms,
+            job_id.as_str(),
+            lease.owner,
+            lease.nonce,
+            now_ms,
+        ],
+    )
+}
+
+/// Retry branch of `cas_fail` — flips state back to `'queued'` and
+/// records the most recent failure class so observers can read it
+/// through the next lease return, but leaves `dead_letter_at_ms`
+/// NULL (the row is not dead-lettered).
+fn exec_fail_retry(
+    tx: &rusqlite::Transaction<'_>,
+    job_id: &JobId,
+    lease: &LeaseToken,
+    class: FailureClass,
+    last_error: &str,
+    next_run_at_ms: i64,
+    now_ms: i64,
+) -> rusqlite::Result<usize> {
+    tx.execute(
+        "UPDATE workflow_jobs \
+            SET state = 'queued', lease_owner = NULL, lease_nonce = NULL, \
+                lease_started = NULL, lease_expires_at = NULL, \
+                attempts = CASE WHEN lease_started = 0 THEN attempts + 1 ELSE attempts END, \
+                last_error = ?, \
+                failure_class = ?, \
+                next_run_at = ?, updated_at = ? \
+          WHERE job_id = ? AND state = 'leased' \
+            AND lease_owner = ? AND lease_nonce = ? \
+            AND lease_expires_at > ?",
+        params![
+            last_error,
+            class.as_str(),
+            next_run_at_ms,
+            now_ms,
+            job_id.as_str(),
+            lease.owner,
+            lease.nonce,
+            now_ms,
+        ],
+    )
+}
+
+/// Apply the workflow-jobs migrations (0020 + 0062) to an in-memory
+/// `SQLite` connection, then provision `schema_migrations` so
+/// [`SqliteJobStore::new`] can pass its drift probes.
+///
+/// Test-only bootstrap shared by the in-crate scheduler/reaper tests
+/// and the integration fixtures under `tests/`. Applies the two
+/// migrations directly to avoid pulling in 0022 (which requires the
+/// `vec0` extension and isn't needed for the workflow_jobs schema).
+///
+/// # Panics
+///
+/// Panics if any `execute_batch` fails — this is a test-only helper
+/// so a panic surfaces the underlying SQL error directly to the test
+/// harness rather than forcing every caller to handle a `Result`.
+#[doc(hidden)]
+#[allow(
+    clippy::expect_used,
+    reason = "test-only bootstrap; panic surfaces SQL errors directly to the test harness"
+)]
+pub fn install_for_tests(conn: &rusqlite::Connection) {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_migrations (\
             migration_id INTEGER NOT NULL PRIMARY KEY, \
@@ -1399,6 +1525,7 @@ pub(crate) fn install_for_tests(conn: &rusqlite::Connection) {
     )
     .expect("create schema_migrations");
     conn.execute_batch(MIGRATION_0020_SQL).expect("apply 0020");
+    conn.execute_batch(MIGRATION_0062_SQL).expect("apply 0062");
 }
 
 /// Maximum number of expired rows reaped under a single write

@@ -380,10 +380,15 @@ mod tests {
             Ok(())
         }
         async fn complete(&self, _: &JobId, _: &LeaseToken, _: i64) -> Result<(), JobStoreError> {
-            match self.completes.lock() {
-                Ok(mut g) => *g = g.saturating_add(1),
-                Err(p) => *p.into_inner() = 0,
-            }
+            // Preserve poisoned-data semantics (matches the `fails`
+            // arm below and the production paths in `sqlite_store.rs`):
+            // the previous version reset the counter to 0 on poison,
+            // which masked test bugs by erasing the running count.
+            let mut g = match self.completes.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            *g = g.saturating_add(1);
             Ok(())
         }
         async fn fail(

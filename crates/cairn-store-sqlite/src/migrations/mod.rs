@@ -131,6 +131,13 @@ const M0062_WORKFLOW_DEAD_LETTER: &str = include_str!("sql/0062_workflow_dead_le
 /// is not in the package archive.
 pub const WORKFLOW_JOBS_MIGRATION_SQL: &str = M0020_WORKFLOW_JOBS;
 
+/// Canonical SQL for migration 0062 (workflow dead-letter + completion
+/// columns). Re-exported alongside `WORKFLOW_JOBS_MIGRATION_SQL` so
+/// `cairn-workflows` test bootstraps can apply the additive schema
+/// without depending on the full migration chain (which pulls in the
+/// `vec0` extension required by 0022).
+pub const WORKFLOW_DEAD_LETTER_MIGRATION_SQL: &str = M0062_WORKFLOW_DEAD_LETTER;
+
 /// Compile-time manifest of `(migration_id, name, source)` used by the
 /// `verify` module to compute and check content hashes.
 pub(crate) const MIGRATION_SOURCES: &[(i64, &str, &str)] = &[
