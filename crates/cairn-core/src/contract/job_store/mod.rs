@@ -14,6 +14,9 @@
 //! milliseconds, newtyped IDs. Backend errors are surfaced through
 //! [`JobStoreError::Backend`].
 
+pub mod failure_class;
+pub use failure_class::FailureClass;
+
 use crate::domain::Rfc3339Timestamp;
 
 /// Stable identifier for a job row. ULID (or any string) chosen by the
