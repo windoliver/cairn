@@ -8,6 +8,10 @@ pub mod admin_model_fetch;
 pub mod admin_reindex;
 pub mod admin_restore;
 pub mod admin_snapshot;
+/// Hidden dev/E2E surface for issue #92 — drives the scheduler against
+/// the live vault DB so an operator can verify dead-letter, crash
+/// recovery, and metrics emission end-to-end.
+pub mod admin_workflow;
 pub mod admin_zero_capture_report;
 pub mod assemble_hot;
 pub mod capture_trace;

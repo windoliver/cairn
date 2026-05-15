@@ -358,6 +358,84 @@ fn admin_subcommand() -> clap::Command {
         .subcommand(admin_reindex_subcommand())
         .subcommand(admin_snapshot_subcommand())
         .subcommand(admin_restore_subcommand())
+        .subcommand(admin_workflow_subcommand())
+}
+
+/// Hidden `cairn admin workflow` tree — issue #92 E2E verification.
+/// Marked `hide(true)` so it stays out of the default --help.
+fn admin_workflow_subcommand() -> clap::Command {
+    clap::Command::new("workflow")
+        .about("Workflow scheduler diagnostics (issue #92 E2E)")
+        .hide(true)
+        .subcommand_required(true)
+        .arg_required_else_help(true)
+        .subcommand(
+            clap::Command::new("run-failing")
+                .about(
+                    "Enqueue a synthetic always-retrying job and run a real scheduler until \
+                     the row dead-letters. Prints the resulting job_id.",
+                )
+                .arg(
+                    clap::Arg::new("kind")
+                        .long("kind")
+                        .value_name("STRING")
+                        .help("Workflow kind discriminator (default: test.e2e.always_retry)"),
+                )
+                .arg(
+                    clap::Arg::new("max-attempts")
+                        .long("max-attempts")
+                        .value_name("U32")
+                        .help("Retry ceiling before terminal failure (default: 2)"),
+                )
+                .arg(
+                    clap::Arg::new("deadline-secs")
+                        .long("deadline-secs")
+                        .value_name("U64")
+                        .help("Polling deadline before reporting a timeout (default: 15)"),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("simulate-crash")
+                .about(
+                    "Enqueue + lease + heartbeat a synthetic job, then exit without releasing \
+                     so the row is left in state='leased' with an expired lease.",
+                )
+                .arg(
+                    clap::Arg::new("kind")
+                        .long("kind")
+                        .value_name("STRING")
+                        .help("Workflow kind discriminator (default: test.e2e.orphan)"),
+                )
+                .arg(
+                    clap::Arg::new("lease-ms")
+                        .long("lease-ms")
+                        .value_name("I64")
+                        .help("Lease duration in ms (default: 100; short so it expires fast)"),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("run-succeeding")
+                .about(
+                    "Enqueue a synthetic always-succeeding job and run a real scheduler \
+                     until the row completes. Prints the resulting job_id.",
+                )
+                .arg(
+                    clap::Arg::new("kind")
+                        .long("kind")
+                        .value_name("STRING")
+                        .help("Workflow kind discriminator (default: test.e2e.always_done)"),
+                )
+                .arg(
+                    clap::Arg::new("deadline-secs")
+                        .long("deadline-secs")
+                        .value_name("U64")
+                        .help("Polling deadline before reporting a timeout (default: 15)"),
+                ),
+        )
+        .subcommand(clap::Command::new("recover").about(
+            "Boot Scheduler with worker_count=0 so the startup reap runs once; \
+                     reports how many leased rows were reclaimed.",
+        ))
 }
 
 fn admin_model_subcommand() -> clap::Command {
