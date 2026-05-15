@@ -26,6 +26,10 @@ struct SnapshotReceipt {
 }
 
 #[derive(Debug)]
+#[allow(
+    dead_code,
+    reason = "backup rewrite plumbing is staged for forget propagation but not yet wired to the CLI"
+)]
 pub(crate) struct RegistryEntryFile {
     pub(crate) path: PathBuf,
     pub(crate) entry: BackupRegistryEntry,
@@ -144,6 +148,10 @@ pub(crate) fn replay_current_forgets(live_vault_root: &Path, restored_root: &Pat
     Ok(())
 }
 
+#[allow(
+    dead_code,
+    reason = "backup rewrite plumbing is staged for forget propagation but not yet wired to the CLI"
+)]
 pub(crate) fn rewrite_registered_backups(
     vault_root: &Path,
     targets: &[TargetId],
@@ -181,6 +189,10 @@ pub(crate) fn rewrite_registered_backups(
     Ok(())
 }
 
+#[allow(
+    dead_code,
+    reason = "backup rewrite plumbing is staged for forget propagation but not yet wired to the CLI"
+)]
 pub(crate) fn load_registry_entries(vault_root: &Path) -> Result<Vec<RegistryEntryFile>> {
     let registry_dir = backup_registry_dir(vault_root);
     if !registry_dir.exists() {
@@ -206,6 +218,10 @@ pub(crate) fn load_registry_entries(vault_root: &Path) -> Result<Vec<RegistryEnt
     Ok(entries)
 }
 
+#[allow(
+    dead_code,
+    reason = "backup rewrite plumbing is staged for forget propagation but not yet wired to the CLI"
+)]
 fn rewrite_registered_backup(
     vault_root: &Path,
     registry_entry: &RegistryEntryFile,
@@ -273,6 +289,10 @@ fn rewrite_registered_backup(
     Ok(())
 }
 
+#[allow(
+    dead_code,
+    reason = "backup rewrite plumbing is staged for forget propagation but not yet wired to the CLI"
+)]
 fn append_shredded_log(vault_root: &Path, entry: &ShreddedBackupEntry) -> Result<()> {
     let log_path = backup_registry_dir(vault_root).join("shredded.log");
     let payload = serde_json::to_string(entry).context("serialize shredded backup entry")?;

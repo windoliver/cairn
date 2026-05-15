@@ -4,7 +4,9 @@
 
 use std::{fs, path::Path, process::Command};
 
-use cairn_core::contract::memory_store::MemoryStore as _;
+use cairn_core::contract::memory_store::{ListArgs, MemoryStore as _};
+use cairn_core::domain::projection::MarkdownProjector;
+use cairn_core::domain::{RecordId, ScopeTuple, TargetId};
 use cairn_store_sqlite::consent::query_source_forgets;
 use cairn_test_fixtures::store::sample_record;
 use sha2::{Digest, Sha256};
@@ -41,6 +43,59 @@ async fn seed_record_for_source(vault: &Path, body: &str) -> (String, String) {
         outcome.record_id.as_str().to_owned(),
         record.target_id.as_str().to_owned(),
     )
+}
+
+async fn seed_session_record(vault: &Path, record_id: &str, target_id: &str, session_id: &str) {
+    let fixture = sample_record();
+    seed_session_record_with_scope(
+        vault,
+        record_id,
+        target_id,
+        ScopeTuple {
+            session_id: Some(session_id.to_owned()),
+            user: fixture.scope.user.clone(),
+            agent: fixture.scope.agent.clone(),
+            ..ScopeTuple::default()
+        },
+    )
+    .await;
+}
+
+async fn seed_session_record_with_scope(
+    vault: &Path,
+    record_id: &str,
+    target_id: &str,
+    scope: ScopeTuple,
+) {
+    let db_path = vault.join(".cairn").join("cairn.db");
+    let store = cairn_store_sqlite::open(&db_path)
+        .await
+        .expect("open store");
+    let mut record = sample_record();
+    record.id = RecordId::parse(record_id).expect("valid record id");
+    record.target_id = TargetId::parse(target_id).expect("valid target id");
+    let session_id = scope
+        .session_id
+        .as_deref()
+        .expect("test scope must include session");
+    record.body = format!("session {session_id} body {record_id}");
+    record.scope = scope;
+    store.upsert(&record).await.expect("upsert session record");
+}
+
+async fn active_projection_path(vault: &Path, record_id: &str) -> std::path::PathBuf {
+    let db_path = vault.join(".cairn").join("cairn.db");
+    let store = cairn_store_sqlite::open(&db_path)
+        .await
+        .expect("open store");
+    let stored = store
+        .list_active_stored(&ListArgs::default())
+        .await
+        .expect("list active stored")
+        .into_iter()
+        .find(|stored| stored.record.id.as_str() == record_id)
+        .expect("seeded record is active");
+    vault.join(MarkdownProjector.project(&stored).path)
 }
 
 async fn seed_record_versions_for_source(
@@ -118,6 +173,220 @@ fn rows_for_target(vault: &Path, target_id: &str) -> i64 {
         |row| row.get(0),
     )
     .expect("count rows")
+}
+
+fn wal_kind_count(vault: &Path, kind: &str) -> i64 {
+    let conn = rusqlite::Connection::open(vault.join(".cairn").join("cairn.db")).expect("open db");
+    conn.query_row(
+        "SELECT COUNT(*) FROM wal_ops WHERE kind = ?1 AND state = 'COMMITTED'",
+        [kind],
+        |row| row.get(0),
+    )
+    .expect("count wal ops")
+}
+
+#[tokio::test]
+async fn forget_session_cli_commits_store_wal_operation() {
+    let vault = tempfile::tempdir().expect("temp vault");
+    bootstrap_vault(vault.path());
+
+    seed_session_record(
+        vault.path(),
+        "01J00000000000000000002001",
+        "01HQZX9F5N0000000000020001",
+        "sess-108-cli",
+    )
+    .await;
+    seed_session_record(
+        vault.path(),
+        "01J00000000000000000002002",
+        "01HQZX9F5N0000000000020002",
+        "sess-108-cli",
+    )
+    .await;
+
+    let out = cli()
+        .current_dir(vault.path())
+        .args(["forget", "--session", "sess-108-cli", "--json"])
+        .output()
+        .expect("cairn forget session");
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "forget session should commit; stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let response = json_stdout(&out);
+    assert_eq!(response["status"], "committed");
+    assert_eq!(response["verb"], "forget");
+    assert_eq!(response["data"]["deleted_count"], 2);
+    assert_eq!(wal_kind_count(vault.path(), "forget_session"), 1);
+}
+
+#[tokio::test]
+async fn forget_session_cli_removes_markdown_projection() {
+    let vault = tempfile::tempdir().expect("temp vault");
+    bootstrap_vault(vault.path());
+
+    let record_id = "01J00000000000000000002011";
+    seed_session_record(
+        vault.path(),
+        record_id,
+        "01HQZX9F5N0000000000020011",
+        "sess-108-projection",
+    )
+    .await;
+
+    let db_path = vault.path().join(".cairn").join("cairn.db");
+    let store = cairn_store_sqlite::open(&db_path)
+        .await
+        .expect("open store");
+    cairn_cli::verbs::lint::fix_markdown_handler(&store, vault.path())
+        .await
+        .expect("write markdown projection");
+
+    let projection_path = active_projection_path(vault.path(), record_id).await;
+    assert!(
+        projection_path.exists(),
+        "test setup should create a markdown projection"
+    );
+
+    let out = cli()
+        .current_dir(vault.path())
+        .args(["forget", "--session", "sess-108-projection", "--json"])
+        .output()
+        .expect("cairn forget session");
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "forget session should commit; stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        !projection_path.exists(),
+        "session forget must remove stale markdown projections"
+    );
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn forget_session_projection_cleanup_failure_leaves_db_unchanged() {
+    let vault = tempfile::tempdir().expect("temp vault");
+    bootstrap_vault(vault.path());
+
+    let record_id = "01J00000000000000000002012";
+    seed_session_record(
+        vault.path(),
+        record_id,
+        "01HQZX9F5N0000000000020012",
+        "sess-108-projection-fail",
+    )
+    .await;
+
+    let projection_path = active_projection_path(vault.path(), record_id).await;
+    fs::create_dir_all(projection_path.parent().expect("projection parent")).expect("mkdir");
+    let outside = vault.path().join("outside-projection.md");
+    fs::write(&outside, "do not follow").expect("write outside target");
+    std::os::unix::fs::symlink(&outside, &projection_path).expect("symlink projection");
+
+    let out = cli()
+        .current_dir(vault.path())
+        .args(["forget", "--session", "sess-108-projection-fail", "--json"])
+        .output()
+        .expect("cairn forget session");
+
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "unsafe projection cleanup should fail before DB purge"
+    );
+    assert!(
+        record_exists(vault.path(), record_id),
+        "DB record must remain when projection cleanup preflight fails"
+    );
+}
+
+#[tokio::test]
+async fn forget_session_cli_reports_missing_session_without_wal_operation() {
+    let vault = tempfile::tempdir().expect("temp vault");
+    bootstrap_vault(vault.path());
+
+    let out = cli()
+        .current_dir(vault.path())
+        .args(["forget", "--session", "sess-108-missing", "--json"])
+        .output()
+        .expect("cairn forget session");
+
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "missing session should fail; stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let response = json_stdout(&out);
+    assert_eq!(response["status"], "aborted");
+    assert_eq!(response["error"]["code"], "NotFound");
+    assert_eq!(wal_kind_count(vault.path(), "forget_session"), 0);
+}
+
+#[tokio::test]
+async fn forget_session_cli_rejects_ambiguous_scope_partitions_without_deleting() {
+    let vault = tempfile::tempdir().expect("temp vault");
+    bootstrap_vault(vault.path());
+
+    seed_session_record_with_scope(
+        vault.path(),
+        "01J00000000000000000002013",
+        "01HQZX9F5N0000000000020013",
+        ScopeTuple {
+            tenant: Some("tenant-a".to_owned()),
+            workspace: Some("workspace-a".to_owned()),
+            session_id: Some("sess-108-ambiguous".to_owned()),
+            user: Some("hmn:tester".to_owned()),
+            agent: Some("agt:test".to_owned()),
+            ..ScopeTuple::default()
+        },
+    )
+    .await;
+    seed_session_record_with_scope(
+        vault.path(),
+        "01J00000000000000000002014",
+        "01HQZX9F5N0000000000020014",
+        ScopeTuple {
+            tenant: Some("tenant-b".to_owned()),
+            workspace: Some("workspace-b".to_owned()),
+            session_id: Some("sess-108-ambiguous".to_owned()),
+            user: Some("hmn:tester".to_owned()),
+            agent: Some("agt:test".to_owned()),
+            ..ScopeTuple::default()
+        },
+    )
+    .await;
+
+    let out = cli()
+        .current_dir(vault.path())
+        .args(["forget", "--session", "sess-108-ambiguous", "--json"])
+        .output()
+        .expect("cairn forget session");
+
+    assert_eq!(
+        out.status.code(),
+        Some(64),
+        "ambiguous session should be a usage error; stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let response = json_stdout(&out);
+    assert_eq!(response["status"], "rejected");
+    assert_eq!(response["error"]["code"], "InvalidArgs");
+    assert!(record_exists(vault.path(), "01J00000000000000000002013"));
+    assert!(record_exists(vault.path(), "01J00000000000000000002014"));
+    assert_eq!(wal_kind_count(vault.path(), "forget_session"), 0);
 }
 
 #[tokio::test]
