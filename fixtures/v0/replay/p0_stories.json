@@ -25,19 +25,34 @@
       "session_id": "p0-session",
       "turn_id": "1",
       "sequence": 2,
-      "trace_event": "assistant_message"
+      "trace_event": "agent_message"
     },
     {
       "id": "01HQZX9F5N00000000000000A2",
       "kind": "trace",
       "class": "episodic",
       "visibility": "private",
-      "body": "cargo check tool result succeeded for memory safety example",
+      "body": "cargo check tool call requested for memory safety example",
       "session_id": "p0-session",
       "turn_id": "1",
       "sequence": 3,
-      "trace_event": "tool_call",
-      "tool_name": "cargo"
+      "trace_event": "pre_tool",
+      "tool_name": "cargo",
+      "tool_call_id": "toolu_cargo_check_01"
+    },
+    {
+      "id": "01HQZX9F5N00000000000000A7",
+      "kind": "trace",
+      "class": "episodic",
+      "visibility": "private",
+      "body": "cargo check tool result succeeded for memory safety example",
+      "session_id": "p0-session",
+      "turn_id": "1",
+      "sequence": 4,
+      "trace_event": "tool_output",
+      "tool_name": "cargo",
+      "tool_call_id": "toolu_cargo_check_01",
+      "parent_event_id": "01HQZX9F5N00000000000000A2"
     },
     {
       "id": "01HQZX9F5N00000000000000A3",
@@ -54,7 +69,7 @@
       "body": "rolling summary p0 session covers rust memory safety and cargo check success",
       "session_id": "p0-session",
       "turn_id": "summary",
-      "sequence": 4,
+      "sequence": 5,
       "trace_event": "turn_summary"
     },
     {
@@ -78,14 +93,14 @@
       "story": "US1_US2",
       "session_id": "p0-session",
       "expected_turn_ids": ["1"],
-      "expected_trace_events": ["user_message", "assistant_message", "tool_call", "turn_summary"]
+      "expected_trace_events": ["user_message", "agent_message", "pre_tool", "tool_output", "turn_summary"]
     },
     {
       "verb": "retrieve_turn",
       "story": "US5",
       "session_id": "p0-session",
       "turn_id": "1",
-      "expected_trace_events": ["user_message", "assistant_message", "tool_call"]
+      "expected_trace_events": ["user_message", "agent_message", "pre_tool", "tool_output"]
     },
     {
       "verb": "record_present",

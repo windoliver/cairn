@@ -1,6 +1,9 @@
 //! Integration coverage for the dev-only replay harness.
 
-use cairn_test_fixtures::replay::{ReplayExpectation, load_named_scenario, run_named_scenario};
+use cairn_test_fixtures::replay::{
+    ReplayAction, ReplayExpectation, ReplaySearchAction, ReplaySearchMode, load_named_scenario,
+    run_named_scenario,
+};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn p0_stories_replay_passes_end_to_end() {
@@ -71,6 +74,43 @@ async fn failure_report_identifies_scenario_verb_query_expected_and_actual() {
         })
     );
     assert_ne!(failure.expected, failure.actual);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn search_replay_hides_reasoning_by_default() {
+    let mut scenario = load_named_scenario("p0_stories").expect("load scenario");
+    scenario
+        .actions
+        .push(ReplayAction::Search(ReplaySearchAction {
+            story: "US7_REASONING_PRIVACY".to_owned(),
+            mode: ReplaySearchMode::Keyword,
+            query: "rolling summary p0 session covers".to_owned(),
+            limit: 5,
+            expected: ReplayExpectation::Hits { record_ids: vec![] },
+        }));
+
+    let report = cairn_test_fixtures::replay::run_scenario(&scenario)
+        .await
+        .expect("run scenario");
+    let check = report
+        .checks
+        .iter()
+        .find(|check| check.story == "US7_REASONING_PRIVACY")
+        .expect("privacy check");
+    assert!(check.passed, "{check:#?}");
+}
+
+#[test]
+fn p0_replay_manifest_uses_canonical_trace_event_names() {
+    let scenario = load_named_scenario("p0_stories").expect("load scenario");
+    for record in &scenario.records {
+        if let Some(event) = &record.trace_event {
+            serde_json::from_value::<cairn_core::domain::trace::TraceEvent>(
+                serde_json::Value::String(event.clone()),
+            )
+            .unwrap_or_else(|e| panic!("record {} trace_event {event:?}: {e}", record.id));
+        }
+    }
 }
 
 #[test]

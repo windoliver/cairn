@@ -14,7 +14,10 @@ use cairn_core::config::{CairnConfig, EmbeddingModelKind};
 use cairn_core::contract::memory_store::{ListArgs, MemoryStore, TombstoneReason};
 use cairn_core::domain::record::MemoryRecord;
 use cairn_core::domain::taxonomy::{MemoryClass, MemoryKind, MemoryVisibility};
+use cairn_core::domain::trace::TraceEvent;
 use cairn_core::domain::{RecordId, Rfc3339Timestamp, ScopeTuple, TargetId};
+use cairn_core::generated::envelope::RetrieveData;
+use cairn_core::verbs::retrieve;
 use cairn_core::verbs::search::{self, SearchError, SearchMode, SearchRequest};
 use cairn_embeddings_local::{EmbeddingModel, MockEmbedder};
 use cairn_store_sqlite::SqliteMemoryStore;
@@ -135,6 +138,12 @@ pub struct ReplayRecord {
     /// Optional tool name for tool-call records.
     #[serde(default)]
     pub tool_name: Option<String>,
+    /// Optional tool-call id for tool lifecycle records.
+    #[serde(default)]
+    pub tool_call_id: Option<String>,
+    /// Optional parent capture event id for post-tool/tool-output records.
+    #[serde(default)]
+    pub parent_event_id: Option<String>,
 }
 
 /// Ordered replay action.
@@ -401,6 +410,15 @@ fn seed_record(seed: &ReplayRecord, index: usize) -> Result<MemoryRecord, Replay
     record.visibility = seed.visibility;
     seed.body.clone_into(&mut record.body);
     record.updated_at = timestamp_for(index)?;
+    record.scope.session_id.clone_from(&seed.session_id);
+    if let Some(event) = &seed.trace_event {
+        serde_json::from_value::<TraceEvent>(Value::String(event.clone())).map_err(|e| {
+            ReplayError::InvalidManifest(format!(
+                "record {} has invalid trace_event {event:?}: {e}",
+                seed.id
+            ))
+        })?;
+    }
     record.extra_frontmatter = trace_frontmatter(seed);
     Ok(record)
 }
@@ -430,6 +448,18 @@ fn trace_frontmatter(seed: &ReplayRecord) -> BTreeMap<String, Value> {
         }
         if let Some(tool_name) = &seed.tool_name {
             trace.insert("tool_name".to_owned(), Value::String(tool_name.clone()));
+        }
+        if let Some(tool_call_id) = &seed.tool_call_id {
+            trace.insert(
+                "tool_call_id".to_owned(),
+                Value::String(tool_call_id.clone()),
+            );
+        }
+        if let Some(parent_event_id) = &seed.parent_event_id {
+            trace.insert(
+                "parent_event_id".to_owned(),
+                Value::String(parent_event_id.clone()),
+            );
         }
         trace.insert(
             "capture_event_id".to_owned(),
@@ -560,7 +590,7 @@ async fn run_search(
             query: action.query.clone(),
             mode: action.mode.to_core(),
             limit: action.limit,
-            include_reasoning: true,
+            include_reasoning: false,
             visibility_allowlist: vec![],
             auth_scope: ScopeTuple::default(),
             model_label: config.search.embedding_model.as_str().to_owned(),
@@ -614,26 +644,49 @@ async fn trace_summary(
     let page = store
         .list(&ListArgs {
             limit: 1000,
+            scope: session_id.map(|session_id| ScopeTuple {
+                session_id: Some(session_id.to_owned()),
+                ..ScopeTuple::default()
+            }),
             ..ListArgs::default()
         })
         .await
         .map_err(|e| ReplayError::Store(format!("list trace records: {e}")))?;
-    let mut rows: Vec<(u64, String, String)> = page
+    let mut rows: Vec<(u64, MemoryRecord)> = page
         .records
-        .iter()
-        .filter_map(|record| trace_projection(record, session_id, turn_id))
+        .into_iter()
+        .filter_map(|record| {
+            trace_projection(&record, session_id, turn_id)
+                .map(|(sequence, _, _)| (sequence, record))
+        })
         .collect();
-    rows.sort_by_key(|(sequence, _, _)| *sequence);
-    let turn_ids: BTreeSet<String> = rows
-        .iter()
-        .filter(|(_, _, event)| event != "turn_summary")
-        .map(|(_, turn, _)| turn.clone())
-        .collect();
-    let trace_events: Vec<String> = rows.into_iter().map(|(_, _, event)| event).collect();
-    Ok(json!({
-        "turn_ids": turn_ids.into_iter().collect::<Vec<_>>(),
-        "trace_events": trace_events,
-    }))
+    rows.sort_by_key(|(sequence, _)| *sequence);
+    let records = rows
+        .into_iter()
+        .map(|(_, record)| record)
+        .collect::<Vec<_>>();
+
+    match (session_id, turn_id) {
+        (Some(session_id), Some(turn_id)) => Ok(summary_from_retrieve_data(
+            retrieve::turn_data_with_options(
+                session_id.to_owned(),
+                turn_id.to_owned(),
+                &records,
+                false,
+                false,
+            ),
+        )),
+        (Some(session_id), None) => Ok(summary_from_retrieve_data(
+            retrieve::session_data_with_options(
+                session_id.to_owned(),
+                &records,
+                None,
+                false,
+                false,
+            ),
+        )),
+        (None, _) => Ok(summary_from_records(&records)),
+    }
 }
 
 fn trace_projection(
@@ -642,8 +695,12 @@ fn trace_projection(
     turn_filter: Option<&str>,
 ) -> Option<(u64, String, String)> {
     let trace = record.extra_frontmatter.get("trace")?.as_object()?;
-    let session_id = trace.get("session_id")?.as_str()?;
-    if session_filter.is_some_and(|wanted| wanted != session_id) {
+    let scope_session_id = record.scope.session_id.as_deref()?;
+    let trace_session_id = trace.get("session_id")?.as_str()?;
+    if trace_session_id != scope_session_id {
+        return None;
+    }
+    if session_filter.is_some_and(|wanted| wanted != scope_session_id) {
         return None;
     }
     let turn_id = trace.get("turn_id")?.as_str()?;
@@ -656,6 +713,58 @@ fn trace_projection(
         .get("trace_event")
         .and_then(Value::as_str)?;
     Some((sequence, turn_id.to_owned(), event.to_owned()))
+}
+
+fn summary_from_retrieve_data(data: RetrieveData) -> Value {
+    match data {
+        RetrieveData::Session(session) => summary_from_turn_items(session.items),
+        RetrieveData::Turn(turn) => summary_from_turn_items(turn.turn),
+        _ => json!({
+            "status": "error",
+            "message": "unexpected retrieve data shape",
+        }),
+    }
+}
+
+fn summary_from_turn_items(
+    items: impl IntoIterator<Item = cairn_core::generated::verbs::retrieve::TurnItem>,
+) -> Value {
+    let mut turn_ids = BTreeSet::new();
+    let mut trace_events = Vec::new();
+    for item in items {
+        let Some(linkage) = item.linkage else {
+            continue;
+        };
+        let Some(event) = linkage.trace_event else {
+            continue;
+        };
+        if event != "turn_summary" {
+            turn_ids.insert(item.turn_id);
+        }
+        trace_events.push(event);
+    }
+    json!({
+        "turn_ids": turn_ids.into_iter().collect::<Vec<_>>(),
+        "trace_events": trace_events,
+    })
+}
+
+fn summary_from_records(records: &[MemoryRecord]) -> Value {
+    let mut rows = records
+        .iter()
+        .filter_map(|record| trace_projection(record, None, None))
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|(sequence, _, _)| *sequence);
+    let turn_ids: BTreeSet<String> = rows
+        .iter()
+        .filter(|(_, _, event)| event != "turn_summary")
+        .map(|(_, turn, _)| turn.clone())
+        .collect();
+    let trace_events: Vec<String> = rows.into_iter().map(|(_, _, event)| event).collect();
+    json!({
+        "turn_ids": turn_ids.into_iter().collect::<Vec<_>>(),
+        "trace_events": trace_events,
+    })
 }
 
 async fn record_present(store: &SqliteMemoryStore, record_id: &str) -> Result<Value, ReplayError> {
@@ -730,4 +839,42 @@ fn error_value(error: &ReplayError) -> Value {
         "status": "error",
         "message": error.to_string(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn trace_seed() -> ReplayRecord {
+        ReplayRecord {
+            id: "01HQZX9F5N00000000000000C0".to_owned(),
+            target_id: None,
+            kind: MemoryKind::Trace,
+            class: MemoryClass::Episodic,
+            visibility: MemoryVisibility::Private,
+            body: "trace body".to_owned(),
+            session_id: Some("session-a".to_owned()),
+            turn_id: Some("turn-a".to_owned()),
+            sequence: Some(1),
+            trace_event: Some("user_message".to_owned()),
+            tool_name: None,
+            tool_call_id: None,
+            parent_event_id: None,
+        }
+    }
+
+    #[test]
+    fn seed_record_sets_scope_session_id_for_trace_records() {
+        let record = seed_record(&trace_seed(), 0).expect("seed record");
+
+        assert_eq!(record.scope.session_id.as_deref(), Some("session-a"));
+    }
+
+    #[test]
+    fn trace_projection_rejects_trace_session_without_record_scope() {
+        let mut record = crate::sample_record(1);
+        record.extra_frontmatter = trace_frontmatter(&trace_seed());
+
+        assert_eq!(trace_projection(&record, Some("session-a"), None), None);
+    }
 }
