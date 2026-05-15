@@ -211,9 +211,8 @@ pub async fn serve_stdio_with_store_consolidation_ready(
 }
 
 /// Per-workflow runtime-readiness flags. Passed by `cairn mcp serve`
-/// after [`crate::scheduler::Scheduler::start`](
-/// cairn_workflows::Scheduler::start) registers each handler. Each
-/// flag flips its matching capability advertisement in
+/// after `cairn_workflows::Scheduler::start` registers each handler.
+/// Each flag flips its matching capability advertisement in
 /// `status.capabilities` and the MCP `initialize` response.
 // One bool per workflow; a bitflags type would obscure the named gate.
 #[allow(clippy::struct_excessive_bools)]

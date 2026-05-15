@@ -1,8 +1,9 @@
 //! Pure per-record expiration decision (issue #91, brief §10.0).
 //!
-//! The handler converts each record's [`Rfc3339Timestamp`] to a millisecond
-//! integer once and threads `now_ms` through; this function is then a
-//! straight table-lookup with no I/O.
+//! The handler converts each record's
+//! [`crate::domain::Rfc3339Timestamp`] to a millisecond integer once
+//! and threads `now_ms` through; this function is then a straight
+//! table-lookup with no I/O.
 
 use crate::config::ExpirationConfig;
 use crate::domain::flush_plan::ExpirationReason;

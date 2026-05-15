@@ -20,7 +20,7 @@ use cairn_core::domain::record::MemoryRecord;
 const CHECK_PAGINATION_CAP: usize = 100_000;
 const CHECK_PAGE_SIZE: usize = 1_000;
 
-/// Result of [`collect_all_records`]. The boolean marks whether the
+/// Result of `collect_all_records`. The boolean marks whether the
 /// pagination cap was hit *before* the cursor naturally exhausted —
 /// callers convert that into [`CheckOutcome::Failed`] rather than a
 /// scheduler retry (round-3 adversarial review #3).
