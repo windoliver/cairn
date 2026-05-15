@@ -129,3 +129,63 @@ fn status_json_reports_sensor_consent_state() {
     assert_eq!(recording["consent"], "enabled");
     assert_eq!(recording["gate"], "allowed");
 }
+
+#[test]
+fn sensor_status_rejects_unbound_explicit_vault() {
+    let vault = tempfile::tempdir().expect("tempdir");
+
+    let out = cli()
+        .args(["--vault"])
+        .arg(vault.path())
+        .args(["sensor", "status", "--json"])
+        .output()
+        .expect("cairn sensor status");
+
+    assert_eq!(
+        out.status.code(),
+        Some(78),
+        "status should reject unbound vault; stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("no Cairn vault"),
+        "stderr should explain missing vault binding: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn sensor_enable_rejects_unbound_explicit_vault_without_creating_state() {
+    let vault = tempfile::tempdir().expect("tempdir");
+
+    let out = cli()
+        .args(["--vault"])
+        .arg(vault.path())
+        .args([
+            "sensor",
+            "enable",
+            "terminal",
+            "--reason",
+            "operator_on",
+            "--json",
+        ])
+        .output()
+        .expect("cairn sensor enable");
+
+    assert_eq!(
+        out.status.code(),
+        Some(78),
+        "enable should reject unbound vault; stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("no Cairn vault"),
+        "stderr should explain missing vault binding: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!vault.path().join(".cairn/config.yaml").exists());
+    assert!(!vault.path().join(".cairn/cairn.db").exists());
+    assert!(!vault.path().join(".cairn/consent.log").exists());
+}
