@@ -43,12 +43,12 @@ pub use open::{
 #[cfg(any(test, feature = "test-helpers"))]
 pub use open::{open_in_memory_sync, open_sync};
 pub use store::SqliteMemoryStore;
-pub use workflow_jobs_reader::SqliteWorkflowJobsReader;
 pub use store::reindex::{DrainStats, drain_once};
 pub use store::reindex_from_db::{RebuildStats, rebuild_from_db};
 pub use store::sessions::{NewSessionMetadata, ResolveOutcome};
 pub use store::tx::StoreTx;
 pub use wal::{RecoveryConfig, RecoveryReport, recover_pending};
+pub use workflow_jobs_reader::SqliteWorkflowJobsReader;
 
 use cairn_core::contract::memory_store::CONTRACT_VERSION;
 use cairn_core::contract::version::{ContractVersion, VersionRange};

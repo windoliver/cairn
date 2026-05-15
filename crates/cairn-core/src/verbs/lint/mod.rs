@@ -303,23 +303,20 @@ impl crate::contract::workflow_jobs::WorkflowJobsReader for MockWorkflowJobsRead
     fn last_success_ms(&self, kind: &crate::contract::job_store::JobKind) -> Option<i64> {
         self.last_success.get(kind.as_str()).copied()
     }
-    fn dead_letter_rows(
-        &self,
-        limit: usize,
-    ) -> Vec<crate::contract::workflow_jobs::DeadLetterRow> {
+    fn dead_letter_rows(&self, limit: usize) -> Vec<crate::contract::workflow_jobs::DeadLetterRow> {
         self.dead_letter.iter().take(limit).cloned().collect()
     }
 }
 
-/// Construct a `LintInputs` populated only with the workflow_jobs reader
+/// Construct a `LintInputs` populated only with the `workflow_jobs` reader
 /// and a synthetic `now_ms`. Used by `workflow_health` unit tests so each
 /// case stays one line and the rest of the input slots stay on the
 /// process-wide empty sentinels.
 #[cfg(test)]
-pub(crate) fn empty_lint_inputs_with_reader<'a>(
-    reader: &'a dyn crate::contract::workflow_jobs::WorkflowJobsReader,
+pub(crate) fn empty_lint_inputs_with_reader(
+    reader: &dyn crate::contract::workflow_jobs::WorkflowJobsReader,
     now_ms: i64,
-) -> LintInputs<'a> {
+) -> LintInputs<'_> {
     use std::sync::OnceLock;
     static CFG: OnceLock<CairnConfig> = OnceLock::new();
     let cfg = CFG.get_or_init(CairnConfig::default);

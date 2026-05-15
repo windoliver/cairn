@@ -129,7 +129,10 @@ mod tests {
         assert!(matches!(findings[0].kind, Kind::WorkflowDeadLetter));
         // Acceptance: target.operation_id carries the job_id for actionability.
         let target = findings[0].target.as_ref().expect("dead-letter target set");
-        assert_eq!(target.operation_id.as_ref().map(|u| u.0.as_str()), Some("j-dead"));
+        assert_eq!(
+            target.operation_id.as_ref().map(|u| u.0.as_str()),
+            Some("j-dead")
+        );
         // Acceptance: message includes the job_id and failure_class string.
         assert!(findings[0].message.contains("j-dead"));
         assert!(findings[0].message.contains("validation"));
@@ -140,7 +143,11 @@ mod tests {
         let reader = MockWorkflowJobsReader::default().with_oldest_queued_age(11 * 60_000);
         let inputs = empty_lint_inputs_with_reader(&reader, 1_000_000);
         let findings = super::run(&inputs);
-        assert!(findings.iter().any(|f| matches!(f.kind, Kind::WorkflowStuck)));
+        assert!(
+            findings
+                .iter()
+                .any(|f| matches!(f.kind, Kind::WorkflowStuck))
+        );
     }
 
     #[test]
@@ -148,7 +155,11 @@ mod tests {
         let reader = MockWorkflowJobsReader::default().with_oldest_queued_age(9 * 60_000);
         let inputs = empty_lint_inputs_with_reader(&reader, 1_000_000);
         let findings = super::run(&inputs);
-        assert!(!findings.iter().any(|f| matches!(f.kind, Kind::WorkflowStuck)));
+        assert!(
+            !findings
+                .iter()
+                .any(|f| matches!(f.kind, Kind::WorkflowStuck))
+        );
     }
 
     #[test]

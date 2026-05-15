@@ -1,5 +1,6 @@
 ---
 source: crates/cairn-test-fixtures/tests/schema_fixtures.rs
+assertion_line: 96
 expression: "&c"
 ---
 {
@@ -107,7 +108,13 @@ expression: "&c"
     }
   },
   "workflows": {
-    "orchestrator": "local"
+    "orchestrator": "local",
+    "lint": {
+      "max_dead_letter_listed": 10,
+      "stuck_queue_threshold_ms": 600000,
+      "stale_dream_threshold_ms": 86400000,
+      "overdue_threshold_ms": 172800000
+    }
   },
   "pipeline": {
     "extract": {
