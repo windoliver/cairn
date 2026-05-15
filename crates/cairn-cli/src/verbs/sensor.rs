@@ -47,8 +47,7 @@ pub fn run(sub: &ArgMatches, vault_root: &Path, config: CairnConfig) -> ExitCode
         Err(error) => {
             let json = sub
                 .subcommand()
-                .map(|(_, matches)| matches.get_flag("json"))
-                .unwrap_or(false);
+                .is_some_and(|(_, matches)| matches.get_flag("json"));
             if json {
                 emit_json(&serde_json::json!({
                     "error": {

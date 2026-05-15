@@ -20,7 +20,7 @@ pub enum SensorGateStage {
     PreCapture,
     /// Before a body-bearing hook artifact is written.
     PreArtifact,
-    /// Before capture_trace resolves body bytes or dispatches extraction.
+    /// Before `capture_trace` resolves body bytes or dispatches extraction.
     PreExtraction,
 }
 
@@ -234,7 +234,7 @@ pub async fn latest_sensor_consent(
     }
 }
 
-/// Resolve latest consent for a local sensor in a vault-backed SQLite store.
+/// Resolve latest consent for a local sensor in a vault-backed `SQLite` store.
 ///
 /// Missing stores are treated as missing consent rather than creating a new
 /// database from a read/gate path.
@@ -256,7 +256,6 @@ pub async fn latest_sensor_consent_for_vault(
 }
 
 /// Evaluate config, consent, and source-side budget for one sensor capture.
-#[must_use]
 pub fn evaluate_sensor_gate(
     config: &CairnConfig,
     consent: SensorConsentState,

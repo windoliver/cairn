@@ -367,9 +367,8 @@ fn enforce_hook_sensor_gate(
             "repair the consent journal and retry the same hook command",
         ))
     })?;
-    let bytes = serde_json::to_vec(payload)
-        .map(|body| u64::try_from(body.len()).unwrap_or(u64::MAX))
-        .unwrap_or(0);
+    let bytes =
+        serde_json::to_vec(payload).map_or(0, |body| u64::try_from(body.len()).unwrap_or(u64::MAX));
     let observation = BudgetObservation { items: 1, bytes };
     match crate::sensor_gate::evaluate_sensor_gate(
         &config,

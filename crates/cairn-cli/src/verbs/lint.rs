@@ -2067,7 +2067,6 @@ fn push_sensor_drop_finding(data: &mut LintData, finding: Finding) {
     data.summary.total += 1;
     match finding.severity {
         Severity::Error => data.summary.by_severity.error += 1,
-        Severity::Warning => data.summary.by_severity.warning += 1,
         Severity::Info => data.summary.by_severity.info += 1,
         _ => data.summary.by_severity.warning += 1,
     }

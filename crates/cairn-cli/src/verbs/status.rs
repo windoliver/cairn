@@ -126,6 +126,7 @@ pub fn run(json: bool) -> ExitCode {
 /// Without this flag a TOCTOU window would let a real-source vault
 /// silently downgrade to `capabilities: []` + exit 0 (round-8 review #3).
 #[must_use]
+#[allow(clippy::too_many_lines)] // status response assembly keeps probe state and human/JSON parity in one place.
 pub fn run_with_context(
     json: bool,
     vault_root: Option<&Path>,
@@ -511,7 +512,7 @@ fn map_local_sensor_status(
                     .iter()
                     .rev()
                     .find(|drop| drop.sensor == sensor)
-                    .and_then(|drop| status_last_drop_reason(drop.reason)),
+                    .map(|drop| status_last_drop_reason(drop.reason)),
                 retention: status_retention(config, sensor),
                 sensor: status_sensor(sensor),
             }
@@ -638,16 +639,12 @@ fn status_sensor(sensor: LocalSensorName) -> StatusResponseSensorsLocalSensor {
     }
 }
 
-fn status_last_drop_reason(
-    reason: SensorGateReason,
-) -> Option<StatusResponseSensorsLocalLastDropReason> {
+fn status_last_drop_reason(reason: SensorGateReason) -> StatusResponseSensorsLocalLastDropReason {
     match reason {
-        SensorGateReason::Disabled => Some(StatusResponseSensorsLocalLastDropReason::Disabled),
-        SensorGateReason::PrivacyDenied => {
-            Some(StatusResponseSensorsLocalLastDropReason::PrivacyDenied)
-        }
+        SensorGateReason::Disabled => StatusResponseSensorsLocalLastDropReason::Disabled,
+        SensorGateReason::PrivacyDenied => StatusResponseSensorsLocalLastDropReason::PrivacyDenied,
         SensorGateReason::BudgetExceeded => {
-            Some(StatusResponseSensorsLocalLastDropReason::BudgetExceeded)
+            StatusResponseSensorsLocalLastDropReason::BudgetExceeded
         }
     }
 }

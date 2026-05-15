@@ -1551,7 +1551,7 @@ async fn run_async(input: CaptureTraceInput, vault_root: PathBuf, config: CairnC
         entity: Some(CAPTURE_TRACE_ENTITY.to_owned()),
         ..ScopeTuple::default()
     };
-    let consolidation_config = ctx.config.consolidation.clone();
+    let consolidation_config = ctx.config.consolidation;
     let job_store_ref = ctx.job_store.as_deref();
     let result = match input {
         CaptureTraceInput::Jsonl(from) => {
