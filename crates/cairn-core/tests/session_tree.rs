@@ -63,9 +63,9 @@ fn fork_preserves_parent_child_lineage() {
     let grandchild = sid("01JTS6R4J70000000000000002");
     let mut tree = SessionTree::flat(root.clone());
 
-    tree.fork(root.clone(), child.clone(), "turn-4")
+    tree.fork(&root, child.clone(), "turn-4")
         .expect("fork child");
-    tree.clone_session(child.clone(), grandchild.clone())
+    tree.clone_session(&child, grandchild.clone())
         .expect("clone grandchild");
 
     assert_eq!(
@@ -100,11 +100,11 @@ fn subtree_preorder_returns_parent_before_children_in_insertion_order() {
     let grandchild = sid("01JTS6R4J70000000000000003");
     let mut tree = SessionTree::flat(root.clone());
 
-    tree.fork(root.clone(), first.clone(), "turn-4")
+    tree.fork(&root, first.clone(), "turn-4")
         .expect("fork first child");
-    tree.fork(root.clone(), second.clone(), "turn-5")
+    tree.fork(&root, second.clone(), "turn-5")
         .expect("fork second child");
-    tree.tool_spawn(first.clone(), grandchild.clone(), "turn-6", "call-review")
+    tree.tool_spawn(&first, grandchild.clone(), "turn-6", "call-review")
         .expect("tool branch");
 
     assert_eq!(
@@ -123,7 +123,7 @@ fn tool_spawned_branch_preserves_tool_call_metadata() {
     let child = sid("01JTS6R4J70000000000000001");
     let mut tree = SessionTree::flat(root.clone());
 
-    tree.tool_spawn(root.clone(), child.clone(), "turn-4", "call-search")
+    tree.tool_spawn(&root, child.clone(), "turn-4", "call-search")
         .expect("tool spawned branch");
 
     let parent = tree
@@ -147,7 +147,7 @@ fn branch_insertion_rejects_missing_parent_and_duplicate_child() {
     let mut tree = SessionTree::flat(root.clone());
 
     let err = tree
-        .fork(missing.clone(), child.clone(), "turn-4")
+        .fork(&missing, child.clone(), "turn-4")
         .expect_err("missing parent rejected");
     assert_eq!(
         err,
@@ -156,10 +156,10 @@ fn branch_insertion_rejects_missing_parent_and_duplicate_child() {
         }
     );
 
-    tree.fork(root.clone(), child.clone(), "turn-4")
+    tree.fork(&root, child.clone(), "turn-4")
         .expect("first fork");
     let err = tree
-        .clone_session(root.clone(), child.clone())
+        .clone_session(&root, child.clone())
         .expect_err("duplicate child rejected");
     assert_eq!(
         err,
@@ -185,7 +185,7 @@ fn merges_are_explicit_and_auditable() {
     let branch = sid("01JTS6R4J70000000000000001");
     let summary = rid("01JTS6R4J70000000000000002");
     let mut tree = SessionTree::flat(root.clone());
-    tree.fork(root.clone(), branch.clone(), "turn-4")
+    tree.fork(&root, branch.clone(), "turn-4")
         .expect("fork branch");
 
     let merge = tree
@@ -216,7 +216,7 @@ fn controlled_splice_merge_records_source_turn_range() {
     let root = sid("01JTS6R4J70000000000000000");
     let branch = sid("01JTS6R4J70000000000000001");
     let mut tree = SessionTree::flat(root.clone());
-    tree.fork(root.clone(), branch.clone(), "turn-4")
+    tree.fork(&root, branch.clone(), "turn-4")
         .expect("fork branch");
 
     let merge = tree
@@ -248,7 +248,7 @@ fn controlled_splice_merge_rejects_empty_source_turn_range() {
     let root = sid("01JTS6R4J70000000000000000");
     let branch = sid("01JTS6R4J70000000000000001");
     let mut tree = SessionTree::flat(root.clone());
-    tree.fork(root.clone(), branch.clone(), "turn-4")
+    tree.fork(&root, branch.clone(), "turn-4")
         .expect("fork branch");
 
     let err = tree
@@ -315,7 +315,7 @@ fn validate_accepts_consistent_tree_snapshot() {
     let summary = rid("01JTS6R4J70000000000000002");
     let mut tree = SessionTree::flat(root.clone());
 
-    tree.tool_spawn(root.clone(), branch.clone(), "turn-4", "call-search")
+    tree.tool_spawn(&root, branch.clone(), "turn-4", "call-search")
         .expect("tool branch");
     tree.record_merge(
         branch,

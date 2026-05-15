@@ -215,6 +215,15 @@ impl SessionTree {
     /// Constructors maintain these invariants for in-memory writes; this
     /// method protects deserialized snapshots before callers trust lineage.
     pub fn validate(&self) -> Result<(), SessionTreeError> {
+        self.validate_root()?;
+        self.validate_nodes()?;
+        self.validate_all_lineages()?;
+        self.validate_merges()?;
+
+        Ok(())
+    }
+
+    fn validate_root(&self) -> Result<(), SessionTreeError> {
         let root = self
             .nodes
             .get(&self.root)
@@ -233,7 +242,10 @@ impl SessionTree {
                 message: "root node id must match tree root",
             });
         }
+        Ok(())
+    }
 
+    fn validate_nodes(&self) -> Result<(), SessionTreeError> {
         for (id, node) in &self.nodes {
             if &node.session_id != id {
                 return Err(SessionTreeError::MalformedLink {
@@ -241,83 +253,116 @@ impl SessionTree {
                     message: "node key must match session_id",
                 });
             }
-            let mut seen_children = BTreeSet::new();
-            for child in &node.children {
-                if !seen_children.insert(child.clone()) {
-                    return Err(SessionTreeError::MalformedLink {
-                        session_id: id.clone(),
-                        message: "children must not contain duplicates",
-                    });
-                }
-                let child_node =
-                    self.nodes
-                        .get(child)
-                        .ok_or_else(|| SessionTreeError::UnknownSession {
-                            session_id: child.clone(),
-                        })?;
-                let Some(parent) = &child_node.parent else {
-                    return Err(SessionTreeError::MalformedLink {
-                        session_id: child.clone(),
-                        message: "child must point back to parent",
-                    });
-                };
-                if &parent.session_id != id {
-                    return Err(SessionTreeError::MalformedLink {
-                        session_id: child.clone(),
-                        message: "child parent does not match containing node",
-                    });
-                }
-            }
+            self.validate_child_links(id, node)?;
 
             if id == &self.root {
                 continue;
             }
-            let parent = node
-                .parent
-                .as_ref()
-                .ok_or_else(|| SessionTreeError::MalformedLink {
-                    session_id: id.clone(),
-                    message: "non-root node must have a parent",
-                })?;
-            self.require_session(&parent.session_id)?;
-            non_empty(parent.at_turn_id.clone(), "at_turn_id")?;
-            match parent.kind {
-                BranchKind::ToolSpawned => {
-                    let tool_call_id =
-                        parent
-                            .tool_call_id
-                            .clone()
-                            .ok_or(SessionTreeError::EmptyField {
-                                field: "tool_call_id",
-                            })?;
-                    non_empty(tool_call_id, "tool_call_id")?;
-                }
-                BranchKind::Fork | BranchKind::Clone => {
-                    if parent.tool_call_id.is_some() {
-                        return Err(SessionTreeError::MalformedLink {
-                            session_id: id.clone(),
-                            message: "tool_call_id is only valid for tool-spawned branches",
-                        });
-                    }
-                }
-            }
-            let parent_node = self.nodes.get(&parent.session_id).ok_or_else(|| {
-                SessionTreeError::UnknownSession {
-                    session_id: parent.session_id.clone(),
-                }
-            })?;
-            if !parent_node.children.iter().any(|child| child == id) {
+            self.validate_parent_link(id, node)?;
+        }
+        Ok(())
+    }
+
+    fn validate_child_links(
+        &self,
+        id: &SessionId,
+        node: &SessionTreeNode,
+    ) -> Result<(), SessionTreeError> {
+        let mut seen_children = BTreeSet::new();
+        for child in &node.children {
+            if !seen_children.insert(child.clone()) {
                 return Err(SessionTreeError::MalformedLink {
                     session_id: id.clone(),
-                    message: "parent children must include child",
+                    message: "children must not contain duplicates",
+                });
+            }
+            let child_node =
+                self.nodes
+                    .get(child)
+                    .ok_or_else(|| SessionTreeError::UnknownSession {
+                        session_id: child.clone(),
+                    })?;
+            let Some(parent) = &child_node.parent else {
+                return Err(SessionTreeError::MalformedLink {
+                    session_id: child.clone(),
+                    message: "child must point back to parent",
+                });
+            };
+            if &parent.session_id != id {
+                return Err(SessionTreeError::MalformedLink {
+                    session_id: child.clone(),
+                    message: "child parent does not match containing node",
                 });
             }
         }
+        Ok(())
+    }
 
+    fn validate_parent_link(
+        &self,
+        id: &SessionId,
+        node: &SessionTreeNode,
+    ) -> Result<(), SessionTreeError> {
+        let parent = node
+            .parent
+            .as_ref()
+            .ok_or_else(|| SessionTreeError::MalformedLink {
+                session_id: id.clone(),
+                message: "non-root node must have a parent",
+            })?;
+        self.require_session(&parent.session_id)?;
+        non_empty(parent.at_turn_id.clone(), "at_turn_id")?;
+        Self::validate_parent_branch_metadata(id, parent)?;
+        let parent_node =
+            self.nodes
+                .get(&parent.session_id)
+                .ok_or_else(|| SessionTreeError::UnknownSession {
+                    session_id: parent.session_id.clone(),
+                })?;
+        if !parent_node.children.iter().any(|child| child == id) {
+            return Err(SessionTreeError::MalformedLink {
+                session_id: id.clone(),
+                message: "parent children must include child",
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_parent_branch_metadata(
+        id: &SessionId,
+        parent: &SessionParent,
+    ) -> Result<(), SessionTreeError> {
+        match parent.kind {
+            BranchKind::ToolSpawned => {
+                let tool_call_id =
+                    parent
+                        .tool_call_id
+                        .clone()
+                        .ok_or(SessionTreeError::EmptyField {
+                            field: "tool_call_id",
+                        })?;
+                non_empty(tool_call_id, "tool_call_id")?;
+            }
+            BranchKind::Fork | BranchKind::Clone => {
+                if parent.tool_call_id.is_some() {
+                    return Err(SessionTreeError::MalformedLink {
+                        session_id: id.clone(),
+                        message: "tool_call_id is only valid for tool-spawned branches",
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_all_lineages(&self) -> Result<(), SessionTreeError> {
         for id in self.nodes.keys() {
             self.lineage(id)?;
         }
+        Ok(())
+    }
 
+    fn validate_merges(&self) -> Result<(), SessionTreeError> {
         for merge in &self.merges {
             if merge.source == merge.destination {
                 return Err(SessionTreeError::SelfMerge {
@@ -329,14 +374,13 @@ impl SessionTree {
             non_empty(merge.applied_at_turn_id.clone(), "applied_at_turn_id")?;
             validate_merge_strategy(&merge.strategy)?;
         }
-
         Ok(())
     }
 
     /// Create a copy-on-write child session from `from` at `at_turn_id`.
     pub fn fork(
         &mut self,
-        from: SessionId,
+        from: &SessionId,
         child: SessionId,
         at_turn_id: impl Into<String>,
     ) -> Result<(), SessionTreeError> {
@@ -346,7 +390,7 @@ impl SessionTree {
     /// Create a full-copy child session from `from`.
     pub fn clone_session(
         &mut self,
-        from: SessionId,
+        from: &SessionId,
         child: SessionId,
     ) -> Result<(), SessionTreeError> {
         self.add_child(from, child, BranchKind::Clone, "latest", None)
@@ -355,7 +399,7 @@ impl SessionTree {
     /// Create a branch spawned by a tool call from `from` at `at_turn_id`.
     pub fn tool_spawn(
         &mut self,
-        from: SessionId,
+        from: &SessionId,
         child: SessionId,
         at_turn_id: impl Into<String>,
         tool_call_id: impl Into<String>,
@@ -431,13 +475,13 @@ impl SessionTree {
 
     fn add_child(
         &mut self,
-        from: SessionId,
+        from: &SessionId,
         child: SessionId,
         kind: BranchKind,
         at_turn_id: impl Into<String>,
         tool_call_id: Option<String>,
     ) -> Result<(), SessionTreeError> {
-        self.require_session(&from)?;
+        self.require_session(from)?;
         if self.nodes.contains_key(&child) {
             return Err(SessionTreeError::DuplicateSession { session_id: child });
         }
@@ -453,7 +497,12 @@ impl SessionTree {
             children: Vec::new(),
         };
         self.nodes.insert(child.clone(), child_node);
-        let parent = self.nodes.get_mut(&from).expect("parent checked above");
+        let parent = self
+            .nodes
+            .get_mut(from)
+            .ok_or_else(|| SessionTreeError::UnknownSession {
+                session_id: from.clone(),
+            })?;
         parent.children.push(child);
         Ok(())
     }

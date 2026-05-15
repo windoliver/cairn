@@ -649,10 +649,10 @@ impl SqliteMemoryStore {
     ) -> Result<(), StoreError> {
         let mut check = SessionTree::flat(from.clone());
         match kind {
-            BranchKind::Fork => check.fork(from.clone(), child.clone(), at_turn_id.clone())?,
-            BranchKind::Clone => check.clone_session(from.clone(), child.clone())?,
+            BranchKind::Fork => check.fork(from, child.clone(), at_turn_id.clone())?,
+            BranchKind::Clone => check.clone_session(from, child.clone())?,
             BranchKind::ToolSpawned => check.tool_spawn(
-                from.clone(),
+                from,
                 child.clone(),
                 at_turn_id.clone(),
                 tool_call_id.clone().ok_or(SessionTreeError::EmptyField {
@@ -1321,10 +1321,10 @@ fn load_session_tree_sync(
             field: "at_turn_id",
         })?;
         match parse_branch_kind(branch_kind.as_deref(), &session_id)? {
-            BranchKind::Fork => tree.fork(parent, session_id, at_turn_id)?,
-            BranchKind::Clone => tree.clone_session(parent, session_id)?,
+            BranchKind::Fork => tree.fork(&parent, session_id, at_turn_id)?,
+            BranchKind::Clone => tree.clone_session(&parent, session_id)?,
             BranchKind::ToolSpawned => tree.tool_spawn(
-                parent,
+                &parent,
                 session_id,
                 at_turn_id,
                 tool_call_id.ok_or(SessionTreeError::EmptyField {
