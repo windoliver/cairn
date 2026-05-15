@@ -1,378 +1,10 @@
-# Issue 97 Replay Harness Implementation Plan
+//! Local replay harness helpers for P0 evaluation fixtures.
+//!
+//! This module is dev-only through the `cairn-test-fixtures` crate. It loads
+//! scenario manifests from `fixtures/v0/replay/`, seeds a temporary `SQLite`
+//! vault, executes deterministic checks, and returns machine-readable reports
+//! suitable for CI gates.
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
-**Goal:** Build a dev-only local replay harness that loads P0 scenario fixtures, executes deterministic replay checks against a temp SQLite vault, and returns machine-readable reports.
-
-**Architecture:** Add a `cairn_test_fixtures::replay` module plus versioned JSON fixtures under `fixtures/v0/replay/`. The harness seeds a temp vault with deterministic `MemoryRecord`s, uses `MockEmbedder` for local semantic/hybrid search, dispatches search through `cairn_core::verbs::search::run`, applies record-level tombstones through `MemoryStore`, and compares actual outcomes to fixture expectations.
-
-**Tech Stack:** Rust 2024, `cairn-test-fixtures`, `cairn-core`, `cairn-store-sqlite`, `cairn-embeddings-local::MockEmbedder`, `serde`, `serde_json`, `tokio`, `tempfile`.
-
----
-
-### Task 1: Add Replay Fixture Manifests
-
-**Files:**
-- Create: `fixtures/v0/replay/p0_stories.json`
-- Create: `fixtures/v0/replay/p0_keyword_only.json`
-- Modify: `fixtures/README.md`
-
-- [ ] **Step 1: Create the fixture directory**
-
-Run:
-
-```bash
-mkdir -p fixtures/v0/replay
-```
-
-Expected: command exits 0.
-
-- [ ] **Step 2: Add `fixtures/v0/replay/p0_stories.json`**
-
-Create the file with this content:
-
-```json
-{
-  "id": "p0_stories",
-  "description": "P0 replay scenario covering US1-US5, US7 all search modes, and US8 record-level forget.",
-  "config": {
-    "local_embeddings": true
-  },
-  "records": [
-    {
-      "id": "01HQZX9F5N00000000000000A0",
-      "kind": "trace",
-      "class": "episodic",
-      "visibility": "private",
-      "body": "rust memory safety session replay user question",
-      "session_id": "p0-session",
-      "turn_id": "1",
-      "sequence": 1,
-      "trace_event": "user_message"
-    },
-    {
-      "id": "01HQZX9F5N00000000000000A1",
-      "kind": "trace",
-      "class": "episodic",
-      "visibility": "private",
-      "body": "ownership borrowing prevent memory bugs at compile time",
-      "session_id": "p0-session",
-      "turn_id": "1",
-      "sequence": 2,
-      "trace_event": "assistant_message"
-    },
-    {
-      "id": "01HQZX9F5N00000000000000A2",
-      "kind": "trace",
-      "class": "episodic",
-      "visibility": "private",
-      "body": "cargo check tool result succeeded for memory safety example",
-      "session_id": "p0-session",
-      "turn_id": "1",
-      "sequence": 3,
-      "trace_event": "tool_call",
-      "tool_name": "cargo"
-    },
-    {
-      "id": "01HQZX9F5N00000000000000A3",
-      "kind": "user",
-      "class": "semantic",
-      "visibility": "private",
-      "body": "user prefers concise rust memory explanations"
-    },
-    {
-      "id": "01HQZX9F5N00000000000000A4",
-      "kind": "reasoning",
-      "class": "semantic",
-      "visibility": "private",
-      "body": "rolling summary p0 session covers rust memory safety and cargo check success",
-      "session_id": "p0-session",
-      "turn_id": "summary",
-      "sequence": 4,
-      "trace_event": "turn_summary"
-    },
-    {
-      "id": "01HQZX9F5N00000000000000A5",
-      "kind": "fact",
-      "class": "semantic",
-      "visibility": "private",
-      "body": "secret project codename aurora should be forgotten"
-    },
-    {
-      "id": "01HQZX9F5N00000000000000A6",
-      "kind": "fact",
-      "class": "semantic",
-      "visibility": "private",
-      "body": "unrelated cooking note tomato soup"
-    }
-  ],
-  "actions": [
-    {
-      "verb": "retrieve_session",
-      "story": "US1_US2",
-      "session_id": "p0-session",
-      "expected_turn_ids": ["1"],
-      "expected_trace_events": ["user_message", "assistant_message", "tool_call", "turn_summary"]
-    },
-    {
-      "verb": "retrieve_turn",
-      "story": "US5",
-      "session_id": "p0-session",
-      "turn_id": "1",
-      "expected_trace_events": ["user_message", "assistant_message", "tool_call"]
-    },
-    {
-      "verb": "record_present",
-      "story": "US3",
-      "record_id": "01HQZX9F5N00000000000000A3",
-      "expected_present": true
-    },
-    {
-      "verb": "record_present",
-      "story": "US4",
-      "record_id": "01HQZX9F5N00000000000000A4",
-      "expected_present": true
-    },
-    {
-      "verb": "search",
-      "story": "US7",
-      "mode": "keyword",
-      "query": "ownership borrowing",
-      "limit": 1,
-      "expected": {
-        "status": "hits",
-        "record_ids": ["01HQZX9F5N00000000000000A1"]
-      }
-    },
-    {
-      "verb": "search",
-      "story": "US7",
-      "mode": "semantic",
-      "query": "user prefers concise rust memory explanations",
-      "limit": 1,
-      "expected": {
-        "status": "hits",
-        "record_ids": ["01HQZX9F5N00000000000000A3"]
-      }
-    },
-    {
-      "verb": "search",
-      "story": "US7",
-      "mode": "hybrid",
-      "query": "rust memory safety session replay user question",
-      "limit": 1,
-      "expected": {
-        "status": "hits",
-        "record_ids": ["01HQZX9F5N00000000000000A0"]
-      }
-    },
-    {
-      "verb": "forget_record",
-      "story": "US8",
-      "record_id": "01HQZX9F5N00000000000000A5",
-      "followup_query": "secret project codename aurora",
-      "expected_absent_from_search": true
-    }
-  ]
-}
-```
-
-- [ ] **Step 3: Add `fixtures/v0/replay/p0_keyword_only.json`**
-
-Create the file with this content:
-
-```json
-{
-  "id": "p0_keyword_only",
-  "description": "P0 degraded keyword-only replay scenario with local embeddings disabled.",
-  "config": {
-    "local_embeddings": false
-  },
-  "records": [
-    {
-      "id": "01HQZX9F5N00000000000000B0",
-      "kind": "fact",
-      "class": "semantic",
-      "visibility": "private",
-      "body": "keyword only mode still finds rust memory safety"
-    }
-  ],
-  "actions": [
-    {
-      "verb": "search",
-      "story": "US7",
-      "mode": "keyword",
-      "query": "rust memory safety",
-      "limit": 1,
-      "expected": {
-        "status": "hits",
-        "record_ids": ["01HQZX9F5N00000000000000B0"]
-      }
-    },
-    {
-      "verb": "search",
-      "story": "US7",
-      "mode": "semantic",
-      "query": "keyword only mode still finds rust memory safety",
-      "limit": 1,
-      "expected": {
-        "status": "capability_unavailable",
-        "capability": "cairn.mcp.v1.search.semantic"
-      }
-    },
-    {
-      "verb": "search",
-      "story": "US7",
-      "mode": "hybrid",
-      "query": "keyword only mode still finds rust memory safety",
-      "limit": 1,
-      "expected": {
-        "status": "capability_unavailable",
-        "capability": "cairn.mcp.v1.search.hybrid"
-      }
-    }
-  ]
-}
-```
-
-- [ ] **Step 4: Document the replay fixtures**
-
-Append this bullet to the `fixtures/v0/` tree in `fixtures/README.md`:
-
-```markdown
-    ├── replay/            ← P0 replay scenarios + golden expectations
-```
-
-Add one sentence after the existing fixture description:
-
-```markdown
-Replay fixtures are consumed by `cairn_test_fixtures::replay` to create temp vaults and emit deterministic machine-readable reports for CI gates.
-```
-
-- [ ] **Step 5: Verify fixture files are visible**
-
-Run:
-
-```bash
-find fixtures/v0/replay -maxdepth 1 -type f | sort
-```
-
-Expected output includes both JSON files.
-
-### Task 2: Write Failing Replay Harness Tests
-
-**Files:**
-- Create: `crates/cairn-test-fixtures/tests/replay_harness.rs`
-
-- [ ] **Step 1: Add failing integration tests**
-
-Create `crates/cairn-test-fixtures/tests/replay_harness.rs` with:
-
-```rust
-use cairn_test_fixtures::replay::{run_named_scenario, load_named_scenario, ReplayExpectation};
-
-#[tokio::test(flavor = "multi_thread")]
-async fn p0_stories_replay_passes_end_to_end() {
-    let report = run_named_scenario("p0_stories").await.expect("run scenario");
-    assert!(report.passed(), "{report:#?}");
-    assert_eq!(report.scenario_id, "p0_stories");
-    assert!(
-        report
-            .checks
-            .iter()
-            .any(|check| check.story == "US7" && check.verb == "search")
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn keyword_only_replay_reports_capability_rejections() {
-    let report = run_named_scenario("p0_keyword_only").await.expect("run scenario");
-    assert!(report.passed(), "{report:#?}");
-    let capabilities: Vec<_> = report
-        .checks
-        .iter()
-        .filter(|check| check.actual["status"] == "capability_unavailable")
-        .map(|check| check.actual["capability"].as_str().unwrap_or_default().to_owned())
-        .collect();
-    assert_eq!(
-        capabilities,
-        vec![
-            "cairn.mcp.v1.search.semantic".to_owned(),
-            "cairn.mcp.v1.search.hybrid".to_owned()
-        ]
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn failure_report_identifies_scenario_verb_query_expected_and_actual() {
-    let mut scenario = load_named_scenario("p0_stories").expect("load scenario");
-    let search = scenario
-        .actions
-        .iter_mut()
-        .find_map(|action| action.as_search_mut())
-        .expect("search action");
-    search.expected = ReplayExpectation::Hits {
-        record_ids: vec!["01HQZX9F5N00000000000000A6".to_owned()],
-    };
-
-    let report = cairn_test_fixtures::replay::run_scenario(&scenario)
-        .await
-        .expect("run scenario");
-    assert!(!report.passed(), "{report:#?}");
-    let failure = report.failures().next().expect("one failure");
-    assert_eq!(failure.scenario_id, "p0_stories");
-    assert_eq!(failure.verb, "search");
-    assert_eq!(failure.query.as_deref(), Some("ownership borrowing"));
-    assert_eq!(
-        failure.expected,
-        serde_json::json!({
-            "status": "hits",
-            "record_ids": ["01HQZX9F5N00000000000000A6"]
-        })
-    );
-    assert_ne!(failure.expected, failure.actual);
-}
-
-#[test]
-fn replay_manifests_deserialize() {
-    for name in ["p0_stories", "p0_keyword_only"] {
-        let scenario = load_named_scenario(name).expect("load scenario");
-        assert_eq!(scenario.id, name);
-        assert!(!scenario.records.is_empty());
-        assert!(!scenario.actions.is_empty());
-    }
-}
-```
-
-- [ ] **Step 2: Run the tests and verify RED**
-
-Run:
-
-```bash
-cargo nextest run -p cairn-test-fixtures --test replay_harness
-```
-
-Expected: compile fails because `cairn_test_fixtures::replay` does not exist.
-
-### Task 3: Implement `cairn_test_fixtures::replay`
-
-**Files:**
-- Create: `crates/cairn-test-fixtures/src/replay.rs`
-- Modify: `crates/cairn-test-fixtures/src/lib.rs`
-
-- [ ] **Step 1: Export the new module**
-
-Add to `crates/cairn-test-fixtures/src/lib.rs`:
-
-```rust
-pub mod replay;
-```
-
-- [ ] **Step 2: Implement the replay module**
-
-Create `crates/cairn-test-fixtures/src/replay.rs` with:
-
-```rust
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -400,13 +32,13 @@ pub struct ReplayReport {
 }
 
 impl ReplayReport {
-    /// True when every check passed.
+    /// `true` when every check passed.
     #[must_use]
     pub fn passed(&self) -> bool {
         self.checks.iter().all(|check| check.passed)
     }
 
-    /// Failed checks only.
+    /// Iterate over failed checks only.
     pub fn failures(&self) -> impl Iterator<Item = &ReplayCheckReport> {
         self.checks.iter().filter(|check| !check.passed)
     }
@@ -556,7 +188,7 @@ pub enum ReplayAction {
 }
 
 impl ReplayAction {
-    /// Mutable search-action view for tests that need to perturb expectations.
+    /// Mutable search-action view for tests that perturb expectations.
     pub fn as_search_mut(&mut self) -> Option<&mut ReplaySearchAction> {
         match self {
             Self::Search(action) => Some(action),
@@ -594,19 +226,11 @@ pub enum ReplaySearchMode {
 }
 
 impl ReplaySearchMode {
-    fn to_core(self) -> SearchMode {
+    const fn to_core(self) -> SearchMode {
         match self {
             Self::Keyword => SearchMode::Keyword,
             Self::Semantic => SearchMode::Semantic,
             Self::Hybrid => SearchMode::Hybrid,
-        }
-    }
-
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Keyword => "keyword",
-            Self::Semantic => "semantic",
-            Self::Hybrid => "hybrid",
         }
     }
 }
@@ -670,6 +294,9 @@ struct ReplayVault {
 }
 
 /// Load a named scenario from `fixtures/v0/replay/{name}.json`.
+///
+/// # Errors
+/// Returns [`ReplayError`] if the fixture cannot be read or parsed.
 pub fn load_named_scenario(name: &str) -> Result<ReplayScenario, ReplayError> {
     let path = crate::fixture_v0_dir()
         .join("replay")
@@ -678,6 +305,9 @@ pub fn load_named_scenario(name: &str) -> Result<ReplayScenario, ReplayError> {
 }
 
 /// Load a scenario from a specific file path.
+///
+/// # Errors
+/// Returns [`ReplayError`] if the fixture cannot be read or parsed.
 pub fn load_scenario_file(path: &Path) -> Result<ReplayScenario, ReplayError> {
     let raw = std::fs::read_to_string(path).map_err(|source| ReplayError::Io {
         path: path.to_path_buf(),
@@ -690,12 +320,18 @@ pub fn load_scenario_file(path: &Path) -> Result<ReplayScenario, ReplayError> {
 }
 
 /// Load and run a named scenario.
+///
+/// # Errors
+/// Returns [`ReplayError`] if loading, vault setup, or fixture replay fails.
 pub async fn run_named_scenario(name: &str) -> Result<ReplayReport, ReplayError> {
     let scenario = load_named_scenario(name)?;
     run_scenario(&scenario).await
 }
 
 /// Run a loaded replay scenario.
+///
+/// # Errors
+/// Returns [`ReplayError`] if the temp vault cannot be built.
 pub async fn run_scenario(scenario: &ReplayScenario) -> Result<ReplayReport, ReplayError> {
     let vault = build_vault(scenario).await?;
     let mut checks = Vec::with_capacity(scenario.actions.len());
@@ -795,7 +431,10 @@ fn trace_frontmatter(seed: &ReplayRecord) -> BTreeMap<String, Value> {
         if let Some(tool_name) = &seed.tool_name {
             trace.insert("tool_name".to_owned(), Value::String(tool_name.clone()));
         }
-        trace.insert("capture_event_id".to_owned(), Value::String(seed.id.clone()));
+        trace.insert(
+            "capture_event_id".to_owned(),
+            Value::String(seed.id.clone()),
+        );
         extra.insert("trace".to_owned(), Value::Object(trace));
     }
     extra
@@ -816,12 +455,19 @@ async fn run_action(
         } => {
             let actual = trace_summary(store, Some(session_id), None)
                 .await
-                .unwrap_or_else(error_value);
+                .unwrap_or_else(|e| error_value(&e));
             let expected = json!({
                 "turn_ids": expected_turn_ids,
-                "trace_events": expected_trace_events
+                "trace_events": expected_trace_events,
             });
-            report_check(&scenario.id, story, "retrieve_session", None, expected, actual)
+            report_check(
+                &scenario.id,
+                story,
+                "retrieve_session",
+                None,
+                expected,
+                actual,
+            )
         }
         ReplayAction::RetrieveTurn {
             story,
@@ -831,10 +477,10 @@ async fn run_action(
         } => {
             let actual = trace_summary(store, Some(session_id), Some(turn_id))
                 .await
-                .unwrap_or_else(error_value);
+                .unwrap_or_else(|e| error_value(&e));
             let expected = json!({
                 "turn_ids": [turn_id],
-                "trace_events": expected_trace_events
+                "trace_events": expected_trace_events,
             });
             report_check(&scenario.id, story, "retrieve_turn", None, expected, actual)
         }
@@ -843,9 +489,18 @@ async fn run_action(
             record_id,
             expected_present,
         } => {
-            let actual = record_present(store, record_id).await.unwrap_or_else(error_value);
+            let actual = record_present(store, record_id)
+                .await
+                .unwrap_or_else(|e| error_value(&e));
             let expected = json!({ "present": expected_present });
-            report_check(&scenario.id, story, "record_present", None, expected, actual)
+            report_check(
+                &scenario.id,
+                story,
+                "record_present",
+                None,
+                expected,
+                actual,
+            )
         }
         ReplayAction::ForgetRecord {
             story,
@@ -855,10 +510,10 @@ async fn run_action(
         } => {
             let actual = forget_record(store, scenario, record_id, followup_query)
                 .await
-                .unwrap_or_else(error_value);
+                .unwrap_or_else(|e| error_value(&e));
             let expected = json!({
                 "retrieve_found": false,
-                "search_contains_record": !expected_absent_from_search
+                "search_contains_record": !expected_absent_from_search,
             });
             report_check(
                 &scenario.id,
@@ -924,17 +579,16 @@ async fn run_search(
                 .collect();
             json!({
                 "status": "hits",
-                "mode": action.mode.as_str(),
-                "record_ids": ids
+                "record_ids": ids,
             })
         }
         Err(SearchError::CapabilityUnavailable { capability }) => json!({
             "status": "capability_unavailable",
-            "capability": capability
+            "capability": capability,
         }),
         Err(err) => json!({
             "status": "error",
-            "message": err.to_string()
+            "message": err.to_string(),
         }),
     }
 }
@@ -943,11 +597,11 @@ fn expected_search_value(expected: &ReplayExpectation) -> Value {
     match expected {
         ReplayExpectation::Hits { record_ids } => json!({
             "status": "hits",
-            "record_ids": record_ids
+            "record_ids": record_ids,
         }),
         ReplayExpectation::CapabilityUnavailable { capability } => json!({
             "status": "capability_unavailable",
-            "capability": capability
+            "capability": capability,
         }),
     }
 }
@@ -970,11 +624,15 @@ async fn trace_summary(
         .filter_map(|record| trace_projection(record, session_id, turn_id))
         .collect();
     rows.sort_by_key(|(sequence, _, _)| *sequence);
-    let turn_ids: BTreeSet<String> = rows.iter().map(|(_, turn, _)| turn.clone()).collect();
+    let turn_ids: BTreeSet<String> = rows
+        .iter()
+        .filter(|(_, _, event)| event != "turn_summary")
+        .map(|(_, turn, _)| turn.clone())
+        .collect();
     let trace_events: Vec<String> = rows.into_iter().map(|(_, _, event)| event).collect();
     Ok(json!({
         "turn_ids": turn_ids.into_iter().collect::<Vec<_>>(),
-        "trace_events": trace_events
+        "trace_events": trace_events,
     }))
 }
 
@@ -1042,7 +700,7 @@ async fn forget_record(
         .is_some_and(|ids| ids.iter().any(|value| value.as_str() == Some(record_id)));
     Ok(json!({
         "retrieve_found": retrieve_found,
-        "search_contains_record": contains
+        "search_contains_record": contains,
     }))
 }
 
@@ -1067,110 +725,9 @@ fn report_check(
     }
 }
 
-fn error_value(error: ReplayError) -> Value {
+fn error_value(error: &ReplayError) -> Value {
     json!({
         "status": "error",
-        "message": error.to_string()
+        "message": error.to_string(),
     })
 }
-```
-
-- [ ] **Step 3: Run replay tests and verify GREEN**
-
-Run:
-
-```bash
-cargo nextest run -p cairn-test-fixtures --test replay_harness
-```
-
-Expected: all replay harness tests pass. If any search ranking expectation differs, inspect the actual report and update only the fixture expectation when the actual ranking is deterministic and defensible.
-
-### Task 4: Tighten Fixture Schema Coverage
-
-**Files:**
-- Modify: `crates/cairn-test-fixtures/tests/schema_fixtures.rs`
-
-- [ ] **Step 1: Add replay directory coverage to schema fixture tests**
-
-In `crates/cairn-test-fixtures/tests/schema_fixtures.rs`, add `replay` to the required `fixtures/v0` subdirectory assertions and add a test:
-
-```rust
-#[test]
-fn replay_scenarios_deserialize() {
-    let replay = v0().join("replay");
-    for name in ["p0_stories.json", "p0_keyword_only.json"] {
-        let path = replay.join(name);
-        let scenario = cairn_test_fixtures::replay::load_scenario_file(&path)
-            .unwrap_or_else(|e| panic!("load {}: {e}", path.display()));
-        assert_eq!(path.file_stem().and_then(std::ffi::OsStr::to_str), Some(scenario.id.as_str()));
-        assert!(!scenario.records.is_empty());
-        assert!(!scenario.actions.is_empty());
-    }
-}
-```
-
-- [ ] **Step 2: Run schema fixture tests**
-
-Run:
-
-```bash
-cargo nextest run -p cairn-test-fixtures --test schema_fixtures
-```
-
-Expected: tests pass.
-
-### Task 5: Final Verification
-
-**Files:**
-- No new files.
-
-- [ ] **Step 1: Run replay harness verification**
-
-Run:
-
-```bash
-cargo nextest run -p cairn-test-fixtures --test replay_harness
-```
-
-Expected: all tests pass.
-
-- [ ] **Step 2: Run existing golden query verification**
-
-Run:
-
-```bash
-cargo nextest run -p cairn-cli --test search_modes_golden
-```
-
-Expected: all tests pass.
-
-- [ ] **Step 3: Run existing evaluation workflow verification**
-
-Run:
-
-```bash
-cargo nextest run -p cairn-workflows --test evaluation
-```
-
-Expected: all tests pass.
-
-- [ ] **Step 4: Run core boundary check**
-
-Run:
-
-```bash
-scripts/check-core-boundary.sh
-```
-
-Expected: exits 0.
-
-- [ ] **Step 5: Inspect final diff**
-
-Run:
-
-```bash
-git status --short
-git diff --stat
-```
-
-Expected: only replay harness, replay fixtures, fixture docs, and fixture tests changed.
