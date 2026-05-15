@@ -1,4 +1,4 @@
-//! Integration: ExpirationHandler tombstones TTL-aged records and
+//! Integration: `ExpirationHandler` tombstones TTL-aged records and
 //! leaves fresh records active. AC#2 of issue #91 — "expiration marks
 //! records retired and removes them from default reads" (the
 //! `MemoryStore::list` contract filters tombstoned rows for us).
@@ -18,7 +18,7 @@ use cairn_workflows::scheduler::{HandlerOutcome, JobHandler};
 use cairn_workflows::{ExpirationHandler, ExpirationPayload};
 
 /// `2027-01-01T00:00:00Z` in epoch millis — well past every
-/// sample_record's stamped `updated_at` (`2026-04-22T14:05:11Z`).
+/// `sample_record`'s stamped `updated_at` (`2026-04-22T14:05:11Z`).
 const FUTURE_NOW_MS: i64 = 1_798_761_600_000;
 
 #[tokio::test]

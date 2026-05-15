@@ -1,4 +1,4 @@
-//! Integration: EvaluationHandler runs the starter golden checks,
+//! Integration: `EvaluationHandler` runs the starter golden checks,
 //! upserts a deterministic report record, and emits a single
 //! `MetricEvent::EvaluationCompleted` per sweep. AC#3 of issue #91 —
 //! "evaluation outputs are deterministic enough for release gating".

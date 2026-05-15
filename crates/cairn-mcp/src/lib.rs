@@ -215,6 +215,8 @@ pub async fn serve_stdio_with_store_consolidation_ready(
 /// cairn_workflows::Scheduler::start) registers each handler. Each
 /// flag flips its matching capability advertisement in
 /// `status.capabilities` and the MCP `initialize` response.
+// One bool per workflow; a bitflags type would obscure the named gate.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct WorkflowReadiness {
     /// `cairn.workflows.v1.consolidation` advertised.

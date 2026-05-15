@@ -39,7 +39,7 @@ impl NoopMemoryStore {
 
 #[async_trait]
 impl MemoryStore for NoopMemoryStore {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "noop"
     }
     fn capabilities(&self) -> &MemoryStoreCapabilities {

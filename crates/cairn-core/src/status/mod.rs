@@ -262,7 +262,12 @@ pub fn advertise(gates: &CapabilityGates) -> Vec<Capabilities> {
     if wiring::CONSOLIDATION_WORKFLOW_WIRED && gates.consolidation_runtime_ready {
         out.push(Capabilities::CairnWorkflowsV1Consolidation);
     }
-    if wiring::DREAM_WORKFLOW_WIRED && gates.dream_runtime_ready {
+    // Dream additionally requires an `LLMProvider` (brief §10.2). Brief §15
+    // fail-closed: advertising a capability the runtime cannot honor is a
+    // violation, and `DreamHandler` short-circuits to `Permanent` when no
+    // provider is wired. Hold the capability back in that case even when
+    // `dream.enabled = true` in config.
+    if wiring::DREAM_WORKFLOW_WIRED && gates.dream_runtime_ready && gates.llm_configured {
         out.push(Capabilities::CairnWorkflowsV1Dream);
     }
     if wiring::EXPIRATION_WORKFLOW_WIRED && gates.expiration_runtime_ready {

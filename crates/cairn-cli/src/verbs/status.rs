@@ -321,7 +321,7 @@ fn compute_capabilities(
             vault_bound: bound,
             model_present,
             embedding_provider_ready,
-            llm_configured: false,
+            llm_configured: config.llm.provider.is_some(),
             consolidation_runtime_ready,
             dream_runtime_ready,
             expiration_runtime_ready,
@@ -453,7 +453,7 @@ fn capabilities_for_config(config: &CairnConfig, model_present: bool) -> Vec<Cap
         // the gate runs only when caller is in a vault.
         model_present,
         embedding_provider_ready,
-        llm_configured: false,
+        llm_configured: config.llm.provider.is_some(),
         consolidation_runtime_ready,
         dream_runtime_ready,
         expiration_runtime_ready,

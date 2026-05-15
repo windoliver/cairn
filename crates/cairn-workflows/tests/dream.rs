@@ -1,6 +1,6 @@
-//! Integration: DreamHandler upserts a deterministic distillation
-//! record when an `LLMProvider` is wired, and declines `Permanent` when
-//! none is configured (issue #91).
+//! Integration: `DreamHandler` upserts a deterministic distillation
+//! record when an `LLMProvider` is wired, and declines `Permanent`
+//! when none is configured (issue #91).
 
 use std::sync::Arc;
 
@@ -22,7 +22,7 @@ struct FakeLlm {
 
 #[async_trait]
 impl LLMProvider for FakeLlm {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "fake-llm"
     }
     fn capabilities(&self) -> &LLMProviderCapabilities {

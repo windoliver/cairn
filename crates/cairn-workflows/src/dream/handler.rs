@@ -13,7 +13,7 @@
 //! Out of scope (deferred to follow-ups, brief §10.1):
 //! * REM / Deep tiers (cron-driven, multi-bucket workflows).
 //! * `AgentDreamWorker` / `HybridDreamWorker` pluggable workers.
-//! * WAL FlushPlan integration — the minimum path upserts directly via
+//! * WAL `FlushPlan` integration — the minimum path upserts directly via
 //!   `MemoryStore::upsert` like the existing consolidation handler.
 
 use std::sync::Arc;

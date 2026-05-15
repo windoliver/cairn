@@ -67,6 +67,9 @@ fn capability_unavailable_result(name: &str) -> CallToolResult {
 /// [`CairnMcpHandler::with_store`] the `search` tool dispatches through
 /// [`cairn_core::verbs::search::run`]; all other tools fall back to
 /// [`dispatch_stub`] until their real dispatch lands in a follow-up PR.
+// One bool per workflow's runtime-ready advertisement gate; collapsing
+// into a single struct doesn't add clarity here.
+#[allow(clippy::struct_excessive_bools)]
 pub struct CairnMcpHandler {
     store: Option<Arc<dyn MemoryStore>>,
     sqlite_store: Option<Arc<SqliteMemoryStore>>,
@@ -417,7 +420,7 @@ impl CairnMcpHandler {
             vault_bound: self.store.is_some(),
             model_present,
             embedding_provider_ready,
-            llm_configured: false,
+            llm_configured: self.config.llm.provider.is_some(),
             // Tie advertisement to BOTH the scheduler-runtime flag AND
             // the config opt-in. The scheduler can be alive while
             // consolidation.enabled=false (the trigger short-circuits

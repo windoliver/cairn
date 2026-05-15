@@ -65,7 +65,7 @@ pub struct OrphanCheck;
 
 #[async_trait]
 impl GoldenCheck for OrphanCheck {
-    fn id(&self) -> &str {
+    fn id(&self) -> &'static str {
         "orphan"
     }
     async fn run(
@@ -103,7 +103,7 @@ pub struct TombstoneConsistencyCheck;
 
 #[async_trait]
 impl GoldenCheck for TombstoneConsistencyCheck {
-    fn id(&self) -> &str {
+    fn id(&self) -> &'static str {
         "tombstone_consistency"
     }
     async fn run(
@@ -121,15 +121,15 @@ impl GoldenCheck for TombstoneConsistencyCheck {
         // row. Mismatches indicate an adapter-level bug.
         for rec in &stored {
             let history = store.versions(&rec.record.target_id).await?;
-            if let Some(v) = history.iter().rev().find(|v| v.record_id == rec.record.id) {
-                if v.tombstoned {
-                    return Ok(CheckOutcome::Failed {
-                        details: format!(
-                            "active list returned tombstoned record {}",
-                            rec.record.id.as_str()
-                        ),
-                    });
-                }
+            if let Some(v) = history.iter().rev().find(|v| v.record_id == rec.record.id)
+                && v.tombstoned
+            {
+                return Ok(CheckOutcome::Failed {
+                    details: format!(
+                        "active list returned tombstoned record {}",
+                        rec.record.id.as_str()
+                    ),
+                });
             }
         }
         Ok(CheckOutcome::Passed)

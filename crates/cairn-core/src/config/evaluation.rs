@@ -24,8 +24,8 @@ pub struct EvaluationConfig {
     pub checks: Vec<String>,
 
     /// When `true` the handler upserts a deterministic `report`
-    /// MemoryRecord summarising findings. Disabling this leaves the
-    /// metrics-only path active — useful for CI dry-runs.
+    /// `MemoryRecord` summarising findings. Disabling this leaves
+    /// the metrics-only path active — useful for CI dry-runs.
     #[serde(default = "defaults::write_report_record")]
     pub write_report_record: bool,
 }

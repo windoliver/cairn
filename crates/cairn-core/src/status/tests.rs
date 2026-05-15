@@ -184,21 +184,35 @@ fn consolidation_capability_requires_wiring_and_runtime_ready() {
 }
 
 #[test]
-fn dream_capability_requires_wiring_and_runtime_ready() {
+fn dream_capability_requires_wiring_runtime_ready_and_llm_provider() {
+    // Runtime not ready: cap absent.
     let mut g = gates(true, true, None);
     g.dream_runtime_ready = false;
+    g.llm_configured = true;
     let caps = advertise(&g);
     assert!(
         !caps.contains(&Capabilities::CairnWorkflowsV1Dream),
         "must not advertise dream when runtime is not ready"
     );
 
+    // Runtime ready but no LLM: cap absent (brief §15 fail-closed —
+    // DreamHandler returns Permanent without an LLMProvider).
     g.dream_runtime_ready = true;
+    g.llm_configured = false;
+    let caps = advertise(&g);
+    assert!(
+        !caps.contains(&Capabilities::CairnWorkflowsV1Dream),
+        "must not advertise dream when no LLMProvider is configured"
+    );
+
+    // Both gates on: cap presence mirrors the wiring const.
+    g.dream_runtime_ready = true;
+    g.llm_configured = true;
     let caps = advertise(&g);
     assert_eq!(
         caps.contains(&Capabilities::CairnWorkflowsV1Dream),
         wiring::DREAM_WORKFLOW_WIRED,
-        "with runtime_ready=true, advertise mirrors DREAM_WORKFLOW_WIRED"
+        "with runtime_ready + llm_configured, advertise mirrors DREAM_WORKFLOW_WIRED"
     );
 }
 
@@ -381,7 +395,7 @@ mod remediation_tests {
             vault_bound: true,
             model_present: true,
             embedding_provider_ready: true,
-            llm_configured: false,
+            llm_configured: true,
             contract_phase: Phase::V0_1,
             consolidation_runtime_ready: false,
             dream_runtime_ready: false,

@@ -290,7 +290,11 @@ pub fn run(
                     sqlite_store.clone();
                 let readiness = cairn_mcp::WorkflowReadiness {
                     consolidation: true,
-                    dream: config.dream.enabled,
+                    // Brief §15 fail-closed: only advertise dream when an
+                    // LLMProvider is configured. The handler short-circuits
+                    // to `Permanent` otherwise (issue #91 follow-up; #144
+                    // lands the first concrete LLMProvider plugin).
+                    dream: config.dream.enabled && config.llm.provider.is_some(),
                     expiration: config.expiration.enabled,
                     evaluation: config.evaluation.enabled,
                 };
