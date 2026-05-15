@@ -22,7 +22,8 @@ use cairn_core::generated::verbs::lint::{
     Finding, Kind, LintData, LintDataSummary, LintDataSummaryBySeverity, Severity,
 };
 use cairn_store_sqlite::{
-    EdgeLintReport, SqliteConsentJournalReader, StoreError, lint_edges, resolve_edge_contradictions,
+    EdgeLintReport, SqliteConsentJournalReader, SqliteWorkflowJobsReader, StoreError, lint_edges,
+    resolve_edge_contradictions,
 };
 use clap::ArgMatches;
 use rusqlite::{Connection, OpenFlags};
@@ -1268,6 +1269,12 @@ pub async fn lint_handler(
     let source_resolver = VaultFsSourceResolver::new(vault_root);
     let (consent_journal, consent_journal_unavailable) = open_consent_journal(vault_root)?;
     let hot_body_loader = |step| super::assemble_hot::lint_step_body_sync(vault_root, config, step);
+    // Issue #92, spec §4.8/§4.12: open a read-only handle to the vault
+    // DB so the `workflow_health` lint check can surface dead-letter /
+    // stuck / stale / overdue findings. Missing or unreadable DB
+    // degrades to `None`, matching the consent-journal degraded path.
+    let workflow_jobs_reader = open_workflow_jobs_reader(vault_root);
+    let now_ms = chrono::Utc::now().timestamp_millis();
     let inputs = LintInputs {
         records: &lint_records,
         config,
@@ -1281,8 +1288,10 @@ pub async fn lint_handler(
         hot_body_loader: Some(&hot_body_loader),
         source_resolver: &source_resolver,
         consent_journal: &consent_journal,
-        workflow_jobs: None,
-        now_ms: 0,
+        workflow_jobs: workflow_jobs_reader
+            .as_ref()
+            .map(|r| r as &dyn cairn_core::contract::workflow_jobs::WorkflowJobsReader),
+        now_ms,
     };
     let mut data = run_checks(&inputs).await;
 
@@ -1566,6 +1575,26 @@ fn open_consent_journal(vault_root: &Path) -> anyhow::Result<(SqliteConsentJourn
     } else {
         Ok((SqliteConsentJournalReader::default(), true))
     }
+}
+
+/// Open a read-only `workflow_jobs` reader for the lint dispatch path
+/// (issue #92, spec §4.8/§4.10/§4.12). Returns `None` when the vault DB
+/// is missing or the connection cannot be opened — the
+/// `workflow_health` check stays on its no-op path, matching the
+/// consent-journal degraded behaviour. Errors are not propagated to the
+/// caller because workflow health is advisory; a missing reader means
+/// "lint cannot see workflow jobs", not "lint must abort".
+fn open_workflow_jobs_reader(vault_root: &Path) -> Option<SqliteWorkflowJobsReader> {
+    let db_path = vault_root.join(".cairn/cairn.db");
+    if !db_path.is_file() {
+        return None;
+    }
+    let conn = Connection::open_with_flags(
+        &db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    Some(SqliteWorkflowJobsReader::new(conn))
 }
 
 /// Append a `deferred_check` info finding noting that the
