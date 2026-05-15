@@ -67,3 +67,18 @@ generated_reference = ""
 audience = "internal"
 page = ""
 generated_reference = ""
+
+[packages.cairn-frontend-logseq]
+audience = "operator"
+page = "usage/plugins.md"
+generated_reference = "reference/generated/plugins.md"
+
+[packages.cairn-frontend-obsidian]
+audience = "operator"
+page = "usage/plugins.md"
+generated_reference = "reference/generated/plugins.md"
+
+[packages.cairn-frontend-vscode]
+audience = "operator"
+page = "usage/plugins.md"
+generated_reference = "reference/generated/plugins.md"

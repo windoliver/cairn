@@ -1,10 +1,12 @@
 ---
 source: crates/cairn-cli/tests/plugins_list_snapshot.rs
-assertion_line: 9
 expression: text
 ---
-NAME                  CONTRACT              VERSION-RANGE     SOURCE
-cairn-mcp             MCPServer             [0.1.0, 0.2.0)    bundled:cairn-mcp
-cairn-sensors-local   SensorIngress         [0.1.0, 0.2.0)    bundled:cairn-sensors-local
-cairn-store-sqlite    MemoryStore           [0.5.0, 0.6.0)    bundled:cairn-store-sqlite
-cairn-workflows       WorkflowOrchestrator  [0.1.0, 0.2.0)    bundled:cairn-workflows
+NAME                     CONTRACT              VERSION-RANGE     SOURCE
+cairn-frontend-logseq    FrontendAdapter       [0.1.0, 0.2.0)    bundled:cairn-frontend-logseq
+cairn-frontend-obsidian  FrontendAdapter       [0.1.0, 0.2.0)    bundled:cairn-frontend-obsidian
+cairn-frontend-vscode    FrontendAdapter       [0.1.0, 0.2.0)    bundled:cairn-frontend-vscode
+cairn-mcp                MCPServer             [0.1.0, 0.2.0)    bundled:cairn-mcp
+cairn-sensors-local      SensorIngress         [0.1.0, 0.2.0)    bundled:cairn-sensors-local
+cairn-store-sqlite       MemoryStore           [0.5.0, 0.6.0)    bundled:cairn-store-sqlite
+cairn-workflows          WorkflowOrchestrator  [0.1.0, 0.2.0)    bundled:cairn-workflows

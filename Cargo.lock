@@ -640,6 +640,9 @@ dependencies = [
  "cairn-core",
  "cairn-embeddings-local",
  "cairn-embeddings-openai",
+ "cairn-frontend-logseq",
+ "cairn-frontend-obsidian",
+ "cairn-frontend-vscode",
  "cairn-idl",
  "cairn-keychain",
  "cairn-llm-openai-compat",
@@ -745,6 +748,42 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "wiremock",
+]
+
+[[package]]
+name = "cairn-frontend-logseq"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "cairn-core",
+ "insta",
+ "pretty_assertions",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "cairn-frontend-obsidian"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "cairn-core",
+ "insta",
+ "pretty_assertions",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "cairn-frontend-vscode"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "cairn-core",
+ "insta",
+ "pretty_assertions",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
