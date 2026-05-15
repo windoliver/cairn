@@ -52,17 +52,35 @@ pub struct Scheduler {
 
 impl Scheduler {
     /// Spawn N workers + 1 reaper and return a handle.
-    #[must_use]
-    pub fn start(
+    ///
+    /// Runs one best-effort `reap_expired(now)` before spawning workers
+    /// so a crashed predecessor's expired leases are reclaimed without
+    /// waiting for the periodic reaper tick (spec §4.7). The startup
+    /// reap is best-effort: a backend failure logs at `warn` and the
+    /// scheduler still spawns — the periodic reaper will catch up at
+    /// the next tick.
+    ///
+    /// `worker_count = 0` is honored verbatim — no worker tasks are
+    /// spawned. This is useful for tests that want to exercise the
+    /// startup reap in isolation from the worker loop.
+    #[must_use = "Scheduler must be retained (and `shutdown()` called) or its workers leak"]
+    pub async fn start(
         incarnation_id: &str,
         store: Arc<dyn JobStore>,
         registry: &HandlerRegistry,
         clock: Arc<dyn Clock>,
         config: SchedulerConfig,
     ) -> Self {
+        let now = clock.now_ms();
+        if let Err(e) = store.reap_expired(now).await {
+            tracing::warn!(
+                error = %e,
+                "startup reap failed; periodic reaper will recover"
+            );
+        }
         let cancel = CancellationToken::new();
         let tracker = TaskTracker::new();
-        for i in 0..config.worker_count.max(1) {
+        for i in 0..config.worker_count {
             let owner = format!("{incarnation_id}:w{i}");
             let t = cancel.clone();
             let s = store.clone();
@@ -97,7 +115,7 @@ mod tests {
         let store: Arc<dyn JobStore> = Arc::new(SqliteJobStore::new(conn).expect("store"));
         let registry = HandlerRegistry::default();
         let clock: Arc<dyn Clock> = Arc::new(MockClock::at(1_000));
-        let s = Scheduler::start("inc-1", store, &registry, clock, SchedulerConfig::p0());
+        let s = Scheduler::start("inc-1", store, &registry, clock, SchedulerConfig::p0()).await;
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         s.shutdown().await;
     }

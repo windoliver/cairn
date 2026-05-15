@@ -308,11 +308,7 @@ pub(crate) const MIGRATION_SOURCES: &[(i64, &str, &str)] = &[
         M0060_CONSENT_SCOPE_UPPERCASE,
     ),
     (61, "0061_salience_access", M0061_SALIENCE_ACCESS),
-    (
-        62,
-        "0062_workflow_dead_letter",
-        M0062_WORKFLOW_DEAD_LETTER,
-    ),
+    (62, "0062_workflow_dead_letter", M0062_WORKFLOW_DEAD_LETTER),
 ];
 
 /// All migrations, in order. Returns a fresh `Migrations` set on every call

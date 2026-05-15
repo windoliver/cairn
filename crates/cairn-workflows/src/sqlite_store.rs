@@ -31,8 +31,7 @@ const MIGRATION_0020_SQL: &str = cairn_store_sqlite::migrations::WORKFLOW_JOBS_M
 /// Additive migration 0062 SQL (dead-letter + completion columns).
 /// Re-exported through the package API for the same self-containment
 /// reason as [`MIGRATION_0020_SQL`].
-const MIGRATION_0062_SQL: &str =
-    cairn_store_sqlite::migrations::WORKFLOW_DEAD_LETTER_MIGRATION_SQL;
+const MIGRATION_0062_SQL: &str = cairn_store_sqlite::migrations::WORKFLOW_DEAD_LETTER_MIGRATION_SQL;
 
 /// Multiplier applied to `max_attempts` to derive a hard ceiling on
 /// raw lease deliveries (started or not). Prevents pre-heartbeat crash

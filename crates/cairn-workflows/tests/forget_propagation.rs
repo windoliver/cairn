@@ -94,7 +94,8 @@ async fn forgetting_source_turn_tombstones_summary() {
         &registry,
         clock.clone(),
         SchedulerConfig::p0(),
-    );
+    )
+    .await;
 
     // Seed 6 turns then enqueue a consolidation job.
     seed_and_enqueue_consolidation(&mem, &jobs, &clock, SESSION_ID, 6).await;

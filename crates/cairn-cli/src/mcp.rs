@@ -249,7 +249,8 @@ pub fn run(
                     &registry,
                     clock,
                     SchedulerConfig::p0(),
-                );
+                )
+                .await;
                 tracing::info!("scheduler started (incarnation={incarnation_id})");
 
                 // Reconcile any sessions whose turn_summary count

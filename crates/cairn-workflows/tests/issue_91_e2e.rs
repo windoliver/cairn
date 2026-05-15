@@ -126,7 +126,8 @@ async fn three_workflows_drain_through_one_scheduler() {
         },
         ..SchedulerConfig::p0()
     };
-    let scheduler = Scheduler::start("e2e", jobs.clone(), &registry, clock.clone(), sched_cfg);
+    let scheduler =
+        Scheduler::start("e2e", jobs.clone(), &registry, clock.clone(), sched_cfg).await;
 
     // Enqueue one job per kind. now_ms for expiration is well past the
     // sample fixture's `updated_at` (2026-04-22) so every seed expires.
