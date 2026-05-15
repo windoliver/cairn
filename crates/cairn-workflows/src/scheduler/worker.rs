@@ -367,12 +367,7 @@ mod tests {
         async fn enqueue(&self, _: ER) -> Result<(), JobStoreError> {
             Ok(())
         }
-        async fn lease(
-            &self,
-            _: &str,
-            _: i64,
-            _: i64,
-        ) -> Result<Option<LeasedJob>, JobStoreError> {
+        async fn lease(&self, _: &str, _: i64, _: i64) -> Result<Option<LeasedJob>, JobStoreError> {
             Ok(None)
         }
         async fn heartbeat(
@@ -384,12 +379,7 @@ mod tests {
         ) -> Result<(), JobStoreError> {
             Ok(())
         }
-        async fn complete(
-            &self,
-            _: &JobId,
-            _: &LeaseToken,
-            _: i64,
-        ) -> Result<(), JobStoreError> {
+        async fn complete(&self, _: &JobId, _: &LeaseToken, _: i64) -> Result<(), JobStoreError> {
             match self.completes.lock() {
                 Ok(mut g) => *g = g.saturating_add(1),
                 Err(p) => *p.into_inner() = 0,
