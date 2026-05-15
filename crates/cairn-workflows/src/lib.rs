@@ -10,12 +10,17 @@
 
 pub mod consent_mirror;
 pub mod consolidation;
+pub mod drainer;
 pub mod dream;
 pub mod evaluation;
 pub mod expiration;
+pub mod planners;
+pub mod salience_decay;
 pub mod scheduler;
+pub mod sqlite_apply;
 pub mod sqlite_store;
 pub mod synthetic;
+pub mod workflows;
 
 #[cfg(test)]
 mod test_support;
@@ -25,6 +30,11 @@ pub use consolidation::{
     CONSOLIDATION_KIND, ConsolidationForgetCleanupHandler, ConsolidationHandler,
     ConsolidationPayload, FORGET_CLEANUP_KIND, ForgetCleanupPayload,
 };
+pub use drainer::{
+    DrainStats, FileWorkflowCheckpointStore, FlushPlanApply, FlushPlanApplyOutcome, Workflow,
+    WorkflowCheckpointStore, WorkflowContext, WorkflowDrainer, WorkflowError,
+    WorkflowStatusSnapshot,
+};
 pub use dream::{DREAM_KIND, DreamHandler, DreamPayload};
 pub use evaluation::{
     CheckOutcome, EVALUATION_KIND, EvaluationHandler, EvaluationPayload, EvaluationReport,
@@ -33,8 +43,11 @@ pub use evaluation::{
 pub use expiration::{
     EXPIRATION_KIND, ExpirationHandler, ExpirationPayload, ExpirationSweepReport,
 };
+pub use planners::{ConsolidatePlanSource, ExpirePlanSource, PromotePlanSource};
 pub use scheduler::{Clock, MockClock, Scheduler, SchedulerConfig, SystemClock};
+pub use sqlite_apply::SqliteFlushPlanApply;
 pub use sqlite_store::{SqliteJobStore, SqliteJobStoreInitError};
+pub use workflows::{ConsolidateWorkflow, ExpireWorkflow, PromoteWorkflow, WorkflowPlanSource};
 
 use cairn_core::contract::version::{ContractVersion, VersionRange};
 use cairn_core::contract::workflow_orchestrator::{

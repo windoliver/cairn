@@ -199,6 +199,11 @@ pub fn advertise(gates: &CapabilityGates) -> Vec<Capabilities> {
         out.push(Capabilities::CairnMcpV1SearchHybrid);
     }
 
+    // ── summarize ────────────────────────────────────────────────────────
+    if phase >= Phase::V0_2 && gates.llm_configured {
+        out.push(Capabilities::CairnMcpV1SummarizeNarrative);
+    }
+
     // ── policy_trace ──────────────────────────────────────────────────────
     if cfg.policy_trace {
         out.push(Capabilities::CairnMcpV1PolicyTrace);

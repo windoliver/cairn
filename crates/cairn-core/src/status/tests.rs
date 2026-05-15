@@ -115,6 +115,35 @@ fn forget_record_advertises_when_runtime_is_wired() {
 }
 
 #[test]
+fn summarize_narrative_advertises_only_when_llm_configured() {
+    let mut without_llm = gates(true, true, None);
+    without_llm.contract_phase = Phase::V0_2;
+    without_llm.llm_configured = false;
+    let caps = advertise(&without_llm);
+    assert!(
+        !caps.contains(&Capabilities::CairnMcpV1SummarizeNarrative),
+        "summarize.narrative requires an LLM provider; got {caps:?}"
+    );
+
+    let mut with_llm = gates(true, true, None);
+    with_llm.contract_phase = Phase::V0_2;
+    with_llm.llm_configured = true;
+    let caps = advertise(&with_llm);
+    assert!(
+        caps.contains(&Capabilities::CairnMcpV1SummarizeNarrative),
+        "summarize.narrative should advertise when an LLM provider is configured; got {caps:?}"
+    );
+
+    let mut v0_1 = with_llm;
+    v0_1.contract_phase = Phase::V0_1;
+    let caps = advertise(&v0_1);
+    assert!(
+        !caps.contains(&Capabilities::CairnMcpV1SummarizeNarrative),
+        "summarize.narrative is pinned to v0.2; got {caps:?}"
+    );
+}
+
+#[test]
 fn retrieve_session_turn_and_tool_call_advertise_when_runtime_is_wired() {
     let g = gates(true, true, None);
     let caps = advertise(&g);
@@ -600,6 +629,7 @@ mod exhaustiveness {
             Capabilities::CairnMcpV1SearchKeyword => "search.keyword",
             Capabilities::CairnMcpV1SearchSemantic => "search.semantic",
             Capabilities::CairnMcpV1SearchHybrid => "search.hybrid",
+            Capabilities::CairnMcpV1SummarizeNarrative => "summarize.narrative",
             Capabilities::CairnMcpV1PolicyTrace => "policy_trace",
             Capabilities::CairnMcpV1SensorsPreCompact => "sensors.pre_compact",
             Capabilities::CairnMcpV1ForgetRecord => "forget.record",
@@ -641,6 +671,7 @@ mod exhaustiveness {
             Capabilities::CairnMcpV1SearchKeyword,
             Capabilities::CairnMcpV1SearchSemantic,
             Capabilities::CairnMcpV1SearchHybrid,
+            Capabilities::CairnMcpV1SummarizeNarrative,
             Capabilities::CairnMcpV1PolicyTrace,
             Capabilities::CairnMcpV1SensorsPreCompact,
             Capabilities::CairnMcpV1ForgetRecord,

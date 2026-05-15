@@ -45,6 +45,7 @@ pub mod filter;
 pub mod lint;
 pub mod pre_compact;
 pub mod profile;
+pub mod salience;
 pub(crate) mod squash;
 pub mod turn;
 

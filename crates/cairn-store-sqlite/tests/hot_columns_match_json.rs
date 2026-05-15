@@ -1,4 +1,4 @@
-//! Proptest: every denormalized column equals its `record_json` projection.
+//! Proptest: an upsert projects denormalized columns from `record_json`.
 //!
 //! Each iteration spins up a fresh tokio current-thread runtime to drive
 //! the async store API from inside the synchronous proptest body. This is

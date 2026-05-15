@@ -505,6 +505,7 @@ impl CairnMcpHandler {
                     cairn_core::generated::status::StatusResponseMcpGraphToolsProbeBasis::ConfigOnly,
                 error: None,
             }),
+            workflows: None,
         }
     }
 }

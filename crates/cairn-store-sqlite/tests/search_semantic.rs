@@ -17,6 +17,24 @@ fn make_embedder() -> Arc<dyn EmbeddingModel> {
     Arc::new(MockEmbedder::new(EmbeddingModelKind::BgeSmallEnV1_5))
 }
 
+async fn hot_salience(
+    store: &cairn_store_sqlite::SqliteMemoryStore,
+    record_id: &cairn_core::domain::RecordId,
+) -> f64 {
+    let conn = store.raw_conn().expect("conn").clone();
+    let id = record_id.as_str().to_owned();
+    conn.call(move |c| {
+        c.query_row(
+            "SELECT salience FROM records WHERE record_id = ?1",
+            rusqlite::params![id],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+    })
+    .await
+    .expect("hot salience")
+}
+
 /// Build a minimal record for test use.
 fn make_record() -> cairn_core::domain::MemoryRecord {
     cairn_test_fixtures::sample_record(42)
@@ -85,6 +103,10 @@ async fn search_semantic_returns_results_after_upsert() {
     assert_eq!(
         page.candidates[0].record_id, outcome.record_id,
         "returned record_id must match the upserted record",
+    );
+    assert!(
+        hot_salience(&store, &outcome.record_id).await > f64::from(r.salience),
+        "semantic search should strengthen returned records",
     );
 }
 

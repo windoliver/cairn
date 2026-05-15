@@ -580,6 +580,8 @@ pub struct VaultConfig {
     pub layout: LayoutConfig,
     /// Hot-memory assembly recipe and budget.
     pub hot_memory: HotMemoryConfig,
+    /// Access-frequency salience strengthening and decay policy.
+    pub salience: SalienceConfig,
     /// Glob-keyed retention policies. Value: `"forever"` or `"<N>d"`.
     pub retention: BTreeMap<String, String>,
     /// Schema files to include in the vault.
@@ -594,8 +596,34 @@ impl Default for VaultConfig {
             source: SourceConfig::default(),
             layout: LayoutConfig::default(),
             hot_memory: HotMemoryConfig::default(),
+            salience: SalienceConfig::default(),
             retention: BTreeMap::new(),
             schema_files: vec!["CLAUDE.md".into(), "AGENTS.md".into(), "GEMINI.md".into()],
+        }
+    }
+}
+
+/// Salience lifecycle policy (§5.1, §10, issue #313).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SalienceConfig {
+    /// Exponential decay rate used by the daily decay workflow.
+    pub decay_rate: f32,
+    /// Salience threshold below which old records may auto-evict.
+    pub eviction_threshold: f32,
+    /// Minimum record age in days before auto-eviction can consider it.
+    pub min_age_days: u32,
+    /// Maximum records processed by one decay batch.
+    pub batch_limit: u32,
+}
+
+impl Default for SalienceConfig {
+    fn default() -> Self {
+        Self {
+            decay_rate: 0.05,
+            eviction_threshold: 0.10,
+            min_age_days: 30,
+            batch_limit: 500,
         }
     }
 }
@@ -688,6 +716,26 @@ pub struct HotMemoryRecipePreset {
     pub max_bytes: u32,
 }
 
+/// Triple-form summarize view a built-in hot-memory recipe prefers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HotMemorySummaryReference {
+    /// Dense structured fact triples from `SummarizeData::facts`.
+    Facts,
+    /// Free-form prose from `SummarizeData::narrative`.
+    Narrative,
+}
+
+impl HotMemorySummaryReference {
+    /// Return the stable config/documentation path for this view.
+    #[must_use]
+    pub fn as_path(self) -> &'static str {
+        match self {
+            Self::Facts => "summarize.facts",
+            Self::Narrative => "summarize.narrative",
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HotMemoryRecipePresetWire {
@@ -721,6 +769,9 @@ pub struct ResolvedHotMemoryRecipe<'a> {
     pub steps: &'a [HotMemoryRecipeStep],
     /// Effective byte budget for the recipe.
     pub max_bytes: u32,
+    /// Preferred triple-form summary view for built-in recipes that consume
+    /// summarized hot-memory inputs.
+    pub summary_reference: Option<HotMemorySummaryReference>,
 }
 
 impl Default for HotMemoryConfig {
@@ -763,6 +814,7 @@ impl HotMemoryConfig {
                 name: name.to_owned(),
                 steps: &recipe.steps,
                 max_bytes: recipe.max_bytes,
+                summary_reference: hot_memory_summary_reference(name),
             });
         }
         // Legacy fallback: only fires when the recipes table is
@@ -777,6 +829,7 @@ impl HotMemoryConfig {
                 name: name.to_owned(),
                 steps: &self.recipe,
                 max_bytes: self.max_bytes,
+                summary_reference: hot_memory_summary_reference(name),
             });
         }
         None
@@ -786,6 +839,14 @@ impl HotMemoryConfig {
     #[must_use]
     pub fn recipe_names(&self) -> Vec<&str> {
         self.recipes.keys().map(String::as_str).collect()
+    }
+}
+
+fn hot_memory_summary_reference(name: &str) -> Option<HotMemorySummaryReference> {
+    match name {
+        "chat" => Some(HotMemorySummaryReference::Narrative),
+        "debug" => Some(HotMemorySummaryReference::Facts),
+        _ => None,
     }
 }
 
@@ -1811,6 +1872,15 @@ mod tests {
     }
 
     #[test]
+    fn default_salience_config_matches_issue_313() {
+        let cfg = CairnConfig::default();
+        assert!((cfg.vault.salience.decay_rate - 0.05).abs() < f32::EPSILON);
+        assert!((cfg.vault.salience.eviction_threshold - 0.10).abs() < f32::EPSILON);
+        assert_eq!(cfg.vault.salience.min_age_days, 30);
+        assert_eq!(cfg.vault.salience.batch_limit, 500);
+    }
+
+    #[test]
     fn default_extract_chain_has_regex_only() {
         let chain = &CairnConfig::default().pipeline.extract.chain;
         assert_eq!(chain.len(), 1);
@@ -1975,6 +2045,26 @@ mod tests {
         assert_eq!(with_flag.steps, default.steps);
         assert_eq!(with_flag.max_bytes, default.max_bytes);
         assert_eq!(with_flag.name, default.name);
+    }
+
+    #[test]
+    fn builtin_recipes_reference_triple_form_summary_views() {
+        let cfg = HotMemoryConfig::default();
+
+        let chat = cfg.resolve_recipe(Some("chat")).expect("chat resolves");
+        assert_eq!(
+            chat.summary_reference
+                .map(HotMemorySummaryReference::as_path),
+            Some("summarize.narrative")
+        );
+
+        let debug = cfg.resolve_recipe(Some("debug")).expect("debug resolves");
+        assert_eq!(
+            debug
+                .summary_reference
+                .map(HotMemorySummaryReference::as_path),
+            Some("summarize.facts")
+        );
     }
 
     #[test]

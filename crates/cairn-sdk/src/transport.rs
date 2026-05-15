@@ -204,6 +204,7 @@ impl<T: Transport> Sdk<T> {
                 probe_basis: StatusResponseMcpGraphToolsProbeBasis::ConfigOnly,
                 error: None,
             }),
+            workflows: None,
         }
     }
 

@@ -95,6 +95,33 @@ fn assert_policy_trace_body_free(value: &serde_json::Value) {
     }
 }
 
+fn normalize_ulids_for_snapshot(value: &mut serde_json::Value) {
+    const ULID_LEN: usize = 26;
+    const PLACEHOLDER: &str = "01XXXXXXXXXXXXXXXXXXXXXXXX";
+
+    match value {
+        serde_json::Value::String(s) => {
+            if s.len() == ULID_LEN
+                && s.chars()
+                    .all(|c| matches!(c, '0'..='9' | 'A'..='H' | 'J'..='K' | 'M'..='N' | 'P'..='T' | 'V'..='Z'))
+            {
+                PLACEHOLDER.clone_into(s);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                normalize_ulids_for_snapshot(item);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for item in map.values_mut() {
+                normalize_ulids_for_snapshot(item);
+            }
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+    }
+}
+
 #[test]
 fn live_ingest_policy_trace_is_body_free() {
     let vault = tempfile::tempdir().expect("vault");
@@ -320,6 +347,14 @@ fn summarize_json_commits_authorized_rollup() {
         "stderr={}",
         String::from_utf8_lossy(&summarize.stderr)
     );
+    let mut snapshot_json: serde_json::Value =
+        serde_json::from_slice(&summarize.stdout).expect("snapshot json");
+    normalize_ulids_for_snapshot(&mut snapshot_json);
+    insta::assert_snapshot!(
+        "summarize_triple_form_json",
+        serde_json::to_string_pretty(&snapshot_json).expect("snapshot string")
+    );
+
     let resp: Response = serde_json::from_slice(&summarize.stdout).expect("response");
     assert_eq!(resp.status, ResponseStatus::Committed);
     assert_eq!(resp.verb, ResponseVerb::Summarize);
@@ -329,10 +364,20 @@ fn summarize_json_commits_authorized_rollup() {
     let Some(ResponseData::Summarize(data)) = resp.data else {
         panic!("summarize must return summary data");
     };
-    assert!(data.summary.contains("Alpha detail for the project"));
-    assert!(data.summary.contains("Beta detail for the project"));
+    assert!(data.digest.contains("Alpha detail for the project"));
+    assert!(data.digest.contains("Beta detail for the project"));
+    assert_eq!(data.narrative, "");
+    assert!(data.facts.iter().any(|fact| {
+        fact.object == "Alpha detail for the project"
+            && fact.confidence == cairn_core::generated::verbs::summarize::ConfidenceTag::Extracted
+            && fact.source_record_ids.iter().any(|id| id.0 == alpha)
+    }));
+    assert!(data.concepts.iter().any(|concept| {
+        concept.name == "project"
+            && concept.kind == cairn_core::generated::verbs::summarize::ConceptKind::Topic
+    }));
     assert!(
-        !data.summary.contains(&alpha),
+        !data.digest.contains(&alpha),
         "citations=off should omit source record ids"
     );
 }
@@ -1032,7 +1077,7 @@ fn issue_61_cli_full_workflow_round_trips_across_verbs() {
     let summary_id = data.persisted_record_id.expect("persisted summary id").0;
     assert_eq!(summary_id.len(), 26);
     assert!(
-        data.summary
+        data.digest
             .contains("full workflow issue 61 project memory")
     );
 
