@@ -85,7 +85,7 @@ top-level contract.
            ▼                                    ▼
 ┌─────────────────────────┐   ┌──────────────────────────────────┐
 │ cairn-store-sqlite      │   │ cairn-core::verbs::lint           │
-│  migration 0021:        │   │   checks/workflow_health.rs (new) │
+│  migration 0062:        │   │   checks/workflow_health.rs (new) │
 │   + dead_letter_at_ms   │   │   reads WorkflowJobsReader        │
 │   + failure_class       │   │   emits Findings w/ job_id + kind │
 └─────────────────────────┘   └──────────────────────────────────┘
@@ -150,9 +150,9 @@ non-load-bearing test code terse.
 These are breaking signature changes inside `cairn-core`, so the PR updates
 every call site in one pass.
 
-### 4.5 SQLite migration 0021
+### 4.5 SQLite migration 0062
 
-New file `crates/cairn-store-sqlite/migrations/0021_workflow_dead_letter.sql`:
+New file `crates/cairn-store-sqlite/src/migrations/sql/0062_workflow_dead_letter.sql`:
 
 ```sql
 ALTER TABLE workflow_jobs ADD COLUMN failure_class    TEXT;
@@ -283,7 +283,7 @@ last completed. Two options:
   `complete()`.
 
 We pick **(a)** for minimum churn: one more nullable column in migration
-0021, populated in the adapter's `complete()` impl, indexed for kind-grouped
+0062, populated in the adapter's `complete()` impl, indexed for kind-grouped
 lookups.
 
 ```sql
@@ -390,7 +390,7 @@ millisecond value. No new contract; just a primitive.
 | `MetricsError` on emit | worker after store mutation | log `warn`, never abort job |
 | Handler panics across await | watchdog | watchdog fires `lease_lost`; reaper reclaims; retry with `class = Timeout` |
 | `WorkflowJobsReader` query failure | lint dispatch | wrap in `LintError::DeferredCheck { reason }` → emit `DeferredCheck` Info finding; rest of checks proceed |
-| Migration 0021 apply failure | startup | fatal — `cairn-cli` exits `EX_CONFIG` (78) |
+| Migration 0062 apply failure | startup | fatal — `cairn-cli` exits `EX_CONFIG` (78) |
 | Malformed `workflows.lint` config | startup | fall back to defaults, log `warn` |
 
 **Failure-class invariants** (debug-asserted, release-warned):
@@ -460,7 +460,7 @@ millisecond value. No new contract; just a primitive.
    `fail()` impl is updated for the new signature but does **not** persist
    the new fields yet — it accepts the param and discards it. Builds and
    tests stay green. No SQLite migration.
-2. **PR-2: SQLite migration 0021 + startup reap.** Add `failure_class`,
+2. **PR-2: SQLite migration 0062 + startup reap.** Add `failure_class`,
    `dead_letter_at_ms`, `completed_at_ms` columns + indexes. Adapter writes
    them on `fail()` / `complete()`. Make `Scheduler::start` async and call
    `reap_expired` once before worker spawn.
