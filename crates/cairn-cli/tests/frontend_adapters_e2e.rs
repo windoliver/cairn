@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 
 use cairn_cli::plugins::host;
 use cairn_core::contract::frontend_adapter::{
-    FrontendAdapterError, FrontendBackendState, FrontendEdit, FrontendIdentityContext,
-    FrontendProjectionRequest, FrontendReconcileError,
+    FrontendAdapter, FrontendAdapterError, FrontendBackendState, FrontendEdit,
+    FrontendIdentityContext, FrontendProjectionRequest, FrontendReconcileError,
 };
 use cairn_core::contract::memory_store::StoredRecord;
 use cairn_core::contract::registry::PluginName;
@@ -61,7 +61,7 @@ fn bundled_frontend_adapters_project_and_reconcile_through_host_e2e() {
 
         let reconcile = adapter
             .reconcile(
-                known_identity("2026-04-22T14:07:11Z", sample_target_hash()),
+                known_identity("2026-04-22T14:07:11Z", &sample_target_hash()),
                 edit(
                     100,
                     sample_target_hash(),
@@ -89,109 +89,112 @@ fn bundled_frontend_adapters_fail_closed_for_corner_cases_e2e() {
         let adapter = registry
             .frontend_adapter(&name)
             .expect("adapter registered");
-
-        assert_reconcile_error(
-            adapter.reconcile(
-                known_identity("2026-04-22T14:07:11Z", sample_target_hash()),
-                edit(
-                    100,
-                    sample_target_hash(),
-                    [("operation_id", serde_json::json!("mutated"))],
-                ),
-            ),
-            |err| {
-                matches!(
-                    err,
-                    FrontendReconcileError::ImmutableFieldChanged { field }
-                        if field == "operation_id"
-                )
-            },
-            case.name,
-            "immutable operation_id is rejected before apply",
-        );
-
-        assert_reconcile_error(
-            adapter.reconcile(
-                known_identity("2026-04-22T14:07:11Z", sample_target_hash()),
-                edit(
-                    100,
-                    sample_target_hash(),
-                    [("body", serde_json::json!("replay://operation"))],
-                ),
-            ),
-            |err| matches!(err, FrontendReconcileError::ReplayDetected),
-            case.name,
-            "replay sentinel is rejected",
-        );
-
-        assert_reconcile_error(
-            adapter.reconcile(
-                known_identity("2026-04-22T14:06:11Z", sample_target_hash()),
-                edit(
-                    99,
-                    sample_target_hash(),
-                    [("body", serde_json::json!("expired and stale"))],
-                ),
-            ),
-            |err| matches!(err, FrontendReconcileError::ExpiredIntent { .. }),
-            case.name,
-            "expired intent wins over stale version",
-        );
-
-        assert_reconcile_error(
-            adapter.reconcile(
-                unknown_identity("2026-04-22T14:07:11Z", sample_target_hash()),
-                edit(
-                    99,
-                    sample_target_hash(),
-                    [("body", serde_json::json!("unknown and stale"))],
-                ),
-            ),
-            |err| matches!(err, FrontendReconcileError::QuarantineRequired { .. }),
-            case.name,
-            "unknown principal is quarantined before stale version",
-        );
-
-        assert_reconcile_error(
-            adapter.reconcile(
-                known_identity("2026-04-22T14:07:11Z", sample_target_hash()),
-                edit(
-                    99,
-                    sample_target_hash(),
-                    [("body", serde_json::json!("stale"))],
-                ),
-            ),
-            |err| {
-                matches!(
-                    err,
-                    FrontendReconcileError::Conflict {
-                        current_version: 100
-                    }
-                )
-            },
-            case.name,
-            "stale version conflicts",
-        );
-
-        assert_reconcile_error(
-            adapter.reconcile(
-                known_identity("2026-04-22T14:07:11Z", sample_target_hash()),
-                edit(
-                    100,
-                    alternate_target_hash(),
-                    [("body", serde_json::json!("hash mismatch"))],
-                ),
-            ),
-            |err| {
-                matches!(
-                    err,
-                    FrontendReconcileError::PolicyDenied { gate, .. } if gate == "target_hash"
-                )
-            },
-            case.name,
-            "target hash mismatch is policy denied",
-        );
+        assert_corner_cases(adapter.as_ref(), case.name);
     }
+}
+
+fn assert_corner_cases(adapter: &dyn FrontendAdapter, adapter_name: &str) {
+    assert_reconcile_error(
+        adapter.reconcile(
+            known_identity("2026-04-22T14:07:11Z", &sample_target_hash()),
+            edit(
+                100,
+                sample_target_hash(),
+                [("operation_id", serde_json::json!("mutated"))],
+            ),
+        ),
+        |err| {
+            matches!(
+                err,
+                FrontendReconcileError::ImmutableFieldChanged { field }
+                    if field == "operation_id"
+            )
+        },
+        adapter_name,
+        "immutable operation_id is rejected before apply",
+    );
+
+    assert_reconcile_error(
+        adapter.reconcile(
+            known_identity("2026-04-22T14:07:11Z", &sample_target_hash()),
+            edit(
+                100,
+                sample_target_hash(),
+                [("body", serde_json::json!("replay://operation"))],
+            ),
+        ),
+        |err| matches!(err, FrontendReconcileError::ReplayDetected),
+        adapter_name,
+        "replay sentinel is rejected",
+    );
+
+    assert_reconcile_error(
+        adapter.reconcile(
+            known_identity("2026-04-22T14:06:11Z", &sample_target_hash()),
+            edit(
+                99,
+                sample_target_hash(),
+                [("body", serde_json::json!("expired and stale"))],
+            ),
+        ),
+        |err| matches!(err, FrontendReconcileError::ExpiredIntent { .. }),
+        adapter_name,
+        "expired intent wins over stale version",
+    );
+
+    assert_reconcile_error(
+        adapter.reconcile(
+            unknown_identity("2026-04-22T14:07:11Z", &sample_target_hash()),
+            edit(
+                99,
+                sample_target_hash(),
+                [("body", serde_json::json!("unknown and stale"))],
+            ),
+        ),
+        |err| matches!(err, FrontendReconcileError::QuarantineRequired { .. }),
+        adapter_name,
+        "unknown principal is quarantined before stale version",
+    );
+
+    assert_reconcile_error(
+        adapter.reconcile(
+            known_identity("2026-04-22T14:07:11Z", &sample_target_hash()),
+            edit(
+                99,
+                sample_target_hash(),
+                [("body", serde_json::json!("stale"))],
+            ),
+        ),
+        |err| {
+            matches!(
+                err,
+                FrontendReconcileError::Conflict {
+                    current_version: 100
+                }
+            )
+        },
+        adapter_name,
+        "stale version conflicts",
+    );
+
+    assert_reconcile_error(
+        adapter.reconcile(
+            known_identity("2026-04-22T14:07:11Z", &sample_target_hash()),
+            edit(
+                100,
+                alternate_target_hash(),
+                [("body", serde_json::json!("hash mismatch"))],
+            ),
+        ),
+        |err| {
+            matches!(
+                err,
+                FrontendReconcileError::PolicyDenied { gate, .. } if gate == "target_hash"
+            )
+        },
+        adapter_name,
+        "target hash mismatch is policy denied",
+    );
 }
 
 #[derive(Clone, Copy)]
@@ -285,14 +288,14 @@ fn edit(
 
 fn known_identity(
     expires_at: &str,
-    signed_target_hash: CanonicalRecordHash,
+    signed_target_hash: &CanonicalRecordHash,
 ) -> FrontendIdentityContext {
     identity_context("hmn:known-user", expires_at, signed_target_hash)
 }
 
 fn unknown_identity(
     expires_at: &str,
-    signed_target_hash: CanonicalRecordHash,
+    signed_target_hash: &CanonicalRecordHash,
 ) -> FrontendIdentityContext {
     identity_context("hmn:unknown-user", expires_at, signed_target_hash)
 }
@@ -300,7 +303,7 @@ fn unknown_identity(
 fn identity_context(
     principal: &str,
     expires_at: &str,
-    signed_target_hash: CanonicalRecordHash,
+    signed_target_hash: &CanonicalRecordHash,
 ) -> FrontendIdentityContext {
     FrontendIdentityContext {
         principal: Identity::parse(principal).expect("valid identity"),
