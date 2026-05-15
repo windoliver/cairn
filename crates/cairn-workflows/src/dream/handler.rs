@@ -63,10 +63,22 @@ impl DreamHandler {
         Self { store, config, llm }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "linear distillation pipeline: window collect → pre-LLM dedupe → LLM call → \
+                  post-LLM dedupe → upsert → post-upsert source-liveness recheck. Splitting \
+                  the pipeline obscures the round-by-round race-closure structure."
+    )]
     async fn run_once(
         &self,
         payload: DreamPayload,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Sanity cap on total pages scanned: each page is
+        // `window_size_records` rows, and we walk at most
+        // `DREAM_FETCH_PAGE_CAP` pages before bailing — keeps a
+        // dream-heavy vault from monopolising the worker.
+        const DREAM_FETCH_PAGE_CAP: usize = 64;
+
         let Some(llm) = self.llm.as_ref() else {
             // The Permanent branch above is what the scheduler sees;
             // this Err path is for callers that drive `run_once`
@@ -82,11 +94,6 @@ impl DreamHandler {
         // sources-hash in `target_key`, and produce a new target on
         // replay (round-2 adversarial review #2).
         let window_cap = self.config.window_size_records as usize;
-        // Sanity cap on total pages scanned: each page is
-        // `window_size_records` rows, and we walk at most
-        // `DREAM_FETCH_PAGE_CAP` pages before bailing — keeps a
-        // dream-heavy vault from monopolising the worker.
-        const DREAM_FETCH_PAGE_CAP: usize = 64;
         let mut filtered: Vec<cairn_core::domain::record::MemoryRecord> =
             Vec::with_capacity(window_cap);
         let mut cursor = None;
@@ -118,12 +125,11 @@ impl DreamHandler {
             if filtered.len() >= window_cap {
                 break;
             }
-            match page.next_cursor {
-                Some(next) => cursor = Some(next),
-                None => {
-                    cursor_exhausted = true;
-                    break;
-                }
+            if let Some(next) = page.next_cursor {
+                cursor = Some(next);
+            } else {
+                cursor_exhausted = true;
+                break;
             }
         }
         // Round-5 adversarial review #2 + round-6 #2 + round-7 #3:
@@ -169,12 +175,8 @@ impl DreamHandler {
             .as_ref()
             .map(ScopeTuple::canonical_wire)
             .unwrap_or_default();
-        let sources_hash =
-            crate::synthetic::sha256_hex(source_record_ids.join(",").as_bytes());
-        let target_key = format!(
-            "dream:{scope_wire}:{key}:{sources_hash}",
-            key = payload.key
-        );
+        let sources_hash = crate::synthetic::sha256_hex(source_record_ids.join(",").as_bytes());
+        let target_key = format!("dream:{scope_wire}:{key}:{sources_hash}", key = payload.key);
 
         // Pre-LLM existence check: if an active dream record already
         // exists at this deterministic target, skip the LLM call. Two
@@ -187,14 +189,55 @@ impl DreamHandler {
         //   2. Retry after a successful upsert but failed handler
         //      completion: the next attempt finds the prior record
         //      and exits without re-prompting the LLM.
+        //
+        // Round-10 adversarial review: if the existing active record
+        // at this target is itself orphaned (one of its sources has
+        // been tombstoned since), tombstone it before returning so
+        // retries that arrived AFTER a failed post-upsert cleanup
+        // still converge to a clean state. Without this, a dream
+        // committed by a prior attempt whose post-upsert recheck /
+        // self-tombstone failed could remain active indefinitely.
         let target_id = crate::synthetic::stable_target_id(&target_key)?;
-        if self.store.get_active_by_target(&target_id).await?.is_some() {
-            info!(
-                key = %payload.key,
-                target_id = target_id.as_str(),
-                "dream: active record already exists at deterministic target — skipping LLM"
-            );
-            return Ok(());
+        if let Some(existing) = self.store.get_active_by_target(&target_id).await? {
+            let existing_sources: Vec<String> = existing
+                .record
+                .extra_frontmatter
+                .get("dream")
+                .and_then(|v| v.get("source_record_ids"))
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|s| s.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut any_stale = false;
+            for source_str in &existing_sources {
+                let source_id = cairn_core::domain::RecordId::parse(source_str.clone())?;
+                if self.store.get(&source_id).await?.is_none() {
+                    any_stale = true;
+                    break;
+                }
+            }
+            if any_stale {
+                warn!(
+                    key = %payload.key,
+                    target_id = target_id.as_str(),
+                    record_id = existing.record.id.as_str(),
+                    "dream: existing active record has stale sources — tombstoning before retry"
+                );
+                self.store
+                    .tombstone(&existing.record.id, TombstoneReason::Forget)
+                    .await?;
+                // Fall through and let this attempt re-distill.
+            } else {
+                info!(
+                    key = %payload.key,
+                    target_id = target_id.as_str(),
+                    "dream: active record already exists at deterministic target — skipping LLM"
+                );
+                return Ok(());
+            }
         }
 
         let prompt = render_dream_prompt(&payload.key, &filtered);

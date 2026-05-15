@@ -133,7 +133,7 @@ impl EvaluationHandler {
     ) -> Result<EvaluationReport, Box<dyn std::error::Error + Send + Sync>> {
         let checks = self
             .select_checks(payload)
-            .map_err(|e| Box::<dyn std::error::Error + Send + Sync>::from(e))?;
+            .map_err(Box::<dyn std::error::Error + Send + Sync>::from)?;
         let mut passed = 0_u32;
         let mut failed = 0_u32;
         let mut findings: Vec<(String, CheckOutcome)> = Vec::with_capacity(checks.len());
@@ -162,10 +162,9 @@ impl EvaluationHandler {
         // unrelated no-report sweeps at the same `ts_ms` would
         // collapse in downstream `(report_target_id, ts_ms)`
         // queries (round-3 adversarial review #2).
-        let target_key = self.report_target_key(payload, &findings);
-        let target_id = stable_target_id(&target_key).map_err(|e| {
-            Box::<dyn std::error::Error + Send + Sync>::from(e.to_string())
-        })?;
+        let target_key = Self::report_target_key(payload, &findings);
+        let target_id = stable_target_id(&target_key)
+            .map_err(|e| Box::<dyn std::error::Error + Send + Sync>::from(e.to_string()))?;
         let report_target_id = target_id.as_str().to_owned();
 
         let _report_was_new = if self.config.write_report_record {
@@ -213,7 +212,6 @@ impl EvaluationHandler {
     /// downstream gating sees both versions as distinct records
     /// (round-4 adversarial review #3).
     fn report_target_key(
-        &self,
         payload: &EvaluationPayload,
         findings: &[(String, CheckOutcome)],
     ) -> String {
@@ -240,8 +238,7 @@ impl EvaluationHandler {
             })
             .collect::<Vec<_>>()
             .join("|");
-        let outcome_hash =
-            crate::synthetic::sha256_hex(outcome_basis.as_bytes());
+        let outcome_hash = crate::synthetic::sha256_hex(outcome_basis.as_bytes());
         // Use only the first 16 hex chars of the digest to keep the
         // key short; collisions at that prefix are vanishingly
         // unlikely (1 in 2^64) and the full hash lives in the

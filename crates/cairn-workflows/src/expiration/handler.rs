@@ -158,12 +158,11 @@ impl ExpirationHandler {
                     break;
                 }
             }
-            match page.next_cursor {
-                Some(next) => cursor = Some(next),
-                None => {
-                    cursor_exhausted = true;
-                    break;
-                }
+            if let Some(next) = page.next_cursor {
+                cursor = Some(next);
+            } else {
+                cursor_exhausted = true;
+                break;
             }
         }
 
@@ -224,9 +223,9 @@ impl ExpirationHandler {
                 // continuation is already queued / leased / done.
                 // Treat as success and let the existing job drive
                 // the next sweep.
-                Err(
-                    cairn_core::contract::job_store::JobStoreError::DuplicateDedupeKey { .. },
-                ) => {
+                Err(cairn_core::contract::job_store::JobStoreError::DuplicateDedupeKey {
+                    ..
+                }) => {
                     info!(
                         job_id = job_id.as_str(),
                         "expiration: continuation already enqueued (dedupe hit)"

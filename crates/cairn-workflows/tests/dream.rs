@@ -138,10 +138,7 @@ async fn second_run_skips_llm_when_target_already_exists() {
         fn supported_contract_versions(&self) -> VersionRange {
             VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
         }
-        async fn complete(
-            &self,
-            _req: &CompletionRequest,
-        ) -> Result<CompletionOutput, LlmError> {
+        async fn complete(&self, _req: &CompletionRequest) -> Result<CompletionOutput, LlmError> {
             let i = self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(CompletionOutput::Text(
                 self.bodies.get(i).copied().unwrap_or("overflow").into(),
@@ -189,10 +186,7 @@ async fn second_run_skips_llm_when_target_already_exists() {
         })
         .await
         .expect("list");
-    let leak = listed
-        .records
-        .iter()
-        .any(|r| r.body == "WOULD HAVE LEAKED");
+    let leak = listed.records.iter().any(|r| r.body == "WOULD HAVE LEAKED");
     assert!(!leak, "second run must not have written a regenerated body");
 }
 

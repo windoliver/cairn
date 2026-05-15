@@ -166,16 +166,13 @@ async fn capped_sweep_enqueues_continuation_to_drain_old_records() {
             .await
             .expect("open memory"),
     );
-    let jobs_conn =
-        cairn_store_sqlite::open_sync(&db_path).expect("open jobs conn");
+    let jobs_conn = cairn_store_sqlite::open_sync(&db_path).expect("open jobs conn");
     let jobs: Arc<dyn JobStore> = Arc::new(SqliteJobStore::new(jobs_conn).expect("jobs"));
 
     // Seed 5 records; batch_size = 2 so a single sweep cannot
     // exhaust the cursor.
     for i in 0..5_u64 {
-        mem.upsert(&sample_record(200 + i))
-            .await
-            .expect("seed");
+        mem.upsert(&sample_record(200 + i)).await.expect("seed");
     }
 
     let dyn_store: Arc<dyn MemoryStore> = mem.clone();
@@ -203,12 +200,13 @@ async fn capped_sweep_enqueues_continuation_to_drain_old_records() {
         .lease("test-lease", 1_777_215_600_000, 30_000)
         .await
         .expect("lease");
-    let leased = leased.expect(
-        "capped sweep must enqueue a continuation when JobStore is wired",
-    );
+    let leased = leased.expect("capped sweep must enqueue a continuation when JobStore is wired");
     assert_eq!(leased.kind.as_str(), "expiration.sweep");
     assert!(
-        leased.job_id.as_str().starts_with("expiration:continuation:"),
+        leased
+            .job_id
+            .as_str()
+            .starts_with("expiration:continuation:"),
         "continuation job_id has stable prefix; got {}",
         leased.job_id.as_str()
     );

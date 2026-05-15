@@ -186,8 +186,7 @@ async fn three_workflows_drain_through_one_scheduler() {
     // fires. We assert these BEFORE enqueuing expiration so the
     // race window between dream upsert and source tombstone is
     // closed by sequencing rather than by hope.
-    let deadline_phase1 =
-        std::time::Instant::now() + Duration::from_secs(15);
+    let deadline_phase1 = std::time::Instant::now() + Duration::from_secs(15);
     let mut seen_dream = false;
     let mut seen_eval = false;
     let mut seen_metric = false;
@@ -228,8 +227,7 @@ async fn three_workflows_drain_through_one_scheduler() {
     .await
     .expect("enqueue expiration");
 
-    let deadline_phase2 =
-        std::time::Instant::now() + Duration::from_secs(15);
+    let deadline_phase2 = std::time::Instant::now() + Duration::from_secs(15);
     let mut seen_expire_drain = false;
     while std::time::Instant::now() < deadline_phase2 {
         let listed = mem
