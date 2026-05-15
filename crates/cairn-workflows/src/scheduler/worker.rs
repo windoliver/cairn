@@ -7,7 +7,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use cairn_core::contract::job_store::{FailDisposition, JobStore, LeasedJob};
+use cairn_core::contract::job_store::{FailDisposition, FailureClass, JobStore, LeasedJob};
 use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, instrument, warn};
@@ -92,6 +92,7 @@ async fn execute_one(
                     &leased.job_id,
                     &leased.lease,
                     FailDisposition::Permanent,
+                    FailureClass::Validation,
                     &e.to_string(),
                     now,
                 )
@@ -181,9 +182,13 @@ async fn execute_one(
 
     let outcome = tokio::select! {
         o = handler.handle(&leased.payload) => o,
-        () = cancel.cancelled() => HandlerOutcome::Retry { reason: "scheduler shutdown".into() },
+        () = cancel.cancelled() => HandlerOutcome::Retry {
+            reason: "scheduler shutdown".into(),
+            class: FailureClass::Transient,
+        },
         () = lease_lost.cancelled() => HandlerOutcome::Retry {
             reason: "heartbeat lost or lease deadline exceeded".into(),
+            class: FailureClass::Timeout,
         },
     };
     hb_token.cancel();
@@ -201,23 +206,45 @@ async fn execute_one(
     let now = clock.now_ms();
     let result = match outcome {
         HandlerOutcome::Done => store.complete(&leased.job_id, &leased.lease, now).await,
-        HandlerOutcome::Retry { reason } => {
+        HandlerOutcome::Retry { reason, class } => {
+            // Handlers must not return scheduler-only classes; the
+            // shutdown arm uses Transient and the lease-loss arm uses
+            // Timeout, which is scheduler-only but stamped here, not
+            // by the handler. Anything else flowing through this arm
+            // with a scheduler-only class is a bug.
+            debug_assert!(
+                !class.is_scheduler_only() || class == FailureClass::Timeout,
+                "handler returned scheduler-only class {class:?}",
+            );
+            // Invariant: Validation/Poison force Permanent regardless of
+            // handler-supplied disposition (spec §4.2).
+            let disposition = if class.forces_permanent() {
+                FailDisposition::Permanent
+            } else {
+                FailDisposition::Retry
+            };
             store
                 .fail(
                     &leased.job_id,
                     &leased.lease,
-                    FailDisposition::Retry,
+                    disposition,
+                    class,
                     &reason,
                     now,
                 )
                 .await
         }
-        HandlerOutcome::Permanent { reason } => {
+        HandlerOutcome::Permanent { reason, class } => {
+            debug_assert!(
+                !class.is_scheduler_only(),
+                "handler returned scheduler-only class {class:?} on Permanent",
+            );
             store
                 .fail(
                     &leased.job_id,
                     &leased.lease,
                     FailDisposition::Permanent,
+                    class,
                     &reason,
                     now,
                 )

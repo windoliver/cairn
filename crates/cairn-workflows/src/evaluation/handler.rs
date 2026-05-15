@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use cairn_core::config::EvaluationConfig;
-use cairn_core::contract::job_store::{JobKind, JobPayload};
+use cairn_core::contract::job_store::{FailureClass, JobKind, JobPayload};
 use cairn_core::contract::memory_store::MemoryStore;
 use cairn_core::contract::metrics::MetricsSink;
 use cairn_core::domain::{
@@ -361,6 +361,7 @@ impl JobHandler for EvaluationHandler {
             Err(e) => {
                 return HandlerOutcome::Permanent {
                     reason: format!("evaluation payload decode failed: {e}"),
+                    class: FailureClass::Validation,
                 };
             }
         };
@@ -368,6 +369,7 @@ impl JobHandler for EvaluationHandler {
         if !self.config.enabled {
             return HandlerOutcome::Permanent {
                 reason: "evaluation.enabled = false in config".into(),
+                class: FailureClass::Validation,
             };
         }
 
@@ -375,13 +377,17 @@ impl JobHandler for EvaluationHandler {
         // check id won't fix itself across retries (round-2
         // adversarial review #3).
         if let Err(e) = self.select_checks(&payload) {
-            return HandlerOutcome::Permanent { reason: e };
+            return HandlerOutcome::Permanent {
+                reason: e,
+                class: FailureClass::Validation,
+            };
         }
 
         match self.run_once(&payload).await {
             Ok(_report) => HandlerOutcome::Done,
             Err(e) => HandlerOutcome::Retry {
                 reason: e.to_string(),
+                class: FailureClass::Transient,
             },
         }
     }

@@ -357,6 +357,8 @@ pub trait JobStore: Send + Sync {
     /// Record a failure. With [`FailDisposition::Retry`] the row goes
     /// back to `Queued` (or terminates if `attempts == max_attempts`);
     /// [`FailDisposition::Permanent`] forces terminal `Failed`.
+    /// `class` is persisted on the row when a terminal disposition is
+    /// reached (used by the lint `workflow_health` check).
     ///
     /// # Errors
     ///
@@ -366,6 +368,7 @@ pub trait JobStore: Send + Sync {
         job_id: &JobId,
         lease: &LeaseToken,
         disposition: FailDisposition,
+        class: FailureClass,
         last_error: &str,
         now_ms: i64,
     ) -> Result<(), JobStoreError>;

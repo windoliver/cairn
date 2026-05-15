@@ -69,8 +69,8 @@ pub use identity_registry::{
     RegistryError,
 };
 pub use job_store::{
-    EnqueueRequest, FailDisposition, JobId, JobKind, JobPayload, JobState, JobStore, JobStoreError,
-    LeaseToken, LeasedJob, RetryPolicy,
+    EnqueueRequest, FailDisposition, FailureClass, JobId, JobKind, JobPayload, JobState, JobStore,
+    JobStoreError, LeaseToken, LeasedJob, RetryPolicy,
 };
 pub use keystore::{Keystore, KeystoreError};
 pub use llm_provider::{

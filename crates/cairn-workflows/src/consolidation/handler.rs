@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use cairn_core::config::ConsolidationConfig;
-use cairn_core::contract::job_store::{JobKind, JobPayload};
+use cairn_core::contract::job_store::{FailureClass, JobKind, JobPayload};
 use cairn_core::contract::memory_store::{MemoryStore, TombstoneReason, UpsertOutcome};
 use cairn_core::domain::{
     ActorChainEntry, ChainRole, EvidenceVector, Identity, Provenance, Rfc3339Timestamp, ScopeTuple,
@@ -142,6 +142,7 @@ impl ConsolidationHandler {
             info!(session = %payload.session_id, "no eligible window — releasing dedupe slot");
             return Ok(HandlerOutcome::Permanent {
                 reason: "no eligible window at lease time".into(),
+                class: FailureClass::Validation,
             });
         };
 
@@ -167,6 +168,7 @@ impl ConsolidationHandler {
             );
             return Ok(HandlerOutcome::Retry {
                 reason: "source tombstoned between read and upsert".into(),
+                class: FailureClass::Transient,
             });
         }
 
@@ -278,6 +280,7 @@ impl ConsolidationHandler {
                         warn!(error = %e, "follow-up enqueue failed; retrying");
                         return Ok(HandlerOutcome::Retry {
                             reason: format!("follow-up enqueue: {e}"),
+                            class: FailureClass::Transient,
                         });
                     }
                 }
@@ -493,6 +496,7 @@ impl JobHandler for ConsolidationHandler {
             Err(e) => {
                 return HandlerOutcome::Permanent {
                     reason: format!("payload decode: {e}"),
+                    class: FailureClass::Validation,
                 };
             }
         };
@@ -502,6 +506,7 @@ impl JobHandler for ConsolidationHandler {
                 warn!(error = %e, "consolidation run failed");
                 HandlerOutcome::Retry {
                     reason: e.to_string(),
+                    class: FailureClass::Transient,
                 }
             }
         }

@@ -4,7 +4,8 @@
 use std::sync::Arc;
 
 use cairn_core::contract::{
-    EnqueueRequest, FailDisposition, JobId, JobKind, JobStore, JobStoreError, RetryPolicy,
+    EnqueueRequest, FailDisposition, FailureClass, JobId, JobKind, JobStore, JobStoreError,
+    RetryPolicy,
 };
 use cairn_store_sqlite::open_sync;
 use cairn_workflows::{SqliteJobStore, SqliteJobStoreInitError};
@@ -146,6 +147,7 @@ async fn fail_with_retry_requeues_until_max_attempts() {
             &leased.job_id,
             &leased.lease,
             FailDisposition::Retry,
+            FailureClass::Transient,
             "boom",
             0,
         )
@@ -164,6 +166,7 @@ async fn fail_with_retry_requeues_until_max_attempts() {
             &leased2.job_id,
             &leased2.lease,
             FailDisposition::Retry,
+            FailureClass::Transient,
             "boom2",
             60_000,
         )
@@ -189,6 +192,7 @@ async fn fail_permanent_skips_retry() {
             &leased.job_id,
             &leased.lease,
             FailDisposition::Permanent,
+            FailureClass::Validation,
             "fatal",
             0,
         )
@@ -259,6 +263,7 @@ async fn expired_lease_cannot_complete_or_heartbeat_before_reap() {
             &leased.job_id,
             &leased.lease,
             FailDisposition::Retry,
+            FailureClass::Transient,
             "late",
             2_000,
         )
@@ -431,6 +436,7 @@ async fn custom_retry_policy_is_persisted_and_honored_after_restart() {
                 &leased.job_id,
                 &leased.lease,
                 FailDisposition::Retry,
+                FailureClass::Transient,
                 "boom",
                 0,
             )
@@ -558,6 +564,7 @@ async fn lease_then_crash_before_heartbeat_does_not_consume_attempt() {
             &leased.job_id,
             &leased.lease,
             FailDisposition::Retry,
+            FailureClass::Transient,
             "real-fail",
             after_lease + 100,
         )
@@ -875,6 +882,7 @@ async fn queue_key_fifo_holds_under_retry() {
             &leased.job_id,
             &leased.lease,
             FailDisposition::Retry,
+            FailureClass::Transient,
             "transient",
             0,
         )
@@ -940,6 +948,7 @@ async fn dedupe_key_replayable_after_terminal_failure() {
             &leased.job_id,
             &leased.lease,
             FailDisposition::Permanent,
+            FailureClass::Validation,
             "fatal",
             0,
         )

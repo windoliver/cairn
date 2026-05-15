@@ -13,8 +13,8 @@
 use std::sync::{Arc, Mutex};
 
 use cairn_core::contract::{
-    EnqueueRequest, FailDisposition, JobId, JobKind, JobStore, JobStoreError, LeaseToken,
-    LeasedJob, RetryPolicy,
+    EnqueueRequest, FailDisposition, FailureClass, JobId, JobKind, JobStore, JobStoreError,
+    LeaseToken, LeasedJob, RetryPolicy,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
@@ -898,9 +898,13 @@ impl JobStore for SqliteJobStore {
         job_id: &JobId,
         lease: &LeaseToken,
         disposition: FailDisposition,
+        _class: FailureClass,
         last_error: &str,
         now_ms: i64,
     ) -> Result<(), JobStoreError> {
+        // Phase 1 accepts `class` for the new contract but does not yet
+        // persist it; migration 0062 + Phase 2 wires the column. The
+        // helper signature mirrors the trait for forward compatibility.
         let conn = Arc::clone(&self.conn);
         let job_id = job_id.clone();
         let lease = lease.clone();
@@ -915,6 +919,7 @@ impl JobStore for SqliteJobStore {
                 &job_id,
                 &lease,
                 disposition,
+                _class,
                 &last_error,
                 now_ms,
             )
@@ -1263,6 +1268,7 @@ fn cas_fail(
     job_id: &JobId,
     lease: &LeaseToken,
     disposition: FailDisposition,
+    _class: FailureClass,
     last_error: &str,
     now_ms: i64,
 ) -> Result<(), JobStoreError> {

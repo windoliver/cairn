@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use cairn_core::config::ExpirationConfig;
 use cairn_core::contract::job_store::{
-    EnqueueRequest, JobId, JobKind, JobPayload, JobStore, RetryPolicy,
+    EnqueueRequest, FailureClass, JobId, JobKind, JobPayload, JobStore, RetryPolicy,
 };
 use cairn_core::contract::memory_store::{ListArgs, ListCursor, MemoryStore, TombstoneReason};
 use cairn_core::domain::RecordId;
@@ -299,6 +299,7 @@ impl JobHandler for ExpirationHandler {
             Err(e) => {
                 return HandlerOutcome::Permanent {
                     reason: format!("expiration payload decode failed: {e}"),
+                    class: FailureClass::Validation,
                 };
             }
         };
@@ -306,6 +307,7 @@ impl JobHandler for ExpirationHandler {
         if !self.config.enabled {
             return HandlerOutcome::Permanent {
                 reason: "expiration.enabled = false in config".into(),
+                class: FailureClass::Validation,
             };
         }
 
@@ -313,6 +315,7 @@ impl JobHandler for ExpirationHandler {
             Ok(_report) => HandlerOutcome::Done,
             Err(e) => HandlerOutcome::Retry {
                 reason: e.to_string(),
+                class: FailureClass::Transient,
             },
         }
     }

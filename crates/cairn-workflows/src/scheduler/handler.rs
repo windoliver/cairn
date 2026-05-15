@@ -5,23 +5,51 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use cairn_core::contract::job_store::{JobKind, JobPayload};
+use cairn_core::contract::job_store::{FailureClass, JobKind, JobPayload};
 
 /// Outcome a handler returns after running.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HandlerOutcome {
     /// Handler succeeded; scheduler calls `complete`.
     Done,
-    /// Retryable failure; scheduler calls `fail(Retry)`.
+    /// Retryable failure; scheduler calls `fail(Retry, class)`. Note: if
+    /// `class.forces_permanent()` is true (`Validation`/`Poison`), the
+    /// scheduler converts disposition to `Permanent` before calling the
+    /// store.
     Retry {
         /// Error message persisted into `workflow_jobs.last_error`.
         reason: String,
+        /// Failure classification. Must NOT be `Timeout` or `LeaseLost`
+        /// — those are scheduler-stamped.
+        class: FailureClass,
     },
-    /// Permanent failure; scheduler calls `fail(Permanent)`.
+    /// Permanent failure; scheduler calls `fail(Permanent, class)`.
     Permanent {
         /// Error message persisted into `workflow_jobs.last_error`.
         reason: String,
+        /// Failure classification. Must NOT be `Timeout` or `LeaseLost`.
+        class: FailureClass,
     },
+}
+
+impl HandlerOutcome {
+    /// Convenience constructor for a transient retry.
+    #[must_use]
+    pub fn transient_retry(reason: impl Into<String>) -> Self {
+        Self::Retry {
+            reason: reason.into(),
+            class: FailureClass::Transient,
+        }
+    }
+
+    /// Convenience constructor for a validation-permanent failure.
+    #[must_use]
+    pub fn validation_permanent(reason: impl Into<String>) -> Self {
+        Self::Permanent {
+            reason: reason.into(),
+            class: FailureClass::Validation,
+        }
+    }
 }
 
 /// Errors from registry plumbing.
