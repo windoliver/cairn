@@ -1141,6 +1141,9 @@ fn atomic_lease(
             nonce,
             expires_at_ms: new_expires,
         },
+        // Phase 2 persists `failure_class` on `fail()`; for now we
+        // read it as `None` since the column does not yet exist.
+        failure_class: None,
     }))
 }
 

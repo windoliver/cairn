@@ -208,6 +208,10 @@ pub struct LeasedJob {
     /// Active lease token; the scheduler must present this on
     /// heartbeat / complete / fail.
     pub lease: LeaseToken,
+    /// Class of the most recent failure, if any. `None` for first
+    /// attempts and successfully completed retries. Set by the store
+    /// when a previously-failed row is re-leased.
+    pub failure_class: Option<FailureClass>,
 }
 
 /// Disposition for [`JobStore::fail`].
