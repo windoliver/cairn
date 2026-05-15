@@ -12,21 +12,34 @@ use cairn_core::contract::memory_store::{ListArgs, MemoryStore};
 use cairn_core::domain::ScopeTuple;
 use cairn_core::domain::record::MemoryRecord;
 
-/// Maximum records a single sweep traverses before it bails with a
-/// `Failed` outcome. Brief §15 release gating prefers a loud failure
-/// over a silent "first page only" green light (round-2 adversarial
-/// review #4). Bump the cap when vaults grow.
+/// Maximum records a single sweep traverses before it stops paging
+/// and lets the caller emit a deterministic `Failed` outcome. Brief
+/// §15 release gating prefers a loud failure over a silent
+/// "first page only" green light (round-2 adversarial review #4).
+/// Bump the cap when vaults grow.
 const CHECK_PAGINATION_CAP: usize = 100_000;
 const CHECK_PAGE_SIZE: usize = 1_000;
 
+/// Result of [`collect_all_records`]. The boolean marks whether the
+/// pagination cap was hit *before* the cursor naturally exhausted —
+/// callers convert that into [`CheckOutcome::Failed`] rather than a
+/// scheduler retry (round-3 adversarial review #3).
+pub struct RecordCollection {
+    /// Records visited up to the cap (or until the cursor exhausted).
+    pub records: Vec<MemoryRecord>,
+    /// `true` when the pagination cap fired before the underlying
+    /// cursor naturally exhausted. Callers MUST treat this as
+    /// `CheckOutcome::Failed` rather than passing on partial data.
+    pub truncated_at_cap: bool,
+}
+
 /// Walk every active record matching `scope`, paginating through the
-/// `MemoryStore::list` cursor. Returns `Err` when the cap is reached
-/// so the caller can downgrade to `Failed` rather than silently
-/// report `Passed` on truncated input.
+/// `MemoryStore::list` cursor up to `CHECK_PAGINATION_CAP`.
+/// Genuine store failures still surface as `Err` (→ Retry).
 async fn collect_all_records(
     store: &dyn MemoryStore,
     scope: Option<&ScopeTuple>,
-) -> Result<Vec<MemoryRecord>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<RecordCollection, Box<dyn std::error::Error + Send + Sync>> {
     let mut out: Vec<MemoryRecord> = Vec::new();
     let mut cursor = None;
     loop {
@@ -39,14 +52,19 @@ async fn collect_all_records(
         let page = store.list(&args).await?;
         out.extend(page.records);
         if out.len() > CHECK_PAGINATION_CAP {
-            return Err(format!(
-                "golden-check pagination cap exceeded ({CHECK_PAGINATION_CAP} records)"
-            )
-            .into());
+            return Ok(RecordCollection {
+                records: out,
+                truncated_at_cap: true,
+            });
         }
         match page.next_cursor {
             Some(next) => cursor = Some(next),
-            None => return Ok(out),
+            None => {
+                return Ok(RecordCollection {
+                    records: out,
+                    truncated_at_cap: false,
+                });
+            }
         }
     }
 }
@@ -118,9 +136,16 @@ impl GoldenCheck for OrphanCheck {
         store: &dyn MemoryStore,
         scope: Option<&ScopeTuple>,
     ) -> Result<CheckOutcome, Box<dyn std::error::Error + Send + Sync>> {
-        let records = collect_all_records(store, scope).await?;
+        let collection = collect_all_records(store, scope).await?;
+        if collection.truncated_at_cap {
+            return Ok(CheckOutcome::Failed {
+                details: format!(
+                    "orphan check stopped at {CHECK_PAGINATION_CAP}-record cap — vault too large for the v0.1 starter check"
+                ),
+            });
+        }
         let mut bad_ids: Vec<String> = Vec::new();
-        for r in &records {
+        for r in &collection.records {
             if r.provenance.source_ids.is_empty() {
                 bad_ids.push(r.id.as_str().to_owned());
             }
@@ -158,8 +183,15 @@ impl GoldenCheck for TombstoneConsistencyCheck {
         // `tombstoned` flag is false for every returned row.
         // Paginated to keep large vaults from silently passing on
         // first-page-only data (round-2 adversarial review #4).
-        let records = collect_all_records(store, scope).await?;
-        for rec in &records {
+        let collection = collect_all_records(store, scope).await?;
+        if collection.truncated_at_cap {
+            return Ok(CheckOutcome::Failed {
+                details: format!(
+                    "tombstone-consistency check stopped at {CHECK_PAGINATION_CAP}-record cap — vault too large for the v0.1 starter check"
+                ),
+            });
+        }
+        for rec in &collection.records {
             let history = store.versions(&rec.target_id).await?;
             if let Some(v) = history.iter().rev().find(|v| v.record_id == rec.id)
                 && v.tombstoned

@@ -155,11 +155,24 @@ impl EvaluationHandler {
         findings.sort_by(|a, b| a.0.cmp(&b.0));
 
         let checks_run = u32::try_from(findings.len()).unwrap_or(u32::MAX);
-        let (report_target_id, _report_was_new) = if self.config.write_report_record {
-            let (id, new) = self.upsert_report_record(payload, &findings).await?;
-            (Some(id), new)
+
+        // Compute the stable `report_target_id` unconditionally so
+        // the metric always carries a deterministic dedupe key even
+        // when `write_report_record = false` — without this, two
+        // unrelated no-report sweeps at the same `ts_ms` would
+        // collapse in downstream `(report_target_id, ts_ms)`
+        // queries (round-3 adversarial review #2).
+        let target_key = self.report_target_key(payload, &findings);
+        let target_id = stable_target_id(&target_key).map_err(|e| {
+            Box::<dyn std::error::Error + Send + Sync>::from(e.to_string())
+        })?;
+        let report_target_id = target_id.as_str().to_owned();
+
+        let _report_was_new = if self.config.write_report_record {
+            self.upsert_report_record(payload, &findings, &target_key)
+                .await?
         } else {
-            (None, true)
+            true
         };
 
         // Brief §15 release gating semantics: at-least-once metric
@@ -172,7 +185,7 @@ impl EvaluationHandler {
         // `(report_target_id, ts_ms)` to collapse duplicates.
         let metric = MetricEvent::EvaluationCompleted {
             ts_ms: payload.ts_ms,
-            report_target_id: report_target_id.clone().unwrap_or_default(),
+            report_target_id: report_target_id.clone(),
             checks_run,
             passed,
             failed,
@@ -187,21 +200,45 @@ impl EvaluationHandler {
             checks_run,
             passed,
             failed,
-            report_target_id,
+            report_target_id: Some(report_target_id),
         })
+    }
+
+    /// Build the deterministic `target_key` for both the upserted
+    /// report record and the emitted metric. Same inputs → same key
+    /// → same `target_id` (round-3 adversarial review #2).
+    fn report_target_key(
+        &self,
+        payload: &EvaluationPayload,
+        findings: &[(String, CheckOutcome)],
+    ) -> String {
+        let key_basis = findings
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        let scope_wire = payload
+            .bound_scope
+            .as_ref()
+            .map(ScopeTuple::canonical_wire)
+            .unwrap_or_default();
+        let day = payload.ts_ms / 86_400_000;
+        format!("evaluation:{scope_wire}:{day}:{key_basis}")
     }
 
     /// Upsert the synthesized `Reasoning` report record.
     ///
-    /// Returns `(target_id_str, was_new)`. `was_new = false` means the
-    /// store deduped against the prior body hash for this target — a
-    /// replay of an already-completed sweep — and the caller should
-    /// skip metric emission.
+    /// Returns `was_new = false` when the store deduped against the
+    /// prior body hash for this target (a replay of an
+    /// already-completed sweep). The caller computes the
+    /// deterministic `target_key` so the metric and the upsert share
+    /// the same `target_id`.
     async fn upsert_report_record(
         &self,
         payload: &EvaluationPayload,
         findings: &[(String, CheckOutcome)],
-    ) -> Result<(String, bool), Box<dyn std::error::Error + Send + Sync>> {
+        target_key: &str,
+    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
         // Build a deterministic Markdown body. Same findings → same
         // bytes → same body hash → store dedupes on idempotent
         // replays.
@@ -221,25 +258,7 @@ impl EvaluationHandler {
             body.push('\n');
         }
 
-        let key_basis = findings
-            .iter()
-            .map(|(id, _)| id.as_str())
-            .collect::<Vec<_>>()
-            .join(",");
-        // `target_key` includes (a) the canonical bound scope so two
-        // tenants running the same check set on the same day get
-        // distinct targets, and (b) the calendar day from `ts_ms` so
-        // a sweep run twice on the same day with the same check set
-        // hits the same target_id and the store body-hash dedupe
-        // makes it a no-op (round-1 adversarial review #4).
-        let scope_wire = payload
-            .bound_scope
-            .as_ref()
-            .map(ScopeTuple::canonical_wire)
-            .unwrap_or_default();
-        let day = payload.ts_ms / 86_400_000;
-        let target_key = format!("evaluation:{scope_wire}:{day}:{key_basis}");
-        let target_id = stable_target_id(&target_key)?;
+        let target_id = stable_target_id(target_key)?;
         let target_id_str = target_id.as_str().to_owned();
 
         let mut extras = std::collections::BTreeMap::new();
@@ -275,7 +294,7 @@ impl EvaluationHandler {
             class: MemoryClass::Procedural,
             scope,
             body,
-            target_key: &target_key,
+            target_key,
             extras,
             agent_id: EVAL_AGENT_ID,
             sensor_id: EVAL_SENSOR_ID,
@@ -292,7 +311,7 @@ impl EvaluationHandler {
                 "evaluation: report record idempotent replay"
             );
         }
-        Ok((target_id_str, outcome.content_changed))
+        Ok(outcome.content_changed)
     }
 }
 

@@ -137,6 +137,46 @@ async fn replays_produce_byte_identical_report() {
 }
 
 #[tokio::test]
+async fn metric_id_is_deterministic_even_without_report_record() {
+    // Round-3 adversarial review #2: when write_report_record=false,
+    // the metric must still carry a stable, non-empty
+    // `report_target_id` so downstream `(report_target_id, ts_ms)`
+    // dedupe can collapse retries correctly.
+    let store = Arc::new(memstore().await);
+    let sink = Arc::new(CapturingMetricsSink::new());
+    let dyn_store: Arc<dyn MemoryStore> = store.clone();
+    let handler = EvaluationHandler::new(
+        dyn_store,
+        sink.clone() as Arc<dyn MetricsSink>,
+        default_golden_checks(),
+        EvaluationConfig {
+            enabled: true,
+            write_report_record: false,
+            ..EvaluationConfig::default()
+        },
+    );
+    let payload = EvaluationPayload {
+        ts_ms: 1_700_000_000_000,
+        check_ids: vec![],
+        bound_scope: None,
+    };
+    handler.run_once(&payload).await.expect("sweep");
+    let events = sink.snapshot().await;
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        MetricEvent::EvaluationCompleted {
+            report_target_id, ..
+        } => {
+            assert!(
+                !report_target_id.is_empty(),
+                "report_target_id must be deterministic even with no report record"
+            );
+        }
+        _ => panic!("expected EvaluationCompleted"),
+    }
+}
+
+#[tokio::test]
 async fn unknown_check_id_returns_permanent() {
     // Round-2 adversarial review #3: a typo'd / removed check id
     // must NOT silently produce a successful zero-check sweep.
