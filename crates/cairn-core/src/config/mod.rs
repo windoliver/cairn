@@ -1905,6 +1905,39 @@ mod tests {
     }
 
     #[test]
+    fn workflows_lint_defaults_match_spec() {
+        // Spec §4.11: defaults are load-bearing — the lint check uses these
+        // when no `workflows.lint:` block is present in `.cairn/config.yaml`.
+        let c = WorkflowsLintConfig::default();
+        assert_eq!(c.max_dead_letter_listed, 10);
+        assert_eq!(c.stuck_queue_threshold_ms, 600_000);
+        assert_eq!(c.stale_dream_threshold_ms, 86_400_000);
+        assert_eq!(c.overdue_threshold_ms, 172_800_000);
+    }
+
+    #[test]
+    fn workflows_missing_lint_block_yields_defaults() {
+        // An empty `workflows:` block (or a missing `lint:` subblock) must
+        // produce `WorkflowsLintConfig::default()` — the `#[serde(default)]`
+        // attribute on the `lint` field is what makes that work.
+        let c: WorkflowsConfig = serde_json::from_str("{}").expect("parse");
+        assert_eq!(c.lint, WorkflowsLintConfig::default());
+    }
+
+    #[test]
+    fn workflows_partial_lint_block_merges_with_defaults() {
+        // A partial `lint:` block must keep unspecified fields at their
+        // defaults. This guards against accidental loss of `#[serde(default)]`
+        // on individual fields of `WorkflowsLintConfig`.
+        let json = r#"{"lint": {"max_dead_letter_listed": 25}}"#;
+        let c: WorkflowsConfig = serde_json::from_str(json).expect("parse");
+        assert_eq!(c.lint.max_dead_letter_listed, 25);
+        assert_eq!(c.lint.stuck_queue_threshold_ms, 600_000);
+        assert_eq!(c.lint.stale_dream_threshold_ms, 86_400_000);
+        assert_eq!(c.lint.overdue_threshold_ms, 172_800_000);
+    }
+
+    #[test]
     fn default_salience_config_matches_issue_313() {
         let cfg = CairnConfig::default();
         assert!((cfg.vault.salience.decay_rate - 0.05).abs() < f32::EPSILON);
