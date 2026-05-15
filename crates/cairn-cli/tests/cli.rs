@@ -47,6 +47,28 @@ fn seed_default_identity(vault: &Path) {
     );
 }
 
+fn enable_local_sensor(vault: &Path, sensor: &str) {
+    let out = cli()
+        .current_dir(vault)
+        .args([
+            "sensor",
+            "enable",
+            sensor,
+            "--reason",
+            "operator_on",
+            "--json",
+        ])
+        .output()
+        .unwrap_or_else(|err| panic!("cairn sensor enable {sensor}: {err}"));
+    assert!(
+        out.status.success(),
+        "sensor enable {sensor} failed: {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 fn seed_consent_journal_vault(seed_sql: &str) -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
     let cairn_dir = dir.path().join(".cairn");
@@ -948,6 +970,7 @@ fn capture_trace_e2e_skips_malformed_prefix_metric_event() {
         force: false,
     })
     .expect("bootstrap vault");
+    enable_local_sensor(vault.path(), "hook");
     let trace_path = write_stop_trace_fixture(vault.path());
     std::fs::write(
         vault.path().join(".cairn").join("metrics.jsonl"),
@@ -998,6 +1021,7 @@ fn capture_trace_e2e_reports_malformed_exact_accepted_metric() {
         force: false,
     })
     .expect("bootstrap vault");
+    enable_local_sensor(vault.path(), "hook");
     let trace_path = write_stop_trace_fixture(vault.path());
     std::fs::write(
         vault.path().join(".cairn").join("metrics.jsonl"),

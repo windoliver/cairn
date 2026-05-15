@@ -176,7 +176,7 @@ impl<T: Transport> Sdk<T> {
             },
             capabilities: self.advertised_capabilities(),
             extensions: vec![],
-            sensors: cairn_core::status::default_sensors_status(),
+            sensors: cairn_core::status::sensors_status_for_config(&self.config),
             // Advertise the live routing policy. Mirrors the CLI
             // status producer: both surfaces emit the same
             // family-granular `pipeline_dispatch` derived from

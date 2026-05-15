@@ -19,7 +19,7 @@ use cairn_core::generated::envelope::{
     Response, ResponseData, ResponsePolicyTrace, ResponseStatus, ResponseVerb,
 };
 use cairn_core::generated::verbs::lint::{
-    Finding, Kind, LintData, LintDataSummary, LintDataSummaryBySeverity, Severity,
+    Finding, Kind, LintData, LintDataSummary, LintDataSummaryBySeverity, Severity, Target,
 };
 use cairn_store_sqlite::{
     EdgeLintReport, SqliteConsentJournalReader, StoreError, lint_edges, resolve_edge_contradictions,
@@ -1311,6 +1311,7 @@ pub async fn lint_handler(
     // Projection-drift pass: read-only, Warning-severity only. Extracted
     // to keep lint_handler within the line-count limit.
     append_projection_drift_findings(store, vault_root, &mut data).await?;
+    append_sensor_drop_findings(vault_root, &mut data)?;
 
     let has_error = data.findings.iter().any(|f| {
         matches!(
@@ -2019,6 +2020,65 @@ fn push_projection_finding(
     data.findings.push(f);
 }
 
+fn append_sensor_drop_findings(vault_root: &Path, data: &mut LintData) -> anyhow::Result<()> {
+    let drops = crate::sensor_gate::read_sensor_drop_metrics(vault_root)
+        .with_context(|| format!("lint: sensor drop metrics from {}", vault_root.display()))?;
+    for drop in drops {
+        let Some(kind) = sensor_drop_kind(drop.reason) else {
+            continue;
+        };
+        let stage = serde_json::to_value(drop.stage)
+            .ok()
+            .and_then(|value| value.as_str().map(ToOwned::to_owned))
+            .unwrap_or_else(|| "unknown".to_owned());
+        let sensor = drop.sensor.as_str();
+        let reason = drop.reason.as_str();
+        let finding = Finding {
+            entities: Some(vec![sensor.to_owned(), reason.to_owned(), stage.clone()]),
+            kind,
+            message: format!("sensor_drop: sensor={sensor} reason={reason} stage={stage}"),
+            severity: Severity::Warning,
+            suggested_fix: Some(
+                "review `cairn sensor status --json`; enable the sensor only when capture is intended and budget/retention policy is acceptable"
+                    .to_owned(),
+            ),
+            target: Some(Target {
+                operation_id: drop.operation_id.map(Ulid),
+                path: Some(".cairn/metrics.jsonl".to_owned()),
+                record_id: None,
+            }),
+            tracking_issue: Some(88),
+        };
+        push_sensor_drop_finding(data, finding);
+    }
+    Ok(())
+}
+
+fn sensor_drop_kind(reason: cairn_core::domain::SensorGateReason) -> Option<Kind> {
+    match reason {
+        cairn_core::domain::SensorGateReason::PrivacyDenied => Some(Kind::SensorPrivacyDenied),
+        cairn_core::domain::SensorGateReason::BudgetExceeded => Some(Kind::SensorBudgetExceeded),
+        cairn_core::domain::SensorGateReason::Disabled => None,
+    }
+}
+
+fn push_sensor_drop_finding(data: &mut LintData, finding: Finding) {
+    let key = kind_key(finding.kind);
+    data.summary.total += 1;
+    match finding.severity {
+        Severity::Error => data.summary.by_severity.error += 1,
+        Severity::Info => data.summary.by_severity.info += 1,
+        _ => data.summary.by_severity.warning += 1,
+    }
+    if let serde_json::Value::Object(map) = &mut data.summary.by_kind {
+        let entry = map.entry(key).or_insert(serde_json::Value::from(0_u64));
+        if let Some(n) = entry.as_u64() {
+            *entry = serde_json::Value::from(n.saturating_add(1));
+        }
+    }
+    data.findings.push(finding);
+}
+
 /// Run `cairn lint`.
 ///
 /// `vault_root` is the already-resolved vault root from `main.rs` —
@@ -2551,6 +2611,8 @@ fn kind_key(kind: Kind) -> String {
         Kind::DeferredCheck => "deferred_check",
         Kind::ProjectionDrift => "projection_drift",
         Kind::ProjectionMissing => "projection_missing",
+        Kind::SensorBudgetExceeded => "sensor_budget_exceeded",
+        Kind::SensorPrivacyDenied => "sensor_privacy_denied",
         _ => "unknown",
     }
     .to_owned()

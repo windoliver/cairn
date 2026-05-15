@@ -143,6 +143,26 @@ fn cairn_bin() -> Command {
     Command::cargo_bin("cairn").expect("locate cairn binary")
 }
 
+fn enable_hook_sensor(vault_root: &Path) {
+    let out = cairn_bin()
+        .arg("sensor")
+        .arg("enable")
+        .arg("hook")
+        .arg("--reason")
+        .arg("e2e_consolidation")
+        .arg("--vault")
+        .arg(vault_root)
+        .arg("--json")
+        .output()
+        .expect("spawn cairn sensor enable hook");
+    assert!(
+        out.status.success(),
+        "sensor enable hook failed: stderr={}\nstdout={}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
 /// What the predicate is looking for, evaluated under async.
 enum WaitFor {
     /// A `Reasoning`-kind record exists for the session.
@@ -261,6 +281,7 @@ async fn e2e_capture_trace_then_forget_propagates_to_summary() {
         "bootstrap failed: stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
+    enable_hook_sensor(vault_root);
 
     // ── Step 2: generate JSONL with 6 turns ─────────────────────────────────
     let jsonl_path: PathBuf = vault_root.join("trace.jsonl");
@@ -405,6 +426,7 @@ async fn cairn_mcp_serve_subprocess_drains_queued_consolidation_job() {
         "bootstrap failed: stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
+    enable_hook_sensor(vault_root);
 
     // ── Step 2: enable single_tenant in config.yaml ────────────────────────
     let config_path = vault_root.join(".cairn/config.yaml");

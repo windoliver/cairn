@@ -1,16 +1,23 @@
 //! Screen sensor diagnostics and capture commands.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use cairn_core::config::CairnConfig;
-use cairn_core::domain::{CaptureEvent, CaptureEventId};
+use cairn_core::domain::{
+    BudgetObservation, CaptureEvent, CaptureEventId, LocalSensorName, SensorGateReason,
+    SourceFamily,
+};
 use cairn_sensors_local::screen::{
     ScreenDegradationCode, ScreenError, ScreenEventObservation, ScreenObservation,
     capture_png_snapshot_configured,
 };
 use cairn_sensors_local::{EmitOutcome, LocalSensorConfig, SensorSettings};
 use clap::{Arg, ArgAction, ArgMatches};
+
+use crate::sensor_gate::{
+    SensorDropMetric, SensorGateStage, append_sensor_drop_metric, latest_sensor_consent_for_vault,
+};
 
 use super::envelope::{emit_json, new_operation_id};
 
@@ -43,18 +50,33 @@ pub fn command() -> clap::Command {
 
 /// Run a `cairn screen` subcommand.
 #[must_use]
-pub fn run(sub: &ArgMatches, config: &CairnConfig) -> ExitCode {
+pub fn run(sub: &ArgMatches, vault_root: &Path, config: &CairnConfig) -> ExitCode {
     match sub.subcommand() {
-        Some(("capture", capture)) => run_capture(capture, config),
+        Some(("capture", capture)) => run_capture(capture, vault_root, config),
         _ => ExitCode::from(64),
     }
 }
 
-fn run_capture(sub: &ArgMatches, config: &CairnConfig) -> ExitCode {
+fn run_capture(sub: &ArgMatches, vault_root: &Path, config: &CairnConfig) -> ExitCode {
     let json = sub.get_flag("json");
     let output_path = sub
         .get_one::<PathBuf>("output")
         .expect("clap requires --output");
+    if let Err(reason) = enforce_screen_sensor_gate(vault_root, config) {
+        if json {
+            emit_json(&serde_json::json!({
+                "status": "dropped",
+                "sensor": "screen",
+                "reason": reason.as_str(),
+            }));
+        } else {
+            eprintln!(
+                "cairn screen capture: screen sensor denied capture: {}",
+                reason.as_str()
+            );
+        }
+        return exit_code_for_gate_reason(reason);
+    }
     match capture_png_snapshot_configured(&config.sensors.screen, output_path) {
         Ok(Some(receipt)) => {
             let capture_event = match capture_event_for_observation(receipt.observation.clone()) {
@@ -105,6 +127,66 @@ fn run_capture(sub: &ArgMatches, config: &CairnConfig) -> ExitCode {
             eprintln!("cairn screen capture: {err}");
             exit_code_for_screen_error(&err)
         }
+    }
+}
+
+fn enforce_screen_sensor_gate(
+    vault_root: &Path,
+    config: &CairnConfig,
+) -> Result<(), SensorGateReason> {
+    if !vault_root.join(".cairn").join("vault.id").exists() {
+        return Ok(());
+    }
+    let observation = BudgetObservation { items: 1, bytes: 0 };
+    let consent = match block_on(latest_sensor_consent_for_vault(
+        vault_root,
+        LocalSensorName::Screen,
+    )) {
+        Ok(consent) => consent,
+        Err(error) => {
+            eprintln!("cairn screen capture: failed to load screen sensor consent: {error:#}");
+            return Err(SensorGateReason::PrivacyDenied);
+        }
+    };
+    match crate::sensor_gate::evaluate_sensor_gate(
+        config,
+        consent,
+        LocalSensorName::Screen,
+        observation,
+    ) {
+        Ok(()) => Ok(()),
+        Err(reason) => {
+            let metric = SensorDropMetric {
+                event: crate::sensor_gate::SENSOR_DROP_EVENT,
+                sensor: LocalSensorName::Screen,
+                source_family: Some(SourceFamily::Screen),
+                reason,
+                stage: SensorGateStage::PreCapture,
+                operation_id: Some(new_operation_id().0),
+                session_id: None,
+                turn_id: None,
+                budget: None,
+            };
+            if let Err(error) = append_sensor_drop_metric(vault_root, &metric) {
+                eprintln!("cairn screen capture: failed to write screen drop metric: {error:#}");
+            }
+            Err(reason)
+        }
+    }
+}
+
+fn block_on<T>(future: impl std::future::Future<Output = anyhow::Result<T>>) -> anyhow::Result<T> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(anyhow::Error::from)?
+        .block_on(future)
+}
+
+fn exit_code_for_gate_reason(reason: SensorGateReason) -> ExitCode {
+    match reason {
+        SensorGateReason::Disabled => ExitCode::from(78),
+        SensorGateReason::PrivacyDenied | SensorGateReason::BudgetExceeded => ExitCode::from(77),
     }
 }
 

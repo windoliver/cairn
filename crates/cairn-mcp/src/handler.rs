@@ -486,7 +486,7 @@ impl CairnMcpHandler {
             },
             capabilities,
             extensions: vec![],
-            sensors: cairn_core::status::default_sensors_status(),
+            sensors: cairn_core::status::sensors_status_for_config(&self.config),
             pipeline_dispatch: Some(pipeline_dispatch_advertisement(&DefaultRegistry)),
             // Mirror the SDK's `Sdk::status` and CLI's no-vault path so
             // CLI/SDK/MCP three-way parity holds. Until MCP exposes a

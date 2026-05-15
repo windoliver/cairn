@@ -68,8 +68,39 @@ source:
 sensors:
   hooks:
     enabled: true
+    budget:
+      max_items: null
+      max_bytes: null
+    retention:
+      max_days: null
   ide:
     enabled: true
+    budget:
+      max_items: null
+      max_bytes: null
+    retention:
+      max_days: null
+  terminal:
+    enabled: false
+    budget:
+      max_items: null
+      max_bytes: null
+    retention:
+      max_days: null
+  clipboard:
+    enabled: false
+    budget:
+      max_items: null
+      max_bytes: null
+    retention:
+      max_days: null
+  voice:
+    enabled: false
+    budget:
+      max_items: null
+      max_bytes: null
+    retention:
+      max_days: null
   screen:
     enabled: false
     backend: xcap
@@ -80,6 +111,15 @@ sensors:
     budget:
       max_frames_per_minute: 12
       max_text_bytes_per_event: 16384
+    retention:
+      max_days: null
+  recording:
+    enabled: false
+    budget:
+      max_items: null
+      max_bytes: null
+    retention:
+      max_days: null
   slack:
     enabled: false
     scope: []

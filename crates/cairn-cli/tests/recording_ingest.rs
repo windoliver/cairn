@@ -25,6 +25,28 @@ fn bootstrap_vault(vault: &Path) {
     .expect("bootstrap vault");
 }
 
+fn enable_recording_sensor(vault: &Path) {
+    let out = cli()
+        .current_dir(vault)
+        .args([
+            "sensor",
+            "enable",
+            "recording",
+            "--reason",
+            "test_enable",
+            "--json",
+        ])
+        .output()
+        .expect("cairn sensor enable recording");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "sensor enable failed; stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 fn json_stdout(out: &std::process::Output) -> serde_json::Value {
     let stdout = String::from_utf8(out.stdout.clone()).expect("utf-8 stdout");
     serde_json::from_str(stdout.trim()).unwrap_or_else(|err| {
@@ -122,6 +144,7 @@ fn vault_contains_exact_bytes(root: &Path, bytes: &[u8]) -> bool {
 fn recording_fixture_ingests_ordered_audio_and_ocr_segments() {
     let vault = tempfile::tempdir().expect("temp vault");
     bootstrap_vault(vault.path());
+    enable_recording_sensor(vault.path());
     let fixtures = fixtures_dir();
     let media = fixtures.join("demo.mp4");
     let fixture_json = fixtures.join("recording-fixture.json");
@@ -213,6 +236,7 @@ fn recording_fixture_ingests_ordered_audio_and_ocr_segments() {
 fn recording_derived_record_forget_removes_search_and_retrieve_text() {
     let vault = tempfile::tempdir().expect("temp vault");
     bootstrap_vault(vault.path());
+    enable_recording_sensor(vault.path());
     let fixtures = fixtures_dir();
     let media = fixtures.join("demo.mp4");
     let fixture_json = fixtures.join("recording-fixture.json");
@@ -352,6 +376,7 @@ fn recording_rejects_unsupported_extension_before_fixture_reads() {
 fn recording_rejects_missing_fixture_runtime_with_actionable_invalid_args() {
     let vault = tempfile::tempdir().expect("temp vault");
     bootstrap_vault(vault.path());
+    enable_recording_sensor(vault.path());
     let media = fixtures_dir().join("demo.mp4");
 
     let out = cli()
@@ -395,6 +420,7 @@ fn recording_rejects_missing_fixture_runtime_with_actionable_invalid_args() {
 fn recording_rejects_corrupt_fixture_before_payload_or_record_writes() {
     let vault = tempfile::tempdir().expect("temp vault");
     bootstrap_vault(vault.path());
+    enable_recording_sensor(vault.path());
     let media = fixtures_dir().join("demo.mp4");
     let corrupt_fixture = vault.path().join("corrupt-recording-fixture.json");
     std::fs::write(&corrupt_fixture, "{ not json").expect("write corrupt fixture");
@@ -444,6 +470,7 @@ fn recording_rejects_corrupt_fixture_before_payload_or_record_writes() {
 fn recording_rejects_fixture_media_mismatch_before_payload_or_record_writes() {
     let vault = tempfile::tempdir().expect("temp vault");
     bootstrap_vault(vault.path());
+    enable_recording_sensor(vault.path());
     let media = fixtures_dir().join("demo.mp4");
     let mismatched_fixture = vault.path().join("mismatched-recording-fixture.json");
     std::fs::write(
@@ -512,6 +539,7 @@ fn recording_rejects_fixture_media_mismatch_before_payload_or_record_writes() {
 fn recording_import_failure_removes_new_payloads_and_keeps_prior_payloads() {
     let vault = tempfile::tempdir().expect("temp vault");
     bootstrap_vault(vault.path());
+    enable_recording_sensor(vault.path());
     let fixtures = fixtures_dir();
     let media = fixtures.join("demo.mp4");
     let fixture_json = fixtures.join("recording-fixture.json");

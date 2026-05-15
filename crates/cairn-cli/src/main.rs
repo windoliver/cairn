@@ -136,6 +136,7 @@ fn subcommand_needs_vault_guard(subcommand: Option<(&str, &ArgMatches)>) -> bool
             | "flush"
             | "hook"
             | "screen"
+            | "sensor"
             | "repair"
     )
 }
@@ -314,7 +315,11 @@ fn main() -> ExitCode {
         Some(("hook", sub)) => hooks::run(sub),
         Some(("status", sub)) => run_status(sub, explicit_vault.as_deref()),
         Some(("screen", sub)) => match resolve_vault_and_config(explicit_vault.as_deref()) {
-            Ok((_vault_root, _source, config)) => verbs::screen::run(sub, &config),
+            Ok((vault_root, _source, config)) => verbs::screen::run(sub, &vault_root, &config),
+            Err(code) => code,
+        },
+        Some(("sensor", sub)) => match resolve_vault_and_config(explicit_vault.as_deref()) {
+            Ok((vault_root, _source, config)) => verbs::sensor::run(sub, &vault_root, config),
             Err(code) => code,
         },
         Some(("handshake", sub)) => run_handshake(sub, explicit_vault.as_deref()),

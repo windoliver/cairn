@@ -83,6 +83,43 @@ impl LocalSensorConfig {
             screen: SensorSettings::disabled(),
         }
     }
+
+    /// Map the core vault sensor config into local adapter settings.
+    #[must_use]
+    pub fn from_core(config: &cairn_core::config::SensorsConfig) -> Self {
+        Self {
+            hooks: settings_from_core(&config.hooks),
+            ide: settings_from_core(&config.ide),
+            terminal: settings_from_core(&config.terminal),
+            clipboard: settings_from_core(&config.clipboard),
+            voice: settings_from_core(&config.voice),
+            screen: SensorSettings {
+                enabled: config.screen.enabled,
+                budget: CaptureBudget {
+                    max_items: Some(u32_to_usize(config.screen.budget.max_frames_per_minute)),
+                    max_bytes: Some(u32_to_usize(config.screen.budget.max_text_bytes_per_event)),
+                },
+            },
+        }
+    }
+}
+
+fn settings_from_core(config: &cairn_core::config::LocalSensorRuntimeConfig) -> SensorSettings {
+    SensorSettings {
+        enabled: config.enabled,
+        budget: CaptureBudget {
+            max_items: config.budget.max_items.map(u64_to_usize),
+            max_bytes: config.budget.max_bytes.map(u64_to_usize),
+        },
+    }
+}
+
+fn u64_to_usize(value: u64) -> usize {
+    usize::try_from(value).unwrap_or(usize::MAX)
+}
+
+fn u32_to_usize(value: u32) -> usize {
+    usize::try_from(value).unwrap_or(usize::MAX)
 }
 
 impl Default for LocalSensorConfig {
@@ -95,5 +132,21 @@ impl Default for LocalSensorConfig {
             voice: SensorSettings::disabled(),
             screen: SensorSettings::disabled(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_core_sensor_config_to_local_adapter_config() {
+        let mut config = cairn_core::config::CairnConfig::default();
+        config.sensors.clipboard.enabled = true;
+        config.sensors.clipboard.budget.max_bytes = Some(128);
+        let local = LocalSensorConfig::from_core(&config.sensors);
+        assert!(local.clipboard.enabled);
+        assert_eq!(local.clipboard.budget.max_bytes, Some(128));
+        assert!(!local.screen.enabled);
     }
 }

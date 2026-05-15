@@ -325,6 +325,8 @@ fn kind_key(k: Kind) -> String {
         Kind::SourceLinkLegacyDuplicate => "source_link_legacy_duplicate",
         Kind::SourceLinkMissing => "source_link_missing",
         Kind::SourceRedactSkipped => "source_redact_skipped",
+        Kind::SensorBudgetExceeded => "sensor_budget_exceeded",
+        Kind::SensorPrivacyDenied => "sensor_privacy_denied",
     }
     .to_owned()
 }
@@ -521,6 +523,18 @@ mod tests {
             "broken_source_link"
         );
         assert_eq!(super::kind_key(Kind::MissingSummary), "missing_summary");
+    }
+
+    #[test]
+    fn sensor_lint_kinds_have_stable_keys() {
+        assert_eq!(
+            super::kind_key(Kind::SensorPrivacyDenied),
+            "sensor_privacy_denied"
+        );
+        assert_eq!(
+            super::kind_key(Kind::SensorBudgetExceeded),
+            "sensor_budget_exceeded"
+        );
     }
 
     #[tokio::test]
