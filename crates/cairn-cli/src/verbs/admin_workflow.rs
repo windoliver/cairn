@@ -160,6 +160,13 @@ pub fn run_failing(sub: &ArgMatches, vault_root: &Path) -> ExitCode {
             backoff_multiplier: 1,
             max_backoff_ms: 1,
         };
+        let now_ms = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+        )
+        .unwrap_or(i64::MAX);
         let req = EnqueueRequest {
             job_id: JobId::new(job_id_str.clone()),
             kind: kind.clone(),
@@ -168,7 +175,9 @@ pub fn run_failing(sub: &ArgMatches, vault_root: &Path) -> ExitCode {
             // Step-level idempotency tag so the lint Finding's
             // operation_id correlates back to the job_id.
             dedupe_key: Some(format!("e2e-{job_id_str}")),
-            not_before_ms: 0,
+            // Wall-clock so `WorkflowJobStarted.queue_lag_ms` is a real
+            // measurement, not `now_ms - 0` ~= 1.7e12 (issue #92).
+            not_before_ms: now_ms,
             retry: policy,
         };
         if let Err(e) = store.enqueue(req).await {
@@ -286,7 +295,10 @@ pub fn simulate_crash(sub: &ArgMatches, vault_root: &Path) -> ExitCode {
             payload: vec![],
             queue_key: None,
             dedupe_key: Some(format!("e2e-crash-{job_id_str}")),
-            not_before_ms: 0,
+            // Stamp wall-clock so `WorkflowJobStarted.queue_lag_ms`
+            // reports a meaningful number on the demo metrics stream
+            // (issue #92).
+            not_before_ms: now_ms,
             retry: RetryPolicy::DEFAULT,
         };
         if let Err(e) = store.enqueue(req).await {
@@ -399,6 +411,11 @@ fn count_leased(db_path: &Path) -> Option<i64> {
 /// completes. Prints the resulting `job_id`. Used to verify the
 /// `workflow_job_completed` metric line is emitted on the happy path.
 #[must_use]
+#[allow(
+    clippy::too_many_lines,
+    reason = "e2e demo: enqueue + scheduler boot + polling drain + shutdown sequence \
+              is intentionally linear so the happy-path lifecycle is visible in one block"
+)]
 pub fn run_succeeding(sub: &ArgMatches, vault_root: &Path) -> ExitCode {
     let kind_str = sub
         .get_one::<String>("kind")
@@ -436,13 +453,22 @@ pub fn run_succeeding(sub: &ArgMatches, vault_root: &Path) -> ExitCode {
             .with(Arc::new(AlwaysDoneHandler { kind: kind.clone() }))
             .build();
 
+        let now_ms = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+        )
+        .unwrap_or(i64::MAX);
         let req = EnqueueRequest {
             job_id: JobId::new(job_id_str.clone()),
             kind: kind.clone(),
             payload: vec![],
             queue_key: None,
             dedupe_key: Some(format!("e2e-done-{job_id_str}")),
-            not_before_ms: 0,
+            // Wall-clock so `WorkflowJobStarted.queue_lag_ms` is a real
+            // measurement, not `now_ms - 0` ~= 1.7e12 (issue #92).
+            not_before_ms: now_ms,
             retry: RetryPolicy::DEFAULT,
         };
         if let Err(e) = store.enqueue(req).await {

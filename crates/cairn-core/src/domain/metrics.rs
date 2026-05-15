@@ -74,6 +74,15 @@ pub enum MetricEvent {
         attempts: u32,
         /// `now_ms − not_before_ms` at lease time — surfaces queue
         /// latency for dashboards.
+        ///
+        /// **`not_before_ms == 0` is the "lag unknown" sentinel** and
+        /// MUST be reported as `queue_lag_ms = 0` rather than the raw
+        /// subtraction (`now_ms - 0` is the entire Unix epoch, ~1.7e12
+        /// ms, and would corrupt dashboards). Production enqueuers
+        /// should stamp `not_before_ms = now_ms` (or a future
+        /// scheduled time) so this field becomes a real measurement;
+        /// the clamp protects against drift from new call sites that
+        /// forget. See `cairn-workflows::scheduler::worker::execute_one`.
         queue_lag_ms: i64,
         /// Step-level idempotency key, if the enqueuer set one.
         dedupe_key: Option<String>,

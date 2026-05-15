@@ -214,7 +214,13 @@ impl ExpirationHandler {
                 payload: bytes,
                 queue_key: None,
                 dedupe_key: Some(job_id.as_str().to_owned()),
-                not_before_ms: 0,
+                // The continuation is immediately eligible — the worker
+                // that produced it is mid-sweep and the next slice
+                // should pick up right after the commit. Stamping
+                // `payload.now_ms` (the canonical sweep clock) gives the
+                // `WorkflowJobStarted.queue_lag_ms` metric a meaningful
+                // baseline (issue #92, spec §4.6).
+                not_before_ms: payload.now_ms,
                 retry: RetryPolicy::DEFAULT,
             };
             match jobs.enqueue(req).await {
