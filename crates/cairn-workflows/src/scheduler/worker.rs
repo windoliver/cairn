@@ -331,4 +331,152 @@ mod tests {
         let _ = timeout(Duration::from_secs(2), handle).await;
         assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
+
+    // ---- class-override invariant suite (spec §4.2) -----------------
+    //
+    // `(disposition × class)` matrix: when a handler returns
+    // `HandlerOutcome::Retry { class }`, the scheduler must convert
+    // disposition to `Permanent` iff `class.forces_permanent()` is true,
+    // otherwise keep disposition `Retry`. The class itself is always
+    // forwarded to the store unchanged.
+    use cairn_core::contract::job_store::{
+        EnqueueRequest as ER, FailureClass, JobStoreError, LeaseToken,
+    };
+    use rstest::rstest;
+    use std::sync::Mutex;
+
+    /// In-memory capturing `JobStore` that records every `fail` call's
+    /// `(disposition, class)` pair so the test can assert the invariant
+    /// converted disposition appropriately.
+    struct CapturingStore {
+        fails: Mutex<Vec<(FailDisposition, FailureClass)>>,
+        completes: Mutex<usize>,
+    }
+
+    impl CapturingStore {
+        fn new() -> Self {
+            Self {
+                fails: Mutex::new(vec![]),
+                completes: Mutex::new(0),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl JobStore for CapturingStore {
+        async fn enqueue(&self, _: ER) -> Result<(), JobStoreError> {
+            Ok(())
+        }
+        async fn lease(
+            &self,
+            _: &str,
+            _: i64,
+            _: i64,
+        ) -> Result<Option<LeasedJob>, JobStoreError> {
+            Ok(None)
+        }
+        async fn heartbeat(
+            &self,
+            _: &JobId,
+            _: &LeaseToken,
+            _: i64,
+            _: i64,
+        ) -> Result<(), JobStoreError> {
+            Ok(())
+        }
+        async fn complete(
+            &self,
+            _: &JobId,
+            _: &LeaseToken,
+            _: i64,
+        ) -> Result<(), JobStoreError> {
+            match self.completes.lock() {
+                Ok(mut g) => *g = g.saturating_add(1),
+                Err(p) => *p.into_inner() = 0,
+            }
+            Ok(())
+        }
+        async fn fail(
+            &self,
+            _: &JobId,
+            _: &LeaseToken,
+            disposition: FailDisposition,
+            class: FailureClass,
+            _: &str,
+            _: i64,
+        ) -> Result<(), JobStoreError> {
+            match self.fails.lock() {
+                Ok(mut g) => g.push((disposition, class)),
+                Err(p) => p.into_inner().push((disposition, class)),
+            }
+            Ok(())
+        }
+        async fn reap_expired(&self, _: i64) -> Result<usize, JobStoreError> {
+            Ok(0)
+        }
+    }
+
+    /// Handler that always returns `Retry` with the configured class —
+    /// used to drive `execute_one` through every `(class)` branch.
+    struct ClassRetryHandler(FailureClass);
+    #[async_trait::async_trait]
+    impl JobHandler for ClassRetryHandler {
+        fn kind(&self) -> JobKind {
+            JobKind::new("test.class")
+        }
+        async fn handle(&self, _: &JobPayload) -> HandlerOutcome {
+            HandlerOutcome::Retry {
+                reason: "x".into(),
+                class: self.0,
+            }
+        }
+    }
+
+    #[rstest]
+    #[case(FailureClass::Transient, FailDisposition::Retry)]
+    #[case(FailureClass::Validation, FailDisposition::Permanent)]
+    #[case(FailureClass::Poison, FailDisposition::Permanent)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn handler_retry_with_class_forces_permanent_when_required(
+        #[case] class: FailureClass,
+        #[case] expected: FailDisposition,
+    ) {
+        let store_cap = Arc::new(CapturingStore::new());
+        let store_dyn: Arc<dyn JobStore> = store_cap.clone();
+        let registry = HandlerRegistryBuilder::default()
+            .with(Arc::new(ClassRetryHandler(class)))
+            .build();
+        let clock = Arc::new(MockClock::at(1_000)) as Arc<dyn Clock>;
+        let cancel = CancellationToken::new();
+        let leased = LeasedJob {
+            job_id: JobId::new("j-1"),
+            kind: JobKind::new("test.class"),
+            payload: vec![],
+            attempts: 1,
+            retry: RetryPolicy::DEFAULT,
+            lease: LeaseToken {
+                owner: "w-0".into(),
+                nonce: "n-0".into(),
+                expires_at_ms: 30_000,
+            },
+            failure_class: None,
+        };
+        let config = WorkerConfig {
+            lease_ms: 30_000,
+            heartbeat_every_ms: 10_000,
+            idle_poll_ms: 50,
+        };
+        execute_one(&store_dyn, &registry, &clock, &cancel, &leased, &config).await;
+        let fails = match store_cap.fails.lock() {
+            Ok(g) => g.clone(),
+            Err(p) => p.into_inner().clone(),
+        };
+        assert_eq!(fails.len(), 1, "exactly one fail call expected");
+        let (got_disposition, got_class) = fails[0];
+        assert_eq!(got_class, class, "class is forwarded unchanged");
+        assert_eq!(
+            got_disposition, expected,
+            "class {class:?} must produce disposition {expected:?}",
+        );
+    }
 }
