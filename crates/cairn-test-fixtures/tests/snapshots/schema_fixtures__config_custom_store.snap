@@ -229,5 +229,22 @@ expression: "&c"
     "min_turns_for_trigger": 4,
     "token_budget": 512,
     "salience_floor": 0.4
+  },
+  "dream": {
+    "enabled": false,
+    "window_size_records": 16,
+    "completion_token_budget": 1024,
+    "llm_temperature": 0.0
+  },
+  "expiration": {
+    "enabled": false,
+    "ttl_days": 30,
+    "salience_floor": 0.0,
+    "batch_size": 128
+  },
+  "evaluation": {
+    "enabled": false,
+    "checks": [],
+    "write_report_record": true
   }
 }

@@ -114,6 +114,18 @@
     {
       "const": "cairn.workflows.v1.consolidation",
       "x-cairn-since": "v0.1"
+    },
+    {
+      "const": "cairn.workflows.v1.dream",
+      "x-cairn-since": "v0.1"
+    },
+    {
+      "const": "cairn.workflows.v1.expiration",
+      "x-cairn-since": "v0.1"
+    },
+    {
+      "const": "cairn.workflows.v1.evaluation",
+      "x-cairn-since": "v0.1"
     }
   ],
   "title": "Cairn capability strings (P0)",

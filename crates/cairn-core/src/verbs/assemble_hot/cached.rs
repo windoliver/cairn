@@ -545,7 +545,9 @@ mod tests {
         assert_eq!(data.prefix, "cached");
         let evs = metrics.snapshot().await;
         assert_eq!(evs.len(), 1);
-        let MetricEvent::HotPrefixAssembled { cache_hit, .. } = &evs[0];
+        let MetricEvent::HotPrefixAssembled { cache_hit, .. } = &evs[0] else {
+            panic!("expected HotPrefixAssembled");
+        };
         assert!(*cache_hit);
     }
 
@@ -572,7 +574,9 @@ mod tests {
         assert_eq!(data.bytes, data.prefix.len() as u64);
         let evs = metrics.snapshot().await;
         assert_eq!(evs.len(), 1);
-        let MetricEvent::HotPrefixAssembled { cache_hit, .. } = &evs[0];
+        let MetricEvent::HotPrefixAssembled { cache_hit, .. } = &evs[0] else {
+            panic!("expected HotPrefixAssembled");
+        };
         assert!(!*cache_hit);
         assert!(cache.entry.lock().await.is_some());
     }
@@ -610,7 +614,9 @@ mod tests {
         .expect("assemble");
         assert_ne!(data.prefix, "stale");
         let evs = metrics.snapshot().await;
-        let MetricEvent::HotPrefixAssembled { cache_hit, .. } = &evs[0];
+        let MetricEvent::HotPrefixAssembled { cache_hit, .. } = &evs[0] else {
+            panic!("expected HotPrefixAssembled");
+        };
         assert!(!*cache_hit);
     }
 

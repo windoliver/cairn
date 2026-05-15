@@ -14,6 +14,10 @@ fn all_package_names() -> Vec<String> {
     [
         "cairn-cli",
         "cairn-core",
+        "cairn-desktop",
+        "cairn-frontend-logseq",
+        "cairn-frontend-obsidian",
+        "cairn-frontend-vscode",
         "cairn-idl",
         "cairn-mcp",
         "cairn-sensors-local",
@@ -36,6 +40,25 @@ generated_reference = "reference/generated/cli.md"
 [packages.cairn-core]
 audience = "sdk-author"
 page = "reference/rust-api.md"
+
+[packages.cairn-desktop]
+audience = "operator"
+page = "usage/cli.md"
+
+[packages.cairn-frontend-logseq]
+audience = "operator"
+page = "usage/plugins.md"
+generated_reference = "reference/generated/plugins.md"
+
+[packages.cairn-frontend-obsidian]
+audience = "operator"
+page = "usage/plugins.md"
+generated_reference = "reference/generated/plugins.md"
+
+[packages.cairn-frontend-vscode]
+audience = "operator"
+page = "usage/plugins.md"
+generated_reference = "reference/generated/plugins.md"
 
 [packages.cairn-idl]
 audience = "maintainer"

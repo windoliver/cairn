@@ -1,11 +1,14 @@
 # Plugins
 
-Cairn currently ships four bundled plugin crates:
+Cairn currently ships seven bundled plugin crates:
 
 - `cairn-mcp`
 - `cairn-sensors-local`
 - `cairn-store-sqlite`
 - `cairn-workflows`
+- `cairn-frontend-obsidian`
+- `cairn-frontend-vscode`
+- `cairn-frontend-logseq`
 
 List them:
 

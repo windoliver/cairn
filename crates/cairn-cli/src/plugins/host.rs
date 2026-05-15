@@ -7,6 +7,9 @@ use cairn_core::contract::registry::{PluginError, PluginRegistry};
 /// encountered (fail-closed).
 ///
 /// Bundled plugins (alphabetical):
+/// - `cairn-frontend-logseq`  → `FrontendAdapter`
+/// - `cairn-frontend-obsidian`→ `FrontendAdapter`
+/// - `cairn-frontend-vscode`  → `FrontendAdapter`
 /// - `cairn-mcp`              → `MCPServer`
 /// - `cairn-sensors-local`    → `SensorIngress`
 /// - `cairn-store-sqlite`     → `MemoryStore`
@@ -18,6 +21,9 @@ use cairn_core::contract::registry::{PluginError, PluginRegistry};
 /// aborts startup.
 pub fn register_all() -> Result<PluginRegistry, PluginError> {
     let mut reg = PluginRegistry::new();
+    cairn_frontend_logseq::register(&mut reg)?;
+    cairn_frontend_obsidian::register(&mut reg)?;
+    cairn_frontend_vscode::register(&mut reg)?;
     cairn_mcp::register(&mut reg)?;
     cairn_sensors_local::register(&mut reg)?;
     cairn_store_sqlite::register(&mut reg)?;
@@ -31,10 +37,13 @@ mod tests {
     use cairn_core::contract::registry::PluginName;
 
     #[test]
-    fn register_all_succeeds_and_populates_four_plugins() {
+    fn register_all_succeeds_and_populates_seven_plugins() {
         let reg = register_all().expect("bundled plugins register");
 
         for name in [
+            "cairn-frontend-logseq",
+            "cairn-frontend-obsidian",
+            "cairn-frontend-vscode",
             "cairn-mcp",
             "cairn-sensors-local",
             "cairn-store-sqlite",
@@ -59,6 +68,9 @@ mod tests {
         assert_eq!(
             sorted,
             vec![
+                "cairn-frontend-logseq",
+                "cairn-frontend-obsidian",
+                "cairn-frontend-vscode",
                 "cairn-mcp",
                 "cairn-sensors-local",
                 "cairn-store-sqlite",

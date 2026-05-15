@@ -36,6 +36,9 @@ fn full_gates(phase: Phase) -> CapabilityGates {
         llm_configured: false,
         contract_phase: phase,
         consolidation_runtime_ready: false,
+        dream_runtime_ready: false,
+        expiration_runtime_ready: false,
+        evaluation_runtime_ready: false,
     }
 }
 

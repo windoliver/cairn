@@ -230,15 +230,15 @@ mod tests {
     use crate::plugins::host::register_all;
 
     #[test]
-    fn run_reports_four_plugins() {
+    fn run_reports_seven_plugins() {
         let reg = register_all().expect("registers");
         let report = run(&reg);
-        assert_eq!(report.plugins.len(), 4);
+        assert_eq!(report.plugins.len(), 7);
         assert_eq!(report.summary.failed, 0, "no failures expected");
-        // 4 plugins × 4 tier-1 cases (manifest_matches_host,
+        // 7 plugins × 4 tier-1 cases (manifest_matches_host,
         // arc_pointer_stable, capability_self_consistency_floor,
-        // manifest_features_match_capabilities) = 16 ok minimum.
-        assert!(report.summary.ok >= 16);
+        // manifest_features_match_capabilities) = 28 ok minimum.
+        assert!(report.summary.ok >= 28);
         assert!(report.summary.pending >= 4, "tier-2 stubs are pending");
     }
 
@@ -536,7 +536,7 @@ patch = 0
         let report = run(&reg);
         let json = render_json(&report);
         let v: serde_json::Value = serde_json::from_str(&json).expect("valid json");
-        assert_eq!(v["plugins"].as_array().unwrap().len(), 4);
+        assert_eq!(v["plugins"].as_array().unwrap().len(), 7);
         assert_eq!(v["summary"]["failed"], 0);
     }
 }

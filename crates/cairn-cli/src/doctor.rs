@@ -664,22 +664,28 @@ impl ProtocolClient {
     }
 
     fn send(&mut self, line: &str) -> Result<(), DoctorError> {
-        let stdin = self.stdin.as_mut().ok_or_else(|| {
-            DoctorError::new(
-                "MCP stdin closed unexpectedly".to_owned(),
-                "rerun doctor after fixing the configured server command",
-            )
-        })?;
-        stdin
-            .write_all(line.as_bytes())
-            .and_then(|()| stdin.write_all(b"\n"))
-            .and_then(|()| stdin.flush())
-            .map_err(|err| {
+        {
+            let stdin = self.stdin.as_mut().ok_or_else(|| {
                 DoctorError::new(
-                    format!("failed to write JSON-RPC request to MCP server: {err}"),
-                    "verify the configured command still speaks stdio MCP and rerun doctor",
+                    "MCP stdin closed unexpectedly".to_owned(),
+                    "rerun doctor after fixing the configured server command",
                 )
-            })
+            })?;
+            if let Err(err) = stdin
+                .write_all(line.as_bytes())
+                .and_then(|()| stdin.write_all(b"\n"))
+                .and_then(|()| stdin.flush())
+            {
+                return Err(DoctorError::new(
+                    format!(
+                        "failed to write JSON-RPC request to MCP server: {err}; stderr so far: {}",
+                        self.stderr_so_far()
+                    ),
+                    "verify the configured command still speaks stdio MCP and rerun doctor",
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn recv(&mut self) -> Result<Value, DoctorError> {

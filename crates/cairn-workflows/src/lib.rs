@@ -11,12 +11,19 @@
 pub mod consent_mirror;
 pub mod consolidation;
 pub mod drainer;
+pub mod dream;
+pub mod evaluation;
+pub mod expiration;
 pub mod planners;
 pub mod salience_decay;
 pub mod scheduler;
 pub mod sqlite_apply;
 pub mod sqlite_store;
+pub mod synthetic;
 pub mod workflows;
+
+#[cfg(test)]
+mod test_support;
 
 pub use consent_mirror::{ConsentLogMaterializer, MirrorError};
 pub use consolidation::{
@@ -27,6 +34,14 @@ pub use drainer::{
     DrainStats, FileWorkflowCheckpointStore, FlushPlanApply, FlushPlanApplyOutcome, Workflow,
     WorkflowCheckpointStore, WorkflowContext, WorkflowDrainer, WorkflowError,
     WorkflowStatusSnapshot,
+};
+pub use dream::{DREAM_KIND, DreamHandler, DreamPayload};
+pub use evaluation::{
+    CheckOutcome, EVALUATION_KIND, EvaluationHandler, EvaluationPayload, EvaluationReport,
+    GoldenCheck, OrphanCheck, TombstoneConsistencyCheck, default_checks as default_golden_checks,
+};
+pub use expiration::{
+    EXPIRATION_KIND, ExpirationHandler, ExpirationPayload, ExpirationSweepReport,
 };
 pub use planners::{ConsolidatePlanSource, ExpirePlanSource, PromotePlanSource};
 pub use scheduler::{Clock, MockClock, Scheduler, SchedulerConfig, SystemClock};

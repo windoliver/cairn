@@ -14,8 +14,9 @@ use cairn_core::domain::ScopeTuple;
 use cairn_core::mcp_auth::{ConfigBackedScope, McpSessionScope};
 use cairn_workflows::scheduler::HandlerRegistryBuilder;
 use cairn_workflows::{
-    ConsolidationForgetCleanupHandler, ConsolidationHandler, Scheduler, SchedulerConfig,
-    SqliteJobStore, SystemClock,
+    ConsolidationForgetCleanupHandler, ConsolidationHandler, DreamHandler, EvaluationHandler,
+    ExpirationHandler, Scheduler, SchedulerConfig, SqliteJobStore, SystemClock,
+    default_golden_checks,
 };
 
 /// Outcome of resolving the `[mcp.stdio]` block into runtime components.
@@ -176,10 +177,12 @@ pub fn run(
                         }
                     };
 
-                // Build the handler registry with both consolidation handlers.
-                // The consolidation handler gets a JobStore handle so it can
-                // chain-enqueue follow-up windows after a successful summary
-                // (round-7 adversarial review #1).
+                // Build the handler registry with the consolidation
+                // handlers (#90) plus the issue #91 minimum-path
+                // workflow handlers (dream / expiration / evaluation).
+                // The consolidation handler gets a JobStore handle so it
+                // can chain-enqueue follow-up windows after a
+                // successful summary (round-7 adversarial review #1).
                 let consolidation_handler = ConsolidationHandler::with_job_store(
                     sqlite_store.clone(),
                     config.consolidation,
@@ -187,9 +190,52 @@ pub fn run(
                 );
                 let forget_cleanup_handler =
                     ConsolidationForgetCleanupHandler::new(sqlite_store.clone());
+
+                // Trait-object views the issue #91 handlers consume —
+                // they only need `MemoryStore`-level surfaces.
+                let store_dyn: Arc<dyn cairn_core::contract::memory_store::MemoryStore> =
+                    sqlite_store.clone();
+
+                // DreamHandler: no LLMProvider is wired at P0 — issue
+                // #144 lands the first concrete provider. The handler
+                // declines `Permanent` on every dispatch until then,
+                // which matches the §10.2 "where configured" qualifier.
+                let dream_handler =
+                    DreamHandler::new(store_dyn.clone(), config.dream, None);
+
+                let expiration_handler = ExpirationHandler::with_job_store(
+                    store_dyn.clone(),
+                    config.expiration,
+                    job_store.clone(),
+                );
+
+                // EvaluationHandler emits MetricEvent::EvaluationCompleted
+                // to `.cairn/metrics.jsonl` via the existing
+                // JsonlMetricsSink (brief §15 release gating).
+                let metrics_sink = match crate::metrics::JsonlMetricsSink::open(vault_root)
+                    .await
+                {
+                    Ok(s) => Arc::new(s)
+                        as Arc<dyn cairn_core::contract::metrics::MetricsSink>,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "evaluation: metrics sink open failed; falling back to no-op");
+                        Arc::new(cairn_core::contract::metrics::NoopMetricsSink)
+                            as Arc<dyn cairn_core::contract::metrics::MetricsSink>
+                    }
+                };
+                let evaluation_handler = EvaluationHandler::new(
+                    store_dyn.clone(),
+                    metrics_sink,
+                    default_golden_checks(),
+                    config.evaluation.clone(),
+                );
+
                 let registry = HandlerRegistryBuilder::default()
                     .with(Arc::new(consolidation_handler))
                     .with(Arc::new(forget_cleanup_handler))
+                    .with(Arc::new(dream_handler))
+                    .with(Arc::new(expiration_handler))
+                    .with(Arc::new(evaluation_handler))
                     .build();
 
                 // Start the scheduler. `Scheduler::start` spawns tokio tasks
@@ -236,21 +282,33 @@ pub fn run(
 
                 // Upcast to dyn MemoryStore for the verb layer; keep the
                 // concrete Arc<SqliteMemoryStore> for the graph-tool layer
-                // (Plan C Task 19). Use the consolidation-ready entry
-                // point with `Some(vault_root)` so we get both:
+                // (Plan C Task 19). Use the workflows-ready entry point
+                // with `Some(vault_root)` so we get both:
                 //   - file-backed verbs (`assemble_hot`) via vault_root
                 //     (main #353 wiring)
-                //   - consolidation capability advertisement once the
-                //     scheduler is live (round-9 adversarial review #3)
+                //   - workflow capability advertisements once the
+                //     scheduler is live (round-9 adversarial review #3,
+                //     issue #91)
                 let store: Arc<dyn cairn_core::contract::memory_store::MemoryStore> =
                     sqlite_store.clone();
-                let serve_result = cairn_mcp::serve_stdio_with_store_consolidation_ready(
+                let readiness = cairn_mcp::WorkflowReadiness {
+                    consolidation: true,
+                    // Brief §15 fail-closed: only advertise dream when an
+                    // LLMProvider is configured. The handler short-circuits
+                    // to `Permanent` otherwise (issue #91 follow-up; #144
+                    // lands the first concrete LLMProvider plugin).
+                    dream: config.dream.enabled && config.llm.provider.is_some(),
+                    expiration: config.expiration.enabled,
+                    evaluation: config.evaluation.enabled,
+                };
+                let serve_result = cairn_mcp::serve_stdio_with_store_workflows_ready(
                     store,
                     sqlite_store,
                     resolver,
                     config.clone(),
                     principal,
                     Some(vault_root.to_path_buf()),
+                    readiness,
                 )
                 .await;
 
