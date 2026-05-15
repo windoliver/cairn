@@ -66,9 +66,13 @@ pub struct ExpirationHandler {
 }
 
 impl ExpirationHandler {
-    /// Construct a handler bound to `store` + `config`. The config
-    /// drives both the `enabled` gate and the TTL/salience thresholds
-    /// the pure decision function consults.
+    /// Construct a handler bound to `store` + `config` *without* a
+    /// continuation-enqueue path. **Single-shot use only** (tests,
+    /// one-off admin runs). Production / scheduled use MUST go
+    /// through [`Self::with_job_store`] — without a `JobStore`, a
+    /// sweep that hits its `batch_size` cap silently returns Done
+    /// and the cursor continuation is dropped, starving old
+    /// records (round-8 adversarial review #1).
     #[must_use]
     pub fn new(store: Arc<dyn MemoryStore>, config: ExpirationConfig) -> Self {
         Self {

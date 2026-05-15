@@ -228,10 +228,8 @@ impl DreamHandler {
         // Full atomicity needs either (a) an
         // `insert_if_no_active_target` store primitive, or (b)
         // enqueuing dream jobs with `queue_key = target_id` so the
-        // scheduler serializes peers. Both are deferred to a
-        // follow-up — at the minimum-path level this recheck plus
-        // the pre-LLM check eliminates the common case (sequential
-        // retry after handler completion failure).
+        // scheduler serializes peers. See
+        // `DreamPayload::recommended_queue_key`.
         if self.store.get_active_by_target(&target_id).await?.is_some() {
             warn!(
                 key = %payload.key,
@@ -239,6 +237,27 @@ impl DreamHandler {
                 "dream: peer published while we were calling LLM — dropping output to avoid version churn"
             );
             return Ok(());
+        }
+
+        // Source-liveness revalidation (round-8 adversarial review
+        // #2): a concurrent expiration / forget can tombstone one
+        // of the records we just digested. Without this check, the
+        // dream record would still cite (in `extras.source_record_ids`)
+        // sources that have been retired — and worse, surface
+        // content into hot reads that the operator believed expired.
+        // Drop our output if any source disappeared between the
+        // list and now; the next scheduled sweep will pick up the
+        // updated active set.
+        for id_str in &source_record_ids {
+            let id = cairn_core::domain::RecordId::parse(id_str.clone())?;
+            if self.store.get(&id).await?.is_none() {
+                warn!(
+                    key = %payload.key,
+                    source_id = id_str.as_str(),
+                    "dream: source record tombstoned between list and upsert — dropping output"
+                );
+                return Ok(());
+            }
         }
 
         let scope = scope_for(&payload);

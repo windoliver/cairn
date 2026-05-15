@@ -91,7 +91,7 @@ async fn three_workflows_drain_through_one_scheduler() {
         },
         Some(Arc::new(StubLlm) as Arc<dyn LLMProvider>),
     );
-    let expiration = ExpirationHandler::new(
+    let expiration = ExpirationHandler::with_job_store(
         dyn_store.clone(),
         ExpirationConfig {
             enabled: true,
@@ -99,6 +99,7 @@ async fn three_workflows_drain_through_one_scheduler() {
             salience_floor: 0.0,
             batch_size: 16,
         },
+        jobs.clone(),
     );
     let evaluation = EvaluationHandler::new(
         dyn_store.clone(),

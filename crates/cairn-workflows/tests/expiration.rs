@@ -12,10 +12,12 @@
 use std::sync::Arc;
 
 use cairn_core::config::ExpirationConfig;
+use cairn_core::contract::job_store::JobStore;
 use cairn_core::contract::memory_store::{ListArgs, MemoryStore};
 use cairn_test_fixtures::{memstore, sample_record};
 use cairn_workflows::scheduler::{HandlerOutcome, JobHandler};
-use cairn_workflows::{ExpirationHandler, ExpirationPayload};
+use cairn_workflows::{ExpirationHandler, ExpirationPayload, SqliteJobStore};
+use tempfile::tempdir;
 
 /// `2027-01-01T00:00:00Z` in epoch millis — well past every
 /// `sample_record`'s stamped `updated_at` (`2026-04-22T14:05:11Z`).
@@ -148,6 +150,98 @@ async fn sweep_is_idempotent_when_replayed() {
         listed.records.is_empty(),
         "every aged row must be tombstoned"
     );
+}
+
+#[tokio::test]
+async fn capped_sweep_enqueues_continuation_to_drain_old_records() {
+    // Round-8 adversarial review #1: a fresh-prefix vault with
+    // more than `batch_size` records must NOT silently starve old
+    // records. With `with_job_store` wired the handler enqueues a
+    // continuation row whenever the inspect-cap fires before the
+    // store cursor exhausts.
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("cairn.db");
+    let mem = Arc::new(
+        cairn_store_sqlite::open(&db_path)
+            .await
+            .expect("open memory"),
+    );
+    let jobs_conn =
+        cairn_store_sqlite::open_sync(&db_path).expect("open jobs conn");
+    let jobs: Arc<dyn JobStore> = Arc::new(SqliteJobStore::new(jobs_conn).expect("jobs"));
+
+    // Seed 5 records; batch_size = 2 so a single sweep cannot
+    // exhaust the cursor.
+    for i in 0..5_u64 {
+        mem.upsert(&sample_record(200 + i))
+            .await
+            .expect("seed");
+    }
+
+    let dyn_store: Arc<dyn MemoryStore> = mem.clone();
+    let handler = ExpirationHandler::with_job_store(
+        dyn_store,
+        ExpirationConfig {
+            enabled: true,
+            ttl_days: 365, // none of the seeds expire by TTL today
+            salience_floor: 0.0,
+            batch_size: 2,
+        },
+        jobs.clone(),
+    );
+    let payload = ExpirationPayload {
+        now_ms: 1_777_215_600_000, // 2026-04-22T15:00:00Z — minutes after fixture stamp
+        bound_scope: None,
+        cursor: None,
+    };
+    let bytes = payload.to_bytes().expect("encode");
+    let outcome = handler.handle(&bytes).await;
+    assert!(matches!(outcome, HandlerOutcome::Done));
+
+    // A continuation job must now be queued for the next sweep.
+    let leased = jobs
+        .lease("test-lease", 1_777_215_600_000, 30_000)
+        .await
+        .expect("lease");
+    let leased = leased.expect(
+        "capped sweep must enqueue a continuation when JobStore is wired",
+    );
+    assert_eq!(leased.kind.as_str(), "expiration.sweep");
+    assert!(
+        leased.job_id.as_str().starts_with("expiration:continuation:"),
+        "continuation job_id has stable prefix; got {}",
+        leased.job_id.as_str()
+    );
+}
+
+#[tokio::test]
+async fn capped_sweep_without_job_store_is_documented_single_shot() {
+    // Counterpart to the above: `new()` is single-shot. We assert
+    // the documented behaviour: when the cap fires without a
+    // JobStore the sweep still returns Done (no continuation
+    // available). Production paths MUST use `with_job_store`.
+    let store = Arc::new(memstore().await);
+    for i in 0..3_u64 {
+        store.upsert(&sample_record(300 + i)).await.expect("seed");
+    }
+    let dyn_store: Arc<dyn MemoryStore> = store.clone();
+    let handler = ExpirationHandler::new(
+        dyn_store,
+        ExpirationConfig {
+            enabled: true,
+            ttl_days: 365,
+            salience_floor: 0.0,
+            batch_size: 1,
+        },
+    );
+    let payload = ExpirationPayload {
+        now_ms: 1_777_215_600_000,
+        bound_scope: None,
+        cursor: None,
+    };
+    let bytes = payload.to_bytes().expect("encode");
+    let outcome = handler.handle(&bytes).await;
+    assert!(matches!(outcome, HandlerOutcome::Done));
 }
 
 #[tokio::test]
