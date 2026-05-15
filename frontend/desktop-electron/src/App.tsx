@@ -100,6 +100,16 @@ export function App({
     };
   }, [loadDesktopData]);
 
+  useEffect(() => {
+    if (!state.error || state.vault) {
+      return;
+    }
+    const retry = window.setTimeout(() => {
+      void loadDesktopData();
+    }, 1000);
+    return () => window.clearTimeout(retry);
+  }, [loadDesktopData, state.error, state.vault]);
+
   const selectedId = state.selected?.id ?? null;
   const recordsByFolder = useMemo(() => state.records, [state.records]);
 

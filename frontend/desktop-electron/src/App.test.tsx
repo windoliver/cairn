@@ -71,6 +71,7 @@ const api = {
 };
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.clearAllMocks();
   vi.unstubAllGlobals();
   delete window.cairnDesktop;
@@ -180,6 +181,24 @@ describe("App", () => {
     await user.click(screen.getByRole("button", { name: "Retry desktop API" }));
 
     expect(await screen.findByText("Desktop Alpha Fixture")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("Markdown body")).toBeInTheDocument();
+  });
+
+  it("automatically retries the initial desktop API load", async () => {
+    vi.useFakeTimers();
+    api.vault.mockRejectedValueOnce(new Error("Desktop API request failed"));
+
+    render(<App api={api} />);
+
+    await act(async () => {});
+    expect(screen.getByText("Desktop API request failed")).toBeInTheDocument();
+
+    await act(async () => {
+      vi.advanceTimersByTime(1000);
+    });
+    await act(async () => {});
+
+    expect(screen.getByText("Desktop Alpha Fixture")).toBeInTheDocument();
     expect(screen.getByDisplayValue("Markdown body")).toBeInTheDocument();
   });
 
