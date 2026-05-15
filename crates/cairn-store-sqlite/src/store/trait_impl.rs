@@ -15,7 +15,9 @@ use cairn_core::contract::memory_store::{
 };
 use cairn_core::contract::version::VersionRange;
 use cairn_core::domain::consent_timeline::ConsentModel;
-use cairn_core::domain::{MemoryRecord, RecordId, TargetId};
+use cairn_core::domain::{
+    MemoryRecord, MergeStrategy, RecordId, SessionId, SessionMerge, SessionTree, TargetId,
+};
 use cairn_core::search::GraphCandidate;
 
 use crate::error::StoreError as ConcreteError;
@@ -73,6 +75,78 @@ impl MemoryStore for SqliteMemoryStore {
             return not_initialized("versions");
         }
         self.do_versions(target).await.map_err(Into::into)
+    }
+
+    async fn get_session_tree(&self, root: &SessionId) -> Result<Option<SessionTree>, StoreError> {
+        if self.conn.is_none() {
+            return not_initialized("get_session_tree");
+        }
+        SqliteMemoryStore::get_session_tree(self, root)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn record_session_fork(
+        &self,
+        from: &SessionId,
+        child: &SessionId,
+        at_turn_id: &str,
+    ) -> Result<(), StoreError> {
+        if self.conn.is_none() {
+            return not_initialized("record_session_fork");
+        }
+        SqliteMemoryStore::record_session_fork(self, from, child, at_turn_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn record_session_clone(
+        &self,
+        from: &SessionId,
+        child: &SessionId,
+    ) -> Result<(), StoreError> {
+        if self.conn.is_none() {
+            return not_initialized("record_session_clone");
+        }
+        SqliteMemoryStore::record_session_clone(self, from, child)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn record_session_tool_spawn(
+        &self,
+        from: &SessionId,
+        child: &SessionId,
+        at_turn_id: &str,
+        tool_call_id: &str,
+    ) -> Result<(), StoreError> {
+        if self.conn.is_none() {
+            return not_initialized("record_session_tool_spawn");
+        }
+        SqliteMemoryStore::record_session_tool_spawn(self, from, child, at_turn_id, tool_call_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn record_session_merge(
+        &self,
+        source: &SessionId,
+        destination: &SessionId,
+        strategy: MergeStrategy,
+        applied_at_turn_id: &str,
+    ) -> Result<SessionMerge, StoreError> {
+        if self.conn.is_none() {
+            return not_initialized("record_session_merge");
+        }
+        SqliteMemoryStore::record_session_merge(
+            self,
+            source,
+            destination,
+            strategy,
+            applied_at_turn_id,
+        )
+        .await
+        .map_err(Into::into)
     }
 
     async fn put_edge(&self, edge: &Edge) -> Result<(), StoreError> {

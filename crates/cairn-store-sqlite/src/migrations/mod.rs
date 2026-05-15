@@ -120,6 +120,9 @@ const M0059_SESSION_METADATA_AUDIT_SEQ: &str =
 const M0060_CONSENT_SCOPE_UPPERCASE: &str = include_str!("sql/0060_consent_scope_uppercase.sql");
 // Issue #313 — salience access tracking and decay guardrails.
 const M0061_SALIENCE_ACCESS: &str = include_str!("sql/0061_salience_access.sql");
+// Issue #133 — storage substrate for session tree branch/merge metadata.
+// Renumbered from 0061 during rebase because #313 landed 0061 first.
+const M0062_SESSION_TREE: &str = include_str!("sql/0062_session_tree.sql");
 
 /// Canonical SQL for migration 0020 (`workflow_jobs`). Re-exported so
 /// downstream crates (notably `cairn-workflows`, which hashes the
@@ -299,6 +302,7 @@ pub(crate) const MIGRATION_SOURCES: &[(i64, &str, &str)] = &[
         M0060_CONSENT_SCOPE_UPPERCASE,
     ),
     (61, "0061_salience_access", M0061_SALIENCE_ACCESS),
+    (62, "0062_session_tree", M0062_SESSION_TREE),
 ];
 
 /// All migrations, in order. Returns a fresh `Migrations` set on every call
@@ -361,5 +365,6 @@ pub fn migrations() -> Migrations<'static> {
         M::up(M0059_SESSION_METADATA_AUDIT_SEQ),
         M::up(M0060_CONSENT_SCOPE_UPPERCASE),
         M::up(M0061_SALIENCE_ACCESS),
+        M::up(M0062_SESSION_TREE),
     ])
 }
