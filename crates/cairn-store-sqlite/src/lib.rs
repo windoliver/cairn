@@ -29,6 +29,7 @@ pub use trace_window::ConsolidationBacklogEntry;
 pub mod vec_ext;
 mod verify;
 pub mod wal;
+pub mod workflow_jobs_reader;
 
 pub use consent_reader::SqliteConsentJournalReader;
 pub use error::StoreError;
@@ -42,6 +43,7 @@ pub use open::{
 #[cfg(any(test, feature = "test-helpers"))]
 pub use open::{open_in_memory_sync, open_sync};
 pub use store::SqliteMemoryStore;
+pub use workflow_jobs_reader::SqliteWorkflowJobsReader;
 pub use store::reindex::{DrainStats, drain_once};
 pub use store::reindex_from_db::{RebuildStats, rebuild_from_db};
 pub use store::sessions::{NewSessionMetadata, ResolveOutcome};
