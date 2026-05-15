@@ -267,6 +267,10 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     // watermarks for assemble_hot cache invalidation.
     ("table", "hot_source_watermarks"),
     ("table", "hot_prefix_cache"),
+    // 0062_workflow_dead_letter (issue #92): lint hot-path indexes for
+    // dead-letter enumeration and per-kind last-success lookup.
+    ("index", "workflow_jobs_dead_letter_idx"),
+    ("index", "workflow_jobs_kind_completed_idx"),
 ];
 
 /// Identity registry objects share `cairn.db` but are owned by
