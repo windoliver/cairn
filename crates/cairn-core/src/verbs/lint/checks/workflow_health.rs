@@ -200,6 +200,46 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_dead_letter_finding() {
+        let row = DeadLetterRow {
+            job_id: JobId::new("01JTESTJOBDEADLETTER0001"),
+            kind: JobKind::new("dream.light"),
+            attempts: 3,
+            failure_class: FailureClass::Poison,
+            last_error: "panic in step 2".into(),
+            dead_letter_at_ms: 1_700_000_000_000,
+        };
+        let reader = MockWorkflowJobsReader::default().with_dead_letter(row);
+        let inputs = empty_lint_inputs_with_reader(&reader, 1_700_000_001_000);
+        let findings = super::run(&inputs);
+        insta::assert_json_snapshot!(findings);
+    }
+
+    #[test]
+    fn snapshot_stuck_finding() {
+        let reader = MockWorkflowJobsReader::default().with_oldest_queued_age(900_000);
+        let inputs = empty_lint_inputs_with_reader(&reader, 1_000_000);
+        let findings = super::run(&inputs);
+        insta::assert_json_snapshot!(findings);
+    }
+
+    #[test]
+    fn snapshot_stale_summary_finding() {
+        let reader = MockWorkflowJobsReader::default().with_last_success("dream.light", 0);
+        let inputs = empty_lint_inputs_with_reader(&reader, 25 * 3_600_000);
+        let findings = super::run(&inputs);
+        insta::assert_json_snapshot!(findings);
+    }
+
+    #[test]
+    fn snapshot_overdue_finding() {
+        let reader = MockWorkflowJobsReader::default().with_last_success("expire.tier", 0);
+        let inputs = empty_lint_inputs_with_reader(&reader, 49 * 3_600_000);
+        let findings = super::run(&inputs);
+        insta::assert_json_snapshot!(findings);
+    }
+
+    #[test]
     fn missing_reader_emits_nothing() {
         let cfg = crate::config::CairnConfig::default();
         let inputs = crate::verbs::lint::LintInputs {

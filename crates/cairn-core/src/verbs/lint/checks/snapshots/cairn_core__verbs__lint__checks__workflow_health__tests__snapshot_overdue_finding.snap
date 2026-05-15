@@ -1,0 +1,12 @@
+---
+source: crates/cairn-core/src/verbs/lint/checks/workflow_health.rs
+assertion_line: 239
+expression: findings
+---
+[
+  {
+    "kind": "workflow_overdue",
+    "message": "no expire.tier success in 176400000ms — schedule may be stalled",
+    "severity": "warning"
+  }
+]
