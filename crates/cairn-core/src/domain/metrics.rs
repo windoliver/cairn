@@ -112,7 +112,7 @@ pub enum MetricEvent {
         attempts: u32,
         /// `"retry"` or `"permanent"`.
         disposition: String,
-        /// `FailureClass::as_str()` — snake_case discriminator.
+        /// `FailureClass::as_str()` — `snake_case` discriminator.
         failure_class: String,
         /// Worker-supplied failure message (truncated upstream as needed).
         last_error: String,

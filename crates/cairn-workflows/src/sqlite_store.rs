@@ -1086,6 +1086,10 @@ fn translate_enqueue_err(e: &rusqlite::Error, req: &EnqueueRequest) -> JobStoreE
     JobStoreError::Backend(msg)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "single linear lease transaction; extraction loses correctness context"
+)]
 fn atomic_lease(
     conn: &mut Connection,
     owner: &str,
@@ -1594,8 +1598,7 @@ fn reap_batch(conn: &mut Connection, now_ms: i64) -> Result<Vec<ReclaimedRow>, J
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| JobStoreError::Backend(e.to_string()))?;
 
-        for (job_id, kind, attempts, delivery_count, max_attempts, base, mult, cap, started) in
-            rows
+        for (job_id, kind, attempts, delivery_count, max_attempts, base, mult, cap, started) in rows
         {
             let policy = retry_from_row(max_attempts, base, mult, cap);
             // For started=1, heartbeat already bumped `attempts` — reap

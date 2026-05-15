@@ -106,16 +106,23 @@ impl Scheduler {
         let tracker = TaskTracker::new();
         for i in 0..config.worker_count {
             let owner = format!("{incarnation_id}:w{i}");
-            let t = cancel.clone();
-            let s = store.clone();
-            let r = registry.clone();
-            let c = clock.clone();
-            let m = config.metrics.clone();
-            tracker.spawn(worker::run_worker(owner, s, r, c, t, config.worker, m));
+            tracker.spawn(worker::run_worker(
+                owner,
+                store.clone(),
+                registry.clone(),
+                clock.clone(),
+                cancel.clone(),
+                config.worker,
+                config.metrics.clone(),
+            ));
         }
-        let t = cancel.clone();
-        let m = config.metrics.clone();
-        tracker.spawn(reaper::run_reaper(store, clock, t, config.reaper, m));
+        tracker.spawn(reaper::run_reaper(
+            store,
+            clock,
+            cancel.clone(),
+            config.reaper,
+            config.metrics.clone(),
+        ));
         tracker.close();
         Self { cancel, tracker }
     }

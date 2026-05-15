@@ -249,8 +249,8 @@ async fn execute_one(
             match store.complete(&leased.job_id, &leased.lease, now).await {
                 Ok(()) => {
                     // Emit AFTER the complete commit lands (spec §4.13).
-                    let duration_ms = u64::try_from(now.saturating_sub(started_at_ms).max(0))
-                        .unwrap_or(u64::MAX);
+                    let duration_ms =
+                        u64::try_from(now.saturating_sub(started_at_ms).max(0)).unwrap_or(u64::MAX);
                     let _ = metrics
                         .emit(MetricEvent::WorkflowJobCompleted {
                             ts_ms: now,
@@ -295,15 +295,7 @@ async fn execute_one(
                 .await;
             match fail_res {
                 Ok(()) => {
-                    emit_failed(
-                        metrics,
-                        leased,
-                        disposition,
-                        class,
-                        &reason,
-                        now,
-                    )
-                    .await;
+                    emit_failed(metrics, leased, disposition, class, &reason, now).await;
                 }
                 Err(e) => {
                     error!(error = %e, job = %leased.job_id, "worker finalize failed");
