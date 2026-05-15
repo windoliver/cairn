@@ -80,6 +80,58 @@ fn open_job_store(vault_root: &Path) -> Result<Arc<dyn JobStore>, String> {
     Ok(Arc::new(store))
 }
 
+/// Prefix every synthetic job kind these diagnostics enqueue starts
+/// with. The isolation precheck refuses to run if any `workflow_jobs`
+/// row whose `kind` does NOT start with this prefix is currently in
+/// `queued` or `leased` state — running a `Scheduler` whose registry
+/// only knows synthetic handlers would otherwise lease that real row,
+/// hit the `HandlerDispatchError::Unknown` path, and permanently fail
+/// it as `FailureClass::Validation` (worker.rs missing-handler arm).
+///
+/// Operators who deliberately want to exercise the live queue should
+/// shut down `cairn mcp` first; the precheck only blocks unsafe
+/// concurrent operation.
+const SYNTHETIC_KIND_PREFIX: &str = "test.e2e.";
+
+/// Refuse to run when production workflow rows are in flight, so the
+/// synthetic scheduler can never accidentally lease and dead-letter
+/// them. Returns `Ok(())` when the queue contains no non-synthetic
+/// rows in `queued`/`leased` state; otherwise returns a descriptive
+/// error listing the offending kinds and an operator-facing hint.
+fn ensure_no_live_production_rows(vault_root: &Path) -> Result<(), String> {
+    let db_path = vault_root.join(".cairn/cairn.db");
+    let conn =
+        Connection::open(&db_path).map_err(|e| format!("open {}: {e}", db_path.display()))?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT kind, COUNT(*) FROM workflow_jobs \
+               WHERE state IN ('queued','leased') \
+                 AND kind NOT LIKE ?1 \
+               GROUP BY kind ORDER BY kind",
+        )
+        .map_err(|e| format!("prepare precheck: {e}"))?;
+    let pattern = format!("{SYNTHETIC_KIND_PREFIX}%");
+    let rows: Vec<(String, i64)> = stmt
+        .query_map(rusqlite::params![pattern], |r| Ok((r.get(0)?, r.get(1)?)))
+        .map_err(|e| format!("query precheck: {e}"))?
+        .collect::<rusqlite::Result<_>>()
+        .map_err(|e| format!("collect precheck: {e}"))?;
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let summary = rows
+        .iter()
+        .map(|(k, n)| format!("{k} ({n})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(format!(
+        "refused — live production workflow rows present (queued|leased): {summary}. \
+         Stop `cairn mcp` and rerun, or wait for the queue to drain. \
+         These diagnostics use a synthetic-only handler registry; running while real \
+         rows are scheduling would permanently fail them through the missing-handler path."
+    ))
+}
+
 /// Build a `JsonlMetricsSink` for the vault. Falls back to a no-op sink
 /// on open failure, matching `cairn mcp`'s wiring.
 async fn open_metrics(vault_root: &Path) -> Arc<dyn MetricsSink> {
@@ -129,6 +181,10 @@ pub fn run_failing(sub: &ArgMatches, vault_root: &Path) -> ExitCode {
         }
     };
     rt.block_on(async move {
+        if let Err(e) = ensure_no_live_production_rows(vault_root) {
+            eprintln!("cairn admin workflow run-failing: {e}");
+            return ExitCode::from(69);
+        }
         let store = match open_job_store(vault_root) {
             Ok(s) => s,
             Err(e) => {
@@ -273,6 +329,10 @@ pub fn simulate_crash(sub: &ArgMatches, vault_root: &Path) -> ExitCode {
         }
     };
     rt.block_on(async move {
+        if let Err(e) = ensure_no_live_production_rows(vault_root) {
+            eprintln!("cairn admin workflow simulate-crash: {e}");
+            return ExitCode::from(69);
+        }
         let store = match open_job_store(vault_root) {
             Ok(s) => s,
             Err(e) => {
@@ -316,6 +376,28 @@ pub fn simulate_crash(sub: &ArgMatches, vault_root: &Path) -> ExitCode {
                 return ExitCode::from(69);
             }
         };
+        // Defense-in-depth: the precheck above blocks the bulk
+        // corruption case (production rows present at start), but a
+        // race with `cairn mcp` could have enqueued a row between
+        // the precheck and our `lease()` call. If the lease returned
+        // a row that isn't ours, abandon it WITHOUT heartbeat/fail —
+        // the lease will expire naturally after `lease_ms` and the
+        // periodic reaper will reclaim it (bumping attempts only if
+        // it had `lease_started = 1`, which it doesn't here). This
+        // is strictly safer than calling heartbeat() and then `fail()`
+        // / `complete()` on a row we didn't enqueue.
+        if leased.job_id.as_str() != job_id_str
+            || !leased.kind.as_str().starts_with(SYNTHETIC_KIND_PREFIX)
+        {
+            eprintln!(
+                "cairn admin workflow simulate-crash: refused — lease returned non-synthetic \
+                 row (job_id={} kind={}); lease will expire and be reaped naturally",
+                leased.job_id, leased.kind,
+            );
+            drop(leased);
+            drop(store);
+            return ExitCode::from(69);
+        }
         // Heartbeat so lease_started flips to 1 — this is the "worker
         // started executing then crashed" shape (consumes an attempt
         // on reap).
@@ -437,6 +519,10 @@ pub fn run_succeeding(sub: &ArgMatches, vault_root: &Path) -> ExitCode {
         }
     };
     rt.block_on(async move {
+        if let Err(e) = ensure_no_live_production_rows(vault_root) {
+            eprintln!("cairn admin workflow run-succeeding: {e}");
+            return ExitCode::from(69);
+        }
         let store = match open_job_store(vault_root) {
             Ok(s) => s,
             Err(e) => {
