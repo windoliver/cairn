@@ -1,0 +1,193 @@
+:root {
+  color: #172026;
+  background: #f6f7f4;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+}
+
+body {
+  margin: 0;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+.app {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  min-height: 100vh;
+  position: relative;
+}
+
+.sidebar {
+  border-right: 1px solid #d8ddd4;
+  background: #fffdfa;
+  padding: 16px;
+  overflow: auto;
+}
+
+.sidebar h1,
+.recordDetail h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.folderGroup h2,
+.panel h2 {
+  font-size: 13px;
+  margin: 18px 0 8px;
+  text-transform: uppercase;
+}
+
+.recordButton {
+  align-items: flex-start;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: inherit;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px;
+  text-align: left;
+  width: 100%;
+}
+
+.recordButton.selected {
+  background: #e9f2ec;
+  border-color: #9fbea8;
+}
+
+.searchStatus {
+  color: #57636b;
+  font-size: 13px;
+  margin: 8px 0;
+}
+
+.searchResult {
+  align-items: flex-start;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: inherit;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+  padding: 8px;
+  text-align: left;
+  width: 100%;
+}
+
+.searchResult.selected {
+  background: #e9f2ec;
+  border-color: #9fbea8;
+}
+
+.searchResult small {
+  color: #57636b;
+}
+
+.workspace {
+  display: grid;
+  grid-template-rows: minmax(360px, 1fr) 280px;
+  min-width: 0;
+}
+
+.recordDetail {
+  display: grid;
+  gap: 12px;
+  padding: 20px;
+}
+
+.metaLine {
+  color: #57636b;
+  display: flex;
+  gap: 12px;
+}
+
+textarea {
+  border: 1px solid #cfd7d2;
+  border-radius: 6px;
+  min-height: 220px;
+  padding: 12px;
+  resize: vertical;
+}
+
+.lowerPanels {
+  border-top: 1px solid #d8ddd4;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  min-height: 0;
+}
+
+.panel,
+.reconcilePanel {
+  border-right: 1px solid #d8ddd4;
+  padding: 14px;
+  overflow: auto;
+}
+
+.graphCanvas {
+  border: 1px solid #d8ddd4;
+  border-radius: 6px;
+  display: block;
+  height: 170px;
+  width: 100%;
+}
+
+.graphEdge {
+  stroke: #82958c;
+  stroke-width: 2;
+}
+
+.graphNode {
+  fill: #f8fbf9;
+  stroke: #51745d;
+  stroke-width: 2;
+}
+
+.graphNode-procedural {
+  stroke: #886c3d;
+}
+
+.graphLabel {
+  fill: #263238;
+  font-size: 10px;
+}
+
+.lintFinding {
+  border: 1px solid #d8ddd4;
+  border-radius: 6px;
+  padding: 8px;
+}
+
+.appErrorBanner {
+  align-items: center;
+  background: #fff2f0;
+  border: 1px solid #d99a92;
+  border-radius: 6px;
+  color: #7a2d25;
+  display: flex;
+  gap: 10px;
+  margin: 0;
+  padding: 8px 10px;
+  position: absolute;
+  right: 16px;
+  top: 12px;
+  z-index: 1;
+}
+
+.appErrorBanner button {
+  background: #7a2d25;
+  border: 0;
+  border-radius: 4px;
+  color: #fff;
+  cursor: pointer;
+  padding: 4px 8px;
+}
