@@ -205,14 +205,19 @@ impl EvaluationHandler {
     }
 
     /// Build the deterministic `target_key` for both the upserted
-    /// report record and the emitted metric. Same inputs → same key
-    /// → same `target_id` (round-3 adversarial review #2).
+    /// report record and the emitted metric. Same inputs *AND* same
+    /// outcomes → same key → same `target_id` (round-3 adversarial
+    /// review #2). The outcome hash is folded in so a retry after a
+    /// vault mutation that flips a check's pass/fail does NOT
+    /// silently overwrite the earlier report — instead the
+    /// downstream gating sees both versions as distinct records
+    /// (round-4 adversarial review #3).
     fn report_target_key(
         &self,
         payload: &EvaluationPayload,
         findings: &[(String, CheckOutcome)],
     ) -> String {
-        let key_basis = findings
+        let check_ids = findings
             .iter()
             .map(|(id, _)| id.as_str())
             .collect::<Vec<_>>()
@@ -223,7 +228,28 @@ impl EvaluationHandler {
             .map(ScopeTuple::canonical_wire)
             .unwrap_or_default();
         let day = payload.ts_ms / 86_400_000;
-        format!("evaluation:{scope_wire}:{day}:{key_basis}")
+        // Outcome digest: stable serialization of pass/fail per
+        // check id. `CheckOutcome::Failed { details }` participates
+        // in the hash so a failure detail change also splits the
+        // target.
+        let outcome_basis: String = findings
+            .iter()
+            .map(|(id, outcome)| match outcome {
+                CheckOutcome::Passed => format!("{id}=P"),
+                CheckOutcome::Failed { details } => format!("{id}=F:{details}"),
+            })
+            .collect::<Vec<_>>()
+            .join("|");
+        let outcome_hash =
+            crate::synthetic::sha256_hex(outcome_basis.as_bytes());
+        // Use only the first 16 hex chars of the digest to keep the
+        // key short; collisions at that prefix are vanishingly
+        // unlikely (1 in 2^64) and the full hash lives in the
+        // upserted record's `extras.evaluation.outcome_hash`.
+        format!(
+            "evaluation:{scope_wire}:{day}:{check_ids}:{prefix}",
+            prefix = &outcome_hash[..16]
+        )
     }
 
     /// Upsert the synthesized `Reasoning` report record.
@@ -261,12 +287,23 @@ impl EvaluationHandler {
         let target_id = stable_target_id(target_key)?;
         let target_id_str = target_id.as_str().to_owned();
 
+        let outcome_basis: String = findings
+            .iter()
+            .map(|(id, outcome)| match outcome {
+                CheckOutcome::Passed => format!("{id}=P"),
+                CheckOutcome::Failed { details } => format!("{id}=F:{details}"),
+            })
+            .collect::<Vec<_>>()
+            .join("|");
+        let outcome_hash = crate::synthetic::sha256_hex(outcome_basis.as_bytes());
+
         let mut extras = std::collections::BTreeMap::new();
         extras.insert(
             "evaluation".to_owned(),
             serde_json::json!({
                 "checks": findings.iter().map(|(id, _)| id).collect::<Vec<_>>(),
                 "ts_ms":  payload.ts_ms,
+                "outcome_hash": outcome_hash,
                 "produced_by": "cairn-workflows::EvaluationHandler",
             }),
         );

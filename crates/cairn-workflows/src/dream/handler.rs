@@ -126,17 +126,6 @@ impl DreamHandler {
             return Ok(());
         }
 
-        let prompt = render_dream_prompt(&payload.key, &filtered);
-        let req = CompletionRequest::builder().prompt(prompt).build();
-        let body = match llm.complete(&req).await? {
-            CompletionOutput::Text(s) => s,
-            CompletionOutput::Json(v) => serde_json::to_string(&v).unwrap_or_default(),
-            // `CompletionOutput` is `#[non_exhaustive]`; future
-            // variants drop into a deterministic fallback rather than
-            // crashing the workflow.
-            other => format!("{other:?}"),
-        };
-
         let mut source_record_ids: Vec<String> =
             filtered.iter().map(|r| r.id.as_str().to_owned()).collect();
         source_record_ids.sort();
@@ -156,6 +145,38 @@ impl DreamHandler {
             "dream:{scope_wire}:{key}:{sources_hash}",
             key = payload.key
         );
+
+        // Pre-LLM existence check: if an active dream record already
+        // exists at this deterministic target, skip the LLM call. Two
+        // failure modes this closes (round-4 adversarial review #4):
+        //   1. Concurrent same-key jobs: worker A and worker B both
+        //      lease their own jobs targeting the same (scope, key,
+        //      sources_hash); the second one to reach this check
+        //      sees A's upserted record and exits without
+        //      regenerating non-deterministic LLM content.
+        //   2. Retry after a successful upsert but failed handler
+        //      completion: the next attempt finds the prior record
+        //      and exits without re-prompting the LLM.
+        let target_id = crate::synthetic::stable_target_id(&target_key)?;
+        if self.store.get_active_by_target(&target_id).await?.is_some() {
+            info!(
+                key = %payload.key,
+                target_id = target_id.as_str(),
+                "dream: active record already exists at deterministic target — skipping LLM"
+            );
+            return Ok(());
+        }
+
+        let prompt = render_dream_prompt(&payload.key, &filtered);
+        let req = CompletionRequest::builder().prompt(prompt).build();
+        let body = match llm.complete(&req).await? {
+            CompletionOutput::Text(s) => s,
+            CompletionOutput::Json(v) => serde_json::to_string(&v).unwrap_or_default(),
+            // `CompletionOutput` is `#[non_exhaustive]`; future
+            // variants drop into a deterministic fallback rather than
+            // crashing the workflow.
+            other => format!("{other:?}"),
+        };
 
         let mut extras = std::collections::BTreeMap::new();
         extras.insert(
