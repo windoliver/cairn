@@ -601,17 +601,7 @@ async fn run_search(
     .await;
 
     match result {
-        Ok(outcome) => {
-            let ids: Vec<String> = outcome
-                .candidates
-                .iter()
-                .map(|candidate| candidate.record_id.as_str().to_owned())
-                .collect();
-            json!({
-                "status": "hits",
-                "record_ids": ids,
-            })
-        }
+        Ok(outcome) => search_success_value(&outcome),
         Err(SearchError::CapabilityUnavailable { capability }) => json!({
             "status": "capability_unavailable",
             "capability": capability,
@@ -619,6 +609,65 @@ async fn run_search(
         Err(err) => json!({
             "status": "error",
             "message": err.to_string(),
+        }),
+    }
+}
+
+fn search_success_value(outcome: &search::SearchOutcome) -> Value {
+    let ids: Vec<String> = outcome
+        .candidates
+        .iter()
+        .map(|candidate| candidate.record_id.as_str().to_owned())
+        .collect();
+    let mut value = json!({
+        "status": "hits",
+        "record_ids": ids,
+    });
+    if !outcome.degraded_legs.is_empty() {
+        value["degraded_legs"] = Value::Array(
+            outcome
+                .degraded_legs
+                .iter()
+                .map(degraded_leg_value)
+                .collect(),
+        );
+    }
+    value
+}
+
+fn degraded_leg_value(leg: &cairn_core::search::DegradedLeg) -> Value {
+    use cairn_core::search::{DegradationReason, DegradedLeg, GraphSource};
+
+    fn reason_value(reason: DegradationReason) -> &'static str {
+        match reason {
+            DegradationReason::CapabilityUnavailable => "capability_unavailable",
+            DegradationReason::DeadlineExceeded => "timeout",
+            _ => "sql_error",
+        }
+    }
+
+    fn source_value(source: GraphSource) -> &'static str {
+        match source {
+            GraphSource::AuthKeywordSeed => "auth_keyword_seed",
+            GraphSource::AuthSemanticSeed => "auth_semantic_seed",
+            _ => "all",
+        }
+    }
+
+    match leg {
+        DegradedLeg::Semantic { reason } => json!({
+            "leg": "semantic",
+            "reason": reason_value(*reason),
+        }),
+        DegradedLeg::Graph { reason, source } => json!({
+            "leg": "graph",
+            "reason": reason_value(*reason),
+            "source": source_value(*source),
+        }),
+        _ => json!({
+            "leg": "graph",
+            "reason": "sql_error",
+            "source": "all",
         }),
     }
 }
@@ -803,10 +852,25 @@ async fn forget_record(
         expected: ReplayExpectation::Hits { record_ids: vec![] },
     };
     let search_actual = run_search(store, scenario, &action).await;
-    let contains = search_actual
-        .get("record_ids")
-        .and_then(Value::as_array)
-        .is_some_and(|ids| ids.iter().any(|value| value.as_str() == Some(record_id)));
+    if search_actual.get("status").and_then(Value::as_str) != Some("hits") {
+        return Ok(json!({
+            "status": search_actual
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("error"),
+            "retrieve_found": retrieve_found,
+            "search_actual": search_actual,
+        }));
+    }
+    let Some(ids) = search_actual.get("record_ids").and_then(Value::as_array) else {
+        return Ok(json!({
+            "status": "error",
+            "retrieve_found": retrieve_found,
+            "message": "follow-up search returned hits without record_ids",
+            "search_actual": search_actual,
+        }));
+    };
+    let contains = ids.iter().any(|value| value.as_str() == Some(record_id));
     Ok(json!({
         "retrieve_found": retrieve_found,
         "search_contains_record": contains,
@@ -876,5 +940,32 @@ mod tests {
         record.extra_frontmatter = trace_frontmatter(&trace_seed());
 
         assert_eq!(trace_projection(&record, Some("session-a"), None), None);
+    }
+
+    #[test]
+    fn search_success_value_surfaces_degraded_hybrid_legs() {
+        let actual = search_success_value(&search::SearchOutcome {
+            candidates: vec![],
+            explain: None,
+            policy_trace: vec![],
+            excluded: None,
+            degraded_legs: vec![cairn_core::search::DegradedLeg::Graph {
+                reason: cairn_core::search::DegradationReason::CapabilityUnavailable,
+                source: cairn_core::search::GraphSource::All,
+            }],
+        });
+
+        assert_eq!(
+            actual,
+            json!({
+                "status": "hits",
+                "record_ids": [],
+                "degraded_legs": [{
+                    "leg": "graph",
+                    "reason": "capability_unavailable",
+                    "source": "all"
+                }]
+            })
+        );
     }
 }

@@ -100,6 +100,29 @@ async fn search_replay_hides_reasoning_by_default() {
     assert!(check.passed, "{check:#?}");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn forget_replay_fails_when_followup_search_errors() {
+    let mut scenario = load_named_scenario("p0_stories").expect("load scenario");
+    let forget = scenario
+        .actions
+        .iter_mut()
+        .find_map(|action| match action {
+            ReplayAction::ForgetRecord { followup_query, .. } => Some(followup_query),
+            _ => None,
+        })
+        .expect("forget action");
+    forget.clear();
+
+    let report = cairn_test_fixtures::replay::run_scenario(&scenario)
+        .await
+        .expect("run scenario");
+    let failure = report
+        .failures()
+        .find(|check| check.verb == "forget_record")
+        .expect("forget check should fail");
+    assert_eq!(failure.actual["status"], "error");
+}
+
 #[test]
 fn p0_replay_manifest_uses_canonical_trace_event_names() {
     let scenario = load_named_scenario("p0_stories").expect("load scenario");
