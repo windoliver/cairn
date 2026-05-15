@@ -126,20 +126,25 @@ impl DreamHandler {
                 }
             }
         }
-        // Round-5 adversarial review #2: distinguish "no eligible
-        // records exist" (legitimately Ok) from "we hit the page cap
-        // before reaching enough non-dream sources" (a transient
-        // condition that should retry — otherwise a dream-heavy
-        // vault can permanently skip its next window).
-        if filtered.is_empty() {
-            if cursor_exhausted {
-                info!(key = %payload.key, "dream: no records in window — nothing to distill");
-                return Ok(());
-            }
+        // Round-5 adversarial review #2 + round-6 #2: distinguish
+        // (i) "no eligible records exist" (legitimately Ok) from
+        // (ii) "page cap fired before we gathered enough non-dream
+        // sources" (a transient condition that should retry — a
+        // dream-heavy vault must not permanently distill from a
+        // truncated input). Treat ANY cap-with-partial-window state
+        // as Err, not just the empty case.
+        if !cursor_exhausted && filtered.len() < window_cap {
             return Err(format!(
-                "dream: page cap ({DREAM_FETCH_PAGE_CAP}) exhausted before finding a non-dream source"
+                "dream: page cap ({DREAM_FETCH_PAGE_CAP}) fired with only \
+                 {got}/{want} non-dream sources collected",
+                got = filtered.len(),
+                want = window_cap,
             )
             .into());
+        }
+        if filtered.is_empty() {
+            info!(key = %payload.key, "dream: no records in window — nothing to distill");
+            return Ok(());
         }
 
         let mut source_record_ids: Vec<String> =

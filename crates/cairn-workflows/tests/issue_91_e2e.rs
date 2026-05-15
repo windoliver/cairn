@@ -144,6 +144,7 @@ async fn three_workflows_drain_through_one_scheduler() {
     let exp_payload = ExpirationPayload {
         now_ms: 1_777_276_800_000,
         bound_scope: None,
+        cursor: None,
     }
     .to_bytes()
     .expect("exp payload");

@@ -44,6 +44,7 @@ async fn ttl_sweep_tombstones_aged_records() {
     let payload = ExpirationPayload {
         now_ms: FUTURE_NOW_MS,
         bound_scope: None,
+        cursor: None,
     };
     let bytes = payload.to_bytes().expect("encode");
     let outcome = handler.handle(&bytes).await;
@@ -91,6 +92,7 @@ async fn fresh_records_survive_a_long_ttl_sweep() {
     let payload = ExpirationPayload {
         now_ms: 1_777_215_600_000,
         bound_scope: None,
+        cursor: None,
     };
     let bytes = payload.to_bytes().expect("encode");
     let outcome = handler.handle(&bytes).await;
@@ -124,6 +126,7 @@ async fn sweep_is_idempotent_when_replayed() {
     let payload = ExpirationPayload {
         now_ms: FUTURE_NOW_MS,
         bound_scope: None,
+        cursor: None,
     };
     let bytes = payload.to_bytes().expect("encode");
 
@@ -165,6 +168,7 @@ async fn disabled_config_keeps_records_alive() {
     let payload = ExpirationPayload {
         now_ms: FUTURE_NOW_MS,
         bound_scope: None,
+        cursor: None,
     };
     let bytes = payload.to_bytes().expect("encode");
     let outcome = handler.handle(&bytes).await;

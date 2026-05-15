@@ -203,8 +203,11 @@ pub fn run(
                 let dream_handler =
                     DreamHandler::new(store_dyn.clone(), config.dream, None);
 
-                let expiration_handler =
-                    ExpirationHandler::new(store_dyn.clone(), config.expiration);
+                let expiration_handler = ExpirationHandler::with_job_store(
+                    store_dyn.clone(),
+                    config.expiration,
+                    job_store.clone(),
+                );
 
                 // EvaluationHandler emits MetricEvent::EvaluationCompleted
                 // to `.cairn/metrics.jsonl` via the existing

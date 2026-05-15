@@ -7,6 +7,22 @@ use cairn_core::contract::job_store::JobPayload;
 use cairn_core::domain::ScopeTuple;
 use serde::{Deserialize, Serialize};
 
+/// Resume cursor folded into a continuation payload. Mirrors the
+/// fields of `cairn_core::contract::memory_store::ListCursor`
+/// (`updated_at` epoch-seconds + tie-breaker `record_id`) so the
+/// handler can rebuild a `ListCursor` without depending on Serde
+/// support on that public type.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExpirationCursor {
+    /// `updated_at` epoch-seconds boundary of the previous page's
+    /// tail.
+    pub updated_at: i64,
+    /// Tie-breaker record id, parseable by
+    /// `cairn_core::domain::RecordId::parse`.
+    pub record_id: String,
+}
+
 /// One enqueued expiration-sweep request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -22,6 +38,13 @@ pub struct ExpirationPayload {
     /// records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bound_scope: Option<ScopeTuple>,
+    /// Optional resume cursor — set on continuation jobs the
+    /// handler enqueues when the inspect-cap fired before the
+    /// store-side cursor exhausted. Without this, expiration in a
+    /// fresh-prefix vault could starve old records permanently
+    /// (round-6 adversarial review #1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<ExpirationCursor>,
 }
 
 impl ExpirationPayload {
@@ -51,6 +74,22 @@ mod tests {
         let p = ExpirationPayload {
             now_ms: 123_456_789,
             bound_scope: None,
+            cursor: None,
+        };
+        let bytes = p.to_bytes().expect("encode");
+        let back = ExpirationPayload::from_bytes(&bytes).expect("decode");
+        assert_eq!(p, back);
+    }
+
+    #[test]
+    fn roundtrip_with_cursor() {
+        let p = ExpirationPayload {
+            now_ms: 1,
+            bound_scope: None,
+            cursor: Some(ExpirationCursor {
+                updated_at: 1_700_000_000,
+                record_id: "01HQZX9F5N0000000000000001".into(),
+            }),
         };
         let bytes = p.to_bytes().expect("encode");
         let back = ExpirationPayload::from_bytes(&bytes).expect("decode");
