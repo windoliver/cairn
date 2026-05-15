@@ -2565,6 +2565,12 @@ fn emit_human(data: &LintData, operation_id: &Ulid) {
 }
 
 fn kind_key(kind: Kind) -> String {
+    // Mirror the core variant→string mapping (`cairn_core::verbs::lint`)
+    // exhaustively so new `Kind` variants surface as their proper key
+    // in `summary.by_kind` instead of silently landing in `"unknown"`.
+    // The match is intentionally exhaustive — adding a `Kind` variant
+    // upstream surfaces here as a compile error rather than as a buggy
+    // runtime aggregate.
     match kind {
         Kind::ContradictoryEdge => "contradictory_edge",
         Kind::AmbiguousEdge => "ambiguous_edge",
@@ -2574,14 +2580,35 @@ fn kind_key(kind: Kind) -> String {
         Kind::MissingConcept => "missing_concept",
         Kind::DataGap => "data_gap",
         Kind::MalformedRecord => "malformed_record",
+        Kind::MisclassifiedProfile => "misclassified_profile",
         Kind::BrokenActorChain => "broken_actor_chain",
+        Kind::BrokenSourceLink => "broken_source_link",
         Kind::MissingProvenance => "missing_provenance",
+        Kind::MissingSummary => "missing_summary",
+        Kind::OrphanInsight => "orphan_insight",
         Kind::StaleSchema => "stale_schema",
+        Kind::StaleProfileLine => "stale_profile_line",
         Kind::HotMemoryOverBudget => "hot_memory_over_budget",
         Kind::IndexDrift => "index_drift",
         Kind::DeferredCheck => "deferred_check",
         Kind::ProjectionDrift => "projection_drift",
         Kind::ProjectionMissing => "projection_missing",
+        Kind::WrongClassForKind => "wrong_class_for_kind",
+        Kind::SourceAfterForget => "source_after_forget",
+        Kind::SourceAfterForgetUnknownVersion => "source_after_forget_unknown_version",
+        Kind::SourceHashMismatch => "source_hash_mismatch",
+        Kind::SourceLinkDangling => "source_link_dangling",
+        Kind::SourceLinkLegacyDuplicate => "source_link_legacy_duplicate",
+        Kind::SourceLinkMissing => "source_link_missing",
+        Kind::SourceRedactSkipped => "source_redact_skipped",
+        Kind::WorkflowDeadLetter => "workflow_dead_letter",
+        Kind::WorkflowOverdue => "workflow_overdue",
+        Kind::WorkflowStaleSummary => "workflow_stale_summary",
+        Kind::WorkflowStuck => "workflow_stuck",
+        // `Kind` is `#[non_exhaustive]`; this catch-all only fires when
+        // a new variant lands upstream and this file hasn't been
+        // updated yet (issue #92 added 4 variants without touching
+        // this match — caught during e2e verification).
         _ => "unknown",
     }
     .to_owned()
