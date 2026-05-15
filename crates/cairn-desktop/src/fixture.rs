@@ -65,6 +65,14 @@ impl DesktopFixture {
     }
 
     fn validate(&self) -> DesktopResult<()> {
+        self.validate_counts()?;
+        let folder_ids = self.validate_folders()?;
+        let record_ids = self.validate_records(&folder_ids)?;
+        self.validate_lint_findings(&record_ids)?;
+        self.validate_reconcile_examples(&record_ids)
+    }
+
+    fn validate_counts(&self) -> DesktopResult<()> {
         if self.vault.record_count != self.records.len() {
             return Err(DesktopError::Fixture {
                 message: format!(
@@ -83,9 +91,13 @@ impl DesktopFixture {
                 ),
             });
         }
+        Ok(())
+    }
+
+    fn validate_folders(&self) -> DesktopResult<BTreeSet<&str>> {
         let mut folder_ids = BTreeSet::new();
         for folder in &self.folders {
-            if !folder_ids.insert(&folder.id) {
+            if !folder_ids.insert(folder.id.as_str()) {
                 return Err(DesktopError::Fixture {
                     message: format!("duplicate folder id {}", folder.id),
                 });
@@ -94,7 +106,7 @@ impl DesktopFixture {
         let folder_parents: BTreeMap<_, _> = self
             .folders
             .iter()
-            .map(|folder| (&folder.id, folder.parent_id.as_ref()))
+            .map(|folder| (folder.id.as_str(), folder.parent_id.as_deref()))
             .collect();
         for folder in &self.folders {
             if let Some(parent_id) = &folder.parent_id {
@@ -103,7 +115,7 @@ impl DesktopFixture {
                         message: format!("folder {} references parentId itself", folder.id),
                     });
                 }
-                if !folder_ids.contains(parent_id) {
+                if !folder_ids.contains(parent_id.as_str()) {
                     return Err(DesktopError::Fixture {
                         message: format!(
                             "folder {} references unknown parentId {}",
@@ -113,7 +125,7 @@ impl DesktopFixture {
                 }
             }
             let mut ancestors = BTreeSet::new();
-            let mut next_parent = folder.parent_id.as_ref();
+            let mut next_parent = folder.parent_id.as_deref();
             while let Some(parent_id) = next_parent {
                 if !ancestors.insert(parent_id) {
                     return Err(DesktopError::Fixture {
@@ -123,16 +135,20 @@ impl DesktopFixture {
                 next_parent = folder_parents.get(parent_id).and_then(|parent| *parent);
             }
         }
+        Ok(folder_ids)
+    }
+
+    fn validate_records(&self, folder_ids: &BTreeSet<&str>) -> DesktopResult<BTreeSet<&str>> {
         let mut record_ids = BTreeSet::new();
         for record in &self.records {
-            if !record_ids.insert(&record.id) {
+            if !record_ids.insert(record.id.as_str()) {
                 return Err(DesktopError::Fixture {
                     message: format!("duplicate record id {}", record.id),
                 });
             }
         }
         for record in &self.records {
-            if !folder_ids.contains(&record.folder_id) {
+            if !folder_ids.contains(record.folder_id.as_str()) {
                 return Err(DesktopError::Fixture {
                     message: format!(
                         "record {} references unknown folderId {}",
@@ -142,7 +158,7 @@ impl DesktopFixture {
             }
             let mut tag_ids = BTreeSet::new();
             for tag in &record.tags {
-                if !tag_ids.insert(tag) {
+                if !tag_ids.insert(tag.as_str()) {
                     return Err(DesktopError::Fixture {
                         message: format!("record {} has duplicate tag {}", record.id, tag),
                     });
@@ -150,37 +166,45 @@ impl DesktopFixture {
             }
             let mut link_ids = BTreeSet::new();
             for link in &record.links {
-                if !link_ids.insert(link) {
+                if !link_ids.insert(link.as_str()) {
                     return Err(DesktopError::Fixture {
                         message: format!("record {} has duplicate link {}", record.id, link),
                     });
                 }
-                if !record_ids.contains(link) {
+                if !record_ids.contains(link.as_str()) {
                     return Err(DesktopError::Fixture {
                         message: format!("record {} links to unknown record {}", record.id, link),
                     });
                 }
             }
         }
+        Ok(record_ids)
+    }
+
+    fn validate_lint_findings(&self, record_ids: &BTreeSet<&str>) -> DesktopResult<()> {
         let mut lint_ids = BTreeSet::new();
         for finding in &self.lint_findings {
-            if !lint_ids.insert(&finding.id) {
+            if !lint_ids.insert(finding.id.as_str()) {
                 return Err(DesktopError::Fixture {
                     message: format!("duplicate lint finding id {}", finding.id),
                 });
             }
-            if let Some(record_id) = &finding.record_id {
-                if !record_ids.contains(record_id) {
-                    return Err(DesktopError::Fixture {
-                        message: format!(
-                            "lint finding {} references unknown recordId {}",
-                            finding.id, record_id
-                        ),
-                    });
-                }
+            if let Some(record_id) = &finding.record_id
+                && !record_ids.contains(record_id.as_str())
+            {
+                return Err(DesktopError::Fixture {
+                    message: format!(
+                        "lint finding {} references unknown recordId {}",
+                        finding.id, record_id
+                    ),
+                });
             }
         }
-        if !record_ids.contains(&self.reconcile_examples.mutable_record_id) {
+        Ok(())
+    }
+
+    fn validate_reconcile_examples(&self, record_ids: &BTreeSet<&str>) -> DesktopResult<()> {
+        if !record_ids.contains(self.reconcile_examples.mutable_record_id.as_str()) {
             return Err(DesktopError::Fixture {
                 message: format!(
                     "reconcile example references unknown record {}",

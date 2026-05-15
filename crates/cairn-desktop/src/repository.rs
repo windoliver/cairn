@@ -268,23 +268,22 @@ impl DesktopRepository {
                 .mutable_diff
                 .get("body")
                 .and_then(serde_json::Value::as_str)
+                && record.body != body
             {
-                if record.body != body {
-                    record.body = body.to_string();
-                    changed = true;
-                }
+                record.body = body.to_string();
+                changed = true;
             }
-            if let Some(tags) = preview.mutable_diff.get("tags").and_then(string_array) {
-                if record.tags != tags {
-                    record.tags = tags;
-                    changed = true;
-                }
+            if let Some(tags) = preview.mutable_diff.get("tags").and_then(string_array)
+                && record.tags != tags
+            {
+                record.tags = tags;
+                changed = true;
             }
-            if let Some(links) = preview.mutable_diff.get("wikilinks").and_then(string_array) {
-                if record.links != links {
-                    record.links = links;
-                    changed = true;
-                }
+            if let Some(links) = preview.mutable_diff.get("wikilinks").and_then(string_array)
+                && record.links != links
+            {
+                record.links = links;
+                changed = true;
             }
             if changed {
                 record.version += 1;
@@ -331,10 +330,10 @@ fn validate_mutable_field(
                 return MutableFieldValidation::InvalidShape;
             };
             let unique_tags: BTreeSet<_> = tags.iter().collect();
-            if unique_tags.len() != tags.len() {
-                MutableFieldValidation::DuplicateTag
-            } else {
+            if unique_tags.len() == tags.len() {
                 MutableFieldValidation::Accepted
+            } else {
+                MutableFieldValidation::DuplicateTag
             }
         }
         "wikilinks" => {

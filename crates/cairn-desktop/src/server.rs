@@ -30,7 +30,6 @@ pub struct DesktopServerState {
 }
 
 /// Build the desktop alpha router.
-#[must_use]
 pub fn router(repo: DesktopRepository) -> Router {
     let state = DesktopServerState {
         repo: Arc::new(repo),

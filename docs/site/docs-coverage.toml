@@ -13,6 +13,11 @@ audience = "sdk-author"
 page = "reference/rust-api.md"
 generated_reference = ""
 
+[packages.cairn-desktop]
+audience = "operator"
+page = "usage/cli.md"
+generated_reference = ""
+
 [packages.cairn-idl]
 audience = "maintainer"
 page = "reference/idl.md"
