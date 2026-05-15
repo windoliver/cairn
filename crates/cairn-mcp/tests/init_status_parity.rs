@@ -179,6 +179,7 @@ const EXTENSION_NAMESPACE_PREFIXES: &[&str] = &[
     "cairn.admin.",
     "cairn.federation.",
     "cairn.sessiontree.",
+    "cairn.coord.",
 ];
 
 /// Default P0 config must NOT advertise any extension verbs in
@@ -255,6 +256,7 @@ async fn calling_unadvertised_extension_verb_returns_mcp_error() {
         "cairn.admin.snapshot",
         "cairn.federation.propose_share",
         "cairn.sessiontree.fork_session",
+        "cairn.coord.next",
     ] {
         send_frame(
             &mut client_write,

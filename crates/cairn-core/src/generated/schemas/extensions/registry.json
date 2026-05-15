@@ -1,7 +1,7 @@
 {
   "$defs": {
     "known": {
-      "description": "The four planned extensions at P0 — carried as literal values so codegen can emit an enum without re-walking the $defs.namespace schema.",
+      "description": "The five planned extensions carried as literal values so codegen can emit an enum without re-walking the $defs.namespace schema.",
       "items": {
         "$ref": "#/$defs/namespace"
       },
@@ -30,11 +30,17 @@
           "name": "cairn.sessiontree.v1",
           "x-cairn-capability": "cairn.mcp.v1.extension.sessiontree",
           "x-cairn-since": "v0.3"
+        },
+        {
+          "enabler": "coord.enable",
+          "name": "cairn.coord.v1",
+          "x-cairn-capability": "cairn.mcp.v1.extension.coord",
+          "x-cairn-since": "v0.3"
         }
       ]
     },
     "namespace": {
-      "description": "One of the four registered extension triples. Independent enums on name / since / enabler would accept invalid combinations, so each namespace is pinned as a whole quadruple (name + since + enabler + capability). The capability string ties negotiation to the shared capabilities enum so status.extensions and status.capabilities cannot drift.",
+      "description": "One of the five registered extension triples. Independent enums on name / since / enabler would accept invalid combinations, so each namespace is pinned as a whole quadruple (name + since + enabler + capability). The capability string ties negotiation to the shared capabilities enum so status.extensions and status.capabilities cannot drift.",
       "oneOf": [
         {
           "additionalProperties": false,
@@ -119,6 +125,30 @@
             },
             "x-cairn-capability": {
               "const": "cairn.mcp.v1.extension.sessiontree"
+            },
+            "x-cairn-since": {
+              "const": "v0.3"
+            }
+          },
+          "required": [
+            "name",
+            "x-cairn-since",
+            "enabler",
+            "x-cairn-capability"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "enabler": {
+              "const": "coord.enable"
+            },
+            "name": {
+              "const": "cairn.coord.v1"
+            },
+            "x-cairn-capability": {
+              "const": "cairn.mcp.v1.extension.coord"
             },
             "x-cairn-since": {
               "const": "v0.3"

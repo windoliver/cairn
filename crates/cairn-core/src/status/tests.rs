@@ -614,6 +614,22 @@ fn openai_provider_without_key_drops_semantic_and_hybrid() {
     );
 }
 
+#[test]
+fn extension_namespaces_follow_advertised_extension_capabilities() {
+    let extensions = extension_namespaces(&[
+        Capabilities::CairnMcpV1SearchKeyword,
+        Capabilities::CairnMcpV1ExtensionCoord,
+    ]);
+    assert_eq!(extensions.len(), 1);
+    assert_eq!(extensions[0]["name"], "cairn.coord.v1");
+    assert_eq!(extensions[0]["x-cairn-since"], "v0.3");
+    assert_eq!(extensions[0]["enabler"], "coord.enable");
+    assert_eq!(
+        extensions[0]["x-cairn-capability"],
+        "cairn.mcp.v1.extension.coord"
+    );
+}
+
 #[cfg(test)]
 mod exhaustiveness {
     use super::*;
@@ -654,6 +670,7 @@ mod exhaustiveness {
             Capabilities::CairnMcpV1ExtensionAdmin => "ext.admin",
             Capabilities::CairnMcpV1ExtensionFederation => "ext.federation",
             Capabilities::CairnMcpV1ExtensionSessiontree => "ext.sessiontree",
+            Capabilities::CairnMcpV1ExtensionCoord => "ext.coord",
             // Capabilities is `#[non_exhaustive]` — explicit catch-all forces
             // the table above to grow when a future codegen adds a variant.
             _ => "unknown",
@@ -694,6 +711,7 @@ mod exhaustiveness {
             Capabilities::CairnMcpV1ExtensionAdmin,
             Capabilities::CairnMcpV1ExtensionFederation,
             Capabilities::CairnMcpV1ExtensionSessiontree,
+            Capabilities::CairnMcpV1ExtensionCoord,
         ];
         for c in known {
             assert_ne!(classify(c), "unknown", "missing classify arm for {c:?}");

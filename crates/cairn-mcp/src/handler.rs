@@ -476,6 +476,8 @@ impl CairnMcpHandler {
             .sort_by_key(|capability| serde_json::to_string(capability).unwrap_or_default());
         capabilities.dedup();
 
+        let extensions = cairn_core::status::extension_namespaces(&capabilities);
+
         StatusResponse {
             contract: "cairn.mcp.v1".to_owned(),
             server_info: StatusResponseServerInfo {
@@ -485,7 +487,7 @@ impl CairnMcpHandler {
                 incarnation: cairn_core::time::new_operation_id(),
             },
             capabilities,
-            extensions: vec![],
+            extensions,
             sensors: cairn_core::status::sensors_status_for_config(&self.config),
             pipeline_dispatch: Some(pipeline_dispatch_advertisement(&DefaultRegistry)),
             // Mirror the SDK's `Sdk::status` and CLI's no-vault path so
@@ -637,6 +639,16 @@ impl ServerHandler for CairnMcpHandler {
             }
         }
 
+        for decl in crate::coord_tools::enabled_tools(&self.build_status_response().capabilities) {
+            let schema_value: serde_json::Value = serde_json::from_slice(decl.input_schema)
+                .unwrap_or_else(|_| serde_json::json!({"type": "object", "properties": {}}));
+            let schema_obj = match schema_value {
+                serde_json::Value::Object(m) => m,
+                _ => serde_json::Map::new(),
+            };
+            tools.push(Tool::new(decl.name, decl.description, Arc::new(schema_obj)));
+        }
+
         std::future::ready(Ok(ListToolsResult::with_all_items(tools)))
     }
 
@@ -690,6 +702,13 @@ impl ServerHandler for CairnMcpHandler {
                 };
                 let queries = GraphQueries::new(req.store, req.allowed, req.now_ms);
                 return Ok(crate::graph_tools::dispatch(&queries, &name, arguments).await);
+            }
+
+            if crate::coord_tools::is_coord_tool(name.as_ref()) {
+                if !crate::coord_tools::runtime_ready(&self.build_status_response().capabilities) {
+                    return Ok(capability_unavailable_result(&name));
+                }
+                return Ok(crate::coord_tools::dispatch(&name, arguments));
             }
 
             let request_verb = crate::verb_envelope::core_verb_for_tool(name.as_ref());

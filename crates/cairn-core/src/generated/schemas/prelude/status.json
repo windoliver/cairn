@@ -270,6 +270,73 @@
           "extensions"
         ]
       }
+    },
+    {
+      "$comment": "coord extension ↔ capability binding",
+      "if": {
+        "properties": {
+          "extensions": {
+            "contains": {
+              "properties": {
+                "name": {
+                  "const": "cairn.coord.v1"
+                }
+              },
+              "required": [
+                "name"
+              ]
+            }
+          }
+        },
+        "required": [
+          "extensions"
+        ]
+      },
+      "then": {
+        "properties": {
+          "capabilities": {
+            "contains": {
+              "const": "cairn.mcp.v1.extension.coord"
+            }
+          }
+        },
+        "required": [
+          "capabilities"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "capabilities": {
+            "contains": {
+              "const": "cairn.mcp.v1.extension.coord"
+            }
+          }
+        },
+        "required": [
+          "capabilities"
+        ]
+      },
+      "then": {
+        "properties": {
+          "extensions": {
+            "contains": {
+              "properties": {
+                "name": {
+                  "const": "cairn.coord.v1"
+                }
+              },
+              "required": [
+                "name"
+              ]
+            }
+          }
+        },
+        "required": [
+          "extensions"
+        ]
+      }
     }
   ],
   "properties": {

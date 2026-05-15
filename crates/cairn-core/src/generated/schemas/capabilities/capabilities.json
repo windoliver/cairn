@@ -76,6 +76,10 @@
       "x-cairn-since": "v0.3"
     },
     {
+      "const": "cairn.mcp.v1.extension.coord",
+      "x-cairn-since": "v0.3"
+    },
+    {
       "const": "cairn.mcp.v1.policy_trace",
       "x-cairn-since": "v0.1"
     },

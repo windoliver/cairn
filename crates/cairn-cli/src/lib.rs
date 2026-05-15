@@ -7,6 +7,7 @@
 
 pub mod command;
 pub mod config;
+pub mod coord;
 pub mod docgen;
 pub mod doctor;
 pub(crate) mod generated;

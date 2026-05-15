@@ -12,10 +12,11 @@ Manage human-review FlushPlans (brief §5.5)
 Usage: flush <COMMAND>
 
 Commands:
-  list    List FlushPlans under .cairn/flush/
-  apply   Apply a pending plan to MemoryStore
-  reject  Reject a pending plan; record a reason
-  help    Print this message or the help of the given subcommand(s)
+  list     List FlushPlans under .cairn/flush/
+  apply    Apply a pending plan to MemoryStore
+  reject   Reject a pending plan; record a reason
+  requeue  Move a quarantined coord plan back to pending/
+  help     Print this message or the help of the given subcommand(s)
 
 Options:
   -h, --help
@@ -27,3 +28,4 @@ Options:
 - [`cairn flush list`](flush-list.md) - List FlushPlans under .cairn/flush/
 - [`cairn flush apply`](flush-apply.md) - Apply a pending plan to MemoryStore
 - [`cairn flush reject`](flush-reject.md) - Reject a pending plan; record a reason
+- [`cairn flush requeue`](flush-requeue.md) - Move a quarantined coord plan back to pending/
