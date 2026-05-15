@@ -183,6 +183,7 @@ pub fn run_with_context(
             return ExitCode::from(78); // EX_CONFIG
         }
     };
+    let extensions = cairn_core::status::extension_namespaces(&caps);
 
     // ── MCP graph-tools availability (issue #190 Plan A) ─────────────
     // The probe only runs against a *bound* vault: an unbound CWD has
@@ -227,7 +228,7 @@ pub fn run_with_context(
             incarnation: incarnation.clone(),
         },
         capabilities: caps,
-        extensions: vec![],
+        extensions,
         sensors: map_screen_probe(
             &screen::probe_config(&status_config.sensors.screen),
             Some(local_sensor_status),

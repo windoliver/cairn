@@ -5,8 +5,8 @@ use std::path::Path;
 use cairn_core::contract::memory_store::{Edge, EdgeDir, EdgeKind, MemoryStore};
 use cairn_core::domain::flush_plan::store::{Bucket, bucket_dir, plan_path};
 use cairn_core::domain::flush_plan::{
-    FlushMode, PatchTarget, PersistedPlan, PlanReason, PlannedMutation, ReplaceOccurrence,
-    StrReplace,
+    CoordActionStatus, FlushMode, PatchTarget, PersistedPlan, PlanReason, PlanStatus,
+    PlannedMutation, ReplaceOccurrence, StrReplace,
 };
 use cairn_core::domain::session::SessionIdentity;
 use cairn_core::domain::{Identity, ScopeTuple, TargetId};
@@ -53,6 +53,26 @@ fn write_real_pending_plan_with_hashes(
     let path = plan_path(vault, Bucket::Pending, &persisted.plan.operation_id);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, serde_json::to_vec_pretty(&persisted).unwrap()).unwrap();
+}
+
+fn write_coord_pending_plan(vault: &Path, id: &str) -> std::path::PathBuf {
+    let action_id = TargetId::parse("01HQZK000000000000000ACTN1").unwrap();
+    let path = plan_path(
+        vault,
+        Bucket::Pending,
+        &cairn_core::generated::common::Ulid(id.into()),
+    );
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+    let mut persisted = sample_pending(id);
+    persisted.plan.mutations = vec![PlannedMutation::ActionUpdate {
+        id: action_id,
+        status: CoordActionStatus::Blocked,
+        reason: Some("waiting on review".into()),
+    }];
+    persisted.schema_version = PersistedPlan::COORD_SCHEMA_VERSION;
+    std::fs::write(&path, serde_json::to_vec_pretty(&persisted).unwrap()).unwrap();
+    path
 }
 
 fn open_store(
@@ -136,6 +156,135 @@ fn flush_apply_moves_pending_to_applied() {
         p.status,
         cairn_core::domain::flush_plan::PlanStatus::Applied { .. }
     ));
+}
+
+#[test]
+fn flush_apply_removes_stale_requeue_marker_for_non_coord_plan() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK0000000000000000001A";
+    write_pending(vault.path(), id);
+    let marker = bucket_dir(vault.path(), Bucket::Pending).join(format!("{id}.requeue-in-flight"));
+    std::fs::write(&marker, "stale coord marker\n").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let out = std::process::Command::new(bin)
+        .args(["flush", "apply", id])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    assert!(
+        out.status.success(),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let applied = plan_path(
+        vault.path(),
+        Bucket::Applied,
+        &cairn_core::generated::common::Ulid(id.into()),
+    );
+    assert!(applied.exists(), "non-coord plan should apply");
+    assert!(!marker.exists(), "stale non-coord marker should be removed");
+}
+
+#[test]
+fn flush_apply_preserves_requeue_marker_for_mismatched_pending_plan() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK0000000000000000001B";
+    let other_id = "01HQZK0000000000000000001C";
+    let ulid = cairn_core::generated::common::Ulid(id.into());
+    let pending = plan_path(vault.path(), Bucket::Pending, &ulid);
+    std::fs::create_dir_all(pending.parent().unwrap()).unwrap();
+    std::fs::write(
+        &pending,
+        serde_json::to_vec_pretty(&sample_pending(other_id)).unwrap(),
+    )
+    .unwrap();
+    let marker = bucket_dir(vault.path(), Bucket::Pending).join(format!("{id}.requeue-in-flight"));
+    std::fs::write(&marker, "stale coord marker\n").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let out = std::process::Command::new(bin)
+        .args(["flush", "apply", id])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    assert_eq!(
+        out.status.code(),
+        Some(70),
+        "mismatched pending file should fail before marker cleanup; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(pending.exists(), "pending artifact should remain");
+    assert!(marker.exists(), "ambiguous requeue marker should remain");
+}
+
+#[test]
+fn flush_apply_refuses_requeue_repair_needed_marker() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK0000000000000000001D";
+    write_pending(vault.path(), id);
+    let pending = plan_path(
+        vault.path(),
+        Bucket::Pending,
+        &cairn_core::generated::common::Ulid(id.into()),
+    );
+    let marker =
+        bucket_dir(vault.path(), Bucket::Pending).join(format!("{id}.requeue-repair-needed"));
+    std::fs::write(&marker, "manual repair required\n").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let out = std::process::Command::new(bin)
+        .args(["flush", "apply", id])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    assert_eq!(
+        out.status.code(),
+        Some(70),
+        "repair-needed marker should block apply; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        pending.exists(),
+        "pending plan should not be claimed when repair marker blocks apply"
+    );
+    assert!(marker.exists(), "repair marker should remain");
+}
+
+#[test]
+fn flush_reject_refuses_requeue_repair_needed_marker_on_malformed_pending() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK0000000000000000001E";
+    let pending = plan_path(
+        vault.path(),
+        Bucket::Pending,
+        &cairn_core::generated::common::Ulid(id.into()),
+    );
+    std::fs::create_dir_all(pending.parent().unwrap()).unwrap();
+    std::fs::write(&pending, "{not json").unwrap();
+    let marker =
+        bucket_dir(vault.path(), Bucket::Pending).join(format!("{id}.requeue-repair-needed"));
+    std::fs::write(&marker, "manual repair required\n").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let out = std::process::Command::new(bin)
+        .args(["flush", "reject", id, "--reason", "operator reject"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    assert_eq!(
+        out.status.code(),
+        Some(70),
+        "repair-needed marker should block reject before malformed-plan handling; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(pending.exists(), "pending artifact should remain");
+    assert!(marker.exists(), "repair marker should remain");
 }
 
 #[test]
@@ -396,6 +545,2105 @@ fn flush_apply_rejects_unsupported_schema_version() {
         &cairn_core::generated::common::Ulid(id.into()),
     );
     assert!(!applied.exists(), "must NOT have moved to applied/");
+}
+
+#[test]
+fn flush_apply_rejects_coord_mutation_in_legacy_schema_version() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCHM2";
+    let action_id = TargetId::parse("01HQZK000000000000000ACTN1").unwrap();
+    let path = plan_path(
+        vault.path(),
+        Bucket::Pending,
+        &cairn_core::generated::common::Ulid(id.into()),
+    );
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+    let mut persisted = sample_pending(id);
+    persisted.plan.mutations = vec![PlannedMutation::ActionUpdate {
+        id: action_id,
+        status: CoordActionStatus::Blocked,
+        reason: Some("waiting on review".into()),
+    }];
+    persisted.schema_version = PersistedPlan::BASE_SCHEMA_VERSION;
+    std::fs::write(&path, serde_json::to_vec_pretty(&persisted).unwrap()).unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let out = std::process::Command::new(bin)
+        .args(["flush", "apply", id])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    assert_eq!(
+        out.status.code(),
+        Some(65),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr)
+            .contains("schema_version 1 is too old for enclosed mutations"),
+        "expected legacy coord mutation message; got: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(path.exists(), "plan file should remain in pending/");
+}
+
+#[test]
+fn flush_apply_rejects_coord_mutation_while_coord_runtime_unwired() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCHM3";
+    let path = write_coord_pending_plan(vault.path(), id);
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let out = std::process::Command::new(bin)
+        .args(["flush", "apply", id])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    assert_eq!(
+        out.status.code(),
+        Some(69),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("coord runtime is not wired"),
+        "expected coord unwired message; got: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(path.exists(), "plan file should remain in pending/");
+}
+
+#[test]
+fn flush_reject_quarantines_coord_mutation_while_coord_runtime_unwired() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCHM4";
+    let path = write_coord_pending_plan(vault.path(), id);
+    let ulid = cairn_core::generated::common::Ulid(id.into());
+    let pending_diff = cairn_core::domain::flush_plan::store::diff_path(vault.path(), &ulid);
+    let quarantined = vault
+        .path()
+        .join(".cairn/flush/quarantined")
+        .join(format!("{id}.plan.json"));
+    let quarantined_diff = vault
+        .path()
+        .join(".cairn/flush/quarantined")
+        .join(format!("{id}.diff.md"));
+    std::fs::write(&pending_diff, "coord review diff").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let out = std::process::Command::new(bin)
+        .args(["flush", "reject", id, "--reason", "unsupported coord"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let retry = std::process::Command::new(bin)
+        .args(["flush", "reject", id, "--reason", "unsupported coord"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn retry");
+    assert!(
+        retry.status.success(),
+        "retry should treat existing quarantine as success; stderr: {}",
+        String::from_utf8_lossy(&retry.stderr)
+    );
+    std::fs::write(&path, std::fs::read(&quarantined).unwrap()).unwrap();
+    let duplicate_retry = std::process::Command::new(bin)
+        .args(["flush", "reject", id, "--reason", "unsupported coord"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn duplicate retry");
+    assert!(
+        duplicate_retry.status.success(),
+        "duplicate pending copy should be reconciled into existing quarantine; stderr: {}",
+        String::from_utf8_lossy(&duplicate_retry.stderr)
+    );
+    assert!(!path.exists(), "coord plan should leave pending/");
+    assert!(!pending_diff.exists(), "pending diff should leave pending/");
+
+    let rejected = plan_path(vault.path(), Bucket::Rejected, &ulid);
+    assert!(
+        !rejected.exists(),
+        "coord quarantine must not semantically reject the plan"
+    );
+    assert!(
+        !rejected.with_extension("json.in-flight").exists(),
+        "coord quarantine must not stage through rejected/"
+    );
+    let persisted: PersistedPlan =
+        serde_json::from_slice(&std::fs::read(&quarantined).unwrap()).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&quarantined_diff).unwrap(),
+        "coord review diff"
+    );
+    assert!(
+        matches!(
+            persisted.status,
+            cairn_core::domain::flush_plan::PlanStatus::Pending
+        ),
+        "quarantine must preserve original plan status, got {:?}",
+        persisted.status
+    );
+    assert_eq!(
+        persisted.schema_version,
+        PersistedPlan::COORD_SCHEMA_VERSION
+    );
+}
+
+#[test]
+fn flush_reject_from_quarantine_writes_terminal_rejected_plan() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCQ21";
+    write_coord_pending_plan(vault.path(), id);
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let quarantined_out = std::process::Command::new(bin)
+        .args(["flush", "reject", id, "--reason", "unsupported coord"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn reject");
+    assert!(
+        quarantined_out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&quarantined_out.stderr)
+    );
+
+    let rejected_out = std::process::Command::new(bin)
+        .args([
+            "flush",
+            "reject",
+            id,
+            "--reason",
+            "malicious coord",
+            "--from-quarantine",
+        ])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn reject from quarantine");
+    assert!(
+        rejected_out.status.success(),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&rejected_out.stdout),
+        String::from_utf8_lossy(&rejected_out.stderr)
+    );
+
+    let ulid = cairn_core::generated::common::Ulid(id.into());
+    let quarantined = vault
+        .path()
+        .join(".cairn/flush/quarantined")
+        .join(format!("{id}.plan.json"));
+    let rejected = plan_path(vault.path(), Bucket::Rejected, &ulid);
+    assert!(!quarantined.exists(), "quarantined plan should be consumed");
+    assert!(rejected.exists(), "rejected terminal should be written");
+    let persisted: PersistedPlan =
+        serde_json::from_slice(&std::fs::read(rejected).unwrap()).unwrap();
+    assert!(matches!(
+        persisted.status,
+        PlanStatus::Rejected { ref reason, .. } if reason == "malicious coord"
+    ));
+}
+
+#[test]
+fn flush_reject_from_quarantine_resumes_quarantine_claim() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCQ23";
+    let pending = write_coord_pending_plan(vault.path(), id);
+    let quarantine_claim = vault
+        .path()
+        .join(".cairn/flush/quarantined")
+        .join(format!("{id}.plan.json.in-flight"));
+    std::fs::create_dir_all(quarantine_claim.parent().unwrap()).unwrap();
+    std::fs::rename(&pending, &quarantine_claim).unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let rejected_out = std::process::Command::new(bin)
+        .args([
+            "flush",
+            "reject",
+            id,
+            "--reason",
+            "malicious coord",
+            "--from-quarantine",
+        ])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn reject from quarantine");
+    assert!(
+        rejected_out.status.success(),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&rejected_out.stdout),
+        String::from_utf8_lossy(&rejected_out.stderr)
+    );
+
+    let ulid = cairn_core::generated::common::Ulid(id.into());
+    let rejected = plan_path(vault.path(), Bucket::Rejected, &ulid);
+    assert!(!quarantine_claim.exists(), "claim should be consumed");
+    assert!(rejected.exists(), "rejected terminal should be written");
+}
+
+#[test]
+fn flush_reject_from_quarantine_collapses_duplicate_matching_claim() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCQ28";
+    let pending = write_coord_pending_plan(vault.path(), id);
+    let quarantined = vault
+        .path()
+        .join(".cairn/flush/quarantined")
+        .join(format!("{id}.plan.json"));
+    let quarantine_claim = quarantined.with_extension("json.in-flight");
+    std::fs::create_dir_all(quarantined.parent().unwrap()).unwrap();
+    std::fs::rename(&pending, &quarantined).unwrap();
+    std::fs::write(&quarantine_claim, std::fs::read(&quarantined).unwrap()).unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let rejected_out = std::process::Command::new(bin)
+        .args([
+            "flush",
+            "reject",
+            id,
+            "--reason",
+            "malicious coord",
+            "--from-quarantine",
+        ])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn reject from quarantine");
+    assert!(
+        rejected_out.status.success(),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&rejected_out.stdout),
+        String::from_utf8_lossy(&rejected_out.stderr)
+    );
+
+    let ulid = cairn_core::generated::common::Ulid(id.into());
+    let rejected = plan_path(vault.path(), Bucket::Rejected, &ulid);
+    assert!(rejected.exists(), "rejected terminal should be written");
+    assert!(
+        !quarantined.exists(),
+        "canonical quarantine should be consumed"
+    );
+    assert!(
+        !quarantine_claim.exists(),
+        "duplicate quarantine claim should be removed"
+    );
+}
+
+#[test]
+fn flush_reject_from_quarantine_claim_removes_pending_diff() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCQ27";
+    let pending = write_coord_pending_plan(vault.path(), id);
+    let ulid = cairn_core::generated::common::Ulid(id.into());
+    let pending_diff = cairn_core::domain::flush_plan::store::diff_path(vault.path(), &ulid);
+    std::fs::write(&pending_diff, "coord review diff").unwrap();
+    let quarantine_claim = vault
+        .path()
+        .join(".cairn/flush/quarantined")
+        .join(format!("{id}.plan.json.in-flight"));
+    std::fs::create_dir_all(quarantine_claim.parent().unwrap()).unwrap();
+    std::fs::rename(&pending, &quarantine_claim).unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let rejected_out = std::process::Command::new(bin)
+        .args([
+            "flush",
+            "reject",
+            id,
+            "--reason",
+            "malicious coord",
+            "--from-quarantine",
+        ])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn reject from quarantine");
+    assert!(
+        rejected_out.status.success(),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&rejected_out.stdout),
+        String::from_utf8_lossy(&rejected_out.stderr)
+    );
+
+    let rejected = plan_path(vault.path(), Bucket::Rejected, &ulid);
+    assert!(rejected.exists(), "rejected terminal should be written");
+    assert!(!pending_diff.exists(), "pending diff should be cleaned up");
+    assert!(!quarantine_claim.exists(), "claim should be consumed");
+}
+
+#[test]
+fn flush_reject_from_quarantine_refuses_divergent_diff_sidecars() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCQ2A";
+    write_coord_pending_plan(vault.path(), id);
+    let ulid = cairn_core::generated::common::Ulid(id.into());
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let first = std::process::Command::new(bin)
+        .args(["flush", "reject", id, "--reason", "unsupported coord"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn first reject");
+    assert!(
+        first.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    let pending_diff = cairn_core::domain::flush_plan::store::diff_path(vault.path(), &ulid);
+    let quarantine_diff = vault
+        .path()
+        .join(".cairn/flush/quarantined")
+        .join(format!("{id}.diff.md"));
+    std::fs::write(&pending_diff, "pending evidence").unwrap();
+    std::fs::write(&quarantine_diff, "quarantine evidence").unwrap();
+
+    let rejected_out = std::process::Command::new(bin)
+        .args([
+            "flush",
+            "reject",
+            id,
+            "--reason",
+            "malicious coord",
+            "--from-quarantine",
+        ])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn reject from quarantine");
+    assert_eq!(
+        rejected_out.status.code(),
+        Some(70),
+        "divergent diffs should fail closed; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&rejected_out.stdout),
+        String::from_utf8_lossy(&rejected_out.stderr)
+    );
+    assert!(pending_diff.exists(), "pending diff should remain");
+    assert!(quarantine_diff.exists(), "quarantine diff should remain");
+    assert!(
+        !plan_path(vault.path(), Bucket::Rejected, &ulid).exists(),
+        "terminal reject should not publish over divergent evidence"
+    );
+}
+
+#[test]
+fn flush_reject_from_quarantine_refuses_orphan_pending_diff() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCQ2B";
+    write_coord_pending_plan(vault.path(), id);
+    let ulid = cairn_core::generated::common::Ulid(id.into());
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let first = std::process::Command::new(bin)
+        .args(["flush", "reject", id, "--reason", "unsupported coord"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn first reject");
+    assert!(
+        first.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    let pending_diff = cairn_core::domain::flush_plan::store::diff_path(vault.path(), &ulid);
+    std::fs::write(&pending_diff, "orphaned pending evidence").unwrap();
+
+    let rejected_out = std::process::Command::new(bin)
+        .args([
+            "flush",
+            "reject",
+            id,
+            "--reason",
+            "malicious coord",
+            "--from-quarantine",
+        ])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn reject from quarantine");
+    assert_eq!(
+        rejected_out.status.code(),
+        Some(70),
+        "orphan pending diff should fail closed; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&rejected_out.stdout),
+        String::from_utf8_lossy(&rejected_out.stderr)
+    );
+    assert!(pending_diff.exists(), "orphan pending diff should remain");
+    assert!(
+        !plan_path(vault.path(), Bucket::Rejected, &ulid).exists(),
+        "terminal reject should not publish over orphan evidence"
+    );
+}
+
+#[test]
+fn flush_reject_json_retry_on_already_quarantined_plan_is_json() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCQ29";
+    write_coord_pending_plan(vault.path(), id);
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let first = std::process::Command::new(bin)
+        .args(["flush", "reject", id, "--reason", "unsupported coord"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn first reject");
+    assert!(
+        first.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    let retry = std::process::Command::new(bin)
+        .args([
+            "flush",
+            "reject",
+            id,
+            "--reason",
+            "unsupported coord",
+            "--json",
+        ])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn retry reject");
+    assert!(
+        retry.status.success(),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&retry.stdout),
+        String::from_utf8_lossy(&retry.stderr)
+    );
+    let body: serde_json::Value =
+        serde_json::from_slice(&retry.stdout).expect("retry should emit JSON");
+    assert_eq!(body["operation_id"], id);
+    assert_eq!(body["status"], "quarantined");
+}
+
+#[test]
+fn flush_reject_from_quarantine_fails_closed_with_duplicate_pending_copy() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCQ22";
+    let pending = write_coord_pending_plan(vault.path(), id);
+    let quarantined = vault
+        .path()
+        .join(".cairn/flush/quarantined")
+        .join(format!("{id}.plan.json"));
+    std::fs::create_dir_all(quarantined.parent().unwrap()).unwrap();
+    std::fs::write(&quarantined, std::fs::read(&pending).unwrap()).unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let rejected_out = std::process::Command::new(bin)
+        .args([
+            "flush",
+            "reject",
+            id,
+            "--reason",
+            "malicious coord",
+            "--from-quarantine",
+        ])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn reject from quarantine");
+    assert_eq!(
+        rejected_out.status.code(),
+        Some(70),
+        "duplicate pending/quarantine should fail closed; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&rejected_out.stdout),
+        String::from_utf8_lossy(&rejected_out.stderr)
+    );
+    assert!(pending.exists(), "pending duplicate should remain");
+    assert!(quarantined.exists(), "quarantined plan should remain");
+}
+
+#[test]
+fn flush_list_marks_invalid_quarantined_artifacts() {
+    let vault = tempfile::tempdir().unwrap();
+    let quarantine_dir = vault.path().join(".cairn/flush/quarantined");
+    std::fs::create_dir_all(&quarantine_dir).unwrap();
+
+    let non_coord_id = "01HQZK000000000000000SCQ24";
+    let non_coord = sample_pending(non_coord_id);
+    std::fs::write(
+        quarantine_dir.join(format!("{non_coord_id}.plan.json")),
+        serde_json::to_vec_pretty(&non_coord).unwrap(),
+    )
+    .unwrap();
+
+    let rejected_id = "01HQZK000000000000000SCQ25";
+    let mut rejected = sample_pending(rejected_id);
+    rejected.plan.mutations = vec![PlannedMutation::ActionUpdate {
+        id: TargetId::parse("01HQZK000000000000000ACTN1").unwrap(),
+        status: CoordActionStatus::Blocked,
+        reason: Some("waiting on review".into()),
+    }];
+    rejected.schema_version = PersistedPlan::COORD_SCHEMA_VERSION;
+    rejected.status = PlanStatus::Rejected {
+        at: "2026-05-09T12:00:00Z".into(),
+        reason: "already rejected".into(),
+    };
+    std::fs::write(
+        quarantine_dir.join(format!("{rejected_id}.plan.json")),
+        serde_json::to_vec_pretty(&rejected).unwrap(),
+    )
+    .unwrap();
+
+    let invalid_schema_id = "01HQZK000000000000000SCQ26";
+    let mut invalid_schema = sample_pending(invalid_schema_id);
+    invalid_schema.plan.mutations = vec![PlannedMutation::ActionUpdate {
+        id: TargetId::parse("01HQZK000000000000000ACTN1").unwrap(),
+        status: CoordActionStatus::Blocked,
+        reason: Some("waiting on review".into()),
+    }];
+    invalid_schema.schema_version = PersistedPlan::COORD_SCHEMA_VERSION + 100;
+    std::fs::write(
+        quarantine_dir.join(format!("{invalid_schema_id}.plan.json")),
+        serde_json::to_vec_pretty(&invalid_schema).unwrap(),
+    )
+    .unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let listed = std::process::Command::new(bin)
+        .args(["flush", "list", "--json"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn flush list");
+    assert!(
+        listed.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&listed.stdout).expect("valid JSON");
+    let plans = v["plans"].as_array().expect("plans array");
+    assert!(
+        plans
+            .iter()
+            .any(|plan| plan["id"] == non_coord_id && plan["status"] == "quarantined (non-coord)"),
+        "non-coord quarantine should be labeled invalid: {v}"
+    );
+    assert!(
+        plans
+            .iter()
+            .any(|plan| plan["id"] == rejected_id
+                && plan["status"] == "quarantined (invalid status)"),
+        "terminal-status quarantine should be labeled invalid: {v}"
+    );
+    assert!(
+        plans.iter().any(|plan| plan["id"] == invalid_schema_id
+            && plan["status"] == "quarantined (invalid schema)"),
+        "schema-invalid quarantine should be labeled invalid: {v}"
+    );
+}
+
+#[test]
+fn flush_reject_resumes_quarantined_in_flight_claim() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCQ11";
+    let pending = write_coord_pending_plan(vault.path(), id);
+    let quarantined = vault
+        .path()
+        .join(".cairn/flush/quarantined")
+        .join(format!("{id}.plan.json"));
+    let quarantine_claim = quarantined.with_extension("json.in-flight");
+    std::fs::create_dir_all(quarantine_claim.parent().unwrap()).unwrap();
+    std::fs::rename(&pending, &quarantine_claim).unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let out = std::process::Command::new(bin)
+        .args(["flush", "reject", id, "--reason", "unsupported coord"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(quarantined.exists(), "quarantined plan should be published");
+    assert!(
+        !quarantine_claim.exists(),
+        "quarantine in-flight claim should be consumed"
+    );
+    assert!(
+        !plan_path(
+            vault.path(),
+            Bucket::Rejected,
+            &cairn_core::generated::common::Ulid(id.into())
+        )
+        .exists(),
+        "coord quarantine recovery must not create rejected terminal state"
+    );
+}
+
+#[test]
+fn flush_list_shows_quarantined_in_flight_claims() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCQ13";
+    let pending = write_coord_pending_plan(vault.path(), id);
+    let quarantined = vault
+        .path()
+        .join(".cairn/flush/quarantined")
+        .join(format!("{id}.plan.json"));
+    let quarantine_claim = quarantined.with_extension("json.in-flight");
+    std::fs::create_dir_all(quarantine_claim.parent().unwrap()).unwrap();
+    std::fs::rename(&pending, &quarantine_claim).unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let listed = std::process::Command::new(bin)
+        .args(["flush", "list", "--json"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn flush list");
+    assert!(
+        listed.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&listed.stdout).expect("valid JSON");
+    let plans = v["plans"].as_array().expect("plans array");
+    assert!(
+        plans.iter().any(|plan| {
+            plan["id"] == id
+                && plan["bucket"] == "in-flight (quarantine)"
+                && plan["status"] == "stranded"
+        }),
+        "flush list should surface quarantined in-flight claims: {v}"
+    );
+}
+
+#[test]
+fn flush_reject_refuses_already_quarantined_plan_while_requeue_marker_exists() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCHMN";
+    let pending = write_coord_pending_plan(vault.path(), id);
+    let quarantined = vault
+        .path()
+        .join(".cairn/flush/quarantined")
+        .join(format!("{id}.plan.json"));
+    let marker = vault
+        .path()
+        .join(".cairn/flush/pending")
+        .join(format!("{id}.requeue-in-flight"));
+    std::fs::create_dir_all(quarantined.parent().unwrap()).unwrap();
+    std::fs::rename(&pending, &quarantined).unwrap();
+    std::fs::write(&marker, "cairn flush requeue in flight\n").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let rejected = std::process::Command::new(bin)
+        .args(["flush", "reject", id, "--reason", "unsupported coord"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn reject");
+    assert_eq!(
+        rejected.status.code(),
+        Some(70),
+        "reject should fail closed while requeue marker exists; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&rejected.stdout),
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains("requeue"),
+        "expected requeue marker message; got: {}",
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    assert!(quarantined.exists(), "quarantine artifact should remain");
+}
+
+#[test]
+fn flush_list_quarantined_scan_counts_plan_rows_not_diff_sidecars() {
+    let vault = tempfile::tempdir().unwrap();
+    let visible_id = "01HQZK000000000000000SCHMQ";
+    let quarantined = vault
+        .path()
+        .join(".cairn/flush/quarantined")
+        .join(format!("{visible_id}.plan.json"));
+    std::fs::create_dir_all(quarantined.parent().unwrap()).unwrap();
+    let mut persisted = sample_pending(visible_id);
+    persisted.plan.mutations = vec![PlannedMutation::ActionUpdate {
+        id: TargetId::parse("01HQZK000000000000000ACTN1").unwrap(),
+        status: CoordActionStatus::Blocked,
+        reason: Some("waiting on review".into()),
+    }];
+    persisted.schema_version = PersistedPlan::COORD_SCHEMA_VERSION;
+    std::fs::write(&quarantined, serde_json::to_vec_pretty(&persisted).unwrap()).unwrap();
+
+    for i in 0..1100 {
+        let sidecar = vault
+            .path()
+            .join(".cairn/flush/quarantined")
+            .join(format!("00DIFF{i:022}.diff.md"));
+        std::fs::write(sidecar, "sidecar").unwrap();
+    }
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let listed = std::process::Command::new(bin)
+        .args(["flush", "list", "--json"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn flush list");
+    assert!(
+        listed.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&listed.stdout).expect("valid JSON");
+    let plans = v["plans"].as_array().expect("plans array");
+    assert!(
+        plans
+            .iter()
+            .any(|plan| plan["id"] == visible_id && plan["bucket"] == "quarantined"),
+        "quarantined plan should remain visible despite many sidecars: {v}"
+    );
+}
+
+#[test]
+fn flush_list_surfaces_quarantined_coord_plans() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCHM8";
+    write_coord_pending_plan(vault.path(), id);
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let out = std::process::Command::new(bin)
+        .args(["flush", "reject", id, "--reason", "unsupported coord"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let listed = std::process::Command::new(bin)
+        .args(["flush", "list", "--json"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn flush list");
+    assert!(
+        listed.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&listed.stdout).expect("valid JSON");
+    let plans = v["plans"].as_array().expect("plans array");
+    assert!(
+        plans.iter().any(|plan| {
+            plan["id"] == id && plan["bucket"] == "quarantined" && plan["status"] == "quarantined"
+        }),
+        "quarantined plan should remain visible in flush list output: {v}"
+    );
+}
+
+#[test]
+fn flush_list_uses_quarantine_filename_id_on_mismatch() {
+    let vault = tempfile::tempdir().unwrap();
+    let filename_id = "01HQZK000000000000000SCHMF";
+    let embedded_id = "01HQZK000000000000000SCHME";
+    let quarantined = vault
+        .path()
+        .join(".cairn/flush/quarantined")
+        .join(format!("{filename_id}.plan.json"));
+    std::fs::create_dir_all(quarantined.parent().unwrap()).unwrap();
+    let mut persisted = sample_pending(embedded_id);
+    persisted.plan.mutations = vec![PlannedMutation::ActionUpdate {
+        id: TargetId::parse("01HQZK000000000000000ACTN1").unwrap(),
+        status: CoordActionStatus::Blocked,
+        reason: Some("waiting on review".into()),
+    }];
+    persisted.schema_version = PersistedPlan::COORD_SCHEMA_VERSION;
+    std::fs::write(&quarantined, serde_json::to_vec_pretty(&persisted).unwrap()).unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let listed = std::process::Command::new(bin)
+        .args(["flush", "list", "--json"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn flush list");
+    assert!(
+        listed.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&listed.stdout).expect("valid JSON");
+    let plans = v["plans"].as_array().expect("plans array");
+    assert!(
+        plans.iter().any(|plan| {
+            plan["id"] == filename_id && plan["status"] == "quarantined (id mismatch)"
+        }),
+        "quarantine list should report filename id and mismatch status: {v}"
+    );
+    assert!(
+        !plans.iter().any(|plan| plan["id"] == embedded_id),
+        "quarantine list should not advertise embedded mismatched id: {v}"
+    );
+}
+
+#[test]
+fn flush_requeue_moves_quarantined_coord_plan_back_to_pending() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCHM9";
+    let original_pending = write_coord_pending_plan(vault.path(), id);
+    let ulid = cairn_core::generated::common::Ulid(id.into());
+    let pending_diff = cairn_core::domain::flush_plan::store::diff_path(vault.path(), &ulid);
+    std::fs::write(&pending_diff, "coord review diff").unwrap();
+    let quarantined = vault
+        .path()
+        .join(".cairn/flush/quarantined")
+        .join(format!("{id}.plan.json"));
+    let quarantined_diff = vault
+        .path()
+        .join(".cairn/flush/quarantined")
+        .join(format!("{id}.diff.md"));
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let rejected = std::process::Command::new(bin)
+        .args(["flush", "reject", id, "--reason", "unsupported coord"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn reject");
+    assert!(
+        rejected.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    assert!(quarantined.exists(), "precondition: plan is quarantined");
+    assert!(
+        quarantined_diff.exists(),
+        "precondition: diff is quarantined"
+    );
+
+    let requeued = std::process::Command::new(bin)
+        .args(["flush", "requeue", id, "--force"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn requeue");
+    assert!(
+        requeued.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&requeued.stderr)
+    );
+    assert!(
+        original_pending.exists(),
+        "requeue should restore the plan to pending"
+    );
+    assert!(
+        pending_diff.exists(),
+        "requeue should restore the companion diff to pending"
+    );
+    assert!(
+        !quarantined.exists(),
+        "requeue should remove the quarantined plan"
+    );
+    assert!(
+        !quarantined_diff.exists(),
+        "requeue should remove the quarantined diff"
+    );
+}
+
+#[test]
+fn flush_requeue_requires_ready_coord_runtime_without_force() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCHMD";
+    write_coord_pending_plan(vault.path(), id);
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let rejected = std::process::Command::new(bin)
+        .args(["flush", "reject", id, "--reason", "unsupported coord"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn reject");
+    assert!(
+        rejected.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+
+    let requeued = std::process::Command::new(bin)
+        .args(["flush", "requeue", id])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn requeue");
+    assert_eq!(
+        requeued.status.code(),
+        Some(69),
+        "unwired coord runtime should block requeue without --force; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&requeued.stdout),
+        String::from_utf8_lossy(&requeued.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&requeued.stderr).contains("coord runtime is not wired"),
+        "expected coord runtime message; got: {}",
+        String::from_utf8_lossy(&requeued.stderr)
+    );
+}
+
+#[test]
+fn flush_apply_reject_refuse_pending_plan_while_requeue_marker_exists() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCHMH";
+    let pending = write_coord_pending_plan(vault.path(), id);
+    let ulid = cairn_core::generated::common::Ulid(id.into());
+    let applied_claim =
+        plan_path(vault.path(), Bucket::Applied, &ulid).with_extension("json.in-flight");
+    let rejected_claim =
+        plan_path(vault.path(), Bucket::Rejected, &ulid).with_extension("json.in-flight");
+    let marker = vault
+        .path()
+        .join(".cairn/flush/pending")
+        .join(format!("{id}.requeue-in-flight"));
+    std::fs::write(&marker, "cairn flush requeue in flight\n").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let apply = std::process::Command::new(bin)
+        .args(["flush", "apply", id])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn apply");
+    assert_eq!(
+        apply.status.code(),
+        Some(70),
+        "apply should fail closed while requeue marker exists; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&apply.stdout),
+        String::from_utf8_lossy(&apply.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&apply.stderr).contains("requeue"),
+        "expected requeue marker message; got: {}",
+        String::from_utf8_lossy(&apply.stderr)
+    );
+    assert!(
+        pending.exists(),
+        "pending plan should remain after apply refuses requeue marker"
+    );
+    assert!(
+        !applied_claim.exists(),
+        "apply refusal must not leave an applied in-flight claim"
+    );
+
+    let reject = std::process::Command::new(bin)
+        .args(["flush", "reject", id, "--reason", "operator decided no"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn reject");
+    assert_eq!(
+        reject.status.code(),
+        Some(70),
+        "reject should fail closed while requeue marker exists; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&reject.stdout),
+        String::from_utf8_lossy(&reject.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&reject.stderr).contains("requeue"),
+        "expected requeue marker message; got: {}",
+        String::from_utf8_lossy(&reject.stderr)
+    );
+    assert!(
+        pending.exists(),
+        "pending plan should remain after reject refuses requeue marker"
+    );
+    assert!(
+        !rejected_claim.exists(),
+        "reject refusal must not leave a rejected in-flight claim"
+    );
+}
+
+#[test]
+fn flush_list_surfaces_requeue_markers() {
+    let vault = tempfile::tempdir().unwrap();
+    let in_flight_id = "01HQZK000000000000000MRK01";
+    let repair_id = "01HQZK000000000000000MRK02";
+    write_coord_pending_plan(vault.path(), in_flight_id);
+
+    let pending_dir = bucket_dir(vault.path(), Bucket::Pending);
+    std::fs::write(
+        pending_dir.join(format!("{in_flight_id}.requeue-in-flight")),
+        "cairn flush requeue in flight\n",
+    )
+    .unwrap();
+    std::fs::write(
+        pending_dir.join(format!("{repair_id}.requeue-repair-needed")),
+        "repair required\n",
+    )
+    .unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let listed = std::process::Command::new(bin)
+        .args(["flush", "list", "--json"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn flush list");
+    assert!(
+        listed.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&listed.stdout).expect("valid JSON");
+    let markers = v["requeue_markers"]
+        .as_array()
+        .expect("requeue markers array");
+    assert!(
+        markers.iter().any(|marker| {
+            marker["id"] == in_flight_id
+                && marker["marker"] == "requeue-in-flight"
+                && marker["status"] == "requeue in flight"
+        }),
+        "list should expose in-flight requeue markers: {v}"
+    );
+    assert!(
+        markers.iter().any(|marker| {
+            marker["id"] == repair_id
+                && marker["marker"] == "requeue-repair-needed"
+                && marker["status"] == "requeue repair needed"
+        }),
+        "list should expose repair-needed requeue markers: {v}"
+    );
+}
+
+#[test]
+fn flush_list_surfaces_requeue_markers_in_busy_pending_dir() {
+    let vault = tempfile::tempdir().unwrap();
+    for i in 0..1100 {
+        write_pending(vault.path(), &format!("01HQZK00000000000000{i:06}"));
+    }
+
+    let marker_id = "01HQZK000000000000000MRK03";
+    let pending_dir = bucket_dir(vault.path(), Bucket::Pending);
+    std::fs::write(
+        pending_dir.join(format!("{marker_id}.requeue-in-flight")),
+        "cairn flush requeue in flight\n",
+    )
+    .unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let listed = std::process::Command::new(bin)
+        .args(["flush", "list", "--json"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn flush list");
+    assert!(
+        listed.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&listed.stdout).expect("valid JSON");
+    let markers = v["requeue_markers"]
+        .as_array()
+        .expect("requeue markers array");
+    assert!(
+        markers
+            .iter()
+            .any(|marker| { marker["id"] == marker_id && marker["marker"] == "requeue-in-flight" }),
+        "busy pending directory should not hide requeue markers: {v}"
+    );
+}
+
+#[test]
+fn flush_requeue_clears_stale_marker_on_pending_plan() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCHMJ";
+    let pending = write_coord_pending_plan(vault.path(), id);
+    let marker = vault
+        .path()
+        .join(".cairn/flush/pending")
+        .join(format!("{id}.requeue-in-flight"));
+    std::fs::write(&marker, "cairn flush requeue in flight\n").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let requeued = std::process::Command::new(bin)
+        .args(["flush", "requeue", id, "--force"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn requeue");
+    assert!(
+        requeued.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&requeued.stderr)
+    );
+    assert!(pending.exists(), "pending plan should remain");
+    assert!(!marker.exists(), "stale marker should be removed");
+}
+
+#[test]
+fn flush_requeue_recovers_quarantine_claim_with_marker() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCQ12";
+    let pending = write_coord_pending_plan(vault.path(), id);
+    let quarantined = vault
+        .path()
+        .join(".cairn/flush/quarantined")
+        .join(format!("{id}.plan.json"));
+    let quarantine_claim = quarantined.with_extension("json.in-flight");
+    let marker = bucket_dir(vault.path(), Bucket::Pending).join(format!("{id}.requeue-in-flight"));
+    std::fs::create_dir_all(quarantine_claim.parent().unwrap()).unwrap();
+    std::fs::rename(&pending, &quarantine_claim).unwrap();
+    std::fs::write(&marker, "cairn flush requeue in flight\n").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let requeued = std::process::Command::new(bin)
+        .args(["flush", "requeue", id, "--force"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn requeue");
+    assert!(
+        requeued.status.success(),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&requeued.stdout),
+        String::from_utf8_lossy(&requeued.stderr)
+    );
+    assert!(pending.exists(), "requeue should restore pending plan");
+    assert!(!quarantine_claim.exists(), "claim should be consumed");
+    assert!(
+        !quarantined.exists(),
+        "quarantine artifact should be consumed"
+    );
+    assert!(!marker.exists(), "requeue marker should be cleaned up");
+}
+
+#[test]
+fn flush_requeue_clears_repair_needed_after_operator_restores_pending_plan() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCMR1";
+    let pending = write_coord_pending_plan(vault.path(), id);
+    let repair_marker =
+        bucket_dir(vault.path(), Bucket::Pending).join(format!("{id}.requeue-repair-needed"));
+    std::fs::write(&repair_marker, "manual repair required\n").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let requeued = std::process::Command::new(bin)
+        .args(["flush", "requeue", id, "--force"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn requeue");
+    assert!(
+        requeued.status.success(),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&requeued.stdout),
+        String::from_utf8_lossy(&requeued.stderr)
+    );
+    assert!(pending.exists(), "repaired pending plan should remain");
+    assert!(
+        !repair_marker.exists(),
+        "completed repair should clear repair marker"
+    );
+
+    let rejected = std::process::Command::new(bin)
+        .args(["flush", "reject", id, "--reason", "operator reject"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn reject");
+    assert!(
+        rejected.status.success(),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&rejected.stdout),
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+}
+
+#[test]
+fn flush_requeue_clears_repair_needed_with_matching_leftover_quarantine_artifacts() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCMR2";
+    let pending = write_coord_pending_plan(vault.path(), id);
+    let ulid = cairn_core::generated::common::Ulid(id.into());
+    let pending_diff = cairn_core::domain::flush_plan::store::diff_path(vault.path(), &ulid);
+    let quarantined = vault
+        .path()
+        .join(".cairn/flush/quarantined")
+        .join(format!("{id}.plan.json"));
+    let quarantined_diff = vault
+        .path()
+        .join(".cairn/flush/quarantined")
+        .join(format!("{id}.diff.md"));
+    let repair_marker =
+        bucket_dir(vault.path(), Bucket::Pending).join(format!("{id}.requeue-repair-needed"));
+    std::fs::create_dir_all(quarantined.parent().unwrap()).unwrap();
+    std::fs::write(&quarantined, std::fs::read(&pending).unwrap()).unwrap();
+    std::fs::write(&pending_diff, "coord review diff").unwrap();
+    std::fs::write(&quarantined_diff, "coord review diff").unwrap();
+    std::fs::write(&repair_marker, "manual repair required\n").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let requeued = std::process::Command::new(bin)
+        .args(["flush", "requeue", id, "--force"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn requeue");
+    assert!(
+        requeued.status.success(),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&requeued.stdout),
+        String::from_utf8_lossy(&requeued.stderr)
+    );
+    assert!(pending.exists(), "repaired pending plan should remain");
+    assert!(pending_diff.exists(), "pending diff should remain");
+    assert!(
+        !quarantined.exists(),
+        "matching quarantine duplicate should be removed"
+    );
+    assert!(
+        !quarantined_diff.exists(),
+        "matching quarantine diff duplicate should be removed"
+    );
+    assert!(
+        !repair_marker.exists(),
+        "completed repair should clear repair marker"
+    );
+}
+
+#[test]
+fn flush_requeue_preserves_marker_on_malformed_pending_plan() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCMA1";
+    let pending = vault
+        .path()
+        .join(".cairn/flush/pending")
+        .join(format!("{id}.plan.json"));
+    let marker = vault
+        .path()
+        .join(".cairn/flush/pending")
+        .join(format!("{id}.requeue-in-flight"));
+    let archived_marker = vault
+        .path()
+        .join(".cairn/flush/pending")
+        .join(format!("{id}.requeue-repair-needed"));
+    std::fs::create_dir_all(pending.parent().unwrap()).unwrap();
+    std::fs::write(&pending, "{not json").unwrap();
+    std::fs::write(&marker, "cairn flush requeue in flight\n").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let requeued = std::process::Command::new(bin)
+        .args(["flush", "requeue", id, "--force"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn requeue");
+    assert_eq!(
+        requeued.status.code(),
+        Some(70),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&requeued.stdout),
+        String::from_utf8_lossy(&requeued.stderr)
+    );
+    assert!(
+        pending.exists(),
+        "pending plan should remain for inspection"
+    );
+    assert!(!marker.exists(), "in-flight marker should be archived");
+    assert!(
+        archived_marker.exists(),
+        "repair marker should preserve recovery evidence"
+    );
+}
+
+#[test]
+fn flush_requeue_marks_repair_needed_for_malformed_pending_with_quarantine_artifact() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCMA2";
+    let pending_dir = bucket_dir(vault.path(), Bucket::Pending);
+    let quarantine_dir = vault.path().join(".cairn/flush/quarantined");
+    let pending = pending_dir.join(format!("{id}.plan.json"));
+    let marker = pending_dir.join(format!("{id}.requeue-in-flight"));
+    let archived_marker = pending_dir.join(format!("{id}.requeue-repair-needed"));
+    std::fs::create_dir_all(&pending_dir).unwrap();
+    std::fs::create_dir_all(&quarantine_dir).unwrap();
+    std::fs::write(&pending, "{not json").unwrap();
+    std::fs::write(&marker, "cairn flush requeue in flight\n").unwrap();
+    std::fs::write(quarantine_dir.join(format!("{id}.diff.md")), "staged diff").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let requeued = std::process::Command::new(bin)
+        .args(["flush", "requeue", id, "--force"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn requeue");
+    assert_eq!(
+        requeued.status.code(),
+        Some(65),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&requeued.stdout),
+        String::from_utf8_lossy(&requeued.stderr)
+    );
+    assert!(!marker.exists(), "in-flight marker should be archived");
+    assert!(
+        archived_marker.exists(),
+        "repair marker should preserve recovery evidence"
+    );
+}
+
+#[test]
+fn flush_requeue_preserves_marker_on_mismatched_pending_plan() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCMM1";
+    let other_id = "01HQZK000000000000000SCMM2";
+    let other_pending = write_coord_pending_plan(vault.path(), other_id);
+    let pending = vault
+        .path()
+        .join(".cairn/flush/pending")
+        .join(format!("{id}.plan.json"));
+    let marker = vault
+        .path()
+        .join(".cairn/flush/pending")
+        .join(format!("{id}.requeue-in-flight"));
+    let archived_marker = vault
+        .path()
+        .join(".cairn/flush/pending")
+        .join(format!("{id}.requeue-repair-needed"));
+    std::fs::rename(other_pending, &pending).unwrap();
+    std::fs::write(&marker, "cairn flush requeue in flight\n").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let requeued = std::process::Command::new(bin)
+        .args(["flush", "requeue", id, "--force"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn requeue");
+    assert_eq!(
+        requeued.status.code(),
+        Some(70),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&requeued.stdout),
+        String::from_utf8_lossy(&requeued.stderr)
+    );
+    assert!(
+        pending.exists(),
+        "pending plan should remain for inspection"
+    );
+    assert!(!marker.exists(), "in-flight marker should be archived");
+    assert!(
+        archived_marker.exists(),
+        "repair marker should preserve recovery evidence"
+    );
+}
+
+#[test]
+fn flush_requeue_clears_stale_marker_after_plan_and_diff_moved_to_pending() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCMD1";
+    let pending = write_coord_pending_plan(vault.path(), id);
+    let ulid = cairn_core::generated::common::Ulid(id.into());
+    let pending_diff = cairn_core::domain::flush_plan::store::diff_path(vault.path(), &ulid);
+    let marker = vault
+        .path()
+        .join(".cairn/flush/pending")
+        .join(format!("{id}.requeue-in-flight"));
+    std::fs::write(&pending_diff, "completed requeue diff").unwrap();
+    std::fs::write(&marker, "cairn flush requeue in flight\n").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let requeued = std::process::Command::new(bin)
+        .args(["flush", "requeue", id, "--force"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn requeue");
+    assert!(
+        requeued.status.success(),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&requeued.stdout),
+        String::from_utf8_lossy(&requeued.stderr)
+    );
+    assert!(
+        pending.exists(),
+        "pending plan should remain for inspection"
+    );
+    assert!(
+        pending_diff.exists(),
+        "pending diff should remain after completed requeue"
+    );
+    assert!(!marker.exists(), "stale marker should be removed");
+}
+
+#[test]
+fn flush_requeue_resumes_marker_only_quarantined_plan() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCHMP";
+    let original_pending = write_coord_pending_plan(vault.path(), id);
+    let quarantined = vault
+        .path()
+        .join(".cairn/flush/quarantined")
+        .join(format!("{id}.plan.json"));
+    let marker = vault
+        .path()
+        .join(".cairn/flush/pending")
+        .join(format!("{id}.requeue-in-flight"));
+    std::fs::create_dir_all(quarantined.parent().unwrap()).unwrap();
+    std::fs::rename(&original_pending, &quarantined).unwrap();
+    std::fs::write(&marker, "cairn flush requeue in flight\n").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let requeued = std::process::Command::new(bin)
+        .args(["flush", "requeue", id, "--force"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn requeue");
+    assert!(
+        requeued.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&requeued.stderr)
+    );
+    assert!(
+        original_pending.exists(),
+        "marker-only interrupted requeue should complete the plan move"
+    );
+    assert!(!quarantined.exists(), "quarantined plan should be consumed");
+    assert!(!marker.exists(), "marker should be removed");
+}
+
+#[test]
+fn flush_requeue_resumes_marker_with_quarantined_plan_and_diff() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCHMM";
+    let original_pending = write_coord_pending_plan(vault.path(), id);
+    let ulid = cairn_core::generated::common::Ulid(id.into());
+    let pending_diff = cairn_core::domain::flush_plan::store::diff_path(vault.path(), &ulid);
+    let quarantined = vault
+        .path()
+        .join(".cairn/flush/quarantined")
+        .join(format!("{id}.plan.json"));
+    let quarantined_diff = vault
+        .path()
+        .join(".cairn/flush/quarantined")
+        .join(format!("{id}.diff.md"));
+    let marker = vault
+        .path()
+        .join(".cairn/flush/pending")
+        .join(format!("{id}.requeue-in-flight"));
+    std::fs::create_dir_all(quarantined.parent().unwrap()).unwrap();
+    std::fs::rename(&original_pending, &quarantined).unwrap();
+    std::fs::write(&quarantined_diff, "coord review diff").unwrap();
+    std::fs::write(&marker, "cairn flush requeue in flight\n").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let requeued = std::process::Command::new(bin)
+        .args(["flush", "requeue", id, "--force"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn requeue");
+    assert!(
+        requeued.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&requeued.stderr)
+    );
+    assert!(original_pending.exists(), "plan should move to pending");
+    assert!(pending_diff.exists(), "diff should move to pending");
+    assert!(!quarantined.exists(), "quarantined plan should be consumed");
+    assert!(
+        !quarantined_diff.exists(),
+        "quarantined diff should be consumed"
+    );
+    assert!(!marker.exists(), "marker should be removed");
+}
+
+#[test]
+fn flush_requeue_repairs_pending_plan_with_quarantined_diff() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCHMA";
+    let pending = write_coord_pending_plan(vault.path(), id);
+    let ulid = cairn_core::generated::common::Ulid(id.into());
+    let pending_diff = cairn_core::domain::flush_plan::store::diff_path(vault.path(), &ulid);
+    let quarantined_diff = vault
+        .path()
+        .join(".cairn/flush/quarantined")
+        .join(format!("{id}.diff.md"));
+    let marker = vault
+        .path()
+        .join(".cairn/flush/pending")
+        .join(format!("{id}.requeue-in-flight"));
+    std::fs::create_dir_all(quarantined_diff.parent().unwrap()).unwrap();
+    std::fs::write(&quarantined_diff, "coord review diff").unwrap();
+    std::fs::write(&marker, "cairn flush requeue in flight\n").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let requeued = std::process::Command::new(bin)
+        .args(["flush", "requeue", id, "--force"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn requeue");
+    assert!(
+        requeued.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&requeued.stderr)
+    );
+    assert!(pending.exists(), "pending plan should remain in place");
+    assert!(
+        pending_diff.exists(),
+        "interrupted requeue should restore quarantined diff to pending"
+    );
+    assert!(
+        !quarantined_diff.exists(),
+        "interrupted requeue repair should remove quarantined diff"
+    );
+    assert!(
+        !marker.exists(),
+        "interrupted requeue repair should remove the marker"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&pending_diff).unwrap(),
+        "coord review diff"
+    );
+}
+
+#[test]
+fn flush_requeue_removes_duplicate_quarantine_claim_when_pending_exists() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCQ15";
+    let pending = write_coord_pending_plan(vault.path(), id);
+    let quarantine_claim = vault
+        .path()
+        .join(".cairn/flush/quarantined")
+        .join(format!("{id}.plan.json.in-flight"));
+    std::fs::create_dir_all(quarantine_claim.parent().unwrap()).unwrap();
+    std::fs::write(&quarantine_claim, std::fs::read(&pending).unwrap()).unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let requeued = std::process::Command::new(bin)
+        .args(["flush", "requeue", id, "--force"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn requeue");
+    assert!(
+        requeued.status.success(),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&requeued.stdout),
+        String::from_utf8_lossy(&requeued.stderr)
+    );
+    assert!(pending.exists(), "pending plan should remain");
+    assert!(
+        !quarantine_claim.exists(),
+        "duplicate quarantine claim should be removed"
+    );
+}
+
+#[test]
+fn flush_requeue_recovers_quarantine_claim_without_marker() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCQ16";
+    let pending = write_coord_pending_plan(vault.path(), id);
+    let quarantine_claim = vault
+        .path()
+        .join(".cairn/flush/quarantined")
+        .join(format!("{id}.plan.json.in-flight"));
+    std::fs::create_dir_all(quarantine_claim.parent().unwrap()).unwrap();
+    std::fs::rename(&pending, &quarantine_claim).unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let requeued = std::process::Command::new(bin)
+        .args(["flush", "requeue", id, "--force"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn requeue");
+    assert!(
+        requeued.status.success(),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&requeued.stdout),
+        String::from_utf8_lossy(&requeued.stderr)
+    );
+    assert!(pending.exists(), "requeue should restore pending plan");
+    assert!(!quarantine_claim.exists(), "claim should be consumed");
+}
+
+#[test]
+fn flush_requeue_collapses_duplicate_matching_quarantine_claim() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCQ14";
+    let pending = write_coord_pending_plan(vault.path(), id);
+    let quarantined = vault
+        .path()
+        .join(".cairn/flush/quarantined")
+        .join(format!("{id}.plan.json"));
+    let quarantine_claim = quarantined.with_extension("json.in-flight");
+    let marker = bucket_dir(vault.path(), Bucket::Pending).join(format!("{id}.requeue-in-flight"));
+    std::fs::create_dir_all(quarantined.parent().unwrap()).unwrap();
+    std::fs::rename(&pending, &quarantined).unwrap();
+    std::fs::write(&quarantine_claim, std::fs::read(&quarantined).unwrap()).unwrap();
+    std::fs::write(&marker, "cairn flush requeue in flight\n").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let requeued = std::process::Command::new(bin)
+        .args(["flush", "requeue", id, "--force"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn requeue");
+    assert!(
+        requeued.status.success(),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&requeued.stdout),
+        String::from_utf8_lossy(&requeued.stderr)
+    );
+    assert!(pending.exists(), "requeue should restore pending plan");
+    assert!(
+        !quarantined.exists(),
+        "quarantine artifact should be consumed"
+    );
+    assert!(
+        !quarantine_claim.exists(),
+        "duplicate quarantine claim should be removed"
+    );
+    assert!(!marker.exists(), "requeue marker should be cleaned up");
+}
+
+#[test]
+fn flush_requeue_refuses_quarantined_diff_without_marker() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCHMF";
+    let pending = write_coord_pending_plan(vault.path(), id);
+    let quarantined_diff = vault
+        .path()
+        .join(".cairn/flush/quarantined")
+        .join(format!("{id}.diff.md"));
+    std::fs::create_dir_all(quarantined_diff.parent().unwrap()).unwrap();
+    std::fs::write(&quarantined_diff, "stray coord review diff").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let requeued = std::process::Command::new(bin)
+        .args(["flush", "requeue", id, "--force"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn requeue");
+    assert_eq!(
+        requeued.status.code(),
+        Some(70),
+        "stray quarantined diff should fail closed; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&requeued.stdout),
+        String::from_utf8_lossy(&requeued.stderr)
+    );
+    assert!(pending.exists(), "pending plan should remain");
+    assert!(
+        quarantined_diff.exists(),
+        "stray quarantined diff should remain for manual inspection"
+    );
+}
+
+#[test]
+fn flush_requeue_refuses_quarantined_plan_without_marker() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCHMK";
+    let pending = write_coord_pending_plan(vault.path(), id);
+    let quarantined = vault
+        .path()
+        .join(".cairn/flush/quarantined")
+        .join(format!("{id}.plan.json"));
+    std::fs::create_dir_all(quarantined.parent().unwrap()).unwrap();
+    std::fs::write(&quarantined, std::fs::read(&pending).unwrap()).unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let requeued = std::process::Command::new(bin)
+        .args(["flush", "requeue", id, "--force"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn requeue");
+    assert_eq!(
+        requeued.status.code(),
+        Some(70),
+        "marker-less quarantined plan should fail closed; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&requeued.stdout),
+        String::from_utf8_lossy(&requeued.stderr)
+    );
+    assert!(pending.exists(), "pending plan should remain");
+    assert!(
+        quarantined.exists(),
+        "marker-less quarantined plan should remain for manual inspection"
+    );
+}
+
+#[test]
+fn flush_requeue_repairs_duplicate_diff_after_plan_move() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCHMG";
+    let pending = write_coord_pending_plan(vault.path(), id);
+    let ulid = cairn_core::generated::common::Ulid(id.into());
+    let pending_diff = cairn_core::domain::flush_plan::store::diff_path(vault.path(), &ulid);
+    let quarantined_diff = vault
+        .path()
+        .join(".cairn/flush/quarantined")
+        .join(format!("{id}.diff.md"));
+    let marker = vault
+        .path()
+        .join(".cairn/flush/pending")
+        .join(format!("{id}.requeue-in-flight"));
+    std::fs::create_dir_all(quarantined_diff.parent().unwrap()).unwrap();
+    std::fs::write(&pending_diff, "coord review diff").unwrap();
+    std::fs::write(&quarantined_diff, "coord review diff").unwrap();
+    std::fs::write(&marker, "cairn flush requeue in flight\n").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let requeued = std::process::Command::new(bin)
+        .args(["flush", "requeue", id, "--force"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn requeue");
+    assert!(
+        requeued.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&requeued.stderr)
+    );
+    assert!(pending.exists(), "pending plan should remain");
+    assert!(pending_diff.exists(), "pending diff should remain");
+    assert!(
+        !quarantined_diff.exists(),
+        "matching duplicate quarantined diff should be cleaned up"
+    );
+    assert!(!marker.exists(), "marker should be removed");
+}
+
+#[test]
+fn flush_requeue_repairs_duplicate_pending_and_quarantined_plan() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCHMC";
+    let pending = write_coord_pending_plan(vault.path(), id);
+    let ulid = cairn_core::generated::common::Ulid(id.into());
+    let quarantined = vault
+        .path()
+        .join(".cairn/flush/quarantined")
+        .join(format!("{id}.plan.json"));
+    let quarantined_diff = vault
+        .path()
+        .join(".cairn/flush/quarantined")
+        .join(format!("{id}.diff.md"));
+    let pending_diff = cairn_core::domain::flush_plan::store::diff_path(vault.path(), &ulid);
+    let marker = vault
+        .path()
+        .join(".cairn/flush/pending")
+        .join(format!("{id}.requeue-in-flight"));
+    std::fs::create_dir_all(quarantined.parent().unwrap()).unwrap();
+    std::fs::write(&quarantined, std::fs::read(&pending).unwrap()).unwrap();
+    std::fs::write(&quarantined_diff, "coord review diff").unwrap();
+    std::fs::write(&marker, "cairn flush requeue in flight\n").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let requeued = std::process::Command::new(bin)
+        .args(["flush", "requeue", id, "--force"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn requeue");
+    assert!(
+        requeued.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&requeued.stderr)
+    );
+    assert!(pending.exists(), "pending plan should remain");
+    assert!(
+        !quarantined.exists(),
+        "matching duplicate quarantined plan should be removed"
+    );
+    assert!(
+        pending_diff.exists(),
+        "quarantined diff should be restored to pending"
+    );
+    assert!(
+        !quarantined_diff.exists(),
+        "quarantined diff should be removed"
+    );
+    assert!(!marker.exists(), "marker should be removed");
+}
+
+#[test]
+fn flush_requeue_refuses_unmarked_pending_diff_with_quarantined_plan() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCHMB";
+    let original_pending = write_coord_pending_plan(vault.path(), id);
+    let ulid = cairn_core::generated::common::Ulid(id.into());
+    let pending_diff = cairn_core::domain::flush_plan::store::diff_path(vault.path(), &ulid);
+    std::fs::write(&pending_diff, "stale pending diff").unwrap();
+    let quarantined = vault
+        .path()
+        .join(".cairn/flush/quarantined")
+        .join(format!("{id}.plan.json"));
+    std::fs::create_dir_all(quarantined.parent().unwrap()).unwrap();
+    std::fs::rename(&original_pending, &quarantined).unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let requeued = std::process::Command::new(bin)
+        .args(["flush", "requeue", id, "--force"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn requeue");
+    assert_eq!(
+        requeued.status.code(),
+        Some(70),
+        "unmarked pending diff should fail closed; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&requeued.stdout),
+        String::from_utf8_lossy(&requeued.stderr)
+    );
+    assert!(
+        !original_pending.exists(),
+        "unmarked pending diff must not complete the plan move"
+    );
+    assert!(
+        quarantined.exists(),
+        "quarantined plan should remain for operator reconciliation"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&pending_diff).unwrap(),
+        "stale pending diff"
+    );
+}
+
+#[test]
+fn flush_requeue_refuses_marker_with_quarantined_plan_and_unverified_pending_diff() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCHME";
+    let original_pending = write_coord_pending_plan(vault.path(), id);
+    let ulid = cairn_core::generated::common::Ulid(id.into());
+    let pending_diff = cairn_core::domain::flush_plan::store::diff_path(vault.path(), &ulid);
+    let quarantined = vault
+        .path()
+        .join(".cairn/flush/quarantined")
+        .join(format!("{id}.plan.json"));
+    std::fs::create_dir_all(quarantined.parent().unwrap()).unwrap();
+    std::fs::rename(&original_pending, &quarantined).unwrap();
+    std::fs::write(&pending_diff, "coord review diff").unwrap();
+    let marker = vault
+        .path()
+        .join(".cairn/flush/pending")
+        .join(format!("{id}.requeue-in-flight"));
+    std::fs::write(&marker, "cairn flush requeue in flight\n").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let requeued = std::process::Command::new(bin)
+        .args(["flush", "requeue", id, "--force"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn requeue");
+    assert_eq!(
+        requeued.status.code(),
+        Some(70),
+        "unverified pending diff should fail closed; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&requeued.stdout),
+        String::from_utf8_lossy(&requeued.stderr)
+    );
+    assert!(
+        !original_pending.exists(),
+        "plan must not move to pending with an unverified diff sidecar"
+    );
+    assert!(
+        pending_diff.exists(),
+        "pending diff should remain for operator inspection"
+    );
+    assert!(quarantined.exists(), "quarantined plan should remain");
+    assert!(marker.exists(), "marker should remain for retry/repair");
+    assert!(
+        String::from_utf8_lossy(&requeued.stderr).contains("without a quarantined diff"),
+        "stderr should explain the unverified diff; stderr: {}",
+        String::from_utf8_lossy(&requeued.stderr)
+    );
+}
+
+#[test]
+fn flush_requeue_refuses_unmarked_quarantined_plan_with_pending_diff_without_quarantined_pair() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCHMX";
+    let original_pending = write_coord_pending_plan(vault.path(), id);
+    let ulid = cairn_core::generated::common::Ulid(id.into());
+    let pending_diff = cairn_core::domain::flush_plan::store::diff_path(vault.path(), &ulid);
+    let quarantined = vault
+        .path()
+        .join(".cairn/flush/quarantined")
+        .join(format!("{id}.plan.json"));
+    std::fs::create_dir_all(quarantined.parent().unwrap()).unwrap();
+    std::fs::rename(&original_pending, &quarantined).unwrap();
+    std::fs::write(&pending_diff, "stale pending diff").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let requeued = std::process::Command::new(bin)
+        .args(["flush", "requeue", id, "--force"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn requeue");
+    assert_eq!(
+        requeued.status.code(),
+        Some(70),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&requeued.stdout),
+        String::from_utf8_lossy(&requeued.stderr)
+    );
+    assert!(
+        !original_pending.exists(),
+        "pending plan should not be restored with an unverified diff sidecar"
+    );
+    assert!(pending_diff.exists(), "pending diff should remain");
+    assert!(quarantined.exists(), "quarantined plan should remain");
+}
+
+#[test]
+fn flush_reject_does_not_discard_divergent_coord_quarantine_retry() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCHM5";
+    let path = write_coord_pending_plan(vault.path(), id);
+    let ulid = cairn_core::generated::common::Ulid(id.into());
+    let pending_diff = cairn_core::domain::flush_plan::store::diff_path(vault.path(), &ulid);
+    let quarantined = vault
+        .path()
+        .join(".cairn/flush/quarantined")
+        .join(format!("{id}.plan.json"));
+    let quarantined_diff = vault
+        .path()
+        .join(".cairn/flush/quarantined")
+        .join(format!("{id}.diff.md"));
+    std::fs::write(&pending_diff, "coord review diff").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let out = std::process::Command::new(bin)
+        .args(["flush", "reject", id, "--reason", "unsupported coord"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    std::fs::write(&path, std::fs::read(&quarantined).unwrap()).unwrap();
+    std::fs::write(&pending_diff, "coord review diff v2").unwrap();
+
+    let retry = std::process::Command::new(bin)
+        .args(["flush", "reject", id, "--reason", "unsupported coord"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn divergent retry");
+    assert_eq!(
+        retry.status.code(),
+        Some(70),
+        "divergent duplicate diff should fail loudly; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&retry.stdout),
+        String::from_utf8_lossy(&retry.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&retry.stderr)
+            .contains("divergent coord quarantine retry for diff"),
+        "expected divergent diff message; got: {}",
+        String::from_utf8_lossy(&retry.stderr)
+    );
+    assert!(
+        path.exists(),
+        "divergent pending plan should be restored for operator reconciliation"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&pending_diff).unwrap(),
+        "coord review diff v2",
+        "divergent pending diff must not be discarded"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&quarantined_diff).unwrap(),
+        "coord review diff",
+        "existing quarantined diff should remain unchanged"
+    );
+
+    let mut divergent_plan = std::fs::read(&quarantined).unwrap();
+    divergent_plan.push(b'\n');
+    std::fs::write(&path, divergent_plan).unwrap();
+    std::fs::write(&pending_diff, "coord review diff").unwrap();
+
+    let retry = std::process::Command::new(bin)
+        .args(["flush", "reject", id, "--reason", "unsupported coord"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn divergent plan retry");
+    assert_eq!(
+        retry.status.code(),
+        Some(70),
+        "divergent duplicate plan should fail loudly; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&retry.stdout),
+        String::from_utf8_lossy(&retry.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&retry.stderr)
+            .contains("divergent coord quarantine retry for plan"),
+        "expected divergent plan message; got: {}",
+        String::from_utf8_lossy(&retry.stderr)
+    );
+    assert!(
+        path.exists(),
+        "divergent pending plan should remain available after plan conflict"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&pending_diff).unwrap(),
+        "coord review diff",
+        "matching pending diff should remain because the divergent plan was not accepted"
+    );
+}
+
+#[test]
+fn flush_reject_rolls_back_plan_when_quarantine_diff_publish_fails() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCHM6";
+    let path = write_coord_pending_plan(vault.path(), id);
+    let ulid = cairn_core::generated::common::Ulid(id.into());
+    let pending_diff = cairn_core::domain::flush_plan::store::diff_path(vault.path(), &ulid);
+    let quarantined = vault
+        .path()
+        .join(".cairn/flush/quarantined")
+        .join(format!("{id}.plan.json"));
+    let quarantined_diff = vault
+        .path()
+        .join(".cairn/flush/quarantined")
+        .join(format!("{id}.diff.md"));
+    std::fs::write(&pending_diff, "coord review diff").unwrap();
+    std::fs::create_dir_all(&quarantined_diff).unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let out = std::process::Command::new(bin)
+        .args(["flush", "reject", id, "--reason", "unsupported coord"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    assert_eq!(
+        out.status.code(),
+        Some(70),
+        "diff publish failure should return I/O failure; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        path.exists(),
+        "plan should be restored to pending when quarantine diff publication fails"
+    );
+    assert!(
+        !quarantined.exists(),
+        "failed quarantine publish must not leave a partial quarantined plan"
+    );
+    assert!(
+        pending_diff.exists(),
+        "pending diff should remain available for retry/operator recovery"
+    );
+}
+
+#[test]
+fn flush_reject_validates_existing_quarantine_before_reporting_success() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCHM7";
+    let quarantined = vault
+        .path()
+        .join(".cairn/flush/quarantined")
+        .join(format!("{id}.plan.json"));
+    std::fs::create_dir_all(quarantined.parent().unwrap()).unwrap();
+    std::fs::write(
+        &quarantined,
+        serde_json::to_vec_pretty(&sample_pending(id)).unwrap(),
+    )
+    .unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let out = std::process::Command::new(bin)
+        .args(["flush", "reject", id, "--reason", "unsupported coord"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    assert_eq!(
+        out.status.code(),
+        Some(65),
+        "non-coord quarantine artifact must not be treated as success; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr)
+            .contains("existing quarantine is not a coord pending plan"),
+        "expected quarantine validation message; got: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        quarantined.exists(),
+        "invalid quarantine artifact should be left for manual inspection"
+    );
 }
 
 /// Round 10 (#54): explicit `--vault` must override `CAIRN_VAULT` for

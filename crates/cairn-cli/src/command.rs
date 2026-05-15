@@ -1,11 +1,11 @@
 //! Shared clap command tree for the runtime CLI and generated docs.
 
-use crate::{doctor, generated, hooks, identity, skill, verbs};
+use crate::{coord, doctor, generated, hooks, identity, skill, verbs};
 
 /// Build the `cairn` command tree used by both `main.rs` and `cairn-docgen`.
 #[must_use]
 pub fn build_command() -> clap::Command {
-    clap::Command::new("cairn")
+    let cmd = clap::Command::new("cairn")
         .about("Cairn — agent memory framework (cairn.mcp.v1)")
         .version(env!("CARGO_PKG_VERSION"))
         .subcommand_required(true)
@@ -58,8 +58,13 @@ pub fn build_command() -> clap::Command {
         .subcommand(verbs::screen::command())
         .subcommand(verbs::sensor::command())
         .subcommand(repair_subcommand())
-        .subcommand(identity::cli::identity_subcommand())
-        .subcommand(verbs::flush::command())
+        .subcommand(identity::cli::identity_subcommand());
+    let cmd = if cairn_core::status::wiring::coord_extension_ready() && coord::dispatch_ready() {
+        cmd.subcommand(coord::command())
+    } else {
+        cmd
+    };
+    cmd.subcommand(verbs::flush::command())
 }
 
 /// Attach `--issuer` to the generated handshake subcommand. The IDL

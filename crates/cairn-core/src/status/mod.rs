@@ -37,7 +37,7 @@ pub use remediation::{REMEDIATION, remediation_for};
 
 use crate::config::{CairnConfig, CapabilitySet, SensorCaptureBudget};
 use crate::domain::LocalSensorName;
-use crate::generated::common::Capabilities;
+use crate::generated::common::{Capabilities, Namespace};
 use crate::generated::status::{
     StatusResponseSensors, StatusResponseSensorsLocal, StatusResponseSensorsLocalBudget,
     StatusResponseSensorsLocalConsent, StatusResponseSensorsLocalGate,
@@ -252,6 +252,11 @@ pub fn advertise(gates: &CapabilityGates) -> Vec<Capabilities> {
         out.push(Capabilities::CairnMcpV1RetrieveProfile);
     }
 
+    // -- extensions -------------------------------------------------------
+    if phase >= Phase::V0_3 && wiring::coord_extension_ready() {
+        out.push(Capabilities::CairnMcpV1ExtensionCoord);
+    }
+
     // ── replay (held back per brief §15 fail-closed) ─────────────────────
     if wiring::REPLAY_SEQUENCE_WIRED {
         out.push(Capabilities::CairnMcpV1ReplaySequence);
@@ -434,6 +439,56 @@ fn default_screen_ocr_capability() -> Capabilities {
     } else {
         Capabilities::CairnSensorV1ScreenOcrTesseract
     }
+}
+
+/// Extension namespace records implied by advertised extension capabilities.
+///
+/// `status.capabilities` and `status.extensions` are bound by the IDL: if an
+/// extension capability is present, its namespace object must be present too,
+/// and vice versa. Keep the mapping here so CLI, SDK, and MCP status producers
+/// cannot drift.
+#[must_use]
+pub fn extension_namespaces(capabilities: &[Capabilities]) -> Vec<Namespace> {
+    let mut out = Vec::new();
+    for capability in capabilities {
+        let namespace = match capability {
+            Capabilities::CairnMcpV1ExtensionAggregate => Some(serde_json::json!({
+                "name": "cairn.aggregate.v1",
+                "x-cairn-since": "v0.2",
+                "enabler": "agent.enable_aggregate",
+                "x-cairn-capability": "cairn.mcp.v1.extension.aggregate",
+            })),
+            Capabilities::CairnMcpV1ExtensionAdmin => Some(serde_json::json!({
+                "name": "cairn.admin.v1",
+                "x-cairn-since": "v0.1",
+                "enabler": "operator role",
+                "x-cairn-capability": "cairn.mcp.v1.extension.admin",
+            })),
+            Capabilities::CairnMcpV1ExtensionFederation => Some(serde_json::json!({
+                "name": "cairn.federation.v1",
+                "x-cairn-since": "v0.3",
+                "enabler": "enterprise deployment",
+                "x-cairn-capability": "cairn.mcp.v1.extension.federation",
+            })),
+            Capabilities::CairnMcpV1ExtensionSessiontree => Some(serde_json::json!({
+                "name": "cairn.sessiontree.v1",
+                "x-cairn-since": "v0.3",
+                "enabler": "session.enable_tree",
+                "x-cairn-capability": "cairn.mcp.v1.extension.sessiontree",
+            })),
+            Capabilities::CairnMcpV1ExtensionCoord => Some(serde_json::json!({
+                "name": "cairn.coord.v1",
+                "x-cairn-since": "v0.3",
+                "enabler": "coord.enable",
+                "x-cairn-capability": "cairn.mcp.v1.extension.coord",
+            })),
+            _ => None,
+        };
+        if let Some(namespace) = namespace {
+            out.push(namespace);
+        }
+    }
+    out
 }
 
 #[cfg(test)]

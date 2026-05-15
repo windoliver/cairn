@@ -140,6 +140,74 @@ pub fn render(plan: &FlushPlan) -> String {
                 writeln!(&mut out, "- **Skill:** `{}`", skill.as_str()).ok();
                 writeln!(&mut out, "- **Diff ref:** `{}`", diff_ref.display()).ok();
             }
+            PlannedMutation::LeaseAcquire {
+                action_id,
+                actor,
+                ttl,
+                expires_at,
+            } => {
+                writeln!(&mut out, "- **Kind:** lease_acquire").ok();
+                writeln!(&mut out, "- **Action:** `{}`", action_id.as_str()).ok();
+                writeln!(&mut out, "- **Actor:** `{}`", actor.as_str()).ok();
+                writeln!(&mut out, "- **TTL:** `{ttl}`").ok();
+                writeln!(&mut out, "- **Expires:** {expires_at}").ok();
+            }
+            PlannedMutation::LeaseRelease {
+                action_id,
+                actor,
+                reason,
+            } => {
+                writeln!(&mut out, "- **Kind:** lease_release").ok();
+                writeln!(&mut out, "- **Action:** `{}`", action_id.as_str()).ok();
+                writeln!(&mut out, "- **Actor:** `{}`", actor.as_str()).ok();
+                if let Some(reason) = reason {
+                    writeln!(&mut out, "- **Reason:** `{reason}`").ok();
+                }
+            }
+            PlannedMutation::SignalSend {
+                from_actor,
+                to_actor,
+                signal_kind,
+                payload_id,
+            } => {
+                writeln!(&mut out, "- **Kind:** signal_send").ok();
+                writeln!(&mut out, "- **From:** `{}`", from_actor.as_str()).ok();
+                writeln!(&mut out, "- **To:** `{}`", to_actor.as_str()).ok();
+                writeln!(&mut out, "- **Signal kind:** `{signal_kind:?}`").ok();
+                if let Some(payload_id) = payload_id {
+                    writeln!(&mut out, "- **Payload:** `{}`", payload_id.as_str()).ok();
+                }
+            }
+            PlannedMutation::ActionCreate {
+                id,
+                title,
+                depends_on,
+                priority,
+            } => {
+                writeln!(&mut out, "- **Kind:** action_create").ok();
+                writeln!(&mut out, "- **Action:** `{}`", id.as_str()).ok();
+                writeln!(&mut out, "- **Title:** {title}").ok();
+                writeln!(&mut out, "- **Priority:** {priority}").ok();
+                writeln!(&mut out, "- **Dependencies:** {}", depends_on.len()).ok();
+            }
+            PlannedMutation::ActionUpdate { id, status, reason } => {
+                writeln!(&mut out, "- **Kind:** action_update").ok();
+                writeln!(&mut out, "- **Action:** `{}`", id.as_str()).ok();
+                writeln!(&mut out, "- **Status:** `{status:?}`").ok();
+                if let Some(reason) = reason {
+                    writeln!(&mut out, "- **Reason:** `{reason}`").ok();
+                }
+            }
+            PlannedMutation::RoutineInstantiate {
+                routine_name,
+                instance_id,
+                vars,
+            } => {
+                writeln!(&mut out, "- **Kind:** routine_instantiate").ok();
+                writeln!(&mut out, "- **Routine:** `{routine_name}`").ok();
+                writeln!(&mut out, "- **Instance:** `{}`", instance_id.0).ok();
+                writeln!(&mut out, "- **Vars:** {}", vars.len()).ok();
+            }
         }
         writeln!(&mut out).ok();
     }

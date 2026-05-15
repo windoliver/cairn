@@ -8,8 +8,10 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use cairn_core::domain::flush_plan::store::{Bucket, bucket_dir, plan_path};
-use cairn_core::domain::flush_plan::{ApplyKind, FlushPlan, PersistedPlan, PlanStatus};
+use cairn_core::domain::flush_plan::store::{Bucket, bucket_dir, plan_path, root as flush_root};
+use cairn_core::domain::flush_plan::{
+    ApplyKind, FlushPlan, PersistedPlan, PersistedPlanVersionError, PlanStatus,
+};
 
 /// Validate that `s` is a canonical 26-char Crockford-base32 ULID
 /// (uppercase, no `I L O U`, leading char `0..=7`). Mirrors the
@@ -37,6 +39,38 @@ pub(crate) fn is_valid_ulid_str(s: &str) -> bool {
             | b'V'..=b'Z'
         )
     })
+}
+
+fn persisted_plan_version_error(prefix: &str, id: &str, err: PersistedPlanVersionError) -> String {
+    match err {
+        PersistedPlanVersionError::Unsupported {
+            schema_version,
+            supported,
+        } => {
+            format!(
+                "{prefix}: plan {id} schema_version {schema_version} unsupported (this CLI handles {supported})"
+            )
+        }
+        PersistedPlanVersionError::RequiresNewer {
+            schema_version,
+            required,
+        } => {
+            format!(
+                "{prefix}: plan {id} schema_version {schema_version} is too old for enclosed mutations (requires {required})"
+            )
+        }
+    }
+}
+
+fn coord_mutations_unwired_error(prefix: &str, id: &str) -> String {
+    format!(
+        "{prefix}: plan {id} contains cairn.coord.v1 mutations but the coord runtime is not wired"
+    )
+}
+
+fn coord_mutations_are_unwired(persisted: &PersistedPlan) -> bool {
+    persisted.plan.contains_coord_mutations()
+        && !cairn_core::status::wiring::coord_flush_runtime_ready()
 }
 use clap::{Arg, ArgAction, ArgMatches, Command};
 
@@ -87,10 +121,37 @@ pub fn command() -> Command {
                         .help("Free-form reason recorded with the rejection"),
                 )
                 .arg(
+                    Arg::new("from-quarantine")
+                        .long("from-quarantine")
+                        .action(ArgAction::SetTrue)
+                        .help("Terminally reject an existing quarantined coord plan"),
+                )
+                .arg(
                     Arg::new("json")
                         .long("json")
                         .action(ArgAction::SetTrue)
                         .help("Emit machine-readable JSON"),
+                ),
+        )
+        .subcommand(
+            Command::new("requeue")
+                .about("Move a quarantined coord plan back to pending/")
+                .arg(
+                    Arg::new("id")
+                        .required(true)
+                        .help("Quarantined plan ULID to requeue"),
+                )
+                .arg(
+                    Arg::new("json")
+                        .long("json")
+                        .action(ArgAction::SetTrue)
+                        .help("Emit machine-readable JSON"),
+                )
+                .arg(
+                    Arg::new("force")
+                        .long("force")
+                        .action(ArgAction::SetTrue)
+                        .help("Requeue even while the coord runtime is not wired"),
                 ),
         )
 }
@@ -111,6 +172,7 @@ pub fn run(sub: &ArgMatches, resolved_vault: Option<PathBuf>) -> ExitCode {
         Some(("list", m)) => list(&vault, m),
         Some(("apply", m)) => apply(&vault, m),
         Some(("reject", m)) => reject(&vault, m),
+        Some(("requeue", m)) => requeue(&vault, m),
         _ => ExitCode::from(64),
     }
 }
@@ -212,14 +274,18 @@ fn apply(vault: &Path, m: &ArgMatches) -> ExitCode {
     // binary does not understand rather than silently overwriting status
     // fields. Rollback the claim — restore the pending file so a later
     // CLI / operator can still see and recover it.
-    if persisted.schema_version != PersistedPlan::SCHEMA_VERSION {
+    if let Err(err) = persisted.validate_schema_version() {
         eprintln!(
-            "cairn flush apply: plan {id} schema_version {} unsupported (this CLI handles {})",
-            persisted.schema_version,
-            PersistedPlan::SCHEMA_VERSION,
+            "{}",
+            persisted_plan_version_error("cairn flush apply", id, err)
         );
         rollback_claim(vault, &claim, &ulid);
         return ExitCode::from(65);
+    }
+    if coord_mutations_are_unwired(&persisted) {
+        eprintln!("{}", coord_mutations_unwired_error("cairn flush apply", id));
+        rollback_claim(vault, &claim, &ulid);
+        return ExitCode::from(69);
     }
     // Identity gate: refuse a pending file whose embedded `operation_id`
     // does not match the path / requested id (tampering or stale-content
@@ -531,6 +597,7 @@ fn reject(vault: &Path, m: &ArgMatches) -> ExitCode {
         .get_one::<String>("reason")
         .expect("clap-required")
         .clone();
+    let from_quarantine = m.get_flag("from-quarantine");
     if !is_valid_ulid_str(id) {
         eprintln!("cairn flush reject: invalid ULID {id} (expected 26-char Crockford base32)");
         return ExitCode::from(64);
@@ -539,6 +606,98 @@ fn reject(vault: &Path, m: &ArgMatches) -> ExitCode {
 
     let applied = plan_path(vault, Bucket::Applied, &ulid);
     let rejected = plan_path(vault, Bucket::Rejected, &ulid);
+    let quarantined = quarantine_path(vault, &ulid);
+    let quarantine_claim = quarantine_claim_path(vault, &ulid);
+
+    if from_quarantine {
+        if applied.exists() {
+            eprintln!("cairn flush reject: {id} is already terminal: applied");
+            return ExitCode::from(65);
+        }
+        if rejected.exists() {
+            eprintln!("cairn flush reject: {id} is already terminal: rejected");
+            return ExitCode::from(65);
+        }
+        if quarantined.exists() && quarantine_claim.exists() {
+            match files_have_same_contents(&quarantined, &quarantine_claim) {
+                Ok(true) => {
+                    if let Err(e) = remove_synced(&quarantine_claim) {
+                        eprintln!(
+                            "cairn flush reject: duplicate quarantine claim cleanup failed: {e}"
+                        );
+                        return ExitCode::from(70);
+                    }
+                }
+                Ok(false) => {
+                    eprintln!(
+                        "cairn flush reject: conflict: both quarantined/{id}.plan.json and quarantined/{id}.plan.json.in-flight exist with different contents; inspect before --from-quarantine"
+                    );
+                    return ExitCode::from(70);
+                }
+                Err(e) => {
+                    eprintln!(
+                        "cairn flush reject: duplicate quarantine claim inspection failed: {e}"
+                    );
+                    return ExitCode::from(70);
+                }
+            }
+        }
+        let quarantine_source = if quarantined.exists() {
+            quarantined.clone()
+        } else if quarantine_claim.exists() {
+            quarantine_claim.clone()
+        } else {
+            eprintln!("cairn flush reject: plan {id} not found in quarantined/");
+            return ExitCode::from(66);
+        };
+        let pending = plan_path(vault, Bucket::Pending, &ulid);
+        if pending.exists() {
+            eprintln!(
+                "cairn flush reject: conflict: both pending/{id}.plan.json and quarantined/{id}.plan.json exist; inspect before --from-quarantine"
+            );
+            return ExitCode::from(70);
+        }
+        if requeue_marker_path(vault, &ulid).exists() {
+            eprintln!(
+                "cairn flush reject: requeue for {id} is in flight; retry after `flush requeue` completes"
+            );
+            return ExitCode::from(70);
+        }
+        if requeue_repair_marker_path(vault, &ulid).exists() {
+            eprintln!(
+                "cairn flush reject: requeue repair is required for {id}; inspect before --from-quarantine"
+            );
+            return ExitCode::from(70);
+        }
+        let quarantine_source_is_claim = quarantine_source == quarantine_claim;
+        if let Err(e) = reject_quarantined_plan(
+            vault,
+            &ulid,
+            &quarantine_source,
+            &rejected,
+            id,
+            &reason,
+            quarantine_source_is_claim,
+        ) {
+            eprintln!("cairn flush reject: quarantine reject failed: {e}");
+            return ExitCode::from(70);
+        }
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "operation_id": id,
+                    "status": "rejected",
+                    "reason": reason,
+                    "source": "quarantined",
+                }))
+                .unwrap_or_default()
+            );
+        } else {
+            println!("flush reject {id}: rejected quarantined plan ({reason})");
+        }
+        return ExitCode::SUCCESS;
+    }
 
     if applied.exists() {
         eprintln!("cairn flush reject: {id} is already terminal: applied");
@@ -548,8 +707,12 @@ fn reject(vault: &Path, m: &ArgMatches) -> ExitCode {
         eprintln!("cairn flush reject: {id} is already terminal: rejected");
         return ExitCode::from(65);
     }
-
-    let claim = match claim_pending(vault, &ulid, "rejected") {
+    let claim_role = if quarantine_claim.exists() || pending_plan_is_unwired_coord(vault, &ulid) {
+        "quarantined"
+    } else {
+        "rejected"
+    };
+    let claim = match claim_pending(vault, &ulid, claim_role) {
         ClaimOutcome::Claimed(p) => p,
         ClaimOutcome::NotFound => {
             if applied.exists() {
@@ -559,6 +722,39 @@ fn reject(vault: &Path, m: &ArgMatches) -> ExitCode {
             if rejected.exists() {
                 eprintln!("cairn flush reject: {id} is already terminal: rejected");
                 return ExitCode::from(65);
+            }
+            if quarantined.exists() {
+                if requeue_marker_path(vault, &ulid).exists() {
+                    eprintln!(
+                        "cairn flush reject: requeue for {id} is in flight; retry after `flush requeue` completes"
+                    );
+                    return ExitCode::from(70);
+                }
+                if let Err(e) = validate_existing_quarantine(&quarantined, id) {
+                    eprintln!("cairn flush reject: {e}");
+                    return ExitCode::from(65);
+                }
+                if let Err(e) = reconcile_existing_quarantine_diff(vault, &ulid) {
+                    eprintln!("cairn flush reject: quarantine diff preservation failed: {e}");
+                    return ExitCode::from(70);
+                }
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "operation_id": id,
+                            "status": "quarantined",
+                            "path": quarantined,
+                        }))
+                        .unwrap_or_default()
+                    );
+                } else {
+                    println!(
+                        "flush reject {id}: already quarantined at {}",
+                        quarantined.display()
+                    );
+                }
+                return ExitCode::SUCCESS;
             }
             eprintln!("cairn flush reject: plan {id} not found in pending/");
             return ExitCode::from(66);
@@ -589,11 +785,10 @@ fn reject(vault: &Path, m: &ArgMatches) -> ExitCode {
             return ExitCode::from(65);
         }
     };
-    if persisted.schema_version != PersistedPlan::SCHEMA_VERSION {
+    if let Err(err) = persisted.validate_schema_version() {
         eprintln!(
-            "cairn flush reject: plan {id} schema_version {} unsupported (this CLI handles {})",
-            persisted.schema_version,
-            PersistedPlan::SCHEMA_VERSION,
+            "{}",
+            persisted_plan_version_error("cairn flush reject", id, err)
         );
         rollback_claim(vault, &claim, &ulid);
         return ExitCode::from(65);
@@ -613,6 +808,30 @@ fn reject(vault: &Path, m: &ArgMatches) -> ExitCode {
         );
         rollback_claim(vault, &claim, &ulid);
         return ExitCode::from(65);
+    }
+    if coord_mutations_are_unwired(&persisted) {
+        if let Err(e) = publish_quarantine(vault, &claim, &quarantined, &ulid) {
+            eprintln!("cairn flush reject: quarantine failed: {e}");
+            return ExitCode::from(70);
+        }
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "operation_id": id,
+                    "status": "quarantined",
+                    "reason": reason,
+                    "path": quarantined,
+                }))
+                .unwrap_or_default()
+            );
+        } else {
+            println!(
+                "flush reject {id}: quarantined unwired coord plan ({reason}) at {}",
+                quarantined.display()
+            );
+        }
+        return ExitCode::SUCCESS;
     }
     // Rejecting an expired non-placeholder plan is still safe (it's a
     // cleanup operation), but we surface the staleness so an operator
@@ -647,6 +866,322 @@ fn reject(vault: &Path, m: &ArgMatches) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "requeue is a linear recovery state machine; splitting it would obscure the ordered failure handling"
+)]
+fn requeue(vault: &Path, m: &ArgMatches) -> ExitCode {
+    let json = m.get_flag("json");
+    let force = m.get_flag("force");
+    #[allow(clippy::expect_used, reason = "clap declared this required")]
+    let id = m.get_one::<String>("id").expect("clap-required");
+    if !is_valid_ulid_str(id) {
+        eprintln!("cairn flush requeue: invalid ULID {id} (expected 26-char Crockford base32)");
+        return ExitCode::from(64);
+    }
+    let ulid = cairn_core::generated::common::Ulid(id.clone());
+    let pending = plan_path(vault, Bucket::Pending, &ulid);
+    let applied = plan_path(vault, Bucket::Applied, &ulid);
+    let rejected = plan_path(vault, Bucket::Rejected, &ulid);
+    let quarantined = quarantine_path(vault, &ulid);
+    let quarantine_claim = quarantine_claim_path(vault, &ulid);
+    let marker = requeue_marker_path(vault, &ulid);
+    let repair_marker = requeue_repair_marker_path(vault, &ulid);
+
+    if !cairn_core::status::wiring::coord_flush_runtime_ready() && !force {
+        eprintln!("cairn flush requeue: coord runtime is not wired; use --force to requeue anyway");
+        return ExitCode::from(69);
+    }
+    if pending.exists() {
+        let quarantined_diff = quarantine_diff_path(vault, &ulid);
+        let pending_diff = cairn_core::domain::flush_plan::store::diff_path(vault, &ulid);
+        let mut cleaned_quarantine_claim = false;
+        if repair_marker.exists() {
+            if let Err(e) = validate_coord_pending_plan_file(&pending, id, "pending plan") {
+                eprintln!("cairn flush requeue: repair is not complete: {e}");
+                return ExitCode::from(70);
+            }
+            if quarantined.exists() {
+                match files_have_same_contents(&pending, &quarantined) {
+                    Ok(true) => {
+                        if let Err(e) = remove_synced(&quarantined) {
+                            eprintln!(
+                                "cairn flush requeue: repaired duplicate quarantine cleanup failed: {e}"
+                            );
+                            return ExitCode::from(70);
+                        }
+                    }
+                    Ok(false) => {
+                        eprintln!(
+                            "cairn flush requeue: repair marker exists for {id} but pending and quarantined plans differ; inspect before clearing repair"
+                        );
+                        return ExitCode::from(70);
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "cairn flush requeue: repaired quarantine inspection failed: {e}"
+                        );
+                        return ExitCode::from(70);
+                    }
+                }
+            }
+            if quarantine_claim.exists() {
+                match files_have_same_contents(&pending, &quarantine_claim) {
+                    Ok(true) => {
+                        if let Err(e) = remove_synced(&quarantine_claim) {
+                            eprintln!(
+                                "cairn flush requeue: repaired duplicate quarantine claim cleanup failed: {e}"
+                            );
+                            return ExitCode::from(70);
+                        }
+                    }
+                    Ok(false) => {
+                        eprintln!(
+                            "cairn flush requeue: repair marker exists for {id} but pending plan and quarantine claim differ; inspect before clearing repair"
+                        );
+                        return ExitCode::from(70);
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "cairn flush requeue: repaired quarantine claim inspection failed: {e}"
+                        );
+                        return ExitCode::from(70);
+                    }
+                }
+            }
+            if quarantined_diff.exists() {
+                if !pending_diff.exists() {
+                    eprintln!(
+                        "cairn flush requeue: repair marker exists for {id} but quarantined diff has no pending diff pair; inspect before clearing repair"
+                    );
+                    return ExitCode::from(70);
+                }
+                match files_have_same_contents(&pending_diff, &quarantined_diff) {
+                    Ok(true) => {
+                        if let Err(e) = remove_synced(&quarantined_diff) {
+                            eprintln!(
+                                "cairn flush requeue: repaired duplicate quarantine diff cleanup failed: {e}"
+                            );
+                            return ExitCode::from(70);
+                        }
+                    }
+                    Ok(false) => {
+                        eprintln!(
+                            "cairn flush requeue: repair marker exists for {id} but pending and quarantined diffs differ; inspect before clearing repair"
+                        );
+                        return ExitCode::from(70);
+                    }
+                    Err(e) => {
+                        eprintln!("cairn flush requeue: repaired diff inspection failed: {e}");
+                        return ExitCode::from(70);
+                    }
+                }
+            }
+            if let Err(e) = remove_synced(&repair_marker) {
+                eprintln!("cairn flush requeue: repair marker cleanup failed: {e}");
+                return ExitCode::from(70);
+            }
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "operation_id": id,
+                        "status": "pending",
+                        "path": pending,
+                    }))
+                    .unwrap_or_default()
+                );
+            } else {
+                println!("flush requeue {id}: cleared completed requeue repair");
+            }
+            return ExitCode::SUCCESS;
+        }
+        if quarantine_claim.exists() {
+            match files_have_same_contents(&pending, &quarantine_claim) {
+                Ok(true) => {
+                    if let Err(e) = remove_synced(&quarantine_claim) {
+                        eprintln!(
+                            "cairn flush requeue: duplicate quarantine claim cleanup failed: {e}"
+                        );
+                        return ExitCode::from(70);
+                    }
+                    cleaned_quarantine_claim = true;
+                }
+                Ok(false) => {
+                    eprintln!(
+                        "cairn flush requeue: conflict: both pending/{id}.plan.json and quarantined/{id}.plan.json.in-flight exist with different contents; inspect before requeue"
+                    );
+                    return ExitCode::from(70);
+                }
+                Err(e) => {
+                    eprintln!(
+                        "cairn flush requeue: duplicate quarantine claim inspection failed: {e}"
+                    );
+                    return ExitCode::from(70);
+                }
+            }
+        }
+        if quarantined.exists() || quarantined_diff.exists() {
+            if let Err(e) = validate_coord_pending_plan_file(&pending, id, "pending plan") {
+                if marker.exists() {
+                    report_marker_repair_needed(vault, &ulid, &marker, &e);
+                } else {
+                    eprintln!("cairn flush requeue: {e}");
+                }
+                return ExitCode::from(65);
+            }
+            if !requeue_marker_path(vault, &ulid).exists() {
+                eprintln!(
+                    "cairn flush requeue: quarantined artifact exists without requeue marker; inspect before requeue"
+                );
+                return ExitCode::from(70);
+            }
+            if let Err(e) = reconcile_interrupted_requeue_plan(&pending, &quarantined) {
+                eprintln!("cairn flush requeue: publish failed: {e}");
+                return ExitCode::from(70);
+            }
+            if let Err(e) = reconcile_interrupted_requeue_diff(vault, &ulid) {
+                eprintln!("cairn flush requeue: publish failed: {e}");
+                return ExitCode::from(70);
+            }
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "operation_id": id,
+                        "status": "pending",
+                        "path": pending,
+                    }))
+                    .unwrap_or_default()
+                );
+            } else {
+                println!("flush requeue {id}: completed interrupted requeue");
+            }
+            return ExitCode::SUCCESS;
+        }
+        if marker.exists() {
+            if let Err(e) = validate_coord_pending_plan_file(&pending, id, "pending plan") {
+                report_marker_repair_needed(vault, &ulid, &marker, &e);
+                return ExitCode::from(70);
+            }
+            if let Err(e) = remove_synced_if_exists(&marker) {
+                eprintln!("cairn flush requeue: marker cleanup failed: {e}");
+                return ExitCode::from(70);
+            }
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "operation_id": id,
+                        "status": "pending",
+                        "path": pending,
+                    }))
+                    .unwrap_or_default()
+                );
+            } else {
+                println!("flush requeue {id}: completed interrupted requeue");
+            }
+            return ExitCode::SUCCESS;
+        }
+        if cleaned_quarantine_claim {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "operation_id": id,
+                        "status": "pending",
+                        "path": pending,
+                    }))
+                    .unwrap_or_default()
+                );
+            } else {
+                println!("flush requeue {id}: removed duplicate quarantine claim");
+            }
+            return ExitCode::SUCCESS;
+        }
+        eprintln!("cairn flush requeue: {id} is already pending");
+        return ExitCode::from(65);
+    }
+    if applied.exists() {
+        eprintln!("cairn flush requeue: {id} is already terminal: applied");
+        return ExitCode::from(65);
+    }
+    if rejected.exists() {
+        eprintln!("cairn flush requeue: {id} is already terminal: rejected");
+        return ExitCode::from(65);
+    }
+    if repair_marker.exists() {
+        eprintln!(
+            "cairn flush requeue: repair marker exists for {id} but no repaired pending plan is present; inspect before clearing repair"
+        );
+        return ExitCode::from(70);
+    }
+    if quarantined.exists() && quarantine_claim.exists() {
+        match files_have_same_contents(&quarantined, &quarantine_claim) {
+            Ok(true) => {
+                if let Err(e) = remove_synced(&quarantine_claim) {
+                    eprintln!(
+                        "cairn flush requeue: duplicate quarantine claim cleanup failed: {e}"
+                    );
+                    return ExitCode::from(70);
+                }
+            }
+            Ok(false) => {
+                eprintln!(
+                    "cairn flush requeue: conflict: both quarantined/{id}.plan.json and quarantined/{id}.plan.json.in-flight exist with different contents; inspect before requeue"
+                );
+                return ExitCode::from(70);
+            }
+            Err(e) => {
+                eprintln!("cairn flush requeue: duplicate quarantine claim inspection failed: {e}");
+                return ExitCode::from(70);
+            }
+        }
+    }
+    if !quarantined.exists() && quarantine_claim.exists() {
+        if let Err(e) =
+            validate_coord_pending_plan_file(&quarantine_claim, id, "quarantined in-flight plan")
+        {
+            if marker.exists() {
+                report_marker_repair_needed(vault, &ulid, &marker, &e);
+            } else {
+                eprintln!("cairn flush requeue: {e}");
+            }
+            return ExitCode::from(70);
+        }
+        if let Err(e) = move_file_no_replace(&quarantine_claim, &quarantined) {
+            eprintln!("cairn flush requeue: claim recovery failed: {e}");
+            return ExitCode::from(70);
+        }
+    }
+    if !quarantined.exists() {
+        eprintln!("cairn flush requeue: plan {id} not found in quarantined/");
+        return ExitCode::from(66);
+    }
+    if let Err(e) = validate_existing_quarantine(&quarantined, id) {
+        eprintln!("cairn flush requeue: {e}");
+        return ExitCode::from(65);
+    }
+    if let Err(e) = publish_requeue(vault, &ulid, &quarantined, &pending) {
+        eprintln!("cairn flush requeue: publish failed: {e}");
+        return ExitCode::from(70);
+    }
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "operation_id": id,
+                "status": "pending",
+                "path": pending,
+            }))
+            .unwrap_or_default()
+        );
+    } else {
+        println!("flush requeue {id}: moved quarantined plan back to pending/");
+    }
+    ExitCode::SUCCESS
+}
+
 /// Restore a claimed pending file to `pending/<id>.plan.json`. Best-effort:
 /// callers invoke this after a validation gate trips so a future apply or
 /// operator can still see the original plan. If the rename fails (e.g. the
@@ -671,6 +1206,604 @@ fn rollback_claim(vault: &Path, claim: &Path, ulid: &cairn_core::generated::comm
     }
 }
 
+fn quarantine_path(vault: &Path, ulid: &cairn_core::generated::common::Ulid) -> PathBuf {
+    flush_root(vault)
+        .join("quarantined")
+        .join(format!("{}.plan.json", ulid.0))
+}
+
+fn quarantine_diff_path(vault: &Path, ulid: &cairn_core::generated::common::Ulid) -> PathBuf {
+    flush_root(vault)
+        .join("quarantined")
+        .join(format!("{}.diff.md", ulid.0))
+}
+
+fn quarantine_claim_path(vault: &Path, ulid: &cairn_core::generated::common::Ulid) -> PathBuf {
+    quarantine_path(vault, ulid).with_extension("json.in-flight")
+}
+
+fn requeue_marker_path(vault: &Path, ulid: &cairn_core::generated::common::Ulid) -> PathBuf {
+    flush_root(vault)
+        .join("pending")
+        .join(format!("{}.requeue-in-flight", ulid.0))
+}
+
+fn requeue_repair_marker_path(vault: &Path, ulid: &cairn_core::generated::common::Ulid) -> PathBuf {
+    flush_root(vault)
+        .join("pending")
+        .join(format!("{}.requeue-repair-needed", ulid.0))
+}
+
+fn report_marker_repair_needed(
+    vault: &Path,
+    ulid: &cairn_core::generated::common::Ulid,
+    marker: &Path,
+    reason: &str,
+) {
+    let archived = requeue_repair_marker_path(vault, ulid);
+    if let Err(archive_err) = move_file_no_replace(marker, &archived) {
+        eprintln!(
+            "cairn flush requeue: {reason}; additionally failed to preserve marker for inspection: {archive_err}"
+        );
+        return;
+    }
+    eprintln!(
+        "cairn flush requeue: {reason}; preserved marker for inspection at {}",
+        archived.display()
+    );
+}
+
+fn publish_quarantine(
+    vault: &Path,
+    claim: &Path,
+    quarantine: &Path,
+    ulid: &cairn_core::generated::common::Ulid,
+) -> std::io::Result<()> {
+    if let Some(parent) = quarantine.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if quarantine.exists() {
+        if !files_have_same_contents(claim, quarantine)? {
+            rollback_claim(vault, claim, ulid);
+            return Err(divergent_quarantine_retry_error("plan", ulid));
+        }
+        if let Err(e) = reconcile_existing_quarantine_diff(vault, ulid) {
+            rollback_claim(vault, claim, ulid);
+            return Err(e);
+        }
+        std::fs::remove_file(claim)?;
+        return Ok(());
+    }
+    move_file_no_replace(claim, quarantine)?;
+    if let Err(e) = preserve_quarantine_diff(vault, ulid) {
+        if let Err(restore_err) = move_file_no_replace(quarantine, claim) {
+            return Err(std::io::Error::new(
+                e.kind(),
+                format!(
+                    "{e}; additionally failed to restore quarantined plan to claim path {}: {restore_err}",
+                    claim.display()
+                ),
+            ));
+        }
+        rollback_claim(vault, claim, ulid);
+        return Err(e);
+    }
+    Ok(())
+}
+
+fn validate_existing_quarantine(quarantine: &Path, id: &str) -> Result<(), String> {
+    validate_coord_pending_plan_file(quarantine, id, "existing quarantine")
+}
+
+fn quarantine_listing_status(persisted: &PersistedPlan, stem: &str) -> String {
+    if persisted.plan.operation_id.0 != stem {
+        return "quarantined (id mismatch)".into();
+    }
+    if persisted.validate_schema_version().is_err() {
+        return "quarantined (invalid schema)".into();
+    }
+    if !matches!(persisted.status, PlanStatus::Pending) {
+        return "quarantined (invalid status)".into();
+    }
+    if !persisted.plan.contains_coord_mutations() {
+        return "quarantined (non-coord)".into();
+    }
+    "quarantined".into()
+}
+
+fn reject_quarantined_plan(
+    vault: &Path,
+    ulid: &cairn_core::generated::common::Ulid,
+    quarantined: &Path,
+    rejected: &Path,
+    id: &str,
+    reason: &str,
+    quarantine_source_is_claim: bool,
+) -> std::io::Result<()> {
+    validate_existing_quarantine(quarantined, id).map_err(std::io::Error::other)?;
+    let bytes = std::fs::read(quarantined)?;
+    let mut persisted: PersistedPlan =
+        serde_json::from_slice(&bytes).map_err(std::io::Error::other)?;
+    persisted.status = PlanStatus::Rejected {
+        at: now_rfc3339(),
+        reason: reason.to_owned(),
+    };
+    let pending_diff = cairn_core::domain::flush_plan::store::diff_path(vault, ulid);
+    let quarantine_diff = quarantine_diff_path(vault, ulid);
+    if pending_diff.exists() && !quarantine_diff.exists() && !quarantine_source_is_claim {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "pending diff sidecar already exists for {} without a quarantined diff to verify; inspect before rejecting from quarantine",
+                ulid.0
+            ),
+        ));
+    }
+    if pending_diff.exists()
+        && quarantine_diff.exists()
+        && !files_have_same_contents(&pending_diff, &quarantine_diff)?
+    {
+        return Err(divergent_quarantine_retry_error("diff", ulid));
+    }
+    publish_terminal(vault, quarantined, rejected, &persisted, ulid)?;
+    remove_synced_if_exists(&pending_diff)?;
+    remove_synced_if_exists(&quarantine_diff)?;
+    Ok(())
+}
+
+fn pending_plan_is_unwired_coord(vault: &Path, ulid: &cairn_core::generated::common::Ulid) -> bool {
+    let pending = plan_path(vault, Bucket::Pending, ulid);
+    let Ok(bytes) = std::fs::read(pending) else {
+        return false;
+    };
+    let Ok(persisted) = serde_json::from_slice::<PersistedPlan>(&bytes) else {
+        return false;
+    };
+    coord_mutations_are_unwired(&persisted)
+}
+
+fn pending_plan_is_canonical_non_coord(
+    vault: &Path,
+    ulid: &cairn_core::generated::common::Ulid,
+) -> std::io::Result<bool> {
+    let pending = plan_path(vault, Bucket::Pending, ulid);
+    let bytes = std::fs::read(pending)?;
+    let persisted: PersistedPlan = serde_json::from_slice(&bytes).map_err(std::io::Error::other)?;
+    persisted
+        .validate_schema_version()
+        .map_err(|err| std::io::Error::other(format!("{err:?}")))?;
+    Ok(persisted.plan.operation_id == *ulid
+        && matches!(persisted.status, PlanStatus::Pending)
+        && !persisted.plan.contains_coord_mutations())
+}
+
+fn validate_coord_pending_plan_file(path: &Path, id: &str, label: &str) -> Result<(), String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("{label} could not be read: {e}"))?;
+    let persisted: PersistedPlan =
+        serde_json::from_slice(&bytes).map_err(|e| format!("{label} is malformed: {e}"))?;
+    persisted
+        .validate_schema_version()
+        .map_err(|err| persisted_plan_version_error(label, id, err))?;
+    if persisted.plan.operation_id.0 != *id {
+        return Err(format!(
+            "{label} operation_id `{}` mismatches requested id {id}",
+            persisted.plan.operation_id.0,
+        ));
+    }
+    if !matches!(persisted.status, PlanStatus::Pending)
+        || !persisted.plan.contains_coord_mutations()
+    {
+        return Err(format!("{label} is not a coord pending plan for {id}"));
+    }
+    Ok(())
+}
+
+fn publish_requeue(
+    vault: &Path,
+    ulid: &cairn_core::generated::common::Ulid,
+    quarantined: &Path,
+    pending: &Path,
+) -> std::io::Result<()> {
+    if let Some(parent) = pending.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let quarantine_diff = quarantine_diff_path(vault, ulid);
+    let pending_diff = cairn_core::domain::flush_plan::store::diff_path(vault, ulid);
+    let marker = requeue_marker_path(vault, ulid);
+    if pending_diff.exists() && !quarantine_diff.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "pending diff sidecar already exists for {} without a quarantined diff to verify; inspect before requeue",
+                ulid.0
+            ),
+        ));
+    }
+    if quarantine_diff.exists()
+        && pending_diff.exists()
+        && !files_have_same_contents(&quarantine_diff, &pending_diff)?
+    {
+        return Err(divergent_quarantine_retry_error("diff", ulid));
+    }
+    if !marker.exists() {
+        write_requeue_marker(&marker)?;
+    } else if !pending_diff.exists() && !quarantine_diff.exists() {
+        if !quarantined.exists() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!(
+                    "requeue marker already exists for {} without recoverable artifacts; inspect before requeue",
+                    ulid.0
+                ),
+            ));
+        }
+    } else if !pending_diff.exists() && quarantine_diff.exists() {
+        if !quarantined.exists() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!(
+                    "requeue marker already exists for {} without quarantined plan; inspect before requeue",
+                    ulid.0
+                ),
+            ));
+        }
+    } else if !pending_diff.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "requeue marker already exists for {} without pending diff; retry after active requeue completes",
+                ulid.0
+            ),
+        ));
+    }
+    move_file_no_replace(quarantined, pending)?;
+    if quarantine_diff.exists()
+        && !pending_diff.exists()
+        && let Err(e) = move_file_no_replace(&quarantine_diff, &pending_diff)
+    {
+        if let Err(rollback_err) = move_file_no_replace(pending, quarantined) {
+            return Err(std::io::Error::new(
+                e.kind(),
+                format!(
+                    "{e}; additionally failed to roll pending plan back to quarantine: {rollback_err}"
+                ),
+            ));
+        }
+        return Err(e);
+    }
+    if quarantine_diff.exists() && pending_diff.exists() {
+        remove_synced(&quarantine_diff)?;
+    }
+    remove_synced(&marker)?;
+    Ok(())
+}
+
+fn write_requeue_marker(path: &Path) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut marker = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    marker.write_all(b"cairn flush requeue in flight\n")?;
+    marker.sync_all()?;
+    if let Some(parent) = path.parent() {
+        sync_dir(parent)?;
+    }
+    Ok(())
+}
+
+fn remove_synced(path: &Path) -> std::io::Result<()> {
+    std::fs::remove_file(path)?;
+    if let Some(parent) = path.parent() {
+        sync_dir(parent)?;
+    }
+    Ok(())
+}
+
+fn remove_synced_if_exists(path: &Path) -> std::io::Result<()> {
+    match remove_synced(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+fn reconcile_interrupted_requeue_diff(
+    vault: &Path,
+    ulid: &cairn_core::generated::common::Ulid,
+) -> std::io::Result<()> {
+    let quarantine_diff = quarantine_diff_path(vault, ulid);
+    let pending_diff = cairn_core::domain::flush_plan::store::diff_path(vault, ulid);
+    reconcile_requeue_diff_paths(ulid, &quarantine_diff, &pending_diff)?;
+    remove_synced_if_exists(&requeue_marker_path(vault, ulid))?;
+    Ok(())
+}
+
+fn reconcile_interrupted_requeue_plan(pending: &Path, quarantined: &Path) -> std::io::Result<()> {
+    if !quarantined.exists() {
+        return Ok(());
+    }
+    if !files_have_same_contents(pending, quarantined)? {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "pending plan {} differs from quarantined plan {}; inspect before requeue",
+                pending.display(),
+                quarantined.display()
+            ),
+        ));
+    }
+    remove_synced(quarantined)?;
+    Ok(())
+}
+
+fn reconcile_requeue_diff_paths(
+    ulid: &cairn_core::generated::common::Ulid,
+    quarantine_diff: &Path,
+    pending_diff: &Path,
+) -> std::io::Result<()> {
+    if !quarantine_diff.exists() {
+        return Ok(());
+    }
+    if pending_diff.exists() {
+        if !files_have_same_contents(quarantine_diff, pending_diff)? {
+            return Err(divergent_quarantine_retry_error("diff", ulid));
+        }
+        remove_synced(quarantine_diff)?;
+        return Ok(());
+    }
+    move_file_no_replace(quarantine_diff, pending_diff)?;
+    Ok(())
+}
+
+fn move_file_no_replace(src: &Path, dst: &Path) -> std::io::Result<()> {
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    match hard_link_no_replace(src, dst) {
+        Ok(()) => {}
+        Err(link_err) if link_err.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(link_err);
+        }
+        Err(link_err) => {
+            return copy_file_no_replace(src, dst).map_err(|copy_err| {
+                std::io::Error::new(
+                    copy_err.kind(),
+                    format!("hard-link move failed: {link_err}; copy fallback failed: {copy_err}"),
+                )
+            });
+        }
+    }
+    if let Some(parent) = dst.parent()
+        && let Err(e) = sync_dir(parent)
+    {
+        let _ = std::fs::remove_file(dst);
+        return Err(e);
+    }
+    if let Err(e) = std::fs::remove_file(src) {
+        let _ = std::fs::remove_file(dst);
+        return Err(e);
+    }
+    if let Some(parent) = src.parent() {
+        sync_dir(parent)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+static FORCE_COPY_MOVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn hard_link_no_replace(src: &Path, dst: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    {
+        if FORCE_COPY_MOVE.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "forced copy fallback",
+            ));
+        }
+    }
+    std::fs::hard_link(src, dst)
+}
+
+fn copy_file_no_replace(src: &Path, dst: &Path) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    let mut source = std::fs::File::open(src)?;
+    let metadata = source.metadata()?;
+    let parent = dst.parent().unwrap_or_else(|| Path::new("."));
+    let mut target = tempfile::NamedTempFile::new_in(parent)?;
+    std::io::copy(&mut source, target.as_file_mut())?;
+    target.as_file_mut().flush()?;
+    std::fs::set_permissions(target.path(), metadata.permissions())?;
+    target.as_file_mut().sync_all()?;
+    let _persisted = target.persist_noclobber(dst).map_err(|e| e.error)?;
+    sync_dir(parent)?;
+    if let Err(e) = std::fs::remove_file(src) {
+        let _ = std::fs::remove_file(dst);
+        return Err(e);
+    }
+    if let Some(parent) = src.parent() {
+        sync_dir(parent)?;
+    }
+    Ok(())
+}
+
+fn sync_dir(path: &Path) -> std::io::Result<()> {
+    std::fs::File::open(path)?.sync_all()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct ForceCopyMoveGuard;
+
+    impl ForceCopyMoveGuard {
+        fn enable() -> Self {
+            FORCE_COPY_MOVE.store(true, std::sync::atomic::Ordering::SeqCst);
+            Self
+        }
+    }
+
+    impl Drop for ForceCopyMoveGuard {
+        fn drop(&mut self) {
+            FORCE_COPY_MOVE.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn move_file_no_replace_falls_back_to_copy_when_hard_links_are_unavailable() {
+        let _guard = ForceCopyMoveGuard::enable();
+        let temp = tempfile::tempdir().unwrap();
+        let src = temp.path().join("src.plan.json");
+        let dst = temp.path().join("nested/dst.plan.json");
+        std::fs::write(&src, b"{\"ok\":true}\n").unwrap();
+
+        move_file_no_replace(&src, &dst).unwrap();
+
+        assert!(
+            !src.exists(),
+            "source should be removed after fallback move"
+        );
+        assert_eq!(std::fs::read(&dst).unwrap(), b"{\"ok\":true}\n");
+    }
+
+    #[test]
+    fn move_file_no_replace_copy_fallback_preserves_existing_destination() {
+        let _guard = ForceCopyMoveGuard::enable();
+        let temp = tempfile::tempdir().unwrap();
+        let src = temp.path().join("src.plan.json");
+        let dst = temp.path().join("dst.plan.json");
+        std::fs::write(&src, b"new").unwrap();
+        std::fs::write(&dst, b"old").unwrap();
+
+        let err = move_file_no_replace(&src, &dst).unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&src).unwrap(), b"new");
+        assert_eq!(std::fs::read(&dst).unwrap(), b"old");
+    }
+
+    #[test]
+    fn publish_requeue_preserves_marker_when_plan_move_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let ulid = cairn_core::generated::common::Ulid("01HQZK000000000000000RQF01".into());
+        let quarantined = quarantine_path(temp.path(), &ulid);
+        let pending = plan_path(temp.path(), Bucket::Pending, &ulid);
+        let marker = requeue_marker_path(temp.path(), &ulid);
+        std::fs::create_dir_all(quarantined.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(pending.parent().unwrap()).unwrap();
+        std::fs::write(&quarantined, "quarantined").unwrap();
+        std::fs::write(&pending, "already pending").unwrap();
+
+        let err = publish_requeue(temp.path(), &ulid, &quarantined, &pending).unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(
+            marker.exists(),
+            "failed requeue publish must remain resumable via marker"
+        );
+        assert!(quarantined.exists(), "quarantined plan should remain");
+        assert!(pending.exists(), "conflicting pending plan should remain");
+    }
+}
+
+fn files_have_same_contents(left: &Path, right: &Path) -> std::io::Result<bool> {
+    Ok(std::fs::read(left)? == std::fs::read(right)?)
+}
+
+fn divergent_quarantine_retry_error(
+    artifact: &str,
+    ulid: &cairn_core::generated::common::Ulid,
+) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        format!(
+            "divergent coord quarantine retry for {} {}; restored pending artifact for operator reconciliation",
+            artifact, ulid.0
+        ),
+    )
+}
+
+fn rollback_diff_move_error(
+    original: std::io::Error,
+    quarantine_diff: &Path,
+    pending_diff: &Path,
+) -> std::io::Error {
+    match move_file_no_replace(quarantine_diff, pending_diff) {
+        Ok(()) => original,
+        Err(rollback) => std::io::Error::new(
+            original.kind(),
+            format!(
+                "{original}; additionally failed to roll quarantined diff {} back to pending {}: {rollback}",
+                quarantine_diff.display(),
+                pending_diff.display()
+            ),
+        ),
+    }
+}
+
+fn reconcile_existing_quarantine_diff(
+    vault: &Path,
+    ulid: &cairn_core::generated::common::Ulid,
+) -> std::io::Result<()> {
+    let pending_diff = cairn_core::domain::flush_plan::store::diff_path(vault, ulid);
+    if !pending_diff.exists() {
+        return Ok(());
+    }
+    let quarantine_diff = quarantine_diff_path(vault, ulid);
+    if let Some(parent) = quarantine_diff.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if quarantine_diff.exists() {
+        if !files_have_same_contents(&pending_diff, &quarantine_diff)? {
+            return Err(divergent_quarantine_retry_error("diff", ulid));
+        }
+        std::fs::remove_file(pending_diff)?;
+        return Ok(());
+    }
+    move_file_no_replace(&pending_diff, &quarantine_diff)?;
+    if let Some(parent) = quarantine_diff.parent()
+        && let Err(e) = sync_dir(parent)
+    {
+        return Err(rollback_diff_move_error(e, &quarantine_diff, &pending_diff));
+    }
+    Ok(())
+}
+
+fn preserve_quarantine_diff(
+    vault: &Path,
+    ulid: &cairn_core::generated::common::Ulid,
+) -> std::io::Result<()> {
+    let pending_diff = cairn_core::domain::flush_plan::store::diff_path(vault, ulid);
+    if !pending_diff.exists() {
+        return Ok(());
+    }
+    let quarantine_diff = quarantine_diff_path(vault, ulid);
+    if let Some(parent) = quarantine_diff.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if quarantine_diff.exists() {
+        if !files_have_same_contents(&pending_diff, &quarantine_diff)? {
+            return Err(divergent_quarantine_retry_error("diff", ulid));
+        }
+        std::fs::remove_file(pending_diff)?;
+        return Ok(());
+    }
+    move_file_no_replace(&pending_diff, &quarantine_diff)?;
+    if let Some(parent) = quarantine_diff.parent()
+        && let Err(e) = sync_dir(parent)
+    {
+        return Err(rollback_diff_move_error(e, &quarantine_diff, &pending_diff));
+    }
+    Ok(())
+}
+
 /// Outcome of an atomic claim attempt on `pending/<id>.plan.json`.
 enum ClaimOutcome {
     /// Successfully renamed pending → claim path; returned path is the
@@ -690,21 +1823,34 @@ enum ClaimOutcome {
 /// path. POSIX `rename(2)` is atomic and returns `ENOENT` if the source
 /// vanished, so two concurrent callers race race-free for the same
 /// pending file: the loser sees `NotFound` and exits without writing
-/// anything. Different `role` strings ("applied" / "rejected") give each
-/// caller a distinct destination so they never overwrite each other's
-/// in-flight state.
+/// anything. Different `role` strings ("applied" / "rejected" /
+/// "quarantined") give each caller a distinct destination so they never
+/// overwrite each other's in-flight state.
+#[allow(
+    clippy::too_many_lines,
+    reason = "claim recovery is intentionally linear to keep crash-recovery ordering auditable"
+)]
 fn claim_pending(
     vault: &Path,
     ulid: &cairn_core::generated::common::Ulid,
     role: &str,
 ) -> ClaimOutcome {
     let pending = plan_path(vault, Bucket::Pending, ulid);
-    let bucket = match role {
-        "applied" => Bucket::Applied,
-        "rejected" => Bucket::Rejected,
+    let requeue_marker = requeue_marker_path(vault, ulid);
+    let requeue_repair_marker = requeue_repair_marker_path(vault, ulid);
+    let claim = match role {
+        "applied" => plan_path(vault, Bucket::Applied, ulid).with_extension("json.in-flight"),
+        "rejected" => plan_path(vault, Bucket::Rejected, ulid).with_extension("json.in-flight"),
+        "quarantined" => quarantine_claim_path(vault, ulid),
         _ => return ClaimOutcome::Err(std::io::Error::other(format!("unknown role {role}"))),
     };
-    let claim = plan_path(vault, bucket, ulid).with_extension("json.in-flight");
+    if requeue_repair_marker.exists() {
+        return ClaimOutcome::Err(std::io::Error::other(format!(
+            "requeue repair is required for {}; inspect {} before apply / reject",
+            ulid.0,
+            requeue_repair_marker.display()
+        )));
+    }
     if let Some(parent) = claim.parent()
         && let Err(e) = std::fs::create_dir_all(parent)
     {
@@ -724,10 +1870,10 @@ fn claim_pending(
     if claim.exists() {
         if pending.exists() {
             return ClaimOutcome::Err(std::io::Error::other(format!(
-                "conflict: both pending/{0}.plan.json and {1}/{0}.plan.json.in-flight exist; \
+                "conflict: both pending/{0}.plan.json and in-flight claim {1} exist; \
                  inspect both files manually before any flush apply / reject",
                 ulid.0,
-                bucket.dir_name(),
+                claim.display(),
             )));
         }
         // Take exclusive ownership of the resume by renaming the
@@ -749,6 +1895,32 @@ fn claim_pending(
             }
             Err(e) => return ClaimOutcome::Err(e),
         }
+    }
+    if requeue_marker.exists() && pending.exists() {
+        match pending_plan_is_canonical_non_coord(vault, ulid) {
+            Ok(true) => {
+                if let Err(e) = remove_synced_if_exists(&requeue_marker) {
+                    return ClaimOutcome::Err(e);
+                }
+            }
+            Ok(false) => {
+                return ClaimOutcome::Err(std::io::Error::other(format!(
+                    "requeue marker exists for {} but pending plan is not a canonical non-coord pending plan; retry after `flush requeue` completes or inspect manually",
+                    ulid.0
+                )));
+            }
+            Err(e) => {
+                return ClaimOutcome::Err(std::io::Error::other(format!(
+                    "requeue marker exists for {} but pending plan could not be classified: {e}",
+                    ulid.0
+                )));
+            }
+        }
+    } else if requeue_marker.exists() && !pending.exists() {
+        return ClaimOutcome::Err(std::io::Error::other(format!(
+            "requeue marker exists for {} without a pending plan; inspect before apply / reject",
+            ulid.0
+        )));
     }
     // Crashed-owner recovery is INTENTIONALLY operator-driven, not
     // automatic. If a previous process renamed the canonical in-flight
@@ -1051,6 +2223,15 @@ struct PlanSummary {
     status: String,
 }
 
+/// Requeue crash/repair marker surfaced by `flush list`.
+#[derive(serde::Serialize)]
+struct RequeueMarkerSummary {
+    id: String,
+    marker: &'static str,
+    status: &'static str,
+    path: String,
+}
+
 /// Bucket-level scan-cap notice — surfaced in JSON output as a typed
 /// envelope field, not as a fake plan row, so consumers cannot
 /// accidentally feed a marker into automation.
@@ -1065,6 +2246,7 @@ struct OmittedNotice {
 #[derive(serde::Serialize)]
 struct ListEnvelope<'a> {
     plans: &'a [PlanSummary],
+    requeue_markers: &'a [RequeueMarkerSummary],
     omitted: &'a [OmittedNotice],
 }
 
@@ -1098,7 +2280,9 @@ fn list(vault: &Path, m: &ArgMatches) -> ExitCode {
         vec![Bucket::Pending]
     };
     let mut rows: Vec<PlanSummary> = Vec::new();
+    let mut requeue_markers: Vec<RequeueMarkerSummary> = Vec::new();
     let mut omitted: Vec<OmittedNotice> = Vec::new();
+    scan_requeue_markers(vault, &mut requeue_markers, &mut omitted);
     // Always scan applied/ + rejected/ for stranded `.in-flight` claim
     // files so an operator can see and recover plans whose owning process
     // crashed between claim and publish. Emit a row for every matching
@@ -1107,10 +2291,14 @@ fn list(vault: &Path, m: &ArgMatches) -> ExitCode {
     // written ones. Defense-in-depth: validate filename stems as ULIDs,
     // refuse to read files larger than `MAX_PLAN_BYTES`, and cap
     // per-bucket row count.
-    let inflight_buckets = [Bucket::Applied, Bucket::Rejected];
-    for b in &inflight_buckets {
-        let dir = bucket_dir(vault, *b);
-        let Ok(read) = std::fs::read_dir(&dir) else {
+    let quarantine_dir = flush_root(vault).join("quarantined");
+    let inflight_dirs = [
+        (bucket_dir(vault, Bucket::Applied), "in-flight (apply)"),
+        (bucket_dir(vault, Bucket::Rejected), "in-flight (reject)"),
+        (quarantine_dir.clone(), "in-flight (quarantine)"),
+    ];
+    for (dir, bucket_label) in &inflight_dirs {
+        let Ok(read) = std::fs::read_dir(dir) else {
             continue;
         };
         // Sort entries so the scan is deterministic across runs (avoids
@@ -1153,11 +2341,6 @@ fn list(vault: &Path, m: &ArgMatches) -> ExitCode {
             if !is_valid_ulid_str(stem) {
                 continue;
             }
-            let bucket_label = match b {
-                Bucket::Applied => "in-flight (apply)",
-                Bucket::Rejected => "in-flight (reject)",
-                Bucket::Pending => "in-flight",
-            };
             let oversize = entry
                 .metadata()
                 .ok()
@@ -1199,11 +2382,6 @@ fn list(vault: &Path, m: &ArgMatches) -> ExitCode {
             bucket_rows += 1;
         }
         if hit_scan_cap || hit_row_cap {
-            let bucket_label = match b {
-                Bucket::Applied => "in-flight (apply)",
-                Bucket::Rejected => "in-flight (reject)",
-                Bucket::Pending => "in-flight",
-            };
             let why = if hit_scan_cap {
                 format!("omitted (scan cap {MAX_INFLIGHT_SCAN})")
             } else {
@@ -1298,14 +2476,98 @@ fn list(vault: &Path, m: &ArgMatches) -> ExitCode {
             });
         }
     }
+    if let Ok(read) = std::fs::read_dir(&quarantine_dir) {
+        let mut entries: Vec<_> = read
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.ends_with(".plan.json"))
+            })
+            .take(MAX_INFLIGHT_SCAN + 1)
+            .collect();
+        let read_full = entries.len() > MAX_INFLIGHT_SCAN;
+        if read_full {
+            entries.truncate(MAX_INFLIGHT_SCAN);
+        }
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        let mut bucket_rows = 0_usize;
+        let mut hit_row_cap = false;
+        for entry in entries {
+            if bucket_rows >= MAX_INFLIGHT_ROWS {
+                hit_row_cap = true;
+                break;
+            }
+            let path = entry.path();
+            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            let Some(stem) = name.strip_suffix(".plan.json") else {
+                continue;
+            };
+            if !is_valid_ulid_str(stem) {
+                continue;
+            }
+            let oversize = entry
+                .metadata()
+                .ok()
+                .is_some_and(|md| md.len() > MAX_PLAN_BYTES);
+            if oversize {
+                rows.push(PlanSummary {
+                    id: stem.to_owned(),
+                    bucket: "quarantined",
+                    mode: "?".into(),
+                    mutations: 0,
+                    issued_at: "?".into(),
+                    status: "quarantined (oversize)".into(),
+                });
+                bucket_rows += 1;
+                continue;
+            }
+            match std::fs::read(&path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<PersistedPlan>(&bytes).ok())
+            {
+                Some(p) => rows.push(PlanSummary {
+                    id: stem.to_owned(),
+                    bucket: "quarantined",
+                    mode: format!("{:?}", p.plan.mode),
+                    mutations: p.plan.mutations.len(),
+                    issued_at: p.plan.issued_at.clone(),
+                    status: quarantine_listing_status(&p, stem),
+                }),
+                None => rows.push(PlanSummary {
+                    id: stem.to_owned(),
+                    bucket: "quarantined",
+                    mode: "?".into(),
+                    mutations: 0,
+                    issued_at: "?".into(),
+                    status: "quarantined (unreadable)".into(),
+                }),
+            }
+            bucket_rows += 1;
+        }
+        if read_full || hit_row_cap {
+            let why = if read_full {
+                format!("omitted (scan cap {MAX_INFLIGHT_SCAN})")
+            } else {
+                format!("omitted (row cap {MAX_INFLIGHT_ROWS})")
+            };
+            omitted.push(OmittedNotice {
+                bucket: "quarantined",
+                reason: why,
+            });
+        }
+    }
     rows.sort_by(|a, b| a.id.cmp(&b.id));
+    requeue_markers.sort_by(|a, b| a.id.cmp(&b.id).then(a.marker.cmp(b.marker)));
     if json {
         let env = ListEnvelope {
             plans: &rows,
+            requeue_markers: &requeue_markers,
             omitted: &omitted,
         };
         println!("{}", serde_json::to_string_pretty(&env).unwrap_or_default());
-    } else if rows.is_empty() && omitted.is_empty() {
+    } else if rows.is_empty() && requeue_markers.is_empty() && omitted.is_empty() {
         println!("(no plans)");
     } else {
         for r in &rows {
@@ -1314,9 +2576,86 @@ fn list(vault: &Path, m: &ArgMatches) -> ExitCode {
                 r.id, r.bucket, r.mode, r.mutations, r.issued_at, r.status
             );
         }
+        for marker in &requeue_markers {
+            println!(
+                "{} {:<19} {:<14} path={} status={}",
+                marker.id, "requeue-marker", marker.marker, marker.path, marker.status
+            );
+        }
         for o in &omitted {
             eprintln!("note: {}: {}", o.bucket, o.reason);
         }
     }
     ExitCode::SUCCESS
+}
+
+fn scan_requeue_markers(
+    vault: &Path,
+    markers: &mut Vec<RequeueMarkerSummary>,
+    omitted: &mut Vec<OmittedNotice>,
+) {
+    let pending_dir = bucket_dir(vault, Bucket::Pending);
+    let Ok(read) = std::fs::read_dir(&pending_dir) else {
+        return;
+    };
+    let mut entries = Vec::new();
+    let mut read_full = false;
+    for entry in read.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if parse_requeue_marker_name(name).is_none() {
+            continue;
+        }
+        if entries.len() >= MAX_INFLIGHT_SCAN {
+            read_full = true;
+            break;
+        }
+        entries.push(entry);
+    }
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    let mut marker_rows = 0_usize;
+    let mut hit_row_cap = false;
+    for entry in entries {
+        if marker_rows >= MAX_INFLIGHT_ROWS {
+            hit_row_cap = true;
+            break;
+        }
+        let path = entry.path();
+        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        let Some((stem, marker, status)) = parse_requeue_marker_name(name) else {
+            continue;
+        };
+        if !is_valid_ulid_str(stem) {
+            continue;
+        }
+        markers.push(RequeueMarkerSummary {
+            id: stem.to_owned(),
+            marker,
+            status,
+            path: path.display().to_string(),
+        });
+        marker_rows += 1;
+    }
+    if read_full || hit_row_cap {
+        let why = if read_full {
+            format!("omitted (scan cap {MAX_INFLIGHT_SCAN})")
+        } else {
+            format!("omitted (row cap {MAX_INFLIGHT_ROWS})")
+        };
+        omitted.push(OmittedNotice {
+            bucket: "requeue-marker",
+            reason: why,
+        });
+    }
+}
+
+fn parse_requeue_marker_name(name: &str) -> Option<(&str, &'static str, &'static str)> {
+    name.strip_suffix(".requeue-in-flight")
+        .map(|stem| (stem, "requeue-in-flight", "requeue in flight"))
+        .or_else(|| {
+            name.strip_suffix(".requeue-repair-needed")
+                .map(|stem| (stem, "requeue-repair-needed", "requeue repair needed"))
+        })
 }

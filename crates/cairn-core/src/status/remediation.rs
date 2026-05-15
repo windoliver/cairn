@@ -59,6 +59,11 @@ pub const REMEDIATION: &[(&str, &str)] = &[
          this, the runtime is reporting a wiring fault — file a bug",
     ),
     (
+        "cairn.mcp.v1.extension.coord",
+        "cairn.coord.v1 ships in v0.3 and requires coordination runtime \
+         wiring; upgrade to a build that enables the coord extension",
+    ),
+    (
         "cairn.mcp.v1.replay.sequence",
         "signed-intent replay protection requires a wired challenge dispatch \
          path; not available in this build",

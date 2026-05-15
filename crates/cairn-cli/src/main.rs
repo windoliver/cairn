@@ -133,6 +133,7 @@ fn subcommand_needs_vault_guard(subcommand: Option<(&str, &ArgMatches)>) -> bool
             | "admin"
             | "llm"
             | "identity"
+            | "coord"
             | "flush"
             | "hook"
             | "screen"
@@ -357,6 +358,7 @@ fn main() -> ExitCode {
         Some(("skill", sub)) => run_skill(sub),
         Some(("admin", sub)) => run_admin(sub, explicit_vault.as_deref()),
         Some(("llm", sub)) => run_llm(sub),
+        Some(("coord", sub)) => cairn_cli::coord::run(sub),
         Some(("flush", sub)) => match resolve_vault_or_cwd(explicit_vault.as_deref()) {
             Ok((vault_root, _source)) => verbs::flush::run(sub, Some(vault_root)),
             Err(e) => {

@@ -19,6 +19,9 @@ Options:
       --reason <reason>
           Free-form reason recorded with the rejection
 
+      --from-quarantine
+          Terminally reject an existing quarantined coord plan
+
       --json
           Emit machine-readable JSON
 
