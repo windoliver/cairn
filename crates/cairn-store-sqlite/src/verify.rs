@@ -267,6 +267,12 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     // watermarks for assemble_hot cache invalidation.
     ("table", "hot_source_watermarks"),
     ("table", "hot_prefix_cache"),
+    // 0062_session_tree (issue #133): v0.3 branch/merge metadata substrate.
+    ("table", "session_tree_nodes"),
+    ("index", "session_tree_nodes_parent_idx"),
+    ("table", "session_tree_merges"),
+    ("index", "session_tree_merges_source_idx"),
+    ("index", "session_tree_merges_destination_idx"),
 ];
 
 /// Identity registry objects share `cairn.db` but are owned by

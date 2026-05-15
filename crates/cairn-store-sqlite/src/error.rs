@@ -86,6 +86,10 @@ pub enum StoreError {
     #[error("invalid record: {0}")]
     InvalidRecord(#[from] cairn_core::domain::DomainError),
 
+    /// Session-tree branch or merge metadata failed pure domain validation.
+    #[error("invalid session tree: {0}")]
+    InvalidSessionTree(#[from] cairn_core::domain::SessionTreeError),
+
     /// Record id was looked up but not present (or only present as a
     /// tombstoned row that callers must not see via `get`).
     #[error("record not found: {id}")]

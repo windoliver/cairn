@@ -31,7 +31,10 @@ use crate::search::ScoreExplain;
 /// while `filter` keeps its narrowing-only role. The companion
 /// `MemoryStoreCapabilities::graph_search` flag and the
 /// `search_graph_neighbors` trait method (default impl returns
-/// `CapabilityUnavailable`) ship in the same bump.
+/// `CapabilityUnavailable`) ship in the same bump. Co-evolved within 0.5 in
+/// #133 when optional session-tree methods landed with default-error
+/// implementations; the public `cairn.sessiontree.v1` capability remains
+/// separately gated.
 pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 5, 0);
 
 /// Errors raised by `MemoryStore` implementations. Adapters define their
@@ -220,6 +223,65 @@ pub trait MemoryStore: Send + Sync {
             });
         }
         Ok(out)
+    }
+
+    // ── Session trees (#133) ────────────────────────────────────────────────
+
+    /// Load the session tree rooted at `root`.
+    ///
+    /// Adapters that support the v0.3 session-tree metadata substrate should
+    /// synthesize older flat sessions as one-node trees so v0.1/v0.2 session
+    /// retrieval stays compatible after the schema is upgraded. The default
+    /// implementation returns a capability-unavailable error because the
+    /// public `cairn.sessiontree.v1` extension remains opt-in and P2.
+    async fn get_session_tree(&self, root: &SessionId) -> Result<Option<SessionTree>, StoreError> {
+        let _ = root;
+        Err("capability unavailable: session_tree".into())
+    }
+
+    /// Persist copy-on-write fork metadata between two existing sessions.
+    async fn record_session_fork(
+        &self,
+        from: &SessionId,
+        child: &SessionId,
+        at_turn_id: &str,
+    ) -> Result<(), StoreError> {
+        let _ = (from, child, at_turn_id);
+        Err("capability unavailable: session_tree".into())
+    }
+
+    /// Persist full-copy clone metadata between two existing sessions.
+    async fn record_session_clone(
+        &self,
+        from: &SessionId,
+        child: &SessionId,
+    ) -> Result<(), StoreError> {
+        let _ = (from, child);
+        Err("capability unavailable: session_tree".into())
+    }
+
+    /// Persist metadata for a branch spawned by a tool call.
+    async fn record_session_tool_spawn(
+        &self,
+        from: &SessionId,
+        child: &SessionId,
+        at_turn_id: &str,
+        tool_call_id: &str,
+    ) -> Result<(), StoreError> {
+        let _ = (from, child, at_turn_id, tool_call_id);
+        Err("capability unavailable: session_tree".into())
+    }
+
+    /// Persist an explicit, auditable merge between two sessions.
+    async fn record_session_merge(
+        &self,
+        source: &SessionId,
+        destination: &SessionId,
+        strategy: MergeStrategy,
+        applied_at_turn_id: &str,
+    ) -> Result<SessionMerge, StoreError> {
+        let _ = (source, destination, strategy, applied_at_turn_id);
+        Err("capability unavailable: session_tree".into())
     }
 
     // ── Edges (#46) ───────────────────────────────────────────────────────
@@ -520,7 +582,7 @@ pub trait MemoryStorePlugin: MemoryStore + Sized {
 // ── Verb-method support types (#46, #47) ──────────────────────────────────────
 
 use crate::domain::{
-    BodyHash, RecordId, ScopeTuple, TargetId,
+    BodyHash, MergeStrategy, RecordId, ScopeTuple, SessionId, SessionMerge, SessionTree, TargetId,
     filter::ValidatedFilter,
     taxonomy::{MemoryClass, MemoryKind, MemoryVisibility},
 };
@@ -1215,7 +1277,8 @@ mod tests {
 
     /// `CONTRACT_VERSION` for the `MemoryStore` trait is locked to 0.5.0.
     /// #258 bumped 0.3→0.4 (per-row `schema_version`). #191 bumped 0.4→0.5
-    /// (`auth_scope`, `graph_search` capability + trait method).
+    /// (`auth_scope`, `graph_search` capability + trait method). #133
+    /// co-evolved within 0.5 by adding default-error session-tree methods.
     #[test]
     fn contract_version_locked_to_0_5_0() {
         assert_eq!(CONTRACT_VERSION, ContractVersion::new(0, 5, 0));

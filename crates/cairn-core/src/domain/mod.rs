@@ -43,6 +43,7 @@ pub mod record;
 pub mod scope;
 pub mod sensor_policy;
 pub mod session;
+pub mod session_tree;
 pub mod source_id;
 pub mod source_ref;
 pub mod target_id;
@@ -85,6 +86,10 @@ pub use sensor_policy::{BudgetObservation, LocalSensorName, SensorGateReason};
 pub use session::{
     DEFAULT_IDLE_WINDOW_SECS, LastActiveSession, Session, SessionDecision, SessionId,
     SessionIdentity, SessionSource, resolve_session,
+};
+pub use session_tree::{
+    BranchKind, MergeStrategy, SessionMerge, SessionParent, SessionTree, SessionTreeError,
+    SessionTreeNode,
 };
 pub use source_id::SourceId;
 pub use source_ref::{SourceRef, validate_source_refs};
