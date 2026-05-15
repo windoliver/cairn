@@ -319,7 +319,13 @@ fn main() -> ExitCode {
             Err(code) => code,
         },
         Some(("sensor", sub)) => match resolve_vault_and_config(explicit_vault.as_deref()) {
-            Ok((vault_root, _source, config)) => verbs::sensor::run(sub, &vault_root, config),
+            Ok((vault_root, _source, config)) => {
+                if let Some(code) = enforce_vault_binding("sensor", &vault_root) {
+                    code
+                } else {
+                    verbs::sensor::run(sub, &vault_root, config)
+                }
+            }
             Err(code) => code,
         },
         Some(("handshake", sub)) => run_handshake(sub, explicit_vault.as_deref()),
