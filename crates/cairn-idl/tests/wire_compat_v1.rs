@@ -138,3 +138,68 @@ fn contract_files_matches_index_json_exactly() {
          to match — or revert the schema/index.json edit if it was unintended."
     );
 }
+
+#[test]
+fn schema_dir_inventory_matches_contract_files() {
+    // Defense in depth: walk schema/ recursively and assert every *.json
+    // file on disk is either in CONTRACT_FILES or in the explicit
+    // allowlist below. Catches the case where a schema file is committed
+    // to the tree but never listed in index.json (so codegen, docgen, and
+    // the per-file/fingerprint snapshots all ignore it) — issue #98
+    // round-2 Codex finding.
+    //
+    // The allowlist is empty today. If a non-contract JSON file ever
+    // needs to live under schema/ (e.g., a fixture), add it here with a
+    // one-line reason; otherwise leave it empty so any new file forces
+    // an explicit decision about whether it is part of the wire contract.
+    const NON_CONTRACT_ALLOWLIST: &[&str] = &[];
+
+    fn walk(root: &std::path::Path, prefix: &str, out: &mut Vec<String>) {
+        for entry in fs::read_dir(root)
+            .unwrap_or_else(|err| panic!("read_dir {}: {err}", root.display()))
+        {
+            let entry = entry.unwrap_or_else(|err| panic!("dirent in {}: {err}", root.display()));
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let rel = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}/{name}")
+            };
+            let file_type = entry
+                .file_type()
+                .unwrap_or_else(|err| panic!("file_type {}: {err}", path.display()));
+            if file_type.is_dir() {
+                walk(&path, &rel, out);
+            } else if file_type.is_file()
+                && path
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+            {
+                out.push(rel);
+            }
+        }
+    }
+
+    let mut on_disk: Vec<String> = Vec::new();
+    walk(&schema_root(), "", &mut on_disk);
+    on_disk.sort();
+
+    let mut expected: Vec<String> = CONTRACT_FILES
+        .iter()
+        .chain(NON_CONTRACT_ALLOWLIST.iter())
+        .map(|s| (*s).to_string())
+        .collect();
+    expected.sort();
+
+    assert_eq!(
+        on_disk, expected,
+        "schema/ directory inventory drifted from CONTRACT_FILES. A *.json file \
+         is on disk that is not listed in CONTRACT_FILES (over-snapshot risk: \
+         the file ships as part of the contract but is invisible to codegen \
+         /docgen / wire-compat snapshots), or a CONTRACT_FILES entry has no \
+         backing file on disk (under-snapshot risk). Update CONTRACT_FILES \
+         (and schema/index.json) or add the path to NON_CONTRACT_ALLOWLIST \
+         with a one-line reason."
+    );
+}

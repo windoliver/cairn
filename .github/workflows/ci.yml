@@ -259,10 +259,14 @@ jobs:
         run: cargo run -p cairn-idl --bin cairn-codegen --locked -- --check
       - name: cairn-docgen --check (IDL → docs)
         run: cargo run -p cairn-cli --bin cairn-docgen --locked -- --check
-      - name: wire-compat fixtures (manifest fingerprint + per-file)
+      - name: wire-compat fixtures (manifest fingerprint + per-file + inventory)
         run: cargo-nextest nextest run -p cairn-idl --test wire_compat_v1 --locked
-      - name: capability matrix v0.1
+      - name: capability matrix v0.1 (pure advertise())
         run: cargo-nextest nextest run -p cairn-core --test capability_matrix_v1 --locked
+      - name: per-surface status advertisement (CLI + SDK)
+        run: cargo-nextest nextest run -p cairn-cli --test status_snapshot_insta --locked
+      - name: per-surface status advertisement (MCP initialize ↔ status parity)
+        run: cargo-nextest nextest run -p cairn-mcp --test init_status_parity --locked
 
   bench-full:
     # Manual-trigger BrainBench scorecard run against the staged
