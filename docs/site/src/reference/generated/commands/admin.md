@@ -31,4 +31,3 @@ Options:
 - [`cairn admin reindex`](admin-reindex.md) - Re-embed records into the ANN index
 - [`cairn admin snapshot`](admin-snapshot.md) - Prepare a vault backup snapshot
 - [`cairn admin restore`](admin-restore.md) - Prepare a restore operation from a backup
-- [`cairn admin workflow`](admin-workflow.md) - Workflow scheduler diagnostics (issue #92 E2E)
