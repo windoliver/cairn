@@ -232,10 +232,10 @@ const BUCKET_SURFACE_SENSORS_DEFAULT: &[&str] = &[
 ///      in `crates/cairn-core/src/status/wiring.rs`. Flip the constant
 ///      + add to `expected_full_p0()` in the same PR.
 ///   2. Capabilities whose `advertise()` row exists but requires a
-///      later `contract_phase`, e.g. `forget.session` (V0_2),
-///      `forget.scope` (V0_3), `summarize.narrative` (V0_2),
-///      `extension.coord` (V0_3 + coord_extension_ready). When the
-///      runtime moves to that phase, the entry surfaces.
+///      later `contract_phase`, e.g. `forget.session` (`V0_2`),
+///      `forget.scope` (`V0_3`), `summarize.narrative` (`V0_2`),
+///      `extension.coord` (`V0_3` + `coord_extension_ready`). When
+///      the runtime moves to that phase, the entry surfaces.
 ///   3. Capabilities reserved in the schema with no `advertise()` row
 ///      and no production producer today — extension namespaces
 ///      (`extension.admin`/`aggregate`/`federation`/`sessiontree`) and
@@ -281,6 +281,7 @@ const BUCKET_DEFERRED_WIRING: &[&str] = &[
 /// does emit under a non-default cfg/feature/OS:
 ///   - `screen.screenpipe` — gated on `cfg(feature = "screenpipe-runtime")`.
 ///   - `screen.ocr.winrt`  — gated on `cfg(target_os = "windows")`.
+///
 /// Both have executable producers; they are simply not part of the
 /// linux/macOS contract-drift CI environment. If the entry stops
 /// being emitted by any producer, move it to `BUCKET_DEFERRED_WIRING`.
