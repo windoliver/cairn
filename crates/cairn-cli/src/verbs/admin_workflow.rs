@@ -93,6 +93,27 @@ fn open_job_store(vault_root: &Path) -> Result<Arc<dyn JobStore>, String> {
 /// concurrent operation.
 const SYNTHETIC_KIND_PREFIX: &str = "test.e2e.";
 
+/// Reject any caller-supplied `--kind` whose value does NOT start with
+/// [`SYNTHETIC_KIND_PREFIX`]. The precheck only catches *pre-existing*
+/// non-synthetic rows; without this guard a caller could enqueue brand
+/// new rows tagged with a production kind (e.g.
+/// `--kind dream.light`). Those rows would either be dead-lettered as
+/// `Validation` by the synthetic-only handler registry (run-failing)
+/// or — worse — completed with `state = 'done'`, satisfying the
+/// `workflow_health` lint's `last_success_ms` check and masking real
+/// production failures (run-succeeding). Apply this guard FIRST,
+/// before opening the store or doing any other work.
+fn validate_synthetic_kind(kind: &str) -> Result<(), String> {
+    if !kind.starts_with(SYNTHETIC_KIND_PREFIX) {
+        return Err(format!(
+            "refused — `--kind {kind}` is not a synthetic kind. \
+             Diagnostic kinds must start with `{SYNTHETIC_KIND_PREFIX}` \
+             so production rows cannot be created or interfered with."
+        ));
+    }
+    Ok(())
+}
+
 /// Refuse to run when production workflow rows are in flight, so the
 /// synthetic scheduler can never accidentally lease and dead-letter
 /// them. Returns `Ok(())` when the queue contains no non-synthetic
@@ -180,6 +201,15 @@ pub fn run_failing(sub: &ArgMatches, vault_root: &Path) -> ExitCode {
             return ExitCode::from(69);
         }
     };
+    // Reject non-synthetic kinds BEFORE opening the store, the runtime,
+    // or anything else — finding 3.2 (round-3). Otherwise an operator
+    // could enqueue a production-kind row that the synthetic registry
+    // would dead-letter as `Validation` (run-failing) or, worse,
+    // complete as `done` and mask a real failure (run-succeeding).
+    if let Err(e) = validate_synthetic_kind(&kind_str) {
+        eprintln!("cairn admin workflow run-failing: {e}");
+        return ExitCode::from(69);
+    }
     rt.block_on(async move {
         if let Err(e) = ensure_no_live_production_rows(vault_root) {
             eprintln!("cairn admin workflow run-failing: {e}");
@@ -328,6 +358,11 @@ pub fn simulate_crash(sub: &ArgMatches, vault_root: &Path) -> ExitCode {
             return ExitCode::from(69);
         }
     };
+    // Reject non-synthetic kinds before any side effects — finding 3.2.
+    if let Err(e) = validate_synthetic_kind(&kind_str) {
+        eprintln!("cairn admin workflow simulate-crash: {e}");
+        return ExitCode::from(69);
+    }
     rt.block_on(async move {
         if let Err(e) = ensure_no_live_production_rows(vault_root) {
             eprintln!("cairn admin workflow simulate-crash: {e}");
@@ -518,6 +553,11 @@ pub fn run_succeeding(sub: &ArgMatches, vault_root: &Path) -> ExitCode {
             return ExitCode::from(69);
         }
     };
+    // Reject non-synthetic kinds before any side effects — finding 3.2.
+    if let Err(e) = validate_synthetic_kind(&kind_str) {
+        eprintln!("cairn admin workflow run-succeeding: {e}");
+        return ExitCode::from(69);
+    }
     rt.block_on(async move {
         if let Err(e) = ensure_no_live_production_rows(vault_root) {
             eprintln!("cairn admin workflow run-succeeding: {e}");
