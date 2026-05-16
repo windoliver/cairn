@@ -1006,7 +1006,12 @@ fn retrieve_session_rehydrate_adds_body_free_trace() {
         "stderr={}",
         String::from_utf8_lossy(&retrieve.stderr)
     );
-    let value: serde_json::Value = serde_json::from_slice(&retrieve.stdout).expect("json");
+    let output = String::from_utf8(retrieve.stdout).expect("utf-8 stdout");
+    assert!(
+        !output.contains("alice@example.com"),
+        "rehydrate output must not leak raw email text: {output}"
+    );
+    let value: serde_json::Value = serde_json::from_str(&output).expect("json");
     let trace = value["policy_trace"].as_array().expect("policy_trace");
     let rehydrate = trace
         .iter()

@@ -306,7 +306,7 @@ async fn retrieve_session(
         rehydrate,
         read_budget_chars,
     } = request;
-    let read_started = Instant::now();
+    let rehydrate_started = rehydrate.then(Instant::now);
     let mut args = scoped_list_args(auth);
     if let Some(scope) = &mut args.scope {
         scope.session_id = Some(session_id.clone());
@@ -338,9 +338,9 @@ async fn retrieve_session(
         include_reasoning,
         include_tool_calls,
     );
-    if rehydrate {
+    if let Some(started) = rehydrate_started {
         budget_report.rehydrate = Some(RehydrateReport {
-            elapsed_ms: read_started.elapsed().as_millis(),
+            elapsed_ms: started.elapsed().as_millis(),
             source_tier: "hot_or_warm",
         });
     }
