@@ -1271,9 +1271,20 @@ pub async fn lint_handler(
     let hot_body_loader = |step| super::assemble_hot::lint_step_body_sync(vault_root, config, step);
     // Issue #92, spec §4.8/§4.12: open a read-only handle to the vault
     // DB so the `workflow_health` lint check can surface dead-letter /
-    // stuck / stale / overdue findings. Missing or unreadable DB
-    // degrades to `None`, matching the consent-journal degraded path.
-    let workflow_jobs_reader = open_workflow_jobs_reader(vault_root);
+    // stuck / stale / overdue findings. The outcome distinguishes
+    // "DB simply absent" (silent no-op, mirrors fresh-init vault) from
+    // "DB present but reader could not be built" (round-7 finding 7.1
+    // — emit a DeferredCheck so the operator is not lied to about
+    // workflow health). A successful reader is passed straight through.
+    let workflow_jobs_outcome = open_workflow_jobs_reader(vault_root);
+    let workflow_jobs_unavailable_reason = match &workflow_jobs_outcome {
+        WorkflowJobsReaderOutcome::Ready(_) | WorkflowJobsReaderOutcome::Absent => None,
+        WorkflowJobsReaderOutcome::Unavailable(reason) => Some(reason.clone()),
+    };
+    let workflow_jobs_reader = match &workflow_jobs_outcome {
+        WorkflowJobsReaderOutcome::Ready(r) => Some(r),
+        WorkflowJobsReaderOutcome::Absent | WorkflowJobsReaderOutcome::Unavailable(_) => None,
+    };
     let now_ms = chrono::Utc::now().timestamp_millis();
     let inputs = LintInputs {
         records: &lint_records,
@@ -1289,7 +1300,6 @@ pub async fn lint_handler(
         source_resolver: &source_resolver,
         consent_journal: &consent_journal,
         workflow_jobs: workflow_jobs_reader
-            .as_ref()
             .map(|r| r as &dyn cairn_core::contract::workflow_jobs::WorkflowJobsReader),
         now_ms,
     };
@@ -1301,6 +1311,15 @@ pub async fn lint_handler(
 
     if consent_journal_unavailable && !lint_records.is_empty() {
         push_consent_journal_unavailable(&mut data);
+    }
+
+    // Issue #92 round-7 finding 7.1: when the workflow_jobs reader
+    // could not be constructed (DB present but unreadable, schema
+    // probe failed, index probe failed), append a `DeferredCheck`
+    // Info finding so the operator does not see "no workflow_health
+    // findings" and assume the queue is fine.
+    if let Some(reason) = workflow_jobs_unavailable_reason {
+        push_workflow_jobs_reader_unavailable(&mut data, &reason);
     }
 
     // Build affected-record map per failed identity. Per-record ids
@@ -1577,37 +1596,105 @@ fn open_consent_journal(vault_root: &Path) -> anyhow::Result<(SqliteConsentJourn
     }
 }
 
+/// Result of attempting to open the `workflow_jobs` reader for the
+/// lint dispatch path (issue #92, spec §4.8/§4.10/§4.12; round-7
+/// finding 7.1). The three variants encode the three operator-visible
+/// outcomes: the reader is wired and queries can run, the vault DB
+/// simply does not exist (silent — matches the fresh-init case), or
+/// the DB exists but the reader could not be built and lint MUST
+/// surface a `DeferredCheck` so the operator does not mistake a
+/// silent failure for a clean health check.
+enum WorkflowJobsReaderOutcome {
+    /// Reader is constructed; `workflow_health` runs against it.
+    Ready(SqliteWorkflowJobsReader),
+    /// Vault DB is absent. Normal for a fresh-init vault that has
+    /// never run a workflow — no finding is emitted because the
+    /// operator already knows the DB does not exist.
+    Absent,
+    /// DB is present but the reader could not be constructed. The
+    /// embedded string is the operator-facing reason — caller emits
+    /// a `DeferredCheck` Info finding so the silent-failure path is
+    /// no longer possible.
+    Unavailable(String),
+}
+
 /// Open a read-only `workflow_jobs` reader for the lint dispatch path
-/// (issue #92, spec §4.8/§4.10/§4.12). Returns `None` when the vault DB
-/// is missing, the connection cannot be opened, or the reader fails
-/// its construction-time column probe (issue #92 round-6 finding 6.2 —
-/// a vault stuck at migration 0020 has no `dead_letter_at_ms` /
-/// `completed_at_ms` / `failure_class` columns, so the reader's
-/// queries would silently mask the gap with `unwrap_or_default()`).
-/// The `workflow_health` check stays on its no-op path, matching the
-/// consent-journal degraded behaviour. Errors are not propagated to the
-/// caller because workflow health is advisory; a missing reader means
-/// "lint cannot see workflow jobs", not "lint must abort". Probe
-/// failures are logged at `warn` so an operator can see why the
-/// check went quiet.
-fn open_workflow_jobs_reader(vault_root: &Path) -> Option<SqliteWorkflowJobsReader> {
+/// (issue #92, spec §4.8/§4.10/§4.12).
+///
+/// Three outcomes mapped onto [`WorkflowJobsReaderOutcome`]:
+/// * `Ready` — reader constructed.
+/// * `Absent` — vault DB file does not exist. Silent no-op; matches
+///   the fresh-init case where the operator knows there is no DB.
+/// * `Unavailable(reason)` — DB exists but the reader could not be
+///   built. The reason is surfaced through a `DeferredCheck` finding
+///   (issue #92 round-7 finding 7.1) so a vault with a locked DB,
+///   schema stuck at 0020 (round-6 finding 6.2 — missing
+///   `dead_letter_at_ms` etc.), or missing 0062 indexes (round-7
+///   finding 7.3) cannot silently look healthy to lint.
+fn open_workflow_jobs_reader(vault_root: &Path) -> WorkflowJobsReaderOutcome {
     let db_path = vault_root.join(".cairn/cairn.db");
     if !db_path.is_file() {
-        return None;
+        return WorkflowJobsReaderOutcome::Absent;
     }
-    let conn = Connection::open_with_flags(
+    let conn = match Connection::open_with_flags(
         &db_path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .ok()?;
-    match SqliteWorkflowJobsReader::new(conn) {
-        Ok(reader) => Some(reader),
+    ) {
+        Ok(c) => c,
         Err(e) => {
             tracing::warn!(
                 error = %e,
-                "workflow_jobs reader construction failed; workflow_health lint check will no-op"
+                "workflow_jobs reader connection-open failed; workflow_health lint check will be deferred"
             );
-            None
+            return WorkflowJobsReaderOutcome::Unavailable(format!("open .cairn/cairn.db: {e}"));
+        }
+    };
+    match SqliteWorkflowJobsReader::new(conn) {
+        Ok(reader) => WorkflowJobsReaderOutcome::Ready(reader),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "workflow_jobs reader construction failed; workflow_health lint check will be deferred"
+            );
+            WorkflowJobsReaderOutcome::Unavailable(e.to_string())
+        }
+    }
+}
+
+/// Issue #92 round-7 finding 7.1: append a `DeferredCheck` Info
+/// finding describing why the `workflow_jobs` reader could not be
+/// constructed. Mirrors `push_consent_journal_unavailable` so the
+/// summary aggregates (`total`, `by_severity.info`,
+/// `by_kind["deferred_check"]`) stay consistent.
+fn push_workflow_jobs_reader_unavailable(
+    data: &mut cairn_core::generated::verbs::lint::LintData,
+    reason: &str,
+) {
+    let f = cairn_core::generated::verbs::lint::Finding {
+        entities: None,
+        kind: cairn_core::generated::verbs::lint::Kind::DeferredCheck,
+        message: format!(
+            "workflow_health: workflow_jobs reader unavailable ({reason}); \
+             dead-letter / stuck / overdue findings skipped this run"
+        ),
+        severity: cairn_core::generated::verbs::lint::Severity::Info,
+        suggested_fix: Some(
+            "ensure .cairn/cairn.db is readable and migrations 0020 + 0062 \
+             (columns and indexes) are applied; re-run `cairn lint`"
+                .to_owned(),
+        ),
+        target: None,
+        tracking_issue: None,
+    };
+    data.findings.push(f);
+    data.summary.total += 1;
+    data.summary.by_severity.info += 1;
+    if let serde_json::Value::Object(map) = &mut data.summary.by_kind {
+        let entry = map
+            .entry("deferred_check".to_owned())
+            .or_insert(serde_json::Value::from(0_u64));
+        if let Some(n) = entry.as_u64() {
+            *entry = serde_json::Value::from(n.saturating_add(1));
         }
     }
 }
