@@ -6,8 +6,8 @@ update this file in the same PR — branch protection references job names
 verbatim.
 
 > **Scope.** This is the v0.1 (P0) automation surface only. Specific gates
-> (wire compatibility / capability matrix, package smoke tests) are tracked
-> under separate issues — see [§ Deferred gates](#deferred-gates) below.
+> (package smoke tests) are tracked under separate issues — see
+> [§ Deferred gates](#deferred-gates) below.
 > v1.0 release-channel hardening lives under issue #141.
 
 ## Workflows
@@ -189,8 +189,6 @@ plus the boundary script and codegen `--check` invocation listed under
 
 Tracked under their own issues; named here so the gap is explicit:
 
-- **Wire compatibility / schema drift / capability matrix** — issue #98. Add
-  snapshot tests for MCP frames + `status` response.
 - **`cargo install` and Homebrew formula smoke** — issue #100. Hook into
   `release-dry-run.yml` once the formula exists.
 - **MCP/CLI/SDK parity** — depends on codegen #35 + verb implementations.
@@ -222,6 +220,7 @@ Configure under **Settings → Rules → Rulesets → Branch ruleset → main**:
    build / macos-latest
    invariant / cairn-core dep-freeness
    codegen / no drift
+   contract-drift / wire-compat + capability matrix (§8.0.a, §15, #98)
    plugins / cairn plugins verify
    docs / generated reference
    docs / mdbook build
