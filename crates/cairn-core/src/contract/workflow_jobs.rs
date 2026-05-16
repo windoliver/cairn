@@ -29,6 +29,13 @@ pub struct DeadLetterRow {
 ///
 /// Implementations are `Send + Sync` so a single shared reader can be
 /// passed to the synchronous lint pipeline from any caller.
+///
+/// The trait methods stay infallible so call sites in `workflow_health`
+/// remain cheap. Adapters that detect a runtime failure (locked DB,
+/// poisoned mutex, post-construction schema drift) MUST record the
+/// reason internally and surface it through [`Self::take_last_error`]
+/// so lint can emit a `DeferredCheck` Info finding instead of silently
+/// reporting "no workflow issues" — issue #92 round-7 finding 7.2.
 pub trait WorkflowJobsReader: Send + Sync {
     /// Count of `state = 'failed'` rows whose `dead_letter_at_ms IS NOT NULL`.
     /// `Some(kind)` filters; `None` counts across all kinds.
@@ -49,4 +56,18 @@ pub trait WorkflowJobsReader: Send + Sync {
 
     /// Up to `limit` dead-letter rows ordered by `dead_letter_at_ms` desc.
     fn dead_letter_rows(&self, limit: usize) -> Vec<DeadLetterRow>;
+
+    /// Drain the most recent runtime failure observed by any of the
+    /// other trait methods. `None` means every method that ran since
+    /// the last drain succeeded (or returned a legitimate empty
+    /// result). `Some(reason)` means at least one method swallowed a
+    /// backend error — lint MUST surface this as a `DeferredCheck`
+    /// Info finding so operators do not mistake "queries failed" for
+    /// "everything is healthy".
+    ///
+    /// Default implementation returns `None` for adapters that cannot
+    /// fail (e.g. in-memory test fakes). Real adapters override.
+    fn take_last_error(&self) -> Option<String> {
+        None
+    }
 }

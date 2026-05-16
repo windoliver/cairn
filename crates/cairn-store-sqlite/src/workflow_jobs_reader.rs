@@ -47,8 +47,16 @@ pub enum SqliteWorkflowJobsReaderError {
 }
 
 /// `WorkflowJobsReader` backed by a single `rusqlite::Connection`.
+///
+/// `last_error` captures the most recent backend failure observed by
+/// any trait method since the last `take_last_error` call. Methods
+/// continue to return their "empty" sentinel (`0` / `None` / `Vec::new()`)
+/// so call sites in `workflow_health` stay simple, but lint can read
+/// this slot at the end of a run and surface a `DeferredCheck` finding
+/// when a query was actually broken — issue #92 round-7 finding 7.2.
 pub struct SqliteWorkflowJobsReader {
     conn: Mutex<Connection>,
+    last_error: Mutex<Option<String>>,
 }
 
 impl SqliteWorkflowJobsReader {
@@ -87,7 +95,23 @@ impl SqliteWorkflowJobsReader {
         }
         Ok(Self {
             conn: Mutex::new(conn),
+            last_error: Mutex::new(None),
         })
+    }
+
+    /// Record a runtime failure that one of the trait methods chose
+    /// to swallow. Only the *first* failure since the last drain is
+    /// kept — subsequent ones are dropped to keep the operator-facing
+    /// message focused on the root cause. Cheap noop when the mutex
+    /// is poisoned (the reader is already in a degraded state and we
+    /// have no better recovery; the poisoned-conn lock attempt will
+    /// itself produce the next error to record).
+    fn record_error(&self, reason: impl Into<String>) {
+        if let Ok(mut slot) = self.last_error.lock()
+            && slot.is_none()
+        {
+            *slot = Some(reason.into());
+        }
     }
 }
 
@@ -110,93 +134,137 @@ fn read_column_set(conn: &Connection) -> Result<Vec<String>, SqliteWorkflowJobsR
 
 impl WorkflowJobsReader for SqliteWorkflowJobsReader {
     fn dead_letter_count(&self, kind: Option<&JobKind>) -> usize {
-        let Ok(conn) = self.conn.lock() else {
-            return 0;
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                self.record_error(format!("dead_letter_count: connection mutex poisoned: {e}"));
+                return 0;
+            }
         };
-        let count: i64 = match kind {
-            Some(k) => conn
-                .query_row(
-                    "SELECT count(*) FROM workflow_jobs \
-                     WHERE dead_letter_at_ms IS NOT NULL AND kind = ?1",
-                    rusqlite::params![k.as_str()],
-                    |r| r.get(0),
-                )
-                .unwrap_or(0),
-            None => conn
-                .query_row(
-                    "SELECT count(*) FROM workflow_jobs WHERE dead_letter_at_ms IS NOT NULL",
-                    [],
-                    |r| r.get(0),
-                )
-                .unwrap_or(0),
+        let result: rusqlite::Result<i64> = match kind {
+            Some(k) => conn.query_row(
+                "SELECT count(*) FROM workflow_jobs \
+                 WHERE dead_letter_at_ms IS NOT NULL AND kind = ?1",
+                rusqlite::params![k.as_str()],
+                |r| r.get(0),
+            ),
+            None => conn.query_row(
+                "SELECT count(*) FROM workflow_jobs WHERE dead_letter_at_ms IS NOT NULL",
+                [],
+                |r| r.get(0),
+            ),
         };
-        usize::try_from(count).unwrap_or(0)
+        match result {
+            Ok(n) => usize::try_from(n).unwrap_or(0),
+            Err(e) => {
+                self.record_error(format!("dead_letter_count: {e}"));
+                0
+            }
+        }
     }
 
     fn oldest_queued_age_ms(&self, kind: Option<&JobKind>, now_ms: i64) -> Option<i64> {
-        let conn = self.conn.lock().ok()?;
-        let oldest: Option<i64> = match kind {
-            Some(k) => conn
-                .query_row(
-                    "SELECT min(next_run_at) FROM workflow_jobs \
-                     WHERE state = 'queued' AND kind = ?1",
-                    rusqlite::params![k.as_str()],
-                    |r| r.get::<_, Option<i64>>(0),
-                )
-                .ok()
-                .flatten(),
-            None => conn
-                .query_row(
-                    "SELECT min(next_run_at) FROM workflow_jobs WHERE state = 'queued'",
-                    [],
-                    |r| r.get::<_, Option<i64>>(0),
-                )
-                .ok()
-                .flatten(),
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                self.record_error(format!(
+                    "oldest_queued_age_ms: connection mutex poisoned: {e}"
+                ));
+                return None;
+            }
         };
-        oldest.map(|t| now_ms - t)
+        let result: rusqlite::Result<Option<i64>> = match kind {
+            Some(k) => conn.query_row(
+                "SELECT min(next_run_at) FROM workflow_jobs \
+                 WHERE state = 'queued' AND kind = ?1",
+                rusqlite::params![k.as_str()],
+                |r| r.get::<_, Option<i64>>(0),
+            ),
+            None => conn.query_row(
+                "SELECT min(next_run_at) FROM workflow_jobs WHERE state = 'queued'",
+                [],
+                |r| r.get::<_, Option<i64>>(0),
+            ),
+        };
+        match result {
+            Ok(oldest) => oldest.map(|t| now_ms - t),
+            Err(e) => {
+                self.record_error(format!("oldest_queued_age_ms: {e}"));
+                None
+            }
+        }
     }
 
     fn longest_held_lease_ms(&self, now_ms: i64) -> Option<i64> {
-        let conn = self.conn.lock().ok()?;
-        let oldest: Option<i64> = conn
-            .query_row(
-                "SELECT min(lease_expires_at) FROM workflow_jobs WHERE state = 'leased'",
-                [],
-                |r| r.get::<_, Option<i64>>(0),
-            )
-            .ok()
-            .flatten();
-        oldest.map(|t| now_ms - t)
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                self.record_error(format!(
+                    "longest_held_lease_ms: connection mutex poisoned: {e}"
+                ));
+                return None;
+            }
+        };
+        let result: rusqlite::Result<Option<i64>> = conn.query_row(
+            "SELECT min(lease_expires_at) FROM workflow_jobs WHERE state = 'leased'",
+            [],
+            |r| r.get::<_, Option<i64>>(0),
+        );
+        match result {
+            Ok(oldest) => oldest.map(|t| now_ms - t),
+            Err(e) => {
+                self.record_error(format!("longest_held_lease_ms: {e}"));
+                None
+            }
+        }
     }
 
     fn last_success_ms(&self, kind: &JobKind) -> Option<i64> {
-        let conn = self.conn.lock().ok()?;
-        conn.query_row(
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                self.record_error(format!("last_success_ms: connection mutex poisoned: {e}"));
+                return None;
+            }
+        };
+        let result: rusqlite::Result<Option<i64>> = conn.query_row(
             "SELECT max(completed_at_ms) FROM workflow_jobs \
              WHERE kind = ?1 AND state = 'done'",
             rusqlite::params![kind.as_str()],
             |r| r.get::<_, Option<i64>>(0),
-        )
-        .ok()
-        .flatten()
+        );
+        match result {
+            Ok(t) => t,
+            Err(e) => {
+                self.record_error(format!("last_success_ms({kind}): {e}"));
+                None
+            }
+        }
     }
 
     fn dead_letter_rows(&self, limit: usize) -> Vec<DeadLetterRow> {
-        let Ok(conn) = self.conn.lock() else {
-            return Vec::new();
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                self.record_error(format!("dead_letter_rows: connection mutex poisoned: {e}"));
+                return Vec::new();
+            }
         };
-        let Ok(mut stmt) = conn.prepare(
+        let mut stmt = match conn.prepare(
             "SELECT job_id, kind, attempts, failure_class, last_error, dead_letter_at_ms
                FROM workflow_jobs
               WHERE dead_letter_at_ms IS NOT NULL
               ORDER BY dead_letter_at_ms DESC
               LIMIT ?1",
-        ) else {
-            return Vec::new();
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                self.record_error(format!("dead_letter_rows: prepare: {e}"));
+                return Vec::new();
+            }
         };
         let limit_bind = i64::try_from(limit).unwrap_or(i64::MAX);
-        let Ok(rows) = stmt.query_map(rusqlite::params![limit_bind], |r| {
+        let rows = match stmt.query_map(rusqlite::params![limit_bind], |r| {
             let job_id: String = r.get(0)?;
             let kind: String = r.get(1)?;
             let attempts: i64 = r.get(2)?;
@@ -215,9 +283,30 @@ impl WorkflowJobsReader for SqliteWorkflowJobsReader {
                 last_error: last_error.unwrap_or_default(),
                 dead_letter_at_ms: dl_at,
             })
-        }) else {
-            return Vec::new();
+        }) {
+            Ok(r) => r,
+            Err(e) => {
+                self.record_error(format!("dead_letter_rows: query_map: {e}"));
+                return Vec::new();
+            }
         };
-        rows.flatten().collect()
+        let mut out: Vec<DeadLetterRow> = Vec::new();
+        for row in rows {
+            match row {
+                Ok(r) => out.push(r),
+                Err(e) => {
+                    self.record_error(format!("dead_letter_rows: row decode: {e}"));
+                    // Continue collecting any rows that still decode —
+                    // an isolated decode error shouldn't blank the
+                    // whole list. The `take_last_error` slot already
+                    // carries the signal.
+                }
+            }
+        }
+        out
+    }
+
+    fn take_last_error(&self) -> Option<String> {
+        self.last_error.lock().ok().and_then(|mut slot| slot.take())
     }
 }

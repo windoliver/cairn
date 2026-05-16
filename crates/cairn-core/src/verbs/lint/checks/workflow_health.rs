@@ -69,6 +69,18 @@ pub fn run(inputs: &LintInputs<'_>) -> Vec<Finding> {
         }
     }
 
+    // Issue #92 round-7 finding 7.2: drain the reader's last_error
+    // slot AFTER every query has run. If any of the methods above
+    // swallowed a backend failure (locked DB, poisoned mutex,
+    // post-construction schema drift), surface it as a `DeferredCheck`
+    // Info finding so an operator does not mistake "queries failed"
+    // for "no workflow issues". One finding per run, regardless of
+    // how many methods failed — the first failure usually identifies
+    // the root cause and noisy duplicates hurt more than they help.
+    if let Some(reason) = jobs.take_last_error() {
+        out.push(reader_degraded_finding(&reason));
+    }
+
     out
 }
 
@@ -131,6 +143,29 @@ fn overdue_finding(kind: &str, age_ms: i64) -> Finding {
         Severity::Warning,
         format!("no {kind} success in {age_ms}ms — schedule may be stalled"),
     )
+}
+
+/// Issue #92 round-7 finding 7.2: build the `DeferredCheck` finding
+/// surfaced when the reader reports that one of its queries failed
+/// at runtime. Severity is `Info` (matching the consent-journal /
+/// index-stats deferred-check paths) — the check ran but its data
+/// is unreliable, not a hard error, and the operator's fix lives at
+/// the DB layer rather than in the records being linted.
+fn reader_degraded_finding(reason: &str) -> Finding {
+    let mut f = finding(
+        Kind::DeferredCheck,
+        Severity::Info,
+        format!(
+            "workflow_health: reader degraded ({reason}); \
+             findings for this run may underreport dead-letter / stuck / overdue jobs"
+        ),
+    );
+    f.suggested_fix = Some(
+        "inspect .cairn/cairn.db for lock contention, schema drift, or corruption; \
+         re-run migrations and retry lint"
+            .to_owned(),
+    );
+    f
 }
 
 #[cfg(test)]
@@ -357,6 +392,73 @@ mod tests {
                 .any(|f| matches!(f.severity, Severity::Warning)
                     && matches!(f.kind, Kind::WorkflowDeadLetter)),
             "no overflow Warning when total <= cap: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn reader_last_error_emits_deferred_check_info() {
+        // Issue #92 round-7 finding 7.2: when the reader records a
+        // runtime failure (e.g. locked DB, schema drift detected
+        // post-construction), `workflow_health::run` must surface a
+        // `DeferredCheck` Info finding instead of leaving the operator
+        // with a clean output that hides the failure.
+        let reader = MockWorkflowJobsReader::default()
+            .with_last_error("dead_letter_count: database is locked");
+        let inputs = empty_lint_inputs_with_reader(&reader, 1_000_000);
+        let findings = super::run(&inputs);
+        let degraded: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| {
+                matches!(f.kind, Kind::DeferredCheck) && matches!(f.severity, Severity::Info)
+            })
+            .collect();
+        assert_eq!(
+            degraded.len(),
+            1,
+            "exactly one reader-degraded DeferredCheck Info finding: {findings:?}"
+        );
+        assert!(
+            degraded[0].message.contains("workflow_health"),
+            "message must scope the deferral to workflow_health: {}",
+            degraded[0].message
+        );
+        assert!(
+            degraded[0].message.contains("database is locked"),
+            "message must surface the underlying reason: {}",
+            degraded[0].message
+        );
+        assert!(
+            degraded[0].suggested_fix.is_some(),
+            "deferred check must carry a remediation hint"
+        );
+    }
+
+    #[test]
+    fn reader_last_error_drains_after_one_finding() {
+        // Drain semantics: a second `run` against a reader whose
+        // `take_last_error` has already returned `Some` (because the
+        // previous run drained it) must NOT emit a second deferred
+        // check. Without this, repeated lint invocations against a
+        // briefly-degraded reader would emit findings forever.
+        let reader = MockWorkflowJobsReader::default().with_last_error("transient lock");
+        let inputs = empty_lint_inputs_with_reader(&reader, 1_000_000);
+        let first = super::run(&inputs);
+        let second = super::run(&inputs);
+        assert_eq!(
+            first
+                .iter()
+                .filter(|f| matches!(f.kind, Kind::DeferredCheck))
+                .count(),
+            1,
+            "first run drains the error"
+        );
+        assert_eq!(
+            second
+                .iter()
+                .filter(|f| matches!(f.kind, Kind::DeferredCheck))
+                .count(),
+            0,
+            "second run sees no error (slot was drained)"
         );
     }
 

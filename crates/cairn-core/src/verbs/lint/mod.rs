@@ -265,6 +265,10 @@ pub(crate) struct MockWorkflowJobsReader {
     pub oldest_queued_age: Option<i64>,
     pub longest_lease: Option<i64>,
     pub last_success: std::collections::HashMap<String, i64>,
+    /// Issue #92 round-7 finding 7.2: pre-staged reader-degraded
+    /// reason. When set, the next `take_last_error` call returns
+    /// `Some(reason)` and then clears the slot (drain semantics).
+    pub last_error: std::sync::Mutex<Option<String>>,
 }
 
 #[cfg(test)]
@@ -281,6 +285,11 @@ impl MockWorkflowJobsReader {
 
     pub fn with_last_success(mut self, kind: &str, ms: i64) -> Self {
         self.last_success.insert(kind.to_string(), ms);
+        self
+    }
+
+    pub fn with_last_error(self, reason: &str) -> Self {
+        *self.last_error.lock().expect("mock last_error lock") = Some(reason.to_string());
         self
     }
 }
@@ -305,6 +314,9 @@ impl crate::contract::workflow_jobs::WorkflowJobsReader for MockWorkflowJobsRead
     }
     fn dead_letter_rows(&self, limit: usize) -> Vec<crate::contract::workflow_jobs::DeadLetterRow> {
         self.dead_letter.iter().take(limit).cloned().collect()
+    }
+    fn take_last_error(&self) -> Option<String> {
+        self.last_error.lock().ok().and_then(|mut slot| slot.take())
     }
 }
 

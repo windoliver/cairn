@@ -276,6 +276,74 @@ fn dead_letter_rows_orders_desc_and_respects_limit() {
 }
 
 #[test]
+fn take_last_error_captures_runtime_query_failure() {
+    // Issue #92 round-7 finding 7.2: when a query method's SQL fails
+    // at runtime (e.g. the table was dropped post-construction, the
+    // DB is locked, or a column went missing under us), the reader
+    // must NOT silently return `0` / `None` / empty `Vec` indistinguishable
+    // from a healthy quiet vault. Instead the failure is captured in
+    // an internal slot and surfaced through `take_last_error`, which
+    // `workflow_health` drains and reports as a `DeferredCheck` Info
+    // finding. This test exercises the round-trip end-to-end against
+    // a real SQLite connection.
+    let conn = fresh_db();
+    let reader = SqliteWorkflowJobsReader::new(conn).expect("reader needs migration 0062");
+    // Sanity check: a fresh DB has no errors to report.
+    assert!(
+        reader.take_last_error().is_none(),
+        "fresh reader must have no last_error"
+    );
+
+    // Now break the table out from under the reader. Open a second
+    // connection (the reader's connection is held in a Mutex but
+    // SQLite shares the on-disk database; for in-memory DBs the
+    // simplest path is to use ATTACH-like trickery, so instead we
+    // explicitly take advantage of the fact that `open_in_memory_sync`
+    // builds the schema and we can replicate that by reaching through
+    // the public API: drop the table via a fresh connection won't see
+    // the same memory DB. Use a file-backed DB instead so both
+    // handles see the same data.
+    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    let path = tmp.path().to_path_buf();
+    // Drop the file so `open_sync` can lay down a fresh DB at this path.
+    drop(tmp);
+    let _staged = cairn_store_sqlite::open_sync(&path).expect("stage file-backed DB");
+    // Build the reader against a fresh read-write connection.
+    let reader_conn = Connection::open(&path).expect("open path for reader");
+    let reader = SqliteWorkflowJobsReader::new(reader_conn).expect("reader needs migration 0062");
+    // Independently break the table via a *separate* connection.
+    let mutator = Connection::open(&path).expect("open path for mutator");
+    mutator
+        .execute("DROP TABLE workflow_jobs", [])
+        .expect("drop workflow_jobs out from under the reader");
+    drop(mutator);
+    // The next query must fail under the covers. The reader returns
+    // its empty sentinel (so workflow_health continues running) but
+    // records the failure for take_last_error to surface.
+    let count = reader.dead_letter_count(None);
+    assert_eq!(count, 0, "broken table returns sentinel count");
+    let err = reader
+        .take_last_error()
+        .expect("dropped table must register a last_error");
+    assert!(
+        err.contains("dead_letter_count"),
+        "last_error must name the failing method: {err}"
+    );
+    // Drain semantics: subsequent take returns None until the next
+    // failure occurs.
+    assert!(
+        reader.take_last_error().is_none(),
+        "take_last_error drains the slot"
+    );
+    // A second failing call should re-arm the slot.
+    let _ = reader.dead_letter_rows(10);
+    assert!(
+        reader.take_last_error().is_some(),
+        "second failing call refills the slot"
+    );
+}
+
+#[test]
 fn new_rejects_db_stuck_at_migration_0020() {
     // Issue #92 round-6 finding 6.2: a DB with only migration 0020
     // applied has no `failure_class`, `dead_letter_at_ms`, or
