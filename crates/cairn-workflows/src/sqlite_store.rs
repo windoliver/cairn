@@ -54,7 +54,25 @@ const REQUIRED_SCHEMA: &[(&str, &str)] = &[
     ("trigger", "workflow_jobs_terminal_absorbing"),
     ("trigger", "workflow_jobs_state_transition"),
     ("trigger", "workflow_jobs_no_delete"),
+    // Migration 0062 additions (dead-letter + completion lookup
+    // hot-path indexes). The constructor probes for them so a DB
+    // stuck at 0020 fails fast at `SqliteJobStore::new` instead of
+    // first surfacing as `no such column: failure_class` from the
+    // `fail`/`complete` paths after `enqueue` has already mutated.
+    ("index", "workflow_jobs_dead_letter_idx"),
+    ("index", "workflow_jobs_kind_completed_idx"),
 ];
+
+/// Columns added by migration 0062 that the runtime reads/writes on
+/// every `fail`/`complete`/terminal-reap path. Probed by name via
+/// `PRAGMA table_info(workflow_jobs)` so a 0020-only DB cannot be
+/// wrapped (the existing `REQUIRED_SCHEMA` probe is keyed off
+/// `sqlite_schema.name` and so does not catch `ALTER TABLE ... ADD
+/// COLUMN` additions). Without this probe a 0020-only DB passed
+/// `SqliteJobStore::new`, then failed at the first `fail()`/`complete()`
+/// with a `no such column: failure_class` runtime error — long
+/// after the constructor has handed out a working-looking store.
+const REQUIRED_0062_COLUMNS: &[&str] = &["failure_class", "dead_letter_at_ms", "completed_at_ms"];
 
 /// A [`JobStore`] backed by a single `SQLite` connection.
 pub struct SqliteJobStore {
@@ -75,6 +93,20 @@ pub enum SqliteJobStoreInitError {
         /// Object kind (`table` | `index` | `trigger`).
         kind: &'static str,
         /// Object name.
+        name: &'static str,
+    },
+    /// The connection points at a database that has applied migration
+    /// 0020 but not 0062 — the `workflow_jobs` table is missing a
+    /// column the runtime writes on every terminal/retry path
+    /// (`failure_class`, `dead_letter_at_ms`, or `completed_at_ms`).
+    /// Surfaced as a distinct variant from
+    /// [`Self::MigrationMissing`] so an operator can see at a glance
+    /// which forward-migration is the culprit.
+    #[error(
+        "workflow_jobs missing column `{name}` (migration 0062 not applied) — run migrations via cairn-store-sqlite first"
+    )]
+    ColumnMissing {
+        /// Column name that the probe expected to find.
         name: &'static str,
     },
     /// The `schema_migrations` row for migration 0020 has a `sql_hash`
@@ -121,7 +153,10 @@ impl SqliteJobStore {
     /// # Errors
     ///
     /// [`SqliteJobStoreInitError::MigrationMissing`] when any required
-    /// object is absent;
+    /// schema object (table / index / trigger) is absent;
+    /// [`SqliteJobStoreInitError::ColumnMissing`] when migration 0062
+    /// has not been applied (the `failure_class`, `dead_letter_at_ms`,
+    /// or `completed_at_ms` columns are missing);
     /// [`SqliteJobStoreInitError::SchemaDrift`] when a runtime
     /// invariant probe fails (e.g. queued-state CHECK no longer
     /// rejects a row with a lease owner);
@@ -142,6 +177,21 @@ impl SqliteJobStore {
                 .map_err(|e| SqliteJobStoreInitError::Backend(e.to_string()))?;
             if exists == 0 {
                 return Err(SqliteJobStoreInitError::MigrationMissing { kind, name });
+            }
+        }
+
+        // Column probe for migration 0062 additions. `ALTER TABLE ADD
+        // COLUMN` mutations do not register new `sqlite_schema` rows,
+        // so the existence-by-name loop above can't catch a DB stuck
+        // at 0020. Walk `PRAGMA table_info(workflow_jobs)` and assert
+        // each required column is present. Without this probe the
+        // `fail`/`complete`/terminal-reap paths surface as
+        // `no such column: failure_class` at runtime — long after the
+        // constructor has returned a working-looking store.
+        let columns = read_column_set(&conn)?;
+        for &needed in REQUIRED_0062_COLUMNS {
+            if !columns.iter().any(|c| c == needed) {
+                return Err(SqliteJobStoreInitError::ColumnMissing { name: needed });
             }
         }
 
@@ -240,6 +290,28 @@ impl SqliteJobStore {
             ))
         })
     }
+}
+
+/// Read every column name out of `workflow_jobs` via `PRAGMA
+/// table_info`. Returned as an unordered `Vec<String>` — callers walk
+/// it linearly via `iter().any(...)` so column order is irrelevant.
+/// The probe surface is small (3 names today) so the
+/// `O(n_columns * n_required)` scan is cheaper than building a
+/// `HashSet`.
+fn read_column_set(conn: &Connection) -> Result<Vec<String>, SqliteJobStoreInitError> {
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(workflow_jobs)")
+        .map_err(|e| SqliteJobStoreInitError::Backend(e.to_string()))?;
+    // `PRAGMA table_info` returns rows of (cid, name, type, notnull,
+    // dflt_value, pk). We only need column 1 (`name`).
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(1))
+        .map_err(|e| SqliteJobStoreInitError::Backend(e.to_string()))?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| SqliteJobStoreInitError::Backend(e.to_string()))?);
+    }
+    Ok(out)
 }
 
 /// SHA256 of the embedded migration SQL, lowercase hex. Stamped by

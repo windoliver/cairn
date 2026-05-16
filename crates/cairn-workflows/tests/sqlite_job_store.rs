@@ -703,6 +703,149 @@ async fn schema_drift_rejected_at_construction() {
 }
 
 #[tokio::test]
+async fn partial_migration_to_0020_only_rejected_at_construction() {
+    // Regression (issue #92 round-5, finding 5.1): SqliteJobStore::new
+    // probed for migration-0020 schema objects by name but did NOT
+    // verify the columns added by migration 0062 (failure_class,
+    // dead_letter_at_ms, completed_at_ms). A DB stuck at 0020 used to
+    // pass `new()` then fail at runtime with `no such column:
+    // failure_class` on the first `fail()` / `complete()` call —
+    // *after* `enqueue` had already mutated the DB. The constructor
+    // now probes both for the new indexes (existence-by-name) AND
+    // for the new columns (PRAGMA table_info) so a partially-migrated
+    // DB is rejected at construction.
+    //
+    // Apply ONLY migration 0020 inline (bypassing the canonical opener
+    // which would apply every migration up through head). The
+    // migration constant is re-exported off `cairn_store_sqlite`.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("only-0020.db");
+    let setup = Connection::open(&db).expect("open");
+    setup
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS schema_migrations (\
+                migration_id INTEGER NOT NULL PRIMARY KEY, \
+                name TEXT NOT NULL, \
+                sql_hash TEXT NOT NULL DEFAULT '', \
+                applied_at INTEGER NOT NULL \
+             );",
+        )
+        .expect("create schema_migrations");
+    setup
+        .execute_batch(cairn_store_sqlite::migrations::WORKFLOW_JOBS_MIGRATION_SQL)
+        .expect("apply 0020");
+    drop(setup);
+
+    let probe = Connection::open(&db).expect("reopen");
+    let Err(err) = SqliteJobStore::new(probe) else {
+        panic!("must reject 0020-only DB");
+    };
+    // The schema-by-name probe walks `REQUIRED_SCHEMA` in order and
+    // hits the 0062 dead-letter index first, so we surface as
+    // MigrationMissing { kind="index", name="workflow_jobs_dead_letter_idx" }.
+    // The intent of finding 5.1 is "reject 0020-only DB at construction" —
+    // the exact discriminator (index vs column) is a probe-order detail;
+    // assert the wider invariant (either MigrationMissing for a 0062
+    // object or ColumnMissing for a 0062 column).
+    match &err {
+        SqliteJobStoreInitError::MigrationMissing { name, .. } => {
+            assert!(
+                name.contains("dead_letter") || name.contains("kind_completed"),
+                "MigrationMissing must name a 0062-introduced object, got `{name}`",
+            );
+        }
+        SqliteJobStoreInitError::ColumnMissing { name } => {
+            assert!(
+                matches!(
+                    name,
+                    &"failure_class" | &"dead_letter_at_ms" | &"completed_at_ms"
+                ),
+                "ColumnMissing must name a 0062 column, got `{name}`",
+            );
+        }
+        other => panic!("expected MigrationMissing or ColumnMissing, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn missing_0062_columns_alone_rejected_at_construction() {
+    // Tighter regression for finding 5.1: confirm the *column probe*
+    // independently catches a DB whose schema_objects (table + every
+    // 0020 *and* 0062 index/trigger) pass the existence-by-name probe
+    // but whose `workflow_jobs` table is missing the 0062 columns.
+    // This isolates the column probe from the schema-by-name probe so
+    // a future schema evolution that reshuffles probe order cannot
+    // silently regress the column check.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("no-0062-columns.db");
+    let conn = Connection::open(&db).expect("open");
+    // Build a workflow_jobs table that omits the 0062 columns, plus
+    // every required schema object by name (including the 0062 index
+    // names — created against an unused expression so they pass the
+    // existence-by-name probe). Triggers are stubs because the
+    // column probe runs BEFORE the runtime-invariant probes; we only
+    // need to get the early checks past their existence test.
+    conn.execute_batch(
+        "CREATE TABLE workflow_jobs ( \
+            job_id TEXT PRIMARY KEY, kind TEXT, payload BLOB, state TEXT, \
+            attempts INTEGER, delivery_count INTEGER, max_attempts INTEGER, \
+            base_backoff_ms INTEGER, backoff_multiplier INTEGER, max_backoff_ms INTEGER, \
+            queue_key TEXT, dedupe_key TEXT, next_run_at INTEGER, \
+            lease_owner TEXT, lease_nonce TEXT, lease_started INTEGER, \
+            lease_expires_at INTEGER, last_error TEXT, \
+            enqueued_at INTEGER, updated_at INTEGER \
+         ); \
+         CREATE INDEX workflow_jobs_ready_idx ON workflow_jobs(next_run_at); \
+         CREATE INDEX workflow_jobs_queued_queue_key_idx \
+            ON workflow_jobs(queue_key, enqueued_at); \
+         CREATE INDEX workflow_jobs_lease_expiry_idx ON workflow_jobs(lease_expires_at); \
+         CREATE UNIQUE INDEX workflow_jobs_queue_key_leased_uniq \
+            ON workflow_jobs(queue_key) WHERE queue_key IS NOT NULL; \
+         CREATE UNIQUE INDEX workflow_jobs_dedupe_uniq \
+            ON workflow_jobs(kind, dedupe_key) WHERE dedupe_key IS NOT NULL; \
+         CREATE INDEX workflow_jobs_dead_letter_idx \
+            ON workflow_jobs(next_run_at) WHERE next_run_at IS NOT NULL; \
+         CREATE INDEX workflow_jobs_kind_completed_idx ON workflow_jobs(kind, next_run_at); \
+         CREATE TRIGGER workflow_jobs_identity_immutable \
+            BEFORE UPDATE ON workflow_jobs FOR EACH ROW WHEN 0 \
+            BEGIN SELECT 1; END; \
+         CREATE TRIGGER workflow_jobs_terminal_absorbing \
+            BEFORE UPDATE OF state ON workflow_jobs FOR EACH ROW WHEN 0 \
+            BEGIN SELECT 1; END; \
+         CREATE TRIGGER workflow_jobs_state_transition \
+            BEFORE UPDATE OF state ON workflow_jobs FOR EACH ROW WHEN 0 \
+            BEGIN SELECT 1; END; \
+         CREATE TRIGGER workflow_jobs_no_delete \
+            BEFORE DELETE ON workflow_jobs FOR EACH ROW WHEN 0 \
+            BEGIN SELECT 1; END; \
+         CREATE TABLE schema_migrations ( \
+            migration_id INTEGER PRIMARY KEY, name TEXT, sql_hash TEXT, applied_at INTEGER \
+         ); \
+         INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at) \
+            VALUES (20, '0020_workflow_jobs', '', 0);",
+    )
+    .expect("setup schema without 0062 columns");
+    drop(conn);
+
+    let probe = Connection::open(&db).expect("reopen");
+    let Err(err) = SqliteJobStore::new(probe) else {
+        panic!("must reject DB missing 0062 columns");
+    };
+    match err {
+        SqliteJobStoreInitError::ColumnMissing { name } => {
+            assert!(
+                matches!(
+                    name,
+                    "failure_class" | "dead_letter_at_ms" | "completed_at_ms"
+                ),
+                "ColumnMissing must name a 0062 column, got `{name}`",
+            );
+        }
+        other => panic!("expected ColumnMissing, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn relaxed_check_rejected_at_construction() {
     // Regression: same-name DDL drift (CHECK relaxed in a hand-edited
     // table) used to start cleanly. The constructor now runs a
@@ -726,7 +869,8 @@ async fn relaxed_check_rejected_at_construction() {
             queue_key TEXT, dedupe_key TEXT, next_run_at INTEGER, \
             lease_owner TEXT, lease_nonce TEXT, lease_started INTEGER, \
             lease_expires_at INTEGER, last_error TEXT, \
-            enqueued_at INTEGER, updated_at INTEGER \
+            enqueued_at INTEGER, updated_at INTEGER, \
+            failure_class TEXT, dead_letter_at_ms INTEGER, completed_at_ms INTEGER \
          ); \
          CREATE INDEX workflow_jobs_ready_idx ON workflow_jobs(next_run_at); \
          CREATE INDEX workflow_jobs_queued_queue_key_idx \
@@ -736,6 +880,10 @@ async fn relaxed_check_rejected_at_construction() {
             ON workflow_jobs(queue_key) WHERE queue_key IS NOT NULL; \
          CREATE UNIQUE INDEX workflow_jobs_dedupe_uniq \
             ON workflow_jobs(kind, dedupe_key) WHERE dedupe_key IS NOT NULL; \
+         CREATE INDEX workflow_jobs_dead_letter_idx \
+            ON workflow_jobs(dead_letter_at_ms) WHERE dead_letter_at_ms IS NOT NULL; \
+         CREATE INDEX workflow_jobs_kind_completed_idx \
+            ON workflow_jobs(kind, completed_at_ms); \
          CREATE TRIGGER workflow_jobs_identity_immutable \
             BEFORE UPDATE ON workflow_jobs FOR EACH ROW WHEN 0 \
             BEGIN SELECT 1; END; \
