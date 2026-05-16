@@ -263,9 +263,11 @@ jobs:
         run: cargo-nextest nextest run -p cairn-idl --test wire_compat_v1 --locked
       - name: capability matrix v0.1 (pure advertise())
         run: cargo-nextest nextest run -p cairn-core --test capability_matrix_v1 --locked
-      - name: per-surface status advertisement (CLI + SDK)
+      - name: per-surface status snapshots (CLI default + degraded configs)
         run: cargo-nextest nextest run -p cairn-cli --test status_snapshot_insta --locked
-      - name: per-surface status advertisement (MCP initialize ↔ status parity)
+      - name: per-surface CLI ↔ SDK parity
+        run: cargo-nextest nextest run -p cairn-cli --test sdk_cli_parity --locked
+      - name: per-surface MCP initialize ↔ status parity
         run: cargo-nextest nextest run -p cairn-mcp --test init_status_parity --locked
 
   bench-full:

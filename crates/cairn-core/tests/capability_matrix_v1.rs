@@ -182,3 +182,169 @@ fn case_d_unbound_vault_advertises_empty_set() {
          empty advertised set; got {caps:?}"
     );
 }
+
+/// Capabilities advertised by `default_sensor_capabilities()` from the
+/// host surface (CLI, SDK, MCP) on top of `advertise()`'s output, when
+/// the runtime is on the default-platform (`xcap` + `ocr.tesseract`)
+/// build. Other platforms swap in alternative backends — see
+/// `BUCKET_NON_DEFAULT` below.
+const BUCKET_SURFACE_SENSORS_DEFAULT: &[&str] = &[
+    "cairn.sensor.v1.screen.xcap",
+    "cairn.sensor.v1.screen.ocr.tesseract",
+];
+
+/// Capabilities held back at v0.1 by an explicit `*_WIRED = false`
+/// constant in `crates/cairn-core/src/status/wiring.rs`. Each entry is
+/// a deliberate fail-closed decision: the contract reserves the
+/// capability string but the runtime can't honor it yet, so `advertise()`
+/// must NOT publish it. Flipping the matching wiring constant moves
+/// the entry into `expected_full_p0()` in a single, reviewed PR.
+const BUCKET_DEFERRED_WIRING: &[&str] = &[
+    "cairn.mcp.v1.retrieve.record",
+    "cairn.mcp.v1.retrieve.folder",
+    "cairn.mcp.v1.retrieve.scope",
+    "cairn.mcp.v1.retrieve.profile",
+    "cairn.mcp.v1.sensors.pre_compact",
+    "cairn.mcp.v1.replay.sequence",
+    "cairn.mcp.v1.replay.challenge",
+];
+
+/// v0.1 capability strings the runtime never publishes via the default
+/// status response: alternative-platform sensor backends (advertised
+/// only when the host is on that platform) and extension-namespace
+/// flags advertised via `status.extensions`, not `status.capabilities`.
+const BUCKET_NON_DEFAULT: &[&str] = &[
+    "cairn.mcp.v1.extension.admin",
+    "cairn.sensor.v1.screen.screenpipe",
+    "cairn.sensor.v1.screen.ocr.vision",
+    "cairn.sensor.v1.screen.ocr.winrt",
+];
+
+fn capability_to_string(cap: Capabilities) -> String {
+    serde_json::to_value(cap)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_else(|| panic!("Capabilities::{cap:?} must serialize to a string"))
+}
+
+#[test]
+fn every_v01_capability_is_classified_exactly_once() {
+    // Reconciliation gate (issue #98, round-3 Codex review): every v0.1
+    // capability declared by `crates/cairn-idl/schema/capabilities/capabilities.json`
+    // must land in EXACTLY ONE bucket:
+    //   - `expected_full_p0()` — advertised in the default-P0 status response.
+    //   - `BUCKET_SURFACE_SENSORS_DEFAULT` — appended by `default_sensor_capabilities()`.
+    //   - `BUCKET_DEFERRED_WIRING` — held back behind a `*_WIRED = false` flag.
+    //   - `BUCKET_NON_DEFAULT` — platform-alternative sensors or extension flags.
+    //
+    // A future PR that adds a new v0.1 capability string MUST also add
+    // a row here (and either flip a wiring flag or leave it deferred,
+    // documented in the PR description). Otherwise this test fails —
+    // the contract version cannot grow silently.
+
+    let schema_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("cairn-idl")
+        .join("schema")
+        .join("capabilities")
+        .join("capabilities.json");
+    let bytes = std::fs::read(&schema_path)
+        .unwrap_or_else(|err| panic!("read {}: {err}", schema_path.display()));
+    let schema: serde_json::Value = serde_json::from_slice(&bytes)
+        .unwrap_or_else(|err| panic!("parse capabilities.json: {err}"));
+
+    let entries = schema
+        .get("oneOf")
+        .and_then(serde_json::Value::as_array)
+        .expect("capabilities.json: oneOf must be an array");
+
+    let v01_strings: HashSet<String> = entries
+        .iter()
+        .filter(|entry| {
+            entry
+                .get("x-cairn-since")
+                .and_then(serde_json::Value::as_str)
+                == Some("v0.1")
+        })
+        .map(|entry| {
+            entry
+                .get("const")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_else(|| panic!("oneOf entry without `const`: {entry}"))
+                .to_owned()
+        })
+        .collect();
+
+    let advertised: HashSet<String> = expected_full_p0()
+        .into_iter()
+        .map(capability_to_string)
+        .collect();
+    let surface_sensors: HashSet<String> = BUCKET_SURFACE_SENSORS_DEFAULT
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+    let deferred: HashSet<String> = BUCKET_DEFERRED_WIRING
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+    let non_default: HashSet<String> = BUCKET_NON_DEFAULT
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+
+    // Sanity 1: every bucket entry must actually be a v0.1 entry in the
+    // schema. Catches typos and stale entries left after a deprecation.
+    for bucket in [&advertised, &surface_sensors, &deferred, &non_default] {
+        for cap in bucket {
+            assert!(
+                v01_strings.contains(cap),
+                "bucket entry `{cap}` is not a v0.1 capability in capabilities.json — \
+                 either the entry is stale or `x-cairn-since` was bumped without updating \
+                 this test"
+            );
+        }
+    }
+
+    // Sanity 2: buckets must be pairwise disjoint. A capability cannot
+    // be both advertised and deferred at the same time.
+    let buckets: [(&str, &HashSet<String>); 4] = [
+        ("advertised_full_p0", &advertised),
+        ("surface_sensors_default", &surface_sensors),
+        ("deferred_wiring", &deferred),
+        ("non_default", &non_default),
+    ];
+    for (i, (name_i, bucket_i)) in buckets.iter().enumerate() {
+        for (name_j, bucket_j) in buckets.iter().skip(i + 1) {
+            let overlap: Vec<&String> = bucket_i.intersection(bucket_j).collect();
+            assert!(
+                overlap.is_empty(),
+                "buckets `{name_i}` and `{name_j}` overlap on {overlap:?} — \
+                 every capability must belong to exactly one bucket"
+            );
+        }
+    }
+
+    // Sanity 3: every v0.1 capability in the schema must appear in
+    // exactly one bucket — the union covers the schema.
+    let union: HashSet<String> = advertised
+        .iter()
+        .chain(surface_sensors.iter())
+        .chain(deferred.iter())
+        .chain(non_default.iter())
+        .cloned()
+        .collect();
+    let missing: HashSet<&String> = v01_strings.difference(&union).collect();
+    assert!(
+        missing.is_empty(),
+        "v0.1 capabilities declared in capabilities.json have no classification: {missing:?}. \
+         Add each one to exactly one of expected_full_p0() / BUCKET_SURFACE_SENSORS_DEFAULT / \
+         BUCKET_DEFERRED_WIRING / BUCKET_NON_DEFAULT. The contract version cannot grow \
+         silently — issue #98."
+    );
+    let extra: HashSet<&String> = union.difference(&v01_strings).collect();
+    assert!(
+        extra.is_empty(),
+        "buckets reference capability strings that are not v0.1 entries in capabilities.json: \
+         {extra:?}. Remove them or re-bucket."
+    );
+}
