@@ -80,6 +80,7 @@ pub struct TreeReadWindow {
 }
 
 /// Input required to plan a tree-aware read window.
+#[derive(Debug, Clone, Copy)]
 pub struct TreeReadWindowInput<'a> {
     /// Hydrated session tree.
     pub tree: &'a SessionTree,
