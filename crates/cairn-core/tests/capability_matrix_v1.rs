@@ -488,10 +488,7 @@ fn every_v01_capability_is_classified_exactly_once() {
         .iter()
         .map(|s| (*s).to_owned())
         .collect();
-    let non_default: HashSet<String> = BUCKET_NON_DEFAULT
-        .iter()
-        .map(|s| (*s).to_owned())
-        .collect();
+    let non_default: HashSet<String> = BUCKET_NON_DEFAULT.iter().map(|s| (*s).to_owned()).collect();
 
     // Sanity 1: every bucket entry must actually be a capability in
     // the schema. Catches typos and stale entries after a deprecation.

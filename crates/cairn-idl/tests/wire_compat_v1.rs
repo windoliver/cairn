@@ -155,8 +155,8 @@ fn schema_dir_inventory_matches_contract_files() {
     const NON_CONTRACT_ALLOWLIST: &[&str] = &[];
 
     fn walk(root: &std::path::Path, prefix: &str, out: &mut Vec<String>) {
-        for entry in fs::read_dir(root)
-            .unwrap_or_else(|err| panic!("read_dir {}: {err}", root.display()))
+        for entry in
+            fs::read_dir(root).unwrap_or_else(|err| panic!("read_dir {}: {err}", root.display()))
         {
             let entry = entry.unwrap_or_else(|err| panic!("dirent in {}: {err}", root.display()));
             let path = entry.path();
