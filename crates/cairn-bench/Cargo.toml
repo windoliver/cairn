@@ -47,6 +47,7 @@ sha2 = { workspace = true }
 # atomically renames so a kill or disk-full event mid-write cannot
 # corrupt the only cache (which holds expensive OpenAI embeddings).
 tempfile = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 toml = { workspace = true }
 tracing = { workspace = true }
