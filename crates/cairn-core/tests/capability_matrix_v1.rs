@@ -223,25 +223,34 @@ const BUCKET_SURFACE_SENSORS_DEFAULT: &[&str] = &[
     "cairn.sensor.v1.screen.ocr.tesseract",
 ];
 
-/// Capabilities held back at v0.1 because the runtime path that would
-/// advertise them is not yet wired. Each entry is a deliberate
-/// fail-closed decision: the contract reserves the capability string
-/// but `advertise()` must not publish it until the matching dispatch
-/// path lands. Two flavors are bucketed together:
-///   - Verb/sensor capabilities gated by a `*_WIRED = false` constant
-///     in `crates/cairn-core/src/status/wiring.rs`.
-///   - Extension-namespace capabilities (`cairn.mcp.v1.extension.*`)
-///     whose `advertise()` row + bidirectional binding (brief §8.0.a:
-///     `cairn.admin.v1` in `status.extensions` ↔ `cairn.mcp.v1.extension.admin`
-///     in `status.capabilities`, encoded in `schema/prelude/status.json`)
-///     are not yet wired into the runtime. The capability string is
-///     reserved; when the extension is enabled, the surface advertising
-///     it must publish both halves together.
+/// Capability strings declared in the schema that the default-P0
+/// status response does NOT publish, for any reason. Three flavors
+/// share this bucket because the reconciliation cares only whether
+/// the entry is *reachable*, not why it is held back:
 ///
-/// Flipping the gate (wiring constant, or wiring up the extension
-/// `advertise()` row) moves the entry into `expected_full_p0()` (or a
-/// future bound/extension-enabled scenario) in a single, reviewed PR.
+///   1. Verb/sensor capabilities gated by a `*_WIRED = false` constant
+///      in `crates/cairn-core/src/status/wiring.rs`. Flip the constant
+///      + add to `expected_full_p0()` in the same PR.
+///   2. Capabilities whose `advertise()` row exists but requires a
+///      later `contract_phase`, e.g. `forget.session` (V0_2),
+///      `forget.scope` (V0_3), `summarize.narrative` (V0_2),
+///      `extension.coord` (V0_3 + coord_extension_ready). When the
+///      runtime moves to that phase, the entry surfaces.
+///   3. Capabilities reserved in the schema with no `advertise()` row
+///      and no production producer today — extension namespaces
+///      (`extension.admin`/`aggregate`/`federation`/`sessiontree`) and
+///      stale sensor flags (`screen.ocr.vision` — declared but never
+///      emitted by `compiled_capabilities()`). Wiring the producer
+///      (and the matching extension binding from `schema/prelude/status.json`
+///      where applicable) moves the entry into the advertised set.
+///
+/// The bidirectional extension binding (brief §8.0.a): `cairn.admin.v1`
+/// in `status.extensions` ↔ `cairn.mcp.v1.extension.admin` in
+/// `status.capabilities` (encoded in `schema/prelude/status.json`).
+/// When the extension is enabled, the surface publishing it must emit
+/// both halves together.
 const BUCKET_DEFERRED_WIRING: &[&str] = &[
+    // Wiring-gated (v0.1 *_WIRED=false).
     "cairn.mcp.v1.retrieve.record",
     "cairn.mcp.v1.retrieve.folder",
     "cairn.mcp.v1.retrieve.scope",
@@ -249,15 +258,34 @@ const BUCKET_DEFERRED_WIRING: &[&str] = &[
     "cairn.mcp.v1.sensors.pre_compact",
     "cairn.mcp.v1.replay.sequence",
     "cairn.mcp.v1.replay.challenge",
+    // Phase-gated v0.2 (would advertise once contract_phase = V0_2+).
+    "cairn.mcp.v1.summarize.narrative",
+    "cairn.mcp.v1.forget.session",
+    // Phase-gated v0.3 (would advertise once contract_phase = V0_3+).
+    "cairn.mcp.v1.forget.scope",
+    // Extension namespaces — reserved, awaiting advertise() row + wiring.
     "cairn.mcp.v1.extension.admin",
+    "cairn.mcp.v1.extension.aggregate",
+    "cairn.mcp.v1.extension.federation",
+    "cairn.mcp.v1.extension.sessiontree",
+    "cairn.mcp.v1.extension.coord",
+    // Reserved sensor flag without a runtime producer (compiled_capabilities()
+    // in cairn-sensors-local never emits this; tesseract/winrt cover the
+    // platform OCR axis instead). Move to NON_DEFAULT only if a real
+    // producer ships.
+    "cairn.sensor.v1.screen.ocr.vision",
 ];
 
-/// v0.1 capability strings the default-platform runtime never publishes:
-/// alternative-platform sensor backends (advertised only when the host
-/// is on that specific platform/config combination).
+/// Capability strings the default-platform runtime never publishes,
+/// but a *real producer* in `cairn-sensors-local::screen::compiled_capabilities`
+/// does emit under a non-default cfg/feature/OS:
+///   - `screen.screenpipe` — gated on `cfg(feature = "screenpipe-runtime")`.
+///   - `screen.ocr.winrt`  — gated on `cfg(target_os = "windows")`.
+/// Both have executable producers; they are simply not part of the
+/// linux/macOS contract-drift CI environment. If the entry stops
+/// being emitted by any producer, move it to `BUCKET_DEFERRED_WIRING`.
 const BUCKET_NON_DEFAULT: &[&str] = &[
     "cairn.sensor.v1.screen.screenpipe",
-    "cairn.sensor.v1.screen.ocr.vision",
     "cairn.sensor.v1.screen.ocr.winrt",
 ];
 
@@ -276,19 +304,29 @@ fn capability_to_string(cap: Capabilities) -> String {
               would hide the cross-bucket invariants in helpers and add no clarity."
 )]
 fn every_v01_capability_is_classified_exactly_once() {
-    // Reconciliation gate (issue #98, round-3 Codex review): every v0.1
-    // capability declared by `crates/cairn-idl/schema/capabilities/capabilities.json`
-    // must land in EXACTLY ONE bucket:
+    // Reconciliation gate (issue #98, rounds 3 + 7 Codex review):
+    // EVERY capability declared by capabilities.json — across all
+    // `x-cairn-since` phases (v0.1, v0.2, v0.3) — must land in EXACTLY
+    // ONE bucket:
     //   - `expected_full_p0()` — advertised in the default-P0 status response.
     //   - `BUCKET_SURFACE_SENSORS_DEFAULT` — appended by `default_sensor_capabilities()`.
-    //   - `BUCKET_DEFERRED_WIRING` — held back behind a `*_WIRED = false`
-    //     flag or an unwired extension namespace.
-    //   - `BUCKET_NON_DEFAULT` — platform-alternative sensor backends.
+    //   - `BUCKET_DEFERRED_WIRING` — held back by wiring flag, phase
+    //     gate, missing advertise() row, or no runtime producer.
+    //   - `BUCKET_NON_DEFAULT` — platform-conditional sensor backends
+    //     that have a real producer behind cfg/feature/OS.
     //
-    // A future PR that adds a new v0.1 capability string MUST also add
-    // a row here (and either flip a wiring flag or leave it deferred,
-    // documented in the PR description). Otherwise this test fails —
-    // the contract version cannot grow silently.
+    // Iterating ALL phases catches v0.2/v0.3 entries that never had a
+    // classification decision (round-7 Codex finding). The default
+    // CLI status response is allowed to advertise v0.2 capabilities
+    // when its `contract_phase` is V0_2+ — those entries are in
+    // `BUCKET_DEFERRED_WIRING` here (held back at the matrix's V0_1
+    // gates) and pinned for the bound CLI surface by
+    // `crates/cairn-cli/tests/status_snapshot_insta.rs`.
+    //
+    // A future PR that adds a new capability string at any phase MUST
+    // also add a row here (and either flip a wiring flag or leave it
+    // deferred, documented in the PR description). Otherwise this test
+    // fails — the contract cannot grow silently.
 
     let schema_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -306,14 +344,10 @@ fn every_v01_capability_is_classified_exactly_once() {
         .and_then(serde_json::Value::as_array)
         .expect("capabilities.json: oneOf must be an array");
 
-    let v01_strings: HashSet<String> = entries
+    // Collect every entry — not filtered by phase. Round-7 finding:
+    // v0.2 / v0.3 entries must be classified too, not silently ignored.
+    let all_strings: HashSet<String> = entries
         .iter()
-        .filter(|entry| {
-            entry
-                .get("x-cairn-since")
-                .and_then(serde_json::Value::as_str)
-                == Some("v0.1")
-        })
         .map(|entry| {
             entry
                 .get("const")
@@ -340,15 +374,14 @@ fn every_v01_capability_is_classified_exactly_once() {
         .map(|s| (*s).to_owned())
         .collect();
 
-    // Sanity 1: every bucket entry must actually be a v0.1 entry in the
-    // schema. Catches typos and stale entries left after a deprecation.
+    // Sanity 1: every bucket entry must actually be a capability in
+    // the schema. Catches typos and stale entries after a deprecation.
     for bucket in [&advertised, &surface_sensors, &deferred, &non_default] {
         for cap in bucket {
             assert!(
-                v01_strings.contains(cap),
-                "bucket entry `{cap}` is not a v0.1 capability in capabilities.json — \
-                 either the entry is stale or `x-cairn-since` was bumped without updating \
-                 this test"
+                all_strings.contains(cap),
+                "bucket entry `{cap}` is not a capability in capabilities.json — \
+                 either the entry is stale or its `const` value was renamed"
             );
         }
     }
@@ -372,8 +405,8 @@ fn every_v01_capability_is_classified_exactly_once() {
         }
     }
 
-    // Sanity 3: every v0.1 capability in the schema must appear in
-    // exactly one bucket — the union covers the schema.
+    // Sanity 3: every capability in the schema must appear in exactly
+    // one bucket — the union covers all phases (v0.1, v0.2, v0.3).
     let union: HashSet<String> = advertised
         .iter()
         .chain(surface_sensors.iter())
@@ -381,18 +414,18 @@ fn every_v01_capability_is_classified_exactly_once() {
         .chain(non_default.iter())
         .cloned()
         .collect();
-    let missing: HashSet<&String> = v01_strings.difference(&union).collect();
+    let missing: HashSet<&String> = all_strings.difference(&union).collect();
     assert!(
         missing.is_empty(),
-        "v0.1 capabilities declared in capabilities.json have no classification: {missing:?}. \
+        "capabilities declared in capabilities.json have no classification: {missing:?}. \
          Add each one to exactly one of expected_full_p0() / BUCKET_SURFACE_SENSORS_DEFAULT / \
-         BUCKET_DEFERRED_WIRING / BUCKET_NON_DEFAULT. The contract version cannot grow \
+         BUCKET_DEFERRED_WIRING / BUCKET_NON_DEFAULT. The contract cannot grow \
          silently — issue #98."
     );
-    let extra: HashSet<&String> = union.difference(&v01_strings).collect();
+    let extra: HashSet<&String> = union.difference(&all_strings).collect();
     assert!(
         extra.is_empty(),
-        "buckets reference capability strings that are not v0.1 entries in capabilities.json: \
+        "buckets reference capability strings that are not in capabilities.json: \
          {extra:?}. Remove them or re-bucket."
     );
 }
