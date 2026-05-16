@@ -22,6 +22,19 @@ use rusqlite::Connection;
 /// `PRAGMA table_info(workflow_jobs)` and fail loud.
 const REQUIRED_0062_COLUMNS: &[&str] = &["failure_class", "dead_letter_at_ms", "completed_at_ms"];
 
+/// Indexes added by migration 0062 that the `workflow_health` lint
+/// check relies on for cheap dead-letter / kind+completed lookups.
+/// Without a construction-time probe a DB whose 0062 columns exist
+/// but whose indexes were dropped (or whose migration aborted between
+/// `ALTER TABLE` and `CREATE INDEX`) silently degrades into a full
+/// table scan under operator load — issue #92 round-7 finding 7.3.
+/// Surfaced separately from the column probe so the operator sees
+/// "indexes missing" rather than a generic schema-drift message.
+const REQUIRED_0062_INDEXES: &[&str] = &[
+    "workflow_jobs_dead_letter_idx",
+    "workflow_jobs_kind_completed_idx",
+];
+
 /// Errors raised by [`SqliteWorkflowJobsReader::new`] when the wrapped
 /// connection's `workflow_jobs` schema does not have migration 0062
 /// applied.
@@ -39,6 +52,20 @@ pub enum SqliteWorkflowJobsReaderError {
     )]
     ColumnMissing {
         /// Column name that the probe expected to find.
+        name: &'static str,
+    },
+    /// The `workflow_jobs` table has the 0062 columns but one of the
+    /// hot-path indexes is missing. The `workflow_health` check would
+    /// otherwise fall back to a full table scan under operator load
+    /// (issue #92 round-7 finding 7.3). Surface loudly so the operator
+    /// can recreate the index instead of waiting for lint to time out
+    /// on a degraded vault.
+    #[error(
+        "workflow_jobs missing index `{name}` (migration 0062 partially applied) — \
+         drop and re-run migration 0062 to recreate the lint hot-path indexes"
+    )]
+    IndexMissing {
+        /// Index name that the probe expected to find.
         name: &'static str,
     },
     /// Backend error during the column probe.
@@ -75,6 +102,14 @@ impl SqliteWorkflowJobsReader {
     /// unavailable" — pass `None` for `workflow_jobs` and the
     /// `workflow_health` check no-ops, matching the missing-DB path.
     ///
+    /// Returns [`SqliteWorkflowJobsReaderError::IndexMissing`] when
+    /// either of the 0062 lint hot-path indexes
+    /// (`workflow_jobs_dead_letter_idx`,
+    /// `workflow_jobs_kind_completed_idx`) is absent. A vault with
+    /// the columns but missing indexes would otherwise serve lint
+    /// queries via full-table scan — surface the drift at
+    /// construction so the operator can restore the indexes.
+    ///
     /// Returns [`SqliteWorkflowJobsReaderError::Backend`] for any
     /// other `SQLite` failure (e.g. unreadable schema, lock error
     /// during the probe).
@@ -91,6 +126,17 @@ impl SqliteWorkflowJobsReader {
         for &needed in REQUIRED_0062_COLUMNS {
             if !columns.iter().any(|c| c == needed) {
                 return Err(SqliteWorkflowJobsReaderError::ColumnMissing { name: needed });
+            }
+        }
+        // Issue #92 round-7 finding 7.3: probe the two 0062 indexes.
+        // Columns alone aren't enough — without these indexes, lint's
+        // dead-letter enumeration and `last_success_ms` lookups
+        // degenerate to full-table scans, and the only signal the
+        // operator gets is that lint runs slow. Loud is better.
+        let indexes = read_index_set(&conn)?;
+        for &needed in REQUIRED_0062_INDEXES {
+            if !indexes.iter().any(|i| i == needed) {
+                return Err(SqliteWorkflowJobsReaderError::IndexMissing { name: needed });
             }
         }
         Ok(Self {
@@ -124,6 +170,25 @@ fn read_column_set(conn: &Connection) -> Result<Vec<String>, SqliteWorkflowJobsR
         .map_err(|e| SqliteWorkflowJobsReaderError::Backend(e.to_string()))?;
     let rows = stmt
         .query_map([], |r| r.get::<_, String>(1))
+        .map_err(|e| SqliteWorkflowJobsReaderError::Backend(e.to_string()))?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| SqliteWorkflowJobsReaderError::Backend(e.to_string()))?);
+    }
+    Ok(out)
+}
+
+/// Read every index name registered against `workflow_jobs` from
+/// `sqlite_master`. Returned unordered — callers scan linearly for
+/// required names.
+fn read_index_set(conn: &Connection) -> Result<Vec<String>, SqliteWorkflowJobsReaderError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'workflow_jobs'",
+        )
+        .map_err(|e| SqliteWorkflowJobsReaderError::Backend(e.to_string()))?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(0))
         .map_err(|e| SqliteWorkflowJobsReaderError::Backend(e.to_string()))?;
     let mut out = Vec::new();
     for r in rows {

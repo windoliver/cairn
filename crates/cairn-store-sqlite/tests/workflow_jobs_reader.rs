@@ -344,6 +344,47 @@ fn take_last_error_captures_runtime_query_failure() {
 }
 
 #[test]
+fn new_rejects_db_missing_0062_dead_letter_index() {
+    // Issue #92 round-7 finding 7.3: a vault with the migration-0062
+    // columns present but the dead-letter index dropped passes the
+    // column probe and ends up serving lint queries via full-table
+    // scans. Surface the gap at construction time so the operator
+    // can recreate the index.
+    let conn = fresh_db();
+    conn.execute("DROP INDEX workflow_jobs_dead_letter_idx", [])
+        .expect("drop dead-letter idx to simulate drift");
+    let err = SqliteWorkflowJobsReader::new(conn)
+        .err()
+        .expect("missing index must fail construction");
+    match err {
+        cairn_store_sqlite::SqliteWorkflowJobsReaderError::IndexMissing { name } => {
+            assert_eq!(name, "workflow_jobs_dead_letter_idx");
+        }
+        other => panic!("expected IndexMissing, got {other:?}"),
+    }
+}
+
+#[test]
+fn new_rejects_db_missing_0062_kind_completed_index() {
+    // Companion to the dead-letter-idx case: the kind+completed index
+    // backs `last_success_ms` lookups. A missing index here turns
+    // every `dream.light` / `expire.tier` / `evaluate.sweep` last-success
+    // probe into a full scan. Fail loud at construction.
+    let conn = fresh_db();
+    conn.execute("DROP INDEX workflow_jobs_kind_completed_idx", [])
+        .expect("drop kind+completed idx to simulate drift");
+    let err = SqliteWorkflowJobsReader::new(conn)
+        .err()
+        .expect("missing index must fail construction");
+    match err {
+        cairn_store_sqlite::SqliteWorkflowJobsReaderError::IndexMissing { name } => {
+            assert_eq!(name, "workflow_jobs_kind_completed_idx");
+        }
+        other => panic!("expected IndexMissing, got {other:?}"),
+    }
+}
+
+#[test]
 fn new_rejects_db_stuck_at_migration_0020() {
     // Issue #92 round-6 finding 6.2: a DB with only migration 0020
     // applied has no `failure_class`, `dead_letter_at_ms`, or
