@@ -98,6 +98,145 @@ async fn dedupe_key_blocks_duplicate_enqueue() {
 }
 
 #[tokio::test]
+async fn enqueue_leased_inserts_directly_into_leased_state() {
+    // Issue #92 round-5 finding 5.2: SqliteJobStore::enqueue_leased
+    // must produce a row in `state = 'leased'` from the moment of
+    // insert — never visible as `queued` to any scheduler. Asserts:
+    //  - The returned LeasedJob carries the supplied job_id/kind and
+    //    a non-empty lease nonce.
+    //  - The persisted row has state='leased', delivery_count=1,
+    //    attempts=0, lease_owner matching the call, and the lease
+    //    nonce/deadline that the LeasedJob reports.
+    //  - The row is NOT lease-eligible via the generic lease() path
+    //    (the partial-unique queue_key index would normally allow a
+    //    re-lease, but enqueue_leased has already grabbed the lease).
+    let (store, dir) = open_store();
+    let req = req("j-enqueue-leased", "kind.eq");
+    let owner = "atomic-owner-1";
+    let now_ms = 1_700_000_000_000_i64;
+    let lease_ms = 30_000_i64;
+
+    let leased = store
+        .enqueue_leased(req.clone(), owner, now_ms, lease_ms)
+        .await
+        .expect("enqueue_leased should succeed on fresh row");
+    assert_eq!(leased.job_id.as_str(), "j-enqueue-leased");
+    assert_eq!(leased.kind.as_str(), "kind.eq");
+    assert_eq!(leased.attempts, 1, "worker-visible attempts = 1");
+    assert_eq!(leased.lease.owner, owner);
+    assert!(
+        !leased.lease.nonce.is_empty(),
+        "lease nonce must be non-empty"
+    );
+    assert_eq!(leased.lease.expires_at_ms, now_ms + lease_ms);
+    assert!(
+        leased.failure_class.is_none(),
+        "no failure_class on fresh row"
+    );
+    assert_eq!(leased.dedupe_key, None);
+
+    // Inspect the persisted row through a fresh connection — the row
+    // must be exactly as the LeasedJob describes, with delivery_count=1
+    // (the lease counts as one delivery) and attempts=0 (matches the
+    // generic atomic_lease's "persisted=0, surfaced=1" contract).
+    let db = dir.path().join("cairn.db");
+    let probe = Connection::open(&db).expect("reopen for inspection");
+    let row: (String, i64, i64, String, String, i64) = probe
+        .query_row(
+            "SELECT state, attempts, delivery_count, lease_owner, lease_nonce, lease_expires_at \
+             FROM workflow_jobs WHERE job_id = ?1",
+            rusqlite::params!["j-enqueue-leased"],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, i64>(5)?,
+                ))
+            },
+        )
+        .expect("row exists");
+    assert_eq!(row.0, "leased", "row must be in state='leased'");
+    assert_eq!(row.1, 0, "persisted attempts = 0");
+    assert_eq!(row.2, 1, "delivery_count = 1 (the active lease)");
+    assert_eq!(row.3, owner);
+    assert_eq!(row.4, leased.lease.nonce);
+    assert_eq!(row.5, now_ms + lease_ms);
+
+    // A concurrent generic lease() must NOT find this row — it's
+    // already in 'leased' state, so the queued-only WHERE filters it
+    // out. This is the load-bearing property: no scheduler can claim
+    // the row between enqueue and our heartbeat.
+    let racing = store
+        .lease("foreign-worker", now_ms, lease_ms)
+        .await
+        .expect("lease query");
+    assert!(
+        racing.is_none(),
+        "enqueue_leased must hide the row from concurrent lease() calls"
+    );
+
+    // The row IS reachable via complete() with the returned lease,
+    // proving the LeaseToken is genuine and matches the row.
+    store
+        .complete(&leased.job_id, &leased.lease, now_ms + 1)
+        .await
+        .expect("complete with returned lease");
+}
+
+#[tokio::test]
+async fn enqueue_leased_rejects_duplicate_dedupe_key() {
+    // Issue #92 round-5 finding 5.2: enqueue_leased must surface
+    // duplicate (kind, dedupe_key) collisions the same way enqueue()
+    // does — the partial-unique index covers `state IN
+    // ('queued','leased','done')` so a leased row blocks a second
+    // enqueue (whether leased OR queued) under the same key.
+    let (store, _dir) = open_store();
+    let mut first = req("j-dup-1", "kind.dup");
+    first.dedupe_key = Some("op-dup".to_string());
+    let leased = store
+        .enqueue_leased(first, "owner-a", 1_000_000_000, 30_000)
+        .await
+        .expect("first enqueue_leased ok");
+    drop(leased);
+
+    let mut second = req("j-dup-2", "kind.dup");
+    second.dedupe_key = Some("op-dup".to_string());
+    let err = store
+        .enqueue_leased(second, "owner-b", 1_000_000_001, 30_000)
+        .await
+        .expect_err("duplicate dedupe must be rejected");
+    match err {
+        JobStoreError::DuplicateDedupeKey { kind, dedupe_key } => {
+            assert_eq!(kind.as_str(), "kind.dup");
+            assert_eq!(dedupe_key, "op-dup");
+        }
+        other => panic!("expected DuplicateDedupeKey, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn enqueue_leased_rejects_non_positive_lease_duration() {
+    // Defensive guard: a zero/negative lease duration is a caller bug,
+    // not a no-op. The store rejects with InvalidLeaseDeadline before
+    // mutating anything.
+    let (store, _dir) = open_store();
+    let r = req("j-bad-dur", "kind.bad");
+    let err = store
+        .enqueue_leased(r.clone(), "owner-x", 0, 0)
+        .await
+        .expect_err("zero lease_duration must reject");
+    assert!(matches!(err, JobStoreError::InvalidLeaseDeadline { .. }));
+    let err = store
+        .enqueue_leased(r, "owner-x", 0, -1)
+        .await
+        .expect_err("negative lease_duration must reject");
+    assert!(matches!(err, JobStoreError::InvalidLeaseDeadline { .. }));
+}
+
+#[tokio::test]
 async fn queue_key_serializes_writers() {
     // Brief §10 v0.1: jobs sharing a queue_key serialize through the
     // lease — they are durably queued, not rejected at enqueue. Both

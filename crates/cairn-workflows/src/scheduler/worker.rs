@@ -579,6 +579,22 @@ mod tests {
         async fn enqueue(&self, _: ER) -> Result<(), JobStoreError> {
             Ok(())
         }
+        async fn enqueue_leased(
+            &self,
+            _: ER,
+            _: &str,
+            _: i64,
+            _: i64,
+        ) -> Result<LeasedJob, JobStoreError> {
+            // Not exercised by the worker unit tests — the worker
+            // never calls enqueue_leased, only the synthetic-diagnostic
+            // path does. Surface a Backend error so an accidental call
+            // is easy to spot, matching the "stub method" pattern other
+            // trait methods in this test fixture follow.
+            Err(JobStoreError::Backend(
+                "CapturingStore::enqueue_leased not implemented".into(),
+            ))
+        }
         async fn lease(&self, _: &str, _: i64, _: i64) -> Result<Option<LeasedJob>, JobStoreError> {
             Ok(None)
         }

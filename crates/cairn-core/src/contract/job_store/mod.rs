@@ -339,6 +339,33 @@ pub trait JobStore: Send + Sync {
     /// key and serialize at lease time.
     async fn enqueue(&self, req: EnqueueRequest) -> Result<(), JobStoreError>;
 
+    /// Atomically insert a job directly into `state = 'leased'` with the
+    /// requested lease. The row is never visible in `queued` state to any
+    /// scheduler. Used by diagnostics that must guarantee exclusive
+    /// access to a specific job from the moment of enqueue: a
+    /// conventional `enqueue` + `lease_specific` sequence has a window
+    /// in which a concurrently-running scheduler could lease the row
+    /// via the generic `lease()` path.
+    ///
+    /// The returned `LeasedJob` carries the same fields populated by
+    /// `lease()` — `attempts = 1`, `delivery_count = 1`, an active
+    /// `LeaseToken` with the supplied `owner` and a freshly-minted
+    /// nonce, and the row's persisted `failure_class` / `dedupe_key`
+    /// (both `None` on a fresh insert).
+    ///
+    /// # Errors
+    /// - [`JobStoreError::DuplicateDedupeKey`] on `(kind, dedupe_key)` collision.
+    /// - [`JobStoreError::InvalidLeaseDeadline`] when `lease_duration_ms <= 0`
+    ///   or `now_ms + lease_duration_ms` overflows.
+    /// - [`JobStoreError::Backend`] on backend failure.
+    async fn enqueue_leased(
+        &self,
+        req: EnqueueRequest,
+        owner: &str,
+        now_ms: i64,
+        lease_duration_ms: i64,
+    ) -> Result<LeasedJob, JobStoreError>;
+
     /// Atomically lease the next eligible job. Returns `Ok(None)` when no
     /// queued row has `next_run_at <= now_ms`. The lease expires at
     /// `now_ms + lease_duration_ms`; the scheduler must heartbeat or

@@ -187,22 +187,27 @@ enum DriveOutcome {
 /// → fail/complete by hand lets us refuse — without mutating —
 /// any row that isn't the one we just enqueued.
 ///
+/// Lease provisioning. Callers pass `initial_lease: Some(LeasedJob)` on
+/// the first iteration (issue #92 round-5 finding 5.2): the subcommand
+/// calls `JobStore::enqueue_leased` once before the loop, inserting
+/// the synthetic row directly in `state='leased'` so no concurrent
+/// `cairn mcp` can claim it via the generic `lease()` path between
+/// enqueue and our claim. Subsequent loop iterations (the retry path)
+/// pass `None`, and this helper re-acquires the lease via
+/// `lease_specific`. The retry window remains scoped to the gap
+/// between our `fail()` and our follow-up `lease_specific` — a far
+/// narrower race than the original enqueue → `lease_specific` gap, and
+/// in practice the precheck plus synthetic-kind prefix make it
+/// vanishingly likely a foreign worker tries to claim it.
+///
 /// Steps (matches `worker.rs::execute_one` for the metric emission
 /// shape, but never dispatches to a handler):
 ///
-/// 1. `store.lease_specific(&our_job_id, &our_kind, owner, now_ms, lease_ms)`
-///    — atomically claim ONLY the row we enqueued. Round-4 finding:
-///    using `lease()` would let a precheck→lease race hand back a
-///    production row, and the very act of leasing that row already
-///    bumps its `delivery_count` and parks it in `state='leased'`
-///    until the lease expires (potentially tripping the poison guard
-///    on repeated diagnostic runs). `lease_specific` constrains the
-///    UPDATE's WHERE to `(job_id, kind)` so non-matching rows stay
-///    untouched on disk.
-/// 2. If `lease_specific` still somehow returns a row whose id+kind
-///    don't match what we expected: bail with `Misrouted`. **No**
-///    heartbeat, **no** fail/complete. (Belt-and-suspenders — the SQL
-///    WHERE already proved the match for production stores.)
+/// 1. Acquire / receive the lease (see "Lease provisioning" above).
+/// 2. If we end up with a leased row whose id+kind don't match what
+///    we expected: bail with `Misrouted`. **No** heartbeat, **no**
+///    fail/complete. (Belt-and-suspenders — the SQL WHERE already
+///    proved the match for production stores.)
 /// 3. Emit `WorkflowJobStarted` to the metrics sink.
 /// 4. Heartbeat once so `lease_started = 1` (mirrors what a real
 ///    worker does between lease and finalize).
@@ -224,16 +229,30 @@ async fn drive_synthetic_job(
     owner: &str,
     lease_ms: i64,
     mode: DriveMode<'_>,
+    initial_lease: Option<LeasedJob>,
 ) -> DriveOutcome {
-    let now_ms = wall_ms();
-    let our_job_id = JobId::new(expected_job_id.to_owned());
-    let leased: LeasedJob = match store
-        .lease_specific(&our_job_id, expected_kind, owner, now_ms, lease_ms)
-        .await
-    {
-        Ok(Some(j)) => j,
-        Ok(None) => return DriveOutcome::NoLeaseAvailable,
-        Err(e) => return DriveOutcome::StoreError(format!("lease_specific: {e}")),
+    // Path 1 (initial iteration): the caller atomically enqueued
+    // directly into leased state via `JobStore::enqueue_leased` and
+    // handed us the LeasedJob. Skip lease_specific entirely — there
+    // is no race window to defend against.
+    //
+    // Path 2 (retry iteration): the previous iteration's fail() put
+    // the row back into queued. Re-acquire via lease_specific so
+    // we still constrain the UPDATE's WHERE to (job_id, kind) and
+    // never mutate a foreign row.
+    let leased: LeasedJob = if let Some(j) = initial_lease {
+        j
+    } else {
+        let now_ms = wall_ms();
+        let our_job_id = JobId::new(expected_job_id.to_owned());
+        match store
+            .lease_specific(&our_job_id, expected_kind, owner, now_ms, lease_ms)
+            .await
+        {
+            Ok(Some(j)) => j,
+            Ok(None) => return DriveOutcome::NoLeaseAvailable,
+            Err(e) => return DriveOutcome::StoreError(format!("lease_specific: {e}")),
+        }
     };
 
     // Belt-and-suspenders post-lease assertion. With `lease_specific`,
@@ -481,13 +500,24 @@ pub fn run_failing(sub: &ArgMatches, vault_root: &Path) -> ExitCode {
             not_before_ms: now_ms,
             retry: policy,
         };
-        if let Err(e) = store.enqueue(req).await {
-            eprintln!("cairn admin workflow run-failing: enqueue: {e}");
-            return ExitCode::from(69);
-        }
-
         let owner = format!("e2e-runfail-{}", ulid::Ulid::new());
         let lease_ms: i64 = 2_000;
+        // Round-5 finding 5.2: atomically enqueue directly into
+        // state='leased' so no concurrent `cairn mcp` can claim the
+        // synthetic row through the generic lease() path between our
+        // enqueue and our first claim. The returned LeasedJob is
+        // handed to drive_synthetic_job as `initial_lease`.
+        let initial = match store
+            .enqueue_leased(req, &owner, now_ms, lease_ms)
+            .await
+        {
+            Ok(j) => j,
+            Err(e) => {
+                eprintln!("cairn admin workflow run-failing: enqueue_leased: {e}");
+                return ExitCode::from(69);
+            }
+        };
+
         let reason = format!("e2e synthetic transient failure ({kind_str})");
         let mode = DriveMode::Fail {
             reason: reason.as_str(),
@@ -495,7 +525,11 @@ pub fn run_failing(sub: &ArgMatches, vault_root: &Path) -> ExitCode {
         };
 
         // Manual lifecycle loop. Bounded by `deadline_secs` so a
-        // race-and-bail outcome doesn't hang the diagnostic.
+        // race-and-bail outcome doesn't hang the diagnostic. The
+        // first iteration consumes the lease produced by
+        // enqueue_leased; subsequent iterations (retry path) re-lease
+        // via lease_specific from within drive_synthetic_job.
+        let mut initial_lease: Option<LeasedJob> = Some(initial);
         let deadline = std::time::Instant::now() + Duration::from_secs(deadline_secs);
         let terminal = loop {
             if std::time::Instant::now() >= deadline {
@@ -509,6 +543,7 @@ pub fn run_failing(sub: &ArgMatches, vault_root: &Path) -> ExitCode {
                 &owner,
                 lease_ms,
                 mode,
+                initial_lease.take(),
             )
             .await
             {
@@ -631,44 +666,28 @@ pub fn simulate_crash(sub: &ArgMatches, vault_root: &Path) -> ExitCode {
             not_before_ms: now_ms,
             retry: RetryPolicy::DEFAULT,
         };
-        if let Err(e) = store.enqueue(req).await {
-            eprintln!("cairn admin workflow simulate-crash: enqueue: {e}");
-            return ExitCode::from(69);
-        }
-        // Use lease_specific so the UPDATE's WHERE constrains to
-        // (job_id, kind). Round 4 finding: plain store.lease() is
-        // already a mutation (bumps delivery_count, sets state='leased')
-        // BEFORE the post-lease assertion can refuse — so a misrouted
-        // production row had its delivery budget consumed. lease_specific
-        // atomically refuses (returns Ok(None)) on any non-matching row.
-        let synthetic_kind = JobKind::new(kind_str.clone());
-        let synthetic_id = JobId::new(job_id_str.clone());
+        // Round-5 finding 5.2: atomic enqueue-into-leased eliminates
+        // the enqueue → claim race. The previous enqueue + lease_specific
+        // sequence still left a window in which a concurrently-running
+        // `cairn mcp` could lease the synthetic row via the generic
+        // `lease()` path (bumping its `delivery_count` and parking it
+        // until the lease expires). `enqueue_leased` collapses the two
+        // steps into one INSERT and guarantees the row is never
+        // visible as `queued` to any scheduler.
         let leased = match store
-            .lease_specific(
-                &synthetic_id,
-                &synthetic_kind,
-                "e2e-crash-worker",
-                now_ms,
-                lease_ms,
-            )
+            .enqueue_leased(req, "e2e-crash-worker", now_ms, lease_ms)
             .await
         {
-            Ok(Some(j)) => j,
-            Ok(None) => {
-                eprintln!(
-                    "cairn admin workflow simulate-crash: lease_specific returned None — \
-                     synthetic row {job_id_str} was not lease-eligible (state mismatch?)"
-                );
-                return ExitCode::from(69);
-            }
+            Ok(j) => j,
             Err(e) => {
-                eprintln!("cairn admin workflow simulate-crash: lease_specific: {e}");
+                eprintln!("cairn admin workflow simulate-crash: enqueue_leased: {e}");
                 return ExitCode::from(69);
             }
         };
-        // Belt-and-suspenders: lease_specific's WHERE already enforced
-        // the match, so this should never fire. Keep it as a tripwire
-        // against a future regression that loosens the SQL predicate.
+        // Belt-and-suspenders: enqueue_leased returns a LeasedJob
+        // built from the EnqueueRequest we supplied, so the ids must
+        // match. Keep this as a tripwire against a future regression
+        // that decouples the returned LeasedJob from the request.
         debug_assert_eq!(leased.job_id.as_str(), job_id_str);
         debug_assert!(leased.kind.as_str().starts_with(SYNTHETIC_KIND_PREFIX));
         // Heartbeat so lease_started flips to 1 — this is the "worker
@@ -837,13 +856,26 @@ pub fn run_succeeding(sub: &ArgMatches, vault_root: &Path) -> ExitCode {
             not_before_ms: now_ms,
             retry: RetryPolicy::DEFAULT,
         };
-        if let Err(e) = store.enqueue(req).await {
-            eprintln!("cairn admin workflow run-succeeding: enqueue: {e}");
-            return ExitCode::from(69);
-        }
-
         let owner = format!("e2e-runok-{}", ulid::Ulid::new());
         let lease_ms: i64 = 2_000;
+        // Round-5 finding 5.2: atomic enqueue-into-leased eliminates
+        // the enqueue → claim race for the happy path. Without this
+        // the synthetic row could be leased by a concurrent `cairn mcp`
+        // worker and dead-lettered as Validation by its synthetic-only
+        // handler registry between our enqueue and our first
+        // lease_specific.
+        let initial = match store
+            .enqueue_leased(req, &owner, now_ms, lease_ms)
+            .await
+        {
+            Ok(j) => j,
+            Err(e) => {
+                eprintln!("cairn admin workflow run-succeeding: enqueue_leased: {e}");
+                return ExitCode::from(69);
+            }
+        };
+
+        let mut initial_lease: Option<LeasedJob> = Some(initial);
         let deadline = std::time::Instant::now() + Duration::from_secs(deadline_secs);
         let done = loop {
             if std::time::Instant::now() >= deadline {
@@ -857,6 +889,7 @@ pub fn run_succeeding(sub: &ArgMatches, vault_root: &Path) -> ExitCode {
                 &owner,
                 lease_ms,
                 DriveMode::Complete,
+                initial_lease.take(),
             )
             .await
             {
@@ -1007,6 +1040,22 @@ mod tests {
         async fn enqueue(&self, _: EnqueueRequest) -> Result<(), JobStoreError> {
             Ok(())
         }
+        async fn enqueue_leased(
+            &self,
+            _: EnqueueRequest,
+            _: &str,
+            _: i64,
+            _: i64,
+        ) -> Result<LeasedJob, JobStoreError> {
+            // Not exercised by the existing drive_synthetic_job tests
+            // (they target the post-lease misrouted branch). Subcommand
+            // wiring uses enqueue_leased on the real SqliteJobStore;
+            // unit tests cover that path via the in-crate integration
+            // tests in cairn-workflows.
+            Err(JobStoreError::Backend(
+                "ScriptedStore::enqueue_leased not implemented".into(),
+            ))
+        }
         async fn lease(&self, _: &str, _: i64, _: i64) -> Result<Option<LeasedJob>, JobStoreError> {
             let mut g = match self.log.lock() {
                 Ok(g) => g,
@@ -1131,6 +1180,10 @@ mod tests {
                 reason: "synthetic",
                 class: FailureClass::Transient,
             },
+            // initial_lease=None exercises the retry path (lease_specific).
+            // The misrouted-row guard runs against whatever lease_specific
+            // returns, so this is the right branch to cover here.
+            None,
         )
         .await;
 
@@ -1174,6 +1227,8 @@ mod tests {
             "test-owner",
             2_000,
             DriveMode::Complete,
+            // initial_lease=None exercises the retry path (lease_specific).
+            None,
         )
         .await;
 
@@ -1219,6 +1274,9 @@ mod tests {
             "test-owner",
             2_000,
             DriveMode::Complete,
+            // initial_lease=None forces the lease_specific branch, which
+            // the scripted store returns None for once drained.
+            None,
         )
         .await;
 
@@ -1252,6 +1310,11 @@ mod tests {
             "test-owner",
             2_000,
             DriveMode::Complete,
+            // initial_lease=None exercises the lease_specific path so
+            // this test still covers the legacy happy path. The
+            // enqueue_leased path is covered end-to-end by the new
+            // sqlite_job_store integration test in cairn-workflows.
+            None,
         )
         .await;
         assert_eq!(outcome, DriveOutcome::Terminal);
@@ -1259,5 +1322,52 @@ mod tests {
         assert_eq!(log.heartbeats, 1, "exactly one heartbeat on happy path");
         assert_eq!(log.completes, 1, "exactly one complete on happy path");
         assert_eq!(log.fails, 0, "no fail on happy path");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drive_synthetic_job_skips_lease_when_initial_lease_provided() {
+        // Round-5 finding 5.2: when the caller supplies an
+        // initial_lease (from `enqueue_leased`), drive_synthetic_job
+        // must NOT call lease_specific — the lease is already held
+        // and re-leasing would race against any concurrent worker.
+        // Use a store whose next_lease slot is empty: if the drive
+        // were to call lease_specific the scripted store would return
+        // None and the outcome would be NoLeaseAvailable. With the
+        // initial_lease shortcut, the drive proceeds straight to
+        // heartbeat+complete and the outcome is Terminal.
+        let job_id = "01JZ_E_LEASED";
+        let leased = synthetic_leased(job_id, "test.e2e.always_done");
+        // Build a store whose lease_specific would return None.
+        let store_concrete = Arc::new(ScriptedStore::new(leased.clone()));
+        {
+            let mut slot = match store_concrete.next_lease.lock() {
+                Ok(s) => s,
+                Err(p) => p.into_inner(),
+            };
+            *slot = None;
+        }
+        let store: Arc<dyn JobStore> = store_concrete.clone();
+        let metrics: Arc<dyn MetricsSink> = Arc::new(NoopMetricsSink);
+
+        let outcome = drive_synthetic_job(
+            &store,
+            &metrics,
+            job_id,
+            &JobKind::new("test.e2e.always_done"),
+            "test-owner",
+            2_000,
+            DriveMode::Complete,
+            Some(leased),
+        )
+        .await;
+        assert_eq!(outcome, DriveOutcome::Terminal);
+
+        let log = store_concrete.snapshot();
+        assert_eq!(
+            log.lease_calls, 0,
+            "initial_lease must short-circuit lease_specific"
+        );
+        assert_eq!(log.heartbeats, 1);
+        assert_eq!(log.completes, 1);
     }
 }

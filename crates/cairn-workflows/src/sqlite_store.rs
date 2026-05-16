@@ -909,6 +909,38 @@ impl JobStore for SqliteJobStore {
         .map_err(|e| JobStoreError::Backend(format!("spawn_blocking join: {e}")))?
     }
 
+    async fn enqueue_leased(
+        &self,
+        req: EnqueueRequest,
+        owner: &str,
+        now_ms: i64,
+        lease_duration_ms: i64,
+    ) -> Result<LeasedJob, JobStoreError> {
+        if lease_duration_ms <= 0 {
+            return Err(JobStoreError::InvalidLeaseDeadline {
+                reason: format!("lease_duration_ms must be > 0 (got {lease_duration_ms})"),
+            });
+        }
+        if now_ms.checked_add(lease_duration_ms).is_none() {
+            return Err(JobStoreError::InvalidLeaseDeadline {
+                reason: format!(
+                    "now_ms + lease_duration_ms overflows i64 (now={now_ms}, dur={lease_duration_ms})"
+                ),
+            });
+        }
+        let conn = Arc::clone(&self.conn);
+        let owner = owner.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let mut guard = match conn.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            atomic_enqueue_leased(&mut guard, &req, &owner, now_ms, lease_duration_ms)
+        })
+        .await
+        .map_err(|e| JobStoreError::Backend(format!("spawn_blocking join: {e}")))?
+    }
+
     async fn lease(
         &self,
         owner: &str,
@@ -1170,6 +1202,116 @@ fn insert_job(conn: &mut Connection, req: &EnqueueRequest) -> Result<(), JobStor
         Ok(_) => Ok(()),
         Err(e) => Err(translate_enqueue_err(&e, req)),
     }
+}
+
+/// Atomic enqueue-into-leased helper for the [`JobStore::enqueue_leased`]
+/// contract. Inserts a single row directly in `state = 'leased'` with
+/// the supplied `owner`, a freshly minted nonce, and the supplied
+/// lease deadline. The row is never visible as `queued` to any
+/// scheduler — eliminating the precheck → claim race the conventional
+/// `enqueue` + `lease_specific` sequence allowed (issue #92 finding 5.2):
+/// a concurrent `cairn mcp` could otherwise lease the just-enqueued
+/// row via the generic `lease()` path before the caller had a chance
+/// to claim it.
+///
+/// Behaviour matches a single `INSERT` (no surrounding transaction) —
+/// `BEGIN IMMEDIATE` would only matter if we performed a follow-up
+/// read; we don't. `SQLite`'s atomicity guarantees the row is either
+/// fully present and `state = 'leased'` or absent.
+///
+/// Constraint contract:
+/// * Migration 0020's state CHECK admits `state IN
+///   ('queued','leased','done','failed')` on INSERT — `state =
+///   'leased'` is therefore legal at insert time.
+/// * Migration 0020's state-shape CHECK requires the leased shape:
+///   `lease_owner IS NOT NULL`, `lease_nonce IS NOT NULL`,
+///   `lease_started IN (0, 1)`, `lease_expires_at IS NOT NULL`. We
+///   stamp the lease fields directly in `VALUES`, so the row passes.
+/// * The state-transition trigger is `BEFORE UPDATE OF state`, so
+///   the leased-on-insert path is unaffected.
+/// * The dedupe-key partial unique index (`workflow_jobs_dedupe_uniq`)
+///   covers `WHERE dedupe_key IS NOT NULL AND state IN
+///   ('queued','leased','done')` — leased rows occupy the dedupe slot,
+///   so a duplicate `(kind, dedupe_key)` on a freshly-inserted leased
+///   row still surfaces as `JobStoreError::DuplicateDedupeKey` through
+///   the same UNIQUE-error path as `insert_job`.
+/// * The leased-queue-key partial unique index
+///   (`workflow_jobs_queue_key_leased_uniq`) covers `WHERE queue_key
+///   IS NOT NULL AND state = 'leased'` — a concurrent caller who has
+///   already leased a row with the same `queue_key` blocks the new
+///   insert via UNIQUE; we surface it as a generic `Backend` error
+///   (diagnostics expect unique `queue_key` values per row).
+///
+/// Returns a [`LeasedJob`] populated with `attempts = 1`, `delivery_count
+/// = 1`, and the active lease token so the caller can immediately
+/// heartbeat / fail / complete without a follow-up `lease_specific`.
+fn atomic_enqueue_leased(
+    conn: &mut Connection,
+    req: &EnqueueRequest,
+    owner: &str,
+    now_ms: i64,
+    lease_duration_ms: i64,
+) -> Result<LeasedJob, JobStoreError> {
+    let new_expires = now_ms.saturating_add(lease_duration_ms);
+    let nonce = ulid::Ulid::new().to_string();
+    // `delivery_count = 1`: the lease counts as one delivery, matching
+    // what `atomic_lease` would have incremented had we gone through
+    // the conventional enqueue+lease path. `attempts = 0` mirrors
+    // `atomic_lease`'s contract — the persisted counter only bumps
+    // on the first heartbeat / fail / complete, even though the
+    // worker-visible `LeasedJob.attempts` is `attempts + 1 = 1`.
+    // `lease_started = 0`: the worker hasn't heartbeated yet. The
+    // synthetic flow heartbeats immediately afterward to flip this to
+    // `1`, just like the production worker loop does.
+    let res = conn.execute(
+        "INSERT INTO workflow_jobs \
+            (job_id, kind, payload, state, attempts, delivery_count, max_attempts, \
+             base_backoff_ms, backoff_multiplier, max_backoff_ms, \
+             queue_key, dedupe_key, next_run_at, \
+             lease_owner, lease_nonce, lease_started, lease_expires_at, \
+             last_error, enqueued_at, updated_at) \
+         VALUES (?, ?, ?, 'leased', 0, 1, ?, ?, ?, ?, ?, ?, ?, \
+                 ?, ?, 0, ?, NULL, \
+                 CAST(strftime('%s','now') AS INTEGER) * 1000, \
+                 CAST(strftime('%s','now') AS INTEGER) * 1000)",
+        params![
+            req.job_id.as_str(),
+            req.kind.as_str(),
+            req.payload,
+            i64::from(req.retry.max_attempts),
+            i64::from(req.retry.base_backoff_ms),
+            i64::from(req.retry.backoff_multiplier),
+            i64::from(req.retry.max_backoff_ms),
+            req.queue_key,
+            req.dedupe_key,
+            req.not_before_ms,
+            owner,
+            nonce,
+            new_expires,
+        ],
+    );
+    if let Err(e) = res {
+        return Err(translate_enqueue_err(&e, req));
+    }
+
+    // Mirror `atomic_lease`'s caller-visible LeasedJob shape: persisted
+    // attempts = 0, surfaced attempts = 1 (the in-flight try the
+    // worker is about to start).
+    Ok(LeasedJob {
+        job_id: req.job_id.clone(),
+        kind: req.kind.clone(),
+        payload: req.payload.clone(),
+        attempts: 1,
+        retry: req.retry,
+        lease: LeaseToken {
+            owner: owner.to_owned(),
+            nonce,
+            expires_at_ms: new_expires,
+        },
+        failure_class: None,
+        not_before_ms: req.not_before_ms,
+        dedupe_key: req.dedupe_key.clone(),
+    })
 }
 
 fn retry_from_row(max_attempts: i64, base: i64, mult: i64, cap: i64) -> RetryPolicy {
