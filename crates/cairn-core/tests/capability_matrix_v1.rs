@@ -202,6 +202,52 @@ fn case_c_no_llm_drops_dream_only() {
 }
 
 #[test]
+fn phase_v02_adds_summarize_narrative_and_forget_session() {
+    // Reachability: prove the two v0.2 advertise() rows actually surface
+    // at `Phase::V0_2` with their gates enabled. Round-8 Codex finding:
+    // without this, a regression that drops the row could ship — the
+    // entry would just sit silently in `BUCKET_DEFERRED_WIRING`.
+    let mut g = gates_full();
+    g.contract_phase = Phase::V0_2;
+    let caps = advertised_set(&g);
+    let mut expected = expected_full_p0();
+    expected.insert(Capabilities::CairnMcpV1SummarizeNarrative);
+    expected.insert(Capabilities::CairnMcpV1ForgetSession);
+    assert_eq!(
+        caps, expected,
+        "phase V0_2: must advertise the full v0.1 set + summarize.narrative \
+         (requires llm_configured) + forget.session (requires FORGET_SESSION_WIRED). \
+         A drift means an advertise() row was dropped or its gate was over-tightened."
+    );
+}
+
+#[test]
+fn phase_v03_matches_v02_until_v03_wiring_lands() {
+    // At Phase V0_3 with current wiring constants, only forget.scope
+    // and extension.coord can move out of BUCKET_DEFERRED_WIRING — and
+    // both are held back: FORGET_SCOPE_WIRED=false and
+    // coord_extension_ready()=false (every COORD_*_WIRED flag is false).
+    // So the v0.3 advertised set must equal the v0.2 set here.
+    //
+    // If this assertion fails, either (a) FORGET_SCOPE_WIRED or one
+    // of the COORD_*_WIRED flags flipped to true (intentional — update
+    // expected), or (b) advertise() grew a new v0.3 row without a
+    // matching gate (regression).
+    let mut g = gates_full();
+    g.contract_phase = Phase::V0_3;
+    let caps = advertised_set(&g);
+    let mut expected = expected_full_p0();
+    expected.insert(Capabilities::CairnMcpV1SummarizeNarrative);
+    expected.insert(Capabilities::CairnMcpV1ForgetSession);
+    assert_eq!(
+        caps, expected,
+        "phase V0_3: forget.scope is held back by FORGET_SCOPE_WIRED=false and \
+         extension.coord by coord_extension_ready()=false. If either flips, \
+         add the matching variant to this expected set."
+    );
+}
+
+#[test]
 fn case_d_unbound_vault_advertises_empty_set() {
     let mut g = gates_full();
     g.vault_bound = false;
