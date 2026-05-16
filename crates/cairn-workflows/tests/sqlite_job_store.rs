@@ -218,6 +218,30 @@ async fn enqueue_leased_rejects_duplicate_dedupe_key() {
 }
 
 #[tokio::test]
+async fn enqueue_leased_rejects_queue_key() {
+    // Issue #92 round-6 finding 6.1: `enqueue_leased` must refuse
+    // `queue_key.is_some()` requests. Migration 0020's partial-unique
+    // index only enforces "at most one leased row per queue_key" — it
+    // does NOT enforce FIFO ordering between leased and queued
+    // siblings sharing a key. FIFO is a runtime invariant of
+    // `atomic_lease`. Accepting a leased-on-insert with `queue_key`
+    // would let it overtake an older queued sibling. Defend the
+    // invariant at the contract layer so future callers can't slip
+    // past it silently.
+    let (store, _dir) = open_store();
+    let mut req = req("j-qkey", "kind.qk");
+    req.queue_key = Some("k1".into());
+    let err = store
+        .enqueue_leased(req, "owner-q", 1_000_000, 30_000)
+        .await
+        .expect_err("queue_key on enqueue_leased must be rejected");
+    assert!(
+        matches!(err, JobStoreError::EnqueueLeasedQueueKey),
+        "expected EnqueueLeasedQueueKey, got {err:?}"
+    );
+}
+
+#[tokio::test]
 async fn enqueue_leased_rejects_non_positive_lease_duration() {
     // Defensive guard: a zero/negative lease duration is a caller bug,
     // not a no-op. The store rejects with InvalidLeaseDeadline before

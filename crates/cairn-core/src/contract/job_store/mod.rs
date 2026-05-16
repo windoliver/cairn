@@ -289,6 +289,18 @@ pub enum JobStoreError {
         /// Human-readable reason.
         reason: String,
     },
+    /// `enqueue_leased` was called with a non-`None` `queue_key`. The
+    /// leased-on-insert path bypasses the FIFO ordering that
+    /// `atomic_lease` enforces (the schema only requires "at most one
+    /// leased row per `queue_key`", not "the oldest queued sibling
+    /// wins"). Accepting a `queue_key` here would let a leased-on-
+    /// insert row overtake an older `queued` sibling with the same
+    /// key. Callers that need queue-key serialization must enqueue
+    /// normally and let the scheduler lease in FIFO order.
+    #[error(
+        "enqueue_leased does not accept queue_key (would bypass FIFO ordering enforced by atomic_lease)"
+    )]
+    EnqueueLeasedQueueKey,
     /// Backend-specific error (`SQLite` I/O, lock contention, etc.).
     #[error("job store backend: {0}")]
     Backend(String),
@@ -353,10 +365,23 @@ pub trait JobStore: Send + Sync {
     /// nonce, and the row's persisted `failure_class` / `dedupe_key`
     /// (both `None` on a fresh insert).
     ///
+    /// **`req.queue_key` must be `None`.** The leased-on-insert path
+    /// bypasses the FIFO ordering that `atomic_lease` enforces in
+    /// SQL; the schema only requires "at most one leased row per
+    /// `queue_key`", not "the oldest queued sibling wins". A leased-
+    /// on-insert row with a `queue_key` could therefore overtake an
+    /// older `queued` sibling that shares the key. Callers that need
+    /// queue-key serialization must use the conventional
+    /// `enqueue` + `lease` pair so the scheduler hands rows out in
+    /// FIFO order. Calls with `queue_key.is_some()` are rejected with
+    /// [`JobStoreError::EnqueueLeasedQueueKey`] before any DB
+    /// mutation.
+    ///
     /// # Errors
     /// - [`JobStoreError::DuplicateDedupeKey`] on `(kind, dedupe_key)` collision.
     /// - [`JobStoreError::InvalidLeaseDeadline`] when `lease_duration_ms <= 0`
     ///   or `now_ms + lease_duration_ms` overflows.
+    /// - [`JobStoreError::EnqueueLeasedQueueKey`] when `req.queue_key.is_some()`.
     /// - [`JobStoreError::Backend`] on backend failure.
     async fn enqueue_leased(
         &self,

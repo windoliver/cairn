@@ -928,6 +928,17 @@ impl JobStore for SqliteJobStore {
                 ),
             });
         }
+        // Issue #92 round-6 finding 6.1: reject queue_key here. The
+        // schema's `workflow_jobs_queue_key_leased_uniq` only enforces
+        // "at most one leased row per queue_key" — FIFO ordering for a
+        // shared queue_key is enforced inside `atomic_lease`, not by
+        // the schema. A leased-on-insert row with `queue_key.is_some()`
+        // would therefore be free to overtake an older `queued` sibling
+        // with the same key. Callers needing queue-key serialization
+        // must enqueue + lease conventionally.
+        if req.queue_key.is_some() {
+            return Err(JobStoreError::EnqueueLeasedQueueKey);
+        }
         let conn = Arc::clone(&self.conn);
         let owner = owner.to_owned();
         tokio::task::spawn_blocking(move || {
