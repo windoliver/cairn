@@ -18,8 +18,8 @@ enum Cmd {
     Latency(cairn_bench::latency::LatencyArgs),
     /// Memory budget gate: measures binary + embedding model against manifest budget.
     Memory(cairn_bench::memory::MemoryArgs),
-    /// Privacy leakage gate (placeholder until Task 8).
-    Privacy,
+    /// Privacy leakage gate: parse fixtures and optionally run them.
+    Privacy(cairn_bench::privacy::PrivacyArgs),
     /// Run latency + memory + privacy and exit non-zero on any failure.
     All {
         /// Skip one or more gates by name (latency, memory, privacy).
@@ -41,7 +41,11 @@ async fn main() -> anyhow::Result<()> {
             let outcome = cairn_bench::memory::run(&args)?;
             std::process::exit(outcome.exit_code().into());
         }
-        Cmd::Privacy | Cmd::All { .. } => {
+        Cmd::Privacy(args) => {
+            let outcome = cairn_bench::privacy::run(&args)?;
+            std::process::exit(outcome.exit_code().into());
+        }
+        Cmd::All { .. } => {
             anyhow::bail!("not implemented yet — wired in later tasks")
         }
     }

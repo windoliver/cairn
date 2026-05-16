@@ -10,5 +10,6 @@ pub mod gates;
 pub mod latency;
 pub mod memory;
 pub mod metrics;
+pub mod privacy;
 pub mod report;
 pub mod scorecard;
