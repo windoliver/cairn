@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "runner": "macos",
+  "captured_at": "2026-05-16T08:47:21.043679+00:00",
+  "commit": "293b9991988dcaf4d77f1ce4f074faa9335f3ce6",
+  "metrics": {
+    "assemble_hot_p95": 104.045,
+    "capture_trace_p95": 87.7684375,
+    "retrieve_p95": 91.592260375,
+    "search_hybrid_p95": 70.7714667,
+    "search_keyword_p95": 68.91628125,
+    "search_semantic_p95": 61.168427125,
+    "wal_apply_p95": 90.0154635,
+    "workflow_enqueue_p95": 89.6142375
+  },
+  "regression_pct": {}
+}

@@ -8,6 +8,13 @@ pub const DEFAULT_REGRESSION_PCT: f64 = 2.0;
 /// Brief §15: p95 turn latency with hot-assembly + write < 50 ms.
 pub const SLO_HOT_PATH_MS: f64 = 50.0;
 
+/// Subprocess wall-clock proxy SLO. The brief §15 50 ms target is the
+/// underlying in-process contract; the bench harness drives verbs via the
+/// `cairn` CLI subprocess (issue #193 will let us flip to in-process), so
+/// the gate enforces a wall-clock proxy that includes process spawn + tokio
+/// runtime init. Tune down toward 50 ms once issue #193 lands.
+pub const SLO_HOT_PATH_SUBPROCESS_MS: f64 = 300.0;
+
 /// Brief §15: p99 turn latency < 100 ms.
 pub const SLO_HOT_PATH_P99_MS: f64 = 100.0;
 

@@ -679,6 +679,7 @@ dependencies = [
  "cairn-sdk",
  "cairn-store-sqlite",
  "cairn-test-fixtures",
+ "chrono",
  "clap",
  "criterion",
  "fs4",

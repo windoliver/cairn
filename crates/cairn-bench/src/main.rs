@@ -14,8 +14,8 @@ struct Cli {
 enum Cmd {
     /// `BrainBench` retrieval-quality scorecard runner.
     Scorecard(cairn_bench::scorecard::ScorecardArgs),
-    /// Latency regression gate (placeholder until Task 4).
-    Latency,
+    /// Latency regression gate: runs criterion, compares to baseline, writes report.
+    Latency(cairn_bench::latency::LatencyArgs),
     /// Memory budget gate (placeholder until Task 6).
     Memory,
     /// Privacy leakage gate (placeholder until Task 8).
@@ -33,7 +33,11 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Scorecard(args) => cairn_bench::scorecard::run(args).await,
-        Cmd::Latency | Cmd::Memory | Cmd::Privacy | Cmd::All { .. } => {
+        Cmd::Latency(args) => {
+            let outcome = cairn_bench::latency::run(&args)?;
+            std::process::exit(outcome.exit_code().into());
+        }
+        Cmd::Memory | Cmd::Privacy | Cmd::All { .. } => {
             anyhow::bail!("not implemented yet — wired in later tasks")
         }
     }
