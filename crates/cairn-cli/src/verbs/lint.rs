@@ -1579,11 +1579,17 @@ fn open_consent_journal(vault_root: &Path) -> anyhow::Result<(SqliteConsentJourn
 
 /// Open a read-only `workflow_jobs` reader for the lint dispatch path
 /// (issue #92, spec §4.8/§4.10/§4.12). Returns `None` when the vault DB
-/// is missing or the connection cannot be opened — the
-/// `workflow_health` check stays on its no-op path, matching the
+/// is missing, the connection cannot be opened, or the reader fails
+/// its construction-time column probe (issue #92 round-6 finding 6.2 —
+/// a vault stuck at migration 0020 has no `dead_letter_at_ms` /
+/// `completed_at_ms` / `failure_class` columns, so the reader's
+/// queries would silently mask the gap with `unwrap_or_default()`).
+/// The `workflow_health` check stays on its no-op path, matching the
 /// consent-journal degraded behaviour. Errors are not propagated to the
 /// caller because workflow health is advisory; a missing reader means
-/// "lint cannot see workflow jobs", not "lint must abort".
+/// "lint cannot see workflow jobs", not "lint must abort". Probe
+/// failures are logged at `warn` so an operator can see why the
+/// check went quiet.
 fn open_workflow_jobs_reader(vault_root: &Path) -> Option<SqliteWorkflowJobsReader> {
     let db_path = vault_root.join(".cairn/cairn.db");
     if !db_path.is_file() {
@@ -1594,7 +1600,16 @@ fn open_workflow_jobs_reader(vault_root: &Path) -> Option<SqliteWorkflowJobsRead
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .ok()?;
-    Some(SqliteWorkflowJobsReader::new(conn))
+    match SqliteWorkflowJobsReader::new(conn) {
+        Ok(reader) => Some(reader),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "workflow_jobs reader construction failed; workflow_health lint check will no-op"
+            );
+            None
+        }
+    }
 }
 
 /// Append a `deferred_check` info finding noting that the
