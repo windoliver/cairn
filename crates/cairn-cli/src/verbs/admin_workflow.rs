@@ -190,12 +190,19 @@ enum DriveOutcome {
 /// Steps (matches `worker.rs::execute_one` for the metric emission
 /// shape, but never dispatches to a handler):
 ///
-/// 1. `store.lease(owner, now_ms, lease_ms)` — try to take a row.
-/// 2. If leased row's `job_id` != our synthetic id OR `kind` does
-///    not start with `SYNTHETIC_KIND_PREFIX`: bail with
-///    `Misrouted`. **No** heartbeat, **no** fail/complete. The
-///    persisted lease will expire after `lease_ms` and the reaper
-///    will reclaim the row for the rightful worker.
+/// 1. `store.lease_specific(&our_job_id, &our_kind, owner, now_ms, lease_ms)`
+///    — atomically claim ONLY the row we enqueued. Round-4 finding:
+///    using `lease()` would let a precheck→lease race hand back a
+///    production row, and the very act of leasing that row already
+///    bumps its `delivery_count` and parks it in `state='leased'`
+///    until the lease expires (potentially tripping the poison guard
+///    on repeated diagnostic runs). `lease_specific` constrains the
+///    UPDATE's WHERE to `(job_id, kind)` so non-matching rows stay
+///    untouched on disk.
+/// 2. If `lease_specific` still somehow returns a row whose id+kind
+///    don't match what we expected: bail with `Misrouted`. **No**
+///    heartbeat, **no** fail/complete. (Belt-and-suspenders — the SQL
+///    WHERE already proved the match for production stores.)
 /// 3. Emit `WorkflowJobStarted` to the metrics sink.
 /// 4. Heartbeat once so `lease_started = 1` (mirrors what a real
 ///    worker does between lease and finalize).
@@ -213,24 +220,30 @@ async fn drive_synthetic_job(
     store: &Arc<dyn JobStore>,
     metrics: &Arc<dyn MetricsSink>,
     expected_job_id: &str,
+    expected_kind: &JobKind,
     owner: &str,
     lease_ms: i64,
     mode: DriveMode<'_>,
 ) -> DriveOutcome {
     let now_ms = wall_ms();
-    let leased: LeasedJob = match store.lease(owner, now_ms, lease_ms).await {
+    let our_job_id = JobId::new(expected_job_id.to_owned());
+    let leased: LeasedJob = match store
+        .lease_specific(&our_job_id, expected_kind, owner, now_ms, lease_ms)
+        .await
+    {
         Ok(Some(j)) => j,
         Ok(None) => return DriveOutcome::NoLeaseAvailable,
-        Err(e) => return DriveOutcome::StoreError(format!("lease: {e}")),
+        Err(e) => return DriveOutcome::StoreError(format!("lease_specific: {e}")),
     };
 
-    // Defense-in-depth post-lease assertion. The precheck blocked the
-    // bulk case (production rows present at start); this catches the
-    // race where `cairn mcp` enqueued a row between precheck and the
-    // lease call above. Abandon WITHOUT heartbeat or fail/complete:
-    // those would consume an attempt or terminate the row we don't
-    // own. The reaper reclaims it after the lease expires.
+    // Belt-and-suspenders post-lease assertion. With `lease_specific`,
+    // a real `JobStore` can ONLY return a row matching the supplied
+    // `(job_id, kind)` — the WHERE clause guarantees it. We keep the
+    // assertion both for defense-in-depth and so a buggy mock /
+    // future store can't silently regress the synthetic diagnostic
+    // into mutating a foreign row.
     if leased.job_id.as_str() != expected_job_id
+        || leased.kind.as_str() != expected_kind.as_str()
         || !leased.kind.as_str().starts_with(SYNTHETIC_KIND_PREFIX)
     {
         return DriveOutcome::Misrouted {
@@ -488,7 +501,17 @@ pub fn run_failing(sub: &ArgMatches, vault_root: &Path) -> ExitCode {
             if std::time::Instant::now() >= deadline {
                 break false;
             }
-            match drive_synthetic_job(&store, &metrics, &job_id_str, &owner, lease_ms, mode).await {
+            match drive_synthetic_job(
+                &store,
+                &metrics,
+                &job_id_str,
+                &kind,
+                &owner,
+                lease_ms,
+                mode,
+            )
+            .await
+            {
                 DriveOutcome::Terminal => break true,
                 DriveOutcome::Requeued => {
                     // Backoff is 1ms so the row should be re-eligible
@@ -612,39 +635,42 @@ pub fn simulate_crash(sub: &ArgMatches, vault_root: &Path) -> ExitCode {
             eprintln!("cairn admin workflow simulate-crash: enqueue: {e}");
             return ExitCode::from(69);
         }
-        let leased = match store.lease("e2e-crash-worker", now_ms, lease_ms).await {
+        // Use lease_specific so the UPDATE's WHERE constrains to
+        // (job_id, kind). Round 4 finding: plain store.lease() is
+        // already a mutation (bumps delivery_count, sets state='leased')
+        // BEFORE the post-lease assertion can refuse — so a misrouted
+        // production row had its delivery budget consumed. lease_specific
+        // atomically refuses (returns Ok(None)) on any non-matching row.
+        let synthetic_kind = JobKind::new(kind_str.clone());
+        let synthetic_id = JobId::new(job_id_str.clone());
+        let leased = match store
+            .lease_specific(
+                &synthetic_id,
+                &synthetic_kind,
+                "e2e-crash-worker",
+                now_ms,
+                lease_ms,
+            )
+            .await
+        {
             Ok(Some(j)) => j,
             Ok(None) => {
-                eprintln!("cairn admin workflow simulate-crash: lease returned None");
+                eprintln!(
+                    "cairn admin workflow simulate-crash: lease_specific returned None — \
+                     synthetic row {job_id_str} was not lease-eligible (state mismatch?)"
+                );
                 return ExitCode::from(69);
             }
             Err(e) => {
-                eprintln!("cairn admin workflow simulate-crash: lease: {e}");
+                eprintln!("cairn admin workflow simulate-crash: lease_specific: {e}");
                 return ExitCode::from(69);
             }
         };
-        // Defense-in-depth: the precheck above blocks the bulk
-        // corruption case (production rows present at start), but a
-        // race with `cairn mcp` could have enqueued a row between
-        // the precheck and our `lease()` call. If the lease returned
-        // a row that isn't ours, abandon it WITHOUT heartbeat/fail —
-        // the lease will expire naturally after `lease_ms` and the
-        // periodic reaper will reclaim it (bumping attempts only if
-        // it had `lease_started = 1`, which it doesn't here). This
-        // is strictly safer than calling heartbeat() and then `fail()`
-        // / `complete()` on a row we didn't enqueue.
-        if leased.job_id.as_str() != job_id_str
-            || !leased.kind.as_str().starts_with(SYNTHETIC_KIND_PREFIX)
-        {
-            eprintln!(
-                "cairn admin workflow simulate-crash: refused — lease returned non-synthetic \
-                 row (job_id={} kind={}); lease will expire and be reaped naturally",
-                leased.job_id, leased.kind,
-            );
-            drop(leased);
-            drop(store);
-            return ExitCode::from(69);
-        }
+        // Belt-and-suspenders: lease_specific's WHERE already enforced
+        // the match, so this should never fire. Keep it as a tripwire
+        // against a future regression that loosens the SQL predicate.
+        debug_assert_eq!(leased.job_id.as_str(), job_id_str);
+        debug_assert!(leased.kind.as_str().starts_with(SYNTHETIC_KIND_PREFIX));
         // Heartbeat so lease_started flips to 1 — this is the "worker
         // started executing then crashed" shape (consumes an attempt
         // on reap).
@@ -827,6 +853,7 @@ pub fn run_succeeding(sub: &ArgMatches, vault_root: &Path) -> ExitCode {
                 &store,
                 &metrics,
                 &job_id_str,
+                &kind,
                 &owner,
                 lease_ms,
                 DriveMode::Complete,
@@ -993,6 +1020,32 @@ mod tests {
             };
             Ok(slot.take())
         }
+        async fn lease_specific(
+            &self,
+            _: &JobId,
+            _: &JobKind,
+            _: &str,
+            _: i64,
+            _: i64,
+        ) -> Result<Option<LeasedJob>, JobStoreError> {
+            // Scripted store ignores the (job_id, kind) constraint and
+            // hands back whatever `next_lease` holds: the diagnostic's
+            // post-lease assertion is what we want to exercise from the
+            // CLI verbs' perspective, mirroring the legacy `lease()`
+            // hook so existing misrouted-row tests still cover the
+            // belt-and-suspenders path.
+            let mut g = match self.log.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            g.lease_calls += 1;
+            drop(g);
+            let mut slot = match self.next_lease.lock() {
+                Ok(s) => s,
+                Err(p) => p.into_inner(),
+            };
+            Ok(slot.take())
+        }
         async fn heartbeat(
             &self,
             _: &JobId,
@@ -1071,6 +1124,7 @@ mod tests {
             &store,
             &metrics,
             "01JZ_OURS_JOB_ULID", // expected != got
+            &JobKind::new("test.e2e.always_retry"),
             "test-owner",
             2_000,
             DriveMode::Fail {
@@ -1113,6 +1167,10 @@ mod tests {
             &store,
             &metrics,
             job_id,
+            // Caller's expected kind is the synthetic one; the mock
+            // hands back a production-kind row to exercise the
+            // belt-and-suspenders assertion.
+            &JobKind::new("test.e2e.always_done"),
             "test-owner",
             2_000,
             DriveMode::Complete,
@@ -1157,6 +1215,7 @@ mod tests {
             &store,
             &metrics,
             "01JZ_ID",
+            &JobKind::new("test.e2e.always_retry"),
             "test-owner",
             2_000,
             DriveMode::Complete,
@@ -1189,6 +1248,7 @@ mod tests {
             &store,
             &metrics,
             job_id,
+            &JobKind::new("test.e2e.always_done"),
             "test-owner",
             2_000,
             DriveMode::Complete,
