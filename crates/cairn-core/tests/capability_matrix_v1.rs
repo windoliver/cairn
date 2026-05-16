@@ -8,6 +8,17 @@
 //! check on the IDL artefacts themselves lives in
 //! `crates/cairn-idl/tests/wire_compat_v1.rs`.
 //!
+//! Per-surface filters: this test pins the *pure* `advertise()` output.
+//! Individual surfaces (CLI, SDK, MCP) may post-filter capabilities
+//! whose dispatch is not yet wired on that specific surface — for
+//! example, `cairn-sdk::transport::advertised_capabilities` strips
+//! `retrieve.session/turn/tool_call` until the SDK transport implements
+//! them end-to-end. Those per-surface filters are pinned by
+//! `crates/cairn-sdk/tests/surface.rs::retrieve_capabilities_filtered_until_sdk_dispatch_is_wired`
+//! (and analogous tests on other surfaces). The `contract-drift` CI
+//! job runs both this matrix *and* the per-surface filter tests so a
+//! drift in either direction (matrix or surface) fails the gate.
+//!
 //! Scenarios:
 //!   A. Full P0 — every gate ON, model + LLM ready, all workflow
 //!      runtimes ready. The expected set lists every capability the
@@ -209,12 +220,19 @@ const BUCKET_DEFERRED_WIRING: &[&str] = &[
     "cairn.mcp.v1.replay.challenge",
 ];
 
-/// v0.1 capability strings the runtime never publishes via the default
-/// status response: alternative-platform sensor backends (advertised
-/// only when the host is on that platform) and extension-namespace
-/// flags advertised via `status.extensions`, not `status.capabilities`.
+/// Extension-namespace capability strings. The bidirectional binding
+/// rule (brief §8.0.a): the namespace appears in `status.extensions`
+/// and the matching capability string is reserved here but is NEVER
+/// published in `status.capabilities` even when the extension is
+/// enabled — the extension is discovered via `status.extensions`. If
+/// a surface ever needs to publish one of these in `status.capabilities`,
+/// that is a contract change and must move to a different bucket.
+const BUCKET_EXTENSION_NAMESPACE_FLAG: &[&str] = &["cairn.mcp.v1.extension.admin"];
+
+/// v0.1 capability strings the default-platform runtime never publishes:
+/// alternative-platform sensor backends (advertised only when the host
+/// is on that specific platform/config combination).
 const BUCKET_NON_DEFAULT: &[&str] = &[
-    "cairn.mcp.v1.extension.admin",
     "cairn.sensor.v1.screen.screenpipe",
     "cairn.sensor.v1.screen.ocr.vision",
     "cairn.sensor.v1.screen.ocr.winrt",
@@ -228,6 +246,12 @@ fn capability_to_string(cap: Capabilities) -> String {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "5-bucket reconciliation: each bucket is one named HashSet plus three \
+              sanity passes (membership, pairwise disjoint, full cover). Splitting \
+              would hide the cross-bucket invariants in helpers and add no clarity."
+)]
 fn every_v01_capability_is_classified_exactly_once() {
     // Reconciliation gate (issue #98, round-3 Codex review): every v0.1
     // capability declared by `crates/cairn-idl/schema/capabilities/capabilities.json`
@@ -235,7 +259,9 @@ fn every_v01_capability_is_classified_exactly_once() {
     //   - `expected_full_p0()` — advertised in the default-P0 status response.
     //   - `BUCKET_SURFACE_SENSORS_DEFAULT` — appended by `default_sensor_capabilities()`.
     //   - `BUCKET_DEFERRED_WIRING` — held back behind a `*_WIRED = false` flag.
-    //   - `BUCKET_NON_DEFAULT` — platform-alternative sensors or extension flags.
+    //   - `BUCKET_EXTENSION_NAMESPACE_FLAG` — extension namespace flags
+    //     advertised via `status.extensions`, never via `status.capabilities`.
+    //   - `BUCKET_NON_DEFAULT` — platform-alternative sensor backends.
     //
     // A future PR that adds a new v0.1 capability string MUST also add
     // a row here (and either flip a wiring flag or leave it deferred,
@@ -287,6 +313,10 @@ fn every_v01_capability_is_classified_exactly_once() {
         .iter()
         .map(|s| (*s).to_owned())
         .collect();
+    let extension_flags: HashSet<String> = BUCKET_EXTENSION_NAMESPACE_FLAG
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
     let non_default: HashSet<String> = BUCKET_NON_DEFAULT
         .iter()
         .map(|s| (*s).to_owned())
@@ -294,7 +324,13 @@ fn every_v01_capability_is_classified_exactly_once() {
 
     // Sanity 1: every bucket entry must actually be a v0.1 entry in the
     // schema. Catches typos and stale entries left after a deprecation.
-    for bucket in [&advertised, &surface_sensors, &deferred, &non_default] {
+    for bucket in [
+        &advertised,
+        &surface_sensors,
+        &deferred,
+        &extension_flags,
+        &non_default,
+    ] {
         for cap in bucket {
             assert!(
                 v01_strings.contains(cap),
@@ -307,10 +343,11 @@ fn every_v01_capability_is_classified_exactly_once() {
 
     // Sanity 2: buckets must be pairwise disjoint. A capability cannot
     // be both advertised and deferred at the same time.
-    let buckets: [(&str, &HashSet<String>); 4] = [
+    let buckets: [(&str, &HashSet<String>); 5] = [
         ("advertised_full_p0", &advertised),
         ("surface_sensors_default", &surface_sensors),
         ("deferred_wiring", &deferred),
+        ("extension_namespace_flag", &extension_flags),
         ("non_default", &non_default),
     ];
     for (i, (name_i, bucket_i)) in buckets.iter().enumerate() {
@@ -330,6 +367,7 @@ fn every_v01_capability_is_classified_exactly_once() {
         .iter()
         .chain(surface_sensors.iter())
         .chain(deferred.iter())
+        .chain(extension_flags.iter())
         .chain(non_default.iter())
         .cloned()
         .collect();
@@ -338,8 +376,8 @@ fn every_v01_capability_is_classified_exactly_once() {
         missing.is_empty(),
         "v0.1 capabilities declared in capabilities.json have no classification: {missing:?}. \
          Add each one to exactly one of expected_full_p0() / BUCKET_SURFACE_SENSORS_DEFAULT / \
-         BUCKET_DEFERRED_WIRING / BUCKET_NON_DEFAULT. The contract version cannot grow \
-         silently — issue #98."
+         BUCKET_DEFERRED_WIRING / BUCKET_EXTENSION_NAMESPACE_FLAG / BUCKET_NON_DEFAULT. The \
+         contract version cannot grow silently — issue #98."
     );
     let extra: HashSet<&String> = union.difference(&v01_strings).collect();
     assert!(

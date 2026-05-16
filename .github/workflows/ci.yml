@@ -267,6 +267,8 @@ jobs:
         run: cargo-nextest nextest run -p cairn-cli --test status_snapshot_insta --locked
       - name: per-surface CLI ↔ SDK parity
         run: cargo-nextest nextest run -p cairn-cli --test sdk_cli_parity --locked
+      - name: per-surface SDK transport capability filter
+        run: cargo-nextest nextest run -p cairn-sdk --test surface --locked -E 'test(advertises) | test(filtered_until)'
       - name: per-surface MCP initialize ↔ status parity
         run: cargo-nextest nextest run -p cairn-mcp --test init_status_parity --locked
 
