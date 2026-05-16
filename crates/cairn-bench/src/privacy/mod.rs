@@ -52,7 +52,13 @@ pub fn run(args: &PrivacyArgs) -> anyhow::Result<GateOutcome> {
 
     let mut total_failures = Vec::new();
     let mut passed = 0_usize;
+    let mut deferred = 0_usize;
     for (path, f) in &fixtures {
+        if f.deferred {
+            deferred += 1;
+            println!("[DEFERRED] {} — {}", path.display(), f.scenario);
+            continue;
+        }
         let failures = harness::run_fixture(f)?;
         if failures.is_empty() {
             passed += 1;
@@ -73,6 +79,7 @@ pub fn run(args: &PrivacyArgs) -> anyhow::Result<GateOutcome> {
         schema_version: 1,
         fixtures_run: fixtures.len(),
         fixtures_passed: passed,
+        fixtures_deferred: deferred,
         ok: total_failures.is_empty(),
         failures: total_failures,
     };

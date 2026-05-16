@@ -44,13 +44,15 @@ pub struct FailureReport {
 pub struct PrivacyReport {
     /// Schema version; currently `1`.
     pub schema_version: u32,
-    /// Total number of fixtures evaluated.
+    /// Total number of fixtures loaded (includes deferred).
     pub fixtures_run: usize,
-    /// Number of fixtures with zero assertion failures.
+    /// Number of non-deferred fixtures that executed with zero assertion failures.
     pub fixtures_passed: usize,
-    /// `true` iff all fixtures passed.
+    /// Number of fixtures skipped because `deferred: true`.
+    pub fixtures_deferred: usize,
+    /// `true` iff all non-deferred fixtures passed.
     pub ok: bool,
-    /// All assertion failures across all fixtures.
+    /// All assertion failures across all non-deferred fixtures.
     pub failures: Vec<FailureReport>,
 }
 

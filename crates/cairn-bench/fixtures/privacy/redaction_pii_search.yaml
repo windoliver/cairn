@@ -1,0 +1,33 @@
+# P0 Privacy fixture 3 — §14 PII redaction: search must not surface raw PII
+#
+# DEFERRED at v0.1: no automatic PII redaction at ingest time.
+# At v0.1, cairn ingest stores the body verbatim; there is no `cairn redact`
+# CLI surface. When Presidio-backed redaction lands (P1+), this fixture should
+# be enabled by removing `deferred: true` and verifying the assertion passes.
+#
+# Hypothesis being registered: after ingesting a record whose body contains
+# a PII email address, a keyword search for that email must NOT surface the
+# record (because the body should have been redacted at ingest).
+#
+# At v0.1 this assertion would FAIL (the email is stored verbatim and is
+# findable via FTS). Marking deferred so the runner reports it as a documented
+# gap rather than a gate failure.
+scenario: redaction_pii_search
+description: |
+  §14 PII redaction (DEFERRED — no auto-redact at ingest in v0.1).
+  Asserts that search for a raw email address does not surface the record.
+  Unblock when Presidio pre-persist redaction is wired (P1+).
+deferred: true
+setup:
+  records:
+    - id: rec_pii_search
+      kind: reference
+      body: "Contact email jane.doe@example-privacy-test.com for details"
+operations: []
+assertions:
+  search:
+    # v0.1 gap: this WOULD fail because the email is stored verbatim.
+    # Deferred so the runner skips rather than blocking the gate.
+    - mode: keyword
+      query: "jane.doe@example-privacy-test.com"
+      must_not_contain_id: rec_pii_search

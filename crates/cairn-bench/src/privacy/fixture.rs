@@ -123,6 +123,11 @@ pub struct PrivacyFixture {
     pub scenario: String,
     /// Human-readable description (brief section reference encouraged).
     pub description: String,
+    /// When `true`, the runner reports this fixture as `[DEFERRED]` and does
+    /// NOT count assertion failures toward the gate pass/fail. Use for
+    /// capabilities not wired at v0.1 (PII redaction, consent revoke, etc.).
+    #[serde(default)]
+    pub deferred: bool,
     /// Records to ingest as precondition.
     pub setup: SetupBlock,
     /// Privacy operations to apply after setup.
@@ -193,10 +198,30 @@ assertions:
     fn parses_minimal_fixture() {
         let f: PrivacyFixture = yaml_serde::from_str(SAMPLE).unwrap();
         assert_eq!(f.scenario, "forget_record_visibility");
+        assert!(!f.deferred, "deferred defaults to false");
         assert_eq!(f.setup.records.len(), 1);
         assert!(matches!(&f.operations[0], FixtureOp::Forget { mode, .. } if mode == "record"));
         assert_eq!(f.assertions.search.len(), 1);
         assert_eq!(f.assertions.indexes[0].table, "record_fts");
+    }
+
+    #[test]
+    fn parses_deferred_fixture() {
+        let src = r#"
+scenario: consent_revoke_invalidates
+description: "deferred: no CLI revoke at v0.1"
+deferred: true
+setup:
+  records:
+    - id: rec_d
+      kind: reference
+      body: "deferred body"
+operations: []
+assertions: {}
+"#;
+        let f: PrivacyFixture = yaml_serde::from_str(src).unwrap();
+        assert!(f.deferred);
+        assert_eq!(f.scenario, "consent_revoke_invalidates");
     }
 
     #[test]

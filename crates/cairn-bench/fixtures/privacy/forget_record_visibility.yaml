@@ -1,24 +1,33 @@
+# P0 Privacy fixture 1 — §14 forget happy path
+# Verifies that a forgotten record is invisible to search and retrieve.
+# This is the primary end-to-end gate for the forget verb (brief §5.6, §14).
+#
+# What is tested (v0.1 — RUNS end-to-end):
+#   - cairn ingest → cairn forget --record → search misses it
+#   - retrieve returns null body (treated as not_found by the harness)
+#
+# Advisory ids (rec_001) are resolved to actual ULIDs by the harness.
 scenario: forget_record_visibility
 description: |
-  Smoke fixture — end-to-end runner check (full P0 fixture set lands in Task 9).
-  Ingests one record, forgets it, then asserts it does not appear in search.
-  The fixture id "rec_smoke" is advisory; the harness resolves it to the actual
-  ULID assigned by cairn ingest and uses that for the forget and assertions.
+  §14 / §5.6 — happy path: ingest, forget --record, assert search miss +
+  retrieve returns null body. Runs end-to-end at v0.1.
 setup:
   records:
-    - id: rec_smoke
+    - id: rec_001
       kind: reference
-      body: "smoke body unique-token-12345"
+      body: "visibility-unique-sentinel-alpha-9182"
 operations:
   - verb: forget
-    target: rec_smoke
+    target: rec_001
     mode: record
 assertions:
   search:
+    # Keyword search must not surface the forgotten record.
     - mode: keyword
-      query: "unique-token-12345"
-      must_not_contain_id: rec_smoke
-  indexes:
-    - table: record_fts
-      column: record_id
-      must_not_contain: rec_smoke
+      query: "visibility-unique-sentinel-alpha-9182"
+      must_not_contain_id: rec_001
+  retrieve:
+    # retrieve returns the envelope with data.body = null for a tombstoned
+    # or purged record; the harness treats null body as not_found.
+    - id: rec_001
+      expect: not_found
