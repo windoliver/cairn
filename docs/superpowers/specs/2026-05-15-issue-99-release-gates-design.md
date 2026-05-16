@@ -201,15 +201,17 @@ Optional per-metric `regression_pct` override fields are accepted for cases wher
 
 Static artifact sizes only. No runtime RSS sampling.
 
-| Component | Source | §19 budget |
-|---|---|---|
-| Rust core binary | `target/release/cairn` (stripped) | ~15 MB |
-| Embedding model | model file resolved via `cairn-embeddings-local::ensure_model` | ~25 MB |
-| sherpa-onnx runtime + models | `cairn-sensors-local` voice deps (resolved transitively) | ~100 MB |
-| Default screen backend | `xcap` + OS OCR (0 on macOS Vision, ~20 MB Linux tesseract) | ~20 MB |
-| Screenpipe (opt-in) | counted only under `--features screenpipe-runtime` | ~500 MB |
-| **Always-on default total** | sum of first four | **~160 MB** |
-| **With screenpipe** | + screenpipe | **~660 MB** |
+**P0 scope.** Brief §19 budgets include four categories of asset: the Rust core binary, the embedding model, sherpa-onnx runtime + models, and the default screen backend (xcap + OS OCR). Of these, only the first two are inspectable from a clean `cargo build --release` + `cairn bootstrap` cycle on a CI runner — sherpa-onnx and screen backends ship as external runtime deps without a stable public path helper at v0.1. The P0 gate therefore enforces only the binary + downloaded embedding model; the other categories ship as a follow-up issue (filed during the implementation PR). The manifest format below already supports them so the follow-up is a one-file edit.
+
+| Component | Source | §19 budget | P0 enforced? |
+|---|---|---|---|
+| Rust core binary | `target/release/cairn` (stripped) | ~15 MB | yes |
+| Embedding model | model file under `.cairn/models/` after first `cairn bootstrap` | ~25 MB | yes |
+| sherpa-onnx runtime + models | external runtime dep, no stable path helper today | ~100 MB | no (deferred) |
+| Default screen backend | `xcap` + OS OCR (0 on macOS Vision, ~20 MB Linux tesseract) | ~20 MB | no (deferred) |
+| Screenpipe (opt-in) | counted only under `--features screenpipe-runtime` | ~500 MB | no (deferred) |
+| **Always-on default total (P0 gate)** | binary + model | **~40 MB** | yes |
+| **Brief §19 design target (full system)** | sum of all four | ~160 MB | informational |
 
 ### 5.2 Mechanism
 
@@ -220,25 +222,25 @@ Static artifact sizes only. No runtime RSS sampling.
 
 ### 5.3 Manifest
 
-`crates/cairn-bench/manifests/memory.toml`:
+`crates/cairn-bench/manifests/memory.toml`. The manifest schema accepts both enforced and deferred entries; deferred entries carry `enforced = false` and are not counted against the total or per-asset tolerance.
 
 ```toml
 [profile.default]
 binary = "target/release/cairn"
 assets = [
-  { source = "embedding_model", expected_mb = 25 },
-  { source = "sherpa_onnx_voice", expected_mb = 100 },
-  { source = "screen_default", expected_mb = 20 },
+  { source = "embedding_model", expected_mb = 25, enforced = true },
+  { source = "sherpa_onnx_voice", expected_mb = 100, enforced = false },
+  { source = "screen_default", expected_mb = 20, enforced = false },
 ]
-budget_mb = 200       # §19 ~160 MB + headroom
+budget_mb = 80        # P0 enforced floor (~40 MB measured + headroom). Brief §19 ~160 MB target documented above.
 
 [profile.screenpipe]
 extends = "default"
 features = ["screenpipe-runtime"]
 assets_add = [
-  { source = "screenpipe_runtime", expected_mb = 500 },
+  { source = "screenpipe_runtime", expected_mb = 500, enforced = false },
 ]
-budget_mb = 700       # §19 ~660 MB + headroom
+budget_mb = 80
 ```
 
 ### 5.4 Per-asset check
