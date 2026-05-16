@@ -1,0 +1,24 @@
+scenario: forget_record_visibility
+description: |
+  Smoke fixture — end-to-end runner check (full P0 fixture set lands in Task 9).
+  Ingests one record, forgets it, then asserts it does not appear in search.
+  The fixture id "rec_smoke" is advisory; the harness resolves it to the actual
+  ULID assigned by cairn ingest and uses that for the forget and assertions.
+setup:
+  records:
+    - id: rec_smoke
+      kind: reference
+      body: "smoke body unique-token-12345"
+operations:
+  - verb: forget
+    target: rec_smoke
+    mode: record
+assertions:
+  search:
+    - mode: keyword
+      query: "unique-token-12345"
+      must_not_contain_id: rec_smoke
+  indexes:
+    - table: record_fts
+      column: record_id
+      must_not_contain: rec_smoke
