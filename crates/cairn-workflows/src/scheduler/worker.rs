@@ -7,7 +7,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use cairn_core::contract::job_store::{FailDisposition, FailureClass, JobStore, LeasedJob};
+use cairn_core::contract::job_store::{FailDisposition, FailureClass, JobId, JobStore, LeasedJob};
 use cairn_core::contract::metrics::MetricsSink;
 use cairn_core::domain::metrics::MetricEvent;
 use tokio::time::{sleep, timeout};
@@ -230,8 +230,21 @@ async fn execute_one(
         })
     };
 
+    // Round-3 finding 3.3: convert scheduler-only classes returned by
+    // a buggy handler (`Timeout`, `LeaseLost`) into a terminal
+    // `Validation` permanent failure at runtime. The previous version
+    // relied on `debug_assert!` downstream of this `select!`, which
+    // release builds skip — a release-mode handler that returns one
+    // of those classes would persist it through `store.fail`,
+    // breaking the spec §4.2 provenance invariant ("`Timeout` /
+    // `LeaseLost` only come from the scheduler").
+    //
+    // The `cancel.cancelled()` and `lease_lost.cancelled()` arms
+    // legitimately produce scheduler-only classes (`Transient` for
+    // shutdown, `Timeout` for lease loss) and MUST NOT go through the
+    // sanitizer — those *are* scheduler-internal.
     let outcome = tokio::select! {
-        o = handler.handle(&leased.payload) => o,
+        o = handler.handle(&leased.payload) => sanitize_handler_outcome(o, &leased.job_id),
         () = cancel.cancelled() => HandlerOutcome::Retry {
             reason: "scheduler shutdown".into(),
             class: FailureClass::Transient,
@@ -277,15 +290,16 @@ async fn execute_one(
             }
         }
         HandlerOutcome::Retry { reason, class } => {
-            // Handlers must not return scheduler-only classes; the
-            // shutdown arm uses Transient and the lease-loss arm uses
-            // Timeout, which is scheduler-only but stamped here, not
-            // by the handler. Anything else flowing through this arm
-            // with a scheduler-only class is a bug.
-            debug_assert!(
-                !class.is_scheduler_only() || class == FailureClass::Timeout,
-                "handler returned scheduler-only class {class:?}",
-            );
+            // Handler-returned scheduler-only classes have already been
+            // converted to `Permanent { class: Validation, ... }` by
+            // `sanitize_handler_outcome` upstream. The two legitimate
+            // scheduler-stamped arrivals here are:
+            //   * `Transient` from the `cancel.cancelled()` arm
+            //     (shutdown).
+            //   * `Timeout` from the `lease_lost.cancelled()` arm
+            //     (deadline/heartbeat-loss).
+            // Both are correct — the sanitizer never sees those paths.
+            //
             // Invariant: Validation/Poison force Permanent regardless of
             // handler-supplied disposition (spec §4.2).
             let disposition = if class.forces_permanent() {
@@ -313,9 +327,13 @@ async fn execute_one(
             }
         }
         HandlerOutcome::Permanent { reason, class } => {
+            // Sanitizer upstream already converted any handler-returned
+            // scheduler-only class into a `Permanent { Validation, ... }`,
+            // so reaching this arm with `class.is_scheduler_only()` true
+            // would be a bug *in the sanitizer*. Belt-and-suspenders.
             debug_assert!(
                 !class.is_scheduler_only(),
-                "handler returned scheduler-only class {class:?} on Permanent",
+                "sanitizer bug: scheduler-only class {class:?} reached Permanent arm",
             );
             let fail_res = store
                 .fail(
@@ -344,6 +362,51 @@ async fn execute_one(
                 }
             }
         }
+    }
+}
+
+/// Runtime guard on the spec §4.2 provenance invariant: handlers must
+/// never return `FailureClass::Timeout` or `FailureClass::LeaseLost`
+/// — those classes mean "the scheduler observed the lease expired"
+/// and are stamped by the scheduler itself on the
+/// `lease_lost.cancelled()` arm of `execute_one`. A handler that
+/// returns one of them anyway is buggy: persisting that class through
+/// `store.fail` would lie about provenance to dashboards, alerts, and
+/// the `workflow_health` lint.
+///
+/// This sits between `handler.handle()` and the result handling in
+/// `execute_one`. Release builds can't rely on a `debug_assert!` to
+/// catch this — the assertion is compiled out. So instead we convert
+/// the outcome to `Permanent { class: Validation, reason: "..." }`
+/// and `warn!` so the operator can locate the buggy handler.
+///
+/// **Not** applied to scheduler-internal arms — `cancel.cancelled()`
+/// and `lease_lost.cancelled()` legitimately produce scheduler-only
+/// classes and call this function NOT from the handler future.
+#[must_use]
+fn sanitize_handler_outcome(outcome: HandlerOutcome, job_id: &JobId) -> HandlerOutcome {
+    let class = match &outcome {
+        HandlerOutcome::Done => return outcome,
+        HandlerOutcome::Retry { class, .. } | HandlerOutcome::Permanent { class, .. } => *class,
+    };
+    if !class.is_scheduler_only() {
+        return outcome;
+    }
+    let orig_reason = match &outcome {
+        HandlerOutcome::Retry { reason, .. } | HandlerOutcome::Permanent { reason, .. } => {
+            reason.clone()
+        }
+        HandlerOutcome::Done => String::new(),
+    };
+    warn!(
+        job = %job_id,
+        returned_class = ?class,
+        reason = %orig_reason,
+        "handler returned scheduler-only failure class; coercing to Permanent/Validation"
+    );
+    HandlerOutcome::Permanent {
+        reason: format!("handler returned scheduler-only class {class:?}: {orig_reason}"),
+        class: FailureClass::Validation,
     }
 }
 
@@ -629,5 +692,242 @@ mod tests {
             got_disposition, expected,
             "class {class:?} must produce disposition {expected:?}",
         );
+    }
+
+    // ---- round-3 finding 3.3: sanitizer suite -----------------------
+    //
+    // Handlers must NEVER return `FailureClass::Timeout` or
+    // `FailureClass::LeaseLost`; both are scheduler-only (spec §4.2).
+    // Round 2 enforced this with a `debug_assert!`, which release
+    // builds skip. The round-3 sanitizer converts these to
+    // `Permanent { class: Validation, ... }` at runtime so a buggy
+    // handler can't break the on-disk provenance invariant.
+
+    /// Handler that returns `HandlerOutcome::Retry { class }` —
+    /// reused below for both the round-2 `Retry` cases (above) and the
+    /// round-3 sanitizer cases (below).
+    #[rstest]
+    #[case(FailureClass::Timeout)]
+    #[case(FailureClass::LeaseLost)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sanitizer_converts_handler_scheduler_only_class_on_retry(
+        #[case] bogus_class: FailureClass,
+    ) {
+        // Pre-condition: this test exercises the sanitizer; the input
+        // class MUST be scheduler-only or the test would be vacuous.
+        assert!(
+            bogus_class.is_scheduler_only(),
+            "test setup error: {bogus_class:?} must be scheduler-only",
+        );
+        let store_cap = Arc::new(CapturingStore::new());
+        let store_dyn: Arc<dyn JobStore> = store_cap.clone();
+        let registry = HandlerRegistryBuilder::default()
+            .with(Arc::new(ClassRetryHandler(bogus_class)))
+            .build();
+        let clock = Arc::new(MockClock::at(1_000)) as Arc<dyn Clock>;
+        let cancel = CancellationToken::new();
+        let leased = LeasedJob {
+            job_id: JobId::new("j-1"),
+            kind: JobKind::new("test.class"),
+            payload: vec![],
+            attempts: 1,
+            retry: RetryPolicy::DEFAULT,
+            lease: LeaseToken {
+                owner: "w-0".into(),
+                nonce: "n-0".into(),
+                expires_at_ms: 30_000,
+            },
+            failure_class: None,
+            not_before_ms: 0,
+            dedupe_key: None,
+        };
+        let config = WorkerConfig {
+            lease_ms: 30_000,
+            heartbeat_every_ms: 10_000,
+            idle_poll_ms: 50,
+        };
+        let metrics: Arc<dyn cairn_core::contract::metrics::MetricsSink> =
+            Arc::new(cairn_core::contract::metrics::NoopMetricsSink);
+        execute_one(
+            &store_dyn, &registry, &clock, &cancel, &leased, &config, &metrics,
+        )
+        .await;
+        let fails = match store_cap.fails.lock() {
+            Ok(g) => g.clone(),
+            Err(p) => p.into_inner().clone(),
+        };
+        assert_eq!(fails.len(), 1, "exactly one fail call expected");
+        let (got_disposition, got_class) = fails[0];
+        assert_eq!(
+            got_disposition,
+            FailDisposition::Permanent,
+            "scheduler-only class from handler must terminate the row",
+        );
+        assert_eq!(
+            got_class,
+            FailureClass::Validation,
+            "sanitizer must coerce scheduler-only class to Validation",
+        );
+    }
+
+    /// Handler that always returns `Permanent` with the configured
+    /// class — for sanitizer coverage of the `Permanent` outcome arm.
+    struct ClassPermanentHandler(FailureClass);
+    #[async_trait::async_trait]
+    impl JobHandler for ClassPermanentHandler {
+        fn kind(&self) -> JobKind {
+            JobKind::new("test.class")
+        }
+        async fn handle(&self, _: &JobPayload) -> HandlerOutcome {
+            HandlerOutcome::Permanent {
+                reason: "x".into(),
+                class: self.0,
+            }
+        }
+    }
+
+    #[rstest]
+    #[case(FailureClass::Timeout)]
+    #[case(FailureClass::LeaseLost)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sanitizer_converts_handler_scheduler_only_class_on_permanent(
+        #[case] bogus_class: FailureClass,
+    ) {
+        // Same as above but the handler returns `Permanent`; sanitizer
+        // must catch both `Retry` and `Permanent` variants.
+        let store_cap = Arc::new(CapturingStore::new());
+        let store_dyn: Arc<dyn JobStore> = store_cap.clone();
+        let registry = HandlerRegistryBuilder::default()
+            .with(Arc::new(ClassPermanentHandler(bogus_class)))
+            .build();
+        let clock = Arc::new(MockClock::at(1_000)) as Arc<dyn Clock>;
+        let cancel = CancellationToken::new();
+        let leased = LeasedJob {
+            job_id: JobId::new("j-1"),
+            kind: JobKind::new("test.class"),
+            payload: vec![],
+            attempts: 1,
+            retry: RetryPolicy::DEFAULT,
+            lease: LeaseToken {
+                owner: "w-0".into(),
+                nonce: "n-0".into(),
+                expires_at_ms: 30_000,
+            },
+            failure_class: None,
+            not_before_ms: 0,
+            dedupe_key: None,
+        };
+        let config = WorkerConfig {
+            lease_ms: 30_000,
+            heartbeat_every_ms: 10_000,
+            idle_poll_ms: 50,
+        };
+        let metrics: Arc<dyn cairn_core::contract::metrics::MetricsSink> =
+            Arc::new(cairn_core::contract::metrics::NoopMetricsSink);
+        execute_one(
+            &store_dyn, &registry, &clock, &cancel, &leased, &config, &metrics,
+        )
+        .await;
+        let fails = match store_cap.fails.lock() {
+            Ok(g) => g.clone(),
+            Err(p) => p.into_inner().clone(),
+        };
+        assert_eq!(fails.len(), 1, "exactly one fail call expected");
+        let (got_disposition, got_class) = fails[0];
+        assert_eq!(got_disposition, FailDisposition::Permanent);
+        assert_eq!(
+            got_class,
+            FailureClass::Validation,
+            "sanitizer must coerce scheduler-only class to Validation",
+        );
+    }
+
+    /// Pure-function check that the sanitizer:
+    /// 1. Passes through legal handler outcomes unchanged.
+    /// 2. Embeds the original reason in the rewritten error message
+    ///    so the operator can locate the buggy handler from the
+    ///    on-disk `last_error`.
+    #[test]
+    fn sanitize_handler_outcome_pure_behaviour() {
+        // Legal Done — pass-through.
+        let job = JobId::new("j-1");
+        let out = sanitize_handler_outcome(HandlerOutcome::Done, &job);
+        assert!(matches!(out, HandlerOutcome::Done));
+
+        // Legal handler class (Transient) — pass-through.
+        let out = sanitize_handler_outcome(
+            HandlerOutcome::Retry {
+                reason: "blip".into(),
+                class: FailureClass::Transient,
+            },
+            &job,
+        );
+        match out {
+            HandlerOutcome::Retry { class, reason } => {
+                assert_eq!(class, FailureClass::Transient);
+                assert_eq!(reason, "blip");
+            }
+            other => panic!("expected Retry pass-through, got {other:?}"),
+        }
+
+        // Legal Validation Permanent — pass-through.
+        let out = sanitize_handler_outcome(
+            HandlerOutcome::Permanent {
+                reason: "bad schema".into(),
+                class: FailureClass::Validation,
+            },
+            &job,
+        );
+        assert!(matches!(
+            out,
+            HandlerOutcome::Permanent {
+                class: FailureClass::Validation,
+                ..
+            }
+        ));
+
+        // Bug: handler returned Timeout on Retry → Permanent/Validation.
+        let out = sanitize_handler_outcome(
+            HandlerOutcome::Retry {
+                reason: "i.am.buggy".into(),
+                class: FailureClass::Timeout,
+            },
+            &job,
+        );
+        match out {
+            HandlerOutcome::Permanent { reason, class } => {
+                assert_eq!(class, FailureClass::Validation);
+                assert!(
+                    reason.contains("scheduler-only"),
+                    "rewritten reason must mention scheduler-only: {reason}"
+                );
+                assert!(
+                    reason.contains("Timeout"),
+                    "rewritten reason must mention the original class: {reason}"
+                );
+                assert!(
+                    reason.contains("i.am.buggy"),
+                    "rewritten reason must embed the original handler reason: {reason}"
+                );
+            }
+            other => panic!("expected Permanent/Validation, got {other:?}"),
+        }
+
+        // Bug: handler returned LeaseLost on Permanent → Permanent/Validation.
+        let out = sanitize_handler_outcome(
+            HandlerOutcome::Permanent {
+                reason: "p.bug".into(),
+                class: FailureClass::LeaseLost,
+            },
+            &job,
+        );
+        match out {
+            HandlerOutcome::Permanent { reason, class } => {
+                assert_eq!(class, FailureClass::Validation);
+                assert!(reason.contains("LeaseLost"), "got: {reason}");
+                assert!(reason.contains("p.bug"), "got: {reason}");
+            }
+            other => panic!("expected Permanent/Validation, got {other:?}"),
+        }
     }
 }
