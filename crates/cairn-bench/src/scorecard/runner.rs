@@ -4,11 +4,11 @@
 
 use std::sync::{Arc, Mutex};
 
-use anyhow::Context;
 use crate::adapter::{
     Adapter, Bm25Adapter, GraphHybridAdapter, HybridAdapter, VectorAdapter, extract_link_graph,
     ingest_pages,
 };
+use anyhow::Context;
 // `ingest_text_for` is only consumed by the gated `openai` adapter path
 // (`run_hybrid_openai_adapter`); importing it unconditionally would
 // regress to the dead-code warning under the default feature set.
@@ -82,8 +82,7 @@ pub(super) async fn run(args: super::ScorecardArgs) -> anyhow::Result<()> {
         cache.save(&args.cache).context("save embed cache")?;
     }
 
-    crate::report::write_report(&args.out_dir, &fixture, &all_runs)
-        .context("write report")?;
+    crate::report::write_report(&args.out_dir, &fixture, &all_runs).context("write report")?;
     Ok(())
 }
 

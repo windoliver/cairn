@@ -61,7 +61,11 @@ pub fn compare(measured: &BTreeMap<String, f64>, baseline: &Baseline) -> Latency
 
     for (bench, measured_ms) in measured {
         let slo = slo_ms(bench);
-        let baseline_ms = baseline.metrics.get(bench).copied().unwrap_or(f64::INFINITY);
+        let baseline_ms = baseline
+            .metrics
+            .get(bench)
+            .copied()
+            .unwrap_or(f64::INFINITY);
         let regression_threshold = baseline.regression_threshold_ms(bench);
         let slo_ok = *measured_ms <= slo;
         let regression_ok = *measured_ms <= regression_threshold;
@@ -101,7 +105,11 @@ pub fn compare(measured: &BTreeMap<String, f64>, baseline: &Baseline) -> Latency
 /// Convert a report to a [`GateOutcome`].
 #[must_use]
 pub fn outcome_from_report(r: &LatencyReport) -> GateOutcome {
-    if r.ok { GateOutcome::Pass } else { GateOutcome::Fail }
+    if r.ok {
+        GateOutcome::Pass
+    } else {
+        GateOutcome::Fail
+    }
 }
 
 /// Parse criterion's `estimates.json` files. Returns bench-name → median ms.
@@ -135,10 +143,7 @@ pub fn parse_criterion_dir(criterion_dir: &Path) -> anyhow::Result<BTreeMap<Stri
             .and_then(|m| m.get("point_estimate"))
             .and_then(serde_json::Value::as_f64)
             .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "missing median.point_estimate in {}",
-                    estimates.display()
-                )
+                anyhow::anyhow!("missing median.point_estimate in {}", estimates.display())
             })?;
         let ms = ns / 1_000_000.0;
         let bench = path

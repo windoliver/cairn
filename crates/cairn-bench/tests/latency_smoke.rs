@@ -14,7 +14,9 @@ fn comparator_emits_failure_when_measured_exceeds_baseline_plus_2pct() {
         runner: "test".into(),
         captured_at: "now".into(),
         commit: "x".into(),
-        metrics: [("assemble_hot_p95".to_string(), 4.0)].into_iter().collect(),
+        metrics: [("assemble_hot_p95".to_string(), 4.0)]
+            .into_iter()
+            .collect(),
         regression_pct: BTreeMap::new(),
     };
     let r = compare(&measured, &baseline);
@@ -31,7 +33,9 @@ fn comparator_emits_failure_when_measured_exceeds_slo() {
         runner: "test".into(),
         captured_at: "now".into(),
         commit: "x".into(),
-        metrics: [("assemble_hot_p95".to_string(), 320.0)].into_iter().collect(),
+        metrics: [("assemble_hot_p95".to_string(), 320.0)]
+            .into_iter()
+            .collect(),
         regression_pct: BTreeMap::new(),
     };
     let r = compare(&measured, &baseline);
@@ -47,7 +51,9 @@ fn comparator_passes_when_under_both_thresholds() {
         runner: "test".into(),
         captured_at: "now".into(),
         commit: "x".into(),
-        metrics: [("assemble_hot_p95".to_string(), 100.0)].into_iter().collect(),
+        metrics: [("assemble_hot_p95".to_string(), 100.0)]
+            .into_iter()
+            .collect(),
         regression_pct: BTreeMap::new(),
     };
     let r = compare(&measured, &baseline);

@@ -37,10 +37,7 @@ fn main() {
 
     // Emit the path even if the binary doesn't exist yet — it will be built
     // alongside the bench binary by `cargo bench`.
-    println!(
-        "cargo:rustc-env=CAIRN_BIN_PATH={}",
-        cairn_path.display()
-    );
+    println!("cargo:rustc-env=CAIRN_BIN_PATH={}", cairn_path.display());
     println!("cargo:rerun-if-env-changed=CARGO_BIN_EXE_cairn");
     println!("cargo:rerun-if-changed=build.rs");
 }

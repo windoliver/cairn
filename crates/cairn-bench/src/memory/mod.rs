@@ -116,7 +116,10 @@ fn print_human_summary(r: &sizer::MemoryReport) {
             tol = a.tolerance_pct
         );
     }
-    println!("  total: {:.1} MB / budget {:.1} MB", r.total_mb, r.budget_mb);
+    println!(
+        "  total: {:.1} MB / budget {:.1} MB",
+        r.total_mb, r.budget_mb
+    );
     if !r.failures.is_empty() {
         println!("failures:");
         for f in &r.failures {

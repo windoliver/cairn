@@ -56,8 +56,8 @@ pub enum BaselineError {
 impl Baseline {
     /// Load a [`Baseline`] from a JSON file on disk.
     pub fn load(path: &Path) -> Result<Self, BaselineError> {
-        let bytes = std::fs::read(path)
-            .map_err(|_| BaselineError::NotFound(path.display().to_string()))?;
+        let bytes =
+            std::fs::read(path).map_err(|_| BaselineError::NotFound(path.display().to_string()))?;
         serde_json::from_slice(&bytes).map_err(|source| BaselineError::Parse {
             path: path.display().to_string(),
             source,

@@ -26,9 +26,6 @@ fn top_level_help_lists_subcommands() {
     let output = cli().args(["--help"]).output().expect("run");
     let stdout = String::from_utf8_lossy(&output.stdout);
     for sub in ["scorecard", "latency", "memory", "privacy", "all"] {
-        assert!(
-            stdout.contains(sub),
-            "expected `{sub}` in --help output"
-        );
+        assert!(stdout.contains(sub), "expected `{sub}` in --help output");
     }
 }

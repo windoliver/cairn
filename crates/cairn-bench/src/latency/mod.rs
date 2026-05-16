@@ -129,7 +129,11 @@ fn current_commit() -> anyhow::Result<String> {
 fn print_human_summary(r: &harness::LatencyReport) {
     println!("latency gate: {}", if r.ok { "PASS" } else { "FAIL" });
     for m in &r.metrics {
-        let mark = if m.slo_ok && m.regression_ok { "OK" } else { "FAIL" };
+        let mark = if m.slo_ok && m.regression_ok {
+            "OK"
+        } else {
+            "FAIL"
+        };
         println!(
             "  [{mark}] {bench}: {meas:.2} ms (SLO {slo:.0} ms, baseline {base:.2} ms, +2% = {thr:.2} ms)",
             bench = m.bench,

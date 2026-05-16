@@ -27,7 +27,11 @@ fn passes_when_total_under_budget() {
     };
     let r = measure(&resolved, dir.path()).unwrap();
     assert!(r.ok, "expected ok; failures: {:?}", r.failures);
-    assert!(r.total_mb > 9.0 && r.total_mb < 11.0, "total_mb={}", r.total_mb);
+    assert!(
+        r.total_mb > 9.0 && r.total_mb < 11.0,
+        "total_mb={}",
+        r.total_mb
+    );
 }
 
 #[test]

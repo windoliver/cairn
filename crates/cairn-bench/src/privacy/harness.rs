@@ -20,9 +20,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::privacy::fixture::{
-    Assertions, FixtureOp, MarkdownAssertion, PrivacyFixture,
-};
+use crate::privacy::fixture::{Assertions, FixtureOp, MarkdownAssertion, PrivacyFixture};
 
 /// A single assertion failure.
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -157,9 +155,7 @@ pub fn run_fixture(fixture: &PrivacyFixture) -> anyhow::Result<Vec<FailureReport
             }
             FixtureOp::Redact { target, span_kind } => {
                 // Redact is not exposed on the CLI at v0.1.
-                eprintln!(
-                    "skipping redact op for {target}/{span_kind} — no CLI surface at v0.1"
-                );
+                eprintln!("skipping redact op for {target}/{span_kind} — no CLI surface at v0.1");
             }
             FixtureOp::Revoke { receipt_id } => {
                 // Revoke is not exposed on the CLI at v0.1.
@@ -289,8 +285,7 @@ fn check_markdown(
             } => {
                 let full = vault.join(path_must_not_exist_or_be_tombstoned);
                 if full.exists()
-                    && std::fs::read_to_string(&full)
-                        .is_ok_and(|body| !body.contains("tombstone:"))
+                    && std::fs::read_to_string(&full).is_ok_and(|body| !body.contains("tombstone:"))
                 {
                     failures.push(FailureReport {
                         scenario: f.scenario.clone(),

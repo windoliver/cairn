@@ -4,7 +4,10 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
-#[command(name = "cairn-bench", about = "Cairn bench harness: scorecard + release gates.")]
+#[command(
+    name = "cairn-bench",
+    about = "Cairn bench harness: scorecard + release gates."
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,

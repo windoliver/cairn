@@ -158,11 +158,8 @@ fn bench_capture_trace(c: &mut Criterion) {
     let trace_str = trace_path.to_string_lossy().into_owned();
     c.bench_function("capture_trace_p95", |b| {
         b.iter(|| {
-            run_cli(
-                &["capture_trace", "--from", &trace_str, "--json"],
-                &v.path,
-            )
-            .expect("capture_trace");
+            run_cli(&["capture_trace", "--from", &trace_str, "--json"], &v.path)
+                .expect("capture_trace");
         });
     });
 }
@@ -172,7 +169,14 @@ fn bench_wal_apply(c: &mut Criterion) {
     c.bench_function("wal_apply_p95", |b| {
         b.iter(|| {
             run_cli(
-                &["ingest", "--kind", "reference", "--body", "bench-wal", "--json"],
+                &[
+                    "ingest",
+                    "--kind",
+                    "reference",
+                    "--body",
+                    "bench-wal",
+                    "--json",
+                ],
                 &v.path,
             )
             .expect("ingest (wal_apply)");
@@ -189,8 +193,7 @@ fn bench_wal_apply(c: &mut Criterion) {
 /// idempotent for duplicate turn imports (WAL dedup), so this does not fail —
 /// it just measures the deduplicated-fast-path after the first sample.
 fn bench_workflow_enqueue(c: &mut Criterion) {
-    let v =
-        SeededVault::new(cairn_bin()).expect("seed vault for workflow_enqueue");
+    let v = SeededVault::new(cairn_bin()).expect("seed vault for workflow_enqueue");
     let enqueue_path = v
         .write_enqueue_trace_jsonl()
         .expect("write enqueue trace jsonl");

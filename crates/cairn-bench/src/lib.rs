@@ -2,8 +2,8 @@
 #![warn(missing_docs)]
 //! Cairn bench harness: `BrainBench` scorecard + release gates (latency, memory, privacy).
 
-pub mod all;
 pub mod adapter;
+pub mod all;
 pub mod cache;
 pub mod cached_embedder;
 pub mod fixture;
