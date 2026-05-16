@@ -7,9 +7,11 @@
 //!   C. No LLM provider configured.
 //!   D. Unbound vault (no `vault.id`).
 //!
-//! Each case asserts the *exact* expected capability set; any change to
-//! `advertise()` either flips an assertion (intentional, reviewed) or
-//! breaks (regression).
+//! Each case asserts the *required* presence and absence of capabilities
+//! tied to that scenario; the wire-stable closed-set lives in the
+//! `cairn-idl` wire-compat fixtures (`crates/cairn-idl/tests/wire_compat_v1.rs`).
+//! A change to `advertise()` either flips an assertion (intentional,
+//! reviewed) or breaks (regression).
 #![allow(missing_docs)]
 
 use cairn_core::config::CapabilitySet;
