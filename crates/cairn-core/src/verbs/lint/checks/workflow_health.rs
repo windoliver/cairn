@@ -3,7 +3,9 @@
 //! Reads [`crate::contract::workflow_jobs::WorkflowJobsReader`] and emits
 //! one of four findings:
 //!
-//! * [`Kind::WorkflowDeadLetter`] (Error) — one per dead-lettered row.
+//! * [`Kind::WorkflowDeadLetter`] (Error) — one per dead-lettered row,
+//!   plus one aggregate Warning when the total exceeds
+//!   `max_dead_letter_listed` (issue #92 round-6 finding 6.3).
 //! * [`Kind::WorkflowStuck`] (Warning) — oldest queued row past `stuck_queue_threshold_ms`.
 //! * [`Kind::WorkflowStaleSummary`] (Warning) — `dream.light` last success too old.
 //! * [`Kind::WorkflowOverdue`] (Warning) — `expire.tier` / `evaluate.sweep` last success too old.
@@ -26,9 +28,20 @@ pub fn run(inputs: &LintInputs<'_>) -> Vec<Finding> {
     let now = inputs.now_ms;
     let mut out: Vec<Finding> = Vec::new();
 
-    // 1. Dead-letter rows -> Error per row.
-    for row in jobs.dead_letter_rows(cfg.max_dead_letter_listed as usize) {
+    // 1. Dead-letter rows -> Error per row, plus one aggregate Warning
+    //    when the total exceeds the listing cap. Without the overflow
+    //    finding a vault with 10 dead-lettered jobs and one with
+    //    100,000 produce the same number of findings — operators get
+    //    no signal that the queue is degenerating. The total count
+    //    query is index-backed via `workflow_jobs_dead_letter_idx`
+    //    (migration 0062), so the extra round-trip is cheap.
+    let listing_cap = cfg.max_dead_letter_listed as usize;
+    let total = jobs.dead_letter_count(None);
+    for row in jobs.dead_letter_rows(listing_cap) {
         out.push(dead_letter_finding(&row));
+    }
+    if total > listing_cap {
+        out.push(dead_letter_overflow_finding(listing_cap, total));
     }
 
     // 2. Stuck queue -> Warning if oldest Queued > threshold.
@@ -78,6 +91,22 @@ fn dead_letter_finding(row: &DeadLetterRow) -> Finding {
         path: None,
     });
     f
+}
+
+/// Issue #92 round-6 finding 6.3: aggregate Warning surfaced when the
+/// dead-letter total exceeds the listing cap. Reuses `WorkflowDeadLetter`
+/// so the downstream pipeline (CLI summary, MCP tool surface) does not
+/// need a new finding kind for what is logically the same family of
+/// issues — only the severity differs from per-row Errors.
+fn dead_letter_overflow_finding(listed: usize, total: usize) -> Finding {
+    finding(
+        Kind::WorkflowDeadLetter,
+        Severity::Warning,
+        format!(
+            "showing {listed} of {total} dead-lettered workflow jobs — \
+             increase workflows.lint.max_dead_letter_listed to see all"
+        ),
+    )
 }
 
 fn stuck_finding(age_ms: i64) -> Finding {
@@ -248,6 +277,86 @@ mod tests {
         let inputs = empty_lint_inputs_with_reader(&reader, 49 * 3_600_000);
         let findings = super::run(&inputs);
         insta::assert_json_snapshot!(findings);
+    }
+
+    #[test]
+    fn dead_letter_overflow_emits_aggregate_warning() {
+        // Issue #92 round-6 finding 6.3: with 25 dead-lettered rows and
+        // the default cap of 10, the check must emit 10 per-row Errors
+        // AND one aggregate Warning whose message names both counts.
+        // Without the overflow Warning operators have no signal that
+        // their dead-letter queue is degenerating beyond what they're
+        // told to look at.
+        let mut reader = MockWorkflowJobsReader::default();
+        for i in 0..25 {
+            reader = reader.with_dead_letter(DeadLetterRow {
+                job_id: JobId::new(format!("j-{i:02}")),
+                kind: JobKind::new("dream.light"),
+                attempts: 3,
+                failure_class: FailureClass::Transient,
+                last_error: "boom".into(),
+                dead_letter_at_ms: 1_000 + i64::from(i),
+            });
+        }
+        let inputs = empty_lint_inputs_with_reader(&reader, 1_000_000);
+        let findings = super::run(&inputs);
+
+        let errors: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| {
+                matches!(f.kind, Kind::WorkflowDeadLetter)
+                    && matches!(f.severity, Severity::Error)
+            })
+            .collect();
+        assert_eq!(
+            errors.len(),
+            10,
+            "10 per-row Errors at default cap, got {}: {findings:?}",
+            errors.len()
+        );
+
+        let warnings: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| {
+                matches!(f.kind, Kind::WorkflowDeadLetter)
+                    && matches!(f.severity, Severity::Warning)
+            })
+            .collect();
+        assert_eq!(
+            warnings.len(),
+            1,
+            "exactly one aggregate Warning: {findings:?}"
+        );
+        let msg = &warnings[0].message;
+        assert!(msg.contains("10 of 25"), "message must name counts: {msg}");
+        assert!(
+            msg.contains("max_dead_letter_listed"),
+            "message must name the config knob: {msg}"
+        );
+    }
+
+    #[test]
+    fn dead_letter_exactly_at_cap_emits_no_overflow_warning() {
+        // Boundary check: total == listing_cap must NOT emit the
+        // aggregate Warning (no overflow, all rows are visible).
+        let mut reader = MockWorkflowJobsReader::default();
+        for i in 0..10 {
+            reader = reader.with_dead_letter(DeadLetterRow {
+                job_id: JobId::new(format!("j-{i:02}")),
+                kind: JobKind::new("dream.light"),
+                attempts: 3,
+                failure_class: FailureClass::Transient,
+                last_error: "boom".into(),
+                dead_letter_at_ms: 1_000 + i64::from(i),
+            });
+        }
+        let inputs = empty_lint_inputs_with_reader(&reader, 1_000_000);
+        let findings = super::run(&inputs);
+        assert!(
+            !findings.iter().any(|f| matches!(f.severity, Severity::Warning)
+                && matches!(f.kind, Kind::WorkflowDeadLetter)),
+            "no overflow Warning when total <= cap: {findings:?}"
+        );
     }
 
     #[test]
