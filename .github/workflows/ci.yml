@@ -237,6 +237,33 @@ jobs:
       - name: cargo run -p cairn-idl --bin cairn-codegen -- --check
         run: cargo run -p cairn-idl --bin cairn-codegen --locked -- --check
 
+  contract-drift:
+    name: contract-drift / wire-compat + capability matrix (§8.0.a, §15, #98)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: contract-drift
+          cache-bin: "false"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@787505cde8a44ea468a00478fe52baf23b15bccd # v2.75.21
+        with:
+          tool: cargo-nextest
+      - name: cairn-codegen --check (IDL → generated)
+        run: cargo run -p cairn-idl --bin cairn-codegen --locked -- --check
+      - name: cairn-docgen --check (IDL → docs)
+        run: cargo run -p cairn-cli --bin cairn-docgen --locked -- --check
+      - name: wire-compat fixtures (manifest fingerprint + per-file)
+        run: cargo-nextest nextest run -p cairn-idl --test wire_compat_v1 --locked
+      - name: capability matrix v0.1
+        run: cargo-nextest nextest run -p cairn-core --test capability_matrix_v1 --locked
+
   bench-full:
     # Manual-trigger BrainBench scorecard run against the staged
     # world-v1 fixture (241 pages). Fetches the BGE model from
