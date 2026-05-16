@@ -143,6 +143,11 @@ jobs:
         run: ./target/release/cairn-bench ${{ matrix.cmd }}
         env:
           CAIRN_MOCK_EMBEDDER: "1"
+          # Use file-backed keystore on Linux runners — gnome-keyring +
+          # Secret Service isn't pre-configured in GHA's ubuntu-latest
+          # and our headless bench subprocesses need a working keystore.
+          # macOS Keychain works headlessly via the OS keystore.
+          CAIRN_KEYSTORE: ${{ matrix.runner == 'ubuntu-latest' && 'file' || '' }}
       - name: Upload reports
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

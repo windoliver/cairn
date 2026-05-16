@@ -38,7 +38,7 @@ must be updated in the same PR.
 | `invariant / cairn-core dep-freeness` (`ci.yml`) | ✅ required | Enforces brief §4 plugin boundary. Adapter or runtime crates depending into core fail closed. |
 | `codegen / no drift` (`ci.yml`) | ✅ required | Runs `cargo run -p cairn-idl --bin cairn-codegen -- --check`; fails when generated CLI/MCP/SDK/skill artefacts disagree with the IDL. |
 | `contract-drift / wire-compat + capability matrix (§8.0.a, §15, #98)` (`ci.yml`) | ✅ required | Aggregates IDL→code drift, IDL→docs drift, `cairn.mcp.v1` wire fixtures (`wire_compat_v1`), and v0.1 capability matrix (`capability_matrix_v1`). |
-| `gates / latency + memory + privacy` (`ci.yml`) | ✅ required | Brief §15 SLO + 2% regression (subprocess proxy), §19 working-set budget, §14 leakage fixtures. Reports in `bench-reports-<runner>` artifact. Linux baseline pending — gate runs advisory on Linux until first baseline lands. |
+| `gates / latency + memory + privacy` (`ci.yml`) | ✅ required | Brief §15 SLO + 2% regression (subprocess proxy), §19 working-set budget, §14 leakage fixtures. Reports in `bench-reports-<runner>` artifact. Linux uses `CAIRN_KEYSTORE=file` (Secret Service not configured in CI); macOS uses the OS Keychain. |
 | `plugins / cairn plugins verify` (`ci.yml`) | ✅ required | Runs the bundled-plugin conformance suite (`cairn plugins verify`) and uploads the JSON report as a build artifact. |
 | `docs / generated reference` (`docs.yml`) | ✅ required | Runs `cargo run -p cairn-cli --bin cairn-docgen -- --check`; fails when committed usage/reference docs disagree with CLI/config/plugin/IDL/MCP/package surfaces. |
 | `docs / mdbook build` (`docs.yml`) | ✅ required | Builds `docs/site` with mdBook; fails on broken book structure or missing pages. |

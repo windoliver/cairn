@@ -38,7 +38,6 @@ use cairn_core::{
 // Re-export these from cairn-core so callers can access them through the
 // identity module without importing cairn-core directly.
 pub use cairn_core::domain::identity::{IdentityStatusReport, MismatchCheckOutcome};
-use cairn_keychain::OsKeystore;
 use cairn_store_sqlite::SqliteIdentityRegistry;
 use chrono::Utc;
 
@@ -104,8 +103,11 @@ impl IdentityService {
             return Err(IdentityServiceError::VaultIdConflict { file_id, db_id });
         }
 
-        // 4. Build OsKeystore bound to vault_id.
-        let keystore: Arc<dyn Keystore> = Arc::new(OsKeystore::new(file_id.clone()));
+        // 4. Open the keystore (OS keychain by default; file-backed if
+        // `CAIRN_KEYSTORE=file` is set — see cairn-keychain::keystore_for_vault).
+        let keystore: Arc<dyn Keystore> =
+            cairn_keychain::keystore_for_vault(file_id.clone(), &vault_path)
+                .map_err(IdentityServiceError::Keystore)?;
 
         // 5. Reconciliation sweep.
         let mut report = ReconciliationReport::default();
@@ -724,7 +726,9 @@ impl IdentityService {
             }
         };
 
-        let keystore: Arc<dyn Keystore> = Arc::new(OsKeystore::new(vault_id.clone()));
+        let keystore: Arc<dyn Keystore> =
+            cairn_keychain::keystore_for_vault(vault_id.clone(), &vault_path)
+                .map_err(IdentityServiceError::Keystore)?;
 
         Ok(Self {
             vault_path,
