@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use cairn_core::config::CairnConfig;
 use cairn_core::contract::identity_registry::IdentityVisibility;
@@ -57,6 +57,7 @@ struct SessionRetrieveRequest {
     order: Option<RetrieveArgsSessionOrder>,
     include: Option<Vec<RetrieveArgsSessionInclude>>,
     cursor: Option<Cursor>,
+    rehydrate: bool,
     read_budget_chars: usize,
 }
 
@@ -68,6 +69,13 @@ struct BudgetReport {
     turns_in: usize,
     turns_out: usize,
     trimmed: bool,
+    rehydrate: Option<RehydrateReport>,
+}
+
+#[derive(Debug, Clone)]
+struct RehydrateReport {
+    elapsed_ms: u128,
+    source_tier: &'static str,
 }
 
 /// Run `cairn retrieve`.
@@ -143,6 +151,7 @@ async fn run_async(args: RetrieveArgs, vault_root: PathBuf, config: CairnConfig)
             include,
             limit,
             order,
+            rehydrate,
             session_id,
             ..
         } => {
@@ -154,6 +163,7 @@ async fn run_async(args: RetrieveArgs, vault_root: PathBuf, config: CairnConfig)
                     order,
                     include,
                     cursor,
+                    rehydrate: rehydrate.unwrap_or(false),
                     read_budget_chars,
                 },
                 &auth,
@@ -293,8 +303,10 @@ async fn retrieve_session(
         order,
         include,
         cursor,
+        rehydrate,
         read_budget_chars,
     } = request;
+    let read_started = Instant::now();
     let mut args = scoped_list_args(auth);
     if let Some(scope) = &mut args.scope {
         scope.session_id = Some(session_id.clone());
@@ -320,12 +332,18 @@ async fn retrieve_session(
         .skip(start)
         .take(requested_limit)
         .collect::<Vec<_>>();
-    let (groups, budget_report) = trim_groups_to_budget(
+    let (groups, mut budget_report) = trim_groups_to_budget(
         groups,
         read_budget_chars,
         include_reasoning,
         include_tool_calls,
     );
+    if rehydrate {
+        budget_report.rehydrate = Some(RehydrateReport {
+            elapsed_ms: read_started.elapsed().as_millis(),
+            source_tier: "hot_or_warm",
+        });
+    }
     let next_offset = start.saturating_add(groups.len());
     let next_cursor = (next_offset < total_groups).then(|| session_cursor(order, next_offset));
     let records = groups
@@ -765,6 +783,23 @@ fn read_policy_trace(
             gate: "read.budget".to_owned(),
             result: ResponsePolicyTraceResult::Pass,
         });
+        if let Some(rehydrate) = &budget.rehydrate {
+            trace.push(ResponsePolicyTrace {
+                detail: Some(format!(
+                    "requested=true source_tier={} elapsed_ms={} budget_chars={} items_in={} items_out={} turns_in={} turns_out={} trimmed={}",
+                    rehydrate.source_tier,
+                    rehydrate.elapsed_ms,
+                    budget.budget_chars,
+                    budget.items_in,
+                    budget.items_out,
+                    budget.turns_in,
+                    budget.turns_out,
+                    budget.trimmed
+                )),
+                gate: "read.rehydrate".to_owned(),
+                result: ResponsePolicyTraceResult::Pass,
+            });
+        }
     }
     trace
 }
@@ -1269,6 +1304,7 @@ fn trim_records_to_budget(
         turns_in: 0,
         turns_out: 0,
         trimmed: out.len() < items_in,
+        rehydrate: None,
     };
     (out, report)
 }
@@ -1303,6 +1339,7 @@ fn trim_groups_to_budget(
         turns_in,
         turns_out: out.len(),
         trimmed: out.len() < turns_in,
+        rehydrate: None,
     };
     (out, report)
 }

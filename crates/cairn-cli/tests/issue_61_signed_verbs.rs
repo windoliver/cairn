@@ -975,6 +975,90 @@ fn retrieve_session_budget_trace_is_deterministic_and_body_free() {
 }
 
 #[test]
+fn retrieve_session_rehydrate_adds_body_free_trace() {
+    const SESSION_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let vault = tempfile::tempdir().expect("vault");
+    bootstrap(&BootstrapOpts {
+        vault_path: vault.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap");
+    let _ = ingest_reference(vault.path(), "seed default issuer before retrieve");
+    let trace_path = write_issue_78_trace_fixture(vault.path(), SESSION_ID);
+    run_capture_trace(vault.path(), &trace_path);
+
+    let retrieve = cli()
+        .current_dir(vault.path())
+        .args([
+            "retrieve",
+            "--session",
+            SESSION_ID,
+            "--rehydrate",
+            "--order",
+            "asc",
+            "--json",
+        ])
+        .output()
+        .expect("run retrieve session rehydrate");
+    assert_eq!(
+        retrieve.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&retrieve.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&retrieve.stdout).expect("json");
+    let trace = value["policy_trace"].as_array().expect("policy_trace");
+    let rehydrate = trace
+        .iter()
+        .find(|entry| entry["gate"] == "read.rehydrate")
+        .expect("read.rehydrate");
+    assert_eq!(rehydrate["result"], "pass");
+    let detail = rehydrate["detail"].as_str().expect("detail");
+    assert!(
+        detail.contains("requested=true source_tier=hot_or_warm"),
+        "detail: {detail}"
+    );
+    assert!(detail.contains("budget_chars="), "detail: {detail}");
+    assert!(detail.contains("elapsed_ms="), "detail: {detail}");
+    assert!(
+        !detail.contains("turn one user"),
+        "rehydrate trace must be body-free: {detail}"
+    );
+}
+
+#[test]
+fn retrieve_session_default_path_omits_rehydrate_trace() {
+    const SESSION_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let vault = tempfile::tempdir().expect("vault");
+    bootstrap(&BootstrapOpts {
+        vault_path: vault.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap");
+    let _ = ingest_reference(vault.path(), "seed default issuer before retrieve");
+    let trace_path = write_issue_78_trace_fixture(vault.path(), SESSION_ID);
+    run_capture_trace(vault.path(), &trace_path);
+
+    let retrieve = cli()
+        .current_dir(vault.path())
+        .args(["retrieve", "--session", SESSION_ID, "--json"])
+        .output()
+        .expect("run retrieve session");
+    assert_eq!(
+        retrieve.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&retrieve.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&retrieve.stdout).expect("json");
+    let trace = value["policy_trace"].as_array().expect("policy_trace");
+    assert!(
+        trace.iter().all(|entry| entry["gate"] != "read.rehydrate"),
+        "default session retrieval must stay on the fast path: {trace:?}"
+    );
+}
+
+#[test]
 fn retrieve_session_returns_redacted_trace_without_raw_secret() {
     const SESSION_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
     let vault = tempfile::tempdir().expect("vault");
