@@ -169,6 +169,25 @@ fn case_b3_store_no_vector_drops_semantic_and_hybrid() {
 }
 
 #[test]
+fn case_b4_store_no_fts_drops_keyword_and_hybrid() {
+    let mut g = gates_full();
+    g.store = Some(StoreCaps {
+        fts: false,
+        vector: true,
+    });
+    let caps = advertised_set(&g);
+    let mut expected = expected_full_p0();
+    expected.remove(&Capabilities::CairnMcpV1SearchKeyword);
+    expected.remove(&Capabilities::CairnMcpV1SearchHybrid);
+    assert_eq!(
+        caps, expected,
+        "case B4 (store no fts): a wired store reporting fts=false must drop \
+         keyword + hybrid — proves the store-fts AND is honored. Semantic \
+         remains since it depends only on vector + provider readiness."
+    );
+}
+
+#[test]
 fn case_c_no_llm_drops_dream_only() {
     let mut g = gates_full();
     g.llm_configured = false;

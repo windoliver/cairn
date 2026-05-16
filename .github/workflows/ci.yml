@@ -268,7 +268,11 @@ jobs:
       - name: per-surface CLI ↔ SDK parity
         run: cargo-nextest nextest run -p cairn-cli --test sdk_cli_parity --locked
       - name: per-surface SDK transport capability filter
-        run: cargo-nextest nextest run -p cairn-sdk --test surface --locked -E 'test(advertises) | test(filtered_until)'
+        # Whole `surface` test module — covers advertise / post-filter
+        # (retrieve/forget) / unavailable fail-closed paths in one shot
+        # so a future SDK-only capability regression cannot slip past a
+        # too-narrow nextest filter. Issue #98 round-6 finding.
+        run: cargo-nextest nextest run -p cairn-sdk --test surface --locked
       - name: per-surface MCP initialize ↔ status parity
         run: cargo-nextest nextest run -p cairn-mcp --test init_status_parity --locked
 
