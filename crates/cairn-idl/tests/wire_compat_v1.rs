@@ -56,3 +56,15 @@ fn manifest_fingerprint_matches_snapshot() {
     let digest = format!("{:x}", hasher.finalize());
     insta::assert_snapshot!("manifest_fingerprint", digest);
 }
+
+#[test]
+fn per_file_snapshots_match() {
+    let root = schema_root();
+    for rel in CONTRACT_FILES {
+        let bytes = fs::read(root.join(rel)).unwrap_or_else(|err| panic!("read {rel}: {err}"));
+        let body = String::from_utf8(bytes).unwrap_or_else(|err| panic!("utf8 {rel}: {err}"));
+        // Slug: replace `/` and `.` with `_` for a flat snap key.
+        let slug = rel.replace(['/', '.'], "_");
+        insta::assert_snapshot!(format!("file__{slug}"), body);
+    }
+}
