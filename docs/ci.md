@@ -15,7 +15,7 @@ verbatim.
 | File | Purpose | Trigger |
 |---|---|---|
 | `governance.yml` | Active path freezes (the bespoke reviewed-by gate was removed in ADR 0003 — see `GOVERNANCE.md` §5). | `pull_request_target` against `main`. |
-| `ci.yml` | Format, lint, build, test, doctest, core-boundary invariant, IDL codegen drift. | PRs + pushes to `main`, merge queue, manual. |
+| `ci.yml` | Format, lint, build, test, doctest, core-boundary invariant, IDL codegen drift, contract-drift release gate (#98). | PRs + pushes to `main`, merge queue, manual. |
 | `supply-chain.yml` | `cargo-deny` (licenses + bans + sources), `cargo-audit` (RUSTSEC), `cargo-machete` (unused deps). | Manifest/lockfile-touching PRs, pushes to `main`, daily cron, manual. |
 | `docs.yml` | Generated docs drift check, mdBook site build, `cargo doc` with `-D warnings`, lychee Markdown link check. | PRs + pushes to `main`, weekly cron, manual. |
 | `pages.yml` | Builds the mdBook site and deploys it to GitHub Pages. | Pushes to `main`, manual. |
@@ -37,6 +37,7 @@ must be updated in the same PR.
 | `build / macos-latest` (`ci.yml`) | ✅ required | Same on macOS. |
 | `invariant / cairn-core dep-freeness` (`ci.yml`) | ✅ required | Enforces brief §4 plugin boundary. Adapter or runtime crates depending into core fail closed. |
 | `codegen / no drift` (`ci.yml`) | ✅ required | Runs `cargo run -p cairn-idl --bin cairn-codegen -- --check`; fails when generated CLI/MCP/SDK/skill artefacts disagree with the IDL. |
+| `contract-drift / wire-compat + capability matrix (§8.0.a, §15, #98)` (`ci.yml`) | ✅ required | Aggregates IDL→code drift, IDL→docs drift, `cairn.mcp.v1` wire fixtures (`wire_compat_v1`), and v0.1 capability matrix (`capability_matrix_v1`). |
 | `plugins / cairn plugins verify` (`ci.yml`) | ✅ required | Runs the bundled-plugin conformance suite (`cairn plugins verify`) and uploads the JSON report as a build artifact. |
 | `docs / generated reference` (`docs.yml`) | ✅ required | Runs `cargo run -p cairn-cli --bin cairn-docgen -- --check`; fails when committed usage/reference docs disagree with CLI/config/plugin/IDL/MCP/package surfaces. |
 | `docs / mdbook build` (`docs.yml`) | ✅ required | Builds `docs/site` with mdBook; fails on broken book structure or missing pages. |
