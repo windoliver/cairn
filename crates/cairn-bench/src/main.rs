@@ -45,8 +45,9 @@ async fn main() -> anyhow::Result<()> {
             let outcome = cairn_bench::privacy::run(&args)?;
             std::process::exit(outcome.exit_code().into());
         }
-        Cmd::All { .. } => {
-            anyhow::bail!("not implemented yet — wired in later tasks")
+        Cmd::All { skip } => {
+            let outcome = cairn_bench::all::run(&cairn_bench::all::AllArgs { skip })?;
+            std::process::exit(outcome.exit_code().into());
         }
     }
 }
