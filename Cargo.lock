@@ -672,6 +672,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "async-trait",
+ "cairn-cli",
  "cairn-core",
  "cairn-embeddings-local",
  "cairn-embeddings-openai",
@@ -687,6 +688,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "toml 0.8.23",
  "tracing",
