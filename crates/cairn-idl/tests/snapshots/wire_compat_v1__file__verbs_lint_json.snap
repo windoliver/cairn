@@ -1,0 +1,154 @@
+---
+source: crates/cairn-idl/tests/wire_compat_v1.rs
+expression: body
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/lint.json",
+  "title": "Cairn verb: lint",
+  "x-cairn-contract": "cairn.mcp.v1",
+  "x-cairn-verb-id": "lint",
+  "x-cairn-capability": null,
+  "x-cairn-auth": "read_only",
+  "x-cairn-cli": {
+    "command": "lint",
+    "flags": [
+      { "name": "write_report", "long": "write-report", "value_source": "bool" },
+      { "name": "fix", "long": "fix", "value_source": "bool" }
+    ]
+  },
+  "x-cairn-skill-triggers": {
+    "positive_triggers": [
+      "use to check vault health — contradictions, orphans, stale claims, missing concept pages, malformed records, broken actor chains, schema drift, hot-memory budget, derived-index drift"
+    ],
+    "negative_triggers": [
+      "do NOT call per turn — run on a cadence (daily / on PR)"
+    ],
+    "exclusivity_hints": "this is the canonical vault-health surface"
+  },
+  "type": "object",
+  "$defs": {
+    "Args": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "write_report": {
+          "type": "boolean",
+          "x-cairn-auth": "write_capability",
+          "description": "When true, writes .cairn/lint-report.md."
+        },
+        "fix": {
+          "type": "boolean",
+          "x-cairn-auth": "write_capability",
+          "description": "When true, resolves live bitemporal edge contradictions by invalidating lower-confidence edges."
+        }
+      }
+    },
+    "Severity": {
+      "type": "string",
+      "enum": ["error", "warning", "info"]
+    },
+    "Kind": {
+      "type": "string",
+      "enum": [
+        "broken_actor_chain",
+        "broken_source_link",
+        "contradictory_edge",
+        "contradiction",
+        "data_gap",
+        "deferred_check",
+        "ambiguous_edge",
+        "hot_memory_over_budget",
+        "index_drift",
+        "malformed_record",
+        "misclassified_profile",
+        "missing_concept",
+        "missing_provenance",
+        "missing_summary",
+        "orphan",
+        "orphan_insight",
+        "projection_drift",
+        "projection_missing",
+        "source_after_forget",
+        "source_after_forget_unknown_version",
+        "source_hash_mismatch",
+        "source_link_dangling",
+        "source_link_legacy_duplicate",
+        "source_link_missing",
+        "source_redact_skipped",
+        "sensor_budget_exceeded",
+        "sensor_privacy_denied",
+        "stale",
+        "stale_profile_line",
+        "stale_schema",
+        "workflow_dead_letter",
+        "workflow_overdue",
+        "workflow_stale_summary",
+        "workflow_stuck",
+        "wrong_class_for_kind"
+      ]
+    },
+    "Target": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "At most one field SHOULD be set; consumers may treat multiple as the most-specific available.",
+      "properties": {
+        "record_id":    { "$ref": "../common/primitives.json#/$defs/Ulid" },
+        "operation_id": { "$ref": "../common/primitives.json#/$defs/Ulid" },
+        "path":         { "type": "string", "minLength": 1 }
+      }
+    },
+    "Finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "severity", "message"],
+      "properties": {
+        "kind":           { "$ref": "#/$defs/Kind" },
+        "severity":       { "$ref": "#/$defs/Severity" },
+        "message":        { "type": "string", "minLength": 1 },
+        "entities": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "suggested_fix":  { "type": "string", "minLength": 1 },
+        "target":         { "$ref": "#/$defs/Target" },
+        "tracking_issue": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "Data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary", "findings"],
+      "properties": {
+        "summary": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["total", "by_severity", "by_kind"],
+          "properties": {
+            "total": { "type": "integer", "minimum": 0 },
+            "by_severity": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["error", "warning", "info"],
+              "properties": {
+                "error":   { "type": "integer", "minimum": 0 },
+                "warning": { "type": "integer", "minimum": 0 },
+                "info":    { "type": "integer", "minimum": 0 }
+              }
+            },
+            "by_kind": {
+              "type": "object",
+              "additionalProperties": { "type": "integer", "minimum": 0 }
+            },
+            "auto_resolved": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "findings": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Finding" }
+        },
+        "report_path": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

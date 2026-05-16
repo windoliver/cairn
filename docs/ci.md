@@ -6,8 +6,8 @@ update this file in the same PR — branch protection references job names
 verbatim.
 
 > **Scope.** This is the v0.1 (P0) automation surface only. Specific gates
-> (wire compatibility / capability matrix, package smoke tests) are tracked
-> under separate issues — see [§ Deferred gates](#deferred-gates) below.
+> (package smoke tests) are tracked under separate issues — see
+> [§ Deferred gates](#deferred-gates) below.
 > v1.0 release-channel hardening lives under issue #141.
 
 ## Workflows
@@ -15,7 +15,7 @@ verbatim.
 | File | Purpose | Trigger |
 |---|---|---|
 | `governance.yml` | Active path freezes (the bespoke reviewed-by gate was removed in ADR 0003 — see `GOVERNANCE.md` §5). | `pull_request_target` against `main`. |
-| `ci.yml` | Format, lint, build, test, doctest, core-boundary invariant, IDL codegen drift. | PRs + pushes to `main`, merge queue, manual. |
+| `ci.yml` | Format, lint, build, test, doctest, core-boundary invariant, IDL codegen drift, contract-drift release gate (#98). | PRs + pushes to `main`, merge queue, manual. |
 | `supply-chain.yml` | `cargo-deny` (licenses + bans + sources), `cargo-audit` (RUSTSEC), `cargo-machete` (unused deps). | Manifest/lockfile-touching PRs, pushes to `main`, daily cron, manual. |
 | `docs.yml` | Generated docs drift check, mdBook site build, `cargo doc` with `-D warnings`, lychee Markdown link check. | PRs + pushes to `main`, weekly cron, manual. |
 | `pages.yml` | Builds the mdBook site and deploys it to GitHub Pages. | Pushes to `main`, manual. |
@@ -37,6 +37,7 @@ must be updated in the same PR.
 | `build / macos-latest` (`ci.yml`) | ✅ required | Same on macOS. |
 | `invariant / cairn-core dep-freeness` (`ci.yml`) | ✅ required | Enforces brief §4 plugin boundary. Adapter or runtime crates depending into core fail closed. |
 | `codegen / no drift` (`ci.yml`) | ✅ required | Runs `cargo run -p cairn-idl --bin cairn-codegen -- --check`; fails when generated CLI/MCP/SDK/skill artefacts disagree with the IDL. |
+| `contract-drift / wire-compat + capability matrix (§8.0.a, §15, #98)` (`ci.yml`) | ✅ required | Aggregates IDL→code drift, IDL→docs drift, `cairn.mcp.v1` wire fixtures (`wire_compat_v1`), and v0.1 capability matrix (`capability_matrix_v1`). |
 | `plugins / cairn plugins verify` (`ci.yml`) | ✅ required | Runs the bundled-plugin conformance suite (`cairn plugins verify`) and uploads the JSON report as a build artifact. |
 | `docs / generated reference` (`docs.yml`) | ✅ required | Runs `cargo run -p cairn-cli --bin cairn-docgen -- --check`; fails when committed usage/reference docs disagree with CLI/config/plugin/IDL/MCP/package surfaces. |
 | `docs / mdbook build` (`docs.yml`) | ✅ required | Builds `docs/site` with mdBook; fails on broken book structure or missing pages. |
@@ -188,8 +189,6 @@ plus the boundary script and codegen `--check` invocation listed under
 
 Tracked under their own issues; named here so the gap is explicit:
 
-- **Wire compatibility / schema drift / capability matrix** — issue #98. Add
-  snapshot tests for MCP frames + `status` response.
 - **`cargo install` and Homebrew formula smoke** — issue #100. Hook into
   `release-dry-run.yml` once the formula exists.
 - **MCP/CLI/SDK parity** — depends on codegen #35 + verb implementations.
@@ -221,6 +220,7 @@ Configure under **Settings → Rules → Rulesets → Branch ruleset → main**:
    build / macos-latest
    invariant / cairn-core dep-freeness
    codegen / no drift
+   contract-drift / wire-compat + capability matrix (§8.0.a, §15, #98)
    plugins / cairn plugins verify
    docs / generated reference
    docs / mdbook build
