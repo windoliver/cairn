@@ -1232,3 +1232,166 @@ async fn enqueue_and_lease_under_load() {
     }
     assert_eq!(drained, n);
 }
+
+/// Round-4 finding regression: `lease_specific` must atomically claim
+/// ONLY the row matching `(job_id, expected_kind)`. Any other queued
+/// row — in particular a production-kind row enqueued concurrently —
+/// must remain `state = 'queued'` with `delivery_count = 0` so the
+/// rightful worker still picks it up untouched. The bug we're proving
+/// fixed: the original `drive_synthetic_job` used the generic `lease()`,
+/// which would happily lease a production row in the precheck→lease
+/// race window, bump its `delivery_count`, and park it in `'leased'`
+/// until expiry.
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "linear regression test: enqueue prod + synth, lease synth, \
+              assert prod untouched, then re-probe with wrong kind and \
+              missing id. Splitting hides the on-disk invariant chain."
+)]
+async fn lease_specific_only_touches_matching_row() {
+    let (store, dir) = open_store();
+    let db_path = dir.path().join("cairn.db");
+
+    // Production row first — a real workflow kind. `not_before_ms = 0`
+    // makes it immediately lease-eligible, which is the worst case for
+    // the diagnostic to misroute.
+    store
+        .enqueue(req("prod-row", "dream.light"))
+        .await
+        .expect("enqueue prod");
+    // Synthetic row second.
+    store
+        .enqueue(req("synth-row", "test.e2e.always_done"))
+        .await
+        .expect("enqueue synthetic");
+
+    let synth_id = JobId::new("synth-row");
+    let synth_kind = JobKind::new("test.e2e.always_done");
+
+    // 1. Successful lease of the synthetic row only.
+    let leased = store
+        .lease_specific(&synth_id, &synth_kind, "diagnostic-owner", 1_000, 30_000)
+        .await
+        .expect("lease_specific ok")
+        .expect("synthetic row should be leasable");
+    assert_eq!(leased.job_id.as_str(), "synth-row");
+    assert_eq!(leased.kind.as_str(), "test.e2e.always_done");
+    assert_eq!(leased.lease.owner, "diagnostic-owner");
+
+    // 2. Inspect on-disk state directly. The production row must be
+    // BIT-IDENTICAL to its post-enqueue state — same state, same
+    // delivery_count, same lease columns (NULL).
+    let prod = Connection::open(&db_path).expect("reopen for assertion");
+    let (prod_state, prod_dc, prod_owner, prod_nonce, prod_expires): (
+        String,
+        i64,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+    ) = prod
+        .query_row(
+            "SELECT state, delivery_count, lease_owner, lease_nonce, lease_expires_at \
+               FROM workflow_jobs WHERE job_id = ?1",
+            rusqlite::params!["prod-row"],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .expect("prod row exists");
+    assert_eq!(prod_state, "queued", "production row must remain queued");
+    assert_eq!(
+        prod_dc, 0,
+        "production row delivery_count must be untouched (was 0 after enqueue)"
+    );
+    assert!(
+        prod_owner.is_none() && prod_nonce.is_none() && prod_expires.is_none(),
+        "production row lease columns must remain NULL"
+    );
+
+    // Synthetic row should be in 'leased' state with delivery_count=1.
+    let (synth_state, synth_dc): (String, i64) = prod
+        .query_row(
+            "SELECT state, delivery_count \
+               FROM workflow_jobs WHERE job_id = ?1",
+            rusqlite::params!["synth-row"],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("synth row exists");
+    assert_eq!(synth_state, "leased", "synthetic row should be leased");
+    assert_eq!(
+        synth_dc, 1,
+        "synthetic row delivery_count should have advanced exactly once"
+    );
+
+    // 3. Kind mismatch refuses with Ok(None). Re-enqueue a fresh
+    // synthetic so we have a queued row to (not) match against — the
+    // first one is now leased and ineligible.
+    store
+        .enqueue(req("synth-row-2", "test.e2e.always_done"))
+        .await
+        .expect("enqueue synthetic-2");
+    let none = store
+        .lease_specific(
+            &JobId::new("synth-row-2"),
+            &JobKind::new("wrong_kind"),
+            "diagnostic-owner",
+            1_500,
+            30_000,
+        )
+        .await
+        .expect("kind-mismatch returns Ok(None), not Err");
+    assert!(
+        none.is_none(),
+        "kind mismatch must refuse to lease (got {none:?})"
+    );
+
+    // After the kind-mismatch attempt, synth-row-2 must still be queued
+    // with delivery_count=0 — proves the UPDATE matched nothing.
+    let (sr2_state, sr2_dc): (String, i64) = prod
+        .query_row(
+            "SELECT state, delivery_count \
+               FROM workflow_jobs WHERE job_id = ?1",
+            rusqlite::params!["synth-row-2"],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("synth-row-2 exists");
+    assert_eq!(
+        sr2_state, "queued",
+        "kind-mismatched row must remain queued"
+    );
+    assert_eq!(
+        sr2_dc, 0,
+        "kind-mismatched row delivery_count must be untouched"
+    );
+
+    // 4. Nonexistent job id refuses with Ok(None).
+    let none2 = store
+        .lease_specific(
+            &JobId::new("nonexistent"),
+            &synth_kind,
+            "diagnostic-owner",
+            2_000,
+            30_000,
+        )
+        .await
+        .expect("nonexistent returns Ok(None), not Err");
+    assert!(
+        none2.is_none(),
+        "nonexistent id must refuse to lease (got {none2:?})"
+    );
+
+    // Production row, third and final check after every other call —
+    // still queued, still untouched.
+    let (prod_state_final, prod_dc_final): (String, i64) = prod
+        .query_row(
+            "SELECT state, delivery_count \
+               FROM workflow_jobs WHERE job_id = ?1",
+            rusqlite::params!["prod-row"],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("prod row exists");
+    assert_eq!(prod_state_final, "queued");
+    assert_eq!(
+        prod_dc_final, 0,
+        "production row delivery_count remains 0 across the entire test"
+    );
+}

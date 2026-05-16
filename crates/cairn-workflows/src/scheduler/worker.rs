@@ -582,6 +582,16 @@ mod tests {
         async fn lease(&self, _: &str, _: i64, _: i64) -> Result<Option<LeasedJob>, JobStoreError> {
             Ok(None)
         }
+        async fn lease_specific(
+            &self,
+            _: &JobId,
+            _: &JobKind,
+            _: &str,
+            _: i64,
+            _: i64,
+        ) -> Result<Option<LeasedJob>, JobStoreError> {
+            Ok(None)
+        }
         async fn heartbeat(
             &self,
             _: &JobId,

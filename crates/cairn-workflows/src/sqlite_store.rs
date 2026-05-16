@@ -871,6 +871,48 @@ impl JobStore for SqliteJobStore {
         .map_err(|e| JobStoreError::Backend(format!("spawn_blocking join: {e}")))?
     }
 
+    async fn lease_specific(
+        &self,
+        job_id: &JobId,
+        expected_kind: &JobKind,
+        owner: &str,
+        now_ms: i64,
+        lease_duration_ms: i64,
+    ) -> Result<Option<LeasedJob>, JobStoreError> {
+        if lease_duration_ms <= 0 {
+            return Err(JobStoreError::InvalidLeaseDeadline {
+                reason: format!("lease_duration_ms must be > 0 (got {lease_duration_ms})"),
+            });
+        }
+        if now_ms.checked_add(lease_duration_ms).is_none() {
+            return Err(JobStoreError::InvalidLeaseDeadline {
+                reason: format!(
+                    "now_ms + lease_duration_ms overflows i64 (now={now_ms}, dur={lease_duration_ms})"
+                ),
+            });
+        }
+        let conn = Arc::clone(&self.conn);
+        let owner = owner.to_owned();
+        let job_id = job_id.clone();
+        let expected_kind = expected_kind.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut guard = match conn.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            atomic_lease_specific(
+                &mut guard,
+                &job_id,
+                &expected_kind,
+                &owner,
+                now_ms,
+                lease_duration_ms,
+            )
+        })
+        .await
+        .map_err(|e| JobStoreError::Backend(format!("spawn_blocking join: {e}")))?
+    }
+
     async fn heartbeat(
         &self,
         job_id: &JobId,
@@ -1229,6 +1271,145 @@ fn atomic_lease(
 
     Ok(Some(LeasedJob {
         job_id: JobId::new(job_id),
+        kind: JobKind::new(kind),
+        payload,
+        attempts: new_attempts,
+        retry,
+        lease: LeaseToken {
+            owner: owner.to_owned(),
+            nonce,
+            expires_at_ms: new_expires,
+        },
+        failure_class,
+        not_before_ms,
+        dedupe_key,
+    }))
+}
+
+/// Atomic id+kind-constrained lease. The single `UPDATE ... RETURNING`
+/// pattern guarantees that any row whose `(job_id, kind)` does NOT match
+/// the caller's expectations remains untouched: `state`, `delivery_count`,
+/// and the lease columns are not modified for non-matching rows. This is
+/// the foundation diagnostics (`cairn admin workflow`) rely on so a
+/// precheck-to-lease race against a concurrent `cairn mcp` cannot
+/// accidentally claim — and thus burn `delivery_count` on — a production
+/// row that was enqueued after the precheck snapshot.
+///
+/// Returns `Ok(None)` when:
+/// - No row with `job_id` exists.
+/// - The row exists but its `kind` differs from `expected_kind`.
+/// - The row exists but is not currently `state = 'queued'`.
+/// - The row is queued but its `next_run_at` is still in the future.
+///
+/// Unlike [`atomic_lease`] this method does NOT consult `queue_key`
+/// head-of-line predicates. Callers are expected to lease an *exact*
+/// row they enqueued moments earlier; queue-key serialization is the
+/// production scheduler's job.
+#[allow(
+    clippy::too_many_lines,
+    reason = "single linear lease transaction mirroring `atomic_lease`; \
+              extraction would obscure the matched WHERE-clause shape"
+)]
+fn atomic_lease_specific(
+    conn: &mut Connection,
+    job_id: &JobId,
+    expected_kind: &JobKind,
+    owner: &str,
+    now_ms: i64,
+    lease_duration_ms: i64,
+) -> Result<Option<LeasedJob>, JobStoreError> {
+    let new_expires = now_ms.saturating_add(lease_duration_ms);
+    let nonce = ulid::Ulid::new().to_string();
+    // BEGIN IMMEDIATE: same rationale as `atomic_lease` — acquire the
+    // write lock up front so concurrent leasers/reapers retry through
+    // `busy_timeout` rather than failing the update with a stale
+    // snapshot.
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|e| JobStoreError::Backend(e.to_string()))?;
+
+    // Single atomic UPDATE...RETURNING: the WHERE clause is the only
+    // thing protecting non-matching rows from `delivery_count`/`state`
+    // mutation. Any clause loosening here is a correctness bug — the
+    // diagnostic contract is "ZERO writes to foreign rows".
+    let row: Option<LeaseRow> = tx
+        .query_row(
+            "UPDATE workflow_jobs \
+                SET state = 'leased', lease_owner = ?1, lease_nonce = ?2, \
+                    lease_started = 0, lease_expires_at = ?3, \
+                    delivery_count = delivery_count + 1, \
+                    updated_at = ?4 \
+              WHERE job_id = ?5 AND kind = ?6 AND state = 'queued' \
+                AND next_run_at <= ?4 \
+              RETURNING job_id, kind, payload, attempts, max_attempts, \
+                        base_backoff_ms, backoff_multiplier, max_backoff_ms, \
+                        failure_class, next_run_at, dedupe_key",
+            params![
+                owner,
+                nonce,
+                new_expires,
+                now_ms,
+                job_id.as_str(),
+                expected_kind.as_str(),
+            ],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Vec<u8>>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, i64>(5)?,
+                    r.get::<_, i64>(6)?,
+                    r.get::<_, i64>(7)?,
+                    r.get::<_, Option<String>>(8)?,
+                    r.get::<_, i64>(9)?,
+                    r.get::<_, Option<String>>(10)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| JobStoreError::Backend(e.to_string()))?;
+
+    let Some((
+        job_id_str,
+        kind,
+        payload,
+        attempts,
+        max_attempts,
+        base,
+        mult,
+        cap,
+        failure_class_raw,
+        not_before_ms,
+        dedupe_key,
+    )) = row
+    else {
+        // No matching row — release the write lock without mutation.
+        tx.rollback()
+            .map_err(|e| JobStoreError::Backend(e.to_string()))?;
+        return Ok(None);
+    };
+
+    tx.commit()
+        .map_err(|e| JobStoreError::Backend(e.to_string()))?;
+
+    let new_attempts = u32::try_from(attempts.saturating_add(1)).unwrap_or(u32::MAX);
+    let retry = retry_from_row(max_attempts, base, mult, cap);
+
+    let failure_class = failure_class_raw.and_then(|raw| match raw.parse::<FailureClass>() {
+        Ok(c) => Some(c),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "failure_class column held unknown variant; surfacing as None"
+            );
+            None
+        }
+    });
+
+    Ok(Some(LeasedJob {
+        job_id: JobId::new(job_id_str),
         kind: JobKind::new(kind),
         payload,
         attempts: new_attempts,

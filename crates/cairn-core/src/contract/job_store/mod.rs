@@ -354,6 +354,32 @@ pub trait JobStore: Send + Sync {
         lease_duration_ms: i64,
     ) -> Result<Option<LeasedJob>, JobStoreError>;
 
+    /// Atomically lease a specific job by `job_id`. Only succeeds when the
+    /// row exists, is currently `state = 'queued'`, has `next_run_at <= now_ms`,
+    /// and its `kind` matches `expected_kind`. Returns `Ok(None)` when the
+    /// row does not match (it was leased by someone else, it is in a
+    /// different state, its kind disagrees, or its `next_run_at` is in
+    /// the future).
+    ///
+    /// This is the primitive diagnostics / test code uses when it has
+    /// already enqueued a specific row and wants to lease ONLY that row,
+    /// with no possibility of accidentally claiming any other queued job.
+    /// Unlike [`Self::lease`], this method makes ZERO persistent changes
+    /// to rows that don't match `(job_id, expected_kind)` — `delivery_count`,
+    /// `state`, and lease fields stay untouched on every non-matching row.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JobStoreError::Backend`] for backend failures.
+    async fn lease_specific(
+        &self,
+        job_id: &JobId,
+        expected_kind: &JobKind,
+        owner: &str,
+        now_ms: i64,
+        lease_duration_ms: i64,
+    ) -> Result<Option<LeasedJob>, JobStoreError>;
+
     /// Extend the lease deadline of a currently-held job. `now_ms` is
     /// the caller's wall-clock; the store rejects the call (with
     /// [`JobStoreError::LeaseLost`]) when the persisted
