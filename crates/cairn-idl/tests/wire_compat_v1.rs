@@ -1,6 +1,6 @@
 //! Wire-compat gate for `cairn.mcp.v1` — issue #98, brief §8.0.a / §15.
 //!
-//! Snapshots a single fingerprint over all 10 contract files in
+//! Snapshots a single fingerprint over every contract file in
 //! canonical order (envelope + errors + capabilities + extensions +
 //! common + prelude + verbs + plugin manifest). Any unintentional edit
 //! to a schema produces a one-line `.snap` diff; intentional edits
@@ -67,4 +67,29 @@ fn per_file_snapshots_match() {
         let slug = rel.replace(['/', '.'], "_");
         insta::assert_snapshot!(format!("file__{slug}"), body);
     }
+}
+
+#[test]
+fn contract_files_matches_index_json_count() {
+    let index_path = schema_root().join("index.json");
+    let bytes = std::fs::read(&index_path).unwrap_or_else(|err| panic!("read index.json: {err}"));
+    let index: serde_json::Value =
+        serde_json::from_slice(&bytes).unwrap_or_else(|err| panic!("parse index.json: {err}"));
+    let files = index
+        .get("x-cairn-files")
+        .and_then(serde_json::Value::as_object)
+        .expect("index.json: x-cairn-files must be an object");
+    let total: usize = files
+        .values()
+        .map(|arr| arr.as_array().map_or(0, std::vec::Vec::len))
+        .sum();
+    assert_eq!(
+        total,
+        CONTRACT_FILES.len(),
+        "CONTRACT_FILES (len={}) drifted from index.json#x-cairn-files (total={}). \
+         A new schema file was added to index.json without updating CONTRACT_FILES \
+         — add it to keep the wire-compat gate honest.",
+        CONTRACT_FILES.len(),
+        total,
+    );
 }
