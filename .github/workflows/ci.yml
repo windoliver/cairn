@@ -115,6 +115,42 @@ jobs:
       - name: scripts/check-core-boundary.sh
         run: ./scripts/check-core-boundary.sh
 
+  gates:
+    name: gates / latency + memory + privacy
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            cmd: "all"
+          - runner: macos-latest
+            cmd: "all --skip memory"
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: gates-${{ matrix.runner }}
+          cache-bin: "false"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build cairn-bench binary
+        run: cargo build --release -p cairn-bench --locked
+      - name: Run gates
+        run: ./target/release/cairn-bench ${{ matrix.cmd }}
+        env:
+          CAIRN_MOCK_EMBEDDER: "1"
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bench-reports-${{ matrix.runner }}
+          path: target/cairn-bench/*.json
+          retention-days: 14
+
   lint-readonly-sources:
     name: invariant / lint never writes sources (§3, #257)
     runs-on: ubuntu-latest

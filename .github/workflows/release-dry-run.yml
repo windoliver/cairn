@@ -173,6 +173,20 @@ jobs:
             exit 1
           fi
           echo "binary smoke check ok: $actual"
+      - name: Memory budget — screenpipe profile (Linux only)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo run -p cairn-bench --release --locked -- memory --profile screenpipe
+        env:
+          CAIRN_MOCK_EMBEDDER: "1"
+      - name: Memory budget — default profile
+        run: cargo run -p cairn-bench --release --locked -- memory --profile default
+        env:
+          CAIRN_MOCK_EMBEDDER: "1"
+      - name: Lifecycle benches (informational)
+        run: cargo bench -p cairn-bench --bench lifecycle --locked
+        continue-on-error: true
+        env:
+          CAIRN_MOCK_EMBEDDER: "1"
       - name: Upload binary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

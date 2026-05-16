@@ -38,6 +38,7 @@ must be updated in the same PR.
 | `invariant / cairn-core dep-freeness` (`ci.yml`) | ✅ required | Enforces brief §4 plugin boundary. Adapter or runtime crates depending into core fail closed. |
 | `codegen / no drift` (`ci.yml`) | ✅ required | Runs `cargo run -p cairn-idl --bin cairn-codegen -- --check`; fails when generated CLI/MCP/SDK/skill artefacts disagree with the IDL. |
 | `contract-drift / wire-compat + capability matrix (§8.0.a, §15, #98)` (`ci.yml`) | ✅ required | Aggregates IDL→code drift, IDL→docs drift, `cairn.mcp.v1` wire fixtures (`wire_compat_v1`), and v0.1 capability matrix (`capability_matrix_v1`). |
+| `gates / latency + memory + privacy` (`ci.yml`) | ✅ required | Brief §15 SLO + 2% regression (subprocess proxy), §19 working-set budget, §14 leakage fixtures. Reports in `bench-reports-<runner>` artifact. Linux baseline pending — gate runs advisory on Linux until first baseline lands. |
 | `plugins / cairn plugins verify` (`ci.yml`) | ✅ required | Runs the bundled-plugin conformance suite (`cairn plugins verify`) and uploads the JSON report as a build artifact. |
 | `docs / generated reference` (`docs.yml`) | ✅ required | Runs `cargo run -p cairn-cli --bin cairn-docgen -- --check`; fails when committed usage/reference docs disagree with CLI/config/plugin/IDL/MCP/package surfaces. |
 | `docs / mdbook build` (`docs.yml`) | ✅ required | Builds `docs/site` with mdBook; fails on broken book structure or missing pages. |
@@ -78,6 +79,13 @@ cargo check --workspace --all-targets --locked
 # IDL codegen drift — fails if generated CLI/MCP/SDK/skill artefacts disagree
 # with the IDL. To regenerate, drop `-- --check` and commit the diff.
 cargo run -p cairn-idl --bin cairn-codegen --locked -- --check
+
+# gates — latency SLO + 2% regression, memory budget, privacy leakage fixtures
+cargo run -p cairn-bench --release --locked -- all
+# Or one at a time:
+cargo run -p cairn-bench --release --locked -- latency
+cargo run -p cairn-bench --release --locked -- memory
+cargo run -p cairn-bench --release --locked -- privacy
 
 # docs generated-reference drift — fails if committed docs disagree with
 # runtime CLI/config/plugin/IDL/MCP/package surfaces. To regenerate, use --write.
@@ -148,6 +156,7 @@ CI is split so the failed job tells you which kind of bug you have:
 | `invariant / cairn-core dep-freeness` | Adapter or runtime crate crept into core. Move it to the right crate; see CLAUDE.md §3. |
 | `codegen / no drift` | IDL changed without re-running codegen, or a generated file was hand-edited. Run `cargo run -p cairn-idl --bin cairn-codegen` and commit the diff. |
 | `plugins / cairn plugins verify` | Bundled-plugin conformance regression. Reproduce with `cargo run -p cairn-cli -- plugins verify --strict`. |
+| `gates / latency + memory + privacy` | Latency SLO, memory budget, or privacy leakage regression. Reproduce with `cargo run -p cairn-bench --release --locked -- all`. |
 | `docs / generated reference` | CLI/config/plugin/IDL/MCP/package docs drift. Run `cargo run -p cairn-cli --bin cairn-docgen -- --write` and commit the diff. |
 | `docs / mdbook build` | Broken docs site structure, missing `SUMMARY.md` target, or invalid mdBook config. Run `mdbook build docs/site`. |
 | `docs / cargo doc` | Broken intra-doc link or missing-docs lint. |
@@ -194,7 +203,7 @@ Tracked under their own issues; named here so the gap is explicit:
 - **MCP/CLI/SDK parity** — depends on codegen #35 + verb implementations.
 - **TypeScript build/test** — no `packages/` directory yet; add a `ts.yml`
   (mirroring `ci.yml`) when the first SDK lands.
-- **Latency / memory budget / privacy regression gates** — issue #99.
+- **Latency / memory budget / privacy regression gates** — issue #99 (landed; `gates / latency + memory + privacy` is now a required check). Linux latency baseline pending — gate runs advisory on Linux until `crates/cairn-bench/baselines/latency.linux.json` is committed.
 
 ## Branch protection setup
 
@@ -221,6 +230,7 @@ Configure under **Settings → Rules → Rulesets → Branch ruleset → main**:
    invariant / cairn-core dep-freeness
    codegen / no drift
    contract-drift / wire-compat + capability matrix (§8.0.a, §15, #98)
+   gates / latency + memory + privacy
    plugins / cairn plugins verify
    docs / generated reference
    docs / mdbook build
