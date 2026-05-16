@@ -123,6 +123,10 @@ const M0061_SALIENCE_ACCESS: &str = include_str!("sql/0061_salience_access.sql")
 // Issue #133 — storage substrate for session tree branch/merge metadata.
 // Renumbered from 0061 during rebase because #313 landed 0061 first.
 const M0062_SESSION_TREE: &str = include_str!("sql/0062_session_tree.sql");
+// Issue #92 — workflow dead-letter columns + completion timestamps.
+// Renumbered from 0062 → 0063 during merge with main: #133 shipped
+// 0062_session_tree first.
+const M0063_WORKFLOW_DEAD_LETTER: &str = include_str!("sql/0063_workflow_dead_letter.sql");
 
 /// Canonical SQL for migration 0020 (`workflow_jobs`). Re-exported so
 /// downstream crates (notably `cairn-workflows`, which hashes the
@@ -131,6 +135,13 @@ const M0062_SESSION_TREE: &str = include_str!("sql/0062_session_tree.sql");
 /// source path — the latter breaks `cargo publish` since the sibling
 /// is not in the package archive.
 pub const WORKFLOW_JOBS_MIGRATION_SQL: &str = M0020_WORKFLOW_JOBS;
+
+/// Canonical SQL for migration 0063 (workflow dead-letter + completion
+/// columns). Re-exported alongside `WORKFLOW_JOBS_MIGRATION_SQL` so
+/// `cairn-workflows` test bootstraps can apply the additive schema
+/// without depending on the full migration chain (which pulls in the
+/// `vec0` extension required by 0022).
+pub const WORKFLOW_DEAD_LETTER_MIGRATION_SQL: &str = M0063_WORKFLOW_DEAD_LETTER;
 
 /// Compile-time manifest of `(migration_id, name, source)` used by the
 /// `verify` module to compute and check content hashes.
@@ -303,6 +314,7 @@ pub(crate) const MIGRATION_SOURCES: &[(i64, &str, &str)] = &[
     ),
     (61, "0061_salience_access", M0061_SALIENCE_ACCESS),
     (62, "0062_session_tree", M0062_SESSION_TREE),
+    (63, "0063_workflow_dead_letter", M0063_WORKFLOW_DEAD_LETTER),
 ];
 
 /// All migrations, in order. Returns a fresh `Migrations` set on every call
@@ -366,5 +378,6 @@ pub fn migrations() -> Migrations<'static> {
         M::up(M0060_CONSENT_SCOPE_UPPERCASE),
         M::up(M0061_SALIENCE_ACCESS),
         M::up(M0062_SESSION_TREE),
+        M::up(M0063_WORKFLOW_DEAD_LETTER),
     ])
 }

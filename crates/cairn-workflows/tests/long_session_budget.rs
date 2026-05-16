@@ -52,7 +52,8 @@ async fn long_session_summary_fits_within_token_budget() {
         &registry,
         clock.clone(),
         SchedulerConfig::p0(),
-    );
+    )
+    .await;
 
     // A valid 26-char Crockford base32 ULID for use as session ID.
     let session = "01ARZ3NDEKTSV4RRFFQ69G5FAV";

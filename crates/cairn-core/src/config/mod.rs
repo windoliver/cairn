@@ -1321,12 +1321,45 @@ pub struct SlackSensorConfig {
 pub struct WorkflowsConfig {
     /// Which workflow orchestrator is active.
     pub orchestrator: OrchestratorKind,
+    /// Lint thresholds for the `workflow_health` check (issue #92, spec §4.11).
+    pub lint: WorkflowsLintConfig,
 }
 
 impl Default for WorkflowsConfig {
     fn default() -> Self {
         Self {
             orchestrator: OrchestratorKind::Local,
+            lint: WorkflowsLintConfig::default(),
+        }
+    }
+}
+
+/// Thresholds for the `workflow_health` lint check (issue #92, spec §4.11).
+///
+/// Phase-4 lands a minimal struct with hard-coded defaults; Phase 5 wires
+/// YAML deserialization onto the same field names. The struct is already
+/// `Serialize`/`Deserialize` so Phase 5 only has to add a docs/test pass —
+/// the schema is stable from this point.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WorkflowsLintConfig {
+    /// Max number of dead-letter rows surfaced as Error findings.
+    pub max_dead_letter_listed: u32,
+    /// Oldest-queued-row age threshold for `WorkflowStuck` finding, ms.
+    pub stuck_queue_threshold_ms: i64,
+    /// `dream.light` last-success staleness threshold, ms.
+    pub stale_dream_threshold_ms: i64,
+    /// `expire.*` / `evaluate.*` last-success staleness threshold, ms.
+    pub overdue_threshold_ms: i64,
+}
+
+impl Default for WorkflowsLintConfig {
+    fn default() -> Self {
+        Self {
+            max_dead_letter_listed: 10,
+            stuck_queue_threshold_ms: 600_000,
+            stale_dream_threshold_ms: 86_400_000,
+            overdue_threshold_ms: 172_800_000,
         }
     }
 }
@@ -2051,6 +2084,39 @@ mod tests {
             CairnConfig::default().workflows.orchestrator,
             OrchestratorKind::Local
         );
+    }
+
+    #[test]
+    fn workflows_lint_defaults_match_spec() {
+        // Spec §4.11: defaults are load-bearing — the lint check uses these
+        // when no `workflows.lint:` block is present in `.cairn/config.yaml`.
+        let c = WorkflowsLintConfig::default();
+        assert_eq!(c.max_dead_letter_listed, 10);
+        assert_eq!(c.stuck_queue_threshold_ms, 600_000);
+        assert_eq!(c.stale_dream_threshold_ms, 86_400_000);
+        assert_eq!(c.overdue_threshold_ms, 172_800_000);
+    }
+
+    #[test]
+    fn workflows_missing_lint_block_yields_defaults() {
+        // An empty `workflows:` block (or a missing `lint:` subblock) must
+        // produce `WorkflowsLintConfig::default()` — the `#[serde(default)]`
+        // attribute on the `lint` field is what makes that work.
+        let c: WorkflowsConfig = serde_json::from_str("{}").expect("parse");
+        assert_eq!(c.lint, WorkflowsLintConfig::default());
+    }
+
+    #[test]
+    fn workflows_partial_lint_block_merges_with_defaults() {
+        // A partial `lint:` block must keep unspecified fields at their
+        // defaults. This guards against accidental loss of `#[serde(default)]`
+        // on individual fields of `WorkflowsLintConfig`.
+        let json = r#"{"lint": {"max_dead_letter_listed": 25}}"#;
+        let c: WorkflowsConfig = serde_json::from_str(json).expect("parse");
+        assert_eq!(c.lint.max_dead_letter_listed, 25);
+        assert_eq!(c.lint.stuck_queue_threshold_ms, 600_000);
+        assert_eq!(c.lint.stale_dream_threshold_ms, 86_400_000);
+        assert_eq!(c.lint.overdue_threshold_ms, 172_800_000);
     }
 
     #[test]

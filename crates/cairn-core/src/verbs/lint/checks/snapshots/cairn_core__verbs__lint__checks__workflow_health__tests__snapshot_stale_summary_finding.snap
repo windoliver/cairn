@@ -1,0 +1,12 @@
+---
+source: crates/cairn-core/src/verbs/lint/checks/workflow_health.rs
+assertion_line: 231
+expression: findings
+---
+[
+  {
+    "kind": "workflow_stale_summary",
+    "message": "no dream.light success in 90000000ms — rolling summary may be stale",
+    "severity": "warning"
+  }
+]

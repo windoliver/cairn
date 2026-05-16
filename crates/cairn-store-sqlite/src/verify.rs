@@ -273,6 +273,10 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("table", "session_tree_merges"),
     ("index", "session_tree_merges_source_idx"),
     ("index", "session_tree_merges_destination_idx"),
+    // 0063_workflow_dead_letter (issue #92): lint hot-path indexes for
+    // dead-letter enumeration and per-kind last-success lookup.
+    ("index", "workflow_jobs_dead_letter_idx"),
+    ("index", "workflow_jobs_kind_completed_idx"),
 ];
 
 /// Identity registry objects share `cairn.db` but are owned by

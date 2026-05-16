@@ -19,7 +19,7 @@
 use std::sync::Arc;
 
 use cairn_core::config::DreamConfig;
-use cairn_core::contract::job_store::{JobKind, JobPayload};
+use cairn_core::contract::job_store::{FailureClass, JobKind, JobPayload};
 use cairn_core::contract::llm_provider::{CompletionOutput, CompletionRequest, LLMProvider};
 use cairn_core::contract::memory_store::{ListArgs, MemoryStore, TombstoneReason};
 use cairn_core::domain::{
@@ -422,6 +422,7 @@ impl JobHandler for DreamHandler {
             Err(e) => {
                 return HandlerOutcome::Permanent {
                     reason: format!("dream payload decode failed: {e}"),
+                    class: FailureClass::Validation,
                 };
             }
         };
@@ -435,12 +436,14 @@ impl JobHandler for DreamHandler {
             );
             return HandlerOutcome::Permanent {
                 reason: "no llm provider configured".into(),
+                class: FailureClass::Validation,
             };
         }
 
         if !self.config.enabled {
             return HandlerOutcome::Permanent {
                 reason: "dream.enabled = false in config".into(),
+                class: FailureClass::Validation,
             };
         }
 
@@ -448,6 +451,7 @@ impl JobHandler for DreamHandler {
             Ok(()) => HandlerOutcome::Done,
             Err(e) => HandlerOutcome::Retry {
                 reason: e.to_string(),
+                class: FailureClass::Transient,
             },
         }
     }

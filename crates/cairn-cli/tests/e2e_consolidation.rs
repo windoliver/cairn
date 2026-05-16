@@ -208,7 +208,8 @@ async fn drain_until(
         &registry,
         clock,
         SchedulerConfig::p0(),
-    );
+    )
+    .await;
 
     let start = std::time::Instant::now();
     while start.elapsed() < max_wait {

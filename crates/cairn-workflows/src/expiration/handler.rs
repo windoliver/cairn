@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use cairn_core::config::ExpirationConfig;
 use cairn_core::contract::job_store::{
-    EnqueueRequest, JobId, JobKind, JobPayload, JobStore, RetryPolicy,
+    EnqueueRequest, FailureClass, JobId, JobKind, JobPayload, JobStore, RetryPolicy,
 };
 use cairn_core::contract::memory_store::{ListArgs, ListCursor, MemoryStore, TombstoneReason};
 use cairn_core::domain::RecordId;
@@ -214,7 +214,13 @@ impl ExpirationHandler {
                 payload: bytes,
                 queue_key: None,
                 dedupe_key: Some(job_id.as_str().to_owned()),
-                not_before_ms: 0,
+                // The continuation is immediately eligible — the worker
+                // that produced it is mid-sweep and the next slice
+                // should pick up right after the commit. Stamping
+                // `payload.now_ms` (the canonical sweep clock) gives the
+                // `WorkflowJobStarted.queue_lag_ms` metric a meaningful
+                // baseline (issue #92, spec §4.6).
+                not_before_ms: payload.now_ms,
                 retry: RetryPolicy::DEFAULT,
             };
             match jobs.enqueue(req).await {
@@ -299,6 +305,7 @@ impl JobHandler for ExpirationHandler {
             Err(e) => {
                 return HandlerOutcome::Permanent {
                     reason: format!("expiration payload decode failed: {e}"),
+                    class: FailureClass::Validation,
                 };
             }
         };
@@ -306,6 +313,7 @@ impl JobHandler for ExpirationHandler {
         if !self.config.enabled {
             return HandlerOutcome::Permanent {
                 reason: "expiration.enabled = false in config".into(),
+                class: FailureClass::Validation,
             };
         }
 
@@ -313,6 +321,7 @@ impl JobHandler for ExpirationHandler {
             Ok(_report) => HandlerOutcome::Done,
             Err(e) => HandlerOutcome::Retry {
                 reason: e.to_string(),
+                class: FailureClass::Transient,
             },
         }
     }

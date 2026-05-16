@@ -290,6 +290,55 @@ fn dedupe_key_unique_per_kind() {
 }
 
 #[test]
+fn migration_0063_adds_dead_letter_columns() {
+    // Run the full migration chain on a fresh in-memory DB (canonical
+    // opener registers the vec0 extension migration 0022 needs) and
+    // assert the three nullable columns introduced by 0063 are present.
+    let conn = open_in_memory().expect("open");
+    let cols: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('workflow_jobs') ORDER BY cid")
+        .expect("prepare")
+        .query_map([], |r| r.get::<_, String>(0))
+        .expect("query")
+        .map(Result::unwrap)
+        .collect();
+    assert!(
+        cols.contains(&"failure_class".to_string()),
+        "failure_class column missing; cols = {cols:?}"
+    );
+    assert!(
+        cols.contains(&"dead_letter_at_ms".to_string()),
+        "dead_letter_at_ms column missing; cols = {cols:?}"
+    );
+    assert!(
+        cols.contains(&"completed_at_ms".to_string()),
+        "completed_at_ms column missing; cols = {cols:?}"
+    );
+
+    // Sanity-check that the new indexes were created.
+    let indexes: Vec<String> = conn
+        .prepare(
+            "SELECT name FROM sqlite_schema \
+              WHERE type = 'index' AND tbl_name = 'workflow_jobs' \
+                AND name IN ('workflow_jobs_dead_letter_idx', \
+                             'workflow_jobs_kind_completed_idx') \
+              ORDER BY name",
+        )
+        .expect("prepare")
+        .query_map([], |r| r.get::<_, String>(0))
+        .expect("query")
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(
+        indexes,
+        vec![
+            "workflow_jobs_dead_letter_idx".to_string(),
+            "workflow_jobs_kind_completed_idx".to_string(),
+        ]
+    );
+}
+
+#[test]
 fn attempts_cannot_exceed_max() {
     let conn = open_in_memory().expect("open");
     let err = conn

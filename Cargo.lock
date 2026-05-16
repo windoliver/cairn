@@ -1034,6 +1034,7 @@ dependencies = [
  "chrono",
  "fs4",
  "proptest",
+ "rstest",
  "rusqlite",
  "serde",
  "serde_json",

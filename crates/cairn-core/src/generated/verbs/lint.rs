@@ -55,6 +55,10 @@ pub enum Kind {
     Stale,
     StaleProfileLine,
     StaleSchema,
+    WorkflowDeadLetter,
+    WorkflowOverdue,
+    WorkflowStaleSummary,
+    WorkflowStuck,
     WrongClassForKind,
 }
 

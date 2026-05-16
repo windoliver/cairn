@@ -39,6 +39,7 @@ pub mod registry;
 pub mod sensor_ingress;
 pub mod source_resolver;
 pub mod version;
+pub mod workflow_jobs;
 pub mod workflow_orchestrator;
 
 #[doc(hidden)]
@@ -69,8 +70,8 @@ pub use identity_registry::{
     RegistryError,
 };
 pub use job_store::{
-    EnqueueRequest, FailDisposition, JobId, JobKind, JobPayload, JobState, JobStore, JobStoreError,
-    LeaseToken, LeasedJob, RetryPolicy,
+    EnqueueRequest, FailDisposition, FailureClass, JobId, JobKind, JobPayload, JobState, JobStore,
+    JobStoreError, LeaseToken, LeasedJob, ReclaimedRow, RetryPolicy,
 };
 pub use keystore::{Keystore, KeystoreError};
 pub use llm_provider::{
@@ -82,6 +83,7 @@ pub use memory_store::{MemoryStore, MemoryStoreCapabilities, MemoryStorePlugin};
 pub use metrics::{CapturingMetricsSink, MetricsError, MetricsSink, NoopMetricsSink};
 pub use sensor_ingress::{SensorIngress, SensorIngressCapabilities, SensorIngressPlugin};
 pub use source_resolver::{SourceResolver, SourceResolverError};
+pub use workflow_jobs::{DeadLetterRow, WorkflowJobsReader};
 pub use workflow_orchestrator::{
     WorkflowOrchestrator, WorkflowOrchestratorCapabilities, WorkflowOrchestratorPlugin,
 };

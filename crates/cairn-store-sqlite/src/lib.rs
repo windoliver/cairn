@@ -29,6 +29,7 @@ pub use trace_window::ConsolidationBacklogEntry;
 pub mod vec_ext;
 mod verify;
 pub mod wal;
+pub mod workflow_jobs_reader;
 
 pub use consent_reader::SqliteConsentJournalReader;
 pub use error::StoreError;
@@ -47,6 +48,7 @@ pub use store::reindex_from_db::{RebuildStats, rebuild_from_db};
 pub use store::sessions::{NewSessionMetadata, ResolveOutcome};
 pub use store::tx::StoreTx;
 pub use wal::{RecoveryConfig, RecoveryReport, recover_pending};
+pub use workflow_jobs_reader::{SqliteWorkflowJobsReader, SqliteWorkflowJobsReaderError};
 
 use cairn_core::contract::memory_store::CONTRACT_VERSION;
 use cairn_core::contract::version::{ContractVersion, VersionRange};

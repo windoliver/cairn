@@ -4,7 +4,8 @@
 use std::sync::Arc;
 
 use cairn_core::contract::{
-    EnqueueRequest, FailDisposition, JobId, JobKind, JobStore, JobStoreError, RetryPolicy,
+    EnqueueRequest, FailDisposition, FailureClass, JobId, JobKind, JobStore, JobStoreError,
+    RetryPolicy,
 };
 use cairn_store_sqlite::open_sync;
 use cairn_workflows::{SqliteJobStore, SqliteJobStoreInitError};
@@ -97,6 +98,169 @@ async fn dedupe_key_blocks_duplicate_enqueue() {
 }
 
 #[tokio::test]
+async fn enqueue_leased_inserts_directly_into_leased_state() {
+    // Issue #92 round-5 finding 5.2: SqliteJobStore::enqueue_leased
+    // must produce a row in `state = 'leased'` from the moment of
+    // insert — never visible as `queued` to any scheduler. Asserts:
+    //  - The returned LeasedJob carries the supplied job_id/kind and
+    //    a non-empty lease nonce.
+    //  - The persisted row has state='leased', delivery_count=1,
+    //    attempts=0, lease_owner matching the call, and the lease
+    //    nonce/deadline that the LeasedJob reports.
+    //  - The row is NOT lease-eligible via the generic lease() path
+    //    (the partial-unique queue_key index would normally allow a
+    //    re-lease, but enqueue_leased has already grabbed the lease).
+    let (store, dir) = open_store();
+    let req = req("j-enqueue-leased", "kind.eq");
+    let owner = "atomic-owner-1";
+    let now_ms = 1_700_000_000_000_i64;
+    let lease_ms = 30_000_i64;
+
+    let leased = store
+        .enqueue_leased(req.clone(), owner, now_ms, lease_ms)
+        .await
+        .expect("enqueue_leased should succeed on fresh row");
+    assert_eq!(leased.job_id.as_str(), "j-enqueue-leased");
+    assert_eq!(leased.kind.as_str(), "kind.eq");
+    assert_eq!(leased.attempts, 1, "worker-visible attempts = 1");
+    assert_eq!(leased.lease.owner, owner);
+    assert!(
+        !leased.lease.nonce.is_empty(),
+        "lease nonce must be non-empty"
+    );
+    assert_eq!(leased.lease.expires_at_ms, now_ms + lease_ms);
+    assert!(
+        leased.failure_class.is_none(),
+        "no failure_class on fresh row"
+    );
+    assert_eq!(leased.dedupe_key, None);
+
+    // Inspect the persisted row through a fresh connection — the row
+    // must be exactly as the LeasedJob describes, with delivery_count=1
+    // (the lease counts as one delivery) and attempts=0 (matches the
+    // generic atomic_lease's "persisted=0, surfaced=1" contract).
+    let db = dir.path().join("cairn.db");
+    let probe = Connection::open(&db).expect("reopen for inspection");
+    let row: (String, i64, i64, String, String, i64) = probe
+        .query_row(
+            "SELECT state, attempts, delivery_count, lease_owner, lease_nonce, lease_expires_at \
+             FROM workflow_jobs WHERE job_id = ?1",
+            rusqlite::params!["j-enqueue-leased"],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, i64>(5)?,
+                ))
+            },
+        )
+        .expect("row exists");
+    assert_eq!(row.0, "leased", "row must be in state='leased'");
+    assert_eq!(row.1, 0, "persisted attempts = 0");
+    assert_eq!(row.2, 1, "delivery_count = 1 (the active lease)");
+    assert_eq!(row.3, owner);
+    assert_eq!(row.4, leased.lease.nonce);
+    assert_eq!(row.5, now_ms + lease_ms);
+
+    // A concurrent generic lease() must NOT find this row — it's
+    // already in 'leased' state, so the queued-only WHERE filters it
+    // out. This is the load-bearing property: no scheduler can claim
+    // the row between enqueue and our heartbeat.
+    let racing = store
+        .lease("foreign-worker", now_ms, lease_ms)
+        .await
+        .expect("lease query");
+    assert!(
+        racing.is_none(),
+        "enqueue_leased must hide the row from concurrent lease() calls"
+    );
+
+    // The row IS reachable via complete() with the returned lease,
+    // proving the LeaseToken is genuine and matches the row.
+    store
+        .complete(&leased.job_id, &leased.lease, now_ms + 1)
+        .await
+        .expect("complete with returned lease");
+}
+
+#[tokio::test]
+async fn enqueue_leased_rejects_duplicate_dedupe_key() {
+    // Issue #92 round-5 finding 5.2: enqueue_leased must surface
+    // duplicate (kind, dedupe_key) collisions the same way enqueue()
+    // does — the partial-unique index covers `state IN
+    // ('queued','leased','done')` so a leased row blocks a second
+    // enqueue (whether leased OR queued) under the same key.
+    let (store, _dir) = open_store();
+    let mut first = req("j-dup-1", "kind.dup");
+    first.dedupe_key = Some("op-dup".to_string());
+    let leased = store
+        .enqueue_leased(first, "owner-a", 1_000_000_000, 30_000)
+        .await
+        .expect("first enqueue_leased ok");
+    drop(leased);
+
+    let mut second = req("j-dup-2", "kind.dup");
+    second.dedupe_key = Some("op-dup".to_string());
+    let err = store
+        .enqueue_leased(second, "owner-b", 1_000_000_001, 30_000)
+        .await
+        .expect_err("duplicate dedupe must be rejected");
+    match err {
+        JobStoreError::DuplicateDedupeKey { kind, dedupe_key } => {
+            assert_eq!(kind.as_str(), "kind.dup");
+            assert_eq!(dedupe_key, "op-dup");
+        }
+        other => panic!("expected DuplicateDedupeKey, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn enqueue_leased_rejects_queue_key() {
+    // Issue #92 round-6 finding 6.1: `enqueue_leased` must refuse
+    // `queue_key.is_some()` requests. Migration 0020's partial-unique
+    // index only enforces "at most one leased row per queue_key" — it
+    // does NOT enforce FIFO ordering between leased and queued
+    // siblings sharing a key. FIFO is a runtime invariant of
+    // `atomic_lease`. Accepting a leased-on-insert with `queue_key`
+    // would let it overtake an older queued sibling. Defend the
+    // invariant at the contract layer so future callers can't slip
+    // past it silently.
+    let (store, _dir) = open_store();
+    let mut req = req("j-qkey", "kind.qk");
+    req.queue_key = Some("k1".into());
+    let err = store
+        .enqueue_leased(req, "owner-q", 1_000_000, 30_000)
+        .await
+        .expect_err("queue_key on enqueue_leased must be rejected");
+    assert!(
+        matches!(err, JobStoreError::EnqueueLeasedQueueKey),
+        "expected EnqueueLeasedQueueKey, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn enqueue_leased_rejects_non_positive_lease_duration() {
+    // Defensive guard: a zero/negative lease duration is a caller bug,
+    // not a no-op. The store rejects with InvalidLeaseDeadline before
+    // mutating anything.
+    let (store, _dir) = open_store();
+    let r = req("j-bad-dur", "kind.bad");
+    let err = store
+        .enqueue_leased(r.clone(), "owner-x", 0, 0)
+        .await
+        .expect_err("zero lease_duration must reject");
+    assert!(matches!(err, JobStoreError::InvalidLeaseDeadline { .. }));
+    let err = store
+        .enqueue_leased(r, "owner-x", 0, -1)
+        .await
+        .expect_err("negative lease_duration must reject");
+    assert!(matches!(err, JobStoreError::InvalidLeaseDeadline { .. }));
+}
+
+#[tokio::test]
 async fn queue_key_serializes_writers() {
     // Brief §10 v0.1: jobs sharing a queue_key serialize through the
     // lease — they are durably queued, not rejected at enqueue. Both
@@ -146,6 +310,7 @@ async fn fail_with_retry_requeues_until_max_attempts() {
             &leased.job_id,
             &leased.lease,
             FailDisposition::Retry,
+            FailureClass::Transient,
             "boom",
             0,
         )
@@ -164,6 +329,7 @@ async fn fail_with_retry_requeues_until_max_attempts() {
             &leased2.job_id,
             &leased2.lease,
             FailDisposition::Retry,
+            FailureClass::Transient,
             "boom2",
             60_000,
         )
@@ -189,6 +355,7 @@ async fn fail_permanent_skips_retry() {
             &leased.job_id,
             &leased.lease,
             FailDisposition::Permanent,
+            FailureClass::Validation,
             "fatal",
             0,
         )
@@ -259,6 +426,7 @@ async fn expired_lease_cannot_complete_or_heartbeat_before_reap() {
             &leased.job_id,
             &leased.lease,
             FailDisposition::Retry,
+            FailureClass::Transient,
             "late",
             2_000,
         )
@@ -297,7 +465,8 @@ async fn reap_expired_recovers_orphans_after_restart() {
         let store = SqliteJobStore::new(conn).expect("init store");
         // Time has advanced past lease expiry.
         let reclaimed = store.reap_expired(10_000).await.expect("reap");
-        assert_eq!(reclaimed, 1);
+        assert_eq!(reclaimed.len(), 1);
+        assert_eq!(reclaimed[0].job_id.as_str(), "j-orphan");
         // Reaper applies per-row backoff; jump past it before re-leasing.
         let after_backoff = 1_000_000_i64;
         let leased = store
@@ -383,7 +552,7 @@ async fn reap_terminates_exhausted_orphans_instead_of_requeueing() {
     drop(leased); // simulate crash after starting
 
     let reclaimed = store.reap_expired(10_000).await.expect("reap");
-    assert_eq!(reclaimed, 1);
+    assert_eq!(reclaimed.len(), 1);
 
     // The exhausted job must NOT be leasable; the next lease must go to
     // `normal`.
@@ -431,6 +600,7 @@ async fn custom_retry_policy_is_persisted_and_honored_after_restart() {
                 &leased.job_id,
                 &leased.lease,
                 FailDisposition::Retry,
+                FailureClass::Transient,
                 "boom",
                 0,
             )
@@ -558,6 +728,7 @@ async fn lease_then_crash_before_heartbeat_does_not_consume_attempt() {
             &leased.job_id,
             &leased.lease,
             FailDisposition::Retry,
+            FailureClass::Transient,
             "real-fail",
             after_lease + 100,
         )
@@ -639,7 +810,7 @@ async fn started_orphan_reap_honors_backoff() {
     // so backoff should be base_backoff_ms = 5000 — meaning
     // next_run_at = 200 + 5000 = 5200.
     let reclaimed = store.reap_expired(200).await.expect("reap");
-    assert_eq!(reclaimed, 1);
+    assert_eq!(reclaimed.len(), 1);
 
     // Before backoff elapsed, must NOT be eligible.
     assert!(
@@ -695,6 +866,149 @@ async fn schema_drift_rejected_at_construction() {
 }
 
 #[tokio::test]
+async fn partial_migration_to_0020_only_rejected_at_construction() {
+    // Regression (issue #92 round-5, finding 5.1): SqliteJobStore::new
+    // probed for migration-0020 schema objects by name but did NOT
+    // verify the columns added by migration 0063 (failure_class,
+    // dead_letter_at_ms, completed_at_ms). A DB stuck at 0020 used to
+    // pass `new()` then fail at runtime with `no such column:
+    // failure_class` on the first `fail()` / `complete()` call —
+    // *after* `enqueue` had already mutated the DB. The constructor
+    // now probes both for the new indexes (existence-by-name) AND
+    // for the new columns (PRAGMA table_info) so a partially-migrated
+    // DB is rejected at construction.
+    //
+    // Apply ONLY migration 0020 inline (bypassing the canonical opener
+    // which would apply every migration up through head). The
+    // migration constant is re-exported off `cairn_store_sqlite`.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("only-0020.db");
+    let setup = Connection::open(&db).expect("open");
+    setup
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS schema_migrations (\
+                migration_id INTEGER NOT NULL PRIMARY KEY, \
+                name TEXT NOT NULL, \
+                sql_hash TEXT NOT NULL DEFAULT '', \
+                applied_at INTEGER NOT NULL \
+             );",
+        )
+        .expect("create schema_migrations");
+    setup
+        .execute_batch(cairn_store_sqlite::migrations::WORKFLOW_JOBS_MIGRATION_SQL)
+        .expect("apply 0020");
+    drop(setup);
+
+    let probe = Connection::open(&db).expect("reopen");
+    let Err(err) = SqliteJobStore::new(probe) else {
+        panic!("must reject 0020-only DB");
+    };
+    // The schema-by-name probe walks `REQUIRED_SCHEMA` in order and
+    // hits the 0063 dead-letter index first, so we surface as
+    // MigrationMissing { kind="index", name="workflow_jobs_dead_letter_idx" }.
+    // The intent of finding 5.1 is "reject 0020-only DB at construction" —
+    // the exact discriminator (index vs column) is a probe-order detail;
+    // assert the wider invariant (either MigrationMissing for a 0063
+    // object or ColumnMissing for a 0063 column).
+    match &err {
+        SqliteJobStoreInitError::MigrationMissing { name, .. } => {
+            assert!(
+                name.contains("dead_letter") || name.contains("kind_completed"),
+                "MigrationMissing must name a 0063-introduced object, got `{name}`",
+            );
+        }
+        SqliteJobStoreInitError::ColumnMissing { name } => {
+            assert!(
+                matches!(
+                    name,
+                    &"failure_class" | &"dead_letter_at_ms" | &"completed_at_ms"
+                ),
+                "ColumnMissing must name a 0063 column, got `{name}`",
+            );
+        }
+        other => panic!("expected MigrationMissing or ColumnMissing, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn missing_0063_columns_alone_rejected_at_construction() {
+    // Tighter regression for finding 5.1: confirm the *column probe*
+    // independently catches a DB whose schema_objects (table + every
+    // 0020 *and* 0063 index/trigger) pass the existence-by-name probe
+    // but whose `workflow_jobs` table is missing the 0063 columns.
+    // This isolates the column probe from the schema-by-name probe so
+    // a future schema evolution that reshuffles probe order cannot
+    // silently regress the column check.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("no-0063-columns.db");
+    let conn = Connection::open(&db).expect("open");
+    // Build a workflow_jobs table that omits the 0063 columns, plus
+    // every required schema object by name (including the 0063 index
+    // names — created against an unused expression so they pass the
+    // existence-by-name probe). Triggers are stubs because the
+    // column probe runs BEFORE the runtime-invariant probes; we only
+    // need to get the early checks past their existence test.
+    conn.execute_batch(
+        "CREATE TABLE workflow_jobs ( \
+            job_id TEXT PRIMARY KEY, kind TEXT, payload BLOB, state TEXT, \
+            attempts INTEGER, delivery_count INTEGER, max_attempts INTEGER, \
+            base_backoff_ms INTEGER, backoff_multiplier INTEGER, max_backoff_ms INTEGER, \
+            queue_key TEXT, dedupe_key TEXT, next_run_at INTEGER, \
+            lease_owner TEXT, lease_nonce TEXT, lease_started INTEGER, \
+            lease_expires_at INTEGER, last_error TEXT, \
+            enqueued_at INTEGER, updated_at INTEGER \
+         ); \
+         CREATE INDEX workflow_jobs_ready_idx ON workflow_jobs(next_run_at); \
+         CREATE INDEX workflow_jobs_queued_queue_key_idx \
+            ON workflow_jobs(queue_key, enqueued_at); \
+         CREATE INDEX workflow_jobs_lease_expiry_idx ON workflow_jobs(lease_expires_at); \
+         CREATE UNIQUE INDEX workflow_jobs_queue_key_leased_uniq \
+            ON workflow_jobs(queue_key) WHERE queue_key IS NOT NULL; \
+         CREATE UNIQUE INDEX workflow_jobs_dedupe_uniq \
+            ON workflow_jobs(kind, dedupe_key) WHERE dedupe_key IS NOT NULL; \
+         CREATE INDEX workflow_jobs_dead_letter_idx \
+            ON workflow_jobs(next_run_at) WHERE next_run_at IS NOT NULL; \
+         CREATE INDEX workflow_jobs_kind_completed_idx ON workflow_jobs(kind, next_run_at); \
+         CREATE TRIGGER workflow_jobs_identity_immutable \
+            BEFORE UPDATE ON workflow_jobs FOR EACH ROW WHEN 0 \
+            BEGIN SELECT 1; END; \
+         CREATE TRIGGER workflow_jobs_terminal_absorbing \
+            BEFORE UPDATE OF state ON workflow_jobs FOR EACH ROW WHEN 0 \
+            BEGIN SELECT 1; END; \
+         CREATE TRIGGER workflow_jobs_state_transition \
+            BEFORE UPDATE OF state ON workflow_jobs FOR EACH ROW WHEN 0 \
+            BEGIN SELECT 1; END; \
+         CREATE TRIGGER workflow_jobs_no_delete \
+            BEFORE DELETE ON workflow_jobs FOR EACH ROW WHEN 0 \
+            BEGIN SELECT 1; END; \
+         CREATE TABLE schema_migrations ( \
+            migration_id INTEGER PRIMARY KEY, name TEXT, sql_hash TEXT, applied_at INTEGER \
+         ); \
+         INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at) \
+            VALUES (20, '0020_workflow_jobs', '', 0);",
+    )
+    .expect("setup schema without 0063 columns");
+    drop(conn);
+
+    let probe = Connection::open(&db).expect("reopen");
+    let Err(err) = SqliteJobStore::new(probe) else {
+        panic!("must reject DB missing 0063 columns");
+    };
+    match err {
+        SqliteJobStoreInitError::ColumnMissing { name } => {
+            assert!(
+                matches!(
+                    name,
+                    "failure_class" | "dead_letter_at_ms" | "completed_at_ms"
+                ),
+                "ColumnMissing must name a 0063 column, got `{name}`",
+            );
+        }
+        other => panic!("expected ColumnMissing, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn relaxed_check_rejected_at_construction() {
     // Regression: same-name DDL drift (CHECK relaxed in a hand-edited
     // table) used to start cleanly. The constructor now runs a
@@ -718,7 +1032,8 @@ async fn relaxed_check_rejected_at_construction() {
             queue_key TEXT, dedupe_key TEXT, next_run_at INTEGER, \
             lease_owner TEXT, lease_nonce TEXT, lease_started INTEGER, \
             lease_expires_at INTEGER, last_error TEXT, \
-            enqueued_at INTEGER, updated_at INTEGER \
+            enqueued_at INTEGER, updated_at INTEGER, \
+            failure_class TEXT, dead_letter_at_ms INTEGER, completed_at_ms INTEGER \
          ); \
          CREATE INDEX workflow_jobs_ready_idx ON workflow_jobs(next_run_at); \
          CREATE INDEX workflow_jobs_queued_queue_key_idx \
@@ -728,6 +1043,10 @@ async fn relaxed_check_rejected_at_construction() {
             ON workflow_jobs(queue_key) WHERE queue_key IS NOT NULL; \
          CREATE UNIQUE INDEX workflow_jobs_dedupe_uniq \
             ON workflow_jobs(kind, dedupe_key) WHERE dedupe_key IS NOT NULL; \
+         CREATE INDEX workflow_jobs_dead_letter_idx \
+            ON workflow_jobs(dead_letter_at_ms) WHERE dead_letter_at_ms IS NOT NULL; \
+         CREATE INDEX workflow_jobs_kind_completed_idx \
+            ON workflow_jobs(kind, completed_at_ms); \
          CREATE TRIGGER workflow_jobs_identity_immutable \
             BEFORE UPDATE ON workflow_jobs FOR EACH ROW WHEN 0 \
             BEGIN SELECT 1; END; \
@@ -875,6 +1194,7 @@ async fn queue_key_fifo_holds_under_retry() {
             &leased.job_id,
             &leased.lease,
             FailDisposition::Retry,
+            FailureClass::Transient,
             "transient",
             0,
         )
@@ -940,6 +1260,7 @@ async fn dedupe_key_replayable_after_terminal_failure() {
             &leased.job_id,
             &leased.lease,
             FailDisposition::Permanent,
+            FailureClass::Validation,
             "fatal",
             0,
         )
@@ -1221,4 +1542,167 @@ async fn enqueue_and_lease_under_load() {
         drained += 1;
     }
     assert_eq!(drained, n);
+}
+
+/// Round-4 finding regression: `lease_specific` must atomically claim
+/// ONLY the row matching `(job_id, expected_kind)`. Any other queued
+/// row — in particular a production-kind row enqueued concurrently —
+/// must remain `state = 'queued'` with `delivery_count = 0` so the
+/// rightful worker still picks it up untouched. The bug we're proving
+/// fixed: the original `drive_synthetic_job` used the generic `lease()`,
+/// which would happily lease a production row in the precheck→lease
+/// race window, bump its `delivery_count`, and park it in `'leased'`
+/// until expiry.
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "linear regression test: enqueue prod + synth, lease synth, \
+              assert prod untouched, then re-probe with wrong kind and \
+              missing id. Splitting hides the on-disk invariant chain."
+)]
+async fn lease_specific_only_touches_matching_row() {
+    let (store, dir) = open_store();
+    let db_path = dir.path().join("cairn.db");
+
+    // Production row first — a real workflow kind. `not_before_ms = 0`
+    // makes it immediately lease-eligible, which is the worst case for
+    // the diagnostic to misroute.
+    store
+        .enqueue(req("prod-row", "dream.light"))
+        .await
+        .expect("enqueue prod");
+    // Synthetic row second.
+    store
+        .enqueue(req("synth-row", "test.e2e.always_done"))
+        .await
+        .expect("enqueue synthetic");
+
+    let synth_id = JobId::new("synth-row");
+    let synth_kind = JobKind::new("test.e2e.always_done");
+
+    // 1. Successful lease of the synthetic row only.
+    let leased = store
+        .lease_specific(&synth_id, &synth_kind, "diagnostic-owner", 1_000, 30_000)
+        .await
+        .expect("lease_specific ok")
+        .expect("synthetic row should be leasable");
+    assert_eq!(leased.job_id.as_str(), "synth-row");
+    assert_eq!(leased.kind.as_str(), "test.e2e.always_done");
+    assert_eq!(leased.lease.owner, "diagnostic-owner");
+
+    // 2. Inspect on-disk state directly. The production row must be
+    // BIT-IDENTICAL to its post-enqueue state — same state, same
+    // delivery_count, same lease columns (NULL).
+    let prod = Connection::open(&db_path).expect("reopen for assertion");
+    let (prod_state, prod_dc, prod_owner, prod_nonce, prod_expires): (
+        String,
+        i64,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+    ) = prod
+        .query_row(
+            "SELECT state, delivery_count, lease_owner, lease_nonce, lease_expires_at \
+               FROM workflow_jobs WHERE job_id = ?1",
+            rusqlite::params!["prod-row"],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .expect("prod row exists");
+    assert_eq!(prod_state, "queued", "production row must remain queued");
+    assert_eq!(
+        prod_dc, 0,
+        "production row delivery_count must be untouched (was 0 after enqueue)"
+    );
+    assert!(
+        prod_owner.is_none() && prod_nonce.is_none() && prod_expires.is_none(),
+        "production row lease columns must remain NULL"
+    );
+
+    // Synthetic row should be in 'leased' state with delivery_count=1.
+    let (synth_state, synth_dc): (String, i64) = prod
+        .query_row(
+            "SELECT state, delivery_count \
+               FROM workflow_jobs WHERE job_id = ?1",
+            rusqlite::params!["synth-row"],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("synth row exists");
+    assert_eq!(synth_state, "leased", "synthetic row should be leased");
+    assert_eq!(
+        synth_dc, 1,
+        "synthetic row delivery_count should have advanced exactly once"
+    );
+
+    // 3. Kind mismatch refuses with Ok(None). Re-enqueue a fresh
+    // synthetic so we have a queued row to (not) match against — the
+    // first one is now leased and ineligible.
+    store
+        .enqueue(req("synth-row-2", "test.e2e.always_done"))
+        .await
+        .expect("enqueue synthetic-2");
+    let none = store
+        .lease_specific(
+            &JobId::new("synth-row-2"),
+            &JobKind::new("wrong_kind"),
+            "diagnostic-owner",
+            1_500,
+            30_000,
+        )
+        .await
+        .expect("kind-mismatch returns Ok(None), not Err");
+    assert!(
+        none.is_none(),
+        "kind mismatch must refuse to lease (got {none:?})"
+    );
+
+    // After the kind-mismatch attempt, synth-row-2 must still be queued
+    // with delivery_count=0 — proves the UPDATE matched nothing.
+    let (sr2_state, sr2_dc): (String, i64) = prod
+        .query_row(
+            "SELECT state, delivery_count \
+               FROM workflow_jobs WHERE job_id = ?1",
+            rusqlite::params!["synth-row-2"],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("synth-row-2 exists");
+    assert_eq!(
+        sr2_state, "queued",
+        "kind-mismatched row must remain queued"
+    );
+    assert_eq!(
+        sr2_dc, 0,
+        "kind-mismatched row delivery_count must be untouched"
+    );
+
+    // 4. Nonexistent job id refuses with Ok(None).
+    let none2 = store
+        .lease_specific(
+            &JobId::new("nonexistent"),
+            &synth_kind,
+            "diagnostic-owner",
+            2_000,
+            30_000,
+        )
+        .await
+        .expect("nonexistent returns Ok(None), not Err");
+    assert!(
+        none2.is_none(),
+        "nonexistent id must refuse to lease (got {none2:?})"
+    );
+
+    // Production row, third and final check after every other call —
+    // still queued, still untouched.
+    let (prod_state_final, prod_dc_final): (String, i64) = prod
+        .query_row(
+            "SELECT state, delivery_count \
+               FROM workflow_jobs WHERE job_id = ?1",
+            rusqlite::params!["prod-row"],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("prod row exists");
+    assert_eq!(prod_state_final, "queued");
+    assert_eq!(
+        prod_dc_final, 0,
+        "production row delivery_count remains 0 across the entire test"
+    );
 }

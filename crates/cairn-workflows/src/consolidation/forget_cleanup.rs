@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use cairn_core::contract::job_store::{JobKind, JobPayload};
+use cairn_core::contract::job_store::{FailureClass, JobKind, JobPayload};
 use cairn_core::contract::memory_store::{MemoryStore, TombstoneReason};
 use cairn_store_sqlite::SqliteMemoryStore;
 use serde::{Deserialize, Serialize};
@@ -76,6 +76,7 @@ impl ConsolidationForgetCleanupHandler {
             );
             return Ok(HandlerOutcome::Retry {
                 reason: "source not yet tombstoned".into(),
+                class: FailureClass::Transient,
             });
         }
 
@@ -111,6 +112,7 @@ impl JobHandler for ConsolidationForgetCleanupHandler {
             Err(e) => {
                 return HandlerOutcome::Permanent {
                     reason: format!("payload decode: {e}"),
+                    class: FailureClass::Validation,
                 };
             }
         };
@@ -120,6 +122,7 @@ impl JobHandler for ConsolidationForgetCleanupHandler {
                 warn!(error = %e, "forget cleanup failed");
                 HandlerOutcome::Retry {
                     reason: e.to_string(),
+                    class: FailureClass::Transient,
                 }
             }
         }

@@ -12,3 +12,4 @@ pub mod salience;
 pub mod schema;
 pub mod taxonomy_conventions;
 pub mod trace_reasoning;
+pub mod workflow_health;

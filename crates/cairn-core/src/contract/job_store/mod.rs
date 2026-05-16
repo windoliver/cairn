@@ -14,6 +14,9 @@
 //! milliseconds, newtyped IDs. Backend errors are surfaced through
 //! [`JobStoreError::Backend`].
 
+pub mod failure_class;
+pub use failure_class::FailureClass;
+
 use crate::domain::Rfc3339Timestamp;
 
 /// Stable identifier for a job row. ULID (or any string) chosen by the
@@ -205,6 +208,45 @@ pub struct LeasedJob {
     /// Active lease token; the scheduler must present this on
     /// heartbeat / complete / fail.
     pub lease: LeaseToken,
+    /// Class of the most recent failure, if any. `None` for first
+    /// attempts and successfully completed retries. Set by the store
+    /// when a previously-failed row is re-leased.
+    pub failure_class: Option<FailureClass>,
+    /// Earliest time the row became lease-eligible. Epoch
+    /// milliseconds. Surfaced so the scheduler can compute
+    /// `queue_lag_ms = now_ms − not_before_ms` for the
+    /// `WorkflowJobStarted` metric (issue #92, spec §4.6).
+    pub not_before_ms: i64,
+    /// Step-level idempotency key persisted at enqueue time, if any.
+    /// Forwarded verbatim from `EnqueueRequest::dedupe_key`.
+    pub dedupe_key: Option<String>,
+}
+
+/// One row that the reaper moved out of `leased`. Surfaced so the
+/// scheduler can emit a `WorkflowJobFailed` metric per reclaimed
+/// lease (issue #92, spec §4.6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReclaimedRow {
+    /// Job identifier of the reclaimed row.
+    pub job_id: JobId,
+    /// Workflow kind of the reclaimed row.
+    pub kind: JobKind,
+    /// Worker-visible attempts after the reap mutation lands.
+    pub attempts: u32,
+    /// `true` when the reaper terminated the row (transitioned it to
+    /// `state = 'failed'` because `attempts >= max_attempts` or the
+    /// poison-delivery guard tripped); `false` when the row was
+    /// requeued for another lease. The scheduler uses this flag to
+    /// choose the right `WorkflowJobFailed.disposition` (`"permanent"`
+    /// vs `"retry"`) so the metric on the wire matches the row's
+    /// actual on-disk state (issue #92, spec §4.6).
+    pub terminated: bool,
+    /// For requeued rows, the `next_run_at` value the reaper wrote to
+    /// `workflow_jobs` (epoch ms). `None` for terminal reaps (the row
+    /// will never run again). The scheduler forwards this verbatim
+    /// into `WorkflowJobFailed.will_retry_at_ms` so the metric agrees
+    /// with the persisted backoff schedule (issue #92, spec §4.6).
+    pub next_run_at_ms: Option<i64>,
 }
 
 /// Disposition for [`JobStore::fail`].
@@ -247,6 +289,18 @@ pub enum JobStoreError {
         /// Human-readable reason.
         reason: String,
     },
+    /// `enqueue_leased` was called with a non-`None` `queue_key`. The
+    /// leased-on-insert path bypasses the FIFO ordering that
+    /// `atomic_lease` enforces (the schema only requires "at most one
+    /// leased row per `queue_key`", not "the oldest queued sibling
+    /// wins"). Accepting a `queue_key` here would let a leased-on-
+    /// insert row overtake an older `queued` sibling with the same
+    /// key. Callers that need queue-key serialization must enqueue
+    /// normally and let the scheduler lease in FIFO order.
+    #[error(
+        "enqueue_leased does not accept queue_key (would bypass FIFO ordering enforced by atomic_lease)"
+    )]
+    EnqueueLeasedQueueKey,
     /// Backend-specific error (`SQLite` I/O, lock contention, etc.).
     #[error("job store backend: {0}")]
     Backend(String),
@@ -297,6 +351,46 @@ pub trait JobStore: Send + Sync {
     /// key and serialize at lease time.
     async fn enqueue(&self, req: EnqueueRequest) -> Result<(), JobStoreError>;
 
+    /// Atomically insert a job directly into `state = 'leased'` with the
+    /// requested lease. The row is never visible in `queued` state to any
+    /// scheduler. Used by diagnostics that must guarantee exclusive
+    /// access to a specific job from the moment of enqueue: a
+    /// conventional `enqueue` + `lease_specific` sequence has a window
+    /// in which a concurrently-running scheduler could lease the row
+    /// via the generic `lease()` path.
+    ///
+    /// The returned `LeasedJob` carries the same fields populated by
+    /// `lease()` — `attempts = 1`, `delivery_count = 1`, an active
+    /// `LeaseToken` with the supplied `owner` and a freshly-minted
+    /// nonce, and the row's persisted `failure_class` / `dedupe_key`
+    /// (both `None` on a fresh insert).
+    ///
+    /// **`req.queue_key` must be `None`.** The leased-on-insert path
+    /// bypasses the FIFO ordering that `atomic_lease` enforces in
+    /// SQL; the schema only requires "at most one leased row per
+    /// `queue_key`", not "the oldest queued sibling wins". A leased-
+    /// on-insert row with a `queue_key` could therefore overtake an
+    /// older `queued` sibling that shares the key. Callers that need
+    /// queue-key serialization must use the conventional
+    /// `enqueue` + `lease` pair so the scheduler hands rows out in
+    /// FIFO order. Calls with `queue_key.is_some()` are rejected with
+    /// [`JobStoreError::EnqueueLeasedQueueKey`] before any DB
+    /// mutation.
+    ///
+    /// # Errors
+    /// - [`JobStoreError::DuplicateDedupeKey`] on `(kind, dedupe_key)` collision.
+    /// - [`JobStoreError::InvalidLeaseDeadline`] when `lease_duration_ms <= 0`
+    ///   or `now_ms + lease_duration_ms` overflows.
+    /// - [`JobStoreError::EnqueueLeasedQueueKey`] when `req.queue_key.is_some()`.
+    /// - [`JobStoreError::Backend`] on backend failure.
+    async fn enqueue_leased(
+        &self,
+        req: EnqueueRequest,
+        owner: &str,
+        now_ms: i64,
+        lease_duration_ms: i64,
+    ) -> Result<LeasedJob, JobStoreError>;
+
     /// Atomically lease the next eligible job. Returns `Ok(None)` when no
     /// queued row has `next_run_at <= now_ms`. The lease expires at
     /// `now_ms + lease_duration_ms`; the scheduler must heartbeat or
@@ -307,6 +401,32 @@ pub trait JobStore: Send + Sync {
     /// Returns [`JobStoreError::Backend`] for backend failures.
     async fn lease(
         &self,
+        owner: &str,
+        now_ms: i64,
+        lease_duration_ms: i64,
+    ) -> Result<Option<LeasedJob>, JobStoreError>;
+
+    /// Atomically lease a specific job by `job_id`. Only succeeds when the
+    /// row exists, is currently `state = 'queued'`, has `next_run_at <= now_ms`,
+    /// and its `kind` matches `expected_kind`. Returns `Ok(None)` when the
+    /// row does not match (it was leased by someone else, it is in a
+    /// different state, its kind disagrees, or its `next_run_at` is in
+    /// the future).
+    ///
+    /// This is the primitive diagnostics / test code uses when it has
+    /// already enqueued a specific row and wants to lease ONLY that row,
+    /// with no possibility of accidentally claiming any other queued job.
+    /// Unlike [`Self::lease`], this method makes ZERO persistent changes
+    /// to rows that don't match `(job_id, expected_kind)` — `delivery_count`,
+    /// `state`, and lease fields stay untouched on every non-matching row.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JobStoreError::Backend`] for backend failures.
+    async fn lease_specific(
+        &self,
+        job_id: &JobId,
+        expected_kind: &JobKind,
         owner: &str,
         now_ms: i64,
         lease_duration_ms: i64,
@@ -350,6 +470,8 @@ pub trait JobStore: Send + Sync {
     /// Record a failure. With [`FailDisposition::Retry`] the row goes
     /// back to `Queued` (or terminates if `attempts == max_attempts`);
     /// [`FailDisposition::Permanent`] forces terminal `Failed`.
+    /// `class` is persisted on the row when a terminal disposition is
+    /// reached (used by the lint `workflow_health` check).
     ///
     /// # Errors
     ///
@@ -359,18 +481,21 @@ pub trait JobStore: Send + Sync {
         job_id: &JobId,
         lease: &LeaseToken,
         disposition: FailDisposition,
+        class: FailureClass,
         last_error: &str,
         now_ms: i64,
     ) -> Result<(), JobStoreError>;
 
     /// Reclaim leased rows whose `lease_expires_at <= now_ms`. Used by
     /// the scheduler's reaper loop and on startup to recover orphans
-    /// from a prior incarnation. Returns the number of rows reclaimed.
+    /// from a prior incarnation. Returns one [`ReclaimedRow`] per
+    /// reclaimed lease so callers can emit per-row metrics (issue
+    /// #92, spec §4.6).
     ///
     /// # Errors
     ///
     /// Backend failure only.
-    async fn reap_expired(&self, now_ms: i64) -> Result<usize, JobStoreError>;
+    async fn reap_expired(&self, now_ms: i64) -> Result<Vec<ReclaimedRow>, JobStoreError>;
 }
 
 // `Rfc3339Timestamp` is used elsewhere in the contract surface; bring it

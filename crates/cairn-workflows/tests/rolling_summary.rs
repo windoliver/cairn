@@ -58,7 +58,7 @@ async fn long_session_emits_rolling_summary_without_blocking_turns() {
         },
         ..SchedulerConfig::p0()
     };
-    let s = Scheduler::start("inc", jobs.clone(), &registry, clock.clone(), sched_cfg);
+    let s = Scheduler::start("inc", jobs.clone(), &registry, clock.clone(), sched_cfg).await;
 
     // Simulate 12 turns landing.
     for seq in 1..=12_u32 {

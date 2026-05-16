@@ -13,8 +13,8 @@
 use std::sync::{Arc, Mutex};
 
 use cairn_core::contract::{
-    EnqueueRequest, FailDisposition, JobId, JobKind, JobStore, JobStoreError, LeaseToken,
-    LeasedJob, RetryPolicy,
+    EnqueueRequest, FailDisposition, FailureClass, JobId, JobKind, JobStore, JobStoreError,
+    LeaseToken, LeasedJob, ReclaimedRow, RetryPolicy,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
@@ -27,6 +27,11 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 /// packaged for publish. Future migrations (12, 13, …) add rows but
 /// do not change this one, so the check is forward-compatible.
 const MIGRATION_0020_SQL: &str = cairn_store_sqlite::migrations::WORKFLOW_JOBS_MIGRATION_SQL;
+
+/// Additive migration 0063 SQL (dead-letter + completion columns).
+/// Re-exported through the package API for the same self-containment
+/// reason as [`MIGRATION_0020_SQL`].
+const MIGRATION_0063_SQL: &str = cairn_store_sqlite::migrations::WORKFLOW_DEAD_LETTER_MIGRATION_SQL;
 
 /// Multiplier applied to `max_attempts` to derive a hard ceiling on
 /// raw lease deliveries (started or not). Prevents pre-heartbeat crash
@@ -49,7 +54,25 @@ const REQUIRED_SCHEMA: &[(&str, &str)] = &[
     ("trigger", "workflow_jobs_terminal_absorbing"),
     ("trigger", "workflow_jobs_state_transition"),
     ("trigger", "workflow_jobs_no_delete"),
+    // Migration 0063 additions (dead-letter + completion lookup
+    // hot-path indexes). The constructor probes for them so a DB
+    // stuck at 0020 fails fast at `SqliteJobStore::new` instead of
+    // first surfacing as `no such column: failure_class` from the
+    // `fail`/`complete` paths after `enqueue` has already mutated.
+    ("index", "workflow_jobs_dead_letter_idx"),
+    ("index", "workflow_jobs_kind_completed_idx"),
 ];
+
+/// Columns added by migration 0063 that the runtime reads/writes on
+/// every `fail`/`complete`/terminal-reap path. Probed by name via
+/// `PRAGMA table_info(workflow_jobs)` so a 0020-only DB cannot be
+/// wrapped (the existing `REQUIRED_SCHEMA` probe is keyed off
+/// `sqlite_schema.name` and so does not catch `ALTER TABLE ... ADD
+/// COLUMN` additions). Without this probe a 0020-only DB passed
+/// `SqliteJobStore::new`, then failed at the first `fail()`/`complete()`
+/// with a `no such column: failure_class` runtime error — long
+/// after the constructor has handed out a working-looking store.
+const REQUIRED_0063_COLUMNS: &[&str] = &["failure_class", "dead_letter_at_ms", "completed_at_ms"];
 
 /// A [`JobStore`] backed by a single `SQLite` connection.
 pub struct SqliteJobStore {
@@ -70,6 +93,20 @@ pub enum SqliteJobStoreInitError {
         /// Object kind (`table` | `index` | `trigger`).
         kind: &'static str,
         /// Object name.
+        name: &'static str,
+    },
+    /// The connection points at a database that has applied migration
+    /// 0020 but not 0063 — the `workflow_jobs` table is missing a
+    /// column the runtime writes on every terminal/retry path
+    /// (`failure_class`, `dead_letter_at_ms`, or `completed_at_ms`).
+    /// Surfaced as a distinct variant from
+    /// [`Self::MigrationMissing`] so an operator can see at a glance
+    /// which forward-migration is the culprit.
+    #[error(
+        "workflow_jobs missing column `{name}` (migration 0063 not applied) — run migrations via cairn-store-sqlite first"
+    )]
+    ColumnMissing {
+        /// Column name that the probe expected to find.
         name: &'static str,
     },
     /// The `schema_migrations` row for migration 0020 has a `sql_hash`
@@ -116,7 +153,10 @@ impl SqliteJobStore {
     /// # Errors
     ///
     /// [`SqliteJobStoreInitError::MigrationMissing`] when any required
-    /// object is absent;
+    /// schema object (table / index / trigger) is absent;
+    /// [`SqliteJobStoreInitError::ColumnMissing`] when migration 0063
+    /// has not been applied (the `failure_class`, `dead_letter_at_ms`,
+    /// or `completed_at_ms` columns are missing);
     /// [`SqliteJobStoreInitError::SchemaDrift`] when a runtime
     /// invariant probe fails (e.g. queued-state CHECK no longer
     /// rejects a row with a lease owner);
@@ -137,6 +177,21 @@ impl SqliteJobStore {
                 .map_err(|e| SqliteJobStoreInitError::Backend(e.to_string()))?;
             if exists == 0 {
                 return Err(SqliteJobStoreInitError::MigrationMissing { kind, name });
+            }
+        }
+
+        // Column probe for migration 0063 additions. `ALTER TABLE ADD
+        // COLUMN` mutations do not register new `sqlite_schema` rows,
+        // so the existence-by-name loop above can't catch a DB stuck
+        // at 0020. Walk `PRAGMA table_info(workflow_jobs)` and assert
+        // each required column is present. Without this probe the
+        // `fail`/`complete`/terminal-reap paths surface as
+        // `no such column: failure_class` at runtime — long after the
+        // constructor has returned a working-looking store.
+        let columns = read_column_set(&conn)?;
+        for &needed in REQUIRED_0063_COLUMNS {
+            if !columns.iter().any(|c| c == needed) {
+                return Err(SqliteJobStoreInitError::ColumnMissing { name: needed });
             }
         }
 
@@ -201,6 +256,62 @@ impl SqliteJobStore {
             conn: Arc::new(Mutex::new(conn)),
         })
     }
+
+    /// Test-only single-row inspection helper used by fixtures that
+    /// need to peek at columns not exposed by the `JobStore` trait
+    /// (e.g. `failure_class`, `dead_letter_at_ms`, `completed_at_ms`).
+    /// Runs `sql` and returns the row as a `(state, opt-text,
+    /// opt-int)` triple — shape chosen to match the dead-letter
+    /// fixture in `tests/dead_letter_fixture.rs`.
+    ///
+    /// Not part of the public `JobStore` contract; not intended for
+    /// production code paths. Production callers should add a
+    /// dedicated read method that returns a typed row.
+    ///
+    /// # Errors
+    ///
+    /// Surfaces `rusqlite::Error` for any backend failure (lock
+    /// poisoning is recovered via `Mutex::into_inner` on the poisoned
+    /// guard, matching the production paths in this module).
+    #[doc(hidden)]
+    pub fn raw_inspect(
+        &self,
+        sql: &str,
+    ) -> rusqlite::Result<(String, Option<String>, Option<i64>)> {
+        let guard = match self.conn.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        guard.query_row(sql, [], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, Option<i64>>(2)?,
+            ))
+        })
+    }
+}
+
+/// Read every column name out of `workflow_jobs` via `PRAGMA
+/// table_info`. Returned as an unordered `Vec<String>` — callers walk
+/// it linearly via `iter().any(...)` so column order is irrelevant.
+/// The probe surface is small (3 names today) so the
+/// `O(n_columns * n_required)` scan is cheaper than building a
+/// `HashSet`.
+fn read_column_set(conn: &Connection) -> Result<Vec<String>, SqliteJobStoreInitError> {
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(workflow_jobs)")
+        .map_err(|e| SqliteJobStoreInitError::Backend(e.to_string()))?;
+    // `PRAGMA table_info` returns rows of (cid, name, type, notnull,
+    // dflt_value, pk). We only need column 1 (`name`).
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(1))
+        .map_err(|e| SqliteJobStoreInitError::Backend(e.to_string()))?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| SqliteJobStoreInitError::Backend(e.to_string()))?);
+    }
+    Ok(out)
 }
 
 /// SHA256 of the embedded migration SQL, lowercase hex. Stamped by
@@ -798,6 +909,49 @@ impl JobStore for SqliteJobStore {
         .map_err(|e| JobStoreError::Backend(format!("spawn_blocking join: {e}")))?
     }
 
+    async fn enqueue_leased(
+        &self,
+        req: EnqueueRequest,
+        owner: &str,
+        now_ms: i64,
+        lease_duration_ms: i64,
+    ) -> Result<LeasedJob, JobStoreError> {
+        if lease_duration_ms <= 0 {
+            return Err(JobStoreError::InvalidLeaseDeadline {
+                reason: format!("lease_duration_ms must be > 0 (got {lease_duration_ms})"),
+            });
+        }
+        if now_ms.checked_add(lease_duration_ms).is_none() {
+            return Err(JobStoreError::InvalidLeaseDeadline {
+                reason: format!(
+                    "now_ms + lease_duration_ms overflows i64 (now={now_ms}, dur={lease_duration_ms})"
+                ),
+            });
+        }
+        // Issue #92 round-6 finding 6.1: reject queue_key here. The
+        // schema's `workflow_jobs_queue_key_leased_uniq` only enforces
+        // "at most one leased row per queue_key" — FIFO ordering for a
+        // shared queue_key is enforced inside `atomic_lease`, not by
+        // the schema. A leased-on-insert row with `queue_key.is_some()`
+        // would therefore be free to overtake an older `queued` sibling
+        // with the same key. Callers needing queue-key serialization
+        // must enqueue + lease conventionally.
+        if req.queue_key.is_some() {
+            return Err(JobStoreError::EnqueueLeasedQueueKey);
+        }
+        let conn = Arc::clone(&self.conn);
+        let owner = owner.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let mut guard = match conn.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            atomic_enqueue_leased(&mut guard, &req, &owner, now_ms, lease_duration_ms)
+        })
+        .await
+        .map_err(|e| JobStoreError::Backend(format!("spawn_blocking join: {e}")))?
+    }
+
     async fn lease(
         &self,
         owner: &str,
@@ -827,6 +981,48 @@ impl JobStore for SqliteJobStore {
                 Err(p) => p.into_inner(),
             };
             atomic_lease(&mut guard, &owner, now_ms, lease_duration_ms)
+        })
+        .await
+        .map_err(|e| JobStoreError::Backend(format!("spawn_blocking join: {e}")))?
+    }
+
+    async fn lease_specific(
+        &self,
+        job_id: &JobId,
+        expected_kind: &JobKind,
+        owner: &str,
+        now_ms: i64,
+        lease_duration_ms: i64,
+    ) -> Result<Option<LeasedJob>, JobStoreError> {
+        if lease_duration_ms <= 0 {
+            return Err(JobStoreError::InvalidLeaseDeadline {
+                reason: format!("lease_duration_ms must be > 0 (got {lease_duration_ms})"),
+            });
+        }
+        if now_ms.checked_add(lease_duration_ms).is_none() {
+            return Err(JobStoreError::InvalidLeaseDeadline {
+                reason: format!(
+                    "now_ms + lease_duration_ms overflows i64 (now={now_ms}, dur={lease_duration_ms})"
+                ),
+            });
+        }
+        let conn = Arc::clone(&self.conn);
+        let owner = owner.to_owned();
+        let job_id = job_id.clone();
+        let expected_kind = expected_kind.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut guard = match conn.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            atomic_lease_specific(
+                &mut guard,
+                &job_id,
+                &expected_kind,
+                &owner,
+                now_ms,
+                lease_duration_ms,
+            )
         })
         .await
         .map_err(|e| JobStoreError::Backend(format!("spawn_blocking join: {e}")))?
@@ -898,9 +1094,13 @@ impl JobStore for SqliteJobStore {
         job_id: &JobId,
         lease: &LeaseToken,
         disposition: FailDisposition,
+        class: FailureClass,
         last_error: &str,
         now_ms: i64,
     ) -> Result<(), JobStoreError> {
+        // `failure_class` is written on every fail() (retry and
+        // terminal); `dead_letter_at_ms` is written only on the
+        // terminal branch (spec §4.5). See `cas_fail`.
         let conn = Arc::clone(&self.conn);
         let job_id = job_id.clone();
         let lease = lease.clone();
@@ -915,6 +1115,7 @@ impl JobStore for SqliteJobStore {
                 &job_id,
                 &lease,
                 disposition,
+                class,
                 &last_error,
                 now_ms,
             )
@@ -923,7 +1124,7 @@ impl JobStore for SqliteJobStore {
         .map_err(|e| JobStoreError::Backend(format!("spawn_blocking join: {e}")))?
     }
 
-    async fn reap_expired(&self, now_ms: i64) -> Result<usize, JobStoreError> {
+    async fn reap_expired(&self, now_ms: i64) -> Result<Vec<ReclaimedRow>, JobStoreError> {
         // Drain in batches, releasing the store mutex between each so
         // concurrent heartbeats / completions / enqueues on this same
         // SqliteJobStore don't queue behind the entire backlog. Each
@@ -931,10 +1132,10 @@ impl JobStore for SqliteJobStore {
         // healthy worker can interleave between batches and avoid
         // missing its lease deadline even when the reaper has many
         // expired rows to process.
-        let mut total = 0usize;
+        let mut reclaimed: Vec<ReclaimedRow> = Vec::new();
         loop {
             let conn = Arc::clone(&self.conn);
-            let processed = tokio::task::spawn_blocking(move || {
+            let batch = tokio::task::spawn_blocking(move || {
                 let mut guard = match conn.lock() {
                     Ok(g) => g,
                     Err(p) => p.into_inner(),
@@ -943,7 +1144,8 @@ impl JobStore for SqliteJobStore {
             })
             .await
             .map_err(|e| JobStoreError::Backend(format!("spawn_blocking join: {e}")))??;
-            total = total.saturating_add(processed);
+            let processed = batch.len();
+            reclaimed.extend(batch);
             if processed == 0 || i64::try_from(processed).unwrap_or(i64::MAX) < REAP_BATCH_SIZE {
                 break;
             }
@@ -951,17 +1153,32 @@ impl JobStore for SqliteJobStore {
             // scheduled before we re-acquire the connection mutex.
             tokio::task::yield_now().await;
         }
-        Ok(total)
+        Ok(reclaimed)
     }
 }
 
 // ---- pure SQL helpers (sync, exercised both directly in tests and via the trait) ----
 
-type LeaseRow = (String, String, Vec<u8>, i64, i64, i64, i64, i64);
+// (job_id, kind, payload, attempts, max_attempts, base, mult, cap,
+//  failure_class, next_run_at, dedupe_key)
+type LeaseRow = (
+    String,
+    String,
+    Vec<u8>,
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+    Option<String>,
+    i64,
+    Option<String>,
+);
 // (attempts, max_attempts, base, mult, cap, lease_started)
 type FailRow = (i64, i64, i64, i64, i64, i64);
-// (job_id, attempts, delivery_count, max_attempts, base, mult, cap, lease_started)
-type ReapRow = (String, i64, i64, i64, i64, i64, i64, i64);
+// (job_id, kind, attempts, delivery_count, max_attempts, base, mult, cap,
+//  lease_started)
+type ReapRow = (String, String, i64, i64, i64, i64, i64, i64, i64);
 
 fn insert_job(conn: &mut Connection, req: &EnqueueRequest) -> Result<(), JobStoreError> {
     // Use SQLite's wall clock for `enqueued_at`/`updated_at` so the
@@ -998,6 +1215,116 @@ fn insert_job(conn: &mut Connection, req: &EnqueueRequest) -> Result<(), JobStor
     }
 }
 
+/// Atomic enqueue-into-leased helper for the [`JobStore::enqueue_leased`]
+/// contract. Inserts a single row directly in `state = 'leased'` with
+/// the supplied `owner`, a freshly minted nonce, and the supplied
+/// lease deadline. The row is never visible as `queued` to any
+/// scheduler — eliminating the precheck → claim race the conventional
+/// `enqueue` + `lease_specific` sequence allowed (issue #92 finding 5.2):
+/// a concurrent `cairn mcp` could otherwise lease the just-enqueued
+/// row via the generic `lease()` path before the caller had a chance
+/// to claim it.
+///
+/// Behaviour matches a single `INSERT` (no surrounding transaction) —
+/// `BEGIN IMMEDIATE` would only matter if we performed a follow-up
+/// read; we don't. `SQLite`'s atomicity guarantees the row is either
+/// fully present and `state = 'leased'` or absent.
+///
+/// Constraint contract:
+/// * Migration 0020's state CHECK admits `state IN
+///   ('queued','leased','done','failed')` on INSERT — `state =
+///   'leased'` is therefore legal at insert time.
+/// * Migration 0020's state-shape CHECK requires the leased shape:
+///   `lease_owner IS NOT NULL`, `lease_nonce IS NOT NULL`,
+///   `lease_started IN (0, 1)`, `lease_expires_at IS NOT NULL`. We
+///   stamp the lease fields directly in `VALUES`, so the row passes.
+/// * The state-transition trigger is `BEFORE UPDATE OF state`, so
+///   the leased-on-insert path is unaffected.
+/// * The dedupe-key partial unique index (`workflow_jobs_dedupe_uniq`)
+///   covers `WHERE dedupe_key IS NOT NULL AND state IN
+///   ('queued','leased','done')` — leased rows occupy the dedupe slot,
+///   so a duplicate `(kind, dedupe_key)` on a freshly-inserted leased
+///   row still surfaces as `JobStoreError::DuplicateDedupeKey` through
+///   the same UNIQUE-error path as `insert_job`.
+/// * The leased-queue-key partial unique index
+///   (`workflow_jobs_queue_key_leased_uniq`) covers `WHERE queue_key
+///   IS NOT NULL AND state = 'leased'` — a concurrent caller who has
+///   already leased a row with the same `queue_key` blocks the new
+///   insert via UNIQUE; we surface it as a generic `Backend` error
+///   (diagnostics expect unique `queue_key` values per row).
+///
+/// Returns a [`LeasedJob`] populated with `attempts = 1`, `delivery_count
+/// = 1`, and the active lease token so the caller can immediately
+/// heartbeat / fail / complete without a follow-up `lease_specific`.
+fn atomic_enqueue_leased(
+    conn: &mut Connection,
+    req: &EnqueueRequest,
+    owner: &str,
+    now_ms: i64,
+    lease_duration_ms: i64,
+) -> Result<LeasedJob, JobStoreError> {
+    let new_expires = now_ms.saturating_add(lease_duration_ms);
+    let nonce = ulid::Ulid::new().to_string();
+    // `delivery_count = 1`: the lease counts as one delivery, matching
+    // what `atomic_lease` would have incremented had we gone through
+    // the conventional enqueue+lease path. `attempts = 0` mirrors
+    // `atomic_lease`'s contract — the persisted counter only bumps
+    // on the first heartbeat / fail / complete, even though the
+    // worker-visible `LeasedJob.attempts` is `attempts + 1 = 1`.
+    // `lease_started = 0`: the worker hasn't heartbeated yet. The
+    // synthetic flow heartbeats immediately afterward to flip this to
+    // `1`, just like the production worker loop does.
+    let res = conn.execute(
+        "INSERT INTO workflow_jobs \
+            (job_id, kind, payload, state, attempts, delivery_count, max_attempts, \
+             base_backoff_ms, backoff_multiplier, max_backoff_ms, \
+             queue_key, dedupe_key, next_run_at, \
+             lease_owner, lease_nonce, lease_started, lease_expires_at, \
+             last_error, enqueued_at, updated_at) \
+         VALUES (?, ?, ?, 'leased', 0, 1, ?, ?, ?, ?, ?, ?, ?, \
+                 ?, ?, 0, ?, NULL, \
+                 CAST(strftime('%s','now') AS INTEGER) * 1000, \
+                 CAST(strftime('%s','now') AS INTEGER) * 1000)",
+        params![
+            req.job_id.as_str(),
+            req.kind.as_str(),
+            req.payload,
+            i64::from(req.retry.max_attempts),
+            i64::from(req.retry.base_backoff_ms),
+            i64::from(req.retry.backoff_multiplier),
+            i64::from(req.retry.max_backoff_ms),
+            req.queue_key,
+            req.dedupe_key,
+            req.not_before_ms,
+            owner,
+            nonce,
+            new_expires,
+        ],
+    );
+    if let Err(e) = res {
+        return Err(translate_enqueue_err(&e, req));
+    }
+
+    // Mirror `atomic_lease`'s caller-visible LeasedJob shape: persisted
+    // attempts = 0, surfaced attempts = 1 (the in-flight try the
+    // worker is about to start).
+    Ok(LeasedJob {
+        job_id: req.job_id.clone(),
+        kind: req.kind.clone(),
+        payload: req.payload.clone(),
+        attempts: 1,
+        retry: req.retry,
+        lease: LeaseToken {
+            owner: owner.to_owned(),
+            nonce,
+            expires_at_ms: new_expires,
+        },
+        failure_class: None,
+        not_before_ms: req.not_before_ms,
+        dedupe_key: req.dedupe_key.clone(),
+    })
+}
+
 fn retry_from_row(max_attempts: i64, base: i64, mult: i64, cap: i64) -> RetryPolicy {
     RetryPolicy {
         max_attempts: u32::try_from(max_attempts).unwrap_or(u32::MAX),
@@ -1026,6 +1353,10 @@ fn translate_enqueue_err(e: &rusqlite::Error, req: &EnqueueRequest) -> JobStoreE
     JobStoreError::Backend(msg)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "single linear lease transaction; extraction loses correctness context"
+)]
 fn atomic_lease(
     conn: &mut Connection,
     owner: &str,
@@ -1054,7 +1385,8 @@ fn atomic_lease(
     let candidate: Option<LeaseRow> = tx
         .query_row(
             "SELECT job_id, kind, payload, attempts, max_attempts, \
-                    base_backoff_ms, backoff_multiplier, max_backoff_ms \
+                    base_backoff_ms, backoff_multiplier, max_backoff_ms, \
+                    failure_class, next_run_at, dedupe_key \
                FROM workflow_jobs AS j \
               WHERE state = 'queued' AND next_run_at <= ? \
                 AND (queue_key IS NULL OR ( \
@@ -1082,13 +1414,29 @@ fn atomic_lease(
                     r.get::<_, i64>(5)?,
                     r.get::<_, i64>(6)?,
                     r.get::<_, i64>(7)?,
+                    r.get::<_, Option<String>>(8)?,
+                    r.get::<_, i64>(9)?,
+                    r.get::<_, Option<String>>(10)?,
                 ))
             },
         )
         .optional()
         .map_err(|e| JobStoreError::Backend(e.to_string()))?;
 
-    let Some((job_id, kind, payload, attempts, max_attempts, base, mult, cap)) = candidate else {
+    let Some((
+        job_id,
+        kind,
+        payload,
+        attempts,
+        max_attempts,
+        base,
+        mult,
+        cap,
+        failure_class_raw,
+        not_before_ms,
+        dedupe_key,
+    )) = candidate
+    else {
         return Ok(None);
     };
 
@@ -1130,6 +1478,22 @@ fn atomic_lease(
     let new_attempts = u32::try_from(attempts.saturating_add(1)).unwrap_or(u32::MAX);
     let retry = retry_from_row(max_attempts, base, mult, cap);
 
+    // Parse the persisted `failure_class` snake-case string back into
+    // the typed enum. An unknown value is logged at `warn` and
+    // surfaced as `None` so a future-version row with a class this
+    // binary doesn't recognize doesn't fail the lease — the lint
+    // hot-path keeps working from the raw column.
+    let failure_class = failure_class_raw.and_then(|raw| match raw.parse::<FailureClass>() {
+        Ok(c) => Some(c),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "failure_class column held unknown variant; surfacing as None"
+            );
+            None
+        }
+    });
+
     Ok(Some(LeasedJob {
         job_id: JobId::new(job_id),
         kind: JobKind::new(kind),
@@ -1141,6 +1505,148 @@ fn atomic_lease(
             nonce,
             expires_at_ms: new_expires,
         },
+        failure_class,
+        not_before_ms,
+        dedupe_key,
+    }))
+}
+
+/// Atomic id+kind-constrained lease. The single `UPDATE ... RETURNING`
+/// pattern guarantees that any row whose `(job_id, kind)` does NOT match
+/// the caller's expectations remains untouched: `state`, `delivery_count`,
+/// and the lease columns are not modified for non-matching rows. This is
+/// the foundation diagnostics (`cairn admin workflow`) rely on so a
+/// precheck-to-lease race against a concurrent `cairn mcp` cannot
+/// accidentally claim — and thus burn `delivery_count` on — a production
+/// row that was enqueued after the precheck snapshot.
+///
+/// Returns `Ok(None)` when:
+/// - No row with `job_id` exists.
+/// - The row exists but its `kind` differs from `expected_kind`.
+/// - The row exists but is not currently `state = 'queued'`.
+/// - The row is queued but its `next_run_at` is still in the future.
+///
+/// Unlike [`atomic_lease`] this method does NOT consult `queue_key`
+/// head-of-line predicates. Callers are expected to lease an *exact*
+/// row they enqueued moments earlier; queue-key serialization is the
+/// production scheduler's job.
+#[allow(
+    clippy::too_many_lines,
+    reason = "single linear lease transaction mirroring `atomic_lease`; \
+              extraction would obscure the matched WHERE-clause shape"
+)]
+fn atomic_lease_specific(
+    conn: &mut Connection,
+    job_id: &JobId,
+    expected_kind: &JobKind,
+    owner: &str,
+    now_ms: i64,
+    lease_duration_ms: i64,
+) -> Result<Option<LeasedJob>, JobStoreError> {
+    let new_expires = now_ms.saturating_add(lease_duration_ms);
+    let nonce = ulid::Ulid::new().to_string();
+    // BEGIN IMMEDIATE: same rationale as `atomic_lease` — acquire the
+    // write lock up front so concurrent leasers/reapers retry through
+    // `busy_timeout` rather than failing the update with a stale
+    // snapshot.
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|e| JobStoreError::Backend(e.to_string()))?;
+
+    // Single atomic UPDATE...RETURNING: the WHERE clause is the only
+    // thing protecting non-matching rows from `delivery_count`/`state`
+    // mutation. Any clause loosening here is a correctness bug — the
+    // diagnostic contract is "ZERO writes to foreign rows".
+    let row: Option<LeaseRow> = tx
+        .query_row(
+            "UPDATE workflow_jobs \
+                SET state = 'leased', lease_owner = ?1, lease_nonce = ?2, \
+                    lease_started = 0, lease_expires_at = ?3, \
+                    delivery_count = delivery_count + 1, \
+                    updated_at = ?4 \
+              WHERE job_id = ?5 AND kind = ?6 AND state = 'queued' \
+                AND next_run_at <= ?4 \
+              RETURNING job_id, kind, payload, attempts, max_attempts, \
+                        base_backoff_ms, backoff_multiplier, max_backoff_ms, \
+                        failure_class, next_run_at, dedupe_key",
+            params![
+                owner,
+                nonce,
+                new_expires,
+                now_ms,
+                job_id.as_str(),
+                expected_kind.as_str(),
+            ],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Vec<u8>>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, i64>(5)?,
+                    r.get::<_, i64>(6)?,
+                    r.get::<_, i64>(7)?,
+                    r.get::<_, Option<String>>(8)?,
+                    r.get::<_, i64>(9)?,
+                    r.get::<_, Option<String>>(10)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| JobStoreError::Backend(e.to_string()))?;
+
+    let Some((
+        job_id_str,
+        kind,
+        payload,
+        attempts,
+        max_attempts,
+        base,
+        mult,
+        cap,
+        failure_class_raw,
+        not_before_ms,
+        dedupe_key,
+    )) = row
+    else {
+        // No matching row — release the write lock without mutation.
+        tx.rollback()
+            .map_err(|e| JobStoreError::Backend(e.to_string()))?;
+        return Ok(None);
+    };
+
+    tx.commit()
+        .map_err(|e| JobStoreError::Backend(e.to_string()))?;
+
+    let new_attempts = u32::try_from(attempts.saturating_add(1)).unwrap_or(u32::MAX);
+    let retry = retry_from_row(max_attempts, base, mult, cap);
+
+    let failure_class = failure_class_raw.and_then(|raw| match raw.parse::<FailureClass>() {
+        Ok(c) => Some(c),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "failure_class column held unknown variant; surfacing as None"
+            );
+            None
+        }
+    });
+
+    Ok(Some(LeasedJob {
+        job_id: JobId::new(job_id_str),
+        kind: JobKind::new(kind),
+        payload,
+        attempts: new_attempts,
+        retry,
+        lease: LeaseToken {
+            owner: owner.to_owned(),
+            nonce,
+            expires_at_ms: new_expires,
+        },
+        failure_class,
+        not_before_ms,
+        dedupe_key,
     }))
 }
 
@@ -1234,17 +1740,28 @@ fn cas_complete(
 ) -> Result<(), JobStoreError> {
     // `complete` implies the worker started executing — bump attempts
     // if no heartbeat already did so, then transition to terminal Done.
+    // Also stamp `completed_at_ms` so the lint last-success lookup can
+    // resolve per-kind completion times without scanning all rows
+    // (spec §4.9).
     let updated = conn
         .execute(
             "UPDATE workflow_jobs \
                 SET state = 'done', lease_owner = NULL, lease_nonce = NULL, \
                     lease_started = NULL, lease_expires_at = NULL, \
                     attempts = CASE WHEN lease_started = 0 THEN attempts + 1 ELSE attempts END, \
+                    completed_at_ms = ?, \
                     updated_at = ? \
               WHERE job_id = ? AND state = 'leased' \
                 AND lease_owner = ? AND lease_nonce = ? \
                 AND lease_expires_at > ?",
-            params![now_ms, job_id.as_str(), lease.owner, lease.nonce, now_ms],
+            params![
+                now_ms,
+                now_ms,
+                job_id.as_str(),
+                lease.owner,
+                lease.nonce,
+                now_ms
+            ],
         )
         .map_err(|e| JobStoreError::Backend(e.to_string()))?;
     if updated == 0 {
@@ -1260,6 +1777,7 @@ fn cas_fail(
     job_id: &JobId,
     lease: &LeaseToken,
     disposition: FailDisposition,
+    class: FailureClass,
     last_error: &str,
     now_ms: i64,
 ) -> Result<(), JobStoreError> {
@@ -1311,50 +1829,13 @@ fn cas_fail(
     let terminal = matches!(disposition, FailDisposition::Permanent) || exhausted;
 
     let res = if terminal {
-        tx.execute(
-            "UPDATE workflow_jobs \
-                SET state = 'failed', lease_owner = NULL, lease_nonce = NULL, \
-                    lease_started = NULL, lease_expires_at = NULL, \
-                    attempts = CASE WHEN lease_started = 0 THEN attempts + 1 ELSE attempts END, \
-                    last_error = ?, updated_at = ? \
-              WHERE job_id = ? AND state = 'leased' \
-                AND lease_owner = ? AND lease_nonce = ? \
-                AND lease_expires_at > ?",
-            params![
-                last_error,
-                now_ms,
-                job_id.as_str(),
-                lease.owner,
-                lease.nonce,
-                now_ms,
-            ],
-        )
+        exec_fail_terminal(&tx, job_id, lease, class, last_error, now_ms)
     } else {
-        // Use the per-row retry policy, not RetryPolicy::DEFAULT, so a
-        // caller's custom backoff actually applies after restart.
         let policy = retry_from_row(max_attempts, base, mult, cap);
         let attempt_for_delay = u32::try_from(effective_attempts).unwrap_or(u32::MAX);
         let delay = u64::from(policy.delay_for_attempt(attempt_for_delay));
         let next_run = now_ms.saturating_add(i64::try_from(delay).unwrap_or(i64::MAX));
-        tx.execute(
-            "UPDATE workflow_jobs \
-                SET state = 'queued', lease_owner = NULL, lease_nonce = NULL, \
-                    lease_started = NULL, lease_expires_at = NULL, \
-                    attempts = CASE WHEN lease_started = 0 THEN attempts + 1 ELSE attempts END, \
-                    last_error = ?, next_run_at = ?, updated_at = ? \
-              WHERE job_id = ? AND state = 'leased' \
-                AND lease_owner = ? AND lease_nonce = ? \
-                AND lease_expires_at > ?",
-            params![
-                last_error,
-                next_run,
-                now_ms,
-                job_id.as_str(),
-                lease.owner,
-                lease.nonce,
-                now_ms,
-            ],
-        )
+        exec_fail_retry(&tx, job_id, lease, class, last_error, next_run, now_ms)
     };
     let updated = res.map_err(|e| JobStoreError::Backend(e.to_string()))?;
     if updated == 0 {
@@ -1369,17 +1850,100 @@ fn cas_fail(
     Ok(())
 }
 
-/// Open a fully-migrated in-memory `SqliteJobStore` for tests.
-/// Runs all `cairn-store-sqlite` migrations (which provision
-/// `schema_migrations` + `workflow_jobs`) then wraps the connection in
-/// a `SqliteJobStore`. Exposed `pub(crate)` so worker/reaper tests share
-/// one bootstrap.
-#[cfg(test)]
-pub(crate) fn install_for_tests(conn: &rusqlite::Connection) {
-    // `schema_migrations` is created by migration 0001, so we need the
-    // full migration runner. Build a minimal schema_migrations table +
-    // apply the workflow_jobs SQL directly so we don't depend on all
-    // prior migrations in this unit test context.
+/// Terminal branch of `cas_fail` — flips state to `'failed'` and
+/// records both the failure class and the dead-letter timestamp so
+/// the lint hot-path index can enumerate dead-letter rows without
+/// scanning all of `workflow_jobs` (spec §4.5).
+fn exec_fail_terminal(
+    tx: &rusqlite::Transaction<'_>,
+    job_id: &JobId,
+    lease: &LeaseToken,
+    class: FailureClass,
+    last_error: &str,
+    now_ms: i64,
+) -> rusqlite::Result<usize> {
+    tx.execute(
+        "UPDATE workflow_jobs \
+            SET state = 'failed', lease_owner = NULL, lease_nonce = NULL, \
+                lease_started = NULL, lease_expires_at = NULL, \
+                attempts = CASE WHEN lease_started = 0 THEN attempts + 1 ELSE attempts END, \
+                last_error = ?, \
+                failure_class = ?, \
+                dead_letter_at_ms = ?, \
+                updated_at = ? \
+          WHERE job_id = ? AND state = 'leased' \
+            AND lease_owner = ? AND lease_nonce = ? \
+            AND lease_expires_at > ?",
+        params![
+            last_error,
+            class.as_str(),
+            now_ms,
+            now_ms,
+            job_id.as_str(),
+            lease.owner,
+            lease.nonce,
+            now_ms,
+        ],
+    )
+}
+
+/// Retry branch of `cas_fail` — flips state back to `'queued'` and
+/// records the most recent failure class so observers can read it
+/// through the next lease return, but leaves `dead_letter_at_ms`
+/// NULL (the row is not dead-lettered).
+fn exec_fail_retry(
+    tx: &rusqlite::Transaction<'_>,
+    job_id: &JobId,
+    lease: &LeaseToken,
+    class: FailureClass,
+    last_error: &str,
+    next_run_at_ms: i64,
+    now_ms: i64,
+) -> rusqlite::Result<usize> {
+    tx.execute(
+        "UPDATE workflow_jobs \
+            SET state = 'queued', lease_owner = NULL, lease_nonce = NULL, \
+                lease_started = NULL, lease_expires_at = NULL, \
+                attempts = CASE WHEN lease_started = 0 THEN attempts + 1 ELSE attempts END, \
+                last_error = ?, \
+                failure_class = ?, \
+                next_run_at = ?, updated_at = ? \
+          WHERE job_id = ? AND state = 'leased' \
+            AND lease_owner = ? AND lease_nonce = ? \
+            AND lease_expires_at > ?",
+        params![
+            last_error,
+            class.as_str(),
+            next_run_at_ms,
+            now_ms,
+            job_id.as_str(),
+            lease.owner,
+            lease.nonce,
+            now_ms,
+        ],
+    )
+}
+
+/// Apply the workflow-jobs migrations (0020 + 0063) to an in-memory
+/// `SQLite` connection, then provision `schema_migrations` so
+/// [`SqliteJobStore::new`] can pass its drift probes.
+///
+/// Test-only bootstrap shared by the in-crate scheduler/reaper tests
+/// and the integration fixtures under `tests/`. Applies the two
+/// migrations directly to avoid pulling in 0022 (which requires the
+/// `vec0` extension and isn't needed for the workflow_jobs schema).
+///
+/// # Panics
+///
+/// Panics if any `execute_batch` fails — this is a test-only helper
+/// so a panic surfaces the underlying SQL error directly to the test
+/// harness rather than forcing every caller to handle a `Result`.
+#[doc(hidden)]
+#[allow(
+    clippy::expect_used,
+    reason = "test-only bootstrap; panic surfaces SQL errors directly to the test harness"
+)]
+pub fn install_for_tests(conn: &rusqlite::Connection) {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_migrations (\
             migration_id INTEGER NOT NULL PRIMARY KEY, \
@@ -1390,6 +1954,7 @@ pub(crate) fn install_for_tests(conn: &rusqlite::Connection) {
     )
     .expect("create schema_migrations");
     conn.execute_batch(MIGRATION_0020_SQL).expect("apply 0020");
+    conn.execute_batch(MIGRATION_0063_SQL).expect("apply 0063");
 }
 
 /// Maximum number of expired rows reaped under a single write
@@ -1399,7 +1964,7 @@ pub(crate) fn install_for_tests(conn: &rusqlite::Connection) {
 /// The reaper sweeps in successive batches until none remain.
 const REAP_BATCH_SIZE: i64 = 64;
 
-fn reap_batch(conn: &mut Connection, now_ms: i64) -> Result<usize, JobStoreError> {
+fn reap_batch(conn: &mut Connection, now_ms: i64) -> Result<Vec<ReclaimedRow>, JobStoreError> {
     // BEGIN IMMEDIATE acquires a write lock up front so a
     // concurrent leaser/reaper on a separate connection retries via
     // `busy_timeout` instead of failing later with a stale-snapshot
@@ -1408,11 +1973,11 @@ fn reap_batch(conn: &mut Connection, now_ms: i64) -> Result<usize, JobStoreError
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|e| JobStoreError::Backend(e.to_string()))?;
-    let mut count = 0usize;
+    let mut reclaimed: Vec<ReclaimedRow> = Vec::new();
     {
         let mut stmt = tx
             .prepare(
-                "SELECT job_id, attempts, delivery_count, max_attempts, \
+                "SELECT job_id, kind, attempts, delivery_count, max_attempts, \
                         base_backoff_ms, backoff_multiplier, max_backoff_ms, lease_started \
                    FROM workflow_jobs \
                   WHERE state = 'leased' AND lease_expires_at <= ? \
@@ -1424,13 +1989,14 @@ fn reap_batch(conn: &mut Connection, now_ms: i64) -> Result<usize, JobStoreError
             .query_map(params![now_ms, REAP_BATCH_SIZE], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
-                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(1)?,
                     r.get::<_, i64>(2)?,
                     r.get::<_, i64>(3)?,
                     r.get::<_, i64>(4)?,
                     r.get::<_, i64>(5)?,
                     r.get::<_, i64>(6)?,
                     r.get::<_, i64>(7)?,
+                    r.get::<_, i64>(8)?,
                 ))
                 .map(|t: ReapRow| t)
             })
@@ -1438,7 +2004,8 @@ fn reap_batch(conn: &mut Connection, now_ms: i64) -> Result<usize, JobStoreError
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| JobStoreError::Backend(e.to_string()))?;
 
-        for (job_id, attempts, delivery_count, max_attempts, base, mult, cap, started) in rows {
+        for (job_id, kind, attempts, delivery_count, max_attempts, base, mult, cap, started) in rows
+        {
             let policy = retry_from_row(max_attempts, base, mult, cap);
             // For started=1, heartbeat already bumped `attempts` — reap
             // doesn't bump again. For started=0, the lease counts as a
@@ -1456,18 +2023,14 @@ fn reap_batch(conn: &mut Connection, now_ms: i64) -> Result<usize, JobStoreError
             //     above any plausible execution budget.
             let delivery_cap = max_attempts.saturating_mul(POISON_DELIVERY_MULTIPLIER);
             let exhausted = attempts >= max_attempts || delivery_count >= delivery_cap;
-            if exhausted {
-                tx.execute(
-                    "UPDATE workflow_jobs \
-                        SET state = 'failed', lease_owner = NULL, lease_nonce = NULL, \
-                            lease_started = NULL, lease_expires_at = NULL, \
-                            last_error = COALESCE(last_error, \
-                                'lease expired with retry budget exhausted'), \
-                            updated_at = ? \
-                      WHERE job_id = ? AND state = 'leased'",
-                    params![now_ms, job_id],
-                )
-                .map_err(|e| JobStoreError::Backend(e.to_string()))?;
+            // Compute the row's next_run_at NOW so we can both persist
+            // it (requeue branch) and surface it on the ReclaimedRow so
+            // the reaper's WorkflowJobFailed metric reports a value
+            // that agrees with the DB. Terminal reaps don't requeue,
+            // but we still surface `None` so callers know there is no
+            // retry to wait for.
+            let next_run_at = if exhausted {
+                None
             } else {
                 // Apply per-row backoff. Use delivery_count for
                 // never-started retries (so repeated pre-heartbeat
@@ -1480,21 +2043,59 @@ fn reap_batch(conn: &mut Connection, now_ms: i64) -> Result<usize, JobStoreError
                     u32::try_from(attempts).unwrap_or(u32::MAX)
                 };
                 let delay = u64::from(policy.delay_for_attempt(attempt_for_delay));
-                let next_run = now_ms.saturating_add(i64::try_from(delay).unwrap_or(i64::MAX));
+                Some(now_ms.saturating_add(i64::try_from(delay).unwrap_or(i64::MAX)))
+            };
+            if exhausted {
+                // Terminal reap: stamp the dead-letter columns so the
+                // workflow_health lint check (which keys on
+                // dead_letter_at_ms IS NOT NULL) sees this row. Without
+                // these columns, an exhausted-reap row goes to
+                // state='failed' silently and the metric event is the
+                // only operator-visible signal — and the spec requires
+                // both the metric AND the lint finding.
+                tx.execute(
+                    "UPDATE workflow_jobs \
+                        SET state = 'failed', lease_owner = NULL, lease_nonce = NULL, \
+                            lease_started = NULL, lease_expires_at = NULL, \
+                            last_error = COALESCE(last_error, \
+                                'lease expired with retry budget exhausted'), \
+                            failure_class = 'lease_lost', \
+                            dead_letter_at_ms = ?, \
+                            updated_at = ? \
+                      WHERE job_id = ? AND state = 'leased'",
+                    params![now_ms, now_ms, job_id],
+                )
+                .map_err(|e| JobStoreError::Backend(e.to_string()))?;
+            } else {
                 tx.execute(
                     "UPDATE workflow_jobs \
                         SET state = 'queued', lease_owner = NULL, lease_nonce = NULL, \
                             lease_started = NULL, lease_expires_at = NULL, \
                             next_run_at = ?, updated_at = ? \
                       WHERE job_id = ? AND state = 'leased'",
-                    params![next_run, now_ms, job_id],
+                    params![next_run_at, now_ms, job_id],
                 )
                 .map_err(|e| JobStoreError::Backend(e.to_string()))?;
             }
-            count += 1;
+            // Worker-visible attempts after reap: started orphans keep
+            // their heartbeat-bumped counter; never-started crashes
+            // (lease_started = 0) are surfaced as attempts+1 — the
+            // delivery the orphan got and didn't finish.
+            let surfaced_attempts = if started == 0 {
+                u32::try_from(attempts.saturating_add(1)).unwrap_or(u32::MAX)
+            } else {
+                u32::try_from(attempts).unwrap_or(u32::MAX)
+            };
+            reclaimed.push(ReclaimedRow {
+                job_id: JobId::new(job_id),
+                kind: JobKind::new(kind),
+                attempts: surfaced_attempts,
+                terminated: exhausted,
+                next_run_at_ms: next_run_at,
+            });
         }
     }
     tx.commit()
         .map_err(|e| JobStoreError::Backend(e.to_string()))?;
-    Ok(count)
+    Ok(reclaimed)
 }
