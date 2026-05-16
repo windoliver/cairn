@@ -134,8 +134,13 @@ fn print_human_summary(r: &harness::LatencyReport) {
         } else {
             "FAIL"
         };
+        let pct = if m.baseline_ms > 0.0 {
+            (m.regression_threshold_ms / m.baseline_ms - 1.0) * 100.0
+        } else {
+            0.0
+        };
         println!(
-            "  [{mark}] {bench}: {meas:.2} ms (SLO {slo:.0} ms, baseline {base:.2} ms, +2% = {thr:.2} ms)",
+            "  [{mark}] {bench}: {meas:.2} ms (SLO {slo:.0} ms, baseline {base:.2} ms, +{pct:.0}% = {thr:.2} ms)",
             bench = m.bench,
             meas = m.measured_ms,
             slo = m.slo_ms,
