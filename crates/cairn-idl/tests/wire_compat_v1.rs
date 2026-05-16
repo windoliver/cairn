@@ -1,10 +1,13 @@
 //! Wire-compat gate for `cairn.mcp.v1` — issue #98, brief §8.0.a / §15.
 //!
-//! Snapshots a single fingerprint over every contract file in
-//! canonical order (envelope + errors + capabilities + extensions +
-//! common + prelude + verbs + plugin manifest). Any unintentional edit
-//! to a schema produces a one-line `.snap` diff; intentional edits
-//! require `cargo insta accept` and an entry in the PR description.
+//! Snapshots a fingerprint over every contract file in canonical order
+//! (manifest + envelope + errors + capabilities + extensions + common +
+//! prelude + verbs + plugin) and an exact-equality check between
+//! `index.json`'s `x-cairn-files` map and `CONTRACT_FILES`. Together
+//! these catch: edits to any contract file, reorder/regroup of
+//! `x-cairn-files`, edits to manifest-only fields like
+//! `x-cairn-verb-ids`, and added/removed/renamed schema files that
+//! kept the same cardinality.
 #![allow(missing_docs)]
 
 use std::fs;
@@ -16,10 +19,28 @@ fn schema_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("schema")
 }
 
-/// Canonical contract-file list — must match `schema/index.json`'s
-/// `x-cairn-files` order. Pinned here so a missing file is a hard fail
-/// rather than a silent drift.
+/// Canonical category order within `index.json#x-cairn-files`. Pinned
+/// here so a reordered or renamed category is a hard fail rather than
+/// a silent drift (Rust's default `serde_json::Map` is `BTreeMap`,
+/// so iteration order is alphabetical — relying on it would mask
+/// canonical-order drift).
+const CATEGORY_ORDER: &[&str] = &[
+    "envelope",
+    "errors",
+    "capabilities",
+    "extensions",
+    "common",
+    "prelude",
+    "verbs",
+    "plugin",
+];
+
+/// Canonical contract-file list — `index.json` plus every entry in its
+/// `x-cairn-files` map, in canonical category order. Pinned so a missing,
+/// added, or reordered file is a hard fail. Must equal
+/// `["index.json"]` ++ `flatten(index.json#x-cairn-files in CATEGORY_ORDER)`.
 const CONTRACT_FILES: &[&str] = &[
+    "index.json",
     "envelope/request.json",
     "envelope/response.json",
     "envelope/signed_intent.json",
@@ -41,6 +62,12 @@ const CONTRACT_FILES: &[&str] = &[
     "verbs/forget.json",
     "plugin/manifest.json",
 ];
+
+fn read_index() -> serde_json::Value {
+    let path = schema_root().join("index.json");
+    let bytes = fs::read(&path).unwrap_or_else(|err| panic!("read index.json: {err}"));
+    serde_json::from_slice(&bytes).unwrap_or_else(|err| panic!("parse index.json: {err}"))
+}
 
 #[test]
 fn manifest_fingerprint_matches_snapshot() {
@@ -70,26 +97,44 @@ fn per_file_snapshots_match() {
 }
 
 #[test]
-fn contract_files_matches_index_json_count() {
-    let index_path = schema_root().join("index.json");
-    let bytes = std::fs::read(&index_path).unwrap_or_else(|err| panic!("read index.json: {err}"));
-    let index: serde_json::Value =
-        serde_json::from_slice(&bytes).unwrap_or_else(|err| panic!("parse index.json: {err}"));
+fn contract_files_matches_index_json_exactly() {
+    let index = read_index();
     let files = index
         .get("x-cairn-files")
         .and_then(serde_json::Value::as_object)
         .expect("index.json: x-cairn-files must be an object");
-    let total: usize = files
-        .values()
-        .map(|arr| arr.as_array().map_or(0, std::vec::Vec::len))
-        .sum();
+
+    let mut actual_categories: Vec<&str> = files.keys().map(String::as_str).collect();
+    actual_categories.sort_unstable();
+    let mut expected_categories: Vec<&str> = CATEGORY_ORDER.to_vec();
+    expected_categories.sort_unstable();
     assert_eq!(
-        total,
-        CONTRACT_FILES.len(),
-        "CONTRACT_FILES (len={}) drifted from index.json#x-cairn-files (total={}). \
-         A new schema file was added to index.json without updating CONTRACT_FILES \
-         — add it to keep the wire-compat gate honest.",
-        CONTRACT_FILES.len(),
-        total,
+        actual_categories, expected_categories,
+        "index.json#x-cairn-files category set drifted from CATEGORY_ORDER. \
+         A category was added, removed, or renamed; update CATEGORY_ORDER \
+         (and CONTRACT_FILES) to keep the wire-compat gate honest."
+    );
+
+    let mut flattened: Vec<String> = vec!["index.json".to_string()];
+    for category in CATEGORY_ORDER {
+        let arr = files
+            .get(*category)
+            .and_then(serde_json::Value::as_array)
+            .unwrap_or_else(|| panic!("x-cairn-files.{category} must be an array"));
+        for entry in arr {
+            let rel = entry
+                .as_str()
+                .unwrap_or_else(|| panic!("x-cairn-files.{category} entries must be strings"));
+            flattened.push(rel.to_string());
+        }
+    }
+
+    let expected: Vec<String> = CONTRACT_FILES.iter().map(|s| (*s).to_string()).collect();
+    assert_eq!(
+        flattened, expected,
+        "CONTRACT_FILES drifted from index.json#x-cairn-files. The wire-compat \
+         snapshot set must equal `[\"index.json\"]` ++ flatten(x-cairn-files in \
+         CATEGORY_ORDER). Update CONTRACT_FILES (and possibly CATEGORY_ORDER) \
+         to match — or revert the schema/index.json edit if it was unintended."
     );
 }
