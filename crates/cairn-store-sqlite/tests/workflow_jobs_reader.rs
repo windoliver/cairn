@@ -314,7 +314,10 @@ fn new_rejects_db_stuck_at_migration_0020() {
             // Probe order is implementation-defined — any of the
             // three migration-0062 columns is acceptable.
             assert!(
-                matches!(name, "failure_class" | "dead_letter_at_ms" | "completed_at_ms"),
+                matches!(
+                    name,
+                    "failure_class" | "dead_letter_at_ms" | "completed_at_ms"
+                ),
                 "unexpected missing column name: {name}"
             );
         }

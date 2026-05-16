@@ -304,8 +304,7 @@ mod tests {
         let errors: Vec<&Finding> = findings
             .iter()
             .filter(|f| {
-                matches!(f.kind, Kind::WorkflowDeadLetter)
-                    && matches!(f.severity, Severity::Error)
+                matches!(f.kind, Kind::WorkflowDeadLetter) && matches!(f.severity, Severity::Error)
             })
             .collect();
         assert_eq!(
@@ -353,8 +352,10 @@ mod tests {
         let inputs = empty_lint_inputs_with_reader(&reader, 1_000_000);
         let findings = super::run(&inputs);
         assert!(
-            !findings.iter().any(|f| matches!(f.severity, Severity::Warning)
-                && matches!(f.kind, Kind::WorkflowDeadLetter)),
+            !findings
+                .iter()
+                .any(|f| matches!(f.severity, Severity::Warning)
+                    && matches!(f.kind, Kind::WorkflowDeadLetter)),
             "no overflow Warning when total <= cap: {findings:?}"
         );
     }
