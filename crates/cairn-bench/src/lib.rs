@@ -8,6 +8,7 @@ pub mod cached_embedder;
 pub mod fixture;
 pub mod gates;
 pub mod latency;
+pub mod memory;
 pub mod metrics;
 pub mod report;
 pub mod scorecard;

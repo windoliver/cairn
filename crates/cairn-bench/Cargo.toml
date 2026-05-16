@@ -52,6 +52,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 toml = { workspace = true }
 tracing = { workspace = true }
+walkdir = { workspace = true }
 yaml_serde = { workspace = true }
 
 [dev-dependencies]
@@ -72,4 +73,4 @@ name = "lifecycle"
 harness = false
 
 [package.metadata.cargo-machete]
-ignored = ["cairn-sdk", "tracing", "rusqlite", "yaml_serde", "toml"]
+ignored = ["cairn-sdk", "tracing", "rusqlite", "yaml_serde"]

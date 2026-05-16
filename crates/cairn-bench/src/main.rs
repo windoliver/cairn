@@ -16,8 +16,8 @@ enum Cmd {
     Scorecard(cairn_bench::scorecard::ScorecardArgs),
     /// Latency regression gate: runs criterion, compares to baseline, writes report.
     Latency(cairn_bench::latency::LatencyArgs),
-    /// Memory budget gate (placeholder until Task 6).
-    Memory,
+    /// Memory budget gate: measures binary + embedding model against manifest budget.
+    Memory(cairn_bench::memory::MemoryArgs),
     /// Privacy leakage gate (placeholder until Task 8).
     Privacy,
     /// Run latency + memory + privacy and exit non-zero on any failure.
@@ -37,7 +37,11 @@ async fn main() -> anyhow::Result<()> {
             let outcome = cairn_bench::latency::run(&args)?;
             std::process::exit(outcome.exit_code().into());
         }
-        Cmd::Memory | Cmd::Privacy | Cmd::All { .. } => {
+        Cmd::Memory(args) => {
+            let outcome = cairn_bench::memory::run(&args)?;
+            std::process::exit(outcome.exit_code().into());
+        }
+        Cmd::Privacy | Cmd::All { .. } => {
             anyhow::bail!("not implemented yet — wired in later tasks")
         }
     }
