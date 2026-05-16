@@ -105,16 +105,20 @@ Exit codes:
 
 Criterion benches in `crates/cairn-bench/benches/latency.rs`, driven from inside the `cairn-bench latency` subcommand. Criterion runs as a library so the gate can read the JSON output and compare to the baseline.
 
-| Bench | Verb path | §15 SLO |
-|---|---|---|
-| `assemble_hot_p95` | `cairn-sdk::assemble_hot` on seeded vault | < 50 ms p95 |
-| `search_keyword_p95` | `cairn-sdk::search` mode=keyword | < 50 ms p95 |
-| `search_semantic_p95` | `cairn-sdk::search` mode=semantic | < 50 ms p95 |
-| `search_hybrid_p95` | `cairn-sdk::search` mode=hybrid | < 50 ms p95 |
-| `retrieve_p95` | `cairn-sdk::retrieve` by id | < 50 ms p95 (§15 turn-latency umbrella); §19.a aspirational p50 < 5 ms is advisory |
-| `capture_trace_p95` | `cairn-sdk::capture_trace` with one event | < 50 ms p95 |
-| `wal_apply_p95` | `cairn-core::wal::apply` on a PREPARED row | < 50 ms p95 |
-| `workflow_enqueue_p95` | `cairn-workflows::enqueue` | < 50 ms p95 |
+**Driver — subprocess via `cairn` CLI.** Each bench iteration spawns the release-built `cairn` binary against a temp vault and waits for it to exit. Rationale: as of the v0.1 codebase, the `cairn-sdk` Rust API returns `Unimplemented` for `assemble_hot`, `retrieve --record`, `capture_trace`, `forget`, and `lint` — these verbs are only wired end-to-end through the CLI (issue #193 will land an SDK-wired path; gates flip to in-process at that point). Subprocess wall-clock includes process spawn + tokio runtime init (~100-200 ms cold, ~20-50 ms warm); the gate amortizes this by reusing the same vault across iterations and using criterion's warm-up sample window.
+
+| Bench | CLI command | §15 SLO (in-process) | Subprocess SLO (proxy) |
+|---|---|---|---|
+| `assemble_hot_p95` | `cairn assemble_hot --json` | < 50 ms p95 | < 300 ms p95 |
+| `search_keyword_p95` | `cairn search --mode keyword --query <q> --json` | < 50 ms p95 | < 300 ms p95 |
+| `search_semantic_p95` | `cairn search --mode semantic --query <q> --json` | < 50 ms p95 | < 300 ms p95 |
+| `search_hybrid_p95` | `cairn search --mode hybrid --query <q> --json` | < 50 ms p95 | < 300 ms p95 |
+| `retrieve_p95` | `cairn retrieve --id <id> --json` | < 50 ms p95 (§15 umbrella); §19.a aspirational p50 < 5 ms is advisory | < 300 ms p95 |
+| `capture_trace_p95` | `cairn capture_trace --from <event-file> --json` | < 50 ms p95 | < 300 ms p95 |
+| `wal_apply_p95` | `cairn ingest --kind reference --body <s> --json` | < 50 ms p95 | < 300 ms p95 |
+| `workflow_enqueue_p95` | `cairn capture_trace --from <stop-event> --json` (Stop event triggers rolling-summary enqueue) | < 50 ms p95 | < 300 ms p95 |
+
+The headline brief §15 50 ms SLO is the underlying contract. The gate's hard SLO is the subprocess proxy (~300 ms p95, matching the precedent set by `crates/cairn-cli/tests/hot_prefix_latency_smoke.rs:88`). Brief §15 also requires "> 2% regression fails build" — that rule applies to the subprocess proxy too (regression detection is unit-independent), and is the load-bearing guard for day-to-day PRs. When issue #193 wires the SDK end-to-end, the latency gate flips to in-process and the proxy threshold is removed.
 
 Lifecycle SLOs (cold-rehydration < 3 s, forget 1M-record < 1 s/30 s) live in `benches/lifecycle.rs` and run only on `release-dry-run.yml` because the setup cost is too high for every PR.
 
@@ -475,7 +479,7 @@ In `release-dry-run.yml`:
 From CLAUDE.md §4:
 
 - **Invariant 2 (stand-alone P0).** All gate code runs offline, no network. Asset paths reuse production resolution code paths so the offline contract holds.
-- **Invariant 3 (CLI is ground truth).** Benches drive `cairn-sdk` directly — same verb functions as CLI/MCP/Skill. No parallel implementation.
+- **Invariant 3 (CLI is ground truth).** Benches drive the `cairn` CLI subprocess directly (in v0.1; flips to in-process via `cairn-sdk` once issue #193 lands the SDK-wired verb paths). No parallel verb implementation in either mode.
 - **Invariant 4 (seven contracts).** Privacy gate exercises `MemoryStore::forget` + `MemoryStore::search` + `MemoryStore::retrieve` only; no new contract.
 - **Invariant 8 (no `unwrap` in `cairn-core`).** Gate code lives in `cairn-bench`, not `cairn-core`. `unwrap` rules for bins/tests apply.
 - **Invariant 9 (privacy by construction).** Privacy gate is the regression net for this invariant — fixtures fail if a leak appears.
