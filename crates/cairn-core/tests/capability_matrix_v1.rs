@@ -41,7 +41,7 @@
 //!       empty set.
 #![allow(missing_docs)]
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use cairn_core::config::CapabilitySet;
 use cairn_core::generated::common::Capabilities;
@@ -391,18 +391,90 @@ fn every_v01_capability_is_classified_exactly_once() {
         .and_then(serde_json::Value::as_array)
         .expect("capabilities.json: oneOf must be an array");
 
-    // Collect every entry — not filtered by phase. Round-7 finding:
-    // v0.2 / v0.3 entries must be classified too, not silently ignored.
-    let all_strings: HashSet<String> = entries
+    // Collect (const, x-cairn-since) pairs. Round-7 finding: v0.2/v0.3
+    // entries must be classified. Round-9 finding: phase metadata
+    // itself must be bound to the runtime — a schema edit that bumps
+    // x-cairn-since silently is a contract version-skew.
+    let schema_phases: HashMap<String, String> = entries
         .iter()
         .map(|entry| {
-            entry
+            let cap = entry
                 .get("const")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_else(|| panic!("oneOf entry without `const`: {entry}"))
-                .to_owned()
+                .to_owned();
+            let phase = entry
+                .get("x-cairn-since")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_else(|| panic!("oneOf entry `{cap}` missing x-cairn-since"))
+                .to_owned();
+            assert!(
+                matches!(phase.as_str(), "v0.1" | "v0.2" | "v0.3"),
+                "capability `{cap}` has unknown x-cairn-since `{phase}` — expected v0.1, v0.2, or v0.3"
+            );
+            (cap, phase)
         })
         .collect();
+    let all_strings: HashSet<String> = schema_phases.keys().cloned().collect();
+
+    // EXPECTED_PHASE binds each capability string to the runtime-tested
+    // phase. Round-9 Codex finding: without this, a schema edit that
+    // bumps `x-cairn-since` (or vice versa, a runtime change that
+    // shifts a row to a different phase) can slip past the bucket sets.
+    // The test compares schema_phases (parsed from capabilities.json)
+    // against this map — any disagreement is a version-skew regression.
+    let expected_phase: HashMap<&'static str, &'static str> = HashMap::from([
+        // v0.1 — advertised in default-P0 status (case A).
+        ("cairn.mcp.v1.search.keyword", "v0.1"),
+        ("cairn.mcp.v1.search.semantic", "v0.1"),
+        ("cairn.mcp.v1.search.hybrid", "v0.1"),
+        ("cairn.mcp.v1.retrieve.session", "v0.1"),
+        ("cairn.mcp.v1.retrieve.turn", "v0.1"),
+        ("cairn.mcp.v1.retrieve.tool_call", "v0.1"),
+        ("cairn.mcp.v1.forget.record", "v0.1"),
+        ("cairn.mcp.v1.policy_trace", "v0.1"),
+        ("cairn.workflows.v1.consolidation", "v0.1"),
+        ("cairn.workflows.v1.dream", "v0.1"),
+        ("cairn.workflows.v1.expiration", "v0.1"),
+        ("cairn.workflows.v1.evaluation", "v0.1"),
+        // v0.1 — surface-added sensors (default-platform).
+        ("cairn.sensor.v1.screen.xcap", "v0.1"),
+        ("cairn.sensor.v1.screen.ocr.tesseract", "v0.1"),
+        // v0.1 — deferred (wiring or stale sensor).
+        ("cairn.mcp.v1.retrieve.record", "v0.1"),
+        ("cairn.mcp.v1.retrieve.folder", "v0.1"),
+        ("cairn.mcp.v1.retrieve.scope", "v0.1"),
+        ("cairn.mcp.v1.retrieve.profile", "v0.1"),
+        ("cairn.mcp.v1.sensors.pre_compact", "v0.1"),
+        ("cairn.mcp.v1.replay.sequence", "v0.1"),
+        ("cairn.mcp.v1.replay.challenge", "v0.1"),
+        ("cairn.mcp.v1.extension.admin", "v0.1"),
+        ("cairn.sensor.v1.screen.ocr.vision", "v0.1"),
+        // v0.1 — non-default (real producer behind cfg/feature/OS).
+        ("cairn.sensor.v1.screen.screenpipe", "v0.1"),
+        ("cairn.sensor.v1.screen.ocr.winrt", "v0.1"),
+        // v0.2.
+        ("cairn.mcp.v1.summarize.narrative", "v0.2"),
+        ("cairn.mcp.v1.forget.session", "v0.2"),
+        ("cairn.mcp.v1.extension.aggregate", "v0.2"),
+        // v0.3.
+        ("cairn.mcp.v1.forget.scope", "v0.3"),
+        ("cairn.mcp.v1.extension.federation", "v0.3"),
+        ("cairn.mcp.v1.extension.sessiontree", "v0.3"),
+        ("cairn.mcp.v1.extension.coord", "v0.3"),
+    ]);
+
+    let actual_phases: HashMap<&str, &str> = schema_phases
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    assert_eq!(
+        actual_phases, expected_phase,
+        "x-cairn-since metadata in capabilities.json drifted from the runtime-bound \
+         EXPECTED_PHASE map. A schema edit bumped a capability's phase without \
+         updating this test (or vice versa). Reconcile both sides in a single PR \
+         and confirm the matching phase reachability case still passes."
+    );
 
     let advertised: HashSet<String> = expected_full_p0()
         .into_iter()
