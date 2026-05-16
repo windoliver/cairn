@@ -28,6 +28,27 @@ fn cli() -> Command {
     Command::new(env!("CARGO_BIN_EXE_cairn"))
 }
 
+fn enable_hook_sensor(vault: &Path) {
+    let out = cli()
+        .current_dir(vault)
+        .args([
+            "sensor",
+            "enable",
+            "hook",
+            "--reason",
+            "operator_on",
+            "--json",
+        ])
+        .output()
+        .expect("enable hook sensor");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 fn retrieve_turn_json(
     vault: &Path,
     session_id: &str,
@@ -731,6 +752,7 @@ fn retrieve_session_after_capture_trace_honors_scope_and_limit() {
     })
     .expect("bootstrap");
     let _ = ingest_reference(vault.path(), "seed default issuer before retrieve");
+    enable_hook_sensor(vault.path());
     let trace_path = write_issue_61_trace_fixture(vault.path(), SESSION_ID);
 
     let capture = cli()
@@ -1081,6 +1103,7 @@ fn issue_61_cli_full_workflow_round_trips_across_verbs() {
             .contains("full workflow issue 61 project memory")
     );
 
+    enable_hook_sensor(vault.path());
     let trace_path = write_issue_61_trace_fixture(vault.path(), SESSION_ID);
     let capture = cli()
         .current_dir(vault.path())
@@ -1355,6 +1378,7 @@ fn provision_agent(vault: &Path, slug: &str) -> String {
 }
 
 fn run_capture_trace(vault: &Path, trace_path: &Path) {
+    enable_hook_sensor(vault);
     let capture = cli()
         .current_dir(vault)
         .args([

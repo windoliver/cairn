@@ -267,7 +267,13 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     // watermarks for assemble_hot cache invalidation.
     ("table", "hot_source_watermarks"),
     ("table", "hot_prefix_cache"),
-    // 0062_workflow_dead_letter (issue #92): lint hot-path indexes for
+    // 0062_session_tree (issue #133): v0.3 branch/merge metadata substrate.
+    ("table", "session_tree_nodes"),
+    ("index", "session_tree_nodes_parent_idx"),
+    ("table", "session_tree_merges"),
+    ("index", "session_tree_merges_source_idx"),
+    ("index", "session_tree_merges_destination_idx"),
+    // 0063_workflow_dead_letter (issue #92): lint hot-path indexes for
     // dead-letter enumeration and per-kind last-success lookup.
     ("index", "workflow_jobs_dead_letter_idx"),
     ("index", "workflow_jobs_kind_completed_idx"),

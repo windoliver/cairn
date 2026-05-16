@@ -1,4 +1,6 @@
--- Migration 0062: workflow dead-letter columns + completion timestamps.
+-- Migration 0063: workflow dead-letter columns + completion timestamps.
+-- (Renumbered from 0062 during merge with main; #133's session_tree
+-- migration shipped 0062 first.)
 -- Issue #92. Spec: docs/superpowers/specs/2026-05-15-workflow-recovery-design.md
 -- Brief sources: §5.6 WAL, §10 Continuous Learning.
 --
@@ -23,4 +25,4 @@ CREATE INDEX workflow_jobs_kind_completed_idx
   ON workflow_jobs(kind, completed_at_ms);
 
 INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at)
-  VALUES (62, '0062_workflow_dead_letter', '', strftime('%s','now') * 1000);
+  VALUES (63, '0063_workflow_dead_letter', '', strftime('%s','now') * 1000);

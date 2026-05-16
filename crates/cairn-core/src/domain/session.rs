@@ -21,7 +21,7 @@ use crate::domain::identity::{Identity, IdentityKind};
 /// Opaque session identifier. Typically a ULID minted by the store, but the
 /// type accepts any non-empty `[A-Za-z0-9._:-]+` string so callers may pass
 /// harness-supplied IDs.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
 pub struct SessionId(String);
 

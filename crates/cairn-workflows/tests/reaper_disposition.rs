@@ -398,7 +398,7 @@ async fn terminal_reap_stamps_dead_letter_columns() {
 
     let reader_conn = rusqlite::Connection::open(&db_path).expect("reopen");
     let reader = cairn_store_sqlite::SqliteWorkflowJobsReader::new(reader_conn)
-        .expect("reader needs migration 0062");
+        .expect("reader needs migration 0063");
     let rows = reader.dead_letter_rows(10);
     assert_eq!(
         rows.len(),

@@ -11,26 +11,19 @@
 //! when `config.source.redact_on_forget` is set, rewrites any matching
 //! files under `sources/` to metadata stubs (issue #327).
 //!
-//! Session-mode forget (issue #328 phase B) acquires session-namespace and
-//! per-partition locks, snapshots affected sources, then atomically purges
-//! every target belonging to the session in a single transaction along with
-//! body-free `source_forget` consent events. Unlike record forget it bypasses
-//! the WAL signed-tombstone path because it operates on a session aggregate
-//! rather than a single record.
+//! Session-mode forget delegates to the store-level `forget_session` WAL path
+//! so the CLI stays a thin surface over the same lock and audit machinery.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::Duration;
 
+use anyhow::Context as _;
 use cairn_core::config::CairnConfig;
 use cairn_core::contract::job_store::{EnqueueRequest, JobId, JobKind, JobStoreError, RetryPolicy};
-use cairn_core::contract::memory_store::{MemoryStore, TombstoneReason};
-use cairn_core::domain::{
-    ConsentEvent, ConsentKind, ConsentPayload, Identity, MemoryRecord, RecordId, Rfc3339Timestamp,
-    SourceId,
-};
+use cairn_core::contract::memory_store::{ListArgs, MemoryStore, TombstoneReason};
+use cairn_core::domain::{ConsentEvent, ConsentKind, ConsentPayload, RecordId, Rfc3339Timestamp};
 use cairn_core::generated::common::Ulid;
 use cairn_core::generated::envelope::ResponseVerb;
 use cairn_core::generated::envelope::{
@@ -48,11 +41,6 @@ use super::envelope::{
     new_operation_id, not_found_response,
 };
 
-const SESSION_LOCK_TENANT: &str = "default";
-const SESSION_LOCK_WORKSPACE: &str = "default";
-const UNSCOPED_LOCK_COMPONENT: &str = "__none__";
-const SESSION_LOCK_TTL: Duration = Duration::from_secs(30);
-
 fn requested_capability(sub: &ArgMatches) -> &'static str {
     if sub.get_one::<String>("session_id").is_some() {
         "cairn.mcp.v1.forget.session"
@@ -67,12 +55,7 @@ fn requested_capability(sub: &ArgMatches) -> &'static str {
 struct SessionForgetReceipt {
     deleted_count: u64,
     tombstones: Vec<Ulid>,
-}
-
-#[derive(Debug)]
-struct SourceGroup {
-    source_hash: String,
-    source_ids: BTreeSet<SourceId>,
+    projection_paths: Vec<PathBuf>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -81,8 +64,6 @@ enum ForgetSessionError {
     NotFound(String),
     #[error("session `{0}` spans multiple scope partitions; refuse ambiguous forget")]
     AmbiguousSession(String),
-    #[error("source artifact write failed at `{path}`: {message}")]
-    SourceRewrite { path: String, message: String },
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -852,7 +833,7 @@ impl ForgetOutcomeExt for cairn_store_sqlite::record_wal::forget::ForgetOutcome 
 // =====================================================================
 
 #[allow(clippy::too_many_lines)]
-fn run_session(session_id: &str, vault_root: &Path, config: &CairnConfig, json: bool) -> ExitCode {
+fn run_session(session_id: &str, vault_root: &Path, _config: &CairnConfig, json: bool) -> ExitCode {
     let operation_id = new_operation_id();
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -878,15 +859,51 @@ fn run_session(session_id: &str, vault_root: &Path, config: &CairnConfig, json: 
         }
     };
 
-    let result = rt.block_on(forget_session(
-        vault_root.to_path_buf(),
-        session_id,
-        &operation_id.0,
-        config.source.redact_on_forget,
-    ));
+    let db_path = vault_root.join(".cairn/cairn.db");
+    let result = rt.block_on(async {
+        let store = cairn_store_sqlite::open(&db_path)
+            .await
+            .map_err(|e| ForgetSessionError::Other(anyhow::anyhow!("open store: {e}")))?;
+        let projection_paths = session_projection_paths_for_forget(&store, session_id).await?;
+        remove_session_projection_files(vault_root, &projection_paths)
+            .map_err(ForgetSessionError::Other)?;
+        store
+            .forget_session(session_id)
+            .await
+            .map(|outcome| SessionForgetReceipt {
+                deleted_count: outcome.deleted_count,
+                projection_paths: outcome.projection_paths,
+                tombstones: outcome
+                    .tombstones
+                    .into_iter()
+                    .map(|id| Ulid(id.as_str().to_owned()))
+                    .collect(),
+            })
+            .map_err(|e| match e {
+                cairn_store_sqlite::StoreError::NotFound { id } => ForgetSessionError::NotFound(id),
+                cairn_store_sqlite::StoreError::Invariant { what }
+                    if what.contains("spans multiple scope partitions") =>
+                {
+                    ForgetSessionError::AmbiguousSession(session_id.to_owned())
+                }
+                other => ForgetSessionError::Other(anyhow::anyhow!("{other}")),
+            })
+    });
 
     match result {
         Ok(receipt) => {
+            if let Err(e) = remove_session_projection_files(vault_root, &receipt.projection_paths) {
+                let resp = super::envelope::internal_error_response(
+                    ResponseVerb::Forget,
+                    &format!("projection cleanup failed after committed session forget: {e}"),
+                );
+                if json {
+                    emit_json(&resp);
+                } else {
+                    human_error("forget", "Internal", &e.to_string(), &resp.operation_id);
+                }
+                return ExitCode::FAILURE;
+            }
             let resp = Response {
                 contract: "cairn.mcp.v1".to_owned(),
                 data: Some(ResponseData::Forget(ForgetData {
@@ -954,364 +971,79 @@ fn run_session(session_id: &str, vault_root: &Path, config: &CairnConfig, json: 
     }
 }
 
-#[allow(clippy::too_many_lines)]
-async fn forget_session(
-    vault_root: PathBuf,
-    session_id: &str,
-    operation_id: &str,
-    redact_on_forget: bool,
-) -> Result<SessionForgetReceipt, ForgetSessionError> {
-    let db_path = vault_root.join(".cairn/cairn.db");
-    let store = cairn_store_sqlite::open(&db_path)
-        .await
-        .map_err(|e| ForgetSessionError::Other(anyhow::anyhow!("open store: {e}")))?;
-    let namespace_lock = acquire_session_namespace_lock(
-        &store,
-        session_id,
-        cairn_store_sqlite::locks::LockMode::Exclusive,
-        operation_id,
-    )
-    .await?;
-
-    let result = async {
-        let session_id_for_tx = session_id.to_owned();
-        let scope_partitions = store
-            .with_tx(move |tx| tx.list_session_scope_partitions(&session_id_for_tx))
-            .await
-            .map_err(|e| ForgetSessionError::Other(anyhow::anyhow!("list session scopes: {e}")))?;
-        let [(tenant, workspace)] = scope_partitions.as_slice() else {
-            return if scope_partitions.is_empty() {
-                Err(ForgetSessionError::NotFound(session_id.to_owned()))
-            } else {
-                Err(ForgetSessionError::AmbiguousSession(session_id.to_owned()))
-            };
-        };
-        let partition_lock = acquire_session_lock(
-            &store,
-            tenant.as_deref(),
-            workspace.as_deref(),
-            session_id,
-            cairn_store_sqlite::locks::LockMode::Exclusive,
-            operation_id,
-        )
-        .await?;
-
-        let body_result = async {
-            let session_id_for_tx = session_id.to_owned();
-            let tenant_for_tx = tenant.clone();
-            let workspace_for_tx = workspace.clone();
-            let target_ids = store
-                .with_tx(move |tx| {
-                    tx.list_target_ids_for_session_scope(
-                        &session_id_for_tx,
-                        tenant_for_tx.as_deref(),
-                        workspace_for_tx.as_deref(),
-                    )
-                })
-                .await
-                .map_err(|e| {
-                    ForgetSessionError::Other(anyhow::anyhow!("list session targets: {e}"))
-                })?;
-            if target_ids.is_empty() {
-                return Err(ForgetSessionError::NotFound(session_id.to_owned()));
-            }
-
-            let decided_at = Rfc3339Timestamp::parse(cairn_core::time::now_rfc3339_seconds())
-                .map_err(|e| ForgetSessionError::Other(anyhow::anyhow!("clock: {e}")))?;
-            let mut deleted_count = 0_u64;
-            let mut tombstones = Vec::new();
-            let mut record_events = Vec::new();
-            let mut source_events = Vec::new();
-            let mut source_groups = HashMap::<String, SourceGroup>::new();
-
-            for target_id in &target_ids {
-                let versions = store.versions(target_id).await.map_err(|e| {
-                    ForgetSessionError::Other(anyhow::anyhow!("load versions: {e}"))
-                })?;
-                if versions.is_empty() {
-                    return Err(ForgetSessionError::NotFound(target_id.as_str().to_owned()));
-                }
-                deleted_count =
-                    deleted_count.saturating_add(u64::try_from(versions.len()).unwrap_or(u64::MAX));
-                tombstones.extend(
-                    versions
-                        .iter()
-                        .map(|version| Ulid(version.record_id.as_str().to_owned())),
-                );
-
-                let mut records = Vec::with_capacity(versions.len());
-                for version in &versions {
-                    let record = store.get(&version.record_id).await.map_err(|e| {
-                        ForgetSessionError::Other(anyhow::anyhow!("load record: {e}"))
-                    })?;
-                    let Some(record) = record else {
-                        return Err(ForgetSessionError::Other(anyhow::anyhow!(
-                            "version `{}` for target `{}` disappeared during forget",
-                            version.record_id.as_str(),
-                            target_id.as_str()
-                        )));
-                    };
-                    records.push(record);
-                }
-
-                let actor = records.first().and_then(signing_author).unwrap_or_else(|| {
-                    Identity::parse("agt:cairn-cli:forget:v0").expect("static identity")
-                });
-                let scope = records
-                    .first()
-                    .map(|record| record.scope.canonical_wire().to_ascii_lowercase())
-                    .unwrap_or_default();
-                let target_hash = target_id_hash(target_id.as_str());
-                let target_source_groups = group_sources(&records);
-
-                record_events.push(ConsentEvent {
-                    consent_id: new_operation_id().0,
-                    kind: ConsentKind::ForgetIntent,
-                    actor: actor.clone(),
-                    subject: target_hash.clone(),
-                    scope: scope.clone(),
-                    op_id: Some(operation_id.to_owned()),
-                    sensor_id: None,
-                    payload: ConsentPayload::IntentReceipt {
-                        target_id_hash: target_hash.clone(),
-                        scope_tier: records[0].visibility,
-                        reason_code: "record_forget".to_owned(),
-                    },
-                    decided_at: decided_at.clone(),
-                    expires_at: None,
-                });
-
-                for group in target_source_groups.values() {
-                    source_groups
-                        .entry(group.source_hash.clone())
-                        .and_modify(|existing| {
-                            existing.source_ids.extend(group.source_ids.iter().cloned());
-                        })
-                        .or_insert_with(|| SourceGroup {
-                            source_hash: group.source_hash.clone(),
-                            source_ids: group.source_ids.clone(),
-                        });
-                    source_events.push(ConsentEvent {
-                        consent_id: new_operation_id().0,
-                        kind: ConsentKind::ForgetIntent,
-                        actor: actor.clone(),
-                        subject: group.source_hash.clone(),
-                        scope: scope.clone(),
-                        op_id: Some(operation_id.to_owned()),
-                        sensor_id: None,
-                        payload: ConsentPayload::IntentReceipt {
-                            target_id_hash: target_hash.clone(),
-                            scope_tier: records[0].visibility,
-                            reason_code: if redact_on_forget {
-                                "source_forget_redacted".to_owned()
-                            } else {
-                                "source_forget".to_owned()
-                            },
-                        },
-                        decided_at: decided_at.clone(),
-                        expires_at: None,
-                    });
-                }
-            }
-
-            super::admin_snapshot::rewrite_registered_backups(
-                &vault_root,
-                &target_ids,
-                operation_id,
-            )
-            .map_err(ForgetSessionError::Other)?;
-
-            if redact_on_forget {
-                for group in source_groups.values() {
-                    for source_id in &group.source_ids {
-                        rewrite_source_redaction_marker(
-                            &vault_root,
-                            source_id,
-                            &group.source_hash,
-                            operation_id,
-                        )?;
-                    }
-                }
-            }
-
-            let target_ids_for_tx = target_ids.clone();
-            store
-                .with_tx(move |tx| {
-                    for event in &record_events {
-                        tx.append_consent_event(event)?;
-                    }
-                    for event in &source_events {
-                        tx.append_consent_event(event)?;
-                    }
-                    for target in &target_ids_for_tx {
-                        tx.purge_target(target)?;
-                    }
-                    Ok::<(), cairn_store_sqlite::StoreError>(())
-                })
-                .await
-                .map_err(|e| {
-                    ForgetSessionError::Other(anyhow::anyhow!("forget transaction: {e:?}"))
-                })?;
-
-            Ok(SessionForgetReceipt {
-                deleted_count,
-                tombstones,
-            })
-        }
-        .await;
-
-        let release_result = partition_lock
-            .release()
-            .await
-            .map_err(|e| ForgetSessionError::Other(anyhow::anyhow!("release session lock: {e}")));
-        match (body_result, release_result) {
-            (Ok(receipt), Ok(())) => Ok(receipt),
-            (Err(error), Ok(())) | (_, Err(error)) => Err(error),
-        }
-    }
-    .await;
-
-    let release_result = namespace_lock.release().await.map_err(|e| {
-        ForgetSessionError::Other(anyhow::anyhow!("release session namespace lock: {e}"))
-    });
-    match (result, release_result) {
-        (Ok(receipt), Ok(())) => Ok(receipt),
-        (Err(error), Ok(())) | (_, Err(error)) => Err(error),
-    }
-}
-
-async fn acquire_session_lock(
-    store: &cairn_store_sqlite::SqliteMemoryStore,
-    tenant: Option<&str>,
-    workspace: Option<&str>,
-    session_id: &str,
-    mode: cairn_store_sqlite::locks::LockMode,
-    operation_id: &str,
-) -> Result<cairn_store_sqlite::locks::LockHandle, ForgetSessionError> {
-    let conn = store
-        .raw_conn_for_admin()
-        .ok_or_else(|| ForgetSessionError::Other(anyhow::anyhow!("store lock path unavailable")))?;
-    let incarnation = store.incarnation().cloned().ok_or_else(|| {
-        ForgetSessionError::Other(anyhow::anyhow!("store incarnation unavailable"))
-    })?;
-    let tenant_component = tenant
-        .unwrap_or(UNSCOPED_LOCK_COMPONENT)
-        .if_empty(SESSION_LOCK_TENANT);
-    let workspace_component = workspace
-        .unwrap_or(UNSCOPED_LOCK_COMPONENT)
-        .if_empty(SESSION_LOCK_WORKSPACE);
-    let resource = cairn_store_sqlite::locks::ResourceKey::session(
-        &tenant_component,
-        &workspace_component,
-        session_id,
-    );
-    let holder_id = format!("pid={}-{}", std::process::id(), ulid::Ulid::new());
-    cairn_store_sqlite::locks::acquire(
-        conn,
-        &resource,
-        mode,
-        &holder_id,
-        SESSION_LOCK_TTL,
-        &incarnation,
-        operation_id,
-    )
-    .await
-    .map_err(|e| ForgetSessionError::Other(anyhow::anyhow!("acquire session lock: {e}")))
-}
-
-async fn acquire_session_namespace_lock(
+async fn session_projection_paths_for_forget(
     store: &cairn_store_sqlite::SqliteMemoryStore,
     session_id: &str,
-    mode: cairn_store_sqlite::locks::LockMode,
-    operation_id: &str,
-) -> Result<cairn_store_sqlite::locks::LockHandle, ForgetSessionError> {
-    let conn = store
-        .raw_conn_for_admin()
-        .ok_or_else(|| ForgetSessionError::Other(anyhow::anyhow!("store lock path unavailable")))?;
-    let incarnation = store.incarnation().cloned().ok_or_else(|| {
-        ForgetSessionError::Other(anyhow::anyhow!("store incarnation unavailable"))
-    })?;
-    let resource = cairn_store_sqlite::locks::ResourceKey::session_namespace(session_id);
-    let holder_id = format!("pid={}-{}", std::process::id(), ulid::Ulid::new());
-    cairn_store_sqlite::locks::acquire(
-        conn,
-        &resource,
-        mode,
-        &holder_id,
-        SESSION_LOCK_TTL,
-        &incarnation,
-        operation_id,
-    )
-    .await
-    .map_err(|e| ForgetSessionError::Other(anyhow::anyhow!("acquire session namespace lock: {e}")))
-}
-
-trait LockComponentExt {
-    fn if_empty(self, fallback: &str) -> String;
-}
-
-impl LockComponentExt for &str {
-    fn if_empty(self, fallback: &str) -> String {
-        if self.is_empty() {
-            fallback.to_owned()
+) -> Result<Vec<PathBuf>, ForgetSessionError> {
+    let partitions = {
+        let session = session_id.to_owned();
+        store
+            .with_tx(move |tx| tx.list_session_scope_partitions(&session))
+            .await
+            .map_err(|e| ForgetSessionError::Other(anyhow::anyhow!("list session scopes: {e}")))?
+    };
+    let [_partition] = partitions.as_slice() else {
+        return if partitions.is_empty() {
+            Err(ForgetSessionError::NotFound(session_id.to_owned()))
         } else {
-            self.to_owned()
+            Err(ForgetSessionError::AmbiguousSession(session_id.to_owned()))
+        };
+    };
+
+    let active = store
+        .list_active_stored(&ListArgs::default())
+        .await
+        .map_err(|e| ForgetSessionError::Other(anyhow::anyhow!("list projections: {e}")))?;
+    let projector = cairn_core::domain::projection::MarkdownProjector;
+    let mut source_record_ids = BTreeSet::new();
+    let mut paths = BTreeSet::new();
+
+    for stored in &active {
+        if stored.record.scope.session_id.as_deref() == Some(session_id) {
+            source_record_ids.insert(stored.record.id.as_str().to_owned());
+            paths.insert(projector.project(stored).path);
         }
     }
-}
 
-fn group_sources(records: &[MemoryRecord]) -> HashMap<String, SourceGroup> {
-    let mut groups = HashMap::new();
-    for record in records {
-        let entry = groups
-            .entry(record.provenance.source_hash.clone())
-            .or_insert_with(|| SourceGroup {
-                source_hash: record.provenance.source_hash.clone(),
-                source_ids: BTreeSet::new(),
-            });
-        entry
-            .source_ids
-            .extend(record.provenance.source_ids.iter().cloned());
+    for stored in &active {
+        let Some(source_ids) = stored
+            .record
+            .extra_frontmatter
+            .get("consolidation")
+            .and_then(|value| value.get("source_record_ids"))
+            .and_then(|value| value.as_array())
+        else {
+            continue;
+        };
+        if source_ids.iter().any(|value| {
+            value
+                .as_str()
+                .is_some_and(|record_id| source_record_ids.contains(record_id))
+        }) {
+            paths.insert(projector.project(stored).path);
+        }
     }
-    groups
+
+    Ok(paths.into_iter().collect())
 }
 
-fn signing_author(record: &MemoryRecord) -> Option<Identity> {
-    record
-        .actor_chain
-        .iter()
-        .find(|entry| matches!(entry.role, cairn_core::domain::ChainRole::Author))
-        .map(|entry| entry.identity.clone())
-}
-
-fn target_id_hash(target_id: &str) -> String {
-    format!("sha256:{:x}", Sha256::digest(target_id.as_bytes()))
-}
-
-fn rewrite_source_redaction_marker(
-    vault_root: &Path,
-    source_id: &SourceId,
-    source_hash: &str,
-    operation_id: &str,
-) -> Result<(), ForgetSessionError> {
-    let path = vault_root.join(source_id.as_str());
-    let parent = path
-        .parent()
-        .ok_or_else(|| ForgetSessionError::SourceRewrite {
-            path: source_id.as_str().to_owned(),
-            message: "missing parent directory".to_owned(),
-        })?;
-    fs::create_dir_all(parent).map_err(|error| ForgetSessionError::SourceRewrite {
-        path: source_id.as_str().to_owned(),
-        message: error.to_string(),
-    })?;
-    let marker = format!(
-        "cairn:redacted-source:v1\nsource_hash={source_hash}\noperation_id={operation_id}\n"
-    );
-    fs::write(&path, marker).map_err(|error| ForgetSessionError::SourceRewrite {
-        path: source_id.as_str().to_owned(),
-        message: error.to_string(),
-    })
+fn remove_session_projection_files(vault_root: &Path, paths: &[PathBuf]) -> anyhow::Result<()> {
+    for rel in paths {
+        let abs = vault_root.join(rel);
+        match fs::symlink_metadata(&abs) {
+            Ok(meta) => {
+                crate::vault::bootstrap::check_write_safe(vault_root, &abs)?;
+                if meta.file_type().is_file() {
+                    fs::remove_file(&abs)
+                        .map_err(anyhow::Error::from)
+                        .with_context(|| format!("remove {}", abs.display()))?;
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(anyhow::Error::from(e).context(format!("stat {}", abs.display()))),
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

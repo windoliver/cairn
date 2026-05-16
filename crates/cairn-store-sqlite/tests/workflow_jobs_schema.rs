@@ -290,10 +290,10 @@ fn dedupe_key_unique_per_kind() {
 }
 
 #[test]
-fn migration_0062_adds_dead_letter_columns() {
+fn migration_0063_adds_dead_letter_columns() {
     // Run the full migration chain on a fresh in-memory DB (canonical
     // opener registers the vec0 extension migration 0022 needs) and
-    // assert the three nullable columns introduced by 0062 are present.
+    // assert the three nullable columns introduced by 0063 are present.
     let conn = open_in_memory().expect("open");
     let cols: Vec<String> = conn
         .prepare("SELECT name FROM pragma_table_info('workflow_jobs') ORDER BY cid")

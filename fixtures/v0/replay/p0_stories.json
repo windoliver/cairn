@@ -1,0 +1,158 @@
+{
+  "id": "p0_stories",
+  "description": "P0 replay scenario covering US1-US5, US7 all search modes, and US8 record-level forget.",
+  "config": {
+    "local_embeddings": true
+  },
+  "records": [
+    {
+      "id": "01HQZX9F5N00000000000000A0",
+      "kind": "trace",
+      "class": "episodic",
+      "visibility": "private",
+      "body": "rust memory safety session replay user question",
+      "session_id": "p0-session",
+      "turn_id": "1",
+      "sequence": 1,
+      "trace_event": "user_message"
+    },
+    {
+      "id": "01HQZX9F5N00000000000000A1",
+      "kind": "trace",
+      "class": "episodic",
+      "visibility": "private",
+      "body": "ownership borrowing prevent memory bugs at compile time",
+      "session_id": "p0-session",
+      "turn_id": "1",
+      "sequence": 2,
+      "trace_event": "agent_message"
+    },
+    {
+      "id": "01HQZX9F5N00000000000000A2",
+      "kind": "trace",
+      "class": "episodic",
+      "visibility": "private",
+      "body": "cargo check tool call requested for memory safety example",
+      "session_id": "p0-session",
+      "turn_id": "1",
+      "sequence": 3,
+      "trace_event": "pre_tool",
+      "tool_name": "cargo",
+      "tool_call_id": "toolu_cargo_check_01"
+    },
+    {
+      "id": "01HQZX9F5N00000000000000A7",
+      "kind": "trace",
+      "class": "episodic",
+      "visibility": "private",
+      "body": "cargo check tool result succeeded for memory safety example",
+      "session_id": "p0-session",
+      "turn_id": "1",
+      "sequence": 4,
+      "trace_event": "tool_output",
+      "tool_name": "cargo",
+      "tool_call_id": "toolu_cargo_check_01",
+      "parent_event_id": "01HQZX9F5N00000000000000A2"
+    },
+    {
+      "id": "01HQZX9F5N00000000000000A3",
+      "kind": "user",
+      "class": "semantic",
+      "visibility": "private",
+      "body": "user prefers concise rust memory explanations"
+    },
+    {
+      "id": "01HQZX9F5N00000000000000A4",
+      "kind": "reasoning",
+      "class": "semantic",
+      "visibility": "private",
+      "body": "rolling summary p0 session covers rust memory safety and cargo check success",
+      "session_id": "p0-session",
+      "turn_id": "summary",
+      "sequence": 5,
+      "trace_event": "turn_summary"
+    },
+    {
+      "id": "01HQZX9F5N00000000000000A5",
+      "kind": "fact",
+      "class": "semantic",
+      "visibility": "private",
+      "body": "secret project codename aurora should be forgotten"
+    },
+    {
+      "id": "01HQZX9F5N00000000000000A6",
+      "kind": "fact",
+      "class": "semantic",
+      "visibility": "private",
+      "body": "unrelated cooking note tomato soup"
+    }
+  ],
+  "actions": [
+    {
+      "verb": "retrieve_session",
+      "story": "US1_US2",
+      "session_id": "p0-session",
+      "expected_turn_ids": ["1"],
+      "expected_trace_events": ["user_message", "agent_message", "pre_tool", "tool_output", "turn_summary"]
+    },
+    {
+      "verb": "retrieve_turn",
+      "story": "US5",
+      "session_id": "p0-session",
+      "turn_id": "1",
+      "expected_trace_events": ["user_message", "agent_message", "pre_tool", "tool_output"]
+    },
+    {
+      "verb": "record_present",
+      "story": "US3",
+      "record_id": "01HQZX9F5N00000000000000A3",
+      "expected_present": true
+    },
+    {
+      "verb": "record_present",
+      "story": "US4",
+      "record_id": "01HQZX9F5N00000000000000A4",
+      "expected_present": true
+    },
+    {
+      "verb": "search",
+      "story": "US7",
+      "mode": "keyword",
+      "query": "ownership borrowing",
+      "limit": 1,
+      "expected": {
+        "status": "hits",
+        "record_ids": ["01HQZX9F5N00000000000000A1"]
+      }
+    },
+    {
+      "verb": "search",
+      "story": "US7",
+      "mode": "semantic",
+      "query": "user prefers concise rust memory explanations",
+      "limit": 1,
+      "expected": {
+        "status": "hits",
+        "record_ids": ["01HQZX9F5N00000000000000A3"]
+      }
+    },
+    {
+      "verb": "search",
+      "story": "US7",
+      "mode": "hybrid",
+      "query": "rust memory safety session replay user question",
+      "limit": 1,
+      "expected": {
+        "status": "hits",
+        "record_ids": ["01HQZX9F5N00000000000000A0"]
+      }
+    },
+    {
+      "verb": "forget_record",
+      "story": "US8",
+      "record_id": "01HQZX9F5N00000000000000A5",
+      "followup_query": "secret project codename aurora",
+      "expected_absent_from_search": true
+    }
+  ]
+}

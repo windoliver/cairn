@@ -28,10 +28,10 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 /// do not change this one, so the check is forward-compatible.
 const MIGRATION_0020_SQL: &str = cairn_store_sqlite::migrations::WORKFLOW_JOBS_MIGRATION_SQL;
 
-/// Additive migration 0062 SQL (dead-letter + completion columns).
+/// Additive migration 0063 SQL (dead-letter + completion columns).
 /// Re-exported through the package API for the same self-containment
 /// reason as [`MIGRATION_0020_SQL`].
-const MIGRATION_0062_SQL: &str = cairn_store_sqlite::migrations::WORKFLOW_DEAD_LETTER_MIGRATION_SQL;
+const MIGRATION_0063_SQL: &str = cairn_store_sqlite::migrations::WORKFLOW_DEAD_LETTER_MIGRATION_SQL;
 
 /// Multiplier applied to `max_attempts` to derive a hard ceiling on
 /// raw lease deliveries (started or not). Prevents pre-heartbeat crash
@@ -54,7 +54,7 @@ const REQUIRED_SCHEMA: &[(&str, &str)] = &[
     ("trigger", "workflow_jobs_terminal_absorbing"),
     ("trigger", "workflow_jobs_state_transition"),
     ("trigger", "workflow_jobs_no_delete"),
-    // Migration 0062 additions (dead-letter + completion lookup
+    // Migration 0063 additions (dead-letter + completion lookup
     // hot-path indexes). The constructor probes for them so a DB
     // stuck at 0020 fails fast at `SqliteJobStore::new` instead of
     // first surfacing as `no such column: failure_class` from the
@@ -63,7 +63,7 @@ const REQUIRED_SCHEMA: &[(&str, &str)] = &[
     ("index", "workflow_jobs_kind_completed_idx"),
 ];
 
-/// Columns added by migration 0062 that the runtime reads/writes on
+/// Columns added by migration 0063 that the runtime reads/writes on
 /// every `fail`/`complete`/terminal-reap path. Probed by name via
 /// `PRAGMA table_info(workflow_jobs)` so a 0020-only DB cannot be
 /// wrapped (the existing `REQUIRED_SCHEMA` probe is keyed off
@@ -72,7 +72,7 @@ const REQUIRED_SCHEMA: &[(&str, &str)] = &[
 /// `SqliteJobStore::new`, then failed at the first `fail()`/`complete()`
 /// with a `no such column: failure_class` runtime error — long
 /// after the constructor has handed out a working-looking store.
-const REQUIRED_0062_COLUMNS: &[&str] = &["failure_class", "dead_letter_at_ms", "completed_at_ms"];
+const REQUIRED_0063_COLUMNS: &[&str] = &["failure_class", "dead_letter_at_ms", "completed_at_ms"];
 
 /// A [`JobStore`] backed by a single `SQLite` connection.
 pub struct SqliteJobStore {
@@ -96,14 +96,14 @@ pub enum SqliteJobStoreInitError {
         name: &'static str,
     },
     /// The connection points at a database that has applied migration
-    /// 0020 but not 0062 — the `workflow_jobs` table is missing a
+    /// 0020 but not 0063 — the `workflow_jobs` table is missing a
     /// column the runtime writes on every terminal/retry path
     /// (`failure_class`, `dead_letter_at_ms`, or `completed_at_ms`).
     /// Surfaced as a distinct variant from
     /// [`Self::MigrationMissing`] so an operator can see at a glance
     /// which forward-migration is the culprit.
     #[error(
-        "workflow_jobs missing column `{name}` (migration 0062 not applied) — run migrations via cairn-store-sqlite first"
+        "workflow_jobs missing column `{name}` (migration 0063 not applied) — run migrations via cairn-store-sqlite first"
     )]
     ColumnMissing {
         /// Column name that the probe expected to find.
@@ -154,7 +154,7 @@ impl SqliteJobStore {
     ///
     /// [`SqliteJobStoreInitError::MigrationMissing`] when any required
     /// schema object (table / index / trigger) is absent;
-    /// [`SqliteJobStoreInitError::ColumnMissing`] when migration 0062
+    /// [`SqliteJobStoreInitError::ColumnMissing`] when migration 0063
     /// has not been applied (the `failure_class`, `dead_letter_at_ms`,
     /// or `completed_at_ms` columns are missing);
     /// [`SqliteJobStoreInitError::SchemaDrift`] when a runtime
@@ -180,7 +180,7 @@ impl SqliteJobStore {
             }
         }
 
-        // Column probe for migration 0062 additions. `ALTER TABLE ADD
+        // Column probe for migration 0063 additions. `ALTER TABLE ADD
         // COLUMN` mutations do not register new `sqlite_schema` rows,
         // so the existence-by-name loop above can't catch a DB stuck
         // at 0020. Walk `PRAGMA table_info(workflow_jobs)` and assert
@@ -189,7 +189,7 @@ impl SqliteJobStore {
         // `no such column: failure_class` at runtime — long after the
         // constructor has returned a working-looking store.
         let columns = read_column_set(&conn)?;
-        for &needed in REQUIRED_0062_COLUMNS {
+        for &needed in REQUIRED_0063_COLUMNS {
             if !columns.iter().any(|c| c == needed) {
                 return Err(SqliteJobStoreInitError::ColumnMissing { name: needed });
             }
@@ -1924,7 +1924,7 @@ fn exec_fail_retry(
     )
 }
 
-/// Apply the workflow-jobs migrations (0020 + 0062) to an in-memory
+/// Apply the workflow-jobs migrations (0020 + 0063) to an in-memory
 /// `SQLite` connection, then provision `schema_migrations` so
 /// [`SqliteJobStore::new`] can pass its drift probes.
 ///
@@ -1954,7 +1954,7 @@ pub fn install_for_tests(conn: &rusqlite::Connection) {
     )
     .expect("create schema_migrations");
     conn.execute_batch(MIGRATION_0020_SQL).expect("apply 0020");
-    conn.execute_batch(MIGRATION_0062_SQL).expect("apply 0062");
+    conn.execute_batch(MIGRATION_0063_SQL).expect("apply 0063");
 }
 
 /// Maximum number of expired rows reaped under a single write

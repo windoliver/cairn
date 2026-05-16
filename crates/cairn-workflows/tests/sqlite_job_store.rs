@@ -869,7 +869,7 @@ async fn schema_drift_rejected_at_construction() {
 async fn partial_migration_to_0020_only_rejected_at_construction() {
     // Regression (issue #92 round-5, finding 5.1): SqliteJobStore::new
     // probed for migration-0020 schema objects by name but did NOT
-    // verify the columns added by migration 0062 (failure_class,
+    // verify the columns added by migration 0063 (failure_class,
     // dead_letter_at_ms, completed_at_ms). A DB stuck at 0020 used to
     // pass `new()` then fail at runtime with `no such column:
     // failure_class` on the first `fail()` / `complete()` call —
@@ -904,17 +904,17 @@ async fn partial_migration_to_0020_only_rejected_at_construction() {
         panic!("must reject 0020-only DB");
     };
     // The schema-by-name probe walks `REQUIRED_SCHEMA` in order and
-    // hits the 0062 dead-letter index first, so we surface as
+    // hits the 0063 dead-letter index first, so we surface as
     // MigrationMissing { kind="index", name="workflow_jobs_dead_letter_idx" }.
     // The intent of finding 5.1 is "reject 0020-only DB at construction" —
     // the exact discriminator (index vs column) is a probe-order detail;
-    // assert the wider invariant (either MigrationMissing for a 0062
-    // object or ColumnMissing for a 0062 column).
+    // assert the wider invariant (either MigrationMissing for a 0063
+    // object or ColumnMissing for a 0063 column).
     match &err {
         SqliteJobStoreInitError::MigrationMissing { name, .. } => {
             assert!(
                 name.contains("dead_letter") || name.contains("kind_completed"),
-                "MigrationMissing must name a 0062-introduced object, got `{name}`",
+                "MigrationMissing must name a 0063-introduced object, got `{name}`",
             );
         }
         SqliteJobStoreInitError::ColumnMissing { name } => {
@@ -923,7 +923,7 @@ async fn partial_migration_to_0020_only_rejected_at_construction() {
                     name,
                     &"failure_class" | &"dead_letter_at_ms" | &"completed_at_ms"
                 ),
-                "ColumnMissing must name a 0062 column, got `{name}`",
+                "ColumnMissing must name a 0063 column, got `{name}`",
             );
         }
         other => panic!("expected MigrationMissing or ColumnMissing, got {other:?}"),
@@ -931,19 +931,19 @@ async fn partial_migration_to_0020_only_rejected_at_construction() {
 }
 
 #[tokio::test]
-async fn missing_0062_columns_alone_rejected_at_construction() {
+async fn missing_0063_columns_alone_rejected_at_construction() {
     // Tighter regression for finding 5.1: confirm the *column probe*
     // independently catches a DB whose schema_objects (table + every
-    // 0020 *and* 0062 index/trigger) pass the existence-by-name probe
-    // but whose `workflow_jobs` table is missing the 0062 columns.
+    // 0020 *and* 0063 index/trigger) pass the existence-by-name probe
+    // but whose `workflow_jobs` table is missing the 0063 columns.
     // This isolates the column probe from the schema-by-name probe so
     // a future schema evolution that reshuffles probe order cannot
     // silently regress the column check.
     let dir = tempfile::tempdir().expect("tempdir");
-    let db = dir.path().join("no-0062-columns.db");
+    let db = dir.path().join("no-0063-columns.db");
     let conn = Connection::open(&db).expect("open");
-    // Build a workflow_jobs table that omits the 0062 columns, plus
-    // every required schema object by name (including the 0062 index
+    // Build a workflow_jobs table that omits the 0063 columns, plus
+    // every required schema object by name (including the 0063 index
     // names — created against an unused expression so they pass the
     // existence-by-name probe). Triggers are stubs because the
     // column probe runs BEFORE the runtime-invariant probes; we only
@@ -987,12 +987,12 @@ async fn missing_0062_columns_alone_rejected_at_construction() {
          INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at) \
             VALUES (20, '0020_workflow_jobs', '', 0);",
     )
-    .expect("setup schema without 0062 columns");
+    .expect("setup schema without 0063 columns");
     drop(conn);
 
     let probe = Connection::open(&db).expect("reopen");
     let Err(err) = SqliteJobStore::new(probe) else {
-        panic!("must reject DB missing 0062 columns");
+        panic!("must reject DB missing 0063 columns");
     };
     match err {
         SqliteJobStoreInitError::ColumnMissing { name } => {
@@ -1001,7 +1001,7 @@ async fn missing_0062_columns_alone_rejected_at_construction() {
                     name,
                     "failure_class" | "dead_letter_at_ms" | "completed_at_ms"
                 ),
-                "ColumnMissing must name a 0062 column, got `{name}`",
+                "ColumnMissing must name a 0063 column, got `{name}`",
             );
         }
         other => panic!("expected ColumnMissing, got {other:?}"),

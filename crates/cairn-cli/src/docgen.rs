@@ -213,7 +213,7 @@ fn emit_cli_docs(files: &mut Vec<GeneratedFile>) -> Result<(), DocgenError> {
     out.push_str(&help_text(&root)?);
     out.push_str("```\n\n");
     out.push_str("## Commands\n\n");
-    for sub in root.get_subcommands() {
+    for sub in root.get_subcommands().filter(|sub| !sub.is_hide_set()) {
         let name = sub.get_name();
         let file = command_file_name(&[name]);
         let about = sub
@@ -240,7 +240,10 @@ fn emit_command_pages(
     out.push_str(&help_text(cmd)?);
     out.push_str("```\n");
 
-    let subcommands: Vec<_> = cmd.get_subcommands().collect();
+    let subcommands: Vec<_> = cmd
+        .get_subcommands()
+        .filter(|sub| !sub.is_hide_set())
+        .collect();
     if !subcommands.is_empty() {
         out.push_str("\n## Subcommands\n\n");
         for sub in subcommands {

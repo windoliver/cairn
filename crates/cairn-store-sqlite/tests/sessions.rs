@@ -6,10 +6,13 @@
 
 #![allow(missing_docs)]
 
+use cairn_core::contract::memory_store::MemoryStore;
 use cairn_core::domain::Identity;
 use cairn_core::domain::session::{
     DEFAULT_IDLE_WINDOW_SECS, SessionDecision, SessionIdentity, resolve_session,
 };
+use cairn_core::domain::session_tree::{BranchKind, MergeStrategy};
+use cairn_core::domain::{RecordId, SessionId};
 use cairn_store_sqlite::{NewSessionMetadata, ResolveOutcome, open, open_in_memory};
 
 fn user() -> Identity {
@@ -22,6 +25,10 @@ fn agent() -> Identity {
 
 fn identity(project: Option<&str>) -> SessionIdentity {
     SessionIdentity::new(user(), agent(), project.map(str::to_owned)).expect("valid")
+}
+
+fn record_id(raw: &str) -> RecordId {
+    RecordId::parse(raw).expect("valid record id")
 }
 
 #[tokio::test]
@@ -51,6 +58,251 @@ async fn create_then_find_returns_same_id() {
     assert_eq!(found.id, session.id);
     // Idle is well within the 24 h window for a freshly-minted row.
     assert!(found.idle_secs < DEFAULT_IDLE_WINDOW_SECS);
+}
+
+#[tokio::test]
+async fn legacy_session_retrieves_as_flat_session_tree() {
+    let store = open_in_memory().await.expect("open");
+    let id_a = identity(Some("/repo"));
+    let session = store
+        .create_session(&id_a, NewSessionMetadata::default())
+        .await
+        .expect("create");
+
+    let tree = store
+        .get_session_tree(&session.id)
+        .await
+        .expect("load tree")
+        .expect("session exists");
+
+    tree.validate().expect("flat tree validates");
+    assert_eq!(tree.root(), &session.id);
+    assert_eq!(
+        tree.lineage(&session.id).expect("flat lineage"),
+        vec![session.id.clone()]
+    );
+    assert!(tree.merges().is_empty());
+}
+
+#[tokio::test]
+async fn session_tree_metadata_is_available_through_store_contract() {
+    let store = open_in_memory().await.expect("open");
+    let root = store
+        .create_session(&identity(Some("/repo-root")), NewSessionMetadata::default())
+        .await
+        .expect("create root");
+    let child = store
+        .create_session(
+            &identity(Some("/repo-child")),
+            NewSessionMetadata::default(),
+        )
+        .await
+        .expect("create child");
+
+    let contract: &dyn MemoryStore = &store;
+    contract
+        .record_session_fork(&root.id, &child.id, "turn-2")
+        .await
+        .expect("record fork through trait");
+
+    let tree = contract
+        .get_session_tree(&root.id)
+        .await
+        .expect("load tree through trait")
+        .expect("tree exists");
+
+    assert_eq!(
+        tree.lineage(&child.id).expect("child lineage"),
+        vec![root.id, child.id]
+    );
+}
+
+#[tokio::test]
+async fn session_tree_branch_and_merge_metadata_round_trips() {
+    let store = open_in_memory().await.expect("open");
+    let root = store
+        .create_session(&identity(Some("/repo-root")), NewSessionMetadata::default())
+        .await
+        .expect("create root");
+    let branch = store
+        .create_session(
+            &identity(Some("/repo-branch")),
+            NewSessionMetadata::default(),
+        )
+        .await
+        .expect("create branch");
+    let tool_branch = store
+        .create_session(&identity(Some("/repo-tool")), NewSessionMetadata::default())
+        .await
+        .expect("create tool branch");
+
+    store
+        .record_session_fork(&root.id, &branch.id, "turn-4")
+        .await
+        .expect("record fork");
+    store
+        .record_session_tool_spawn(&branch.id, &tool_branch.id, "turn-5", "call-review")
+        .await
+        .expect("record tool branch");
+    let summary = record_id("01JTS6R4J70000000000000009");
+    store
+        .record_session_merge(
+            &tool_branch.id,
+            &root.id,
+            MergeStrategy::ReasoningSummary {
+                summary_record_id: summary.clone(),
+            },
+            "turn-8",
+        )
+        .await
+        .expect("record merge");
+
+    let tree = store
+        .get_session_tree(&root.id)
+        .await
+        .expect("load tree")
+        .expect("root exists");
+
+    tree.validate().expect("tree validates");
+    assert_eq!(
+        tree.lineage(&tool_branch.id).expect("tool branch lineage"),
+        vec![root.id.clone(), branch.id.clone(), tool_branch.id.clone()]
+    );
+    let parent = tree
+        .parent(&tool_branch.id)
+        .expect("parent lookup")
+        .expect("tool branch parent");
+    assert_eq!(parent.kind, BranchKind::ToolSpawned);
+    assert_eq!(parent.tool_call_id.as_deref(), Some("call-review"));
+    assert_eq!(
+        tree.subtree_preorder(&root.id).expect("preorder"),
+        vec![root.id.clone(), branch.id.clone(), tool_branch.id.clone()]
+    );
+    assert_eq!(tree.merges().len(), 1);
+    assert_eq!(tree.merges()[0].source, tool_branch.id);
+    assert_eq!(tree.merges()[0].destination, root.id);
+    assert_eq!(
+        tree.merges()[0].strategy,
+        MergeStrategy::ReasoningSummary {
+            summary_record_id: summary
+        }
+    );
+
+    let branch_tree = store
+        .get_session_tree(&tool_branch.id)
+        .await
+        .expect("load tree from branch")
+        .expect("branch exists");
+    assert_eq!(branch_tree.root(), tree.root());
+    assert_eq!(
+        branch_tree
+            .lineage(&tool_branch.id)
+            .expect("branch lineage from branch lookup"),
+        vec![root.id.clone(), branch.id.clone(), tool_branch.id.clone()]
+    );
+    assert_eq!(branch_tree.merges(), tree.merges());
+}
+
+#[tokio::test]
+async fn session_tree_merge_rejects_unrelated_sessions() {
+    let store = open_in_memory().await.expect("open");
+    let source = store
+        .create_session(
+            &identity(Some("/repo-source")),
+            NewSessionMetadata::default(),
+        )
+        .await
+        .expect("create source");
+    let destination = store
+        .create_session(
+            &identity(Some("/repo-destination")),
+            NewSessionMetadata::default(),
+        )
+        .await
+        .expect("create destination");
+    let summary = record_id("01JTS6R4J7000000000000000A");
+
+    let err = store
+        .record_session_merge(
+            &source.id,
+            &destination.id,
+            MergeStrategy::ReasoningSummary {
+                summary_record_id: summary,
+            },
+            "turn-9",
+        )
+        .await
+        .expect_err("unrelated sessions cannot be merged");
+
+    assert!(
+        err.to_string().contains("unknown session"),
+        "unexpected error: {err}"
+    );
+}
+
+#[tokio::test]
+async fn session_tree_branch_lookup_rejects_parent_cycle_without_hanging() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("sessions.db");
+    {
+        let conn = cairn_store_sqlite::open_sync(&db_path).expect("open sync");
+        let session_a = "01JTS6R4J7000000000000000B";
+        let session_b = "01JTS6R4J7000000000000000C";
+        for (session_id, project_root) in [(session_a, "/cycle-a"), (session_b, "/cycle-b")] {
+            conn.execute(
+                "INSERT INTO sessions \
+                   (session_id, user_id, agent_id, project_root, title, \
+                    created_at, last_activity_at, ended_at) \
+                 VALUES (?1, 'hmn:alice', 'agt:claude-code:opus-4-7:main:v1', ?2, '', 0, 0, NULL)",
+                rusqlite::params![session_id, project_root],
+            )
+            .expect("insert session");
+        }
+        conn.execute(
+            "INSERT INTO session_tree_nodes \
+               (session_id, parent_session_id, at_turn_id, branch_kind, tool_call_id, created_at) \
+             VALUES (?1, ?2, 'turn-a', 'fork', NULL, 0)",
+            rusqlite::params![session_a, session_b],
+        )
+        .expect("insert cycle a");
+        conn.execute(
+            "INSERT INTO session_tree_nodes \
+               (session_id, parent_session_id, at_turn_id, branch_kind, tool_call_id, created_at) \
+             VALUES (?1, ?2, 'turn-b', 'fork', NULL, 0)",
+            rusqlite::params![session_b, session_a],
+        )
+        .expect("insert cycle b");
+    }
+
+    let store = open(&db_path).await.expect("open async");
+    let session_a = SessionId::parse("01JTS6R4J7000000000000000B").expect("valid session id");
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        store.get_session_tree(&session_a),
+    )
+    .await
+    .expect("cycle detection should not hang");
+    let err = result.expect_err("cycle without a root is invalid");
+
+    assert!(
+        err.to_string()
+            .contains("session tree ancestry does not reach a root"),
+        "unexpected error: {err}"
+    );
+}
+
+#[tokio::test]
+async fn missing_session_tree_returns_none() {
+    let store = open_in_memory().await.expect("open");
+    let missing = SessionId::parse("01JTS6R4J70000000000000000").expect("valid session id");
+
+    assert!(
+        store
+            .get_session_tree(&missing)
+            .await
+            .expect("load missing tree")
+            .is_none()
+    );
 }
 
 #[tokio::test]

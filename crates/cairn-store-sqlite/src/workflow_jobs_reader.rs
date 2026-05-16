@@ -14,7 +14,7 @@ use cairn_core::contract::job_store::{FailureClass, JobId, JobKind};
 use cairn_core::contract::workflow_jobs::{DeadLetterRow, WorkflowJobsReader};
 use rusqlite::Connection;
 
-/// Columns added by migration 0062 that every `WorkflowJobsReader`
+/// Columns added by migration 0063 that every `WorkflowJobsReader`
 /// query reads. A DB stuck at 0020 has none of these columns; without
 /// a construction-time probe the trait methods silently `unwrap_or`
 /// past the missing-column error, returning empty results that look
@@ -22,9 +22,9 @@ use rusqlite::Connection;
 /// `PRAGMA table_info(workflow_jobs)` and fail loud.
 const REQUIRED_0062_COLUMNS: &[&str] = &["failure_class", "dead_letter_at_ms", "completed_at_ms"];
 
-/// Indexes added by migration 0062 that the `workflow_health` lint
+/// Indexes added by migration 0063 that the `workflow_health` lint
 /// check relies on for cheap dead-letter / kind+completed lookups.
-/// Without a construction-time probe a DB whose 0062 columns exist
+/// Without a construction-time probe a DB whose 0063 columns exist
 /// but whose indexes were dropped (or whose migration aborted between
 /// `ALTER TABLE` and `CREATE INDEX`) silently degrades into a full
 /// table scan under operator load — issue #92 round-7 finding 7.3.
@@ -36,7 +36,7 @@ const REQUIRED_0062_INDEXES: &[&str] = &[
 ];
 
 /// Errors raised by [`SqliteWorkflowJobsReader::new`] when the wrapped
-/// connection's `workflow_jobs` schema does not have migration 0062
+/// connection's `workflow_jobs` schema does not have migration 0063
 /// applied.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -47,22 +47,22 @@ pub enum SqliteWorkflowJobsReaderError {
     /// [`Self::Backend`] so the operator can see at a glance that the
     /// vault is stuck at migration 0020.
     #[error(
-        "workflow_jobs missing column `{name}` (migration 0062 not applied) — \
+        "workflow_jobs missing column `{name}` (migration 0063 not applied) — \
          run migrations via cairn-store-sqlite first"
     )]
     ColumnMissing {
         /// Column name that the probe expected to find.
         name: &'static str,
     },
-    /// The `workflow_jobs` table has the 0062 columns but one of the
+    /// The `workflow_jobs` table has the 0063 columns but one of the
     /// hot-path indexes is missing. The `workflow_health` check would
     /// otherwise fall back to a full table scan under operator load
     /// (issue #92 round-7 finding 7.3). Surface loudly so the operator
     /// can recreate the index instead of waiting for lint to time out
     /// on a degraded vault.
     #[error(
-        "workflow_jobs missing index `{name}` (migration 0062 partially applied) — \
-         drop and re-run migration 0062 to recreate the lint hot-path indexes"
+        "workflow_jobs missing index `{name}` (migration 0063 partially applied) — \
+         drop and re-run migration 0063 to recreate the lint hot-path indexes"
     )]
     IndexMissing {
         /// Index name that the probe expected to find.
@@ -88,7 +88,7 @@ pub struct SqliteWorkflowJobsReader {
 
 impl SqliteWorkflowJobsReader {
     /// Wrap an opened connection. Caller is responsible for opening
-    /// against the vault DB that has migrations through 0062 applied.
+    /// against the vault DB that has migrations through 0063 applied.
     ///
     /// # Errors
     ///
@@ -103,7 +103,7 @@ impl SqliteWorkflowJobsReader {
     /// `workflow_health` check no-ops, matching the missing-DB path.
     ///
     /// Returns [`SqliteWorkflowJobsReaderError::IndexMissing`] when
-    /// either of the 0062 lint hot-path indexes
+    /// either of the 0063 lint hot-path indexes
     /// (`workflow_jobs_dead_letter_idx`,
     /// `workflow_jobs_kind_completed_idx`) is absent. A vault with
     /// the columns but missing indexes would otherwise serve lint
@@ -128,7 +128,7 @@ impl SqliteWorkflowJobsReader {
                 return Err(SqliteWorkflowJobsReaderError::ColumnMissing { name: needed });
             }
         }
-        // Issue #92 round-7 finding 7.3: probe the two 0062 indexes.
+        // Issue #92 round-7 finding 7.3: probe the two 0063 indexes.
         // Columns alone aren't enough — without these indexes, lint's
         // dead-letter enumeration and `last_success_ms` lookups
         // degenerate to full-table scans, and the only signal the

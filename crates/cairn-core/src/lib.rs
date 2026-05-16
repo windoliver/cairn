@@ -10,6 +10,7 @@
 
 pub mod config;
 pub mod contract;
+pub mod coord;
 pub mod domain;
 pub mod error;
 pub mod generated;

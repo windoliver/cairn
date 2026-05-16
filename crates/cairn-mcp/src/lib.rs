@@ -10,6 +10,7 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod coord_tools;
 pub mod error;
 pub mod generated;
 pub mod graph_tools;

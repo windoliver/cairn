@@ -13,6 +13,7 @@ pub mod hybrid_vault;
 pub mod intent;
 pub mod keystore;
 pub mod mcp;
+pub mod replay;
 pub mod source_links;
 pub mod store;
 pub mod trace;

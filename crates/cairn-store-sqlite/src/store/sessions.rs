@@ -4,15 +4,20 @@
 //! is the persistence half: locating the most recent active session for an
 //! identity, minting new ones, bumping `last_activity_at`, and ending them.
 //!
-//! Methods are inherent on [`SqliteMemoryStore`] rather than on the
-//! [`MemoryStore`] trait: P0 deliberately keeps session storage out of the
-//! trait surface so future stores (fixture, remote) don't have to implement
-//! it. The verb dispatcher reaches into the concrete store, the same way
-//! [`SqliteMemoryStore::with_tx`] is reached.
+//! Session lifecycle methods remain inherent on [`SqliteMemoryStore`].
+//! Session-tree metadata is also exposed through the optional
+//! [`MemoryStore`] trait methods added for the v0.3 substrate; adapters that
+//! do not implement those methods keep the default capability-unavailable
+//! behavior.
 //!
 //! [`MemoryStore`]: cairn_core::contract::memory_store::MemoryStore
 
+use std::collections::BTreeSet;
+
 use cairn_core::domain::session::{LastActiveSession, Session, SessionId, SessionIdentity};
+use cairn_core::domain::{
+    BranchKind, MergeStrategy, RecordId, SessionMerge, SessionTree, SessionTreeError,
+};
 use rusqlite::{OptionalExtension, params};
 use tracing::instrument;
 use ulid::Ulid;
@@ -563,6 +568,184 @@ impl SqliteMemoryStore {
         Ok(row.filter(|s| s.identity == *expected))
     }
 
+    /// Load session-tree metadata rooted at `root`.
+    ///
+    /// Existing v0.1 sessions have no `session_tree_nodes` row; those are
+    /// synthesized as a one-node flat tree so old sessions keep retrieving
+    /// normally after the v0.3 schema lands.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::NotInitialized`] when the store is unconnected,
+    /// [`StoreError::Sqlite`] / [`StoreError::Worker`] for storage failures,
+    /// and [`StoreError::InvalidSessionTree`] when persisted metadata violates
+    /// the pure session-tree invariants.
+    #[instrument(
+        skip(self),
+        err,
+        fields(verb = "get_session_tree", session_id = %root.as_str()),
+    )]
+    #[allow(
+        tail_expr_drop_order,
+        reason = "drop order of the cloned tokio_rusqlite handle relative to the await temporary is benign — both are channel-backed clones with no observable side effects beyond worker shutdown, which the runtime handles regardless of order"
+    )]
+    pub async fn get_session_tree(
+        &self,
+        root: &SessionId,
+    ) -> Result<Option<SessionTree>, StoreError> {
+        let conn = self.require_conn("get_session_tree")?.clone();
+        let root_key = root.as_str().to_owned();
+        conn.call(move |c| Ok::<_, tokio_rusqlite::Error>(load_session_tree_sync(c, &root_key)))
+            .await
+            .map_err(StoreError::from)?
+    }
+
+    /// Persist copy-on-write branch metadata between two existing sessions.
+    pub async fn record_session_fork(
+        &self,
+        from: &SessionId,
+        child: &SessionId,
+        at_turn_id: impl Into<String>,
+    ) -> Result<(), StoreError> {
+        self.record_session_branch(from, child, BranchKind::Fork, at_turn_id.into(), None)
+            .await
+    }
+
+    /// Persist full-copy branch metadata between two existing sessions.
+    pub async fn record_session_clone(
+        &self,
+        from: &SessionId,
+        child: &SessionId,
+    ) -> Result<(), StoreError> {
+        self.record_session_branch(from, child, BranchKind::Clone, "latest".to_owned(), None)
+            .await
+    }
+
+    /// Persist tool-spawned branch metadata between two existing sessions.
+    pub async fn record_session_tool_spawn(
+        &self,
+        from: &SessionId,
+        child: &SessionId,
+        at_turn_id: impl Into<String>,
+        tool_call_id: impl Into<String>,
+    ) -> Result<(), StoreError> {
+        self.record_session_branch(
+            from,
+            child,
+            BranchKind::ToolSpawned,
+            at_turn_id.into(),
+            Some(tool_call_id.into()),
+        )
+        .await
+    }
+
+    async fn record_session_branch(
+        &self,
+        from: &SessionId,
+        child: &SessionId,
+        kind: BranchKind,
+        at_turn_id: String,
+        tool_call_id: Option<String>,
+    ) -> Result<(), StoreError> {
+        let mut check = SessionTree::flat(from.clone());
+        match kind {
+            BranchKind::Fork => check.fork(from, child.clone(), at_turn_id.clone())?,
+            BranchKind::Clone => check.clone_session(from, child.clone())?,
+            BranchKind::ToolSpawned => check.tool_spawn(
+                from,
+                child.clone(),
+                at_turn_id.clone(),
+                tool_call_id.clone().ok_or(SessionTreeError::EmptyField {
+                    field: "tool_call_id",
+                })?,
+            )?,
+            _ => {
+                return Err(StoreError::Invariant {
+                    what: "unknown future BranchKind cannot be persisted by this store".to_owned(),
+                });
+            }
+        }
+
+        let conn = self.require_conn("record_session_branch")?.clone();
+        let from_key = from.as_str().to_owned();
+        let child_key = child.as_str().to_owned();
+        let kind_wire = branch_kind_wire(kind).to_owned();
+        conn.call(move |c| {
+            let now_ms = current_unix_ms();
+            c.execute(
+                "INSERT OR IGNORE INTO session_tree_nodes \
+                   (session_id, parent_session_id, at_turn_id, branch_kind, tool_call_id, created_at) \
+                 VALUES (?1, NULL, NULL, NULL, NULL, ?2)",
+                params![from_key, now_ms],
+            )?;
+            c.execute(
+                "INSERT INTO session_tree_nodes \
+                   (session_id, parent_session_id, at_turn_id, branch_kind, tool_call_id, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![child_key, from_key, at_turn_id, kind_wire, tool_call_id, now_ms],
+            )?;
+            Ok::<_, tokio_rusqlite::Error>(())
+        })
+        .await?;
+        Ok(())
+    }
+
+    /// Persist an explicit, auditable session-tree merge between sessions.
+    pub async fn record_session_merge(
+        &self,
+        source: &SessionId,
+        destination: &SessionId,
+        strategy: MergeStrategy,
+        applied_at_turn_id: impl Into<String>,
+    ) -> Result<SessionMerge, StoreError> {
+        let applied_at_turn_id = applied_at_turn_id.into();
+        if source == destination {
+            return Err(SessionTreeError::SelfMerge {
+                session_id: source.clone(),
+            }
+            .into());
+        }
+        let tree = self.get_session_tree(source).await?.ok_or_else(|| {
+            SessionTreeError::UnknownSession {
+                session_id: source.clone(),
+            }
+        })?;
+        tree.lineage(destination)?;
+        let mut check = tree.clone();
+        let merge = check.record_merge(
+            source.clone(),
+            destination.clone(),
+            strategy.clone(),
+            applied_at_turn_id.clone(),
+        )?;
+
+        let conn = self.require_conn("record_session_merge")?.clone();
+        let source_key = source.as_str().to_owned();
+        let destination_key = destination.as_str().to_owned();
+        let encoded = EncodedMergeStrategy::from_strategy(&strategy);
+        conn.call(move |c| {
+            c.execute(
+                "INSERT INTO session_tree_merges \
+                   (source_session_id, destination_session_id, strategy_kind, \
+                    summary_record_id, first_turn_id, last_turn_id, applied_at_turn_id, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    source_key,
+                    destination_key,
+                    encoded.kind,
+                    encoded.summary_record_id,
+                    encoded.first_turn_id,
+                    encoded.last_turn_id,
+                    applied_at_turn_id,
+                    current_unix_ms(),
+                ],
+            )?;
+            Ok::<_, tokio_rusqlite::Error>(())
+        })
+        .await?;
+        Ok(merge)
+    }
+
     /// Test-only accessor that bypasses the identity guard
     /// [`SqliteMemoryStore::get_session`] enforces.
     ///
@@ -1044,6 +1227,293 @@ impl From<rusqlite::Error> for InTxError {
             }
         }
         Self::Sqlite(e)
+    }
+}
+
+type SessionTreeNodeRow = (
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+type SessionTreeMergeRow = (
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    String,
+);
+
+struct EncodedMergeStrategy {
+    kind: &'static str,
+    summary_record_id: Option<String>,
+    first_turn_id: Option<String>,
+    last_turn_id: Option<String>,
+}
+
+impl EncodedMergeStrategy {
+    fn from_strategy(strategy: &MergeStrategy) -> Self {
+        match strategy {
+            MergeStrategy::ReasoningSummary { summary_record_id } => Self {
+                kind: "reasoning_summary",
+                summary_record_id: Some(summary_record_id.as_str().to_owned()),
+                first_turn_id: None,
+                last_turn_id: None,
+            },
+            MergeStrategy::ControlledSplice {
+                first_turn_id,
+                last_turn_id,
+            } => Self {
+                kind: "controlled_splice",
+                summary_record_id: None,
+                first_turn_id: Some(first_turn_id.clone()),
+                last_turn_id: Some(last_turn_id.clone()),
+            },
+            _ => Self {
+                kind: "unknown",
+                summary_record_id: None,
+                first_turn_id: None,
+                last_turn_id: None,
+            },
+        }
+    }
+}
+
+fn load_session_tree_sync(
+    conn: &rusqlite::Connection,
+    root_key: &str,
+) -> Result<Option<SessionTree>, StoreError> {
+    let root_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) = 1 FROM sessions WHERE session_id = ?1",
+            params![root_key],
+            |r| r.get::<_, i64>(0).map(|v| v == 1),
+        )
+        .map_err(StoreError::Sqlite)?;
+    if !root_exists {
+        return Ok(None);
+    }
+
+    let root_key = resolve_session_tree_root_key(conn, root_key)?;
+    let root = parse_session_id(&root_key)?;
+    let mut tree = SessionTree::flat(root.clone());
+    let mut subtree_ids = BTreeSet::from([root.clone()]);
+    let rows = load_session_tree_node_rows(conn, &root_key)?;
+
+    for (session_id, parent_session_id, at_turn_id, branch_kind, tool_call_id) in rows {
+        let session_id = parse_session_id(&session_id)?;
+        subtree_ids.insert(session_id.clone());
+        if session_id == root {
+            continue;
+        }
+        let parent = parent_session_id.ok_or_else(|| {
+            StoreError::InvalidSessionTree(SessionTreeError::MalformedLink {
+                session_id: session_id.clone(),
+                message: "non-root node must have a parent",
+            })
+        })?;
+        let parent = parse_session_id(&parent)?;
+        let at_turn_id = at_turn_id.ok_or(SessionTreeError::EmptyField {
+            field: "at_turn_id",
+        })?;
+        match parse_branch_kind(branch_kind.as_deref(), &session_id)? {
+            BranchKind::Fork => tree.fork(&parent, session_id, at_turn_id)?,
+            BranchKind::Clone => tree.clone_session(&parent, session_id)?,
+            BranchKind::ToolSpawned => tree.tool_spawn(
+                &parent,
+                session_id,
+                at_turn_id,
+                tool_call_id.ok_or(SessionTreeError::EmptyField {
+                    field: "tool_call_id",
+                })?,
+            )?,
+            _ => unreachable!("BranchKind is non_exhaustive for forward compatibility"),
+        }
+    }
+
+    for row in load_session_tree_merge_rows(conn)? {
+        let (source, destination, strategy_kind, summary, first, last, applied_at) = row;
+        let source = parse_session_id(&source)?;
+        let destination = parse_session_id(&destination)?;
+        if !(subtree_ids.contains(&source) && subtree_ids.contains(&destination)) {
+            continue;
+        }
+        tree.record_merge(
+            source,
+            destination,
+            parse_merge_strategy(&strategy_kind, summary, first, last)?,
+            applied_at,
+        )?;
+    }
+    tree.validate()?;
+    Ok(Some(tree))
+}
+
+fn resolve_session_tree_root_key(
+    conn: &rusqlite::Connection,
+    session_key: &str,
+) -> Result<String, StoreError> {
+    let mut stmt = conn.prepare(
+        "WITH RECURSIVE ancestors(session_id, parent_session_id) AS ( \
+           SELECT session_id, parent_session_id \
+             FROM session_tree_nodes \
+            WHERE session_id = ?1 \
+           UNION \
+           SELECT n.session_id, n.parent_session_id \
+             FROM session_tree_nodes n \
+             JOIN ancestors ON ancestors.parent_session_id = n.session_id \
+         ) \
+         SELECT session_id \
+           FROM ancestors \
+          WHERE parent_session_id IS NULL \
+          LIMIT 1",
+    )?;
+    let resolved = stmt
+        .query_row(params![session_key], |r| r.get::<_, String>(0))
+        .optional()
+        .map_err(StoreError::Sqlite)?;
+    if let Some(root_key) = resolved {
+        return Ok(root_key);
+    }
+
+    let has_metadata: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM session_tree_nodes WHERE session_id = ?1",
+            params![session_key],
+            |r| r.get::<_, i64>(0).map(|v| v > 0),
+        )
+        .map_err(StoreError::Sqlite)?;
+    if !has_metadata {
+        return Ok(session_key.to_owned());
+    }
+
+    let session_id = parse_session_id(session_key)?;
+    Err(StoreError::InvalidSessionTree(
+        SessionTreeError::MalformedLink {
+            session_id,
+            message: "session tree ancestry does not reach a root",
+        },
+    ))
+}
+
+fn load_session_tree_node_rows(
+    conn: &rusqlite::Connection,
+    root_key: &str,
+) -> Result<Vec<SessionTreeNodeRow>, StoreError> {
+    let mut stmt = conn.prepare(
+        "WITH RECURSIVE subtree(session_id, depth) AS ( \
+           SELECT ?1, 0 \
+           UNION ALL \
+           SELECT n.session_id, subtree.depth + 1 \
+             FROM session_tree_nodes n \
+             JOIN subtree ON n.parent_session_id = subtree.session_id \
+         ) \
+         SELECT n.session_id, n.parent_session_id, n.at_turn_id, n.branch_kind, n.tool_call_id \
+           FROM session_tree_nodes n \
+           JOIN subtree ON subtree.session_id = n.session_id \
+          ORDER BY subtree.depth, n.created_at, n.session_id",
+    )?;
+    let rows = stmt.query_map(params![root_key], |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+    })?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(StoreError::Sqlite)
+}
+
+fn load_session_tree_merge_rows(
+    conn: &rusqlite::Connection,
+) -> Result<Vec<SessionTreeMergeRow>, StoreError> {
+    let mut stmt = conn.prepare(
+        "SELECT source_session_id, destination_session_id, strategy_kind, \
+                summary_record_id, first_turn_id, last_turn_id, applied_at_turn_id \
+           FROM session_tree_merges \
+          ORDER BY created_at, merge_id",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get(0)?,
+            r.get(1)?,
+            r.get(2)?,
+            r.get(3)?,
+            r.get(4)?,
+            r.get(5)?,
+            r.get(6)?,
+        ))
+    })?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(StoreError::Sqlite)
+}
+
+fn parse_session_id(raw: &str) -> Result<SessionId, StoreError> {
+    SessionId::parse(raw).map_err(|e| StoreError::Invariant {
+        what: format!("session_tree session_id round-trip failed: {e}"),
+    })
+}
+
+fn parse_record_id(raw: &str) -> Result<RecordId, StoreError> {
+    RecordId::parse(raw).map_err(|e| StoreError::Invariant {
+        what: format!("session_tree record_id round-trip failed: {e}"),
+    })
+}
+
+fn parse_branch_kind(raw: Option<&str>, session_id: &SessionId) -> Result<BranchKind, StoreError> {
+    match raw {
+        Some("fork") => Ok(BranchKind::Fork),
+        Some("clone") => Ok(BranchKind::Clone),
+        Some("tool_spawned") => Ok(BranchKind::ToolSpawned),
+        Some(_) => Err(StoreError::InvalidSessionTree(
+            SessionTreeError::MalformedLink {
+                session_id: session_id.clone(),
+                message: "unknown branch kind",
+            },
+        )),
+        None => Err(StoreError::InvalidSessionTree(
+            SessionTreeError::MalformedLink {
+                session_id: session_id.clone(),
+                message: "non-root node must have a branch kind",
+            },
+        )),
+    }
+}
+
+fn branch_kind_wire(kind: BranchKind) -> &'static str {
+    match kind {
+        BranchKind::Fork => "fork",
+        BranchKind::Clone => "clone",
+        BranchKind::ToolSpawned => "tool_spawned",
+        _ => unreachable!("BranchKind is non_exhaustive for forward compatibility"),
+    }
+}
+
+fn parse_merge_strategy(
+    kind: &str,
+    summary_record_id: Option<String>,
+    first_turn_id: Option<String>,
+    last_turn_id: Option<String>,
+) -> Result<MergeStrategy, StoreError> {
+    match kind {
+        "reasoning_summary" => Ok(MergeStrategy::ReasoningSummary {
+            summary_record_id: parse_record_id(&summary_record_id.ok_or(
+                SessionTreeError::EmptyField {
+                    field: "summary_record_id",
+                },
+            )?)?,
+        }),
+        "controlled_splice" => Ok(MergeStrategy::ControlledSplice {
+            first_turn_id: first_turn_id.ok_or(SessionTreeError::EmptyField {
+                field: "first_turn_id",
+            })?,
+            last_turn_id: last_turn_id.ok_or(SessionTreeError::EmptyField {
+                field: "last_turn_id",
+            })?,
+        }),
+        _ => Err(StoreError::Invariant {
+            what: "session_tree merge strategy kind is unknown".to_owned(),
+        }),
     }
 }
 

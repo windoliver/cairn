@@ -37,6 +37,8 @@ pub enum PolicyGate {
     SearchCapability,
     /// Search read-filter aggregation gate.
     SearchReadFilter,
+    /// Local sensor consent gate.
+    SensorConsent,
 }
 
 impl PolicyGate {
@@ -57,6 +59,7 @@ impl PolicyGate {
             Self::SearchScope => "search.scope",
             Self::SearchCapability => "search.capability",
             Self::SearchReadFilter => "search.read_filter",
+            Self::SensorConsent => "sensor_consent",
         }
     }
 }

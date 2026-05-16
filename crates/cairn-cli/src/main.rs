@@ -133,9 +133,11 @@ fn subcommand_needs_vault_guard(subcommand: Option<(&str, &ArgMatches)>) -> bool
             | "admin"
             | "llm"
             | "identity"
+            | "coord"
             | "flush"
             | "hook"
             | "screen"
+            | "sensor"
             | "repair"
     )
 }
@@ -314,7 +316,17 @@ fn main() -> ExitCode {
         Some(("hook", sub)) => hooks::run(sub),
         Some(("status", sub)) => run_status(sub, explicit_vault.as_deref()),
         Some(("screen", sub)) => match resolve_vault_and_config(explicit_vault.as_deref()) {
-            Ok((_vault_root, _source, config)) => verbs::screen::run(sub, &config),
+            Ok((vault_root, _source, config)) => verbs::screen::run(sub, &vault_root, &config),
+            Err(code) => code,
+        },
+        Some(("sensor", sub)) => match resolve_vault_and_config(explicit_vault.as_deref()) {
+            Ok((vault_root, _source, config)) => {
+                if let Some(code) = enforce_vault_binding("sensor", &vault_root) {
+                    code
+                } else {
+                    verbs::sensor::run(sub, &vault_root, config)
+                }
+            }
             Err(code) => code,
         },
         Some(("handshake", sub)) => run_handshake(sub, explicit_vault.as_deref()),
@@ -346,6 +358,7 @@ fn main() -> ExitCode {
         Some(("skill", sub)) => run_skill(sub),
         Some(("admin", sub)) => run_admin(sub, explicit_vault.as_deref()),
         Some(("llm", sub)) => run_llm(sub),
+        Some(("coord", sub)) => cairn_cli::coord::run(sub),
         Some(("flush", sub)) => match resolve_vault_or_cwd(explicit_vault.as_deref()) {
             Ok((vault_root, _source)) => verbs::flush::run(sub, Some(vault_root)),
             Err(e) => {

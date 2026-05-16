@@ -34,7 +34,7 @@ pub fn run(inputs: &LintInputs<'_>) -> Vec<Finding> {
     //    100,000 produce the same number of findings — operators get
     //    no signal that the queue is degenerating. The total count
     //    query is index-backed via `workflow_jobs_dead_letter_idx`
-    //    (migration 0062), so the extra round-trip is cheap.
+    //    (migration 0063), so the extra round-trip is cheap.
     let listing_cap = cfg.max_dead_letter_listed as usize;
     let total = jobs.dead_letter_count(None);
     for row in jobs.dead_letter_rows(listing_cap) {

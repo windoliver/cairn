@@ -84,6 +84,78 @@ pub struct StatusResponsePipelineDispatch {
     pub tool_id: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusResponseSensorsLocalBudget {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_items: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatusResponseSensorsLocalConsent {
+    Enabled,
+    Disabled,
+    Missing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatusResponseSensorsLocalGate {
+    Allowed,
+    Disabled,
+    PrivacyDenied,
+    BudgetExceeded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatusResponseSensorsLocalLastDropReason {
+    Disabled,
+    PrivacyDenied,
+    BudgetExceeded,
+    PolicyRejected,
+    MalformedObservation,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusResponseSensorsLocalRetention {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_days: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatusResponseSensorsLocalSensor {
+    Hook,
+    Ide,
+    Terminal,
+    Clipboard,
+    Voice,
+    Screen,
+    Recording,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusResponseSensorsLocal {
+    pub budget: StatusResponseSensorsLocalBudget,
+    pub consent: StatusResponseSensorsLocalConsent,
+    pub enabled: bool,
+    pub gate: StatusResponseSensorsLocalGate,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_drop_reason: Option<StatusResponseSensorsLocalLastDropReason>,
+    pub retention: StatusResponseSensorsLocalRetention,
+    pub sensor: StatusResponseSensorsLocalSensor,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -167,6 +239,9 @@ pub struct StatusResponseSensorsScreen {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StatusResponseSensors {
+    /// Per-local-sensor config, consent, and gate state. Optional and additive for issue #88.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local: Option<Vec<StatusResponseSensorsLocal>>,
     pub screen: StatusResponseSensorsScreen,
 }
 

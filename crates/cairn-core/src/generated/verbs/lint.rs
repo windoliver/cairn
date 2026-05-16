@@ -50,6 +50,8 @@ pub enum Kind {
     SourceLinkLegacyDuplicate,
     SourceLinkMissing,
     SourceRedactSkipped,
+    SensorBudgetExceeded,
+    SensorPrivacyDenied,
     Stale,
     StaleProfileLine,
     StaleSchema,

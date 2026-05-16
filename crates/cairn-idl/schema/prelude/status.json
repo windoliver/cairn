@@ -98,6 +98,49 @@
               }
             }
           }
+        },
+        "local": {
+          "type": "array",
+          "description": "Per-local-sensor config, consent, and gate state. Optional and additive for issue #88.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["sensor", "enabled", "consent", "gate", "budget", "retention"],
+            "properties": {
+              "sensor": {
+                "type": "string",
+                "enum": ["hook", "ide", "terminal", "clipboard", "voice", "screen", "recording"]
+              },
+              "enabled": { "type": "boolean" },
+              "consent": {
+                "type": "string",
+                "enum": ["enabled", "disabled", "missing"]
+              },
+              "gate": {
+                "type": "string",
+                "enum": ["allowed", "disabled", "privacy_denied", "budget_exceeded"]
+              },
+              "budget": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "max_items": { "type": "integer", "minimum": 1 },
+                  "max_bytes": { "type": "integer", "minimum": 1 }
+                }
+              },
+              "retention": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "max_days": { "type": "integer", "minimum": 1 }
+                }
+              },
+              "last_drop_reason": {
+                "type": "string",
+                "enum": ["disabled", "privacy_denied", "budget_exceeded", "policy_rejected", "malformed_observation"]
+              }
+            }
+          }
         }
       }
     },
@@ -289,6 +332,39 @@
         "properties": {
           "extensions": {
             "contains": { "properties": { "name": { "const": "cairn.sessiontree.v1" } }, "required": ["name"] }
+          }
+        },
+        "required": ["extensions"]
+      }
+    },
+    {
+      "$comment": "coord extension ↔ capability binding",
+      "if": {
+        "properties": {
+          "extensions": {
+            "contains": { "properties": { "name": { "const": "cairn.coord.v1" } }, "required": ["name"] }
+          }
+        },
+        "required": ["extensions"]
+      },
+      "then": {
+        "properties": {
+          "capabilities": { "contains": { "const": "cairn.mcp.v1.extension.coord" } }
+        },
+        "required": ["capabilities"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "capabilities": { "contains": { "const": "cairn.mcp.v1.extension.coord" } }
+        },
+        "required": ["capabilities"]
+      },
+      "then": {
+        "properties": {
+          "extensions": {
+            "contains": { "properties": { "name": { "const": "cairn.coord.v1" } }, "required": ["name"] }
           }
         },
         "required": ["extensions"]

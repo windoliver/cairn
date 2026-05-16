@@ -31,7 +31,116 @@ fn fresh_vault_opens_and_reopens_idempotent() {
             r.get(0)
         })
         .expect("query head");
-    assert_eq!(head, 62);
+    assert_eq!(head, 63);
+}
+
+#[test]
+fn migration_0062_creates_session_tree_tables() {
+    let conn = open_in_memory().expect("open");
+
+    for table in ["session_tree_nodes", "session_tree_merges"] {
+        let exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) = 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+                [table],
+                |r| r.get::<_, i64>(0).map(|v| v == 1),
+            )
+            .expect("query table");
+        assert!(exists, "{table} must exist");
+    }
+
+    for index in [
+        "session_tree_nodes_parent_idx",
+        "session_tree_merges_source_idx",
+        "session_tree_merges_destination_idx",
+    ] {
+        let exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) = 1 FROM sqlite_schema WHERE type = 'index' AND name = ?1",
+                [index],
+                |r| r.get::<_, i64>(0).map(|v| v == 1),
+            )
+            .expect("query index");
+        assert!(exists, "{index} must exist");
+    }
+}
+
+#[test]
+fn migration_0062_enforces_session_tree_shape_constraints() {
+    let conn = open_in_memory().expect("open");
+    let sessions = [
+        ("01JTS6R4J7000000000000000D", "/tree-root"),
+        ("01JTS6R4J7000000000000000E", "/tree-child"),
+        ("01JTS6R4J7000000000000000F", "/tree-tool"),
+    ];
+    for (session_id, project_root) in sessions {
+        conn.execute(
+            "INSERT INTO sessions \
+               (session_id, user_id, agent_id, project_root, title, \
+                created_at, last_activity_at, ended_at) \
+             VALUES (?1, 'hmn:alice', 'agt:claude-code:opus-4-7:main:v1', ?2, '', 0, 0, NULL)",
+            params![session_id, project_root],
+        )
+        .expect("seed session");
+    }
+
+    conn.execute(
+        "INSERT INTO session_tree_nodes \
+           (session_id, parent_session_id, at_turn_id, branch_kind, tool_call_id, created_at) \
+         VALUES ('01JTS6R4J7000000000000000D', NULL, NULL, NULL, NULL, 0)",
+        [],
+    )
+    .expect("valid root node");
+    conn.execute(
+        "INSERT INTO session_tree_nodes \
+           (session_id, parent_session_id, at_turn_id, branch_kind, tool_call_id, created_at) \
+         VALUES ('01JTS6R4J7000000000000000E', '01JTS6R4J7000000000000000D', 'turn-2', 'fork', NULL, 0)",
+        [],
+    )
+    .expect("valid fork node");
+
+    let err = conn
+        .execute(
+            "INSERT INTO session_tree_nodes \
+               (session_id, parent_session_id, at_turn_id, branch_kind, tool_call_id, created_at) \
+             VALUES ('01JTS6R4J7000000000000000F', '01JTS6R4J7000000000000000D', 'turn-3', 'tool_spawned', NULL, 0)",
+            [],
+        )
+        .expect_err("tool-spawned node must carry tool_call_id");
+    assert!(
+        format!("{err}").contains("CHECK constraint failed"),
+        "unexpected error: {err}"
+    );
+
+    let err = conn
+        .execute(
+            "INSERT INTO session_tree_merges \
+               (source_session_id, destination_session_id, strategy_kind, summary_record_id, \
+                first_turn_id, last_turn_id, applied_at_turn_id, created_at) \
+             VALUES ('01JTS6R4J7000000000000000E', '01JTS6R4J7000000000000000D', \
+                     'controlled_splice', NULL, 'turn-2', NULL, 'turn-4', 0)",
+            [],
+        )
+        .expect_err("controlled splice must carry both turn bounds");
+    assert!(
+        format!("{err}").contains("CHECK constraint failed"),
+        "unexpected error: {err}"
+    );
+
+    let err = conn
+        .execute(
+            "INSERT INTO session_tree_merges \
+               (source_session_id, destination_session_id, strategy_kind, summary_record_id, \
+                first_turn_id, last_turn_id, applied_at_turn_id, created_at) \
+             VALUES ('01JTS6R4J7000000000000000E', '01JTS6R4J7000000000000000E', \
+                     'reasoning_summary', '01JTS6R4J7000000000000000A', NULL, NULL, 'turn-4', 0)",
+            [],
+        )
+        .expect_err("self-merge must be rejected");
+    assert!(
+        format!("{err}").contains("CHECK constraint failed"),
+        "unexpected error: {err}"
+    );
 }
 
 #[test]

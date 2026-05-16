@@ -166,6 +166,8 @@ impl<T: Transport> Sdk<T> {
     ///   to surface `Internal` instead of fail-closed `CapabilityUnavailable`.
     #[must_use]
     pub fn status(&self) -> StatusResponse {
+        let capabilities = self.advertised_capabilities();
+        let extensions = cairn_core::status::extension_namespaces(&capabilities);
         StatusResponse {
             contract: CONTRACT.to_owned(),
             server_info: StatusResponseServerInfo {
@@ -174,9 +176,9 @@ impl<T: Transport> Sdk<T> {
                 started_at: now_rfc3339_seconds(),
                 incarnation: crate::stub::new_operation_id(),
             },
-            capabilities: self.advertised_capabilities(),
-            extensions: vec![],
-            sensors: cairn_core::status::default_sensors_status(),
+            capabilities,
+            extensions,
+            sensors: cairn_core::status::sensors_status_for_config(&self.config),
             // Advertise the live routing policy. Mirrors the CLI
             // status producer: both surfaces emit the same
             // family-granular `pipeline_dispatch` derived from

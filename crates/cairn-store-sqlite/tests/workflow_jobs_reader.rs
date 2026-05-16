@@ -79,7 +79,7 @@ fn dead_letter_rows_returns_failed_row_with_typed_columns() {
             ("last_error", &"bad payload"),
         ],
     );
-    let reader = SqliteWorkflowJobsReader::new(conn).expect("reader needs migration 0062");
+    let reader = SqliteWorkflowJobsReader::new(conn).expect("reader needs migration 0063");
     let rows = reader.dead_letter_rows(10);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].job_id.as_str(), "j-1");
@@ -103,7 +103,7 @@ fn dead_letter_rows_returns_failed_row_with_typed_columns() {
 #[test]
 fn dead_letter_rows_empty_table_returns_empty() {
     let conn = fresh_db();
-    let reader = SqliteWorkflowJobsReader::new(conn).expect("reader needs migration 0062");
+    let reader = SqliteWorkflowJobsReader::new(conn).expect("reader needs migration 0063");
     assert!(reader.dead_letter_rows(10).is_empty());
     assert_eq!(reader.dead_letter_count(None), 0);
 }
@@ -113,7 +113,7 @@ fn oldest_queued_age_ms_returns_now_minus_next_run_for_queued() {
     let conn = fresh_db();
     insert_workflow_row(&conn, "j-a", "dream.light", "queued", 100, &[]);
     insert_workflow_row(&conn, "j-b", "dream.light", "queued", 200, &[]);
-    let reader = SqliteWorkflowJobsReader::new(conn).expect("reader needs migration 0062");
+    let reader = SqliteWorkflowJobsReader::new(conn).expect("reader needs migration 0063");
     assert_eq!(reader.oldest_queued_age_ms(None, 1_000), Some(900));
     assert_eq!(
         reader.oldest_queued_age_ms(Some(&JobKind::new("dream.light")), 1_000),
@@ -128,7 +128,7 @@ fn oldest_queued_age_ms_returns_now_minus_next_run_for_queued() {
 #[test]
 fn oldest_queued_age_ms_empty_returns_none() {
     let conn = fresh_db();
-    let reader = SqliteWorkflowJobsReader::new(conn).expect("reader needs migration 0062");
+    let reader = SqliteWorkflowJobsReader::new(conn).expect("reader needs migration 0063");
     assert!(reader.oldest_queued_age_ms(None, 1_000).is_none());
 }
 
@@ -159,7 +159,7 @@ fn last_success_ms_returns_max_completed_for_kind() {
         0,
         &[("completed_at_ms", &200_i64)],
     );
-    let reader = SqliteWorkflowJobsReader::new(conn).expect("reader needs migration 0062");
+    let reader = SqliteWorkflowJobsReader::new(conn).expect("reader needs migration 0063");
     assert_eq!(
         reader.last_success_ms(&JobKind::new("dream.light")),
         Some(500)
@@ -174,7 +174,7 @@ fn last_success_ms_returns_max_completed_for_kind() {
 #[test]
 fn last_success_ms_empty_returns_none() {
     let conn = fresh_db();
-    let reader = SqliteWorkflowJobsReader::new(conn).expect("reader needs migration 0062");
+    let reader = SqliteWorkflowJobsReader::new(conn).expect("reader needs migration 0063");
     assert!(
         reader
             .last_success_ms(&JobKind::new("dream.light"))
@@ -211,7 +211,7 @@ fn longest_held_lease_ms_returns_now_minus_min_expires() {
             ("lease_expires_at", &900_i64),
         ],
     );
-    let reader = SqliteWorkflowJobsReader::new(conn).expect("reader needs migration 0062");
+    let reader = SqliteWorkflowJobsReader::new(conn).expect("reader needs migration 0063");
     // min(lease_expires_at) is 800; now - 800 = 200.
     assert_eq!(reader.longest_held_lease_ms(1_000), Some(200));
 }
@@ -219,7 +219,7 @@ fn longest_held_lease_ms_returns_now_minus_min_expires() {
 #[test]
 fn longest_held_lease_ms_empty_returns_none() {
     let conn = fresh_db();
-    let reader = SqliteWorkflowJobsReader::new(conn).expect("reader needs migration 0062");
+    let reader = SqliteWorkflowJobsReader::new(conn).expect("reader needs migration 0063");
     assert!(reader.longest_held_lease_ms(1_000).is_none());
 }
 
@@ -268,7 +268,7 @@ fn dead_letter_rows_orders_desc_and_respects_limit() {
             ("last_error", &"new"),
         ],
     );
-    let reader = SqliteWorkflowJobsReader::new(conn).expect("reader needs migration 0062");
+    let reader = SqliteWorkflowJobsReader::new(conn).expect("reader needs migration 0063");
     let rows = reader.dead_letter_rows(2);
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].job_id.as_str(), "j-new");
@@ -287,7 +287,7 @@ fn take_last_error_captures_runtime_query_failure() {
     // finding. This test exercises the round-trip end-to-end against
     // a real SQLite connection.
     let conn = fresh_db();
-    let reader = SqliteWorkflowJobsReader::new(conn).expect("reader needs migration 0062");
+    let reader = SqliteWorkflowJobsReader::new(conn).expect("reader needs migration 0063");
     // Sanity check: a fresh DB has no errors to report.
     assert!(
         reader.take_last_error().is_none(),
@@ -310,7 +310,7 @@ fn take_last_error_captures_runtime_query_failure() {
     let _staged = cairn_store_sqlite::open_sync(&path).expect("stage file-backed DB");
     // Build the reader against a fresh read-write connection.
     let reader_conn = Connection::open(&path).expect("open path for reader");
-    let reader = SqliteWorkflowJobsReader::new(reader_conn).expect("reader needs migration 0062");
+    let reader = SqliteWorkflowJobsReader::new(reader_conn).expect("reader needs migration 0063");
     // Independently break the table via a *separate* connection.
     let mutator = Connection::open(&path).expect("open path for mutator");
     mutator
@@ -344,8 +344,8 @@ fn take_last_error_captures_runtime_query_failure() {
 }
 
 #[test]
-fn new_rejects_db_missing_0062_dead_letter_index() {
-    // Issue #92 round-7 finding 7.3: a vault with the migration-0062
+fn new_rejects_db_missing_0063_dead_letter_index() {
+    // Issue #92 round-7 finding 7.3: a vault with the migration-0063
     // columns present but the dead-letter index dropped passes the
     // column probe and ends up serving lint queries via full-table
     // scans. Surface the gap at construction time so the operator
@@ -365,7 +365,7 @@ fn new_rejects_db_missing_0062_dead_letter_index() {
 }
 
 #[test]
-fn new_rejects_db_missing_0062_kind_completed_index() {
+fn new_rejects_db_missing_0063_kind_completed_index() {
     // Companion to the dead-letter-idx case: the kind+completed index
     // backs `last_success_ms` lookups. A missing index here turns
     // every `dream.light` / `expire.tier` / `evaluate.sweep` last-success
@@ -398,7 +398,7 @@ fn new_rejects_db_stuck_at_migration_0020() {
     let conn = Connection::open_in_memory().expect("in-memory db");
     // 0020 inserts into schema_migrations; create the bookkeeping
     // table first so we can apply the workflow_jobs migration in
-    // isolation (full open_sync would apply 0062 too).
+    // isolation (full open_sync would apply 0063 too).
     conn.execute_batch(
         "CREATE TABLE schema_migrations (\
             migration_id INTEGER NOT NULL PRIMARY KEY, \
@@ -409,19 +409,19 @@ fn new_rejects_db_stuck_at_migration_0020() {
     )
     .expect("create schema_migrations");
     conn.execute_batch(cairn_store_sqlite::migrations::WORKFLOW_JOBS_MIGRATION_SQL)
-        .expect("apply 0020 only — simulate a vault that has not yet run 0062");
+        .expect("apply 0020 only — simulate a vault that has not yet run 0063");
     let err = SqliteWorkflowJobsReader::new(conn)
         .err()
         .expect("0020-only DB must fail the column probe");
     let msg = err.to_string();
     assert!(
-        msg.contains("migration 0062"),
-        "error message must point operator at migration 0062: {msg}"
+        msg.contains("migration 0063"),
+        "error message must point operator at migration 0063: {msg}"
     );
     match err {
         cairn_store_sqlite::SqliteWorkflowJobsReaderError::ColumnMissing { name } => {
             // Probe order is implementation-defined — any of the
-            // three migration-0062 columns is acceptable.
+            // three migration-0063 columns is acceptable.
             assert!(
                 matches!(
                     name,

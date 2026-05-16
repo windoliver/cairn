@@ -106,3 +106,25 @@ fn retrieve_capabilities_follow_wiring_flags_at_every_phase() {
         }
     }
 }
+
+#[test]
+fn coord_extension_capability_is_v0_3_and_hidden_until_wired() {
+    let cap: Capabilities = serde_json::from_str("\"cairn.mcp.v1.extension.coord\"")
+        .expect("coord extension capability must be part of the generated enum");
+    assert_eq!(
+        serde_json::to_value(cap).expect("capability serializes"),
+        serde_json::json!("cairn.mcp.v1.extension.coord")
+    );
+
+    for phase in [Phase::V0_1, Phase::V0_2, Phase::V0_3] {
+        let caps = advertise(&full_gates(phase));
+        let cap_strings: Vec<_> = caps
+            .iter()
+            .map(|cap| serde_json::to_value(cap).expect("capability serializes"))
+            .collect();
+        assert!(
+            !cap_strings.contains(&serde_json::json!("cairn.mcp.v1.extension.coord")),
+            "coord extension must stay hidden until runtime dispatch is wired; got {caps:?}"
+        );
+    }
+}

@@ -21,5 +21,6 @@ expression: "String::from_utf8(out.stdout).unwrap()"
       "status": "pending"
     }
   ],
+  "requeue_markers": [],
   "omitted": []
 }

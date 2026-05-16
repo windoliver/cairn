@@ -37,6 +37,41 @@ pub const RETRIEVE_SCOPE_WIRED: bool = false;
 /// `retrieve --profile` dispatch path.
 pub const RETRIEVE_PROFILE_WIRED: bool = false;
 
+/// `cairn.coord.v1` multi-agent coordination extension.
+///
+/// The registry and `FlushPlan` mutation contract can land before the runtime
+/// dispatcher. Keep the capability hidden until CLI/MCP/SDK calls can honor
+/// leases, signals, actions, routines, and frontier end to end.
+pub const COORD_EXTENSION_WIRED: bool = false;
+
+/// `cairn coord` CLI dispatch is wired end to end.
+pub const COORD_CLI_DISPATCH_WIRED: bool = false;
+
+/// Flush apply/requeue can execute coord mutations end to end.
+pub const COORD_FLUSH_RUNTIME_WIRED: bool = false;
+
+/// `cairn.coord.v1` MCP tool declarations are wired.
+pub const COORD_MCP_TOOLS_WIRED: bool = false;
+
+/// `cairn.coord.v1` MCP tool dispatch is wired end to end.
+pub const COORD_MCP_DISPATCH_WIRED: bool = false;
+
+/// Single readiness source for advertising `cairn.coord.v1`.
+#[must_use]
+pub const fn coord_extension_ready() -> bool {
+    COORD_EXTENSION_WIRED
+        && COORD_CLI_DISPATCH_WIRED
+        && COORD_FLUSH_RUNTIME_WIRED
+        && COORD_MCP_TOOLS_WIRED
+        && COORD_MCP_DISPATCH_WIRED
+}
+
+/// Readiness gate for local flush execution of coord mutations.
+#[must_use]
+pub const fn coord_flush_runtime_ready() -> bool {
+    COORD_EXTENSION_WIRED && COORD_FLUSH_RUNTIME_WIRED
+}
+
 /// `PreCompact` sensor capture + status advertisement path (issue #310).
 ///
 /// Held off until a real dispatched runtime caller invokes

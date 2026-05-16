@@ -80,6 +80,27 @@ pub struct FlushPlan {
 }
 
 impl FlushPlan {
+    /// Earliest persisted-plan schema that can represent every mutation in
+    /// this plan.
+    #[must_use]
+    pub fn required_schema_version(&self) -> u16 {
+        self.mutations
+            .iter()
+            .map(PlannedMutation::required_schema_version)
+            .max()
+            .unwrap_or(PersistedPlan::BASE_SCHEMA_VERSION)
+    }
+
+    /// Whether this plan contains coordination mutations. Keep feature
+    /// gating tied to mutation semantics rather than to the persisted
+    /// schema version, which can advance for unrelated mutation families.
+    #[must_use]
+    pub fn contains_coord_mutations(&self) -> bool {
+        self.mutations
+            .iter()
+            .any(PlannedMutation::is_coord_mutation)
+    }
+
     /// Idempotency key per §5.6 — the `operation_id`.
     #[must_use]
     pub fn idempotency_key(&self) -> &Ulid {
@@ -203,6 +224,143 @@ pub enum PlannedMutation {
         /// Path to the diff file (relative to vault root).
         diff_ref: PathBuf,
     },
+    /// Acquire the exclusive coordination lease for an action.
+    LeaseAcquire {
+        /// Action being claimed.
+        action_id: TargetId,
+        /// Actor acquiring the lease.
+        actor: Identity,
+        /// ISO 8601 duration string for the lease TTL.
+        ttl: String,
+        /// RFC 3339 timestamp when the lease expires.
+        expires_at: String,
+    },
+    /// Release a coordination lease held by an actor.
+    LeaseRelease {
+        /// Action whose lease is released.
+        action_id: TargetId,
+        /// Actor releasing the lease.
+        actor: Identity,
+        /// Optional release reason for the audit log.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        reason: Option<String>,
+    },
+    /// Append an inter-agent coordination signal.
+    SignalSend {
+        /// Actor that emitted the signal.
+        from_actor: Identity,
+        /// Actor that should observe the signal.
+        to_actor: Identity,
+        /// Closed signal kind.
+        signal_kind: CoordSignalKind,
+        /// Optional payload record id.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        payload_id: Option<TargetId>,
+    },
+    /// Create a coordination action node.
+    ActionCreate {
+        /// Stable action id.
+        id: TargetId,
+        /// Human-readable title.
+        title: String,
+        /// Action ids that must complete before this action is unblocked.
+        depends_on: Vec<TargetId>,
+        /// Higher priority sorts earlier in frontier results.
+        priority: i32,
+    },
+    /// Update a coordination action's lifecycle status.
+    ActionUpdate {
+        /// Stable action id.
+        id: TargetId,
+        /// New lifecycle status.
+        status: CoordActionStatus,
+        /// Optional transition reason for the audit log.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        reason: Option<String>,
+    },
+    /// Instantiate a declarative coordination routine.
+    RoutineInstantiate {
+        /// Routine template name.
+        routine_name: String,
+        /// Stable routine instance id.
+        instance_id: Ulid,
+        /// String variables passed to the template expander.
+        vars: BTreeMap<String, String>,
+    },
+}
+
+impl PlannedMutation {
+    /// True for mutations owned by the `cairn.coord.v1` extension.
+    #[must_use]
+    pub fn is_coord_mutation(&self) -> bool {
+        matches!(
+            self,
+            Self::LeaseAcquire { .. }
+                | Self::LeaseRelease { .. }
+                | Self::SignalSend { .. }
+                | Self::ActionCreate { .. }
+                | Self::ActionUpdate { .. }
+                | Self::RoutineInstantiate { .. }
+        )
+    }
+
+    /// Earliest persisted-plan schema version that can encode this mutation.
+    #[must_use]
+    pub fn required_schema_version(&self) -> u16 {
+        match self {
+            Self::LeaseAcquire { .. }
+            | Self::LeaseRelease { .. }
+            | Self::SignalSend { .. }
+            | Self::ActionCreate { .. }
+            | Self::ActionUpdate { .. }
+            | Self::RoutineInstantiate { .. } => PersistedPlan::COORD_SCHEMA_VERSION,
+            Self::Upsert { .. }
+            | Self::Delete { .. }
+            | Self::Patch { .. }
+            | Self::Rename { .. }
+            | Self::Promote { .. }
+            | Self::Expire { .. }
+            | Self::ForgetSession { .. }
+            | Self::ForgetRecord { .. }
+            | Self::Evolve { .. } => PersistedPlan::BASE_SCHEMA_VERSION,
+        }
+    }
+}
+
+/// Closed set of coordination signal kinds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CoordSignalKind {
+    /// An action or routine finished successfully.
+    TaskCompleted,
+    /// A lease was released.
+    LeaseReleased,
+    /// Another actor should review the payload or action.
+    RequestReview,
+    /// Progress requires user input.
+    UserInputNeeded,
+    /// The sender hit an error.
+    Error,
+    /// Informational observation.
+    Info,
+}
+
+/// Closed set of coordination action lifecycle statuses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CoordActionStatus {
+    /// Ready once dependencies complete.
+    Pending,
+    /// Claimed or actively running.
+    InProgress,
+    /// Finished successfully.
+    Completed,
+    /// Cannot proceed until an external condition changes.
+    Blocked,
+    /// Intentionally abandoned.
+    Cancelled,
 }
 
 /// Why an expiration was planned (brief §10 `ExpirationWorkflow`).
@@ -259,7 +417,7 @@ pub enum PlanReason {
 /// On-disk wrapper persisted under `.cairn/flush/`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedPlan {
-    /// On-disk schema version. Always `1` in this PR.
+    /// On-disk schema version.
     pub schema_version: u16,
     /// The plan itself.
     pub plan: FlushPlan,
@@ -268,18 +426,63 @@ pub struct PersistedPlan {
 }
 
 impl PersistedPlan {
+    /// Original flush-plan schema used by non-coordination mutations.
+    pub const BASE_SCHEMA_VERSION: u16 = 1;
+    /// Schema version that introduced `cairn.coord.v1` mutation variants.
+    pub const COORD_SCHEMA_VERSION: u16 = 2;
     /// Schema version constant — bump when the on-disk shape changes.
-    pub const SCHEMA_VERSION: u16 = 1;
+    pub const SCHEMA_VERSION: u16 = Self::COORD_SCHEMA_VERSION;
 
     /// Wrap a [`FlushPlan`] in a [`PersistedPlan`] with [`PlanStatus::Pending`].
     #[must_use]
     pub fn pending(plan: FlushPlan) -> Self {
+        let schema_version = plan.required_schema_version();
         Self {
-            schema_version: Self::SCHEMA_VERSION,
+            schema_version,
             plan,
             status: PlanStatus::Pending,
         }
     }
+
+    /// Validate that this binary understands the wrapper version and that the
+    /// wrapper is new enough for the enclosed mutations.
+    pub fn validate_schema_version(&self) -> Result<(), PersistedPlanVersionError> {
+        if self.schema_version > Self::SCHEMA_VERSION {
+            return Err(PersistedPlanVersionError::Unsupported {
+                schema_version: self.schema_version,
+                supported: Self::SCHEMA_VERSION,
+            });
+        }
+
+        let required = self.plan.required_schema_version();
+        if self.schema_version < required {
+            return Err(PersistedPlanVersionError::RequiresNewer {
+                schema_version: self.schema_version,
+                required,
+            });
+        }
+
+        Ok(())
+    }
+}
+
+/// Persisted-plan schema compatibility error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersistedPlanVersionError {
+    /// The plan was written by a newer format than this binary understands.
+    Unsupported {
+        /// Version stored in the plan wrapper.
+        schema_version: u16,
+        /// Highest version supported by this binary.
+        supported: u16,
+    },
+    /// The wrapper version is too old for the enclosed mutation kinds.
+    RequiresNewer {
+        /// Version stored in the plan wrapper.
+        schema_version: u16,
+        /// Minimum version required by the plan content.
+        required: u16,
+    },
 }
 
 /// How a `PlanStatus::Applied` was actually executed.
@@ -388,6 +591,28 @@ mod tests {
         }]);
         let json = serde_json::to_string_pretty(&PersistedPlan::pending(plan)).unwrap();
         insta::assert_snapshot!("plan_expire_json", json);
+    }
+
+    #[test]
+    fn coord_mutation_detection_is_explicit() {
+        let mut plan = sample_plan();
+        assert_eq!(
+            plan.required_schema_version(),
+            PersistedPlan::BASE_SCHEMA_VERSION
+        );
+        assert!(!plan.contains_coord_mutations());
+
+        plan.mutations.push(PlannedMutation::ActionCreate {
+            id: TargetId::parse("01HQZK000000000000000ACTN1").unwrap(),
+            title: "coordinate work".into(),
+            depends_on: vec![],
+            priority: 0,
+        });
+        assert_eq!(
+            plan.required_schema_version(),
+            PersistedPlan::COORD_SCHEMA_VERSION
+        );
+        assert!(plan.contains_coord_mutations());
     }
 
     #[test]

@@ -35,10 +35,14 @@ pub mod wiring;
 
 pub use remediation::{REMEDIATION, remediation_for};
 
-use crate::config::CapabilitySet;
-use crate::generated::common::Capabilities;
+use crate::config::{CairnConfig, CapabilitySet, SensorCaptureBudget};
+use crate::domain::LocalSensorName;
+use crate::generated::common::{Capabilities, Namespace};
 use crate::generated::status::{
-    StatusResponseSensors, StatusResponseSensorsScreen, StatusResponseSensorsScreenBackend,
+    StatusResponseSensors, StatusResponseSensorsLocal, StatusResponseSensorsLocalBudget,
+    StatusResponseSensorsLocalConsent, StatusResponseSensorsLocalGate,
+    StatusResponseSensorsLocalRetention, StatusResponseSensorsLocalSensor,
+    StatusResponseSensorsScreen, StatusResponseSensorsScreenBackend,
     StatusResponseSensorsScreenDegradation, StatusResponseSensorsScreenDegradationCode,
     StatusResponseSensorsScreenMode, StatusResponseSensorsScreenOcrEngine,
     StatusResponseSensorsScreenPermission, StatusResponseSensorsScreenState,
@@ -248,6 +252,11 @@ pub fn advertise(gates: &CapabilityGates) -> Vec<Capabilities> {
         out.push(Capabilities::CairnMcpV1RetrieveProfile);
     }
 
+    // -- extensions -------------------------------------------------------
+    if phase >= Phase::V0_3 && wiring::coord_extension_ready() {
+        out.push(Capabilities::CairnMcpV1ExtensionCoord);
+    }
+
     // ── replay (held back per brief §15 fail-closed) ─────────────────────
     if wiring::REPLAY_SEQUENCE_WIRED {
         out.push(Capabilities::CairnMcpV1ReplaySequence);
@@ -288,7 +297,14 @@ pub fn advertise(gates: &CapabilityGates) -> Vec<Capabilities> {
 /// Default sensor status for surfaces that do not host local sensor runtimes.
 #[must_use]
 pub fn default_sensors_status() -> StatusResponseSensors {
+    sensors_status_for_config(&CairnConfig::default())
+}
+
+/// Sensor status for surfaces that cannot inspect a vault consent journal.
+#[must_use]
+pub fn sensors_status_for_config(config: &CairnConfig) -> StatusResponseSensors {
     StatusResponseSensors {
+        local: Some(default_local_sensor_status(config)),
         screen: StatusResponseSensorsScreen {
             backend: StatusResponseSensorsScreenBackend::Xcap,
             degradation: Some(StatusResponseSensorsScreenDegradation {
@@ -300,6 +316,99 @@ pub fn default_sensors_status() -> StatusResponseSensors {
             permission: StatusResponseSensorsScreenPermission::NotRequested,
             state: StatusResponseSensorsScreenState::Disabled,
         },
+    }
+}
+
+fn default_local_sensor_status(config: &CairnConfig) -> Vec<StatusResponseSensorsLocal> {
+    LocalSensorName::ALL
+        .into_iter()
+        .map(|sensor| {
+            let enabled = sensor_enabled(config, sensor);
+            StatusResponseSensorsLocal {
+                budget: local_sensor_budget(config, sensor),
+                consent: StatusResponseSensorsLocalConsent::Missing,
+                enabled,
+                gate: if enabled {
+                    StatusResponseSensorsLocalGate::PrivacyDenied
+                } else {
+                    StatusResponseSensorsLocalGate::Disabled
+                },
+                last_drop_reason: None,
+                retention: local_sensor_retention(config, sensor),
+                sensor: local_sensor_name(sensor),
+            }
+        })
+        .collect()
+}
+
+fn sensor_enabled(config: &CairnConfig, sensor: LocalSensorName) -> bool {
+    match sensor {
+        LocalSensorName::Hook => config.sensors.hooks.enabled,
+        LocalSensorName::Ide => config.sensors.ide.enabled,
+        LocalSensorName::Terminal => config.sensors.terminal.enabled,
+        LocalSensorName::Clipboard => config.sensors.clipboard.enabled,
+        LocalSensorName::Voice => config.sensors.voice.enabled,
+        LocalSensorName::Screen => config.sensors.screen.enabled,
+        LocalSensorName::Recording => config.sensors.recording.enabled,
+    }
+}
+
+fn local_sensor_budget(
+    config: &CairnConfig,
+    sensor: LocalSensorName,
+) -> StatusResponseSensorsLocalBudget {
+    match sensor {
+        LocalSensorName::Hook => shared_budget(&config.sensors.hooks.budget),
+        LocalSensorName::Ide => shared_budget(&config.sensors.ide.budget),
+        LocalSensorName::Terminal => shared_budget(&config.sensors.terminal.budget),
+        LocalSensorName::Clipboard => shared_budget(&config.sensors.clipboard.budget),
+        LocalSensorName::Voice => shared_budget(&config.sensors.voice.budget),
+        LocalSensorName::Screen => StatusResponseSensorsLocalBudget {
+            max_bytes: Some(i64::from(
+                config.sensors.screen.budget.max_text_bytes_per_event,
+            )),
+            max_items: Some(i64::from(
+                config.sensors.screen.budget.max_frames_per_minute,
+            )),
+        },
+        LocalSensorName::Recording => shared_budget(&config.sensors.recording.budget),
+    }
+}
+
+fn shared_budget(budget: &SensorCaptureBudget) -> StatusResponseSensorsLocalBudget {
+    StatusResponseSensorsLocalBudget {
+        max_bytes: budget.max_bytes.and_then(|value| i64::try_from(value).ok()),
+        max_items: budget.max_items.and_then(|value| i64::try_from(value).ok()),
+    }
+}
+
+fn local_sensor_retention(
+    config: &CairnConfig,
+    sensor: LocalSensorName,
+) -> StatusResponseSensorsLocalRetention {
+    let max_days = match sensor {
+        LocalSensorName::Hook => config.sensors.hooks.retention.max_days,
+        LocalSensorName::Ide => config.sensors.ide.retention.max_days,
+        LocalSensorName::Terminal => config.sensors.terminal.retention.max_days,
+        LocalSensorName::Clipboard => config.sensors.clipboard.retention.max_days,
+        LocalSensorName::Voice => config.sensors.voice.retention.max_days,
+        LocalSensorName::Screen => config.sensors.screen.retention.max_days,
+        LocalSensorName::Recording => config.sensors.recording.retention.max_days,
+    };
+    StatusResponseSensorsLocalRetention {
+        max_days: max_days.map(i64::from),
+    }
+}
+
+fn local_sensor_name(sensor: LocalSensorName) -> StatusResponseSensorsLocalSensor {
+    match sensor {
+        LocalSensorName::Hook => StatusResponseSensorsLocalSensor::Hook,
+        LocalSensorName::Ide => StatusResponseSensorsLocalSensor::Ide,
+        LocalSensorName::Terminal => StatusResponseSensorsLocalSensor::Terminal,
+        LocalSensorName::Clipboard => StatusResponseSensorsLocalSensor::Clipboard,
+        LocalSensorName::Voice => StatusResponseSensorsLocalSensor::Voice,
+        LocalSensorName::Screen => StatusResponseSensorsLocalSensor::Screen,
+        LocalSensorName::Recording => StatusResponseSensorsLocalSensor::Recording,
     }
 }
 
@@ -330,6 +439,56 @@ fn default_screen_ocr_capability() -> Capabilities {
     } else {
         Capabilities::CairnSensorV1ScreenOcrTesseract
     }
+}
+
+/// Extension namespace records implied by advertised extension capabilities.
+///
+/// `status.capabilities` and `status.extensions` are bound by the IDL: if an
+/// extension capability is present, its namespace object must be present too,
+/// and vice versa. Keep the mapping here so CLI, SDK, and MCP status producers
+/// cannot drift.
+#[must_use]
+pub fn extension_namespaces(capabilities: &[Capabilities]) -> Vec<Namespace> {
+    let mut out = Vec::new();
+    for capability in capabilities {
+        let namespace = match capability {
+            Capabilities::CairnMcpV1ExtensionAggregate => Some(serde_json::json!({
+                "name": "cairn.aggregate.v1",
+                "x-cairn-since": "v0.2",
+                "enabler": "agent.enable_aggregate",
+                "x-cairn-capability": "cairn.mcp.v1.extension.aggregate",
+            })),
+            Capabilities::CairnMcpV1ExtensionAdmin => Some(serde_json::json!({
+                "name": "cairn.admin.v1",
+                "x-cairn-since": "v0.1",
+                "enabler": "operator role",
+                "x-cairn-capability": "cairn.mcp.v1.extension.admin",
+            })),
+            Capabilities::CairnMcpV1ExtensionFederation => Some(serde_json::json!({
+                "name": "cairn.federation.v1",
+                "x-cairn-since": "v0.3",
+                "enabler": "enterprise deployment",
+                "x-cairn-capability": "cairn.mcp.v1.extension.federation",
+            })),
+            Capabilities::CairnMcpV1ExtensionSessiontree => Some(serde_json::json!({
+                "name": "cairn.sessiontree.v1",
+                "x-cairn-since": "v0.3",
+                "enabler": "session.enable_tree",
+                "x-cairn-capability": "cairn.mcp.v1.extension.sessiontree",
+            })),
+            Capabilities::CairnMcpV1ExtensionCoord => Some(serde_json::json!({
+                "name": "cairn.coord.v1",
+                "x-cairn-since": "v0.3",
+                "enabler": "coord.enable",
+                "x-cairn-capability": "cairn.mcp.v1.extension.coord",
+            })),
+            _ => None,
+        };
+        if let Some(namespace) = namespace {
+            out.push(namespace);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
