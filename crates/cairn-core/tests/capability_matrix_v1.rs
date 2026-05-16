@@ -204,12 +204,24 @@ const BUCKET_SURFACE_SENSORS_DEFAULT: &[&str] = &[
     "cairn.sensor.v1.screen.ocr.tesseract",
 ];
 
-/// Capabilities held back at v0.1 by an explicit `*_WIRED = false`
-/// constant in `crates/cairn-core/src/status/wiring.rs`. Each entry is
-/// a deliberate fail-closed decision: the contract reserves the
-/// capability string but the runtime can't honor it yet, so `advertise()`
-/// must NOT publish it. Flipping the matching wiring constant moves
-/// the entry into `expected_full_p0()` in a single, reviewed PR.
+/// Capabilities held back at v0.1 because the runtime path that would
+/// advertise them is not yet wired. Each entry is a deliberate
+/// fail-closed decision: the contract reserves the capability string
+/// but `advertise()` must not publish it until the matching dispatch
+/// path lands. Two flavors are bucketed together:
+///   - Verb/sensor capabilities gated by a `*_WIRED = false` constant
+///     in `crates/cairn-core/src/status/wiring.rs`.
+///   - Extension-namespace capabilities (`cairn.mcp.v1.extension.*`)
+///     whose `advertise()` row + bidirectional binding (brief §8.0.a:
+///     `cairn.admin.v1` in `status.extensions` ↔ `cairn.mcp.v1.extension.admin`
+///     in `status.capabilities`, encoded in `schema/prelude/status.json`)
+///     are not yet wired into the runtime. The capability string is
+///     reserved; when the extension is enabled, the surface advertising
+///     it must publish both halves together.
+///
+/// Flipping the gate (wiring constant, or wiring up the extension
+/// `advertise()` row) moves the entry into `expected_full_p0()` (or a
+/// future bound/extension-enabled scenario) in a single, reviewed PR.
 const BUCKET_DEFERRED_WIRING: &[&str] = &[
     "cairn.mcp.v1.retrieve.record",
     "cairn.mcp.v1.retrieve.folder",
@@ -218,16 +230,8 @@ const BUCKET_DEFERRED_WIRING: &[&str] = &[
     "cairn.mcp.v1.sensors.pre_compact",
     "cairn.mcp.v1.replay.sequence",
     "cairn.mcp.v1.replay.challenge",
+    "cairn.mcp.v1.extension.admin",
 ];
-
-/// Extension-namespace capability strings. The bidirectional binding
-/// rule (brief §8.0.a): the namespace appears in `status.extensions`
-/// and the matching capability string is reserved here but is NEVER
-/// published in `status.capabilities` even when the extension is
-/// enabled — the extension is discovered via `status.extensions`. If
-/// a surface ever needs to publish one of these in `status.capabilities`,
-/// that is a contract change and must move to a different bucket.
-const BUCKET_EXTENSION_NAMESPACE_FLAG: &[&str] = &["cairn.mcp.v1.extension.admin"];
 
 /// v0.1 capability strings the default-platform runtime never publishes:
 /// alternative-platform sensor backends (advertised only when the host
@@ -258,9 +262,8 @@ fn every_v01_capability_is_classified_exactly_once() {
     // must land in EXACTLY ONE bucket:
     //   - `expected_full_p0()` — advertised in the default-P0 status response.
     //   - `BUCKET_SURFACE_SENSORS_DEFAULT` — appended by `default_sensor_capabilities()`.
-    //   - `BUCKET_DEFERRED_WIRING` — held back behind a `*_WIRED = false` flag.
-    //   - `BUCKET_EXTENSION_NAMESPACE_FLAG` — extension namespace flags
-    //     advertised via `status.extensions`, never via `status.capabilities`.
+    //   - `BUCKET_DEFERRED_WIRING` — held back behind a `*_WIRED = false`
+    //     flag or an unwired extension namespace.
     //   - `BUCKET_NON_DEFAULT` — platform-alternative sensor backends.
     //
     // A future PR that adds a new v0.1 capability string MUST also add
@@ -313,10 +316,6 @@ fn every_v01_capability_is_classified_exactly_once() {
         .iter()
         .map(|s| (*s).to_owned())
         .collect();
-    let extension_flags: HashSet<String> = BUCKET_EXTENSION_NAMESPACE_FLAG
-        .iter()
-        .map(|s| (*s).to_owned())
-        .collect();
     let non_default: HashSet<String> = BUCKET_NON_DEFAULT
         .iter()
         .map(|s| (*s).to_owned())
@@ -324,13 +323,7 @@ fn every_v01_capability_is_classified_exactly_once() {
 
     // Sanity 1: every bucket entry must actually be a v0.1 entry in the
     // schema. Catches typos and stale entries left after a deprecation.
-    for bucket in [
-        &advertised,
-        &surface_sensors,
-        &deferred,
-        &extension_flags,
-        &non_default,
-    ] {
+    for bucket in [&advertised, &surface_sensors, &deferred, &non_default] {
         for cap in bucket {
             assert!(
                 v01_strings.contains(cap),
@@ -343,11 +336,10 @@ fn every_v01_capability_is_classified_exactly_once() {
 
     // Sanity 2: buckets must be pairwise disjoint. A capability cannot
     // be both advertised and deferred at the same time.
-    let buckets: [(&str, &HashSet<String>); 5] = [
+    let buckets: [(&str, &HashSet<String>); 4] = [
         ("advertised_full_p0", &advertised),
         ("surface_sensors_default", &surface_sensors),
         ("deferred_wiring", &deferred),
-        ("extension_namespace_flag", &extension_flags),
         ("non_default", &non_default),
     ];
     for (i, (name_i, bucket_i)) in buckets.iter().enumerate() {
@@ -367,7 +359,6 @@ fn every_v01_capability_is_classified_exactly_once() {
         .iter()
         .chain(surface_sensors.iter())
         .chain(deferred.iter())
-        .chain(extension_flags.iter())
         .chain(non_default.iter())
         .cloned()
         .collect();
@@ -376,8 +367,8 @@ fn every_v01_capability_is_classified_exactly_once() {
         missing.is_empty(),
         "v0.1 capabilities declared in capabilities.json have no classification: {missing:?}. \
          Add each one to exactly one of expected_full_p0() / BUCKET_SURFACE_SENSORS_DEFAULT / \
-         BUCKET_DEFERRED_WIRING / BUCKET_EXTENSION_NAMESPACE_FLAG / BUCKET_NON_DEFAULT. The \
-         contract version cannot grow silently — issue #98."
+         BUCKET_DEFERRED_WIRING / BUCKET_NON_DEFAULT. The contract version cannot grow \
+         silently — issue #98."
     );
     let extra: HashSet<&String> = union.difference(&v01_strings).collect();
     assert!(
