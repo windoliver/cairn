@@ -110,9 +110,9 @@ Criterion benches in `crates/cairn-bench/benches/latency.rs`, driven from inside
 | Bench | CLI command | §15 SLO (in-process) | Subprocess SLO (proxy) |
 |---|---|---|---|
 | `assemble_hot_p95` | `cairn assemble_hot --json` | < 50 ms p95 | < 300 ms p95 |
-| `search_keyword_p95` | `cairn search --mode keyword --query <q> --json` | < 50 ms p95 | < 300 ms p95 |
-| `search_semantic_p95` | `cairn search --mode semantic --query <q> --json` | < 50 ms p95 | < 300 ms p95 |
-| `search_hybrid_p95` | `cairn search --mode hybrid --query <q> --json` | < 50 ms p95 | < 300 ms p95 |
+| `search_keyword_p95` | `cairn search <q> --mode keyword --json` | < 50 ms p95 | < 300 ms p95 |
+| `search_semantic_p95` | `cairn search <q> --mode semantic --json` (with `CAIRN_MOCK_EMBEDDER=1`) | < 50 ms p95 | < 300 ms p95 |
+| `search_hybrid_p95` | `cairn search <q> --mode hybrid --json` (with `CAIRN_MOCK_EMBEDDER=1`) | < 50 ms p95 | < 300 ms p95 |
 | `retrieve_p95` | `cairn retrieve --id <id> --json` | < 50 ms p95 (§15 umbrella); §19.a aspirational p50 < 5 ms is advisory | < 300 ms p95 |
 | `capture_trace_p95` | `cairn capture_trace --from <event-file> --json` | < 50 ms p95 | < 300 ms p95 |
 | `wal_apply_p95` | `cairn ingest --kind reference --body <s> --json` | < 50 ms p95 | < 300 ms p95 |
@@ -128,7 +128,7 @@ Reuse the P0 replay fixture vault from `cairn-test-fixtures`. Seeded vault is cr
 
 ### 4.3 Criterion config
 
-`Criterion::default().measurement_time(Duration::from_secs(8)).sample_size(50)` — keeps each bench under ~10 s, total ~80 s wall for the 8 benches.
+`Criterion::default().measurement_time(Duration::from_secs(8)).sample_size(20).warm_up_time(Duration::from_secs(2))` — keeps each bench under ~10 s, total ~80 s wall for the 8 benches. The sample size starts at 20 (not criterion's default 100) because the subprocess driver caps useful throughput; tune up later if regression noise on CI runners exceeds the 2% threshold.
 
 ### 4.4 Comparator
 
