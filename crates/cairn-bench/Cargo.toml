@@ -29,6 +29,7 @@ openai = ["dep:cairn-embeddings-openai"]
 cairn-core = { workspace = true, features = ["test-fixtures"] }
 cairn-embeddings-local = { workspace = true }
 cairn-embeddings-openai = { workspace = true, optional = true }
+cairn-sdk = { workspace = true }
 cairn-store-sqlite = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
@@ -38,6 +39,7 @@ clap = { workspace = true, features = ["derive"] }
 # interleave reads and atomic renames and silently lose one another's
 # additions. fs4 is already in the transitive tree (sqlite-vec).
 fs4 = { version = "0.13", features = ["sync"] }
+rusqlite = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
@@ -46,6 +48,25 @@ sha2 = { workspace = true }
 # corrupt the only cache (which holds expensive OpenAI embeddings).
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+toml = { workspace = true }
+tracing = { workspace = true }
+yaml_serde = { workspace = true }
+
+[dev-dependencies]
+cairn-test-fixtures = { workspace = true }
+criterion = { workspace = true }
+insta = { workspace = true, features = ["json", "yaml"] }
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "latency"
+harness = false
+
+[[bench]]
+name = "lifecycle"
+harness = false
+
+[package.metadata.cargo-machete]
+ignored = ["cairn-sdk", "tracing", "rusqlite", "yaml_serde", "toml"]

@@ -85,6 +85,7 @@ zeroize = { version = "1.7", default-features = false, features = ["zeroize_deri
 ed25519-dalek = { version = "2.1", default-features = false, features = ["std", "zeroize", "rand_core"] }
 rand_core = { version = "0.6", default-features = false, features = ["std"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
+criterion = { version = "0.5", default-features = false, features = ["html_reports", "cargo_bench_support"] }
 rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
 keyring = { version = "3", default-features = false, features = ["apple-native", "linux-native", "windows-native"] }
 parking_lot = "0.12"
