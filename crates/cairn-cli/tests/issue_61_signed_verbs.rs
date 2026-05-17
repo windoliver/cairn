@@ -1032,6 +1032,146 @@ fn retrieve_session_rehydrate_adds_body_free_trace() {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "single E2E regression covers archive, default hot stubs, cold rehydrate, privacy, and cursor behavior"
+)]
+fn retrieve_session_rehydrates_from_cold_bundle_after_archive() {
+    const SESSION_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let vault = tempfile::tempdir().expect("vault");
+    bootstrap(&BootstrapOpts {
+        vault_path: vault.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap");
+    let _ = ingest_reference(vault.path(), "seed default issuer before retrieve");
+    let trace_path = write_issue_78_trace_fixture(vault.path(), SESSION_ID);
+    run_capture_trace(vault.path(), &trace_path);
+
+    let archive = cli()
+        .current_dir(vault.path())
+        .args([
+            "admin",
+            "archive-session",
+            "--session",
+            SESSION_ID,
+            "--json",
+        ])
+        .output()
+        .expect("run archive-session");
+    assert_eq!(
+        archive.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&archive.stderr)
+    );
+    let archive_json: serde_json::Value =
+        serde_json::from_slice(&archive.stdout).expect("archive json");
+    assert_eq!(archive_json["session_id"], SESSION_ID);
+    assert_eq!(archive_json["records_archived"], 5);
+    assert!(
+        vault
+            .path()
+            .join(".cairn/cold/session_01ARZ3NDEKTSV4RRFFQ69G5FAV.json")
+            .exists()
+    );
+
+    let default = cli()
+        .current_dir(vault.path())
+        .args([
+            "retrieve",
+            "--session",
+            SESSION_ID,
+            "--order",
+            "asc",
+            "--json",
+        ])
+        .output()
+        .expect("run default retrieve session");
+    assert_eq!(
+        default.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&default.stderr)
+    );
+    let default_text = String::from_utf8(default.stdout).expect("utf-8 default");
+    assert!(
+        !default_text.contains("turn one user"),
+        "default hot path should only expose archived stubs: {default_text}"
+    );
+    assert!(
+        !default_text.contains("alice@example.com"),
+        "default hot path must not leak raw cold text: {default_text}"
+    );
+    let default_json: serde_json::Value = serde_json::from_str(&default_text).expect("json");
+    assert!(
+        default_json["policy_trace"]
+            .as_array()
+            .expect("policy_trace")
+            .iter()
+            .all(|entry| entry["gate"] != "read.rehydrate")
+    );
+
+    let rehydrate = cli()
+        .current_dir(vault.path())
+        .args([
+            "retrieve",
+            "--session",
+            SESSION_ID,
+            "--rehydrate",
+            "--limit",
+            "2",
+            "--order",
+            "asc",
+            "--json",
+        ])
+        .output()
+        .expect("run cold rehydrate retrieve session");
+    assert_eq!(
+        rehydrate.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&rehydrate.stderr)
+    );
+    let rehydrate_text = String::from_utf8(rehydrate.stdout).expect("utf-8 rehydrate");
+    assert!(
+        !rehydrate_text.contains("alice@example.com"),
+        "cold rehydrate output must stay redacted: {rehydrate_text}"
+    );
+    let resp: Response = serde_json::from_str(&rehydrate_text).expect("response");
+    let Some(ResponseData::Retrieve(RetrieveData::Session(data))) = resp.data else {
+        panic!("retrieve session must return session data");
+    };
+    assert_eq!(data.items.len(), 4);
+    assert_eq!(data.items[0].content.as_deref(), Some("turn one user"));
+    assert!(
+        data.items
+            .iter()
+            .any(|item| item.content.as_deref() == Some("turn two user [REDACTED:email]"))
+    );
+    assert!(data.next_cursor.is_some());
+
+    let rehydrate_json: serde_json::Value =
+        serde_json::from_str(&rehydrate_text).expect("rehydrate json");
+    let trace = rehydrate_json["policy_trace"]
+        .as_array()
+        .expect("policy_trace");
+    let rehydrate_trace = trace
+        .iter()
+        .find(|entry| entry["gate"] == "read.rehydrate")
+        .expect("read.rehydrate trace");
+    let detail = rehydrate_trace["detail"].as_str().expect("detail");
+    assert!(
+        detail.contains("source_tier=cold"),
+        "cold rehydrate trace should name the cold source tier: {detail}"
+    );
+    assert!(
+        !detail.contains("turn one user"),
+        "rehydrate trace must remain body-free: {detail}"
+    );
+}
+
+#[test]
 fn retrieve_session_default_path_omits_rehydrate_trace() {
     const SESSION_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
     let vault = tempfile::tempdir().expect("vault");

@@ -360,6 +360,7 @@ fn admin_subcommand() -> clap::Command {
         .subcommand_required(true)
         .arg_required_else_help(true)
         .subcommand(admin_model_subcommand())
+        .subcommand(admin_archive_session_subcommand())
         .subcommand(admin_zero_capture_report_subcommand())
         .subcommand(admin_reindex_subcommand())
         .subcommand(admin_snapshot_subcommand())
@@ -442,6 +443,19 @@ fn admin_workflow_subcommand() -> clap::Command {
             "Boot Scheduler with worker_count=0 so the startup reap runs once; \
                      reports how many leased rows were reclaimed.",
         ))
+}
+
+fn admin_archive_session_subcommand() -> clap::Command {
+    clap::Command::new("archive-session")
+        .about("Archive a session into the local cold bundle substrate")
+        .arg(
+            clap::Arg::new("session")
+                .long("session")
+                .required(true)
+                .value_name("STRING")
+                .help("Session id to archive"),
+        )
+        .arg(json_arg("Emit JSON output"))
 }
 
 fn admin_model_subcommand() -> clap::Command {

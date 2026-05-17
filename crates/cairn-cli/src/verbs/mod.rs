@@ -4,6 +4,7 @@ use std::path::Path;
 
 use cairn_core::config::{CairnConfig, EmbeddingProvider};
 
+pub mod admin_archive_session;
 pub mod admin_model_fetch;
 pub mod admin_reindex;
 pub mod admin_restore;
@@ -15,6 +16,7 @@ pub mod admin_workflow;
 pub mod admin_zero_capture_report;
 pub mod assemble_hot;
 pub mod capture_trace;
+pub(crate) mod cold_session;
 pub mod envelope;
 pub mod flush;
 /// Real `flush apply` executor for non-placeholder plans (issue #289).

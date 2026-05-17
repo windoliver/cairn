@@ -4,7 +4,8 @@
     reason = "CLI helpers return complete response envelopes for direct JSON emission"
 )]
 
-use std::path::PathBuf;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -157,6 +158,7 @@ async fn run_async(args: RetrieveArgs, vault_root: PathBuf, config: CairnConfig)
         } => {
             retrieve_session(
                 &ctx.store,
+                &vault_root,
                 SessionRetrieveRequest {
                     session_id,
                     limit,
@@ -294,6 +296,7 @@ async fn retrieve_scope(
 
 async fn retrieve_session(
     store: &SqliteMemoryStore,
+    vault_root: &Path,
     request: SessionRetrieveRequest,
     auth: &ReadAuthorization,
 ) -> Response {
@@ -319,11 +322,25 @@ async fn retrieve_session(
     let requested_limit = limit
         .and_then(|v| usize::try_from(v).ok())
         .unwrap_or(usize::MAX);
-    let mut records = match list_records(store, args).await {
+    let mut hot_records = match list_records(store, args).await {
         Ok(records) => records,
         Err(resp) => return resp,
     };
-    records.retain(|record| record.scope.session_id.as_deref() == Some(session_id.as_str()));
+    hot_records.retain(|record| record.scope.session_id.as_deref() == Some(session_id.as_str()));
+    let (records, source_tier) = if rehydrate {
+        match cold_records_for_hot(vault_root, &session_id, &hot_records) {
+            Ok(Some(cold_records)) => (cold_records, "cold"),
+            Ok(None) => (hot_records, "hot_or_warm"),
+            Err(error) => {
+                return super::signed::aborted(
+                    ResponseVerb::Retrieve,
+                    format!("cold rehydrate: {error:#}"),
+                );
+            }
+        }
+    } else {
+        (hot_records, "hot_or_warm")
+    };
     let (include_reasoning, include_tool_calls) = session_include_flags(include.as_deref());
     let groups = session_turn_groups(records, order);
     let total_groups = groups.len();
@@ -341,7 +358,7 @@ async fn retrieve_session(
     if let Some(started) = rehydrate_started {
         budget_report.rehydrate = Some(RehydrateReport {
             elapsed_ms: started.elapsed().as_millis(),
-            source_tier: "hot_or_warm",
+            source_tier,
         });
     }
     let next_offset = start.saturating_add(groups.len());
@@ -485,6 +502,35 @@ async fn list_records(
         .await
         .map(|page| page.records)
         .map_err(|e| super::signed::aborted(ResponseVerb::Retrieve, format!("store list: {e}")))
+}
+
+fn cold_records_for_hot(
+    vault_root: &Path,
+    session_id: &str,
+    hot_records: &[MemoryRecord],
+) -> anyhow::Result<Option<Vec<MemoryRecord>>> {
+    let Some(bundle) = super::cold_session::load_bundle(vault_root, session_id)? else {
+        return Ok(None);
+    };
+    let allowed_targets = hot_records
+        .iter()
+        .map(|record| record.target_id.as_str().to_owned())
+        .collect::<BTreeSet<_>>();
+    let mut records = bundle
+        .records
+        .into_iter()
+        .filter(|record| {
+            record.scope.session_id.as_deref() == Some(session_id)
+                && allowed_targets.contains(record.target_id.as_str())
+        })
+        .collect::<Vec<_>>();
+    records.sort_by(|left, right| {
+        trace_sequence(left)
+            .cmp(&trace_sequence(right))
+            .then_with(|| trace_capture_event_id(left).cmp(&trace_capture_event_id(right)))
+            .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+    });
+    Ok(Some(records))
 }
 
 fn committed(

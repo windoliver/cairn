@@ -686,6 +686,7 @@ fn run_admin(matches: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
             Ok(config) => verbs::admin_reindex::run(sub, &vault_root, &config),
             Err(code) => code,
         },
+        Some(("archive-session", sub)) => verbs::admin_archive_session::run(sub, &vault_root),
         Some(("zero-capture-report", sub)) => {
             verbs::admin_zero_capture_report::run(sub, &vault_root)
         }
