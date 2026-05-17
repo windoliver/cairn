@@ -115,8 +115,12 @@ impl ModelCache {
         }
         std::fs::create_dir_all(&tmp)?;
 
-        let api =
-            hf_hub::api::sync::Api::new().map_err(|e| EmbeddingError::Network(e.to_string()))?;
+        // ApiBuilder::from_env() picks up HF_ENDPOINT / HF_HOME / HF_TOKEN so
+        // operators on locked-down networks can point at a mirror. Plain
+        // Api::new() hardcodes huggingface.co and would ignore the env.
+        let api = hf_hub::api::sync::ApiBuilder::from_env()
+            .build()
+            .map_err(|e| EmbeddingError::Network(e.to_string()))?;
         let repo_id = kind
             .hf_repo()
             .ok_or(EmbeddingError::ModelNotFetched { kind })?;
