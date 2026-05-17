@@ -130,6 +130,8 @@ const M0063_WORKFLOW_DEAD_LETTER: &str = include_str!("sql/0063_workflow_dead_le
 // Issue #109 — v0.2 additive session-link metadata for cold rehydration and
 // session-level forget migrations.
 const M0064_V02_RECORD_SESSION_LINKS: &str = include_str!("sql/0064_v02_record_session_links.sql");
+// Issue #134 — task-trace canvas substrate layered after tree-aware read windows.
+const M0065_TRACE_CANVAS: &str = include_str!("sql/0065_trace_canvas.sql");
 
 /// Canonical SQL for migration 0020 (`workflow_jobs`). Re-exported so
 /// downstream crates (notably `cairn-workflows`, which hashes the
@@ -323,6 +325,7 @@ pub(crate) const MIGRATION_SOURCES: &[(i64, &str, &str)] = &[
         "0064_v02_record_session_links",
         M0064_V02_RECORD_SESSION_LINKS,
     ),
+    (65, "0065_trace_canvas", M0065_TRACE_CANVAS),
 ];
 
 /// All migrations, in order. Returns a fresh `Migrations` set on every call
@@ -388,5 +391,6 @@ pub fn migrations() -> Migrations<'static> {
         M::up(M0062_SESSION_TREE),
         M::up(M0063_WORKFLOW_DEAD_LETTER),
         M::up(M0064_V02_RECORD_SESSION_LINKS),
+        M::up(M0065_TRACE_CANVAS),
     ])
 }
