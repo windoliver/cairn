@@ -199,3 +199,52 @@ jobs:
           path: dist/cairn
           if-no-files-found: error
           retention-days: 7
+
+  install-smoke:
+    name: install-smoke / ${{ matrix.os }}
+    # Proves `cargo install cairn` + the eight-verb smoke pass on a clean
+    # prefix. On macOS, additionally audits the Homebrew formula. Closes the
+    # last v0.1 packaging gap called out in docs/ci.md (issue #100).
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: install-smoke-${{ matrix.os }}
+          cache-bin: "false"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: cargo install into a clean prefix
+        shell: bash
+        run: |
+          set -euo pipefail
+          prefix="$(mktemp -d -t cairn-install-XXXXXX)"
+          echo "CAIRN_PREFIX=$prefix" >>"$GITHUB_ENV"
+          cargo install --path crates/cairn-cli --locked --no-track \
+            --root "$prefix"
+          ls "$prefix/bin"
+      - name: Run install smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          CAIRN_BIN="$CAIRN_PREFIX/bin/cairn" ./scripts/install-smoke.sh
+      - name: Audit Homebrew formula
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # `brew audit --strict` validates formula structure offline. Path
+          # invocation (`--formula <path>`) was removed in brew 5.x, so we
+          # stage the formula into a temp tap and audit through that.
+          tap="$(brew --repository)/Library/Taps/local/homebrew-cairn-audit"
+          mkdir -p "$tap/Formula"
+          cp packaging/homebrew/cairn.rb "$tap/Formula/cairn.rb"
+          trap 'rm -rf "$tap"' EXIT
+          brew audit --strict local/cairn-audit/cairn
