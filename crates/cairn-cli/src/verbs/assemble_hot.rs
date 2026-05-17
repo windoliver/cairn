@@ -15,7 +15,8 @@ use cairn_core::domain::canonical::canonical_bytes_signed_intent;
 use cairn_core::domain::consent_timeline::ConsentModel;
 use cairn_core::domain::identity::keys::SecretHandle;
 use cairn_core::domain::{
-    Identity, MemoryKind, MemoryRecord, MemoryVisibility, RecordId, ScopeTuple,
+    Identity, MemoryKind, MemoryRecord, MemoryVisibility, RecordId, ScopeTuple, SessionId,
+    SessionTree,
 };
 use cairn_core::generated::common::{Ed25519Signature, Ulid};
 use cairn_core::generated::envelope::{
@@ -95,6 +96,7 @@ struct LoadedHotBodies {
     bodies: Vec<String>,
     files: usize,
     records: Vec<LoadedRecordTrace>,
+    tree_context: Option<TreeHotContext>,
 }
 
 #[derive(Clone)]
@@ -110,6 +112,13 @@ impl From<&MemoryRecord> for LoadedRecordTrace {
             consent_model: record.consent_model,
         }
     }
+}
+
+#[derive(Clone, Copy)]
+struct TreeHotContext {
+    path_sessions: usize,
+    siblings: usize,
+    merges: usize,
 }
 
 fn reject_invalid_args(json: bool, field: &str, reason: &str) -> ExitCode {
@@ -280,7 +289,18 @@ async fn run_async(args: AssembleHotArgs, vault_root: PathBuf, config: CairnConf
         Ok(loaded) => loaded,
         Err(resp) => return merge_policy_trace(read_policy_trace(&auth, 0, &[]), resp),
     };
-    let policy_trace = read_policy_trace(&auth, loaded.files, &loaded.records);
+    let mut policy_trace = read_policy_trace(&auth, loaded.files, &loaded.records);
+    if let Some(context) = loaded.tree_context {
+        policy_trace.push(ResponsePolicyTrace {
+            detail: Some(tree_policy_detail(
+                context.path_sessions,
+                context.siblings,
+                context.merges,
+            )),
+            gate: "tree.branch_context".to_owned(),
+            result: ResponsePolicyTraceResult::Pass,
+        });
+    }
     record_access(&ctx.store, &loaded.records, "assemble_hot").await;
 
     let vault_id = std::fs::read_to_string(ctx.vault_root.join(".cairn/vault.id"))
@@ -363,6 +383,7 @@ async fn load_hot_bodies(
     let mut bodies = Vec::with_capacity(config.vault.hot_memory.recipe.len());
     let mut loaded_records = Vec::new();
     let mut loaded_files = 0_usize;
+    let mut tree_context = None;
     let mut used_bytes = 0_u64;
 
     for step in &config.vault.hot_memory.recipe {
@@ -409,6 +430,7 @@ async fn load_hot_bodies(
                     )
                     .await?;
                     let records = records
+                        .records
                         .into_iter()
                         .filter(is_pinned_record)
                         .collect::<Vec<_>>();
@@ -422,7 +444,8 @@ async fn load_hot_bodies(
                 } else {
                     let mut records =
                         load_records_for_kinds(store, &[MemoryKind::Project], auth, None, 32)
-                            .await?;
+                            .await?
+                            .records;
                     records.sort_by(|a, b| {
                         b.salience
                             .partial_cmp(&a.salience)
@@ -439,7 +462,8 @@ async fn load_hot_bodies(
                 } else {
                     let mut records =
                         load_records_for_kinds(store, &[MemoryKind::Playbook], auth, None, 16)
-                            .await?;
+                            .await?
+                            .records;
                     records.sort_by(|a, b| b.updated_at.as_str().cmp(a.updated_at.as_str()));
                     records.truncate(1);
                     loaded_records.extend(records.iter().map(LoadedRecordTrace::from));
@@ -450,7 +474,7 @@ async fn load_hot_bodies(
                 if remaining == 0 {
                     String::new()
                 } else {
-                    let mut records = load_records_for_kinds(
+                    let loaded = load_records_for_kinds(
                         store,
                         &[MemoryKind::UserSignal],
                         auth,
@@ -458,6 +482,10 @@ async fn load_hot_bodies(
                         16,
                     )
                     .await?;
+                    let mut records = loaded.records;
+                    if tree_context.is_none() && !records.is_empty() {
+                        tree_context = loaded.tree_context;
+                    }
                     records.sort_by(|a, b| b.updated_at.as_str().cmp(a.updated_at.as_str()));
                     records.truncate(5);
                     loaded_records.extend(records.iter().map(LoadedRecordTrace::from));
@@ -480,6 +508,7 @@ async fn load_hot_bodies(
         bodies,
         files: loaded_files,
         records: loaded_records,
+        tree_context,
     })
 }
 
@@ -527,13 +556,18 @@ async fn build_explain_debug(
         None,
         64,
     )
-    .await?;
-    let project_records =
-        load_records_for_kinds(store, &[MemoryKind::Project], auth, None, 64).await?;
-    let playbook_records =
-        load_records_for_kinds(store, &[MemoryKind::Playbook], auth, None, 64).await?;
+    .await?
+    .records;
+    let project_records = load_records_for_kinds(store, &[MemoryKind::Project], auth, None, 64)
+        .await?
+        .records;
+    let playbook_records = load_records_for_kinds(store, &[MemoryKind::Playbook], auth, None, 64)
+        .await?
+        .records;
     let signal_records =
-        load_records_for_kinds(store, &[MemoryKind::UserSignal], auth, session_id, 64).await?;
+        load_records_for_kinds(store, &[MemoryKind::UserSignal], auth, session_id, 64)
+            .await?
+            .records;
 
     let purpose_md = read_vault_markdown_file(vault_root, Path::new("purpose.md"), budget)
         .or_else(|e| {
@@ -640,61 +674,172 @@ async fn load_records_for_kinds(
     auth: &ReadAuthorization,
     session_id: Option<&str>,
     limit: usize,
-) -> Result<Vec<MemoryRecord>, Response> {
+) -> Result<LoadedRecordsForKinds, Response> {
     let mut out = Vec::new();
+    let mut tree_context = None;
     for kind in kinds {
-        let mut base_scope = auth.scope.clone();
-        if matches!(kind, MemoryKind::UserSignal) {
-            base_scope.session_id = session_id.map(str::to_owned);
+        if matches!(kind, MemoryKind::UserSignal)
+            && let Some(session_id) = session_id
+            && let Some((sessions, context)) = tree_user_signal_sessions(store, session_id).await?
+        {
+            tree_context.get_or_insert(context);
+            for lineage_session in sessions {
+                out.extend(
+                    load_records_for_kind_session(
+                        store,
+                        *kind,
+                        auth,
+                        Some(lineage_session.as_str()),
+                        limit,
+                    )
+                    .await?,
+                );
+            }
+            continue;
         }
 
+        out.extend(load_records_for_kind_session(store, *kind, auth, session_id, limit).await?);
+    }
+    Ok(LoadedRecordsForKinds {
+        records: out,
+        tree_context,
+    })
+}
+
+struct LoadedRecordsForKinds {
+    records: Vec<MemoryRecord>,
+    tree_context: Option<TreeHotContext>,
+}
+
+async fn tree_user_signal_sessions(
+    store: &cairn_store_sqlite::SqliteMemoryStore,
+    session_id: &str,
+) -> Result<Option<(Vec<SessionId>, TreeHotContext)>, Response> {
+    let target = SessionId::parse(session_id.to_owned())
+        .map_err(|e| super::signed::rejected_from_domain(ResponseVerb::AssembleHot, e))?;
+    let tree = match store.get_session_tree(&target).await {
+        Ok(tree) => tree,
+        Err(e) if store_error_is_capability_unavailable(&e) => None,
+        Err(e) => {
+            return Err(super::signed::aborted(
+                ResponseVerb::AssembleHot,
+                format!("session tree: {e}"),
+            ));
+        }
+    };
+    let Some(tree) = tree else {
+        return Ok(None);
+    };
+    if !tree_has_hot_context(&tree, &target)? {
+        return Ok(None);
+    }
+    let lineage = tree.lineage(&target).map_err(|e| {
+        super::signed::aborted(ResponseVerb::AssembleHot, format!("session tree: {e}"))
+    })?;
+    let siblings = tree
+        .parent(&target)
+        .map_err(|e| {
+            super::signed::aborted(ResponseVerb::AssembleHot, format!("session tree: {e}"))
+        })?
+        .map(|parent| {
+            tree.children(&parent.session_id)
+                .map(|children| children.into_iter().filter(|id| id != &target).count())
+        })
+        .transpose()
+        .map_err(|e| {
+            super::signed::aborted(ResponseVerb::AssembleHot, format!("session tree: {e}"))
+        })?
+        .unwrap_or(0);
+    let context = TreeHotContext {
+        path_sessions: lineage.len(),
+        siblings,
+        merges: tree.merges().len(),
+    };
+    Ok(Some((lineage, context)))
+}
+
+fn tree_has_hot_context(tree: &SessionTree, target_session: &SessionId) -> Result<bool, Response> {
+    let lineage = tree.lineage(target_session).map_err(|e| {
+        super::signed::aborted(ResponseVerb::AssembleHot, format!("session tree: {e}"))
+    })?;
+    Ok(lineage.len() > 1 || !tree.merges().is_empty())
+}
+
+async fn load_records_for_kind_session(
+    store: &cairn_store_sqlite::SqliteMemoryStore,
+    kind: MemoryKind,
+    auth: &ReadAuthorization,
+    session_id: Option<&str>,
+    limit: usize,
+) -> Result<Vec<MemoryRecord>, Response> {
+    let mut out = Vec::new();
+    let mut base_scope = auth.scope.clone();
+    if matches!(kind, MemoryKind::UserSignal) {
+        base_scope.session_id = session_id.map(str::to_owned);
+    }
+
+    out.extend(
+        list_records_for_visibility(
+            store,
+            kind,
+            base_scope.clone(),
+            MemoryVisibility::Project,
+            auth,
+            session_id,
+            limit,
+        )
+        .await?,
+    );
+
+    if let Some(private_scope) = principal_scoped_query(base_scope.clone(), &auth.issuer) {
         out.extend(
             list_records_for_visibility(
                 store,
-                *kind,
-                base_scope.clone(),
-                MemoryVisibility::Project,
+                kind,
+                private_scope,
+                MemoryVisibility::Private,
                 auth,
                 session_id,
                 limit,
             )
             .await?,
         );
-
-        if let Some(private_scope) = principal_scoped_query(base_scope.clone(), &auth.issuer) {
-            out.extend(
-                list_records_for_visibility(
-                    store,
-                    *kind,
-                    private_scope,
-                    MemoryVisibility::Private,
-                    auth,
-                    session_id,
-                    limit,
-                )
-                .await?,
-            );
-        }
-
-        if let Some(session_id) = session_id
-            && let Some(mut session_scope) = principal_scoped_query(base_scope, &auth.issuer)
-        {
-            session_scope.session_id = Some(session_id.to_owned());
-            out.extend(
-                list_records_for_visibility(
-                    store,
-                    *kind,
-                    session_scope,
-                    MemoryVisibility::Session,
-                    auth,
-                    Some(session_id),
-                    limit,
-                )
-                .await?,
-            );
-        }
     }
+
+    if let Some(session_id) = session_id
+        && let Some(mut session_scope) = principal_scoped_query(base_scope, &auth.issuer)
+    {
+        session_scope.session_id = Some(session_id.to_owned());
+        out.extend(
+            list_records_for_visibility(
+                store,
+                kind,
+                session_scope,
+                MemoryVisibility::Session,
+                auth,
+                Some(session_id),
+                limit,
+            )
+            .await?,
+        );
+    }
+
     Ok(out)
+}
+
+fn tree_policy_detail(path_sessions: usize, siblings: usize, merges: usize) -> String {
+    format!("path_sessions={path_sessions} siblings={siblings} merges={merges}")
+}
+
+fn store_error_is_capability_unavailable(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = Some(error);
+    while let Some(error) = current {
+        if error.to_string().contains("capability unavailable") {
+            return true;
+        }
+        current = error.source();
+    }
+    false
 }
 
 async fn list_records_for_visibility(
@@ -1192,5 +1337,16 @@ pub(crate) fn lint_step_body_sync(
         // dispatch context. Return empty so the budget computation remains a
         // strict lower bound (no false-positives).
         _ => Ok(String::new()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tree_policy_detail_is_metadata_only() {
+        let detail = tree_policy_detail(2, 1, 3);
+        assert_eq!(detail, "path_sessions=2 siblings=1 merges=3");
     }
 }
