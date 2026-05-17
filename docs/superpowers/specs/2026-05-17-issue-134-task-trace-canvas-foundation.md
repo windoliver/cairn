@@ -23,8 +23,8 @@ workflow slice:
 
 - idempotent trace-step upsert keyed by `(source_hash, tool_call_id)`
 - exact result-reference lookup for trace steps
-- canvas and node upserts
-- active canvas context reads with deterministic node ordering
+- canvas, node, and edge upserts
+- active canvas context reads with deterministic node and edge ordering
 
 ## Non-Goals
 

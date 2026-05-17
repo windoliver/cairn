@@ -27,7 +27,8 @@ pub mod store;
 pub mod trace_canvas;
 pub mod trace_window;
 pub use trace_canvas::{
-    TraceCanvasContext, TraceCanvasDraft, TraceCanvasNodeDraft, TraceCanvasNodeRow, TraceCanvasRow,
+    TraceCanvasContext, TraceCanvasDraft, TraceCanvasEdgeDraft, TraceCanvasEdgeKind,
+    TraceCanvasEdgeRow, TraceCanvasNodeDraft, TraceCanvasNodeRow, TraceCanvasRow,
     TraceCanvasStatus, TraceStepDraft, TraceStepRow, TraceStepUpsert,
 };
 pub use trace_window::ConsolidationBacklogEntry;

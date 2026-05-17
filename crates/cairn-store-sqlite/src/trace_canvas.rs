@@ -206,13 +206,89 @@ pub struct TraceCanvasNodeRow {
     pub evidence_record_ids: Vec<String>,
 }
 
-/// Active canvas plus its ordered nodes.
+/// Canvas edge kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceCanvasEdgeKind {
+    /// `from_node_id` depends on `to_node_id`.
+    DependsOn,
+    /// `from_node_id` supersedes `to_node_id`.
+    Supersedes,
+    /// `from_node_id` branches to `to_node_id`.
+    BranchesTo,
+    /// `from_node_id` merges into `to_node_id`.
+    MergesInto,
+    /// `from_node_id` supports `to_node_id`.
+    Supports,
+}
+
+impl TraceCanvasEdgeKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::DependsOn => "depends_on",
+            Self::Supersedes => "supersedes",
+            Self::BranchesTo => "branches_to",
+            Self::MergesInto => "merges_into",
+            Self::Supports => "supports",
+        }
+    }
+}
+
+impl TryFrom<String> for TraceCanvasEdgeKind {
+    type Error = StoreError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        match value.as_str() {
+            "depends_on" => Ok(Self::DependsOn),
+            "supersedes" => Ok(Self::Supersedes),
+            "branches_to" => Ok(Self::BranchesTo),
+            "merges_into" => Ok(Self::MergesInto),
+            "supports" => Ok(Self::Supports),
+            _ => Err(StoreError::Invariant {
+                what: format!("unknown trace canvas edge kind `{value}`"),
+            }),
+        }
+    }
+}
+
+/// Draft row for inserting or updating a canvas edge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceCanvasEdgeDraft {
+    /// Parent canvas id.
+    pub canvas_id: String,
+    /// Source node id.
+    pub from_node_id: String,
+    /// Destination node id.
+    pub to_node_id: String,
+    /// Edge kind.
+    pub kind: TraceCanvasEdgeKind,
+    /// Optional edge label.
+    pub label: Option<String>,
+}
+
+/// Stored canvas edge row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceCanvasEdgeRow {
+    /// Parent canvas id.
+    pub canvas_id: String,
+    /// Source node id.
+    pub from_node_id: String,
+    /// Destination node id.
+    pub to_node_id: String,
+    /// Edge kind.
+    pub kind: TraceCanvasEdgeKind,
+    /// Optional edge label.
+    pub label: Option<String>,
+}
+
+/// Active canvas plus its ordered nodes and edges.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraceCanvasContext {
     /// Active canvas row.
     pub canvas: TraceCanvasRow,
     /// Canvas nodes ordered by timestamp then id.
     pub nodes: Vec<TraceCanvasNodeRow>,
+    /// Canvas edges ordered by source, destination, kind, then label.
+    pub edges: Vec<TraceCanvasEdgeRow>,
 }
 
 impl SqliteMemoryStore {
@@ -398,6 +474,45 @@ impl SqliteMemoryStore {
             .await?)
     }
 
+    /// Insert or update a task-trace canvas edge.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::NotInitialized`] when the store is unconnected,
+    /// [`StoreError::Worker`] on background-thread failure, or
+    /// [`StoreError::Sqlite`] for storage errors.
+    pub async fn upsert_trace_canvas_edge(
+        &self,
+        draft: TraceCanvasEdgeDraft,
+    ) -> Result<TraceCanvasEdgeRow, StoreError> {
+        let conn = self.require_conn("upsert_trace_canvas_edge")?.clone();
+        Ok(conn
+            .call(move |c| {
+                c.execute(
+                    "INSERT OR IGNORE INTO trace_canvas_edges
+                        (canvas_id, from_node_id, to_node_id, kind, label)
+                     VALUES
+                        (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        draft.canvas_id,
+                        draft.from_node_id,
+                        draft.to_node_id,
+                        draft.kind.as_str(),
+                        draft.label,
+                    ],
+                )?;
+                Ok(trace_canvas_edge_by_key(
+                    c,
+                    &draft.canvas_id,
+                    &draft.from_node_id,
+                    &draft.to_node_id,
+                    draft.kind,
+                    draft.label.as_deref(),
+                )?)
+            })
+            .await?)
+    }
+
     /// Return the latest active trace canvas and its ordered nodes.
     ///
     /// # Errors
@@ -442,10 +557,20 @@ impl SqliteMemoryStore {
                 let nodes: Result<Vec<_>, rusqlite::Error> = stmt
                     .query_map([canvas.canvas_id.as_str()], trace_canvas_node_from_row)?
                     .collect();
+                let mut edge_stmt = c.prepare_cached(
+                    "SELECT canvas_id, from_node_id, to_node_id, kind, label
+                       FROM trace_canvas_edges
+                      WHERE canvas_id = ?1
+                      ORDER BY from_node_id ASC, to_node_id ASC, kind ASC, label ASC",
+                )?;
+                let edges: Result<Vec<_>, rusqlite::Error> = edge_stmt
+                    .query_map([canvas.canvas_id.as_str()], trace_canvas_edge_from_row)?
+                    .collect();
 
                 Ok(Some(TraceCanvasContext {
                     canvas,
                     nodes: nodes?,
+                    edges: edges?,
                 }))
             })
             .await?)
@@ -532,5 +657,39 @@ fn trace_canvas_node_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Trace
         evidence_record_ids: serde_json::from_str(&evidence_record_ids).map_err(|err| {
             rusqlite::Error::FromSqlConversionFailure(7, rusqlite::types::Type::Text, Box::new(err))
         })?,
+    })
+}
+
+fn trace_canvas_edge_by_key(
+    c: &rusqlite::Connection,
+    canvas_id: &str,
+    from_node_id: &str,
+    to_node_id: &str,
+    kind: TraceCanvasEdgeKind,
+    label: Option<&str>,
+) -> rusqlite::Result<TraceCanvasEdgeRow> {
+    c.query_row(
+        "SELECT canvas_id, from_node_id, to_node_id, kind, label
+           FROM trace_canvas_edges
+          WHERE canvas_id = ?1
+            AND from_node_id = ?2
+            AND to_node_id = ?3
+            AND kind = ?4
+            AND COALESCE(label, '') = COALESCE(?5, '')",
+        params![canvas_id, from_node_id, to_node_id, kind.as_str(), label],
+        trace_canvas_edge_from_row,
+    )
+}
+
+fn trace_canvas_edge_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TraceCanvasEdgeRow> {
+    let kind: String = row.get(3)?;
+    Ok(TraceCanvasEdgeRow {
+        canvas_id: row.get(0)?,
+        from_node_id: row.get(1)?,
+        to_node_id: row.get(2)?,
+        kind: TraceCanvasEdgeKind::try_from(kind).map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(err))
+        })?,
+        label: row.get(4)?,
     })
 }
