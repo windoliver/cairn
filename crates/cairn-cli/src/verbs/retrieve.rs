@@ -4,9 +4,10 @@
     reason = "CLI helpers return complete response envelopes for direct JSON emission"
 )]
 
-use std::path::PathBuf;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use cairn_core::config::CairnConfig;
 use cairn_core::contract::identity_registry::IdentityVisibility;
@@ -57,6 +58,7 @@ struct SessionRetrieveRequest {
     order: Option<RetrieveArgsSessionOrder>,
     include: Option<Vec<RetrieveArgsSessionInclude>>,
     cursor: Option<Cursor>,
+    rehydrate: bool,
     read_budget_chars: usize,
 }
 
@@ -68,6 +70,13 @@ struct BudgetReport {
     turns_in: usize,
     turns_out: usize,
     trimmed: bool,
+    rehydrate: Option<RehydrateReport>,
+}
+
+#[derive(Debug, Clone)]
+struct RehydrateReport {
+    elapsed_ms: u128,
+    source_tier: &'static str,
 }
 
 /// Run `cairn retrieve`.
@@ -143,17 +152,20 @@ async fn run_async(args: RetrieveArgs, vault_root: PathBuf, config: CairnConfig)
             include,
             limit,
             order,
+            rehydrate,
             session_id,
             ..
         } => {
             retrieve_session(
                 &ctx.store,
+                &vault_root,
                 SessionRetrieveRequest {
                     session_id,
                     limit,
                     order,
                     include,
                     cursor,
+                    rehydrate: rehydrate.unwrap_or(false),
                     read_budget_chars,
                 },
                 &auth,
@@ -284,6 +296,7 @@ async fn retrieve_scope(
 
 async fn retrieve_session(
     store: &SqliteMemoryStore,
+    vault_root: &Path,
     request: SessionRetrieveRequest,
     auth: &ReadAuthorization,
 ) -> Response {
@@ -293,8 +306,10 @@ async fn retrieve_session(
         order,
         include,
         cursor,
+        rehydrate,
         read_budget_chars,
     } = request;
+    let rehydrate_started = rehydrate.then(Instant::now);
     let mut args = scoped_list_args(auth);
     if let Some(scope) = &mut args.scope {
         scope.session_id = Some(session_id.clone());
@@ -307,11 +322,25 @@ async fn retrieve_session(
     let requested_limit = limit
         .and_then(|v| usize::try_from(v).ok())
         .unwrap_or(usize::MAX);
-    let mut records = match list_records(store, args).await {
+    let mut hot_records = match list_records(store, args).await {
         Ok(records) => records,
         Err(resp) => return resp,
     };
-    records.retain(|record| record.scope.session_id.as_deref() == Some(session_id.as_str()));
+    hot_records.retain(|record| record.scope.session_id.as_deref() == Some(session_id.as_str()));
+    let (records, source_tier) = if rehydrate {
+        match cold_records_for_hot(vault_root, &session_id, &hot_records) {
+            Ok(Some(cold_records)) => (cold_records, "cold"),
+            Ok(None) => (hot_records, "hot_or_warm"),
+            Err(error) => {
+                return super::signed::aborted(
+                    ResponseVerb::Retrieve,
+                    format!("cold rehydrate: {error:#}"),
+                );
+            }
+        }
+    } else {
+        (hot_records, "hot_or_warm")
+    };
     let (include_reasoning, include_tool_calls) = session_include_flags(include.as_deref());
     let groups = session_turn_groups(records, order);
     let total_groups = groups.len();
@@ -320,12 +349,18 @@ async fn retrieve_session(
         .skip(start)
         .take(requested_limit)
         .collect::<Vec<_>>();
-    let (groups, budget_report) = trim_groups_to_budget(
+    let (groups, mut budget_report) = trim_groups_to_budget(
         groups,
         read_budget_chars,
         include_reasoning,
         include_tool_calls,
     );
+    if let Some(started) = rehydrate_started {
+        budget_report.rehydrate = Some(RehydrateReport {
+            elapsed_ms: started.elapsed().as_millis(),
+            source_tier,
+        });
+    }
     let next_offset = start.saturating_add(groups.len());
     let next_cursor = (next_offset < total_groups).then(|| session_cursor(order, next_offset));
     let records = groups
@@ -467,6 +502,35 @@ async fn list_records(
         .await
         .map(|page| page.records)
         .map_err(|e| super::signed::aborted(ResponseVerb::Retrieve, format!("store list: {e}")))
+}
+
+fn cold_records_for_hot(
+    vault_root: &Path,
+    session_id: &str,
+    hot_records: &[MemoryRecord],
+) -> anyhow::Result<Option<Vec<MemoryRecord>>> {
+    let Some(bundle) = super::cold_session::load_bundle(vault_root, session_id)? else {
+        return Ok(None);
+    };
+    let allowed_targets = hot_records
+        .iter()
+        .map(|record| record.target_id.as_str().to_owned())
+        .collect::<BTreeSet<_>>();
+    let mut records = bundle
+        .records
+        .into_iter()
+        .filter(|record| {
+            record.scope.session_id.as_deref() == Some(session_id)
+                && allowed_targets.contains(record.target_id.as_str())
+        })
+        .collect::<Vec<_>>();
+    records.sort_by(|left, right| {
+        trace_sequence(left)
+            .cmp(&trace_sequence(right))
+            .then_with(|| trace_capture_event_id(left).cmp(&trace_capture_event_id(right)))
+            .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+    });
+    Ok(Some(records))
 }
 
 fn committed(
@@ -765,6 +829,23 @@ fn read_policy_trace(
             gate: "read.budget".to_owned(),
             result: ResponsePolicyTraceResult::Pass,
         });
+        if let Some(rehydrate) = &budget.rehydrate {
+            trace.push(ResponsePolicyTrace {
+                detail: Some(format!(
+                    "requested=true source_tier={} elapsed_ms={} budget_chars={} items_in={} items_out={} turns_in={} turns_out={} trimmed={}",
+                    rehydrate.source_tier,
+                    rehydrate.elapsed_ms,
+                    budget.budget_chars,
+                    budget.items_in,
+                    budget.items_out,
+                    budget.turns_in,
+                    budget.turns_out,
+                    budget.trimmed
+                )),
+                gate: "read.rehydrate".to_owned(),
+                result: ResponsePolicyTraceResult::Pass,
+            });
+        }
     }
     trace
 }
@@ -1269,6 +1350,7 @@ fn trim_records_to_budget(
         turns_in: 0,
         turns_out: 0,
         trimmed: out.len() < items_in,
+        rehydrate: None,
     };
     (out, report)
 }
@@ -1303,6 +1385,7 @@ fn trim_groups_to_budget(
         turns_in,
         turns_out: out.len(),
         trimmed: out.len() < turns_in,
+        rehydrate: None,
     };
     (out, report)
 }
