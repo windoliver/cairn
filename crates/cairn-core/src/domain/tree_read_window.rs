@@ -347,7 +347,12 @@ mod tests {
         )
         .expect("merge c");
         let records = vec![
-            item("branch-a", "turn-3", "01JTS6R4J70000000000000007", "branch body"),
+            item(
+                "branch-a",
+                "turn-3",
+                "01JTS6R4J70000000000000007",
+                "branch body",
+            ),
             item(
                 "branch-b",
                 "turn-3",
@@ -386,12 +391,7 @@ mod tests {
         let mut tree = SessionTree::flat(root.clone());
         tree.fork(&root, branch.clone(), "turn-2").expect("fork");
         let records = vec![
-            item(
-                "root",
-                "turn-1",
-                "01JTS6R4J70000000000000005",
-                "elder",
-            ),
+            item("root", "turn-1", "01JTS6R4J70000000000000005", "elder"),
             item("branch", "turn-3", "01JTS6R4J70000000000000006", "local"),
         ];
         let shuffled_records = vec![records[1].clone(), records[0].clone()];
