@@ -121,9 +121,10 @@ pub fn plan_tree_read_window(
         })
         .collect::<Vec<_>>();
 
-    selected.sort_by(compare_selection);
+    selected.sort_by(compare_trim_priority);
     let records_in = selected.len();
-    let selected = trim_selections(selected, input.budget_bytes);
+    let mut selected = trim_selections(selected, input.budget_bytes);
+    selected.sort_by(compare_display_order);
     let records_out = selected.len();
     let selected_records = selected
         .iter()
@@ -146,18 +147,35 @@ pub fn plan_tree_read_window(
     })
 }
 
-fn compare_selection(a: &TreeReadSelection, b: &TreeReadSelection) -> std::cmp::Ordering {
-    segment_sort_rank(a.kind)
-        .cmp(&segment_sort_rank(b.kind))
+fn compare_display_order(a: &TreeReadSelection, b: &TreeReadSelection) -> std::cmp::Ordering {
+    display_sort_rank(a.kind)
+        .cmp(&display_sort_rank(b.kind))
         .then_with(|| a.record.session_id.cmp(&b.record.session_id))
         .then_with(|| a.record.turn_id.cmp(&b.record.turn_id))
         .then_with(|| a.record.record_id.cmp(&b.record.record_id))
 }
 
-fn segment_sort_rank(kind: TreeReadSegmentKind) -> u8 {
+fn compare_trim_priority(a: &TreeReadSelection, b: &TreeReadSelection) -> std::cmp::Ordering {
+    trim_priority_rank(a.kind)
+        .cmp(&trim_priority_rank(b.kind))
+        .then_with(|| a.record.session_id.cmp(&b.record.session_id))
+        .then_with(|| a.record.turn_id.cmp(&b.record.turn_id))
+        .then_with(|| a.record.record_id.cmp(&b.record.record_id))
+}
+
+fn display_sort_rank(kind: TreeReadSegmentKind) -> u8 {
     match kind {
         TreeReadSegmentKind::AncestorContext => 0,
         TreeReadSegmentKind::BranchLocal => 1,
+        TreeReadSegmentKind::MergeSummary => 2,
+        TreeReadSegmentKind::SiblingSummary => 3,
+    }
+}
+
+fn trim_priority_rank(kind: TreeReadSegmentKind) -> u8 {
+    match kind {
+        TreeReadSegmentKind::BranchLocal => 0,
+        TreeReadSegmentKind::AncestorContext => 1,
         TreeReadSegmentKind::MergeSummary => 2,
         TreeReadSegmentKind::SiblingSummary => 3,
     }
@@ -309,16 +327,6 @@ mod tests {
         tree.fork(&root, branch_a.clone(), "turn-2")
             .expect("fork a");
         tree.record_merge(
-            branch_a.clone(),
-            branch_c.clone(),
-            crate::domain::MergeStrategy::ControlledSplice {
-                first_turn_id: "turn-3".to_owned(),
-                last_turn_id: "turn-4".to_owned(),
-            },
-            "turn-z",
-        )
-        .expect("merge c");
-        tree.record_merge(
             root.clone(),
             branch_a.clone(),
             crate::domain::MergeStrategy::ControlledSplice {
@@ -328,6 +336,16 @@ mod tests {
             "turn-a",
         )
         .expect("merge root");
+        tree.record_merge(
+            branch_a.clone(),
+            branch_c.clone(),
+            crate::domain::MergeStrategy::ControlledSplice {
+                first_turn_id: "turn-3".to_owned(),
+                last_turn_id: "turn-4".to_owned(),
+            },
+            "turn-z",
+        )
+        .expect("merge c");
         let records = vec![
             item("branch-a", "turn-3", "01JTS6R4J70000000000000007", "branch body"),
             item(
@@ -372,9 +390,9 @@ mod tests {
                 "root",
                 "turn-1",
                 "01JTS6R4J70000000000000005",
-                "ancestor-long",
+                "elder",
             ),
-            item("branch", "turn-3", "01JTS6R4J70000000000000006", "branch"),
+            item("branch", "turn-3", "01JTS6R4J70000000000000006", "local"),
         ];
         let shuffled_records = vec![records[1].clone(), records[0].clone()];
 
@@ -382,14 +400,14 @@ mod tests {
             tree: &tree,
             target_session: &branch,
             records: &records,
-            budget_bytes: "branch".len(),
+            budget_bytes: "local".len(),
         })
         .expect("plan window");
         let shuffled_window = plan_tree_read_window(TreeReadWindowInput {
             tree: &tree,
             target_session: &branch,
             records: &shuffled_records,
-            budget_bytes: "branch".len(),
+            budget_bytes: "local".len(),
         })
         .expect("plan shuffled window");
 
@@ -398,7 +416,7 @@ mod tests {
             .iter()
             .map(|r| r.body.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(selected_bodies, vec!["branch"]);
+        assert_eq!(selected_bodies, vec!["local"]);
         assert_eq!(
             selected_bodies,
             shuffled_window
