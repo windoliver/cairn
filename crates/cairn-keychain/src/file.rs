@@ -6,9 +6,9 @@
 //!
 //! **Security posture:** the file is written with `0o600` permissions but
 //! is otherwise not encrypted at rest. This is the same posture as
-//! [`OsKeystore`] when an unencrypted keyring is mounted, but callers
-//! should not point this implementation at a multi-tenant host. Opt-in
-//! only via `CAIRN_KEYSTORE=file` (see `cairn-keychain::keystore_for_vault`).
+//! [`crate::OsKeystore`] when an unencrypted keyring is mounted, but
+//! callers should not point this implementation at a multi-tenant host.
+//! Opt-in only via `CAIRN_KEYSTORE=file` (see [`crate::keystore_for_vault`]).
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};

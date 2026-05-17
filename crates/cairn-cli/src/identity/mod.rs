@@ -4,8 +4,10 @@
 //! This module exposes a single [`IdentityService`] struct that:
 //! - validates the `vault.id` file ↔ `vault_meta` consistency on open,
 //! - runs the reconciliation sweep (keystore liveness check) in `open`, and
-//! - delegates cryptographic storage to [`OsKeystore`] and durable identity
-//!   state to [`SqliteIdentityRegistry`].
+//! - delegates cryptographic storage to a `Keystore` impl selected by
+//!   [`cairn_keychain::keystore_for_vault`] (OS keychain by default, file-backed
+//!   under `CAIRN_KEYSTORE=file` for headless environments) and durable
+//!   identity state to [`SqliteIdentityRegistry`].
 
 pub mod cli;
 mod first_bind;
