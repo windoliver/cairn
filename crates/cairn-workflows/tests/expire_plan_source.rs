@@ -4,12 +4,15 @@
 use std::sync::Arc;
 
 use cairn_core::contract::memory_store::MemoryStore as _;
+use cairn_core::domain::record::Ed25519Signature;
+use cairn_core::domain::taxonomy::MemoryClass;
 use cairn_core::domain::{
     ExpirationReason, FlushMode, Identity, MemoryKind, PlanReason, PlannedMutation,
 };
 use cairn_test_fixtures::{FixtureStore, memstore, sample_record};
 use cairn_workflows::{
-    ConsolidatePlanSource, ExpirePlanSource, PromotePlanSource, WorkflowContext, WorkflowPlanSource,
+    ConsolidatePlanSource, ExpirePlanSource, PromotePlanSource, ReflectionPlanSource,
+    WorkflowContext, WorkflowPlanSource,
 };
 
 #[tokio::test]
@@ -274,4 +277,286 @@ async fn consolidate_plan_source_reuses_operation_ids_for_same_duplicates() {
     assert_eq!(first.len(), 1);
     assert_eq!(second.len(), 1);
     assert_eq!(first[0].operation_id, second[0].operation_id);
+}
+
+#[tokio::test]
+async fn reflection_plan_source_emits_upsert_candidate_with_evidence_links() {
+    let store = Arc::new(memstore().await);
+    for seed in 20..=22 {
+        let mut record = sample_record(seed);
+        record.kind = MemoryKind::Feedback;
+        record.class = MemoryClass::Episodic;
+        record.body = "Always run privacy bypass tests".to_owned();
+        record.salience = 0.8;
+        record.confidence = 0.8;
+        store.upsert(&record).await.expect("seed reflection signal");
+    }
+
+    let source = ReflectionPlanSource::new(
+        store,
+        Identity::parse("agt:cairn-workflows:reflection:v1").expect("valid issuer"),
+    );
+
+    let plans = source
+        .plan("reflect", &WorkflowContext::default())
+        .await
+        .expect("plan");
+
+    assert_eq!(plans.len(), 1);
+    assert_eq!(plans[0].mode, FlushMode::Autonomous);
+    let expected_scope = sample_record(20).scope;
+    assert_eq!(plans[0].scope, expected_scope);
+    assert!(matches!(
+        plans[0].reason,
+        PlanReason::Reflect {
+            candidate_kind: MemoryKind::Rule,
+            evidence_count: 3,
+        }
+    ));
+    let PlannedMutation::Upsert { record, .. } = &plans[0].mutations[0] else {
+        panic!("expected reflection upsert");
+    };
+    assert_eq!(record.kind, MemoryKind::Rule);
+    assert_eq!(record.class, MemoryClass::Procedural);
+    assert_eq!(record.scope, expected_scope);
+    record
+        .validate()
+        .expect("reflection candidate record validates");
+    let evidence = record
+        .extra_frontmatter
+        .get("reflection")
+        .and_then(|v| v.get("evidence_record_ids"))
+        .and_then(|v| v.as_array())
+        .expect("reflection evidence ids");
+    assert_eq!(evidence.len(), 3);
+}
+
+#[tokio::test]
+async fn reflection_plan_source_emits_review_plan_for_low_confidence_candidates() {
+    let store = Arc::new(memstore().await);
+    for seed in 23..=25 {
+        let mut record = sample_record(seed);
+        record.kind = MemoryKind::Feedback;
+        record.class = MemoryClass::Episodic;
+        record.body = "Prefer cargo nextest".to_owned();
+        record.salience = 0.8;
+        record.confidence = 0.45;
+        store.upsert(&record).await.expect("seed reflection signal");
+    }
+
+    let source = ReflectionPlanSource::new(
+        store,
+        Identity::parse("agt:cairn-workflows:reflection:v1").expect("valid issuer"),
+    );
+
+    let plans = source
+        .plan("reflect", &WorkflowContext::default())
+        .await
+        .expect("plan");
+
+    assert_eq!(plans.len(), 1);
+    assert_eq!(plans[0].mode, FlushMode::HumanReview);
+}
+
+#[tokio::test]
+async fn reflection_plan_source_ignores_unsigned_source_records() {
+    let store = Arc::new(memstore().await);
+    for seed in 26..=28 {
+        let mut record = sample_record(seed);
+        record.kind = MemoryKind::Feedback;
+        record.class = MemoryClass::Episodic;
+        record.body = "Always run privacy bypass tests".to_owned();
+        record.salience = 0.8;
+        record.confidence = 0.8;
+        record.signature = Ed25519Signature::flush_mutated_sentinel();
+        store.upsert(&record).await.expect("seed reflection signal");
+    }
+
+    let source = ReflectionPlanSource::new(
+        store,
+        Identity::parse("agt:cairn-workflows:reflection:v1").expect("valid issuer"),
+    );
+
+    let plans = source
+        .plan("reflect", &WorkflowContext::default())
+        .await
+        .expect("plan");
+
+    assert!(plans.is_empty());
+}
+
+#[tokio::test]
+async fn reflection_plan_source_maps_repeated_trace_errors_to_knowledge_gap() {
+    let store = Arc::new(memstore().await);
+    for seed in 29..=31 {
+        let mut record = sample_record(seed);
+        record.kind = MemoryKind::Trace;
+        record.class = MemoryClass::Episodic;
+        record.body = "tool failed: sqlite vec index missing".to_owned();
+        record.salience = 0.8;
+        record.confidence = 0.8;
+        store.upsert(&record).await.expect("seed reflection signal");
+    }
+
+    let source = ReflectionPlanSource::new(
+        store,
+        Identity::parse("agt:cairn-workflows:reflection:v1").expect("valid issuer"),
+    );
+
+    let plans = source
+        .plan("reflect", &WorkflowContext::default())
+        .await
+        .expect("plan");
+
+    assert_eq!(plans.len(), 1);
+    assert!(matches!(
+        plans[0].reason,
+        PlanReason::Reflect {
+            candidate_kind: MemoryKind::KnowledgeGap,
+            evidence_count: 3,
+        }
+    ));
+}
+
+#[tokio::test]
+async fn reflection_plan_source_returns_empty_for_other_workflow_names() {
+    let store = Arc::new(memstore().await);
+    for seed in 32..=34 {
+        let mut record = sample_record(seed);
+        record.kind = MemoryKind::Feedback;
+        record.body = "Always run privacy bypass tests".to_owned();
+        record.salience = 0.8;
+        record.confidence = 0.8;
+        store.upsert(&record).await.expect("seed reflection signal");
+    }
+
+    let source = ReflectionPlanSource::new(
+        store,
+        Identity::parse("agt:cairn-workflows:reflection:v1").expect("valid issuer"),
+    );
+
+    let plans = source
+        .plan("expire", &WorkflowContext::default())
+        .await
+        .expect("plan");
+
+    assert!(plans.is_empty());
+}
+
+#[tokio::test]
+async fn reflection_plan_source_paginates_past_first_store_page() {
+    let store = Arc::new(memstore().await);
+    for seed in 35..=37 {
+        let mut record = sample_record(seed);
+        record.kind = MemoryKind::Feedback;
+        record.body = "Prefer deterministic reflection plans".to_owned();
+        record.salience = 0.8;
+        record.confidence = 0.8;
+        store.upsert(&record).await.expect("seed reflection signal");
+    }
+
+    let source = ReflectionPlanSource::new(
+        store,
+        Identity::parse("agt:cairn-workflows:reflection:v1").expect("valid issuer"),
+    )
+    .with_page_limit(2);
+
+    let plans = source
+        .plan("reflect", &WorkflowContext::default())
+        .await
+        .expect("plan");
+
+    assert_eq!(plans.len(), 1);
+    assert!(matches!(
+        plans[0].reason,
+        PlanReason::Reflect {
+            candidate_kind: MemoryKind::Rule,
+            evidence_count: 3,
+        }
+    ));
+}
+
+#[tokio::test]
+async fn reflection_plan_source_emits_single_novel_entity_candidate() {
+    let store = Arc::new(memstore().await);
+    let mut record = sample_record(38);
+    record.kind = MemoryKind::Entity;
+    record.class = MemoryClass::Semantic;
+    record.body = "Cairn ReflectionWorkflow".to_owned();
+    record.salience = 0.8;
+    record.confidence = 0.8;
+    store.upsert(&record).await.expect("seed reflection signal");
+
+    let source = ReflectionPlanSource::new(
+        store,
+        Identity::parse("agt:cairn-workflows:reflection:v1").expect("valid issuer"),
+    );
+
+    let plans = source
+        .plan("reflect", &WorkflowContext::default())
+        .await
+        .expect("plan");
+
+    assert_eq!(plans.len(), 1);
+    assert_eq!(plans[0].mode, FlushMode::Autonomous);
+    assert!(matches!(
+        plans[0].reason,
+        PlanReason::Reflect {
+            candidate_kind: MemoryKind::Entity,
+            evidence_count: 1,
+        }
+    ));
+}
+
+#[tokio::test]
+async fn reflection_plan_source_does_not_merge_repeated_patterns_across_scopes() {
+    let store = Arc::new(memstore().await);
+    for seed in 39..=41 {
+        let mut record = sample_record(seed);
+        record.kind = MemoryKind::Feedback;
+        record.body = "Prefer deterministic reflection plans".to_owned();
+        record.salience = 0.8;
+        record.confidence = 0.8;
+        if seed == 41 {
+            record.scope.user = Some("hmn:other-user".to_owned());
+        }
+        store.upsert(&record).await.expect("seed reflection signal");
+    }
+
+    let source = ReflectionPlanSource::new(
+        store,
+        Identity::parse("agt:cairn-workflows:reflection:v1").expect("valid issuer"),
+    );
+
+    let plans = source
+        .plan("reflect", &WorkflowContext::default())
+        .await
+        .expect("plan");
+
+    assert!(plans.is_empty());
+}
+
+#[tokio::test]
+async fn reflection_plan_source_discards_low_salience_patterns() {
+    let store = Arc::new(memstore().await);
+    for seed in 42..=44 {
+        let mut record = sample_record(seed);
+        record.kind = MemoryKind::Feedback;
+        record.body = "Prefer deterministic reflection plans".to_owned();
+        record.salience = 0.2;
+        record.confidence = 0.8;
+        store.upsert(&record).await.expect("seed reflection signal");
+    }
+
+    let source = ReflectionPlanSource::new(
+        store,
+        Identity::parse("agt:cairn-workflows:reflection:v1").expect("valid issuer"),
+    );
+
+    let plans = source
+        .plan("reflect", &WorkflowContext::default())
+        .await
+        .expect("plan");
+
+    assert!(plans.is_empty());
 }

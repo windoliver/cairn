@@ -159,7 +159,7 @@ expression: body
         "properties": {
           "workflow": {
             "type": "string",
-            "enum": ["consolidate", "promote", "expire"],
+            "enum": ["consolidate", "promote", "expire", "reflect"],
             "description": "Stable workflow class name."
           },
           "drained_plans": {

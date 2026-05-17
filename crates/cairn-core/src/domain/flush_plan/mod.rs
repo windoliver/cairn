@@ -412,6 +412,13 @@ pub enum PlanReason {
         /// Version of the skill before this evolution.
         previous_version: u32,
     },
+    /// Triggered by the reflection workflow.
+    Reflect {
+        /// Candidate memory kind produced by reflection.
+        candidate_kind: MemoryKind,
+        /// Number of evidence records consulted.
+        evidence_count: u32,
+    },
 }
 
 /// On-disk wrapper persisted under `.cairn/flush/`.

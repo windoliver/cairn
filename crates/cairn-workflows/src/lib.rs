@@ -43,11 +43,15 @@ pub use evaluation::{
 pub use expiration::{
     EXPIRATION_KIND, ExpirationHandler, ExpirationPayload, ExpirationSweepReport,
 };
-pub use planners::{ConsolidatePlanSource, ExpirePlanSource, PromotePlanSource};
+pub use planners::{
+    ConsolidatePlanSource, ExpirePlanSource, PromotePlanSource, ReflectionPlanSource,
+};
 pub use scheduler::{Clock, MockClock, Scheduler, SchedulerConfig, SystemClock};
 pub use sqlite_apply::SqliteFlushPlanApply;
 pub use sqlite_store::{SqliteJobStore, SqliteJobStoreInitError};
-pub use workflows::{ConsolidateWorkflow, ExpireWorkflow, PromoteWorkflow, WorkflowPlanSource};
+pub use workflows::{
+    ConsolidateWorkflow, ExpireWorkflow, PromoteWorkflow, ReflectionWorkflow, WorkflowPlanSource,
+};
 
 use cairn_core::contract::version::{ContractVersion, VersionRange};
 use cairn_core::contract::workflow_orchestrator::{

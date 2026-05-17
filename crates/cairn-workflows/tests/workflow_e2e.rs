@@ -4,12 +4,13 @@
 use std::sync::Arc;
 
 use cairn_core::contract::memory_store::MemoryStore as _;
-use cairn_core::domain::{Identity, MemoryKind};
+use cairn_core::domain::{FlushMode, Identity, MemoryKind, PlannedMutation};
 use cairn_core::generated::status::StatusResponseWorkflowsWorkflow;
 use cairn_test_fixtures::{memstore, sample_record};
 use cairn_workflows::{
     ConsolidatePlanSource, ConsolidateWorkflow, ExpirePlanSource, ExpireWorkflow,
-    PromotePlanSource, PromoteWorkflow, SqliteFlushPlanApply, WorkflowContext, WorkflowDrainer,
+    PromotePlanSource, PromoteWorkflow, ReflectionPlanSource, ReflectionWorkflow,
+    SqliteFlushPlanApply, WorkflowContext, WorkflowDrainer, WorkflowPlanSource,
 };
 
 #[tokio::test]
@@ -210,4 +211,79 @@ async fn consolidate_workflow_drains_planned_flushes_into_sqlite_store_end_to_en
     assert_eq!(second.applied, 0);
     assert_eq!(second.already_applied, 0);
     assert!(!second.cancelled);
+}
+
+#[tokio::test]
+async fn reflection_workflow_drains_candidate_record_into_sqlite_store_end_to_end() {
+    let store = Arc::new(memstore().await);
+    for seed in 8..=10 {
+        let mut record = sample_record(seed);
+        record.kind = MemoryKind::Feedback;
+        record.body = "Always run privacy bypass tests".to_owned();
+        record.salience = 0.8;
+        record.confidence = 0.8;
+        store.upsert(&record).await.expect("seed reflection signal");
+    }
+
+    let source = Arc::new(ReflectionPlanSource::new(
+        store.clone(),
+        Identity::parse("agt:cairn-workflows:reflection:v1").expect("valid issuer"),
+    ));
+    let planned = source
+        .plan("reflect", &WorkflowContext::default())
+        .await
+        .expect("plan reflection candidate");
+    assert_eq!(planned.len(), 1);
+    assert_eq!(planned[0].mode, FlushMode::Autonomous);
+    let PlannedMutation::Upsert { record, .. } = &planned[0].mutations[0] else {
+        panic!("expected reflection upsert");
+    };
+    let target = record.target_id.clone();
+
+    let drainer = WorkflowDrainer::new(
+        WorkflowContext::default(),
+        Arc::new(SqliteFlushPlanApply::new(store.clone())),
+    );
+
+    let first = drainer
+        .run(Arc::new(ReflectionWorkflow::new(source)))
+        .await
+        .expect("first reflection drain");
+
+    assert_eq!(first.workflow, "reflect");
+    assert_eq!(first.planned, 1);
+    assert_eq!(first.applied, 1);
+    assert_eq!(first.already_applied, 0);
+    assert!(!first.cancelled);
+
+    let candidate = store
+        .get_active_by_target(&target)
+        .await
+        .expect("get reflection target")
+        .expect("reflection candidate was applied")
+        .record;
+    assert_eq!(candidate.kind, MemoryKind::Rule);
+    assert!(
+        candidate
+            .tags
+            .iter()
+            .any(|tag| tag == "reflection_candidate")
+    );
+    let reflection = candidate
+        .extra_frontmatter
+        .get("reflection")
+        .expect("reflection frontmatter");
+    assert_eq!(
+        reflection
+            .get("candidate_disposition")
+            .and_then(serde_json::Value::as_str),
+        Some("ready_for_flush")
+    );
+    assert_eq!(
+        reflection
+            .get("evidence_record_ids")
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::len),
+        Some(3)
+    );
 }
