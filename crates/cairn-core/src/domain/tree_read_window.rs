@@ -147,11 +147,20 @@ pub fn plan_tree_read_window(
 }
 
 fn compare_selection(a: &TreeReadSelection, b: &TreeReadSelection) -> std::cmp::Ordering {
-    a.kind
-        .cmp(&b.kind)
+    segment_sort_rank(a.kind)
+        .cmp(&segment_sort_rank(b.kind))
         .then_with(|| a.record.session_id.cmp(&b.record.session_id))
         .then_with(|| a.record.turn_id.cmp(&b.record.turn_id))
         .then_with(|| a.record.record_id.cmp(&b.record.record_id))
+}
+
+fn segment_sort_rank(kind: TreeReadSegmentKind) -> u8 {
+    match kind {
+        TreeReadSegmentKind::AncestorContext => 0,
+        TreeReadSegmentKind::BranchLocal => 1,
+        TreeReadSegmentKind::MergeSummary => 2,
+        TreeReadSegmentKind::SiblingSummary => 3,
+    }
 }
 
 fn trim_selections(
@@ -280,8 +289,8 @@ mod tests {
                 .map(|s| (s.kind, s.record.body.as_str()))
                 .collect::<Vec<_>>(),
             vec![
-                (TreeReadSegmentKind::BranchLocal, "branch"),
                 (TreeReadSegmentKind::AncestorContext, "ancestor"),
+                (TreeReadSegmentKind::BranchLocal, "branch"),
             ]
         );
     }
@@ -291,34 +300,65 @@ mod tests {
         let root = sid("root");
         let branch_a = sid("branch-a");
         let branch_b = sid("branch-b");
+        let branch_c = sid("branch-c");
         let mut tree = SessionTree::flat(root.clone());
+        tree.fork(&root, branch_c.clone(), "turn-2")
+            .expect("fork c");
         tree.fork(&root, branch_b.clone(), "turn-2")
             .expect("fork b");
         tree.fork(&root, branch_a.clone(), "turn-2")
             .expect("fork a");
         tree.record_merge(
             branch_a.clone(),
-            root.clone(),
+            branch_c.clone(),
             crate::domain::MergeStrategy::ControlledSplice {
                 first_turn_id: "turn-3".to_owned(),
                 last_turn_id: "turn-4".to_owned(),
             },
-            "turn-5",
+            "turn-z",
         )
-        .expect("merge");
+        .expect("merge c");
+        tree.record_merge(
+            root.clone(),
+            branch_a.clone(),
+            crate::domain::MergeStrategy::ControlledSplice {
+                first_turn_id: "turn-6".to_owned(),
+                last_turn_id: "turn-7".to_owned(),
+            },
+            "turn-a",
+        )
+        .expect("merge root");
+        let records = vec![
+            item("branch-a", "turn-3", "01JTS6R4J70000000000000007", "branch body"),
+            item(
+                "branch-b",
+                "turn-3",
+                "01JTS6R4J70000000000000008",
+                "sibling body",
+            ),
+            item("root", "turn-1", "01JTS6R4J70000000000000009", "root body"),
+        ];
 
         let window = plan_tree_read_window(TreeReadWindowInput {
             tree: &tree,
             target_session: &branch_a,
-            records: &[],
+            records: &records,
             budget_bytes: 1024,
         })
         .expect("plan window");
 
-        assert_eq!(window.sibling_sessions, vec![branch_b]);
-        assert_eq!(window.merge_notes.len(), 1);
-        assert!(window.merge_notes[0].contains("applied_at=turn-5"));
-        assert!(!window.merge_notes[0].contains("branch body"));
+        assert_eq!(window.sibling_sessions, vec![branch_b, branch_c]);
+        assert_eq!(
+            window.merge_notes,
+            vec![
+                "source=branch-a destination=branch-c applied_at=turn-z".to_owned(),
+                "source=root destination=branch-a applied_at=turn-a".to_owned(),
+            ]
+        );
+        let metadata = format!("{:?} {:?}", window.sibling_sessions, window.merge_notes);
+        assert!(!metadata.contains("branch body"));
+        assert!(!metadata.contains("sibling body"));
+        assert!(!metadata.contains("root body"));
     }
 
     #[test]
@@ -336,6 +376,7 @@ mod tests {
             ),
             item("branch", "turn-3", "01JTS6R4J70000000000000006", "branch"),
         ];
+        let shuffled_records = vec![records[1].clone(), records[0].clone()];
 
         let window = plan_tree_read_window(TreeReadWindowInput {
             tree: &tree,
@@ -344,14 +385,39 @@ mod tests {
             budget_bytes: "branch".len(),
         })
         .expect("plan window");
+        let shuffled_window = plan_tree_read_window(TreeReadWindowInput {
+            tree: &tree,
+            target_session: &branch,
+            records: &shuffled_records,
+            budget_bytes: "branch".len(),
+        })
+        .expect("plan shuffled window");
 
+        let selected_bodies = window
+            .selected_records
+            .iter()
+            .map(|r| r.body.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(selected_bodies, vec!["branch"]);
         assert_eq!(
-            window
+            selected_bodies,
+            shuffled_window
                 .selected_records
                 .iter()
                 .map(|r| r.body.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            window
+                .selections
+                .iter()
+                .map(|selection| selection.kind)
                 .collect::<Vec<_>>(),
-            vec!["branch"]
+            shuffled_window
+                .selections
+                .iter()
+                .map(|selection| selection.kind)
+                .collect::<Vec<_>>()
         );
         assert!(window.budget.trimmed);
         assert_eq!(window.budget.skipped_for_budget, 1);
