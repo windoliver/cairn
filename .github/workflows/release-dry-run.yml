@@ -36,7 +36,6 @@ name: release-dry-run
 #
 # Out of scope (tracked elsewhere):
 #   - Real `cargo publish` to crates.io and signing — issue #141.
-#   - Homebrew formula audit and `cargo install` smoke — issue #100.
 #   - Desktop signing/notarization — issue #139.
 
 on:

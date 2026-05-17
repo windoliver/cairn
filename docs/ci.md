@@ -19,7 +19,7 @@ verbatim.
 | `supply-chain.yml` | `cargo-deny` (licenses + bans + sources), `cargo-audit` (RUSTSEC), `cargo-machete` (unused deps). | Manifest/lockfile-touching PRs, pushes to `main`, daily cron, manual. |
 | `docs.yml` | Generated docs drift check, mdBook site build, `cargo doc` with `-D warnings`, lychee Markdown link check. | PRs + pushes to `main`, weekly cron, manual. |
 | `pages.yml` | Builds the mdBook site and deploys it to GitHub Pages. | Pushes to `main`, manual. |
-| `release-dry-run.yml` | tag-version validation; `cargo package --workspace --no-verify` for all crates; full `cargo publish --dry-run` for the two pure-leaf crates; release-mode binary build on Ubuntu + macOS; uploaded artifacts. Downstream-crate publish dry-run is a known v0.1 gap (→ #141). | `v*` tags, manual. |
+| `release-dry-run.yml` | tag-version validation; `cargo package --workspace --no-verify` for all crates; full `cargo publish --dry-run` for the two pure-leaf crates; release-mode binary build on Ubuntu + macOS; uploaded artifacts. `install-smoke` job (issue #100) runs on the Linux and macOS matrix: `cargo install --path crates/cairn-cli` into a temp prefix, then `scripts/install-smoke.sh` against the installed binary; the macOS leg additionally stages `packaging/homebrew/cairn.rb` into a temp tap and runs `brew audit --strict`. Advisory until release #141 wires real publishes; promotes to required when bottles ship. Downstream-crate publish dry-run is a known v0.1 gap (→ #141). | `v*` tags, manual. |
 
 ## Required status checks
 
@@ -198,8 +198,6 @@ plus the boundary script and codegen `--check` invocation listed under
 
 Tracked under their own issues; named here so the gap is explicit:
 
-- **`cargo install` and Homebrew formula smoke** — issue #100. Hook into
-  `release-dry-run.yml` once the formula exists.
 - **MCP/CLI/SDK parity** — depends on codegen #35 + verb implementations.
 - **TypeScript build/test** — no `packages/` directory yet; add a `ts.yml`
   (mirroring `ci.yml`) when the first SDK lands.
