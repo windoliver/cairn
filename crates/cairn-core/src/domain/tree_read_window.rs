@@ -252,4 +252,108 @@ mod tests {
         );
         assert!(!window.budget.trimmed);
     }
+
+    #[test]
+    fn branch_session_includes_ancestor_then_branch_local_records() {
+        let root = sid("root");
+        let branch = sid("branch");
+        let mut tree = SessionTree::flat(root.clone());
+        tree.fork(&root, branch.clone(), "turn-2").expect("fork");
+        let records = vec![
+            item("branch", "turn-3", "01JTS6R4J70000000000000003", "branch"),
+            item("root", "turn-1", "01JTS6R4J70000000000000004", "ancestor"),
+        ];
+
+        let window = plan_tree_read_window(TreeReadWindowInput {
+            tree: &tree,
+            target_session: &branch,
+            records: &records,
+            budget_bytes: 1024,
+        })
+        .expect("plan window");
+
+        assert_eq!(window.ancestry_path, vec![root, branch]);
+        assert_eq!(
+            window
+                .selections
+                .iter()
+                .map(|s| (s.kind, s.record.body.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (TreeReadSegmentKind::BranchLocal, "branch"),
+                (TreeReadSegmentKind::AncestorContext, "ancestor"),
+            ]
+        );
+    }
+
+    #[test]
+    fn sibling_and_merge_metadata_are_body_free_and_sorted() {
+        let root = sid("root");
+        let branch_a = sid("branch-a");
+        let branch_b = sid("branch-b");
+        let mut tree = SessionTree::flat(root.clone());
+        tree.fork(&root, branch_b.clone(), "turn-2")
+            .expect("fork b");
+        tree.fork(&root, branch_a.clone(), "turn-2")
+            .expect("fork a");
+        tree.record_merge(
+            branch_a.clone(),
+            root.clone(),
+            crate::domain::MergeStrategy::ControlledSplice {
+                first_turn_id: "turn-3".to_owned(),
+                last_turn_id: "turn-4".to_owned(),
+            },
+            "turn-5",
+        )
+        .expect("merge");
+
+        let window = plan_tree_read_window(TreeReadWindowInput {
+            tree: &tree,
+            target_session: &branch_a,
+            records: &[],
+            budget_bytes: 1024,
+        })
+        .expect("plan window");
+
+        assert_eq!(window.sibling_sessions, vec![branch_b]);
+        assert_eq!(window.merge_notes.len(), 1);
+        assert!(window.merge_notes[0].contains("applied_at=turn-5"));
+        assert!(!window.merge_notes[0].contains("branch body"));
+    }
+
+    #[test]
+    fn budget_trimming_is_deterministic_and_preserves_priority_order() {
+        let root = sid("root");
+        let branch = sid("branch");
+        let mut tree = SessionTree::flat(root.clone());
+        tree.fork(&root, branch.clone(), "turn-2").expect("fork");
+        let records = vec![
+            item(
+                "root",
+                "turn-1",
+                "01JTS6R4J70000000000000005",
+                "ancestor-long",
+            ),
+            item("branch", "turn-3", "01JTS6R4J70000000000000006", "branch"),
+        ];
+
+        let window = plan_tree_read_window(TreeReadWindowInput {
+            tree: &tree,
+            target_session: &branch,
+            records: &records,
+            budget_bytes: "branch".len(),
+        })
+        .expect("plan window");
+
+        assert_eq!(
+            window
+                .selected_records
+                .iter()
+                .map(|r| r.body.as_str())
+                .collect::<Vec<_>>(),
+            vec!["branch"]
+        );
+        assert!(window.budget.trimmed);
+        assert_eq!(window.budget.skipped_for_budget, 1);
+    }
 }
