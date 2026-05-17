@@ -22,7 +22,6 @@ use serde::{Deserialize, Serialize};
 
 use cairn_core::generated::envelope::{Response, ResponseData, ResponseStatus, ResponseVerb};
 use cairn_core::generated::verbs::retrieve::DataRecord;
-use cairn_core::generated::verbs::search::SearchData;
 
 use crate::privacy::fixture::{Assertions, FixtureOp, MarkdownAssertion, PrivacyFixture};
 
@@ -295,15 +294,39 @@ fn check_retrieve(
             );
         }
         let stdout = String::from_utf8_lossy(&out.stdout);
-        let body_present = parse_retrieve_envelope(stdout.trim(), actual_id)?;
+        let record = parse_retrieve_envelope(stdout.trim(), actual_id)?;
         let expected_present = ra.expect == "present";
-        if body_present != expected_present {
+        let (matches, actual_desc) = if expected_present {
+            // Present = body non-empty. Frontmatter doesn't matter.
+            (
+                record_is_present(&record),
+                if record_is_present(&record) {
+                    "present"
+                } else {
+                    "not_found"
+                },
+            )
+        } else {
+            // Not-found = body absent/empty AND no frontmatter leak.
+            // A response with `body: null` but a populated frontmatter is
+            // itself a metadata leak and must fail the fixture.
+            let is_clean = record_is_clean_not_found(&record);
+            let actual = if record_is_present(&record) {
+                "present"
+            } else if !is_clean {
+                "not_found_with_metadata_leak"
+            } else {
+                "not_found"
+            };
+            (is_clean, actual)
+        };
+        if !matches {
             failures.push(FailureReport {
                 scenario: f.scenario.clone(),
                 surface: "retrieve".into(),
                 query_or_id: actual_id.to_owned(),
                 expected: ra.expect.clone(),
-                actual: if body_present { "present" } else { "not_found" }.into(),
+                actual: actual_desc.into(),
             });
         }
     }
@@ -412,7 +435,10 @@ fn check_indexes(
 /// Parse a search response stdout and return the typed `Hit` list.
 ///
 /// Fails closed on: invalid envelope shape, missing required fields,
-/// status != committed, verb != Search, missing/wrong data variant.
+/// `status != committed`, `verb != Search`, missing/wrong data variant,
+/// and any non-empty `degraded_legs` (a committed-with-degraded-legs
+/// response cannot be trusted as "record absent" for privacy assertions
+/// because the leg that would have surfaced the record may have failed).
 fn parse_search_envelope(
     stdout: &str,
     mode: &str,
@@ -435,8 +461,8 @@ fn parse_search_envelope(
             envelope.verb
         );
     }
-    match envelope.data {
-        Some(ResponseData::Search(SearchData { hits, .. })) => Ok(hits),
+    let search_data = match envelope.data {
+        Some(ResponseData::Search(d)) => d,
         Some(other) => anyhow::bail!(
             "cairn search mode={mode} query={query:?} envelope.data variant={:?} (expected Search): {stdout}",
             std::mem::discriminant(&other)
@@ -444,15 +470,25 @@ fn parse_search_envelope(
         None => anyhow::bail!(
             "cairn search mode={mode} query={query:?} envelope.data missing on committed response: {stdout}"
         ),
+    };
+    if let Some(degraded) = &search_data.degraded_legs
+        && !degraded.is_empty()
+    {
+        anyhow::bail!(
+            "cairn search mode={mode} query={query:?} returned committed-with-degraded-legs ({} legs); empty hits cannot be trusted as no-leak: {stdout}",
+            degraded.len()
+        );
     }
+    Ok(search_data.hits)
 }
 
-/// Parse a retrieve response stdout and return whether the body is present.
+/// Parse a retrieve response stdout and return the typed `DataRecord`.
 ///
-/// Fails closed on: invalid envelope, missing fields, non-committed status,
-/// wrong verb, missing data, or wrong variant. A committed envelope where
-/// `data.body` is `None` returns `Ok(false)` — that's the `not_found` signal.
-fn parse_retrieve_envelope(stdout: &str, actual_id: &str) -> anyhow::Result<bool> {
+/// Fails closed on: invalid envelope, missing fields, non-committed
+/// status, wrong verb, missing data, wrong variant, or `record_id`
+/// mismatch (a misrouted response would otherwise pass the present/
+/// `not_found` check against the wrong record).
+fn parse_retrieve_envelope(stdout: &str, actual_id: &str) -> anyhow::Result<DataRecord> {
     let envelope: Response = serde_json::from_str(stdout).map_err(|e| {
         anyhow::anyhow!(
             "cairn retrieve id={actual_id} returned invalid envelope: {e}; stdout={stdout:?}"
@@ -470,10 +506,10 @@ fn parse_retrieve_envelope(stdout: &str, actual_id: &str) -> anyhow::Result<bool
             envelope.verb
         );
     }
-    match envelope.data {
-        Some(ResponseData::Retrieve(
-            cairn_core::generated::envelope::RetrieveData::Record(DataRecord { body, .. }),
-        )) => Ok(body.is_some_and(|s| !s.is_empty())),
+    let record = match envelope.data {
+        Some(ResponseData::Retrieve(cairn_core::generated::envelope::RetrieveData::Record(
+            rec,
+        ))) => rec,
         Some(other) => anyhow::bail!(
             "cairn retrieve id={actual_id} envelope.data variant={:?} (expected Retrieve::Record): {stdout}",
             std::mem::discriminant(&other)
@@ -481,7 +517,35 @@ fn parse_retrieve_envelope(stdout: &str, actual_id: &str) -> anyhow::Result<bool
         None => anyhow::bail!(
             "cairn retrieve id={actual_id} envelope.data missing on committed response: {stdout}"
         ),
+    };
+    if record.record_id.0 != actual_id {
+        anyhow::bail!(
+            "cairn retrieve id={actual_id} returned record_id={} (misrouted response): {stdout}",
+            record.record_id.0
+        );
     }
+    Ok(record)
+}
+
+/// True iff this `DataRecord` represents a present, readable record —
+/// i.e. body is non-empty. Used by [`check_retrieve`].
+fn record_is_present(rec: &DataRecord) -> bool {
+    rec.body.as_ref().is_some_and(|s| !s.is_empty())
+}
+
+/// True iff this `DataRecord` represents a `not_found` shape that does
+/// NOT leak any metadata — body absent/empty AND no frontmatter. A
+/// committed retrieve that has a null body but still returns frontmatter
+/// is itself a leak vector (frontmatter often carries provenance, scope,
+/// or labels derived from the body).
+fn record_is_clean_not_found(rec: &DataRecord) -> bool {
+    let body_empty = !record_is_present(rec);
+    let no_frontmatter = match &rec.frontmatter {
+        None | Some(serde_json::Value::Null) => true,
+        Some(serde_json::Value::Object(m)) => m.is_empty(),
+        _ => false,
+    };
+    body_empty && no_frontmatter
 }
 
 #[cfg(test)]
@@ -583,21 +647,79 @@ mod tests {
 
     #[test]
     fn retrieve_committed_with_body_returns_present() {
-        assert!(parse_retrieve_envelope(RETRIEVE_COMMITTED_WITH_BODY, "x").unwrap());
+        let rec =
+            parse_retrieve_envelope(RETRIEVE_COMMITTED_WITH_BODY, "01ARZ3NDEKTSV4RRFFQ69G5FAA")
+                .unwrap();
+        assert!(record_is_present(&rec));
+        assert!(!record_is_clean_not_found(&rec));
     }
 
     #[test]
-    fn retrieve_committed_no_body_returns_not_found() {
-        assert!(!parse_retrieve_envelope(RETRIEVE_COMMITTED_NO_BODY, "x").unwrap());
+    fn retrieve_committed_no_body_returns_clean_not_found() {
+        let rec = parse_retrieve_envelope(RETRIEVE_COMMITTED_NO_BODY, "01ARZ3NDEKTSV4RRFFQ69G5FAA")
+            .unwrap();
+        assert!(!record_is_present(&rec));
+        assert!(record_is_clean_not_found(&rec));
     }
 
     #[test]
     fn retrieve_rejected_bails() {
-        let err = parse_retrieve_envelope(RETRIEVE_REJECTED, "x").unwrap_err();
+        let err =
+            parse_retrieve_envelope(RETRIEVE_REJECTED, "01ARZ3NDEKTSV4RRFFQ69G5FAA").unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("Rejected") || msg.contains("rejected") || msg.contains("status"),
             "expected an envelope-status failure; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn retrieve_record_id_mismatch_bails() {
+        // Body present but record_id doesn't match the actual_id we asked for.
+        let err =
+            parse_retrieve_envelope(RETRIEVE_COMMITTED_WITH_BODY, "01DIFFERENTIDBBBBBBBBBBBBB")
+                .unwrap_err();
+        assert!(format!("{err}").contains("misrouted"), "got: {err}");
+    }
+
+    const RETRIEVE_NULL_BODY_WITH_FRONTMATTER: &str = r#"{
+        "contract": "cairn.mcp.v1",
+        "data": {"frontmatter": {"scope": "project", "labels": ["pii"]}, "kind": "unknown", "record_id": "01ARZ3NDEKTSV4RRFFQ69G5FAA"},
+        "operation_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "policy_trace": [],
+        "status": "committed",
+        "target": "record",
+        "verb": "retrieve"
+    }"#;
+
+    #[test]
+    fn retrieve_null_body_with_frontmatter_is_metadata_leak() {
+        let rec = parse_retrieve_envelope(
+            RETRIEVE_NULL_BODY_WITH_FRONTMATTER,
+            "01ARZ3NDEKTSV4RRFFQ69G5FAA",
+        )
+        .unwrap();
+        assert!(!record_is_present(&rec));
+        // Body is gone but frontmatter leaked metadata — not a clean not_found.
+        assert!(!record_is_clean_not_found(&rec));
+    }
+
+    const SEARCH_COMMITTED_WITH_DEGRADED_LEGS: &str = r#"{
+        "contract": "cairn.mcp.v1",
+        "data": {"hits": [], "degraded_legs": [{"leg": "semantic", "reason": "timeout"}]},
+        "operation_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "policy_trace": [],
+        "status": "committed",
+        "verb": "search"
+    }"#;
+
+    #[test]
+    fn search_with_degraded_legs_bails() {
+        let err =
+            parse_search_envelope(SEARCH_COMMITTED_WITH_DEGRADED_LEGS, "hybrid", "x").unwrap_err();
+        assert!(
+            format!("{err}").contains("degraded"),
+            "expected degraded-legs failure; got: {err}"
         );
     }
 }
