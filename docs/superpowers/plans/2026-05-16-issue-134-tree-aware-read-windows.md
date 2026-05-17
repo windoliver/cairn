@@ -36,7 +36,7 @@
 - Create: `crates/cairn-core/src/domain/tree_read_window.rs`
 - Modify: `crates/cairn-core/src/domain/mod.rs`
 
-- [ ] **Step 1: Write the failing flat-session compatibility test**
+- [x] **Step 1: Write the failing flat-session compatibility test**
 
 Add this test module to the new file first:
 
@@ -95,7 +95,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run:
 
@@ -105,7 +105,7 @@ cargo test -p cairn-core flat_session_selects_branch_local_records_in_turn_order
 
 Expected: compile failure because `tree_read_window`, `TreeReadRecord`, `TreeReadWindowInput`, and `plan_tree_read_window` do not exist yet.
 
-- [ ] **Step 3: Add the minimal planner API**
+- [x] **Step 3: Add the minimal planner API**
 
 Create `crates/cairn-core/src/domain/tree_read_window.rs`:
 
@@ -292,7 +292,7 @@ pub use tree_read_window::{
 
 Remove unused imports if the compiler reports them.
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 Run:
 
@@ -302,7 +302,7 @@ cargo test -p cairn-core flat_session_selects_branch_local_records_in_turn_order
 
 Expected: one matching test passes.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/cairn-core/src/domain/tree_read_window.rs crates/cairn-core/src/domain/mod.rs
@@ -316,7 +316,7 @@ git commit -m "feat(core): add tree read window planner"
 **Files:**
 - Modify: `crates/cairn-core/src/domain/tree_read_window.rs`
 
-- [ ] **Step 1: Write failing tests for tree behavior**
+- [x] **Step 1: Write failing tests for tree behavior**
 
 Append these tests to the existing test module:
 
@@ -415,7 +415,7 @@ fn budget_trimming_is_deterministic_and_preserves_priority_order() {
 }
 ```
 
-- [ ] **Step 2: Run the tests to verify failures where behavior is incomplete**
+- [x] **Step 2: Run the tests to verify failures where behavior is incomplete**
 
 Run:
 
@@ -425,7 +425,7 @@ cargo test -p cairn-core tree_read_window
 
 Expected before implementation adjustments: at least one assertion fails if Task 1 sorted ancestor before branch-local or did not trim by priority. If all pass because Task 1 already implemented these semantics, continue and treat this as the red check for currently covered behavior.
 
-- [ ] **Step 3: Adjust planner ordering and trim behavior if needed**
+- [x] **Step 3: Adjust planner ordering and trim behavior if needed**
 
 Ensure `compare_selection` keeps priority order:
 
@@ -450,7 +450,7 @@ pub enum TreeReadSegmentKind {
 }
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run:
 
@@ -460,7 +460,7 @@ cargo test -p cairn-core tree_read_window
 
 Expected: all `tree_read_window` tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/cairn-core/src/domain/tree_read_window.rs
@@ -474,7 +474,7 @@ git commit -m "test(core): cover tree read window semantics"
 **Files:**
 - Modify: `crates/cairn-cli/src/verbs/retrieve.rs`
 
-- [ ] **Step 1: Write the failing CLI-local unit test**
+- [x] **Step 1: Write the failing CLI-local unit test**
 
 Add a `#[cfg(test)] mod tree_window_tests` near the bottom of `retrieve.rs` with a focused helper test that does not require a full CLI process:
 
@@ -518,7 +518,7 @@ mod tree_window_tests {
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run:
 
@@ -528,7 +528,7 @@ cargo test -p cairn-cli tree_records_from_memory_records_preserve_trace_turn_ids
 
 Expected: compile failure because `tree_read_records_from_memory_records` does not exist.
 
-- [ ] **Step 3: Add conversion and policy-trace helpers**
+- [x] **Step 3: Add conversion and policy-trace helpers**
 
 In `retrieve.rs`, import the planner types:
 
@@ -589,7 +589,7 @@ fn tree_trace_entries(window: &TreeReadWindow) -> Vec<ResponsePolicyTrace> {
 }
 ```
 
-- [ ] **Step 4: Run the focused test to verify it passes**
+- [x] **Step 4: Run the focused test to verify it passes**
 
 Run:
 
@@ -599,7 +599,7 @@ cargo test -p cairn-cli tree_records_from_memory_records_preserve_trace_turn_ids
 
 Expected: the test passes.
 
-- [ ] **Step 5: Wire `retrieve_session` to load lineage records and plan**
+- [x] **Step 5: Wire `retrieve_session` to load lineage records and plan**
 
 Inside `retrieve_session`, after parsing `order` and `start`, replace the single-session load with a tree-aware path:
 
@@ -684,7 +684,7 @@ resp.policy_trace.extend(tree_trace);
 resp
 ```
 
-- [ ] **Step 6: Run retrieve tests**
+- [x] **Step 6: Run retrieve tests**
 
 Run:
 
@@ -694,7 +694,7 @@ cargo test -p cairn-cli retrieve_session
 
 Expected: tests compile and any matching retrieve session tests pass.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/cairn-cli/src/verbs/retrieve.rs
@@ -708,7 +708,7 @@ git commit -m "feat(cli): plan tree-aware session retrieval"
 **Files:**
 - Modify: `crates/cairn-cli/src/verbs/retrieve.rs`
 
-- [ ] **Step 1: Write a failing response-shaping test**
+- [x] **Step 1: Write a failing response-shaping test**
 
 Extend the `tree_window_tests` module from Task 3:
 
@@ -756,7 +756,7 @@ fn tree_trace_entries_explain_path_without_record_bodies() {
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run:
 
@@ -766,7 +766,7 @@ cargo test -p cairn-cli tree_trace_entries_explain_path_without_record_bodies
 
 Expected: compile failure if Task 3 did not expose `tree_trace_entries`; otherwise failure if the detail leaks record body text or omits the lineage path.
 
-- [ ] **Step 3: Update `tree_trace_entries` if needed**
+- [x] **Step 3: Update `tree_trace_entries` if needed**
 
 Ensure the lineage detail uses only session ids and counts:
 
@@ -784,7 +784,7 @@ detail: Some(format!(
 )),
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 Run:
 
@@ -794,7 +794,7 @@ cargo test -p cairn-cli tree_trace_entries_explain_path_without_record_bodies
 
 Expected: test passes.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/cairn-cli/src/verbs/retrieve.rs
@@ -808,7 +808,7 @@ git commit -m "test(cli): cover tree-aware retrieve metadata"
 **Files:**
 - Modify: `crates/cairn-cli/src/verbs/assemble_hot.rs`
 
-- [ ] **Step 1: Write failing helper test**
+- [x] **Step 1: Write failing helper test**
 
 Add a test module near the bottom of `assemble_hot.rs`:
 
@@ -825,7 +825,7 @@ mod tree_hot_tests {
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run:
 
@@ -835,7 +835,7 @@ cargo test -p cairn-cli tree_policy_detail_is_metadata_only
 
 Expected: compile failure because `tree_policy_detail` does not exist.
 
-- [ ] **Step 3: Add metadata helper and planner-backed session expansion**
+- [x] **Step 3: Add metadata helper and planner-backed session expansion**
 
 Add:
 
@@ -849,7 +849,7 @@ In `load_records_for_kinds`, when `session_id.is_some()` and `kind == MemoryKind
 
 The new branch should preserve authorization by calling existing `list_records_for_visibility` for each lineage session rather than directly querying the DB.
 
-- [ ] **Step 4: Append policy trace metadata**
+- [x] **Step 4: Append policy trace metadata**
 
 In `read_policy_trace` or immediately after `load_hot_bodies`, append a `ResponsePolicyTrace` when tree metadata was used:
 
@@ -863,7 +863,7 @@ ResponsePolicyTrace {
 
 Do not include raw record bodies, turn text, or unauthorized ids in the detail.
 
-- [ ] **Step 5: Run focused tests**
+- [x] **Step 5: Run focused tests**
 
 Run:
 
@@ -874,7 +874,7 @@ cargo test -p cairn-cli assemble_hot
 
 Expected: focused helper test and existing assemble-hot tests pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/cairn-cli/src/verbs/assemble_hot.rs
@@ -888,7 +888,7 @@ git commit -m "feat(cli): add tree context to hot memory reads"
 **Files:**
 - Modify: `crates/cairn-cli/src/verbs/summarize.rs`
 
-- [ ] **Step 1: Inspect current summarize source loading**
+- [x] **Step 1: Inspect current summarize source loading**
 
 Run:
 
@@ -899,7 +899,7 @@ sed -n '1,260p' crates/cairn-cli/src/verbs/summarize.rs
 Confirm where source `MemoryRecord` values are loaded before
 `cairn_core::verbs::summarize::render_summary_data`.
 
-- [ ] **Step 2: Write failing helper test**
+- [x] **Step 2: Write failing helper test**
 
 Add a local unit test in `summarize.rs` for a helper that extracts one common session id:
 
@@ -931,7 +931,7 @@ d.scope.session_id = Some("session-d".to_owned());
 assert!(common_session_id(&[c, d]).is_none());
 ```
 
-- [ ] **Step 3: Run the test to verify it fails**
+- [x] **Step 3: Run the test to verify it fails**
 
 Run:
 
@@ -941,7 +941,7 @@ cargo test -p cairn-cli common_session_id_requires_all_records_to_match
 
 Expected: compile failure because `common_session_id` does not exist.
 
-- [ ] **Step 4: Add helper and planner use**
+- [x] **Step 4: Add helper and planner use**
 
 Add:
 
@@ -959,7 +959,7 @@ After source records are authorized and loaded, if `common_session_id` returns a
 
 If `get_session_tree` returns capability unavailable, keep existing behavior. If it returns malformed tree metadata, abort the summarize response.
 
-- [ ] **Step 5: Run summarize tests**
+- [x] **Step 5: Run summarize tests**
 
 Run:
 
@@ -970,7 +970,7 @@ cargo test -p cairn-cli summarize
 
 Expected: focused helper and existing summarize tests pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/cairn-cli/src/verbs/summarize.rs
@@ -984,7 +984,7 @@ git commit -m "feat(cli): apply tree windows to summarize"
 **Files:**
 - No source changes unless verification exposes a defect.
 
-- [ ] **Step 1: Run core planner tests**
+- [x] **Step 1: Run core planner tests**
 
 Run:
 
@@ -994,7 +994,7 @@ cargo test -p cairn-core tree_read_window
 
 Expected: all tree-read-window tests pass.
 
-- [ ] **Step 2: Run session-tree store tests**
+- [x] **Step 2: Run session-tree store tests**
 
 Run:
 
@@ -1004,7 +1004,7 @@ cargo test -p cairn-store-sqlite sessions
 
 Expected: existing #133 session tests pass.
 
-- [ ] **Step 3: Run CLI focused tests**
+- [x] **Step 3: Run CLI focused tests**
 
 Run:
 
@@ -1016,7 +1016,7 @@ cargo test -p cairn-cli summarize
 
 Expected: focused CLI tests pass.
 
-- [ ] **Step 4: Run workspace check**
+- [x] **Step 4: Run workspace check**
 
 Run:
 
@@ -1026,7 +1026,7 @@ cargo check --workspace --all-targets --locked
 
 Expected: exit code 0.
 
-- [ ] **Step 5: Run core boundary check**
+- [x] **Step 5: Run core boundary check**
 
 Run:
 
@@ -1036,7 +1036,7 @@ Run:
 
 Expected: exit code 0 and no `cairn-core` dependency violations.
 
-- [ ] **Step 6: Commit verification fixes if any**
+- [x] **Step 6: Commit verification fixes if any**
 
 If any command fails, fix only the defect exposed by that command and rerun the failing command. Commit the fix:
 
@@ -1053,3 +1053,27 @@ git commit -m "fix: stabilize tree-aware read windows"
 - Trace canvas remains out of scope and has no storage/workflow tasks here.
 - No IDL change is planned. If implementation proves existing metadata surfaces are insufficient, stop and write a small IDL amendment plan before touching generated code.
 - TDD order is explicit for every behavior-changing task.
+
+## Execution Notes
+
+Completed on branch `codex/issue-134-tree-hot-memory`.
+
+Final verification:
+
+```bash
+cargo fmt --all --check
+cargo clippy -p cairn-cli --all-targets --locked -- -D warnings
+cargo test -p cairn-cli assemble_hot --locked
+cargo test -p cairn-cli summarize --locked
+cargo check --workspace --all-targets --locked
+./scripts/check-core-boundary.sh
+cargo run -p cairn-idl --bin cairn-codegen --locked -- --check
+cargo nextest run --workspace --locked --no-fail-fast
+cargo test --doc --workspace --locked
+```
+
+Results:
+
+- `cargo nextest`: 4,634 passed, 19 skipped.
+- `cairn-codegen --check`: clean, 74 generated files matched.
+- Doctests passed across the workspace.
