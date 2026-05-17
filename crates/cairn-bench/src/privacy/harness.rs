@@ -218,9 +218,27 @@ fn check_search(
     failures: &mut Vec<FailureReport>,
 ) -> anyhow::Result<()> {
     for sa in &a.search {
+        // Wrap as an FTS5 phrase so punctuation (hyphens, dots, etc.) in
+        // fixture queries doesn't trip the FTS5 grammar's column-prefix
+        // syntax. Escape embedded double quotes by doubling them per FTS5.
+        let escaped = sa.query.replace('"', "\"\"");
+        let phrase = format!("\"{escaped}\"");
         let out = cli(vault)
-            .args(["search", &sa.query, "--mode", &sa.mode, "--json"])
+            .args(["search", &phrase, "--mode", &sa.mode, "--json"])
             .output()?;
+        // Fail closed: a non-zero subprocess exit is an infrastructure
+        // failure, not a "no leak" signal. Surface both streams in the error
+        // so reviewers see why the CLI rejected the search.
+        if !out.status.success() {
+            anyhow::bail!(
+                "cairn search mode={} query={:?} failed (exit {}): stderr={:?} stdout={:?}",
+                sa.mode,
+                sa.query,
+                out.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&out.stderr),
+                String::from_utf8_lossy(&out.stdout)
+            );
+        }
         let stdout = String::from_utf8_lossy(&out.stdout);
         // Resolve the advisory must_not_contain_id to the actual id if possible.
         let actual_forbidden = id_map
@@ -252,11 +270,26 @@ fn check_retrieve(
         let out = cli(vault)
             .args(["retrieve", actual_id, "--json"])
             .output()?;
+        // Fail closed on a non-zero retrieve exit. The CLI returns exit 0
+        // with `data.body = null` for a forgotten record; any other failure
+        // is an infrastructure problem, not a "not_found" signal.
+        if !out.status.success() {
+            anyhow::bail!(
+                "cairn retrieve id={} failed (exit {}): stderr={:?} stdout={:?}",
+                actual_id,
+                out.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&out.stderr),
+                String::from_utf8_lossy(&out.stdout)
+            );
+        }
         let stdout = String::from_utf8_lossy(&out.stdout);
-        // `cairn retrieve` exits 0 even for a forgotten record, returning an
-        // envelope with `data.body = null`. We treat "body present" as
-        // `present` and "body absent / null" as `not_found`.
-        let v: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_default();
+        // Parse strictly: malformed JSON is an infrastructure failure, not
+        // a silently-passing `not_found`.
+        let v: serde_json::Value = serde_json::from_str(stdout.trim()).map_err(|e| {
+            anyhow::anyhow!(
+                "cairn retrieve id={actual_id} returned invalid JSON: {e}; stdout={stdout:?}"
+            )
+        })?;
         let body_present = !v["data"]["body"].is_null() && v["data"]["body"] != "";
         let expected_present = ra.expect == "present";
         if body_present != expected_present {

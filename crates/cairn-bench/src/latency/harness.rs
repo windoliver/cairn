@@ -54,10 +54,45 @@ pub struct LatencyReport {
 }
 
 /// Compare measured values against a baseline and return a report.
+///
+/// **Fail-closed semantics:**
+/// - Empty measured set → fail (criterion didn't produce output).
+/// - Any baseline metric missing from `measured` → fail (bench was renamed
+///   or dropped; regression coverage would silently disappear otherwise).
+/// - Any measured metric not in baseline → fail (unknown new metric; the
+///   baseline must be refreshed before the gate accepts it).
 #[must_use]
 pub fn compare(measured: &BTreeMap<String, f64>, baseline: &Baseline) -> LatencyReport {
     let mut metrics = Vec::new();
     let mut failures = Vec::new();
+
+    if measured.is_empty() {
+        failures.push(
+            "no measured metrics — criterion produced no output (rerun without --no-run)".into(),
+        );
+    }
+
+    // Detect renamed / dropped benches: every baseline metric must appear
+    // in `measured`. Surfacing this catches the silent-gate-pass failure
+    // mode where a renamed bench drops regression coverage.
+    for bench in baseline.metrics.keys() {
+        if !measured.contains_key(bench) {
+            failures.push(format!(
+                "{bench}: in baseline but missing from measured output — was the bench renamed or filtered?"
+            ));
+        }
+    }
+
+    // Detect new / unknown benches: anything in `measured` that has no
+    // baseline entry must be added to the baseline (via --refresh-baseline)
+    // before the gate accepts it.
+    for bench in measured.keys() {
+        if !baseline.metrics.contains_key(bench) {
+            failures.push(format!(
+                "{bench}: measured but not in baseline — refresh the baseline to enrol this metric"
+            ));
+        }
+    }
 
     for (bench, measured_ms) in measured {
         let slo = slo_ms(bench);
@@ -76,7 +111,7 @@ pub fn compare(measured: &BTreeMap<String, f64>, baseline: &Baseline) -> Latency
         }
         if !regression_ok {
             failures.push(format!(
-                "{bench}: measured {measured_ms:.2} ms > baseline+2% ({regression_threshold:.2} ms)"
+                "{bench}: measured {measured_ms:.2} ms > baseline regression threshold {regression_threshold:.2} ms"
             ));
         }
         metrics.push(MetricResult {
@@ -195,6 +230,51 @@ mod tests {
         let baseline = b("assemble_hot_p95", 100.0);
         let r = compare(&measured, &baseline);
         assert!(!r.ok);
-        assert!(r.failures.iter().any(|f| f.contains("baseline+2%")));
+        assert!(
+            r.failures
+                .iter()
+                .any(|f| f.contains("baseline regression threshold"))
+        );
+    }
+
+    #[test]
+    fn fail_when_measured_empty() {
+        let measured: BTreeMap<String, f64> = BTreeMap::new();
+        let baseline = b("assemble_hot_p95", 100.0);
+        let r = compare(&measured, &baseline);
+        assert!(!r.ok);
+        assert!(r.failures.iter().any(|f| f.contains("no measured")));
+    }
+
+    #[test]
+    fn fail_when_baseline_metric_missing_from_measured() {
+        // Rename: the baseline knows assemble_hot_p95 but criterion only
+        // produced a result for a (renamed) `assemble_hot_v2_p95`.
+        let measured: BTreeMap<String, f64> = [("assemble_hot_v2_p95".into(), 100.0)].into();
+        let baseline = b("assemble_hot_p95", 100.0);
+        let r = compare(&measured, &baseline);
+        assert!(!r.ok);
+        assert!(
+            r.failures
+                .iter()
+                .any(|f| f.contains("missing from measured output"))
+        );
+    }
+
+    #[test]
+    fn fail_when_measured_has_new_unknown_metric() {
+        let measured: BTreeMap<String, f64> = [
+            ("assemble_hot_p95".into(), 100.0),
+            ("new_unknown_p95".into(), 100.0),
+        ]
+        .into();
+        let baseline = b("assemble_hot_p95", 100.0);
+        let r = compare(&measured, &baseline);
+        assert!(!r.ok);
+        assert!(
+            r.failures
+                .iter()
+                .any(|f| f.contains("not in baseline — refresh"))
+        );
     }
 }

@@ -11,7 +11,7 @@ setup:
   records:
     - id: rec_smoke
       kind: reference
-      body: "smoke body unique-token-12345"
+      body: "smoke body uniqueTokenTwelveThreeFour"
 operations:
   - verb: forget
     target: rec_smoke
@@ -19,7 +19,7 @@ operations:
 assertions:
   search:
     - mode: keyword
-      query: "unique-token-12345"
+      query: "uniqueTokenTwelveThreeFour"
       must_not_contain_id: rec_smoke
 "#;
 

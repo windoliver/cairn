@@ -125,6 +125,12 @@ impl FileKeystore {
 
     /// Persist `state` under the existing file lock. Caller must hold a
     /// `LockGuard` returned by [`Self::locked_read`].
+    ///
+    /// Uses a per-call random temp filename + `O_CREAT | O_EXCL` so a
+    /// pre-existing world-readable temp file or symlink at a predictable
+    /// path cannot be used to siphon secrets or redirect the write. The
+    /// rename target is the keystore path itself, which is also kept at
+    /// 0600 by virtue of the temp file's permissions.
     fn locked_write(&self, _guard: &LockGuard, state: &FileState) -> Result<(), KeystoreError> {
         let bytes =
             serde_json::to_vec_pretty(state).map_err(|e| KeystoreError::Backend(Box::new(e)))?;
@@ -134,28 +140,68 @@ impl FileKeystore {
             .ok_or_else(|| KeystoreError::Backend("keystore path has no parent".into()))?;
         std::fs::create_dir_all(parent).map_err(|e| KeystoreError::Backend(Box::new(e)))?;
 
-        // Open the temp file with mode 0600 from creation — no permission
-        // window where secrets are world-readable.
-        let tmp = self.path.with_extension("json.tmp");
-        let mut opts = OpenOptions::new();
-        opts.create(true).write(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            opts.mode(0o600);
+        // Build a per-call random temp filename in the same dir so the
+        // rename is atomic. `O_EXCL` (`create_new`) refuses to follow an
+        // existing path or symlink — if the path is occupied we retry with
+        // a fresh suffix, bounded by a small attempt limit.
+        let stem = self
+            .path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("keystore.json");
+        let mut last_err: Option<std::io::Error> = None;
+        let mut tmp_path: Option<PathBuf> = None;
+        let mut tmp_file_opt: Option<File> = None;
+        for attempt in 0..8u32 {
+            let suffix = random_suffix();
+            let candidate = parent.join(format!(".{stem}.{suffix}.tmp"));
+            let mut opts = OpenOptions::new();
+            opts.create_new(true).write(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt as _;
+                opts.mode(0o600);
+            }
+            match opts.open(&candidate) {
+                Ok(f) => {
+                    tmp_file_opt = Some(f);
+                    tmp_path = Some(candidate);
+                    break;
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    let _ = attempt; // retry with a fresh suffix
+                }
+            }
         }
-        let mut tmp_file = opts
-            .open(&tmp)
-            .map_err(|e| KeystoreError::Backend(Box::new(e)))?;
-        tmp_file
+        let mut tmp_file = tmp_file_opt.ok_or_else(|| {
+            KeystoreError::Backend(last_err.map_or_else(
+                || "could not create exclusive temp file".into(),
+                |e| format!("could not create exclusive temp file: {e}").into(),
+            ))
+        })?;
+        let Some(tmp) = tmp_path else {
+            // Invariant: tmp_path is set whenever tmp_file_opt is set.
+            return Err(KeystoreError::Backend(
+                "internal invariant: tmp_path unset after successful open".into(),
+            ));
+        };
+
+        let write_result = tmp_file
             .write_all(&bytes)
-            .map_err(|e| KeystoreError::Backend(Box::new(e)))?;
-        tmp_file
-            .sync_all()
-            .map_err(|e| KeystoreError::Backend(Box::new(e)))?;
+            .and_then(|()| tmp_file.sync_all());
+        if let Err(e) = write_result {
+            // Best-effort cleanup of the temp file on failure so we don't
+            // leak partial-write material into the vault.
+            let _ = std::fs::remove_file(&tmp);
+            return Err(KeystoreError::Backend(Box::new(e)));
+        }
         drop(tmp_file);
 
-        std::fs::rename(&tmp, &self.path).map_err(|e| KeystoreError::Backend(Box::new(e)))?;
+        if let Err(e) = std::fs::rename(&tmp, &self.path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(KeystoreError::Backend(Box::new(e)));
+        }
 
         // Fsync the parent directory so the rename is durable across crashes.
         #[cfg(unix)]
@@ -177,6 +223,19 @@ impl Drop for LockGuard {
     fn drop(&mut self) {
         let _ = FileExt::unlock(&self.file);
     }
+}
+
+/// Generate a short random suffix for the temp filename. Uses
+/// `std::time` and process id for entropy — does not need
+/// cryptographic randomness because the file lock guarantees only one
+/// writer at a time and `O_EXCL` covers any residual collision.
+fn random_suffix() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let pid = std::process::id();
+    format!("{nanos:x}-{pid:x}")
 }
 
 fn load_or_default(path: &Path) -> Result<FileState, KeystoreError> {
@@ -346,5 +405,41 @@ mod tests {
         let ks2 = FileKeystore::new(v, path).unwrap();
         let loaded = ks2.load_secret(&handle).await.unwrap();
         assert_eq!(loaded.as_slice(), key.expose_secret_bytes().as_slice());
+    }
+
+    /// A stale predictable-name temp file in the keystore directory must
+    /// NOT block `store_secret` — the per-call random suffix + `O_EXCL`
+    /// makes the write resilient.
+    #[tokio::test]
+    async fn store_succeeds_when_old_predictable_tmp_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keystore.json");
+        // Pre-create a world-readable "keystore.json.tmp" — the original
+        // predictable name. The new write must not use it.
+        std::fs::write(dir.path().join("keystore.json.tmp"), b"junk").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(
+                dir.path().join("keystore.json.tmp"),
+                std::fs::Permissions::from_mode(0o666),
+            )
+            .unwrap();
+        }
+        let v = fresh_vault();
+        let handle = SecretHandle::for_witness(v.clone());
+        let ks = FileKeystore::new(v, path.clone()).unwrap();
+        let key = SigningKey::generate(&mut OsRng);
+        ks.store_secret(&handle, &key.expose_secret_bytes())
+            .await
+            .unwrap();
+
+        // The final keystore.json must be 0o600.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "keystore.json permissions: {mode:o}");
+        }
     }
 }

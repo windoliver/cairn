@@ -21,7 +21,11 @@ fn comparator_emits_failure_when_measured_exceeds_baseline_plus_2pct() {
     };
     let r = compare(&measured, &baseline);
     assert!(!r.ok);
-    assert!(r.failures.iter().any(|f| f.contains("baseline+2%")));
+    assert!(
+        r.failures
+            .iter()
+            .any(|f| f.contains("baseline regression threshold"))
+    );
 }
 
 #[test]
