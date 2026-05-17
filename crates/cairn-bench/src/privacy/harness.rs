@@ -218,17 +218,20 @@ fn check_search(
     failures: &mut Vec<FailureReport>,
 ) -> anyhow::Result<()> {
     for sa in &a.search {
-        // Wrap as an FTS5 phrase so punctuation (hyphens, dots, etc.) in
-        // fixture queries doesn't trip the FTS5 grammar's column-prefix
-        // syntax. Escape embedded double quotes by doubling them per FTS5.
-        let escaped = sa.query.replace('"', "\"\"");
-        let phrase = format!("\"{escaped}\"");
+        // Only wrap keyword queries as FTS5 phrases. Semantic and hybrid
+        // legs interpret the query string differently — wrapping there
+        // would silently lower recall and let a real leak slip through.
+        let query_arg = if sa.mode == "keyword" {
+            let escaped = sa.query.replace('"', "\"\"");
+            format!("\"{escaped}\"")
+        } else {
+            sa.query.clone()
+        };
         let out = cli(vault)
-            .args(["search", &phrase, "--mode", &sa.mode, "--json"])
+            .args(["search", &query_arg, "--mode", &sa.mode, "--json"])
             .output()?;
         // Fail closed: a non-zero subprocess exit is an infrastructure
-        // failure, not a "no leak" signal. Surface both streams in the error
-        // so reviewers see why the CLI rejected the search.
+        // failure, not a "no leak" signal.
         if !out.status.success() {
             anyhow::bail!(
                 "cairn search mode={} query={:?} failed (exit {}): stderr={:?} stdout={:?}",
@@ -239,18 +242,48 @@ fn check_search(
                 String::from_utf8_lossy(&out.stdout)
             );
         }
+        // Parse the envelope strictly. A zero-exit with the wrong status
+        // (rejected/aborted/etc.) is an infrastructure failure, not a leak
+        // signal — surfacing it as a bail prevents the gate from silently
+        // passing when the CLI's response shape regresses.
         let stdout = String::from_utf8_lossy(&out.stdout);
+        let envelope: serde_json::Value = serde_json::from_str(stdout.trim()).map_err(|e| {
+            anyhow::anyhow!(
+                "cairn search mode={} query={:?} returned invalid JSON: {e}; stdout={stdout:?}",
+                sa.mode,
+                sa.query
+            )
+        })?;
+        let status = envelope["status"].as_str().unwrap_or("");
+        if status != "committed" {
+            anyhow::bail!(
+                "cairn search mode={} query={:?} envelope status={status:?}: {stdout}",
+                sa.mode,
+                sa.query
+            );
+        }
+        let hits = envelope["data"]["hits"].as_array().ok_or_else(|| {
+            anyhow::anyhow!(
+                "cairn search mode={} query={:?} missing data.hits array; stdout={stdout:?}",
+                sa.mode,
+                sa.query
+            )
+        })?;
+
         // Resolve the advisory must_not_contain_id to the actual id if possible.
         let actual_forbidden = id_map
             .get(&sa.must_not_contain_id)
             .map_or(sa.must_not_contain_id.as_str(), String::as_str);
-        if stdout.contains(actual_forbidden) {
+        let leaked = hits
+            .iter()
+            .any(|hit| hit["record_id"].as_str() == Some(actual_forbidden));
+        if leaked {
             failures.push(FailureReport {
                 scenario: f.scenario.clone(),
                 surface: format!("search({})", sa.mode),
                 query_or_id: sa.query.clone(),
                 expected: format!("no result with id={actual_forbidden}"),
-                actual: format!("id={actual_forbidden} appears in search output"),
+                actual: format!("id={actual_forbidden} appears in search hits"),
             });
         }
     }
@@ -290,7 +323,19 @@ fn check_retrieve(
                 "cairn retrieve id={actual_id} returned invalid JSON: {e}; stdout={stdout:?}"
             )
         })?;
-        let body_present = !v["data"]["body"].is_null() && v["data"]["body"] != "";
+        let status = v["status"].as_str().unwrap_or("");
+        if status != "committed" {
+            anyhow::bail!("cairn retrieve id={actual_id} envelope status={status:?}: {stdout}");
+        }
+        // `data.body` is OMITTED from a committed retrieve envelope when
+        // the record has been forgotten/purged — that omission IS the
+        // not_found signal. A schema regression where `body` becomes null
+        // or empty for a still-present record is treated as not_found too;
+        // any reviewer who needs to distinguish those should add a verb
+        // assertion that checks `data.kind` against the fixture.
+        let body_present = v["data"]
+            .get("body")
+            .is_some_and(|b| !b.is_null() && b.as_str().is_none_or(|s| !s.is_empty()));
         let expected_present = ra.expect == "present";
         if body_present != expected_present {
             failures.push(FailureReport {
