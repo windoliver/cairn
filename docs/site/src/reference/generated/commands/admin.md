@@ -13,6 +13,7 @@ Usage: admin <COMMAND>
 
 Commands:
   model                Embedding model management
+  archive-session      Archive a session into the local cold bundle substrate
   zero-capture-report  Render a zero-capture dogfood report from vault metrics
   reindex              Re-embed records into the ANN index
   snapshot             Prepare a vault backup snapshot
@@ -27,6 +28,7 @@ Options:
 ## Subcommands
 
 - [`cairn admin model`](admin-model.md) - Embedding model management
+- [`cairn admin archive-session`](admin-archive-session.md) - Archive a session into the local cold bundle substrate
 - [`cairn admin zero-capture-report`](admin-zero-capture-report.md) - Render a zero-capture dogfood report from vault metrics
 - [`cairn admin reindex`](admin-reindex.md) - Re-embed records into the ANN index
 - [`cairn admin snapshot`](admin-snapshot.md) - Prepare a vault backup snapshot
