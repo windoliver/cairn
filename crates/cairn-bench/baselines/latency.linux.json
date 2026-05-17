@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "runner": "linux",
+  "captured_at": "2026-05-16T20:18:57.423518179+00:00",
+  "commit": "unknown",
+  "metrics": {
+    "assemble_hot_p95": 112.566135,
+    "capture_trace_p95": 144.797631,
+    "retrieve_p95": 131.189138375,
+    "search_hybrid_p95": 98.72455690000001,
+    "search_keyword_p95": 75.282419,
+    "search_semantic_p95": 86.11469813445377,
+    "wal_apply_p95": 135.728813,
+    "workflow_enqueue_p95": 120.433995125
+  },
+  "regression_pct": {
+    "assemble_hot_p95": 25.0,
+    "capture_trace_p95": 25.0,
+    "retrieve_p95": 25.0,
+    "search_hybrid_p95": 25.0,
+    "search_keyword_p95": 25.0,
+    "search_semantic_p95": 25.0,
+    "wal_apply_p95": 25.0,
+    "workflow_enqueue_p95": 25.0
+  }
+}

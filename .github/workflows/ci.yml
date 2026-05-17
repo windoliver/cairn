@@ -115,6 +115,55 @@ jobs:
       - name: scripts/check-core-boundary.sh
         run: ./scripts/check-core-boundary.sh
 
+  gates:
+    name: gates / latency + memory + privacy
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            cmd: "all"
+          - runner: macos-latest
+            cmd: "all --skip memory"
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: gates-${{ matrix.runner }}
+          cache-bin: "false"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build cairn + cairn-bench binaries
+        # Build both binaries explicitly. The bench harness shells out to the
+        # `cairn` CLI via the CAIRN_BIN_PATH baked by build.rs; without an
+        # explicit cargo build for cairn-cli, a cold or restored cache can
+        # leave target/release/cairn missing or stale.
+        run: |
+          cargo build --release --locked -p cairn-cli --bin cairn
+          cargo build --release --locked -p cairn-bench
+          test -x ./target/release/cairn || { echo "missing target/release/cairn after build"; exit 1; }
+          test -x ./target/release/cairn-bench || { echo "missing target/release/cairn-bench after build"; exit 1; }
+      - name: Run gates
+        run: ./target/release/cairn-bench ${{ matrix.cmd }}
+        env:
+          CAIRN_MOCK_EMBEDDER: "1"
+          # Use file-backed keystore on Linux runners — gnome-keyring +
+          # Secret Service isn't pre-configured in GHA's ubuntu-latest
+          # and our headless bench subprocesses need a working keystore.
+          # macOS Keychain works headlessly via the OS keystore.
+          CAIRN_KEYSTORE: ${{ matrix.runner == 'ubuntu-latest' && 'file' || '' }}
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bench-reports-${{ matrix.runner }}
+          path: target/cairn-bench/*.json
+          retention-days: 14
+
   lint-readonly-sources:
     name: invariant / lint never writes sources (§3, #257)
     runs-on: ubuntu-latest

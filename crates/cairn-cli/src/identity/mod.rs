@@ -4,8 +4,10 @@
 //! This module exposes a single [`IdentityService`] struct that:
 //! - validates the `vault.id` file ↔ `vault_meta` consistency on open,
 //! - runs the reconciliation sweep (keystore liveness check) in `open`, and
-//! - delegates cryptographic storage to [`OsKeystore`] and durable identity
-//!   state to [`SqliteIdentityRegistry`].
+//! - delegates cryptographic storage to a `Keystore` impl selected by
+//!   [`cairn_keychain::keystore_for_vault`] (OS keychain by default, file-backed
+//!   under `CAIRN_KEYSTORE=file` for headless environments) and durable
+//!   identity state to [`SqliteIdentityRegistry`].
 
 pub mod cli;
 mod first_bind;
@@ -38,7 +40,6 @@ use cairn_core::{
 // Re-export these from cairn-core so callers can access them through the
 // identity module without importing cairn-core directly.
 pub use cairn_core::domain::identity::{IdentityStatusReport, MismatchCheckOutcome};
-use cairn_keychain::OsKeystore;
 use cairn_store_sqlite::SqliteIdentityRegistry;
 use chrono::Utc;
 
@@ -104,8 +105,11 @@ impl IdentityService {
             return Err(IdentityServiceError::VaultIdConflict { file_id, db_id });
         }
 
-        // 4. Build OsKeystore bound to vault_id.
-        let keystore: Arc<dyn Keystore> = Arc::new(OsKeystore::new(file_id.clone()));
+        // 4. Open the keystore (OS keychain by default; file-backed if
+        // `CAIRN_KEYSTORE=file` is set — see cairn-keychain::keystore_for_vault).
+        let keystore: Arc<dyn Keystore> =
+            cairn_keychain::keystore_for_vault(file_id.clone(), &vault_path)
+                .map_err(IdentityServiceError::Keystore)?;
 
         // 5. Reconciliation sweep.
         let mut report = ReconciliationReport::default();
@@ -724,7 +728,9 @@ impl IdentityService {
             }
         };
 
-        let keystore: Arc<dyn Keystore> = Arc::new(OsKeystore::new(vault_id.clone()));
+        let keystore: Arc<dyn Keystore> =
+            cairn_keychain::keystore_for_vault(vault_id.clone(), &vault_path)
+                .map_err(IdentityServiceError::Keystore)?;
 
         Ok(Self {
             vault_path,

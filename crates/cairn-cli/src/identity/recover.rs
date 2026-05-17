@@ -24,7 +24,7 @@ use std::{
 use cairn_core::{
     contract::{
         identity_registry::{IdentityRegistry as _, IdentityVisibility, RegistryError},
-        keystore::{Keystore as _, KeystoreError},
+        keystore::KeystoreError,
     },
     domain::identity::{Identity, keys::SecretHandle, keys::VaultId},
     error::identity::IdentityServiceError,
@@ -353,7 +353,8 @@ pub async fn finalise_binding(
                 // Best-effort delete the keystore witness for this vault_id.
                 // Any error other than NotFound/Unsupported aborts abandon so
                 // the operator can investigate.
-                let keystore = cairn_keychain::OsKeystore::new(vault_id.clone());
+                let keystore = cairn_keychain::keystore_for_vault(vault_id.clone(), &vault_path)
+                    .map_err(IdentityServiceError::Keystore)?;
                 let witness_handle = SecretHandle::for_witness(vault_id);
                 match keystore.delete_secret(&witness_handle).await {
                     Ok(()) | Err(KeystoreError::NotFound | KeystoreError::DiscoveryUnsupported) => {
@@ -455,7 +456,11 @@ async fn recover_orphan_binding(
         .try_into()
         .map_err(|_| IdentityServiceError::PartialBindNeedsProvision)?;
 
-    let keystore = cairn_keychain::OsKeystore::new(vault_id.clone());
+    let vault_root = cairn_dir.parent().ok_or_else(|| {
+        IdentityServiceError::Keystore(KeystoreError::Backend("cairn_dir has no parent".into()))
+    })?;
+    let keystore = cairn_keychain::keystore_for_vault(vault_id.clone(), vault_root)
+        .map_err(IdentityServiceError::Keystore)?;
     let witness_handle = SecretHandle::for_witness(vault_id);
     let witness_bytes = match keystore.load_secret(&witness_handle).await {
         Ok(b) => b,
@@ -595,7 +600,8 @@ pub async fn vault_id_recover(
     if probe_keychain {
         let probe_vault_id = VaultId::parse("00000000-0000-0000-0000-000000000000")
             .map_err(|e| IdentityServiceError::Registry(RegistryError::Backend(Box::new(e))))?;
-        let probe_keystore = cairn_keychain::OsKeystore::new(probe_vault_id);
+        let probe_keystore = cairn_keychain::keystore_for_vault(probe_vault_id, &vault_path)
+            .map_err(IdentityServiceError::Keystore)?;
         match probe_keystore.list_vault_namespaces("cairn:").await {
             Ok(namespaces) => match namespaces.len() {
                 0 => {
@@ -657,7 +663,11 @@ async fn adopt_namespace_from_override(
     // Local metadata loss: the operator's `--vault-id` is authoritative.
     // Load the keystore witness, rebuild `.binding` from its hash, write
     // `vault.id`. Refuse only if no witness exists (nothing to anchor on).
-    let bound_keystore = cairn_keychain::OsKeystore::new(candidate.clone());
+    let vault_root = cairn_dir.parent().ok_or_else(|| {
+        IdentityServiceError::Keystore(KeystoreError::Backend("cairn_dir has no parent".into()))
+    })?;
+    let bound_keystore = cairn_keychain::keystore_for_vault(candidate.clone(), vault_root)
+        .map_err(IdentityServiceError::Keystore)?;
     let witness_handle =
         cairn_core::domain::identity::keys::SecretHandle::for_witness(candidate.clone());
     let witness_bytes = match bound_keystore.load_secret(&witness_handle).await {
@@ -706,7 +716,11 @@ async fn verify_and_adopt_namespace(
             .map_err(|_| IdentityServiceError::AmbiguousVaultNamespaces)?,
         _ => return Err(IdentityServiceError::AmbiguousVaultNamespaces),
     };
-    let bound_keystore = cairn_keychain::OsKeystore::new(candidate.clone());
+    let vault_root = cairn_dir.parent().ok_or_else(|| {
+        IdentityServiceError::Keystore(KeystoreError::Backend("cairn_dir has no parent".into()))
+    })?;
+    let bound_keystore = cairn_keychain::keystore_for_vault(candidate.clone(), vault_root)
+        .map_err(IdentityServiceError::Keystore)?;
     let witness_handle =
         cairn_core::domain::identity::keys::SecretHandle::for_witness(candidate.clone());
     let witness_bytes = match bound_keystore.load_secret(&witness_handle).await {
