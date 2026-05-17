@@ -11,18 +11,27 @@ brief sections that govern this area:
 - §10 Continuous Learning: projection and consolidation should be workflow
   driven, not ad hoc in read paths.
 
-The slice adds only the durable SQLite substrate:
+The slice adds the durable `SQLite` substrate:
 
 - `trace_steps`
 - `trace_canvases`
 - `trace_canvas_nodes`
 - `trace_canvas_edges`
 
+It also exposes adapter-local `SqliteMemoryStore` helpers for the next
+workflow slice:
+
+- idempotent trace-step upsert keyed by `(source_hash, tool_call_id)`
+- exact result-reference lookup for trace steps
+- canvas and node upserts
+- active canvas context reads with deterministic node ordering
+
 ## Non-Goals
 
 This slice does not implement workflow materialization, hot-memory selection,
 lint checks, metric emission, exact retrieval keys, or search ranking changes.
-Those build on the schema once the storage invariants are pinned.
+Those build on the schema and adapter-local helpers once the storage invariants
+are pinned.
 
 ## Invariants
 
