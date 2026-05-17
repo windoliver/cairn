@@ -20,6 +20,10 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+use cairn_core::generated::envelope::{Response, ResponseData, ResponseStatus, ResponseVerb};
+use cairn_core::generated::verbs::retrieve::DataRecord;
+use cairn_core::generated::verbs::search::SearchData;
+
 use crate::privacy::fixture::{Assertions, FixtureOp, MarkdownAssertion, PrivacyFixture};
 
 /// A single assertion failure.
@@ -242,33 +246,8 @@ fn check_search(
                 String::from_utf8_lossy(&out.stdout)
             );
         }
-        // Parse the envelope strictly. A zero-exit with the wrong status
-        // (rejected/aborted/etc.) is an infrastructure failure, not a leak
-        // signal — surfacing it as a bail prevents the gate from silently
-        // passing when the CLI's response shape regresses.
         let stdout = String::from_utf8_lossy(&out.stdout);
-        let envelope: serde_json::Value = serde_json::from_str(stdout.trim()).map_err(|e| {
-            anyhow::anyhow!(
-                "cairn search mode={} query={:?} returned invalid JSON: {e}; stdout={stdout:?}",
-                sa.mode,
-                sa.query
-            )
-        })?;
-        let status = envelope["status"].as_str().unwrap_or("");
-        if status != "committed" {
-            anyhow::bail!(
-                "cairn search mode={} query={:?} envelope status={status:?}: {stdout}",
-                sa.mode,
-                sa.query
-            );
-        }
-        let hits = envelope["data"]["hits"].as_array().ok_or_else(|| {
-            anyhow::anyhow!(
-                "cairn search mode={} query={:?} missing data.hits array; stdout={stdout:?}",
-                sa.mode,
-                sa.query
-            )
-        })?;
+        let hits = parse_search_envelope(stdout.trim(), &sa.mode, &sa.query)?;
 
         // Resolve the advisory must_not_contain_id to the actual id if possible.
         let actual_forbidden = id_map
@@ -276,7 +255,7 @@ fn check_search(
             .map_or(sa.must_not_contain_id.as_str(), String::as_str);
         let leaked = hits
             .iter()
-            .any(|hit| hit["record_id"].as_str() == Some(actual_forbidden));
+            .any(|hit| hit.record_id.0.as_str() == actual_forbidden);
         if leaked {
             failures.push(FailureReport {
                 scenario: f.scenario.clone(),
@@ -316,26 +295,7 @@ fn check_retrieve(
             );
         }
         let stdout = String::from_utf8_lossy(&out.stdout);
-        // Parse strictly: malformed JSON is an infrastructure failure, not
-        // a silently-passing `not_found`.
-        let v: serde_json::Value = serde_json::from_str(stdout.trim()).map_err(|e| {
-            anyhow::anyhow!(
-                "cairn retrieve id={actual_id} returned invalid JSON: {e}; stdout={stdout:?}"
-            )
-        })?;
-        let status = v["status"].as_str().unwrap_or("");
-        if status != "committed" {
-            anyhow::bail!("cairn retrieve id={actual_id} envelope status={status:?}: {stdout}");
-        }
-        // `data.body` is OMITTED from a committed retrieve envelope when
-        // the record has been forgotten/purged — that omission IS the
-        // not_found signal. A schema regression where `body` becomes null
-        // or empty for a still-present record is treated as not_found too;
-        // any reviewer who needs to distinguish those should add a verb
-        // assertion that checks `data.kind` against the fixture.
-        let body_present = v["data"]
-            .get("body")
-            .is_some_and(|b| !b.is_null() && b.as_str().is_none_or(|s| !s.is_empty()));
+        let body_present = parse_retrieve_envelope(stdout.trim(), actual_id)?;
         let expected_present = ra.expect == "present";
         if body_present != expected_present {
             failures.push(FailureReport {
@@ -447,4 +407,197 @@ fn check_indexes(
         }
     }
     Ok(())
+}
+
+/// Parse a search response stdout and return the typed `Hit` list.
+///
+/// Fails closed on: invalid envelope shape, missing required fields,
+/// status != committed, verb != Search, missing/wrong data variant.
+fn parse_search_envelope(
+    stdout: &str,
+    mode: &str,
+    query: &str,
+) -> anyhow::Result<Vec<cairn_core::generated::verbs::search::Hit>> {
+    let envelope: Response = serde_json::from_str(stdout).map_err(|e| {
+        anyhow::anyhow!(
+            "cairn search mode={mode} query={query:?} returned invalid envelope: {e}; stdout={stdout:?}"
+        )
+    })?;
+    if envelope.status != ResponseStatus::Committed {
+        anyhow::bail!(
+            "cairn search mode={mode} query={query:?} envelope status={:?}: {stdout}",
+            envelope.status
+        );
+    }
+    if envelope.verb != ResponseVerb::Search {
+        anyhow::bail!(
+            "cairn search mode={mode} query={query:?} envelope verb={:?} (expected Search): {stdout}",
+            envelope.verb
+        );
+    }
+    match envelope.data {
+        Some(ResponseData::Search(SearchData { hits, .. })) => Ok(hits),
+        Some(other) => anyhow::bail!(
+            "cairn search mode={mode} query={query:?} envelope.data variant={:?} (expected Search): {stdout}",
+            std::mem::discriminant(&other)
+        ),
+        None => anyhow::bail!(
+            "cairn search mode={mode} query={query:?} envelope.data missing on committed response: {stdout}"
+        ),
+    }
+}
+
+/// Parse a retrieve response stdout and return whether the body is present.
+///
+/// Fails closed on: invalid envelope, missing fields, non-committed status,
+/// wrong verb, missing data, or wrong variant. A committed envelope where
+/// `data.body` is `None` returns `Ok(false)` — that's the `not_found` signal.
+fn parse_retrieve_envelope(stdout: &str, actual_id: &str) -> anyhow::Result<bool> {
+    let envelope: Response = serde_json::from_str(stdout).map_err(|e| {
+        anyhow::anyhow!(
+            "cairn retrieve id={actual_id} returned invalid envelope: {e}; stdout={stdout:?}"
+        )
+    })?;
+    if envelope.status != ResponseStatus::Committed {
+        anyhow::bail!(
+            "cairn retrieve id={actual_id} envelope status={:?}: {stdout}",
+            envelope.status
+        );
+    }
+    if envelope.verb != ResponseVerb::Retrieve {
+        anyhow::bail!(
+            "cairn retrieve id={actual_id} envelope verb={:?} (expected Retrieve): {stdout}",
+            envelope.verb
+        );
+    }
+    match envelope.data {
+        Some(ResponseData::Retrieve(
+            cairn_core::generated::envelope::RetrieveData::Record(DataRecord { body, .. }),
+        )) => Ok(body.is_some_and(|s| !s.is_empty())),
+        Some(other) => anyhow::bail!(
+            "cairn retrieve id={actual_id} envelope.data variant={:?} (expected Retrieve::Record): {stdout}",
+            std::mem::discriminant(&other)
+        ),
+        None => anyhow::bail!(
+            "cairn retrieve id={actual_id} envelope.data missing on committed response: {stdout}"
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SEARCH_COMMITTED_EMPTY: &str = r#"{
+        "contract": "cairn.mcp.v1",
+        "data": {"hits": []},
+        "operation_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "policy_trace": [],
+        "status": "committed",
+        "verb": "search"
+    }"#;
+
+    const SEARCH_COMMITTED_WITH_HIT: &str = r#"{
+        "contract": "cairn.mcp.v1",
+        "data": {"hits": [{"record_id": "01ARZ3NDEKTSV4RRFFQ69G5FAA", "score": 0.0, "snippet": "x", "trust": "unknown"}]},
+        "operation_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "policy_trace": [],
+        "status": "committed",
+        "verb": "search"
+    }"#;
+
+    const SEARCH_REJECTED: &str = r#"{
+        "contract": "cairn.mcp.v1",
+        "error": {"code": "InvalidArgs", "message": "bad query"},
+        "operation_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "policy_trace": [],
+        "status": "rejected",
+        "verb": "search"
+    }"#;
+
+    const SEARCH_MISSING_CONTRACT: &str = r#"{
+        "data": {"hits": []},
+        "operation_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "policy_trace": [],
+        "status": "committed",
+        "verb": "search"
+    }"#;
+
+    #[test]
+    fn search_committed_empty_returns_no_hits() {
+        let hits = parse_search_envelope(SEARCH_COMMITTED_EMPTY, "keyword", "x").unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn search_committed_with_hit_returns_record_id() {
+        let hits = parse_search_envelope(SEARCH_COMMITTED_WITH_HIT, "keyword", "x").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].record_id.0, "01ARZ3NDEKTSV4RRFFQ69G5FAA");
+    }
+
+    #[test]
+    fn search_rejected_bails() {
+        let err = parse_search_envelope(SEARCH_REJECTED, "keyword", "x").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Rejected") || msg.contains("rejected") || msg.contains("status"),
+            "expected an envelope-status failure; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn search_missing_required_envelope_field_bails() {
+        let err = parse_search_envelope(SEARCH_MISSING_CONTRACT, "keyword", "x").unwrap_err();
+        assert!(format!("{err}").contains("invalid envelope"));
+    }
+
+    const RETRIEVE_COMMITTED_WITH_BODY: &str = r#"{
+        "contract": "cairn.mcp.v1",
+        "data": {"body": "hello", "kind": "reference", "record_id": "01ARZ3NDEKTSV4RRFFQ69G5FAA"},
+        "operation_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "policy_trace": [],
+        "status": "committed",
+        "target": "record",
+        "verb": "retrieve"
+    }"#;
+
+    const RETRIEVE_COMMITTED_NO_BODY: &str = r#"{
+        "contract": "cairn.mcp.v1",
+        "data": {"kind": "unknown", "record_id": "01ARZ3NDEKTSV4RRFFQ69G5FAA"},
+        "operation_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "policy_trace": [],
+        "status": "committed",
+        "target": "record",
+        "verb": "retrieve"
+    }"#;
+
+    const RETRIEVE_REJECTED: &str = r#"{
+        "contract": "cairn.mcp.v1",
+        "error": {"code": "Forbidden", "message": "no read"},
+        "operation_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "policy_trace": [],
+        "status": "rejected",
+        "verb": "retrieve"
+    }"#;
+
+    #[test]
+    fn retrieve_committed_with_body_returns_present() {
+        assert!(parse_retrieve_envelope(RETRIEVE_COMMITTED_WITH_BODY, "x").unwrap());
+    }
+
+    #[test]
+    fn retrieve_committed_no_body_returns_not_found() {
+        assert!(!parse_retrieve_envelope(RETRIEVE_COMMITTED_NO_BODY, "x").unwrap());
+    }
+
+    #[test]
+    fn retrieve_rejected_bails() {
+        let err = parse_retrieve_envelope(RETRIEVE_REJECTED, "x").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Rejected") || msg.contains("rejected") || msg.contains("status"),
+            "expected an envelope-status failure; got: {msg}"
+        );
+    }
 }
