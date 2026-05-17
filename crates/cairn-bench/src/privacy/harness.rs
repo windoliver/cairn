@@ -533,11 +533,18 @@ fn record_is_present(rec: &DataRecord) -> bool {
     rec.body.as_ref().is_some_and(|s| !s.is_empty())
 }
 
+/// Canonical sentinel for `kind` on the missing-record shape: a
+/// committed retrieve for a forgotten/tombstoned record returns
+/// `kind = "unknown"`. Any other kind on a body-absent response means
+/// the record's classification metadata leaked through forget.
+const NOT_FOUND_KIND_SENTINEL: &str = "unknown";
+
 /// True iff this `DataRecord` represents a `not_found` shape that does
-/// NOT leak any metadata — body absent/empty AND no frontmatter. A
-/// committed retrieve that has a null body but still returns frontmatter
-/// is itself a leak vector (frontmatter often carries provenance, scope,
-/// or labels derived from the body).
+/// NOT leak any metadata — body absent/empty AND no frontmatter AND
+/// `kind == "unknown"`. A committed retrieve that has a null body but
+/// still returns frontmatter or the record's original kind is itself a
+/// leak vector (frontmatter and kind both carry classification metadata
+/// derived from the original body).
 fn record_is_clean_not_found(rec: &DataRecord) -> bool {
     let body_empty = !record_is_present(rec);
     let no_frontmatter = match &rec.frontmatter {
@@ -545,7 +552,8 @@ fn record_is_clean_not_found(rec: &DataRecord) -> bool {
         Some(serde_json::Value::Object(m)) => m.is_empty(),
         _ => false,
     };
-    body_empty && no_frontmatter
+    let kind_is_unknown = rec.kind == NOT_FOUND_KIND_SENTINEL;
+    body_empty && no_frontmatter && kind_is_unknown
 }
 
 #[cfg(test)]
@@ -691,6 +699,32 @@ mod tests {
         "target": "record",
         "verb": "retrieve"
     }"#;
+
+    const RETRIEVE_NULL_BODY_PRESERVED_KIND: &str = r#"{
+        "contract": "cairn.mcp.v1",
+        "data": {"kind": "reference", "record_id": "01ARZ3NDEKTSV4RRFFQ69G5FAA"},
+        "operation_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "policy_trace": [],
+        "status": "committed",
+        "target": "record",
+        "verb": "retrieve"
+    }"#;
+
+    #[test]
+    fn retrieve_null_body_with_preserved_kind_is_metadata_leak() {
+        // Forget should reset `kind` to "unknown" — preserving the original
+        // kind even with no body and no frontmatter is a classification leak.
+        let rec = parse_retrieve_envelope(
+            RETRIEVE_NULL_BODY_PRESERVED_KIND,
+            "01ARZ3NDEKTSV4RRFFQ69G5FAA",
+        )
+        .unwrap();
+        assert!(!record_is_present(&rec));
+        assert!(
+            !record_is_clean_not_found(&rec),
+            "kind=reference on a body-absent response must not be treated as clean not_found"
+        );
+    }
 
     #[test]
     fn retrieve_null_body_with_frontmatter_is_metadata_leak() {
