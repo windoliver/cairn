@@ -898,6 +898,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "cairn-core",
+ "fs4",
  "keyring",
  "rand_core 0.6.4",
  "serde",

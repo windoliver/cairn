@@ -137,8 +137,16 @@ jobs:
           shared-key: gates-${{ matrix.runner }}
           cache-bin: "false"
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Build cairn-bench binary
-        run: cargo build --release -p cairn-bench --locked
+      - name: Build cairn + cairn-bench binaries
+        # Build both binaries explicitly. The bench harness shells out to the
+        # `cairn` CLI via the CAIRN_BIN_PATH baked by build.rs; without an
+        # explicit cargo build for cairn-cli, a cold or restored cache can
+        # leave target/release/cairn missing or stale.
+        run: |
+          cargo build --release --locked -p cairn-cli --bin cairn
+          cargo build --release --locked -p cairn-bench
+          test -x ./target/release/cairn || { echo "missing target/release/cairn after build"; exit 1; }
+          test -x ./target/release/cairn-bench || { echo "missing target/release/cairn-bench after build"; exit 1; }
       - name: Run gates
         run: ./target/release/cairn-bench ${{ matrix.cmd }}
         env:

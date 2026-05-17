@@ -11,10 +11,13 @@
 //! only via `CAIRN_KEYSTORE=file` (see `cairn-keychain::keystore_for_vault`).
 
 use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use async_trait::async_trait;
+use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
 
 use cairn_core::contract::keystore::{Keystore, KeystoreError};
@@ -24,10 +27,20 @@ use cairn_core::domain::identity::{
 };
 
 /// File-backed keystore scoped to a single vault.
+///
+/// Concurrency model: every read/write opens the JSON file under an OS-level
+/// advisory exclusive lock on a sibling `.lock` file, reloads the on-disk
+/// state, mutates, persists via temp-file-with-mode-0600 + fsync + atomic
+/// rename + parent dir fsync. The in-memory [`Mutex`] guards in-process
+/// concurrent operations on the same handle; the file lock guards
+/// cross-process concurrent operations on the same vault.
 pub struct FileKeystore {
     bound_vault: Option<VaultId>,
     path: PathBuf,
-    state: Mutex<FileState>,
+    lock_path: PathBuf,
+    /// In-process lock to keep `&self` async methods safe; cross-process
+    /// safety comes from the `fs4` flock on `lock_path` during persist.
+    op_lock: Mutex<()>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -42,11 +55,15 @@ impl FileKeystore {
     /// # Errors
     /// Returns an error if the file exists but cannot be read or parsed.
     pub fn new(vault_id: VaultId, path: PathBuf) -> Result<Self, KeystoreError> {
-        let state = load_or_default(&path)?;
+        // Probe-load to surface parse errors early. The state is re-read
+        // under the file lock on every operation.
+        let _ = load_or_default(&path)?;
+        let lock_path = path.with_extension("json.lock");
         Ok(Self {
             bound_vault: Some(vault_id),
             path,
-            state: Mutex::new(state),
+            lock_path,
+            op_lock: Mutex::new(()),
         })
     }
 
@@ -55,11 +72,13 @@ impl FileKeystore {
     /// # Errors
     /// Returns an error if the file exists but cannot be read or parsed.
     pub fn for_discovery(path: PathBuf) -> Result<Self, KeystoreError> {
-        let state = load_or_default(&path)?;
+        let _ = load_or_default(&path)?;
+        let lock_path = path.with_extension("json.lock");
         Ok(Self {
             bound_vault: None,
             path,
-            state: Mutex::new(state),
+            lock_path,
+            op_lock: Mutex::new(()),
         })
     }
 
@@ -78,28 +97,85 @@ impl FileKeystore {
         format!("{}|{}", handle.service(), handle.account_string())
     }
 
-    fn persist(&self, state: &FileState) -> Result<(), KeystoreError> {
+    /// Atomically read the current on-disk state under an exclusive file lock.
+    fn locked_read(&self) -> Result<(LockGuard, FileState), KeystoreError> {
+        {
+            // In-process lock held only long enough to ensure two async tasks
+            // on the same handle don't race acquiring the file lock. The
+            // returned `LockGuard` owns the cross-process exclusive flock for
+            // the caller's scope.
+            let _in_proc = self.op_lock.lock().map_err(|_| {
+                KeystoreError::Backend("file keystore in-process mutex poisoned".into())
+            })?;
+            if let Some(parent) = self.path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| KeystoreError::Backend(Box::new(e)))?;
+            }
+        }
+        let lock_file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&self.lock_path)
+            .map_err(|e| KeystoreError::Backend(Box::new(e)))?;
+        FileExt::lock_exclusive(&lock_file).map_err(|e| KeystoreError::Backend(Box::new(e)))?;
+        let state = load_or_default(&self.path)?;
+        Ok((LockGuard { file: lock_file }, state))
+    }
+
+    /// Persist `state` under the existing file lock. Caller must hold a
+    /// `LockGuard` returned by [`Self::locked_read`].
+    fn locked_write(&self, _guard: &LockGuard, state: &FileState) -> Result<(), KeystoreError> {
         let bytes =
             serde_json::to_vec_pretty(state).map_err(|e| KeystoreError::Backend(Box::new(e)))?;
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| KeystoreError::Backend(Box::new(e)))?;
-        }
-        // Write to a sibling tempfile + atomic rename so a crash mid-write
-        // leaves the previous content intact.
+        let parent = self
+            .path
+            .parent()
+            .ok_or_else(|| KeystoreError::Backend("keystore path has no parent".into()))?;
+        std::fs::create_dir_all(parent).map_err(|e| KeystoreError::Backend(Box::new(e)))?;
+
+        // Open the temp file with mode 0600 from creation — no permission
+        // window where secrets are world-readable.
         let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, &bytes).map_err(|e| KeystoreError::Backend(Box::new(e)))?;
+        let mut opts = OpenOptions::new();
+        opts.create(true).write(true).truncate(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt as _;
-            let mut perms = std::fs::metadata(&tmp)
-                .map_err(|e| KeystoreError::Backend(Box::new(e)))?
-                .permissions();
-            perms.set_mode(0o600);
-            std::fs::set_permissions(&tmp, perms)
+            use std::os::unix::fs::OpenOptionsExt as _;
+            opts.mode(0o600);
+        }
+        let mut tmp_file = opts
+            .open(&tmp)
+            .map_err(|e| KeystoreError::Backend(Box::new(e)))?;
+        tmp_file
+            .write_all(&bytes)
+            .map_err(|e| KeystoreError::Backend(Box::new(e)))?;
+        tmp_file
+            .sync_all()
+            .map_err(|e| KeystoreError::Backend(Box::new(e)))?;
+        drop(tmp_file);
+
+        std::fs::rename(&tmp, &self.path).map_err(|e| KeystoreError::Backend(Box::new(e)))?;
+
+        // Fsync the parent directory so the rename is durable across crashes.
+        #[cfg(unix)]
+        {
+            let dir = File::open(parent).map_err(|e| KeystoreError::Backend(Box::new(e)))?;
+            dir.sync_all()
                 .map_err(|e| KeystoreError::Backend(Box::new(e)))?;
         }
-        std::fs::rename(&tmp, &self.path).map_err(|e| KeystoreError::Backend(Box::new(e)))?;
         Ok(())
+    }
+}
+
+/// RAII handle holding the file lock; releases on drop.
+struct LockGuard {
+    file: File,
+}
+
+impl Drop for LockGuard {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
     }
 }
 
@@ -136,23 +212,17 @@ impl Keystore for FileKeystore {
         self.ensure_bound_match(handle)?;
         let key = Self::key_for(handle);
         let bytes = secret.expose_secret_bytes();
-        let mut guard = self
-            .state
-            .lock()
-            .map_err(|_| KeystoreError::Backend("file keystore mutex poisoned".into()))?;
-        guard.entries.insert(key, b64_encode(&bytes));
-        self.persist(&guard)?;
+        let (guard, mut state) = self.locked_read()?;
+        state.entries.insert(key, b64_encode(&bytes));
+        self.locked_write(&guard, &state)?;
         Ok(())
     }
 
     async fn load_signing_key(&self, handle: &SecretHandle) -> Result<SigningKey, KeystoreError> {
         self.ensure_bound_match(handle)?;
         let key = Self::key_for(handle);
-        let guard = self
-            .state
-            .lock()
-            .map_err(|_| KeystoreError::Backend("file keystore mutex poisoned".into()))?;
-        let raw_b64 = guard.entries.get(&key).ok_or(KeystoreError::NotFound)?;
+        let (_guard, state) = self.locked_read()?;
+        let raw_b64 = state.entries.get(&key).ok_or(KeystoreError::NotFound)?;
         let raw = b64_decode(raw_b64)?;
         let arr: [u8; 32] = raw
             .as_slice()
@@ -164,35 +234,26 @@ impl Keystore for FileKeystore {
     async fn delete_keypair(&self, handle: &SecretHandle) -> Result<(), KeystoreError> {
         self.ensure_bound_match(handle)?;
         let key = Self::key_for(handle);
-        let mut guard = self
-            .state
-            .lock()
-            .map_err(|_| KeystoreError::Backend("file keystore mutex poisoned".into()))?;
-        guard.entries.remove(&key);
-        self.persist(&guard)?;
+        let (guard, mut state) = self.locked_read()?;
+        state.entries.remove(&key);
+        self.locked_write(&guard, &state)?;
         Ok(())
     }
 
     async fn store_secret(&self, handle: &SecretHandle, bytes: &[u8]) -> Result<(), KeystoreError> {
         self.ensure_bound_match(handle)?;
         let key = Self::key_for(handle);
-        let mut guard = self
-            .state
-            .lock()
-            .map_err(|_| KeystoreError::Backend("file keystore mutex poisoned".into()))?;
-        guard.entries.insert(key, b64_encode(bytes));
-        self.persist(&guard)?;
+        let (guard, mut state) = self.locked_read()?;
+        state.entries.insert(key, b64_encode(bytes));
+        self.locked_write(&guard, &state)?;
         Ok(())
     }
 
     async fn load_secret(&self, handle: &SecretHandle) -> Result<SecretBytes, KeystoreError> {
         self.ensure_bound_match(handle)?;
         let key = Self::key_for(handle);
-        let guard = self
-            .state
-            .lock()
-            .map_err(|_| KeystoreError::Backend("file keystore mutex poisoned".into()))?;
-        let raw_b64 = guard.entries.get(&key).ok_or(KeystoreError::NotFound)?;
+        let (_guard, state) = self.locked_read()?;
+        let raw_b64 = state.entries.get(&key).ok_or(KeystoreError::NotFound)?;
         let raw = b64_decode(raw_b64)?;
         Ok(SecretBytes::new(raw))
     }
