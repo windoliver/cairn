@@ -2,7 +2,7 @@
 
 use std::path::Path;
 use std::process::ExitCode;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
 use cairn_core::contract::memory_store::{ListArgs, MemoryStore, TombstoneReason};
@@ -100,6 +100,7 @@ async fn run_async(vault_root: &Path, session_id: String) -> Result<ArchiveSessi
         bundle_path.file_name().and_then(|name| name.to_str()),
     )
     .await?;
+    drain_async_lock_releases().await;
 
     Ok(ArchiveSessionReceipt {
         session_id,
@@ -161,4 +162,9 @@ fn current_unix_ms_u128() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_millis())
+}
+
+async fn drain_async_lock_releases() {
+    tokio::task::yield_now().await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
 }
