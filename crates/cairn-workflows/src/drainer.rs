@@ -533,6 +533,7 @@ fn workflow_to_wire(workflow: &str) -> Option<StatusResponseWorkflowsWorkflow> {
         "consolidate" => Some(StatusResponseWorkflowsWorkflow::Consolidate),
         "promote" => Some(StatusResponseWorkflowsWorkflow::Promote),
         "expire" => Some(StatusResponseWorkflowsWorkflow::Expire),
+        "reflect" => Some(StatusResponseWorkflowsWorkflow::Reflect),
         _ => None,
     }
 }

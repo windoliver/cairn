@@ -262,6 +262,7 @@ pub enum StatusResponseWorkflowsWorkflow {
     Consolidate,
     Promote,
     Expire,
+    Reflect,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

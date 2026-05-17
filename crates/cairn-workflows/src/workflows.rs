@@ -65,3 +65,8 @@ workflow_type!(
     "expire",
     "Expiration workflow class: emits `FlushPlan` batches for TTL and salience expiration candidates."
 );
+workflow_type!(
+    ReflectionWorkflow,
+    "reflect",
+    "Reflection workflow class: emits candidate-record `FlushPlan` batches from repeated recent patterns."
+);
