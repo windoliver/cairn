@@ -1,10 +1,15 @@
 //! Nexus sandbox sidecar lifecycle and health checks.
 
+use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::time::Duration;
+use std::path::PathBuf;
+use std::process::{Child, Command};
+use std::thread;
+use std::time::{Duration, Instant};
 
 const MAX_STATUS_LINE_BYTES: usize = 1024;
+const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// Parsed HTTP endpoint for the Nexus sidecar health probe.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,11 +22,173 @@ pub struct HttpEndpoint {
 
 /// Result of a Nexus sidecar health probe.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProbeResult {
+pub enum ProjectionProbe {
     /// Sidecar answered HTTP 200.
     Healthy,
     /// Sidecar could not be reached or returned a non-200 response.
     Degraded(String),
+}
+
+/// Backward-compatible name for direct HTTP probe results.
+pub type ProbeResult = ProjectionProbe;
+
+/// Process and health settings for the Nexus sandbox sidecar supervisor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SupervisorConfig {
+    /// Executable to spawn.
+    pub command: String,
+    /// Arguments passed to the executable.
+    pub args: Vec<String>,
+    /// Base HTTP endpoint, formatted as `http://host:port`.
+    pub endpoint: String,
+    /// Health endpoint path.
+    pub health_path: String,
+    /// Nexus sidecar data directory.
+    pub data_dir: PathBuf,
+    /// `SQLite` database path made visible to the child.
+    pub sqlite_db: PathBuf,
+    /// Maximum time to wait for health to recover.
+    pub health_timeout: Duration,
+    /// Maximum graceful shutdown window before force-kill.
+    pub shutdown_timeout: Duration,
+}
+
+/// Running Nexus sandbox sidecar process.
+#[derive(Debug)]
+pub struct NexusSupervisor {
+    /// Spawned child process.
+    pub child: Child,
+    /// Supervisor configuration used to launch the child.
+    pub config: SupervisorConfig,
+}
+
+impl NexusSupervisor {
+    /// Create the sidecar data directory and spawn the configured process.
+    pub fn start(config: SupervisorConfig) -> std::io::Result<Self> {
+        fs::create_dir_all(&config.data_dir)?;
+        let mut command = Command::new(&config.command);
+        command
+            .args(&config.args)
+            .env("CAIRN_VAULT_DIR", &config.data_dir)
+            .env("CAIRN_NEXUS_DATA_DIR", &config.data_dir)
+            .env("CAIRN_SQLITE_DB", &config.sqlite_db);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+
+            command.process_group(0);
+        }
+        let child = command.spawn()?;
+        Ok(Self { child, config })
+    }
+
+    /// Poll the configured HTTP health endpoint until it is healthy or times out.
+    pub fn wait_until_healthy(&mut self) -> ProjectionProbe {
+        let deadline = Instant::now() + self.config.health_timeout;
+        let mut last_reason = None;
+
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) => {
+                    return ProjectionProbe::Degraded(format!(
+                        "supervisor process exited before health recovered: {status}"
+                    ));
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    return ProjectionProbe::Degraded(format!(
+                        "checking supervisor process status: {err}"
+                    ));
+                }
+            }
+
+            if Instant::now() >= deadline {
+                return ProjectionProbe::Degraded(format!(
+                    "health did not recover before timeout: {}",
+                    last_reason
+                        .as_deref()
+                        .unwrap_or("health endpoint was not probed")
+                ));
+            }
+
+            match probe_http_health(
+                &self.config.endpoint,
+                &self.config.health_path,
+                HEALTH_POLL_INTERVAL,
+            ) {
+                ProjectionProbe::Healthy => return ProjectionProbe::Healthy,
+                ProjectionProbe::Degraded(reason) => last_reason = Some(reason),
+            }
+
+            thread::sleep(HEALTH_POLL_INTERVAL);
+        }
+    }
+
+    /// Stop the sidecar process, escalating to force-kill after the shutdown timeout.
+    pub fn stop(&mut self) -> std::io::Result<()> {
+        if self.child.try_wait()?.is_some() {
+            return Ok(());
+        }
+
+        self.terminate_gracefully()?;
+        let deadline = Instant::now() + self.config.shutdown_timeout;
+        while Instant::now() < deadline {
+            if self.child.try_wait()?.is_some() {
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        if self.child.try_wait()?.is_none() {
+            self.force_kill()?;
+        }
+        let _ = self.child.wait()?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn terminate_gracefully(&mut self) -> std::io::Result<()> {
+        let status = Command::new("kill")
+            .arg("-TERM")
+            .arg(self.child.id().to_string())
+            .status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(format!(
+                "kill -TERM exited with status {status}"
+            )))
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn terminate_gracefully(&mut self) -> std::io::Result<()> {
+        self.child.kill()
+    }
+
+    #[cfg(unix)]
+    fn force_kill(&mut self) -> std::io::Result<()> {
+        let status = Command::new("kill")
+            .arg("-KILL")
+            .arg(format!("-{}", self.child.id()))
+            .status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            self.child.kill()
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn force_kill(&mut self) -> std::io::Result<()> {
+        self.child.kill()
+    }
+}
+
+impl Drop for NexusSupervisor {
+    fn drop(&mut self) {
+        let _ = self.stop();
+    }
 }
 
 impl HttpEndpoint {
@@ -163,6 +330,8 @@ fn is_success_status(status_line: &[u8]) -> bool {
 mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::path::Path;
+    use std::process::Command;
     use std::thread;
     use std::time::Duration;
 
@@ -186,6 +355,145 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         drop(listener);
         format!("http://{addr}")
+    }
+
+    fn supervisor_config(
+        data_dir: &Path,
+        endpoint: String,
+        health_timeout: Duration,
+    ) -> SupervisorConfig {
+        let (command, args) = sleeper_command();
+        SupervisorConfig {
+            command,
+            args,
+            endpoint,
+            health_path: "/health".to_owned(),
+            data_dir: data_dir.to_path_buf(),
+            sqlite_db: data_dir.join("nexus.sqlite"),
+            health_timeout,
+            shutdown_timeout: Duration::from_millis(200),
+        }
+    }
+
+    #[cfg(unix)]
+    fn sleeper_command() -> (String, Vec<String>) {
+        (
+            "/bin/sh".to_owned(),
+            vec!["-c".to_owned(), "sleep 10".to_owned()],
+        )
+    }
+
+    #[cfg(windows)]
+    fn sleeper_command() -> (String, Vec<String>) {
+        (
+            "cmd".to_owned(),
+            vec!["/C".to_owned(), "ping -n 11 127.0.0.1 >NUL".to_owned()],
+        )
+    }
+
+    #[cfg(unix)]
+    fn stubborn_command() -> (String, Vec<String>) {
+        (
+            "/bin/sh".to_owned(),
+            vec![
+                "-c".to_owned(),
+                "trap '' TERM; while :; do sleep 1; done".to_owned(),
+            ],
+        )
+    }
+
+    #[cfg(windows)]
+    fn stubborn_command() -> (String, Vec<String>) {
+        (
+            "powershell".to_owned(),
+            vec![
+                "-NoProfile".to_owned(),
+                "-Command".to_owned(),
+                "Start-Sleep -Seconds 30".to_owned(),
+            ],
+        )
+    }
+
+    #[test]
+    fn supervisor_creates_data_dir_and_reaches_healthy_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("nexus-data");
+        let endpoint = spawn_health_server("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+        let mut supervisor = NexusSupervisor::start(supervisor_config(
+            &data_dir,
+            endpoint,
+            Duration::from_secs(1),
+        ))
+        .unwrap();
+
+        assert!(data_dir.is_dir());
+        assert!(matches!(
+            supervisor.wait_until_healthy(),
+            ProjectionProbe::Healthy
+        ));
+
+        supervisor.stop().unwrap();
+    }
+
+    #[test]
+    fn supervisor_reports_degraded_when_health_never_recovers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut supervisor = NexusSupervisor::start(supervisor_config(
+            &tmp.path().join("nexus-data"),
+            closed_endpoint(),
+            Duration::from_millis(100),
+        ))
+        .unwrap();
+
+        let probe = supervisor.wait_until_healthy();
+
+        assert!(matches!(probe, ProjectionProbe::Degraded(reason) if reason.contains("health")));
+        supervisor.stop().unwrap();
+    }
+
+    #[test]
+    fn supervisor_force_kills_process_that_ignores_graceful_stop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("nexus-data");
+        let endpoint = spawn_health_server("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+        let (command, args) = stubborn_command();
+        let mut supervisor = NexusSupervisor::start(SupervisorConfig {
+            command,
+            args,
+            endpoint,
+            health_path: "/health".to_owned(),
+            data_dir: data_dir.clone(),
+            sqlite_db: data_dir.join("nexus.sqlite"),
+            health_timeout: Duration::from_secs(1),
+            shutdown_timeout: Duration::from_millis(100),
+        })
+        .unwrap();
+        let pid = supervisor.child.id();
+
+        supervisor.stop().unwrap();
+
+        assert!(!process_is_running(pid));
+    }
+
+    fn process_is_running(pid: u32) -> bool {
+        #[cfg(unix)]
+        {
+            Command::new("kill")
+                .arg("-0")
+                .arg(pid.to_string())
+                .status()
+                .is_ok_and(|status| status.success())
+        }
+        #[cfg(windows)]
+        {
+            Command::new("cmd")
+                .args([
+                    "/C",
+                    &format!("tasklist /FI \"PID eq {pid}\" | findstr {pid}"),
+                ])
+                .status()
+                .is_ok_and(|status| status.success())
+        }
     }
 
     #[test]
