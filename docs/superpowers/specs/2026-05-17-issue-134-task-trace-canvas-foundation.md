@@ -43,12 +43,16 @@ renders a compact body-free `Current Task` section inside the existing
 `recent_user_signal` step. This keeps v1 wire compatibility while making
 materialized canvas state available at session start/resume.
 
+`retrieve` now probes the trace-step `result_ref` index for returned records
+and emits body-free `trace_canvas.result_ref` policy metadata when exact
+trace-step links exist. The response shape stays unchanged.
+
 ## Non-Goals
 
-This slice does not implement lint checks, metric emission, exact retrieval
-keys, or search ranking changes. Those build on the schema, adapter-local
-helpers, queued canvas materialization path, and hot-prefix rendering once the
-storage invariants are pinned.
+This slice does not implement lint checks, metric emission, or search ranking
+changes. Those build on the schema, adapter-local helpers, queued canvas
+materialization path, hot-prefix rendering, and exact result-ref metadata once
+the storage invariants are pinned.
 
 ## Invariants
 

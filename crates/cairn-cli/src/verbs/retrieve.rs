@@ -659,7 +659,11 @@ async fn committed_after_access(
     budget: Option<&BudgetReport>,
 ) -> Response {
     record_access(store, records, "retrieve").await;
-    committed(auth, data, records, budget)
+    let mut response = committed(auth, data, records, budget);
+    response
+        .policy_trace
+        .extend(trace_step_result_ref_policy_trace(store, records).await);
+    response
 }
 
 async fn record_access(store: &SqliteMemoryStore, records: &[MemoryRecord], reason: &str) {
@@ -953,6 +957,46 @@ fn read_policy_trace(
         }
     }
     trace
+}
+
+async fn trace_step_result_ref_policy_trace(
+    store: &SqliteMemoryStore,
+    records: &[MemoryRecord],
+) -> Vec<ResponsePolicyTrace> {
+    if records.is_empty() {
+        return Vec::new();
+    }
+
+    let mut records_with_steps = 0_usize;
+    let mut steps = 0_usize;
+    for record in records {
+        match store
+            .find_trace_steps_by_result_ref(record.id.as_str())
+            .await
+        {
+            Ok(found) if !found.is_empty() => {
+                records_with_steps = records_with_steps.saturating_add(1);
+                steps = steps.saturating_add(found.len());
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "trace-step result-ref lookup failed during retrieve"
+                );
+            }
+        }
+    }
+
+    if steps == 0 {
+        return Vec::new();
+    }
+
+    vec![ResponsePolicyTrace {
+        detail: Some(format!("records={records_with_steps} steps={steps}")),
+        gate: "trace_canvas.result_ref".to_owned(),
+        result: ResponsePolicyTraceResult::Pass,
+    }]
 }
 
 fn tree_read_records_from_memory_records(
@@ -1848,5 +1892,47 @@ mod tests {
         assert!(!detail.contains("private-branch"));
         assert!(!detail.contains("private-peer"));
         assert!(!detail.contains("secret body"));
+    }
+
+    #[tokio::test]
+    async fn trace_step_result_ref_policy_trace_reports_counts_only() {
+        let store = cairn_store_sqlite::open_in_memory()
+            .await
+            .expect("open store");
+        let record = record(
+            "01JTS6R4J70000000000000005",
+            "session-1",
+            "turn-1",
+            "secret retrieved body",
+        );
+        store
+            .upsert_trace_step(cairn_store_sqlite::TraceStepDraft {
+                step_id: "step-1".to_owned(),
+                trace_id: "trace-1".to_owned(),
+                session_id: "session-1".to_owned(),
+                turn_id: "turn-1".to_owned(),
+                tool_call_id: Some("toolu-1".to_owned()),
+                timestamp_ms: 1,
+                tool_name: Some("shell".to_owned()),
+                call_summary: "call summary should not leak".to_owned(),
+                result_summary: "result summary should not leak".to_owned(),
+                result_ref: Some(record.id.as_str().to_owned()),
+                salience: 0.5,
+                replaceability_score: 0.5,
+                node_id: None,
+                source_hash: "hash-1".to_owned(),
+            })
+            .await
+            .expect("trace step");
+
+        let trace = trace_step_result_ref_policy_trace(&store, std::slice::from_ref(&record)).await;
+
+        assert_eq!(trace.len(), 1);
+        assert_eq!(trace[0].gate, "trace_canvas.result_ref");
+        assert_eq!(trace[0].detail.as_deref(), Some("records=1 steps=1"));
+        let detail = trace[0].detail.as_deref().unwrap_or_default();
+        assert!(!detail.contains(record.id.as_str()));
+        assert!(!detail.contains("secret"));
+        assert!(!detail.contains("step-1"));
     }
 }
