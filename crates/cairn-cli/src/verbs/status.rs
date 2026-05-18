@@ -8,7 +8,11 @@
 use std::process::ExitCode;
 
 use cairn_core::generated::common::Capabilities;
-use cairn_core::generated::status::{StatusResponse, StatusResponseServerInfo};
+use cairn_core::generated::status::{
+    StatusResponse, StatusResponseHealth, StatusResponseHealthAuthorityDb,
+    StatusResponseHealthAuthorityDbState, StatusResponseHealthNexusProjection,
+    StatusResponseHealthNexusProjectionState, StatusResponseServerInfo,
+};
 
 use super::envelope::{emit_json, new_operation_id};
 
@@ -27,6 +31,7 @@ pub fn run(json: bool) -> ExitCode {
         },
         capabilities: p0_capabilities(),
         extensions: vec![],
+        health: p0_health(),
     };
 
     if json {
@@ -55,6 +60,22 @@ pub fn run(json: bool) -> ExitCode {
 /// Update this list when store adapters land (issue #9).
 fn p0_capabilities() -> Vec<Capabilities> {
     vec![]
+}
+
+fn p0_health() -> StatusResponseHealth {
+    StatusResponseHealth {
+        authority_db: StatusResponseHealthAuthorityDb {
+            state: StatusResponseHealthAuthorityDbState::Missing,
+            path: ".cairn/cairn.db".to_owned(),
+            reason: None,
+        },
+        nexus_projection: StatusResponseHealthNexusProjection {
+            state: StatusResponseHealthNexusProjectionState::Disabled,
+            data_dir: None,
+            endpoint: None,
+            reason: None,
+        },
+    }
 }
 
 /// Return the current UTC time as an RFC-3339 string without sub-second precision.
