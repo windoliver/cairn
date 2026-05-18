@@ -1,7 +1,15 @@
 //! Integration tests for the cairn-cli config loader (brief §3.1, §6.5).
 
+use std::sync::{Mutex, MutexGuard};
+
 use cairn_cli::config::{load, write_default, CliOverrides};
 use cairn_core::config::{CairnConfig, StoreKind};
+
+static CONFIG_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+fn config_env_lock() -> MutexGuard<'static, ()> {
+    CONFIG_ENV_LOCK.lock().unwrap()
+}
 
 fn write_yaml(vault: &std::path::Path, content: &str) {
     let dir = vault.join(".cairn");
@@ -13,6 +21,7 @@ fn write_yaml(vault: &std::path::Path, content: &str) {
 
 #[test]
 fn absent_config_file_gives_default() {
+    let _guard = config_env_lock();
     let dir = tempfile::tempdir().unwrap();
     let config = load(dir.path(), &CliOverrides::default()).unwrap();
     assert_eq!(config, CairnConfig::default());
@@ -20,6 +29,7 @@ fn absent_config_file_gives_default() {
 
 #[test]
 fn load_from_file_overrides_name() {
+    let _guard = config_env_lock();
     let dir = tempfile::tempdir().unwrap();
     write_yaml(dir.path(), "vault:\n  name: test-vault\n");
     let config = load(dir.path(), &CliOverrides::default()).unwrap();
@@ -30,6 +40,7 @@ fn load_from_file_overrides_name() {
 
 #[test]
 fn v01_config_without_store_stays_sqlite() {
+    let _guard = config_env_lock();
     let dir = tempfile::tempdir().unwrap();
     write_yaml(dir.path(), "vault:\n  name: old-vault\n");
     let config = load(dir.path(), &CliOverrides::default()).unwrap();
@@ -39,6 +50,7 @@ fn v01_config_without_store_stays_sqlite() {
 
 #[test]
 fn nexus_sandbox_file_defaults_profile() {
+    let _guard = config_env_lock();
     let dir = tempfile::tempdir().unwrap();
     write_yaml(dir.path(), "store:\n  kind: nexus-sandbox\n");
     let config = load(dir.path(), &CliOverrides::default()).unwrap();
@@ -50,6 +62,7 @@ fn nexus_sandbox_file_defaults_profile() {
 
 #[test]
 fn disabling_nexus_keeps_sqlite_usable() {
+    let _guard = config_env_lock();
     let dir = tempfile::tempdir().unwrap();
     write_yaml(
         dir.path(),
@@ -61,6 +74,7 @@ fn disabling_nexus_keeps_sqlite_usable() {
 
 #[test]
 fn env_var_interpolation_sets_api_key() {
+    let _guard = config_env_lock();
     // Use HOME instead of set_var (set_var is unsafe in Rust edition 2024).
     // HOME is guaranteed to be set in any Unix test environment.
     let dir = tempfile::tempdir().unwrap();
@@ -77,6 +91,7 @@ fn env_var_interpolation_sets_api_key() {
 
 #[test]
 fn missing_env_var_returns_error() {
+    let _guard = config_env_lock();
     let dir = tempfile::tempdir().unwrap();
     // CAIRN_IT_MISSING_VAR_TEST is not set in any test environment
     write_yaml(
@@ -93,6 +108,7 @@ fn missing_env_var_returns_error() {
 
 #[test]
 fn cairn_env_override_wins_over_file() {
+    let _guard = config_env_lock();
     // Use temp_env::with_var instead of set_var/remove_var (unsafe in edition 2024).
     let dir = tempfile::tempdir().unwrap();
     write_yaml(dir.path(), "store:\n  kind: nexus-sandbox\n");
@@ -105,6 +121,7 @@ fn cairn_env_override_wins_over_file() {
 
 #[test]
 fn invalid_config_returns_error() {
+    let _guard = config_env_lock();
     let dir = tempfile::tempdir().unwrap();
     // zero budget is invalid
     write_yaml(dir.path(), "vault:\n  hot_memory:\n    max_bytes: 0\n");
@@ -120,6 +137,7 @@ fn invalid_config_returns_error() {
 
 #[test]
 fn bootstrap_writes_config_file() {
+    let _guard = config_env_lock();
     let dir = tempfile::tempdir().unwrap();
     write_default(dir.path()).unwrap();
     assert!(dir.path().join(".cairn/config.yaml").exists());
@@ -127,6 +145,7 @@ fn bootstrap_writes_config_file() {
 
 #[test]
 fn bootstrap_round_trips_to_default() {
+    let _guard = config_env_lock();
     let dir = tempfile::tempdir().unwrap();
     write_default(dir.path()).unwrap();
     let config = load(dir.path(), &CliOverrides::default()).unwrap();
@@ -135,6 +154,7 @@ fn bootstrap_round_trips_to_default() {
 
 #[test]
 fn bootstrap_fails_if_file_already_exists() {
+    let _guard = config_env_lock();
     let dir = tempfile::tempdir().unwrap();
     write_yaml(dir.path(), "vault:\n  name: existing\n");
     let err = write_default(dir.path()).unwrap_err();

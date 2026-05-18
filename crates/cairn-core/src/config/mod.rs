@@ -1,6 +1,10 @@
 //! Typed config structs for `.cairn/config.yaml` (brief §3.1, §4.1, §5.2.a).
 
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    ffi::OsString,
+    path::{Component, PrefixComponent},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -439,10 +443,14 @@ impl NexusSandboxConfig {
                 reason: "must not be empty".into(),
             });
         }
-        if self.health_path.trim().is_empty() || !self.health_path.starts_with('/') {
+        let health_path = self.health_path.trim();
+        if health_path.is_empty()
+            || health_path != self.health_path
+            || !self.health_path.starts_with('/')
+        {
             return Err(ConfigError::InvalidNexusProfile {
                 field: "store.nexus.health_path",
-                reason: "must start with /".into(),
+                reason: "must start with / and must not contain surrounding whitespace".into(),
             });
         }
         if self.health_timeout_ms == 0 {
@@ -464,8 +472,7 @@ impl NexusSandboxConfig {
                 reason: "must not be empty".into(),
             });
         }
-        if data_dir == ".cairn" || data_dir == ".cairn/cairn.db" || data_dir.starts_with(".cairn/")
-        {
+        if points_inside_cairn_authority(data_dir) {
             return Err(ConfigError::InvalidNexusProfile {
                 field: "store.nexus.data_dir",
                 reason: "must not point inside .cairn authority state".into(),
@@ -473,6 +480,54 @@ impl NexusSandboxConfig {
         }
         Ok(())
     }
+}
+
+fn points_inside_cairn_authority(path: &str) -> bool {
+    normalized_path_components(path)
+        .iter()
+        .find_map(|component| match component {
+            NormalizedComponent::Normal(value) => value.to_str(),
+            NormalizedComponent::ParentDir
+            | NormalizedComponent::RootDir
+            | NormalizedComponent::Prefix(_) => None,
+        })
+        .is_some_and(|component| component == ".cairn")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NormalizedComponent {
+    Prefix(OsString),
+    RootDir,
+    ParentDir,
+    Normal(OsString),
+}
+
+fn normalized_path_components(path: &str) -> Vec<NormalizedComponent> {
+    let mut components = Vec::new();
+    for component in std::path::Path::new(path).components() {
+        match component {
+            Component::Prefix(prefix) => components.push(NormalizedComponent::Prefix(
+                prefix_component_os_string(prefix),
+            )),
+            Component::RootDir => components.push(NormalizedComponent::RootDir),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if matches!(components.last(), Some(NormalizedComponent::Normal(_))) {
+                    components.pop();
+                } else {
+                    components.push(NormalizedComponent::ParentDir);
+                }
+            }
+            Component::Normal(value) => {
+                components.push(NormalizedComponent::Normal(value.to_os_string()));
+            }
+        }
+    }
+    components
+}
+
+fn prefix_component_os_string(prefix: PrefixComponent<'_>) -> OsString {
+    prefix.as_os_str().to_os_string()
 }
 
 // ── LLM ──────────────────────────────────────────────────────────────────
@@ -905,6 +960,36 @@ mod tests {
             err,
             ConfigError::InvalidNexusProfile {
                 field: "store.nexus.data_dir",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_normalized_nexus_data_dir_under_cairn_authority() {
+        let mut config = CairnConfig::default();
+        config.store.kind = StoreKind::NexusSandbox;
+        config.store.nexus.data_dir = "./.cairn/cairn.db".into();
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidNexusProfile {
+                field: "store.nexus.data_dir",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_health_path_with_surrounding_whitespace() {
+        let mut config = CairnConfig::default();
+        config.store.kind = StoreKind::NexusSandbox;
+        config.store.nexus.health_path = "/health ".into();
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidNexusProfile {
+                field: "store.nexus.health_path",
                 ..
             }
         ));
