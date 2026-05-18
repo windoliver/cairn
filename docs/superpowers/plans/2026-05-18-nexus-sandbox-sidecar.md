@@ -49,7 +49,7 @@ In `crates/cairn-core/src/config/mod.rs`, add these tests inside the existing `#
             serde_json::from_str(r#"{"store":{"kind":"nexus-sandbox"}}"#).unwrap();
         assert_eq!(config.store.kind, StoreKind::NexusSandbox);
         assert_eq!(config.store.nexus.data_dir, "nexus-data");
-        assert_eq!(config.store.nexus.command, "nexus");
+        assert_eq!(config.store.nexus.command, "cairn-nexus-sandbox");
         assert_eq!(
             config.store.nexus.args,
             vec!["sandbox".to_owned(), "serve".to_owned()]
@@ -171,7 +171,7 @@ impl Default for NexusSandboxConfig {
     fn default() -> Self {
         Self {
             data_dir: "nexus-data".into(),
-            command: "nexus".into(),
+            command: "cairn-nexus-sandbox".into(),
             args: vec!["sandbox".into(), "serve".into()],
             endpoint: "http://127.0.0.1:8765".into(),
             health_path: "/health".into(),
@@ -270,7 +270,7 @@ fn nexus_sandbox_file_defaults_profile() {
     let config = load(dir.path(), &CliOverrides::default()).unwrap();
     assert_eq!(config.store.kind, StoreKind::NexusSandbox);
     assert_eq!(config.store.nexus.data_dir, "nexus-data");
-    assert_eq!(config.store.nexus.command, "nexus");
+    assert_eq!(config.store.nexus.command, "cairn-nexus-sandbox");
     assert_eq!(config.store.nexus.health_timeout_ms, 5_000);
 }
 

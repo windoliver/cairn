@@ -40,7 +40,7 @@ expression: json
     "kind": "sqlite",
     "nexus": {
       "data_dir": "nexus-data",
-      "command": "nexus",
+      "command": "cairn-nexus-sandbox",
       "args": [
         "sandbox",
         "serve"

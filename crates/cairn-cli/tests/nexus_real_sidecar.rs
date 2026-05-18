@@ -4,10 +4,10 @@
 //!
 //! ```text
 //! CAIRN_REAL_NEXUS_SIDECAR=1 \
-//! CAIRN_REAL_NEXUS_SIDECAR_COMMAND=/path/to/sidecar \
+//! CAIRN_REAL_NEXUS_SIDECAR_COMMAND=cairn-nexus-sandbox \
 //! CAIRN_REAL_NEXUS_SIDECAR_ARGS='["sandbox","serve"]' \
 //! CAIRN_REAL_NEXUS_SIDECAR_ENDPOINT=http://127.0.0.1:8765 \
-//! cargo nextest run -p cairn-cli --test nexus_real_sidecar --ignored --locked
+//! cargo nextest run -p cairn-cli --test nexus_real_sidecar --run-ignored only --locked
 //! ```
 
 use std::path::Path;
@@ -29,7 +29,8 @@ fn require_opt_in() {
 }
 
 fn sidecar_command() -> String {
-    std::env::var("CAIRN_REAL_NEXUS_SIDECAR_COMMAND").unwrap_or_else(|_| "nexus".to_owned())
+    std::env::var("CAIRN_REAL_NEXUS_SIDECAR_COMMAND")
+        .unwrap_or_else(|_| "cairn-nexus-sandbox".to_owned())
 }
 
 fn sidecar_args() -> Vec<String> {

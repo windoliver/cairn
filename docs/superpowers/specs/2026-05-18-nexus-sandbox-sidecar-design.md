@@ -57,7 +57,7 @@ store:
   kind: nexus-sandbox
   nexus:
     data_dir: nexus-data
-    command: nexus
+    command: cairn-nexus-sandbox
     args: ["sandbox", "serve"]
     endpoint: "http://127.0.0.1:8765"
     health_path: "/health"

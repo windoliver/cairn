@@ -98,6 +98,8 @@ impl NexusSupervisor {
             .args(&config.args)
             .env("CAIRN_VAULT_DIR", vault_dir)
             .env("CAIRN_NEXUS_DATA_DIR", &config.data_dir)
+            .env("CAIRN_NEXUS_ENDPOINT", &config.endpoint)
+            .env("CAIRN_NEXUS_HEALTH_PATH", &config.health_path)
             .env("CAIRN_SQLITE_DB", &config.sqlite_db);
         #[cfg(unix)]
         {
@@ -581,7 +583,7 @@ mod tests {
                 vec![
                     "-c".to_owned(),
                     format!(
-                        "printf '%s\n%s\n%s\n' \"$CAIRN_VAULT_DIR\" \"$CAIRN_NEXUS_DATA_DIR\" \"$CAIRN_SQLITE_DB\" > {}; sleep 10",
+                        "printf '%s\n%s\n%s\n%s\n%s\n' \"$CAIRN_VAULT_DIR\" \"$CAIRN_NEXUS_DATA_DIR\" \"$CAIRN_SQLITE_DB\" \"$CAIRN_NEXUS_ENDPOINT\" \"$CAIRN_NEXUS_HEALTH_PATH\" > {}; sleep 10",
                         shell_quote(output)
                     ),
                 ],
@@ -595,7 +597,7 @@ mod tests {
                     "-NoProfile".to_owned(),
                     "-Command".to_owned(),
                     format!(
-                        "[IO.File]::WriteAllLines('{}', @($env:CAIRN_VAULT_DIR, $env:CAIRN_NEXUS_DATA_DIR, $env:CAIRN_SQLITE_DB)); Start-Sleep -Seconds 10",
+                        "[IO.File]::WriteAllLines('{}', @($env:CAIRN_VAULT_DIR, $env:CAIRN_NEXUS_DATA_DIR, $env:CAIRN_SQLITE_DB, $env:CAIRN_NEXUS_ENDPOINT, $env:CAIRN_NEXUS_HEALTH_PATH)); Start-Sleep -Seconds 10",
                         output.display()
                     ),
                 ],
@@ -644,6 +646,8 @@ mod tests {
             std::env::var("CAIRN_VAULT_DIR").unwrap_or_default(),
             std::env::var("CAIRN_NEXUS_DATA_DIR").unwrap_or_default(),
             std::env::var("CAIRN_SQLITE_DB").unwrap_or_default(),
+            std::env::var("CAIRN_NEXUS_ENDPOINT").unwrap_or_default(),
+            std::env::var("CAIRN_NEXUS_HEALTH_PATH").unwrap_or_default(),
         ]
         .join("\n");
         fs::write(data_dir.join("helper-env.txt"), env_capture).unwrap();
@@ -680,12 +684,13 @@ mod tests {
         let sqlite_db = vault_dir.join(".cairn").join("cairn.db");
         fs::create_dir_all(&data_dir).unwrap();
         let port = reserve_loopback_port();
+        let endpoint = format!("http://127.0.0.1:{port}");
         fs::write(data_dir.join("health-port"), port.to_string()).unwrap();
         let (command, args) = test_harness_helper_command();
         let mut supervisor = NexusSupervisor::start(SupervisorConfig {
             command,
             args,
-            endpoint: format!("http://127.0.0.1:{port}"),
+            endpoint: endpoint.clone(),
             health_path: "/health".to_owned(),
             data_dir: data_dir.clone(),
             sqlite_db: sqlite_db.clone(),
@@ -708,6 +713,8 @@ mod tests {
                 vault_dir.to_str().unwrap(),
                 data_dir.to_str().unwrap(),
                 sqlite_db.to_str().unwrap(),
+                endpoint.as_str(),
+                "/health",
             ]
         );
         let pid = supervisor.child.id();
@@ -768,6 +775,8 @@ mod tests {
                 vault_dir.to_str().unwrap(),
                 data_dir.to_str().unwrap(),
                 sqlite_db.to_str().unwrap(),
+                "http://127.0.0.1:1",
+                "/health",
             ]
         );
         supervisor.stop().unwrap();

@@ -56,7 +56,7 @@ fn nexus_sandbox_file_defaults_profile() {
     let config = load(dir.path(), &CliOverrides::default()).unwrap();
     assert_eq!(config.store.kind, StoreKind::NexusSandbox);
     assert_eq!(config.store.nexus.data_dir, "nexus-data");
-    assert_eq!(config.store.nexus.command, "nexus");
+    assert_eq!(config.store.nexus.command, "cairn-nexus-sandbox");
     assert_eq!(config.store.nexus.health_timeout_ms, 5_000);
 }
 
