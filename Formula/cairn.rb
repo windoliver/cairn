@@ -8,13 +8,12 @@
 class Cairn < Formula
   desc "Harness-agnostic agent memory: one binary, one SQLite file, one vault"
   homepage "https://github.com/windoliver/cairn"
-  # First stable release block. URL and sha256 are populated by release #141
-  # when the v0.1.0 tag is cut. Until then `brew install --HEAD cairn` is the
-  # only supported install path; the stable block is present so `brew audit`
-  # has a release URL to validate.
-  url "https://github.com/windoliver/cairn/archive/refs/tags/v0.1.0.tar.gz"
-  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
   license "Apache-2.0"
+  # HEAD-only until v0.1.0 ships. The stable `url`/`sha256` pair will be
+  # added by release #141 with a real tarball digest; advertising it now
+  # with a placeholder sha256 would make `brew install cairn` (the default
+  # stable path) fail at checksum verification. Pre-release users install
+  # with `brew install --HEAD cairn`.
   head "https://github.com/windoliver/cairn.git", branch: "main"
 
   depends_on "rust" => :build

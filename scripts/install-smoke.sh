@@ -28,10 +28,22 @@ if ! command -v "$CAIRN_BIN" >/dev/null 2>&1 && [ ! -x "$CAIRN_BIN" ]; then
   exit 1
 fi
 
+# Detach from any caller state — the CLI honours these env vars and would
+# otherwise route mutating verbs (ingest, summarize, capture_trace, forget)
+# into the caller's real vault / registry / signing key. Strip them so the
+# smoke is hermetic.
+unset CAIRN_VAULT CAIRN_REGISTRY CAIRN_ISSUER
+
 VAULT="$(mktemp -d -t cairn-smoke-XXXXXX)"
 # shellcheck disable=SC2064  # expand $VAULT now so the trap survives unset
 trap "rm -rf '$VAULT'" EXIT INT TERM
 cd "$VAULT"
+
+# `ingest` auto-provisions a default issuer and stores its signing key. On
+# headless Linux there is no Secret Service, and the macOS keychain prompts
+# would block CI. Force the file-backed keystore (key file lives inside the
+# temp vault and is cleaned up with it).
+export CAIRN_KEYSTORE="file"
 
 # Pre-seed the YAML config so `cairn bootstrap` skips the embedding-model
 # fetch. `bootstrap` calls `write_once` for `.cairn/config.yaml` and respects

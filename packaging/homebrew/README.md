@@ -14,8 +14,7 @@ This repo *is* the tap. End users:
 
 ```bash
 brew tap windoliver/cairn https://github.com/windoliver/cairn
-brew install --HEAD cairn    # supported pre-release path
-brew install cairn           # only after v0.1.0 ships (sha256 placeholder today)
+brew install --HEAD cairn    # only supported install path pre-release
 ```
 
 Homebrew discovers formulae at one of three locations in a tap repo —
@@ -24,27 +23,34 @@ the tap layout is unambiguous.
 
 ## Formula structure (`Formula/cairn.rb`)
 
-- `head` → `https://github.com/windoliver/cairn.git@main` — installable
-  today with `brew install --HEAD cairn`.
-- `url` / `sha256` → tagged release tarball; the sha256 is a placeholder
-  until the first `v0.1.0` tag is cut. Homebrew infers the `version`
-  from the `vX.Y.Z` tag in the URL, so no explicit `version` line is
-  needed.
+The formula is **HEAD-only** until v0.1.0 ships. The `head` block points
+at `https://github.com/windoliver/cairn.git@main`. There is no stable
+`url`/`sha256` block today — advertising one with a placeholder sha256
+would make `brew install cairn` (the default stable path) fail at
+checksum verification on every user's machine.
 
-## Updating on a release
+## Adding the stable block on the first release
 
-1. After the release workflow uploads the tarball at
-   `https://github.com/windoliver/cairn/archive/refs/tags/vX.Y.Z.tar.gz`,
-   compute its sha256:
+When release #141 cuts `v0.1.0`:
+
+1. Compute the tarball sha256:
 
    ```bash
    curl -sL https://github.com/windoliver/cairn/archive/refs/tags/vX.Y.Z.tar.gz \
      | shasum -a 256
    ```
 
-2. Edit `Formula/cairn.rb`:
-   - `url` → the tagged URL above (Homebrew parses `X.Y.Z` from `vX.Y.Z`).
-   - `sha256` → the computed digest.
+2. Add the stable block to `Formula/cairn.rb` immediately after
+   `homepage`:
+
+   ```ruby
+   url "https://github.com/windoliver/cairn/archive/refs/tags/vX.Y.Z.tar.gz"
+   sha256 "<digest from step 1>"
+   ```
+
+   Homebrew parses `X.Y.Z` from `vX.Y.Z`, so no explicit `version` line
+   is needed. After this lands, `brew install cairn` becomes the
+   default install path.
 
 3. Validate locally before tapping. Homebrew 5.x rejects `brew audit
    <path>` and `brew install <path>`, so stage the formula into a temp

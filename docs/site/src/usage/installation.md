@@ -21,12 +21,12 @@ brew tap windoliver/cairn https://github.com/windoliver/cairn
 brew install --HEAD cairn
 ```
 
-Builds from source via the bundled `cargo install` step. `--HEAD` is required
-until v0.1.0 is tagged — the stable release block in the formula still has a
-placeholder `sha256`, so plain `brew install cairn` will fail at checksum
-verification. Bottles (pre-built binaries) and the first stable release are
-tracked under issue #141; once v0.1.0 ships, `brew install cairn` will work
-without `--HEAD`.
+Builds from source via the bundled `cargo install` step. The formula is
+**HEAD-only** until v0.1.0 is tagged — there is no stable `url`/`sha256`
+block today, so `--HEAD` is the only supported install path. Bottles
+(pre-built binaries) and the first stable release are tracked under
+issue #141; once v0.1.0 ships, `brew install cairn` will work without
+`--HEAD`.
 
 ## First-run model fetch
 
