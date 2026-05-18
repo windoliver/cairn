@@ -37,6 +37,8 @@ use super::envelope::{
 const DEFAULT_ASSEMBLE_ISSUER: &str = "agt:cairn-cli:default:writer:v1";
 const DEFAULT_TENANT: &str = "default";
 const ASSEMBLE_ENTITY: &str = "ingest";
+const TRACE_CANVAS_DEFAULT_BUDGET_NUMERATOR: u64 = 1;
+const TRACE_CANVAS_DEFAULT_BUDGET_DENOMINATOR: u64 = 5;
 
 /// In-process fallback cache used when `SqliteHotPrefixCache::open`
 /// fails (e.g., transient `SQLite` error during runtime). Always misses
@@ -1032,6 +1034,11 @@ fn render_trace_canvas_section(
     push_capped(&mut out, "# Current Task\n", canvas_budget);
     push_capped(&mut out, &context.canvas.title, canvas_budget);
     push_capped(&mut out, "\n", canvas_budget);
+    push_capped(
+        &mut out,
+        &format!("Canvas: {}\n", context.canvas.canvas_id),
+        canvas_budget,
+    );
     if !context.canvas.goal.trim().is_empty() {
         push_capped(
             &mut out,
@@ -1057,6 +1064,11 @@ fn render_trace_canvas_section(
             &format!("Active: {} ({})\n", active.label, active.status),
             canvas_budget,
         );
+        push_capped(
+            &mut out,
+            &format!("Active node: {}\n", active.node_id),
+            canvas_budget,
+        );
     }
     for node in &context.nodes {
         if out.len() as u64 >= canvas_budget {
@@ -1067,18 +1079,51 @@ fn render_trace_canvas_section(
             &format!("- [{}] {}: {}\n", node.status, node.label, node.summary),
             canvas_budget,
         );
+        push_node_retrieve_hints(&mut out, node, canvas_budget);
     }
     out
+}
+
+fn push_node_retrieve_hints(
+    out: &mut String,
+    node: &cairn_store_sqlite::TraceCanvasNodeRow,
+    budget: u64,
+) {
+    if node.source_step_ids.is_empty() && node.evidence_record_ids.is_empty() {
+        return;
+    }
+    push_capped(out, "  Retrieve hints:", budget);
+    if !node.source_step_ids.is_empty() {
+        push_capped(
+            out,
+            &format!(" trace_steps={}", node.source_step_ids.join(",")),
+            budget,
+        );
+    }
+    if !node.evidence_record_ids.is_empty() {
+        push_capped(
+            out,
+            &format!(" result_refs={}", node.evidence_record_ids.join(",")),
+            budget,
+        );
+    }
+    push_capped(out, "\n", budget);
 }
 
 fn effective_trace_canvas_budget(
     context: &cairn_store_sqlite::TraceCanvasContext,
     budget: u64,
 ) -> u64 {
+    let ratio_cap = default_trace_canvas_budget_cap(budget);
     u64::try_from(context.canvas.max_bytes)
         .ok()
         .filter(|bytes| *bytes > 0)
-        .map_or(budget, |bytes| bytes.min(budget))
+        .map_or(ratio_cap, |bytes| bytes.min(ratio_cap))
+}
+
+fn default_trace_canvas_budget_cap(budget: u64) -> u64 {
+    budget.saturating_mul(TRACE_CANVAS_DEFAULT_BUDGET_NUMERATOR)
+        / TRACE_CANVAS_DEFAULT_BUDGET_DENOMINATOR
 }
 
 fn trace_canvas_metric_event(
@@ -1505,7 +1550,7 @@ mod tests {
         let session_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
         let mut config = CairnConfig::default();
         config.vault.hot_memory.recipe = vec![HotMemoryRecipeStep::RecentUserSignal];
-        config.vault.hot_memory.max_bytes = 1024;
+        config.vault.hot_memory.max_bytes = 4096;
 
         store
             .upsert_trace_step(cairn_store_sqlite::TraceStepDraft {
@@ -1578,7 +1623,7 @@ mod tests {
             issuer: Identity::parse(DEFAULT_ASSEMBLE_ISSUER).expect("valid issuer"),
         };
 
-        let loaded = load_hot_bodies(&store, vault.path(), &config, &auth, Some(session_id), 1024)
+        let loaded = load_hot_bodies(&store, vault.path(), &config, &auth, Some(session_id), 4096)
             .await
             .expect("load bodies");
         let prefix = loaded.bodies.join("");
@@ -1620,6 +1665,72 @@ mod tests {
         let section = render_trace_canvas_section(&context, 32);
         assert!(section.len() <= 32);
         assert!(section.is_char_boundary(section.len()));
+    }
+
+    #[test]
+    fn trace_canvas_section_uses_default_fifth_of_remaining_budget() {
+        let context = cairn_store_sqlite::TraceCanvasContext {
+            canvas: cairn_store_sqlite::TraceCanvasRow {
+                canvas_id: "canvas-1".to_owned(),
+                session_id: "session-1".to_owned(),
+                title: "Active task title".to_owned(),
+                goal: "Goal text".to_owned(),
+                status: cairn_store_sqlite::TraceCanvasStatus::Active,
+                summary: "Summary text".to_owned(),
+                active_node_id: None,
+                max_bytes: 4096,
+                version: 1,
+            },
+            nodes: vec![cairn_store_sqlite::TraceCanvasNodeRow {
+                node_id: "node-1".to_owned(),
+                canvas_id: "canvas-1".to_owned(),
+                label: "Node".to_owned(),
+                status: "completed".to_owned(),
+                summary: "Node summary".to_owned(),
+                timestamp_ms: 1,
+                source_step_ids: vec!["step-1".to_owned()],
+                evidence_record_ids: vec![],
+            }],
+            edges: vec![],
+        };
+
+        let section = render_trace_canvas_section(&context, 100);
+        assert!(section.len() <= 20, "section was {} bytes", section.len());
+    }
+
+    #[test]
+    fn trace_canvas_section_includes_retrieve_hints() {
+        let context = cairn_store_sqlite::TraceCanvasContext {
+            canvas: cairn_store_sqlite::TraceCanvasRow {
+                canvas_id: "canvas-1".to_owned(),
+                session_id: "session-1".to_owned(),
+                title: "Active task title".to_owned(),
+                goal: "Goal text".to_owned(),
+                status: cairn_store_sqlite::TraceCanvasStatus::Active,
+                summary: "Summary text".to_owned(),
+                active_node_id: Some("node-1".to_owned()),
+                max_bytes: 4096,
+                version: 1,
+            },
+            nodes: vec![cairn_store_sqlite::TraceCanvasNodeRow {
+                node_id: "node-1".to_owned(),
+                canvas_id: "canvas-1".to_owned(),
+                label: "Node".to_owned(),
+                status: "completed".to_owned(),
+                summary: "Node summary".to_owned(),
+                timestamp_ms: 1,
+                source_step_ids: vec!["step-1".to_owned()],
+                evidence_record_ids: vec!["record-1".to_owned()],
+            }],
+            edges: vec![],
+        };
+
+        let section = render_trace_canvas_section(&context, 2_000);
+        assert!(section.contains("Canvas: canvas-1"));
+        assert!(section.contains("Active node: node-1"));
+        assert!(section.contains("Retrieve hints:"));
+        assert!(section.contains("trace_steps=step-1"));
+        assert!(section.contains("result_refs=record-1"));
     }
 
     #[test]
@@ -1676,7 +1787,7 @@ mod tests {
                 assert_eq!(*node_count, 1);
                 assert_eq!(*edge_count, 1);
                 assert_eq!(*bytes, 42);
-                assert_eq!(*budget_bytes, 64);
+                assert_eq!(*budget_bytes, 25);
                 assert!(*active_node);
             }
             _ => panic!("expected trace canvas metric"),
@@ -1719,7 +1830,7 @@ mod tests {
                 assert_eq!(*node_count, 1);
                 assert_eq!(*edge_count, 0);
                 assert!(*bytes > 0);
-                assert_eq!(*budget_bytes, 1024);
+                assert_eq!(*budget_bytes, 819);
                 assert!(*active_node);
             }
             _ => panic!("expected trace canvas metric"),

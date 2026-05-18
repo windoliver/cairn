@@ -221,9 +221,12 @@ impl TraceCanvasMaterializer {
                 status: projection.node_status,
                 summary: projection.node_summary,
                 timestamp_ms,
-                source_step_ids: vec![step_id],
+                source_step_ids: vec![step_id.clone()],
                 evidence_record_ids: result_ref.into_iter().collect(),
             })
+            .await?;
+        self.store
+            .assign_trace_step_node(&step_id, &node_id)
             .await?;
 
         self.store

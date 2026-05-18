@@ -1,6 +1,6 @@
 //! Task-trace canvas lint checks for issue #134.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::contract::source_resolver::SourceResolver;
 use crate::domain::projection::{ProjectionStatus, compare_projection};
@@ -79,6 +79,11 @@ pub fn run(
         .iter()
         .map(|node| node.node_id.as_str())
         .collect::<HashSet<_>>();
+    let node_canvas_ids = snapshot
+        .nodes
+        .iter()
+        .map(|node| (node.node_id.as_str(), node.canvas_id.as_str()))
+        .collect::<HashMap<_, _>>();
     let step_ids = snapshot
         .steps
         .iter()
@@ -122,7 +127,7 @@ pub fn run(
 
     for canvas in &snapshot.canvases {
         if let Some(active_node_id) = canvas.active_node_id.as_deref()
-            && !node_ids.contains(active_node_id)
+            && node_canvas_ids.get(active_node_id).copied() != Some(canvas.canvas_id.as_str())
         {
             findings.push(canvas_missing_active_node_finding(canvas, active_node_id));
         }
@@ -520,6 +525,41 @@ mod tests {
                 .any(|f| matches!(f.kind, Kind::HotMemoryOverBudget)
                     && f.message.contains("canvas-1")),
             "oversized canvas text should emit HotMemoryOverBudget: {findings:?}",
+        );
+    }
+
+    #[test]
+    fn active_node_must_belong_to_its_canvas() {
+        let snapshot = TraceCanvasLintSnapshot {
+            steps: vec![],
+            canvases: vec![
+                TraceCanvasLintCanvas {
+                    canvas_id: "canvas-1".to_owned(),
+                    active_node_id: Some("node-2".to_owned()),
+                    projection_markdown: None,
+                    ..canvas_fixture()
+                },
+                TraceCanvasLintCanvas {
+                    canvas_id: "canvas-2".to_owned(),
+                    active_node_id: Some("node-2".to_owned()),
+                    projection_markdown: None,
+                    ..canvas_fixture()
+                },
+            ],
+            nodes: vec![TraceCanvasLintNode {
+                node_id: "node-2".to_owned(),
+                canvas_id: "canvas-2".to_owned(),
+                source_step_ids: Vec::new(),
+                ..node_fixture()
+            }],
+        };
+
+        let findings = run(&snapshot, &[], empty_source_resolver());
+        assert!(
+            findings.iter().any(|f| matches!(f.kind, Kind::Orphan)
+                && f.message.contains("canvas-1")
+                && f.message.contains("node-2")),
+            "cross-canvas active node should emit Orphan: {findings:?}",
         );
     }
 }

@@ -75,6 +75,33 @@ async fn materializer_refreshes_markdown_projection_cache() {
 }
 
 #[tokio::test]
+async fn materializer_backfills_trace_step_node_assignment() {
+    let store = Arc::new(open_in_memory().await.expect("open"));
+    let materializer = TraceCanvasMaterializer::new(Arc::clone(&store));
+
+    materializer
+        .project_step(TraceCanvasProjection {
+            step: step("step-1", "turn-1", 100, Some("record-1")),
+            canvas_title: "Current task".into(),
+            canvas_goal: "finish issue 134".into(),
+            node_label: "Run check".into(),
+            node_status: "completed".into(),
+            node_summary: "The focused check passed.".into(),
+        })
+        .await
+        .expect("project step");
+
+    let snapshot = store
+        .trace_canvas_lint_snapshot()
+        .await
+        .expect("lint snapshot");
+    assert_eq!(
+        snapshot.steps[0].node_id.as_deref(),
+        Some("trace-node:step-1")
+    );
+}
+
+#[tokio::test]
 async fn materializer_links_previous_active_node_to_new_node() {
     let store = Arc::new(open_in_memory().await.expect("open"));
     let materializer = TraceCanvasMaterializer::new(Arc::clone(&store));

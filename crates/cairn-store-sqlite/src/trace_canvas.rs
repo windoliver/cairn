@@ -398,6 +398,36 @@ impl SqliteMemoryStore {
             .await?)
     }
 
+    /// Assign a persisted trace step to its materialized canvas node.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::NotInitialized`] when the store is unconnected,
+    /// [`StoreError::Worker`] on background-thread failure, or
+    /// [`StoreError::Sqlite`] for storage errors.
+    pub async fn assign_trace_step_node(
+        &self,
+        step_id: &str,
+        node_id: &str,
+    ) -> Result<(), StoreError> {
+        let conn = self.require_conn("assign_trace_step_node")?.clone();
+        let step_id = step_id.to_owned();
+        let node_id = node_id.to_owned();
+        let now_ms = current_unix_ms();
+        Ok(conn
+            .call(move |c| {
+                c.execute(
+                    "UPDATE trace_steps
+                        SET node_id = ?1,
+                            updated_at_ms = ?2
+                      WHERE step_id = ?3",
+                    params![node_id, now_ms, step_id],
+                )?;
+                Ok::<_, tokio_rusqlite::Error>(())
+            })
+            .await?)
+    }
+
     /// Insert or update a task-trace canvas.
     ///
     /// # Errors
