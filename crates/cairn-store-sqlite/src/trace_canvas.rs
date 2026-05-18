@@ -9,6 +9,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::StoreError;
 use crate::store::{SqliteMemoryStore, current_unix_ms};
+use cairn_core::verbs::lint::checks::trace_canvas::{
+    TraceCanvasLintCanvas, TraceCanvasLintNode, TraceCanvasLintSnapshot, TraceCanvasLintStep,
+};
 
 /// Draft row for inserting or replaying a trace step.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -574,6 +577,85 @@ impl SqliteMemoryStore {
                     nodes: nodes?,
                     edges: edges?,
                 }))
+            })
+            .await?)
+    }
+
+    /// Return a read-only snapshot for task-trace canvas lint checks.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::NotInitialized`] when the store is unconnected,
+    /// [`StoreError::Worker`] on background-thread failure, or
+    /// [`StoreError::Sqlite`] / [`StoreError::Codec`] for query errors.
+    pub async fn trace_canvas_lint_snapshot(&self) -> Result<TraceCanvasLintSnapshot, StoreError> {
+        let conn = self.require_conn("trace_canvas_lint_snapshot")?.clone();
+        Ok(conn
+            .call(move |c| {
+                let mut step_stmt = c.prepare_cached(
+                    "SELECT step_id, trace_id, session_id, turn_id, tool_call_id, timestamp_ms,
+                        tool_name, call_summary, result_summary, result_ref, salience,
+                        replaceability_score, node_id, source_hash
+                   FROM trace_steps
+                  ORDER BY session_id ASC, timestamp_ms ASC, step_id ASC",
+                )?;
+                let steps = step_stmt
+                    .query_map([], trace_step_from_row)?
+                    .map(|row| {
+                        row.map(|step| TraceCanvasLintStep {
+                            step_id: step.step_id,
+                            session_id: step.session_id,
+                            result_ref: step.result_ref,
+                            node_id: step.node_id,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                let mut canvas_stmt = c.prepare_cached(
+                    "SELECT canvas_id, session_id, title, goal, status, summary,
+                            active_node_id, max_bytes, version
+                       FROM trace_canvases
+                      ORDER BY session_id ASC, canvas_id ASC",
+                )?;
+                let canvases = canvas_stmt
+                    .query_map([], trace_canvas_from_row)?
+                    .map(|row| {
+                        row.map(|canvas| TraceCanvasLintCanvas {
+                            canvas_id: canvas.canvas_id,
+                            session_id: canvas.session_id,
+                            title: canvas.title,
+                            goal: canvas.goal,
+                            summary: canvas.summary,
+                            active_node_id: canvas.active_node_id,
+                            max_bytes: u64::try_from(canvas.max_bytes).unwrap_or(u64::MAX),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                let mut node_stmt = c.prepare_cached(
+                    "SELECT node_id, canvas_id, label, status, summary, timestamp_ms,
+                        source_step_ids, evidence_record_ids
+                   FROM trace_canvas_nodes
+                  ORDER BY canvas_id ASC, timestamp_ms ASC, node_id ASC",
+                )?;
+                let nodes = node_stmt
+                    .query_map([], trace_canvas_node_from_row)?
+                    .map(|row| {
+                        row.map(|node| TraceCanvasLintNode {
+                            node_id: node.node_id,
+                            canvas_id: node.canvas_id,
+                            label: node.label,
+                            summary: node.summary,
+                            source_step_ids: node.source_step_ids,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                Ok::<_, tokio_rusqlite::Error>(TraceCanvasLintSnapshot {
+                    steps,
+                    canvases,
+                    nodes,
+                })
             })
             .await?)
     }

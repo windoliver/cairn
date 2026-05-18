@@ -163,6 +163,44 @@ async fn active_trace_canvas_context_returns_edges_in_stable_order() {
     assert_eq!(context.edges[1].label, None);
 }
 
+#[tokio::test]
+async fn trace_canvas_lint_snapshot_carries_steps_canvases_and_nodes() {
+    let store = open_in_memory().await.expect("open");
+    seed_canvas_with_two_nodes(&store).await;
+    store
+        .upsert_trace_step(TraceStepDraft {
+            step_id: "step-1".into(),
+            trace_id: "trace-1".into(),
+            session_id: "session-1".into(),
+            turn_id: "turn-1".into(),
+            tool_call_id: Some("tool-call-1".into()),
+            timestamp_ms: 100,
+            tool_name: Some("shell".into()),
+            call_summary: "run check".into(),
+            result_summary: "check passed".into(),
+            result_ref: Some("record-1".into()),
+            salience: 0.7,
+            replaceability_score: 0.2,
+            node_id: Some("node-1".into()),
+            source_hash: "source-hash-1".into(),
+        })
+        .await
+        .expect("insert step");
+
+    let snapshot = store
+        .trace_canvas_lint_snapshot()
+        .await
+        .expect("trace canvas lint snapshot");
+    assert_eq!(snapshot.steps.len(), 1);
+    assert_eq!(snapshot.steps[0].step_id, "step-1");
+    assert_eq!(snapshot.steps[0].node_id.as_deref(), Some("node-1"));
+    assert_eq!(snapshot.canvases.len(), 1);
+    assert_eq!(snapshot.canvases[0].canvas_id, "canvas-1");
+    assert_eq!(snapshot.nodes.len(), 2);
+    assert_eq!(snapshot.nodes[0].node_id, "node-1");
+    assert_eq!(snapshot.nodes[1].source_step_ids, vec!["step-2"]);
+}
+
 async fn seed_canvas_with_two_nodes(store: &cairn_store_sqlite::SqliteMemoryStore) {
     store
         .upsert_trace_canvas(TraceCanvasDraft {
