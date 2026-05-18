@@ -57,6 +57,27 @@ runs use the cache and require no network access.
   works; semantic and hybrid search are then rejected with
   `CapabilityUnavailable` (brief §8.0.b).
 
+## Signing-key storage
+
+`cairn ingest` and the other mutating verbs auto-provision a default issuer
+the first time they run. The signing key is written to a keystore.
+
+- **macOS:** the OS keychain (Keychain Access). You may be prompted to allow
+  access on the first run.
+- **Linux desktop:** the Secret Service (gnome-keyring / KWallet). Make sure
+  one is running.
+- **Linux headless / CI / Docker / WSL without a desktop:** there is no
+  Secret Service, so the OS path fails. Set `CAIRN_KEYSTORE=file` before
+  running any mutating verb — the key is stored under
+  `<vault>/.cairn/keystore/` instead:
+
+  ```bash
+  export CAIRN_KEYSTORE=file
+  ```
+
+  The `scripts/install-smoke.sh` test harness does this automatically
+  because CI runners are headless.
+
 ## Verifying the install
 
 ```bash
