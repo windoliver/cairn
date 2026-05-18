@@ -4,6 +4,7 @@
     reason = "CLI helpers return complete response envelopes for direct JSON emission"
 )]
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1030,28 +1031,35 @@ fn render_trace_canvas_section(
         return String::new();
     }
     let canvas_budget = effective_trace_canvas_budget(context, budget);
+    if canvas_budget == 0 {
+        return String::new();
+    }
+    let full = render_trace_canvas_section_uncapped(context);
+    if full.len() as u64 <= canvas_budget {
+        return full;
+    }
+
+    let compact = render_compact_trace_canvas_section(context);
+    if !compact.is_empty() && compact.len() as u64 <= canvas_budget {
+        return compact;
+    }
+
+    String::new()
+}
+
+fn render_trace_canvas_section_uncapped(
+    context: &cairn_store_sqlite::TraceCanvasContext,
+) -> String {
     let mut out = String::new();
-    push_capped(&mut out, "# Current Task\n", canvas_budget);
-    push_capped(&mut out, &context.canvas.title, canvas_budget);
-    push_capped(&mut out, "\n", canvas_budget);
-    push_capped(
-        &mut out,
-        &format!("Canvas: {}\n", context.canvas.canvas_id),
-        canvas_budget,
-    );
+    out.push_str("# Current Task\n");
+    out.push_str(&context.canvas.title);
+    out.push('\n');
+    let _ = writeln!(out, "Canvas: {}", context.canvas.canvas_id);
     if !context.canvas.goal.trim().is_empty() {
-        push_capped(
-            &mut out,
-            &format!("Goal: {}\n", context.canvas.goal),
-            canvas_budget,
-        );
+        let _ = writeln!(out, "Goal: {}", context.canvas.goal);
     }
     if !context.canvas.summary.trim().is_empty() {
-        push_capped(
-            &mut out,
-            &format!("Summary: {}\n", context.canvas.summary),
-            canvas_budget,
-        );
+        let _ = writeln!(out, "Summary: {}", context.canvas.summary);
     }
     if let Some(active_node_id) = context.canvas.active_node_id.as_deref()
         && let Some(active) = context
@@ -1059,55 +1067,51 @@ fn render_trace_canvas_section(
             .iter()
             .find(|node| node.node_id == active_node_id)
     {
-        push_capped(
-            &mut out,
-            &format!("Active: {} ({})\n", active.label, active.status),
-            canvas_budget,
-        );
-        push_capped(
-            &mut out,
-            &format!("Active node: {}\n", active.node_id),
-            canvas_budget,
-        );
+        let _ = writeln!(out, "Active: {} ({})", active.label, active.status);
+        let _ = writeln!(out, "Active node: {}", active.node_id);
     }
     for node in &context.nodes {
-        if out.len() as u64 >= canvas_budget {
-            break;
-        }
-        push_capped(
-            &mut out,
-            &format!("- [{}] {}: {}\n", node.status, node.label, node.summary),
-            canvas_budget,
-        );
-        push_node_retrieve_hints(&mut out, node, canvas_budget);
+        let _ = writeln!(out, "- [{}] {}: {}", node.status, node.label, node.summary);
+        push_node_retrieve_hints(&mut out, node);
     }
     out
 }
 
-fn push_node_retrieve_hints(
-    out: &mut String,
-    node: &cairn_store_sqlite::TraceCanvasNodeRow,
-    budget: u64,
-) {
+fn push_node_retrieve_hints(out: &mut String, node: &cairn_store_sqlite::TraceCanvasNodeRow) {
     if node.source_step_ids.is_empty() && node.evidence_record_ids.is_empty() {
         return;
     }
-    push_capped(out, "  Retrieve hints:", budget);
+    out.push_str("  Retrieve hints:");
     if !node.source_step_ids.is_empty() {
-        push_capped(
-            out,
-            &format!(" trace_steps={}", node.source_step_ids.join(",")),
-            budget,
-        );
+        let _ = write!(out, " trace_steps={}", node.source_step_ids.join(","));
     }
     if !node.evidence_record_ids.is_empty() {
-        push_capped(
-            out,
-            &format!(" result_refs={}", node.evidence_record_ids.join(",")),
-            budget,
-        );
+        let _ = write!(out, " result_refs={}", node.evidence_record_ids.join(","));
     }
-    push_capped(out, "\n", budget);
+    out.push('\n');
+}
+
+fn render_compact_trace_canvas_section(context: &cairn_store_sqlite::TraceCanvasContext) -> String {
+    let active = context
+        .canvas
+        .active_node_id
+        .as_deref()
+        .and_then(|active_node_id| {
+            context
+                .nodes
+                .iter()
+                .find(|node| node.node_id == active_node_id)
+        })
+        .or_else(|| context.nodes.first());
+    let Some(active) = active else {
+        return String::new();
+    };
+    let mut out = String::new();
+    out.push_str("# Current Task\n");
+    let _ = writeln!(out, "Canvas: {}", context.canvas.canvas_id);
+    let _ = writeln!(out, "Active node: {}", active.node_id);
+    push_node_retrieve_hints(&mut out, active);
+    out
 }
 
 fn effective_trace_canvas_budget(
@@ -1695,7 +1699,7 @@ mod tests {
         };
 
         let section = render_trace_canvas_section(&context, 100);
-        assert!(section.len() <= 20, "section was {} bytes", section.len());
+        assert!(section.is_empty());
     }
 
     #[test]
@@ -1731,6 +1735,41 @@ mod tests {
         assert!(section.contains("Retrieve hints:"));
         assert!(section.contains("trace_steps=step-1"));
         assert!(section.contains("result_refs=record-1"));
+    }
+
+    #[test]
+    fn trace_canvas_section_falls_back_to_compact_complete_hints() {
+        let context = cairn_store_sqlite::TraceCanvasContext {
+            canvas: cairn_store_sqlite::TraceCanvasRow {
+                canvas_id: "c".to_owned(),
+                session_id: "session-1".to_owned(),
+                title: "Very long active task title".to_owned(),
+                goal: "Very long goal text".repeat(20),
+                status: cairn_store_sqlite::TraceCanvasStatus::Active,
+                summary: "Very long summary text".repeat(20),
+                active_node_id: Some("n".to_owned()),
+                max_bytes: 4096,
+                version: 1,
+            },
+            nodes: vec![cairn_store_sqlite::TraceCanvasNodeRow {
+                node_id: "n".to_owned(),
+                canvas_id: "c".to_owned(),
+                label: "Very long node label".to_owned(),
+                status: "completed".to_owned(),
+                summary: "Very long node summary".repeat(20),
+                timestamp_ms: 1,
+                source_step_ids: vec!["s".to_owned()],
+                evidence_record_ids: vec!["r".to_owned()],
+            }],
+            edges: vec![],
+        };
+
+        let section = render_trace_canvas_section(&context, 1_000);
+        assert!(section.len() <= 200, "section was {} bytes", section.len());
+        assert!(section.contains("Canvas: c"));
+        assert!(section.contains("Active node: n"));
+        assert!(section.contains("Retrieve hints: trace_steps=s result_refs=r"));
+        assert!(!section.contains("Very long goal text"));
     }
 
     #[test]
