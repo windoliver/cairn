@@ -2,7 +2,7 @@
 
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -94,10 +94,13 @@ pub fn run(matches: &ArgMatches) -> ExitCode {
 
 fn run_claude_code(matches: &ArgMatches) -> ExitCode {
     let json = matches.get_flag("json");
-    let project_dir = matches.get_one::<String>("project-dir").map_or_else(
-        || std::env::current_dir().expect("cwd available"),
-        PathBuf::from,
-    );
+    let project_dir = match doctor_project_dir(matches) {
+        Ok(project_dir) => project_dir,
+        Err(err) => {
+            eprintln!("cairn doctor claude-code: failed to resolve project directory: {err}");
+            return ExitCode::from(69);
+        }
+    };
     let home_dir = matches
         .get_one::<String>("home-dir")
         .map(PathBuf::from)
@@ -187,6 +190,39 @@ fn run_claude_code(matches: &ArgMatches) -> ExitCode {
     }
 
     finish(json, server_name, project_dir, stages)
+}
+
+fn doctor_project_dir(matches: &ArgMatches) -> std::io::Result<PathBuf> {
+    let raw = match matches.get_one::<String>("project-dir") {
+        Some(path) => PathBuf::from(path),
+        None => std::env::current_dir()?,
+    };
+    absolute_path(&raw)
+}
+
+fn absolute_path(path: &Path) -> std::io::Result<PathBuf> {
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    Ok(normalize_path(&path))
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+        }
+    }
+    normalized
 }
 
 fn finish(

@@ -30,7 +30,7 @@ cairn doctor claude-code
 Remove only the Cairn server entry:
 
 ```bash
-cairn setup claude-code remove
+cairn setup claude-code --vault work remove
 ```
 
 Cairn writes no API keys or provider credentials into Claude Code config. The

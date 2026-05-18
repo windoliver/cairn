@@ -337,3 +337,57 @@ fn doctor_succeeds_after_setup_with_hook_settings() {
     let receipt = parse_stdout_json(out);
     assert_eq!(receipt["ok"], true);
 }
+
+#[test]
+fn doctor_succeeds_after_setup_with_relative_project_dir() {
+    let root = tempfile::tempdir().expect("root tempdir");
+    let project = root.path().join("project");
+    let home = root.path().join("home");
+    std::fs::create_dir_all(&project).expect("mkdir project");
+    std::fs::create_dir_all(&home).expect("mkdir home");
+    write_hook_settings(&project);
+
+    let vault = synth_vault();
+    let binary = env!("CARGO_BIN_EXE_cairn");
+
+    cli()
+        .current_dir(root.path())
+        .arg("--vault")
+        .arg(vault.path())
+        .args(["setup", "claude-code"])
+        .args(["--project-dir", "project"])
+        .arg("--home-dir")
+        .arg(&home)
+        .args(["--binary", binary, "--json"])
+        .assert()
+        .success();
+
+    let out = cli()
+        .current_dir(root.path())
+        .args(["doctor", "claude-code"])
+        .args(["--project-dir", "project"])
+        .arg("--home-dir")
+        .arg(&home)
+        .arg("--json")
+        .output()
+        .expect("cairn doctor claude-code --json");
+
+    assert!(
+        out.status.success(),
+        "exit: {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let receipt = parse_stdout_json(out);
+    assert_eq!(receipt["ok"], true);
+    let expected_project_dir = project
+        .canonicalize()
+        .expect("canonicalize project")
+        .display()
+        .to_string();
+    assert_eq!(
+        receipt["project_dir"].as_str(),
+        Some(expected_project_dir.as_str())
+    );
+}
