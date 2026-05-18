@@ -38,6 +38,9 @@ fn install_smoke_script_passes_against_built_binary() {
         "ok: ingest",
         "ok: search",
         "ok: retrieve",
+        "ok: summarize",
+        "ok: assemble_hot",
+        "ok: capture_trace",
         "ok: lint",
         "ok: forget",
     ] {

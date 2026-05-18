@@ -115,10 +115,17 @@ impl ModelCache {
         }
         std::fs::create_dir_all(&tmp)?;
 
-        // ApiBuilder::from_env() picks up HF_ENDPOINT / HF_HOME / HF_TOKEN so
-        // operators on locked-down networks can point at a mirror. Plain
-        // Api::new() hardcodes huggingface.co and would ignore the env.
+        // ApiBuilder::from_env() picks up HF_ENDPOINT / HF_HOME so operators
+        // on locked-down networks can point at a mirror. Plain Api::new()
+        // hardcodes huggingface.co and would ignore the env.
+        //
+        // `.with_token(None)` explicitly clears any cached Hugging Face
+        // bearer token from `$HF_HOME/token`. The bge-small / MiniLM models
+        // we fetch are public and need no auth — and forwarding a personal
+        // token to an arbitrary `HF_ENDPOINT` mirror would be a credential
+        // leak we cannot accept.
         let api = hf_hub::api::sync::ApiBuilder::from_env()
+            .with_token(None)
             .build()
             .map_err(|e| EmbeddingError::Network(e.to_string()))?;
         let repo_id = kind

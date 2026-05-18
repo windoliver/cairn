@@ -6,10 +6,12 @@
 # $CAIRN_BIN (default: `cairn` from PATH).
 #
 # Local embeddings are turned off via a pre-seeded `.cairn/config.yaml` so the
-# smoke does not depend on the one-time embedding-model fetch (~25 MB). That
+# smoke does not depend on the one-time embedding-model fetch (~128 MB). That
 # path is covered separately by `crates/cairn-cli/tests/bootstrap.rs`.
 #
-# Verb order: bootstrap → status → ingest → search → retrieve → lint → forget.
+# Verb order: bootstrap → status → ingest → search → retrieve → summarize →
+# assemble_hot → capture_trace → lint → forget — the eight P0 verbs from
+# brief §8.0.b plus bootstrap and status.
 # Each step that succeeds prints `ok: <verb>`. On the first failure the script
 # exits 1 with `fail: <verb> — <reason>` on stderr.
 #
@@ -112,7 +114,40 @@ assert_committed "$retrieve_out" \
   || fail "retrieve" "envelope not committed: $retrieve_out"
 echo "ok: retrieve"
 
-# ── 6. lint ────────────────────────────────────────────────────────────────
+# ── 6. summarize ───────────────────────────────────────────────────────────
+# `summarize` takes the record id positionally — see
+# crates/cairn-cli/tests/envelope_tests.rs::summarize_returns_committed_envelope.
+summarize_out="$("$CAIRN_BIN" summarize "$RECORD_ID" --json \
+  2>"$VAULT/summarize.err")" \
+  || fail "summarize" "exit $? — $(cat "$VAULT/summarize.err")"
+assert_committed "$summarize_out" \
+  || fail "summarize" "envelope not committed: $summarize_out"
+echo "ok: summarize"
+
+# ── 7. assemble_hot ────────────────────────────────────────────────────────
+# `assemble_hot` needs a bound vault with a seeded default identity — the
+# earlier `ingest` step satisfies that. See
+# crates/cairn-cli/tests/envelope_tests.rs::assemble_hot_returns_committed_envelope.
+assemble_out="$("$CAIRN_BIN" assemble_hot --json \
+  2>"$VAULT/assemble_hot.err")" \
+  || fail "assemble_hot" "exit $? — $(cat "$VAULT/assemble_hot.err")"
+assert_committed "$assemble_out" \
+  || fail "assemble_hot" "envelope not committed: $assemble_out"
+echo "ok: assemble_hot"
+
+# ── 8. capture_trace ───────────────────────────────────────────────────────
+# `capture_trace --from <jsonl>` ingests a trace journal. An empty file is
+# enough to prove the verb is wired and emits a committed envelope. See
+# crates/cairn-cli/tests/envelope_tests.rs::capture_trace_returns_committed_envelope.
+: >"$VAULT/empty-trace.jsonl"
+trace_out="$("$CAIRN_BIN" capture_trace --from "$VAULT/empty-trace.jsonl" --json \
+  2>"$VAULT/capture_trace.err")" \
+  || fail "capture_trace" "exit $? — $(cat "$VAULT/capture_trace.err")"
+assert_committed "$trace_out" \
+  || fail "capture_trace" "envelope not committed: $trace_out"
+echo "ok: capture_trace"
+
+# ── 9. lint ────────────────────────────────────────────────────────────────
 # `lint` exits 1 when findings exist but still emits a committed envelope —
 # see crates/cairn-cli/tests/lint_cli.rs. Tolerate exit codes 0 and 1, and
 # assert by envelope shape.
@@ -128,7 +163,7 @@ assert_committed "$lint_out" \
   || fail "lint" "envelope not committed: $lint_out"
 echo "ok: lint"
 
-# ── 7. forget ──────────────────────────────────────────────────────────────
+# ── 10. forget ─────────────────────────────────────────────────────────────
 # `forget --record <id>` (the flag is `--record`, NOT `--record-id`) —
 # see crates/cairn-cli/tests/envelope_tests.rs::forget_record_returns_committed_envelope.
 forget_out="$("$CAIRN_BIN" forget --record "$RECORD_ID" --json \

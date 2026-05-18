@@ -5,27 +5,28 @@ Cairn v0.1 is a single Rust binary. Two supported install paths.
 ## `cargo install` (any platform)
 
 ```bash
-cargo install cairn
+cargo install cairn-cli
 ```
 
-Requires Rust 1.95+. Pulls `cairn-cli` from crates.io and builds the `cairn`
-binary into `~/.cargo/bin/cairn`. No other runtime dependencies.
+Requires Rust 1.95+. The crate name is `cairn-cli`; it builds a binary named
+`cairn` into `~/.cargo/bin/cairn`. No other runtime dependencies.
+
+> The shorter `cairn` crate name on crates.io is already taken by an unrelated
+> project; renaming `cairn-cli → cairn` is tracked under issue #141.
 
 ## `brew install` (macOS / Linux)
 
 ```bash
 brew tap windoliver/cairn https://github.com/windoliver/cairn
-brew install cairn
-```
-
-Builds from source via the bundled `cargo install` step. Bottles (pre-built
-binaries) are tracked under issue #141 and not yet available.
-
-To track `main` instead of the latest tagged release:
-
-```bash
 brew install --HEAD cairn
 ```
+
+Builds from source via the bundled `cargo install` step. `--HEAD` is required
+until v0.1.0 is tagged — the stable release block in the formula still has a
+placeholder `sha256`, so plain `brew install cairn` will fail at checksum
+verification. Bottles (pre-built binaries) and the first stable release are
+tracked under issue #141; once v0.1.0 ships, `brew install cairn` will work
+without `--HEAD`.
 
 ## First-run model fetch
 
@@ -60,8 +61,9 @@ source tree — point it at your installed binary:
 CAIRN_BIN="$(which cairn)" scripts/install-smoke.sh
 ```
 
-It bootstraps a temp vault, exercises every P0 verb (`status`, `ingest`,
-`search`, `retrieve`, `lint`, `forget`), and exits 0 on full pass.
+It bootstraps a temp vault, exercises the eight P0 verbs (`status`, `ingest`,
+`search`, `retrieve`, `summarize`, `assemble_hot`, `capture_trace`, `lint`,
+`forget`), and exits 0 on full pass.
 
 ## Offline after the first run
 
