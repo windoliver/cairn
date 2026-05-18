@@ -197,6 +197,14 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("index", "records_trace_seq"),
     ("index", "records_trace_parent"),
     ("index", "records_trace_payload_hash"),
+    // 0064_v02_record_session_links (issue #109; brief §19 + §5.6):
+    // deterministic session-delete metadata derived from legacy v0.1
+    // scope/trace rows, plus a review queue for ambiguous conflicts.
+    ("table", "record_session_links"),
+    ("index", "record_session_links_session_idx"),
+    ("index", "record_session_links_target_idx"),
+    ("table", "record_link_review"),
+    ("index", "record_link_review_reason_idx"),
     // 0031_records_consent_model — Phase-A per-row consent gate (#253, brief §14).
     ("index", "records_consent_model_idx"),
     // 0032_consent_timeline — append-only receipt event log (#253, brief §14).

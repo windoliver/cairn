@@ -52,6 +52,19 @@ fn consolidation_summary_record(
     record
 }
 
+fn unscoped_record(record_id: &str, target_id: &str, body: &str) -> MemoryRecord {
+    let mut record = sample_record();
+    record.id = RecordId::parse(record_id).expect("valid record id");
+    record.target_id = TargetId::parse(target_id).expect("valid target id");
+    body.clone_into(&mut record.body);
+    record.scope = ScopeTuple {
+        user: record.scope.user.clone(),
+        agent: record.scope.agent.clone(),
+        ..ScopeTuple::default()
+    };
+    record
+}
+
 #[tokio::test]
 async fn forget_session_purges_all_session_targets_through_wal() {
     let store = open_in_memory().await.expect("open store");
@@ -152,6 +165,60 @@ async fn forget_session_purges_all_session_targets_through_wal() {
     })
     .await
     .expect("wal assertion");
+}
+
+#[tokio::test]
+async fn forget_session_uses_migrated_record_session_links() {
+    let store = open_in_memory().await.expect("open store");
+    let record = unscoped_record(
+        "01J00000000000000000001091",
+        "01HQZX9F5N0000000000010901",
+        "issue109 migrated trace body",
+    );
+    store.upsert(&record).await.expect("upsert migrated record");
+
+    let conn = store.raw_conn_for_admin().expect("raw conn").clone();
+    let record_id = record.id.as_str().to_owned();
+    let target_id = record.target_id.as_str().to_owned();
+    conn.call(move |c| {
+        c.execute(
+            "INSERT INTO record_session_links (
+                record_id, target_id, session_id, tenant, workspace,
+                link_source, link_confidence, created_at
+             ) VALUES (?1, ?2, 'sess-109-derived', NULL, NULL, 'trace', 'derived', 109)",
+            params![record_id, target_id],
+        )?;
+        Ok::<_, tokio_rusqlite::Error>(())
+    })
+    .await
+    .expect("seed migrated session link");
+
+    let outcome = store
+        .forget_session("sess-109-derived")
+        .await
+        .expect("forget derived session");
+
+    assert_eq!(outcome.deleted_count, 1);
+    assert!(outcome.tombstones.contains(&record.id));
+
+    let conn = store.raw_conn_for_admin().expect("raw conn").clone();
+    conn.call(move |c| {
+        let leaked_records: i64 = c.query_row(
+            "SELECT COUNT(*) FROM records WHERE record_id = '01J00000000000000000001091'",
+            [],
+            |row| row.get(0),
+        )?;
+        let leaked_links: i64 = c.query_row(
+            "SELECT COUNT(*) FROM record_session_links WHERE session_id = 'sess-109-derived'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(leaked_records, 0);
+        assert_eq!(leaked_links, 0);
+        Ok::<_, tokio_rusqlite::Error>(())
+    })
+    .await
+    .expect("derived link assertion");
 }
 
 #[tokio::test]

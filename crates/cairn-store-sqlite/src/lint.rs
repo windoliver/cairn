@@ -44,10 +44,12 @@ pub fn lint_edges(conn: &Connection) -> Result<EdgeLintReport, StoreError> {
     let mut findings = contradiction_findings(conn)?;
     let ambiguous_findings = ambiguous_findings(conn)?;
     let purge_findings = lint_purge_pending(conn)?;
+    let review_findings = lint_record_link_review(conn)?;
     let contradictions = usize_to_u64(findings.len());
     let ambiguous_edges = usize_to_u64(ambiguous_findings.len());
     findings.extend(ambiguous_findings);
     findings.extend(purge_findings);
+    findings.extend(review_findings);
 
     Ok(EdgeLintReport {
         findings,
@@ -55,6 +57,48 @@ pub fn lint_edges(conn: &Connection) -> Result<EdgeLintReport, StoreError> {
         ambiguous_edges,
         auto_resolved: 0,
     })
+}
+
+fn lint_record_link_review(conn: &Connection) -> Result<Vec<Finding>, StoreError> {
+    ensure_table(conn, "record_link_review")?;
+
+    let mut stmt = conn.prepare(
+        "SELECT record_id, reason, scope_session_id, trace_session_id
+           FROM record_link_review
+          ORDER BY record_id",
+    )?;
+    let mut rows = stmt.query([])?;
+    let mut findings = Vec::new();
+
+    while let Some(row) = rows.next()? {
+        let record_id: String = row.get(0)?;
+        let reason: String = row.get(1)?;
+        let scope_session_id: Option<String> = row.get(2)?;
+        let trace_session_id: Option<String> = row.get(3)?;
+        let scope_label = scope_session_id.as_deref().unwrap_or("<missing>");
+        let trace_label = trace_session_id.as_deref().unwrap_or("<missing>");
+        findings.push(Finding {
+            kind: Kind::DeferredCheck,
+            severity: Severity::Warning,
+            message: format!(
+                "manual review required: record {record_id} has {reason} \
+                 (scope_session_id={scope_label}, trace_session_id={trace_label})"
+            ),
+            entities: Some(vec![record_id.clone()]),
+            suggested_fix: Some(
+                "repair or re-ingest the record after choosing the authoritative session link"
+                    .to_owned(),
+            ),
+            target: Some(Target {
+                operation_id: None,
+                path: None,
+                record_id: Some(Ulid(record_id)),
+            }),
+            tracking_issue: Some(109),
+        });
+    }
+
+    Ok(findings)
 }
 
 /// Find record-forget operations whose Phase B purge work is still incomplete.
