@@ -22,10 +22,13 @@ fn spawn_health_server() -> (String, thread::JoinHandle<()>) {
     listener.set_nonblocking(true).unwrap();
     let addr = listener.local_addr().unwrap();
     let handle = thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             match listener.accept() {
                 Ok((mut stream, _)) => {
+                    stream
+                        .set_nonblocking(false)
+                        .expect("make accepted health stream blocking");
                     let mut buf = [0_u8; 512];
                     let n = stream.read(&mut buf).expect("read health request");
                     let request = String::from_utf8_lossy(&buf[..n]);
@@ -205,10 +208,14 @@ fn status_json_reports_healthy_nexus_projection_from_health_endpoint() {
         .args(["status", "--json"])
         .output()
         .expect("cairn status --json");
-    server.join().unwrap();
 
-    assert!(out.status.success(), "exit: {:?}", out.status);
     let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    let stderr = String::from_utf8(out.stderr).expect("utf-8");
+    assert!(
+        out.status.success(),
+        "exit: {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        out.status
+    );
     let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
     assert_eq!(v["health"]["authority_db"]["state"], "missing");
     assert_eq!(v["health"]["nexus_projection"]["state"], "healthy");
@@ -223,6 +230,7 @@ fn status_json_reports_healthy_nexus_projection_from_health_endpoint() {
     );
     assert_eq!(v["health"]["nexus_projection"]["endpoint"], endpoint);
     assert!(v["health"]["nexus_projection"]["reason"].is_null());
+    server.join().unwrap();
     assert!(
         !dir.path().join("nexus-data").exists(),
         "status must not create projection directories"
