@@ -62,6 +62,31 @@ fn status_json_reports_missing_authority_db() {
 }
 
 #[test]
+fn status_json_reports_invalid_authority_db_unavailable() {
+    let dir = tempfile::tempdir().unwrap();
+    let cairn_dir = dir.path().join(".cairn");
+    std::fs::create_dir(&cairn_dir).unwrap();
+    std::fs::write(cairn_dir.join("cairn.db"), "not a sqlite database").unwrap();
+
+    let out = cli()
+        .current_dir(dir.path())
+        .args(["status", "--json"])
+        .output()
+        .expect("cairn status --json");
+
+    assert!(out.status.success(), "exit: {:?}", out.status);
+    let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+    assert_eq!(v["health"]["authority_db"]["state"], "unavailable");
+    assert!(
+        v["health"]["authority_db"]["reason"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty()),
+        "missing non-empty reason: {stdout}"
+    );
+}
+
+#[test]
 fn status_human_prints_split_health() {
     let dir = tempfile::tempdir().unwrap();
     let out = cli()

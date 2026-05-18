@@ -34,11 +34,22 @@ fn authority_db_health(vault_path: &Path) -> StatusResponseHealthAuthorityDb {
         };
     }
 
-    match rusqlite::Connection::open_with_flags(
+    let conn = match rusqlite::Connection::open_with_flags(
         &db_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     ) {
-        Ok(_) => StatusResponseHealthAuthorityDb {
+        Ok(conn) => conn,
+        Err(err) => {
+            return StatusResponseHealthAuthorityDb {
+                state: StatusResponseHealthAuthorityDbState::Unavailable,
+                path,
+                reason: Some(err.to_string()),
+            };
+        }
+    };
+
+    match conn.query_row("PRAGMA schema_version", [], |_| Ok(())) {
+        Ok(()) => StatusResponseHealthAuthorityDb {
             state: StatusResponseHealthAuthorityDbState::Healthy,
             path,
             reason: None,
