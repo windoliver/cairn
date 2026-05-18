@@ -244,7 +244,7 @@ impl TraceCanvasMaterializer {
         {
             self.store
                 .upsert_trace_canvas_edge(TraceCanvasEdgeDraft {
-                    canvas_id,
+                    canvas_id: canvas_id.clone(),
                     from_node_id: previous_node_id,
                     to_node_id: node_id,
                     kind: TraceCanvasEdgeKind::DependsOn,
@@ -252,6 +252,10 @@ impl TraceCanvasMaterializer {
                 })
                 .await?;
         }
+
+        self.store
+            .refresh_trace_canvas_projection(&canvas_id)
+            .await?;
 
         self.store
             .active_trace_canvas_for_session(&context_session_id)

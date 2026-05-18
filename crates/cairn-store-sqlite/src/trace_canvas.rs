@@ -9,8 +9,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::StoreError;
 use crate::store::{SqliteMemoryStore, current_unix_ms};
+use cairn_core::domain::projection::body_hash;
 use cairn_core::verbs::lint::checks::trace_canvas::{
     TraceCanvasLintCanvas, TraceCanvasLintNode, TraceCanvasLintSnapshot, TraceCanvasLintStep,
+    render_markdown,
 };
 
 /// Draft row for inserting or replaying a trace step.
@@ -294,6 +296,17 @@ pub struct TraceCanvasContext {
     pub nodes: Vec<TraceCanvasNodeRow>,
     /// Canvas edges ordered by source, destination, kind, then label.
     pub edges: Vec<TraceCanvasEdgeRow>,
+}
+
+/// Cached markdown projection rebuilt from authoritative trace-canvas rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceCanvasProjectionCache {
+    /// Canvas id the projection describes.
+    pub canvas_id: String,
+    /// Canonical markdown body.
+    pub markdown: String,
+    /// Hash of the canonical markdown body.
+    pub hash: String,
 }
 
 impl SqliteMemoryStore {
@@ -581,6 +594,50 @@ impl SqliteMemoryStore {
             .await?)
     }
 
+    /// Rebuild and persist the markdown projection cache for one canvas.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::NotInitialized`] when the store is unconnected,
+    /// [`StoreError::Worker`] on background-thread failure, or
+    /// [`StoreError::Sqlite`] / [`StoreError::Codec`] for query errors.
+    pub async fn refresh_trace_canvas_projection(
+        &self,
+        canvas_id: &str,
+    ) -> Result<TraceCanvasProjectionCache, StoreError> {
+        let conn = self
+            .require_conn("refresh_trace_canvas_projection")?
+            .clone();
+        let canvas_id = canvas_id.to_owned();
+        let now_ms = current_unix_ms();
+        Ok(conn
+            .call(move |c| {
+                let canvas = trace_canvas_by_id(c, &canvas_id)?;
+                let nodes = trace_canvas_nodes_for_canvas(c, &canvas_id)?;
+                let lint_canvas = lint_canvas_from_row(canvas, None);
+                let lint_nodes = nodes
+                    .into_iter()
+                    .map(lint_node_from_row)
+                    .collect::<Vec<_>>();
+                let markdown = render_markdown(&lint_canvas, &lint_nodes);
+                let hash = body_hash(&markdown);
+                c.execute(
+                    "UPDATE trace_canvases
+                        SET projection_markdown = ?1,
+                            projection_hash = ?2,
+                            updated_at_ms = ?3
+                      WHERE canvas_id = ?4",
+                    params![&markdown, &hash, now_ms, &canvas_id],
+                )?;
+                Ok::<_, tokio_rusqlite::Error>(TraceCanvasProjectionCache {
+                    canvas_id,
+                    markdown,
+                    hash,
+                })
+            })
+            .await?)
+    }
+
     /// Return a read-only snapshot for task-trace canvas lint checks.
     ///
     /// # Errors
@@ -613,23 +670,12 @@ impl SqliteMemoryStore {
 
                 let mut canvas_stmt = c.prepare_cached(
                     "SELECT canvas_id, session_id, title, goal, status, summary,
-                            active_node_id, max_bytes, version
+                            active_node_id, max_bytes, version, projection_markdown
                        FROM trace_canvases
                       ORDER BY session_id ASC, canvas_id ASC",
                 )?;
                 let canvases = canvas_stmt
-                    .query_map([], trace_canvas_from_row)?
-                    .map(|row| {
-                        row.map(|canvas| TraceCanvasLintCanvas {
-                            canvas_id: canvas.canvas_id,
-                            session_id: canvas.session_id,
-                            title: canvas.title,
-                            goal: canvas.goal,
-                            summary: canvas.summary,
-                            active_node_id: canvas.active_node_id,
-                            max_bytes: u64::try_from(canvas.max_bytes).unwrap_or(u64::MAX),
-                        })
-                    })
+                    .query_map([], trace_canvas_lint_from_row)?
                     .collect::<Result<Vec<_>, _>>()?;
 
                 let mut node_stmt = c.prepare_cached(
@@ -640,15 +686,7 @@ impl SqliteMemoryStore {
                 )?;
                 let nodes = node_stmt
                     .query_map([], trace_canvas_node_from_row)?
-                    .map(|row| {
-                        row.map(|node| TraceCanvasLintNode {
-                            node_id: node.node_id,
-                            canvas_id: node.canvas_id,
-                            label: node.label,
-                            summary: node.summary,
-                            source_step_ids: node.source_step_ids,
-                        })
-                    })
+                    .map(|row| row.map(lint_node_from_row))
                     .collect::<Result<Vec<_>, _>>()?;
 
                 Ok::<_, tokio_rusqlite::Error>(TraceCanvasLintSnapshot {
@@ -711,6 +749,41 @@ fn trace_canvas_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TraceCanva
     })
 }
 
+fn trace_canvas_lint_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TraceCanvasLintCanvas> {
+    let status: String = row.get(4)?;
+    let canvas = TraceCanvasRow {
+        canvas_id: row.get(0)?,
+        session_id: row.get(1)?,
+        title: row.get(2)?,
+        goal: row.get(3)?,
+        status: TraceCanvasStatus::try_from(status).map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(err))
+        })?,
+        summary: row.get(5)?,
+        active_node_id: row.get(6)?,
+        max_bytes: row.get(7)?,
+        version: row.get(8)?,
+    };
+    let projection_markdown = row.get(9)?;
+    Ok(lint_canvas_from_row(canvas, projection_markdown))
+}
+
+fn lint_canvas_from_row(
+    canvas: TraceCanvasRow,
+    projection_markdown: Option<String>,
+) -> TraceCanvasLintCanvas {
+    TraceCanvasLintCanvas {
+        canvas_id: canvas.canvas_id,
+        session_id: canvas.session_id,
+        title: canvas.title,
+        goal: canvas.goal,
+        summary: canvas.summary,
+        active_node_id: canvas.active_node_id,
+        max_bytes: u64::try_from(canvas.max_bytes).unwrap_or(u64::MAX),
+        projection_markdown,
+    }
+}
+
 fn trace_canvas_node_by_id(
     c: &rusqlite::Connection,
     node_id: &str,
@@ -723,6 +796,21 @@ fn trace_canvas_node_by_id(
         [node_id],
         trace_canvas_node_from_row,
     )
+}
+
+fn trace_canvas_nodes_for_canvas(
+    c: &rusqlite::Connection,
+    canvas_id: &str,
+) -> rusqlite::Result<Vec<TraceCanvasNodeRow>> {
+    let mut stmt = c.prepare_cached(
+        "SELECT node_id, canvas_id, label, status, summary, timestamp_ms,
+                source_step_ids, evidence_record_ids
+           FROM trace_canvas_nodes
+          WHERE canvas_id = ?1
+          ORDER BY timestamp_ms ASC, node_id ASC",
+    )?;
+    stmt.query_map([canvas_id], trace_canvas_node_from_row)?
+        .collect()
 }
 
 fn trace_canvas_node_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TraceCanvasNodeRow> {
@@ -742,6 +830,16 @@ fn trace_canvas_node_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Trace
             rusqlite::Error::FromSqlConversionFailure(7, rusqlite::types::Type::Text, Box::new(err))
         })?,
     })
+}
+
+fn lint_node_from_row(node: TraceCanvasNodeRow) -> TraceCanvasLintNode {
+    TraceCanvasLintNode {
+        node_id: node.node_id,
+        canvas_id: node.canvas_id,
+        label: node.label,
+        summary: node.summary,
+        source_step_ids: node.source_step_ids,
+    }
 }
 
 fn trace_canvas_edge_by_key(

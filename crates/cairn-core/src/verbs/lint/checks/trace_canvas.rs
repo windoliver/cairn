@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 
 use crate::contract::source_resolver::SourceResolver;
+use crate::domain::projection::{ProjectionStatus, compare_projection};
 use crate::generated::verbs::lint::{Finding, Kind, Severity};
 use crate::verbs::lint::{LintRecord, finding, target_path};
 
@@ -47,6 +48,8 @@ pub struct TraceCanvasLintCanvas {
     pub active_node_id: Option<String>,
     /// Canvas-local render budget.
     pub max_bytes: u64,
+    /// Last materialized markdown projection, if one exists.
+    pub projection_markdown: Option<String>,
 }
 
 /// Lint view of one `trace_canvas_nodes` row.
@@ -128,9 +131,66 @@ pub fn run(
         if bytes > canvas.max_bytes {
             findings.push(canvas_over_budget_finding(canvas, bytes));
         }
+
+        let canonical = render_markdown(canvas, &snapshot.nodes);
+        if let Some(finding) = projection_finding(canvas, &canonical) {
+            findings.push(finding);
+        }
     }
 
     findings
+}
+
+/// Render the canonical markdown projection for a trace canvas.
+#[must_use]
+pub fn render_markdown(canvas: &TraceCanvasLintCanvas, nodes: &[TraceCanvasLintNode]) -> String {
+    let active_node = canvas.active_node_id.as_deref().unwrap_or("none");
+    let mut out = String::new();
+    out.push_str("# ");
+    out.push_str(&canvas.title);
+    out.push('\n');
+    out.push('\n');
+    out.push_str("Canvas: ");
+    out.push_str(&canvas.canvas_id);
+    out.push('\n');
+    out.push_str("Session: ");
+    out.push_str(&canvas.session_id);
+    out.push('\n');
+    out.push_str("Goal: ");
+    out.push_str(&canvas.goal);
+    out.push('\n');
+    out.push_str("Active node: ");
+    out.push_str(active_node);
+    out.push('\n');
+    out.push('\n');
+    out.push_str("## Summary\n");
+    out.push_str(&canvas.summary);
+    out.push('\n');
+    out.push('\n');
+    out.push_str("## Nodes\n");
+
+    for node in nodes
+        .iter()
+        .filter(|node| node.canvas_id == canvas.canvas_id)
+    {
+        out.push_str("- ");
+        out.push_str(&node.label);
+        out.push_str(" [");
+        out.push_str(&node.node_id);
+        out.push_str("]\n");
+        out.push_str("  Summary: ");
+        out.push_str(&node.summary);
+        out.push('\n');
+        out.push_str("  Source steps: ");
+        if node.source_step_ids.is_empty() {
+            out.push_str("none");
+        } else {
+            out.push_str(&node.source_step_ids.join(", "));
+        }
+        out.push('\n');
+    }
+
+    out
 }
 
 fn broken_result_ref_finding(step: &TraceCanvasLintStep, result_ref: &str) -> Finding {
@@ -222,28 +282,42 @@ fn canvas_over_budget_finding(canvas: &TraceCanvasLintCanvas, bytes: u64) -> Fin
     f
 }
 
-fn rendered_canvas_bytes(canvas: &TraceCanvasLintCanvas, nodes: &[TraceCanvasLintNode]) -> u64 {
-    let mut bytes = "# Current Task\n".len()
-        + canvas.title.len()
-        + "\n".len()
-        + "Goal: \n".len()
-        + canvas.goal.len()
-        + "Summary: \n".len()
-        + canvas.summary.len();
-
-    for node in nodes
-        .iter()
-        .filter(|node| node.canvas_id == canvas.canvas_id)
-    {
-        bytes = bytes
-            .saturating_add("- ".len())
-            .saturating_add(node.label.len())
-            .saturating_add(": ".len())
-            .saturating_add(node.summary.len())
-            .saturating_add("\n".len());
+fn projection_finding(canvas: &TraceCanvasLintCanvas, canonical: &str) -> Option<Finding> {
+    let path = format!("trace_canvases/{}.md", canvas.canvas_id);
+    match compare_projection(canonical, canvas.projection_markdown.as_deref()) {
+        ProjectionStatus::Match => None,
+        ProjectionStatus::Drift {
+            expected_body_hash,
+            actual_body_hash,
+        } => {
+            let mut f = finding(
+                Kind::ProjectionDrift,
+                Severity::Warning,
+                format!(
+                    "trace canvas projection at {path} drifts from db; expected_body_hash={expected_body_hash} actual_body_hash={actual_body_hash}",
+                ),
+            );
+            f.target = Some(target_path(path));
+            f.suggested_fix = Some("rebuild the trace canvas markdown projection".to_owned());
+            Some(f)
+        }
+        ProjectionStatus::Missing { expected_body_hash } => {
+            let mut f = finding(
+                Kind::ProjectionMissing,
+                Severity::Warning,
+                format!(
+                    "trace canvas projection at {path} is missing; expected_body_hash={expected_body_hash}",
+                ),
+            );
+            f.target = Some(target_path(path));
+            f.suggested_fix = Some("rebuild the trace canvas markdown projection".to_owned());
+            Some(f)
+        }
     }
+}
 
-    u64::try_from(bytes).unwrap_or(u64::MAX)
+fn rendered_canvas_bytes(canvas: &TraceCanvasLintCanvas, nodes: &[TraceCanvasLintNode]) -> u64 {
+    u64::try_from(render_markdown(canvas, nodes).len()).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]
@@ -279,6 +353,19 @@ mod tests {
             summary: "Canvas summary".to_owned(),
             active_node_id: Some("node-1".to_owned()),
             max_bytes: 256,
+            projection_markdown: Some(render_markdown(
+                &TraceCanvasLintCanvas {
+                    canvas_id: "canvas-1".to_owned(),
+                    session_id: "session-1".to_owned(),
+                    title: "Current task".to_owned(),
+                    goal: "Keep the trace canvas healthy".to_owned(),
+                    summary: "Canvas summary".to_owned(),
+                    active_node_id: Some("node-1".to_owned()),
+                    max_bytes: 256,
+                    projection_markdown: None,
+                },
+                &[node_fixture()],
+            )),
         }
     }
 
@@ -310,6 +397,70 @@ mod tests {
         };
 
         assert!(run(&snapshot, &records, empty_source_resolver()).is_empty());
+    }
+
+    #[test]
+    fn projection_markdown_is_rebuildable_and_includes_source_ids() {
+        let canvas = canvas_fixture();
+        let rendered = render_markdown(&canvas, &[node_fixture()]);
+
+        assert!(rendered.contains("# Current task"));
+        assert!(rendered.contains("Canvas: canvas-1"));
+        assert!(rendered.contains("Active node: node-1"));
+        assert!(rendered.contains("## Nodes"));
+        assert!(rendered.contains("- Mapped node [node-1]"));
+        assert!(rendered.contains("Source steps: step-1"));
+        assert!(rendered.ends_with('\n'));
+    }
+
+    #[test]
+    fn missing_or_drifted_projection_emits_projection_findings() {
+        let canonical = render_markdown(&canvas_fixture(), &[node_fixture()]);
+        let snapshot = TraceCanvasLintSnapshot {
+            steps: vec![TraceCanvasLintStep {
+                step_id: "step-1".to_owned(),
+                session_id: "session-1".to_owned(),
+                result_ref: None,
+                node_id: Some("node-1".to_owned()),
+            }],
+            canvases: vec![
+                TraceCanvasLintCanvas {
+                    projection_markdown: None,
+                    ..canvas_fixture()
+                },
+                TraceCanvasLintCanvas {
+                    canvas_id: "canvas-2".to_owned(),
+                    active_node_id: None,
+                    projection_markdown: Some(format!("{canonical}\nstale edit\n")),
+                    ..canvas_fixture()
+                },
+            ],
+            nodes: vec![
+                node_fixture(),
+                TraceCanvasLintNode {
+                    canvas_id: "canvas-2".to_owned(),
+                    node_id: "node-2".to_owned(),
+                    source_step_ids: Vec::new(),
+                    ..node_fixture()
+                },
+            ],
+        };
+
+        let findings = run(&snapshot, &[], empty_source_resolver());
+        assert!(
+            findings
+                .iter()
+                .any(|f| matches!(f.kind, Kind::ProjectionMissing)
+                    && f.message.contains("trace_canvases/canvas-1.md")),
+            "missing projection should be reported: {findings:?}",
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| matches!(f.kind, Kind::ProjectionDrift)
+                    && f.message.contains("trace_canvases/canvas-2.md")),
+            "drifted projection should be reported: {findings:?}",
+        );
     }
 
     #[test]

@@ -201,6 +201,30 @@ async fn trace_canvas_lint_snapshot_carries_steps_canvases_and_nodes() {
     assert_eq!(snapshot.nodes[1].source_step_ids, vec!["step-2"]);
 }
 
+#[tokio::test]
+async fn trace_canvas_projection_refresh_is_rebuildable_from_rows() {
+    let store = open_in_memory().await.expect("open");
+    seed_canvas_with_two_nodes(&store).await;
+
+    let projection = store
+        .refresh_trace_canvas_projection("canvas-1")
+        .await
+        .expect("refresh projection");
+    assert!(projection.markdown.contains("# Ship issue"));
+    assert!(projection.markdown.contains("Canvas: canvas-1"));
+    assert!(projection.markdown.contains("Source steps: step-1"));
+    assert!(projection.hash.len() >= 64);
+
+    let snapshot = store
+        .trace_canvas_lint_snapshot()
+        .await
+        .expect("lint snapshot");
+    assert_eq!(
+        snapshot.canvases[0].projection_markdown.as_deref(),
+        Some(projection.markdown.as_str())
+    );
+}
+
 async fn seed_canvas_with_two_nodes(store: &cairn_store_sqlite::SqliteMemoryStore) {
     store
         .upsert_trace_canvas(TraceCanvasDraft {
