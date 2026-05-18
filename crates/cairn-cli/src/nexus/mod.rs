@@ -3,7 +3,7 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -65,11 +65,12 @@ pub struct NexusSupervisor {
 impl NexusSupervisor {
     /// Create the sidecar data directory and spawn the configured process.
     pub fn start(config: SupervisorConfig) -> std::io::Result<Self> {
+        let vault_dir = derive_vault_dir(&config.sqlite_db)?;
         fs::create_dir_all(&config.data_dir)?;
         let mut command = Command::new(&config.command);
         command
             .args(&config.args)
-            .env("CAIRN_VAULT_DIR", &config.data_dir)
+            .env("CAIRN_VAULT_DIR", vault_dir)
             .env("CAIRN_NEXUS_DATA_DIR", &config.data_dir)
             .env("CAIRN_SQLITE_DB", &config.sqlite_db);
         #[cfg(unix)]
@@ -84,7 +85,9 @@ impl NexusSupervisor {
 
     /// Poll the configured HTTP health endpoint until it is healthy or times out.
     pub fn wait_until_healthy(&mut self) -> ProjectionProbe {
-        let deadline = Instant::now() + self.config.health_timeout;
+        let deadline = Instant::now()
+            .checked_add(self.config.health_timeout)
+            .unwrap_or_else(Instant::now);
         let mut last_reason = None;
 
         loop {
@@ -102,7 +105,16 @@ impl NexusSupervisor {
                 }
             }
 
-            if Instant::now() >= deadline {
+            let now = Instant::now();
+            let Some(remaining) = deadline.checked_duration_since(now) else {
+                return ProjectionProbe::Degraded(format!(
+                    "health did not recover before timeout: {}",
+                    last_reason
+                        .as_deref()
+                        .unwrap_or("health endpoint was not probed")
+                ));
+            };
+            if remaining.is_zero() {
                 return ProjectionProbe::Degraded(format!(
                     "health did not recover before timeout: {}",
                     last_reason
@@ -111,16 +123,27 @@ impl NexusSupervisor {
                 ));
             }
 
+            let probe_timeout = remaining.min(HEALTH_POLL_INTERVAL);
+
             match probe_http_health(
                 &self.config.endpoint,
                 &self.config.health_path,
-                HEALTH_POLL_INTERVAL,
+                probe_timeout,
             ) {
-                ProjectionProbe::Healthy => return ProjectionProbe::Healthy,
+                ProjectionProbe::Healthy if Instant::now() <= deadline => {
+                    return ProjectionProbe::Healthy;
+                }
+                ProjectionProbe::Healthy => {
+                    return ProjectionProbe::Degraded(
+                        "health did not recover before timeout".to_owned(),
+                    );
+                }
                 ProjectionProbe::Degraded(reason) => last_reason = Some(reason),
             }
 
-            thread::sleep(HEALTH_POLL_INTERVAL);
+            if let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+                thread::sleep(remaining.min(HEALTH_POLL_INTERVAL));
+            }
         }
     }
 
@@ -150,7 +173,7 @@ impl NexusSupervisor {
     fn terminate_gracefully(&mut self) -> std::io::Result<()> {
         let status = Command::new("kill")
             .arg("-TERM")
-            .arg(self.child.id().to_string())
+            .arg(format!("-{}", self.child.id()))
             .status()?;
         if status.success() {
             Ok(())
@@ -183,6 +206,19 @@ impl NexusSupervisor {
     fn force_kill(&mut self) -> std::io::Result<()> {
         self.child.kill()
     }
+}
+
+fn derive_vault_dir(sqlite_db: &Path) -> std::io::Result<&Path> {
+    sqlite_db
+        .parent()
+        .and_then(Path::parent)
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "sqlite_db must be nested under <vault>/.cairn/cairn.db",
+            )
+        })
 }
 
 impl Drop for NexusSupervisor {
@@ -333,7 +369,7 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use super::*;
 
@@ -369,7 +405,7 @@ mod tests {
             endpoint,
             health_path: "/health".to_owned(),
             data_dir: data_dir.to_path_buf(),
-            sqlite_db: data_dir.join("nexus.sqlite"),
+            sqlite_db: data_dir.parent().unwrap_or(data_dir).join("cairn.db"),
             health_timeout,
             shutdown_timeout: Duration::from_millis(200),
         }
@@ -402,6 +438,17 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
+    fn descendant_command(pid_file: &Path) -> (String, Vec<String>) {
+        (
+            "/bin/sh".to_owned(),
+            vec![
+                "-c".to_owned(),
+                format!("sleep 30 & echo $! > {}; wait", pid_file.display()),
+            ],
+        )
+    }
+
     #[cfg(windows)]
     fn stubborn_command() -> (String, Vec<String>) {
         (
@@ -414,10 +461,65 @@ mod tests {
         )
     }
 
+    fn env_capture_command(output: &Path) -> (String, Vec<String>) {
+        #[cfg(unix)]
+        {
+            (
+                "/bin/sh".to_owned(),
+                vec![
+                    "-c".to_owned(),
+                    format!(
+                        "printf '%s\n%s\n%s\n' \"$CAIRN_VAULT_DIR\" \"$CAIRN_NEXUS_DATA_DIR\" \"$CAIRN_SQLITE_DB\" > {}; sleep 10",
+                        output.display()
+                    ),
+                ],
+            )
+        }
+        #[cfg(windows)]
+        {
+            (
+                "powershell".to_owned(),
+                vec![
+                    "-NoProfile".to_owned(),
+                    "-Command".to_owned(),
+                    format!(
+                        "[IO.File]::WriteAllLines('{}', @($env:CAIRN_VAULT_DIR, $env:CAIRN_NEXUS_DATA_DIR, $env:CAIRN_SQLITE_DB)); Start-Sleep -Seconds 10",
+                        output.display()
+                    ),
+                ],
+            )
+        }
+    }
+
+    fn wait_for_file(path: &Path) {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline {
+            if path.is_file() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("timed out waiting for {}", path.display());
+    }
+
+    fn spawn_delayed_health_server(response_delay: Duration) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0_u8; 512];
+                let _ = stream.read(&mut buf);
+                thread::sleep(response_delay);
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+            }
+        });
+        format!("http://{addr}")
+    }
+
     #[test]
     fn supervisor_creates_data_dir_and_reaches_healthy_state() {
         let tmp = tempfile::tempdir().unwrap();
-        let data_dir = tmp.path().join("nexus-data");
+        let data_dir = tmp.path().join(".cairn").join("nexus-data");
         let endpoint = spawn_health_server("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
         let mut supervisor = NexusSupervisor::start(supervisor_config(
             &data_dir,
@@ -436,10 +538,67 @@ mod tests {
     }
 
     #[test]
+    fn supervisor_passes_exact_environment_to_child() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault_dir = tmp.path().join("vault");
+        let data_dir = vault_dir.join(".cairn").join("nexus-data");
+        let sqlite_db = vault_dir.join(".cairn").join("cairn.db");
+        let env_file = tmp.path().join("env.txt");
+        let endpoint = spawn_health_server("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+        let (command, args) = env_capture_command(&env_file);
+        let mut supervisor = NexusSupervisor::start(SupervisorConfig {
+            command,
+            args,
+            endpoint,
+            health_path: "/health".to_owned(),
+            data_dir: data_dir.clone(),
+            sqlite_db: sqlite_db.clone(),
+            health_timeout: Duration::from_secs(1),
+            shutdown_timeout: Duration::from_millis(100),
+        })
+        .unwrap();
+
+        wait_for_file(&env_file);
+        let captured = fs::read_to_string(&env_file).unwrap();
+        let lines = captured.lines().collect::<Vec<_>>();
+
+        assert_eq!(
+            lines,
+            vec![
+                vault_dir.to_str().unwrap(),
+                data_dir.to_str().unwrap(),
+                sqlite_db.to_str().unwrap(),
+            ]
+        );
+        supervisor.stop().unwrap();
+    }
+
+    #[test]
+    fn supervisor_rejects_sqlite_path_without_vault_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("nexus-data");
+        let endpoint = spawn_health_server("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+        let (command, args) = sleeper_command();
+        let err = NexusSupervisor::start(SupervisorConfig {
+            command,
+            args,
+            endpoint,
+            health_path: "/health".to_owned(),
+            data_dir,
+            sqlite_db: Path::new("cairn.db").to_path_buf(),
+            health_timeout: Duration::from_secs(1),
+            shutdown_timeout: Duration::from_millis(100),
+        })
+        .unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
     fn supervisor_reports_degraded_when_health_never_recovers() {
         let tmp = tempfile::tempdir().unwrap();
         let mut supervisor = NexusSupervisor::start(supervisor_config(
-            &tmp.path().join("nexus-data"),
+            &tmp.path().join(".cairn").join("nexus-data"),
             closed_endpoint(),
             Duration::from_millis(100),
         ))
@@ -452,9 +611,25 @@ mod tests {
     }
 
     #[test]
+    fn supervisor_does_not_report_healthy_after_health_timeout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut supervisor = NexusSupervisor::start(supervisor_config(
+            &tmp.path().join(".cairn").join("nexus-data"),
+            spawn_delayed_health_server(Duration::from_millis(20)),
+            Duration::from_millis(5),
+        ))
+        .unwrap();
+
+        let probe = supervisor.wait_until_healthy();
+
+        assert!(matches!(probe, ProjectionProbe::Degraded(reason) if reason.contains("timeout")));
+        supervisor.stop().unwrap();
+    }
+
+    #[test]
     fn supervisor_force_kills_process_that_ignores_graceful_stop() {
         let tmp = tempfile::tempdir().unwrap();
-        let data_dir = tmp.path().join("nexus-data");
+        let data_dir = tmp.path().join(".cairn").join("nexus-data");
         let endpoint = spawn_health_server("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
         let (command, args) = stubborn_command();
         let mut supervisor = NexusSupervisor::start(SupervisorConfig {
@@ -473,6 +648,38 @@ mod tests {
         supervisor.stop().unwrap();
 
         assert!(!process_is_running(pid));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn supervisor_gracefully_stops_descendant_process_group() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join(".cairn").join("nexus-data");
+        let child_pid_file = tmp.path().join("child.pid");
+        let endpoint = spawn_health_server("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+        let (command, args) = descendant_command(&child_pid_file);
+        let mut supervisor = NexusSupervisor::start(SupervisorConfig {
+            command,
+            args,
+            endpoint,
+            health_path: "/health".to_owned(),
+            data_dir: data_dir.clone(),
+            sqlite_db: data_dir.parent().unwrap().join("cairn.db"),
+            health_timeout: Duration::from_secs(1),
+            shutdown_timeout: Duration::from_millis(500),
+        })
+        .unwrap();
+
+        wait_for_file(&child_pid_file);
+        let child_pid = fs::read_to_string(&child_pid_file)
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+
+        supervisor.stop().unwrap();
+
+        assert!(!process_is_running(child_pid));
     }
 
     fn process_is_running(pid: u32) -> bool {
