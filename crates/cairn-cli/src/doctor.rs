@@ -320,7 +320,7 @@ fn locate_registration(
         format!(
             "no Claude Code MCP registration named `{server_name}` was found in local, project, or user scope"
         ),
-        "add the Cairn server to Claude Code (for example with `claude mcp add cairn -- cairn mcp` or by writing `.mcp.json`), then rerun doctor",
+        "run `cairn setup claude-code --vault <name-or-path>` from the project, then rerun `cairn doctor claude-code`",
     ))
 }
 
@@ -464,7 +464,7 @@ fn verify_registration_shape(registration: &McpRegistration) -> Result<(), Docto
                     "registration uses transport {:?}, but the reference consumer expects a stdio MCP server",
                     registration.server_type
                 ),
-                "re-register Cairn as a stdio MCP server (`claude mcp add cairn -- cairn mcp`) and rerun doctor",
+                "run `cairn setup claude-code --vault <name-or-path>` to replace the entry with a stdio Cairn MCP registration, then rerun doctor",
             )
             .with_source(registration.source.clone()),
         );
@@ -478,7 +478,7 @@ fn verify_registration_shape(registration: &McpRegistration) -> Result<(), Docto
                     "registration does not look like a Cairn MCP launch: command=`{}` args={:?}",
                     registration.command, registration.args
                 ),
-                "update the Claude Code registration so it launches the Cairn binary with an `mcp` argument",
+                "run `cairn setup claude-code --vault <name-or-path>` so the Claude Code registration launches the Cairn binary with the `mcp` argument",
             )
             .with_source(registration.source.clone()),
         );

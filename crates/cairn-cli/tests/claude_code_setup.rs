@@ -33,6 +33,25 @@ fn synth_vault() -> tempfile::TempDir {
     dir
 }
 
+fn write_hook_settings(project: &Path) {
+    let claude_dir = project.join(".claude");
+    std::fs::create_dir_all(&claude_dir).expect("mkdir .claude");
+    let body = serde_json::json!({
+        "hooks": {
+            "SessionStart": [{"command": "cairn hook SessionStart"}],
+            "UserPromptSubmit": [{"command": "cairn hook UserPromptSubmit"}],
+            "PreToolUse": [{"command": "cairn hook PreToolUse"}],
+            "PostToolUse": [{"command": "cairn hook PostToolUse"}],
+            "Stop": [{"command": "cairn hook Stop"}]
+        }
+    });
+    std::fs::write(
+        claude_dir.join("settings.local.json"),
+        serde_json::to_vec_pretty(&body).expect("serialize settings.local.json"),
+    )
+    .expect("write settings.local.json");
+}
+
 #[test]
 fn setup_help_lists_claude_code() {
     cli()
@@ -158,4 +177,163 @@ fn setup_claude_code_remove_honors_parent_common_options() {
             .expect("parse generated .mcp.json");
     assert!(config["mcpServers"].get("cairn").is_none());
     assert_eq!(config["mcpServers"]["other"]["command"], "/usr/bin/true");
+}
+
+#[test]
+fn setup_claude_code_is_idempotent() {
+    let vault = synth_vault();
+    let project = tempfile::tempdir().expect("project tempdir");
+    let home = tempfile::tempdir().expect("home tempdir");
+    let binary = env!("CARGO_BIN_EXE_cairn");
+
+    cli()
+        .arg("--vault")
+        .arg(vault.path())
+        .args(["setup", "claude-code"])
+        .arg("--project-dir")
+        .arg(project.path())
+        .arg("--home-dir")
+        .arg(home.path())
+        .args(["--binary", binary, "--json"])
+        .assert()
+        .success();
+
+    let config_path = home.path().join(".claude.json");
+    let before = std::fs::read(&config_path).expect("read generated .claude.json");
+
+    let out = cli()
+        .arg("--vault")
+        .arg(vault.path())
+        .args(["setup", "claude-code"])
+        .arg("--project-dir")
+        .arg(project.path())
+        .arg("--home-dir")
+        .arg(home.path())
+        .args(["--binary", binary, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+
+    let receipt = parse_stdout_json(out);
+    assert_eq!(receipt["status"], "unchanged");
+    let after = std::fs::read(&config_path).expect("read unchanged .claude.json");
+    assert_eq!(after, before);
+}
+
+#[test]
+fn setup_claude_code_project_scope_writes_mcp_json() {
+    let vault = synth_vault();
+    let project = tempfile::tempdir().expect("project tempdir");
+    let home = tempfile::tempdir().expect("home tempdir");
+    let binary = env!("CARGO_BIN_EXE_cairn");
+
+    let out = cli()
+        .arg("--vault")
+        .arg(vault.path())
+        .args(["setup", "claude-code", "--scope", "project"])
+        .arg("--project-dir")
+        .arg(project.path())
+        .arg("--home-dir")
+        .arg(home.path())
+        .args(["--binary", binary, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+
+    let receipt = parse_stdout_json(out);
+    assert_eq!(receipt["scope"], "project");
+
+    let config_path = project.path().join(".mcp.json");
+    let config: Value =
+        serde_json::from_slice(&std::fs::read(&config_path).expect("read generated .mcp.json"))
+            .expect("parse generated .mcp.json");
+    assert_eq!(config["mcpServers"]["cairn"]["command"], binary);
+}
+
+#[test]
+fn setup_claude_code_remove_deletes_project_entry() {
+    let vault = synth_vault();
+    let project = tempfile::tempdir().expect("project tempdir");
+    let home = tempfile::tempdir().expect("home tempdir");
+    let binary = env!("CARGO_BIN_EXE_cairn");
+
+    cli()
+        .arg("--vault")
+        .arg(vault.path())
+        .args(["setup", "claude-code", "--scope", "project"])
+        .arg("--project-dir")
+        .arg(project.path())
+        .arg("--home-dir")
+        .arg(home.path())
+        .args(["--binary", binary, "--json"])
+        .assert()
+        .success();
+
+    let out = cli()
+        .arg("--vault")
+        .arg(vault.path())
+        .args(["setup", "claude-code", "remove"])
+        .arg("--scope")
+        .arg("project")
+        .arg("--project-dir")
+        .arg(project.path())
+        .arg("--home-dir")
+        .arg(home.path())
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+
+    let receipt = parse_stdout_json(out);
+    assert_eq!(receipt["status"], "removed");
+
+    let config_path = project.path().join(".mcp.json");
+    let config: Value =
+        serde_json::from_slice(&std::fs::read(&config_path).expect("read generated .mcp.json"))
+            .expect("parse generated .mcp.json");
+    assert!(config["mcpServers"].get("cairn").is_none());
+}
+
+#[test]
+fn doctor_succeeds_after_setup_with_hook_settings() {
+    let vault = synth_vault();
+    let project = tempfile::tempdir().expect("project tempdir");
+    let home = tempfile::tempdir().expect("home tempdir");
+    let binary = env!("CARGO_BIN_EXE_cairn");
+    write_hook_settings(project.path());
+
+    cli()
+        .arg("--vault")
+        .arg(vault.path())
+        .args(["setup", "claude-code"])
+        .arg("--project-dir")
+        .arg(project.path())
+        .arg("--home-dir")
+        .arg(home.path())
+        .args(["--binary", binary, "--json"])
+        .assert()
+        .success();
+
+    let out = cli()
+        .args(["doctor", "claude-code"])
+        .arg("--project-dir")
+        .arg(project.path())
+        .arg("--home-dir")
+        .arg(home.path())
+        .arg("--json")
+        .output()
+        .expect("cairn doctor claude-code --json");
+
+    assert!(
+        out.status.success(),
+        "exit: {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let receipt = parse_stdout_json(out);
+    assert_eq!(receipt["ok"], true);
 }
