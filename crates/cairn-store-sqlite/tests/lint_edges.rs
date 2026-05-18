@@ -32,6 +32,30 @@ fn allow_corrupt_overlaps(conn: &Connection) {
     .expect("drop overlap guards for corruption fixture");
 }
 
+fn insert_record_stub(conn: &Connection, record_id: &str, target_id: &str) {
+    let record_json = serde_json::json!({
+        "id": record_id,
+        "target_id": target_id,
+        "body": "record link review fixture",
+        "extra_frontmatter": {}
+    })
+    .to_string();
+    conn.execute(
+        "INSERT INTO records (
+            record_id, target_id, version, path, kind, class, visibility,
+            scope, actor_chain, body, body_hash, created_at, updated_at,
+            active, tombstoned, is_static, record_json, confidence, salience,
+            tags_json
+         ) VALUES (
+            ?1, ?2, 1, 'raw/link-review.md', 'note', 'episodic', 'session',
+            '{}', '[]', 'record link review fixture', 'sha256:lint', 1, 1,
+            1, 0, 0, ?3, 0.5, 0.5, '[]'
+         )",
+        params![record_id, target_id, record_json],
+    )
+    .expect("insert record stub");
+}
+
 #[allow(clippy::too_many_arguments)]
 fn insert_edge(
     conn: &Connection,
@@ -67,6 +91,46 @@ fn insert_edge(
         ],
     )
     .expect("insert edge");
+}
+
+#[test]
+fn read_only_lint_surfaces_record_link_review_conflicts() {
+    let conn = conn();
+    insert_record_stub(
+        &conn,
+        "01J00000000000000000001901",
+        "01HQZX9F5N0000000000019001",
+    );
+    conn.execute(
+        "INSERT INTO record_link_review (
+            record_id, reason, scope_session_id, trace_session_id, detail_json, created_at
+         ) VALUES (
+            '01J00000000000000000001901', 'session_id_mismatch',
+            'scope-session', 'trace-session',
+            '{\"migration_id\":64}', 109
+         )",
+        [],
+    )
+    .expect("insert review row");
+
+    let report = lint_edges(&conn).expect("lint report");
+
+    let finding = report
+        .findings
+        .iter()
+        .find(|finding| finding.tracking_issue == Some(109))
+        .expect("issue 109 lint finding");
+    assert_eq!(finding.kind, Kind::DeferredCheck);
+    assert_eq!(finding.severity, Severity::Warning);
+    assert_eq!(
+        finding.entities.as_deref(),
+        Some(&["01J00000000000000000001901".to_owned()][..])
+    );
+    assert!(
+        finding.message.contains("scope-session")
+            && finding.message.contains("trace-session")
+            && finding.message.contains("manual review")
+    );
 }
 
 #[test]

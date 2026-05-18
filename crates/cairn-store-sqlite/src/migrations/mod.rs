@@ -127,6 +127,9 @@ const M0062_SESSION_TREE: &str = include_str!("sql/0062_session_tree.sql");
 // Renumbered from 0062 → 0063 during merge with main: #133 shipped
 // 0062_session_tree first.
 const M0063_WORKFLOW_DEAD_LETTER: &str = include_str!("sql/0063_workflow_dead_letter.sql");
+// Issue #109 — v0.2 additive session-link metadata for cold rehydration and
+// session-level forget migrations.
+const M0064_V02_RECORD_SESSION_LINKS: &str = include_str!("sql/0064_v02_record_session_links.sql");
 
 /// Canonical SQL for migration 0020 (`workflow_jobs`). Re-exported so
 /// downstream crates (notably `cairn-workflows`, which hashes the
@@ -315,6 +318,11 @@ pub(crate) const MIGRATION_SOURCES: &[(i64, &str, &str)] = &[
     (61, "0061_salience_access", M0061_SALIENCE_ACCESS),
     (62, "0062_session_tree", M0062_SESSION_TREE),
     (63, "0063_workflow_dead_letter", M0063_WORKFLOW_DEAD_LETTER),
+    (
+        64,
+        "0064_v02_record_session_links",
+        M0064_V02_RECORD_SESSION_LINKS,
+    ),
 ];
 
 /// All migrations, in order. Returns a fresh `Migrations` set on every call
@@ -379,5 +387,6 @@ pub fn migrations() -> Migrations<'static> {
         M::up(M0061_SALIENCE_ACCESS),
         M::up(M0062_SESSION_TREE),
         M::up(M0063_WORKFLOW_DEAD_LETTER),
+        M::up(M0064_V02_RECORD_SESSION_LINKS),
     ])
 }

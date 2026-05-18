@@ -3,6 +3,7 @@
 #![allow(missing_docs)]
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use cairn_core::contract::memory_store::{ListArgs, MemoryStore};
@@ -49,6 +50,19 @@ fn consolidation_summary_record(
             "last_sequence": 7,
         }),
     )]);
+    record
+}
+
+fn unscoped_record(record_id: &str, target_id: &str, body: &str) -> MemoryRecord {
+    let mut record = sample_record();
+    record.id = RecordId::parse(record_id).expect("valid record id");
+    record.target_id = TargetId::parse(target_id).expect("valid target id");
+    body.clone_into(&mut record.body);
+    record.scope = ScopeTuple {
+        user: record.scope.user.clone(),
+        agent: record.scope.agent.clone(),
+        ..ScopeTuple::default()
+    };
     record
 }
 
@@ -152,6 +166,179 @@ async fn forget_session_purges_all_session_targets_through_wal() {
     })
     .await
     .expect("wal assertion");
+}
+
+#[tokio::test]
+async fn forget_session_uses_migrated_record_session_links() {
+    let store = open_in_memory().await.expect("open store");
+    let record = unscoped_record(
+        "01J00000000000000000001091",
+        "01HQZX9F5N0000000000010901",
+        "issue109 migrated trace body",
+    );
+    store.upsert(&record).await.expect("upsert migrated record");
+
+    let conn = store.raw_conn_for_admin().expect("raw conn").clone();
+    let record_id = record.id.as_str().to_owned();
+    let target_id = record.target_id.as_str().to_owned();
+    conn.call(move |c| {
+        c.execute(
+            "INSERT INTO record_session_links (
+                record_id, target_id, session_id, tenant, workspace,
+                link_source, link_confidence, created_at
+             ) VALUES (?1, ?2, 'sess-109-derived', NULL, NULL, 'trace', 'derived', 109)",
+            params![record_id, target_id],
+        )?;
+        Ok::<_, tokio_rusqlite::Error>(())
+    })
+    .await
+    .expect("seed migrated session link");
+
+    let outcome = store
+        .forget_session("sess-109-derived")
+        .await
+        .expect("forget derived session");
+
+    assert_eq!(outcome.deleted_count, 1);
+    assert!(outcome.tombstones.contains(&record.id));
+
+    let conn = store.raw_conn_for_admin().expect("raw conn").clone();
+    conn.call(move |c| {
+        let leaked_records: i64 = c.query_row(
+            "SELECT COUNT(*) FROM records WHERE record_id = '01J00000000000000000001091'",
+            [],
+            |row| row.get(0),
+        )?;
+        let leaked_links: i64 = c.query_row(
+            "SELECT COUNT(*) FROM record_session_links WHERE session_id = 'sess-109-derived'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(leaked_records, 0);
+        assert_eq!(leaked_links, 0);
+        Ok::<_, tokio_rusqlite::Error>(())
+    })
+    .await
+    .expect("derived link assertion");
+}
+
+#[tokio::test]
+async fn forget_session_skips_manual_review_session_conflicts() {
+    let store = open_in_memory().await.expect("open store");
+    let record = session_record(
+        "01J00000000000000000001094",
+        "01HQZX9F5N0000000000010904",
+        "issue109 ambiguous session body",
+        "sess-109-scope",
+    );
+    store
+        .upsert(&record)
+        .await
+        .expect("upsert ambiguous record");
+
+    let conn = store.raw_conn_for_admin().expect("raw conn").clone();
+    let record_id = record.id.as_str().to_owned();
+    let target_id = record.target_id.as_str().to_owned();
+    conn.call(move |c| {
+        c.execute(
+            "INSERT INTO record_session_links (
+                record_id, target_id, session_id, tenant, workspace,
+                link_source, link_confidence, created_at
+             ) VALUES (?1, ?2, 'sess-109-scope', NULL, NULL, 'scope', 'explicit', 109)",
+            params![record_id, target_id],
+        )?;
+        c.execute(
+            "INSERT INTO record_link_review (
+                record_id, reason, scope_session_id, trace_session_id, detail_json, created_at
+             ) VALUES (
+                ?1, 'session_id_mismatch', 'sess-109-scope', 'sess-109-trace',
+                '{\"migration_id\":64}', 109
+             )",
+            params![record_id],
+        )?;
+        Ok::<_, tokio_rusqlite::Error>(())
+    })
+    .await
+    .expect("seed manual-review conflict");
+
+    let err = store
+        .forget_session("sess-109-scope")
+        .await
+        .expect_err("manual-review records must not be guessed from fallback scope metadata");
+    assert!(
+        matches!(err, StoreError::NotFound { .. }),
+        "expected NotFound when every matching row is under manual review, got {err:?}"
+    );
+
+    let listed = store.list(&ListArgs::default()).await.expect("list");
+    assert_eq!(listed.records.len(), 1);
+    assert_eq!(listed.records[0].id, record.id);
+}
+
+#[tokio::test]
+async fn forget_session_uses_migrated_summary_and_projection_links() {
+    let store = open_in_memory().await.expect("open store");
+    let source = session_record(
+        "01J00000000000000000001092",
+        "01HQZX9F5N0000000000010902",
+        "issue109 source body",
+        "sess-109-summary-links",
+    );
+    let summary = unscoped_record(
+        "01J00000000000000000001093",
+        "01HQZX9F5N0000000000010903",
+        "issue109 linked summary body",
+    );
+    store.upsert(&source).await.expect("upsert source");
+    store.upsert(&summary).await.expect("upsert summary");
+
+    let conn = store.raw_conn_for_admin().expect("raw conn").clone();
+    let source_record_id = source.id.as_str().to_owned();
+    let source_target_id = source.target_id.as_str().to_owned();
+    let summary_record_id = summary.id.as_str().to_owned();
+    let summary_target_id = summary.target_id.as_str().to_owned();
+    conn.call(move |c| {
+        c.execute(
+            "INSERT INTO record_summary_links (
+                summary_record_id, source_record_id, summary_kind, link_source, created_at
+             ) VALUES (?1, ?2, 'consolidation', 'consolidation', 109)",
+            params![summary_record_id, source_record_id],
+        )?;
+        c.execute(
+            "INSERT INTO record_projection_links (
+                record_id, target_id, projection_kind, path, body_hash, created_at
+             ) VALUES (?1, ?2, 'markdown', 'raw/custom-source.md', 'sha256:source', 109)",
+            params![source_record_id, source_target_id],
+        )?;
+        c.execute(
+            "INSERT INTO record_projection_links (
+                record_id, target_id, projection_kind, path, body_hash, created_at
+             ) VALUES (?1, ?2, 'markdown', 'raw/custom-summary.md', 'sha256:summary', 109)",
+            params![summary_record_id, summary_target_id],
+        )?;
+        Ok::<_, tokio_rusqlite::Error>(())
+    })
+    .await
+    .expect("seed migrated summary/projection links");
+
+    let outcome = store
+        .forget_session("sess-109-summary-links")
+        .await
+        .expect("forget session");
+
+    assert_eq!(outcome.deleted_count, 2);
+    assert!(outcome.tombstones.contains(&source.id));
+    assert!(outcome.tombstones.contains(&summary.id));
+    assert!(
+        outcome
+            .projection_paths
+            .contains(&PathBuf::from("raw/custom-source.md"))
+    );
+    assert!(
+        outcome
+            .projection_paths
+            .contains(&PathBuf::from("raw/custom-summary.md"))
+    );
 }
 
 #[tokio::test]

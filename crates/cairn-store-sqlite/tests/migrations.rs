@@ -7,6 +7,90 @@ use cairn_store_sqlite::{
 use rusqlite::params;
 use tempfile::tempdir;
 
+type SessionLinkRow = (String, String, Option<String>, Option<String>, String);
+type SummaryLinkRow = (String, String, String, String);
+type ProjectionLinkRow = (String, String, String, String);
+
+#[allow(
+    clippy::expect_used,
+    reason = "test fixture helper: invalid seed SQL should fail loudly"
+)]
+fn insert_legacy_trace_record(
+    conn: &rusqlite::Connection,
+    record_id: &str,
+    target_id: &str,
+    scope_json: &str,
+    trace_session_id: Option<&str>,
+) {
+    let trace = match trace_session_id {
+        Some(session_id) => serde_json::json!({
+            "session_id": session_id,
+            "turn_id": "turn-1",
+            "sequence": 0,
+            "capture_event_id": record_id,
+            "payload_hash": "sha256:legacy",
+        }),
+        None => serde_json::json!({
+            "turn_id": "turn-1",
+            "sequence": 0,
+            "capture_event_id": record_id,
+            "payload_hash": "sha256:legacy",
+        }),
+    };
+    let record_json = serde_json::json!({
+        "id": record_id,
+        "target_id": target_id,
+        "body": "legacy trace body",
+        "extra_frontmatter": {
+            "trace_event": "user_message",
+            "trace": trace,
+        },
+    })
+    .to_string();
+
+    conn.execute(
+        "INSERT INTO records \
+           (record_id, target_id, version, path, kind, class, visibility, scope, \
+            actor_chain, body, body_hash, created_at, updated_at, active, tombstoned, \
+            is_static, record_json, confidence, salience, tags_json) \
+         VALUES (?1, ?2, 1, 'raw/legacy.md', 'trace', 'episodic', 'session', ?3, \
+                 '[]', 'legacy trace body', 'sha256:legacy', 0, 0, 1, 0, \
+                 0, ?4, 0.5, 0.5, '[]')",
+        params![record_id, target_id, scope_json, record_json],
+    )
+    .expect("insert legacy trace record");
+}
+
+fn insert_legacy_record_with_extra(
+    conn: &rusqlite::Connection,
+    record_id: &str,
+    target_id: &str,
+    kind: &str,
+    extra_frontmatter: &serde_json::Value,
+) {
+    let path = format!("raw/{record_id}.md");
+    let body_hash = format!("sha256:{record_id}");
+    let record_json = serde_json::json!({
+        "id": record_id,
+        "target_id": target_id,
+        "body": "legacy linked body",
+        "extra_frontmatter": extra_frontmatter,
+    })
+    .to_string();
+
+    conn.execute(
+        "INSERT INTO records \
+           (record_id, target_id, version, path, kind, class, visibility, scope, \
+            actor_chain, body, body_hash, created_at, updated_at, active, tombstoned, \
+            is_static, record_json, confidence, salience, tags_json) \
+         VALUES (?1, ?2, 1, ?3, ?4, 'episodic', 'session', '{}', \
+                 '[]', 'legacy linked body', ?5, 0, 0, 1, 0, \
+                 0, ?6, 0.5, 0.5, '[]')",
+        params![record_id, target_id, path, kind, body_hash, record_json],
+    )
+    .expect("insert legacy record with extra frontmatter");
+}
+
 #[test]
 fn fresh_in_memory_opens_to_head() {
     let conn = open_in_memory().expect("open in-memory store");
@@ -15,7 +99,7 @@ fn fresh_in_memory_opens_to_head() {
             r.get(0)
         })
         .expect("query head");
-    assert_eq!(head, 63);
+    assert_eq!(head, 64);
 }
 
 #[test]
@@ -31,7 +115,291 @@ fn fresh_vault_opens_and_reopens_idempotent() {
             r.get(0)
         })
         .expect("query head");
-    assert_eq!(head, 63);
+    assert_eq!(head, 64);
+}
+
+#[test]
+fn migration_0064_backfills_trace_derived_session_links() {
+    register_vec0();
+    let mut conn = rusqlite::Connection::open_in_memory().expect("open raw in-memory db");
+    migrations()
+        .to_version(&mut conn, 57)
+        .expect("apply migrations through pre-0064 head");
+
+    insert_legacy_trace_record(
+        &conn,
+        "01JTS6R4J7000000000000000A",
+        "01JTS6R4J7000000000000000A",
+        "{}",
+        Some("sess-109"),
+    );
+    insert_legacy_trace_record(
+        &conn,
+        "01JTS6R4J7000000000000000B",
+        "01JTS6R4J7000000000000000B",
+        r#"{"session_id":"sess-scope","tenant":"t1","workspace":"w1"}"#,
+        Some("sess-scope"),
+    );
+
+    migrations()
+        .to_latest(&mut conn)
+        .expect("apply migration 0064");
+
+    let linked: Vec<SessionLinkRow> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT record_id, session_id, tenant, workspace, link_source \
+                   FROM record_session_links \
+                  ORDER BY record_id",
+            )
+            .expect("prepare links query");
+        stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })
+        .expect("query links")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect links")
+    };
+
+    assert_eq!(
+        linked,
+        vec![
+            (
+                "01JTS6R4J7000000000000000A".to_owned(),
+                "sess-109".to_owned(),
+                None,
+                None,
+                "trace".to_owned(),
+            ),
+            (
+                "01JTS6R4J7000000000000000B".to_owned(),
+                "sess-scope".to_owned(),
+                Some("t1".to_owned()),
+                Some("w1".to_owned()),
+                "scope".to_owned(),
+            ),
+        ]
+    );
+}
+
+#[test]
+fn migration_0064_reports_conflicting_session_links_for_manual_review() {
+    register_vec0();
+    let mut conn = rusqlite::Connection::open_in_memory().expect("open raw in-memory db");
+    migrations()
+        .to_version(&mut conn, 57)
+        .expect("apply migrations through pre-0064 head");
+
+    insert_legacy_trace_record(
+        &conn,
+        "01JTS6R4J7000000000000000C",
+        "01JTS6R4J7000000000000000C",
+        r#"{"session_id":"sess-scope"}"#,
+        Some("sess-trace"),
+    );
+
+    migrations()
+        .to_latest(&mut conn)
+        .expect("apply migration 0064");
+
+    let link_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM record_session_links", [], |row| {
+            row.get(0)
+        })
+        .expect("count links");
+    assert_eq!(link_count, 0, "conflicting links must not be guessed");
+
+    let review: (String, String, String, String) = conn
+        .query_row(
+            "SELECT record_id, reason, scope_session_id, trace_session_id \
+               FROM record_link_review",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("manual-review row");
+    assert_eq!(
+        review,
+        (
+            "01JTS6R4J7000000000000000C".to_owned(),
+            "session_id_mismatch".to_owned(),
+            "sess-scope".to_owned(),
+            "sess-trace".to_owned(),
+        )
+    );
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "migration acceptance fixture keeps source, summary, and projection assertions together"
+)]
+fn migration_0064_backfills_summary_and_projection_links() {
+    register_vec0();
+    let mut conn = rusqlite::Connection::open_in_memory().expect("open raw in-memory db");
+    migrations()
+        .to_version(&mut conn, 57)
+        .expect("apply migrations through pre-0064 head");
+
+    insert_legacy_record_with_extra(
+        &conn,
+        "01JTS6R4J7000000000000001A",
+        "01JTS6R4J7000000000000001A",
+        "trace",
+        &serde_json::json!({
+            "trace_event": "user_message",
+            "trace": {
+                "session_id": "sess-109-summary",
+                "turn_id": "turn-1",
+                "sequence": 0,
+                "capture_event_id": "01JTS6R4J7000000000000001A",
+                "payload_hash": "sha256:source-a"
+            }
+        }),
+    );
+    insert_legacy_record_with_extra(
+        &conn,
+        "01JTS6R4J7000000000000001B",
+        "01JTS6R4J7000000000000001B",
+        "trace",
+        &serde_json::json!({
+            "trace_event": "assistant_message",
+            "trace": {
+                "session_id": "sess-109-summary",
+                "turn_id": "turn-1",
+                "sequence": 1,
+                "capture_event_id": "01JTS6R4J7000000000000001B",
+                "payload_hash": "sha256:source-b"
+            }
+        }),
+    );
+    insert_legacy_record_with_extra(
+        &conn,
+        "01JTS6R4J7000000000000001C",
+        "01JTS6R4J7000000000000001C",
+        "trace",
+        &serde_json::json!({
+            "trace_event": "turn_summary",
+            "trace": {
+                "session_id": "sess-109-summary",
+                "turn_id": "turn-1",
+                "sequence": 2,
+                "capture_event_id": "01JTS6R4J7000000000000001C",
+                "payload_hash": "sha256:summary",
+                "member_event_ids": [
+                    "01JTS6R4J7000000000000001A",
+                    "01JTS6R4J7000000000000001B"
+                ]
+            }
+        }),
+    );
+    insert_legacy_record_with_extra(
+        &conn,
+        "01JTS6R4J7000000000000001D",
+        "01JTS6R4J7000000000000001D",
+        "reasoning",
+        &serde_json::json!({
+            "consolidation": {
+                "source_record_ids": ["01JTS6R4J7000000000000001A"],
+                "last_sequence": 2
+            }
+        }),
+    );
+
+    migrations()
+        .to_latest(&mut conn)
+        .expect("apply migration 0064");
+
+    let summary_links: Vec<SummaryLinkRow> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT summary_record_id, source_record_id, summary_kind, link_source \
+                   FROM record_summary_links \
+                  ORDER BY summary_record_id, source_record_id",
+            )
+            .expect("prepare summary links query");
+        stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .expect("query summary links")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect summary links")
+    };
+    assert_eq!(
+        summary_links,
+        vec![
+            (
+                "01JTS6R4J7000000000000001C".to_owned(),
+                "01JTS6R4J7000000000000001A".to_owned(),
+                "turn_summary".to_owned(),
+                "trace".to_owned(),
+            ),
+            (
+                "01JTS6R4J7000000000000001C".to_owned(),
+                "01JTS6R4J7000000000000001B".to_owned(),
+                "turn_summary".to_owned(),
+                "trace".to_owned(),
+            ),
+            (
+                "01JTS6R4J7000000000000001D".to_owned(),
+                "01JTS6R4J7000000000000001A".to_owned(),
+                "consolidation".to_owned(),
+                "consolidation".to_owned(),
+            ),
+        ]
+    );
+
+    let projection_links: Vec<ProjectionLinkRow> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT record_id, target_id, projection_kind, path \
+                   FROM record_projection_links \
+                  WHERE record_id IN (
+                    '01JTS6R4J7000000000000001A',
+                    '01JTS6R4J7000000000000001D'
+                  ) \
+                  ORDER BY record_id",
+            )
+            .expect("prepare projection links query");
+        stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .expect("query projection links")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect projection links")
+    };
+    assert_eq!(
+        projection_links,
+        vec![
+            (
+                "01JTS6R4J7000000000000001A".to_owned(),
+                "01JTS6R4J7000000000000001A".to_owned(),
+                "markdown".to_owned(),
+                "raw/01JTS6R4J7000000000000001A.md".to_owned(),
+            ),
+            (
+                "01JTS6R4J7000000000000001D".to_owned(),
+                "01JTS6R4J7000000000000001D".to_owned(),
+                "markdown".to_owned(),
+                "raw/01JTS6R4J7000000000000001D.md".to_owned(),
+            ),
+        ]
+    );
 }
 
 #[test]

@@ -206,8 +206,25 @@ impl StoreTx<'_> {
     ) -> Result<Vec<TargetId>, StoreError> {
         let mut stmt = self.tx.prepare(
             "SELECT DISTINCT target_id
-               FROM records
-              WHERE json_extract(scope, '$.session_id') = ?1
+               FROM (
+                    SELECT target_id
+                      FROM record_session_links
+                     WHERE session_id = ?1
+                       AND NOT EXISTS (
+                           SELECT 1
+                             FROM record_link_review AS review
+                            WHERE review.record_id = record_session_links.record_id
+                       )
+                    UNION
+                    SELECT target_id
+                      FROM records
+                     WHERE json_extract(scope, '$.session_id') = ?1
+                       AND NOT EXISTS (
+                           SELECT 1
+                             FROM record_link_review AS review
+                            WHERE review.record_id = records.record_id
+                       )
+               )
               ORDER BY target_id",
         )?;
         let mut rows = stmt.query([session_id])?;
@@ -233,10 +250,27 @@ impl StoreTx<'_> {
     ) -> Result<Vec<SessionScopePartition>, StoreError> {
         let mut stmt = self.tx.prepare(
             "SELECT DISTINCT \
-                json_extract(scope, '$.tenant') AS tenant, \
-                json_extract(scope, '$.workspace') AS workspace \
-               FROM records \
-              WHERE json_extract(scope, '$.session_id') = ?1 \
+                tenant, workspace
+               FROM (
+                    SELECT tenant, workspace
+                      FROM record_session_links
+                     WHERE session_id = ?1
+                       AND NOT EXISTS (
+                           SELECT 1
+                             FROM record_link_review AS review
+                            WHERE review.record_id = record_session_links.record_id
+                       )
+                    UNION
+                    SELECT json_extract(scope, '$.tenant') AS tenant,
+                           json_extract(scope, '$.workspace') AS workspace
+                      FROM records
+                     WHERE json_extract(scope, '$.session_id') = ?1
+                       AND NOT EXISTS (
+                           SELECT 1
+                             FROM record_link_review AS review
+                            WHERE review.record_id = records.record_id
+                       )
+               )
               ORDER BY tenant, workspace",
         )?;
         let mut rows = stmt.query([session_id])?;
@@ -264,16 +298,35 @@ impl StoreTx<'_> {
     ) -> Result<Vec<TargetId>, StoreError> {
         let mut stmt = self.tx.prepare(
             "SELECT DISTINCT target_id
-               FROM records
-               WHERE json_extract(scope, '$.session_id') = ?1
-                 AND (
-                       (?2 IS NULL AND json_extract(scope, '$.tenant') IS NULL)
-                    OR json_extract(scope, '$.tenant') = ?2
-                 )
-                 AND (
-                       (?3 IS NULL AND json_extract(scope, '$.workspace') IS NULL)
-                    OR json_extract(scope, '$.workspace') = ?3
-                 )
+               FROM (
+                    SELECT target_id, tenant, workspace
+                      FROM record_session_links
+                     WHERE session_id = ?1
+                       AND NOT EXISTS (
+                           SELECT 1
+                             FROM record_link_review AS review
+                            WHERE review.record_id = record_session_links.record_id
+                       )
+                    UNION
+                    SELECT target_id,
+                           json_extract(scope, '$.tenant') AS tenant,
+                           json_extract(scope, '$.workspace') AS workspace
+                      FROM records
+                     WHERE json_extract(scope, '$.session_id') = ?1
+                       AND NOT EXISTS (
+                           SELECT 1
+                             FROM record_link_review AS review
+                            WHERE review.record_id = records.record_id
+                       )
+               )
+              WHERE (
+                    (?2 IS NULL AND tenant IS NULL)
+                 OR tenant = ?2
+              )
+                AND (
+                    (?3 IS NULL AND workspace IS NULL)
+                 OR workspace = ?3
+              )
                ORDER BY target_id",
         )?;
         let mut rows = stmt.query(params![session_id, tenant, workspace])?;
