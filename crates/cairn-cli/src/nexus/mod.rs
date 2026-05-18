@@ -4,6 +4,8 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
+const MAX_STATUS_LINE_BYTES: usize = 1024;
+
 /// Parsed HTTP endpoint for the Nexus sidecar health probe.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpEndpoint {
@@ -46,32 +48,77 @@ impl HttpEndpoint {
         })
     }
 
-    fn socket_addr(&self) -> Result<SocketAddr, String> {
-        (self.host.as_str(), self.port)
+    fn socket_addrs(&self) -> Result<Vec<SocketAddr>, String> {
+        let addrs = (self.host.as_str(), self.port)
             .to_socket_addrs()
             .map_err(|err| format!("resolving endpoint: {err}"))?
-            .next()
-            .ok_or_else(|| "endpoint resolved to no socket addresses".to_owned())
+            .collect::<Vec<_>>();
+        if addrs.is_empty() {
+            Err("endpoint resolved to no socket addresses".to_owned())
+        } else {
+            Ok(addrs)
+        }
     }
 }
 
 /// Probe the Nexus sidecar health endpoint using a minimal HTTP/1.1 request.
 #[must_use]
 pub fn probe_http_health(endpoint: &str, health_path: &str, timeout: Duration) -> ProbeResult {
+    if let Err(err) = validate_health_path(health_path) {
+        return ProbeResult::Degraded(err);
+    }
     let endpoint = match HttpEndpoint::parse(endpoint) {
         Ok(endpoint) => endpoint,
         Err(err) => return ProbeResult::Degraded(err),
     };
-    let addr = match endpoint.socket_addr() {
-        Ok(addr) => addr,
+    let addrs = match endpoint.socket_addrs() {
+        Ok(addrs) => addrs,
         Err(err) => return ProbeResult::Degraded(err),
     };
+
+    let mut failures = Vec::new();
+    for addr in addrs {
+        match probe_addr(&endpoint, addr, health_path, timeout) {
+            ProbeResult::Healthy => return ProbeResult::Healthy,
+            ProbeResult::Degraded(reason) => failures.push(format!("{addr}: {reason}")),
+        }
+    }
+
+    ProbeResult::Degraded(format!(
+        "all health endpoint addresses failed: {}",
+        failures.join("; ")
+    ))
+}
+
+fn validate_health_path(health_path: &str) -> Result<(), String> {
+    if health_path.is_empty() {
+        return Err("health_path must not be empty".into());
+    }
+    if health_path
+        .bytes()
+        .any(|byte| byte == b' ' || byte.is_ascii_control())
+    {
+        return Err("health_path must not contain spaces or control characters".into());
+    }
+    Ok(())
+}
+
+fn probe_addr(
+    endpoint: &HttpEndpoint,
+    addr: SocketAddr,
+    health_path: &str,
+    timeout: Duration,
+) -> ProbeResult {
     let mut stream = match TcpStream::connect_timeout(&addr, timeout) {
         Ok(stream) => stream,
         Err(err) => return ProbeResult::Degraded(format!("connecting health endpoint: {err}")),
     };
-    let _ = stream.set_read_timeout(Some(timeout));
-    let _ = stream.set_write_timeout(Some(timeout));
+    if let Err(err) = stream.set_read_timeout(Some(timeout)) {
+        return ProbeResult::Degraded(format!("setting health read timeout: {err}"));
+    }
+    if let Err(err) = stream.set_write_timeout(Some(timeout)) {
+        return ProbeResult::Degraded(format!("setting health write timeout: {err}"));
+    }
     let request = format!(
         "GET {health_path} HTTP/1.1\r\nHost: {}:{}\r\nConnection: close\r\n\r\n",
         endpoint.host, endpoint.port
@@ -79,15 +126,37 @@ pub fn probe_http_health(endpoint: &str, health_path: &str, timeout: Duration) -
     if let Err(err) = stream.write_all(request.as_bytes()) {
         return ProbeResult::Degraded(format!("writing health request: {err}"));
     }
-    let mut response = String::new();
-    if let Err(err) = stream.read_to_string(&mut response) {
-        return ProbeResult::Degraded(format!("reading health response: {err}"));
+
+    match read_status_line(&mut stream) {
+        Ok(status_line) if is_success_status(&status_line) => ProbeResult::Healthy,
+        Ok(_) => ProbeResult::Degraded("health endpoint returned non-200".into()),
+        Err(err) => ProbeResult::Degraded(err),
     }
-    if response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.0 200") {
-        ProbeResult::Healthy
-    } else {
-        ProbeResult::Degraded("health endpoint returned non-200".into())
+}
+
+fn read_status_line(stream: &mut TcpStream) -> Result<Vec<u8>, String> {
+    let mut status_line = Vec::with_capacity(64);
+    let mut byte = [0_u8; 1];
+    while status_line.len() < MAX_STATUS_LINE_BYTES {
+        match stream.read(&mut byte) {
+            Ok(0) if status_line.is_empty() => {
+                return Err("health endpoint closed before status line".into());
+            }
+            Ok(0) => return Ok(status_line),
+            Ok(_) => {
+                status_line.push(byte[0]);
+                if byte[0] == b'\n' {
+                    return Ok(status_line);
+                }
+            }
+            Err(err) => return Err(format!("reading health status line: {err}")),
+        }
     }
+    Err("health status line exceeded 1024 bytes".into())
+}
+
+fn is_success_status(status_line: &[u8]) -> bool {
+    status_line.starts_with(b"HTTP/1.1 200") || status_line.starts_with(b"HTTP/1.0 200")
 }
 
 #[cfg(test)]
@@ -112,6 +181,13 @@ mod tests {
         format!("http://{addr}")
     }
 
+    fn closed_endpoint() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        format!("http://{addr}")
+    }
+
     #[test]
     fn http_endpoint_parses_host_and_port() {
         let endpoint = HttpEndpoint::parse("http://127.0.0.1:8765").unwrap();
@@ -127,12 +203,39 @@ mod tests {
     }
 
     #[test]
-    fn probe_health_reports_degraded_on_connection_failure() {
+    fn probe_health_reports_healthy_without_waiting_for_eof() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0_u8; 512];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\n");
+                thread::sleep(Duration::from_millis(200));
+            }
+        });
+
         let result = probe_http_health(
-            "http://127.0.0.1:9",
+            &format!("http://{addr}"),
             "/health",
-            Duration::from_millis(25),
+            Duration::from_millis(50),
         );
+
+        assert!(matches!(result, ProbeResult::Healthy));
+    }
+
+    #[test]
+    fn probe_health_reports_degraded_on_connection_failure() {
+        let result = probe_http_health(&closed_endpoint(), "/health", Duration::from_millis(25));
         assert!(matches!(result, ProbeResult::Degraded(_)));
+    }
+
+    #[test]
+    fn probe_health_rejects_invalid_health_path_before_connecting() {
+        let result = probe_http_health(&closed_endpoint(), "/bad path", Duration::from_millis(25));
+        assert!(matches!(
+            result,
+            ProbeResult::Degraded(reason) if reason.contains("health_path")
+        ));
     }
 }
