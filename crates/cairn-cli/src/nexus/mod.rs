@@ -472,10 +472,7 @@ mod tests {
     fn stubborn_command() -> (String, Vec<String>) {
         (
             "/bin/sh".to_owned(),
-            vec![
-                "-c".to_owned(),
-                "trap '' TERM; while :; do sleep 1; done".to_owned(),
-            ],
+            vec!["-c".to_owned(), "trap '' TERM; exec sleep 30".to_owned()],
         )
     }
 
