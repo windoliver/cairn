@@ -5,12 +5,14 @@
 //! materialization and hot-memory selection are settled.
 
 use rusqlite::{OptionalExtension, params};
+use serde::{Deserialize, Serialize};
 
 use crate::error::StoreError;
 use crate::store::{SqliteMemoryStore, current_unix_ms};
 
 /// Draft row for inserting or replaying a trace step.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TraceStepDraft {
     /// Stable step id minted by the projector.
     pub step_id: String,

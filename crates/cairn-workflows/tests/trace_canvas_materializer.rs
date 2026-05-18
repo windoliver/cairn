@@ -3,7 +3,11 @@
 use std::sync::Arc;
 
 use cairn_store_sqlite::{TraceCanvasEdgeKind, TraceStepDraft, open_in_memory};
-use cairn_workflows::{TraceCanvasMaterializer, TraceCanvasProjection};
+use cairn_workflows::{
+    TRACE_CANVAS_KIND, TraceCanvasHandler, TraceCanvasMaterializer, TraceCanvasPayload,
+    TraceCanvasProjection,
+    scheduler::{HandlerOutcome, JobHandler},
+};
 
 #[tokio::test]
 async fn materializer_creates_active_canvas_node_and_step() {
@@ -78,6 +82,42 @@ async fn materializer_links_previous_active_node_to_new_node() {
     assert_eq!(context.edges[0].from_node_id, "trace-node:step-1");
     assert_eq!(context.edges[0].to_node_id, "trace-node:step-2");
     assert_eq!(context.edges[0].kind, TraceCanvasEdgeKind::DependsOn);
+}
+
+#[tokio::test]
+async fn handler_decodes_payload_and_materializes_context() {
+    let store = Arc::new(open_in_memory().await.expect("open"));
+    let handler = TraceCanvasHandler::new(Arc::clone(&store));
+    assert_eq!(
+        handler.kind(),
+        cairn_core::contract::job_store::JobKind::new(TRACE_CANVAS_KIND)
+    );
+
+    let payload = TraceCanvasPayload {
+        projection: TraceCanvasProjection {
+            step: step("step-1", "turn-1", 100, Some("record-1")),
+            canvas_title: "Current task".into(),
+            canvas_goal: "finish issue 134".into(),
+            node_label: "Run check".into(),
+            node_status: "completed".into(),
+            node_summary: "The focused check passed.".into(),
+        },
+    };
+
+    let outcome = handler
+        .handle(&payload.to_bytes().expect("encode payload"))
+        .await;
+    assert_eq!(outcome, HandlerOutcome::Done);
+
+    let context = store
+        .active_trace_canvas_for_session("session-1")
+        .await
+        .expect("load context")
+        .expect("context exists");
+    assert_eq!(
+        context.canvas.active_node_id.as_deref(),
+        Some("trace-node:step-1")
+    );
 }
 
 fn step(

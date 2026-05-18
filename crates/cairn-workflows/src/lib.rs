@@ -53,7 +53,10 @@ pub use planners::{
 pub use scheduler::{Clock, MockClock, Scheduler, SchedulerConfig, SystemClock};
 pub use sqlite_apply::SqliteFlushPlanApply;
 pub use sqlite_store::{SqliteJobStore, SqliteJobStoreInitError};
-pub use trace_canvas::{TraceCanvasMaterializer, TraceCanvasProjection};
+pub use trace_canvas::{
+    TRACE_CANVAS_KIND, TraceCanvasHandler, TraceCanvasMaterializer, TraceCanvasPayload,
+    TraceCanvasProjection,
+};
 pub use workflows::{
     ConsolidateWorkflow, ExpireWorkflow, PromoteWorkflow, ReflectionWorkflow, WorkflowPlanSource,
 };

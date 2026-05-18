@@ -6,13 +6,21 @@
 
 use std::sync::Arc;
 
+use cairn_core::contract::job_store::{FailureClass, JobKind, JobPayload};
 use cairn_store_sqlite::{
     SqliteMemoryStore, StoreError, TraceCanvasContext, TraceCanvasDraft, TraceCanvasEdgeDraft,
     TraceCanvasEdgeKind, TraceCanvasNodeDraft, TraceCanvasStatus, TraceStepDraft,
 };
+use serde::{Deserialize, Serialize};
+
+use crate::scheduler::{HandlerOutcome, JobHandler};
+
+/// The `JobKind` discriminator stored in `workflow_jobs.kind`.
+pub const TRACE_CANVAS_KIND: &str = "trace_canvas.materialize_step";
 
 /// Deterministic projection input for one trace step.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TraceCanvasProjection {
     /// Trace step to persist.
     pub step: TraceStepDraft,
@@ -28,9 +36,83 @@ pub struct TraceCanvasProjection {
     pub node_summary: String,
 }
 
+/// One enqueued trace-canvas materialization request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TraceCanvasPayload {
+    /// Projection to apply.
+    pub projection: TraceCanvasProjection,
+}
+
+impl TraceCanvasPayload {
+    /// Recommended `EnqueueRequest::queue_key` for this payload.
+    #[must_use]
+    pub fn recommended_queue_key(&self) -> String {
+        format!("trace-canvas:{}", self.projection.step.session_id)
+    }
+
+    /// Serialize to `JobPayload`.
+    ///
+    /// # Errors
+    /// JSON encoding failure (effectively unreachable for this struct).
+    pub fn to_bytes(&self) -> Result<JobPayload, serde_json::Error> {
+        serde_json::to_vec(self)
+    }
+
+    /// Deserialize from `JobPayload`.
+    ///
+    /// # Errors
+    /// JSON decoding failure.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, serde_json::Error> {
+        serde_json::from_slice(bytes)
+    }
+}
+
 /// Store-backed task-trace canvas materializer.
 pub struct TraceCanvasMaterializer {
     store: Arc<SqliteMemoryStore>,
+}
+
+/// Scheduler handler for task-trace canvas materialization jobs.
+pub struct TraceCanvasHandler {
+    materializer: TraceCanvasMaterializer,
+}
+
+impl TraceCanvasHandler {
+    /// Create a handler backed by `store`.
+    #[must_use]
+    pub fn new(store: Arc<SqliteMemoryStore>) -> Self {
+        Self {
+            materializer: TraceCanvasMaterializer::new(store),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl JobHandler for TraceCanvasHandler {
+    fn kind(&self) -> JobKind {
+        JobKind::new(TRACE_CANVAS_KIND)
+    }
+
+    async fn handle(&self, payload_bytes: &JobPayload) -> HandlerOutcome {
+        let payload = match TraceCanvasPayload::from_bytes(payload_bytes) {
+            Ok(payload) => payload,
+            Err(err) => {
+                return HandlerOutcome::Permanent {
+                    reason: format!("trace canvas payload decode failed: {err}"),
+                    class: FailureClass::Validation,
+                };
+            }
+        };
+
+        match self.materializer.project_step(payload.projection).await {
+            Ok(_) => HandlerOutcome::Done,
+            Err(err) => HandlerOutcome::Retry {
+                reason: err.to_string(),
+                class: FailureClass::Transient,
+            },
+        }
+    }
 }
 
 impl TraceCanvasMaterializer {

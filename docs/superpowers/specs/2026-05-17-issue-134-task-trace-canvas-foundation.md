@@ -32,6 +32,10 @@ canvas if needed, writes the step and node, advances the active node pointer,
 and links the previous active node to the new node with a deterministic
 `depends_on` edge.
 
+The same module exposes `TraceCanvasPayload` and `TraceCanvasHandler` under
+`trace_canvas.materialize_step` so the scheduler can dispatch materialization
+jobs once capture enqueueing lands.
+
 ## Non-Goals
 
 This slice does not implement workflow materialization, hot-memory selection,
