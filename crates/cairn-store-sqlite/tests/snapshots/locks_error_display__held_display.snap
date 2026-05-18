@@ -1,0 +1,5 @@
+---
+source: crates/cairn-store-sqlite/tests/locks_error_display.rs
+expression: "format!(\"{e}\")"
+---
+lock held: resource=vault:abc123 mode=EXCLUSIVE held_by=pid=42-01HQZ7N4VXJ8XK 500ms ago, ttl_remaining=4500ms, retry=BackoffJitter { initial: 50ms, max: 5s }

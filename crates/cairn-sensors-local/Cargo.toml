@@ -10,13 +10,31 @@ homepage.workspace = true
 readme.workspace = true
 description = "Local sensors (IDE hook, terminal, clipboard, voice, screen) for Cairn."
 
+[features]
+default = []
+voice-runtime = ["dep:cpal", "dep:sherpa-onnx"]
+screenpipe-runtime = ["dep:reqwest", "dep:serde", "dep:tokio"]
+
 [dependencies]
 cairn-core = { workspace = true }
 async-trait = { workspace = true }
+cpal = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+regex = { workspace = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+sherpa-onnx = { workspace = true, optional = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, optional = true, features = ["time"] }
 tracing = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+xcap = { workspace = true }
 
 [dev-dependencies]
 cairn-test-fixtures = { workspace = true }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

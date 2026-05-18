@@ -1,0 +1,4 @@
+[plugin]
+name = "cairn-embeddings-local"
+kind = "embedder"
+description = "Pure-Rust local embedding runtime using candle BERT models."

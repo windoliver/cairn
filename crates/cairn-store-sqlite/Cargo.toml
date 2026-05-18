@@ -12,19 +12,69 @@ description = "SQLite + FTS5 + sqlite-vec record store adapter for Cairn."
 
 [dependencies]
 cairn-core = { workspace = true }
+cairn-embeddings-local = { path = "../cairn-embeddings-local" }
 async-trait = { workspace = true }
+base64 = { workspace = true }
+blake3 = { workspace = true }
+# `getrandom` is already implied by `rand`'s `std` feature in 0.8, but
+# enable it explicitly so any future workspace tweak that drops `std`
+# does not silently break `OsRng` lookup at handshake mint time
+# (issue #52 round-4 review #1).
+rand = { workspace = true, features = ["getrandom"] }
+rusqlite = { workspace = true }
+rusqlite_migration = { workspace = true }
+serde_json = { workspace = true }
+serde = { workspace = true }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
-# NOTE: rusqlite (with `bundled` feature) is intentionally held out of the P0
-# scaffold. Pulling libsqlite3-sys/cc into every workspace build widens the
-# native-compilation surface before any storage code uses it. The real dep
-# lands with the storage implementation in issue #46.
+tokio = { workspace = true, features = ["time", "rt"] }
+tokio-util = { workspace = true }
+tokio_rusqlite = { workspace = true }
+tracing = { workspace = true }
+ulid = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+ed25519-dalek = { workspace = true }
+parking_lot = { workspace = true }
+indexmap = { workspace = true }
+# sqlite-vec ANN extension — statically compiled; the crate's own build.rs
+# handles compilation. We load it per-connection via register_auto_extension.
+sqlite-vec = { workspace = true }
+
+[features]
+default = []
+# Exposes sync `rusqlite::Connection` open helpers for integration tests.
+# Not part of the production API — keeps the test surface explicit.
+test-helpers = []
 
 [dev-dependencies]
+cairn-core = { workspace = true, features = ["test-fixtures", "test-helpers"] }
+cairn-cli = { path = "../cairn-cli" }
+cairn-store-sqlite = { path = ".", features = ["test-helpers"] }
 cairn-test-fixtures = { workspace = true }
+insta = { workspace = true }
+proptest = { workspace = true }
+serde = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+rand_core = { workspace = true }
+rstest = { workspace = true }
 
-[lints]
-workspace = true
+[lints.rust]
+# Inherits all workspace lints except unsafe_code (lowered to deny so
+# vec_ext::register_vec0() can use #[allow(unsafe_code)] to isolate the
+# single narrow unsafe call needed to register the statically-linked
+# sqlite-vec C extension via rusqlite::ffi::sqlite3_auto_extension).
+unsafe_code = "deny"
+missing_docs = "warn"
+rust_2024_compatibility = { level = "deny", priority = -1 }
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
 
 # Forward-declared scaffold deps. Drop entries as their first call site lands.
 [package.metadata.cargo-machete]
-ignored = ["thiserror"]
+ignored = ["thiserror", "chrono", "serde_json", "ed25519-dalek", "sha2", "ulid"]

@@ -1,0 +1,15 @@
+{
+  "contract": "cairn.mcp.v1",
+  "error": {
+    "code": "InvalidArgs",
+    "data": {
+      "field": "args",
+      "reason": "unknown field `but_missing_required_field`, expected one of `batch_size`, `body`, `dry_run`, `exclude`, `file`, `folder`, `frontmatter`, `harness`, `human_review`, `include`, `jsonl`, `kind`, `limit`, `mode`, `no_cache`, `no_diff`, `recording`, `recursive`, `session_id`, `session_id_from`, `tags`, `url`"
+    },
+    "message": "invalid args: args: unknown field `but_missing_required_field`, expected one of `batch_size`, `body`, `dry_run`, `exclude`, `file`, `folder`, `frontmatter`, `harness`, `human_review`, `include`, `jsonl`, `kind`, `limit`, `mode`, `no_cache`, `no_diff`, `recording`, `recursive`, `session_id`, `session_id_from`, `tags`, `url`"
+  },
+  "operation_id": "<OPERATION_ID>",
+  "policy_trace": [],
+  "status": "rejected",
+  "verb": "ingest"
+}

@@ -1,0 +1,42 @@
+{
+  "media_path": "fixtures/v0/recordings/demo.mp4",
+  "media_sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000087",
+  "duration_ms": 5200,
+  "file_size": 1234,
+  "audio": [
+    {
+      "start_ms": 0,
+      "duration_ms": 1800,
+      "speaker_id": "unknown_speaker_01",
+      "confidence": 0.91,
+      "text": "alpha recording launch note"
+    },
+    {
+      "start_ms": 3200,
+      "duration_ms": 900,
+      "speaker_id": "unknown_speaker_02",
+      "confidence": 0.86,
+      "text": "beta follow up action"
+    }
+  ],
+  "frames": [
+    {
+      "timestamp_ms": 2000,
+      "duration_ms": 1000,
+      "confidence": 0.82,
+      "text": "screen shows gamma config"
+    },
+    {
+      "timestamp_ms": 3000,
+      "duration_ms": 1000,
+      "confidence": 0.80,
+      "text": "screen shows gamma config"
+    },
+    {
+      "timestamp_ms": 4200,
+      "duration_ms": 1000,
+      "confidence": 0.70,
+      "text": "   "
+    }
+  ]
+}

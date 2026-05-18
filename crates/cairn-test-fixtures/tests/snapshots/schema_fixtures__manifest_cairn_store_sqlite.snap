@@ -10,12 +10,12 @@ PluginManifest {
     contract_version_range: VersionRange {
         min: ContractVersion {
             major: 0,
-            minor: 1,
+            minor: 2,
             patch: 0,
         },
         max_exclusive: ContractVersion {
             major: 0,
-            minor: 2,
+            minor: 3,
             patch: 0,
         },
     },

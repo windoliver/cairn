@@ -1,0 +1,35 @@
+# P0 Privacy fixture 5 — §14 PII redaction: vault markdown must not contain raw PII
+#
+# DEFERRED at v0.1: no automatic PII redaction at ingest time.
+# The vault writes the body verbatim to the markdown projection. Without
+# redaction at ingest the vault .md file contains raw PII.
+#
+# Hypothesis: the markdown projection of a PII-containing record must not
+# contain the raw email/phone span (it should be replaced by a masked form).
+#
+# Note: the harness checks markdown files by vault-relative path. The actual
+# vault path for the raw markdown projection depends on the record's path
+# field, which is ULID-derived. We cannot specify the exact path in the
+# fixture without advisory-id resolution in the markdown checker (not yet
+# implemented). So this fixture documents the gap and defers.
+#
+# When PII redaction is wired, extend the markdown DSL to support
+# path_contains_advisory_id and then assert body_must_not_contain.
+scenario: redaction_pii_markdown
+description: |
+  §14 PII redaction (DEFERRED — no auto-redact at ingest in v0.1).
+  Asserts that the vault markdown projection does not contain raw PII.
+  Unblock when Presidio pre-persist redaction + markdown-path resolver land (P1+).
+deferred: true
+setup:
+  records:
+    - id: rec_pii_markdown
+      kind: reference
+      body: "SSN 123-45-6789 must not appear in vault markdown"
+operations: []
+assertions:
+  # v0.1 gap: the harness markdown checker needs the exact vault-relative path.
+  # Since paths are ULID-derived we cannot hard-code them here without a
+  # path-resolver extension to the DSL. Both gaps (redaction + path-resolver)
+  # need to land before this fixture can run end-to-end.
+  markdown: []

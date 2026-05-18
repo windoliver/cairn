@@ -1,0 +1,40 @@
+{
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/prelude/handshake.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "challenge": {
+      "additionalProperties": false,
+      "properties": {
+        "expires_at": {
+          "description": "Unix epoch milliseconds; default TTL 60 s.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "nonce": {
+          "allOf": [
+            {
+              "$ref": "../common/primitives.json#/$defs/Nonce16Base64"
+            }
+          ],
+          "description": "Fresh 16-byte nonce; single-use; stored in outstanding_challenges. This is the same shape clients later place into signed_intent.server_challenge."
+        }
+      },
+      "required": [
+        "nonce",
+        "expires_at"
+      ],
+      "type": "object"
+    },
+    "contract": {
+      "const": "cairn.mcp.v1"
+    }
+  },
+  "required": [
+    "contract",
+    "challenge"
+  ],
+  "title": "Cairn handshake response",
+  "type": "object",
+  "x-cairn-contract": "cairn.mcp.v1"
+}

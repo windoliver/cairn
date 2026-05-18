@@ -1,0 +1,10 @@
+{
+  "cases": {
+    "ok_minimal": {
+      "kind": "stub"
+    },
+    "err_write_no_capability": {
+      "kind": "stub"
+    }
+  }
+}

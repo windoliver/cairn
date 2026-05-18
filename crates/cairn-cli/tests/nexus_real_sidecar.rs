@@ -64,11 +64,26 @@ fn write_config(vault: &Path, endpoint: &str, health_path: &str) {
     .unwrap();
 }
 
+fn write_vault_id(vault: &Path) {
+    let config_dir = vault.join(".cairn");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(config_dir.join("vault.id"), "01HQZX9F5N0000000000000000")
+        .expect("write vault.id");
+}
+
 fn create_authority_db(vault: &Path) {
     let db_dir = vault.join(".cairn");
     std::fs::create_dir_all(&db_dir).unwrap();
-    let conn = rusqlite::Connection::open(db_dir.join("cairn.db")).unwrap();
-    conn.execute_batch("PRAGMA user_version = 1;").unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    rt.block_on(async {
+        let store = cairn_store_sqlite::open(db_dir.join("cairn.db"))
+            .await
+            .expect("migrate authority db");
+        drop(store);
+    });
 }
 
 #[test]
@@ -84,6 +99,7 @@ fn real_sidecar_lifecycle_and_cli_status_e2e() {
     let health_path = sidecar_health_path();
     create_authority_db(&vault);
     write_config(&vault, &endpoint, &health_path);
+    write_vault_id(&vault);
 
     let mut supervisor = NexusSupervisor::start(SupervisorConfig {
         command: sidecar_command(),

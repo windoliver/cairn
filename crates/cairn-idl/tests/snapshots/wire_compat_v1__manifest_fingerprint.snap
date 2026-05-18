@@ -1,0 +1,5 @@
+---
+source: crates/cairn-idl/tests/wire_compat_v1.rs
+expression: digest
+---
+e5c6ad17c663c74aac20fc1a5cf12f7b55cd2d70768d56699bfac77bc551e0ea

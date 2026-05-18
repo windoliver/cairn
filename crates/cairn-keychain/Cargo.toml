@@ -1,0 +1,38 @@
+[package]
+name = "cairn-keychain"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "OS keychain (Keychain / Secret Service / DPAPI) backed Keystore for Cairn."
+
+[features]
+default = []
+## Enable OS-keychain round-trip integration tests.
+##
+## These tests require a live keychain daemon (macOS Keychain, Secret Service,
+## or Windows Credential Manager) and are therefore excluded from headless CI.
+## Run manually with:
+##     cargo nextest run -p cairn-keychain --features integration
+integration = []
+
+[dependencies]
+cairn-core = { workspace = true }
+async-trait = { workspace = true }
+base64 = { workspace = true }
+fs4 = { workspace = true }
+keyring = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }
+
+[dev-dependencies]
+rand_core = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }
+
+[lints]
+workspace = true

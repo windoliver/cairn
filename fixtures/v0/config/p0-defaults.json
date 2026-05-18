@@ -20,6 +20,7 @@
   },
   "store": { "kind": "sqlite" },
   "llm": { "provider": null, "base_url": null, "model": null, "api_key": null },
+  "search": { "local_embeddings": true },
   "sensors": {
     "hooks": { "enabled": true },
     "ide": { "enabled": true },

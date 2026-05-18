@@ -231,12 +231,12 @@ contract = "MemoryStore"
 
 [contract_version_range.min]
 major = 0
-minor = 1
+minor = 2
 patch = 0
 
 [contract_version_range.max_exclusive]
 major = 0
-minor = 2
+minor = 3
 patch = 0
 
 [features]
@@ -250,10 +250,10 @@ graph_edges = false
         let m = PluginManifest::parse_toml(FIXTURE).expect("fixture is valid");
         assert_eq!(m.name.as_str(), "cairn-store-sqlite");
         assert_eq!(m.contract, ContractKind::MemoryStore);
-        assert_eq!(m.contract_version_range.min, ContractVersion::new(0, 1, 0));
+        assert_eq!(m.contract_version_range.min, ContractVersion::new(0, 2, 0));
         assert_eq!(
             m.contract_version_range.max_exclusive,
-            ContractVersion::new(0, 2, 0)
+            ContractVersion::new(0, 3, 0)
         );
         assert_eq!(m.features.get("fts"), Some(&true));
     }
@@ -460,7 +460,7 @@ graph_edges = false
             m.verify_compatible_with(
                 &expected,
                 ContractKind::MemoryStore,
-                ContractVersion::new(0, 1, 0)
+                ContractVersion::new(0, 2, 0)
             )
             .is_ok()
         );
@@ -468,7 +468,7 @@ graph_edges = false
             m.verify_compatible_with(
                 &expected,
                 ContractKind::MemoryStore,
-                ContractVersion::new(0, 1, 9)
+                ContractVersion::new(0, 2, 9)
             )
             .is_ok()
         );
@@ -482,13 +482,13 @@ graph_edges = false
             .verify_compatible_with(
                 &expected,
                 ContractKind::MemoryStore,
-                ContractVersion::new(0, 2, 0),
+                ContractVersion::new(0, 3, 0),
             )
             .expect_err("host outside range must fail");
         match err {
             PluginError::UnsupportedContractVersion { contract, host, .. } => {
                 assert_eq!(contract, "MemoryStore");
-                assert_eq!(host, ContractVersion::new(0, 2, 0));
+                assert_eq!(host, ContractVersion::new(0, 3, 0));
             }
             other => panic!("wrong variant: {other:?}"),
         }
@@ -523,7 +523,7 @@ graph_edges = false
             .verify_compatible_with(
                 &wrong,
                 ContractKind::MemoryStore,
-                ContractVersion::new(0, 1, 0),
+                ContractVersion::new(0, 2, 0),
             )
             .expect_err("manifest name mismatch must fail");
         match err {
@@ -542,7 +542,7 @@ graph_edges = false
         assert_eq!(m.contract(), ContractKind::MemoryStore);
         assert_eq!(
             m.contract_version_range(),
-            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0),)
+            VersionRange::new(ContractVersion::new(0, 2, 0), ContractVersion::new(0, 3, 0),)
         );
         assert_eq!(m.features().get("fts"), Some(&true));
         assert_eq!(m.features().len(), 3);

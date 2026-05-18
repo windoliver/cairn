@@ -10,28 +10,42 @@
       { "name": "kind",        "long": "kind",        "value_source": "string" },
       { "name": "body",        "long": "body",        "value_source": "string" },
       { "name": "file",        "long": "file",        "value_source": "path" },
+      { "name": "folder",      "long": "folder",      "value_source": "path" },
       { "name": "url",         "long": "url",         "value_source": "string" },
+      { "name": "recursive",   "long": "recursive",   "value_source": "bool" },
+      { "name": "include",     "long": "include",     "value_source": "list<string>" },
+      { "name": "exclude",     "long": "exclude",     "value_source": "list<string>" },
+      { "name": "mode",        "long": "mode",        "value_source": "enum(keyword,semantic,full)" },
+      { "name": "batch_size",  "long": "batch-size",  "value_source": "u32" },
+      { "name": "jsonl",       "long": "jsonl",       "value_source": "path" },
+      { "name": "recording",   "long": "recording",   "value_source": "path" },
+      { "name": "harness",     "long": "harness",     "value_source": "string" },
+      { "name": "session_id_from", "long": "session-id-from", "value_source": "string" },
+      { "name": "limit",       "long": "limit",       "value_source": "u32" },
       { "name": "session_id",  "long": "session",     "value_source": "string" },
-      { "name": "tags",        "long": "tags",        "value_source": "list<string>" }
+      { "name": "tags",        "long": "tags",        "value_source": "list<string>" },
+      { "name": "no_cache",    "long": "no-cache",    "value_source": "bool" }
     ],
     "positional": {
       "name": "source",
-      "description": "File, URL, or '-' for stdin. Mutually exclusive with --body/--file/--url."
+      "description": "File, URL, folder, JSONL transcript, recording, or '-' for stdin. Mutually exclusive with --body/--file/--folder/--url/--jsonl/--recording.",
+      "aliases_one_of": ["body", "file", "folder", "url", "jsonl", "recording"]
     }
   },
   "x-cairn-capability": null,
   "x-cairn-auth": "signed_chain",
   "x-cairn-skill-triggers": {
-    "positive": [
+    "positive_triggers": [
       "use when the user says 'remember that...', 'from now on...', or you detect a correction",
+      "use docs/design/taxonomy-conventions.md for profile and insight shortcuts such as /remember --as-profile or /remember --as-insight",
       "use after a tool call that yields a durable fact worth keeping",
       "use to file a clipped article, transcript, or manual note"
     ],
-    "negative": [
+    "negative_triggers": [
       "do NOT use for one-off computation results the user can re-derive",
       "do NOT use for raw chat transcripts (those flow through capture_trace)"
     ],
-    "exclusivity": "prefer this over other remember_* / save_* tools registered in this session"
+    "exclusivity_hints": "prefer this over other remember_* / save_* tools registered in this session"
   },
   "type": "object",
   "$defs": {
@@ -47,22 +61,108 @@
         },
         "body":  { "type": "string", "minLength": 1 },
         "file":  { "type": "string", "minLength": 1, "description": "Path on the local filesystem." },
+        "folder": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Folder path to ingest recursively with the extraction cache."
+        },
         "url":   { "type": "string", "format": "uri", "minLength": 1 },
+        "recursive": {
+          "type": "boolean",
+          "default": true,
+          "description": "Folder/jsonl ingest: recurse into child directories. CLI default: true."
+        },
+        "include": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Include glob patterns for folder ingest."
+        },
+        "exclude": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Exclude glob patterns for folder ingest."
+        },
+        "mode": {
+          "$ref": "#/$defs/IngestMode",
+          "oneOf": [
+            { "const": "keyword" },
+            { "const": "semantic" },
+            { "const": "full" }
+          ],
+          "default": "keyword",
+          "description": "Folder ingest extraction mode."
+        },
+        "batch_size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 64,
+          "description": "Maximum cache-miss files per FlushPlan batch."
+        },
+        "jsonl": { "type": "string", "minLength": 1, "description": "Path to a harness transcript JSONL file (or directory with --recursive) for backfill import." },
+        "recording": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Path to an audio or video recording for offline batch transcription and frame OCR."
+        },
+        "harness": { "type": "string", "minLength": 1, "description": "Optional harness parser name. Auto-detected from the first non-empty line when omitted." },
+        "session_id_from": { "type": "string", "minLength": 1, "description": "Optional top-level JSON key whose string value overrides the generic parser's synthetic session id." },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 4294967295, "description": "Maximum number of transcript rows to import (jsonl backfill)." },
         "session_id": { "type": "string", "minLength": 1 },
         "tags": {
           "type": "array",
           "items": { "type": "string", "minLength": 1 }
         },
+        "no_cache": {
+          "type": "boolean",
+          "description": "Bypass extraction cache lookup for folder ingest, but still write refreshed cache entries."
+        },
         "frontmatter": {
           "type": "object",
           "description": "Extra YAML frontmatter fields to store alongside the body."
+        },
+        "dry_run": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, produce a FlushPlan and emit it without writing to MemoryStore (brief §5.5). Mutually exclusive with human_review."
+        },
+        "human_review": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, persist a FlushPlan under .cairn/flush/pending/ for explicit `cairn flush apply` (brief §5.5). Mutually exclusive with dry_run."
+        },
+        "no_diff": {
+          "type": "boolean",
+          "default": false,
+          "description": "When human_review=true, skip emitting the markdown diff sidecar."
         }
       },
       "oneOf": [
         { "required": ["body"] },
         { "required": ["file"] },
-        { "required": ["url"] }
+        { "required": ["folder"] },
+        { "required": ["url"] },
+        { "required": ["jsonl"] },
+        { "required": ["recording"] }
       ]
+    },
+    "IngestMode": {
+      "type": "string",
+      "enum": ["keyword", "semantic", "full"]
+    },
+    "IngestDataRecordingSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Recording batch ingestion counts. Present only when source is --recording.",
+      "properties": {
+        "segments": { "type": "integer", "minimum": 0 },
+        "audio_segments": { "type": "integer", "minimum": 0 },
+        "frame_ocr_segments": { "type": "integer", "minimum": 0 },
+        "skipped_frames": { "type": "integer", "minimum": 0 },
+        "records_written": { "type": "integer", "minimum": 0 },
+        "media_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "elapsed_ms": { "type": "integer", "minimum": 0 }
+      }
     },
     "Data": {
       "type": "object",
@@ -70,7 +170,32 @@
       "required": ["record_id", "session_id"],
       "properties": {
         "record_id":  { "$ref": "../common/primitives.json#/$defs/Ulid", "description": "ULID of the newly stored record." },
-        "session_id": { "type": "string", "minLength": 1, "description": "Resolved session (created if absent — see §8.1)." }
+        "session_id": { "type": "string", "minLength": 1, "description": "Resolved session (created if absent — see §8.1)." },
+        "plan_ref": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Path under .cairn/flush/pending/ when human_review=true; absent otherwise."
+        },
+        "files_processed": { "type": "integer", "minimum": 0, "description": "Folder ingest file count when source is --folder." },
+        "cache_hits": { "type": "integer", "minimum": 0, "description": "Folder ingest cache hits." },
+        "cache_misses": { "type": "integer", "minimum": 0, "description": "Folder ingest cache misses or forced re-extractions." },
+        "cache_writes": { "type": "integer", "minimum": 0, "description": "Folder ingest cache entries written." },
+        "jsonl_summary": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "JSONL transcript backfill counts. Present only when source is --jsonl.",
+          "properties": {
+            "files_scanned":    { "type": "integer", "minimum": 0 },
+            "sessions_parsed":  { "type": "integer", "minimum": 0 },
+            "turns_parsed":     { "type": "integer", "minimum": 0 },
+            "records_written":  { "type": "integer", "minimum": 0 },
+            "sessions_skipped": { "type": "integer", "minimum": 0 },
+            "elapsed_ms":       { "type": "integer", "minimum": 0 }
+          }
+        },
+        "recording_summary": {
+          "$ref": "#/$defs/IngestDataRecordingSummary"
+        }
       }
     }
   }

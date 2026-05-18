@@ -1,0 +1,40 @@
+# P0 Privacy fixture 8 — §14 / §6.6 no body leak in metrics log
+# Verifies that the record body text does not appear verbatim in
+# .cairn/metrics.jsonl after the record is ingested and forgotten.
+#
+# What is tested (v0.1 — RUNS end-to-end):
+#   - The sentinel string "FORBIDDEN_BODY_TOKEN_SHOULD_NEVER_APPEAR_IN_LOGS"
+#     is used as the record body. After forget, the harness reads
+#     .cairn/metrics.jsonl (if it exists) and asserts the sentinel is absent.
+#   - If metrics.jsonl does not exist (no assemble_hot / capture_trace in this
+#     run), the NoUnmaskedSpan assertion is a no-op (harness reads with
+#     is_ok_and; missing file ⇒ false ⇒ no failure). This is correct: a
+#     missing log cannot contain the sentinel.
+#
+# Brief §6.6 mandates: "Never log record bodies above debug."
+# metrics.jsonl is an info-level structured append log; it must not contain
+# raw record body content.
+scenario: forget_does_not_leak_body_in_logs
+description: |
+  §14 / §6.6 — record body must not appear verbatim in .cairn/metrics.jsonl
+  after ingest + forget. Runs end-to-end at v0.1.
+setup:
+  records:
+    - id: rec_log_leak
+      kind: reference
+      body: "FORBIDDEN_BODY_TOKEN_SHOULD_NEVER_APPEAR_IN_LOGS"
+operations:
+  - verb: forget
+    target: rec_log_leak
+    mode: record
+assertions:
+  search:
+    # Belt-and-suspenders: search should not surface the forgotten record.
+    - mode: keyword
+      query: "FORBIDDEN_BODY_TOKEN_SHOULD_NEVER_APPEAR_IN_LOGS"
+      must_not_contain_id: rec_log_leak
+  markdown:
+    # The sentinel must not appear verbatim in the metrics log.
+    # If metrics.jsonl does not exist, the assertion passes (no leak possible).
+    - path: ".cairn/metrics.jsonl"
+      must_not_contain: "FORBIDDEN_BODY_TOKEN_SHOULD_NEVER_APPEAR_IN_LOGS"

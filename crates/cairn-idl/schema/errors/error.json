@@ -46,7 +46,13 @@
       "additionalProperties": false,
       "required": ["capability"],
       "properties": {
-        "capability": { "$ref": "../capabilities/capabilities.json" }
+        "capability": { "$ref": "../capabilities/capabilities.json" },
+        "remediation": {
+          "type": "string",
+          "minLength": 1,
+          "x-cairn-since": "v0.1.0",
+          "description": "Free-form operator-facing hint for resolving the capability gap. Optional and additive — populated by v0.1.0+ servers via cairn-core::status::REMEDIATION. Pre-v0.1.0 servers do not exist; v0.1.0 IS the first wire spec for cairn.mcp.v1, so there is no deployed peer that would reject the field. Callers MUST NOT parse this for dispatch; the closed `capability` enum is the machine-readable signal."
+        }
       }
     },
     "UnknownVerbData": {
