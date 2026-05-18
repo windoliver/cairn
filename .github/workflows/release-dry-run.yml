@@ -234,16 +234,23 @@ jobs:
         run: |
           set -euo pipefail
           CAIRN_BIN="$CAIRN_PREFIX/bin/cairn" ./scripts/install-smoke.sh
-      - name: Audit Homebrew formula
+      - name: Exercise Homebrew formula end-to-end
         if: matrix.os == 'macos-latest'
         shell: bash
         run: |
           set -euo pipefail
           # `brew audit --strict` validates formula structure offline. Path
           # invocation (`--formula <path>`) was removed in brew 5.x, so we
-          # stage the formula into a temp tap and audit through that.
+          # stage the formula into a temp tap. We then run the full user
+          # flow that docs advertise — `brew install --HEAD`, `brew test`,
+          # and the install-smoke against the brewed binary — so a broken
+          # `def install`, missing build dep, or wrong sandbox interaction
+          # fails CI here instead of on a user's machine.
           tap="$(brew --repository)/Library/Taps/local/homebrew-cairn-audit"
           mkdir -p "$tap/Formula"
           cp Formula/cairn.rb "$tap/Formula/cairn.rb"
-          trap 'rm -rf "$tap"' EXIT
+          trap 'rm -rf "$tap"; brew uninstall --force cairn || true' EXIT
           brew audit --strict local/cairn-audit/cairn
+          brew install --build-from-source --HEAD local/cairn-audit/cairn
+          brew test local/cairn-audit/cairn
+          CAIRN_BIN="$(brew --prefix cairn)/bin/cairn" ./scripts/install-smoke.sh

@@ -28,16 +28,41 @@ if ! command -v "$CAIRN_BIN" >/dev/null 2>&1 && [ ! -x "$CAIRN_BIN" ]; then
   exit 1
 fi
 
-# Detach from any caller state — the CLI honours these env vars and would
-# otherwise route mutating verbs (ingest, summarize, capture_trace, forget)
-# into the caller's real vault / registry / signing key. Strip them so the
-# smoke is hermetic.
-unset CAIRN_VAULT CAIRN_REGISTRY CAIRN_ISSUER
+# Detach from any caller state. The CLI honours a CAIRN_* env prefix as
+# nested config overrides (e.g. CAIRN_SEARCH__LOCAL_EMBEDDINGS=true would
+# override the YAML we are about to write), plus LLM-provider aliases that
+# could route `summarize` to a real OpenAI/Ollama endpoint. Strip the
+# full set so the smoke is hermetic.
+unset_prefix() {
+  prefix="$1"
+  keep="$2"
+  # POSIX env walk; bash 3.2-safe (no associative arrays, no `printenv -0`).
+  while IFS='=' read -r name _; do
+    case "$name" in
+      "$keep") ;;
+      "$prefix"*) unset "$name" ;;
+    esac
+  done <<EOF
+$(env)
+EOF
+}
+# `CAIRN_BIN` is OUR contract with the caller — preserve it. Strip every
+# other CAIRN_* (config overrides) and provider envs.
+unset_prefix CAIRN_ CAIRN_BIN
+unset_prefix OPENAI_ ""
+unset OLLAMA_HOST
 
 VAULT="$(mktemp -d -t cairn-smoke-XXXXXX)"
 # shellcheck disable=SC2064  # expand $VAULT now so the trap survives unset
 trap "rm -rf '$VAULT'" EXIT INT TERM
 cd "$VAULT"
+
+# Reroute HOME / XDG_CONFIG_HOME under the temp vault so the CLI cannot
+# pick up the caller's `~/.config/cairn/` or `~/.cache/huggingface/`. The
+# trap above cleans these up with the vault.
+export HOME="$VAULT/home"
+export XDG_CONFIG_HOME="$HOME/.config"
+mkdir -p "$XDG_CONFIG_HOME"
 
 # `ingest` auto-provisions a default issuer and stores its signing key. On
 # headless Linux there is no Secret Service, and the macOS keychain prompts
