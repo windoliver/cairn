@@ -244,6 +244,6 @@ jobs:
           # stage the formula into a temp tap and audit through that.
           tap="$(brew --repository)/Library/Taps/local/homebrew-cairn-audit"
           mkdir -p "$tap/Formula"
-          cp packaging/homebrew/cairn.rb "$tap/Formula/cairn.rb"
+          cp Formula/cairn.rb "$tap/Formula/cairn.rb"
           trap 'rm -rf "$tap"' EXIT
           brew audit --strict local/cairn-audit/cairn

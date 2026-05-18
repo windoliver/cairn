@@ -102,6 +102,13 @@ search_out="$("$CAIRN_BIN" search "install smoke" --mode keyword --json \
   || fail "search" "exit $? — $(cat "$VAULT/search.err")"
 assert_committed "$search_out" \
   || fail "search" "envelope not committed: $search_out"
+# Behavioural check: the keyword query must surface the record we just
+# ingested. A broken keyword index that returns 0 hits would otherwise
+# slip past this smoke.
+case "$search_out" in
+  *"$RECORD_ID"*) ;;
+  *) fail "search" "ingested $RECORD_ID not in keyword hits: $search_out" ;;
+esac
 echo "ok: search"
 
 # ── 5. retrieve ────────────────────────────────────────────────────────────
