@@ -366,6 +366,16 @@ impl crate::store::tx::StoreTx<'_> {
         let projector = MarkdownProjector;
         let mut paths = BTreeSet::new();
         for target in targets {
+            let mut stmt = self.tx.prepare(
+                "SELECT DISTINCT path \
+                   FROM record_projection_links \
+                  WHERE target_id = ?1 AND projection_kind = 'markdown' \
+                  ORDER BY path",
+            )?;
+            let rows = stmt.query_map(params![target.as_str()], |row| row.get::<_, String>(0))?;
+            for raw in rows {
+                paths.insert(PathBuf::from(raw?));
+            }
             if let Some(stored) = self.get_active_by_target(target)? {
                 paths.insert(projector.project(&stored).path);
             }
@@ -380,16 +390,28 @@ impl crate::store::tx::StoreTx<'_> {
         let mut target_ids = BTreeSet::new();
         for record_id in source_record_ids {
             let mut stmt = self.tx.prepare(
-                "SELECT DISTINCT target_id \
-                   FROM records \
-                  WHERE active = 1 AND tombstoned = 0 \
-                    AND json_extract(extra_frontmatter, '$.consolidation') IS NOT NULL \
-                    AND EXISTS ( \
-                        SELECT 1 \
-                          FROM json_each(json_extract(extra_frontmatter, \
-                                           '$.consolidation.source_record_ids')) \
-                         WHERE value = ?1 \
-                    )",
+                "SELECT DISTINCT target_id
+                   FROM (
+                        SELECT r.target_id
+                          FROM record_summary_links AS links
+                          JOIN records AS r
+                            ON r.record_id = links.summary_record_id
+                         WHERE links.source_record_id = ?1
+                           AND r.active = 1
+                           AND r.tombstoned = 0
+                        UNION
+                        SELECT target_id
+                          FROM records
+                         WHERE active = 1 AND tombstoned = 0
+                           AND json_extract(extra_frontmatter, '$.consolidation') IS NOT NULL
+                           AND EXISTS (
+                               SELECT 1
+                                 FROM json_each(json_extract(extra_frontmatter,
+                                                  '$.consolidation.source_record_ids'))
+                                WHERE value = ?1
+                           )
+                   )
+                  ORDER BY target_id",
             )?;
             let rows =
                 stmt.query_map(params![record_id.as_str()], |row| row.get::<_, String>(0))?;

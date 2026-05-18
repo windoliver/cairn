@@ -3,6 +3,7 @@
 #![allow(missing_docs)]
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use cairn_core::contract::memory_store::{ListArgs, MemoryStore};
@@ -219,6 +220,72 @@ async fn forget_session_uses_migrated_record_session_links() {
     })
     .await
     .expect("derived link assertion");
+}
+
+#[tokio::test]
+async fn forget_session_uses_migrated_summary_and_projection_links() {
+    let store = open_in_memory().await.expect("open store");
+    let source = session_record(
+        "01J00000000000000000001092",
+        "01HQZX9F5N0000000000010902",
+        "issue109 source body",
+        "sess-109-summary-links",
+    );
+    let summary = unscoped_record(
+        "01J00000000000000000001093",
+        "01HQZX9F5N0000000000010903",
+        "issue109 linked summary body",
+    );
+    store.upsert(&source).await.expect("upsert source");
+    store.upsert(&summary).await.expect("upsert summary");
+
+    let conn = store.raw_conn_for_admin().expect("raw conn").clone();
+    let source_record_id = source.id.as_str().to_owned();
+    let source_target_id = source.target_id.as_str().to_owned();
+    let summary_record_id = summary.id.as_str().to_owned();
+    let summary_target_id = summary.target_id.as_str().to_owned();
+    conn.call(move |c| {
+        c.execute(
+            "INSERT INTO record_summary_links (
+                summary_record_id, source_record_id, summary_kind, link_source, created_at
+             ) VALUES (?1, ?2, 'consolidation', 'consolidation', 109)",
+            params![summary_record_id, source_record_id],
+        )?;
+        c.execute(
+            "INSERT INTO record_projection_links (
+                record_id, target_id, projection_kind, path, body_hash, created_at
+             ) VALUES (?1, ?2, 'markdown', 'raw/custom-source.md', 'sha256:source', 109)",
+            params![source_record_id, source_target_id],
+        )?;
+        c.execute(
+            "INSERT INTO record_projection_links (
+                record_id, target_id, projection_kind, path, body_hash, created_at
+             ) VALUES (?1, ?2, 'markdown', 'raw/custom-summary.md', 'sha256:summary', 109)",
+            params![summary_record_id, summary_target_id],
+        )?;
+        Ok::<_, tokio_rusqlite::Error>(())
+    })
+    .await
+    .expect("seed migrated summary/projection links");
+
+    let outcome = store
+        .forget_session("sess-109-summary-links")
+        .await
+        .expect("forget session");
+
+    assert_eq!(outcome.deleted_count, 2);
+    assert!(outcome.tombstones.contains(&source.id));
+    assert!(outcome.tombstones.contains(&summary.id));
+    assert!(
+        outcome
+            .projection_paths
+            .contains(&PathBuf::from("raw/custom-source.md"))
+    );
+    assert!(
+        outcome
+            .projection_paths
+            .contains(&PathBuf::from("raw/custom-summary.md"))
+    );
 }
 
 #[tokio::test]

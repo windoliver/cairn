@@ -205,6 +205,12 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("index", "record_session_links_target_idx"),
     ("table", "record_link_review"),
     ("index", "record_link_review_reason_idx"),
+    ("table", "record_summary_links"),
+    ("index", "record_summary_links_source_idx"),
+    ("index", "record_summary_links_summary_idx"),
+    ("table", "record_projection_links"),
+    ("index", "record_projection_links_target_idx"),
+    ("index", "record_projection_links_path_idx"),
     // 0031_records_consent_model — Phase-A per-row consent gate (#253, brief §14).
     ("index", "records_consent_model_idx"),
     // 0032_consent_timeline — append-only receipt event log (#253, brief §14).
