@@ -39,3 +39,38 @@ fn status_human_exits_zero() {
         "human output missing contract: {stdout}"
     );
 }
+
+#[test]
+fn status_json_reports_missing_authority_db() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = cli()
+        .current_dir(dir.path())
+        .args(["status", "--json"])
+        .output()
+        .expect("cairn status --json");
+    assert!(out.status.success(), "exit: {:?}", out.status);
+    let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+    assert_eq!(v["health"]["authority_db"]["state"], "missing");
+    assert!(
+        v["health"]["authority_db"]["path"]
+            .as_str()
+            .unwrap()
+            .ends_with(".cairn/cairn.db")
+    );
+    assert_eq!(v["health"]["nexus_projection"]["state"], "disabled");
+}
+
+#[test]
+fn status_human_prints_split_health() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = cli()
+        .current_dir(dir.path())
+        .arg("status")
+        .output()
+        .expect("cairn status");
+    assert!(out.status.success(), "exit: {:?}", out.status);
+    let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    assert!(stdout.contains("authority_db: missing"), "{stdout}");
+    assert!(stdout.contains("nexus_projection: disabled"), "{stdout}");
+}

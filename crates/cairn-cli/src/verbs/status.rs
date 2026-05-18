@@ -5,6 +5,7 @@
 //! When the store adapter lands, read the incarnation from the daemon table.
 //! For P0 scaffold with no store wired, capabilities is empty.
 
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use cairn_core::generated::common::Capabilities;
@@ -14,13 +15,107 @@ use cairn_core::generated::status::{
     StatusResponseHealthNexusProjectionState, StatusResponseServerInfo,
 };
 
+use crate::config::{self, CliOverrides};
+
 use super::envelope::{emit_json, new_operation_id};
+
+fn default_vault_path() -> Result<PathBuf, String> {
+    std::env::current_dir().map_err(|err| format!("reading current directory: {err}"))
+}
+
+fn authority_db_health(vault_path: &Path) -> StatusResponseHealthAuthorityDb {
+    let db_path = vault_path.join(".cairn/cairn.db");
+    let path = db_path.display().to_string();
+    if !db_path.exists() {
+        return StatusResponseHealthAuthorityDb {
+            state: StatusResponseHealthAuthorityDbState::Missing,
+            path,
+            reason: None,
+        };
+    }
+
+    match rusqlite::Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ) {
+        Ok(_) => StatusResponseHealthAuthorityDb {
+            state: StatusResponseHealthAuthorityDbState::Healthy,
+            path,
+            reason: None,
+        },
+        Err(err) => StatusResponseHealthAuthorityDb {
+            state: StatusResponseHealthAuthorityDbState::Unavailable,
+            path,
+            reason: Some(err.to_string()),
+        },
+    }
+}
+
+fn disabled_nexus_projection() -> StatusResponseHealthNexusProjection {
+    StatusResponseHealthNexusProjection {
+        state: StatusResponseHealthNexusProjectionState::Disabled,
+        data_dir: None,
+        endpoint: None,
+        reason: None,
+    }
+}
+
+fn render_projection_human(projection: &StatusResponseHealthNexusProjection) -> String {
+    match projection.state {
+        StatusResponseHealthNexusProjectionState::Disabled => "disabled".to_owned(),
+        StatusResponseHealthNexusProjectionState::Healthy => "healthy".to_owned(),
+        StatusResponseHealthNexusProjectionState::Degraded => {
+            projection.reason.as_ref().map_or_else(
+                || "degraded".to_owned(),
+                |reason| format!("degraded ({reason})"),
+            )
+        }
+        _ => "unknown".to_owned(),
+    }
+}
+
+fn render_authority_human(authority: &StatusResponseHealthAuthorityDb) -> String {
+    match authority.state {
+        StatusResponseHealthAuthorityDbState::Healthy => "healthy".to_owned(),
+        StatusResponseHealthAuthorityDbState::Missing => "missing".to_owned(),
+        StatusResponseHealthAuthorityDbState::Unavailable => authority.reason.as_ref().map_or_else(
+            || "unavailable".to_owned(),
+            |reason| format!("unavailable ({reason})"),
+        ),
+        _ => "unknown".to_owned(),
+    }
+}
 
 /// Run `cairn status`. Exits 0 on success.
 #[must_use]
 pub fn run(json: bool) -> ExitCode {
+    let vault_path = match default_vault_path() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("cairn status: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    run_for_vault(&vault_path, json)
+}
+
+#[must_use]
+/// Run `cairn status` for an explicit vault path. Exits 0 on success.
+pub fn run_for_vault(vault_path: &Path, json: bool) -> ExitCode {
+    let config = match config::load(vault_path, &CliOverrides::default()) {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("cairn status: {err:#}");
+            return ExitCode::from(78);
+        }
+    };
+
     let incarnation = new_operation_id();
     let started_at = chrono_like_now();
+    let health = StatusResponseHealth {
+        authority_db: authority_db_health(vault_path),
+        nexus_projection: disabled_nexus_projection(),
+    };
     let resp = StatusResponse {
         contract: "cairn.mcp.v1".to_owned(),
         server_info: StatusResponseServerInfo {
@@ -29,9 +124,9 @@ pub fn run(json: bool) -> ExitCode {
             started_at: started_at.clone(),
             incarnation: incarnation.clone(),
         },
-        capabilities: p0_capabilities(),
+        capabilities: p0_capabilities(&config),
         extensions: vec![],
-        health: p0_health(),
+        health,
     };
 
     if json {
@@ -42,8 +137,16 @@ pub fn run(json: bool) -> ExitCode {
         println!("build:       {}", resp.server_info.build);
         println!("started_at:  {started_at}");
         println!("incarnation: {}", incarnation.0);
+        println!(
+            "authority_db: {}",
+            render_authority_human(&resp.health.authority_db)
+        );
+        println!(
+            "nexus_projection: {}",
+            render_projection_human(&resp.health.nexus_projection)
+        );
         if resp.capabilities.is_empty() {
-            println!("capabilities: (none — store not wired in this P0 build)");
+            println!("capabilities: (none - store not wired in this P0 build)");
         } else {
             for cap in &resp.capabilities {
                 println!(
@@ -58,24 +161,8 @@ pub fn run(json: bool) -> ExitCode {
 
 /// P0 advertises no capabilities — the store adapter is not wired yet.
 /// Update this list when store adapters land (issue #9).
-fn p0_capabilities() -> Vec<Capabilities> {
+fn p0_capabilities(_config: &cairn_core::config::CairnConfig) -> Vec<Capabilities> {
     vec![]
-}
-
-fn p0_health() -> StatusResponseHealth {
-    StatusResponseHealth {
-        authority_db: StatusResponseHealthAuthorityDb {
-            state: StatusResponseHealthAuthorityDbState::Missing,
-            path: ".cairn/cairn.db".to_owned(),
-            reason: None,
-        },
-        nexus_projection: StatusResponseHealthNexusProjection {
-            state: StatusResponseHealthNexusProjectionState::Disabled,
-            data_dir: None,
-            endpoint: None,
-            reason: None,
-        },
-    }
 }
 
 /// Return the current UTC time as an RFC-3339 string without sub-second precision.
@@ -229,7 +316,7 @@ mod tests {
 
     #[test]
     fn p0_capabilities_returns_empty() {
-        let caps = p0_capabilities();
+        let caps = p0_capabilities(&cairn_core::config::CairnConfig::default());
         assert!(caps.is_empty(), "P0 must advertise no capabilities");
     }
 }
