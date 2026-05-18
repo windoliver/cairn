@@ -140,14 +140,15 @@ pub fn setup(opts: &ClaudeCodeSetupOpts) -> Result<ClaudeCodeSetupReceipt> {
             path: config_path.clone(),
         })?;
     let entry = registration_entry(&binary, &vault);
-    let servers = ensure_mcp_servers_mut(root, opts.scope, &project_dir, &config_path)?;
+    let (servers, migrated_project_key) =
+        ensure_mcp_servers_mut(root, opts.scope, &project_dir, &config_path)?;
     let status = match servers.get(&opts.server_name) {
         Some(existing) if existing == &entry => SetupStatus::Unchanged,
         Some(_) => SetupStatus::Updated,
         None => SetupStatus::Created,
     };
 
-    if status != SetupStatus::Unchanged {
+    if status != SetupStatus::Unchanged || migrated_project_key {
         servers.insert(opts.server_name.clone(), entry);
         write_config(&config_path, &config)?;
     }
@@ -191,15 +192,15 @@ pub fn remove(opts: &ClaudeCodeRemoveOpts) -> Result<ClaudeCodeSetupReceipt> {
         .ok_or_else(|| ClaudeCodeSetupError::ConfigRoot {
             path: config_path.clone(),
         })?;
-    let status = if let Some(servers) =
-        mcp_servers_mut_if_present(root, opts.scope, &project_dir, &config_path)?
-    {
-        if servers.remove(&opts.server_name).is_some() {
-            write_config(&config_path, &config)?;
-            SetupStatus::Removed
-        } else {
-            SetupStatus::NotFound
-        }
+    let status = if remove_server_from_scope(
+        root,
+        opts.scope,
+        &project_dir,
+        &config_path,
+        &opts.server_name,
+    )? {
+        write_config(&config_path, &config)?;
+        SetupStatus::Removed
     } else {
         SetupStatus::NotFound
     };
@@ -298,35 +299,188 @@ fn path_string(path: &Path) -> String {
 
 fn local_project_keys(project_dir: &Path) -> Vec<String> {
     let mut keys = Vec::new();
-    if let Ok(canonical) = project_dir.canonicalize() {
-        push_unique_project_key(&mut keys, &normalize_path(&canonical));
+    if let Some(canonical) = canonical_project_key(project_dir) {
+        push_unique_project_key(&mut keys, &canonical);
     }
-    push_unique_project_key(&mut keys, project_dir);
+    push_unique_project_path(&mut keys, project_dir);
     keys
 }
 
-fn push_unique_project_key(keys: &mut Vec<String>, path: &Path) {
-    let key = path_string(path);
-    if !keys.iter().any(|existing| existing == &key) {
-        keys.push(key);
+fn canonical_project_key(path: &Path) -> Option<String> {
+    if !path.is_absolute() {
+        return None;
+    }
+    path.canonicalize()
+        .ok()
+        .map(|canonical| path_string(&normalize_path(&canonical)))
+}
+
+fn push_unique_project_path(keys: &mut Vec<String>, path: &Path) {
+    push_unique_project_key(keys, &path_string(path));
+}
+
+fn push_unique_project_key(keys: &mut Vec<String>, key: &str) {
+    if !keys.iter().any(|existing| existing == key) {
+        keys.push(key.to_string());
     }
 }
 
-fn local_project_key_for_write(projects: &Map<String, Value>, project_dir: &Path) -> String {
-    let keys = local_project_keys(project_dir);
-    keys.iter()
-        .find(|key| projects.contains_key(key.as_str()))
-        .cloned()
-        .unwrap_or_else(|| keys[0].clone())
+fn local_project_candidate_keys(projects: &Map<String, Value>, project_dir: &Path) -> Vec<String> {
+    let mut keys = local_project_keys(project_dir);
+    if let Some(target) = canonical_project_key(project_dir) {
+        for key in projects.keys() {
+            if canonical_project_key(Path::new(key)).as_deref() == Some(target.as_str()) {
+                push_unique_project_key(&mut keys, key);
+            }
+        }
+    }
+    keys
 }
 
-fn local_project_key_if_present(
-    projects: &Map<String, Value>,
+fn preferred_local_project_key(project_dir: &Path) -> String {
+    canonical_project_key(project_dir).unwrap_or_else(|| path_string(project_dir))
+}
+
+fn local_project_key_for_write(
+    projects: &mut Map<String, Value>,
     project_dir: &Path,
-) -> Option<String> {
-    local_project_keys(project_dir)
+    config_path: &Path,
+) -> Result<(String, bool)> {
+    let preferred = preferred_local_project_key(project_dir);
+    let aliases: Vec<_> = local_project_candidate_keys(projects, project_dir)
         .into_iter()
-        .find(|key| projects.contains_key(key.as_str()))
+        .filter(|key| key != &preferred)
+        .collect();
+    let mut migrated = false;
+
+    validate_project_entries(
+        projects,
+        std::iter::once(&preferred).chain(aliases.iter()),
+        config_path,
+    )?;
+
+    for alias in aliases {
+        if !projects.contains_key(&alias) {
+            continue;
+        }
+
+        if !projects.contains_key(&preferred) {
+            let value = projects
+                .remove(&alias)
+                .expect("alias key existence was just checked");
+            projects.insert(preferred.clone(), value);
+            migrated = true;
+            continue;
+        }
+
+        if projects
+            .get(&preferred)
+            .and_then(Value::as_object)
+            .is_some()
+        {
+            let alias_value = projects
+                .remove(&alias)
+                .expect("alias key existence was just checked");
+            let preferred_value = projects
+                .get_mut(&preferred)
+                .expect("preferred key existence was just checked");
+            merge_project_alias(preferred_value, alias_value, config_path)?;
+            migrated = true;
+        }
+    }
+
+    Ok((preferred, migrated))
+}
+
+fn validate_project_entries<'a>(
+    projects: &Map<String, Value>,
+    keys: impl IntoIterator<Item = &'a String>,
+    config_path: &Path,
+) -> Result<()> {
+    for key in keys {
+        if let Some(value) = projects.get(key) {
+            validate_project_entry(value, config_path)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_project_entry(value: &Value, config_path: &Path) -> Result<()> {
+    let Some(project) = value.as_object() else {
+        return Err(ClaudeCodeSetupError::ConfigRoot {
+            path: config_path.to_path_buf(),
+        });
+    };
+    if project
+        .get("mcpServers")
+        .is_some_and(|servers| !servers.is_object())
+    {
+        return Err(ClaudeCodeSetupError::ConfigRoot {
+            path: config_path.to_path_buf(),
+        });
+    }
+    Ok(())
+}
+
+fn merge_project_alias(
+    preferred_value: &mut Value,
+    alias_value: Value,
+    config_path: &Path,
+) -> Result<()> {
+    let Some(preferred) = preferred_value.as_object_mut() else {
+        return Err(ClaudeCodeSetupError::ConfigRoot {
+            path: config_path.to_path_buf(),
+        });
+    };
+    let Value::Object(alias) = alias_value else {
+        return Err(ClaudeCodeSetupError::ConfigRoot {
+            path: config_path.to_path_buf(),
+        });
+    };
+
+    for (key, value) in alias {
+        if key == "mcpServers" {
+            merge_mcp_servers(preferred, value, config_path)?;
+        } else if !preferred.contains_key(&key) {
+            preferred.insert(key, value);
+        }
+    }
+    Ok(())
+}
+
+fn merge_mcp_servers(
+    project: &mut Map<String, Value>,
+    alias_servers_value: Value,
+    config_path: &Path,
+) -> Result<()> {
+    let Value::Object(alias_servers) = alias_servers_value else {
+        return Err(ClaudeCodeSetupError::ConfigRoot {
+            path: config_path.to_path_buf(),
+        });
+    };
+    let Some(preferred_servers_value) = project.get_mut("mcpServers") else {
+        project.insert("mcpServers".to_string(), Value::Object(alias_servers));
+        return Ok(());
+    };
+    let Some(preferred_servers) = preferred_servers_value.as_object_mut() else {
+        return Err(ClaudeCodeSetupError::ConfigRoot {
+            path: config_path.to_path_buf(),
+        });
+    };
+
+    for (server_name, server) in alias_servers {
+        if !preferred_servers.contains_key(&server_name) {
+            preferred_servers.insert(server_name, server);
+        }
+    }
+    Ok(())
+}
+
+fn local_project_keys_if_present(projects: &Map<String, Value>, project_dir: &Path) -> Vec<String> {
+    local_project_candidate_keys(projects, project_dir)
+        .into_iter()
+        .filter(|key| projects.contains_key(key.as_str()))
+        .collect()
 }
 
 fn registration_entry(binary: &Path, vault: &Path) -> Value {
@@ -458,40 +612,68 @@ fn ensure_mcp_servers_mut<'a>(
     scope: ClaudeCodeScope,
     project_dir: &Path,
     config_path: &Path,
-) -> Result<&'a mut Map<String, Value>> {
+) -> Result<(&'a mut Map<String, Value>, bool)> {
     match scope {
         ClaudeCodeScope::Local => {
             let projects = ensure_object_child(root, "projects", config_path)?;
-            let project_key = local_project_key_for_write(projects, project_dir);
+            let (project_key, migrated_project_key) =
+                local_project_key_for_write(projects, project_dir, config_path)?;
             let project = ensure_object_child(projects, &project_key, config_path)?;
-            ensure_object_child(project, "mcpServers", config_path)
+            Ok((
+                ensure_object_child(project, "mcpServers", config_path)?,
+                migrated_project_key,
+            ))
         }
-        ClaudeCodeScope::Project => ensure_object_child(root, "mcpServers", config_path),
+        ClaudeCodeScope::Project => {
+            Ok((ensure_object_child(root, "mcpServers", config_path)?, false))
+        }
     }
 }
 
-fn mcp_servers_mut_if_present<'a>(
-    root: &'a mut Map<String, Value>,
+fn remove_server_from_scope(
+    root: &mut Map<String, Value>,
     scope: ClaudeCodeScope,
     project_dir: &Path,
     config_path: &Path,
-) -> Result<Option<&'a mut Map<String, Value>>> {
+    server_name: &str,
+) -> Result<bool> {
     match scope {
         ClaudeCodeScope::Local => {
-            let Some(projects) = object_child_mut_if_present(root, "projects", config_path)? else {
-                return Ok(None);
-            };
-            let Some(project_key) = local_project_key_if_present(projects, project_dir) else {
-                return Ok(None);
-            };
-            let Some(project) = object_child_mut_if_present(projects, &project_key, config_path)?
-            else {
-                return Ok(None);
-            };
-            object_child_mut_if_present(project, "mcpServers", config_path)
+            remove_local_project_server(root, project_dir, config_path, server_name)
         }
-        ClaudeCodeScope::Project => object_child_mut_if_present(root, "mcpServers", config_path),
+        ClaudeCodeScope::Project => {
+            let Some(servers) = object_child_mut_if_present(root, "mcpServers", config_path)?
+            else {
+                return Ok(false);
+            };
+            Ok(servers.remove(server_name).is_some())
+        }
     }
+}
+
+fn remove_local_project_server(
+    root: &mut Map<String, Value>,
+    project_dir: &Path,
+    config_path: &Path,
+    server_name: &str,
+) -> Result<bool> {
+    let Some(projects) = object_child_mut_if_present(root, "projects", config_path)? else {
+        return Ok(false);
+    };
+    let project_keys = local_project_keys_if_present(projects, project_dir);
+    validate_project_entries(projects, project_keys.iter(), config_path)?;
+    let mut removed = false;
+    for project_key in project_keys {
+        let project = projects
+            .get_mut(&project_key)
+            .and_then(Value::as_object_mut)
+            .expect("project entry was just validated");
+        let Some(servers) = project.get_mut("mcpServers").and_then(Value::as_object_mut) else {
+            continue;
+        };
+        removed |= servers.remove(server_name).is_some();
+    }
+    Ok(removed)
 }
 
 fn object_child_mut_if_present<'a>(
@@ -856,6 +1038,115 @@ mod tests {
             fs::read(&config_path).expect("config should remain"),
             original
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_project_key_for_write_rejects_invalid_alias_without_mutating_projects() {
+        let root = TempDir::new().expect("tempdir");
+        let real_root = root.path().join("real");
+        let alias_root = root.path().join("alias");
+        let project = real_root.join("project");
+        fs::create_dir_all(&project).expect("project dir");
+        std::os::unix::fs::symlink(&real_root, &alias_root).expect("symlink root");
+        let alias_project = alias_root.join("project");
+        let alias_key = path_string(&alias_project);
+        let config_path = root.path().join(".claude.json");
+        let mut projects = Map::new();
+        projects.insert(alias_key, json!(false));
+        let before = projects.clone();
+
+        let err = local_project_key_for_write(&mut projects, &alias_project, &config_path)
+            .expect_err("setup should reject invalid alias before migration");
+
+        assert_eq!(err.exit_code(), 78);
+        assert_eq!(projects, before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_project_key_for_write_rejects_invalid_merge_without_mutating_projects() {
+        let root = TempDir::new().expect("tempdir");
+        let real_root = root.path().join("real");
+        let alias_root = root.path().join("alias");
+        let project = real_root.join("project");
+        fs::create_dir_all(&project).expect("project dir");
+        std::os::unix::fs::symlink(&real_root, &alias_root).expect("symlink root");
+        let alias_project = alias_root.join("project");
+        let canonical_key = preferred_local_project_key(&alias_project);
+        let alias_key = path_string(&alias_project);
+        let config_path = root.path().join(".claude.json");
+        let mut projects = Map::new();
+        projects.insert(
+            canonical_key,
+            json!({
+                "mcpServers": false
+            }),
+        );
+        projects.insert(
+            alias_key,
+            json!({
+                "mcpServers": {
+                    "cairn": {
+                        "type": "stdio",
+                        "command": "/bin/cairn",
+                        "args": [],
+                        "env": {}
+                    }
+                }
+            }),
+        );
+        let before = projects.clone();
+
+        let err = local_project_key_for_write(&mut projects, &alias_project, &config_path)
+            .expect_err("setup should reject invalid merge before moving aliases");
+
+        assert_eq!(err.exit_code(), 78);
+        assert_eq!(projects, before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_local_project_server_rejects_invalid_alias_without_mutating_root() {
+        let root = TempDir::new().expect("tempdir");
+        let real_root = root.path().join("real");
+        let alias_root = root.path().join("alias");
+        let project = real_root.join("project");
+        fs::create_dir_all(&project).expect("project dir");
+        std::os::unix::fs::symlink(&real_root, &alias_root).expect("symlink root");
+        let alias_project = alias_root.join("project");
+        let canonical_key = preferred_local_project_key(&alias_project);
+        let alias_key = path_string(&alias_project);
+        let config_path = root.path().join(".claude.json");
+        let mut root_config = json!({
+            "projects": {
+                canonical_key: {
+                    "mcpServers": {
+                        "cairn": {
+                            "type": "stdio",
+                            "command": "/bin/cairn",
+                            "args": [],
+                            "env": {}
+                        }
+                    }
+                },
+                alias_key: false
+            }
+        });
+        let before = root_config.clone();
+
+        let err = remove_local_project_server(
+            root_config
+                .as_object_mut()
+                .expect("root config should be object"),
+            &alias_project,
+            &config_path,
+            "cairn",
+        )
+        .expect_err("remove should reject invalid alias before deleting servers");
+
+        assert_eq!(err.exit_code(), 78);
+        assert_eq!(root_config, before);
     }
 
     #[test]

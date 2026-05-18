@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use clap::ArgMatches;
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 /// Default Claude Code MCP server name expected by the doctor flow.
 pub const DEFAULT_SERVER_NAME: &str = "cairn";
@@ -225,19 +225,40 @@ fn normalize_path(path: &Path) -> PathBuf {
     normalized
 }
 
-fn project_keys(project_dir: &Path) -> Vec<String> {
+fn direct_project_keys(project_dir: &Path) -> Vec<String> {
     let mut keys = Vec::new();
-    if let Ok(canonical) = project_dir.canonicalize() {
-        push_unique_project_key(&mut keys, &normalize_path(&canonical));
+    if let Some(canonical) = canonical_project_key(project_dir) {
+        push_unique_project_key(&mut keys, &canonical);
     }
-    push_unique_project_key(&mut keys, project_dir);
+    let lexical = project_dir.to_string_lossy().into_owned();
+    push_unique_project_key(&mut keys, &lexical);
     keys
 }
 
-fn push_unique_project_key(keys: &mut Vec<String>, path: &Path) {
-    let key = path.to_string_lossy().into_owned();
-    if !keys.iter().any(|existing| existing == &key) {
-        keys.push(key);
+fn canonical_project_key(path: &Path) -> Option<String> {
+    if !path.is_absolute() {
+        return None;
+    }
+    path.canonicalize()
+        .ok()
+        .map(|canonical| normalize_path(&canonical).to_string_lossy().into_owned())
+}
+
+fn project_keys(projects: &Map<String, Value>, project_dir: &Path) -> Vec<String> {
+    let mut keys = direct_project_keys(project_dir);
+    if let Some(target) = canonical_project_key(project_dir) {
+        for key in projects.keys() {
+            if canonical_project_key(Path::new(key)).as_deref() == Some(target.as_str()) {
+                push_unique_project_key(&mut keys, key);
+            }
+        }
+    }
+    keys
+}
+
+fn push_unique_project_key(keys: &mut Vec<String>, key: &str) {
+    if !keys.iter().any(|existing| existing == key) {
+        keys.push(key.to_string());
     }
 }
 
@@ -339,7 +360,7 @@ fn locate_registration(
         candidates.push(RegistrationCandidate {
             path: home_dir.join(".claude.json"),
             kind: RegistrationSource::LocalProject {
-                project_keys: project_keys(project_dir),
+                project_dir: project_dir.to_path_buf(),
             },
         });
     }
@@ -396,7 +417,7 @@ impl RegistrationCandidate {
 
 #[derive(Debug)]
 enum RegistrationSource {
-    LocalProject { project_keys: Vec<String> },
+    LocalProject { project_dir: PathBuf },
     Project,
     User,
 }
@@ -404,11 +425,11 @@ enum RegistrationSource {
 impl RegistrationSource {
     fn extract(&self, root: &Value, server_name: &str) -> Option<RawRegistration> {
         match self {
-            Self::LocalProject { project_keys } => {
-                let projects = root.get("projects")?;
-                for project_key in project_keys {
+            Self::LocalProject { project_dir } => {
+                let projects = root.get("projects")?.as_object()?;
+                for project_key in project_keys(projects, project_dir) {
                     if let Some(registration) = projects
-                        .get(project_key)
+                        .get(&project_key)
                         .and_then(|project| project.get("mcpServers"))
                         .and_then(|servers| servers.get(server_name))
                         .and_then(parse_registration)

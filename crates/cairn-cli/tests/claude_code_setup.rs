@@ -60,6 +60,15 @@ fn claude_project_key(project: &Path) -> String {
         .to_string()
 }
 
+fn registration_entry(binary: &str, vault: &Path) -> Value {
+    serde_json::json!({
+        "type": "stdio",
+        "command": binary,
+        "args": ["--vault", vault.display().to_string(), "mcp"],
+        "env": {}
+    })
+}
+
 #[test]
 fn setup_help_lists_claude_code() {
     cli()
@@ -448,4 +457,452 @@ fn doctor_succeeds_when_setup_uses_symlinked_project_path() {
     );
     let receipt = parse_stdout_json(out);
     assert_eq!(receipt["ok"], true);
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_succeeds_with_legacy_symlinked_local_project_key() {
+    let root = tempfile::tempdir().expect("root tempdir");
+    let real_root = root.path().join("real");
+    let alias_root = root.path().join("alias");
+    let project = real_root.join("project");
+    let home = real_root.join("home");
+    std::fs::create_dir_all(&project).expect("mkdir project");
+    std::fs::create_dir_all(&home).expect("mkdir home");
+    std::os::unix::fs::symlink(&real_root, &alias_root).expect("symlink root");
+    write_hook_settings(&project);
+
+    let vault = synth_vault();
+    let binary = env!("CARGO_BIN_EXE_cairn");
+    let legacy_project_key = alias_root.join("project").display().to_string();
+    std::fs::write(
+        home.join(".claude.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "projects": {
+                legacy_project_key: {
+                    "mcpServers": {
+                        "cairn": registration_entry(binary, vault.path())
+                    }
+                }
+            }
+        }))
+        .expect("serialize legacy .claude.json"),
+    )
+    .expect("write legacy .claude.json");
+
+    let out = cli()
+        .current_dir(&real_root)
+        .args(["doctor", "claude-code"])
+        .args(["--project-dir", "project"])
+        .arg("--home-dir")
+        .arg(&home)
+        .arg("--json")
+        .output()
+        .expect("cairn doctor claude-code --json");
+
+    assert!(
+        out.status.success(),
+        "exit: {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let receipt = parse_stdout_json(out);
+    assert_eq!(receipt["ok"], true);
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_migrates_legacy_symlinked_project_key_when_entry_is_unchanged() {
+    let root = tempfile::tempdir().expect("root tempdir");
+    let real_root = root.path().join("real");
+    let alias_root = root.path().join("alias");
+    let project = real_root.join("project");
+    let home = real_root.join("home");
+    std::fs::create_dir_all(&project).expect("mkdir project");
+    std::fs::create_dir_all(&home).expect("mkdir home");
+    std::os::unix::fs::symlink(&real_root, &alias_root).expect("symlink root");
+
+    let vault = synth_vault();
+    let binary = env!("CARGO_BIN_EXE_cairn");
+    let legacy_project_key = alias_root.join("project").display().to_string();
+    let canonical_project_key = claude_project_key(&project);
+    std::fs::write(
+        home.join(".claude.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "projects": {
+                legacy_project_key.clone(): {
+                    "keep": true,
+                    "mcpServers": {
+                        "cairn": registration_entry(binary, vault.path()),
+                        "other": {
+                            "type": "stdio",
+                            "command": "/usr/bin/true",
+                            "args": [],
+                            "env": {}
+                        }
+                    }
+                }
+            }
+        }))
+        .expect("serialize legacy .claude.json"),
+    )
+    .expect("write legacy .claude.json");
+
+    let out = cli()
+        .arg("--vault")
+        .arg(vault.path())
+        .args(["setup", "claude-code"])
+        .arg("--project-dir")
+        .arg(alias_root.join("project"))
+        .arg("--home-dir")
+        .arg(&home)
+        .args(["--binary", binary, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+
+    let receipt = parse_stdout_json(out);
+    assert_eq!(receipt["status"], "unchanged");
+    let config: Value =
+        serde_json::from_slice(&std::fs::read(home.join(".claude.json")).expect("read config"))
+            .expect("parse config");
+    assert!(
+        config["projects"]
+            .get(legacy_project_key.as_str())
+            .is_none()
+    );
+    assert_eq!(
+        config["projects"][canonical_project_key.as_str()]["keep"],
+        true
+    );
+    assert_eq!(
+        config["projects"][canonical_project_key.as_str()]["mcpServers"]["cairn"],
+        registration_entry(binary, vault.path())
+    );
+    assert_eq!(
+        config["projects"][canonical_project_key.as_str()]["mcpServers"]["other"]["command"],
+        "/usr/bin/true"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_merges_legacy_symlinked_project_key_when_canonical_key_exists() {
+    let root = tempfile::tempdir().expect("root tempdir");
+    let real_root = root.path().join("real");
+    let alias_root = root.path().join("alias");
+    let project = real_root.join("project");
+    let home = real_root.join("home");
+    std::fs::create_dir_all(&project).expect("mkdir project");
+    std::fs::create_dir_all(&home).expect("mkdir home");
+    std::os::unix::fs::symlink(&real_root, &alias_root).expect("symlink root");
+
+    let vault = synth_vault();
+    let binary = env!("CARGO_BIN_EXE_cairn");
+    let legacy_project_key = alias_root.join("project").display().to_string();
+    let canonical_project_key = claude_project_key(&project);
+    std::fs::write(
+        home.join(".claude.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "projects": {
+                canonical_project_key.clone(): {
+                    "canonical": true,
+                    "mcpServers": {
+                        "canonical-other": {
+                            "type": "stdio",
+                            "command": "/usr/bin/true",
+                            "args": [],
+                            "env": {}
+                        }
+                    }
+                },
+                legacy_project_key.clone(): {
+                    "legacy": true,
+                    "mcpServers": {
+                        "cairn": registration_entry(binary, vault.path()),
+                        "legacy-other": {
+                            "type": "stdio",
+                            "command": "/usr/bin/false",
+                            "args": [],
+                            "env": {}
+                        }
+                    }
+                }
+            }
+        }))
+        .expect("serialize legacy .claude.json"),
+    )
+    .expect("write legacy .claude.json");
+
+    let out = cli()
+        .arg("--vault")
+        .arg(vault.path())
+        .args(["setup", "claude-code"])
+        .arg("--project-dir")
+        .arg(alias_root.join("project"))
+        .arg("--home-dir")
+        .arg(&home)
+        .args(["--binary", binary, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+
+    let receipt = parse_stdout_json(out);
+    assert_eq!(receipt["status"], "unchanged");
+    let config: Value =
+        serde_json::from_slice(&std::fs::read(home.join(".claude.json")).expect("read config"))
+            .expect("parse config");
+    assert!(
+        config["projects"]
+            .get(legacy_project_key.as_str())
+            .is_none()
+    );
+    assert_eq!(
+        config["projects"][canonical_project_key.as_str()]["canonical"],
+        true
+    );
+    assert_eq!(
+        config["projects"][canonical_project_key.as_str()]["legacy"],
+        true
+    );
+    assert_eq!(
+        config["projects"][canonical_project_key.as_str()]["mcpServers"]["cairn"],
+        registration_entry(binary, vault.path())
+    );
+    assert_eq!(
+        config["projects"][canonical_project_key.as_str()]["mcpServers"]["canonical-other"]["command"],
+        "/usr/bin/true"
+    );
+    assert_eq!(
+        config["projects"][canonical_project_key.as_str()]["mcpServers"]["legacy-other"]["command"],
+        "/usr/bin/false"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_rejects_invalid_canonical_mcp_servers_when_legacy_key_exists() {
+    let root = tempfile::tempdir().expect("root tempdir");
+    let real_root = root.path().join("real");
+    let alias_root = root.path().join("alias");
+    let project = real_root.join("project");
+    let home = real_root.join("home");
+    std::fs::create_dir_all(&project).expect("mkdir project");
+    std::fs::create_dir_all(&home).expect("mkdir home");
+    std::os::unix::fs::symlink(&real_root, &alias_root).expect("symlink root");
+
+    let vault = synth_vault();
+    let binary = env!("CARGO_BIN_EXE_cairn");
+    let legacy_project_key = alias_root.join("project").display().to_string();
+    let canonical_project_key = claude_project_key(&project);
+    let config_path = home.join(".claude.json");
+    std::fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "projects": {
+                canonical_project_key.clone(): {
+                    "mcpServers": false
+                },
+                legacy_project_key.clone(): {
+                    "mcpServers": {
+                        "cairn": registration_entry(binary, vault.path())
+                    }
+                }
+            }
+        }))
+        .expect("serialize invalid canonical .claude.json"),
+    )
+    .expect("write invalid canonical .claude.json");
+    let before = std::fs::read(&config_path).expect("read original config");
+
+    cli()
+        .arg("--vault")
+        .arg(vault.path())
+        .args(["setup", "claude-code"])
+        .arg("--project-dir")
+        .arg(alias_root.join("project"))
+        .arg("--home-dir")
+        .arg(&home)
+        .args(["--binary", binary, "--json"])
+        .assert()
+        .code(78)
+        .stderr(predicate::str::contains(
+            "config root must be a JSON object",
+        ));
+
+    let after = std::fs::read(&config_path).expect("read unchanged config");
+    assert_eq!(after, before);
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_rejects_invalid_legacy_mcp_servers_when_canonical_key_exists() {
+    let root = tempfile::tempdir().expect("root tempdir");
+    let real_root = root.path().join("real");
+    let alias_root = root.path().join("alias");
+    let project = real_root.join("project");
+    let home = real_root.join("home");
+    std::fs::create_dir_all(&project).expect("mkdir project");
+    std::fs::create_dir_all(&home).expect("mkdir home");
+    std::os::unix::fs::symlink(&real_root, &alias_root).expect("symlink root");
+
+    let vault = synth_vault();
+    let binary = env!("CARGO_BIN_EXE_cairn");
+    let legacy_project_key = alias_root.join("project").display().to_string();
+    let canonical_project_key = claude_project_key(&project);
+    let config_path = home.join(".claude.json");
+    std::fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "projects": {
+                canonical_project_key.clone(): {
+                    "mcpServers": {
+                        "cairn": registration_entry(binary, vault.path())
+                    }
+                },
+                legacy_project_key.clone(): {
+                    "mcpServers": []
+                }
+            }
+        }))
+        .expect("serialize invalid legacy .claude.json"),
+    )
+    .expect("write invalid legacy .claude.json");
+    let before = std::fs::read(&config_path).expect("read original config");
+
+    cli()
+        .arg("--vault")
+        .arg(vault.path())
+        .args(["setup", "claude-code"])
+        .arg("--project-dir")
+        .arg(alias_root.join("project"))
+        .arg("--home-dir")
+        .arg(&home)
+        .args(["--binary", binary, "--json"])
+        .assert()
+        .code(78)
+        .stderr(predicate::str::contains(
+            "config root must be a JSON object",
+        ));
+
+    let after = std::fs::read(&config_path).expect("read unchanged config");
+    assert_eq!(after, before);
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_rejects_invalid_legacy_project_entry_when_canonical_key_exists() {
+    let root = tempfile::tempdir().expect("root tempdir");
+    let real_root = root.path().join("real");
+    let alias_root = root.path().join("alias");
+    let project = real_root.join("project");
+    let home = real_root.join("home");
+    std::fs::create_dir_all(&project).expect("mkdir project");
+    std::fs::create_dir_all(&home).expect("mkdir home");
+    std::os::unix::fs::symlink(&real_root, &alias_root).expect("symlink root");
+
+    let vault = synth_vault();
+    let binary = env!("CARGO_BIN_EXE_cairn");
+    let legacy_project_key = alias_root.join("project").display().to_string();
+    let canonical_project_key = claude_project_key(&project);
+    let config_path = home.join(".claude.json");
+    std::fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "projects": {
+                canonical_project_key.clone(): {
+                    "mcpServers": {
+                        "cairn": registration_entry(binary, vault.path())
+                    }
+                },
+                legacy_project_key.clone(): false
+            }
+        }))
+        .expect("serialize invalid legacy .claude.json"),
+    )
+    .expect("write invalid legacy .claude.json");
+    let before = std::fs::read(&config_path).expect("read original config");
+
+    cli()
+        .arg("--vault")
+        .arg(vault.path())
+        .args(["setup", "claude-code"])
+        .arg("--project-dir")
+        .arg(alias_root.join("project"))
+        .arg("--home-dir")
+        .arg(&home)
+        .args(["--binary", binary, "--json"])
+        .assert()
+        .code(78)
+        .stderr(predicate::str::contains(
+            "config root must be a JSON object",
+        ));
+
+    let after = std::fs::read(&config_path).expect("read unchanged config");
+    assert_eq!(after, before);
+}
+
+#[cfg(unix)]
+#[test]
+fn remove_deletes_legacy_symlinked_local_project_key() {
+    let root = tempfile::tempdir().expect("root tempdir");
+    let real_root = root.path().join("real");
+    let alias_root = root.path().join("alias");
+    let project = real_root.join("project");
+    let home = real_root.join("home");
+    std::fs::create_dir_all(&project).expect("mkdir project");
+    std::fs::create_dir_all(&home).expect("mkdir home");
+    std::os::unix::fs::symlink(&real_root, &alias_root).expect("symlink root");
+
+    let vault = synth_vault();
+    let binary = env!("CARGO_BIN_EXE_cairn");
+    let legacy_project_key = alias_root.join("project").display().to_string();
+    std::fs::write(
+        home.join(".claude.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "projects": {
+                legacy_project_key.clone(): {
+                    "mcpServers": {
+                        "cairn": registration_entry(binary, vault.path()),
+                        "other": {
+                            "type": "stdio",
+                            "command": "/usr/bin/true",
+                            "args": [],
+                            "env": {}
+                        }
+                    }
+                }
+            }
+        }))
+        .expect("serialize legacy .claude.json"),
+    )
+    .expect("write legacy .claude.json");
+
+    let out = cli()
+        .arg("--vault")
+        .arg(vault.path())
+        .args(["setup", "claude-code", "remove"])
+        .arg("--project-dir")
+        .arg(&project)
+        .arg("--home-dir")
+        .arg(&home)
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+
+    let receipt = parse_stdout_json(out);
+    assert_eq!(receipt["status"], "removed");
+    let config: Value =
+        serde_json::from_slice(&std::fs::read(home.join(".claude.json")).expect("read config"))
+            .expect("parse config");
+    assert!(config["projects"][legacy_project_key.as_str()]["mcpServers"]["cairn"].is_null());
+    assert_eq!(
+        config["projects"][legacy_project_key.as_str()]["mcpServers"]["other"]["command"],
+        "/usr/bin/true"
+    );
 }
