@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::Context as _;
-use cairn_core::config::{CairnConfig, ConsolidationConfig};
+use cairn_core::config::{CairnConfig, ConsolidationConfig, DreamConfig, DreamTier};
 use cairn_core::contract::job_store::JobStore;
 use cairn_core::domain::capture::{
     CaptureEvent, CaptureMode, CapturePayload, CaptureRefs, PayloadHash, SourceFamily,
@@ -61,7 +61,7 @@ use tokio::fs::File;
 use tokio::io::{AsyncBufReadExt as _, BufReader};
 use ulid::Ulid;
 
-use cairn_workflows::consolidation::enqueue_if_due_scoped;
+use cairn_workflows::{consolidation::enqueue_if_due_scoped, enqueue_tier_with_dedupe_token};
 
 use crate::identity::{guard::refuse_if_degraded, status::ReconciliationReport};
 use crate::sensor_gate::{
@@ -156,6 +156,7 @@ pub async fn run_handler(
         None,
         None,
         &ConsolidationConfig::default(),
+        &DreamConfig::default(),
     )
     .await
 }
@@ -175,6 +176,7 @@ pub async fn run_handler_with_scope(
         None,
         None,
         &ConsolidationConfig::default(),
+        &DreamConfig::default(),
     )
     .await
 }
@@ -199,6 +201,7 @@ pub async fn run_events_handler(
         None,
         None,
         &ConsolidationConfig::default(),
+        &DreamConfig::default(),
     )
     .await
 }
@@ -219,6 +222,7 @@ pub async fn run_events_handler_with_scope(
         None,
         None,
         &ConsolidationConfig::default(),
+        &DreamConfig::default(),
     )
     .await
 }
@@ -282,6 +286,7 @@ async fn run_blocks_handler_with_scope(
 }
 
 #[allow(
+    clippy::too_many_arguments,
     clippy::too_many_lines,
     reason = "trace import keeps validation, projection, and per-turn atomicity in one ordered transaction flow"
 )]
@@ -293,6 +298,7 @@ async fn run_handler_inner(
     sensor_config: Option<&CairnConfig>,
     job_store: Option<&dyn JobStore>,
     consolidation_config: &ConsolidationConfig,
+    dream_config: &DreamConfig,
 ) -> anyhow::Result<CaptureTraceResponse> {
     capture_trace_guard()?;
     let events = read_jsonl_events(from).await?;
@@ -304,6 +310,7 @@ async fn run_handler_inner(
         sensor_config,
         job_store,
         consolidation_config,
+        dream_config,
     )
     .await
 }
@@ -314,6 +321,7 @@ fn capture_trace_guard() -> anyhow::Result<()> {
 }
 
 #[allow(
+    clippy::too_many_arguments,
     clippy::too_many_lines,
     reason = "trace import keeps validation, projection, and per-turn atomicity in one ordered transaction flow"
 )]
@@ -325,6 +333,7 @@ async fn run_events_handler_inner_no_guard(
     sensor_config: Option<&CairnConfig>,
     job_store: Option<&dyn JobStore>,
     consolidation_config: &ConsolidationConfig,
+    dream_config: &DreamConfig,
 ) -> anyhow::Result<CaptureTraceResponse> {
     // Group by (session_id, turn_id). Events missing either ref, or
     // failing structural validation, are reported as failed and skipped
@@ -769,6 +778,13 @@ async fn run_events_handler_inner_no_guard(
             // review #1). Watermark itself stays monotone via
             // `latest_consolidation_watermark_scoped` which counts
             // tombstoned summaries.
+            let now_ms = i64::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis(),
+            )
+            .unwrap_or(i64::MAX);
             let since_sequence = store
                 .latest_consolidation_watermark_scoped(&session_str, scope_binding)
                 .await
@@ -780,21 +796,28 @@ async fn run_events_handler_inner_no_guard(
                 .await
                 .ok()
                 .map(|h| u32::try_from(h.len()).unwrap_or(u32::MAX));
+            let dream_dedupe_token =
+                active_eligible_opt.map(|active| since_sequence.saturating_add(active).to_string());
             if let Some(active_eligible) = active_eligible_opt {
                 let turn_count = since_sequence.saturating_add(active_eligible);
-                let now_ms = i64::try_from(
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis(),
-                )
-                .unwrap_or(i64::MAX);
                 let _ = enqueue_if_due_scoped(
                     js,
                     consolidation_config,
                     &session_str,
                     turn_count,
                     since_sequence,
+                    now_ms,
+                    scope_binding,
+                )
+                .await;
+            }
+            if let (true, Some(dedupe_token)) = (had_stop, dream_dedupe_token.as_deref()) {
+                let _ = enqueue_tier_with_dedupe_token(
+                    js,
+                    dream_config,
+                    DreamTier::LightSleep,
+                    &session_str,
+                    dedupe_token,
                     now_ms,
                     scope_binding,
                 )
@@ -1551,7 +1574,6 @@ async fn run_async(input: CaptureTraceInput, vault_root: PathBuf, config: CairnC
         entity: Some(CAPTURE_TRACE_ENTITY.to_owned()),
         ..ScopeTuple::default()
     };
-    let consolidation_config = ctx.config.consolidation;
     let job_store_ref = ctx.job_store.as_deref();
     let result = match input {
         CaptureTraceInput::Jsonl(from) => {
@@ -1562,7 +1584,8 @@ async fn run_async(input: CaptureTraceInput, vault_root: PathBuf, config: CairnC
                 Some(&scope_binding),
                 Some(&ctx.config),
                 job_store_ref,
-                &consolidation_config,
+                &ctx.config.consolidation,
+                &ctx.config.dream,
             )
             .await
         }
@@ -1713,7 +1736,137 @@ fn response_exit_code(resp: &Response) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
+    use cairn_core::contract::job_store::{
+        EnqueueRequest, FailDisposition, FailureClass, JobId, JobKind, JobStoreError, LeaseToken,
+        LeasedJob, ReclaimedRow,
+    };
+
+    const STOP_EVENT_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAW";
+    const STOP_SESSION_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    const STOP_SOURCE_HASH: &str =
+        "sha256:a11c3d917a2149a4b548217038bc8f2dd2130a1966e0c7af5c4225d81f25a8c3";
+    const STOP_SOURCE_REF: &str = "sources/hook/01ARZ3NDEKTSV4RRFFQ69G5FAW.json";
+
+    struct RecordingJobStore {
+        requests: Mutex<Vec<EnqueueRequest>>,
+    }
+
+    impl RecordingJobStore {
+        fn new() -> Self {
+            Self {
+                requests: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl JobStore for RecordingJobStore {
+        async fn enqueue(&self, req: EnqueueRequest) -> Result<(), JobStoreError> {
+            self.requests.lock().expect("invariant: mutex").push(req);
+            Ok(())
+        }
+
+        async fn enqueue_leased(
+            &self,
+            _: EnqueueRequest,
+            _: &str,
+            _: i64,
+            _: i64,
+        ) -> Result<LeasedJob, JobStoreError> {
+            Err(JobStoreError::Backend("unused in test".into()))
+        }
+
+        async fn lease(&self, _: &str, _: i64, _: i64) -> Result<Option<LeasedJob>, JobStoreError> {
+            Ok(None)
+        }
+
+        async fn lease_specific(
+            &self,
+            _: &JobId,
+            _: &JobKind,
+            _: &str,
+            _: i64,
+            _: i64,
+        ) -> Result<Option<LeasedJob>, JobStoreError> {
+            Ok(None)
+        }
+
+        async fn heartbeat(
+            &self,
+            _: &JobId,
+            _: &LeaseToken,
+            _: i64,
+            _: i64,
+        ) -> Result<(), JobStoreError> {
+            Err(JobStoreError::Backend("unused in test".into()))
+        }
+
+        async fn complete(&self, _: &JobId, _: &LeaseToken, _: i64) -> Result<(), JobStoreError> {
+            Err(JobStoreError::Backend("unused in test".into()))
+        }
+
+        async fn fail(
+            &self,
+            _: &JobId,
+            _: &LeaseToken,
+            _: FailDisposition,
+            _: FailureClass,
+            _: &str,
+            _: i64,
+        ) -> Result<(), JobStoreError> {
+            Err(JobStoreError::Backend("unused in test".into()))
+        }
+
+        async fn reap_expired(&self, _: i64) -> Result<Vec<ReclaimedRow>, JobStoreError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[allow(
+        clippy::expect_used,
+        reason = "test fixture: panics surface broken invariants immediately"
+    )]
+    fn write_stop_source(vault: &Path) {
+        std::fs::create_dir_all(vault.join("sources/hook")).expect("mkdir sources");
+        std::fs::write(vault.join(STOP_SOURCE_REF), b"stop\n").expect("write source");
+    }
+
+    #[allow(
+        clippy::expect_used,
+        reason = "test fixture: panics surface broken invariants immediately"
+    )]
+    fn stop_hook_event() -> CaptureEvent {
+        let sensor =
+            Identity::parse("snr:local:hook:cc-session:v1").expect("invariant: valid sensor id");
+        let captured_at =
+            Rfc3339Timestamp::parse("2026-05-17T12:00:00Z").expect("invariant: valid RFC-3339");
+        CaptureEvent {
+            event_id: CaptureEventId::parse(STOP_EVENT_ID).expect("invariant: valid ULID"),
+            sensor_id: sensor.clone(),
+            capture_mode: CaptureMode::Auto,
+            actor_chain: vec![ActorChainEntry {
+                role: ChainRole::Author,
+                identity: sensor,
+                at: captured_at.clone(),
+            }],
+            refs: Some(CaptureRefs {
+                session_id: Some(STOP_SESSION_ID.to_owned()),
+                turn_id: Some("turn-1".to_owned()),
+                tool_id: None,
+            }),
+            payload_hash: PayloadHash::parse(STOP_SOURCE_HASH).expect("invariant: valid sha256"),
+            payload_ref: STOP_SOURCE_REF.into(),
+            captured_at,
+            payload: CapturePayload::Hook {
+                hook_name: "Stop".to_owned(),
+                tool_name: None,
+            },
+            source_family: SourceFamily::Hook,
+        }
+    }
 
     #[test]
     fn public_failed_turn_reason_redacts_internal_sensor_gate_errors() {
@@ -1763,6 +1916,7 @@ mod tests {
             None,
             None,
             &ConsolidationConfig::default(),
+            &DreamConfig::default(),
         )
         .await
         .expect("run_handler_inner should succeed on empty input");
@@ -1794,5 +1948,86 @@ mod tests {
             ..ConsolidationConfig::default()
         };
         assert!(!cfg.enabled, "disabled config must not be enabled");
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::expect_used,
+        reason = "test: panics surface broken invariants immediately"
+    )]
+    async fn stop_hook_enqueues_light_sleep_dream_job() {
+        let store = cairn_store_sqlite::open_in_memory()
+            .await
+            .expect("in-memory store");
+        let jobs = RecordingJobStore::new();
+        let vault = tempfile::tempdir().expect("tempdir");
+        write_stop_source(vault.path());
+        let consolidation = ConsolidationConfig {
+            enabled: false,
+            ..ConsolidationConfig::default()
+        };
+        let dream_config = DreamConfig {
+            enabled: true,
+            ..DreamConfig::default()
+        };
+
+        let result = run_events_handler_inner_no_guard(
+            &store,
+            vault.path(),
+            vec![stop_hook_event()],
+            None,
+            None,
+            Some(&jobs),
+            &consolidation,
+            &dream_config,
+        )
+        .await
+        .expect("capture_trace");
+        assert!(
+            result.failed_turns.is_empty(),
+            "unexpected failed turns: {:?}",
+            result.failed_turns
+        );
+
+        {
+            let requests = jobs.requests.lock().expect("invariant: mutex");
+            let dream_request = requests
+                .iter()
+                .find(|req| req.kind.as_str() == cairn_workflows::DREAM_KIND)
+                .expect("queued dream job");
+            let payload = cairn_workflows::DreamPayload::from_bytes(&dream_request.payload)
+                .expect("dream payload");
+            assert_eq!(payload.tier, DreamTier::LightSleep);
+            assert_eq!(payload.key, STOP_SESSION_ID);
+        }
+
+        let replay = run_events_handler_inner_no_guard(
+            &store,
+            vault.path(),
+            vec![stop_hook_event()],
+            None,
+            None,
+            Some(&jobs),
+            &consolidation,
+            &dream_config,
+        )
+        .await
+        .expect("capture_trace replay");
+        assert!(
+            replay.failed_turns.is_empty(),
+            "unexpected replay failed turns: {:?}",
+            replay.failed_turns
+        );
+
+        let requests = jobs.requests.lock().expect("invariant: mutex");
+        let dream_requests = requests
+            .iter()
+            .filter(|req| req.kind.as_str() == cairn_workflows::DREAM_KIND)
+            .collect::<Vec<_>>();
+        assert_eq!(dream_requests.len(), 2);
+        assert_eq!(
+            dream_requests[0].dedupe_key, dream_requests[1].dedupe_key,
+            "idempotent Stop-hook replay must target the same dream dedupe slot"
+        );
     }
 }

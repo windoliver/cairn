@@ -163,7 +163,7 @@ pub async fn serve_stdio_with_store_at_vault(
     principal: cairn_core::domain::ScopeTuple,
     vault_root: PathBuf,
 ) -> Result<(), TransportError> {
-    serve_stdio_with_store_io_at_vault(
+    Box::pin(serve_stdio_with_store_io_at_vault(
         store,
         sqlite_store,
         scope,
@@ -172,7 +172,7 @@ pub async fn serve_stdio_with_store_at_vault(
         vault_root,
         tokio::io::stdin(),
         tokio::io::stdout(),
-    )
+    ))
     .await
 }
 

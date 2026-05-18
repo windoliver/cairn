@@ -9,7 +9,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use cairn_core::config::{DreamConfig, EvaluationConfig, ExpirationConfig};
+use cairn_core::config::{
+    DreamConfig, DreamTier, DreamTierConfig, EvaluationConfig, ExpirationConfig,
+};
 use cairn_core::contract::job_store::{EnqueueRequest, JobId, JobKind, JobStore, RetryPolicy};
 use cairn_core::contract::llm_provider::{
     CompletionOutput, CompletionRequest, LLMProvider, LLMProviderCapabilities, LlmError,
@@ -86,7 +88,10 @@ async fn three_workflows_drain_through_one_scheduler() {
         dyn_store.clone(),
         DreamConfig {
             enabled: true,
-            window_size_records: 8,
+            light_sleep: DreamTierConfig {
+                window_size_records: 8,
+                ..DreamTierConfig::light_sleep_default()
+            },
             ..DreamConfig::default()
         },
         Some(Arc::new(StubLlm) as Arc<dyn LLMProvider>),
@@ -132,6 +137,7 @@ async fn three_workflows_drain_through_one_scheduler() {
     // Enqueue one job per kind. now_ms for expiration is well past the
     // sample fixture's `updated_at` (2026-04-22) so every seed expires.
     let dream_payload = DreamPayload {
+        tier: DreamTier::LightSleep,
         key: "e2e-sess".into(),
         bound_scope: None,
     }

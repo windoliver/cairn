@@ -35,7 +35,10 @@ pub use drainer::{
     WorkflowCheckpointStore, WorkflowContext, WorkflowDrainer, WorkflowError,
     WorkflowStatusSnapshot,
 };
-pub use dream::{DREAM_KIND, DreamHandler, DreamPayload};
+pub use dream::{
+    DREAM_KIND, DreamEnqueueDecision, DreamHandler, DreamPayload, enqueue_tier,
+    enqueue_tier_with_dedupe_token,
+};
 pub use evaluation::{
     CheckOutcome, EVALUATION_KIND, EvaluationHandler, EvaluationPayload, EvaluationReport,
     GoldenCheck, OrphanCheck, TombstoneConsistencyCheck, default_checks as default_golden_checks,

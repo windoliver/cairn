@@ -1,6 +1,5 @@
 ---
 source: crates/cairn-core/src/config/mod.rs
-assertion_line: 2452
 expression: json
 ---
 {
@@ -203,9 +202,42 @@ expression: json
   },
   "dream": {
     "enabled": false,
-    "window_size_records": 16,
-    "completion_token_budget": 1024,
-    "llm_temperature": 0.0
+    "light_sleep": {
+      "tier": "light_sleep",
+      "cadence": "stop_hook_and_turns",
+      "input_window": "current_session_and_last24h",
+      "output_kind": "index_updates_and_conflict_markers",
+      "worker": "llm",
+      "window_size_records": 16,
+      "completion_token_budget": 1024,
+      "max_wall_ms": 60000,
+      "max_tool_calls": 0,
+      "llm_temperature": 0.0
+    },
+    "rem_sleep": {
+      "tier": "rem_sleep",
+      "cadence": "hourly_or_high_salience",
+      "input_window": "last7_days",
+      "output_kind": "consolidated_records_and_reflection_kicks",
+      "worker": "hybrid",
+      "window_size_records": 128,
+      "completion_token_budget": 4096,
+      "max_wall_ms": 180000,
+      "max_tool_calls": 0,
+      "llm_temperature": 0.0
+    },
+    "deep_dreaming": {
+      "tier": "deep_dreaming",
+      "cadence": "nightly_or_cron",
+      "input_window": "entire_vault",
+      "output_kind": "promotions_skills_synthesis_and_lint",
+      "worker": "hybrid",
+      "window_size_records": 1024,
+      "completion_token_budget": 16384,
+      "max_wall_ms": 900000,
+      "max_tool_calls": 0,
+      "llm_temperature": 0.0
+    }
   },
   "expiration": {
     "enabled": false,

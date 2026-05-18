@@ -1,24 +1,23 @@
-//! `DreamHandler` — minimum-path P0 distillation worker (issue #91,
-//! brief §10.1, §10.2).
+//! `DreamHandler` — tiered dream distillation worker (brief §10.1, §10.2).
 //!
-//! The "Light"-tier `LLMDreamWorker`: reads up to `window_size_records`
-//! recent records bound by the payload's scope, asks an `LLMProvider`
-//! for a short distillation, and upserts a deterministic `reasoning`
-//! record summarizing the dream. When no `LLMProvider` is wired the
-//! handler returns
+//! The `llm` mode reads up to the tier's configured
+//! `window_size_records` recent records bound by the payload's scope.
+//! The `hybrid` mode first prunes duplicate bodies, then uses the same
+//! bounded LLM distillation call. Both modes upsert a deterministic
+//! `reasoning` record carrying tier, worker, budget, and source
+//! evidence metadata. When no `LLMProvider` is wired the handler returns
 //! [`HandlerOutcome::Permanent`](crate::scheduler::HandlerOutcome) so
 //! the scheduler stops retrying — the capability gate in `status`
 //! mirrors this by holding back `cairn.workflows.v1.dream`.
 //!
 //! Out of scope (deferred to follow-ups, brief §10.1):
-//! * REM / Deep tiers (cron-driven, multi-bucket workflows).
-//! * `AgentDreamWorker` / `HybridDreamWorker` pluggable workers.
+//! * `AgentDreamWorker` / P2 tool-loop workers.
 //! * WAL `FlushPlan` integration — the minimum path upserts directly via
 //!   `MemoryStore::upsert` like the existing consolidation handler.
 
 use std::sync::Arc;
 
-use cairn_core::config::DreamConfig;
+use cairn_core::config::{DreamConfig, DreamTierConfig, DreamWorkerMode, ExtractBudget};
 use cairn_core::contract::job_store::{FailureClass, JobKind, JobPayload};
 use cairn_core::contract::llm_provider::{CompletionOutput, CompletionRequest, LLMProvider};
 use cairn_core::contract::memory_store::{ListArgs, MemoryStore, TombstoneReason};
@@ -86,6 +85,8 @@ impl DreamHandler {
             return Err("no llm provider configured".into());
         };
 
+        let tier_config = self.config.tier_config(payload.tier);
+
         // Collect `window_size_records` *non-dream* records, paging
         // through `list` until we either reach the cap or exhaust
         // the store. Without this, a single capped page that
@@ -93,9 +94,10 @@ impl DreamHandler {
         // would silently shrink the source set, shift the
         // sources-hash in `target_key`, and produce a new target on
         // replay (round-2 adversarial review #2).
-        let window_cap = self.config.window_size_records as usize;
+        let window_cap = tier_config.window_size_records as usize;
         let mut filtered: Vec<cairn_core::domain::record::MemoryRecord> =
             Vec::with_capacity(window_cap);
+        let mut seen_body_hashes = std::collections::BTreeSet::new();
         let mut cursor = None;
         let mut cursor_exhausted = false;
         for _ in 0..DREAM_FETCH_PAGE_CAP {
@@ -116,6 +118,12 @@ impl DreamHandler {
                         == Some("cairn-workflows::DreamHandler")
                 }) {
                     continue;
+                }
+                if tier_config.worker == DreamWorkerMode::Hybrid {
+                    let body_hash = crate::synthetic::sha256_hex(r.body.as_bytes());
+                    if !seen_body_hashes.insert(body_hash) {
+                        continue;
+                    }
                 }
                 filtered.push(r);
                 if filtered.len() >= window_cap {
@@ -176,7 +184,11 @@ impl DreamHandler {
             .map(ScopeTuple::canonical_wire)
             .unwrap_or_default();
         let sources_hash = crate::synthetic::sha256_hex(source_record_ids.join(",").as_bytes());
-        let target_key = format!("dream:{scope_wire}:{key}:{sources_hash}", key = payload.key);
+        let target_key = format!(
+            "dream:{tier}:{scope_wire}:{key}:{sources_hash}",
+            tier = payload.tier.as_str(),
+            key = payload.key
+        );
 
         // Pre-LLM existence check: if an active dream record already
         // exists at this deterministic target, skip the LLM call. Two
@@ -240,8 +252,15 @@ impl DreamHandler {
             }
         }
 
-        let prompt = render_dream_prompt(&payload.key, &filtered);
-        let req = CompletionRequest::builder().prompt(prompt).build();
+        let prompt = render_dream_prompt(&payload.key, &filtered, &tier_config);
+        let req = CompletionRequest::builder()
+            .prompt(prompt)
+            .budget(ExtractBudget {
+                max_tokens: Some(tier_config.completion_token_budget),
+                max_wall_ms: Some(tier_config.max_wall_ms),
+                max_turns: None,
+            })
+            .build();
         let body = match llm.complete(&req).await? {
             CompletionOutput::Text(s) => s,
             CompletionOutput::Json(v) => serde_json::to_string(&v).unwrap_or_default(),
@@ -250,6 +269,16 @@ impl DreamHandler {
             // crashing the workflow.
             other => format!("{other:?}"),
         };
+        let body_budget = tier_config.completion_token_budget as usize * 4;
+        if body.len() > body_budget {
+            return Err(format!(
+                "dream budget exceeded for tier {tier}: body length {actual} > char budget {budget}",
+                tier = payload.tier,
+                actual = body.len(),
+                budget = body_budget,
+            )
+            .into());
+        }
 
         let mut extras = std::collections::BTreeMap::new();
         extras.insert(
@@ -257,6 +286,19 @@ impl DreamHandler {
             serde_json::json!({
                 "source_record_ids": source_record_ids,
                 "window_size":        filtered.len(),
+                "tier":               payload.tier.as_str(),
+                "worker":             match tier_config.worker {
+                    DreamWorkerMode::Llm => "llm",
+                    DreamWorkerMode::Hybrid => "hybrid",
+                },
+                "cadence":            tier_config.cadence,
+                "input_window":       tier_config.input_window,
+                "output_kind":        tier_config.output_kind,
+                "budget": {
+                    "max_tokens":     tier_config.completion_token_budget,
+                    "max_wall_ms":    tier_config.max_wall_ms,
+                    "max_tool_calls": tier_config.max_tool_calls,
+                },
                 "produced_by":        "cairn-workflows::DreamHandler",
             }),
         );
@@ -387,9 +429,19 @@ fn scope_for(payload: &DreamPayload) -> ScopeTuple {
 pub fn render_dream_prompt(
     key: &str,
     records: &[cairn_core::domain::record::MemoryRecord],
+    tier_config: &DreamTierConfig,
 ) -> String {
     let mut s = String::with_capacity(256 + records.len() * 128);
     s.push_str("# Dream distillation\n\n");
+    s.push_str("Tier: ");
+    s.push_str(tier_config.tier.as_str());
+    s.push('\n');
+    s.push_str("Worker: ");
+    s.push_str(match tier_config.worker {
+        DreamWorkerMode::Llm => "llm",
+        DreamWorkerMode::Hybrid => "hybrid",
+    });
+    s.push('\n');
     s.push_str("Key: ");
     s.push_str(key);
     s.push_str("\nRecords:\n");
@@ -461,6 +513,7 @@ impl JobHandler for DreamHandler {
 mod tests {
     use super::*;
     use crate::test_support::NoopMemoryStore;
+    use cairn_core::config::DreamTier;
 
     #[tokio::test]
     async fn handle_returns_permanent_when_no_llm() {
@@ -474,6 +527,7 @@ mod tests {
             None,
         );
         let p = DreamPayload {
+            tier: DreamTier::LightSleep,
             key: "sess-1".into(),
             bound_scope: None,
         };
@@ -492,8 +546,9 @@ mod tests {
 
     #[test]
     fn render_dream_prompt_is_deterministic_for_empty_window() {
-        let a = render_dream_prompt("k", &[]);
-        let b = render_dream_prompt("k", &[]);
+        let tier = DreamTierConfig::light_sleep_default();
+        let a = render_dream_prompt("k", &[], &tier);
+        let b = render_dream_prompt("k", &[], &tier);
         assert_eq!(a, b);
     }
 }
