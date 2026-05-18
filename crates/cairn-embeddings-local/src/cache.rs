@@ -41,6 +41,16 @@ impl ModelCache {
     }
 
     /// `true` iff the `.integrity` marker exists (fetch was completed).
+    ///
+    /// **v0.1 limitation:** this is a marker-only check. The recorded
+    /// blake3 digest is NOT re-validated against the cached bytes here, so
+    /// a stale marker, partial restore, or tampered cache will still
+    /// report ready. Bootstrap users get a fresh cache and a fresh digest;
+    /// the gap only matters once a vault is reused on a possibly-mutated
+    /// disk. A follow-up will tighten this to recompute the digest and
+    /// force refetch on mismatch — tracked under the same packaging-trust
+    /// thread as model-revision pinning (see installation.md, "Trust
+    /// model (v0.1)").
     #[must_use]
     pub fn is_present(&self, kind: EmbeddingModelKind) -> bool {
         self.model_dir(kind).join(".integrity").exists()
