@@ -12,6 +12,8 @@ fn backup_registry_entry_rejects_empty_artifact_path() {
         backup_id: "bkp_01J00000000000000000000000".to_owned(),
         created_at: Rfc3339Timestamp::parse("2026-05-12T12:00:00Z").expect("valid timestamp"),
         artifact_path: "   ".to_owned(),
+        file_digest: "sha256:abc".to_owned(),
+        backup_kind: "snapshot".to_owned(),
         target_ids_included: vec![TargetId::parse("01HQZX9F5N0000000000000000").expect("valid")],
     };
 
@@ -30,6 +32,8 @@ fn backup_registry_entry_rejects_empty_backup_id() {
         backup_id: "  ".to_owned(),
         created_at: Rfc3339Timestamp::parse("2026-05-12T12:00:00Z").expect("valid timestamp"),
         artifact_path: ".cairn/backups/backup-01.tar.zst".to_owned(),
+        file_digest: "sha256:abc".to_owned(),
+        backup_kind: "snapshot".to_owned(),
         target_ids_included: vec![TargetId::parse("01HQZX9F5N0000000000000000").expect("valid")],
     };
 

@@ -31,6 +31,7 @@ Commands:
   vault          Manage the vault registry (brief §3.3)
   skill          Manage the Cairn skill bundle
   admin          Administrative operations (model management, reindex, reporting, backup substrate)
+  backup         Audit and manage registered vault backups
   llm            LLM provider diagnostics (ADR 0001)
   screen         Screen sensor diagnostics
   sensor         Manage local sensor consent and policy gates
@@ -70,6 +71,7 @@ Options:
 - [`cairn vault`](commands/vault.md) - Manage the vault registry (brief §3.3)
 - [`cairn skill`](commands/skill.md) - Manage the Cairn skill bundle
 - [`cairn admin`](commands/admin.md) - Administrative operations (model management, reindex, reporting, backup substrate)
+- [`cairn backup`](commands/backup.md) - Audit and manage registered vault backups
 - [`cairn llm`](commands/llm.md) - LLM provider diagnostics (ADR 0001)
 - [`cairn screen`](commands/screen.md) - Screen sensor diagnostics
 - [`cairn sensor`](commands/sensor.md) - Manage local sensor consent and policy gates

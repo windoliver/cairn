@@ -16,6 +16,7 @@ use cairn_core::domain::{
 use clap::ArgMatches;
 use rusqlite::Connection;
 use serde::Serialize;
+use sha2::Digest;
 
 #[derive(Serialize)]
 struct SnapshotReceipt {
@@ -23,6 +24,17 @@ struct SnapshotReceipt {
     backup_path: String,
     registry_dir: String,
     registry_entry: String,
+}
+
+/// Operator-visible receipt for one backup registry mutation.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct BackupRegistryReceipt {
+    pub(crate) backup_id: String,
+    pub(crate) artifact_path: String,
+    pub(crate) file_digest: String,
+    pub(crate) backup_kind: String,
+    pub(crate) registry_entry: String,
+    pub(crate) target_ids_included: Vec<TargetId>,
 }
 
 #[derive(Debug)]
@@ -85,24 +97,39 @@ fn create_snapshot(vault_root: &Path, backup_path: &Path) -> Result<SnapshotRece
     materialize_backup_artifact(vault_root, backup_path)
         .with_context(|| format!("materialize backup at {}", backup_path.display()))?;
 
+    let receipt = register_backup_artifact(vault_root, backup_path, "snapshot")?;
+
+    Ok(SnapshotReceipt {
+        backup_id: receipt.backup_id,
+        backup_path: backup_path.display().to_string(),
+        registry_dir: backup_registry_dir(vault_root).display().to_string(),
+        registry_entry: receipt.registry_entry,
+    })
+}
+
+pub(crate) fn register_backup_artifact(
+    vault_root: &Path,
+    backup_path: &Path,
+    backup_kind: &str,
+) -> Result<BackupRegistryReceipt> {
+    validate_backup_root(backup_path)?;
+    fs::create_dir_all(backup_registry_dir(vault_root))
+        .with_context(|| format!("create {}", backup_registry_dir(vault_root).display()))?;
+
     let backup_id = format!("bkp_{}", timestamp_millis());
     let registry_path = backup_registry_dir(vault_root).join(format!("{backup_id}.json"));
     let entry = BackupRegistryEntry {
         backup_id: backup_id.clone(),
         created_at: now_timestamp()?,
         artifact_path: backup_path.display().to_string(),
-        target_ids_included: collect_target_ids(&vault_root.join(".cairn/cairn.db"))
-            .with_context(|| format!("collect target ids from {}", vault_root.display()))?,
+        file_digest: digest_path(backup_path)?,
+        backup_kind: backup_kind.to_owned(),
+        target_ids_included: collect_target_ids(&backup_path.join(".cairn/cairn.db"))
+            .with_context(|| format!("collect target ids from {}", backup_path.display()))?,
     };
     write_registry_entry(&registry_path, &entry)
         .with_context(|| format!("write registry entry {}", registry_path.display()))?;
-
-    Ok(SnapshotReceipt {
-        backup_id,
-        backup_path: backup_path.display().to_string(),
-        registry_dir: backup_registry_dir(vault_root).display().to_string(),
-        registry_entry: registry_path.display().to_string(),
-    })
+    Ok(receipt_for_entry(&registry_path, entry))
 }
 
 pub(crate) fn materialize_backup_artifact(source_root: &Path, backup_path: &Path) -> Result<()> {
@@ -189,6 +216,31 @@ pub(crate) fn rewrite_registered_backups(
     Ok(())
 }
 
+pub(crate) fn validate_registered_backups_for_targets(
+    vault_root: &Path,
+    targets: &[TargetId],
+) -> Result<()> {
+    if targets.is_empty() {
+        return Ok(());
+    }
+
+    let target_set: BTreeSet<String> = targets
+        .iter()
+        .map(|target| target.as_str().to_owned())
+        .collect();
+    for registry_entry in load_registry_entries(vault_root)? {
+        if registry_entry
+            .entry
+            .target_ids_included
+            .iter()
+            .any(|target| target_set.contains(target.as_str()))
+        {
+            validate_backup_root(Path::new(&registry_entry.entry.artifact_path))?;
+        }
+    }
+    Ok(())
+}
+
 #[allow(
     dead_code,
     reason = "backup rewrite plumbing is staged for forget propagation but not yet wired to the CLI"
@@ -216,6 +268,30 @@ pub(crate) fn load_registry_entries(vault_root: &Path) -> Result<Vec<RegistryEnt
 
     entries.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(entries)
+}
+
+pub(crate) fn list_backup_registry(vault_root: &Path) -> Result<Vec<BackupRegistryReceipt>> {
+    load_registry_entries(vault_root).map(|entries| {
+        entries
+            .into_iter()
+            .map(|entry| receipt_for_entry(&entry.path, entry.entry))
+            .collect()
+    })
+}
+
+pub(crate) fn forget_backup_registry_entry(
+    vault_root: &Path,
+    digest: &str,
+) -> Result<Option<BackupRegistryReceipt>> {
+    for registry_entry in load_registry_entries(vault_root)? {
+        if registry_entry.entry.file_digest == digest {
+            let receipt = receipt_for_entry(&registry_entry.path, registry_entry.entry);
+            fs::remove_file(&registry_entry.path)
+                .with_context(|| format!("remove {}", registry_entry.path.display()))?;
+            return Ok(Some(receipt));
+        }
+    }
+    Ok(None)
 }
 
 #[allow(
@@ -275,6 +351,7 @@ fn rewrite_registered_backup(
 
     let updated_entry = BackupRegistryEntry {
         target_ids_included: retained_targets,
+        file_digest: digest_path(&artifact_path)?,
         ..registry_entry.entry.clone()
     };
     write_registry_entry(&registry_entry.path, &updated_entry)?;
@@ -305,13 +382,65 @@ fn append_shredded_log(vault_root: &Path, entry: &ShreddedBackupEntry) -> Result
     Ok(())
 }
 
-fn backup_registry_dir(vault_root: &Path) -> PathBuf {
+pub(crate) fn backup_registry_dir(vault_root: &Path) -> PathBuf {
     vault_root.join(".cairn").join("backups")
 }
 
+fn receipt_for_entry(path: &Path, entry: BackupRegistryEntry) -> BackupRegistryReceipt {
+    BackupRegistryReceipt {
+        backup_id: entry.backup_id,
+        artifact_path: entry.artifact_path,
+        file_digest: entry.file_digest,
+        backup_kind: entry.backup_kind,
+        registry_entry: path.display().to_string(),
+        target_ids_included: entry.target_ids_included,
+    }
+}
+
 fn write_registry_entry(path: &Path, entry: &BackupRegistryEntry) -> Result<()> {
+    entry.validate().context("validate backup registry entry")?;
     let payload = serde_json::to_vec_pretty(entry).context("serialize backup registry entry")?;
     fs::write(path, payload).with_context(|| format!("write {}", path.display()))?;
+    Ok(())
+}
+
+fn digest_path(path: &Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    digest_path_into(path, path, &mut hasher)?;
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+fn digest_path_into(root: &Path, path: &Path, hasher: &mut sha2::Sha256) -> Result<()> {
+    let metadata =
+        fs::symlink_metadata(path).with_context(|| format!("stat {}", path.display()))?;
+    if metadata.file_type().is_symlink() {
+        anyhow::bail!("refusing to digest symlinked path {}", path.display());
+    }
+
+    if metadata.is_file() {
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        hasher.update(rel.as_bytes());
+        hasher.update([0]);
+        hasher.update(fs::read(path).with_context(|| format!("read {}", path.display()))?);
+        hasher.update([0]);
+        return Ok(());
+    }
+
+    let mut children = fs::read_dir(path)
+        .with_context(|| format!("read {}", path.display()))?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<_>>>()
+        .with_context(|| format!("read {}", path.display()))?;
+    children.sort();
+    for child in children {
+        digest_path_into(root, &child, hasher)?;
+    }
     Ok(())
 }
 
