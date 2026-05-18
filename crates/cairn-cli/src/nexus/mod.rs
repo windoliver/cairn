@@ -313,8 +313,19 @@ impl HttpEndpoint {
         if rest.contains('/') {
             return Err("endpoint must not include a path; use health_path instead".into());
         }
-        let Some((host, port_raw)) = rest.rsplit_once(':') else {
-            return Err("endpoint must include an explicit port".into());
+        let (host, port_raw) = if let Some(ipv6_rest) = rest.strip_prefix('[') {
+            let Some((host, after_host)) = ipv6_rest.split_once(']') else {
+                return Err("IPv6 endpoint host must close with ]".into());
+            };
+            let Some(port_raw) = after_host.strip_prefix(':') else {
+                return Err("endpoint must include an explicit port".into());
+            };
+            (host, port_raw)
+        } else {
+            let Some((host, port_raw)) = rest.rsplit_once(':') else {
+                return Err("endpoint must include an explicit port".into());
+            };
+            (host, port_raw)
         };
         if host.is_empty() {
             return Err("endpoint host must not be empty".into());
@@ -537,6 +548,19 @@ mod tests {
         )
     }
 
+    fn test_harness_helper_command() -> (String, Vec<String>) {
+        (
+            std::env::current_exe()
+                .expect("current test executable")
+                .display()
+                .to_string(),
+            vec![
+                "nexus_sidecar_helper_process".to_owned(),
+                "--nocapture".to_owned(),
+            ],
+        )
+    }
+
     #[cfg(windows)]
     fn stubborn_command() -> (String, Vec<String>) {
         (
@@ -595,6 +619,45 @@ mod tests {
         panic!("timed out waiting for {}", path.display());
     }
 
+    fn reserve_loopback_port() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    }
+
+    #[test]
+    fn nexus_sidecar_helper_process() {
+        let Ok(data_dir) = std::env::var("CAIRN_NEXUS_DATA_DIR") else {
+            return;
+        };
+        let data_dir = Path::new(&data_dir);
+        let port_file = data_dir.join("health-port");
+        if !port_file.is_file() {
+            return;
+        }
+
+        let port = fs::read_to_string(&port_file)
+            .unwrap()
+            .trim()
+            .parse::<u16>()
+            .unwrap();
+        let env_capture = [
+            std::env::var("CAIRN_VAULT_DIR").unwrap_or_default(),
+            std::env::var("CAIRN_NEXUS_DATA_DIR").unwrap_or_default(),
+            std::env::var("CAIRN_SQLITE_DB").unwrap_or_default(),
+        ]
+        .join("\n");
+        fs::write(data_dir.join("helper-env.txt"), env_capture).unwrap();
+
+        let listener = TcpListener::bind(("127.0.0.1", port)).unwrap();
+        fs::write(data_dir.join("helper-ready"), b"ready").unwrap();
+        for stream in listener.incoming() {
+            let mut stream = stream.unwrap();
+            let mut buf = [0_u8; 512];
+            let _ = stream.read(&mut buf);
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+        }
+    }
+
     fn spawn_delayed_health_server(response_delay: Duration) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -607,6 +670,51 @@ mod tests {
             }
         });
         format!("http://{addr}")
+    }
+
+    #[test]
+    fn supervisor_starts_mock_sidecar_process_serving_real_health_endpoint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault_dir = tmp.path().join("vault");
+        let data_dir = vault_dir.join("nexus-data");
+        let sqlite_db = vault_dir.join(".cairn").join("cairn.db");
+        fs::create_dir_all(&data_dir).unwrap();
+        let port = reserve_loopback_port();
+        fs::write(data_dir.join("health-port"), port.to_string()).unwrap();
+        let (command, args) = test_harness_helper_command();
+        let mut supervisor = NexusSupervisor::start(SupervisorConfig {
+            command,
+            args,
+            endpoint: format!("http://127.0.0.1:{port}"),
+            health_path: "/health".to_owned(),
+            data_dir: data_dir.clone(),
+            sqlite_db: sqlite_db.clone(),
+            health_timeout: Duration::from_secs(2),
+            shutdown_timeout: Duration::from_millis(500),
+        })
+        .unwrap();
+
+        assert!(matches!(
+            supervisor.wait_until_healthy(),
+            ProjectionProbe::Healthy
+        ));
+        wait_for_file(&data_dir.join("helper-ready"));
+        wait_for_file(&data_dir.join("helper-env.txt"));
+        let env_capture = fs::read_to_string(data_dir.join("helper-env.txt")).unwrap();
+        let lines = env_capture.lines().collect::<Vec<_>>();
+        assert_eq!(
+            lines,
+            vec![
+                vault_dir.to_str().unwrap(),
+                data_dir.to_str().unwrap(),
+                sqlite_db.to_str().unwrap(),
+            ]
+        );
+        let pid = supervisor.child.id();
+
+        supervisor.stop().unwrap();
+
+        assert!(!process_is_running(pid));
     }
 
     #[test]
@@ -820,9 +928,48 @@ mod tests {
     }
 
     #[test]
+    fn http_endpoint_parses_bracketed_ipv6_host_and_port() {
+        let endpoint = HttpEndpoint::parse("http://[::1]:8765").unwrap();
+        assert_eq!(endpoint.host, "::1");
+        assert_eq!(endpoint.port, 8765);
+    }
+
+    #[test]
     fn probe_health_reports_healthy_on_200() {
         let endpoint = spawn_health_server("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
         let result = probe_http_health(&endpoint, "/health", Duration::from_secs(1));
+        assert!(matches!(result, ProbeResult::Healthy));
+    }
+
+    #[test]
+    fn probe_health_reports_healthy_on_ipv6_loopback_when_available() {
+        let listener = match TcpListener::bind("[::1]:0") {
+            Ok(listener) => listener,
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::AddrNotAvailable | std::io::ErrorKind::Unsupported
+                ) =>
+            {
+                return;
+            }
+            Err(err) => panic!("bind IPv6 loopback health server: {err}"),
+        };
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0_u8; 512];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+            }
+        });
+
+        let result = probe_http_health(
+            &format!("http://[::1]:{port}"),
+            "/health",
+            Duration::from_secs(1),
+        );
+
         assert!(matches!(result, ProbeResult::Healthy));
     }
 
