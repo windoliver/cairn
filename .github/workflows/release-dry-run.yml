@@ -241,8 +241,14 @@ jobs:
             --locked \
             --no-track \
             --root "$prefix" \
+            --bin cairn \
             cairn-cli
+          # Single-binary contract: only `cairn` ships; the internal
+          # `cairn-docgen` doc generator must not be installed.
           ls "$prefix/bin"
+          [ -x "$prefix/bin/cairn" ] || { echo "missing cairn binary"; exit 1; }
+          [ ! -e "$prefix/bin/cairn-docgen" ] || \
+            { echo "::error::cairn-docgen leaked into install prefix"; exit 1; }
       - name: Run install smoke
         shell: bash
         run: |

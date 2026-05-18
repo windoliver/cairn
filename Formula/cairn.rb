@@ -19,17 +19,23 @@ class Cairn < Formula
   depends_on "rust" => :build
 
   def install
-    # Builds the `cairn` binary out of crates/cairn-cli. std_cargo_args
-    # already injects `--locked` and `--root=#{prefix}`; we only need to
-    # add `--no-track` to keep `cargo install` from leaving a metadata
-    # file in the build sandbox.
-    system "cargo", "install", *std_cargo_args(path: "crates/cairn-cli"), "--no-track"
+    # Builds the user-facing `cairn` binary out of crates/cairn-cli.
+    # `--bin=cairn` excludes the internal `cairn-docgen` doc generator,
+    # which is a build-time tool, not part of the supported CLI surface.
+    # std_cargo_args already injects `--locked` and `--root=#{prefix}`;
+    # we only need to add `--no-track` to keep `cargo install` from
+    # leaving a metadata file in the build sandbox.
+    system "cargo", "install", *std_cargo_args(path: "crates/cairn-cli"),
+           "--bin=cairn", "--no-track"
   end
 
   test do
     # Brew's own smoke: bin runs, vault bootstraps, status returns a
     # well-formed envelope. Mirrors scripts/install-smoke.sh in miniature.
     assert_match(/cairn /, shell_output("#{bin}/cairn --version"))
+    # Single-binary contract: only `cairn` ships; the internal docgen
+    # tool must not be installed.
+    refute_path_exists bin/"cairn-docgen"
     ENV["CAIRN_VAULT"] = testpath.to_s
     (testpath/".cairn").mkpath
     (testpath/".cairn/config.yaml").write("search:\n  local_embeddings: false\n")

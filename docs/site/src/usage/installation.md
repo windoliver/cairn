@@ -7,16 +7,20 @@ Cairn v0.1 is a single Rust binary. Two supported install paths.
 Until v0.1.0 is published to crates.io (issue #141), install from git:
 
 ```bash
-cargo install --git https://github.com/windoliver/cairn --branch main cairn-cli
+cargo install --locked --git https://github.com/windoliver/cairn \
+  --branch main --bin cairn cairn-cli
 ```
 
-Requires Rust 1.95+. The package name is `cairn-cli`; it builds a binary named
-`cairn` into `~/.cargo/bin/cairn`. No other runtime dependencies.
+Requires Rust 1.95+. The package name is `cairn-cli`; `--bin cairn` selects the
+single user-facing binary (the package also contains an internal
+`cairn-docgen` doc generator that is not part of the supported surface).
+`--locked` matches the lockfile that CI tests against. The result is a `cairn`
+binary in `~/.cargo/bin/cairn` with no other runtime dependencies.
 
 Once v0.1.0 is on crates.io the command becomes:
 
 ```bash
-cargo install cairn-cli
+cargo install --locked --bin cairn cairn-cli
 ```
 
 > The shorter `cairn` crate name on crates.io is already taken by an unrelated
