@@ -20,11 +20,11 @@ class Cairn < Formula
   depends_on "rust" => :build
 
   def install
-    # Builds the `cairn` binary out of crates/cairn-cli. `--locked` keeps
-    # dependency resolution identical to CI; `--no-track` keeps `cargo
-    # install` from leaving a metadata file in the build sandbox.
-    system "cargo", "install", *std_cargo_args(path: "crates/cairn-cli"),
-           "--locked", "--no-track"
+    # Builds the `cairn` binary out of crates/cairn-cli. std_cargo_args
+    # already injects `--locked` and `--root=#{prefix}`; we only need to
+    # add `--no-track` to keep `cargo install` from leaving a metadata
+    # file in the build sandbox.
+    system "cargo", "install", *std_cargo_args(path: "crates/cairn-cli"), "--no-track"
   end
 
   test do
