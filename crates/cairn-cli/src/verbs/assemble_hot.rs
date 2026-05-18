@@ -474,6 +474,11 @@ async fn load_hot_bodies(
                 if remaining == 0 {
                     String::new()
                 } else {
+                    let canvas_section = load_trace_canvas_section(store, session_id, remaining)
+                        .await?
+                        .unwrap_or_default();
+                    let records_budget =
+                        remaining.saturating_sub(u64::try_from(canvas_section.len()).unwrap_or(0));
                     let loaded = load_records_for_kinds(
                         store,
                         &[MemoryKind::UserSignal],
@@ -489,7 +494,13 @@ async fn load_hot_bodies(
                     records.sort_by(|a, b| b.updated_at.as_str().cmp(a.updated_at.as_str()));
                     records.truncate(5);
                     loaded_records.extend(records.iter().map(LoadedRecordTrace::from));
-                    render_records_section("Recent User Signal", &records, remaining)
+                    let mut body = canvas_section;
+                    body.push_str(&render_records_section(
+                        "Recent User Signal",
+                        &records,
+                        records_budget,
+                    ));
+                    body
                 }
             }
             _ => {
@@ -962,6 +973,80 @@ fn render_records_section(title: &str, records: &[MemoryRecord], budget: u64) ->
     out
 }
 
+async fn load_trace_canvas_section(
+    store: &cairn_store_sqlite::SqliteMemoryStore,
+    session_id: Option<&str>,
+    budget: u64,
+) -> Result<Option<String>, Response> {
+    let Some(session_id) = session_id else {
+        return Ok(None);
+    };
+    if budget == 0 {
+        return Ok(None);
+    }
+    let context = store
+        .active_trace_canvas_for_session(session_id)
+        .await
+        .map_err(|e| {
+            internal_error_response(ResponseVerb::AssembleHot, &format!("trace canvas: {e}"))
+        })?;
+    Ok(context.map(|context| render_trace_canvas_section(&context, budget)))
+}
+
+fn render_trace_canvas_section(
+    context: &cairn_store_sqlite::TraceCanvasContext,
+    budget: u64,
+) -> String {
+    if budget == 0 {
+        return String::new();
+    }
+    let canvas_budget = u64::try_from(context.canvas.max_bytes)
+        .ok()
+        .filter(|bytes| *bytes > 0)
+        .map_or(budget, |bytes| bytes.min(budget));
+    let mut out = String::new();
+    push_capped(&mut out, "# Current Task\n", canvas_budget);
+    push_capped(&mut out, &context.canvas.title, canvas_budget);
+    push_capped(&mut out, "\n", canvas_budget);
+    if !context.canvas.goal.trim().is_empty() {
+        push_capped(
+            &mut out,
+            &format!("Goal: {}\n", context.canvas.goal),
+            canvas_budget,
+        );
+    }
+    if !context.canvas.summary.trim().is_empty() {
+        push_capped(
+            &mut out,
+            &format!("Summary: {}\n", context.canvas.summary),
+            canvas_budget,
+        );
+    }
+    if let Some(active_node_id) = context.canvas.active_node_id.as_deref()
+        && let Some(active) = context
+            .nodes
+            .iter()
+            .find(|node| node.node_id == active_node_id)
+    {
+        push_capped(
+            &mut out,
+            &format!("Active: {} ({})\n", active.label, active.status),
+            canvas_budget,
+        );
+    }
+    for node in &context.nodes {
+        if out.len() as u64 >= canvas_budget {
+            break;
+        }
+        push_capped(
+            &mut out,
+            &format!("- [{}] {}: {}\n", node.status, node.label, node.summary),
+            canvas_budget,
+        );
+    }
+    out
+}
+
 fn push_capped(out: &mut String, text: &str, budget: u64) {
     let remaining = budget.saturating_sub(out.len() as u64);
     if remaining == 0 {
@@ -1348,5 +1433,130 @@ mod tests {
     fn tree_policy_detail_is_metadata_only() {
         let detail = tree_policy_detail(2, 1, 3);
         assert_eq!(detail, "path_sessions=2 siblings=1 merges=3");
+    }
+
+    #[tokio::test]
+    async fn recent_user_signal_step_renders_active_trace_canvas() {
+        let store = cairn_store_sqlite::open_in_memory()
+            .await
+            .expect("open store");
+        let vault = tempfile::tempdir().expect("tempdir");
+        let session_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let mut config = CairnConfig::default();
+        config.vault.hot_memory.recipe = vec![HotMemoryRecipeStep::RecentUserSignal];
+        config.vault.hot_memory.max_bytes = 1024;
+
+        store
+            .upsert_trace_step(cairn_store_sqlite::TraceStepDraft {
+                step_id: "step-1".to_owned(),
+                trace_id: "trace-1".to_owned(),
+                session_id: session_id.to_owned(),
+                turn_id: "turn-1".to_owned(),
+                tool_call_id: Some("toolu-1".to_owned()),
+                timestamp_ms: 1_000,
+                tool_name: Some("shell".to_owned()),
+                call_summary: "run focused tests".to_owned(),
+                result_summary: "tests passed".to_owned(),
+                result_ref: Some("record-1".to_owned()),
+                salience: 0.7,
+                replaceability_score: 0.4,
+                node_id: None,
+                source_hash: "hash-1".to_owned(),
+            })
+            .await
+            .expect("step");
+        store
+            .upsert_trace_canvas(cairn_store_sqlite::TraceCanvasDraft {
+                canvas_id: "canvas-1".to_owned(),
+                session_id: session_id.to_owned(),
+                title: "Issue 134".to_owned(),
+                goal: "finish trace canvas hot memory".to_owned(),
+                status: cairn_store_sqlite::TraceCanvasStatus::Active,
+                summary: "Active task trace canvas.".to_owned(),
+                active_node_id: None,
+                max_bytes: 1024,
+            })
+            .await
+            .expect("canvas");
+        store
+            .upsert_trace_canvas_node(cairn_store_sqlite::TraceCanvasNodeDraft {
+                node_id: "node-1".to_owned(),
+                canvas_id: "canvas-1".to_owned(),
+                label: "Verify enqueue".to_owned(),
+                status: "completed".to_owned(),
+                summary: "Trace canvas enqueue path is verified.".to_owned(),
+                timestamp_ms: 1_000,
+                source_step_ids: vec!["step-1".to_owned()],
+                evidence_record_ids: vec!["record-1".to_owned()],
+            })
+            .await
+            .expect("node");
+        store
+            .upsert_trace_canvas(cairn_store_sqlite::TraceCanvasDraft {
+                canvas_id: "canvas-1".to_owned(),
+                session_id: session_id.to_owned(),
+                title: "Issue 134".to_owned(),
+                goal: "finish trace canvas hot memory".to_owned(),
+                status: cairn_store_sqlite::TraceCanvasStatus::Active,
+                summary: "Active task trace canvas.".to_owned(),
+                active_node_id: Some("node-1".to_owned()),
+                max_bytes: 1024,
+            })
+            .await
+            .expect("canvas active");
+
+        let auth = ReadAuthorization {
+            operation_id: Ulid("01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned()),
+            scope: ScopeTuple {
+                tenant: Some(DEFAULT_TENANT.to_owned()),
+                workspace: Some(config.vault.name.clone()),
+                entity: Some(ASSEMBLE_ENTITY.to_owned()),
+                ..ScopeTuple::default()
+            },
+            max_visibility: MemoryVisibility::Project,
+            issuer: Identity::parse(DEFAULT_ASSEMBLE_ISSUER).expect("valid issuer"),
+        };
+
+        let loaded = load_hot_bodies(&store, vault.path(), &config, &auth, Some(session_id), 1024)
+            .await
+            .expect("load bodies");
+        let prefix = loaded.bodies.join("");
+        assert!(prefix.contains("# Current Task"));
+        assert!(prefix.contains("Issue 134"));
+        assert!(prefix.contains("finish trace canvas hot memory"));
+        assert!(prefix.contains("Verify enqueue"));
+        assert!(prefix.contains("Trace canvas enqueue path is verified."));
+    }
+
+    #[test]
+    fn trace_canvas_section_respects_budget() {
+        let context = cairn_store_sqlite::TraceCanvasContext {
+            canvas: cairn_store_sqlite::TraceCanvasRow {
+                canvas_id: "canvas-1".to_owned(),
+                session_id: "session-1".to_owned(),
+                title: "A very long active task title".to_owned(),
+                goal: "A goal that should be trimmed by the caller budget".to_owned(),
+                status: cairn_store_sqlite::TraceCanvasStatus::Active,
+                summary: "A summary that should not overflow".to_owned(),
+                active_node_id: None,
+                max_bytes: 4096,
+                version: 1,
+            },
+            nodes: vec![cairn_store_sqlite::TraceCanvasNodeRow {
+                node_id: "node-1".to_owned(),
+                canvas_id: "canvas-1".to_owned(),
+                label: "Node".to_owned(),
+                status: "completed".to_owned(),
+                summary: "Long node summary".to_owned(),
+                timestamp_ms: 1,
+                source_step_ids: vec!["step-1".to_owned()],
+                evidence_record_ids: vec![],
+            }],
+            edges: vec![],
+        };
+
+        let section = render_trace_canvas_section(&context, 32);
+        assert!(section.len() <= 32);
+        assert!(section.is_char_boundary(section.len()));
     }
 }
