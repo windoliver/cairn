@@ -2,7 +2,7 @@
 
 use std::sync::{Mutex, MutexGuard};
 
-use cairn_cli::config::{load, write_default, CliOverrides};
+use cairn_cli::config::{CliOverrides, load, write_default};
 use cairn_core::config::{CairnConfig, StoreKind};
 
 static CONFIG_ENV_LOCK: Mutex<()> = Mutex::new(());
