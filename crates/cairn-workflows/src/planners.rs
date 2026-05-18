@@ -45,6 +45,9 @@ pub struct PromotePlanSource {
 
 impl PromotePlanSource {
     const DEFAULT_PAGE_LIMIT: usize = 1000;
+    const MIN_RECALL_COUNT: u32 = 3;
+    const MIN_EVIDENCE_SCORE: f32 = 0.7;
+    const MIN_UNIQUE_QUERIES: u32 = 2;
 
     /// Create a promotion planner for active records with confidence greater
     /// than or equal to `confidence_threshold`.
@@ -218,7 +221,10 @@ impl WorkflowPlanSource for PromotePlanSource {
 
         let mut plans = Vec::new();
         for record in list_active_records(&self.store, workflow, self.page_limit).await? {
-            if record.kind == self.to_kind || record.confidence < self.confidence_threshold {
+            if record.kind == self.to_kind
+                || record.confidence < self.confidence_threshold
+                || !Self::evidence_gate_passes(&record)
+            {
                 continue;
             }
             plans.push(self.plan_for_record(&record));
@@ -316,9 +322,23 @@ impl ExpirePlanSource {
 }
 
 impl PromotePlanSource {
+    fn evidence_gate_passes(record: &MemoryRecord) -> bool {
+        record.evidence.validate().is_ok()
+            && record.evidence.recall_count >= Self::MIN_RECALL_COUNT
+            && record.evidence.score >= Self::MIN_EVIDENCE_SCORE
+            && record.evidence.unique_queries >= Self::MIN_UNIQUE_QUERIES
+    }
+
     fn plan_for_record(&self, record: &MemoryRecord) -> FlushPlan {
         let issued_at = now_rfc3339();
         let expires_at = expires_at_rfc3339();
+        let evidence_refs = promotion_evidence_refs(record);
+        let evidence_key = evidence_refs
+            .iter()
+            .map(|id| id.0.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        let evidence_count = u32::try_from(evidence_refs.len()).unwrap_or(u32::MAX);
         FlushPlan {
             operation_id: stable_plan_ulid(&[
                 "promote",
@@ -328,6 +348,7 @@ impl PromotePlanSource {
                 self.to_kind.as_str(),
                 &record.confidence.to_bits().to_string(),
                 &self.confidence_threshold.to_bits().to_string(),
+                &evidence_key,
             ]),
             issued_at,
             issuer: self.issuer.clone(),
@@ -337,13 +358,13 @@ impl PromotePlanSource {
             mutations: vec![PlannedMutation::Promote {
                 from: record.target_id.clone(),
                 to_kind: self.to_kind,
-                evidence: Vec::new(),
+                evidence: evidence_refs.clone(),
             }],
             reason: PlanReason::Promote {
                 confidence: record.confidence,
-                evidence_count: 0,
+                evidence_count,
             },
-            source_events: Vec::new(),
+            source_events: evidence_refs,
             target_hashes: std::collections::BTreeMap::new(),
             dependencies: Vec::new(),
             expires_at,
@@ -567,6 +588,17 @@ fn looks_like_tool_error(body: &str) -> bool {
 
 fn evidence_count_for(candidate: &ReflectionCandidate) -> u32 {
     u32::try_from(candidate.evidence_record_ids.len()).unwrap_or(u32::MAX)
+}
+
+fn promotion_evidence_refs(record: &MemoryRecord) -> Vec<Ulid> {
+    if record.source_ids.is_empty() {
+        return vec![Ulid(record.id.as_str().to_owned())];
+    }
+    record
+        .source_ids
+        .iter()
+        .map(|id| Ulid(id.as_str().to_owned()))
+        .collect()
 }
 
 async fn list_active_records(

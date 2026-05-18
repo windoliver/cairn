@@ -4,7 +4,9 @@
 use std::sync::Arc;
 
 use cairn_core::contract::memory_store::MemoryStore as _;
-use cairn_core::domain::{FlushMode, Identity, MemoryKind, PlannedMutation};
+use cairn_core::domain::{
+    EvidenceVector, FlushMode, Identity, MemoryKind, PlanReason, PlannedMutation,
+};
 use cairn_core::generated::status::StatusResponseWorkflowsWorkflow;
 use cairn_test_fixtures::{memstore, sample_record};
 use cairn_workflows::{
@@ -93,6 +95,12 @@ async fn promote_workflow_drains_planned_flushes_into_sqlite_store_end_to_end() 
     let mut candidate = sample_record(3);
     candidate.kind = MemoryKind::Reference;
     candidate.confidence = 0.95;
+    candidate.evidence = EvidenceVector {
+        recall_count: 3,
+        score: 0.72,
+        unique_queries: 2,
+        recency_half_life_days: 14,
+    };
     let mut already_promoted = sample_record(4);
     already_promoted.kind = MemoryKind::Fact;
     already_promoted.confidence = 0.99;
@@ -111,6 +119,32 @@ async fn promote_workflow_drains_planned_flushes_into_sqlite_store_end_to_end() 
     let drainer = WorkflowDrainer::new(
         WorkflowContext::default(),
         Arc::new(SqliteFlushPlanApply::new(store.clone())),
+    );
+    let planned = source
+        .plan("promote", &WorkflowContext::default())
+        .await
+        .expect("plan promote");
+    assert_eq!(planned.len(), 1);
+    assert!(
+        matches!(
+            &planned[0].mutations[0],
+            PlannedMutation::Promote { evidence, .. }
+                if evidence.iter().map(|id| id.0.as_str()).collect::<Vec<_>>()
+                    == vec![candidate.source_ids[0].as_str()]
+        ),
+        "promotion plan must cite source evidence: {:?}",
+        planned[0].mutations
+    );
+    assert!(
+        matches!(
+            planned[0].reason,
+            PlanReason::Promote {
+                confidence,
+                evidence_count: 1
+            } if confidence >= 0.95
+        ),
+        "promotion reason must count cited evidence refs: {:?}",
+        planned[0].reason
     );
 
     let first = drainer
@@ -140,6 +174,47 @@ async fn promote_workflow_drains_planned_flushes_into_sqlite_store_end_to_end() 
     assert_eq!(second.applied, 0);
     assert_eq!(second.already_applied, 0);
     assert!(!second.cancelled);
+}
+
+#[tokio::test]
+async fn promote_workflow_skips_high_confidence_candidate_without_evidence_gate() {
+    let store = Arc::new(memstore().await);
+    let mut candidate = sample_record(30);
+    candidate.kind = MemoryKind::Reference;
+    candidate.confidence = 0.99;
+    candidate.evidence = EvidenceVector {
+        recall_count: 2,
+        score: 0.95,
+        unique_queries: 2,
+        recency_half_life_days: 14,
+    };
+    store.upsert(&candidate).await.expect("seed candidate");
+
+    let source = Arc::new(PromotePlanSource::new(
+        store.clone(),
+        Identity::parse("agt:cairn-workflows:promote:v1").expect("valid issuer"),
+        MemoryKind::Fact,
+        0.9,
+    ));
+    let drainer = WorkflowDrainer::new(
+        WorkflowContext::default(),
+        Arc::new(SqliteFlushPlanApply::new(store.clone())),
+    );
+
+    let result = drainer
+        .run(Arc::new(PromoteWorkflow::new(source)))
+        .await
+        .expect("promote drain");
+
+    assert_eq!(result.workflow, "promote");
+    assert_eq!(result.planned, 0);
+    assert_eq!(result.applied, 0);
+    let active = store
+        .get_active_by_target(&candidate.target_id)
+        .await
+        .expect("get candidate")
+        .expect("candidate remains active");
+    assert_eq!(active.record.kind, MemoryKind::Reference);
 }
 
 #[tokio::test]
