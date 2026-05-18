@@ -11,9 +11,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use cairn_core::config::{CairnConfig, HotMemoryRecipeStep};
 use cairn_core::contract::identity_registry::IdentityVisibility;
 use cairn_core::contract::memory_store::{ListArgs, MemoryStore};
+use cairn_core::contract::metrics::MetricsSink;
 use cairn_core::domain::canonical::canonical_bytes_signed_intent;
 use cairn_core::domain::consent_timeline::ConsentModel;
 use cairn_core::domain::identity::keys::SecretHandle;
+use cairn_core::domain::metrics::MetricEvent;
 use cairn_core::domain::{
     Identity, MemoryKind, MemoryRecord, MemoryVisibility, RecordId, ScopeTuple, SessionId,
     SessionTree,
@@ -97,6 +99,12 @@ struct LoadedHotBodies {
     files: usize,
     records: Vec<LoadedRecordTrace>,
     tree_context: Option<TreeHotContext>,
+    trace_canvas_metrics: Vec<MetricEvent>,
+}
+
+struct LoadedTraceCanvasSection {
+    body: String,
+    metric: MetricEvent,
 }
 
 #[derive(Clone)]
@@ -255,7 +263,7 @@ async fn run_async(args: AssembleHotArgs, vault_root: PathBuf, config: CairnConf
                 Box::new(NoopHotPrefixCache)
             }
         };
-    let metrics: Box<dyn cairn_core::contract::metrics::MetricsSink> =
+    let metrics: Box<dyn MetricsSink> =
         match crate::metrics::JsonlMetricsSink::open(&ctx.vault_root).await {
             Ok(s) => Box::new(s),
             Err(e) => {
@@ -302,6 +310,7 @@ async fn run_async(args: AssembleHotArgs, vault_root: PathBuf, config: CairnConf
         });
     }
     record_access(&ctx.store, &loaded.records, "assemble_hot").await;
+    let trace_canvas_metrics = loaded.trace_canvas_metrics.clone();
 
     let vault_id = std::fs::read_to_string(ctx.vault_root.join(".cairn/vault.id"))
         .unwrap_or_default()
@@ -329,6 +338,7 @@ async fn run_async(args: AssembleHotArgs, vault_root: PathBuf, config: CairnConf
     .await
     {
         Ok(mut data) => {
+            emit_trace_canvas_metrics(metrics.as_ref(), &trace_canvas_metrics).await;
             // `--explain` (Args.explain) layers a typed per-step debug
             // trace on top of the assembled prefix. The trace runs the
             // pure source modules + admissibility predicate over the
@@ -384,6 +394,7 @@ async fn load_hot_bodies(
     let mut loaded_records = Vec::new();
     let mut loaded_files = 0_usize;
     let mut tree_context = None;
+    let mut trace_canvas_metrics = Vec::new();
     let mut used_bytes = 0_u64;
 
     for step in &config.vault.hot_memory.recipe {
@@ -474,9 +485,15 @@ async fn load_hot_bodies(
                 if remaining == 0 {
                     String::new()
                 } else {
-                    let canvas_section = load_trace_canvas_section(store, session_id, remaining)
-                        .await?
-                        .unwrap_or_default();
+                    let loaded_canvas =
+                        load_trace_canvas_section(store, session_id, remaining).await?;
+                    let (canvas_section, canvas_metric) = loaded_canvas.map_or_else(
+                        || (String::new(), None),
+                        |loaded| (loaded.body, Some(loaded.metric)),
+                    );
+                    if let Some(metric) = canvas_metric {
+                        trace_canvas_metrics.push(metric);
+                    }
                     let records_budget =
                         remaining.saturating_sub(u64::try_from(canvas_section.len()).unwrap_or(0));
                     let loaded = load_records_for_kinds(
@@ -520,6 +537,7 @@ async fn load_hot_bodies(
         files: loaded_files,
         records: loaded_records,
         tree_context,
+        trace_canvas_metrics,
     })
 }
 
@@ -977,7 +995,7 @@ async fn load_trace_canvas_section(
     store: &cairn_store_sqlite::SqliteMemoryStore,
     session_id: Option<&str>,
     budget: u64,
-) -> Result<Option<String>, Response> {
+) -> Result<Option<LoadedTraceCanvasSection>, Response> {
     let Some(session_id) = session_id else {
         return Ok(None);
     };
@@ -990,7 +1008,16 @@ async fn load_trace_canvas_section(
         .map_err(|e| {
             internal_error_response(ResponseVerb::AssembleHot, &format!("trace canvas: {e}"))
         })?;
-    Ok(context.map(|context| render_trace_canvas_section(&context, budget)))
+    Ok(context.map(|context| {
+        let body = render_trace_canvas_section(&context, budget);
+        let metric = trace_canvas_metric_event(
+            &context,
+            u64::try_from(body.len()).unwrap_or(u64::MAX),
+            budget,
+            current_unix_ms_i64(),
+        );
+        LoadedTraceCanvasSection { body, metric }
+    }))
 }
 
 fn render_trace_canvas_section(
@@ -1000,10 +1027,7 @@ fn render_trace_canvas_section(
     if budget == 0 {
         return String::new();
     }
-    let canvas_budget = u64::try_from(context.canvas.max_bytes)
-        .ok()
-        .filter(|bytes| *bytes > 0)
-        .map_or(budget, |bytes| bytes.min(budget));
+    let canvas_budget = effective_trace_canvas_budget(context, budget);
     let mut out = String::new();
     push_capped(&mut out, "# Current Task\n", canvas_budget);
     push_capped(&mut out, &context.canvas.title, canvas_budget);
@@ -1045,6 +1069,43 @@ fn render_trace_canvas_section(
         );
     }
     out
+}
+
+fn effective_trace_canvas_budget(
+    context: &cairn_store_sqlite::TraceCanvasContext,
+    budget: u64,
+) -> u64 {
+    u64::try_from(context.canvas.max_bytes)
+        .ok()
+        .filter(|bytes| *bytes > 0)
+        .map_or(budget, |bytes| bytes.min(budget))
+}
+
+fn trace_canvas_metric_event(
+    context: &cairn_store_sqlite::TraceCanvasContext,
+    rendered_bytes: u64,
+    budget: u64,
+    ts_ms: i64,
+) -> MetricEvent {
+    MetricEvent::TraceCanvasRendered {
+        ts_ms,
+        session_id_hash: sha256_wire(context.canvas.session_id.as_bytes()),
+        canvas_id_hash: sha256_wire(context.canvas.canvas_id.as_bytes()),
+        version: context.canvas.version,
+        node_count: u32::try_from(context.nodes.len()).unwrap_or(u32::MAX),
+        edge_count: u32::try_from(context.edges.len()).unwrap_or(u32::MAX),
+        bytes: rendered_bytes,
+        budget_bytes: effective_trace_canvas_budget(context, budget),
+        active_node: context.canvas.active_node_id.is_some(),
+    }
+}
+
+async fn emit_trace_canvas_metrics(metrics: &dyn MetricsSink, events: &[MetricEvent]) {
+    for event in events {
+        if let Err(e) = metrics.emit(event.clone()).await {
+            tracing::warn!(error = %e, "trace canvas metric emit failed");
+        }
+    }
 }
 
 fn push_capped(out: &mut String, text: &str, budget: u64) {
@@ -1526,6 +1587,7 @@ mod tests {
         assert!(prefix.contains("finish trace canvas hot memory"));
         assert!(prefix.contains("Verify enqueue"));
         assert!(prefix.contains("Trace canvas enqueue path is verified."));
+        assert_rendered_canvas_metric(&loaded.trace_canvas_metrics, session_id);
     }
 
     #[test]
@@ -1558,5 +1620,114 @@ mod tests {
         let section = render_trace_canvas_section(&context, 32);
         assert!(section.len() <= 32);
         assert!(section.is_char_boundary(section.len()));
+    }
+
+    #[test]
+    fn trace_canvas_metric_event_is_body_free() {
+        let context = cairn_store_sqlite::TraceCanvasContext {
+            canvas: cairn_store_sqlite::TraceCanvasRow {
+                canvas_id: "canvas-secret".to_owned(),
+                session_id: "session-secret".to_owned(),
+                title: "Sensitive task title".to_owned(),
+                goal: "Sensitive task goal".to_owned(),
+                status: cairn_store_sqlite::TraceCanvasStatus::Active,
+                summary: "Sensitive task summary".to_owned(),
+                active_node_id: Some("node-secret".to_owned()),
+                max_bytes: 64,
+                version: 7,
+            },
+            nodes: vec![cairn_store_sqlite::TraceCanvasNodeRow {
+                node_id: "node-secret".to_owned(),
+                canvas_id: "canvas-secret".to_owned(),
+                label: "Sensitive node label".to_owned(),
+                status: "active".to_owned(),
+                summary: "Sensitive node summary".to_owned(),
+                timestamp_ms: 1,
+                source_step_ids: vec!["step-secret".to_owned()],
+                evidence_record_ids: vec!["record-secret".to_owned()],
+            }],
+            edges: vec![cairn_store_sqlite::TraceCanvasEdgeRow {
+                canvas_id: "canvas-secret".to_owned(),
+                from_node_id: "node-secret".to_owned(),
+                to_node_id: "node-other".to_owned(),
+                kind: cairn_store_sqlite::TraceCanvasEdgeKind::DependsOn,
+                label: Some("Sensitive edge label".to_owned()),
+            }],
+        };
+
+        let event = trace_canvas_metric_event(&context, 42, 128, 1_700_000_000_000);
+        match &event {
+            MetricEvent::TraceCanvasRendered {
+                session_id_hash,
+                canvas_id_hash,
+                version,
+                node_count,
+                edge_count,
+                bytes,
+                budget_bytes,
+                active_node,
+                ..
+            } => {
+                assert!(session_id_hash.starts_with("sha256:"));
+                assert!(canvas_id_hash.starts_with("sha256:"));
+                assert_ne!(session_id_hash, "session-secret");
+                assert_ne!(canvas_id_hash, "canvas-secret");
+                assert_eq!(*version, 7);
+                assert_eq!(*node_count, 1);
+                assert_eq!(*edge_count, 1);
+                assert_eq!(*bytes, 42);
+                assert_eq!(*budget_bytes, 64);
+                assert!(*active_node);
+            }
+            _ => panic!("expected trace canvas metric"),
+        }
+        let json = serde_json::to_string(&event).expect("metric json");
+        for raw in [
+            "session-secret",
+            "canvas-secret",
+            "node-secret",
+            "Sensitive task title",
+            "Sensitive task goal",
+            "Sensitive task summary",
+            "Sensitive node label",
+            "Sensitive node summary",
+            "Sensitive edge label",
+        ] {
+            assert!(!json.contains(raw), "metric leaked raw value {raw}");
+        }
+    }
+
+    fn assert_rendered_canvas_metric(metrics: &[MetricEvent], session_id: &str) {
+        assert_eq!(metrics.len(), 1);
+        match &metrics[0] {
+            MetricEvent::TraceCanvasRendered {
+                session_id_hash,
+                canvas_id_hash,
+                version,
+                node_count,
+                edge_count,
+                bytes,
+                budget_bytes,
+                active_node,
+                ..
+            } => {
+                assert!(session_id_hash.starts_with("sha256:"));
+                assert!(canvas_id_hash.starts_with("sha256:"));
+                assert_ne!(session_id_hash, session_id);
+                assert_ne!(canvas_id_hash, "canvas-1");
+                assert_eq!(*version, 2);
+                assert_eq!(*node_count, 1);
+                assert_eq!(*edge_count, 0);
+                assert!(*bytes > 0);
+                assert_eq!(*budget_bytes, 1024);
+                assert!(*active_node);
+            }
+            _ => panic!("expected trace canvas metric"),
+        }
+        let metric_json = serde_json::to_string(&metrics[0]).expect("metric json");
+        assert!(!metric_json.contains(session_id));
+        assert!(!metric_json.contains("canvas-1"));
+        assert!(!metric_json.contains("Issue 134"));
+        assert!(!metric_json.contains("finish trace canvas hot memory"));
     }
 }
