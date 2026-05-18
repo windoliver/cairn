@@ -210,10 +210,20 @@ impl StoreTx<'_> {
                     SELECT target_id
                       FROM record_session_links
                      WHERE session_id = ?1
+                       AND NOT EXISTS (
+                           SELECT 1
+                             FROM record_link_review AS review
+                            WHERE review.record_id = record_session_links.record_id
+                       )
                     UNION
                     SELECT target_id
                       FROM records
                      WHERE json_extract(scope, '$.session_id') = ?1
+                       AND NOT EXISTS (
+                           SELECT 1
+                             FROM record_link_review AS review
+                            WHERE review.record_id = records.record_id
+                       )
                )
               ORDER BY target_id",
         )?;
@@ -245,11 +255,21 @@ impl StoreTx<'_> {
                     SELECT tenant, workspace
                       FROM record_session_links
                      WHERE session_id = ?1
+                       AND NOT EXISTS (
+                           SELECT 1
+                             FROM record_link_review AS review
+                            WHERE review.record_id = record_session_links.record_id
+                       )
                     UNION
                     SELECT json_extract(scope, '$.tenant') AS tenant,
                            json_extract(scope, '$.workspace') AS workspace
                       FROM records
                      WHERE json_extract(scope, '$.session_id') = ?1
+                       AND NOT EXISTS (
+                           SELECT 1
+                             FROM record_link_review AS review
+                            WHERE review.record_id = records.record_id
+                       )
                )
               ORDER BY tenant, workspace",
         )?;
@@ -282,12 +302,22 @@ impl StoreTx<'_> {
                     SELECT target_id, tenant, workspace
                       FROM record_session_links
                      WHERE session_id = ?1
+                       AND NOT EXISTS (
+                           SELECT 1
+                             FROM record_link_review AS review
+                            WHERE review.record_id = record_session_links.record_id
+                       )
                     UNION
                     SELECT target_id,
                            json_extract(scope, '$.tenant') AS tenant,
                            json_extract(scope, '$.workspace') AS workspace
                       FROM records
                      WHERE json_extract(scope, '$.session_id') = ?1
+                       AND NOT EXISTS (
+                           SELECT 1
+                             FROM record_link_review AS review
+                            WHERE review.record_id = records.record_id
+                       )
                )
               WHERE (
                     (?2 IS NULL AND tenant IS NULL)

@@ -223,6 +223,59 @@ async fn forget_session_uses_migrated_record_session_links() {
 }
 
 #[tokio::test]
+async fn forget_session_skips_manual_review_session_conflicts() {
+    let store = open_in_memory().await.expect("open store");
+    let record = session_record(
+        "01J00000000000000000001094",
+        "01HQZX9F5N0000000000010904",
+        "issue109 ambiguous session body",
+        "sess-109-scope",
+    );
+    store
+        .upsert(&record)
+        .await
+        .expect("upsert ambiguous record");
+
+    let conn = store.raw_conn_for_admin().expect("raw conn").clone();
+    let record_id = record.id.as_str().to_owned();
+    let target_id = record.target_id.as_str().to_owned();
+    conn.call(move |c| {
+        c.execute(
+            "INSERT INTO record_session_links (
+                record_id, target_id, session_id, tenant, workspace,
+                link_source, link_confidence, created_at
+             ) VALUES (?1, ?2, 'sess-109-scope', NULL, NULL, 'scope', 'explicit', 109)",
+            params![record_id, target_id],
+        )?;
+        c.execute(
+            "INSERT INTO record_link_review (
+                record_id, reason, scope_session_id, trace_session_id, detail_json, created_at
+             ) VALUES (
+                ?1, 'session_id_mismatch', 'sess-109-scope', 'sess-109-trace',
+                '{\"migration_id\":64}', 109
+             )",
+            params![record_id],
+        )?;
+        Ok::<_, tokio_rusqlite::Error>(())
+    })
+    .await
+    .expect("seed manual-review conflict");
+
+    let err = store
+        .forget_session("sess-109-scope")
+        .await
+        .expect_err("manual-review records must not be guessed from fallback scope metadata");
+    assert!(
+        matches!(err, StoreError::NotFound { .. }),
+        "expected NotFound when every matching row is under manual review, got {err:?}"
+    );
+
+    let listed = store.list(&ListArgs::default()).await.expect("list");
+    assert_eq!(listed.records.len(), 1);
+    assert_eq!(listed.records[0].id, record.id);
+}
+
+#[tokio::test]
 async fn forget_session_uses_migrated_summary_and_projection_links() {
     let store = open_in_memory().await.expect("open store");
     let source = session_record(
