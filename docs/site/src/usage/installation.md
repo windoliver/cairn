@@ -4,12 +4,20 @@ Cairn v0.1 is a single Rust binary. Two supported install paths.
 
 ## `cargo install` (any platform)
 
+Until v0.1.0 is published to crates.io (issue #141), install from git:
+
+```bash
+cargo install --git https://github.com/windoliver/cairn --branch main cairn-cli
+```
+
+Requires Rust 1.95+. The package name is `cairn-cli`; it builds a binary named
+`cairn` into `~/.cargo/bin/cairn`. No other runtime dependencies.
+
+Once v0.1.0 is on crates.io the command becomes:
+
 ```bash
 cargo install cairn-cli
 ```
-
-Requires Rust 1.95+. The crate name is `cairn-cli`; it builds a binary named
-`cairn` into `~/.cargo/bin/cairn`. No other runtime dependencies.
 
 > The shorter `cairn` crate name on crates.io is already taken by an unrelated
 > project; renaming `cairn-cli → cairn` is tracked under issue #141.

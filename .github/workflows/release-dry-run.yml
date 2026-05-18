@@ -249,8 +249,25 @@ jobs:
           tap="$(brew --repository)/Library/Taps/local/homebrew-cairn-audit"
           mkdir -p "$tap/Formula"
           cp Formula/cairn.rb "$tap/Formula/cairn.rb"
+          # Audit the shipped formula as-is (head URL must point at main
+          # because that is what users will receive).
           trap 'rm -rf "$tap"; brew uninstall --force cairn || true' EXIT
           brew audit --strict local/cairn-audit/cairn
+          # CRITICAL: rewrite head URL to file://$PWD so the brew install
+          # rehearsal builds the commit under test, NOT whatever happens
+          # to be on the remote `main` right now. Without this, a formula
+          # or build break introduced by this PR can be masked by main's
+          # good code.
+          #
+          # The formula's `branch: "main"` is preserved — force the local
+          # `main` ref to point at HEAD so brew (cloning via git) picks
+          # up the PR commit. actions/checkout leaves HEAD detached at
+          # GITHUB_SHA, so `git branch -f main HEAD` is safe and bounded.
+          git branch -f main HEAD
+          sed -i.bak \
+            "s|https://github.com/windoliver/cairn.git|file://$PWD|" \
+            "$tap/Formula/cairn.rb"
+          rm -f "$tap/Formula/cairn.rb.bak"
           brew install --build-from-source --HEAD local/cairn-audit/cairn
           brew test local/cairn-audit/cairn
           CAIRN_BIN="$(brew --prefix cairn)/bin/cairn" ./scripts/install-smoke.sh
