@@ -220,14 +220,28 @@ jobs:
           shared-key: install-smoke-${{ matrix.os }}
           cache-bin: "false"
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: cargo install into a clean prefix
+      - name: cargo install via the documented git path
         shell: bash
         run: |
           set -euo pipefail
+          # docs/site/src/usage/installation.md tells users:
+          #   cargo install --git https://github.com/windoliver/cairn --branch main cairn-cli
+          # Exercise that exact shape — clone + ref selection + package
+          # filtering — against the PR commit, not a published main. A
+          # plain `cargo install --path` would skip the git-clone code path
+          # users actually hit.
           prefix="$(mktemp -d -t cairn-install-XXXXXX)"
           echo "CAIRN_PREFIX=$prefix" >>"$GITHUB_ENV"
-          cargo install --path crates/cairn-cli --locked --no-track \
-            --root "$prefix"
+          # Stage a stable local branch ref at HEAD without touching `main`
+          # (which would fail if main is the currently checked-out branch).
+          git branch -f cairn-ci-head HEAD
+          cargo install \
+            --git "file://$PWD" \
+            --branch cairn-ci-head \
+            --locked \
+            --no-track \
+            --root "$prefix" \
+            cairn-cli
           ls "$prefix/bin"
       - name: Run install smoke
         shell: bash
@@ -259,13 +273,14 @@ jobs:
           # or build break introduced by this PR can be masked by main's
           # good code.
           #
-          # The formula's `branch: "main"` is preserved — force the local
-          # `main` ref to point at HEAD so brew (cloning via git) picks
-          # up the PR commit. actions/checkout leaves HEAD detached at
-          # GITHUB_SHA, so `git branch -f main HEAD` is safe and bounded.
-          git branch -f main HEAD
+          # Use a dedicated `cairn-ci-head` branch ref rather than touching
+          # `main` — `git branch -f main HEAD` fails when main is the
+          # currently checked-out branch (e.g. a workflow_dispatch run on
+          # main), and we don't want to mutate a meaningful ref name.
+          git branch -f cairn-ci-head HEAD
           sed -i.bak \
-            "s|https://github.com/windoliver/cairn.git|file://$PWD|" \
+            -e "s|https://github.com/windoliver/cairn.git|file://$PWD|" \
+            -e 's|branch: "main"|branch: "cairn-ci-head"|' \
             "$tap/Formula/cairn.rb"
           rm -f "$tap/Formula/cairn.rb.bak"
           brew install --build-from-source --HEAD local/cairn-audit/cairn
