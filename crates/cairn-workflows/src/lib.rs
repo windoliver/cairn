@@ -20,6 +20,7 @@ pub mod scheduler;
 pub mod sqlite_apply;
 pub mod sqlite_store;
 pub mod synthetic;
+pub mod trace_canvas;
 pub mod workflows;
 
 #[cfg(test)]
@@ -52,6 +53,7 @@ pub use planners::{
 pub use scheduler::{Clock, MockClock, Scheduler, SchedulerConfig, SystemClock};
 pub use sqlite_apply::SqliteFlushPlanApply;
 pub use sqlite_store::{SqliteJobStore, SqliteJobStoreInitError};
+pub use trace_canvas::{TraceCanvasMaterializer, TraceCanvasProjection};
 pub use workflows::{
     ConsolidateWorkflow, ExpireWorkflow, PromoteWorkflow, ReflectionWorkflow, WorkflowPlanSource,
 };

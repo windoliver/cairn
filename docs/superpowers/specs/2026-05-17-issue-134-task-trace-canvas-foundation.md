@@ -26,6 +26,12 @@ workflow slice:
 - canvas, node, and edge upserts
 - active canvas context reads with deterministic node and edge ordering
 
+The workflows crate now adds a narrow `TraceCanvasMaterializer` helper that
+projects one trace step into the session's active canvas. It creates the active
+canvas if needed, writes the step and node, advances the active node pointer,
+and links the previous active node to the new node with a deterministic
+`depends_on` edge.
+
 ## Non-Goals
 
 This slice does not implement workflow materialization, hot-memory selection,
