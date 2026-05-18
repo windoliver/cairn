@@ -41,6 +41,16 @@ impl ModelCache {
     }
 
     /// `true` iff the `.integrity` marker exists (fetch was completed).
+    ///
+    /// **v0.1 limitation:** this is a marker-only check. The recorded
+    /// blake3 digest is NOT re-validated against the cached bytes here, so
+    /// a stale marker, partial restore, or tampered cache will still
+    /// report ready. Bootstrap users get a fresh cache and a fresh digest;
+    /// the gap only matters once a vault is reused on a possibly-mutated
+    /// disk. A follow-up will tighten this to recompute the digest and
+    /// force refetch on mismatch — tracked under the same packaging-trust
+    /// thread as model-revision pinning (see installation.md, "Trust
+    /// model (v0.1)").
     #[must_use]
     pub fn is_present(&self, kind: EmbeddingModelKind) -> bool {
         self.model_dir(kind).join(".integrity").exists()
@@ -115,8 +125,19 @@ impl ModelCache {
         }
         std::fs::create_dir_all(&tmp)?;
 
-        let api =
-            hf_hub::api::sync::Api::new().map_err(|e| EmbeddingError::Network(e.to_string()))?;
+        // ApiBuilder::from_env() picks up HF_ENDPOINT / HF_HOME so operators
+        // on locked-down networks can point at a mirror. Plain Api::new()
+        // hardcodes huggingface.co and would ignore the env.
+        //
+        // `.with_token(None)` explicitly clears any cached Hugging Face
+        // bearer token from `$HF_HOME/token`. The bge-small / MiniLM models
+        // we fetch are public and need no auth — and forwarding a personal
+        // token to an arbitrary `HF_ENDPOINT` mirror would be a credential
+        // leak we cannot accept.
+        let api = hf_hub::api::sync::ApiBuilder::from_env()
+            .with_token(None)
+            .build()
+            .map_err(|e| EmbeddingError::Network(e.to_string()))?;
         let repo_id = kind
             .hf_repo()
             .ok_or(EmbeddingError::ModelNotFetched { kind })?;

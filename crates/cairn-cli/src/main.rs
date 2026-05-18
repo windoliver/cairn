@@ -815,7 +815,7 @@ fn run_bootstrap(matches: &ArgMatches) -> ExitCode {
         let cache = cairn_embeddings_local::ModelCache::new(&models_root);
         if !cache.is_present(kind) {
             eprintln!(
-                "cairn bootstrap: fetching embedding model '{}' (~25 MB)…",
+                "cairn bootstrap: fetching embedding model '{}' (~128 MB)…",
                 kind.as_str()
             );
             match cache.fetch(kind) {

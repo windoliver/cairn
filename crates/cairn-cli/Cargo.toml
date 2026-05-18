@@ -8,7 +8,9 @@ authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme.workspace = true
-description = "Cairn terminal entry point. Wires adapters into the verb layer."
+description = "Cairn — harness-agnostic agent memory: one binary, one SQLite file, one markdown vault. Eight verbs over CLI/MCP/SDK. Offline after first-run model cache; no Python, no cloud credentials."
+categories = ["command-line-utilities", "database", "development-tools"]
+keywords = ["memory", "agent", "llm", "mcp", "vault"]
 default-run = "cairn"
 
 [features]

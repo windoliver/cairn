@@ -12,6 +12,7 @@
 
 # Usage
 
+- [Installation](usage/installation.md)
 - [CLI](usage/cli.md)
 - [Configuration](usage/config.md)
 - [Plugins](usage/plugins.md)
