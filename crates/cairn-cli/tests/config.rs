@@ -1,6 +1,6 @@
 //! Integration tests for the cairn-cli config loader (brief §3.1, §6.5).
 
-use cairn_cli::config::{CliOverrides, load, write_default};
+use cairn_cli::config::{load, write_default, CliOverrides};
 use cairn_core::config::{CairnConfig, StoreKind};
 
 fn write_yaml(vault: &std::path::Path, content: &str) {
@@ -25,6 +25,37 @@ fn load_from_file_overrides_name() {
     let config = load(dir.path(), &CliOverrides::default()).unwrap();
     assert_eq!(config.vault.name, "test-vault");
     // Unset fields stay at default
+    assert_eq!(config.store.kind, StoreKind::Sqlite);
+}
+
+#[test]
+fn v01_config_without_store_stays_sqlite() {
+    let dir = tempfile::tempdir().unwrap();
+    write_yaml(dir.path(), "vault:\n  name: old-vault\n");
+    let config = load(dir.path(), &CliOverrides::default()).unwrap();
+    assert_eq!(config.store.kind, StoreKind::Sqlite);
+    assert_eq!(config.store.nexus.data_dir, "nexus-data");
+}
+
+#[test]
+fn nexus_sandbox_file_defaults_profile() {
+    let dir = tempfile::tempdir().unwrap();
+    write_yaml(dir.path(), "store:\n  kind: nexus-sandbox\n");
+    let config = load(dir.path(), &CliOverrides::default()).unwrap();
+    assert_eq!(config.store.kind, StoreKind::NexusSandbox);
+    assert_eq!(config.store.nexus.data_dir, "nexus-data");
+    assert_eq!(config.store.nexus.command, "nexus");
+    assert_eq!(config.store.nexus.health_timeout_ms, 5_000);
+}
+
+#[test]
+fn disabling_nexus_keeps_sqlite_usable() {
+    let dir = tempfile::tempdir().unwrap();
+    write_yaml(
+        dir.path(),
+        "store:\n  kind: sqlite\n  nexus:\n    command: \"\"\n",
+    );
+    let config = load(dir.path(), &CliOverrides::default()).unwrap();
     assert_eq!(config.store.kind, StoreKind::Sqlite);
 }
 

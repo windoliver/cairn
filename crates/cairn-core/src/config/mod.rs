@@ -32,6 +32,14 @@ pub enum ConfigError {
     /// A retention key glob is malformed.
     #[error("invalid retention key pattern: {0}")]
     InvalidRetentionKey(String),
+    /// The active Nexus sandbox profile contains an invalid field.
+    #[error("invalid Nexus sandbox profile for {field}: {reason}")]
+    InvalidNexusProfile {
+        /// The config field name containing the invalid value.
+        field: &'static str,
+        /// Why the value is invalid.
+        reason: String,
+    },
     /// The pipeline chain contains an `llm` worker but no `llm.provider` is set.
     #[error("pipeline chain has llm worker but llm.provider is not configured")]
     LlmExtractorWithoutProvider,
@@ -370,13 +378,100 @@ impl Default for HotMemoryConfig {
 pub struct StoreConfig {
     /// Which memory store adapter is active.
     pub kind: StoreKind,
+    /// Nexus sandbox profile. Only active when `kind` is `nexus-sandbox`.
+    pub nexus: NexusSandboxConfig,
 }
 
 impl Default for StoreConfig {
     fn default() -> Self {
         Self {
             kind: StoreKind::Sqlite,
+            nexus: NexusSandboxConfig::default(),
         }
+    }
+}
+
+/// Nexus sandbox sidecar profile (§3.0, §19 v0.2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NexusSandboxConfig {
+    /// Vault-relative or absolute Nexus projection directory.
+    pub data_dir: String,
+    /// Sidecar executable name or path.
+    pub command: String,
+    /// Arguments passed to the sidecar executable.
+    pub args: Vec<String>,
+    /// Base HTTP endpoint for the sidecar.
+    pub endpoint: String,
+    /// HTTP path used for health checks.
+    pub health_path: String,
+    /// Maximum time to wait for health, in milliseconds.
+    pub health_timeout_ms: u64,
+    /// Maximum graceful shutdown wait, in milliseconds.
+    pub shutdown_timeout_ms: u64,
+}
+
+impl Default for NexusSandboxConfig {
+    fn default() -> Self {
+        Self {
+            data_dir: "nexus-data".into(),
+            command: "nexus".into(),
+            args: vec!["sandbox".into(), "serve".into()],
+            endpoint: "http://127.0.0.1:8765".into(),
+            health_path: "/health".into(),
+            health_timeout_ms: 5_000,
+            shutdown_timeout_ms: 2_000,
+        }
+    }
+}
+
+impl NexusSandboxConfig {
+    /// Whether this profile is active for the selected store kind.
+    #[must_use]
+    pub fn is_active_for(&self, kind: &StoreKind) -> bool {
+        matches!(kind, StoreKind::NexusSandbox)
+    }
+
+    fn validate_active(&self) -> Result<(), ConfigError> {
+        if self.command.trim().is_empty() {
+            return Err(ConfigError::InvalidNexusProfile {
+                field: "store.nexus.command",
+                reason: "must not be empty".into(),
+            });
+        }
+        if self.health_path.trim().is_empty() || !self.health_path.starts_with('/') {
+            return Err(ConfigError::InvalidNexusProfile {
+                field: "store.nexus.health_path",
+                reason: "must start with /".into(),
+            });
+        }
+        if self.health_timeout_ms == 0 {
+            return Err(ConfigError::InvalidBudget {
+                field: "store.nexus.health_timeout_ms",
+                value: 0,
+            });
+        }
+        if self.shutdown_timeout_ms == 0 {
+            return Err(ConfigError::InvalidBudget {
+                field: "store.nexus.shutdown_timeout_ms",
+                value: 0,
+            });
+        }
+        let data_dir = self.data_dir.trim();
+        if data_dir.is_empty() {
+            return Err(ConfigError::InvalidNexusProfile {
+                field: "store.nexus.data_dir",
+                reason: "must not be empty".into(),
+            });
+        }
+        if data_dir == ".cairn" || data_dir == ".cairn/cairn.db" || data_dir.starts_with(".cairn/")
+        {
+            return Err(ConfigError::InvalidNexusProfile {
+                field: "store.nexus.data_dir",
+                reason: "must not point inside .cairn authority state".into(),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -567,6 +662,9 @@ impl CairnConfig {
                 source,
             })?;
         }
+        if self.store.nexus.is_active_for(&self.store.kind) {
+            self.store.nexus.validate_active()?;
+        }
 
         // 2. Custom orchestrator plugin name grammar
         if let OrchestratorKind::Custom(name) = &self.workflows.orchestrator {
@@ -754,6 +852,62 @@ mod tests {
     #[test]
     fn default_store_kind_is_sqlite() {
         assert_eq!(CairnConfig::default().store.kind, StoreKind::Sqlite);
+    }
+
+    #[test]
+    fn nexus_sandbox_store_defaults_profile_fields() {
+        let config: CairnConfig =
+            serde_json::from_str(r#"{"store":{"kind":"nexus-sandbox"}}"#).unwrap();
+        assert_eq!(config.store.kind, StoreKind::NexusSandbox);
+        assert_eq!(config.store.nexus.data_dir, "nexus-data");
+        assert_eq!(config.store.nexus.command, "nexus");
+        assert_eq!(
+            config.store.nexus.args,
+            vec!["sandbox".to_owned(), "serve".to_owned()]
+        );
+        assert_eq!(config.store.nexus.endpoint, "http://127.0.0.1:8765");
+        assert_eq!(config.store.nexus.health_path, "/health");
+        assert_eq!(config.store.nexus.health_timeout_ms, 5_000);
+        assert_eq!(config.store.nexus.shutdown_timeout_ms, 2_000);
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn sqlite_store_keeps_nexus_profile_inactive() {
+        let config = CairnConfig::default();
+        assert_eq!(config.store.kind, StoreKind::Sqlite);
+        assert!(!config.store.nexus.is_active_for(&config.store.kind));
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_empty_active_nexus_command() {
+        let mut config = CairnConfig::default();
+        config.store.kind = StoreKind::NexusSandbox;
+        config.store.nexus.command.clear();
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidNexusProfile {
+                field: "store.nexus.command",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_nexus_data_dir_under_cairn_authority() {
+        let mut config = CairnConfig::default();
+        config.store.kind = StoreKind::NexusSandbox;
+        config.store.nexus.data_dir = ".cairn/cairn.db".into();
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidNexusProfile {
+                field: "store.nexus.data_dir",
+                ..
+            }
+        ));
     }
 
     #[test]
