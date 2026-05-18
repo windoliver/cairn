@@ -54,14 +54,17 @@ use cairn_core::pipeline::filter::{
 };
 use cairn_core::pipeline::turn::summarize_turn_with_scope;
 use cairn_core::policy_trace::{PolicyErrorCode, PolicyGate, PolicyTraceEntry, to_wire};
-use cairn_store_sqlite::SqliteMemoryStore;
+use cairn_store_sqlite::{SqliteMemoryStore, TraceStepDraft};
 use clap::ArgMatches;
 use sha2::{Digest as _, Sha256};
 use tokio::fs::File;
 use tokio::io::{AsyncBufReadExt as _, BufReader};
 use ulid::Ulid;
 
-use cairn_workflows::{consolidation::enqueue_if_due_scoped, enqueue_tier_with_dedupe_token};
+use cairn_workflows::{
+    TraceCanvasPayload, TraceCanvasProjection, consolidation::enqueue_if_due_scoped,
+    enqueue_tier_with_dedupe_token, enqueue_trace_canvas_step,
+};
 
 use crate::identity::{guard::refuse_if_degraded, status::ReconciliationReport};
 use crate::sensor_gate::{
@@ -397,6 +400,7 @@ async fn run_events_handler_inner_no_guard(
         // the sync tx closure — tokio::fs reads must not run on the DB
         // worker thread.
         let mut projected: Vec<cairn_core::domain::MemoryRecord> = Vec::with_capacity(group.len());
+        let mut trace_canvas_projections: Vec<TraceCanvasProjection> = Vec::new();
         let mut had_stop = false;
         let mut group_failed = false;
 
@@ -617,6 +621,10 @@ async fn run_events_handler_inner_no_guard(
                 let key = tool_call_id.clone().unwrap_or_default();
                 needs_parent_from_store.push((projected.len(), key));
             }
+            if let Some(projection) = trace_canvas_projection_for_record(event, classified, &record)
+            {
+                trace_canvas_projections.push(projection);
+            }
             projected.push(record);
 
             // Register this PreTool so later PostTool/ToolOutput events can
@@ -761,6 +769,25 @@ async fn run_events_handler_inner_no_guard(
         // Failure is non-fatal — the CLI verb succeeds even if the scheduler
         // is absent or the enqueue fails.
         if let Some(js) = job_store {
+            let now_ms = i64::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis(),
+            )
+            .unwrap_or(i64::MAX);
+
+            for projection in &trace_canvas_projections {
+                let _ = enqueue_trace_canvas_step(
+                    js,
+                    TraceCanvasPayload {
+                        projection: projection.clone(),
+                    },
+                    now_ms,
+                )
+                .await;
+            }
+
             // Scope both reads + enqueue by the caller's bound scope so
             // queries narrow to this issuer's data (round-4 adversarial
             // review #1). At single-tenant P0 `scope_binding` is `None`
@@ -1058,6 +1085,128 @@ fn classify_trace_event(
         CapturePayload::RecordingBatch { .. } => Ok(TraceEvent::UserMessage),
         _ => core_classify(event),
     }
+}
+
+fn trace_canvas_projection_for_record(
+    event: &CaptureEvent,
+    classified: TraceEvent,
+    record: &cairn_core::domain::MemoryRecord,
+) -> Option<TraceCanvasProjection> {
+    if !matches!(
+        classified,
+        TraceEvent::PreTool | TraceEvent::PostTool | TraceEvent::ToolOutput
+    ) {
+        return None;
+    }
+
+    let refs = event.refs.as_ref()?;
+    let session_id = refs.session_id.as_ref()?.clone();
+    let turn_id = refs.turn_id.as_ref()?.clone();
+    let tool_call_id = refs.tool_id.clone();
+    let tool_name = trace_canvas_tool_name(event);
+    let record_id = record.id.as_str().to_owned();
+    let timestamp_ms = event.captured_at.as_chrono().timestamp_millis();
+    let (call_summary, result_summary, node_label, node_status, node_summary) =
+        trace_canvas_summaries(classified, tool_name.as_deref());
+    let step_id = format!("trace-step:{record_id}");
+
+    Some(TraceCanvasProjection {
+        step: TraceStepDraft {
+            step_id: step_id.clone(),
+            trace_id: event.event_id.as_str().to_owned(),
+            session_id,
+            turn_id,
+            tool_call_id: tool_call_id.clone(),
+            timestamp_ms,
+            tool_name,
+            call_summary,
+            result_summary,
+            result_ref: Some(record_id),
+            salience: trace_canvas_salience(classified),
+            replaceability_score: trace_canvas_replaceability(classified),
+            node_id: Some(format!("trace-node:{step_id}")),
+            source_hash: trace_canvas_source_hash(event, classified, tool_call_id.as_deref()),
+        },
+        canvas_title: "Current task".to_owned(),
+        canvas_goal: "Continue the current session task".to_owned(),
+        node_label,
+        node_status,
+        node_summary,
+    })
+}
+
+fn trace_canvas_tool_name(event: &CaptureEvent) -> Option<String> {
+    match &event.payload {
+        CapturePayload::Hook { tool_name, .. } => tool_name.clone(),
+        CapturePayload::Terminal { .. } => Some("terminal".to_owned()),
+        _ => None,
+    }
+}
+
+fn trace_canvas_summaries(
+    event: TraceEvent,
+    tool_name: Option<&str>,
+) -> (String, String, String, String, String) {
+    let label_tool = tool_name.unwrap_or("tool");
+    match event {
+        TraceEvent::PreTool => (
+            "tool call started".to_owned(),
+            "result pending".to_owned(),
+            format!("{label_tool} started"),
+            "active".to_owned(),
+            "Tool call was dispatched.".to_owned(),
+        ),
+        TraceEvent::PostTool => (
+            "tool call completed".to_owned(),
+            "tool result captured".to_owned(),
+            format!("{label_tool} completed"),
+            "completed".to_owned(),
+            "Tool call completed and its result is available.".to_owned(),
+        ),
+        TraceEvent::ToolOutput => (
+            "tool output captured".to_owned(),
+            "tool output available".to_owned(),
+            format!("{label_tool} output"),
+            "completed".to_owned(),
+            "Tool output was captured for exact retrieval.".to_owned(),
+        ),
+        _ => unreachable!("caller filters to tool lifecycle events"),
+    }
+}
+
+fn trace_canvas_salience(event: TraceEvent) -> f64 {
+    match event {
+        TraceEvent::PreTool => 0.45,
+        TraceEvent::PostTool | TraceEvent::ToolOutput => 0.65,
+        _ => 0.5,
+    }
+}
+
+fn trace_canvas_replaceability(event: TraceEvent) -> f64 {
+    match event {
+        TraceEvent::PreTool => 0.75,
+        TraceEvent::PostTool | TraceEvent::ToolOutput => 0.55,
+        _ => 0.7,
+    }
+}
+
+fn trace_canvas_source_hash(
+    event: &CaptureEvent,
+    classified: TraceEvent,
+    tool_call_id: Option<&str>,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"cairn:trace-canvas-step:v1\0");
+    hasher.update(event.event_id.as_str().as_bytes());
+    hasher.update([0]);
+    hasher.update(event.payload_hash.as_str().as_bytes());
+    hasher.update([0]);
+    hasher.update(format!("{classified:?}").as_bytes());
+    hasher.update([0]);
+    if let Some(tool_call_id) = tool_call_id {
+        hasher.update(tool_call_id.as_bytes());
+    }
+    format!("sha256:{:x}", hasher.finalize())
 }
 
 fn voice_transcript_text(body_bytes: &[u8]) -> anyhow::Result<String> {
@@ -2029,5 +2178,151 @@ mod tests {
             dream_requests[0].dedupe_key, dream_requests[1].dedupe_key,
             "idempotent Stop-hook replay must target the same dream dedupe slot"
         );
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::expect_used,
+        reason = "test: panics surface broken invariants immediately"
+    )]
+    async fn capture_trace_enqueues_trace_canvas_tool_steps() {
+        let store = cairn_store_sqlite::open_in_memory()
+            .await
+            .expect("in-memory store");
+        let vault = tempfile::tempdir().expect("tempdir");
+        let conn = rusqlite::Connection::open_in_memory().expect("job conn");
+        cairn_workflows::sqlite_store::install_for_tests(&conn);
+        let jobs = cairn_workflows::SqliteJobStore::new(conn).expect("job store");
+
+        let session_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let turn_id = "turn-canvas";
+        let tool_id = "toolu_canvas_01";
+        let pre_id = "01ARZ3NDEKTSV4RRFFQ69G5FA1";
+        let post_id = "01ARZ3NDEKTSV4RRFFQ69G5FA2";
+        let pre_body = r#"{"tool":"shell","input":{}}"#;
+        let post_body = r#"{"ok":true}"#;
+        let pre_ref = write_test_source(vault.path(), pre_id, pre_body);
+        let post_ref = write_test_source(vault.path(), post_id, post_body);
+        let events = vec![
+            test_hook_event(
+                pre_id,
+                "PreToolUse",
+                session_id,
+                turn_id,
+                "2026-05-02T00:00:02Z",
+                Some(tool_id),
+                &pre_ref,
+                pre_body,
+            ),
+            test_hook_event(
+                post_id,
+                "PostToolUse",
+                session_id,
+                turn_id,
+                "2026-05-02T00:00:03Z",
+                Some(tool_id),
+                &post_ref,
+                post_body,
+            ),
+        ];
+
+        let response = run_events_handler_inner_no_guard(
+            &store,
+            vault.path(),
+            events,
+            None,
+            None,
+            Some(&jobs),
+            &ConsolidationConfig::default(),
+            &DreamConfig::default(),
+        )
+        .await
+        .expect("capture trace");
+        assert_eq!(
+            response.failed_turns,
+            Vec::<(String, String, String)>::new()
+        );
+
+        let job_id = cairn_core::contract::job_store::JobId::new(format!(
+            "trace-canvas:trace-step:{post_id}"
+        ));
+        let leased = cairn_core::contract::job_store::JobStore::lease_specific(
+            &jobs,
+            &job_id,
+            &cairn_core::contract::job_store::JobKind::new(cairn_workflows::TRACE_CANVAS_KIND),
+            "test-worker",
+            chrono::Utc::now().timestamp_millis(),
+            30_000,
+        )
+        .await
+        .expect("lease")
+        .expect("trace canvas job queued");
+        let payload =
+            cairn_workflows::TraceCanvasPayload::from_bytes(&leased.payload).expect("payload");
+        assert_eq!(
+            payload.projection.step.step_id,
+            format!("trace-step:{post_id}")
+        );
+        assert_eq!(payload.projection.step.session_id, session_id);
+        assert_eq!(payload.projection.step.turn_id, turn_id);
+        assert_eq!(
+            payload.projection.step.tool_call_id.as_deref(),
+            Some(tool_id)
+        );
+        assert_eq!(payload.projection.step.result_ref.as_deref(), Some(post_id));
+        assert_eq!(payload.projection.node_status, "completed");
+    }
+
+    fn write_test_source(vault: &Path, event_id: &str, body: &str) -> String {
+        let dir = vault.join("sources/hook");
+        std::fs::create_dir_all(&dir).expect("mkdir source dir");
+        let file_name = format!("{event_id}.txt");
+        std::fs::write(dir.join(&file_name), body).expect("write source");
+        format!("sources/hook/{file_name}")
+    }
+
+    #[allow(clippy::too_many_arguments, reason = "test fixture factory")]
+    fn test_hook_event(
+        event_id: &str,
+        hook_name: &str,
+        session_id: &str,
+        turn_id: &str,
+        timestamp: &str,
+        tool_id: Option<&str>,
+        payload_ref: &str,
+        body: &str,
+    ) -> CaptureEvent {
+        let sensor =
+            Identity::parse("snr:local:hook:cc-session:v1").expect("valid sensor identity");
+        CaptureEvent {
+            event_id: CaptureEventId::parse(event_id).expect("valid event id"),
+            sensor_id: sensor.clone(),
+            capture_mode: CaptureMode::Auto,
+            actor_chain: vec![ActorChainEntry {
+                role: ChainRole::Author,
+                identity: sensor,
+                at: Rfc3339Timestamp::parse(timestamp).expect("valid timestamp"),
+            }],
+            refs: Some(CaptureRefs {
+                session_id: Some(session_id.to_owned()),
+                turn_id: Some(turn_id.to_owned()),
+                tool_id: tool_id.map(ToOwned::to_owned),
+            }),
+            payload_hash: PayloadHash::parse(format!("sha256:{}", test_sha256_hex(body)))
+                .expect("valid payload hash"),
+            payload_ref: payload_ref.to_owned(),
+            captured_at: Rfc3339Timestamp::parse(timestamp).expect("valid timestamp"),
+            payload: CapturePayload::Hook {
+                hook_name: hook_name.to_owned(),
+                tool_name: Some("shell".to_owned()),
+            },
+            source_family: SourceFamily::Hook,
+        }
+    }
+
+    fn test_sha256_hex(body: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(body.as_bytes());
+        format!("{:x}", hasher.finalize())
     }
 }

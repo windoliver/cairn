@@ -6,7 +6,9 @@
 
 use std::sync::Arc;
 
-use cairn_core::contract::job_store::{FailureClass, JobKind, JobPayload};
+use cairn_core::contract::job_store::{
+    EnqueueRequest, FailureClass, JobId, JobKind, JobPayload, JobStore, JobStoreError, RetryPolicy,
+};
 use cairn_store_sqlite::{
     SqliteMemoryStore, StoreError, TraceCanvasContext, TraceCanvasDraft, TraceCanvasEdgeDraft,
     TraceCanvasEdgeKind, TraceCanvasNodeDraft, TraceCanvasStatus, TraceStepDraft,
@@ -44,6 +46,17 @@ pub struct TraceCanvasPayload {
     pub projection: TraceCanvasProjection,
 }
 
+/// Outcome of a trace-canvas materialization enqueue attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TraceCanvasEnqueueDecision {
+    /// A materialization job was accepted, or an existing matching job
+    /// already covers the same step.
+    Enqueued {
+        /// Stable job id for the materialization request.
+        job_id: JobId,
+    },
+}
+
 impl TraceCanvasPayload {
     /// Recommended `EnqueueRequest::queue_key` for this payload.
     #[must_use]
@@ -65,6 +78,40 @@ impl TraceCanvasPayload {
     /// JSON decoding failure.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, serde_json::Error> {
         serde_json::from_slice(bytes)
+    }
+}
+
+/// Enqueue one trace-step materialization job.
+///
+/// The request is idempotent on `step_id`: replaying a capture batch will hit
+/// the job-store dedupe constraint and report the same [`TraceCanvasEnqueueDecision`].
+///
+/// # Errors
+/// Returns [`JobStoreError::Backend`] on store I/O or payload encoding failures.
+pub async fn enqueue_trace_canvas_step(
+    store: &dyn JobStore,
+    payload: TraceCanvasPayload,
+    now_ms: i64,
+) -> Result<TraceCanvasEnqueueDecision, JobStoreError> {
+    let job_id = JobId::new(format!("trace-canvas:{}", payload.projection.step.step_id));
+    let dedupe_key = payload.projection.step.step_id.clone();
+    let req = EnqueueRequest {
+        job_id: job_id.clone(),
+        kind: JobKind::new(TRACE_CANVAS_KIND),
+        payload: payload
+            .to_bytes()
+            .map_err(|e| JobStoreError::Backend(e.to_string()))?,
+        queue_key: Some(payload.recommended_queue_key()),
+        dedupe_key: Some(dedupe_key),
+        not_before_ms: now_ms,
+        retry: RetryPolicy::DEFAULT,
+    };
+
+    match store.enqueue(req).await {
+        Ok(()) | Err(JobStoreError::DuplicateDedupeKey { .. }) => {
+            Ok(TraceCanvasEnqueueDecision::Enqueued { job_id })
+        }
+        Err(err) => Err(err),
     }
 }
 

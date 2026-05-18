@@ -33,15 +33,16 @@ and links the previous active node to the new node with a deterministic
 `depends_on` edge.
 
 The same module exposes `TraceCanvasPayload` and `TraceCanvasHandler` under
-`trace_canvas.materialize_step` so the scheduler can dispatch materialization
-jobs once capture enqueueing lands.
+`trace_canvas.materialize_step`, plus an idempotent enqueue helper. The
+`capture_trace` path now queues body-free tool-step materialization jobs after
+successful turn commits when a `JobStore` is available.
 
 ## Non-Goals
 
-This slice does not implement workflow materialization, hot-memory selection,
-lint checks, metric emission, exact retrieval keys, or search ranking changes.
-Those build on the schema and adapter-local helpers once the storage invariants
-are pinned.
+This slice does not implement hot-memory selection, lint checks, metric
+emission, exact retrieval keys, or search ranking changes. Those build on the
+schema, adapter-local helpers, and queued canvas materialization path once the
+storage invariants are pinned.
 
 ## Invariants
 

@@ -2,10 +2,11 @@
 
 use std::sync::Arc;
 
+use cairn_core::contract::job_store::JobStore;
 use cairn_store_sqlite::{TraceCanvasEdgeKind, TraceStepDraft, open_in_memory};
 use cairn_workflows::{
-    TRACE_CANVAS_KIND, TraceCanvasHandler, TraceCanvasMaterializer, TraceCanvasPayload,
-    TraceCanvasProjection,
+    SqliteJobStore, TRACE_CANVAS_KIND, TraceCanvasEnqueueDecision, TraceCanvasHandler,
+    TraceCanvasMaterializer, TraceCanvasPayload, TraceCanvasProjection, enqueue_trace_canvas_step,
     scheduler::{HandlerOutcome, JobHandler},
 };
 
@@ -117,6 +118,58 @@ async fn handler_decodes_payload_and_materializes_context() {
     assert_eq!(
         context.canvas.active_node_id.as_deref(),
         Some("trace-node:step-1")
+    );
+}
+
+#[tokio::test]
+async fn enqueue_trace_canvas_step_is_idempotent_and_serializes_payload() {
+    let conn = rusqlite::Connection::open_in_memory().expect("conn");
+    cairn_workflows::sqlite_store::install_for_tests(&conn);
+    let jobs = SqliteJobStore::new(conn).expect("job store");
+    let payload = TraceCanvasPayload {
+        projection: TraceCanvasProjection {
+            step: step("step-1", "turn-1", 100, Some("record-1")),
+            canvas_title: "Current task".into(),
+            canvas_goal: "finish issue 134".into(),
+            node_label: "Run check".into(),
+            node_status: "completed".into(),
+            node_summary: "The focused check passed.".into(),
+        },
+    };
+
+    let first = enqueue_trace_canvas_step(&jobs, payload.clone(), 1234)
+        .await
+        .expect("first enqueue");
+    let second = enqueue_trace_canvas_step(&jobs, payload.clone(), 1234)
+        .await
+        .expect("second enqueue dedupes");
+    assert_eq!(first, second);
+    assert_eq!(
+        first,
+        TraceCanvasEnqueueDecision::Enqueued {
+            job_id: cairn_core::contract::job_store::JobId::new("trace-canvas:step-1".to_owned())
+        }
+    );
+
+    let leased = jobs
+        .lease_specific(
+            &cairn_core::contract::job_store::JobId::new("trace-canvas:step-1".to_owned()),
+            &cairn_core::contract::job_store::JobKind::new(TRACE_CANVAS_KIND),
+            "worker",
+            1235,
+            30_000,
+        )
+        .await
+        .expect("lease")
+        .expect("job queued");
+    assert_eq!(leased.job_id.as_str(), "trace-canvas:step-1");
+    assert_eq!(
+        TraceCanvasPayload::from_bytes(&leased.payload)
+            .expect("decode")
+            .projection
+            .step
+            .step_id,
+        "step-1"
     );
 }
 
