@@ -51,7 +51,16 @@ runs use the cache and require no network access.
 - The fetch uses the Hugging Face Hub over HTTPS. Set `HF_ENDPOINT` to
   point at a mirror if your network blocks `huggingface.co`.
 - **No API keys are required.** The model is public; Cairn never sends
-  user data to any third party as part of the fetch.
+  user data to any third party as part of the fetch, and any cached HF
+  bearer token in `$HF_HOME/token` is explicitly cleared before the
+  request so a hostile mirror cannot harvest it.
+- **Trust model (v0.1):** Cairn trusts the configured endpoint
+  (huggingface.co or your `HF_ENDPOINT` mirror) to serve untampered
+  bytes for the public model repos. The cache records a blake3 digest
+  of what was fetched, but v0.1 does not pin to a known-good digest in
+  the binary; if you operate under a stricter threat model, point
+  `HF_ENDPOINT` at an internal mirror you control. Tightening this to
+  per-file pinned digests is tracked under a follow-up issue.
 - To skip the fetch entirely, set `search.local_embeddings: false` in
   `.cairn/config.yaml` before running `bootstrap`. Keyword search still
   works; semantic and hybrid search are then rejected with
@@ -64,19 +73,24 @@ the first time they run. The signing key is written to a keystore.
 
 - **macOS:** the OS keychain (Keychain Access). You may be prompted to allow
   access on the first run.
-- **Linux desktop:** the Secret Service (gnome-keyring / KWallet). Make sure
-  one is running.
-- **Linux headless / CI / Docker / WSL without a desktop:** there is no
-  Secret Service, so the OS path fails. Set `CAIRN_KEYSTORE=file` before
-  running any mutating verb — the key is stored under
-  `<vault>/.cairn/keystore/` instead:
+- **Windows:** the Windows Credential Manager.
+- **Linux:** the kernel keyutils (per the `keyring` crate's `linux-native`
+  backend — **not** Secret Service / gnome-keyring). On most distributions
+  keyutils entries are session-scoped: they survive across processes within
+  one login session but are wiped on reboot or logout. If you need keys
+  that outlive a reboot, switch to the file backend below.
+- **Headless / CI / Docker / WSL / reboot-persistent setups:** set
+  `CAIRN_KEYSTORE=file` before running any mutating verb — the key is
+  stored at `<vault>/.cairn/keystore.json` instead of the OS keystore:
 
   ```bash
   export CAIRN_KEYSTORE=file
   ```
 
-  The `scripts/install-smoke.sh` test harness does this automatically
-  because CI runners are headless.
+  `<vault>/.cairn/keystore.json` should be backed up alongside the vault
+  and treated as sensitive (`chmod 600`). The
+  `scripts/install-smoke.sh` test harness sets `CAIRN_KEYSTORE=file`
+  automatically because CI runners are headless.
 
 ## Verifying the install
 
