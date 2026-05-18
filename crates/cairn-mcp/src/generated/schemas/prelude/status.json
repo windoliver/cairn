@@ -290,6 +290,71 @@
       "type": "array",
       "uniqueItems": true
     },
+    "health": {
+      "additionalProperties": false,
+      "properties": {
+        "authority_db": {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "reason": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "state": {
+              "enum": [
+                "healthy",
+                "missing",
+                "unavailable"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "path"
+          ],
+          "type": "object"
+        },
+        "nexus_projection": {
+          "additionalProperties": false,
+          "properties": {
+            "data_dir": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "endpoint": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "reason": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "state": {
+              "enum": [
+                "disabled",
+                "healthy",
+                "degraded"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "authority_db",
+        "nexus_projection"
+      ],
+      "type": "object"
+    },
     "server_info": {
       "additionalProperties": false,
       "properties": {
@@ -327,7 +392,8 @@
     "contract",
     "server_info",
     "capabilities",
-    "extensions"
+    "extensions",
+    "health"
   ],
   "title": "Cairn status response",
   "type": "object",
