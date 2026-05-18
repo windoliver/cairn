@@ -5,9 +5,10 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
-use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
+
+use cairn_core::config::{CairnConfig, StoreKind};
 
 const MAX_STATUS_LINE_BYTES: usize = 1024;
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -52,6 +53,30 @@ pub struct SupervisorConfig {
     pub health_timeout: Duration,
     /// Maximum graceful shutdown window before force-kill.
     pub shutdown_timeout: Duration,
+}
+
+/// One-shot status result for the optional Nexus projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectionStatus {
+    /// Projection status state.
+    pub state: ProjectionStatusState,
+    /// Resolved projection directory when the Nexus profile is active.
+    pub data_dir: Option<PathBuf>,
+    /// Configured endpoint when the Nexus profile is active.
+    pub endpoint: Option<String>,
+    /// Degraded reason when unavailable.
+    pub reason: Option<String>,
+}
+
+/// Projection state for status assembly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectionStatusState {
+    /// Nexus projection profile is not active.
+    Disabled,
+    /// Nexus sidecar is reachable.
+    Healthy,
+    /// Nexus sidecar is unavailable.
+    Degraded,
 }
 
 /// Running Nexus sandbox sidecar process.
@@ -230,6 +255,49 @@ fn derive_vault_dir(sqlite_db: &Path) -> std::io::Result<&Path> {
         .ok_or_else(invalid)
 }
 
+/// Resolve and evaluate the optional Nexus projection for one CLI invocation.
+#[must_use]
+pub fn evaluate_projection_status(vault_path: &Path, config: &CairnConfig) -> ProjectionStatus {
+    if !matches!(config.store.kind, StoreKind::NexusSandbox) {
+        return ProjectionStatus {
+            state: ProjectionStatusState::Disabled,
+            data_dir: None,
+            endpoint: None,
+            reason: None,
+        };
+    }
+
+    let data_dir = resolve_data_dir(vault_path, &config.store.nexus.data_dir);
+    let endpoint = config.store.nexus.endpoint.clone();
+    match probe_http_health(
+        &endpoint,
+        &config.store.nexus.health_path,
+        Duration::from_millis(config.store.nexus.health_timeout_ms.min(250)),
+    ) {
+        ProbeResult::Healthy => ProjectionStatus {
+            state: ProjectionStatusState::Healthy,
+            data_dir: Some(data_dir),
+            endpoint: Some(endpoint),
+            reason: None,
+        },
+        ProbeResult::Degraded(reason) => ProjectionStatus {
+            state: ProjectionStatusState::Degraded,
+            data_dir: Some(data_dir),
+            endpoint: Some(endpoint),
+            reason: Some(reason),
+        },
+    }
+}
+
+fn resolve_data_dir(vault_path: &Path, data_dir: &str) -> PathBuf {
+    let raw = Path::new(data_dir);
+    if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        vault_path.join(raw)
+    }
+}
+
 impl Drop for NexusSupervisor {
     fn drop(&mut self) {
         let _ = self.stop();
@@ -279,35 +347,9 @@ pub fn probe_http_health(endpoint: &str, health_path: &str, timeout: Duration) -
     if timeout.is_zero() {
         return ProbeResult::Degraded("health probe timed out".into());
     }
-    let endpoint = endpoint.to_owned();
-    let health_path = health_path.to_owned();
-    let (tx, rx) = mpsc::channel();
-    let thread_timeout = timeout;
-    match thread::Builder::new()
-        .name("cairn-nexus-health-probe".to_owned())
-        .spawn(move || {
-            let _ = tx.send(probe_http_health_inner(
-                &endpoint,
-                &health_path,
-                thread_timeout,
-            ));
-        }) {
-        Ok(_handle) => {}
-        Err(err) => return ProbeResult::Degraded(format!("starting health probe: {err}")),
-    }
-
-    match rx.recv_timeout(timeout) {
-        Ok(result) => result,
-        Err(mpsc::RecvTimeoutError::Timeout) => {
-            ProbeResult::Degraded("health probe timed out".into())
-        }
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            ProbeResult::Degraded("health probe failed".into())
-        }
-    }
-}
-
-fn probe_http_health_inner(endpoint: &str, health_path: &str, timeout: Duration) -> ProbeResult {
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .unwrap_or_else(Instant::now);
     if let Err(err) = validate_health_path(health_path) {
         return ProbeResult::Degraded(err);
     }
@@ -322,7 +364,15 @@ fn probe_http_health_inner(endpoint: &str, health_path: &str, timeout: Duration)
 
     let mut failures = Vec::new();
     for addr in addrs {
-        match probe_addr(&endpoint, addr, health_path, timeout) {
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            failures.push("health probe timed out".to_owned());
+            break;
+        };
+        if remaining.is_zero() {
+            failures.push("health probe timed out".to_owned());
+            break;
+        }
+        match probe_addr(&endpoint, addr, health_path, remaining) {
             ProbeResult::Healthy => return ProbeResult::Healthy,
             ProbeResult::Degraded(reason) => failures.push(format!("{addr}: {reason}")),
         }

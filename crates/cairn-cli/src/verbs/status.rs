@@ -16,6 +16,7 @@ use cairn_core::generated::status::{
 };
 
 use crate::config::{self, CliOverrides};
+use crate::nexus::{self, ProjectionStatusState};
 
 use super::envelope::{emit_json, new_operation_id};
 
@@ -62,12 +63,21 @@ fn authority_db_health(vault_path: &Path) -> StatusResponseHealthAuthorityDb {
     }
 }
 
-fn disabled_nexus_projection() -> StatusResponseHealthNexusProjection {
+fn nexus_projection_health(
+    vault_path: &Path,
+    config: &cairn_core::config::CairnConfig,
+) -> StatusResponseHealthNexusProjection {
+    let projection = nexus::evaluate_projection_status(vault_path, config);
+    let state = match projection.state {
+        ProjectionStatusState::Disabled => StatusResponseHealthNexusProjectionState::Disabled,
+        ProjectionStatusState::Healthy => StatusResponseHealthNexusProjectionState::Healthy,
+        ProjectionStatusState::Degraded => StatusResponseHealthNexusProjectionState::Degraded,
+    };
     StatusResponseHealthNexusProjection {
-        state: StatusResponseHealthNexusProjectionState::Disabled,
-        data_dir: None,
-        endpoint: None,
-        reason: None,
+        state,
+        data_dir: projection.data_dir.map(|path| path.display().to_string()),
+        endpoint: projection.endpoint,
+        reason: projection.reason,
     }
 }
 
@@ -125,7 +135,7 @@ pub fn run_for_vault(vault_path: &Path, json: bool) -> ExitCode {
     let started_at = chrono_like_now();
     let health = StatusResponseHealth {
         authority_db: authority_db_health(vault_path),
-        nexus_projection: disabled_nexus_projection(),
+        nexus_projection: nexus_projection_health(vault_path, &config),
     };
     let resp = StatusResponse {
         contract: "cairn.mcp.v1".to_owned(),

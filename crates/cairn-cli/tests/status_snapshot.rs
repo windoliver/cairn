@@ -7,6 +7,12 @@ fn cli() -> Command {
     Command::new(env!("CARGO_BIN_EXE_cairn"))
 }
 
+fn write_yaml(vault: &std::path::Path, content: &str) {
+    let dir = vault.join(".cairn");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("config.yaml"), content).unwrap();
+}
+
 #[test]
 fn status_json_has_required_keys() {
     let out = cli()
@@ -98,4 +104,48 @@ fn status_human_prints_split_health() {
     let stdout = String::from_utf8(out.stdout).expect("utf-8");
     assert!(stdout.contains("authority_db: missing"), "{stdout}");
     assert!(stdout.contains("nexus_projection: disabled"), "{stdout}");
+}
+
+#[test]
+fn status_json_reports_degraded_nexus_projection_without_failing_sqlite() {
+    let dir = tempfile::tempdir().unwrap();
+    write_yaml(
+        dir.path(),
+        "store:\n  kind: nexus-sandbox\n  nexus:\n    endpoint: http://127.0.0.1:0\n    health_timeout_ms: 25\n    shutdown_timeout_ms: 25\n",
+    );
+
+    let out = cli()
+        .current_dir(dir.path())
+        .args(["status", "--json"])
+        .output()
+        .expect("cairn status --json");
+
+    assert!(out.status.success(), "exit: {:?}", out.status);
+    let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+    assert_eq!(v["health"]["authority_db"]["state"], "missing");
+    assert_eq!(v["health"]["nexus_projection"]["state"], "degraded");
+    let expected_data_dir = std::fs::canonicalize(dir.path())
+        .unwrap()
+        .join("nexus-data")
+        .display()
+        .to_string();
+    assert_eq!(
+        v["health"]["nexus_projection"]["data_dir"],
+        expected_data_dir
+    );
+    assert_eq!(
+        v["health"]["nexus_projection"]["endpoint"],
+        "http://127.0.0.1:0"
+    );
+    assert!(
+        v["health"]["nexus_projection"]["reason"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty()),
+        "missing probe reason: {stdout}"
+    );
+    assert!(
+        !dir.path().join("nexus-data").exists(),
+        "status must not create projection directories"
+    );
 }
