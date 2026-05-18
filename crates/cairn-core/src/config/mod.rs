@@ -485,13 +485,12 @@ impl NexusSandboxConfig {
 fn points_inside_cairn_authority(path: &str) -> bool {
     normalized_path_components(path)
         .iter()
-        .find_map(|component| match component {
-            NormalizedComponent::Normal(value) => value.to_str(),
+        .any(|component| match component {
+            NormalizedComponent::Normal(value) => value.to_str() == Some(".cairn"),
             NormalizedComponent::ParentDir
             | NormalizedComponent::RootDir
-            | NormalizedComponent::Prefix(_) => None,
+            | NormalizedComponent::Prefix(_) => false,
         })
-        .is_some_and(|component| component == ".cairn")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -970,6 +969,36 @@ mod tests {
         let mut config = CairnConfig::default();
         config.store.kind = StoreKind::NexusSandbox;
         config.store.nexus.data_dir = "./.cairn/cairn.db".into();
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidNexusProfile {
+                field: "store.nexus.data_dir",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_nested_nexus_data_dir_under_cairn_authority() {
+        let mut config = CairnConfig::default();
+        config.store.kind = StoreKind::NexusSandbox;
+        config.store.nexus.data_dir = "foo/.cairn/cairn.db".into();
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidNexusProfile {
+                field: "store.nexus.data_dir",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_absolute_nexus_data_dir_under_cairn_authority() {
+        let mut config = CairnConfig::default();
+        config.store.kind = StoreKind::NexusSandbox;
+        config.store.nexus.data_dir = "/vault/.cairn/cairn.db".into();
         let err = config.validate().unwrap_err();
         assert!(matches!(
             err,
