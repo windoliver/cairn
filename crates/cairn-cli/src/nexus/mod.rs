@@ -5,6 +5,7 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -157,14 +158,15 @@ impl NexusSupervisor {
         let deadline = Instant::now() + self.config.shutdown_timeout;
         while Instant::now() < deadline {
             if self.child.try_wait()?.is_some() {
+                #[cfg(not(unix))]
                 return Ok(());
+                #[cfg(unix)]
+                break;
             }
             thread::sleep(Duration::from_millis(10));
         }
 
-        if self.child.try_wait()?.is_none() {
-            self.force_kill()?;
-        }
+        self.force_kill()?;
         let _ = self.child.wait()?;
         Ok(())
     }
@@ -175,7 +177,7 @@ impl NexusSupervisor {
             .arg("-TERM")
             .arg(format!("-{}", self.child.id()))
             .status()?;
-        if status.success() {
+        if status.success() || self.child.try_wait()?.is_some() {
             Ok(())
         } else {
             Err(std::io::Error::other(format!(
@@ -195,7 +197,7 @@ impl NexusSupervisor {
             .arg("-KILL")
             .arg(format!("-{}", self.child.id()))
             .status()?;
-        if status.success() {
+        if status.success() || self.child.try_wait()?.is_some() {
             Ok(())
         } else {
             self.child.kill()
@@ -209,16 +211,23 @@ impl NexusSupervisor {
 }
 
 fn derive_vault_dir(sqlite_db: &Path) -> std::io::Result<&Path> {
-    sqlite_db
+    let invalid = || {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "sqlite_db must be <vault>/.cairn/cairn.db",
+        )
+    };
+    if sqlite_db.file_name().and_then(|name| name.to_str()) != Some("cairn.db") {
+        return Err(invalid());
+    }
+    let cairn_dir = sqlite_db.parent().ok_or_else(invalid)?;
+    if cairn_dir.file_name().and_then(|name| name.to_str()) != Some(".cairn") {
+        return Err(invalid());
+    }
+    cairn_dir
         .parent()
-        .and_then(Path::parent)
         .filter(|path| !path.as_os_str().is_empty())
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "sqlite_db must be nested under <vault>/.cairn/cairn.db",
-            )
-        })
+        .ok_or_else(invalid)
 }
 
 impl Drop for NexusSupervisor {
@@ -267,6 +276,38 @@ impl HttpEndpoint {
 /// Probe the Nexus sidecar health endpoint using a minimal HTTP/1.1 request.
 #[must_use]
 pub fn probe_http_health(endpoint: &str, health_path: &str, timeout: Duration) -> ProbeResult {
+    if timeout.is_zero() {
+        return ProbeResult::Degraded("health probe timed out".into());
+    }
+    let endpoint = endpoint.to_owned();
+    let health_path = health_path.to_owned();
+    let (tx, rx) = mpsc::channel();
+    let thread_timeout = timeout;
+    match thread::Builder::new()
+        .name("cairn-nexus-health-probe".to_owned())
+        .spawn(move || {
+            let _ = tx.send(probe_http_health_inner(
+                &endpoint,
+                &health_path,
+                thread_timeout,
+            ));
+        }) {
+        Ok(_handle) => {}
+        Err(err) => return ProbeResult::Degraded(format!("starting health probe: {err}")),
+    }
+
+    match rx.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            ProbeResult::Degraded("health probe timed out".into())
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            ProbeResult::Degraded("health probe failed".into())
+        }
+    }
+}
+
+fn probe_http_health_inner(endpoint: &str, health_path: &str, timeout: Duration) -> ProbeResult {
     if let Err(err) = validate_health_path(health_path) {
         return ProbeResult::Degraded(err);
     }
@@ -444,7 +485,7 @@ mod tests {
             "/bin/sh".to_owned(),
             vec![
                 "-c".to_owned(),
-                format!("sleep 30 & echo $! > {}; wait", pid_file.display()),
+                format!("sleep 30 & echo $! > {}; wait", shell_quote(pid_file)),
             ],
         )
     }
@@ -470,7 +511,7 @@ mod tests {
                     "-c".to_owned(),
                     format!(
                         "printf '%s\n%s\n%s\n' \"$CAIRN_VAULT_DIR\" \"$CAIRN_NEXUS_DATA_DIR\" \"$CAIRN_SQLITE_DB\" > {}; sleep 10",
-                        output.display()
+                        shell_quote(output)
                     ),
                 ],
             )
@@ -489,6 +530,11 @@ mod tests {
                 ],
             )
         }
+    }
+
+    #[cfg(unix)]
+    fn shell_quote(path: &Path) -> String {
+        format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
     }
 
     fn wait_for_file(path: &Path) {
@@ -544,12 +590,11 @@ mod tests {
         let data_dir = vault_dir.join(".cairn").join("nexus-data");
         let sqlite_db = vault_dir.join(".cairn").join("cairn.db");
         let env_file = tmp.path().join("env.txt");
-        let endpoint = spawn_health_server("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
         let (command, args) = env_capture_command(&env_file);
         let mut supervisor = NexusSupervisor::start(SupervisorConfig {
             command,
             args,
-            endpoint,
+            endpoint: "http://127.0.0.1:1".to_owned(),
             health_path: "/health".to_owned(),
             data_dir: data_dir.clone(),
             sqlite_db: sqlite_db.clone(),
@@ -577,15 +622,34 @@ mod tests {
     fn supervisor_rejects_sqlite_path_without_vault_root() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path().join("nexus-data");
-        let endpoint = spawn_health_server("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
         let (command, args) = sleeper_command();
         let err = NexusSupervisor::start(SupervisorConfig {
             command,
             args,
-            endpoint,
+            endpoint: "http://127.0.0.1:1".to_owned(),
             health_path: "/health".to_owned(),
             data_dir,
             sqlite_db: Path::new("cairn.db").to_path_buf(),
+            health_timeout: Duration::from_secs(1),
+            shutdown_timeout: Duration::from_millis(100),
+        })
+        .unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn supervisor_rejects_sqlite_path_outside_authority_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join(".cairn").join("nexus-data");
+        let (command, args) = sleeper_command();
+        let err = NexusSupervisor::start(SupervisorConfig {
+            command,
+            args,
+            endpoint: "http://127.0.0.1:1".to_owned(),
+            health_path: "/health".to_owned(),
+            data_dir: data_dir.clone(),
+            sqlite_db: data_dir.join("nexus.sqlite"),
             health_timeout: Duration::from_secs(1),
             shutdown_timeout: Duration::from_millis(100),
         })
@@ -630,15 +694,14 @@ mod tests {
     fn supervisor_force_kills_process_that_ignores_graceful_stop() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path().join(".cairn").join("nexus-data");
-        let endpoint = spawn_health_server("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
         let (command, args) = stubborn_command();
         let mut supervisor = NexusSupervisor::start(SupervisorConfig {
             command,
             args,
-            endpoint,
+            endpoint: "http://127.0.0.1:1".to_owned(),
             health_path: "/health".to_owned(),
             data_dir: data_dir.clone(),
-            sqlite_db: data_dir.join("nexus.sqlite"),
+            sqlite_db: data_dir.parent().unwrap().join("cairn.db"),
             health_timeout: Duration::from_secs(1),
             shutdown_timeout: Duration::from_millis(100),
         })
@@ -656,12 +719,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path().join(".cairn").join("nexus-data");
         let child_pid_file = tmp.path().join("child.pid");
-        let endpoint = spawn_health_server("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
         let (command, args) = descendant_command(&child_pid_file);
         let mut supervisor = NexusSupervisor::start(SupervisorConfig {
             command,
             args,
-            endpoint,
+            endpoint: "http://127.0.0.1:1".to_owned(),
             health_path: "/health".to_owned(),
             data_dir: data_dir.clone(),
             sqlite_db: data_dir.parent().unwrap().join("cairn.db"),
