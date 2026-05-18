@@ -9,22 +9,16 @@ Reject a pending plan; record a reason
 ```text
 Reject a pending plan; record a reason
 
-Usage: reject [OPTIONS] --reason <reason> <id>
+Usage: cairn flush reject [OPTIONS] --reason <reason> <id>
 
 Arguments:
-  <id>
-          Plan ULID to reject
+  <id>  Plan ULID to reject
 
 Options:
-      --reason <reason>
-          Free-form reason recorded with the rejection
-
-      --from-quarantine
-          Terminally reject an existing quarantined coord plan
-
-      --json
-          Emit machine-readable JSON
-
-  -h, --help
-          Print help
+      --reason <reason>       Free-form reason recorded with the rejection
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+      --from-quarantine       Terminally reject an existing quarantined coord plan
+      --json                  Emit machine-readable JSON
+  -h, --help                  Print help
 ```

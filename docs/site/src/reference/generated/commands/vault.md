@@ -9,7 +9,7 @@ Manage the vault registry (brief §3.3)
 ```text
 Manage the vault registry (brief §3.3)
 
-Usage: vault <COMMAND>
+Usage: cairn vault [OPTIONS] <COMMAND>
 
 Commands:
   add     Register a vault in the registry
@@ -19,8 +19,9 @@ Commands:
   help    Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help
-          Print help
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+  -h, --help                  Print help
 ```
 
 ## Subcommands

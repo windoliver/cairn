@@ -9,21 +9,14 @@ cairn.mcp.v1 verb: capture_trace
 ```text
 cairn.mcp.v1 verb: capture_trace
 
-Usage: capture_trace [OPTIONS]
+Usage: cairn capture_trace [OPTIONS]
 
 Options:
       --from <PATH>
-
-
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
       --blocks <PATH>
-
-
       --session <STRING>
-
-
-      --json
-          Emit machine-readable JSON response envelope to stdout
-
-  -h, --help
-          Print help
+      --json                  Emit machine-readable JSON response envelope to stdout
+  -h, --help                  Print help
 ```

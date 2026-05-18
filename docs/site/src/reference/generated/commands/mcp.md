@@ -10,9 +10,10 @@ Start an MCP stdio server. Reads MCP frames from stdin, dispatches to the eight 
 Start an MCP stdio server. Reads MCP frames from stdin, dispatches to the eight cairn verbs, writes
 responses to stdout. Blocks until stdin closes.
 
-Usage: mcp
+Usage: cairn mcp [OPTIONS]
 
 Options:
-  -h, --help
-          Print help
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+  -h, --help                  Print help
 ```

@@ -9,24 +9,15 @@ cairn.mcp.v1 verb: assemble_hot
 ```text
 cairn.mcp.v1 verb: assemble_hot
 
-Usage: assemble_hot [OPTIONS]
+Usage: cairn assemble_hot [OPTIONS]
 
 Options:
       --recipe <STRING>
-
-
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
       --session <STRING>
-
-
       --budget <U32>
-
-
       --explain
-
-
-      --json
-          Emit machine-readable JSON response envelope to stdout
-
-  -h, --help
-          Print help
+      --json                  Emit machine-readable JSON response envelope to stdout
+  -h, --help                  Print help
 ```

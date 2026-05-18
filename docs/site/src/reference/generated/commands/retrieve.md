@@ -9,61 +9,29 @@ cairn.mcp.v1 verb: retrieve
 ```text
 cairn.mcp.v1 verb: retrieve
 
-Usage: retrieve [OPTIONS] <id|--session <STRING>|--folder <STRING>|--scope <JSON>|--profile>
+Usage: cairn retrieve [OPTIONS] <id|--session <STRING>|--folder <STRING>|--scope <JSON>|--profile>
 
 Arguments:
-  [id]
-          Record ULID
+  [id]  Record ULID
 
 Options:
       --session <STRING>
-
-
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
       --limit <U32>
-
-
-      --order <ENUM>
-          [possible values: asc, desc]
-
+      --order <ENUM>          [possible values: asc, desc]
       --rehydrate
-
-
       --include-reasoning
-
-
-      --include <ENUM>
-          [possible values: tool_calls, reasoning]
-
+      --include <ENUM>        [possible values: tool_calls, reasoning]
       --cursor <STRING>
-
-
       --turn <STRING>
-
-
       --tool-call <STRING>
-
-
       --folder <STRING>
-
-
       --depth <U8>
-
-
       --scope <JSON>
-
-
       --profile
-
-
       --user <STRING>
-
-
       --agent <STRING>
-
-
-      --json
-          Emit machine-readable JSON response envelope to stdout
-
-  -h, --help
-          Print help
+      --json                  Emit machine-readable JSON response envelope to stdout
+  -h, --help                  Print help
 ```

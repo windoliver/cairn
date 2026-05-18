@@ -9,21 +9,14 @@ List or delete legacy consent_journal rows that block migration 0021
 ```text
 List or delete legacy consent_journal rows that block migration 0021
 
-Usage: consent-journal [OPTIONS]
+Usage: cairn repair consent-journal [OPTIONS]
 
 Options:
-      --json
-          Emit JSON output
-
-      --delete-rowid <ROWID>
-          Delete one repair-eligible consent_journal rowid
-
-      --reason <TEXT>
-          Operator reason for a delete repair
-
-      --yes
-          Confirm the requested delete repair
-
-  -h, --help
-          Print help
+      --json                  Emit JSON output
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+      --delete-rowid <ROWID>  Delete one repair-eligible consent_journal rowid
+      --reason <TEXT>         Operator reason for a delete repair
+      --yes                   Confirm the requested delete repair
+  -h, --help                  Print help
 ```

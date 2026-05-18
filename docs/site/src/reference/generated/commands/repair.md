@@ -9,15 +9,16 @@ Operator repair commands for blocked vault state
 ```text
 Operator repair commands for blocked vault state
 
-Usage: repair <COMMAND>
+Usage: cairn repair [OPTIONS] <COMMAND>
 
 Commands:
   consent-journal  List or delete legacy consent_journal rows that block migration 0021
   help             Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help
-          Print help
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+  -h, --help                  Print help
 ```
 
 ## Subcommands

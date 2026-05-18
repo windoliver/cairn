@@ -9,16 +9,14 @@ Set the default vault
 ```text
 Set the default vault
 
-Usage: switch [OPTIONS] <NAME>
+Usage: cairn vault switch [OPTIONS] <NAME>
 
 Arguments:
-  <NAME>
-          Name of the vault to make default
+  <NAME>  Name of the vault to make default
 
 Options:
-      --json
-          Emit JSON output
-
-  -h, --help
-          Print help
+      --json                  Emit JSON output
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+  -h, --help                  Print help
 ```

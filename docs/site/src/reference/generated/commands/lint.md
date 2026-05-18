@@ -9,29 +9,19 @@ cairn.mcp.v1 verb: lint
 ```text
 cairn.mcp.v1 verb: lint
 
-Usage: lint [OPTIONS]
+Usage: cairn lint [OPTIONS]
 
 Options:
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
       --write-report
-
-
       --fix
-
-
-      --plan <ULID>
-          Lint the pending FlushPlan with this id (issue #289 — surfaces rename target collisions
-          before apply)
-
-      --fix-folders
-          Regenerate folder _index.md sidecars and backlinks for every non-empty folder (brief §3.4,
-          #44)
-
-      --fix-markdown
-          Regenerate missing or stale markdown projections for all active records
-
-      --json
-          Emit machine-readable JSON response envelope to stdout
-
-  -h, --help
-          Print help
+      --plan <ULID>           Lint the pending FlushPlan with this id (issue #289 — surfaces rename
+                              target collisions before apply)
+      --fix-folders           Regenerate folder _index.md sidecars and backlinks for every non-empty
+                              folder (brief §3.4, #44)
+      --fix-markdown          Regenerate missing or stale markdown projections for all active
+                              records
+      --json                  Emit machine-readable JSON response envelope to stdout
+  -h, --help                  Print help
 ```

@@ -9,12 +9,11 @@ Provision the default human and agent identities
 ```text
 Provision the default human and agent identities
 
-Usage: init-defaults [OPTIONS]
+Usage: cairn identity init-defaults [OPTIONS]
 
 Options:
-      --json
-          Emit JSON output instead of human-readable text
-
-  -h, --help
-          Print help
+      --json                  Emit JSON output instead of human-readable text
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+  -h, --help                  Print help
 ```

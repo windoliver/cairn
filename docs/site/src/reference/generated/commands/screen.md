@@ -9,15 +9,16 @@ Screen sensor diagnostics
 ```text
 Screen sensor diagnostics
 
-Usage: screen <COMMAND>
+Usage: cairn screen [OPTIONS] <COMMAND>
 
 Commands:
   capture  Capture one screenshot through the configured screen backend
   help     Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help
-          Print help
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+  -h, --help                  Print help
 ```
 
 ## Subcommands

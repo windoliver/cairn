@@ -9,22 +9,16 @@ Register a vault in the registry
 ```text
 Register a vault in the registry
 
-Usage: add [OPTIONS] --name <NAME> <PATH>
+Usage: cairn vault add [OPTIONS] --name <NAME> <PATH>
 
 Arguments:
-  <PATH>
-          Filesystem path to the vault root
+  <PATH>  Filesystem path to the vault root
 
 Options:
-      --name <NAME>
-          Short identifier for the vault
-
-      --label <LABEL>
-          Human-readable description
-
-      --json
-          Emit JSON output
-
-  -h, --help
-          Print help
+      --name <NAME>           Short identifier for the vault
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+      --label <LABEL>         Human-readable description
+      --json                  Emit JSON output
+  -h, --help                  Print help
 ```

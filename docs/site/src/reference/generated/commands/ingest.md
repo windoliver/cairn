@@ -9,83 +9,39 @@ cairn.mcp.v1 verb: ingest
 ```text
 cairn.mcp.v1 verb: ingest
 
-Usage: ingest [OPTIONS] [source]
+Usage: cairn ingest [OPTIONS] [source]
 
 Arguments:
-  [source]
-          File, URL, folder, JSONL transcript, recording, or '-' for stdin. Mutually exclusive with
-          --body/--file/--folder/--url/--jsonl/--recording.
+  [source]  File, URL, folder, JSONL transcript, recording, or '-' for stdin. Mutually exclusive
+            with --body/--file/--folder/--url/--jsonl/--recording.
 
 Options:
       --kind <STRING>
-
-
+      --vault <NAME_OR_PATH>      Active vault: name from registry or filesystem path (overrides
+                                  CAIRN_VAULT)
       --body <STRING>
-
-
       --file <PATH>
-
-
       --folder <PATH>
-
-
       --url <STRING>
-
-
       --recursive
-
-
       --include <STRING>
-
-
       --exclude <STRING>
-
-
-      --mode <ENUM>
-          [possible values: keyword, semantic, full]
-
+      --mode <ENUM>               [possible values: keyword, semantic, full]
       --batch-size <U32>
-
-
       --jsonl <PATH>
-
-
       --recording <PATH>
-
-
       --harness <STRING>
-
-
       --session-id-from <STRING>
-
-
       --limit <U32>
-
-
       --session <STRING>
-
-
       --tags <STRING>
-
-
       --no-cache
-
-
-      --dry-run
-          Produce a FlushPlan and emit it; write nothing to the vault (brief §5.5)
-
-      --human-review
-          Persist a FlushPlan under .cairn/flush/pending/ for explicit apply
-
-      --no-diff
-          Skip the markdown diff sidecar in human-review mode
-
-      --resync <PATH>
-          Re-ingest an out-of-band edited markdown projection (brief §3.0, #43)
-
-      --json
-          Emit machine-readable JSON response envelope to stdout
-
-  -h, --help
-          Print help
+      --dry-run                   Produce a FlushPlan and emit it; write nothing to the vault (brief
+                                  §5.5)
+      --human-review              Persist a FlushPlan under .cairn/flush/pending/ for explicit apply
+      --no-diff                   Skip the markdown diff sidecar in human-review mode
+      --resync <PATH>             Re-ingest an out-of-band edited markdown projection (brief §3.0,
+                                  #43)
+      --json                      Emit machine-readable JSON response envelope to stdout
+  -h, --help                      Print help
 ```

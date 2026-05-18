@@ -11,19 +11,15 @@ Build the configured LLMProvider and issue one completion. Exits 78 (EX_CONFIG) 
 configured, 69 (EX_UNAVAILABLE) when the endpoint is unreachable or lacks a required capability, 77
 (EX_NOPERM) on auth failure.
 
-Usage: probe [OPTIONS]
+Usage: cairn llm probe [OPTIONS]
 
 Options:
-      --prompt <TEXT>
-          Prompt to send (default: "Reply with the single word: ping")
-
-      --schema-file <PATH>
-          Path to a JSON Schema file. When set, the probe requests JSON output and validates the
-          response against the schema (exits 1 on validation failure).
-
-      --json
-          Emit JSON receipt instead of human-readable output
-
-  -h, --help
-          Print help
+      --prompt <TEXT>         Prompt to send (default: "Reply with the single word: ping")
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+      --schema-file <PATH>    Path to a JSON Schema file. When set, the probe requests JSON output
+                              and validates the response against the schema (exits 1 on validation
+                              failure).
+      --json                  Emit JSON receipt instead of human-readable output
+  -h, --help                  Print help
 ```

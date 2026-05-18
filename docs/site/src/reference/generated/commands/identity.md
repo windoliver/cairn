@@ -9,7 +9,7 @@ Manage vault identities (§3.5 / §4.1)
 ```text
 Manage vault identities (§3.5 / §4.1)
 
-Usage: identity <COMMAND>
+Usage: cairn identity [OPTIONS] <COMMAND>
 
 Commands:
   status            Show vault identity health report
@@ -27,8 +27,9 @@ Commands:
   help              Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help
-          Print help
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+  -h, --help                  Print help
 ```
 
 ## Subcommands

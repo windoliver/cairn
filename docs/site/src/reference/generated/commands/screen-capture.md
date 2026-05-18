@@ -9,15 +9,12 @@ Capture one screenshot through the configured screen backend
 ```text
 Capture one screenshot through the configured screen backend
 
-Usage: capture [OPTIONS] --output <PATH>
+Usage: cairn screen capture [OPTIONS] --output <PATH>
 
 Options:
-      --output <PATH>
-          PNG file path to write
-
-      --json
-          Emit JSON receipt instead of human-readable output
-
-  -h, --help
-          Print help
+      --output <PATH>         PNG file path to write
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+      --json                  Emit JSON receipt instead of human-readable output
+  -h, --help                  Print help
 ```

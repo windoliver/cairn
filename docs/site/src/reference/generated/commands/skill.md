@@ -9,15 +9,16 @@ Manage the Cairn skill bundle
 ```text
 Manage the Cairn skill bundle
 
-Usage: skill <COMMAND>
+Usage: cairn skill [OPTIONS] <COMMAND>
 
 Commands:
   install  Install the Cairn skill bundle into the harness skill directory (§18.d)
   help     Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help
-          Print help
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+  -h, --help                  Print help
 ```
 
 ## Subcommands
