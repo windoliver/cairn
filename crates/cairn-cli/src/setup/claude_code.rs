@@ -296,6 +296,39 @@ fn path_string(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
+fn local_project_keys(project_dir: &Path) -> Vec<String> {
+    let mut keys = Vec::new();
+    if let Ok(canonical) = project_dir.canonicalize() {
+        push_unique_project_key(&mut keys, &normalize_path(&canonical));
+    }
+    push_unique_project_key(&mut keys, project_dir);
+    keys
+}
+
+fn push_unique_project_key(keys: &mut Vec<String>, path: &Path) {
+    let key = path_string(path);
+    if !keys.iter().any(|existing| existing == &key) {
+        keys.push(key);
+    }
+}
+
+fn local_project_key_for_write(projects: &Map<String, Value>, project_dir: &Path) -> String {
+    let keys = local_project_keys(project_dir);
+    keys.iter()
+        .find(|key| projects.contains_key(key.as_str()))
+        .cloned()
+        .unwrap_or_else(|| keys[0].clone())
+}
+
+fn local_project_key_if_present(
+    projects: &Map<String, Value>,
+    project_dir: &Path,
+) -> Option<String> {
+    local_project_keys(project_dir)
+        .into_iter()
+        .find(|key| projects.contains_key(key.as_str()))
+}
+
 fn registration_entry(binary: &Path, vault: &Path) -> Value {
     json!({
         "type": "stdio",
@@ -429,7 +462,8 @@ fn ensure_mcp_servers_mut<'a>(
     match scope {
         ClaudeCodeScope::Local => {
             let projects = ensure_object_child(root, "projects", config_path)?;
-            let project = ensure_object_child(projects, &path_string(project_dir), config_path)?;
+            let project_key = local_project_key_for_write(projects, project_dir);
+            let project = ensure_object_child(projects, &project_key, config_path)?;
             ensure_object_child(project, "mcpServers", config_path)
         }
         ClaudeCodeScope::Project => ensure_object_child(root, "mcpServers", config_path),
@@ -447,7 +481,9 @@ fn mcp_servers_mut_if_present<'a>(
             let Some(projects) = object_child_mut_if_present(root, "projects", config_path)? else {
                 return Ok(None);
             };
-            let project_key = path_string(project_dir);
+            let Some(project_key) = local_project_key_if_present(projects, project_dir) else {
+                return Ok(None);
+            };
             let Some(project) = object_child_mut_if_present(projects, &project_key, config_path)?
             else {
                 return Ok(None);
@@ -518,7 +554,14 @@ mod tests {
     }
 
     fn server<'a>(config: &'a Value, project_dir: &Path, name: &str) -> &'a Value {
-        &config["projects"][project_dir.to_string_lossy().as_ref()]["mcpServers"][name]
+        let projects = config["projects"]
+            .as_object()
+            .expect("projects should be an object");
+        let project_key = local_project_keys(project_dir)
+            .into_iter()
+            .find(|key| projects.contains_key(key.as_str()))
+            .expect("project should exist");
+        &projects[&project_key]["mcpServers"][name]
     }
 
     fn expected_entry(binary: &Path, vault: &Path) -> Value {

@@ -225,6 +225,22 @@ fn normalize_path(path: &Path) -> PathBuf {
     normalized
 }
 
+fn project_keys(project_dir: &Path) -> Vec<String> {
+    let mut keys = Vec::new();
+    if let Ok(canonical) = project_dir.canonicalize() {
+        push_unique_project_key(&mut keys, &normalize_path(&canonical));
+    }
+    push_unique_project_key(&mut keys, project_dir);
+    keys
+}
+
+fn push_unique_project_key(keys: &mut Vec<String>, path: &Path) {
+    let key = path.to_string_lossy().into_owned();
+    if !keys.iter().any(|existing| existing == &key) {
+        keys.push(key);
+    }
+}
+
 fn finish(
     json: bool,
     server_name: String,
@@ -323,7 +339,7 @@ fn locate_registration(
         candidates.push(RegistrationCandidate {
             path: home_dir.join(".claude.json"),
             kind: RegistrationSource::LocalProject {
-                project_dir: project_dir.to_path_buf(),
+                project_keys: project_keys(project_dir),
             },
         });
     }
@@ -380,7 +396,7 @@ impl RegistrationCandidate {
 
 #[derive(Debug)]
 enum RegistrationSource {
-    LocalProject { project_dir: PathBuf },
+    LocalProject { project_keys: Vec<String> },
     Project,
     User,
 }
@@ -388,12 +404,20 @@ enum RegistrationSource {
 impl RegistrationSource {
     fn extract(&self, root: &Value, server_name: &str) -> Option<RawRegistration> {
         match self {
-            Self::LocalProject { project_dir } => root
-                .get("projects")?
-                .get(project_dir.to_string_lossy().as_ref())?
-                .get("mcpServers")?
-                .get(server_name)
-                .and_then(parse_registration),
+            Self::LocalProject { project_keys } => {
+                let projects = root.get("projects")?;
+                for project_key in project_keys {
+                    if let Some(registration) = projects
+                        .get(project_key)
+                        .and_then(|project| project.get("mcpServers"))
+                        .and_then(|servers| servers.get(server_name))
+                        .and_then(parse_registration)
+                    {
+                        return Some(registration);
+                    }
+                }
+                None
+            }
             Self::Project | Self::User => root
                 .get("mcpServers")?
                 .get(server_name)

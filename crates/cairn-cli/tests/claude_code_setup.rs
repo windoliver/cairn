@@ -52,6 +52,14 @@ fn write_hook_settings(project: &Path) {
     .expect("write settings.local.json");
 }
 
+fn claude_project_key(project: &Path) -> String {
+    project
+        .canonicalize()
+        .unwrap_or_else(|_| project.to_path_buf())
+        .display()
+        .to_string()
+}
+
 #[test]
 fn setup_help_lists_claude_code() {
     cli()
@@ -90,7 +98,8 @@ fn setup_claude_code_writes_local_scope_by_default() {
     let config: Value =
         serde_json::from_slice(&std::fs::read(&config_path).expect("read generated .claude.json"))
             .expect("parse generated .claude.json");
-    let server = &config["projects"][project.path().display().to_string()]["mcpServers"]["cairn"];
+    let project_key = claude_project_key(project.path());
+    let server = &config["projects"][project_key.as_str()]["mcpServers"]["cairn"];
     assert_eq!(server["type"], "stdio");
     assert_eq!(server["command"], binary);
     assert_eq!(
@@ -390,4 +399,53 @@ fn doctor_succeeds_after_setup_with_relative_project_dir() {
         receipt["project_dir"].as_str(),
         Some(expected_project_dir.as_str())
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_succeeds_when_setup_uses_symlinked_project_path() {
+    let root = tempfile::tempdir().expect("root tempdir");
+    let real_root = root.path().join("real");
+    let alias_root = root.path().join("alias");
+    let project = real_root.join("project");
+    let home = real_root.join("home");
+    std::fs::create_dir_all(&project).expect("mkdir project");
+    std::fs::create_dir_all(&home).expect("mkdir home");
+    std::os::unix::fs::symlink(&real_root, &alias_root).expect("symlink root");
+    write_hook_settings(&project);
+
+    let vault = synth_vault();
+    let binary = env!("CARGO_BIN_EXE_cairn");
+
+    cli()
+        .arg("--vault")
+        .arg(vault.path())
+        .args(["setup", "claude-code"])
+        .arg("--project-dir")
+        .arg(alias_root.join("project"))
+        .arg("--home-dir")
+        .arg(&home)
+        .args(["--binary", binary, "--json"])
+        .assert()
+        .success();
+
+    let out = cli()
+        .current_dir(&real_root)
+        .args(["doctor", "claude-code"])
+        .args(["--project-dir", "project"])
+        .arg("--home-dir")
+        .arg(&home)
+        .arg("--json")
+        .output()
+        .expect("cairn doctor claude-code --json");
+
+    assert!(
+        out.status.success(),
+        "exit: {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let receipt = parse_stdout_json(out);
+    assert_eq!(receipt["ok"], true);
 }
