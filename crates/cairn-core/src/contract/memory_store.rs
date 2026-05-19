@@ -444,6 +444,18 @@ pub trait MemoryStore: Send + Sync {
         None
     }
 
+    /// Return the adapter's read-only task-trace canvas snapshot for
+    /// lint checks, when the backend supports the issue #134 substrate.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] when the underlying read fails, or the
+    /// "not supported" sentinel for adapters that have not opted in.
+    async fn trace_canvas_lint_snapshot(
+        &self,
+    ) -> Result<crate::verbs::lint::checks::trace_canvas::TraceCanvasLintSnapshot, StoreError> {
+        Err("trace_canvas_lint_snapshot: not supported by this store adapter".into())
+    }
+
     // ── Bitemporal knowledge graph (#186) ─────────────────────────────────
 
     /// Upsert an entity node. Deduplication is by `name_norm` (UNIQUE in

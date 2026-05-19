@@ -30,6 +30,12 @@ const FS_FINGERPRINT_PATHS: &[&str] = &["purpose.md", "index.md", ".cairn/config
 /// assembled prefix while leaving the fingerprint unchanged.
 const FS_FINGERPRINT_MAX_BYTES: u64 = 4 * 1024 * 1024; // 4 MiB
 
+/// Cache-key schema for assembled hot-prefix bytes.
+///
+/// Bump this when assembly semantics change without a corresponding recipe,
+/// budget, session, watermark, or filesystem-fingerprint change.
+const HOT_PREFIX_CACHE_KEY_VERSION: &[u8] = b"assemble-hot-cache-key-v2";
+
 /// Compute a content-hash fingerprint for filesystem-backed hot-memory
 /// sources. Returns an empty string when `vault_root` is `None` — the
 /// fingerprint check is then a no-op (cache hit relies solely on
@@ -135,6 +141,8 @@ pub fn cache_key_hash(
     effective_budget: u64,
 ) -> String {
     let mut h = Sha256::new();
+    h.update(HOT_PREFIX_CACHE_KEY_VERSION);
+    h.update(b"\x00");
     let recipe_bytes = serde_json::to_vec(recipe).unwrap_or_default();
     h.update(&recipe_bytes);
     h.update(b"\x00");
@@ -465,6 +473,24 @@ mod tests {
 
     fn config() -> HotMemoryConfig {
         HotMemoryConfig::default()
+    }
+
+    #[test]
+    fn cache_key_hash_includes_assembly_semantics_version() {
+        let cfg = config();
+        let current = cache_key_hash(&cfg.recipe, Some("session"), 100);
+
+        let mut legacy = Sha256::new();
+        let recipe_bytes = serde_json::to_vec(&cfg.recipe).expect("recipe serializes");
+        legacy.update(&recipe_bytes);
+        legacy.update(b"\x00");
+        legacy.update(b"sid:");
+        legacy.update(b"session");
+        legacy.update(b"\x00");
+        legacy.update(b"budget:");
+        legacy.update(100_u64.to_le_bytes());
+
+        assert_ne!(current, hex_lower(&legacy.finalize()));
     }
 
     /// Mock cache for the unit tests. All async work serialised through

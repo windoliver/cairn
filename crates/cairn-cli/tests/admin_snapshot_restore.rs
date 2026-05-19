@@ -1,6 +1,9 @@
 //! CLI integration tests for `cairn admin snapshot` / `cairn admin restore`.
 
 use assert_cmd::Command;
+use cairn_core::contract::memory_store::MemoryStore as _;
+use cairn_core::domain::{RecordId, ScopeTuple, TargetId};
+use cairn_test_fixtures::store::sample_record;
 use serde_json::Value;
 use std::{fs, io, path::Path};
 
@@ -37,6 +40,25 @@ fn ingest_body(vault: &Path, body: &str) -> String {
         .to_owned()
 }
 
+async fn seed_session_record(vault: &Path, target_id: &str, session_id: &str) {
+    let db_path = vault.join(".cairn").join("cairn.db");
+    let store = cairn_store_sqlite::open(&db_path)
+        .await
+        .expect("open store");
+    let fixture = sample_record();
+    let mut record = sample_record();
+    record.id = RecordId::parse(target_id).expect("valid record id");
+    record.target_id = TargetId::parse(target_id).expect("valid target id");
+    record.body = format!("session {session_id} body {target_id}");
+    record.scope = ScopeTuple {
+        session_id: Some(session_id.to_owned()),
+        user: fixture.scope.user.clone(),
+        agent: fixture.scope.agent.clone(),
+        ..ScopeTuple::default()
+    };
+    store.upsert(&record).await.expect("upsert session record");
+}
+
 fn only_registry_entry(vault: &Path) -> Value {
     let registry_dir = vault.join(".cairn").join("backups");
     let entries: Vec<_> = registry_dir
@@ -50,6 +72,21 @@ fn only_registry_entry(vault: &Path) -> Value {
     serde_json::from_slice(&bytes).expect("registry json")
 }
 
+fn registry_entries(vault: &Path) -> Vec<Value> {
+    let registry_dir = vault.join(".cairn").join("backups");
+    let mut entries: Vec<_> = registry_dir
+        .read_dir()
+        .expect("read registry dir")
+        .map(|entry| entry.expect("registry entry").path())
+        .filter(|path| path.extension().and_then(std::ffi::OsStr::to_str) == Some("json"))
+        .collect();
+    entries.sort();
+    entries
+        .into_iter()
+        .map(|path| serde_json::from_slice(&fs::read(path).expect("read registry entry")).unwrap())
+        .collect()
+}
+
 fn target_row_count(db_path: &Path, target_id: &str) -> i64 {
     let conn = rusqlite::Connection::open(db_path).expect("open db");
     conn.query_row(
@@ -58,6 +95,13 @@ fn target_row_count(db_path: &Path, target_id: &str) -> i64 {
         |row| row.get(0),
     )
     .expect("target count")
+}
+
+fn digest_string(value: &Value) -> String {
+    value["file_digest"]
+        .as_str()
+        .expect("registry entry must include file_digest")
+        .to_owned()
 }
 
 fn copy_tree(src: &Path, dst: &Path) {
@@ -157,6 +201,356 @@ fn admin_snapshot_writes_backup_and_registry_entry() {
         registry_entry["target_ids_included"],
         serde_json::json!([record_id])
     );
+    assert_eq!(registry_entry["backup_kind"], "snapshot");
+    assert!(
+        registry_entry["file_digest"]
+            .as_str()
+            .is_some_and(|digest| digest.starts_with("sha256:")),
+        "registry entry must include a sha256 digest: {registry_entry}"
+    );
+}
+
+#[test]
+fn backup_cli_lists_registers_and_forgets_registry_entries() {
+    let vault = tempfile::tempdir().expect("vault tempdir");
+    bootstrap_vault(vault.path());
+    let snapshot_record = ingest_body(vault.path(), "snapshot registry entry");
+
+    let backup_root = tempfile::tempdir().expect("backup tempdir");
+    let snapshot_path = backup_root.path().join("snapshot-backup");
+    let snapshot_output = Command::cargo_bin("cairn")
+        .expect("cairn binary")
+        .env("CAIRN_VAULT", vault.path())
+        .args([
+            "admin",
+            "snapshot",
+            "--backup",
+            snapshot_path.to_str().expect("utf-8 backup path"),
+            "--json",
+        ])
+        .output()
+        .expect("run admin snapshot");
+    assert!(
+        snapshot_output.status.success(),
+        "snapshot should commit. stderr: {}",
+        String::from_utf8_lossy(&snapshot_output.stderr)
+    );
+
+    let imported_path = backup_root.path().join("imported-backup");
+    copy_tree(&snapshot_path, &imported_path);
+    fs::write(
+        imported_path.join("wiki/imported-marker.txt"),
+        "operator import marker",
+    )
+    .expect("make imported backup digest distinct");
+    let register_output = Command::cargo_bin("cairn")
+        .expect("cairn binary")
+        .env("CAIRN_VAULT", vault.path())
+        .args([
+            "backup",
+            "register",
+            imported_path.to_str().expect("utf-8 backup path"),
+            "--kind",
+            "export",
+            "--json",
+        ])
+        .output()
+        .expect("run backup register");
+    assert!(
+        register_output.status.success(),
+        "backup register should commit. stderr: {}",
+        String::from_utf8_lossy(&register_output.stderr)
+    );
+
+    let list_output = Command::cargo_bin("cairn")
+        .expect("cairn binary")
+        .env("CAIRN_VAULT", vault.path())
+        .args(["backup", "list", "--json"])
+        .output()
+        .expect("run backup list");
+    assert!(
+        list_output.status.success(),
+        "backup list should commit. stderr: {}",
+        String::from_utf8_lossy(&list_output.stderr)
+    );
+    let listed: Value = serde_json::from_slice(&list_output.stdout).expect("backup list json");
+    assert_eq!(
+        listed["backups"].as_array().expect("backups array").len(),
+        2
+    );
+    assert!(
+        listed["backups"].as_array().unwrap().iter().any(|entry| {
+            entry["artifact_path"] == imported_path.display().to_string()
+                && entry["backup_kind"] == "export"
+                && entry["target_ids_included"] == serde_json::json!([snapshot_record])
+        }),
+        "registered backup must appear in list output: {listed}"
+    );
+
+    let imported_digest = digest_string(
+        listed["backups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["artifact_path"] == imported_path.display().to_string())
+            .expect("imported backup entry"),
+    );
+    let forget_output = Command::cargo_bin("cairn")
+        .expect("cairn binary")
+        .env("CAIRN_VAULT", vault.path())
+        .args(["backup", "forget", &imported_digest, "--json"])
+        .output()
+        .expect("run backup forget");
+    assert!(
+        forget_output.status.success(),
+        "backup forget should commit. stderr: {}",
+        String::from_utf8_lossy(&forget_output.stderr)
+    );
+
+    let entries = registry_entries(vault.path());
+    assert_eq!(
+        entries.len(),
+        1,
+        "backup forget must remove one registry entry"
+    );
+    assert_ne!(digest_string(&entries[0]), imported_digest);
+}
+
+#[test]
+fn backup_cli_forgets_all_registry_entries_with_matching_digest() {
+    let vault = tempfile::tempdir().expect("vault tempdir");
+    bootstrap_vault(vault.path());
+    ingest_body(vault.path(), "duplicate digest registry entry");
+
+    let backup_root = tempfile::tempdir().expect("backup tempdir");
+    let snapshot_path = backup_root.path().join("snapshot-backup");
+    let snapshot_output = Command::cargo_bin("cairn")
+        .expect("cairn binary")
+        .env("CAIRN_VAULT", vault.path())
+        .args([
+            "admin",
+            "snapshot",
+            "--backup",
+            snapshot_path.to_str().expect("utf-8 backup path"),
+            "--json",
+        ])
+        .output()
+        .expect("run admin snapshot");
+    assert!(
+        snapshot_output.status.success(),
+        "snapshot should commit. stderr: {}",
+        String::from_utf8_lossy(&snapshot_output.stderr)
+    );
+
+    let imported_a = backup_root.path().join("imported-a");
+    let imported_b = backup_root.path().join("imported-b");
+    copy_tree(&snapshot_path, &imported_a);
+    copy_tree(&snapshot_path, &imported_b);
+
+    for imported in [&imported_a, &imported_b] {
+        let register_output = Command::cargo_bin("cairn")
+            .expect("cairn binary")
+            .env("CAIRN_VAULT", vault.path())
+            .args([
+                "backup",
+                "register",
+                imported.to_str().expect("utf-8 backup path"),
+                "--kind",
+                "export",
+                "--json",
+            ])
+            .output()
+            .expect("run backup register");
+        assert!(
+            register_output.status.success(),
+            "backup register should commit. stderr: {}",
+            String::from_utf8_lossy(&register_output.stderr)
+        );
+    }
+
+    let listed: Value = serde_json::from_slice(
+        &Command::cargo_bin("cairn")
+            .expect("cairn binary")
+            .env("CAIRN_VAULT", vault.path())
+            .args(["backup", "list", "--json"])
+            .output()
+            .expect("run backup list")
+            .stdout,
+    )
+    .expect("backup list json");
+    let duplicate_digest = digest_string(
+        listed["backups"]
+            .as_array()
+            .expect("backups array")
+            .iter()
+            .find(|entry| entry["artifact_path"] == imported_a.display().to_string())
+            .expect("imported-a entry"),
+    );
+    assert_eq!(
+        listed["backups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|entry| digest_string(entry) == duplicate_digest)
+            .count(),
+        3,
+        "snapshot plus imported copies should share one artifact digest"
+    );
+
+    let forget_output = Command::cargo_bin("cairn")
+        .expect("cairn binary")
+        .env("CAIRN_VAULT", vault.path())
+        .args(["backup", "forget", &duplicate_digest, "--json"])
+        .output()
+        .expect("run backup forget");
+    assert!(
+        forget_output.status.success(),
+        "backup forget should commit. stderr: {}",
+        String::from_utf8_lossy(&forget_output.stderr)
+    );
+
+    let entries = registry_entries(vault.path());
+    assert!(
+        entries
+            .iter()
+            .all(|entry| digest_string(entry) != duplicate_digest),
+        "backup forget must not leave another entry with the requested digest"
+    );
+}
+
+#[test]
+fn forget_record_replays_tombstone_into_registered_backup() {
+    let vault = tempfile::tempdir().expect("vault tempdir");
+    bootstrap_vault(vault.path());
+    let record_id = ingest_body(vault.path(), "backup replay must remove me");
+
+    let backup_root = tempfile::tempdir().expect("backup tempdir");
+    let backup_path = backup_root.path().join("snapshot-backup");
+    let snapshot_output = Command::cargo_bin("cairn")
+        .expect("cairn binary")
+        .env("CAIRN_VAULT", vault.path())
+        .args([
+            "admin",
+            "snapshot",
+            "--backup",
+            backup_path.to_str().expect("utf-8 backup path"),
+            "--json",
+        ])
+        .output()
+        .expect("run admin snapshot");
+    assert!(
+        snapshot_output.status.success(),
+        "snapshot should commit. stderr: {}",
+        String::from_utf8_lossy(&snapshot_output.stderr)
+    );
+    assert_eq!(
+        target_row_count(&backup_path.join(".cairn/cairn.db"), &record_id),
+        1,
+        "backup should contain record before forget"
+    );
+
+    let forget_output = Command::cargo_bin("cairn")
+        .expect("cairn binary")
+        .env("CAIRN_VAULT", vault.path())
+        .args(["forget", "--record", &record_id, "--json"])
+        .output()
+        .expect("run forget");
+    assert!(
+        forget_output.status.success(),
+        "forget should commit. stderr: {}",
+        String::from_utf8_lossy(&forget_output.stderr)
+    );
+
+    assert_eq!(
+        target_row_count(&backup_path.join(".cairn/cairn.db"), &record_id),
+        0,
+        "forget Phase B must replay tombstones into registered backups"
+    );
+    let registry_entry = only_registry_entry(vault.path());
+    assert_eq!(registry_entry["target_ids_included"], serde_json::json!([]));
+    assert!(
+        vault.path().join(".cairn/backups/shredded.log").is_file(),
+        "forget must leave an audit receipt for the superseded backup"
+    );
+
+    let restore_target = vault.path().join("restore-after-forget");
+    let restore_output = Command::cargo_bin("cairn")
+        .expect("cairn binary")
+        .env("CAIRN_VAULT", vault.path())
+        .args([
+            "admin",
+            "restore",
+            "--from",
+            backup_path.to_str().expect("utf-8 backup path"),
+            "--into",
+            restore_target.to_str().expect("utf-8 restore path"),
+            "--json",
+        ])
+        .output()
+        .expect("run admin restore");
+    assert!(
+        restore_output.status.success(),
+        "restore should commit. stderr: {}",
+        String::from_utf8_lossy(&restore_output.stderr)
+    );
+    assert_eq!(
+        target_row_count(&restore_target.join(".cairn/cairn.db"), &record_id),
+        0,
+        "restoring a registered backup after forget must not resurrect forgotten content"
+    );
+}
+
+#[tokio::test]
+async fn forget_session_replays_tombstones_into_registered_backup() {
+    let vault = tempfile::tempdir().expect("vault tempdir");
+    bootstrap_vault(vault.path());
+    let first = "01HQZX9F5N0000000000000001";
+    let second = "01HQZX9F5N0000000000000002";
+    seed_session_record(vault.path(), first, "sess-backup-replay").await;
+    seed_session_record(vault.path(), second, "sess-backup-replay").await;
+
+    let backup_root = tempfile::tempdir().expect("backup tempdir");
+    let backup_path = backup_root.path().join("snapshot-backup");
+    let snapshot_output = Command::cargo_bin("cairn")
+        .expect("cairn binary")
+        .env("CAIRN_VAULT", vault.path())
+        .args([
+            "admin",
+            "snapshot",
+            "--backup",
+            backup_path.to_str().expect("utf-8 backup path"),
+            "--json",
+        ])
+        .output()
+        .expect("run admin snapshot");
+    assert!(
+        snapshot_output.status.success(),
+        "snapshot should commit. stderr: {}",
+        String::from_utf8_lossy(&snapshot_output.stderr)
+    );
+
+    let forget_output = Command::cargo_bin("cairn")
+        .expect("cairn binary")
+        .env("CAIRN_VAULT", vault.path())
+        .args(["forget", "--session", "sess-backup-replay", "--json"])
+        .output()
+        .expect("run forget session");
+    assert!(
+        forget_output.status.success(),
+        "session forget should commit. stderr: {}",
+        String::from_utf8_lossy(&forget_output.stderr)
+    );
+
+    assert_eq!(
+        target_row_count(&backup_path.join(".cairn/cairn.db"), first),
+        0
+    );
+    assert_eq!(
+        target_row_count(&backup_path.join(".cairn/cairn.db"), second),
+        0
+    );
+    let registry_entry = only_registry_entry(vault.path());
+    assert_eq!(registry_entry["target_ids_included"], serde_json::json!([]));
 }
 
 #[test]
@@ -447,7 +841,7 @@ fn admin_snapshot_and_restore_ignore_malformed_config() {
 }
 
 #[test]
-#[ignore = "admin snapshot/restore + forget tombstone replay needs follow-up after merge integrates main's signed forget WAL path"]
+#[ignore = "tracks stale unregistered backup replay; issue 160 covers registered backup tombstone replay"]
 fn restore_replays_current_forget_tombstones_before_success() {
     let vault = tempfile::tempdir().expect("vault tempdir");
     bootstrap_vault(vault.path());

@@ -9,15 +9,12 @@ Run the conformance suite against every loaded plugin
 ```text
 Run the conformance suite against every loaded plugin
 
-Usage: verify [OPTIONS]
+Usage: cairn plugins verify [OPTIONS]
 
 Options:
-      --strict
-          Treat tier-2 `pending` cases as failures
-
-      --json
-          Emit JSON instead of a human-readable report
-
-  -h, --help
-          Print help
+      --strict                Treat tier-2 `pending` cases as failures
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+      --json                  Emit JSON instead of a human-readable report
+  -h, --help                  Print help
 ```

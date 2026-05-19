@@ -4,7 +4,7 @@
     reason = "CLI helpers return complete response envelopes for direct JSON emission"
 )]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -20,7 +20,8 @@ use cairn_core::domain::consent_timeline::ConsentModel;
 use cairn_core::domain::identity::keys::SecretHandle;
 use cairn_core::domain::taxonomy::MemoryVisibility;
 use cairn_core::domain::{
-    Identity, MemoryRecord, RecordId, ScopeTuple, SignedAdmission, WalActionKind,
+    Identity, MemoryRecord, RecordId, ScopeTuple, SessionId, SignedAdmission, TreeReadRecord,
+    TreeReadWindowInput, WalActionKind, plan_tree_read_window,
 };
 use cairn_core::generated::common::{Ed25519Signature, Nonce16Base64, Ulid};
 use cairn_core::generated::envelope::{
@@ -102,6 +103,10 @@ async fn run_async(args: SummarizeArgs, vault_root: PathBuf, config: CairnConfig
     };
 
     let records = match load_source_records(&ctx.store, &args, &auth).await {
+        Ok(records) => records,
+        Err(resp) => return merge_policy_trace(read_policy_trace(&auth, &[]), resp),
+    };
+    let records = match tree_window_source_records(&ctx.store, records).await {
         Ok(records) => records,
         Err(resp) => return merge_policy_trace(read_policy_trace(&auth, &[]), resp),
     };
@@ -218,6 +223,118 @@ fn record_principal_matches_issuer(record: &MemoryRecord, issuer: &Identity) -> 
             record.provenance.source_sensor.as_str() == issuer.as_str()
         }
     }
+}
+
+fn common_session_id(records: &[MemoryRecord]) -> Option<&str> {
+    let first = records.first()?.scope.session_id.as_deref()?;
+    records
+        .iter()
+        .all(|record| record.scope.session_id.as_deref() == Some(first))
+        .then_some(first)
+}
+
+async fn tree_window_source_records(
+    store: &cairn_store_sqlite::SqliteMemoryStore,
+    records: Vec<MemoryRecord>,
+) -> Result<Vec<MemoryRecord>, Response> {
+    let Some(session_id) = common_session_id(&records).map(str::to_owned) else {
+        return Ok(records);
+    };
+    let target_session = SessionId::parse(session_id).map_err(|e| {
+        super::signed::aborted(ResponseVerb::Summarize, format!("session tree: {e}"))
+    })?;
+    let tree = match store.get_session_tree(&target_session).await {
+        Ok(tree) => tree,
+        Err(e) if store_error_is_capability_unavailable(&e) => None,
+        Err(e) => {
+            return Err(super::signed::aborted(
+                ResponseVerb::Summarize,
+                format!("session tree: {e}"),
+            ));
+        }
+    };
+    if let Some(tree) = tree
+        && tree_has_summary_context(&tree, &target_session)?
+    {
+        let tree_records = tree_read_records_from_memory_records(&records).map_err(|e| {
+            super::signed::aborted(
+                ResponseVerb::Summarize,
+                format!("session tree records: {e}"),
+            )
+        })?;
+        let window = plan_tree_read_window(TreeReadWindowInput {
+            tree: &tree,
+            target_session: &target_session,
+            records: &tree_records,
+            budget_bytes: usize::MAX,
+        })
+        .map_err(|e| {
+            super::signed::aborted(ResponseVerb::Summarize, format!("session tree: {e}"))
+        })?;
+        let records_by_id = records
+            .into_iter()
+            .map(|record| (record.id.clone(), record))
+            .collect::<BTreeMap<_, _>>();
+        let selected = window
+            .selected_records
+            .iter()
+            .filter_map(|record| records_by_id.get(&record.record_id).cloned())
+            .collect::<Vec<_>>();
+        return Ok(selected);
+    }
+    Ok(records)
+}
+
+fn tree_has_summary_context(
+    tree: &cairn_core::domain::SessionTree,
+    target_session: &SessionId,
+) -> Result<bool, Response> {
+    let lineage = tree.lineage(target_session).map_err(|e| {
+        super::signed::aborted(ResponseVerb::Summarize, format!("session tree: {e}"))
+    })?;
+    Ok(lineage.len() > 1 || !tree.merges().is_empty())
+}
+
+fn tree_read_records_from_memory_records(
+    records: &[MemoryRecord],
+) -> Result<Vec<TreeReadRecord>, cairn_core::domain::DomainError> {
+    records
+        .iter()
+        .map(|record| {
+            let session_id = record.scope.session_id.clone().ok_or(
+                cairn_core::domain::DomainError::MalformedScope {
+                    message: "tree read record missing session_id".to_owned(),
+                },
+            )?;
+            Ok(TreeReadRecord {
+                session_id: SessionId::parse(session_id)?,
+                turn_id: trace_turn_id(record),
+                record_id: record.id.clone(),
+                body: record.body.clone(),
+            })
+        })
+        .collect()
+}
+
+fn trace_turn_id(record: &MemoryRecord) -> Option<String> {
+    record
+        .extra_frontmatter
+        .get("trace")
+        .and_then(|trace| trace.get("turn_id"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn store_error_is_capability_unavailable(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = Some(error);
+    while let Some(error) = current {
+        if error.to_string().contains("capability unavailable") {
+            return true;
+        }
+        current = error.source();
+    }
+    false
 }
 
 #[allow(
@@ -717,4 +834,40 @@ fn unix_time_millis_i64() -> i64 {
         .unwrap_or_default()
         .as_millis();
     i64::try_from(millis).unwrap_or(i64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use cairn_core::domain::record::tests_export::sample_record;
+
+    use super::*;
+
+    fn record_with_session(session_id: Option<&str>) -> MemoryRecord {
+        let mut record = sample_record();
+        record.scope.session_id = session_id.map(str::to_owned);
+        record
+    }
+
+    #[test]
+    fn common_session_id_requires_all_records_to_match() {
+        let records = vec![
+            record_with_session(Some("branch-a")),
+            record_with_session(Some("branch-a")),
+        ];
+        assert_eq!(common_session_id(&records), Some("branch-a"));
+
+        let mismatched = vec![
+            record_with_session(Some("branch-a")),
+            record_with_session(Some("branch-b")),
+        ];
+        assert_eq!(common_session_id(&mismatched), None);
+
+        let missing = vec![
+            record_with_session(Some("branch-a")),
+            record_with_session(None),
+        ];
+        assert_eq!(common_session_id(&missing), None);
+
+        assert_eq!(common_session_id(&[]), None);
+    }
 }

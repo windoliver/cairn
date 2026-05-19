@@ -9,7 +9,7 @@ Manage local sensor consent and policy gates
 ```text
 Manage local sensor consent and policy gates
 
-Usage: sensor <COMMAND>
+Usage: cairn sensor [OPTIONS] <COMMAND>
 
 Commands:
   enable   Enable a local sensor
@@ -18,8 +18,9 @@ Commands:
   help     Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help
-          Print help
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+  -h, --help                  Print help
 ```
 
 ## Subcommands

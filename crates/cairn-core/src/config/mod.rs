@@ -1119,7 +1119,7 @@ impl Default for NexusSandboxConfig {
             ],
             endpoint: "http://127.0.0.1:8765".into(),
             health_path: "/health".into(),
-            health_timeout_ms: 15_000,
+            health_timeout_ms: 120_000,
             shutdown_timeout_ms: 2_000,
         }
     }
@@ -2141,7 +2141,7 @@ mod tests {
         );
         assert_eq!(config.store.nexus.endpoint, "http://127.0.0.1:8765");
         assert_eq!(config.store.nexus.health_path, "/health");
-        assert_eq!(config.store.nexus.health_timeout_ms, 15_000);
+        assert_eq!(config.store.nexus.health_timeout_ms, 120_000);
         assert_eq!(config.store.nexus.shutdown_timeout_ms, 2_000);
         config.validate().unwrap();
     }

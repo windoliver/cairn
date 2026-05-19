@@ -9,12 +9,11 @@ Check the configured Nexus sandbox projection
 ```text
 Check the configured Nexus sandbox projection
 
-Usage: doctor [OPTIONS]
+Usage: cairn nexus doctor [OPTIONS]
 
 Options:
-      --json
-          Emit JSON receipt
-
-  -h, --help
-          Print help
+      --json                  Emit JSON receipt
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+  -h, --help                  Print help
 ```

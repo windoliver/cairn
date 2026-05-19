@@ -9,20 +9,13 @@ Initialize a vault directory tree with the §3 layout
 ```text
 Initialize a vault directory tree with the §3 layout
 
-Usage: bootstrap [OPTIONS]
+Usage: cairn bootstrap [OPTIONS]
 
 Options:
-      --vault-path <PATH>
-          Vault root directory (default: current directory)
-
-          [default: .]
-
-      --json
-          Emit JSON receipt instead of human-readable output
-
-      --force
-          Overwrite existing placeholder files
-
-  -h, --help
-          Print help
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+      --vault-path <PATH>     Vault root directory (default: current directory) [default: .]
+      --json                  Emit JSON receipt instead of human-readable output
+      --force                 Overwrite existing placeholder files
+  -h, --help                  Print help
 ```

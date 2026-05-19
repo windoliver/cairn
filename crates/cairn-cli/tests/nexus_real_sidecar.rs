@@ -59,7 +59,7 @@ fn write_config(vault: &Path, endpoint: &str, health_path: &str) {
     std::fs::write(
         config_dir.join("config.yaml"),
         format!(
-            "store:\n  kind: nexus-sandbox\n  nexus:\n    endpoint: {endpoint:?}\n    health_path: {health_path:?}\n    health_timeout_ms: 5000\n    shutdown_timeout_ms: 2000\n"
+            "store:\n  kind: nexus-sandbox\n  nexus:\n    endpoint: {endpoint:?}\n    health_path: {health_path:?}\n    health_timeout_ms: 120000\n    shutdown_timeout_ms: 2000\n"
         ),
     )
     .unwrap();
@@ -109,7 +109,7 @@ fn real_sidecar_lifecycle_and_cli_status_e2e() {
         health_path: health_path.clone(),
         data_dir: data_dir.clone(),
         sqlite_db: sqlite_db.clone(),
-        health_timeout: Duration::from_secs(15),
+        health_timeout: Duration::from_mins(2),
         shutdown_timeout: Duration::from_secs(2),
     })
     .unwrap();

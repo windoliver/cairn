@@ -23,6 +23,7 @@ pub mod render;
 pub mod repair;
 pub mod sensor_gate;
 pub mod session_source;
+pub mod setup;
 pub mod skill;
 pub mod vault;
 pub mod verbs;

@@ -220,7 +220,7 @@ fn emit_cli_docs(files: &mut Vec<GeneratedFile>) -> Result<(), DocgenError> {
             .get_about()
             .map_or_else(String::new, std::string::ToString::to_string);
         let _ = writeln!(out, "- [`cairn {name}`](commands/{file}) - {about}");
-        emit_command_pages(files, &[name.to_owned()], sub)?;
+        emit_command_pages(files, &root, &[name.to_owned()], sub)?;
     }
     files.push(generated_file("cli.md", out));
     Ok(())
@@ -228,6 +228,7 @@ fn emit_cli_docs(files: &mut Vec<GeneratedFile>) -> Result<(), DocgenError> {
 
 fn emit_command_pages(
     files: &mut Vec<GeneratedFile>,
+    root: &clap::Command,
     parts: &[String],
     cmd: &clap::Command,
 ) -> Result<(), DocgenError> {
@@ -237,7 +238,7 @@ fn emit_command_pages(
         let _ = writeln!(out, "{about}\n");
     }
     out.push_str("## Help\n\n```text\n");
-    out.push_str(&help_text(cmd)?);
+    out.push_str(&contextual_help_text(root, parts)?);
     out.push_str("```\n");
 
     let subcommands: Vec<_> = cmd
@@ -258,7 +259,7 @@ fn emit_command_pages(
                 "- [`cairn {}`]({file}) - {about}",
                 child_parts.join(" ")
             );
-            emit_command_pages(files, &child_parts, sub)?;
+            emit_command_pages(files, root, &child_parts, sub)?;
         }
     }
 
@@ -419,13 +420,43 @@ fn help_text(cmd: &clap::Command) -> Result<String, DocgenError> {
     let mut bytes = Vec::new();
     cmd.write_long_help(&mut bytes)?;
     let raw = String::from_utf8_lossy(&bytes);
+    Ok(clean_help_text(&raw))
+}
+
+fn contextual_help_text(root: &clap::Command, parts: &[String]) -> Result<String, DocgenError> {
+    let mut cmd = root.clone();
+    cmd = cmd.color(clap::ColorChoice::Never);
+    let mut args = Vec::with_capacity(parts.len() + 2);
+    args.push(cmd.get_name().to_owned());
+    args.extend(parts.iter().cloned());
+    args.push("--help".to_owned());
+
+    match cmd.try_get_matches_from_mut(args) {
+        Ok(_) => Err(DocgenError::Metadata(format!(
+            "expected help for command path: {}",
+            parts.join(" ")
+        ))),
+        Err(err)
+            if matches!(
+                err.kind(),
+                clap::error::ErrorKind::DisplayHelp
+                    | clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+            ) =>
+        {
+            Ok(clean_help_text(&err.render().to_string()))
+        }
+        Err(err) => Err(DocgenError::Metadata(err.to_string())),
+    }
+}
+
+fn clean_help_text(raw: &str) -> String {
     let mut cleaned = raw
         .lines()
         .map(str::trim_end)
         .collect::<Vec<_>>()
         .join("\n");
     cleaned.push('\n');
-    Ok(cleaned)
+    cleaned
 }
 
 fn command_file_name(parts: &[&str]) -> String {

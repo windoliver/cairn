@@ -9,12 +9,11 @@ List loaded plugins
 ```text
 List loaded plugins
 
-Usage: list [OPTIONS]
+Usage: cairn plugins list [OPTIONS]
 
 Options:
-      --json
-          Emit JSON instead of a human-readable table
-
-  -h, --help
-          Print help
+      --json                  Emit JSON instead of a human-readable table
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+  -h, --help                  Print help
 ```

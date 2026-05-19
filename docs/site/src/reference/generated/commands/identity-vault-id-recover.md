@@ -9,18 +9,13 @@ Recover or reconstruct the .cairn/vault.id file
 ```text
 Recover or reconstruct the .cairn/vault.id file
 
-Usage: vault-id-recover [OPTIONS]
+Usage: cairn identity vault-id-recover [OPTIONS]
 
 Options:
-      --probe-keychain
-          Probe OS keychain for vault namespaces
-
-      --vault-id <UUID>
-          Explicit vault UUID override
-
-      --json
-          Emit JSON output instead of human-readable text
-
-  -h, --help
-          Print help
+      --probe-keychain        Probe OS keychain for vault namespaces
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+      --vault-id <UUID>       Explicit vault UUID override
+      --json                  Emit JSON output instead of human-readable text
+  -h, --help                  Print help
 ```

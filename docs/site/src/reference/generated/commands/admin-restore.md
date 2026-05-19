@@ -9,18 +9,13 @@ Prepare a restore operation from a backup
 ```text
 Prepare a restore operation from a backup
 
-Usage: restore [OPTIONS] --from <PATH> --into <PATH>
+Usage: cairn admin restore [OPTIONS] --from <PATH> --into <PATH>
 
 Options:
-      --from <PATH>
-          Source backup path to restore from
-
-      --into <PATH>
-          Destination vault path to restore into
-
-      --json
-          Emit JSON output
-
-  -h, --help
-          Print help
+      --from <PATH>           Source backup path to restore from
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+      --into <PATH>           Destination vault path to restore into
+      --json                  Emit JSON output
+  -h, --help                  Print help
 ```

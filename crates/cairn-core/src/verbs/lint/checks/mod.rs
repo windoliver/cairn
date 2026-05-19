@@ -11,5 +11,6 @@ pub mod provenance;
 pub mod salience;
 pub mod schema;
 pub mod taxonomy_conventions;
+pub mod trace_canvas;
 pub mod trace_reasoning;
 pub mod workflow_health;

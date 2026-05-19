@@ -9,27 +9,17 @@ Run a Cairn harness lifecycle hook
 ```text
 Run a Cairn harness lifecycle hook
 
-Usage: hook [OPTIONS] <NAME>
+Usage: cairn hook [OPTIONS] <NAME>
 
 Arguments:
-  <NAME>
-          Hook name: SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop
+  <NAME>  Hook name: SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop
 
 Options:
-      --payload <JSON>
-          Hook payload JSON object
-
-      --payload-file <PATH>
-          Read hook payload JSON object from a file
-
-      --vault-path <PATH>
-          Vault root directory used for hook artifacts
-
-          [default: .]
-
-      --json
-          Emit JSON instead of human-readable output
-
-  -h, --help
-          Print help
+      --payload <JSON>        Hook payload JSON object
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+      --payload-file <PATH>   Read hook payload JSON object from a file
+      --vault-path <PATH>     Vault root directory used for hook artifacts [default: .]
+      --json                  Emit JSON instead of human-readable output
+  -h, --help                  Print help
 ```

@@ -9,7 +9,7 @@ Nexus sandbox setup and diagnostics
 ```text
 Nexus sandbox setup and diagnostics
 
-Usage: nexus <COMMAND>
+Usage: cairn nexus [OPTIONS] <COMMAND>
 
 Commands:
   setup   Find a compatible Nexus daemon and print explicit setup guidance
@@ -17,8 +17,9 @@ Commands:
   help    Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help
-          Print help
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+  -h, --help                  Print help
 ```
 
 ## Subcommands

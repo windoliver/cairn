@@ -9,12 +9,11 @@ Print rendered plugin-facing descriptions
 ```text
 Print rendered plugin-facing descriptions
 
-Usage: describe --mcp
+Usage: cairn plugins describe [OPTIONS] --mcp
 
 Options:
-      --mcp
-          Print the MCP tool descriptions exactly as tools/list advertises them
-
-  -h, --help
-          Print help
+      --mcp                   Print the MCP tool descriptions exactly as tools/list advertises them
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+  -h, --help                  Print help
 ```

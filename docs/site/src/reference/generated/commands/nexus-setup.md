@@ -9,12 +9,11 @@ Find a compatible Nexus daemon and print explicit setup guidance
 ```text
 Find a compatible Nexus daemon and print explicit setup guidance
 
-Usage: setup [OPTIONS]
+Usage: cairn nexus setup [OPTIONS]
 
 Options:
-      --json
-          Emit JSON guidance
-
-  -h, --help
-          Print help
+      --json                  Emit JSON guidance
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+  -h, --help                  Print help
 ```

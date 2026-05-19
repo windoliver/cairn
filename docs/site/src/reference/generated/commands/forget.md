@@ -9,33 +9,19 @@ cairn.mcp.v1 verb: forget
 ```text
 cairn.mcp.v1 verb: forget
 
-Usage: forget [OPTIONS] <--record <STRING>|--session <STRING>|--scope <JSON>|--pin <ULID>>
+Usage: cairn forget [OPTIONS] <--record <STRING>|--session <STRING>|--scope <JSON>|--pin <ULID>>
 
 Options:
       --record <STRING>
-
-
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
       --session <STRING>
-
-
       --scope <JSON>
-
-
-      --dry-run
-          Produce a FlushPlan and emit it; write nothing to the vault (brief §5.5)
-
-      --human-review
-          Persist a FlushPlan under .cairn/flush/pending/ for explicit apply
-
-      --no-diff
-          Skip the markdown diff sidecar in human-review mode
-
-      --pin <ULID>
-          Pin a record so salience-decay eviction will not forget it
-
-      --json
-          Emit machine-readable JSON response envelope to stdout
-
-  -h, --help
-          Print help
+      --dry-run               Produce a FlushPlan and emit it; write nothing to the vault (brief
+                              §5.5)
+      --human-review          Persist a FlushPlan under .cairn/flush/pending/ for explicit apply
+      --no-diff               Skip the markdown diff sidecar in human-review mode
+      --pin <ULID>            Pin a record so salience-decay eviction will not forget it
+      --json                  Emit machine-readable JSON response envelope to stdout
+  -h, --help                  Print help
 ```

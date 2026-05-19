@@ -84,7 +84,7 @@ fn nexus_sandbox_file_defaults_profile() {
                 "{data_dir}".to_owned(),
             ]
         );
-        assert_eq!(config.store.nexus.health_timeout_ms, 15_000);
+        assert_eq!(config.store.nexus.health_timeout_ms, 120_000);
     });
 }
 

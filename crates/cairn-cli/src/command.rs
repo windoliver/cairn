@@ -1,6 +1,6 @@
 //! Shared clap command tree for the runtime CLI and generated docs.
 
-use crate::{coord, doctor, generated, hooks, identity, nexus_cli, skill, verbs};
+use crate::{coord, doctor, generated, hooks, identity, nexus_cli, setup, skill, verbs};
 
 /// Build the `cairn` command tree used by both `main.rs` and `cairn-docgen`.
 #[must_use]
@@ -54,7 +54,9 @@ pub fn build_command() -> clap::Command {
         .subcommand(mcp_subcommand())
         .subcommand(vault_subcommand())
         .subcommand(skill_subcommand())
+        .subcommand(setup_subcommand())
         .subcommand(admin_subcommand())
+        .subcommand(backup_subcommand())
         .subcommand(llm_subcommand())
         .subcommand(verbs::screen::command())
         .subcommand(verbs::sensor::command())
@@ -277,6 +279,64 @@ fn skill_subcommand() -> clap::Command {
         )
 }
 
+fn setup_subcommand() -> clap::Command {
+    clap::Command::new("setup")
+        .about("Configure harness integrations")
+        .subcommand_required(true)
+        .arg_required_else_help(true)
+        .subcommand(claude_code_setup_subcommand())
+}
+
+fn claude_code_setup_subcommand() -> clap::Command {
+    clap::Command::new("claude-code")
+        .about("Register Cairn as a Claude Code stdio MCP server")
+        .args(claude_code_common_args())
+        .arg(
+            clap::Arg::new("binary")
+                .long("binary")
+                .value_name("PATH")
+                .value_parser(clap::value_parser!(std::path::PathBuf))
+                .help("Cairn binary path to register as the MCP command"),
+        )
+        .subcommand(
+            clap::Command::new("remove")
+                .about("Remove the Cairn MCP server from Claude Code config")
+                .args(claude_code_common_args()),
+        )
+}
+
+fn claude_code_common_args() -> [clap::Arg; 5] {
+    [
+        clap::Arg::new("scope")
+            .long("scope")
+            .value_name("SCOPE")
+            .default_value("local")
+            .value_parser(clap::builder::EnumValueParser::<
+                setup::claude_code::ClaudeCodeScope,
+            >::new())
+            .help("Claude Code config scope: local or project"),
+        clap::Arg::new("project-dir")
+            .long("project-dir")
+            .value_name("PATH")
+            .value_parser(clap::value_parser!(std::path::PathBuf))
+            .help("Project directory used for local/project Claude Code config"),
+        clap::Arg::new("home-dir")
+            .long("home-dir")
+            .value_name("PATH")
+            .value_parser(clap::value_parser!(std::path::PathBuf))
+            .help("Home directory used for local Claude Code config"),
+        clap::Arg::new("server-name")
+            .long("server-name")
+            .value_name("NAME")
+            .default_value("cairn")
+            .help("Claude Code MCP server name to configure"),
+        clap::Arg::new("json")
+            .long("json")
+            .action(clap::ArgAction::SetTrue)
+            .help("Emit JSON receipt instead of human-readable output"),
+    ]
+}
+
 fn vault_subcommand() -> clap::Command {
     clap::Command::new("vault")
         .about("Manage the vault registry (brief §3.3)")
@@ -367,6 +427,48 @@ fn admin_subcommand() -> clap::Command {
         .subcommand(admin_snapshot_subcommand())
         .subcommand(admin_restore_subcommand())
         .subcommand(admin_workflow_subcommand())
+}
+
+fn backup_subcommand() -> clap::Command {
+    clap::Command::new("backup")
+        .about("Audit and manage registered vault backups")
+        .subcommand_required(true)
+        .arg_required_else_help(true)
+        .subcommand(
+            clap::Command::new("register")
+                .about("Register an existing Cairn backup artifact for forget replay")
+                .arg(
+                    clap::Arg::new("path")
+                        .value_name("PATH")
+                        .required(true)
+                        .help("Backup artifact root to register"),
+                )
+                .arg(
+                    clap::Arg::new("kind")
+                        .long("kind")
+                        .value_name("KIND")
+                        .default_value("export")
+                        .value_parser(["snapshot", "wal-shipping", "export"])
+                        .help("Backup kind recorded in the registry"),
+                )
+                .arg(json_arg("Emit JSON output")),
+        )
+        .subcommand(
+            clap::Command::new("list")
+                .about("List registered backups")
+                .arg(json_arg("Emit JSON output")),
+        )
+        .subcommand(
+            clap::Command::new("forget")
+                .about("Remove backup registry entries by digest")
+                .arg(
+                    clap::Arg::new("digest")
+                        .value_name("DIGEST")
+                        .required(true)
+                        .help("Registered backup digest to remove from the registry"),
+                )
+                .arg(json_arg("Emit JSON output")),
+        )
 }
 
 /// Hidden `cairn admin workflow` tree — issue #92 E2E verification.

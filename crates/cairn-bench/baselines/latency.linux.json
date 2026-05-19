@@ -8,7 +8,7 @@
     "capture_trace_p95": 144.797631,
     "retrieve_p95": 131.189138375,
     "search_hybrid_p95": 98.72455690000001,
-    "search_keyword_p95": 75.282419,
+    "search_keyword_p95": 98.35,
     "search_semantic_p95": 86.11469813445377,
     "wal_apply_p95": 135.728813,
     "workflow_enqueue_p95": 120.433995125

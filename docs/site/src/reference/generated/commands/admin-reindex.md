@@ -9,22 +9,15 @@ Re-embed records into the ANN index
 ```text
 Re-embed records into the ANN index
 
-Usage: reindex [OPTIONS]
+Usage: cairn admin reindex [OPTIONS]
 
 Options:
-      --semantic
-          Reindex semantic (ANN) vectors
-
-      --all
-          Enqueue ALL active records before draining (use after model swap)
-
-      --from-db
-          Rebuild FTS5 + vector indexes from the authoritative records table (use after derived
-          indexes are deleted or corrupted).
-
-      --json
-          Emit JSON output
-
-  -h, --help
-          Print help
+      --semantic              Reindex semantic (ANN) vectors
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+      --all                   Enqueue ALL active records before draining (use after model swap)
+      --from-db               Rebuild FTS5 + vector indexes from the authoritative records table
+                              (use after derived indexes are deleted or corrupted).
+      --json                  Emit JSON output
+  -h, --help                  Print help
 ```

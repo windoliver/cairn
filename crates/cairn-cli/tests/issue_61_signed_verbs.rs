@@ -11,7 +11,7 @@ use cairn_cli::verbs::signed::{
 use cairn_core::contract::memory_store::MemoryStore;
 use cairn_core::domain::{
     ActorChainEntry, CaptureEvent, CaptureEventId, CaptureMode, CapturePayload, CaptureRefs,
-    ChainRole, DomainError, Identity, MemoryVisibility, PayloadHash, Rfc3339Timestamp,
+    ChainRole, DomainError, Identity, MemoryVisibility, PayloadHash, Rfc3339Timestamp, SessionId,
     SourceFamily,
 };
 use cairn_core::generated::common::Ulid;
@@ -884,6 +884,121 @@ fn retrieve_session_windows_by_turn_with_cursor() {
 }
 
 #[test]
+fn retrieve_session_includes_tree_lineage_context() {
+    const ROOT_SESSION: &str = "root-session";
+    const BRANCH_SESSION: &str = "branch-session";
+    let vault = tempfile::tempdir().expect("vault");
+    bootstrap(&BootstrapOpts {
+        vault_path: vault.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap");
+    let _ = ingest_reference(vault.path(), "seed default issuer before retrieve");
+    let root_trace = write_single_trace_fixture(
+        vault.path(),
+        "issue-134-root.jsonl",
+        "01ARZ3NDEKTSV4RRFFQ69G5FAJ",
+        ROOT_SESSION,
+        "turn-1",
+        "ancestor tree body",
+        "2026-05-02T00:00:01Z",
+    );
+    run_capture_trace(vault.path(), &root_trace);
+    let branch_trace = write_single_trace_fixture(
+        vault.path(),
+        "issue-134-branch.jsonl",
+        "01ARZ3NDEKTSV4RRFFQ69G5FAK",
+        BRANCH_SESSION,
+        "turn-2",
+        "branch tree body",
+        "2026-05-02T00:00:02Z",
+    );
+    run_capture_trace(vault.path(), &branch_trace);
+    insert_session_row(vault.path(), ROOT_SESSION, "/tmp/cairn-root-session");
+    insert_session_row(vault.path(), BRANCH_SESSION, "/tmp/cairn-branch-session");
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    rt.block_on(async {
+        let store = cairn_store_sqlite::open(vault.path().join(".cairn/cairn.db"))
+            .await
+            .expect("open store");
+        store
+            .record_session_fork(
+                &SessionId::parse(ROOT_SESSION).expect("root session id"),
+                &SessionId::parse(BRANCH_SESSION).expect("branch session id"),
+                "turn-1",
+            )
+            .await
+            .expect("record fork");
+    });
+
+    let value = retrieve_session_json_value(vault.path(), BRANCH_SESSION);
+    assert_tree_retrieve_response(&value);
+}
+
+fn retrieve_session_json_value(vault: &Path, session_id: &str) -> serde_json::Value {
+    let retrieve = cli()
+        .current_dir(vault)
+        .args([
+            "retrieve",
+            "--session",
+            session_id,
+            "--order",
+            "asc",
+            "--json",
+        ])
+        .output()
+        .expect("run retrieve session");
+    assert_eq!(
+        retrieve.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&retrieve.stderr)
+    );
+    serde_json::from_slice(&retrieve.stdout).expect("json")
+}
+
+fn assert_tree_retrieve_response(value: &serde_json::Value) {
+    let items = value["data"]["items"].as_array().expect("items");
+    assert!(
+        items
+            .iter()
+            .any(|item| item["content"] == "ancestor tree body"),
+        "ancestor context missing: {value}"
+    );
+    assert!(
+        items
+            .iter()
+            .any(|item| item["content"] == "branch tree body"),
+        "branch-local content missing: {value}"
+    );
+    let tree_trace = value["policy_trace"]
+        .as_array()
+        .expect("policy_trace")
+        .iter()
+        .filter(|entry| {
+            entry["gate"]
+                .as_str()
+                .is_some_and(|gate| gate.starts_with("tree."))
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        tree_trace
+            .iter()
+            .any(|entry| entry["gate"] == "tree.lineage"),
+        "tree lineage trace missing: {value}"
+    );
+    for entry in tree_trace {
+        let detail = entry["detail"].as_str().expect("tree trace detail");
+        assert!(!detail.contains("ancestor tree body"));
+        assert!(!detail.contains("branch tree body"));
+    }
+}
+
+#[test]
 fn retrieve_turn_and_tool_call_return_linkage() {
     const SESSION_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
     let vault = tempfile::tempdir().expect("vault");
@@ -1587,6 +1702,19 @@ fn insert_session_record(vault: &Path, body: &str) -> String {
     record_id
 }
 
+fn insert_session_row(vault: &Path, session_id: &str, project_root: &str) {
+    let conn = Connection::open(vault.join(".cairn/cairn.db")).expect("open sqlite");
+    conn.pragma_update(None, "foreign_keys", "ON")
+        .expect("enable foreign keys");
+    conn.execute(
+        "INSERT OR IGNORE INTO sessions \
+         (session_id, user_id, agent_id, project_root, title, created_at, last_activity_at) \
+         VALUES (?1, 'hmn:cairn:test:v1', 'agt:cairn-cli:default:writer:v1', ?2, '', 1, 1)",
+        rusqlite::params![session_id, project_root],
+    )
+    .expect("insert session row");
+}
+
 fn provision_agent(vault: &Path, slug: &str) -> String {
     let provision = cli()
         .current_dir(vault)
@@ -1738,6 +1866,37 @@ fn write_issue_61_trace_fixture(vault: &Path, session_id: &str) -> PathBuf {
         )
         .expect("write trace event");
     }
+    trace_path
+}
+
+fn write_single_trace_fixture(
+    vault: &Path,
+    filename: &str,
+    event_id: &str,
+    session_id: &str,
+    turn_id: &str,
+    body: &str,
+    timestamp: &str,
+) -> PathBuf {
+    let trace_path = vault.join(filename);
+    let mut jsonl = std::fs::File::create(&trace_path).expect("create trace jsonl");
+    let payload_ref = write_trace_source(vault, event_id, body);
+    let event = capture_trace_event_with_hook(
+        event_id,
+        session_id,
+        turn_id,
+        "UserPromptSubmit",
+        None,
+        timestamp,
+        &payload_ref,
+        body,
+    );
+    writeln!(
+        jsonl,
+        "{}",
+        serde_json::to_string(&event).expect("event json")
+    )
+    .expect("write trace event");
     trace_path
 }
 

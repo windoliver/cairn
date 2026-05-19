@@ -81,16 +81,20 @@ struct NexusSetupReceipt {
     auto_install: bool,
     detected_command: Option<String>,
     recommended: RecommendedNexusConfig,
+    install_steps: Vec<String>,
     remediation: Vec<String>,
     message: &'static str,
 }
 
 #[derive(Debug, Serialize)]
 struct RecommendedNexusConfig {
+    data_dir: String,
     command: String,
     args: Vec<String>,
     endpoint: String,
     health_path: String,
+    health_timeout_ms: u64,
+    shutdown_timeout_ms: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -114,6 +118,7 @@ fn setup_receipt() -> NexusSetupReceipt {
         auto_install: false,
         detected_command,
         recommended,
+        install_steps: install_steps(),
         remediation: setup_remediation(),
         message: "No changes made. Install or select Nexus explicitly, then configure the sandbox profile.",
     }
@@ -152,16 +157,28 @@ fn doctor_receipt(vault_path: &Path, config: &CairnConfig) -> NexusDoctorReceipt
 fn recommended_config(command: Option<&str>) -> RecommendedNexusConfig {
     let default = NexusSandboxConfig::default();
     RecommendedNexusConfig {
+        data_dir: default.data_dir,
         command: command.unwrap_or(&default.command).to_owned(),
         args: default.args,
         endpoint: default.endpoint,
         health_path: default.health_path,
+        health_timeout_ms: default.health_timeout_ms,
+        shutdown_timeout_ms: default.shutdown_timeout_ms,
     }
+}
+
+fn install_steps() -> Vec<String> {
+    vec![
+        "mkdir -p ~/nexus".to_owned(),
+        "python3.14 -m venv ~/nexus/.venv".to_owned(),
+        "~/nexus/.venv/bin/python -m pip install --upgrade pip".to_owned(),
+        "~/nexus/.venv/bin/python -m pip install 'nexus-ai-fs[sandbox]'".to_owned(),
+    ]
 }
 
 fn setup_remediation() -> Vec<String> {
     vec![
-        "Install Nexus so the `nexusd` daemon is available on PATH, or keep it at `~/nexus/.venv/bin/nexusd`.".to_owned(),
+        "Install Nexus at `~/nexus/.venv/bin/nexusd` with the install steps above, or put a compatible `nexusd` on PATH.".to_owned(),
         "Set `store.kind: nexus-sandbox` and `store.nexus.command` to the detected `nexusd` path when it is not on PATH.".to_owned(),
         "Keep `{vault_dir}` and `{data_dir}` in `store.nexus.args`; Cairn expands them before launching the daemon.".to_owned(),
         "Do not point `store.nexus.command` at a generic `nexus` CLI unless that binary exposes the daemon health protocol.".to_owned(),
@@ -180,13 +197,29 @@ fn render_setup_human(receipt: &NexusSetupReceipt) -> String {
         "    store:".to_owned(),
         "      kind: nexus-sandbox".to_owned(),
         "      nexus:".to_owned(),
+        format!("        data_dir: {}", receipt.recommended.data_dir),
         format!("        command: {}", receipt.recommended.command),
         format!("        args: [{}]", shell_words(&receipt.recommended.args)),
         format!("        endpoint: {}", receipt.recommended.endpoint),
         format!("        health_path: {}", receipt.recommended.health_path),
+        format!(
+            "        health_timeout_ms: {}",
+            receipt.recommended.health_timeout_ms
+        ),
+        format!(
+            "        shutdown_timeout_ms: {}",
+            receipt.recommended.shutdown_timeout_ms
+        ),
         format!("  {}", receipt.message),
-        "  next:".to_owned(),
+        "  install:".to_owned(),
     ];
+    lines.extend(
+        receipt
+            .install_steps
+            .iter()
+            .map(|step| format!("    $ {step}")),
+    );
+    lines.extend(["  next:".to_owned()]);
     lines.extend(
         receipt
             .remediation

@@ -291,6 +291,20 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     // dead-letter enumeration and per-kind last-success lookup.
     ("index", "workflow_jobs_dead_letter_idx"),
     ("index", "workflow_jobs_kind_completed_idx"),
+    // 0065_trace_canvas (issue #134 addendum): durable task-trace canvas
+    // substrate for projected steps, nodes, and edges.
+    ("table", "trace_canvases"),
+    ("index", "trace_canvases_session_idx"),
+    ("table", "trace_canvas_nodes"),
+    ("index", "trace_canvas_nodes_canvas_idx"),
+    ("table", "trace_canvas_edges"),
+    ("index", "trace_canvas_edges_unique_idx"),
+    ("index", "trace_canvas_edges_to_idx"),
+    ("table", "trace_steps"),
+    ("index", "trace_steps_replay_key_idx"),
+    ("index", "trace_steps_session_turn_idx"),
+    ("index", "trace_steps_node_idx"),
+    ("index", "trace_steps_result_ref_idx"),
 ];
 
 /// Identity registry objects share `cairn.db` but are owned by

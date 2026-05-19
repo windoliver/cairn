@@ -59,7 +59,7 @@ store:
     - '{data_dir}'
     endpoint: http://127.0.0.1:8765
     health_path: /health
-    health_timeout_ms: 15000
+    health_timeout_ms: 120000
     shutdown_timeout_ms: 2000
 llm:
   provider: null

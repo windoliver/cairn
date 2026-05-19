@@ -9,12 +9,11 @@ Render a zero-capture dogfood report from vault metrics
 ```text
 Render a zero-capture dogfood report from vault metrics
 
-Usage: zero-capture-report [OPTIONS]
+Usage: cairn admin zero-capture-report [OPTIONS]
 
 Options:
-      --json
-          Emit JSON summary plus session rows
-
-  -h, --help
-          Print help
+      --json                  Emit JSON summary plus session rows
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+  -h, --help                  Print help
 ```
