@@ -24,6 +24,7 @@ pub mod evidence;
 pub mod filter;
 pub mod identity;
 pub mod intent;
+pub mod projection;
 pub mod provenance;
 pub mod record;
 pub mod scope;
