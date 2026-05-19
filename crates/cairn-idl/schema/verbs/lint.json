@@ -66,7 +66,7 @@
             "additionalProperties": false,
             "required": ["kind", "message"],
             "properties": {
-              "kind":      { "type": "string", "enum": ["contradiction", "orphan", "stale", "missing_concept", "data_gap", "projection_stale", "projection_missing", "projection_parser_failed", "projection_hash_mismatch", "projection_sidecar_unavailable"] },
+              "kind":      { "type": "string", "enum": ["contradiction", "orphan", "stale", "missing_concept", "data_gap", "projection_stale", "projection_missing", "projection_failed", "projection_parser_failed", "projection_hash_mismatch", "projection_sidecar_unavailable"] },
               "message":   { "type": "string", "minLength": 1 },
               "record_id": { "$ref": "../common/primitives.json#/$defs/Ulid" },
               "projection_target": { "type": "string", "minLength": 1 },

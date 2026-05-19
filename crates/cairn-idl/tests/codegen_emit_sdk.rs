@@ -249,7 +249,7 @@ fn lint_sdk_includes_projection_findings() {
 
     assert!(body.contains("ProjectionStale"), "{body}");
     assert!(body.contains("ProjectionMissing"), "{body}");
-    assert!(body.contains("ProjectionParserFailed"), "{body}");
+    assert!(body.contains("ProjectionFailed"), "{body}");
     assert!(body.contains("projection_stale"), "{body}");
 }
 

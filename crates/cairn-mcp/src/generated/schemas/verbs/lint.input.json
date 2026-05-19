@@ -32,6 +32,7 @@
                   "data_gap",
                   "projection_stale",
                   "projection_missing",
+                  "projection_failed",
                   "projection_parser_failed",
                   "projection_hash_mismatch",
                   "projection_sidecar_unavailable"

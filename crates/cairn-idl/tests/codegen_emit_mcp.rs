@@ -362,7 +362,7 @@ fn lint_schema_exposes_projection_finding_kinds() {
         kinds
             .as_array()
             .expect("kind enum")
-            .contains(&serde_json::json!("projection_parser_failed"))
+            .contains(&serde_json::json!("projection_failed"))
     );
 }
 

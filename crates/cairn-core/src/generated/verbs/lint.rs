@@ -27,6 +27,7 @@ pub enum LintDataFindingsKind {
     DataGap,
     ProjectionStale,
     ProjectionMissing,
+    ProjectionFailed,
     ProjectionParserFailed,
     ProjectionHashMismatch,
     ProjectionSidecarUnavailable,
