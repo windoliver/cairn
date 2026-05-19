@@ -258,7 +258,10 @@ fn status_sdk_includes_projection_detail() {
     let files = emit_sdk::emit(&doc()).unwrap();
     let status = files
         .iter()
-        .find(|file| file.path.ends_with("crates/cairn-core/src/generated/status.rs"))
+        .find(|file| {
+            file.path
+                .ends_with("crates/cairn-core/src/generated/status.rs")
+        })
         .expect("status SDK output");
     let body = std::str::from_utf8(&status.bytes).expect("utf-8 status SDK");
 
