@@ -37,7 +37,7 @@ pub struct MemoryStoreCapabilities {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SearchMode {
-    /// SQLite FTS / lexical search.
+    /// `SQLite` FTS / lexical search.
     Keyword,
     /// Vector search.
     Semantic,
@@ -74,9 +74,9 @@ pub struct SearchRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RankingSignalName {
-    /// SQLite FTS5 lexical score.
+    /// `SQLite` FTS5 lexical score.
     SqliteFts5,
-    /// SQLite vector score.
+    /// `SQLite` vector score.
     SqliteVec,
     /// Nexus BM25S lexical score.
     NexusBm25s,
