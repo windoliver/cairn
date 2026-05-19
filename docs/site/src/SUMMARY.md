@@ -20,6 +20,7 @@
 - [MCP](usage/mcp.md)
 - [Claude Code](usage/claude-code.md)
 - [Cairn Skill](usage/skill.md)
+- [Claude Code Reference Consumer](usage/claude-code-reference.md)
 
 # Reference
 

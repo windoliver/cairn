@@ -66,6 +66,40 @@ fn run_hook_with_payload_file(
     parse_stdout_json(out)
 }
 
+fn run_hook_with_stdin_payload(
+    name: &str,
+    payload: &str,
+    vault: &tempfile::TempDir,
+) -> serde_json::Value {
+    use std::io::Write;
+
+    let mut child = cli()
+        .args([
+            "hook",
+            name,
+            "--vault-path",
+            vault.path().to_str().expect("utf-8 vault path"),
+            "--payload-file",
+            "-",
+            "--json",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|err| panic!("spawn cairn hook {name} --payload-file -: {err}"));
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(payload.as_bytes())
+        .expect("write hook stdin");
+    let out = child
+        .wait_with_output()
+        .unwrap_or_else(|err| panic!("wait cairn hook {name}: {err}"));
+    assert!(out.status.success(), "{name} exit: {:?}", out.status);
+    parse_stdout_json(out)
+}
+
 fn trace_artifact(vault: &tempfile::TempDir, result: &serde_json::Value) -> serde_json::Value {
     let trace_id = result["artifacts"]["trace_id"].as_str().expect("trace_id");
     read_json_file(
@@ -74,6 +108,78 @@ fn trace_artifact(vault: &tempfile::TempDir, result: &serde_json::Value) -> serd
             .join(".cairn/hooks/traces")
             .join(format!("{trace_id}.json")),
     )
+}
+
+#[test]
+fn hook_payload_file_dash_reads_claude_code_stdin() {
+    let vault = tempfile::tempdir().expect("temp vault");
+    let result = run_hook_with_stdin_payload(
+        "UserPromptSubmit",
+        r#"{
+            "session_id": "sess-stdin",
+            "transcript_path": "/Users/me/.claude/projects/p/sess.jsonl",
+            "cwd": "/repo",
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "remember this stdin payload"
+        }"#,
+        &vault,
+    );
+
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["routing_hints"]["capture_prompt"], true);
+    assert_eq!(result["routing_hints"]["memory_write_suggested"], true);
+    assert_eq!(result["routing_hints"]["forget_suggested"], false);
+    assert_eq!(result["routing_hints"]["search_suggested"], false);
+    let trace = trace_artifact(&vault, &result);
+    assert_eq!(trace["hook"], "UserPromptSubmit");
+    assert_eq!(trace["session_id"], "sess-stdin");
+    assert_eq!(trace["event"]["prompt"], "remember this stdin payload");
+    assert_eq!(trace["event"]["hook_event_name"], "UserPromptSubmit");
+    assert_eq!(trace["event"]["cwd"], "/repo");
+}
+
+#[test]
+fn claude_code_tool_payloads_map_tool_use_id_to_cairn_tool_call_id() {
+    let vault = tempfile::tempdir().expect("temp vault");
+    let pre = run_hook_with_stdin_payload(
+        "PreToolUse",
+        r#"{
+            "session_id": "sess-tool",
+            "transcript_path": "/Users/me/.claude/projects/p/sess.jsonl",
+            "cwd": "/repo",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "cargo test"},
+            "tool_use_id": "toolu_01ABC"
+        }"#,
+        &vault,
+    );
+    let post = run_hook_with_stdin_payload(
+        "PostToolUse",
+        r#"{
+            "session_id": "sess-tool",
+            "transcript_path": "/Users/me/.claude/projects/p/sess.jsonl",
+            "cwd": "/repo",
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "cargo test"},
+            "tool_response": {"stdout": "ok", "stderr": "", "interrupted": false},
+            "tool_use_id": "toolu_01ABC",
+            "duration_ms": 12
+        }"#,
+        &vault,
+    );
+
+    let pre_trace = trace_artifact(&vault, &pre);
+    assert_eq!(pre_trace["tool_call_id"], "toolu_01ABC");
+    assert_eq!(pre_trace["tool_name"], "Bash");
+    assert_eq!(pre_trace["event"]["tool_input"]["command"], "cargo test");
+
+    let post_trace = trace_artifact(&vault, &post);
+    assert_eq!(post_trace["tool_call_id"], "toolu_01ABC");
+    assert_eq!(post_trace["tool_name"], "Bash");
+    assert_eq!(post_trace["status"], "ok");
+    assert_eq!(post_trace["event"]["duration_ms"], 12);
 }
 
 fn assert_session_hot_artifact(

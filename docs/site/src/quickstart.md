@@ -63,3 +63,7 @@ Successful doctor output is the reproducibility checklist: it proves the Cairn
 binary is discoverable, Claude Code can find the MCP registration, the
 configured server starts, `status` is callable through the MCP surface, and the
 five expected hook entries are present.
+
+Use the [Claude Code reference consumer guide](usage/claude-code-reference.md)
+for the full hook-loop smoke test, P0 acceptance checklist, and daily dogfood
+workflow.
