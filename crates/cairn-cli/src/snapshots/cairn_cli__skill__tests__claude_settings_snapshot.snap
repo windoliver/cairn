@@ -6,7 +6,7 @@ expression: merged
   "hooks": {
     "SessionStart": [
       {
-        "command": "cairn ingest --folder . --mode keyword"
+        "command": "cairn ingest --folder . --mode keyword >/tmp/cairn-session-start.log 2>&1 &"
       }
     ]
   },

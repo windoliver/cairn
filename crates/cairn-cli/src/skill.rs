@@ -66,6 +66,8 @@ impl Agent {
 
 const AGENT_BLOCK_BEGIN: &str = "<!-- BEGIN CAIRN AGENT SKILL -->";
 const AGENT_BLOCK_END: &str = "<!-- END CAIRN AGENT SKILL -->";
+const SESSION_START_HOOK_COMMAND: &str =
+    "cairn ingest --folder . --mode keyword >/tmp/cairn-session-start.log 2>&1 &";
 
 fn render_agent_markdown_block(agent: Agent) -> String {
     format!(
@@ -665,6 +667,14 @@ fn install_claude_code_integration(
         &render_agent_markdown_block(Agent::ClaudeCode),
         &mut receipt,
     )?;
+    for (name, content) in claude_slash_commands() {
+        write_generated_guarded_file(
+            &project_dir.join(".claude/commands").join(name),
+            content,
+            force,
+            &mut receipt,
+        )?;
+    }
     Ok(receipt)
 }
 
@@ -711,8 +721,76 @@ fn install_cursor_integration(
         force,
         &mut receipt,
     )?;
+    write_guarded_markdown(
+        &project_dir.join(".cursorrules"),
+        &render_agent_markdown_block(Agent::Cursor),
+        &mut receipt,
+    )?;
     Ok(receipt)
 }
+
+fn claude_slash_commands() -> [(&'static str, &'static str); 4] {
+    [
+        ("remember.md", CLAUDE_REMEMBER_COMMAND),
+        ("forget.md", CLAUDE_FORGET_COMMAND),
+        ("recall.md", CLAUDE_RECALL_COMMAND),
+        ("graph.md", CLAUDE_GRAPH_COMMAND),
+    ]
+}
+
+const CLAUDE_REMEMBER_COMMAND: &str = r#"---
+description: Remember durable project context in Cairn
+argument-hint: <memory>
+---
+
+<!-- BEGIN CAIRN AGENT SKILL -->
+Store the user's provided memory in Cairn.
+
+Run:
+`cairn ingest --kind user --body "$ARGUMENTS"`
+<!-- END CAIRN AGENT SKILL -->
+"#;
+
+const CLAUDE_FORGET_COMMAND: &str = r#"---
+description: Forget a Cairn record after explicit confirmation
+argument-hint: <record-id>
+---
+
+<!-- BEGIN CAIRN AGENT SKILL -->
+Confirm the user wants to forget the named Cairn record, then run:
+
+`cairn forget --record "$ARGUMENTS"`
+<!-- END CAIRN AGENT SKILL -->
+"#;
+
+const CLAUDE_RECALL_COMMAND: &str = r#"---
+description: Search and retrieve relevant Cairn memory
+argument-hint: <query>
+---
+
+<!-- BEGIN CAIRN AGENT SKILL -->
+Search Cairn for relevant memory, then retrieve exact records when needed.
+
+Start with:
+`cairn search --mode keyword "$ARGUMENTS"`
+
+Then run:
+`cairn retrieve <record-id>`
+<!-- END CAIRN AGENT SKILL -->
+"#;
+
+const CLAUDE_GRAPH_COMMAND: &str = r#"---
+description: Explore non-obvious Cairn graph connections
+argument-hint: <entity-ids>
+---
+
+<!-- BEGIN CAIRN AGENT SKILL -->
+Use the MCP graph tools for non-obvious connections between known entity ids.
+
+Prefer `graph.surprising_connections` when comparing multiple entities.
+Do not use graph tools for ordinary file reads or code execution.
+<!-- END CAIRN AGENT SKILL -->
+"#;
 
 impl AgentIntegrationReceipt {
     fn new(agent: Agent) -> Self {
@@ -761,7 +839,7 @@ fn merged_claude_hooks(existing: Option<serde_json::Value>) -> serde_json::Value
         "SessionStart".to_owned(),
         serde_json::json!([
             {
-                "command": "cairn ingest --folder . --mode keyword"
+                "command": SESSION_START_HOOK_COMMAND
             }
         ]),
     );
@@ -1112,6 +1190,70 @@ mod tests {
         assert!(project.join(".kiro/steering/cairn.md").exists());
         assert!(project.join(".cursor/rules/cairn.mdc").exists());
         assert_eq!(receipt.integrations.len(), 4);
+    }
+
+    #[test]
+    fn install_agent_pack_claude_writes_slash_commands_and_background_hook() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&project).expect("project dir");
+        let target = tmp.path().join("skills/cairn");
+
+        install_agent_pack(&AgentInstallOpts {
+            target_dir: target,
+            project_dir: project.clone(),
+            agents: vec![Agent::ClaudeCode],
+            harness: Harness::ClaudeCode,
+            force: false,
+        })
+        .expect("install Claude Code agent pack");
+
+        let settings: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(project.join(".claude/settings.json")).expect("settings"),
+        )
+        .expect("settings json");
+        let command = settings["hooks"]["SessionStart"][0]["command"]
+            .as_str()
+            .expect("SessionStart command");
+        assert!(command.contains("cairn ingest --folder . --mode keyword"));
+        assert!(
+            command.trim_end().ends_with('&'),
+            "session-start hook should run in the background: {command}"
+        );
+
+        let commands = project.join(".claude/commands");
+        let remember =
+            std::fs::read_to_string(commands.join("remember.md")).expect("remember command");
+        let forget = std::fs::read_to_string(commands.join("forget.md")).expect("forget command");
+        let recall = std::fs::read_to_string(commands.join("recall.md")).expect("recall command");
+        let graph = std::fs::read_to_string(commands.join("graph.md")).expect("graph command");
+        assert!(remember.contains("cairn ingest"));
+        assert!(forget.contains("cairn forget"));
+        assert!(recall.contains("cairn retrieve"));
+        assert!(graph.contains("graph.surprising_connections"));
+    }
+
+    #[test]
+    fn install_agent_pack_cursor_writes_modern_and_legacy_rules() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&project).expect("project dir");
+        let target = tmp.path().join("skills/cairn");
+
+        install_agent_pack(&AgentInstallOpts {
+            target_dir: target,
+            project_dir: project.clone(),
+            agents: vec![Agent::Cursor],
+            harness: Harness::Cursor,
+            force: false,
+        })
+        .expect("install Cursor agent pack");
+
+        assert!(project.join(".cursor/rules/cairn.mdc").exists());
+        let cursorrules =
+            std::fs::read_to_string(project.join(".cursorrules")).expect(".cursorrules");
+        assert!(cursorrules.contains("<!-- BEGIN CAIRN AGENT SKILL -->"));
+        assert!(cursorrules.contains("cairn ingest --folder . --mode keyword"));
     }
 
     #[test]
