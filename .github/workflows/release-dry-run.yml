@@ -36,7 +36,6 @@ name: release-dry-run
 #
 # Out of scope (tracked elsewhere):
 #   - Real `cargo publish` to crates.io and signing — issue #141.
-#   - Homebrew formula audit and `cargo install` smoke — issue #100.
 #   - Desktop signing/notarization — issue #139.
 
 on:
@@ -199,3 +198,97 @@ jobs:
           path: dist/cairn
           if-no-files-found: error
           retention-days: 7
+
+  install-smoke:
+    name: install-smoke / ${{ matrix.os }}
+    # Proves `cargo install cairn` + the eight-verb smoke pass on a clean
+    # prefix. On macOS, additionally audits the Homebrew formula. Closes the
+    # last v0.1 packaging gap called out in docs/ci.md (issue #100).
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: install-smoke-${{ matrix.os }}
+          cache-bin: "false"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: cargo install via the documented git path
+        shell: bash
+        run: |
+          set -euo pipefail
+          # docs/site/src/usage/installation.md tells users:
+          #   cargo install --git https://github.com/windoliver/cairn --branch main cairn-cli
+          # Exercise that exact shape — clone + ref selection + package
+          # filtering — against the PR commit, not a published main. A
+          # plain `cargo install --path` would skip the git-clone code path
+          # users actually hit.
+          prefix="$(mktemp -d -t cairn-install-XXXXXX)"
+          echo "CAIRN_PREFIX=$prefix" >>"$GITHUB_ENV"
+          # Stage a stable local branch ref at HEAD without touching `main`
+          # (which would fail if main is the currently checked-out branch).
+          git branch -f cairn-ci-head HEAD
+          cargo install \
+            --git "file://$PWD" \
+            --branch cairn-ci-head \
+            --locked \
+            --no-track \
+            --root "$prefix" \
+            --bin cairn \
+            cairn-cli
+          # Single-binary contract: only `cairn` ships; the internal
+          # `cairn-docgen` doc generator must not be installed.
+          ls "$prefix/bin"
+          [ -x "$prefix/bin/cairn" ] || { echo "missing cairn binary"; exit 1; }
+          [ ! -e "$prefix/bin/cairn-docgen" ] || \
+            { echo "::error::cairn-docgen leaked into install prefix"; exit 1; }
+      - name: Run install smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          CAIRN_BIN="$CAIRN_PREFIX/bin/cairn" ./scripts/install-smoke.sh
+      - name: Exercise Homebrew formula end-to-end
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # `brew audit --strict` validates formula structure offline. Path
+          # invocation (`--formula <path>`) was removed in brew 5.x, so we
+          # stage the formula into a temp tap. We then run the full user
+          # flow that docs advertise — `brew install --HEAD`, `brew test`,
+          # and the install-smoke against the brewed binary — so a broken
+          # `def install`, missing build dep, or wrong sandbox interaction
+          # fails CI here instead of on a user's machine.
+          tap="$(brew --repository)/Library/Taps/local/homebrew-cairn-audit"
+          mkdir -p "$tap/Formula"
+          cp Formula/cairn.rb "$tap/Formula/cairn.rb"
+          # Audit the shipped formula as-is (head URL must point at main
+          # because that is what users will receive).
+          trap 'rm -rf "$tap"; brew uninstall --force cairn || true' EXIT
+          brew audit --strict local/cairn-audit/cairn
+          # CRITICAL: rewrite head URL to file://$PWD so the brew install
+          # rehearsal builds the commit under test, NOT whatever happens
+          # to be on the remote `main` right now. Without this, a formula
+          # or build break introduced by this PR can be masked by main's
+          # good code.
+          #
+          # Use a dedicated `cairn-ci-head` branch ref rather than touching
+          # `main` — `git branch -f main HEAD` fails when main is the
+          # currently checked-out branch (e.g. a workflow_dispatch run on
+          # main), and we don't want to mutate a meaningful ref name.
+          git branch -f cairn-ci-head HEAD
+          sed -i.bak \
+            -e "s|https://github.com/windoliver/cairn.git|file://$PWD|" \
+            -e 's|branch: "main"|branch: "cairn-ci-head"|' \
+            "$tap/Formula/cairn.rb"
+          rm -f "$tap/Formula/cairn.rb.bak"
+          brew install --build-from-source --HEAD local/cairn-audit/cairn
+          brew test local/cairn-audit/cairn
+          CAIRN_BIN="$(brew --prefix cairn)/bin/cairn" ./scripts/install-smoke.sh

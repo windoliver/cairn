@@ -9,19 +9,15 @@ Move a quarantined coord plan back to pending/
 ```text
 Move a quarantined coord plan back to pending/
 
-Usage: requeue [OPTIONS] <id>
+Usage: cairn flush requeue [OPTIONS] <id>
 
 Arguments:
-  <id>
-          Quarantined plan ULID to requeue
+  <id>  Quarantined plan ULID to requeue
 
 Options:
-      --json
-          Emit machine-readable JSON
-
-      --force
-          Requeue even while the coord runtime is not wired
-
-  -h, --help
-          Print help
+      --json                  Emit machine-readable JSON
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+      --force                 Requeue even while the coord runtime is not wired
+  -h, --help                  Print help
 ```

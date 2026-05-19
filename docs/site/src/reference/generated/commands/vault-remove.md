@@ -9,16 +9,14 @@ Remove a vault from the registry (does not delete files)
 ```text
 Remove a vault from the registry (does not delete files)
 
-Usage: remove [OPTIONS] <NAME>
+Usage: cairn vault remove [OPTIONS] <NAME>
 
 Arguments:
-  <NAME>
-          Name of the vault to remove
+  <NAME>  Name of the vault to remove
 
 Options:
-      --json
-          Emit JSON output
-
-  -h, --help
-          Print help
+      --json                  Emit JSON output
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+  -h, --help                  Print help
 ```

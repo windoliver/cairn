@@ -9,16 +9,14 @@ Apply a pending plan to MemoryStore
 ```text
 Apply a pending plan to MemoryStore
 
-Usage: apply [OPTIONS] <id>
+Usage: cairn flush apply [OPTIONS] <id>
 
 Arguments:
-  <id>
-          Plan ULID to apply
+  <id>  Plan ULID to apply
 
 Options:
-      --json
-          Emit machine-readable JSON
-
-  -h, --help
-          Print help
+      --json                  Emit machine-readable JSON
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+  -h, --help                  Print help
 ```

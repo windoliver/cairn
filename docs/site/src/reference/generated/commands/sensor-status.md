@@ -9,16 +9,14 @@ Show local sensor gate status
 ```text
 Show local sensor gate status
 
-Usage: status [OPTIONS] [SENSOR]
+Usage: cairn sensor status [OPTIONS] [SENSOR]
 
 Arguments:
-  [SENSOR]
-          Local sensor: hook, ide, terminal, clipboard, voice, screen, or recording
+  [SENSOR]  Local sensor: hook, ide, terminal, clipboard, voice, screen, or recording
 
 Options:
-      --json
-          Emit JSON output
-
-  -h, --help
-          Print help
+      --json                  Emit JSON output
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+  -h, --help                  Print help
 ```

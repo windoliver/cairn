@@ -9,7 +9,7 @@ LLM provider diagnostics (ADR 0001)
 ```text
 LLM provider diagnostics (ADR 0001)
 
-Usage: llm <COMMAND>
+Usage: cairn llm [OPTIONS] <COMMAND>
 
 Commands:
   probe  Build the configured LLMProvider and issue one completion. Exits 78 (EX_CONFIG) when no
@@ -18,8 +18,9 @@ Commands:
   help   Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help
-          Print help
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+  -h, --help                  Print help
 ```
 
 ## Subcommands

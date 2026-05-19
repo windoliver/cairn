@@ -9,12 +9,11 @@ Bulk repair all pending identity rows
 ```text
 Bulk repair all pending identity rows
 
-Usage: reconcile [OPTIONS]
+Usage: cairn identity reconcile [OPTIONS]
 
 Options:
-      --json
-          Emit JSON output instead of human-readable text
-
-  -h, --help
-          Print help
+      --json                  Emit JSON output instead of human-readable text
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+  -h, --help                  Print help
 ```

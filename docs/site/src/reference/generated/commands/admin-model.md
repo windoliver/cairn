@@ -9,15 +9,16 @@ Embedding model management
 ```text
 Embedding model management
 
-Usage: model <COMMAND>
+Usage: cairn admin model [OPTIONS] <COMMAND>
 
 Commands:
   fetch  Download the configured embedding model (~25 MB) from HuggingFace Hub
   help   Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help
-          Print help
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+  -h, --help                  Print help
 ```
 
 ## Subcommands

@@ -9,19 +9,15 @@ Revoke an identity (two-phase WAL tombstone)
 ```text
 Revoke an identity (two-phase WAL tombstone)
 
-Usage: revoke [OPTIONS] <IDENTITY>
+Usage: cairn identity revoke [OPTIONS] <IDENTITY>
 
 Arguments:
-  <IDENTITY>
-          Target identity wire form
+  <IDENTITY>  Target identity wire form
 
 Options:
-      --signer <IDENTITY>
-          Signer identity wire form (default: first active agent)
-
-      --json
-          Emit JSON output instead of human-readable text
-
-  -h, --help
-          Print help
+      --signer <IDENTITY>     Signer identity wire form (default: first active agent)
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+      --json                  Emit JSON output instead of human-readable text
+  -h, --help                  Print help
 ```

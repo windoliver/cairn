@@ -9,19 +9,15 @@ Permanently purge an identity (requires .cairn/maintenance/purge-ack file)
 ```text
 Permanently purge an identity (requires .cairn/maintenance/purge-ack file)
 
-Usage: purge [OPTIONS] <IDENTITY>
+Usage: cairn identity purge [OPTIONS] <IDENTITY>
 
 Arguments:
-  <IDENTITY>
-          Target identity wire form
+  <IDENTITY>  Target identity wire form
 
 Options:
-      --resume
-          Resume a previously interrupted purge
-
-      --json
-          Emit JSON output instead of human-readable text
-
-  -h, --help
-          Print help
+      --resume                Resume a previously interrupted purge
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+      --json                  Emit JSON output instead of human-readable text
+  -h, --help                  Print help
 ```

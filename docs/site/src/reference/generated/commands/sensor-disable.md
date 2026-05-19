@@ -9,24 +9,17 @@ Disable a local sensor
 ```text
 Disable a local sensor
 
-Usage: disable [OPTIONS] --reason <CODE> <SENSOR>
+Usage: cairn sensor disable [OPTIONS] --reason <CODE> <SENSOR>
 
 Arguments:
-  <SENSOR>
-          Local sensor: hook, ide, terminal, clipboard, voice, screen, or recording
+  <SENSOR>  Local sensor: hook, ide, terminal, clipboard, voice, screen, or recording
 
 Options:
-      --reason <CODE>
-          Body-free consent reason code, e.g. operator_on or operator_off
-
-      --actor <IDENTITY>
-          Human or agent identity writing the consent event
-
-          [default: hmn:local-operator]
-
-      --json
-          Emit JSON output
-
-  -h, --help
-          Print help
+      --reason <CODE>         Body-free consent reason code, e.g. operator_on or operator_off
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+      --actor <IDENTITY>      Human or agent identity writing the consent event [default:
+                              hmn:local-operator]
+      --json                  Emit JSON output
+  -h, --help                  Print help
 ```

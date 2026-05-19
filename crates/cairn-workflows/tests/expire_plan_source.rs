@@ -7,7 +7,8 @@ use cairn_core::contract::memory_store::MemoryStore as _;
 use cairn_core::domain::record::Ed25519Signature;
 use cairn_core::domain::taxonomy::MemoryClass;
 use cairn_core::domain::{
-    ExpirationReason, FlushMode, Identity, MemoryKind, PlanReason, PlannedMutation,
+    EvidenceVector, ExpirationReason, FlushMode, Identity, MemoryKind, PlanReason, PlannedMutation,
+    SourceId,
 };
 use cairn_test_fixtures::{FixtureStore, memstore, sample_record};
 use cairn_workflows::{
@@ -138,6 +139,12 @@ async fn promote_plan_source_emits_promote_plan_for_confident_non_target_kind() 
     let mut candidate = sample_record(4);
     candidate.kind = MemoryKind::Reference;
     candidate.confidence = 0.95;
+    candidate.evidence = EvidenceVector {
+        recall_count: 3,
+        score: 0.72,
+        unique_queries: 2,
+        recency_half_life_days: 14,
+    };
     let mut already_promoted = sample_record(5);
     already_promoted.kind = MemoryKind::Fact;
     already_promoted.confidence = 0.99;
@@ -159,6 +166,11 @@ async fn promote_plan_source_emits_promote_plan_for_confident_non_target_kind() 
         .await
         .expect("plan");
 
+    let expected_evidence = candidate
+        .source_ids
+        .iter()
+        .map(SourceId::as_str)
+        .collect::<Vec<_>>();
     assert_eq!(plans.len(), 1);
     assert_eq!(plans[0].mode, FlushMode::Autonomous);
     assert!(matches!(
@@ -167,13 +179,14 @@ async fn promote_plan_source_emits_promote_plan_for_confident_non_target_kind() 
             from,
             to_kind: MemoryKind::Fact,
             evidence,
-        } if from == &candidate.target_id && evidence.is_empty()
+        } if from == &candidate.target_id
+            && evidence.iter().map(|id| id.0.as_str()).collect::<Vec<_>>() == expected_evidence
     ));
     assert!(matches!(
         plans[0].reason,
         PlanReason::Promote {
             confidence,
-            evidence_count: 0,
+            evidence_count: 1,
         } if (confidence - 0.95).abs() < f32::EPSILON
     ));
 }
@@ -184,6 +197,12 @@ async fn promote_plan_source_reuses_operation_ids_for_same_candidates() {
     let mut candidate = sample_record(10);
     candidate.kind = MemoryKind::Reference;
     candidate.confidence = 0.95;
+    candidate.evidence = EvidenceVector {
+        recall_count: 3,
+        score: 0.72,
+        unique_queries: 2,
+        recency_half_life_days: 14,
+    };
     store.upsert(&candidate).await.expect("seed candidate");
 
     let source = PromotePlanSource::new(

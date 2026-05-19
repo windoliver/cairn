@@ -12,11 +12,13 @@
 
 # Usage
 
+- [Installation](usage/installation.md)
 - [CLI](usage/cli.md)
 - [Backup Registry](usage/backup.md)
 - [Configuration](usage/config.md)
 - [Plugins](usage/plugins.md)
 - [MCP](usage/mcp.md)
+- [Claude Code](usage/claude-code.md)
 - [Cairn Skill](usage/skill.md)
 
 # Reference
@@ -37,6 +39,9 @@
   - [`cairn plugins verify`](reference/generated/commands/plugins-verify.md)
   - [`cairn bootstrap`](reference/generated/commands/bootstrap.md)
   - [`cairn mcp`](reference/generated/commands/mcp.md)
+  - [`cairn setup`](reference/generated/commands/setup.md)
+  - [`cairn setup claude-code`](reference/generated/commands/setup-claude-code.md)
+  - [`cairn setup claude-code remove`](reference/generated/commands/setup-claude-code-remove.md)
   - [`cairn vault`](reference/generated/commands/vault.md)
   - [`cairn vault add`](reference/generated/commands/vault-add.md)
   - [`cairn vault list`](reference/generated/commands/vault-list.md)

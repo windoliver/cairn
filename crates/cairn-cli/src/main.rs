@@ -6,9 +6,10 @@
 //! dispatch.
 
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use cairn_cli::{command, doctor, hooks, identity, plugins, repair, verbs};
+use cairn_cli::{command, doctor, hooks, identity, plugins, repair, setup, verbs};
 use cairn_core::contract::registry::PluginError;
 use cairn_core::generated::envelope::ResponseVerb;
 use clap::ArgMatches;
@@ -140,6 +141,7 @@ fn subcommand_needs_vault_guard(subcommand: Option<(&str, &ArgMatches)>) -> bool
             | "screen"
             | "sensor"
             | "repair"
+            | "setup"
     )
 }
 
@@ -357,6 +359,7 @@ fn main() -> ExitCode {
         }
         Some(("vault", sub)) => run_vault(sub),
         Some(("skill", sub)) => run_skill(sub),
+        Some(("setup", sub)) => run_setup(sub, explicit_vault.as_deref()),
         Some(("admin", sub)) => run_admin(sub, explicit_vault.as_deref()),
         Some(("backup", sub)) => run_backup(sub, explicit_vault.as_deref()),
         Some(("llm", sub)) => run_llm(sub),
@@ -831,7 +834,7 @@ fn run_bootstrap(matches: &ArgMatches) -> ExitCode {
         let cache = cairn_embeddings_local::ModelCache::new(&models_root);
         if !cache.is_present(kind) {
             eprintln!(
-                "cairn bootstrap: fetching embedding model '{}' (~25 MB)…",
+                "cairn bootstrap: fetching embedding model '{}' (~128 MB)…",
                 kind.as_str()
             );
             match cache.fetch(kind) {
@@ -874,6 +877,238 @@ fn run_skill(matches: &ArgMatches) -> ExitCode {
         _ => unreachable!(
             "clap subcommand_required(true) on skill ensures a subcommand is always present"
         ),
+    }
+}
+
+fn run_setup(matches: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
+    match matches.subcommand() {
+        Some(("claude-code", sub)) => run_setup_claude_code(sub, explicit_vault),
+        _ => unreachable!(
+            "clap subcommand_required(true) on setup ensures a subcommand is always present"
+        ),
+    }
+}
+
+fn run_setup_claude_code(matches: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
+    match matches.subcommand() {
+        Some(("remove", sub)) => run_setup_claude_code_remove(matches, sub, explicit_vault),
+        None => run_setup_claude_code_write(matches, explicit_vault),
+        _ => unreachable!("clap only registers setup claude-code remove as a nested subcommand"),
+    }
+}
+
+fn setup_project_dir(matches: &ArgMatches) -> Result<PathBuf, ExitCode> {
+    if let Some(path) = matches.get_one::<PathBuf>("project-dir") {
+        Ok(path.clone())
+    } else {
+        std::env::current_dir().map_err(|e| {
+            eprintln!("cairn setup claude-code: failed to resolve current directory - {e}");
+            ExitCode::from(69)
+        })
+    }
+}
+
+fn setup_home_dir(matches: &ArgMatches) -> Result<PathBuf, ExitCode> {
+    if let Some(path) = matches.get_one::<PathBuf>("home-dir") {
+        Ok(path.clone())
+    } else {
+        std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
+            eprintln!("HOME is not set; pass --home-dir");
+            ExitCode::from(69)
+        })
+    }
+}
+
+fn setup_scope(matches: &ArgMatches) -> setup::claude_code::ClaudeCodeScope {
+    *matches
+        .get_one::<setup::claude_code::ClaudeCodeScope>("scope")
+        .expect("invariant: --scope has a default value")
+}
+
+fn setup_server_name(matches: &ArgMatches) -> String {
+    matches
+        .get_one::<String>("server-name")
+        .expect("invariant: --server-name has a default value")
+        .clone()
+}
+
+fn setup_binary(matches: &ArgMatches) -> Result<PathBuf, ExitCode> {
+    if let Some(path) = matches.get_one::<PathBuf>("binary") {
+        Ok(path.clone())
+    } else {
+        std::env::current_exe().map_err(|e| {
+            eprintln!("cairn setup claude-code: failed to resolve current executable - {e}");
+            ExitCode::from(69)
+        })
+    }
+}
+
+fn setup_project_dir_for_remove(
+    parent: &ArgMatches,
+    child: &ArgMatches,
+) -> Result<PathBuf, ExitCode> {
+    if let Some(path) = child.get_one::<PathBuf>("project-dir") {
+        Ok(path.clone())
+    } else {
+        setup_project_dir(parent)
+    }
+}
+
+fn setup_home_dir_for_remove(parent: &ArgMatches, child: &ArgMatches) -> Result<PathBuf, ExitCode> {
+    if let Some(path) = child.get_one::<PathBuf>("home-dir") {
+        Ok(path.clone())
+    } else {
+        setup_home_dir(parent)
+    }
+}
+
+fn setup_scope_for_remove(
+    parent: &ArgMatches,
+    child: &ArgMatches,
+) -> setup::claude_code::ClaudeCodeScope {
+    if child.value_source("scope") == Some(clap::parser::ValueSource::CommandLine) {
+        setup_scope(child)
+    } else {
+        setup_scope(parent)
+    }
+}
+
+fn setup_server_name_for_remove(parent: &ArgMatches, child: &ArgMatches) -> String {
+    if child.value_source("server-name") == Some(clap::parser::ValueSource::CommandLine) {
+        setup_server_name(child)
+    } else {
+        setup_server_name(parent)
+    }
+}
+
+fn setup_json_for_remove(parent: &ArgMatches, child: &ArgMatches) -> bool {
+    parent.get_flag("json") || child.get_flag("json")
+}
+
+fn resolve_setup_vault(
+    explicit_vault: Option<&str>,
+    project_dir: &Path,
+) -> Result<PathBuf, ExitCode> {
+    let store = registry_store().map_err(|e| {
+        eprintln!("cairn setup claude-code: registry path error - {e:#}");
+        ExitCode::from(78)
+    })?;
+    let vault_root = cairn_cli::vault::resolve_vault(cairn_cli::vault::ResolveOpts {
+        explicit: explicit_vault.map(str::to_owned),
+        cwd: Some(project_dir.to_path_buf()),
+        store: &store,
+    })
+    .map_err(|e| {
+        eprintln!(
+            "cairn setup claude-code: no active Cairn vault resolved - {e:#}. \
+             Pass --vault or run `cairn bootstrap` first."
+        );
+        ExitCode::from(78)
+    })?;
+
+    match verbs::status::probe_vault_binding(&vault_root) {
+        verbs::status::VaultBinding::Bound => Ok(vault_root),
+        verbs::status::VaultBinding::Unbound => {
+            eprintln!(
+                "cairn setup claude-code: vault resolution produced {} which is not a Cairn vault \
+                 (no .cairn/vault.id) - run `cairn bootstrap` first",
+                vault_root.display()
+            );
+            Err(ExitCode::from(78))
+        }
+        verbs::status::VaultBinding::Invalid(reason) => {
+            eprintln!("cairn setup claude-code: vault binding error - {reason}");
+            Err(ExitCode::from(78))
+        }
+    }
+}
+
+fn run_setup_claude_code_write(matches: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
+    let project_dir = match setup_project_dir(matches) {
+        Ok(path) => path,
+        Err(code) => return code,
+    };
+    let home_dir = match setup_home_dir(matches) {
+        Ok(path) => path,
+        Err(code) => return code,
+    };
+    let binary = match setup_binary(matches) {
+        Ok(path) => path,
+        Err(code) => return code,
+    };
+    let vault = match resolve_setup_vault(explicit_vault, &project_dir) {
+        Ok(path) => path,
+        Err(code) => return code,
+    };
+    let opts = setup::claude_code::ClaudeCodeSetupOpts {
+        scope: setup_scope(matches),
+        project_dir,
+        home_dir,
+        server_name: setup_server_name(matches),
+        vault,
+        binary,
+    };
+
+    match setup::claude_code::setup(&opts) {
+        Ok(receipt) => {
+            if matches.get_flag("json") {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&receipt)
+                        .expect("invariant: ClaudeCodeSetupReceipt is always serializable")
+                );
+            } else {
+                println!("{}", setup::claude_code::render_human(&receipt));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("cairn setup claude-code: {e:#}");
+            ExitCode::from(e.exit_code())
+        }
+    }
+}
+
+fn run_setup_claude_code_remove(
+    parent: &ArgMatches,
+    child: &ArgMatches,
+    explicit_vault: Option<&str>,
+) -> ExitCode {
+    let project_dir = match setup_project_dir_for_remove(parent, child) {
+        Ok(path) => path,
+        Err(code) => return code,
+    };
+    if let Err(code) = resolve_setup_vault(explicit_vault, &project_dir) {
+        return code;
+    }
+    let home_dir = match setup_home_dir_for_remove(parent, child) {
+        Ok(path) => path,
+        Err(code) => return code,
+    };
+    let opts = setup::claude_code::ClaudeCodeRemoveOpts {
+        scope: setup_scope_for_remove(parent, child),
+        project_dir,
+        home_dir,
+        server_name: setup_server_name_for_remove(parent, child),
+    };
+
+    match setup::claude_code::remove(&opts) {
+        Ok(receipt) => {
+            if setup_json_for_remove(parent, child) {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&receipt)
+                        .expect("invariant: ClaudeCodeSetupReceipt is always serializable")
+                );
+            } else {
+                println!("{}", setup::claude_code::render_human(&receipt));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("cairn setup claude-code remove: {e:#}");
+            ExitCode::from(e.exit_code())
+        }
     }
 }
 

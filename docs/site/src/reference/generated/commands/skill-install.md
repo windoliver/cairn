@@ -9,7 +9,7 @@ Install the Cairn skill bundle into the harness skill directory (§18.d)
 ```text
 Install the Cairn skill bundle into the harness skill directory (§18.d)
 
-Usage: install [OPTIONS] --harness <HARNESS>
+Usage: cairn skill install [OPTIONS] --harness <HARNESS>
 
 Options:
       --harness <HARNESS>
@@ -23,6 +23,9 @@ Options:
             path
           - cursor:      Cursor harness — registers the skill via .cursorrules
           - custom:      Custom or unknown harness — prints a generic registration hint
+
+      --vault <NAME_OR_PATH>
+          Active vault: name from registry or filesystem path (overrides CAIRN_VAULT)
 
       --target-dir <PATH>
           Override the default install path (~/.cairn/skills/cairn/)

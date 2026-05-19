@@ -9,15 +9,12 @@ Download the configured embedding model (~25 MB) from HuggingFace Hub
 ```text
 Download the configured embedding model (~25 MB) from HuggingFace Hub
 
-Usage: fetch [OPTIONS]
+Usage: cairn admin model fetch [OPTIONS]
 
 Options:
-      --force
-          Re-fetch even if model files are already on disk
-
-      --json
-          Emit JSON output
-
-  -h, --help
-          Print help
+      --force                 Re-fetch even if model files are already on disk
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+      --json                  Emit JSON output
+  -h, --help                  Print help
 ```

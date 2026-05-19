@@ -4,7 +4,10 @@ pub mod consolidation;
 pub use consolidation::{ConsolidationConfig, ConsolidationConfigError};
 
 pub mod dream;
-pub use dream::{DreamConfig, DreamConfigError};
+pub use dream::{
+    DreamCadence, DreamConfig, DreamConfigError, DreamInputWindow, DreamOutputKind, DreamTier,
+    DreamTierConfig, DreamWorkerMode,
+};
 
 pub mod evaluation;
 pub use evaluation::{EvaluationConfig, EvaluationConfigError};
