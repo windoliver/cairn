@@ -85,7 +85,7 @@ jobs:
           cache-bin: "false"
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@787505cde8a44ea468a00478fe52baf23b15bccd # v2.75.21
+        uses: taiki-e/install-action@b550161ef8a7bc4f2a671c0b03a18ac9ccedea1e # v2.79.1
         with:
           tool: cargo-nextest
       - name: cargo nextest run --workspace
@@ -301,7 +301,7 @@ jobs:
           cache-bin: "false"
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@787505cde8a44ea468a00478fe52baf23b15bccd # v2.75.21
+        uses: taiki-e/install-action@b550161ef8a7bc4f2a671c0b03a18ac9ccedea1e # v2.79.1
         with:
           tool: cargo-nextest
       - name: cairn-codegen --check (IDL → generated)
