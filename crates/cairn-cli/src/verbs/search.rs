@@ -876,7 +876,11 @@ async fn resolve_local_embedder(
     // and need deterministic, offline query embedding.
     if std::env::var("CAIRN_MOCK_EMBEDDER").as_deref() == Ok("1") {
         let embedder: Arc<dyn EmbeddingModel> =
-            Arc::new(cairn_embeddings_local::MockEmbedder::new(kind));
+            if std::env::var("CAIRN_MOCK_EMBEDDER_FAIL").as_deref() == Ok("network") {
+                Arc::new(NetworkFailingMockEmbedder { kind })
+            } else {
+                Arc::new(cairn_embeddings_local::MockEmbedder::new(kind))
+            };
         return Ok(embedder);
     }
 
@@ -889,6 +893,33 @@ async fn resolve_local_embedder(
         .map_err(|e| EmbedderInitError::Internal {
             msg: format!("{e:#}"),
         })
+}
+
+struct NetworkFailingMockEmbedder {
+    kind: cairn_core::config::EmbeddingModelKind,
+}
+
+impl EmbeddingModel for NetworkFailingMockEmbedder {
+    fn kind(&self) -> cairn_core::config::EmbeddingModelKind {
+        self.kind
+    }
+
+    fn dim(&self) -> usize {
+        self.kind.dim()
+    }
+
+    fn embed_document(
+        &self,
+        text: &str,
+    ) -> Result<Vec<f32>, cairn_embeddings_local::EmbeddingError> {
+        Ok(cairn_embeddings_local::mock_vector(text))
+    }
+
+    fn embed_query(&self, _text: &str) -> Result<Vec<f32>, cairn_embeddings_local::EmbeddingError> {
+        Err(cairn_embeddings_local::EmbeddingError::Network(
+            "mock semantic provider outage".to_owned(),
+        ))
+    }
 }
 
 #[cfg(feature = "openai")]

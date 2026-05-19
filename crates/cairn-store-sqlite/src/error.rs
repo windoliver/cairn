@@ -143,6 +143,10 @@ pub enum StoreError {
         message: String,
     },
 
+    /// Embedding provider/runtime failed while serving a query.
+    #[error("embedding error: {0}")]
+    Embedding(#[from] cairn_embeddings_local::EmbeddingError),
+
     /// Background `tokio_rusqlite` worker error (channel closed, panic
     /// in the worker thread, etc.).
     #[error("tokio_rusqlite worker error")]

@@ -629,9 +629,7 @@ impl SqliteMemoryStore {
                 .map_err(|e| StoreError::Invariant {
                     what: format!("embedding task panicked: {e}"),
                 })?
-                .map_err(|e| StoreError::Invariant {
-                    what: format!("embed_query failed: {e}"),
-                })?;
+                .map_err(StoreError::Embedding)?;
 
         let query_bytes: Vec<u8> = query_vec.iter().flat_map(|&f| f.to_le_bytes()).collect();
         let limit = args.limit.clamp(1, SEARCH_LIMIT_MAX);

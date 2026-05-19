@@ -123,9 +123,7 @@ impl SqliteMemoryStore {
             Ok(page) => page,
             Err(e) => {
                 tracing::warn!(error = %e, "semantic leg failed; degrading hybrid response");
-                leg_degradations.push(DegradedLeg::Semantic {
-                    reason: DegradationReason::SqlError,
-                });
+                push_semantic_degradation(&mut leg_degradations, semantic_degradation_reason(&e));
                 cairn_core::contract::memory_store::SemanticSearchPage {
                     candidates: Vec::new(),
                     explain: None,
@@ -158,7 +156,21 @@ impl SqliteMemoryStore {
         // embedded once internally; the v0.1 hybrid path accepts the second
         // embed for simplicity. Future optimization: thread the precomputed
         // vector through a `do_search_semantic_with_vector` shortcut.
-        let query_vector = embed_query_blocking(&embedder, args.query.clone()).await?;
+        let (query_vector, force_skip_rerank) =
+            match embed_query_blocking(&embedder, args.query.clone()).await {
+                Ok(v) => (v, false),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "hybrid rerank query embedding failed; skipping cosine rerank"
+                    );
+                    push_semantic_degradation(
+                        &mut leg_degradations,
+                        semantic_degradation_reason(&e),
+                    );
+                    (Vec::new(), true)
+                }
+            };
 
         // Build the dedup'd candidate id list bounded by `rerank_topk` —
         // RRF only re-ranks its own top-K, so fetching more vectors is waste.
@@ -169,22 +181,18 @@ impl SqliteMemoryStore {
         // skip re-rank and surface a `DegradedLeg::Semantic` entry —
         // unless one is already present from `do_search_semantic` itself
         // (don't double-report a single failure mode).
-        let (doc_vectors, skip_rerank) =
+        let (doc_vectors, skip_rerank) = if force_skip_rerank {
+            (HashMap::new(), true)
+        } else {
             match fetch_doc_vectors(conn, combined_ids, args.model_label.clone()).await {
                 Ok(v) => (v, false),
                 Err(e) => {
                     tracing::warn!(error = %e, "fetch_doc_vectors failed; skipping cosine rerank");
-                    if !leg_degradations
-                        .iter()
-                        .any(|d| matches!(d, DegradedLeg::Semantic { .. }))
-                    {
-                        leg_degradations.push(DegradedLeg::Semantic {
-                            reason: DegradationReason::SqlError,
-                        });
-                    }
+                    push_semantic_degradation(&mut leg_degradations, DegradationReason::SqlError);
                     (HashMap::new(), true)
                 }
-            };
+            }
+        };
         let degraded_legs = leg_degradations;
 
         // Run the pure-function orchestration.
@@ -491,6 +499,53 @@ fn scored_from_semantic(candidates: &[SearchCandidate]) -> Vec<ScoredCandidate> 
         .collect()
 }
 
+fn semantic_degradation_reason(error: &StoreError) -> DegradationReason {
+    match error {
+        StoreError::Embedding(cairn_embeddings_local::EmbeddingError::Network(msg)) => {
+            if is_transient_embedding_network_error(msg) {
+                DegradationReason::TransientProviderOutage
+            } else {
+                DegradationReason::SqlError
+            }
+        }
+        _ => DegradationReason::SqlError,
+    }
+}
+
+fn is_transient_embedding_network_error(msg: &str) -> bool {
+    let lower = msg.to_ascii_lowercase();
+    if lower.contains("authentication failed")
+        || lower.contains("http 401")
+        || lower.contains("http 403")
+        || lower.contains("cannot serve")
+        || lower.contains("response parse error")
+        || lower.contains("wrong number of vectors")
+    {
+        return false;
+    }
+    lower.contains("network")
+        || lower.contains("connection")
+        || lower.contains("timeout")
+        || lower.contains("outage")
+        || lower.contains("rate limited")
+        || lower.contains("http 429")
+        || lower.contains("server error")
+        || lower.contains("http 5")
+}
+
+fn push_semantic_degradation(degraded: &mut Vec<DegradedLeg>, reason: DegradationReason) {
+    if let Some(DegradedLeg::Semantic { reason: existing }) = degraded
+        .iter_mut()
+        .find(|leg| matches!(leg, DegradedLeg::Semantic { .. }))
+    {
+        if reason == DegradationReason::TransientProviderOutage {
+            *existing = reason;
+        }
+        return;
+    }
+    degraded.push(DegradedLeg::Semantic { reason });
+}
+
 /// Embed `query` on the blocking pool. Hybrid path embeds once for the
 /// cosine re-rank, distinct from the embed `do_search_semantic` already
 /// performed for the ANN leg — see the docstring on `do_search_hybrid`.
@@ -504,9 +559,7 @@ async fn embed_query_blocking(
         .map_err(|e| StoreError::Invariant {
             what: format!("hybrid embedding task panicked: {e}"),
         })?
-        .map_err(|e| StoreError::Invariant {
-            what: format!("hybrid embed_query failed: {e}"),
-        })
+        .map_err(StoreError::Embedding)
 }
 
 /// Build the union of candidate ids across both legs, deduplicated while
@@ -808,6 +861,25 @@ mod tests {
         blob.extend_from_slice(&[0xAB, 0xCD, 0xEF]); // 3 trailing bytes
         let back = blob_to_f32_vec(&blob);
         assert_eq!(back, v);
+    }
+
+    #[test]
+    fn semantic_degradation_reason_only_marks_transient_provider_failures() {
+        let transient = StoreError::Embedding(cairn_embeddings_local::EmbeddingError::Network(
+            "network error: connection reset".to_owned(),
+        ));
+        assert_eq!(
+            semantic_degradation_reason(&transient),
+            DegradationReason::TransientProviderOutage
+        );
+
+        let auth = StoreError::Embedding(cairn_embeddings_local::EmbeddingError::Network(
+            "authentication failed (HTTP 401)".to_owned(),
+        ));
+        assert_eq!(
+            semantic_degradation_reason(&auth),
+            DegradationReason::SqlError
+        );
     }
 
     #[test]
