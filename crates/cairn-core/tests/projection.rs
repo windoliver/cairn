@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 use cairn_core::domain::{
     projection::{
         ParserProjectionKind, ProjectionCursor, ProjectionItemState, ProjectionLedgerRow,
