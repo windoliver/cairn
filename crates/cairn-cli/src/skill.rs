@@ -662,6 +662,15 @@ fn install_claude_code_integration(
     );
     write_if_changed(&settings_path, &settings, force, &mut receipt)?;
 
+    let project_mcp_path = project_dir.join(".mcp.json");
+    let existing_mcp = read_json_or_empty(&project_mcp_path)?;
+    let merged_mcp = merge_project_mcp_json(existing_mcp)?;
+    let project_mcp = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&merged_mcp).context("serializing project MCP JSON")?
+    );
+    write_if_changed(&project_mcp_path, &project_mcp, force, &mut receipt)?;
+
     write_guarded_markdown(
         &project_dir.join("CLAUDE.md"),
         &render_agent_markdown_block(Agent::ClaudeCode),
@@ -816,19 +825,32 @@ fn merge_claude_settings(mut value: serde_json::Value) -> Result<serde_json::Val
     let root = value
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("Claude Code settings root must be a JSON object"))?;
-    let servers = root
-        .entry("mcpServers")
-        .or_insert_with(|| serde_json::json!({}))
-        .as_object_mut()
-        .ok_or_else(|| anyhow::anyhow!("Claude Code mcpServers must be a JSON object"))?;
-    servers.insert(
-        "cairn".to_owned(),
-        serde_json::json!({"command": "cairn", "args": ["mcp"]}),
-    );
+    insert_cairn_mcp_server(root)?;
 
     let hooks = root.remove("hooks");
     root.insert("hooks".to_owned(), merged_claude_hooks(hooks));
     Ok(value)
+}
+
+fn merge_project_mcp_json(mut value: serde_json::Value) -> Result<serde_json::Value> {
+    let root = value
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("project .mcp.json root must be a JSON object"))?;
+    insert_cairn_mcp_server(root)?;
+    Ok(value)
+}
+
+fn insert_cairn_mcp_server(root: &mut serde_json::Map<String, serde_json::Value>) -> Result<()> {
+    let servers = root
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("mcpServers must be a JSON object"))?;
+    servers.insert(
+        "cairn".to_owned(),
+        serde_json::json!({"command": "cairn", "args": ["mcp"]}),
+    );
+    Ok(())
 }
 
 fn merged_claude_hooks(existing: Option<serde_json::Value>) -> serde_json::Value {
@@ -1212,6 +1234,15 @@ mod tests {
             &std::fs::read_to_string(project.join(".claude/settings.json")).expect("settings"),
         )
         .expect("settings json");
+        let mcp: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(project.join(".mcp.json")).expect("mcp"))
+                .expect("mcp json");
+        assert_eq!(mcp["mcpServers"]["cairn"]["command"], "cairn");
+        assert_eq!(
+            mcp["mcpServers"]["cairn"]["args"],
+            serde_json::json!(["mcp"])
+        );
+
         let command = settings["hooks"]["SessionStart"][0]["command"]
             .as_str()
             .expect("SessionStart command");
