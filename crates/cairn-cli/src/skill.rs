@@ -24,6 +24,94 @@ pub enum Harness {
     Custom,
 }
 
+/// Agents with first-slice generated skill-pack integrations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum Agent {
+    /// Claude Code project integration.
+    #[value(name = "claude-code")]
+    ClaudeCode,
+    /// Codex/OpenCode project instructions.
+    Codex,
+    /// Kiro always-included steering file.
+    Kiro,
+    /// Cursor always-applied rule file.
+    Cursor,
+}
+
+impl Agent {
+    /// First-slice agents in deterministic receipt order.
+    pub const ALL: [Self; 4] = [Self::ClaudeCode, Self::Codex, Self::Kiro, Self::Cursor];
+
+    /// Compatibility mapping from the older issue #68 harness flag.
+    #[must_use]
+    pub const fn from_harness(harness: &Harness) -> Option<Self> {
+        match harness {
+            Harness::ClaudeCode => Some(Self::ClaudeCode),
+            Harness::Codex => Some(Self::Codex),
+            Harness::Cursor => Some(Self::Cursor),
+            Harness::Gemini | Harness::Opencode | Harness::Custom => None,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "Claude Code",
+            Self::Codex => "Codex / OpenCode",
+            Self::Kiro => "Kiro",
+            Self::Cursor => "Cursor",
+        }
+    }
+}
+
+const AGENT_BLOCK_BEGIN: &str = "<!-- BEGIN CAIRN AGENT SKILL -->";
+const AGENT_BLOCK_END: &str = "<!-- END CAIRN AGENT SKILL -->";
+
+fn render_agent_markdown_block(agent: Agent) -> String {
+    format!(
+        "{AGENT_BLOCK_BEGIN}\n\
+         ## Cairn Memory Layer ({label})\n\n\
+         Cairn is the persistent memory and knowledge-graph layer for this project.\n\n\
+         - Use Cairn when persistent memory, recall from previous sessions, or graph-aware connections would help.\n\
+         - Do not use Cairn tools for ordinary file reads or code execution.\n\
+         - Prefer exact `cairn search` / `cairn retrieve` paths when the user names a known record or concept; use graph exploration only for non-obvious connections.\n\
+         - At session start, run `cairn ingest --folder . --mode keyword` in the project root.\n\
+         - Use `cairn assemble_hot` when you need a hot-memory prefix for the current session.\n\
+         - `/remember` maps to `cairn ingest`; `/forget` maps to `cairn forget` after explicit user confirmation.\n\
+         {AGENT_BLOCK_END}\n",
+        label = agent.label()
+    )
+}
+
+fn upsert_guarded_markdown(existing: &str, block: &str) -> String {
+    if let Some(start) = existing.find(AGENT_BLOCK_BEGIN)
+        && let Some(end_rel) = existing[start..].find(AGENT_BLOCK_END)
+    {
+        let end = start + end_rel + AGENT_BLOCK_END.len();
+        let mut out = String::new();
+        out.push_str(&existing[..start]);
+        out.push_str(block.trim_end());
+        out.push('\n');
+        out.push_str(&existing[end..]);
+        return ensure_trailing_newline(out);
+    }
+
+    let mut out = ensure_trailing_newline(existing.to_owned());
+    if !out.trim().is_empty() {
+        out.push('\n');
+    }
+    out.push_str(block.trim_end());
+    out.push('\n');
+    out
+}
+
+fn ensure_trailing_newline(mut text: String) -> String {
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text
+}
+
 /// Returns the harness-specific registration hint for the actual install path.
 ///
 /// The hint uses `target_dir` so that `--target-dir` installs produce a hint
@@ -84,6 +172,43 @@ pub struct InstallReceipt {
     pub files_skipped: Vec<PathBuf>,
     /// Harness-specific registration hint for the user.
     pub registration_hint: String,
+}
+
+/// Options for installing the skill bundle plus generated agent integrations.
+#[derive(Debug, Clone)]
+pub struct AgentInstallOpts {
+    /// Target directory for the shared Cairn skill bundle.
+    pub target_dir: PathBuf,
+    /// Project directory where harness integration files are written.
+    pub project_dir: PathBuf,
+    /// Agents to write integrations for.
+    pub agents: Vec<Agent>,
+    /// Compatibility harness used for the shared bundle registration hint.
+    pub harness: Harness,
+    /// If `true`, overwrite generated files even if the version matches.
+    pub force: bool,
+}
+
+/// Result of a skill bundle plus agent integration install.
+#[derive(Debug, serde::Serialize)]
+pub struct AgentInstallReceipt {
+    /// Receipt from the shared skill bundle install.
+    pub bundle: InstallReceipt,
+    /// Per-agent generated integration writes.
+    pub integrations: Vec<AgentIntegrationReceipt>,
+}
+
+/// Files written for one generated agent integration.
+#[derive(Debug, serde::Serialize)]
+pub struct AgentIntegrationReceipt {
+    /// Agent integration that was installed.
+    pub agent: Agent,
+    /// New files created during the integration write.
+    pub files_created: Vec<PathBuf>,
+    /// Existing files updated during the integration write.
+    pub files_updated: Vec<PathBuf>,
+    /// Files left unchanged because generated content already matched.
+    pub files_skipped: Vec<PathBuf>,
 }
 
 /// Resolves the default install directory (`~/.cairn/skills/cairn/`).
@@ -484,6 +609,227 @@ pub fn install(opts: &InstallOpts) -> Result<InstallReceipt> {
     })
 }
 
+/// Install the Cairn skill bundle and generated agent integration files.
+///
+/// # Errors
+/// Returns an error if the shared bundle install fails, an integration file
+/// cannot be read or written, or a JSON integration file is malformed.
+pub fn install_agent_pack(opts: &AgentInstallOpts) -> Result<AgentInstallReceipt> {
+    let bundle = install(&InstallOpts {
+        target_dir: opts.target_dir.clone(),
+        harness: opts.harness.clone(),
+        force: opts.force,
+    })?;
+    let project_dir = if opts.project_dir.is_absolute() {
+        opts.project_dir.components().collect::<PathBuf>()
+    } else {
+        std::env::current_dir()
+            .context("resolving current directory for project path")?
+            .join(&opts.project_dir)
+            .components()
+            .collect::<PathBuf>()
+    };
+
+    let mut integrations = Vec::new();
+    for agent in &opts.agents {
+        integrations.push(match agent {
+            Agent::ClaudeCode => install_claude_code_integration(&project_dir, opts.force)?,
+            Agent::Codex => install_codex_integration(&project_dir)?,
+            Agent::Kiro => install_kiro_integration(&project_dir, opts.force)?,
+            Agent::Cursor => install_cursor_integration(&project_dir, opts.force)?,
+        });
+    }
+
+    Ok(AgentInstallReceipt {
+        bundle,
+        integrations,
+    })
+}
+
+fn install_claude_code_integration(
+    project_dir: &std::path::Path,
+    force: bool,
+) -> Result<AgentIntegrationReceipt> {
+    let mut receipt = AgentIntegrationReceipt::new(Agent::ClaudeCode);
+    let settings_path = project_dir.join(".claude/settings.json");
+    let existing = read_json_or_empty(&settings_path)?;
+    let merged = merge_claude_settings(existing)?;
+    let settings = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&merged).context("serializing Claude Code settings JSON")?
+    );
+    write_if_changed(&settings_path, &settings, force, &mut receipt)?;
+
+    write_guarded_markdown(
+        &project_dir.join("CLAUDE.md"),
+        &render_agent_markdown_block(Agent::ClaudeCode),
+        &mut receipt,
+    )?;
+    Ok(receipt)
+}
+
+fn install_codex_integration(project_dir: &std::path::Path) -> Result<AgentIntegrationReceipt> {
+    let mut receipt = AgentIntegrationReceipt::new(Agent::Codex);
+    write_guarded_markdown(
+        &project_dir.join("AGENTS.md"),
+        &render_agent_markdown_block(Agent::Codex),
+        &mut receipt,
+    )?;
+    Ok(receipt)
+}
+
+fn install_kiro_integration(
+    project_dir: &std::path::Path,
+    force: bool,
+) -> Result<AgentIntegrationReceipt> {
+    let mut receipt = AgentIntegrationReceipt::new(Agent::Kiro);
+    let content = format!(
+        "---\ninclusion: always\n---\n\n{}",
+        render_agent_markdown_block(Agent::Kiro)
+    );
+    write_generated_guarded_file(
+        &project_dir.join(".kiro/steering/cairn.md"),
+        &content,
+        force,
+        &mut receipt,
+    )?;
+    Ok(receipt)
+}
+
+fn install_cursor_integration(
+    project_dir: &std::path::Path,
+    force: bool,
+) -> Result<AgentIntegrationReceipt> {
+    let mut receipt = AgentIntegrationReceipt::new(Agent::Cursor);
+    let content = format!(
+        "---\nalwaysApply: true\n---\n\n{}",
+        render_agent_markdown_block(Agent::Cursor)
+    );
+    write_generated_guarded_file(
+        &project_dir.join(".cursor/rules/cairn.mdc"),
+        &content,
+        force,
+        &mut receipt,
+    )?;
+    Ok(receipt)
+}
+
+impl AgentIntegrationReceipt {
+    fn new(agent: Agent) -> Self {
+        Self {
+            agent,
+            files_created: Vec::new(),
+            files_updated: Vec::new(),
+            files_skipped: Vec::new(),
+        }
+    }
+}
+
+fn read_json_or_empty(path: &std::path::Path) -> Result<serde_json::Value> {
+    match std::fs::read_to_string(path) {
+        Ok(content) => serde_json::from_str(&content)
+            .with_context(|| format!("parsing JSON from {}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(serde_json::json!({})),
+        Err(e) => Err(anyhow::Error::from(e).context(format!("reading {}", path.display()))),
+    }
+}
+
+fn merge_claude_settings(mut value: serde_json::Value) -> Result<serde_json::Value> {
+    let root = value
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("Claude Code settings root must be a JSON object"))?;
+    let servers = root
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("Claude Code mcpServers must be a JSON object"))?;
+    servers.insert(
+        "cairn".to_owned(),
+        serde_json::json!({"command": "cairn", "args": ["mcp"]}),
+    );
+
+    let hooks = root.remove("hooks");
+    root.insert("hooks".to_owned(), merged_claude_hooks(hooks));
+    Ok(value)
+}
+
+fn merged_claude_hooks(existing: Option<serde_json::Value>) -> serde_json::Value {
+    let mut hooks = existing
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    hooks.insert(
+        "SessionStart".to_owned(),
+        serde_json::json!([
+            {
+                "command": "cairn ingest --folder . --mode keyword"
+            }
+        ]),
+    );
+    serde_json::Value::Object(hooks)
+}
+
+fn write_guarded_markdown(
+    path: &std::path::Path,
+    block: &str,
+    receipt: &mut AgentIntegrationReceipt,
+) -> Result<()> {
+    let existing = read_optional_string(path)?;
+    let updated = upsert_guarded_markdown(existing.as_deref().unwrap_or(""), block);
+    write_if_changed(path, &updated, false, receipt)
+}
+
+fn write_generated_guarded_file(
+    path: &std::path::Path,
+    content: &str,
+    force: bool,
+    receipt: &mut AgentIntegrationReceipt,
+) -> Result<()> {
+    if !force
+        && let Some(existing) = read_optional_string(path)?
+        && !existing.contains(AGENT_BLOCK_BEGIN)
+        && existing.trim() != content.trim()
+    {
+        anyhow::bail!(
+            "{} exists without a Cairn guard; pass --force to overwrite it",
+            path.display()
+        );
+    }
+    write_if_changed(path, content, force, receipt)
+}
+
+fn write_if_changed(
+    path: &std::path::Path,
+    content: &str,
+    force: bool,
+    receipt: &mut AgentIntegrationReceipt,
+) -> Result<()> {
+    let existing = read_optional_string(path)?;
+    if !force && existing.as_deref() == Some(content) {
+        receipt.files_skipped.push(path.to_path_buf());
+        return Ok(());
+    }
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating directory {}", parent.display()))?;
+    }
+    std::fs::write(path, content).with_context(|| format!("writing {}", path.display()))?;
+    if existing.is_some() {
+        receipt.files_updated.push(path.to_path_buf());
+    } else {
+        receipt.files_created.push(path.to_path_buf());
+    }
+    Ok(())
+}
+
+fn read_optional_string(path: &std::path::Path) -> Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(content) => Ok(Some(content)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(anyhow::Error::from(e).context(format!("reading {}", path.display()))),
+    }
+}
+
 /// Renders a human-readable summary of an install receipt.
 #[must_use]
 pub fn render_human(receipt: &InstallReceipt) -> String {
@@ -523,6 +869,26 @@ pub fn render_human(receipt: &InstallReceipt) -> String {
         }
     }
 
+    lines.join("\n")
+}
+
+/// Renders a human-readable summary of an agent-pack install receipt.
+#[must_use]
+pub fn render_agent_human(receipt: &AgentInstallReceipt) -> String {
+    let mut lines = vec![render_human(&receipt.bundle)];
+    for integration in &receipt.integrations {
+        lines.push(String::new());
+        lines.push(format!("{} integration:", integration.agent.label()));
+        for path in &integration.files_created {
+            lines.push(format!("  {}  [created]", path.display()));
+        }
+        for path in &integration.files_updated {
+            lines.push(format!("  {}  [updated]", path.display()));
+        }
+        for path in &integration.files_skipped {
+            lines.push(format!("  {}  [skipped]", path.display()));
+        }
+    }
     lines.join("\n")
 }
 
@@ -617,6 +983,167 @@ mod tests {
                 "hint for {harness:?} should mention '{expected_fragment}' — got: {hint:?}"
             );
         }
+    }
+
+    #[test]
+    fn agent_values_render_expected_fragments() {
+        assert_eq!(
+            Agent::ClaudeCode
+                .to_possible_value()
+                .expect("possible value")
+                .get_name(),
+            "claude-code"
+        );
+        assert_eq!(
+            Agent::Codex
+                .to_possible_value()
+                .expect("possible value")
+                .get_name(),
+            "codex"
+        );
+        assert_eq!(
+            Agent::Kiro
+                .to_possible_value()
+                .expect("possible value")
+                .get_name(),
+            "kiro"
+        );
+        assert_eq!(
+            Agent::Cursor
+                .to_possible_value()
+                .expect("possible value")
+                .get_name(),
+            "cursor"
+        );
+
+        let block = render_agent_markdown_block(Agent::Codex);
+        assert!(block.contains("<!-- BEGIN CAIRN AGENT SKILL -->"));
+        assert!(block.contains("cairn ingest --folder . --mode keyword"));
+        assert!(
+            block.contains("Do not use Cairn tools for ordinary file reads or code execution.")
+        );
+        assert!(block.contains("/remember"));
+        assert!(block.contains("/forget"));
+    }
+
+    #[test]
+    fn harness_maps_to_first_slice_agent_when_supported() {
+        assert_eq!(
+            Agent::from_harness(&Harness::ClaudeCode),
+            Some(Agent::ClaudeCode)
+        );
+        assert_eq!(Agent::from_harness(&Harness::Codex), Some(Agent::Codex));
+        assert_eq!(Agent::from_harness(&Harness::Cursor), Some(Agent::Cursor));
+        assert_eq!(Agent::from_harness(&Harness::Gemini), None);
+        assert_eq!(Agent::from_harness(&Harness::Opencode), None);
+        assert_eq!(Agent::from_harness(&Harness::Custom), None);
+    }
+
+    #[test]
+    fn guarded_markdown_appends_to_user_content() {
+        let original = "# Existing\n\nKeep me.\n";
+        let block = render_agent_markdown_block(Agent::Codex);
+        let updated = upsert_guarded_markdown(original, &block);
+
+        assert!(updated.starts_with(original));
+        assert!(updated.contains("<!-- BEGIN CAIRN AGENT SKILL -->"));
+        assert!(updated.ends_with('\n'));
+    }
+
+    #[test]
+    fn guarded_markdown_replaces_existing_block_once() {
+        let old = "# Existing\n\n<!-- BEGIN CAIRN AGENT SKILL -->\nold\n<!-- END CAIRN AGENT SKILL -->\n\nTail\n";
+        let block = render_agent_markdown_block(Agent::Codex);
+        let updated = upsert_guarded_markdown(old, &block);
+
+        assert!(updated.contains("# Existing"));
+        assert!(updated.contains("Tail"));
+        assert!(!updated.contains("\nold\n"));
+        assert_eq!(
+            updated.matches("<!-- BEGIN CAIRN AGENT SKILL -->").count(),
+            1
+        );
+    }
+
+    #[test]
+    fn install_agent_pack_codex_writes_agents_md_and_bundle() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&project).expect("project dir");
+        std::fs::write(project.join("AGENTS.md"), "# Project\n").expect("seed agents");
+        let target = tmp.path().join("skills/cairn");
+
+        let receipt = install_agent_pack(&AgentInstallOpts {
+            target_dir: target.clone(),
+            project_dir: project.clone(),
+            agents: vec![Agent::Codex],
+            harness: Harness::Codex,
+            force: false,
+        })
+        .expect("install codex agent pack");
+
+        assert!(target.join("SKILL.md").exists());
+        let agents = std::fs::read_to_string(project.join("AGENTS.md")).expect("read agents");
+        assert!(agents.contains("# Project"));
+        assert!(agents.contains("<!-- BEGIN CAIRN AGENT SKILL -->"));
+        assert_eq!(receipt.integrations.len(), 1);
+        assert_eq!(receipt.integrations[0].agent, Agent::Codex);
+    }
+
+    #[test]
+    fn install_agent_pack_all_writes_first_slice_files() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&project).expect("project dir");
+        let target = tmp.path().join("skills/cairn");
+
+        let receipt = install_agent_pack(&AgentInstallOpts {
+            target_dir: target,
+            project_dir: project.clone(),
+            agents: Agent::ALL.to_vec(),
+            harness: Harness::ClaudeCode,
+            force: false,
+        })
+        .expect("install all agent packs");
+
+        assert!(project.join(".claude/settings.json").exists());
+        assert!(project.join("CLAUDE.md").exists());
+        assert!(project.join("AGENTS.md").exists());
+        assert!(project.join(".kiro/steering/cairn.md").exists());
+        assert!(project.join(".cursor/rules/cairn.mdc").exists());
+        assert_eq!(receipt.integrations.len(), 4);
+    }
+
+    #[test]
+    fn claude_settings_merge_preserves_unrelated_keys() {
+        let existing = serde_json::json!({
+            "theme": "dark",
+            "mcpServers": {
+                "other": {"command": "other", "args": []}
+            }
+        });
+        let merged = merge_claude_settings(existing).expect("merge settings");
+
+        assert_eq!(merged["theme"], "dark");
+        assert_eq!(merged["mcpServers"]["other"]["command"], "other");
+        assert_eq!(merged["mcpServers"]["cairn"]["command"], "cairn");
+        assert_eq!(
+            merged["mcpServers"]["cairn"]["args"],
+            serde_json::json!(["mcp"])
+        );
+        let rendered = serde_json::to_string(&merged).expect("json");
+        assert!(rendered.contains("cairn ingest --folder . --mode keyword"));
+    }
+
+    #[test]
+    fn agent_markdown_block_snapshot() {
+        insta::assert_snapshot!(render_agent_markdown_block(Agent::Codex));
+    }
+
+    #[test]
+    fn claude_settings_snapshot() {
+        let merged = merge_claude_settings(serde_json::json!({})).expect("merge");
+        insta::assert_json_snapshot!(merged);
     }
 
     // Task 7: idempotency and version-same skip tests

@@ -1,0 +1,21 @@
+---
+source: crates/cairn-cli/src/skill.rs
+expression: merged
+---
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "command": "cairn ingest --folder . --mode keyword"
+      }
+    ]
+  },
+  "mcpServers": {
+    "cairn": {
+      "args": [
+        "mcp"
+      ],
+      "command": "cairn"
+    }
+  }
+}

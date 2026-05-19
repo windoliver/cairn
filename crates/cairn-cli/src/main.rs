@@ -1097,11 +1097,6 @@ fn run_setup_claude_code_remove(
 }
 
 fn run_skill_install(matches: &ArgMatches) -> ExitCode {
-    let harness = matches
-        .get_one::<cairn_cli::skill::Harness>("harness")
-        .expect("invariant: --harness is required by clap")
-        .clone();
-
     let target_dir = if let Some(path) = matches.get_one::<String>("target-dir") {
         std::path::PathBuf::from(path)
     } else {
@@ -1116,6 +1111,64 @@ fn run_skill_install(matches: &ArgMatches) -> ExitCode {
 
     let force = matches.get_flag("force");
     let json = matches.get_flag("json");
+
+    if matches.get_flag("all")
+        || matches
+            .get_one::<cairn_cli::skill::Agent>("agent")
+            .is_some()
+    {
+        let agents = if matches.get_flag("all") {
+            cairn_cli::skill::Agent::ALL.to_vec()
+        } else {
+            vec![
+                *matches
+                    .get_one::<cairn_cli::skill::Agent>("agent")
+                    .expect("invariant: skill-install-target requires --agent when present"),
+            ]
+        };
+        let harness = agents
+            .first()
+            .map(agent_default_harness)
+            .unwrap_or(cairn_cli::skill::Harness::ClaudeCode);
+        let project_dir = match std::env::current_dir() {
+            Ok(path) => path,
+            Err(e) => {
+                eprintln!("cairn skill install: failed to resolve current directory - {e}");
+                return ExitCode::from(69);
+            }
+        };
+        let opts = cairn_cli::skill::AgentInstallOpts {
+            target_dir,
+            project_dir,
+            agents,
+            harness,
+            force,
+        };
+
+        return match cairn_cli::skill::install_agent_pack(&opts) {
+            Ok(receipt) => {
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&receipt)
+                            .expect("invariant: AgentInstallReceipt is always serializable")
+                    );
+                } else {
+                    println!("{}", cairn_cli::skill::render_agent_human(&receipt));
+                }
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("cairn skill install: {e:#}");
+                ExitCode::from(74)
+            }
+        };
+    }
+
+    let harness = matches
+        .get_one::<cairn_cli::skill::Harness>("harness")
+        .expect("invariant: skill-install-target requires --harness without --agent/--all")
+        .clone();
 
     let opts = cairn_cli::skill::InstallOpts {
         target_dir,
@@ -1140,6 +1193,15 @@ fn run_skill_install(matches: &ArgMatches) -> ExitCode {
             eprintln!("cairn skill install: {e:#}");
             ExitCode::from(74) // EX_IOERR
         }
+    }
+}
+
+fn agent_default_harness(agent: &cairn_cli::skill::Agent) -> cairn_cli::skill::Harness {
+    match agent {
+        cairn_cli::skill::Agent::ClaudeCode => cairn_cli::skill::Harness::ClaudeCode,
+        cairn_cli::skill::Agent::Codex => cairn_cli::skill::Harness::Codex,
+        cairn_cli::skill::Agent::Kiro => cairn_cli::skill::Harness::Custom,
+        cairn_cli::skill::Agent::Cursor => cairn_cli::skill::Harness::Cursor,
     }
 }
 
