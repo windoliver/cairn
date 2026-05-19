@@ -31,6 +31,11 @@
         "name": "cursor",
         "long": "cursor",
         "value_source": "string"
+      },
+      {
+        "name": "bm25s",
+        "long": "bm25s",
+        "value_source": "enum(auto,required,disabled)"
       }
     ],
     "positional": {
@@ -104,6 +109,21 @@
         "cursor": {
           "$ref": "../common/primitives.json#/$defs/Cursor",
           "description": "Opaque continuation token from a prior search Data.next_cursor."
+        },
+        "ranking": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "bm25s": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "required",
+                "disabled"
+              ],
+              "default": "auto"
+            }
+          }
         }
       }
     },
@@ -131,7 +151,8 @@
       "required": [
         "record_id",
         "score",
-        "trust"
+        "trust",
+        "ranking_signals"
       ],
       "properties": {
         "record_id": {
@@ -153,6 +174,37 @@
             "unverified",
             "unknown"
           ]
+        },
+        "ranking_signals": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "used"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "enum": [
+                  "sqlite_fts5",
+                  "sqlite_vec",
+                  "nexus_bm25s"
+                ]
+              },
+              "used": {
+                "type": "boolean"
+              },
+              "score": {
+                "type": "number"
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
         }
       }
     },

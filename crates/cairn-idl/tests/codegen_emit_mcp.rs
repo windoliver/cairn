@@ -315,3 +315,73 @@ fn status_schema_requires_health() {
     );
     assert!(parsed.pointer("/properties/health").is_some());
 }
+
+#[test]
+fn search_schema_exposes_bm25s_ranking_preference() {
+    let files = emit_mcp::emit(&doc()).unwrap();
+    let search = files
+        .iter()
+        .find(|file| {
+            file.path
+                .ends_with("crates/cairn-mcp/src/generated/schemas/verbs/search.json")
+        })
+        .expect("search MCP schema");
+    let parsed: serde_json::Value = serde_json::from_slice(&search.bytes).expect("search json");
+
+    assert_eq!(
+        parsed["$defs"]["Args"]["properties"]["ranking"]["properties"]["bm25s"]["enum"],
+        serde_json::json!(["auto", "required", "disabled"])
+    );
+    assert!(
+        parsed["$defs"]["Hit"]["properties"]["ranking_signals"].is_object(),
+        "{parsed:#}"
+    );
+}
+
+#[test]
+fn lint_schema_exposes_projection_finding_kinds() {
+    let files = emit_mcp::emit(&doc()).unwrap();
+    let lint = files
+        .iter()
+        .find(|file| {
+            file.path
+                .ends_with("crates/cairn-mcp/src/generated/schemas/verbs/lint.json")
+        })
+        .expect("lint MCP schema");
+    let parsed: serde_json::Value = serde_json::from_slice(&lint.bytes).expect("lint json");
+    let kinds =
+        &parsed["$defs"]["Data"]["properties"]["findings"]["items"]["properties"]["kind"]["enum"];
+
+    assert!(
+        kinds
+            .as_array()
+            .expect("kind enum")
+            .contains(&serde_json::json!("projection_stale"))
+    );
+    assert!(
+        kinds
+            .as_array()
+            .expect("kind enum")
+            .contains(&serde_json::json!("projection_parser_failed"))
+    );
+}
+
+#[test]
+fn status_schema_exposes_projection_detail() {
+    let files = emit_mcp::emit(&doc()).unwrap();
+    let status = files
+        .iter()
+        .find(|file| {
+            file.path
+                .ends_with("crates/cairn-mcp/src/generated/schemas/prelude/status.json")
+        })
+        .expect("status MCP schema");
+    let parsed: serde_json::Value = serde_json::from_slice(&status.bytes).expect("status json");
+
+    assert!(
+        parsed["properties"]["health"]["properties"]["nexus_projection"]["properties"]
+            ["projection_detail"]
+            .is_object(),
+        "{parsed:#}"
+    );
+}

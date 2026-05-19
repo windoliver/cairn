@@ -43,6 +43,21 @@
           "minLength": 1,
           "type": "string"
         },
+        "ranking": {
+          "additionalProperties": false,
+          "properties": {
+            "bm25s": {
+              "default": "auto",
+              "enum": [
+                "auto",
+                "required",
+                "disabled"
+              ],
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
         "scope": {
           "$ref": "../common/scope_filter.json",
           "description": "Optional narrowing of the already-authorized signed-intent scope. Reuses the closed scope filter grammar — unknown keys and empty values reject at schema validation so a typo cannot silently widen reads."
@@ -78,6 +93,37 @@
         "citation": {
           "type": "string"
         },
+        "ranking_signals": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "enum": [
+                  "sqlite_fts5",
+                  "sqlite_vec",
+                  "nexus_bm25s"
+                ],
+                "type": "string"
+              },
+              "reason": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "score": {
+                "type": "number"
+              },
+              "used": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "name",
+              "used"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
         "record_id": {
           "$ref": "../common/primitives.json#/$defs/Ulid"
         },
@@ -99,7 +145,8 @@
       "required": [
         "record_id",
         "score",
-        "trust"
+        "trust",
+        "ranking_signals"
       ],
       "type": "object"
     },

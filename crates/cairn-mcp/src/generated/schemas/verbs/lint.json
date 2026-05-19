@@ -3,6 +3,11 @@
     "Args": {
       "additionalProperties": false,
       "properties": {
+        "fix": {
+          "description": "When true, repairs projection findings that are rebuildable from .cairn/cairn.db.",
+          "type": "boolean",
+          "x-cairn-auth": "write_capability"
+        },
         "write_report": {
           "description": "When true, writes .cairn/lint-report.md.",
           "type": "boolean",
@@ -24,7 +29,12 @@
                   "orphan",
                   "stale",
                   "missing_concept",
-                  "data_gap"
+                  "data_gap",
+                  "projection_stale",
+                  "projection_missing",
+                  "projection_parser_failed",
+                  "projection_hash_mismatch",
+                  "projection_sidecar_unavailable"
                 ],
                 "type": "string"
               },
@@ -32,8 +42,19 @@
                 "minLength": 1,
                 "type": "string"
               },
+              "projection_target": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "rebuildable": {
+                "type": "boolean"
+              },
               "record_id": {
                 "$ref": "../common/primitives.json#/$defs/Ulid"
+              },
+              "source_hash": {
+                "minLength": 1,
+                "type": "string"
               }
             },
             "required": [
@@ -56,6 +77,18 @@
               "type": "integer"
             },
             "orphans": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "projection_failed": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "projection_missing": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "projection_stale": {
               "minimum": 0,
               "type": "integer"
             },
@@ -93,6 +126,11 @@
       {
         "long": "write-report",
         "name": "write_report",
+        "value_source": "bool"
+      },
+      {
+        "long": "fix",
+        "name": "fix",
         "value_source": "bool"
       }
     ]

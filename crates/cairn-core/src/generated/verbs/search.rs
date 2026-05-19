@@ -8,6 +8,26 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
+pub enum HitRankingSignalsName {
+    SqliteFts5,
+    SqliteVec,
+    NexusBm25s,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HitRankingSignals {
+    pub name: HitRankingSignalsName,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<f64>,
+    pub used: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum HitTrust {
     Verified,
     Unverified,
@@ -19,6 +39,7 @@ pub enum HitTrust {
 pub struct Hit {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub citation: Option<String>,
+    pub ranking_signals: Vec<HitRankingSignals>,
     pub record_id: crate::generated::common::Ulid,
     pub score: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -218,6 +239,22 @@ impl SearchArgsMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum SearchArgsRankingBm25s {
+    Auto,
+    Required,
+    Disabled,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SearchArgsRanking {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bm25s: Option<SearchArgsRankingBm25s>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SearchArgs {
@@ -232,6 +269,8 @@ pub struct SearchArgs {
     pub limit: Option<i64>,
     pub mode: SearchArgsMode,
     pub query: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ranking: Option<SearchArgsRanking>,
     /// Optional narrowing of the already-authorized signed-intent scope. Reuses the closed scope filter grammar — unknown keys and empty values reject at schema validation so a typo cannot silently widen reads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<crate::generated::common::ScopeFilter>,
@@ -251,6 +290,8 @@ struct RawSearchArgs {
     limit: Option<i64>,
     mode: SearchArgsMode,
     query: String,
+    #[serde(default)]
+    ranking: Option<SearchArgsRanking>,
     /// Optional narrowing of the already-authorized signed-intent scope. Reuses the closed scope filter grammar — unknown keys and empty values reject at schema validation so a typo cannot silently widen reads.
     #[serde(default)]
     scope: Option<crate::generated::common::ScopeFilter>,
@@ -270,6 +311,7 @@ impl ::core::convert::TryFrom<RawSearchArgs> for SearchArgs {
             limit: raw.limit,
             mode: raw.mode,
             query: raw.query,
+            ranking: raw.ranking,
             scope: raw.scope,
         })
     }

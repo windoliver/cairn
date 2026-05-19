@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LintArgs {
+    /// When true, repairs projection findings that are rebuildable from .cairn/cairn.db.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fix: Option<bool>,
     /// When true, writes .cairn/lint-report.md.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub write_report: Option<bool>,
@@ -22,6 +25,11 @@ pub enum LintDataFindingsKind {
     Stale,
     MissingConcept,
     DataGap,
+    ProjectionStale,
+    ProjectionMissing,
+    ProjectionParserFailed,
+    ProjectionHashMismatch,
+    ProjectionSidecarUnavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -30,7 +38,13 @@ pub struct LintDataFindings {
     pub kind: LintDataFindingsKind,
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection_target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rebuildable: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub record_id: Option<crate::generated::common::Ulid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -40,6 +54,12 @@ pub struct LintDataSummary {
     pub contradictions: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orphans: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection_failed: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection_missing: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection_stale: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stale: Option<u64>,
     pub total: u64,

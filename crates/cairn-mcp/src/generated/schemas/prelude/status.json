@@ -330,6 +330,71 @@
               "minLength": 1,
               "type": "string"
             },
+            "projection_detail": {
+              "additionalProperties": false,
+              "properties": {
+                "last_successful_rebuild_at": {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                "targets": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "current": {
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "failed": {
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "lagging": {
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "reason": {
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "state": {
+                        "enum": [
+                          "current",
+                          "stale",
+                          "failed",
+                          "missing"
+                        ],
+                        "type": "string"
+                      },
+                      "target": {
+                        "enum": [
+                          "bm25s"
+                        ],
+                        "type": "string"
+                      },
+                      "total": {
+                        "minimum": 0,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "target",
+                      "state",
+                      "total",
+                      "current",
+                      "lagging",
+                      "failed"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "targets"
+              ],
+              "type": "object"
+            },
             "reason": {
               "minLength": 1,
               "type": "string"

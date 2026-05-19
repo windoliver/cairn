@@ -27,6 +27,7 @@ pub fn search_subcommand() -> clap::Command {
         .arg(clap::Arg::new("filters").long("filters").value_name("JSON"))
         .arg(clap::Arg::new("citations").long("citations").value_name("ENUM").value_parser(["on", "compact", "off"]))
         .arg(clap::Arg::new("cursor").long("cursor").value_name("STRING"))
+        .arg(clap::Arg::new("bm25s").long("bm25s").value_name("ENUM").value_parser(["auto", "required", "disabled"]))
         .arg(clap::Arg::new("query").help("Free-text query string.").required(false))
 }
 
@@ -87,6 +88,7 @@ pub fn lint_subcommand() -> clap::Command {
     clap::Command::new("lint")
         .about("cairn.mcp.v1 verb: lint")
         .arg(clap::Arg::new("write_report").long("write-report").action(clap::ArgAction::SetTrue))
+        .arg(clap::Arg::new("fix").long("fix").action(clap::ArgAction::SetTrue))
 }
 
 /// `cairn forget` subcommand builder.

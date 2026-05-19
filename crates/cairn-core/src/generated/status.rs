@@ -26,6 +26,44 @@ pub struct StatusResponseHealthAuthorityDb {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
+pub enum StatusResponseHealthNexusProjectionProjectionDetailTargetsState {
+    Current,
+    Stale,
+    Failed,
+    Missing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatusResponseHealthNexusProjectionProjectionDetailTargetsTarget {
+    Bm25s,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusResponseHealthNexusProjectionProjectionDetailTargets {
+    pub current: u64,
+    pub failed: u64,
+    pub lagging: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub state: StatusResponseHealthNexusProjectionProjectionDetailTargetsState,
+    pub target: StatusResponseHealthNexusProjectionProjectionDetailTargetsTarget,
+    pub total: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusResponseHealthNexusProjectionProjectionDetail {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_successful_rebuild_at: Option<String>,
+    pub targets: Vec<StatusResponseHealthNexusProjectionProjectionDetailTargets>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum StatusResponseHealthNexusProjectionState {
     Disabled,
     Healthy,
@@ -39,6 +77,8 @@ pub struct StatusResponseHealthNexusProjection {
     pub data_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection_detail: Option<StatusResponseHealthNexusProjectionProjectionDetail>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     pub state: StatusResponseHealthNexusProjectionState,
