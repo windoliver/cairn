@@ -9,12 +9,11 @@ List registered backups
 ```text
 List registered backups
 
-Usage: list [OPTIONS]
+Usage: cairn backup list [OPTIONS]
 
 Options:
-      --json
-          Emit JSON output
-
-  -h, --help
-          Print help
+      --json                  Emit JSON output
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+  -h, --help                  Print help
 ```

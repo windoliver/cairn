@@ -9,16 +9,14 @@ Remove a backup registry entry by digest
 ```text
 Remove a backup registry entry by digest
 
-Usage: forget [OPTIONS] <DIGEST>
+Usage: cairn backup forget [OPTIONS] <DIGEST>
 
 Arguments:
-  <DIGEST>
-          Registered backup digest to remove
+  <DIGEST>  Registered backup digest to remove
 
 Options:
-      --json
-          Emit JSON output
-
-  -h, --help
-          Print help
+      --json                  Emit JSON output
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+  -h, --help                  Print help
 ```

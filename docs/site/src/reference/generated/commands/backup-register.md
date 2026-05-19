@@ -9,22 +9,16 @@ Register an existing Cairn backup artifact for forget replay
 ```text
 Register an existing Cairn backup artifact for forget replay
 
-Usage: register [OPTIONS] <PATH>
+Usage: cairn backup register [OPTIONS] <PATH>
 
 Arguments:
-  <PATH>
-          Backup artifact root to register
+  <PATH>  Backup artifact root to register
 
 Options:
-      --kind <KIND>
-          Backup kind recorded in the registry
-
-          [default: export]
-          [possible values: snapshot, wal-shipping, export]
-
-      --json
-          Emit JSON output
-
-  -h, --help
-          Print help
+      --kind <KIND>           Backup kind recorded in the registry [default: export] [possible
+                              values: snapshot, wal-shipping, export]
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+      --json                  Emit JSON output
+  -h, --help                  Print help
 ```

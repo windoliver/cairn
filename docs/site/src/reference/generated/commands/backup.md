@@ -9,7 +9,7 @@ Audit and manage registered vault backups
 ```text
 Audit and manage registered vault backups
 
-Usage: backup <COMMAND>
+Usage: cairn backup [OPTIONS] <COMMAND>
 
 Commands:
   register  Register an existing Cairn backup artifact for forget replay
@@ -18,8 +18,9 @@ Commands:
   help      Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help
-          Print help
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+  -h, --help                  Print help
 ```
 
 ## Subcommands
