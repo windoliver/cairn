@@ -207,6 +207,7 @@ EXCLUSIVITY: this is the canonical vault-health surface
         capability: None,
         auth: "read_only",
         auth_overrides: &[
+            AuthOverride { path: "fix", auth: "write_capability" },
             AuthOverride { path: "write_report", auth: "write_capability" },
         ],
         capability_overrides: &[],
