@@ -749,8 +749,7 @@ mod tests {
 
         let listener = TcpListener::bind(("127.0.0.1", port)).unwrap();
         fs::write(data_dir.join("helper-ready"), b"ready").unwrap();
-        for stream in listener.incoming() {
-            let mut stream = stream.unwrap();
+        if let Ok((mut stream, _)) = listener.accept() {
             let mut buf = [0_u8; 512];
             let _ = stream.read(&mut buf);
             let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
