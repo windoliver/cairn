@@ -86,6 +86,9 @@ pub struct NexusSupervisor {
     pub child: Child,
     /// Supervisor configuration used to launch the child.
     pub config: SupervisorConfig,
+    /// Isolated child process group used for descendant cleanup on Unix.
+    #[cfg(unix)]
+    process_group: Option<i32>,
 }
 
 impl NexusSupervisor {
@@ -108,7 +111,14 @@ impl NexusSupervisor {
             command.process_group(0);
         }
         let child = command.spawn()?;
-        Ok(Self { child, config })
+        #[cfg(unix)]
+        let process_group = isolated_child_process_group(child.id());
+        Ok(Self {
+            child,
+            config,
+            #[cfg(unix)]
+            process_group,
+        })
     }
 
     /// Poll the configured HTTP health endpoint until it is healthy or times out.
@@ -185,10 +195,13 @@ impl NexusSupervisor {
         let deadline = Instant::now() + self.config.shutdown_timeout;
         while Instant::now() < deadline {
             if self.child.try_wait()?.is_some() {
-                #[cfg(not(unix))]
-                return Ok(());
                 #[cfg(unix)]
-                break;
+                {
+                    if self.process_group.is_some() {
+                        break;
+                    }
+                }
+                return Ok(());
             }
             thread::sleep(Duration::from_millis(10));
         }
@@ -200,16 +213,14 @@ impl NexusSupervisor {
 
     #[cfg(unix)]
     fn terminate_gracefully(&mut self) -> std::io::Result<()> {
-        let status = Command::new("kill")
-            .arg("-TERM")
-            .arg(format!("-{}", self.child.id()))
-            .status()?;
-        if status.success() || self.child.try_wait()?.is_some() {
-            Ok(())
+        if let Some(process_group) = self.process_group {
+            match signal_process_group(process_group, UnixSignal::Term) {
+                Ok(()) => Ok(()),
+                Err(_) if self.child.try_wait()?.is_some() => Ok(()),
+                Err(err) => Err(err),
+            }
         } else {
-            Err(std::io::Error::other(format!(
-                "kill -TERM exited with status {status}"
-            )))
+            self.child.kill()
         }
     }
 
@@ -220,12 +231,12 @@ impl NexusSupervisor {
 
     #[cfg(unix)]
     fn force_kill(&mut self) -> std::io::Result<()> {
-        let status = Command::new("kill")
-            .arg("-KILL")
-            .arg(format!("-{}", self.child.id()))
-            .status()?;
-        if status.success() || self.child.try_wait()?.is_some() {
-            Ok(())
+        if let Some(process_group) = self.process_group {
+            match signal_process_group(process_group, UnixSignal::Kill) {
+                Ok(()) => Ok(()),
+                Err(_) if self.child.try_wait()?.is_some() => Ok(()),
+                Err(_) => self.child.kill(),
+            }
         } else {
             self.child.kill()
         }
@@ -235,6 +246,90 @@ impl NexusSupervisor {
     fn force_kill(&mut self) -> std::io::Result<()> {
         self.child.kill()
     }
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug)]
+enum UnixSignal {
+    Term,
+    Kill,
+}
+
+#[cfg(unix)]
+impl UnixSignal {
+    fn number(self) -> i32 {
+        match self {
+            Self::Term => 15,
+            Self::Kill => 9,
+        }
+    }
+}
+
+#[cfg(unix)]
+fn isolated_child_process_group(child_pid: u32) -> Option<i32> {
+    let child_pid = i32::try_from(child_pid).ok()?;
+    let process_group = process_group_for_pid(child_pid).ok()?;
+    if process_group <= 1 {
+        return None;
+    }
+    let current_process_group = current_process_group().ok()?;
+    if process_group == current_process_group || process_group != child_pid {
+        return None;
+    }
+    Some(process_group)
+}
+
+#[cfg(unix)]
+fn signal_process_group(process_group: i32, signal: UnixSignal) -> std::io::Result<()> {
+    if process_group <= 1 || Some(process_group) == current_process_group().ok() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "refusing to signal unsafe process group",
+        ));
+    }
+    let status = Command::new("kill")
+        .arg(format!("-{}", signal.number()))
+        .arg(format!("-{process_group}"))
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "kill exited with status {status}"
+        )))
+    }
+}
+
+#[cfg(unix)]
+fn current_process_group() -> std::io::Result<i32> {
+    let pid = i32::try_from(std::process::id()).map_err(|err| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("current process id does not fit i32: {err}"),
+        )
+    })?;
+    process_group_for_pid(pid)
+}
+
+#[cfg(unix)]
+fn process_group_for_pid(pid: i32) -> std::io::Result<i32> {
+    let output = Command::new("ps")
+        .args(["-o", "pgid=", "-p", &pid.to_string()])
+        .output()?;
+    if !output.status.success() {
+        return Err(std::io::Error::other(format!(
+            "ps exited with status {}",
+            output.status
+        )));
+    }
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+    stdout.trim().parse::<i32>().map_err(|err| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("parsing process group from ps output {stdout:?}: {err}"),
+        )
+    })
 }
 
 fn derive_vault_dir(sqlite_db: &Path) -> std::io::Result<&Path> {
@@ -820,6 +915,27 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn supervisor_records_isolated_process_group_before_group_signaling() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join(".cairn").join("nexus-data");
+        let mut supervisor = NexusSupervisor::start(supervisor_config(
+            &data_dir,
+            closed_endpoint(),
+            Duration::from_millis(100),
+        ))
+        .unwrap();
+
+        let process_group = supervisor
+            .process_group
+            .expect("supervisor should record an isolated child process group");
+
+        assert_eq!(process_group, i32::try_from(supervisor.child.id()).unwrap());
+        assert_ne!(process_group, current_process_group().unwrap());
+        supervisor.stop().unwrap();
     }
 
     #[test]
