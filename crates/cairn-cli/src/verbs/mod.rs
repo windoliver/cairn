@@ -15,6 +15,7 @@ pub mod admin_snapshot;
 pub mod admin_workflow;
 pub mod admin_zero_capture_report;
 pub mod assemble_hot;
+pub mod backup;
 pub mod capture_trace;
 pub(crate) mod cold_session;
 pub mod envelope;

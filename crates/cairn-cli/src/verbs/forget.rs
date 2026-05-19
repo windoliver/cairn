@@ -23,7 +23,9 @@ use anyhow::Context as _;
 use cairn_core::config::CairnConfig;
 use cairn_core::contract::job_store::{EnqueueRequest, JobId, JobKind, JobStoreError, RetryPolicy};
 use cairn_core::contract::memory_store::{ListArgs, MemoryStore, TombstoneReason};
-use cairn_core::domain::{ConsentEvent, ConsentKind, ConsentPayload, RecordId, Rfc3339Timestamp};
+use cairn_core::domain::{
+    ConsentEvent, ConsentKind, ConsentPayload, RecordId, Rfc3339Timestamp, TargetId,
+};
 use cairn_core::generated::common::Ulid;
 use cairn_core::generated::envelope::ResponseVerb;
 use cairn_core::generated::envelope::{
@@ -186,6 +188,26 @@ async fn run_record(record_id_raw: String, vault_root: PathBuf, config: CairnCon
         Ok(ctx) => ctx,
         Err(resp) => return resp,
     };
+
+    let backup_targets = match ctx.store.get(&record_id).await {
+        Ok(Some(record)) => vec![record.target_id],
+        Ok(None) => Vec::new(),
+        Err(e) => {
+            return super::signed::aborted(
+                ResponseVerb::Forget,
+                format!("resolve backup replay target: {e}"),
+            );
+        }
+    };
+    if let Err(e) =
+        super::admin_snapshot::validate_registered_backups_for_targets(&vault_root, &backup_targets)
+    {
+        return super::signed::aborted(
+            ResponseVerb::Forget,
+            format!("backup.replay_tombstones preflight: {e}"),
+        );
+    }
+
     // Crash-window guard (round-2 adversarial review #4):
     // Order operations so a crash between any pair leaves either a
     // consistent state or a durable promise to repair:
@@ -286,6 +308,17 @@ async fn run_record(record_id_raw: String, vault_root: PathBuf, config: CairnCon
                 Err(message) => return super::signed::aborted(ResponseVerb::Forget, message),
             };
             let op_id_str = operation_id.0.clone();
+
+            if let Err(e) = super::admin_snapshot::rewrite_registered_backups(
+                &vault_root,
+                &backup_targets,
+                outcome.operation_id.as_str(),
+            ) {
+                return super::signed::aborted(
+                    ResponseVerb::Forget,
+                    format!("backup.replay_tombstones: {e}"),
+                );
+            }
 
             // ── Step 5: stage backups + apply source redactions ─────
             let manifest_dir = if config.source.redact_on_forget {
@@ -864,20 +897,37 @@ fn run_session(session_id: &str, vault_root: &Path, _config: &CairnConfig, json:
         let store = cairn_store_sqlite::open(&db_path)
             .await
             .map_err(|e| ForgetSessionError::Other(anyhow::anyhow!("open store: {e}")))?;
+        let backup_targets = session_target_ids_for_forget(&store, session_id).await?;
+        super::admin_snapshot::validate_registered_backups_for_targets(vault_root, &backup_targets)
+            .map_err(|e| {
+                ForgetSessionError::Other(anyhow::anyhow!(
+                    "backup.replay_tombstones preflight: {e}"
+                ))
+            })?;
         let projection_paths = session_projection_paths_for_forget(&store, session_id).await?;
         remove_session_projection_files(vault_root, &projection_paths)
             .map_err(ForgetSessionError::Other)?;
         store
             .forget_session(session_id)
             .await
-            .map(|outcome| SessionForgetReceipt {
-                deleted_count: outcome.deleted_count,
-                projection_paths: outcome.projection_paths,
-                tombstones: outcome
-                    .tombstones
-                    .into_iter()
-                    .map(|id| Ulid(id.as_str().to_owned()))
-                    .collect(),
+            .and_then(|outcome| {
+                super::admin_snapshot::rewrite_registered_backups(
+                    vault_root,
+                    &backup_targets,
+                    outcome.operation_id.as_str(),
+                )
+                .map_err(|e| cairn_store_sqlite::StoreError::Invariant {
+                    what: format!("backup.replay_tombstones: {e}"),
+                })?;
+                Ok(SessionForgetReceipt {
+                    deleted_count: outcome.deleted_count,
+                    projection_paths: outcome.projection_paths,
+                    tombstones: outcome
+                        .tombstones
+                        .into_iter()
+                        .map(|id| Ulid(id.as_str().to_owned()))
+                        .collect(),
+                })
             })
             .map_err(|e| match e {
                 cairn_store_sqlite::StoreError::NotFound { id } => ForgetSessionError::NotFound(id),
@@ -1025,6 +1075,61 @@ async fn session_projection_paths_for_forget(
     }
 
     Ok(paths.into_iter().collect())
+}
+
+async fn session_target_ids_for_forget(
+    store: &cairn_store_sqlite::SqliteMemoryStore,
+    session_id: &str,
+) -> Result<Vec<TargetId>, ForgetSessionError> {
+    let partitions = {
+        let session = session_id.to_owned();
+        store
+            .with_tx(move |tx| tx.list_session_scope_partitions(&session))
+            .await
+            .map_err(|e| ForgetSessionError::Other(anyhow::anyhow!("list session scopes: {e}")))?
+    };
+    let [_partition] = partitions.as_slice() else {
+        return if partitions.is_empty() {
+            Err(ForgetSessionError::NotFound(session_id.to_owned()))
+        } else {
+            Err(ForgetSessionError::AmbiguousSession(session_id.to_owned()))
+        };
+    };
+
+    let active = store
+        .list_active_stored(&ListArgs::default())
+        .await
+        .map_err(|e| ForgetSessionError::Other(anyhow::anyhow!("list session targets: {e}")))?;
+    let mut source_record_ids = BTreeSet::new();
+    let mut targets = BTreeSet::new();
+
+    for stored in &active {
+        if stored.record.scope.session_id.as_deref() == Some(session_id) {
+            source_record_ids.insert(stored.record.id.as_str().to_owned());
+            targets.insert(stored.record.target_id.clone());
+        }
+    }
+
+    for stored in &active {
+        let Some(source_ids) = stored
+            .record
+            .extra_frontmatter
+            .get("consolidation")
+            .and_then(|value| value.get("source_record_ids"))
+            .and_then(|value| value.as_array())
+        else {
+            continue;
+        };
+        if source_ids.iter().any(|value| {
+            value
+                .as_str()
+                .is_some_and(|record_id| source_record_ids.contains(record_id))
+        }) {
+            targets.insert(stored.record.target_id.clone());
+        }
+    }
+
+    Ok(targets.into_iter().collect())
 }
 
 fn remove_session_projection_files(vault_root: &Path, paths: &[PathBuf]) -> anyhow::Result<()> {

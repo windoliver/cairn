@@ -237,6 +237,18 @@ impl MemoryStore for SqliteMemoryStore {
         self.do_list_consent_models().await.map_err(Into::into)
     }
 
+    async fn trace_canvas_lint_snapshot(
+        &self,
+    ) -> Result<cairn_core::verbs::lint::checks::trace_canvas::TraceCanvasLintSnapshot, StoreError>
+    {
+        if self.conn.is_none() {
+            return not_initialized("trace_canvas_lint_snapshot");
+        }
+        SqliteMemoryStore::trace_canvas_lint_snapshot(self)
+            .await
+            .map_err(Into::into)
+    }
+
     async fn record_access(
         &self,
         record_ids: &[RecordId],

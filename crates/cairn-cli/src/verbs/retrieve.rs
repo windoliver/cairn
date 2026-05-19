@@ -4,7 +4,7 @@
     reason = "CLI helpers return complete response envelopes for direct JSON emission"
 )]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -16,7 +16,10 @@ use cairn_core::domain::canonical::canonical_bytes_signed_intent;
 use cairn_core::domain::consent_timeline::ConsentModel;
 use cairn_core::domain::identity::keys::SecretHandle;
 use cairn_core::domain::taxonomy::MemoryVisibility;
-use cairn_core::domain::{Identity, MemoryKind, MemoryRecord, RecordId, ScopeTuple};
+use cairn_core::domain::{
+    Identity, MemoryKind, MemoryRecord, RecordId, ScopeTuple, SessionId, TreeReadRecord,
+    TreeReadWindow, TreeReadWindowInput, plan_tree_read_window,
+};
 use cairn_core::generated::common::{Cursor, Ed25519Signature, ScopeFilter, ScopeFilterTier, Ulid};
 use cairn_core::generated::envelope::{
     RequestArgs, RequestVerb, Response, ResponseData, ResponsePolicyTrace,
@@ -310,10 +313,10 @@ async fn retrieve_session(
         read_budget_chars,
     } = request;
     let rehydrate_started = rehydrate.then(Instant::now);
-    let mut args = scoped_list_args(auth);
-    if let Some(scope) = &mut args.scope {
-        scope.session_id = Some(session_id.clone());
-    }
+    let target_session = match SessionId::parse(session_id.clone()) {
+        Ok(session_id) => session_id,
+        Err(e) => return super::signed::rejected_from_domain(ResponseVerb::Retrieve, e),
+    };
     let order = order.unwrap_or(RetrieveArgsSessionOrder::Asc);
     let start = match parse_session_cursor(cursor.as_ref(), order) {
         Ok(start) => start,
@@ -322,11 +325,18 @@ async fn retrieve_session(
     let requested_limit = limit
         .and_then(|v| usize::try_from(v).ok())
         .unwrap_or(usize::MAX);
-    let mut hot_records = match list_records(store, args).await {
+    let (hot_records, mut tree_policy_trace) = match session_records_for_retrieve(
+        store,
+        auth,
+        &session_id,
+        &target_session,
+        read_budget_chars,
+    )
+    .await
+    {
         Ok(records) => records,
         Err(resp) => return resp,
     };
-    hot_records.retain(|record| record.scope.session_id.as_deref() == Some(session_id.as_str()));
     let (records, source_tier) = if rehydrate {
         match cold_records_for_hot(vault_root, &session_id, &hot_records) {
             Ok(Some(cold_records)) => (cold_records, "cold"),
@@ -367,7 +377,7 @@ async fn retrieve_session(
         .into_iter()
         .flat_map(|group| group.records)
         .collect::<Vec<_>>();
-    committed_after_access(
+    let mut response = committed_after_access(
         store,
         auth,
         cairn_core::verbs::retrieve::session_data_with_options(
@@ -380,7 +390,102 @@ async fn retrieve_session(
         &records,
         Some(&budget_report),
     )
-    .await
+    .await;
+    if records.is_empty() {
+        tree_policy_trace.clear();
+    }
+    response.policy_trace.append(&mut tree_policy_trace);
+    response
+}
+
+async fn session_records_for_retrieve(
+    store: &SqliteMemoryStore,
+    auth: &ReadAuthorization,
+    session_id: &str,
+    target_session: &SessionId,
+    read_budget_chars: usize,
+) -> Result<(Vec<MemoryRecord>, Vec<ResponsePolicyTrace>), Response> {
+    let tree = match store.get_session_tree(target_session).await {
+        Ok(tree) => tree,
+        Err(e) if store_error_is_capability_unavailable(&e) => None,
+        Err(e) => {
+            return Err(super::signed::aborted(
+                ResponseVerb::Retrieve,
+                format!("session tree: {e}"),
+            ));
+        }
+    };
+    if let Some(tree) = tree
+        && tree_has_retrieve_context(&tree, target_session)?
+    {
+        return tree_session_records_for_retrieve(
+            store,
+            auth,
+            target_session,
+            read_budget_chars,
+            &tree,
+        )
+        .await;
+    }
+    flat_session_records_for_retrieve(store, auth, session_id)
+        .await
+        .map(|records| (records, Vec::new()))
+}
+
+fn tree_has_retrieve_context(
+    tree: &cairn_core::domain::SessionTree,
+    target_session: &SessionId,
+) -> Result<bool, Response> {
+    let lineage = tree.lineage(target_session).map_err(|e| {
+        super::signed::aborted(ResponseVerb::Retrieve, format!("session tree: {e}"))
+    })?;
+    Ok(lineage.len() > 1 || !tree.merges().is_empty())
+}
+
+async fn tree_session_records_for_retrieve(
+    store: &SqliteMemoryStore,
+    auth: &ReadAuthorization,
+    target_session: &SessionId,
+    read_budget_chars: usize,
+    tree: &cairn_core::domain::SessionTree,
+) -> Result<(Vec<MemoryRecord>, Vec<ResponsePolicyTrace>), Response> {
+    let lineage = tree.lineage(target_session).map_err(|e| {
+        super::signed::aborted(ResponseVerb::Retrieve, format!("session tree: {e}"))
+    })?;
+    let mut lineage_records = Vec::new();
+    for lineage_session in lineage {
+        let mut session_records =
+            flat_session_records_for_retrieve(store, auth, lineage_session.as_str()).await?;
+        lineage_records.append(&mut session_records);
+    }
+    let tree_records = tree_read_records_from_memory_records(&lineage_records).map_err(|e| {
+        super::signed::aborted(ResponseVerb::Retrieve, format!("session tree records: {e}"))
+    })?;
+    let window = plan_tree_read_window(TreeReadWindowInput {
+        tree,
+        target_session,
+        records: &tree_records,
+        budget_bytes: read_budget_chars,
+    })
+    .map_err(|e| super::signed::aborted(ResponseVerb::Retrieve, format!("session tree: {e}")))?;
+    Ok((
+        memory_records_in_tree_order(lineage_records, &window),
+        tree_read_policy_trace(&window),
+    ))
+}
+
+async fn flat_session_records_for_retrieve(
+    store: &SqliteMemoryStore,
+    auth: &ReadAuthorization,
+    session_id: &str,
+) -> Result<Vec<MemoryRecord>, Response> {
+    let mut args = scoped_list_args(auth);
+    if let Some(scope) = &mut args.scope {
+        scope.session_id = Some(session_id.to_owned());
+    }
+    let mut records = list_records(store, args).await?;
+    records.retain(|record| record.scope.session_id.as_deref() == Some(session_id));
+    Ok(records)
 }
 
 async fn retrieve_turn(
@@ -554,7 +659,11 @@ async fn committed_after_access(
     budget: Option<&BudgetReport>,
 ) -> Response {
     record_access(store, records, "retrieve").await;
-    committed(auth, data, records, budget)
+    let mut response = committed(auth, data, records, budget);
+    response
+        .policy_trace
+        .extend(trace_step_result_ref_policy_trace(store, records).await);
+    response
 }
 
 async fn record_access(store: &SqliteMemoryStore, records: &[MemoryRecord], reason: &str) {
@@ -848,6 +957,129 @@ fn read_policy_trace(
         }
     }
     trace
+}
+
+async fn trace_step_result_ref_policy_trace(
+    store: &SqliteMemoryStore,
+    records: &[MemoryRecord],
+) -> Vec<ResponsePolicyTrace> {
+    if records.is_empty() {
+        return Vec::new();
+    }
+
+    let mut records_with_steps = 0_usize;
+    let mut steps = 0_usize;
+    for record in records {
+        match store
+            .find_trace_steps_by_result_ref(record.id.as_str())
+            .await
+        {
+            Ok(found) if !found.is_empty() => {
+                records_with_steps = records_with_steps.saturating_add(1);
+                steps = steps.saturating_add(found.len());
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "trace-step result-ref lookup failed during retrieve"
+                );
+            }
+        }
+    }
+
+    if steps == 0 {
+        return Vec::new();
+    }
+
+    vec![ResponsePolicyTrace {
+        detail: Some(format!("records={records_with_steps} steps={steps}")),
+        gate: "trace_canvas.result_ref".to_owned(),
+        result: ResponsePolicyTraceResult::Pass,
+    }]
+}
+
+fn tree_read_records_from_memory_records(
+    records: &[MemoryRecord],
+) -> Result<Vec<TreeReadRecord>, cairn_core::domain::DomainError> {
+    records
+        .iter()
+        .map(|record| {
+            let session_id = record.scope.session_id.clone().ok_or(
+                cairn_core::domain::DomainError::MalformedScope {
+                    message: "tree read record missing session_id".to_owned(),
+                },
+            )?;
+            Ok(TreeReadRecord {
+                session_id: SessionId::parse(session_id)?,
+                turn_id: trace_turn_id(record),
+                record_id: record.id.clone(),
+                body: record.body.clone(),
+            })
+        })
+        .collect()
+}
+
+fn memory_records_in_tree_order(
+    records: Vec<MemoryRecord>,
+    window: &TreeReadWindow,
+) -> Vec<MemoryRecord> {
+    let records_by_id = records
+        .into_iter()
+        .map(|record| (record.id.clone(), record))
+        .collect::<BTreeMap<_, _>>();
+    window
+        .selected_records
+        .iter()
+        .filter_map(|record| records_by_id.get(&record.record_id).cloned())
+        .collect()
+}
+
+fn tree_read_policy_trace(window: &TreeReadWindow) -> Vec<ResponsePolicyTrace> {
+    if window.selected_records.is_empty() {
+        return Vec::new();
+    }
+    let mut trace = vec![ResponsePolicyTrace {
+        detail: Some(format!(
+            "path_sessions={} records_in={} records_out={} skipped_for_budget={} trimmed={}",
+            window.ancestry_path.len(),
+            window.budget.records_in,
+            window.budget.records_out,
+            window.budget.skipped_for_budget,
+            window.budget.trimmed
+        )),
+        gate: "tree.lineage".to_owned(),
+        result: ResponsePolicyTraceResult::Pass,
+    }];
+    if !window.sibling_sessions.is_empty() {
+        trace.push(ResponsePolicyTrace {
+            detail: Some(format!(
+                "sibling_sessions={}",
+                window.sibling_sessions.len()
+            )),
+            gate: "tree.sibling_context".to_owned(),
+            result: ResponsePolicyTraceResult::Pass,
+        });
+    }
+    if !window.merge_notes.is_empty() {
+        trace.push(ResponsePolicyTrace {
+            detail: Some(format!("merge_notes={}", window.merge_notes.len())),
+            gate: "tree.merge_context".to_owned(),
+            result: ResponsePolicyTraceResult::Pass,
+        });
+    }
+    trace
+}
+
+fn store_error_is_capability_unavailable(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = Some(error);
+    while let Some(error) = current {
+        if error.to_string().contains("capability unavailable") {
+            return true;
+        }
+        current = error.source();
+    }
+    false
 }
 
 fn session_include_flags(include: Option<&[RetrieveArgsSessionInclude]>) -> (bool, bool) {
@@ -1542,4 +1774,165 @@ fn read_sequence() -> u64 {
 
 fn current_unix_ms_i64() -> i64 {
     i64::try_from(read_sequence()).unwrap_or(i64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use cairn_core::domain::record::tests_export::sample_record;
+    use cairn_core::domain::{RecordId, ScopeTuple};
+
+    use super::*;
+
+    fn record(id: &str, session_id: &str, turn_id: &str, body: &str) -> MemoryRecord {
+        let mut record = sample_record();
+        record.id = RecordId::parse(id).expect("valid record id");
+        record.scope = ScopeTuple {
+            session_id: Some(session_id.to_owned()),
+            ..ScopeTuple::default()
+        };
+        record.body = body.to_owned();
+        record.extra_frontmatter.insert(
+            "trace".to_owned(),
+            serde_json::json!({
+                "turn_id": turn_id,
+            }),
+        );
+        record
+    }
+
+    #[test]
+    fn tree_records_from_memory_records_preserve_trace_turn_ids() {
+        let records = vec![
+            record("01JTS6R4J70000000000000001", "root", "turn-1", "root body"),
+            record(
+                "01JTS6R4J70000000000000002",
+                "branch",
+                "turn-2",
+                "branch body",
+            ),
+        ];
+
+        let tree_records = tree_read_records_from_memory_records(&records)
+            .expect("memory records should convert to tree read records");
+
+        assert_eq!(tree_records.len(), 2);
+        assert_eq!(tree_records[0].session_id.as_str(), "root");
+        assert_eq!(tree_records[0].turn_id.as_deref(), Some("turn-1"));
+        assert_eq!(
+            tree_records[0].record_id.as_str(),
+            "01JTS6R4J70000000000000001"
+        );
+        assert_eq!(tree_records[0].body, "root body");
+        assert_eq!(tree_records[1].session_id.as_str(), "branch");
+        assert_eq!(tree_records[1].turn_id.as_deref(), Some("turn-2"));
+        assert_eq!(
+            tree_records[1].record_id.as_str(),
+            "01JTS6R4J70000000000000002"
+        );
+        assert_eq!(tree_records[1].body, "branch body");
+    }
+
+    #[test]
+    fn flat_tree_is_not_treated_as_tree_retrieve_context() {
+        let root = SessionId::parse("root").expect("root session");
+        let tree = cairn_core::domain::SessionTree::flat(root.clone());
+
+        assert!(
+            !tree_has_retrieve_context(&tree, &root).expect("flat context check"),
+            "synthesized flat trees must preserve legacy retrieve ordering and budget"
+        );
+    }
+
+    #[test]
+    fn tree_trace_is_non_identifying_and_suppressed_without_selected_records() {
+        let root = SessionId::parse("private-root").expect("root session");
+        let branch = SessionId::parse("private-branch").expect("branch session");
+        let sibling = SessionId::parse("private-peer").expect("sibling session");
+        let mut tree = cairn_core::domain::SessionTree::flat(root.clone());
+        tree.fork(&root, branch.clone(), "turn-2").expect("fork");
+        tree.fork(&root, sibling.clone(), "turn-2")
+            .expect("sibling fork");
+        let records = vec![TreeReadRecord {
+            session_id: sibling,
+            turn_id: Some("turn-3".to_owned()),
+            record_id: RecordId::parse("01JTS6R4J70000000000000003").expect("record id"),
+            body: "sibling secret body".to_owned(),
+        }];
+        let empty_window = plan_tree_read_window(TreeReadWindowInput {
+            tree: &tree,
+            target_session: &branch,
+            records: &records,
+            budget_bytes: 1024,
+        })
+        .expect("window");
+
+        assert!(tree_read_policy_trace(&empty_window).is_empty());
+
+        let authorized = vec![TreeReadRecord {
+            session_id: branch.clone(),
+            turn_id: Some("turn-4".to_owned()),
+            record_id: RecordId::parse("01JTS6R4J70000000000000004").expect("record id"),
+            body: "branch secret body".to_owned(),
+        }];
+        let window = plan_tree_read_window(TreeReadWindowInput {
+            tree: &tree,
+            target_session: &branch,
+            records: &authorized,
+            budget_bytes: 1024,
+        })
+        .expect("authorized window");
+        let detail = tree_read_policy_trace(&window)
+            .iter()
+            .filter_map(|entry| entry.detail.as_deref())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(detail.contains("path_sessions=2"));
+        assert!(!detail.contains("private-root"));
+        assert!(!detail.contains("private-branch"));
+        assert!(!detail.contains("private-peer"));
+        assert!(!detail.contains("secret body"));
+    }
+
+    #[tokio::test]
+    async fn trace_step_result_ref_policy_trace_reports_counts_only() {
+        let store = cairn_store_sqlite::open_in_memory()
+            .await
+            .expect("open store");
+        let record = record(
+            "01JTS6R4J70000000000000005",
+            "session-1",
+            "turn-1",
+            "secret retrieved body",
+        );
+        store
+            .upsert_trace_step(cairn_store_sqlite::TraceStepDraft {
+                step_id: "step-1".to_owned(),
+                trace_id: "trace-1".to_owned(),
+                session_id: "session-1".to_owned(),
+                turn_id: "turn-1".to_owned(),
+                tool_call_id: Some("toolu-1".to_owned()),
+                timestamp_ms: 1,
+                tool_name: Some("shell".to_owned()),
+                call_summary: "call summary should not leak".to_owned(),
+                result_summary: "result summary should not leak".to_owned(),
+                result_ref: Some(record.id.as_str().to_owned()),
+                salience: 0.5,
+                replaceability_score: 0.5,
+                node_id: None,
+                source_hash: "hash-1".to_owned(),
+            })
+            .await
+            .expect("trace step");
+
+        let trace = trace_step_result_ref_policy_trace(&store, std::slice::from_ref(&record)).await;
+
+        assert_eq!(trace.len(), 1);
+        assert_eq!(trace[0].gate, "trace_canvas.result_ref");
+        assert_eq!(trace[0].detail.as_deref(), Some("records=1 steps=1"));
+        let detail = trace[0].detail.as_deref().unwrap_or_default();
+        assert!(!detail.contains(record.id.as_str()));
+        assert!(!detail.contains("secret"));
+        assert!(!detail.contains("step-1"));
+    }
 }

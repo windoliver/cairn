@@ -8,8 +8,7 @@ use serde_json::Value;
 
 use super::artifact::{self, ArtifactKind};
 use super::{
-    HookArtifacts, HookError, optional_string, payload_object, require_string,
-    require_string_one_of,
+    HookArtifacts, HookError, optional_string, payload_object, require_any_string, require_string,
 };
 
 #[derive(Serialize)]
@@ -29,7 +28,8 @@ pub(super) fn run(
     payload: &Value,
 ) -> Result<HookArtifacts, HookError> {
     let session_id = require_string(payload, "session_id")?;
-    let tool_call_id = require_string_one_of(payload, &["tool_call_id", "tool_use_id"])?;
+    let tool_call_id =
+        require_any_string(payload, &["tool_call_id", "tool_use_id"], "tool_call_id")?;
     let tool_name = require_string(payload, "tool_name")?;
     let status = post_tool_status(payload);
     let trace_id = crate::verbs::envelope::new_operation_id();
