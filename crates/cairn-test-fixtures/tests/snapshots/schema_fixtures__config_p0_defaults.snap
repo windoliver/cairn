@@ -37,7 +37,19 @@ expression: "&c"
     ]
   },
   "store": {
-    "kind": "sqlite"
+    "kind": "sqlite",
+    "nexus": {
+      "data_dir": "nexus-data",
+      "command": "cairn-nexus-sandbox",
+      "args": [
+        "sandbox",
+        "serve"
+      ],
+      "endpoint": "http://127.0.0.1:8765",
+      "health_path": "/health",
+      "health_timeout_ms": 5000,
+      "shutdown_timeout_ms": 2000
+    }
   },
   "llm": {
     "provider": null,
