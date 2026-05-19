@@ -5,9 +5,12 @@
 //! `cached_assemble` verb) swallows them with a `tracing::warn!`. Brief
 //! §15: a missing line is preferable to a broken `assemble_hot`.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use cairn_core::config::CairnConfig;
 use cairn_core::contract::metrics::{MetricsError, MetricsSink};
 use cairn_core::domain::metrics::MetricEvent;
 use tokio::io::AsyncWriteExt;
@@ -58,6 +61,63 @@ impl MetricsSink for JsonlMetricsSink {
         guard.write_all(&line).await?;
         guard.flush().await?;
         Ok(())
+    }
+}
+
+/// Current wall-clock millis since UNIX epoch.
+#[must_use]
+pub fn now_ms() -> i64 {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0_u128, |duration| duration.as_millis());
+    i64::try_from(millis).unwrap_or(i64::MAX)
+}
+
+/// Append one local metric synchronously. Used by the thin CLI
+/// dispatch layer, which cannot await while returning an `ExitCode`.
+///
+/// # Errors
+/// Returns filesystem or serialization errors.
+pub fn append_local_event_sync(vault_root: &Path, event: &MetricEvent) -> anyhow::Result<()> {
+    let path = vault_root.join(".cairn").join("metrics.jsonl");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)?;
+    serde_json::to_writer(&mut file, event)?;
+    file.write_all(b"\n")?;
+    Ok(())
+}
+
+/// Emit a body-free verb invocation metric when local metrics are enabled.
+pub fn emit_verb_invocation_sync(
+    vault_root: &Path,
+    config: &CairnConfig,
+    verb: &str,
+    mode: Option<&str>,
+    status: &str,
+    latency_ms: u64,
+    error: Option<&str>,
+) {
+    if !config.observability.enabled || !config.observability.local_metrics {
+        return;
+    }
+    let event = MetricEvent::VerbInvocation {
+        ts_ms: now_ms(),
+        verb: verb.to_owned(),
+        surface: "cli".to_owned(),
+        mode: mode.map(str::to_owned),
+        status: status.to_owned(),
+        latency_ms,
+        error: error.map(str::to_owned),
+        budget_used_ratio: None,
+        degradation_state: Some("none".to_owned()),
+    };
+    if let Err(err) = append_local_event_sync(vault_root, &event) {
+        tracing::warn!(error = %err, verb, "verb metric emit failed");
     }
 }
 

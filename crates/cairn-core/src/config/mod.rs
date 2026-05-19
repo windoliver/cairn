@@ -158,6 +158,52 @@ pub enum ConfigError {
         /// Stringified `DomainError::MalformedScope` body.
         message: String,
     },
+    /// OTLP export was requested without an endpoint.
+    #[error("observability.exporter = otlp requires observability.endpoint")]
+    MissingObservabilityEndpoint,
+}
+
+/// Optional telemetry exporter for traces/metrics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ObservabilityExporter {
+    /// No network exporter. Default local-only mode.
+    #[default]
+    None,
+    /// OTLP exporter. Requires `observability.endpoint`.
+    Otlp,
+}
+
+/// Local-first observability configuration (§15, §19 v0.2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ObservabilityConfig {
+    /// Master switch for spans and metrics.
+    pub enabled: bool,
+    /// Append body-free events to `.cairn/metrics.jsonl`.
+    pub local_metrics: bool,
+    /// Emit structured `tracing` spans/events without network export.
+    pub local_traces: bool,
+    /// Optional external exporter, disabled by default.
+    pub exporter: ObservabilityExporter,
+    /// Exporter endpoint such as an OTLP collector URL.
+    pub endpoint: Option<String>,
+    /// Keep sensitive record fields out of exported telemetry.
+    pub redact_sensitive_fields: bool,
+}
+
+impl Default for ObservabilityConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            local_metrics: true,
+            local_traces: true,
+            exporter: ObservabilityExporter::None,
+            endpoint: None,
+            redact_sensitive_fields: true,
+        }
+    }
 }
 
 /// Vault storage tier (§3.1).
@@ -541,6 +587,9 @@ pub struct CairnConfig {
     pub pipeline: PipelineConfig,
     /// MCP transport configuration (issue #190).
     pub mcp: McpConfig,
+    /// Local-first observability and exporter configuration (§15, §19 v0.2).
+    #[serde(default)]
+    pub observability: ObservabilityConfig,
     /// Rolling-summary consolidation workflow configuration (brief §5.3, §10.0).
     #[serde(default)]
     pub consolidation: ConsolidationConfig,
@@ -1852,6 +1901,16 @@ impl CairnConfig {
         self.evaluation
             .validate()
             .map_err(|source| ConfigError::InvalidEvaluation { source })?;
+
+        if self.observability.exporter == ObservabilityExporter::Otlp
+            && self
+                .observability
+                .endpoint
+                .as_ref()
+                .is_none_or(|endpoint| endpoint.trim().is_empty())
+        {
+            return Err(ConfigError::MissingObservabilityEndpoint);
+        }
 
         Ok(())
     }
@@ -3180,6 +3239,24 @@ rerank_topk: 20
         // Default: single_tenant = false, principal = None — cleanly valid.
         let cfg = CairnConfig::default();
         cfg.validate_mcp().expect("default config is valid");
+    }
+
+    #[test]
+    fn observability_defaults_are_local_only() {
+        let cfg = CairnConfig::default();
+        assert!(cfg.observability.enabled);
+        assert!(cfg.observability.local_metrics);
+        assert!(cfg.observability.local_traces);
+        assert_eq!(cfg.observability.exporter, ObservabilityExporter::None);
+        assert!(cfg.observability.redact_sensitive_fields);
+    }
+
+    #[test]
+    fn validate_rejects_otlp_exporter_without_endpoint() {
+        let mut cfg = CairnConfig::default();
+        cfg.observability.exporter = ObservabilityExporter::Otlp;
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(err, ConfigError::MissingObservabilityEndpoint));
     }
 
     proptest! {

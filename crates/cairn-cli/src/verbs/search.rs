@@ -10,11 +10,12 @@
 use std::collections::HashMap;
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cairn_core::config::{EmbeddingProvider, StoreKind};
 use cairn_core::contract::memory_store::MemoryStore;
 use cairn_core::domain::filter::validate_filter;
+use cairn_core::domain::metrics::MetricEvent;
 use cairn_core::domain::projection::ProjectionTarget;
 use cairn_core::generated::envelope::ResponseVerb;
 use cairn_core::generated::verbs::search::{SearchArgsFilters, SearchArgsMode};
@@ -44,6 +45,16 @@ enum SearchMode {
     Keyword,
     Semantic,
     Hybrid,
+}
+
+impl SearchMode {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Keyword => "keyword",
+            Self::Semantic => "semantic",
+            Self::Hybrid => "hybrid",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -287,6 +298,7 @@ async fn run_async(
     let provider_ready = super::embedding_provider_ready(&config, model_present, Some(&vault_root));
     let caps = config.capabilities(provider_ready);
     let provider = config.search.default_provider;
+    let search_started = Instant::now();
 
     // CLI-side capability gate — fires BEFORE embedder resolution so an
     // unadvertised mode (e.g. `--mode semantic` against a vault without
@@ -385,11 +397,21 @@ async fn run_async(
     match cairn_core::verbs::search::run(&store, &config, &caps, request).await {
         Ok(outcome) => {
             match bm25s_scores(&store, &config, &outcome, &query_text, limit, bm25s_mode).await {
-                Ok(scores) => render_outcome(&outcome, json, mode, scores.as_ref()),
+                Ok(scores) => {
+                    emit_search_metric(&vault_root, &config, mode, search_started, &outcome, None);
+                    render_outcome(&outcome, json, mode, scores.as_ref())
+                }
                 Err(err) => emit_bm25s_unavailable(json, &err),
             }
         }
         Err(cairn_core::verbs::search::SearchError::CapabilityUnavailable { capability }) => {
+            emit_search_metric_error(
+                &vault_root,
+                &config,
+                mode,
+                search_started,
+                "capability_unavailable",
+            );
             let resp = capability_unavailable_response(ResponseVerb::Search, capability);
             if json {
                 emit_json(&resp);
@@ -407,6 +429,7 @@ async fn run_async(
             ExitCode::from(69) // EX_UNAVAILABLE
         }
         Err(cairn_core::verbs::search::SearchError::InvalidArgs { reason }) => {
+            emit_search_metric_error(&vault_root, &config, mode, search_started, "invalid_args");
             let resp = invalid_args_response(ResponseVerb::Search, "args", &reason);
             if json {
                 emit_json(&resp);
@@ -421,6 +444,7 @@ async fn run_async(
             ExitCode::from(64) // EX_USAGE
         }
         Err(cairn_core::verbs::search::SearchError::InvalidFilter { reason }) => {
+            emit_search_metric_error(&vault_root, &config, mode, search_started, "invalid_filter");
             let resp = invalid_filter_response(ResponseVerb::Search, &reason, Some("filters"));
             if json {
                 emit_json(&resp);
@@ -435,6 +459,7 @@ async fn run_async(
             ExitCode::from(64) // EX_USAGE
         }
         Err(e) => {
+            emit_search_metric_error(&vault_root, &config, mode, search_started, "internal");
             let msg = format!("{e}");
             let resp = internal_error_response(ResponseVerb::Search, &msg);
             if json {
@@ -600,6 +625,60 @@ fn required_or_skip<T>(mode: Bm25sMode, reason: String) -> Result<Option<T>, Bm2
         Err(Bm25sUnavailable { reason })
     } else {
         Ok(None)
+    }
+}
+
+fn emit_search_metric(
+    vault_root: &std::path::Path,
+    config: &cairn_core::config::CairnConfig,
+    mode: SearchMode,
+    started: Instant,
+    outcome: &cairn_core::verbs::search::SearchOutcome,
+    error: Option<&str>,
+) {
+    if !config.observability.enabled || !config.observability.local_metrics {
+        return;
+    }
+    let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let degradation_state = if outcome.degraded_legs.is_empty() {
+        "none"
+    } else {
+        "partial"
+    };
+    let event = MetricEvent::SearchCompleted {
+        ts_ms: crate::metrics::now_ms(),
+        mode: mode.as_str().to_owned(),
+        hit_count: u32::try_from(outcome.candidates.len()).unwrap_or(u32::MAX),
+        latency_ms,
+        degradation_state: degradation_state.to_owned(),
+        error: error.map(str::to_owned),
+    };
+    if let Err(err) = crate::metrics::append_local_event_sync(vault_root, &event) {
+        tracing::warn!(error = %err, "search metric emit failed");
+    }
+}
+
+fn emit_search_metric_error(
+    vault_root: &std::path::Path,
+    config: &cairn_core::config::CairnConfig,
+    mode: SearchMode,
+    started: Instant,
+    error: &str,
+) {
+    if !config.observability.enabled || !config.observability.local_metrics {
+        return;
+    }
+    let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let event = MetricEvent::SearchCompleted {
+        ts_ms: crate::metrics::now_ms(),
+        mode: mode.as_str().to_owned(),
+        hit_count: 0,
+        latency_ms,
+        degradation_state: "failed".to_owned(),
+        error: Some(error.to_owned()),
+    };
+    if let Err(err) = crate::metrics::append_local_event_sync(vault_root, &event) {
+        tracing::warn!(error = %err, "search metric emit failed");
     }
 }
 

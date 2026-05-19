@@ -1,6 +1,7 @@
 //! Public upsert apply through record WAL.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use cairn_core::contract::memory_store::UpsertOutcome;
 use cairn_core::domain::{BodyHash, MemoryRecord, RecordId};
@@ -22,6 +23,7 @@ pub(crate) async fn apply_upsert(
     record: &MemoryRecord,
     embed: StoredEmbedOutcome,
 ) -> Result<UpsertOutcome, StoreError> {
+    let started = Instant::now();
     let conn = Arc::clone(store.require_conn("upsert")?);
     let incarnation = store.incarnation().cloned().ok_or(StoreError::Invariant {
         what: "upsert requires daemon incarnation".to_owned(),
@@ -97,6 +99,15 @@ pub(crate) async fn apply_upsert(
         Ok::<_, tokio_rusqlite::Error>(())
     })
     .await?;
+
+    tracing::info!(
+        wal.kind = WalKind::Upsert.as_str(),
+        operation_id = op_id.as_str(),
+        state = OpState::Committed.as_str(),
+        latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        retry_count = 0_u32,
+        "record WAL apply complete"
+    );
 
     Ok(UpsertOutcome {
         record_id: RecordId::parse(planned_for_outcome.outcome_record_id.clone()).map_err(|e| {

@@ -1,6 +1,7 @@
 //! Public record-level forget apply through record WAL.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use cairn_core::domain::{RecordId, ScopeTuple, TargetId};
 use cairn_core::wal::{OpState, OperationId, WalKind, graph_for};
@@ -42,6 +43,7 @@ pub(crate) async fn apply_forget_record(
     store: &SqliteMemoryStore,
     record_id: &RecordId,
 ) -> Result<ForgetOutcome, StoreError> {
+    let started = Instant::now();
     let conn = Arc::clone(store.require_conn("forget_record")?);
     let incarnation = store.incarnation().cloned().ok_or(StoreError::Invariant {
         what: "forget_record requires daemon incarnation".to_owned(),
@@ -119,6 +121,15 @@ pub(crate) async fn apply_forget_record(
     })
     .await
     .map_err(unpack_worker_err)?;
+
+    tracing::info!(
+        wal.kind = WalKind::ForgetRecord.as_str(),
+        operation_id = op_id.as_str(),
+        state = OpState::Committed.as_str(),
+        latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        retry_count = 0_u32,
+        "record WAL apply complete"
+    );
 
     Ok(ForgetOutcome {
         deleted_count: u64::try_from(target.record_ids.len()).unwrap_or(u64::MAX),

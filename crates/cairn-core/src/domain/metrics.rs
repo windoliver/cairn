@@ -14,6 +14,66 @@ use crate::domain::hot_prefix::SourceWatermarks;
 #[serde(tag = "event")]
 #[non_exhaustive]
 pub enum MetricEvent {
+    /// Emitted once per observed verb invocation. The payload is
+    /// intentionally body-free: it records dimensions needed for SRE
+    /// dashboards without carrying query text, record bodies, snippets,
+    /// source paths, or raw error messages.
+    #[serde(rename = "verb_invocation")]
+    VerbInvocation {
+        /// Wall-clock millis since UNIX epoch.
+        ts_ms: i64,
+        /// Verb name (`ingest`, `search`, `assemble_hot`, ...).
+        verb: String,
+        /// Surface that handled the verb (`cli`, `mcp`, `sdk`).
+        surface: String,
+        /// Body-free mode/classification such as `keyword`, `hybrid`,
+        /// or `record`.
+        mode: Option<String>,
+        /// Response status (`committed`, `aborted`, `rejected`).
+        status: String,
+        /// Wall-clock latency observed by the surface.
+        latency_ms: u64,
+        /// Body-free error class when status is not committed.
+        error: Option<String>,
+        /// Budget usage ratio when the verb has an explicit budget.
+        budget_used_ratio: Option<f64>,
+        /// Degradation state such as `none` or `partial`.
+        degradation_state: Option<String>,
+    },
+    /// Emitted for local search modes after a response is produced.
+    /// Query text and snippets are deliberately omitted.
+    #[serde(rename = "search_completed")]
+    SearchCompleted {
+        /// Wall-clock millis since UNIX epoch.
+        ts_ms: i64,
+        /// Search mode (`keyword`, `semantic`, `hybrid`).
+        mode: String,
+        /// Number of hits returned to the caller.
+        hit_count: u32,
+        /// Response latency in milliseconds.
+        latency_ms: u64,
+        /// Degradation state such as `none` or `partial`.
+        degradation_state: String,
+        /// Body-free error class when the search did not commit.
+        error: Option<String>,
+    },
+    /// Emitted for record WAL operations after finalization.
+    #[serde(rename = "wal_apply")]
+    WalApply {
+        /// Wall-clock millis since UNIX epoch.
+        ts_ms: i64,
+        /// WAL kind (`upsert`, `forget_record`, `expire`).
+        kind: String,
+        /// Operation id.
+        operation_id: String,
+        /// Final WAL state (`committed`, `aborted`, ...).
+        state: String,
+        /// Apply latency in milliseconds.
+        latency_ms: u64,
+        /// Retry count observed by the caller. Record WAL applies are
+        /// single-pass today, so this is currently zero.
+        retry_count: u32,
+    },
     /// Emitted exactly once per `assemble_hot` call.
     #[serde(rename = "hot_prefix_assembled")]
     HotPrefixAssembled {
@@ -324,5 +384,26 @@ mod tests {
             }
             _ => panic!("expected WorkflowJobFailed"),
         }
+    }
+
+    #[test]
+    fn verb_invocation_metric_is_body_free() {
+        let event = MetricEvent::VerbInvocation {
+            ts_ms: 1,
+            verb: "ingest".into(),
+            surface: "cli".into(),
+            mode: Some("body".into()),
+            status: "committed".into(),
+            latency_ms: 12,
+            error: None,
+            budget_used_ratio: Some(0.25),
+            degradation_state: Some("none".into()),
+        };
+        let json = serde_json::to_string(&event).expect("serialize");
+        assert!(json.contains("\"event\":\"verb_invocation\""));
+        assert!(json.contains("\"verb\":\"ingest\""));
+        assert!(json.contains("\"budget_used_ratio\":0.25"));
+        assert!(!json.contains("secret"));
+        assert!(!json.contains("body_text"));
     }
 }

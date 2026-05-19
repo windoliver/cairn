@@ -1,6 +1,7 @@
 //! Public expire apply through record WAL.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use cairn_core::domain::{ScopeTuple, TargetId};
 use cairn_core::wal::{OpState, WalKind, graph_for};
@@ -18,6 +19,7 @@ pub(crate) async fn apply_expire(
     store: &SqliteMemoryStore,
     target: &TargetId,
 ) -> Result<(), StoreError> {
+    let started = Instant::now();
     let conn = Arc::clone(store.require_conn("expire")?);
     let incarnation = store.incarnation().cloned().ok_or(StoreError::Invariant {
         what: "expire requires daemon incarnation".to_owned(),
@@ -68,6 +70,14 @@ pub(crate) async fn apply_expire(
         Ok::<_, tokio_rusqlite::Error>(())
     })
     .await?;
+    tracing::info!(
+        wal.kind = WalKind::Expire.as_str(),
+        operation_id = op_id.as_str(),
+        state = OpState::Committed.as_str(),
+        latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        retry_count = 0_u32,
+        "record WAL apply complete"
+    );
     Ok(())
 }
 
