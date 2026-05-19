@@ -116,8 +116,7 @@ pub(crate) fn register_backup_artifact(
     fs::create_dir_all(backup_registry_dir(vault_root))
         .with_context(|| format!("create {}", backup_registry_dir(vault_root).display()))?;
 
-    let backup_id = format!("bkp_{}", timestamp_millis());
-    let registry_path = backup_registry_dir(vault_root).join(format!("{backup_id}.json"));
+    let (backup_id, registry_path) = allocate_backup_registry_path(vault_root)?;
     let entry = BackupRegistryEntry {
         backup_id: backup_id.clone(),
         created_at: now_timestamp()?,
@@ -127,7 +126,7 @@ pub(crate) fn register_backup_artifact(
         target_ids_included: collect_target_ids(&backup_path.join(".cairn/cairn.db"))
             .with_context(|| format!("collect target ids from {}", backup_path.display()))?,
     };
-    write_registry_entry(&registry_path, &entry)
+    write_new_registry_entry(&registry_path, &entry)
         .with_context(|| format!("write registry entry {}", registry_path.display()))?;
     Ok(receipt_for_entry(&registry_path, entry))
 }
@@ -386,6 +385,32 @@ pub(crate) fn backup_registry_dir(vault_root: &Path) -> PathBuf {
     vault_root.join(".cairn").join("backups")
 }
 
+fn allocate_backup_registry_path(vault_root: &Path) -> Result<(String, PathBuf)> {
+    allocate_backup_registry_path_with(vault_root, || format!("bkp_{}", ulid::Ulid::new()))
+}
+
+fn allocate_backup_registry_path_with<F>(
+    vault_root: &Path,
+    mut next_id: F,
+) -> Result<(String, PathBuf)>
+where
+    F: FnMut() -> String,
+{
+    let registry_dir = backup_registry_dir(vault_root);
+    for _ in 0..16 {
+        let backup_id = next_id();
+        let registry_path = registry_dir.join(format!("{backup_id}.json"));
+        if !registry_path.exists() {
+            return Ok((backup_id, registry_path));
+        }
+    }
+
+    anyhow::bail!(
+        "failed to allocate a unique backup registry entry under {}",
+        registry_dir.display()
+    );
+}
+
 fn receipt_for_entry(path: &Path, entry: BackupRegistryEntry) -> BackupRegistryReceipt {
     BackupRegistryReceipt {
         backup_id: entry.backup_id,
@@ -395,6 +420,19 @@ fn receipt_for_entry(path: &Path, entry: BackupRegistryEntry) -> BackupRegistryR
         registry_entry: path.display().to_string(),
         target_ids_included: entry.target_ids_included,
     }
+}
+
+fn write_new_registry_entry(path: &Path, entry: &BackupRegistryEntry) -> Result<()> {
+    entry.validate().context("validate backup registry entry")?;
+    let payload = serde_json::to_vec_pretty(entry).context("serialize backup registry entry")?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .with_context(|| format!("create {}", path.display()))?;
+    file.write_all(&payload)
+        .with_context(|| format!("write {}", path.display()))?;
+    Ok(())
 }
 
 fn write_registry_entry(path: &Path, entry: &BackupRegistryEntry) -> Result<()> {
@@ -821,4 +859,25 @@ fn timestamp_millis() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_millis())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backup_registry_path_allocation_retries_existing_ids() {
+        let vault = tempfile::tempdir().expect("vault tempdir");
+        let registry_dir = backup_registry_dir(vault.path());
+        fs::create_dir_all(&registry_dir).expect("create registry dir");
+        fs::write(registry_dir.join("bkp_duplicate.json"), "{}").expect("seed existing entry");
+
+        let mut ids = ["bkp_duplicate".to_owned(), "bkp_unique".to_owned()].into_iter();
+        let (backup_id, registry_path) =
+            allocate_backup_registry_path_with(vault.path(), || ids.next().unwrap())
+                .expect("allocate registry path");
+
+        assert_eq!(backup_id, "bkp_unique");
+        assert_eq!(registry_path, registry_dir.join("bkp_unique.json"));
+    }
 }
