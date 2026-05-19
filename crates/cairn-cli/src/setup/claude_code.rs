@@ -7,6 +7,14 @@ use clap::ValueEnum;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
+const HOOK_NAMES: &[&str] = &[
+    "SessionStart",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+    "Stop",
+];
+
 /// Claude Code MCP configuration scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
@@ -108,6 +116,12 @@ pub enum ClaudeCodeSetupError {
         /// Underlying I/O error.
         source: std::io::Error,
     },
+    /// The selected path would write through a symlink.
+    #[error("{path} is a symlink — cairn will not write through it")]
+    UnsafePath {
+        /// Symlink path that blocked the operation.
+        path: PathBuf,
+    },
 }
 
 impl ClaudeCodeSetupError {
@@ -115,7 +129,10 @@ impl ClaudeCodeSetupError {
     #[must_use]
     pub fn exit_code(&self) -> u8 {
         match self {
-            Self::InvalidOption(_) | Self::ConfigParse { .. } | Self::ConfigRoot { .. } => 78,
+            Self::InvalidOption(_)
+            | Self::ConfigParse { .. }
+            | Self::ConfigRoot { .. }
+            | Self::UnsafePath { .. } => 78,
             Self::Io { .. } => 74,
         }
     }
@@ -152,6 +169,7 @@ pub fn setup(opts: &ClaudeCodeSetupOpts) -> Result<ClaudeCodeSetupReceipt> {
         servers.insert(opts.server_name.clone(), entry);
         write_config(&config_path, &config)?;
     }
+    write_project_hook_settings(&project_dir, &binary, &vault)?;
 
     Ok(ClaudeCodeSetupReceipt {
         scope: opts.scope,
@@ -307,12 +325,26 @@ fn local_project_keys(project_dir: &Path) -> Vec<String> {
 }
 
 fn canonical_project_key(path: &Path) -> Option<String> {
+    canonical_existing_path(path).map(|canonical| path_string(&normalize_path(&canonical)))
+}
+
+fn canonical_existing_path(path: &Path) -> Option<PathBuf> {
     if !path.is_absolute() {
         return None;
     }
-    path.canonicalize()
-        .ok()
-        .map(|canonical| path_string(&normalize_path(&canonical)))
+
+    let mut missing = Vec::new();
+    let mut cursor = path;
+    loop {
+        if let Ok(mut canonical) = cursor.canonicalize() {
+            for component in missing.iter().rev() {
+                canonical.push(component);
+            }
+            return Some(canonical);
+        }
+        missing.push(cursor.file_name()?.to_owned());
+        cursor = cursor.parent()?;
+    }
 }
 
 fn push_unique_project_path(keys: &mut Vec<String>, path: &Path) {
@@ -492,7 +524,97 @@ fn registration_entry(binary: &Path, vault: &Path) -> Value {
     })
 }
 
+fn hook_settings_path(project_dir: &Path) -> PathBuf {
+    canonical_existing_path(project_dir)
+        .unwrap_or_else(|| project_dir.to_path_buf())
+        .join(".claude")
+        .join("settings.local.json")
+}
+
+fn write_project_hook_settings(project_dir: &Path, binary: &Path, vault: &Path) -> Result<bool> {
+    let path = hook_settings_path(project_dir);
+    let mut config = read_config_or_empty(&path)?;
+    let root = config
+        .as_object_mut()
+        .ok_or_else(|| ClaudeCodeSetupError::ConfigRoot { path: path.clone() })?;
+    let hooks = ensure_object_child(root, "hooks", &path)?;
+
+    for hook in HOOK_NAMES {
+        let entry = json!({
+            "type": "command",
+            "command": hook_command(binary, vault, hook),
+        });
+        let mut group = Map::new();
+        if matches!(*hook, "PreToolUse" | "PostToolUse") {
+            group.insert("matcher".to_string(), Value::String("*".to_string()));
+        }
+        group.insert("hooks".to_string(), Value::Array(vec![entry.clone()]));
+        let group = Value::Object(group);
+        let slot = hooks
+            .entry((*hook).to_string())
+            .or_insert_with(|| Value::Array(Vec::new()));
+        if !slot.is_array() {
+            *slot = Value::Array(Vec::new());
+        }
+        let items = slot
+            .as_array_mut()
+            .expect("slot was just normalized to an array");
+        if !items.iter().any(|item| hook_group_contains(item, &entry)) {
+            items.push(group);
+        }
+    }
+
+    let changed = config_changed(&path, &config)?;
+    if changed {
+        write_config(&path, &config)?;
+    }
+    Ok(changed)
+}
+
+fn hook_command(binary: &Path, vault: &Path, hook: &str) -> String {
+    let mut command = shell_word(&path_string(binary));
+    let _ = write!(
+        command,
+        " hook {hook} --vault-path {} --payload-file - --json",
+        shell_word(&path_string(vault))
+    );
+    command
+}
+
+fn hook_group_contains(item: &Value, entry: &Value) -> bool {
+    if item == entry {
+        return true;
+    }
+    item.get("hooks")
+        .and_then(Value::as_array)
+        .is_some_and(|hooks| hooks.iter().any(|hook| hook == entry))
+}
+
+fn shell_word(raw: &str) -> String {
+    if raw
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-' | b':'))
+    {
+        return raw.to_string();
+    }
+    format!("'{}'", raw.replace('\'', "'\\''"))
+}
+
+fn config_changed(path: &Path, desired: &Value) -> Result<bool> {
+    reject_symlink_ancestors(path)?;
+    let Ok(contents) = fs::read(path) else {
+        return Ok(true);
+    };
+    let current: Value =
+        serde_json::from_slice(&contents).map_err(|source| ClaudeCodeSetupError::ConfigParse {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    Ok(current != *desired)
+}
+
 fn read_config_or_empty(path: &Path) -> Result<Value> {
+    reject_symlink_ancestors(path)?;
     match fs::read_to_string(path) {
         Ok(contents) => {
             serde_json::from_str(&contents).map_err(|source| ClaudeCodeSetupError::ConfigParse {
@@ -515,10 +637,8 @@ fn write_config(path: &Path, config: &Value) -> Result<()> {
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent).map_err(|source| ClaudeCodeSetupError::Io {
-        path: parent.to_path_buf(),
-        source,
-    })?;
+    create_dir_checked(parent)?;
+    reject_symlink_ancestors(path)?;
     let mut contents =
         serde_json::to_string_pretty(config).expect("serializing serde_json::Value cannot fail");
     contents.push('\n');
@@ -585,6 +705,72 @@ fn create_temp_file(parent: &Path, target: &Path) -> Result<(PathBuf, File)> {
 
 fn cleanup_temp_file(path: &Path) {
     let _ = fs::remove_file(path);
+}
+
+fn reject_symlink_ancestors(path: &Path) -> Result<()> {
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|source| ClaudeCodeSetupError::Io {
+                path: PathBuf::from("."),
+                source,
+            })?
+            .join(path)
+    };
+    let mut check = PathBuf::new();
+    let mut depth = 0usize;
+    for component in abs.components() {
+        check.push(component);
+        depth += 1;
+        let is_final = check == abs;
+        if (depth > 2 || is_final)
+            && fs::symlink_metadata(&check)
+                .ok()
+                .is_some_and(|meta| meta.file_type().is_symlink())
+        {
+            return Err(ClaudeCodeSetupError::UnsafePath { path: check });
+        }
+    }
+    Ok(())
+}
+
+fn create_dir_checked(path: &Path) -> Result<()> {
+    let mut check = PathBuf::new();
+    let mut depth = 0usize;
+    for component in path.components() {
+        check.push(component);
+        depth += 1;
+        match fs::create_dir(&check) {
+            Ok(()) => {}
+            Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
+                if !fs::metadata(&check).is_ok_and(|meta| meta.is_dir()) {
+                    return Err(ClaudeCodeSetupError::Io {
+                        path: check,
+                        source: std::io::Error::new(
+                            std::io::ErrorKind::AlreadyExists,
+                            "path exists but is not a directory",
+                        ),
+                    });
+                }
+            }
+            Err(source) => {
+                return Err(ClaudeCodeSetupError::Io {
+                    path: check,
+                    source,
+                });
+            }
+        }
+        let is_final = check == path;
+        if (depth > 2 || is_final)
+            && fs::symlink_metadata(&check)
+                .ok()
+                .is_some_and(|meta| meta.file_type().is_symlink())
+        {
+            return Err(ClaudeCodeSetupError::UnsafePath { path: check });
+        }
+    }
+    Ok(())
 }
 
 fn ensure_object_child<'a>(
@@ -736,6 +922,10 @@ mod tests {
     }
 
     fn server<'a>(config: &'a Value, project_dir: &Path, name: &str) -> &'a Value {
+        &project(config, project_dir)["mcpServers"][name]
+    }
+
+    fn project<'a>(config: &'a Value, project_dir: &Path) -> &'a Value {
         let projects = config["projects"]
             .as_object()
             .expect("projects should be an object");
@@ -743,7 +933,7 @@ mod tests {
             .into_iter()
             .find(|key| projects.contains_key(key.as_str()))
             .expect("project should exist");
-        &projects[&project_key]["mcpServers"][name]
+        &projects[&project_key]
     }
 
     fn expected_entry(binary: &Path, vault: &Path) -> Value {
@@ -823,20 +1013,14 @@ mod tests {
             server(&config, &opts.project_dir, "cairn"),
             &expected_entry(&opts.binary, &opts.vault)
         );
-        assert_eq!(
-            config["projects"][opts.project_dir.to_string_lossy().as_ref()]["mcpServers"]["other"]
-                ["command"],
-            "/other"
-        );
+        let project = project(&config, &opts.project_dir);
+        assert_eq!(project["mcpServers"]["other"]["command"], "/other");
         assert_eq!(
             config["projects"]["/elsewhere"]["mcpServers"]["cairn"]["command"],
             "/elsewhere"
         );
         assert_eq!(config["theme"], "dark");
-        assert_eq!(
-            config["projects"][opts.project_dir.to_string_lossy().as_ref()]["keep"],
-            true
-        );
+        assert_eq!(project["keep"], true);
     }
 
     #[test]

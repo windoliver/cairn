@@ -314,12 +314,21 @@ fn load_payload(matches: &ArgMatches) -> Result<Value, HookError> {
         serde_json::from_str(raw)
             .map_err(|err| HookError::invalid_args(format!("payload must be valid JSON: {err}")))?
     } else if let Some(path) = matches.get_one::<PathBuf>("payload-file") {
-        let raw = std::fs::read_to_string(path).map_err(|err| {
-            HookError::internal(
-                format!("failed to read payload file `{}`: {err}", path.display()),
-                "restore access to the payload file and retry the same hook command",
-            )
-        })?;
+        let raw = if path == std::path::Path::new("-") {
+            std::io::read_to_string(std::io::stdin()).map_err(|err| {
+                HookError::internal(
+                    format!("failed to read hook payload from stdin: {err}"),
+                    "retry the same hook command with a JSON object on stdin",
+                )
+            })?
+        } else {
+            std::fs::read_to_string(path).map_err(|err| {
+                HookError::internal(
+                    format!("failed to read payload file `{}`: {err}", path.display()),
+                    "restore access to the payload file and retry the same hook command",
+                )
+            })?
+        };
         serde_json::from_str(&raw).map_err(|err| {
             HookError::invalid_args(format!("payload file must contain valid JSON: {err}"))
         })?
@@ -429,6 +438,28 @@ pub fn require_string(payload: &Value, field: &'static str) -> Result<String, Ho
         .map(ToOwned::to_owned)
         .ok_or_else(|| {
             HookError::invalid_args(format!("payload.{field} must be a non-empty string"))
+        })
+}
+
+/// Read the first available required non-empty string field from a hook payload.
+pub fn require_any_string(
+    payload: &Value,
+    fields: &[&'static str],
+    canonical_field: &'static str,
+) -> Result<String, HookError> {
+    fields
+        .iter()
+        .find_map(|field| {
+            payload
+                .get(*field)
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(ToOwned::to_owned)
+        })
+        .ok_or_else(|| {
+            HookError::invalid_args(format!(
+                "payload.{canonical_field} must be a non-empty string"
+            ))
         })
 }
 
