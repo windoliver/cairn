@@ -14,6 +14,7 @@
 
 - [Installation](usage/installation.md)
 - [CLI](usage/cli.md)
+- [Backup Registry](usage/backup.md)
 - [Configuration](usage/config.md)
 - [Plugins](usage/plugins.md)
 - [MCP](usage/mcp.md)

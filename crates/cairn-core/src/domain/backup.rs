@@ -17,6 +17,12 @@ pub struct BackupRegistryEntry {
     pub created_at: Rfc3339Timestamp,
     /// Filesystem path to the backup artifact.
     pub artifact_path: String,
+    /// Digest of the backup artifact at registration time.
+    #[serde(default = "unknown_digest")]
+    pub file_digest: String,
+    /// Backup family: `snapshot`, `wal-shipping`, or `export`.
+    #[serde(default = "unknown_backup_kind")]
+    pub backup_kind: String,
     /// Target lineages present in the backup.
     pub target_ids_included: Vec<TargetId>,
 }
@@ -32,13 +38,26 @@ impl BackupRegistryEntry {
                 field: "artifact_path",
             });
         }
-        if self.target_ids_included.is_empty() {
+        if self.file_digest.trim().is_empty() {
             return Err(DomainError::EmptyField {
-                field: "target_ids_included",
+                field: "file_digest",
+            });
+        }
+        if self.backup_kind.trim().is_empty() {
+            return Err(DomainError::EmptyField {
+                field: "backup_kind",
             });
         }
         Ok(())
     }
+}
+
+fn unknown_digest() -> String {
+    "sha256:unknown".to_owned()
+}
+
+fn unknown_backup_kind() -> String {
+    "unknown".to_owned()
 }
 
 /// Deterministic plan for rewriting a backup while dropping forgotten targets.

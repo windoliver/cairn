@@ -55,6 +55,7 @@ pub fn build_command() -> clap::Command {
         .subcommand(skill_subcommand())
         .subcommand(setup_subcommand())
         .subcommand(admin_subcommand())
+        .subcommand(backup_subcommand())
         .subcommand(llm_subcommand())
         .subcommand(verbs::screen::command())
         .subcommand(verbs::sensor::command())
@@ -425,6 +426,48 @@ fn admin_subcommand() -> clap::Command {
         .subcommand(admin_snapshot_subcommand())
         .subcommand(admin_restore_subcommand())
         .subcommand(admin_workflow_subcommand())
+}
+
+fn backup_subcommand() -> clap::Command {
+    clap::Command::new("backup")
+        .about("Audit and manage registered vault backups")
+        .subcommand_required(true)
+        .arg_required_else_help(true)
+        .subcommand(
+            clap::Command::new("register")
+                .about("Register an existing Cairn backup artifact for forget replay")
+                .arg(
+                    clap::Arg::new("path")
+                        .value_name("PATH")
+                        .required(true)
+                        .help("Backup artifact root to register"),
+                )
+                .arg(
+                    clap::Arg::new("kind")
+                        .long("kind")
+                        .value_name("KIND")
+                        .default_value("export")
+                        .value_parser(["snapshot", "wal-shipping", "export"])
+                        .help("Backup kind recorded in the registry"),
+                )
+                .arg(json_arg("Emit JSON output")),
+        )
+        .subcommand(
+            clap::Command::new("list")
+                .about("List registered backups")
+                .arg(json_arg("Emit JSON output")),
+        )
+        .subcommand(
+            clap::Command::new("forget")
+                .about("Remove backup registry entries by digest")
+                .arg(
+                    clap::Arg::new("digest")
+                        .value_name("DIGEST")
+                        .required(true)
+                        .help("Registered backup digest to remove from the registry"),
+                )
+                .arg(json_arg("Emit JSON output")),
+        )
 }
 
 /// Hidden `cairn admin workflow` tree — issue #92 E2E verification.

@@ -132,6 +132,7 @@ fn subcommand_needs_vault_guard(subcommand: Option<(&str, &ArgMatches)>) -> bool
             | "plugins"
             | "mcp"
             | "admin"
+            | "backup"
             | "llm"
             | "identity"
             | "coord"
@@ -360,6 +361,7 @@ fn main() -> ExitCode {
         Some(("skill", sub)) => run_skill(sub),
         Some(("setup", sub)) => run_setup(sub, explicit_vault.as_deref()),
         Some(("admin", sub)) => run_admin(sub, explicit_vault.as_deref()),
+        Some(("backup", sub)) => run_backup(sub, explicit_vault.as_deref()),
         Some(("llm", sub)) => run_llm(sub),
         Some(("coord", sub)) => cairn_cli::coord::run(sub),
         Some(("flush", sub)) => match resolve_vault_or_cwd(explicit_vault.as_deref()) {
@@ -708,6 +710,20 @@ fn run_admin(matches: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
             "clap subcommand_required(true) on admin ensures a subcommand is always present"
         ),
     }
+}
+
+fn run_backup(matches: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
+    let (vault_root, _source) = match resolve_vault_or_cwd(explicit_vault) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("cairn backup: vault resolution error — {e:#}");
+            return ExitCode::from(78);
+        }
+    };
+    if let Some(rc) = enforce_vault_binding("backup", &vault_root) {
+        return rc;
+    }
+    verbs::backup::run(matches, &vault_root)
 }
 
 fn load_admin_config(
