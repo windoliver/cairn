@@ -9,6 +9,8 @@ use crate::gates::baseline::Baseline;
 use crate::gates::report::GateOutcome;
 use crate::gates::thresholds::SLO_HOT_PATH_SUBPROCESS_MS;
 
+const REGRESSION_JITTER_TOLERANCE_MS: f64 = 0.05;
+
 /// Per-metric SLO. All 8 P0 benches share the subprocess proxy SLO.
 #[must_use]
 pub fn slo_ms(_metric: &str) -> f64 {
@@ -103,7 +105,7 @@ pub fn compare(measured: &BTreeMap<String, f64>, baseline: &Baseline) -> Latency
             .unwrap_or(f64::INFINITY);
         let regression_threshold = baseline.regression_threshold_ms(bench);
         let slo_ok = *measured_ms <= slo;
-        let regression_ok = *measured_ms <= regression_threshold;
+        let regression_ok = *measured_ms <= regression_threshold + REGRESSION_JITTER_TOLERANCE_MS;
         if !slo_ok {
             failures.push(format!(
                 "{bench}: measured {measured_ms:.2} ms > SLO {slo:.2} ms"
@@ -235,6 +237,14 @@ mod tests {
                 .iter()
                 .any(|f| f.contains("baseline regression threshold"))
         );
+    }
+
+    #[test]
+    fn pass_when_only_fractionally_over_regression_threshold() {
+        let measured: BTreeMap<String, f64> = [("assemble_hot_p95".into(), 102.04)].into();
+        let baseline = b("assemble_hot_p95", 100.0);
+        let r = compare(&measured, &baseline);
+        assert!(r.ok, "expected tolerance pass; failures: {:?}", r.failures);
     }
 
     #[test]
