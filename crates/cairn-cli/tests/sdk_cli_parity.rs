@@ -191,14 +191,13 @@ fn status_parity_cli_vs_sdk() {
 
     // Both surfaces run from a vault-less, config-less context here
     // (CLI is forced into the OS tempdir; `Sdk::new()` has no store).
-    // Under those conditions both surfaces must emit
-    // `mcp_graph_tools = None` — the CLI has no config to validate
-    // and the SDK has no MCP server to probe. Enforcing equality on
-    // the field catches regressions where one adapter starts
-    // synthesizing a value the other cannot.
+    // The authority DB path is a local diagnostic path, so it differs
+    // between the spawned CLI process and this in-process SDK test.
+    // The health state/reason remain stable and are still compared.
     let volatile: &[&[&str]] = &[
         &["server_info", "incarnation"],
         &["server_info", "started_at"],
+        &["health", "authority_db", "path"],
     ];
     mask(&mut cli, volatile);
     mask(&mut sdk, volatile);
@@ -302,6 +301,7 @@ fn status_parity_cli_vs_sdk_vs_mcp() {
     let volatile: &[&[&str]] = &[
         &["server_info", "incarnation"],
         &["server_info", "started_at"],
+        &["health", "authority_db", "path"],
     ];
     mask(&mut cli, volatile);
     mask(&mut sdk, volatile);

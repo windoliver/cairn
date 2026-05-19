@@ -2,4 +2,4 @@
 source: crates/cairn-idl/tests/wire_compat_v1.rs
 expression: digest
 ---
-28b9c460e2b07035b0f59f316fccaa34f321b40a186ad4c7993505084dad231d
+e5c6ad17c663c74aac20fc1a5cf12f7b55cd2d70768d56699bfac77bc551e0ea

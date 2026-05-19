@@ -1,6 +1,6 @@
 //! Shared clap command tree for the runtime CLI and generated docs.
 
-use crate::{coord, doctor, generated, hooks, identity, setup, skill, verbs};
+use crate::{coord, doctor, generated, hooks, identity, nexus_cli, setup, skill, verbs};
 
 /// Build the `cairn` command tree used by both `main.rs` and `cairn-docgen`.
 #[must_use]
@@ -50,6 +50,7 @@ pub fn build_command() -> clap::Command {
         .subcommand(plugins_subcommand())
         .subcommand(bootstrap_subcommand())
         .subcommand(doctor_subcommand())
+        .subcommand(nexus_cli::command())
         .subcommand(setup_subcommand())
         .subcommand(mcp_subcommand())
         .subcommand(vault_subcommand())

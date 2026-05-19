@@ -1,6 +1,5 @@
 ---
 source: crates/cairn-cli/tests/status_snapshot_insta.rs
-assertion_line: 101
 expression: v
 ---
 {
@@ -10,6 +9,15 @@ expression: v
   ],
   "contract": "cairn.mcp.v1",
   "extensions": [],
+  "health": {
+    "authority_db": {
+      "path": "<masked>",
+      "state": "missing"
+    },
+    "nexus_projection": {
+      "state": "disabled"
+    }
+  },
   "mcp_graph_tools": {
     "probe_basis": "config_only",
     "reason": "vault_not_bound",

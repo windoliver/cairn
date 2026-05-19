@@ -34,6 +34,38 @@ use cairn_store_sqlite::entity_graph::queries::GraphQueries;
 
 use crate::generated::TOOLS;
 
+fn status_health(
+    vault_root: Option<&Path>,
+    sqlite_store_wired: bool,
+) -> cairn_core::generated::status::StatusResponseHealth {
+    let db_path = vault_root.map_or_else(
+        || PathBuf::from(".cairn/cairn.db"),
+        |root| root.join(".cairn/cairn.db"),
+    );
+    let authority_state = if sqlite_store_wired {
+        cairn_core::generated::status::StatusResponseHealthAuthorityDbState::Healthy
+    } else if db_path.exists() {
+        cairn_core::generated::status::StatusResponseHealthAuthorityDbState::Unavailable
+    } else {
+        cairn_core::generated::status::StatusResponseHealthAuthorityDbState::Missing
+    };
+
+    cairn_core::generated::status::StatusResponseHealth {
+        authority_db: cairn_core::generated::status::StatusResponseHealthAuthorityDb {
+            state: authority_state,
+            path: db_path.display().to_string(),
+            reason: None,
+        },
+        nexus_projection: cairn_core::generated::status::StatusResponseHealthNexusProjection {
+            state:
+                cairn_core::generated::status::StatusResponseHealthNexusProjectionState::Disabled,
+            endpoint: None,
+            data_dir: None,
+            reason: None,
+        },
+    }
+}
+
 /// Materialized graph-request bundle. Resolved once; carried into dispatch.
 /// Holds the **concrete** sqlite store handle — `GraphQueries` is sqlite-
 /// specific and there is no graph-capable trait on `dyn MemoryStore` yet.
@@ -488,6 +520,7 @@ impl CairnMcpHandler {
             },
             capabilities,
             extensions,
+            health: status_health(self.vault_root.as_deref(), self.sqlite_store.is_some()),
             sensors: cairn_core::status::sensors_status_for_config(&self.config),
             pipeline_dispatch: Some(pipeline_dispatch_advertisement(&DefaultRegistry)),
             // Mirror the SDK's `Sdk::status` and CLI's no-vault path so

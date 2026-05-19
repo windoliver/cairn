@@ -5,7 +5,7 @@
   "x-cairn-contract": "cairn.mcp.v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["contract", "server_info", "capabilities", "extensions", "sensors"],
+  "required": ["contract", "server_info", "capabilities", "extensions", "health", "sensors"],
   "properties": {
     "contract": { "const": "cairn.mcp.v1" },
     "mcp_graph_tools": {
@@ -49,6 +49,40 @@
       "type": "array",
       "uniqueItems": true,
       "items": { "$ref": "../extensions/registry.json#/$defs/namespace" }
+    },
+    "health": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["authority_db", "nexus_projection"],
+      "properties": {
+        "authority_db": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "path"],
+          "properties": {
+            "state": {
+              "type": "string",
+              "enum": ["healthy", "missing", "unavailable"]
+            },
+            "path": { "type": "string", "minLength": 1 },
+            "reason": { "type": "string", "minLength": 1 }
+          }
+        },
+        "nexus_projection": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state"],
+          "properties": {
+            "state": {
+              "type": "string",
+              "enum": ["disabled", "healthy", "degraded"]
+            },
+            "endpoint": { "type": "string", "minLength": 1 },
+            "data_dir": { "type": "string", "minLength": 1 },
+            "reason": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
     },
     "sensors": {
       "type": "object",

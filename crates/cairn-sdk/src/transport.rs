@@ -16,8 +16,11 @@ use cairn_core::contract::memory_store::MemoryStore;
 use cairn_core::generated::common::Capabilities;
 use cairn_core::generated::handshake::{HandshakeResponse, HandshakeResponseChallenge};
 use cairn_core::generated::status::{
-    StatusResponse, StatusResponseMcpGraphTools, StatusResponseMcpGraphToolsProbeBasis,
-    StatusResponseMcpGraphToolsReason, StatusResponseMcpGraphToolsState, StatusResponseServerInfo,
+    StatusResponse, StatusResponseHealth, StatusResponseHealthAuthorityDb,
+    StatusResponseHealthAuthorityDbState, StatusResponseHealthNexusProjection,
+    StatusResponseHealthNexusProjectionState, StatusResponseMcpGraphTools,
+    StatusResponseMcpGraphToolsProbeBasis, StatusResponseMcpGraphToolsReason,
+    StatusResponseMcpGraphToolsState, StatusResponseServerInfo,
 };
 use cairn_core::generated::verbs::{
     assemble_hot::{AssembleHotArgs, AssembleHotData},
@@ -178,6 +181,19 @@ impl<T: Transport> Sdk<T> {
             },
             capabilities,
             extensions,
+            health: StatusResponseHealth {
+                authority_db: StatusResponseHealthAuthorityDb {
+                    state: StatusResponseHealthAuthorityDbState::Missing,
+                    path: ".cairn/cairn.db".to_owned(),
+                    reason: None,
+                },
+                nexus_projection: StatusResponseHealthNexusProjection {
+                    state: StatusResponseHealthNexusProjectionState::Disabled,
+                    endpoint: None,
+                    data_dir: None,
+                    reason: None,
+                },
+            },
             sensors: cairn_core::status::sensors_status_for_config(&self.config),
             // Advertise the live routing policy. Mirrors the CLI
             // status producer: both surfaces emit the same

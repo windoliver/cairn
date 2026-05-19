@@ -61,6 +61,34 @@ fn load_from_file_overrides_name() {
 }
 
 #[test]
+fn nexus_sandbox_file_defaults_profile() {
+    with_clean_config_env(&[], || {
+        let dir = tempfile::tempdir().unwrap();
+        write_yaml(dir.path(), "store:\n  kind: nexus-sandbox\n");
+        let config = load(dir.path(), &CliOverrides::default()).unwrap();
+        assert_eq!(config.store.kind, StoreKind::NexusSandbox);
+        assert_eq!(config.store.nexus.data_dir, "nexus-data");
+        assert_eq!(config.store.nexus.command, "nexusd");
+        assert_eq!(
+            config.store.nexus.args,
+            vec![
+                "--profile".to_owned(),
+                "sandbox".to_owned(),
+                "--host".to_owned(),
+                "127.0.0.1".to_owned(),
+                "--port".to_owned(),
+                "8765".to_owned(),
+                "--workspace".to_owned(),
+                "{vault_dir}".to_owned(),
+                "--data-dir".to_owned(),
+                "{data_dir}".to_owned(),
+            ]
+        );
+        assert_eq!(config.store.nexus.health_timeout_ms, 120_000);
+    });
+}
+
+#[test]
 fn source_redact_on_forget_defaults_false() {
     with_clean_config_env(&[], || {
         let dir = tempfile::tempdir().unwrap();

@@ -26,6 +26,18 @@ fn write_vault_id(root: &Path) {
     .unwrap();
 }
 
+fn mask_status_volatiles(v: &mut serde_json::Value) {
+    if let Some(si) = v["server_info"].as_object_mut() {
+        si.insert("incarnation".into(), "<masked>".into());
+        si.insert("started_at".into(), "<masked>".into());
+        si.insert("version".into(), "<masked>".into());
+        si.insert("build".into(), "<masked>".into());
+    }
+    if let Some(path) = v.pointer_mut("/health/authority_db/path") {
+        *path = "<masked>".into();
+    }
+}
+
 /// Run `cairn --vault <dir> status --json` with optional config overrides.
 /// Returns the parsed JSON with volatile fields masked.
 fn run_status(dir: &Path, config_yaml: Option<&str>) -> serde_json::Value {
@@ -43,12 +55,7 @@ fn run_status(dir: &Path, config_yaml: Option<&str>) -> serde_json::Value {
         String::from_utf8_lossy(&out.stdout),
     );
     let mut v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
-    if let Some(si) = v["server_info"].as_object_mut() {
-        si.insert("incarnation".into(), "<masked>".into());
-        si.insert("started_at".into(), "<masked>".into());
-        si.insert("version".into(), "<masked>".into());
-        si.insert("build".into(), "<masked>".into());
-    }
+    mask_status_volatiles(&mut v);
     v
 }
 
@@ -92,23 +99,13 @@ fn snapshot_unbound_dir() {
         String::from_utf8_lossy(&out.stderr)
     );
     let mut v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
-    if let Some(si) = v["server_info"].as_object_mut() {
-        si.insert("incarnation".into(), "<masked>".into());
-        si.insert("started_at".into(), "<masked>".into());
-        si.insert("version".into(), "<masked>".into());
-        si.insert("build".into(), "<masked>".into());
-    }
+    mask_status_volatiles(&mut v);
     insta::assert_json_snapshot!("unbound_dir", v);
 }
 
 #[test]
 fn snapshot_sdk_new_no_store() {
     let mut v = serde_json::to_value(cairn_sdk::Sdk::new().status()).expect("serialize");
-    if let Some(si) = v["server_info"].as_object_mut() {
-        si.insert("incarnation".into(), "<masked>".into());
-        si.insert("started_at".into(), "<masked>".into());
-        si.insert("version".into(), "<masked>".into());
-        si.insert("build".into(), "<masked>".into());
-    }
+    mask_status_volatiles(&mut v);
     insta::assert_json_snapshot!("sdk_new_no_store", v);
 }

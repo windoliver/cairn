@@ -8,6 +8,52 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
+pub enum StatusResponseHealthAuthorityDbState {
+    Healthy,
+    Missing,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusResponseHealthAuthorityDb {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub state: StatusResponseHealthAuthorityDbState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatusResponseHealthNexusProjectionState {
+    Disabled,
+    Healthy,
+    Degraded,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusResponseHealthNexusProjection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub state: StatusResponseHealthNexusProjectionState,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusResponseHealth {
+    pub authority_db: StatusResponseHealthAuthorityDb,
+    pub nexus_projection: StatusResponseHealthNexusProjection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum StatusResponseMcpGraphToolsProbeBasis {
     Full,
     ConfigOnly,
@@ -285,6 +331,7 @@ pub struct StatusResponse {
     pub capabilities: Vec<crate::generated::common::Capabilities>,
     pub contract: String,
     pub extensions: Vec<crate::generated::common::Namespace>,
+    pub health: StatusResponseHealth,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_graph_tools: Option<StatusResponseMcpGraphTools>,
     /// Per-(source_family, tool_id) routing decisions for the Capture → Extract pipeline (issue #217). Each entry tells clients whether captured payloads flow through `squash` (lossy compaction) or `bypass` (raw bytes). Entries MUST be sorted lexicographically by (source_family, tool_id ?? "") for byte-stable status responses across an incarnation (brief §8.0.a). Optional and additive — not in `required[]` so a pre-#217 server's response (no field) deserializes against this schema.

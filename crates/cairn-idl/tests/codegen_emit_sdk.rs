@@ -255,3 +255,20 @@ fn error_code_enum_omits_rename_all_so_pascal_wire_round_trips() {
         "ErrorCode must not declare rename_all (PascalCase wire is the contract)"
     );
 }
+
+#[test]
+fn status_response_includes_split_health_types() {
+    let files = emit_sdk::emit(&doc()).unwrap();
+    let status = files
+        .iter()
+        .find(|f| {
+            f.path
+                .ends_with("crates/cairn-core/src/generated/status.rs")
+        })
+        .unwrap();
+    let body = std::str::from_utf8(&status.bytes).unwrap();
+    assert!(body.contains("pub struct StatusResponseHealth"));
+    assert!(body.contains("pub struct StatusResponseHealthAuthorityDb"));
+    assert!(body.contains("pub struct StatusResponseHealthNexusProjection"));
+    assert!(body.contains("pub health: StatusResponseHealth"));
+}

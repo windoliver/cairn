@@ -43,6 +43,24 @@ vault:
   - GEMINI.md
 store:
   kind: sqlite
+  nexus:
+    data_dir: nexus-data
+    command: nexusd
+    args:
+    - --profile
+    - sandbox
+    - --host
+    - 127.0.0.1
+    - --port
+    - '8765'
+    - --workspace
+    - '{vault_dir}'
+    - --data-dir
+    - '{data_dir}'
+    endpoint: http://127.0.0.1:8765
+    health_path: /health
+    health_timeout_ms: 120000
+    shutdown_timeout_ms: 2000
 llm:
   provider: null
   base_url: null

@@ -137,7 +137,7 @@ pub async fn serve_stdio_with_store(
     config: cairn_core::config::CairnConfig,
     principal: cairn_core::domain::ScopeTuple,
 ) -> Result<(), TransportError> {
-    serve_stdio_with_store_io(
+    Box::pin(serve_stdio_with_store_io(
         store,
         sqlite_store,
         scope,
@@ -145,7 +145,7 @@ pub async fn serve_stdio_with_store(
         principal,
         tokio::io::stdin(),
         tokio::io::stdout(),
-    )
+    ))
     .await
 }
 
@@ -194,7 +194,7 @@ pub async fn serve_stdio_with_store_consolidation_ready(
     principal: cairn_core::domain::ScopeTuple,
     vault_root: Option<PathBuf>,
 ) -> Result<(), TransportError> {
-    serve_stdio_with_store_io_inner(
+    Box::pin(serve_stdio_with_store_io_inner(
         store,
         sqlite_store,
         scope,
@@ -207,7 +207,7 @@ pub async fn serve_stdio_with_store_consolidation_ready(
             consolidation: true,
             ..WorkflowReadiness::default()
         },
-    )
+    ))
     .await
 }
 
@@ -244,7 +244,7 @@ pub async fn serve_stdio_with_store_workflows_ready(
     vault_root: Option<PathBuf>,
     readiness: WorkflowReadiness,
 ) -> Result<(), TransportError> {
-    serve_stdio_with_store_io_inner(
+    Box::pin(serve_stdio_with_store_io_inner(
         store,
         sqlite_store,
         scope,
@@ -254,7 +254,7 @@ pub async fn serve_stdio_with_store_workflows_ready(
         tokio::io::stdin(),
         tokio::io::stdout(),
         readiness,
-    )
+    ))
     .await
 }
 
@@ -279,7 +279,7 @@ where
     I: AsyncRead + Unpin + Send + 'static,
     O: AsyncWrite + Unpin + Send + 'static,
 {
-    serve_stdio_with_store_io_inner(
+    Box::pin(serve_stdio_with_store_io_inner(
         store,
         sqlite_store,
         scope,
@@ -289,7 +289,7 @@ where
         input,
         output,
         WorkflowReadiness::default(),
-    )
+    ))
     .await
 }
 
@@ -317,7 +317,7 @@ where
     I: AsyncRead + Unpin + Send + 'static,
     O: AsyncWrite + Unpin + Send + 'static,
 {
-    serve_stdio_with_store_io_inner(
+    Box::pin(serve_stdio_with_store_io_inner(
         store,
         sqlite_store,
         scope,
@@ -327,7 +327,7 @@ where
         input,
         output,
         WorkflowReadiness::default(),
-    )
+    ))
     .await
 }
 

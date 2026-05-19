@@ -21,16 +21,19 @@ use cairn_core::domain::identity::keys::VaultId;
 use cairn_core::domain::{BudgetObservation, LocalSensorName, SensorGateReason};
 use cairn_core::generated::common::Capabilities;
 use cairn_core::generated::status::{
-    StatusResponse, StatusResponseMcpGraphTools, StatusResponseMcpGraphToolsProbeBasis,
-    StatusResponseMcpGraphToolsReason, StatusResponseMcpGraphToolsState, StatusResponseSensors,
-    StatusResponseSensorsLocal, StatusResponseSensorsLocalBudget,
-    StatusResponseSensorsLocalConsent, StatusResponseSensorsLocalGate,
-    StatusResponseSensorsLocalLastDropReason, StatusResponseSensorsLocalRetention,
-    StatusResponseSensorsLocalSensor, StatusResponseSensorsScreen,
-    StatusResponseSensorsScreenBackend, StatusResponseSensorsScreenDegradation,
-    StatusResponseSensorsScreenDegradationCode, StatusResponseSensorsScreenMode,
-    StatusResponseSensorsScreenOcrEngine, StatusResponseSensorsScreenPermission,
-    StatusResponseSensorsScreenState, StatusResponseServerInfo,
+    StatusResponse, StatusResponseHealth, StatusResponseHealthAuthorityDb,
+    StatusResponseHealthAuthorityDbState, StatusResponseHealthNexusProjection,
+    StatusResponseHealthNexusProjectionState, StatusResponseMcpGraphTools,
+    StatusResponseMcpGraphToolsProbeBasis, StatusResponseMcpGraphToolsReason,
+    StatusResponseMcpGraphToolsState, StatusResponseSensors, StatusResponseSensorsLocal,
+    StatusResponseSensorsLocalBudget, StatusResponseSensorsLocalConsent,
+    StatusResponseSensorsLocalGate, StatusResponseSensorsLocalLastDropReason,
+    StatusResponseSensorsLocalRetention, StatusResponseSensorsLocalSensor,
+    StatusResponseSensorsScreen, StatusResponseSensorsScreenBackend,
+    StatusResponseSensorsScreenDegradation, StatusResponseSensorsScreenDegradationCode,
+    StatusResponseSensorsScreenMode, StatusResponseSensorsScreenOcrEngine,
+    StatusResponseSensorsScreenPermission, StatusResponseSensorsScreenState,
+    StatusResponseServerInfo,
 };
 use cairn_core::pipeline::dispatch::{DefaultRegistry, pipeline_dispatch_advertisement};
 use cairn_sensors_local::screen::{
@@ -38,9 +41,94 @@ use cairn_sensors_local::screen::{
     ScreenProbe, ScreenState,
 };
 
+use crate::nexus::{self, ProjectionStatusState};
+
 use super::envelope::{emit_json, new_operation_id};
 
 const CLI_CONTRACT_PHASE: cairn_core::status::Phase = cairn_core::status::Phase::V0_2;
+
+fn authority_db_health(vault_path: &Path) -> StatusResponseHealthAuthorityDb {
+    let db_path = vault_path.join(".cairn/cairn.db");
+    let path = db_path.display().to_string();
+    if !db_path.exists() {
+        return StatusResponseHealthAuthorityDb {
+            state: StatusResponseHealthAuthorityDbState::Missing,
+            path,
+            reason: None,
+        };
+    }
+
+    let conn = match rusqlite::Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ) {
+        Ok(conn) => conn,
+        Err(err) => {
+            return StatusResponseHealthAuthorityDb {
+                state: StatusResponseHealthAuthorityDbState::Unavailable,
+                path,
+                reason: Some(err.to_string()),
+            };
+        }
+    };
+
+    match conn.query_row("PRAGMA schema_version", [], |_| Ok(())) {
+        Ok(()) => StatusResponseHealthAuthorityDb {
+            state: StatusResponseHealthAuthorityDbState::Healthy,
+            path,
+            reason: None,
+        },
+        Err(err) => StatusResponseHealthAuthorityDb {
+            state: StatusResponseHealthAuthorityDbState::Unavailable,
+            path,
+            reason: Some(err.to_string()),
+        },
+    }
+}
+
+fn nexus_projection_health(
+    vault_path: &Path,
+    config: &CairnConfig,
+) -> StatusResponseHealthNexusProjection {
+    let projection = nexus::evaluate_projection_status(vault_path, config);
+    let state = match projection.state {
+        ProjectionStatusState::Disabled => StatusResponseHealthNexusProjectionState::Disabled,
+        ProjectionStatusState::Healthy => StatusResponseHealthNexusProjectionState::Healthy,
+        ProjectionStatusState::Degraded => StatusResponseHealthNexusProjectionState::Degraded,
+    };
+    StatusResponseHealthNexusProjection {
+        state,
+        data_dir: projection.data_dir.map(|path| path.display().to_string()),
+        endpoint: projection.endpoint,
+        reason: projection.reason,
+    }
+}
+
+fn render_projection_human(projection: &StatusResponseHealthNexusProjection) -> String {
+    match projection.state {
+        StatusResponseHealthNexusProjectionState::Disabled => "disabled".to_owned(),
+        StatusResponseHealthNexusProjectionState::Healthy => "healthy".to_owned(),
+        StatusResponseHealthNexusProjectionState::Degraded => {
+            projection.reason.as_ref().map_or_else(
+                || "degraded".to_owned(),
+                |reason| format!("degraded ({reason})"),
+            )
+        }
+        _ => "unknown".to_owned(),
+    }
+}
+
+fn render_authority_human(authority: &StatusResponseHealthAuthorityDb) -> String {
+    match authority.state {
+        StatusResponseHealthAuthorityDbState::Healthy => "healthy".to_owned(),
+        StatusResponseHealthAuthorityDbState::Missing => "missing".to_owned(),
+        StatusResponseHealthAuthorityDbState::Unavailable => authority.reason.as_ref().map_or_else(
+            || "unavailable".to_owned(),
+            |reason| format!("unavailable ({reason})"),
+        ),
+        _ => "unknown".to_owned(),
+    }
+}
 
 /// Outcome of probing `<vault>/.cairn/vault.id` for the capability gate.
 #[derive(Debug, PartialEq, Eq)]
@@ -173,16 +261,26 @@ pub fn run_with_context(
     let started_at = chrono_like_now();
     let fallback_config = CairnConfig::default();
     let status_config = config.unwrap_or(&fallback_config);
+    let status_vault_root = vault_root.unwrap_or_else(|| Path::new("."));
 
     let bound = matches!(binding, Some(VaultBinding::Bound));
     let caps = compute_capabilities(vault_root, config, bound);
-    let local_sensor_status = match map_local_sensor_status(vault_root, status_config, bound) {
-        Ok(rows) => rows,
-        Err(error) => {
-            eprintln!("cairn status: sensor status error — {error:#}");
-            return ExitCode::from(78); // EX_CONFIG
-        }
+    let health = StatusResponseHealth {
+        authority_db: authority_db_health(status_vault_root),
+        nexus_projection: nexus_projection_health(status_vault_root, status_config),
     };
+    let authority_db_healthy = matches!(
+        health.authority_db.state,
+        StatusResponseHealthAuthorityDbState::Healthy
+    );
+    let local_sensor_status =
+        match map_local_sensor_status(vault_root, status_config, bound, authority_db_healthy) {
+            Ok(rows) => rows,
+            Err(error) => {
+                eprintln!("cairn status: sensor status error — {error:#}");
+                return ExitCode::from(78); // EX_CONFIG
+            }
+        };
     let extensions = cairn_core::status::extension_namespaces(&caps);
 
     // ── MCP graph-tools availability (issue #190 Plan A) ─────────────
@@ -229,6 +327,7 @@ pub fn run_with_context(
         },
         capabilities: caps,
         extensions,
+        health,
         sensors: map_screen_probe(
             &screen::probe_config(&status_config.sensors.screen),
             Some(local_sensor_status),
@@ -276,6 +375,14 @@ pub fn run_with_context(
             "screen:      {} {}",
             status_screen_backend_label(resp.sensors.screen.backend),
             status_screen_state_label(resp.sensors.screen.state)
+        );
+        println!(
+            "authority_db: {}",
+            render_authority_human(&resp.health.authority_db)
+        );
+        println!(
+            "nexus_projection: {}",
+            render_projection_human(&resp.health.nexus_projection)
         );
     }
     // suppress unused warning when config is None
@@ -497,14 +604,10 @@ fn map_local_sensor_status(
     vault_root: Option<&Path>,
     config: &CairnConfig,
     bound: bool,
+    authority_db_healthy: bool,
 ) -> anyhow::Result<Vec<StatusResponseSensorsLocal>> {
-    let consent_states = if let Some(root) = vault_root.filter(|_| bound) {
-        let db_path = root.join(".cairn").join("cairn.db");
-        if db_path.exists() {
-            block_on(read_local_sensor_consent_states(root))?
-        } else {
-            vec![crate::sensor_gate::SensorConsentState::Missing; LocalSensorName::ALL.len()]
-        }
+    let consent_states = if let Some(root) = vault_root.filter(|_| bound && authority_db_healthy) {
+        block_on(read_local_sensor_consent_states(root))?
     } else {
         vec![crate::sensor_gate::SensorConsentState::Missing; LocalSensorName::ALL.len()]
     };

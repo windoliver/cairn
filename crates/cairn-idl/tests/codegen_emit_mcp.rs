@@ -404,3 +404,25 @@ fn verb_schema_carries_full_idl_file_with_local_defs() {
         );
     }
 }
+
+#[test]
+fn status_schema_requires_health() {
+    let files = emit_mcp::emit(&doc()).unwrap();
+    let status = files
+        .iter()
+        .find(|f| {
+            f.path
+                .ends_with("crates/cairn-mcp/src/generated/schemas/prelude/status.json")
+        })
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_slice(&status.bytes).unwrap();
+    let required = parsed
+        .get("required")
+        .and_then(serde_json::Value::as_array)
+        .expect("status required array");
+    assert!(
+        required.iter().any(|v| v.as_str() == Some("health")),
+        "status response must require health"
+    );
+    assert!(parsed.pointer("/properties/health").is_some());
+}
