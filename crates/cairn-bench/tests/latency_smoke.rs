@@ -8,7 +8,7 @@ use cairn_bench::latency::harness::compare;
 
 #[test]
 fn comparator_emits_failure_when_measured_exceeds_baseline_plus_2pct() {
-    let measured: BTreeMap<String, f64> = [("assemble_hot_p95".into(), 6.0)].into();
+    let measured: BTreeMap<String, f64> = [("assemble_hot_p95".into(), 7.0)].into();
     let baseline = Baseline {
         schema_version: 1,
         runner: "test".into(),

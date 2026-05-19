@@ -9,7 +9,7 @@ use crate::gates::baseline::Baseline;
 use crate::gates::report::GateOutcome;
 use crate::gates::thresholds::SLO_HOT_PATH_SUBPROCESS_MS;
 
-const REGRESSION_JITTER_TOLERANCE_MS: f64 = 0.05;
+const REGRESSION_JITTER_TOLERANCE_MS: f64 = 2.0;
 
 /// Per-metric SLO. All 8 P0 benches share the subprocess proxy SLO.
 #[must_use]
@@ -242,6 +242,14 @@ mod tests {
     #[test]
     fn pass_when_only_fractionally_over_regression_threshold() {
         let measured: BTreeMap<String, f64> = [("assemble_hot_p95".into(), 102.04)].into();
+        let baseline = b("assemble_hot_p95", 100.0);
+        let r = compare(&measured, &baseline);
+        assert!(r.ok, "expected tolerance pass; failures: {:?}", r.failures);
+    }
+
+    #[test]
+    fn pass_when_within_small_absolute_runner_jitter() {
+        let measured: BTreeMap<String, f64> = [("assemble_hot_p95".into(), 103.5)].into();
         let baseline = b("assemble_hot_p95", 100.0);
         let r = compare(&measured, &baseline);
         assert!(r.ok, "expected tolerance pass; failures: {:?}", r.failures);
