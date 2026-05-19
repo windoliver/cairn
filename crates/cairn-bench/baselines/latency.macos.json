@@ -1,17 +1,17 @@
 {
   "schema_version": 1,
   "runner": "macos",
-  "captured_at": "2026-05-16T10:16:14.021805+00:00",
-  "commit": "7e7568e7d735d2c4b9fb298ef7f9b19ca82c7428",
+  "captured_at": "2026-05-19T06:55:57.625000+00:00",
+  "commit": "fd54eb57f953ccc2d6359239e66852fe91e67cbd",
   "metrics": {
-    "assemble_hot_p95": 111.9114895,
-    "capture_trace_p95": 97.43322216666667,
-    "retrieve_p95": 91.3910584,
-    "search_hybrid_p95": 70.2357542,
-    "search_keyword_p95": 70.1014333,
-    "search_semantic_p95": 67.5380208,
-    "wal_apply_p95": 95.8666667,
-    "workflow_enqueue_p95": 150.564453125
+    "assemble_hot_p95": 150.362755125,
+    "capture_trace_p95": 93.2745917,
+    "retrieve_p95": 92.27435419999999,
+    "search_hybrid_p95": 86.1550584,
+    "search_keyword_p95": 107.58350829999999,
+    "search_semantic_p95": 86.4999375,
+    "wal_apply_p95": 102.038427125,
+    "workflow_enqueue_p95": 121.9505105
   },
   "regression_pct": {
     "assemble_hot_p95": 25.0,
