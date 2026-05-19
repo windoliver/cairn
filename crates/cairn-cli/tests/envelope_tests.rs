@@ -1638,6 +1638,7 @@ fn search_default_response_omits_excluded_field() {
         next_cursor: None,
         score_explain: None,
         degraded_legs: None,
+        semantic_degraded: None,
     };
     let json = serde_json::to_string(&data).expect("serializable");
     assert!(
@@ -1664,6 +1665,7 @@ fn search_with_excluded_emits_field() {
         next_cursor: None,
         score_explain: None,
         degraded_legs: None,
+        semantic_degraded: None,
     };
     let json = serde_json::to_string(&data).expect("serializable");
     assert!(
@@ -1685,11 +1687,50 @@ fn search_without_degraded_legs_omits_field() {
         next_cursor: None,
         score_explain: None,
         degraded_legs: None,
+        semantic_degraded: None,
     };
     let json = serde_json::to_string(&data).expect("serializable");
     assert!(
         !json.contains("\"degraded_legs\""),
         "healthy SearchData must not emit degraded_legs; got {json}"
+    );
+}
+
+#[test]
+fn search_without_semantic_degraded_omits_field() {
+    use cairn_core::generated::verbs::search::SearchData;
+
+    let data = SearchData {
+        excluded: None,
+        hits: Vec::new(),
+        next_cursor: None,
+        score_explain: None,
+        degraded_legs: None,
+        semantic_degraded: None,
+    };
+    let json = serde_json::to_string(&data).expect("serializable");
+    assert!(
+        !json.contains("\"semantic_degraded\""),
+        "healthy SearchData must not emit semantic_degraded; got {json}"
+    );
+}
+
+#[test]
+fn search_with_semantic_degraded_emits_true() {
+    use cairn_core::generated::verbs::search::SearchData;
+
+    let data = SearchData {
+        excluded: None,
+        hits: Vec::new(),
+        next_cursor: None,
+        score_explain: None,
+        degraded_legs: None,
+        semantic_degraded: Some(true),
+    };
+    let json = serde_json::to_string(&data).expect("serializable");
+    assert!(
+        json.contains("\"semantic_degraded\":true"),
+        "degraded SearchData must emit semantic_degraded=true; got {json}"
     );
 }
 
@@ -1720,6 +1761,7 @@ fn search_with_degraded_legs_emits_full_entry() {
                 source: Some(DegradedLegEntrySource::AuthSemanticSeed),
             },
         ]),
+        semantic_degraded: None,
     };
     let json = serde_json::to_string(&data).expect("serializable");
     let v: serde_json::Value = serde_json::from_str(&json).expect("roundtrip");

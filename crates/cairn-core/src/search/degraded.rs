@@ -11,6 +11,8 @@
 pub enum DegradationReason {
     /// Store does not advertise the capability needed by this leg.
     CapabilityUnavailable,
+    /// External semantic embedding provider had a transient outage.
+    TransientProviderOutage,
     /// Per-leg deadline elapsed before results landed.
     DeadlineExceeded,
     /// `SQLite` returned an error.
