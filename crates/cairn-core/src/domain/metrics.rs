@@ -38,6 +38,31 @@ pub enum MetricEvent {
         /// Snapshot of every source-class watermark at assembly time.
         watermarks: SourceWatermarks,
     },
+    /// Emitted when an active task-trace canvas is rendered into the
+    /// hot-memory current-task section. The payload is intentionally
+    /// body-free: IDs are hashed and canvas text / node summaries are
+    /// omitted so metrics stay safe for append-only observability.
+    #[serde(rename = "trace_canvas_rendered")]
+    TraceCanvasRendered {
+        /// Wall-clock millis since UNIX epoch.
+        ts_ms: i64,
+        /// SHA-256 of the canvas session id.
+        session_id_hash: String,
+        /// SHA-256 of the rendered canvas id.
+        canvas_id_hash: String,
+        /// Monotonic canvas version rendered by the caller.
+        version: i64,
+        /// Number of canvas nodes available to the renderer.
+        node_count: u32,
+        /// Number of canvas edges available to the renderer.
+        edge_count: u32,
+        /// Bytes rendered into the hot prefix for this section.
+        bytes: u64,
+        /// Effective canvas-local render budget.
+        budget_bytes: u64,
+        /// True when the canvas identified an active node.
+        active_node: bool,
+    },
     /// Emitted at the end of each `EvaluationWorkflow` sweep (issue
     /// #91, brief §15). Drives release gating — CI rejects merges
     /// whose `failed` count grows beyond the previous baseline.
@@ -182,6 +207,45 @@ mod tests {
                 assert_eq!(failed, 0);
             }
             _ => panic!("expected EvaluationCompleted"),
+        }
+    }
+
+    #[test]
+    fn trace_canvas_rendered_round_trips_without_body_fields() {
+        let event = MetricEvent::TraceCanvasRendered {
+            ts_ms: 1_700_000_000_000,
+            session_id_hash: "sha256:session".into(),
+            canvas_id_hash: "sha256:canvas".into(),
+            version: 3,
+            node_count: 2,
+            edge_count: 1,
+            bytes: 512,
+            budget_bytes: 1024,
+            active_node: true,
+        };
+        let json = serde_json::to_string(&event).expect("serialize");
+        assert!(json.contains("\"event\":\"trace_canvas_rendered\""));
+        assert!(!json.contains("Issue 134"));
+        assert!(!json.contains("finish trace canvas hot memory"));
+        let back: MetricEvent = serde_json::from_str(&json).expect("deserialize");
+        match back {
+            MetricEvent::TraceCanvasRendered {
+                version,
+                node_count,
+                edge_count,
+                bytes,
+                budget_bytes,
+                active_node,
+                ..
+            } => {
+                assert_eq!(version, 3);
+                assert_eq!(node_count, 2);
+                assert_eq!(edge_count, 1);
+                assert_eq!(bytes, 512);
+                assert_eq!(budget_bytes, 1024);
+                assert!(active_node);
+            }
+            _ => panic!("expected TraceCanvasRendered"),
         }
     }
 

@@ -1305,6 +1305,8 @@ pub async fn lint_handler(
     };
     let mut data = run_checks(&inputs).await;
 
+    append_trace_canvas_findings(store, &lint_records, &source_resolver, &mut data).await?;
+
     if index_stats_skipped {
         push_index_stats_skipped(&mut data);
     }
@@ -2153,6 +2155,33 @@ fn push_projection_finding(
     data.findings.push(f);
 }
 
+async fn append_trace_canvas_findings(
+    store: &dyn cairn_core::contract::memory_store::MemoryStore,
+    records: &[cairn_core::verbs::lint::LintRecord],
+    source_resolver: &dyn SourceResolver,
+    data: &mut LintData,
+) -> anyhow::Result<()> {
+    let snapshot = match store.trace_canvas_lint_snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(e)
+            if e.to_string()
+                .contains("not supported by this store adapter") =>
+        {
+            return Ok(());
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!("store: trace_canvas_lint_snapshot: {e}"))
+                .context("lint: trace_canvas_lint_snapshot");
+        }
+    };
+    let findings =
+        cairn_core::verbs::lint::checks::trace_canvas::run(&snapshot, records, source_resolver);
+    for finding in findings {
+        push_lint_finding(data, finding);
+    }
+    Ok(())
+}
+
 fn append_sensor_drop_findings(vault_root: &Path, data: &mut LintData) -> anyhow::Result<()> {
     let drops = crate::sensor_gate::read_sensor_drop_metrics(vault_root)
         .with_context(|| format!("lint: sensor drop metrics from {}", vault_root.display()))?;
@@ -2182,7 +2211,7 @@ fn append_sensor_drop_findings(vault_root: &Path, data: &mut LintData) -> anyhow
             }),
             tracking_issue: Some(88),
         };
-        push_sensor_drop_finding(data, finding);
+        push_lint_finding(data, finding);
     }
     Ok(())
 }
@@ -2195,7 +2224,7 @@ fn sensor_drop_kind(reason: cairn_core::domain::SensorGateReason) -> Option<Kind
     }
 }
 
-fn push_sensor_drop_finding(data: &mut LintData, finding: Finding) {
+fn push_lint_finding(data: &mut LintData, finding: Finding) {
     let key = kind_key(finding.kind);
     data.summary.total += 1;
     match finding.severity {

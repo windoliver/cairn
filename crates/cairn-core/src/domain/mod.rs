@@ -51,6 +51,7 @@ pub mod taxonomy;
 pub mod time;
 pub mod timestamp;
 pub mod trace;
+pub mod tree_read_window;
 pub mod zero_capture;
 
 pub use actor_chain::{ActorChainEntry, ChainRole, validate_chain};
@@ -98,6 +99,10 @@ pub use taxonomy::{MemoryClass, MemoryKind, MemoryVisibility};
 pub use time::{Clock, SystemClock};
 pub use timestamp::Rfc3339Timestamp;
 pub use trace::{TraceBlock, TraceEvent, TraceLink, TraceLinkError};
+pub use tree_read_window::{
+    TreeBudgetReport, TreeReadRecord, TreeReadSegmentKind, TreeReadSelection, TreeReadWindow,
+    TreeReadWindowError, TreeReadWindowInput, plan_tree_read_window,
+};
 pub use zero_capture::{
     ZeroCaptureAuditInput, ZeroCaptureDecision, ZeroCaptureDecisionCode, ZeroCaptureNudge,
     ZeroCaptureReport, ZeroCaptureReportSummary, ZeroCaptureSuppression, ZeroCaptureTrigger,
