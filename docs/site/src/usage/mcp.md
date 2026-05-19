@@ -1,7 +1,16 @@
 # MCP
 
-`cairn-mcp` contains the MCP adapter crate, generated tool declarations, plugin
-manifest, and stdio serving entry point.
+For Claude Code, prefer the first-party setup command:
+
+```bash
+cairn setup claude-code --vault <name-or-path>
+cairn doctor claude-code
+```
+
+See [Claude Code](claude-code.md) for the full reference-consumer workflow.
+
+`cairn-mcp` contains the lower-level MCP adapter crate, generated tool
+declarations, plugin manifest, and stdio serving entry point.
 
 Current truth:
 

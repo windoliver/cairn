@@ -9,7 +9,7 @@ Administrative operations (model management, reindex, reporting, backup substrat
 ```text
 Administrative operations (model management, reindex, reporting, backup substrate)
 
-Usage: admin <COMMAND>
+Usage: cairn admin [OPTIONS] <COMMAND>
 
 Commands:
   model                Embedding model management
@@ -21,8 +21,9 @@ Commands:
   help                 Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help
-          Print help
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+  -h, --help                  Print help
 ```
 
 ## Subcommands

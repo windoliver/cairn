@@ -9,15 +9,12 @@ List operational identities
 ```text
 List operational identities
 
-Usage: list [OPTIONS]
+Usage: cairn identity list [OPTIONS]
 
 Options:
-      --kind <KIND>
-          Filter by kind: human, agent, sensor
-
-      --json
-          Emit JSON output instead of human-readable text
-
-  -h, --help
-          Print help
+      --kind <KIND>           Filter by kind: human, agent, sensor
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+      --json                  Emit JSON output instead of human-readable text
+  -h, --help                  Print help
 ```

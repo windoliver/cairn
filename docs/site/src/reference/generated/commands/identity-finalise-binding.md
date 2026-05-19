@@ -9,18 +9,13 @@ Resume or abandon a partial first-bind after a crash
 ```text
 Resume or abandon a partial first-bind after a crash
 
-Usage: finalise-binding [OPTIONS]
+Usage: cairn identity finalise-binding [OPTIONS]
 
 Options:
-      --abandon
-          Abandon the partial bind (deletes .cairn/vault.binding.pending)
-
-      --vault-id <UUID>
-          Explicit vault UUID override
-
-      --json
-          Emit JSON output instead of human-readable text
-
-  -h, --help
-          Print help
+      --abandon               Abandon the partial bind (deletes .cairn/vault.binding.pending)
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+      --vault-id <UUID>       Explicit vault UUID override
+      --json                  Emit JSON output instead of human-readable text
+  -h, --help                  Print help
 ```

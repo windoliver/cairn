@@ -10,23 +10,16 @@ Verify Claude Code can discover the configured Cairn MCP server, start it, call 
 Verify Claude Code can discover the configured Cairn MCP server, start it, call `status`, and find
 the five expected hook entries without mutating config.
 
-Usage: claude-code [OPTIONS]
+Usage: cairn doctor claude-code [OPTIONS]
 
 Options:
-      --project-dir <PATH>
-          Project directory used for .mcp.json and .claude/settings*.json lookups
-
-      --home-dir <PATH>
-          Override the user home directory for ~/.claude.json and ~/.claude/settings.json
-
-      --server-name <NAME>
-          Claude Code MCP server name to verify
-
-          [default: cairn]
-
-      --json
-          Emit JSON receipt instead of human-readable output
-
-  -h, --help
-          Print help
+      --project-dir <PATH>    Project directory used for .mcp.json and .claude/settings*.json
+                              lookups
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+      --home-dir <PATH>       Override the user home directory for ~/.claude.json and
+                              ~/.claude/settings.json
+      --server-name <NAME>    Claude Code MCP server name to verify [default: cairn]
+      --json                  Emit JSON receipt instead of human-readable output
+  -h, --help                  Print help
 ```

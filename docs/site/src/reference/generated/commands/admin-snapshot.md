@@ -9,15 +9,12 @@ Prepare a vault backup snapshot
 ```text
 Prepare a vault backup snapshot
 
-Usage: snapshot [OPTIONS] --backup <PATH>
+Usage: cairn admin snapshot [OPTIONS] --backup <PATH>
 
 Options:
-      --backup <PATH>
-          Destination path for the prepared backup
-
-      --json
-          Emit JSON output
-
-  -h, --help
-          Print help
+      --backup <PATH>         Destination path for the prepared backup
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+      --json                  Emit JSON output
+  -h, --help                  Print help
 ```

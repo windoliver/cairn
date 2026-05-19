@@ -9,15 +9,12 @@ Archive a session into the local cold bundle substrate
 ```text
 Archive a session into the local cold bundle substrate
 
-Usage: archive-session [OPTIONS] --session <STRING>
+Usage: cairn admin archive-session [OPTIONS] --session <STRING>
 
 Options:
-      --session <STRING>
-          Session id to archive
-
-      --json
-          Emit JSON output
-
-  -h, --help
-          Print help
+      --session <STRING>      Session id to archive
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+      --json                  Emit JSON output
+  -h, --help                  Print help
 ```

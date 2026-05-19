@@ -175,6 +175,34 @@ fn docgen_write_then_check_is_clean() {
 }
 
 #[test]
+fn command_pages_include_full_usage_and_global_options() {
+    let root = tempfile::tempdir().expect("tempdir");
+    write_coverage(root.path(), complete_coverage());
+
+    let opts = RunOpts {
+        workspace_root: root.path().to_path_buf(),
+        mode: RunMode::Write,
+        package_names: Some(all_package_names()),
+    };
+    run(&opts).expect("write docs");
+
+    let page = std::fs::read_to_string(
+        root.path()
+            .join("docs/site/src/reference/generated/commands/setup-claude-code.md"),
+    )
+    .expect("read generated command page");
+
+    assert!(
+        page.contains("Usage: cairn setup claude-code"),
+        "command page should render full command usage:\n{page}",
+    );
+    assert!(
+        page.contains("--vault <NAME_OR_PATH>"),
+        "command page should include propagated global options:\n{page}",
+    );
+}
+
+#[test]
 fn docgen_detects_generated_file_drift() {
     let root = tempfile::tempdir().expect("tempdir");
     write_coverage(root.path(), complete_coverage());

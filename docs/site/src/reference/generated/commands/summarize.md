@@ -9,25 +9,17 @@ cairn.mcp.v1 verb: summarize
 ```text
 cairn.mcp.v1 verb: summarize
 
-Usage: summarize [OPTIONS] <record_ids>...
+Usage: cairn summarize [OPTIONS] <record_ids>...
 
 Arguments:
-  <record_ids>...
-          One or more record ULIDs.
+  <record_ids>...  One or more record ULIDs.
 
 Options:
       --persist
-
-
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
       --kind <STRING>
-
-
-      --citations <ENUM>
-          [possible values: on, compact, off]
-
-      --json
-          Emit machine-readable JSON response envelope to stdout
-
-  -h, --help
-          Print help
+      --citations <ENUM>      [possible values: on, compact, off]
+      --json                  Emit machine-readable JSON response envelope to stdout
+  -h, --help                  Print help
 ```

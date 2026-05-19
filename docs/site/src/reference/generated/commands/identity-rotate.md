@@ -9,16 +9,14 @@ Rotate the signing key for an identity
 ```text
 Rotate the signing key for an identity
 
-Usage: rotate [OPTIONS] <IDENTITY>
+Usage: cairn identity rotate [OPTIONS] <IDENTITY>
 
 Arguments:
-  <IDENTITY>
-          Identity wire form
+  <IDENTITY>  Identity wire form
 
 Options:
-      --json
-          Emit JSON output instead of human-readable text
-
-  -h, --help
-          Print help
+      --json                  Emit JSON output instead of human-readable text
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+  -h, --help                  Print help
 ```

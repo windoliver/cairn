@@ -9,12 +9,11 @@ cairn.mcp.v1 prelude: status
 ```text
 cairn.mcp.v1 prelude: status
 
-Usage: status [OPTIONS]
+Usage: cairn status [OPTIONS]
 
 Options:
-      --json
-          Emit machine-readable JSON response envelope to stdout
-
-  -h, --help
-          Print help
+      --json                  Emit machine-readable JSON response envelope to stdout
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+  -h, --help                  Print help
 ```

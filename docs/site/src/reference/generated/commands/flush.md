@@ -9,7 +9,7 @@ Manage human-review FlushPlans (brief §5.5)
 ```text
 Manage human-review FlushPlans (brief §5.5)
 
-Usage: flush <COMMAND>
+Usage: cairn flush [OPTIONS] <COMMAND>
 
 Commands:
   list     List FlushPlans under .cairn/flush/
@@ -19,8 +19,9 @@ Commands:
   help     Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help
-          Print help
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+  -h, --help                  Print help
 ```
 
 ## Subcommands

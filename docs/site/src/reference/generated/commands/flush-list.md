@@ -9,15 +9,12 @@ List FlushPlans under .cairn/flush/
 ```text
 List FlushPlans under .cairn/flush/
 
-Usage: list [OPTIONS]
+Usage: cairn flush list [OPTIONS]
 
 Options:
-      --all
-          Include applied/ and rejected/ buckets
-
-      --json
-          Emit machine-readable JSON
-
-  -h, --help
-          Print help
+      --all                   Include applied/ and rejected/ buckets
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+      --json                  Emit machine-readable JSON
+  -h, --help                  Print help
 ```

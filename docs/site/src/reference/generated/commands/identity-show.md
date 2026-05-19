@@ -9,16 +9,14 @@ Show a single identity record
 ```text
 Show a single identity record
 
-Usage: show [OPTIONS] <IDENTITY>
+Usage: cairn identity show [OPTIONS] <IDENTITY>
 
 Arguments:
-  <IDENTITY>
-          Identity wire form (e.g. hmn:alice:v1)
+  <IDENTITY>  Identity wire form (e.g. hmn:alice:v1)
 
 Options:
-      --json
-          Emit JSON output instead of human-readable text
-
-  -h, --help
-          Print help
+      --json                  Emit JSON output instead of human-readable text
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+  -h, --help                  Print help
 ```

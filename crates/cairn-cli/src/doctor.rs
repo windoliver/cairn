@@ -2,14 +2,14 @@
 
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use clap::ArgMatches;
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 /// Default Claude Code MCP server name expected by the doctor flow.
 pub const DEFAULT_SERVER_NAME: &str = "cairn";
@@ -94,10 +94,13 @@ pub fn run(matches: &ArgMatches) -> ExitCode {
 
 fn run_claude_code(matches: &ArgMatches) -> ExitCode {
     let json = matches.get_flag("json");
-    let project_dir = matches.get_one::<String>("project-dir").map_or_else(
-        || std::env::current_dir().expect("cwd available"),
-        PathBuf::from,
-    );
+    let project_dir = match doctor_project_dir(matches) {
+        Ok(project_dir) => project_dir,
+        Err(err) => {
+            eprintln!("cairn doctor claude-code: failed to resolve project directory: {err}");
+            return ExitCode::from(69);
+        }
+    };
     let home_dir = matches
         .get_one::<String>("home-dir")
         .map(PathBuf::from)
@@ -187,6 +190,76 @@ fn run_claude_code(matches: &ArgMatches) -> ExitCode {
     }
 
     finish(json, server_name, project_dir, stages)
+}
+
+fn doctor_project_dir(matches: &ArgMatches) -> std::io::Result<PathBuf> {
+    let raw = match matches.get_one::<String>("project-dir") {
+        Some(path) => PathBuf::from(path),
+        None => std::env::current_dir()?,
+    };
+    absolute_path(&raw)
+}
+
+fn absolute_path(path: &Path) -> std::io::Result<PathBuf> {
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    Ok(normalize_path(&path))
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+        }
+    }
+    normalized
+}
+
+fn direct_project_keys(project_dir: &Path) -> Vec<String> {
+    let mut keys = Vec::new();
+    if let Some(canonical) = canonical_project_key(project_dir) {
+        push_unique_project_key(&mut keys, &canonical);
+    }
+    let lexical = project_dir.to_string_lossy().into_owned();
+    push_unique_project_key(&mut keys, &lexical);
+    keys
+}
+
+fn canonical_project_key(path: &Path) -> Option<String> {
+    if !path.is_absolute() {
+        return None;
+    }
+    path.canonicalize()
+        .ok()
+        .map(|canonical| normalize_path(&canonical).to_string_lossy().into_owned())
+}
+
+fn project_keys(projects: &Map<String, Value>, project_dir: &Path) -> Vec<String> {
+    let mut keys = direct_project_keys(project_dir);
+    if let Some(target) = canonical_project_key(project_dir) {
+        for key in projects.keys() {
+            if canonical_project_key(Path::new(key)).as_deref() == Some(target.as_str()) {
+                push_unique_project_key(&mut keys, key);
+            }
+        }
+    }
+    keys
+}
+
+fn push_unique_project_key(keys: &mut Vec<String>, key: &str) {
+    if !keys.iter().any(|existing| existing == key) {
+        keys.push(key.to_string());
+    }
 }
 
 fn finish(
@@ -320,7 +393,7 @@ fn locate_registration(
         format!(
             "no Claude Code MCP registration named `{server_name}` was found in local, project, or user scope"
         ),
-        "add the Cairn server to Claude Code (for example with `claude mcp add cairn -- cairn mcp` or by writing `.mcp.json`), then rerun doctor",
+        "run `cairn setup claude-code --vault <name-or-path>` from the project, then rerun `cairn doctor claude-code`",
     ))
 }
 
@@ -352,12 +425,20 @@ enum RegistrationSource {
 impl RegistrationSource {
     fn extract(&self, root: &Value, server_name: &str) -> Option<RawRegistration> {
         match self {
-            Self::LocalProject { project_dir } => root
-                .get("projects")?
-                .get(project_dir.to_string_lossy().as_ref())?
-                .get("mcpServers")?
-                .get(server_name)
-                .and_then(parse_registration),
+            Self::LocalProject { project_dir } => {
+                let projects = root.get("projects")?.as_object()?;
+                for project_key in project_keys(projects, project_dir) {
+                    if let Some(registration) = projects
+                        .get(&project_key)
+                        .and_then(|project| project.get("mcpServers"))
+                        .and_then(|servers| servers.get(server_name))
+                        .and_then(parse_registration)
+                    {
+                        return Some(registration);
+                    }
+                }
+                None
+            }
             Self::Project | Self::User => root
                 .get("mcpServers")?
                 .get(server_name)
@@ -464,7 +545,7 @@ fn verify_registration_shape(registration: &McpRegistration) -> Result<(), Docto
                     "registration uses transport {:?}, but the reference consumer expects a stdio MCP server",
                     registration.server_type
                 ),
-                "re-register Cairn as a stdio MCP server (`claude mcp add cairn -- cairn mcp`) and rerun doctor",
+                "run `cairn setup claude-code --vault <name-or-path>` to replace the entry with a stdio Cairn MCP registration, then rerun doctor",
             )
             .with_source(registration.source.clone()),
         );
@@ -478,7 +559,7 @@ fn verify_registration_shape(registration: &McpRegistration) -> Result<(), Docto
                     "registration does not look like a Cairn MCP launch: command=`{}` args={:?}",
                     registration.command, registration.args
                 ),
-                "update the Claude Code registration so it launches the Cairn binary with an `mcp` argument",
+                "run `cairn setup claude-code --vault <name-or-path>` so the Claude Code registration launches the Cairn binary with the `mcp` argument",
             )
             .with_source(registration.source.clone()),
         );

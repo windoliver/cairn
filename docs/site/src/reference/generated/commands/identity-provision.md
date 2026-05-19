@@ -9,19 +9,15 @@ Provision a new identity
 ```text
 Provision a new identity
 
-Usage: provision [OPTIONS] <KIND> <SLUG>
+Usage: cairn identity provision [OPTIONS] <KIND> <SLUG>
 
 Arguments:
-  <KIND>
-          Identity kind: human, agent, sensor
-
-  <SLUG>
-          Slug / triple for the identity (format depends on kind)
+  <KIND>  Identity kind: human, agent, sensor
+  <SLUG>  Slug / triple for the identity (format depends on kind)
 
 Options:
-      --json
-          Emit JSON output instead of human-readable text
-
-  -h, --help
-          Print help
+      --json                  Emit JSON output instead of human-readable text
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+  -h, --help                  Print help
 ```

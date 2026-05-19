@@ -9,7 +9,7 @@ Manage and inspect bundled plugins
 ```text
 Manage and inspect bundled plugins
 
-Usage: plugins <COMMAND>
+Usage: cairn plugins [OPTIONS] <COMMAND>
 
 Commands:
   list      List loaded plugins
@@ -18,8 +18,9 @@ Commands:
   help      Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help
-          Print help
+      --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
+                              CAIRN_VAULT)
+  -h, --help                  Print help
 ```
 
 ## Subcommands
