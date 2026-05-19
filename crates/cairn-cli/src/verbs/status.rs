@@ -77,6 +77,7 @@ fn nexus_projection_health(
         state,
         data_dir: projection.data_dir.map(|path| path.display().to_string()),
         endpoint: projection.endpoint,
+        projection_detail: None,
         reason: projection.reason,
     }
 }
