@@ -4,8 +4,8 @@
 //!
 //! ```text
 //! CAIRN_REAL_NEXUS_SIDECAR=1 \
-//! CAIRN_REAL_NEXUS_SIDECAR_COMMAND=cairn-nexus-sandbox \
-//! CAIRN_REAL_NEXUS_SIDECAR_ARGS='["sandbox","serve"]' \
+//! CAIRN_REAL_NEXUS_SIDECAR_COMMAND=nexusd \
+//! CAIRN_REAL_NEXUS_SIDECAR_ARGS='["--profile","sandbox","--host","127.0.0.1","--port","8765","--workspace","{vault_dir}","--data-dir","{data_dir}"]' \
 //! CAIRN_REAL_NEXUS_SIDECAR_ENDPOINT=http://127.0.0.1:8765 \
 //! cargo nextest run -p cairn-cli --test nexus_real_sidecar --run-ignored only --locked
 //! ```
@@ -29,13 +29,14 @@ fn require_opt_in() {
 }
 
 fn sidecar_command() -> String {
-    std::env::var("CAIRN_REAL_NEXUS_SIDECAR_COMMAND")
-        .unwrap_or_else(|_| "cairn-nexus-sandbox".to_owned())
+    std::env::var("CAIRN_REAL_NEXUS_SIDECAR_COMMAND").unwrap_or_else(|_| "nexusd".to_owned())
 }
 
 fn sidecar_args() -> Vec<String> {
-    let raw = std::env::var("CAIRN_REAL_NEXUS_SIDECAR_ARGS")
-        .unwrap_or_else(|_| r#"["sandbox","serve"]"#.to_owned());
+    let raw = std::env::var("CAIRN_REAL_NEXUS_SIDECAR_ARGS").unwrap_or_else(|_| {
+        r#"["--profile","sandbox","--host","127.0.0.1","--port","8765","--workspace","{vault_dir}","--data-dir","{data_dir}"]"#
+            .to_owned()
+    });
     if raw.trim_start().starts_with('[') {
         serde_json::from_str(&raw).expect("CAIRN_REAL_NEXUS_SIDECAR_ARGS must be a JSON array")
     } else {
@@ -108,7 +109,7 @@ fn real_sidecar_lifecycle_and_cli_status_e2e() {
         health_path: health_path.clone(),
         data_dir: data_dir.clone(),
         sqlite_db: sqlite_db.clone(),
-        health_timeout: Duration::from_secs(5),
+        health_timeout: Duration::from_secs(15),
         shutdown_timeout: Duration::from_secs(2),
     })
     .unwrap();

@@ -68,8 +68,23 @@ fn nexus_sandbox_file_defaults_profile() {
         let config = load(dir.path(), &CliOverrides::default()).unwrap();
         assert_eq!(config.store.kind, StoreKind::NexusSandbox);
         assert_eq!(config.store.nexus.data_dir, "nexus-data");
-        assert_eq!(config.store.nexus.command, "cairn-nexus-sandbox");
-        assert_eq!(config.store.nexus.health_timeout_ms, 5_000);
+        assert_eq!(config.store.nexus.command, "nexusd");
+        assert_eq!(
+            config.store.nexus.args,
+            vec![
+                "--profile".to_owned(),
+                "sandbox".to_owned(),
+                "--host".to_owned(),
+                "127.0.0.1".to_owned(),
+                "--port".to_owned(),
+                "8765".to_owned(),
+                "--workspace".to_owned(),
+                "{vault_dir}".to_owned(),
+                "--data-dir".to_owned(),
+                "{data_dir}".to_owned(),
+            ]
+        );
+        assert_eq!(config.store.nexus.health_timeout_ms, 15_000);
     });
 }
 

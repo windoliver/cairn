@@ -1104,11 +1104,22 @@ impl Default for NexusSandboxConfig {
     fn default() -> Self {
         Self {
             data_dir: "nexus-data".into(),
-            command: "cairn-nexus-sandbox".into(),
-            args: vec!["sandbox".into(), "serve".into()],
+            command: "nexusd".into(),
+            args: vec![
+                "--profile".into(),
+                "sandbox".into(),
+                "--host".into(),
+                "127.0.0.1".into(),
+                "--port".into(),
+                "8765".into(),
+                "--workspace".into(),
+                "{vault_dir}".into(),
+                "--data-dir".into(),
+                "{data_dir}".into(),
+            ],
             endpoint: "http://127.0.0.1:8765".into(),
             health_path: "/health".into(),
-            health_timeout_ms: 5_000,
+            health_timeout_ms: 15_000,
             shutdown_timeout_ms: 2_000,
         }
     }
@@ -2112,14 +2123,25 @@ mod tests {
             serde_json::from_str(r#"{"store":{"kind":"nexus-sandbox"}}"#).unwrap();
         assert_eq!(config.store.kind, StoreKind::NexusSandbox);
         assert_eq!(config.store.nexus.data_dir, "nexus-data");
-        assert_eq!(config.store.nexus.command, "cairn-nexus-sandbox");
+        assert_eq!(config.store.nexus.command, "nexusd");
         assert_eq!(
             config.store.nexus.args,
-            vec!["sandbox".to_owned(), "serve".to_owned()]
+            vec![
+                "--profile".to_owned(),
+                "sandbox".to_owned(),
+                "--host".to_owned(),
+                "127.0.0.1".to_owned(),
+                "--port".to_owned(),
+                "8765".to_owned(),
+                "--workspace".to_owned(),
+                "{vault_dir}".to_owned(),
+                "--data-dir".to_owned(),
+                "{data_dir}".to_owned(),
+            ]
         );
         assert_eq!(config.store.nexus.endpoint, "http://127.0.0.1:8765");
         assert_eq!(config.store.nexus.health_path, "/health");
-        assert_eq!(config.store.nexus.health_timeout_ms, 5_000);
+        assert_eq!(config.store.nexus.health_timeout_ms, 15_000);
         assert_eq!(config.store.nexus.shutdown_timeout_ms, 2_000);
         config.validate().unwrap();
     }

@@ -4,7 +4,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -12,6 +12,8 @@ use cairn_core::config::{CairnConfig, StoreKind};
 
 const MAX_STATUS_LINE_BYTES: usize = 1024;
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const PROJECTION_SETUP_HINT: &str =
+    "run `cairn nexus setup`, or set `store.nexus.command` to a compatible `nexusd` daemon";
 
 /// Parsed HTTP endpoint for the Nexus sidecar health probe.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +81,12 @@ pub enum ProjectionStatusState {
     Degraded,
 }
 
+/// Actionable remediation appended to degraded Nexus projection status.
+#[must_use]
+pub fn projection_setup_hint() -> &'static str {
+    PROJECTION_SETUP_HINT
+}
+
 /// Running Nexus sandbox sidecar process.
 #[derive(Debug)]
 pub struct NexusSupervisor {
@@ -96,9 +104,11 @@ impl NexusSupervisor {
     pub fn start(config: SupervisorConfig) -> std::io::Result<Self> {
         let vault_dir = derive_vault_dir(&config.sqlite_db)?;
         fs::create_dir_all(&config.data_dir)?;
+        let args = expand_sidecar_args(&config.args, &config, vault_dir);
         let mut command = Command::new(&config.command);
         command
-            .args(&config.args)
+            .args(&args)
+            .current_dir(&config.data_dir)
             .env("CAIRN_VAULT_DIR", vault_dir)
             .env("CAIRN_NEXUS_DATA_DIR", &config.data_dir)
             .env("CAIRN_NEXUS_ENDPOINT", &config.endpoint)
@@ -248,6 +258,24 @@ impl NexusSupervisor {
     }
 }
 
+fn expand_sidecar_args(
+    args: &[String],
+    config: &SupervisorConfig,
+    vault_dir: &Path,
+) -> Vec<String> {
+    args.iter()
+        .map(|arg| expand_sidecar_arg(arg, config, vault_dir))
+        .collect()
+}
+
+fn expand_sidecar_arg(arg: &str, config: &SupervisorConfig, vault_dir: &Path) -> String {
+    arg.replace("{vault_dir}", &vault_dir.display().to_string())
+        .replace("{data_dir}", &config.data_dir.display().to_string())
+        .replace("{sqlite_db}", &config.sqlite_db.display().to_string())
+        .replace("{endpoint}", &config.endpoint)
+        .replace("{health_path}", &config.health_path)
+}
+
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug)]
 enum UnixSignal {
@@ -291,6 +319,7 @@ fn signal_process_group(process_group: i32, signal: UnixSignal) -> std::io::Resu
         .arg(format!("-{}", signal.name()))
         .arg("--")
         .arg(format!("-{process_group}"))
+        .stderr(Stdio::null())
         .status()?;
     if status.success() {
         Ok(())
@@ -382,8 +411,16 @@ pub fn evaluate_projection_status(vault_path: &Path, config: &CairnConfig) -> Pr
             state: ProjectionStatusState::Degraded,
             data_dir: Some(data_dir),
             endpoint: Some(endpoint),
-            reason: Some(reason),
+            reason: Some(reason_with_setup_hint(reason)),
         },
+    }
+}
+
+fn reason_with_setup_hint(reason: String) -> String {
+    if reason.contains("cairn nexus setup") {
+        reason
+    } else {
+        format!("{reason}; {}", projection_setup_hint())
     }
 }
 
@@ -679,7 +716,7 @@ mod tests {
                 vec![
                     "-c".to_owned(),
                     format!(
-                        "printf '%s\n%s\n%s\n%s\n%s\n' \"$CAIRN_VAULT_DIR\" \"$CAIRN_NEXUS_DATA_DIR\" \"$CAIRN_SQLITE_DB\" \"$CAIRN_NEXUS_ENDPOINT\" \"$CAIRN_NEXUS_HEALTH_PATH\" > {}; sleep 10",
+                        "printf '%s\n%s\n%s\n%s\n%s\n%s\n' \"$CAIRN_VAULT_DIR\" \"$CAIRN_NEXUS_DATA_DIR\" \"$CAIRN_SQLITE_DB\" \"$CAIRN_NEXUS_ENDPOINT\" \"$CAIRN_NEXUS_HEALTH_PATH\" \"$(pwd)\" > {}; sleep 10",
                         shell_quote(output)
                     ),
                 ],
@@ -693,7 +730,7 @@ mod tests {
                     "-NoProfile".to_owned(),
                     "-Command".to_owned(),
                     format!(
-                        "[IO.File]::WriteAllLines('{}', @($env:CAIRN_VAULT_DIR, $env:CAIRN_NEXUS_DATA_DIR, $env:CAIRN_SQLITE_DB, $env:CAIRN_NEXUS_ENDPOINT, $env:CAIRN_NEXUS_HEALTH_PATH)); Start-Sleep -Seconds 10",
+                        "[IO.File]::WriteAllLines('{}', @($env:CAIRN_VAULT_DIR, $env:CAIRN_NEXUS_DATA_DIR, $env:CAIRN_SQLITE_DB, $env:CAIRN_NEXUS_ENDPOINT, $env:CAIRN_NEXUS_HEALTH_PATH, (Get-Location).Path)); Start-Sleep -Seconds 10",
                         output.display()
                     ),
                 ],
@@ -862,19 +899,68 @@ mod tests {
 
         wait_for_file(&env_file);
         let captured = fs::read_to_string(&env_file).unwrap();
-        let lines = captured.lines().collect::<Vec<_>>();
+        let lines = captured.lines().map(str::to_owned).collect::<Vec<String>>();
+        let expected_cwd = fs::canonicalize(&data_dir).unwrap().display().to_string();
 
         assert_eq!(
             lines,
             vec![
-                vault_dir.to_str().unwrap(),
-                data_dir.to_str().unwrap(),
-                sqlite_db.to_str().unwrap(),
-                "http://127.0.0.1:1",
-                "/health",
+                vault_dir.display().to_string(),
+                data_dir.display().to_string(),
+                sqlite_db.display().to_string(),
+                "http://127.0.0.1:1".to_owned(),
+                "/health".to_owned(),
+                expected_cwd,
             ]
         );
         supervisor.stop().unwrap();
+    }
+
+    #[test]
+    fn supervisor_expands_launch_arg_tokens() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault_dir = tmp.path().join("vault");
+        let data_dir = vault_dir.join("nexus-data");
+        let sqlite_db = vault_dir.join(".cairn").join("cairn.db");
+        let config = SupervisorConfig {
+            command: "nexusd".to_owned(),
+            args: vec![
+                "--workspace".to_owned(),
+                "{vault_dir}".to_owned(),
+                "--data-dir".to_owned(),
+                "{data_dir}".to_owned(),
+                "--db".to_owned(),
+                "{sqlite_db}".to_owned(),
+                "--endpoint".to_owned(),
+                "{endpoint}".to_owned(),
+                "--health".to_owned(),
+                "{health_path}".to_owned(),
+            ],
+            endpoint: "http://127.0.0.1:8765".to_owned(),
+            health_path: "/health".to_owned(),
+            data_dir: data_dir.clone(),
+            sqlite_db: sqlite_db.clone(),
+            health_timeout: Duration::from_secs(1),
+            shutdown_timeout: Duration::from_secs(1),
+        };
+
+        let args = expand_sidecar_args(&config.args, &config, &vault_dir);
+
+        assert_eq!(
+            args,
+            vec![
+                "--workspace".to_owned(),
+                vault_dir.display().to_string(),
+                "--data-dir".to_owned(),
+                data_dir.display().to_string(),
+                "--db".to_owned(),
+                sqlite_db.display().to_string(),
+                "--endpoint".to_owned(),
+                "http://127.0.0.1:8765".to_owned(),
+                "--health".to_owned(),
+                "/health".to_owned(),
+            ]
+        );
     }
 
     #[test]

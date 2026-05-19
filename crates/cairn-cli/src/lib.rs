@@ -17,6 +17,7 @@ pub mod llm;
 pub mod mcp;
 pub mod metrics;
 pub mod nexus;
+pub mod nexus_cli;
 pub mod plugins;
 pub mod render;
 pub mod repair;

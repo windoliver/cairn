@@ -198,6 +198,7 @@ fn help_flag_lists_core_commands() {
         "lint",
         "forget",
         "hook",
+        "nexus",
     ] {
         assert!(
             stdout.contains(verb),

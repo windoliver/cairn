@@ -57,11 +57,11 @@ store:
   kind: nexus-sandbox
   nexus:
     data_dir: nexus-data
-    command: cairn-nexus-sandbox
-    args: ["sandbox", "serve"]
+    command: nexusd
+    args: ["--profile", "sandbox", "--host", "127.0.0.1", "--port", "8765", "--workspace", "{vault_dir}", "--data-dir", "{data_dir}"]
     endpoint: "http://127.0.0.1:8765"
     health_path: "/health"
-    health_timeout_ms: 5000
+    health_timeout_ms: 15000
     shutdown_timeout_ms: 2000
 ```
 
@@ -69,6 +69,10 @@ Defaults are only activated when `store.kind` is `nexus-sandbox`. Existing v0.1 
 with only `store.kind: sqlite` or no `store` block continue to deserialize to the same P0
 defaults. A v0.1 config can migrate in place by changing only `store.kind` to
 `nexus-sandbox`; missing Nexus fields are filled from defaults.
+
+The bundled `cairn-nexus-sandbox` binary remains a deterministic test/dev fallback. User-facing
+setup defaults to a real `nexusd` daemon and `cairn nexus setup` prints explicit install/config
+guidance instead of silently installing or selecting an unrelated `nexus` CLI.
 
 `data_dir` is vault-relative unless absolute. The default resolves to
 `<vault>/nexus-data`, beside `.cairn/`, matching section 3.0. The config validation rejects
