@@ -13,7 +13,7 @@ struct BackupListReceipt {
 
 #[derive(Serialize)]
 struct BackupForgetReceipt {
-    forgotten: super::admin_snapshot::BackupRegistryReceipt,
+    forgotten: Vec<super::admin_snapshot::BackupRegistryReceipt>,
 }
 
 /// Run `cairn backup`.
@@ -87,9 +87,9 @@ fn run_forget(sub: &ArgMatches, vault_root: &Path) -> ExitCode {
     let json = sub.get_flag("json");
 
     match super::admin_snapshot::forget_backup_registry_entry(vault_root, digest) {
-        Ok(Some(receipt)) => {
+        Ok(forgotten) if !forgotten.is_empty() => {
             if json {
-                match serde_json::to_string_pretty(&BackupForgetReceipt { forgotten: receipt }) {
+                match serde_json::to_string_pretty(&BackupForgetReceipt { forgotten }) {
                     Ok(output) => println!("{output}"),
                     Err(error) => {
                         eprintln!("cairn backup forget: failed to render json — {error}");
@@ -97,11 +97,11 @@ fn run_forget(sub: &ArgMatches, vault_root: &Path) -> ExitCode {
                     }
                 }
             } else {
-                println!("cairn backup: forgot registry entry {digest}");
+                println!("cairn backup: forgot registry entries for {digest}");
             }
             ExitCode::SUCCESS
         }
-        Ok(None) => {
+        Ok(_) => {
             eprintln!("cairn backup forget: no registered backup has digest {digest}");
             ExitCode::from(1)
         }

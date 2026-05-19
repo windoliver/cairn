@@ -14,7 +14,7 @@ Usage: cairn backup [OPTIONS] <COMMAND>
 Commands:
   register  Register an existing Cairn backup artifact for forget replay
   list      List registered backups
-  forget    Remove a backup registry entry by digest
+  forget    Remove backup registry entries by digest
   help      Print this message or the help of the given subcommand(s)
 
 Options:
@@ -27,4 +27,4 @@ Options:
 
 - [`cairn backup register`](backup-register.md) - Register an existing Cairn backup artifact for forget replay
 - [`cairn backup list`](backup-list.md) - List registered backups
-- [`cairn backup forget`](backup-forget.md) - Remove a backup registry entry by digest
+- [`cairn backup forget`](backup-forget.md) - Remove backup registry entries by digest

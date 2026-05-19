@@ -2,17 +2,17 @@
 
 # cairn backup forget
 
-Remove a backup registry entry by digest
+Remove backup registry entries by digest
 
 ## Help
 
 ```text
-Remove a backup registry entry by digest
+Remove backup registry entries by digest
 
 Usage: cairn backup forget [OPTIONS] <DIGEST>
 
 Arguments:
-  <DIGEST>  Registered backup digest to remove
+  <DIGEST>  Registered backup digest to remove from the registry
 
 Options:
       --json                  Emit JSON output

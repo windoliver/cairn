@@ -17,6 +17,10 @@ cairn backup list
 cairn backup forget sha256:...
 ```
 
+If multiple registered artifacts have the same digest, `backup forget` removes
+all matching registry entries. This avoids leaving an indistinguishable
+same-content artifact registered after the operator asked to forget that digest.
+
 The guarantee boundary is intentionally narrow: Cairn can replay tombstones into
 its own registered backup artifacts and into restore operations that use
 `cairn admin restore`. It cannot redact or discover third-party backups that

@@ -459,12 +459,12 @@ fn backup_subcommand() -> clap::Command {
         )
         .subcommand(
             clap::Command::new("forget")
-                .about("Remove a backup registry entry by digest")
+                .about("Remove backup registry entries by digest")
                 .arg(
                     clap::Arg::new("digest")
                         .value_name("DIGEST")
                         .required(true)
-                        .help("Registered backup digest to remove"),
+                        .help("Registered backup digest to remove from the registry"),
                 )
                 .arg(json_arg("Emit JSON output")),
         )

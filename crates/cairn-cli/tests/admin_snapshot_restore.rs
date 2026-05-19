@@ -317,6 +317,108 @@ fn backup_cli_lists_registers_and_forgets_registry_entries() {
 }
 
 #[test]
+fn backup_cli_forgets_all_registry_entries_with_matching_digest() {
+    let vault = tempfile::tempdir().expect("vault tempdir");
+    bootstrap_vault(vault.path());
+    ingest_body(vault.path(), "duplicate digest registry entry");
+
+    let backup_root = tempfile::tempdir().expect("backup tempdir");
+    let snapshot_path = backup_root.path().join("snapshot-backup");
+    let snapshot_output = Command::cargo_bin("cairn")
+        .expect("cairn binary")
+        .env("CAIRN_VAULT", vault.path())
+        .args([
+            "admin",
+            "snapshot",
+            "--backup",
+            snapshot_path.to_str().expect("utf-8 backup path"),
+            "--json",
+        ])
+        .output()
+        .expect("run admin snapshot");
+    assert!(
+        snapshot_output.status.success(),
+        "snapshot should commit. stderr: {}",
+        String::from_utf8_lossy(&snapshot_output.stderr)
+    );
+
+    let imported_a = backup_root.path().join("imported-a");
+    let imported_b = backup_root.path().join("imported-b");
+    copy_tree(&snapshot_path, &imported_a);
+    copy_tree(&snapshot_path, &imported_b);
+
+    for imported in [&imported_a, &imported_b] {
+        let register_output = Command::cargo_bin("cairn")
+            .expect("cairn binary")
+            .env("CAIRN_VAULT", vault.path())
+            .args([
+                "backup",
+                "register",
+                imported.to_str().expect("utf-8 backup path"),
+                "--kind",
+                "export",
+                "--json",
+            ])
+            .output()
+            .expect("run backup register");
+        assert!(
+            register_output.status.success(),
+            "backup register should commit. stderr: {}",
+            String::from_utf8_lossy(&register_output.stderr)
+        );
+    }
+
+    let listed: Value = serde_json::from_slice(
+        &Command::cargo_bin("cairn")
+            .expect("cairn binary")
+            .env("CAIRN_VAULT", vault.path())
+            .args(["backup", "list", "--json"])
+            .output()
+            .expect("run backup list")
+            .stdout,
+    )
+    .expect("backup list json");
+    let duplicate_digest = digest_string(
+        listed["backups"]
+            .as_array()
+            .expect("backups array")
+            .iter()
+            .find(|entry| entry["artifact_path"] == imported_a.display().to_string())
+            .expect("imported-a entry"),
+    );
+    assert_eq!(
+        listed["backups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|entry| digest_string(entry) == duplicate_digest)
+            .count(),
+        3,
+        "snapshot plus imported copies should share one artifact digest"
+    );
+
+    let forget_output = Command::cargo_bin("cairn")
+        .expect("cairn binary")
+        .env("CAIRN_VAULT", vault.path())
+        .args(["backup", "forget", &duplicate_digest, "--json"])
+        .output()
+        .expect("run backup forget");
+    assert!(
+        forget_output.status.success(),
+        "backup forget should commit. stderr: {}",
+        String::from_utf8_lossy(&forget_output.stderr)
+    );
+
+    let entries = registry_entries(vault.path());
+    assert!(
+        entries
+            .iter()
+            .all(|entry| digest_string(entry) != duplicate_digest),
+        "backup forget must not leave another entry with the requested digest"
+    );
+}
+
+#[test]
 fn forget_record_replays_tombstone_into_registered_backup() {
     let vault = tempfile::tempdir().expect("vault tempdir");
     bootstrap_vault(vault.path());

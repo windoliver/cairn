@@ -281,16 +281,17 @@ pub(crate) fn list_backup_registry(vault_root: &Path) -> Result<Vec<BackupRegist
 pub(crate) fn forget_backup_registry_entry(
     vault_root: &Path,
     digest: &str,
-) -> Result<Option<BackupRegistryReceipt>> {
+) -> Result<Vec<BackupRegistryReceipt>> {
+    let mut forgotten = Vec::new();
     for registry_entry in load_registry_entries(vault_root)? {
         if registry_entry.entry.file_digest == digest {
             let receipt = receipt_for_entry(&registry_entry.path, registry_entry.entry);
             fs::remove_file(&registry_entry.path)
                 .with_context(|| format!("remove {}", registry_entry.path.display()))?;
-            return Ok(Some(receipt));
+            forgotten.push(receipt);
         }
     }
-    Ok(None)
+    Ok(forgotten)
 }
 
 #[allow(
