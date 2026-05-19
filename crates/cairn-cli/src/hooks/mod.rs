@@ -3,6 +3,7 @@
 //! The store-backed per-hook behavior lands in later tasks. This module owns
 //! the stable command surface and shared result/error envelope.
 
+use std::io::{IsTerminal as _, Read as _};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -324,7 +325,7 @@ fn load_payload(matches: &ArgMatches) -> Result<Value, HookError> {
             HookError::invalid_args(format!("payload file must contain valid JSON: {err}"))
         })?
     } else {
-        serde_json::json!({})
+        read_stdin_payload()?
     };
 
     if value.is_object() {
@@ -334,6 +335,26 @@ fn load_payload(matches: &ArgMatches) -> Result<Value, HookError> {
             "hook payload must be a JSON object",
         ))
     }
+}
+
+fn read_stdin_payload() -> Result<Value, HookError> {
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        return Ok(serde_json::json!({}));
+    }
+
+    let mut raw = String::new();
+    stdin.lock().read_to_string(&mut raw).map_err(|err| {
+        HookError::internal(
+            format!("failed to read hook payload from stdin: {err}"),
+            "retry the same hook command with a readable JSON payload on stdin",
+        )
+    })?;
+    if raw.trim().is_empty() {
+        return Ok(serde_json::json!({}));
+    }
+    serde_json::from_str(&raw)
+        .map_err(|err| HookError::invalid_args(format!("stdin payload must be valid JSON: {err}")))
 }
 
 enum HookGateOutcome {
@@ -430,6 +451,31 @@ pub fn require_string(payload: &Value, field: &'static str) -> Result<String, Ho
         .ok_or_else(|| {
             HookError::invalid_args(format!("payload.{field} must be a non-empty string"))
         })
+}
+
+/// Read the first present non-empty string field from a hook payload.
+pub fn optional_string(payload: &Value, field: &'static str) -> Option<String> {
+    payload
+        .get(field)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+/// Read a required string field, accepting the aliases used by hook providers.
+pub fn require_string_one_of(
+    payload: &Value,
+    fields: &[&'static str],
+) -> Result<String, HookError> {
+    for field in fields {
+        if let Some(value) = optional_string(payload, field) {
+            return Ok(value);
+        }
+    }
+    Err(HookError::invalid_args(format!(
+        "hook payload must include one of: {}",
+        fields.join(", ")
+    )))
 }
 
 /// Clone the payload object for artifact storage.
