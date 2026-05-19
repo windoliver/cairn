@@ -356,7 +356,7 @@ fn status_json_reports_degraded_nexus_projection_without_failing_sqlite() {
     assert!(
         v["health"]["nexus_projection"]["reason"]
             .as_str()
-            .is_some_and(|reason| reason.contains("cairn nexus setup")
+            .is_some_and(|reason| reason.contains("cairn nexus enable")
                 && reason.contains("store.nexus.command")
                 && reason.contains("nexusd")),
         "missing probe reason: {stdout}"

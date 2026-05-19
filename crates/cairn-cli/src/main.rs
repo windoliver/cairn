@@ -398,52 +398,68 @@ fn main() -> ExitCode {
 
 fn run_nexus(sub: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
     match sub.subcommand() {
+        Some(("enable", enable)) => {
+            let (vault_root, config) = match resolve_bound_nexus_vault("enable", explicit_vault) {
+                Ok(v) => v,
+                Err(code) => return code,
+            };
+            nexus_cli::run_enable(enable, &vault_root, &config)
+        }
         Some(("setup", setup)) => nexus_cli::run_setup(setup),
         Some(("doctor", doctor)) => {
-            let (vault_root, source) = match resolve_vault_or_cwd(explicit_vault) {
+            let (vault_root, config) = match resolve_bound_nexus_vault("doctor", explicit_vault) {
                 Ok(v) => v,
-                Err(e) => {
-                    eprintln!("cairn nexus doctor: vault resolution error — {e:#}");
-                    return ExitCode::from(78); // EX_CONFIG
-                }
-            };
-            if source == VaultResolutionSource::CwdFallback {
-                eprintln!(
-                    "cairn nexus doctor: no Cairn vault found from cwd {} \
-                     — pass --vault, run from inside a vault, or `cairn bootstrap`",
-                    vault_root.display()
-                );
-                return ExitCode::from(78); // EX_CONFIG
-            }
-            match verbs::status::probe_vault_binding(&vault_root) {
-                verbs::status::VaultBinding::Bound => {}
-                verbs::status::VaultBinding::Unbound => {
-                    eprintln!(
-                        "cairn nexus doctor: {} is not a Cairn vault \
-                         (no .cairn/vault.id) — run `cairn bootstrap` first",
-                        vault_root.display()
-                    );
-                    return ExitCode::from(78); // EX_CONFIG
-                }
-                verbs::status::VaultBinding::Invalid(reason) => {
-                    eprintln!("cairn nexus doctor: vault binding error — {reason}");
-                    return ExitCode::from(78); // EX_CONFIG
-                }
-            }
-            let config = match cairn_cli::config::load(
-                &vault_root,
-                &cairn_cli::config::CliOverrides::default(),
-            ) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("cairn nexus doctor: config error — {e:#}");
-                    return ExitCode::from(78); // EX_CONFIG
-                }
+                Err(code) => return code,
             };
             nexus_cli::run_doctor(doctor, &vault_root, &config)
         }
         _ => unreachable!("clap subcommand_required(true) on nexus ensures a subcommand"),
     }
+}
+
+fn resolve_bound_nexus_vault(
+    action: &str,
+    explicit_vault: Option<&str>,
+) -> Result<(PathBuf, cairn_core::config::CairnConfig), ExitCode> {
+    let (vault_root, source) = match resolve_vault_or_cwd(explicit_vault) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("cairn nexus {action}: vault resolution error — {e:#}");
+            return Err(ExitCode::from(78)); // EX_CONFIG
+        }
+    };
+    if source == VaultResolutionSource::CwdFallback {
+        eprintln!(
+            "cairn nexus {action}: no Cairn vault found from cwd {} \
+             — pass --vault, run from inside a vault, or `cairn bootstrap`",
+            vault_root.display()
+        );
+        return Err(ExitCode::from(78)); // EX_CONFIG
+    }
+    match verbs::status::probe_vault_binding(&vault_root) {
+        verbs::status::VaultBinding::Bound => {}
+        verbs::status::VaultBinding::Unbound => {
+            eprintln!(
+                "cairn nexus {action}: {} is not a Cairn vault \
+                 (no .cairn/vault.id) — run `cairn bootstrap` first",
+                vault_root.display()
+            );
+            return Err(ExitCode::from(78)); // EX_CONFIG
+        }
+        verbs::status::VaultBinding::Invalid(reason) => {
+            eprintln!("cairn nexus {action}: vault binding error — {reason}");
+            return Err(ExitCode::from(78)); // EX_CONFIG
+        }
+    }
+    let config =
+        match cairn_cli::config::load(&vault_root, &cairn_cli::config::CliOverrides::default()) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("cairn nexus {action}: config error — {e:#}");
+                return Err(ExitCode::from(78)); // EX_CONFIG
+            }
+        };
+    Ok((vault_root, config))
 }
 
 /// `cairn handshake` dispatch (issue #52, brief §8.0.a).

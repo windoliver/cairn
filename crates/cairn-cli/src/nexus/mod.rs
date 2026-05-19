@@ -13,7 +13,7 @@ use cairn_core::config::{CairnConfig, StoreKind};
 const MAX_STATUS_LINE_BYTES: usize = 1024;
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const PROJECTION_SETUP_HINT: &str =
-    "run `cairn nexus setup`, or set `store.nexus.command` to a compatible `nexusd` daemon";
+    "run `cairn nexus enable`, or set `store.nexus.command` to a compatible `nexusd` daemon";
 
 /// Parsed HTTP endpoint for the Nexus sidecar health probe.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -417,7 +417,7 @@ pub fn evaluate_projection_status(vault_path: &Path, config: &CairnConfig) -> Pr
 }
 
 fn reason_with_setup_hint(reason: String) -> String {
-    if reason.contains("cairn nexus setup") {
+    if reason.contains("cairn nexus enable") || reason.contains("cairn nexus setup") {
         reason
     } else {
         format!("{reason}; {}", projection_setup_hint())

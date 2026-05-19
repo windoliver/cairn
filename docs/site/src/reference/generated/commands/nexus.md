@@ -12,6 +12,7 @@ Nexus sandbox setup and diagnostics
 Usage: cairn nexus [OPTIONS] <COMMAND>
 
 Commands:
+  enable  Enable the Nexus sandbox profile for the active vault
   setup   Find a compatible Nexus daemon and print explicit setup guidance
   doctor  Check the configured Nexus sandbox projection
   help    Print this message or the help of the given subcommand(s)
@@ -24,5 +25,6 @@ Options:
 
 ## Subcommands
 
+- [`cairn nexus enable`](nexus-enable.md) - Enable the Nexus sandbox profile for the active vault
 - [`cairn nexus setup`](nexus-setup.md) - Find a compatible Nexus daemon and print explicit setup guidance
 - [`cairn nexus doctor`](nexus-doctor.md) - Check the configured Nexus sandbox projection
