@@ -1,7 +1,8 @@
 // Integration test files are not public API; doc-comments are not required.
 #![allow(missing_docs)]
 
-use std::process::Command;
+use std::io::Write as _;
+use std::process::{Command, Stdio};
 
 fn cli() -> Command {
     Command::new(env!("CARGO_BIN_EXE_cairn"))
@@ -71,8 +72,36 @@ fn run_hook_with_stdin_payload(
     payload: &str,
     vault: &tempfile::TempDir,
 ) -> serde_json::Value {
-    use std::io::Write;
+    let mut child = cli()
+        .args([
+            "hook",
+            name,
+            "--vault-path",
+            vault.path().to_str().expect("utf-8 path"),
+            "--json",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|err| panic!("spawn cairn hook {name}: {err}"));
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin pipe")
+        .write_all(payload.as_bytes())
+        .unwrap_or_else(|err| panic!("write cairn hook {name} stdin: {err}"));
+    let out = child
+        .wait_with_output()
+        .unwrap_or_else(|err| panic!("wait cairn hook {name}: {err}"));
+    assert!(out.status.success(), "{name} exit: {:?}", out.status);
+    parse_stdout_json(out)
+}
 
+fn run_hook_with_payload_file_stdin(
+    name: &str,
+    payload: &str,
+    vault: &tempfile::TempDir,
+) -> serde_json::Value {
     let mut child = cli()
         .args([
             "hook",
@@ -83,8 +112,8 @@ fn run_hook_with_stdin_payload(
             "-",
             "--json",
         ])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
         .spawn()
         .unwrap_or_else(|err| panic!("spawn cairn hook {name} --payload-file -: {err}"));
     child
@@ -113,7 +142,7 @@ fn trace_artifact(vault: &tempfile::TempDir, result: &serde_json::Value) -> serd
 #[test]
 fn hook_payload_file_dash_reads_claude_code_stdin() {
     let vault = tempfile::tempdir().expect("temp vault");
-    let result = run_hook_with_stdin_payload(
+    let result = run_hook_with_payload_file_stdin(
         "UserPromptSubmit",
         r#"{
             "session_id": "sess-stdin",
@@ -141,7 +170,7 @@ fn hook_payload_file_dash_reads_claude_code_stdin() {
 #[test]
 fn claude_code_tool_payloads_map_tool_use_id_to_cairn_tool_call_id() {
     let vault = tempfile::tempdir().expect("temp vault");
-    let pre = run_hook_with_stdin_payload(
+    let pre = run_hook_with_payload_file_stdin(
         "PreToolUse",
         r#"{
             "session_id": "sess-tool",
@@ -154,7 +183,7 @@ fn claude_code_tool_payloads_map_tool_use_id_to_cairn_tool_call_id() {
         }"#,
         &vault,
     );
-    let post = run_hook_with_stdin_payload(
+    let post = run_hook_with_payload_file_stdin(
         "PostToolUse",
         r#"{
             "session_id": "sess-tool",
@@ -436,6 +465,28 @@ fn user_prompt_submit_writes_trace_artifact() {
 }
 
 #[test]
+fn claude_code_user_prompt_payload_is_read_from_stdin() {
+    let vault = tempfile::tempdir().expect("temp vault");
+    let v = run_hook_with_stdin_payload(
+        "UserPromptSubmit",
+        r#"{"session_id":"sess-cc","transcript_path":"/tmp/claude/transcript.jsonl","cwd":"/tmp/project","permission_mode":"default","hook_event_name":"UserPromptSubmit","prompt":"remember this from stdin"}"#,
+        &vault,
+    );
+
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["hook"], "UserPromptSubmit");
+    let trace = trace_artifact(&vault, &v);
+    assert_eq!(trace["session_id"], "sess-cc");
+    assert_eq!(trace["event"]["hook_event_name"], "UserPromptSubmit");
+    assert_eq!(
+        trace["event"]["transcript_path"],
+        "/tmp/claude/transcript.jsonl"
+    );
+    assert_eq!(trace["event"]["cwd"], "/tmp/project");
+    assert_eq!(trace["event"]["prompt"], "remember this from stdin");
+}
+
+#[test]
 fn session_start_returns_hot_artifact() {
     let vault = tempfile::tempdir().expect("temp vault");
     let v = run_hook_with_payload("SessionStart", r#"{"session_id":"sess-1"}"#, &vault);
@@ -466,6 +517,36 @@ fn pre_tool_use_writes_trace_artifact() {
             .join(format!("{trace_id}.json"))
             .exists()
     );
+}
+
+#[test]
+fn claude_code_tool_hooks_use_tool_use_id_as_parent_link() {
+    let vault = tempfile::tempdir().expect("temp vault");
+    let pre = run_hook_with_stdin_payload(
+        "PreToolUse",
+        r#"{"session_id":"sess-cc","transcript_path":"/tmp/claude/transcript.jsonl","cwd":"/tmp/project","permission_mode":"default","hook_event_name":"PreToolUse","tool_name":"Bash","tool_use_id":"toolu_123","tool_input":{"command":"cargo test"}}"#,
+        &vault,
+    );
+    let post = run_hook_with_stdin_payload(
+        "PostToolUse",
+        r#"{"session_id":"sess-cc","transcript_path":"/tmp/claude/transcript.jsonl","cwd":"/tmp/project","permission_mode":"default","hook_event_name":"PostToolUse","tool_name":"Bash","tool_use_id":"toolu_123","tool_input":{"command":"cargo test"},"tool_response":{"success":true}}"#,
+        &vault,
+    );
+
+    let pre_trace = trace_artifact(&vault, &pre);
+    assert_eq!(pre_trace["hook"], "PreToolUse");
+    assert_eq!(pre_trace["tool_call_id"], "toolu_123");
+    assert_eq!(pre_trace["tool_name"], "Bash");
+    assert_eq!(pre_trace["event"]["tool_use_id"], "toolu_123");
+    assert_eq!(pre_trace["event"]["tool_input"]["command"], "cargo test");
+
+    let post_trace = trace_artifact(&vault, &post);
+    assert_eq!(post_trace["hook"], "PostToolUse");
+    assert_eq!(post_trace["tool_call_id"], "toolu_123");
+    assert_eq!(post_trace["tool_name"], "Bash");
+    assert_eq!(post_trace["status"], "ok");
+    assert_eq!(post_trace["event"]["tool_use_id"], "toolu_123");
+    assert_eq!(post_trace["event"]["tool_response"]["success"], true);
 }
 
 #[test]
@@ -671,6 +752,87 @@ fn full_hook_lifecycle_via_payload_files_round_trips_artifact_contents() {
     let stop =
         run_hook_with_payload_file("Stop", &format!(r#"{{"session_id":"{session}"}}"#), &vault);
     assert_stop_artifacts(&vault, &stop, session);
+    assert_lifecycle_artifact_counts(&vault);
+}
+
+#[test]
+fn full_claude_code_stdin_lifecycle_round_trips_artifact_contents() {
+    let vault = tempfile::tempdir().expect("temp vault");
+    let session = "sess-cc-e2e";
+    let transcript = "/tmp/claude/transcript.jsonl";
+    let cwd = "/tmp/project";
+    let tool_use_id = "toolu_e2e";
+
+    let session_start = run_hook_with_stdin_payload(
+        "SessionStart",
+        &format!(
+            r#"{{"session_id":"{session}","transcript_path":"{transcript}","cwd":"{cwd}","hook_event_name":"SessionStart","source":"startup"}}"#
+        ),
+        &vault,
+    );
+    assert_session_hot_artifact(&vault, &session_start, session);
+
+    let prompt = run_hook_with_stdin_payload(
+        "UserPromptSubmit",
+        &format!(
+            r#"{{"session_id":"{session}","transcript_path":"{transcript}","cwd":"{cwd}","permission_mode":"default","hook_event_name":"UserPromptSubmit","prompt":"remember to search before you forget stale notes"}}"#
+        ),
+        &vault,
+    );
+    assert_prompt_trace(&vault, &prompt, session);
+    let prompt_trace = trace_artifact(&vault, &prompt);
+    assert_eq!(prompt_trace["event"]["hook_event_name"], "UserPromptSubmit");
+    assert_eq!(prompt_trace["event"]["transcript_path"], transcript);
+    assert_eq!(prompt_trace["event"]["cwd"], cwd);
+
+    let pre = run_hook_with_stdin_payload(
+        "PreToolUse",
+        &format!(
+            r#"{{"session_id":"{session}","transcript_path":"{transcript}","cwd":"{cwd}","permission_mode":"default","hook_event_name":"PreToolUse","tool_name":"Bash","tool_use_id":"{tool_use_id}","tool_input":{{"command":"cargo test"}}}}"#
+        ),
+        &vault,
+    );
+    let pre_trace = trace_artifact(&vault, &pre);
+    assert_eq!(pre_trace["hook"], "PreToolUse");
+    assert_eq!(pre_trace["session_id"], session);
+    assert_eq!(pre_trace["tool_call_id"], tool_use_id);
+    assert_eq!(pre_trace["tool_name"], "Bash");
+    assert_eq!(pre_trace["event"]["hook_event_name"], "PreToolUse");
+    assert_eq!(pre_trace["event"]["transcript_path"], transcript);
+    assert_eq!(pre_trace["event"]["cwd"], cwd);
+    assert_eq!(pre_trace["event"]["tool_input"]["command"], "cargo test");
+
+    let post = run_hook_with_stdin_payload(
+        "PostToolUse",
+        &format!(
+            r#"{{"session_id":"{session}","transcript_path":"{transcript}","cwd":"{cwd}","permission_mode":"default","hook_event_name":"PostToolUse","tool_name":"Bash","tool_use_id":"{tool_use_id}","tool_input":{{"command":"cargo test"}},"tool_response":{{"success":false,"stderr":"compile failed"}}}}"#
+        ),
+        &vault,
+    );
+    let post_trace = trace_artifact(&vault, &post);
+    assert_eq!(post_trace["hook"], "PostToolUse");
+    assert_eq!(post_trace["session_id"], session);
+    assert_eq!(post_trace["tool_call_id"], tool_use_id);
+    assert_eq!(post_trace["tool_name"], "Bash");
+    assert_eq!(post_trace["status"], "error");
+    assert_eq!(post_trace["event"]["hook_event_name"], "PostToolUse");
+    assert_eq!(post_trace["event"]["transcript_path"], transcript);
+    assert_eq!(post_trace["event"]["cwd"], cwd);
+    assert_eq!(post_trace["event"]["tool_response"]["success"], false);
+
+    let stop = run_hook_with_stdin_payload(
+        "Stop",
+        &format!(
+            r#"{{"session_id":"{session}","transcript_path":"{transcript}","cwd":"{cwd}","hook_event_name":"Stop","stop_hook_active":false}}"#
+        ),
+        &vault,
+    );
+    assert_stop_artifacts(&vault, &stop, session);
+    let stop_trace = trace_artifact(&vault, &stop);
+    assert_eq!(stop_trace["event"]["hook_event_name"], "Stop");
+    assert_eq!(stop_trace["event"]["transcript_path"], transcript);
+    assert_eq!(stop_trace["event"]["cwd"], cwd);
+    assert_eq!(stop_trace["event"]["stop_hook_active"], false);
     assert_lifecycle_artifact_counts(&vault);
 }
 

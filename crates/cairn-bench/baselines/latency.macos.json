@@ -2,16 +2,16 @@
   "schema_version": 1,
   "runner": "macos",
   "captured_at": "2026-05-19T17:37:55.248315+00:00",
-  "commit": "6d275e9f85b83a48cee09673b935f0439c1ce31e",
+  "commit": "be394028656b1791931ef76e05ccf5477156523c",
   "metrics": {
-    "assemble_hot_p95": 112.17,
+    "assemble_hot_p95": 150.362755125,
     "capture_trace_p95": 147.16,
     "retrieve_p95": 149.79,
     "search_hybrid_p95": 94.49,
-    "search_keyword_p95": 96.52,
+    "search_keyword_p95": 107.58350829999999,
     "search_semantic_p95": 99.32,
     "wal_apply_p95": 112.77,
-    "workflow_enqueue_p95": 96.49
+    "workflow_enqueue_p95": 121.9505105
   },
   "regression_pct": {
     "assemble_hot_p95": 25.0,
