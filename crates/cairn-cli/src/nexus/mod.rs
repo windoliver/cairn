@@ -257,10 +257,10 @@ enum UnixSignal {
 
 #[cfg(unix)]
 impl UnixSignal {
-    fn number(self) -> i32 {
+    fn name(self) -> &'static str {
         match self {
-            Self::Term => 15,
-            Self::Kill => 9,
+            Self::Term => "TERM",
+            Self::Kill => "KILL",
         }
     }
 }
@@ -288,7 +288,8 @@ fn signal_process_group(process_group: i32, signal: UnixSignal) -> std::io::Resu
         ));
     }
     let status = Command::new("kill")
-        .arg(format!("-{}", signal.number()))
+        .arg(format!("-{}", signal.name()))
+        .arg("--")
         .arg(format!("-{process_group}"))
         .status()?;
     if status.success() {
@@ -986,9 +987,14 @@ mod tests {
         })
         .unwrap();
         let pid = supervisor.child.id();
+        let started = Instant::now();
 
         supervisor.stop().unwrap();
 
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "force-kill path should not wait for the stubborn child to exit naturally"
+        );
         assert!(!process_is_running(pid));
     }
 
@@ -1017,9 +1023,14 @@ mod tests {
             .trim()
             .parse::<u32>()
             .unwrap();
+        let started = Instant::now();
 
         supervisor.stop().unwrap();
 
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "process-group shutdown should not wait for the descendant to exit naturally"
+        );
         assert!(!process_is_running(child_pid));
     }
 
