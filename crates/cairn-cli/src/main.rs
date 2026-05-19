@@ -129,6 +129,7 @@ fn subcommand_needs_vault_guard(subcommand: Option<(&str, &ArgMatches)>) -> bool
         active_subcommand,
         "vault"
             | "bootstrap"
+            | "setup"
             | "plugins"
             | "mcp"
             | "admin"
@@ -141,7 +142,6 @@ fn subcommand_needs_vault_guard(subcommand: Option<(&str, &ArgMatches)>) -> bool
             | "screen"
             | "sensor"
             | "repair"
-            | "setup"
     )
 }
 
