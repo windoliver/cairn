@@ -589,8 +589,9 @@ fn degraded_leg_to_idl(
 
     let reason_to_idl = |r: DegradationReason| match r {
         DegradationReason::CapabilityUnavailable => DegradedLegEntryReason::CapabilityUnavailable,
-        DegradationReason::TransientProviderOutage => DegradedLegEntryReason::Timeout,
-        DegradationReason::DeadlineExceeded => DegradedLegEntryReason::Timeout,
+        DegradationReason::TransientProviderOutage | DegradationReason::DeadlineExceeded => {
+            DegradedLegEntryReason::Timeout
+        }
         _ => DegradedLegEntryReason::SqlError,
     };
     let source_to_idl = |s: GraphSource| match s {

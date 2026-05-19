@@ -644,8 +644,9 @@ fn degraded_leg_to_idl(
 
     let reason_to_idl = |r: DegradationReason| match r {
         DegradationReason::CapabilityUnavailable => DegradedLegEntryReason::CapabilityUnavailable,
-        DegradationReason::TransientProviderOutage => DegradedLegEntryReason::Timeout,
-        DegradationReason::DeadlineExceeded => DegradedLegEntryReason::Timeout,
+        DegradationReason::TransientProviderOutage | DegradationReason::DeadlineExceeded => {
+            DegradedLegEntryReason::Timeout
+        }
         // SqlError + WorkerPanic + future variants (DegradationReason
         // is #[non_exhaustive]) all surface as SqlError on the wire.
         _ => DegradedLegEntryReason::SqlError,

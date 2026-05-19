@@ -254,18 +254,7 @@ pub async fn run(
             reason: e.to_string(),
         })?;
 
-    let visibility = if request.visibility_allowlist.is_empty() {
-        vec![
-            MemoryVisibility::Private,
-            MemoryVisibility::Session,
-            MemoryVisibility::Project,
-            MemoryVisibility::Team,
-            MemoryVisibility::Org,
-            MemoryVisibility::Public,
-        ]
-    } else {
-        request.visibility_allowlist.clone()
-    };
+    let visibility = visibility_allowlist(&request);
 
     let (candidates, explain, read_filter_exclusions, degraded_legs) = match request.mode {
         SearchMode::Keyword => {
@@ -355,6 +344,21 @@ fn semantic_degraded(degraded_legs: &[crate::search::DegradedLeg]) -> bool {
             }
         )
     })
+}
+
+fn visibility_allowlist(request: &SearchRequest) -> Vec<MemoryVisibility> {
+    if !request.visibility_allowlist.is_empty() {
+        return request.visibility_allowlist.clone();
+    }
+
+    vec![
+        MemoryVisibility::Private,
+        MemoryVisibility::Session,
+        MemoryVisibility::Project,
+        MemoryVisibility::Team,
+        MemoryVisibility::Org,
+        MemoryVisibility::Public,
+    ]
 }
 
 fn search_policy_trace(
