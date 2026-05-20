@@ -146,9 +146,16 @@ fn projection_parser_fixtures_are_present_and_typed() {
         "parser-failure.json",
     ] {
         let bytes = std::fs::read(fixture_dir.join(name)).expect("read projection fixture");
-        let value: serde_json::Value = serde_json::from_slice(&bytes).expect("projection fixture json");
-        assert!(value["projection_target"].as_str().is_some(), "{name}: {value:#}");
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("projection fixture json");
+        assert!(
+            value["projection_target"].as_str().is_some(),
+            "{name}: {value:#}"
+        );
         assert!(value["source_hash"].as_str().is_some(), "{name}: {value:#}");
-        assert!(value["expected_state"].as_str().is_some(), "{name}: {value:#}");
+        assert!(
+            value["expected_state"].as_str().is_some(),
+            "{name}: {value:#}"
+        );
     }
 }
