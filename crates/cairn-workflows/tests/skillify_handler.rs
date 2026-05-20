@@ -36,6 +36,34 @@ impl JsonLlm {
     }
 }
 
+struct FailingLlm;
+
+#[async_trait::async_trait]
+impl LLMProvider for FailingLlm {
+    fn name(&self) -> &str {
+        "failing-llm"
+    }
+
+    fn capabilities(&self) -> &LLMProviderCapabilities {
+        static CAPS: LLMProviderCapabilities = LLMProviderCapabilities {
+            json_mode: true,
+            streaming: false,
+            tool_calls: false,
+        };
+        &CAPS
+    }
+
+    fn supported_contract_versions(&self) -> VersionRange {
+        VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+    }
+
+    async fn complete(&self, _req: &CompletionRequest) -> Result<CompletionOutput, LlmError> {
+        Err(LlmError::NotConfigured {
+            remediation: "cairn config set llm.provider ollama".to_owned(),
+        })
+    }
+}
+
 #[async_trait::async_trait]
 impl LLMProvider for JsonLlm {
     fn name(&self) -> &str {
@@ -131,7 +159,38 @@ async fn handler_rejects_llm_slug_that_could_escape_bundle() {
 }
 
 #[tokio::test]
-async fn job_handler_maps_invalid_payload_and_missing_llm_to_validation_permanent() {
+async fn handler_replay_keeps_existing_bundle_without_calling_llm() {
+    let temp = TempDir::new().expect("temp");
+    let handler = SkillifyHandler::new(
+        temp.path().to_path_buf(),
+        Some(Arc::new(JsonLlm::bundle("deploy-hotfix"))),
+    );
+    handler.run_once(payload()).await.expect("first run");
+
+    let replay = SkillifyHandler::new(
+        temp.path().to_path_buf(),
+        Some(Arc::new(JsonLlm {
+            output: CompletionOutput::Text("not json".to_owned()),
+        })),
+    );
+    replay.run_once(payload()).await.expect("replay");
+
+    let script = std::fs::read_to_string(
+        temp.path()
+            .join(".cairn/evolution/skillify/skc_fixture/bundle/scripts/deploy-hotfix.sh"),
+    )
+    .expect("script");
+    assert!(script.contains("deploy-hotfix"));
+    assert!(
+        !temp
+            .path()
+            .join(".cairn/evolution/skillify/skc_fixture/bundle/scripts/changed.sh")
+            .exists()
+    );
+}
+
+#[tokio::test]
+async fn job_handler_maps_permanent_failures_to_validation_permanent() {
     let temp = TempDir::new().expect("temp");
     let handler = SkillifyHandler::new(temp.path().to_path_buf(), None);
 
@@ -146,6 +205,39 @@ async fn job_handler_maps_invalid_payload_and_missing_llm_to_validation_permanen
     assert!(matches!(
         handler
             .handle(&payload().to_bytes().expect("payload"))
+            .await,
+        HandlerOutcome::Permanent {
+            class: FailureClass::Validation,
+            ..
+        }
+    ));
+
+    let unsafe_handler = SkillifyHandler::new(
+        temp.path().to_path_buf(),
+        Some(Arc::new(JsonLlm::bundle("../escape"))),
+    );
+    assert!(matches!(
+        unsafe_handler
+            .handle(&payload().to_bytes().expect("payload"))
+            .await,
+        HandlerOutcome::Permanent {
+            class: FailureClass::Validation,
+            ..
+        }
+    ));
+
+    let failing_handler =
+        SkillifyHandler::new(temp.path().to_path_buf(), Some(Arc::new(FailingLlm)));
+    assert!(matches!(
+        failing_handler
+            .handle(
+                &SkillifyPayload {
+                    candidate_id: Some("skc_missing_llm".to_owned()),
+                    ..payload()
+                }
+                .to_bytes()
+                .expect("payload")
+            )
             .await,
         HandlerOutcome::Permanent {
             class: FailureClass::Validation,

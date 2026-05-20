@@ -2,10 +2,11 @@
 
 use std::fs;
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use cairn_core::pipeline::skillify::{
-    SkillArtifact, SkillArtifactBundle, SkillArtifactKind, SkillifyGate, SkillifyGateReport,
-    SkillifyGateStatus,
+    SkillArtifact, SkillArtifactBundle, SkillArtifactError, SkillArtifactKind, SkillifyGate,
+    SkillifyGateReport, SkillifyGateStatus,
 };
 use sha2::{Digest, Sha256};
 
@@ -37,7 +38,7 @@ pub struct AuthoredSkillBundle {
 }
 
 impl TryFrom<serde_json::Value> for AuthoredSkillBundle {
-    type Error = String;
+    type Error = SkillifyMaterializeError;
 
     fn try_from(value: serde_json::Value) -> Result<Self, Self::Error> {
         let bundle = Self {
@@ -58,6 +59,78 @@ impl TryFrom<serde_json::Value> for AuthoredSkillBundle {
     }
 }
 
+/// Candidate materialization failures.
+#[derive(Debug, thiserror::Error)]
+pub enum SkillifyMaterializeError {
+    /// Required string field was absent or not a string.
+    #[error("missing string field {field}")]
+    MissingStringField {
+        /// Field name.
+        field: String,
+    },
+    /// Required JSON field was absent.
+    #[error("missing field {field}")]
+    MissingField {
+        /// Field name.
+        field: String,
+    },
+    /// A path token controlled by authored content or payload was unsafe.
+    #[error("invalid {label} `{value}`")]
+    InvalidPathToken {
+        /// Token label.
+        label: &'static str,
+        /// Rejected token value.
+        value: String,
+    },
+    /// Candidate directory exists but is not a complete ready bundle.
+    #[error("candidate `{candidate_id}` already exists but is incomplete")]
+    ExistingCandidateIncomplete {
+        /// Candidate id.
+        candidate_id: String,
+    },
+    /// JSON serialization/deserialization failed.
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+    /// Filesystem operation failed.
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    /// Core artifact validation failed.
+    #[error(transparent)]
+    Artifact(#[from] SkillArtifactError),
+}
+
+impl SkillifyMaterializeError {
+    /// Whether retrying the same job can reasonably fix this error.
+    #[must_use]
+    pub fn is_permanent(&self) -> bool {
+        matches!(
+            self,
+            Self::MissingStringField { .. }
+                | Self::MissingField { .. }
+                | Self::InvalidPathToken { .. }
+                | Self::ExistingCandidateIncomplete { .. }
+                | Self::Json(_)
+                | Self::Artifact(_)
+        )
+    }
+}
+
+/// Return true when the candidate already has a complete ready bundle.
+///
+/// # Errors
+/// Returns an error when the candidate id is unsafe or an existing candidate
+/// directory is incomplete.
+pub fn candidate_ready(
+    vault_root: &Path,
+    candidate_id: &str,
+) -> Result<bool, SkillifyMaterializeError> {
+    validate_path_token("candidate id", candidate_id)?;
+    let root = vault_root
+        .join(".cairn/evolution/skillify")
+        .join(candidate_id);
+    read_existing_bundle(&root, candidate_id).map(|bundle| bundle.is_some())
+}
+
 /// Materialize a candidate bundle under `.cairn/evolution/skillify/{candidate_id}`.
 ///
 /// # Errors
@@ -68,15 +141,51 @@ pub fn materialize_bundle(
     candidate_id: &str,
     authored: &AuthoredSkillBundle,
     evidence_refs: &[String],
-) -> Result<SkillArtifactBundle, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<SkillArtifactBundle, SkillifyMaterializeError> {
     validate_path_token("candidate id", candidate_id)?;
 
-    let root = vault_root
-        .join(".cairn/evolution/skillify")
-        .join(candidate_id);
-    let bundle_root = root.join("bundle");
-    fs::create_dir_all(&root)?;
+    let parent = vault_root.join(".cairn/evolution/skillify");
+    fs::create_dir_all(&parent)?;
+    let root = parent.join(candidate_id);
+    if let Some(existing) = read_existing_bundle(&root, candidate_id)? {
+        return Ok(existing);
+    }
 
+    let temp_root = temp_candidate_dir(&parent, candidate_id);
+    fs::create_dir(&temp_root)?;
+    let result = materialize_new_bundle(&temp_root, candidate_id, authored, evidence_refs);
+    let bundle = match result {
+        Ok(bundle) => bundle,
+        Err(e) => {
+            let _ = fs::remove_dir_all(&temp_root);
+            return Err(e);
+        }
+    };
+
+    match fs::rename(&temp_root, &root) {
+        Ok(()) => Ok(bundle),
+        Err(e) if root.exists() => {
+            let _ = fs::remove_dir_all(&temp_root);
+            if let Some(existing) = read_existing_bundle(&root, candidate_id)? {
+                Ok(existing)
+            } else {
+                Err(SkillifyMaterializeError::Io(e))
+            }
+        }
+        Err(e) => {
+            let _ = fs::remove_dir_all(&temp_root);
+            Err(SkillifyMaterializeError::Io(e))
+        }
+    }
+}
+
+fn materialize_new_bundle(
+    root: &Path,
+    candidate_id: &str,
+    authored: &AuthoredSkillBundle,
+    evidence_refs: &[String],
+) -> Result<SkillArtifactBundle, SkillifyMaterializeError> {
+    let bundle_root = root.join("bundle");
     let files = [
         (
             SkillArtifactKind::SkillContract,
@@ -169,22 +278,79 @@ pub fn materialize_bundle(
     Ok(bundle)
 }
 
-fn required_string(value: &serde_json::Value, key: &str) -> Result<String, String> {
+fn read_existing_bundle(
+    root: &Path,
+    candidate_id: &str,
+) -> Result<Option<SkillArtifactBundle>, SkillifyMaterializeError> {
+    if !root.exists() {
+        return Ok(None);
+    }
+
+    let manifest_path = root.join("manifest.json");
+    let gate_report_path = root.join("gate-report.json");
+    if !manifest_path.exists() || !gate_report_path.exists() {
+        return Err(SkillifyMaterializeError::ExistingCandidateIncomplete {
+            candidate_id: candidate_id.to_owned(),
+        });
+    }
+
+    let bundle: SkillArtifactBundle = serde_json::from_slice(&fs::read(&manifest_path)?)?;
+    let report: SkillifyGateReport = serde_json::from_slice(&fs::read(&gate_report_path)?)?;
+    if bundle.candidate_id != candidate_id
+        || report.candidate_id != candidate_id
+        || !report.ready_for_promotion()
+    {
+        return Err(SkillifyMaterializeError::ExistingCandidateIncomplete {
+            candidate_id: candidate_id.to_owned(),
+        });
+    }
+    bundle.validate()?;
+    for artifact in &bundle.artifacts {
+        if !root.join(&artifact.path).exists() {
+            return Err(SkillifyMaterializeError::ExistingCandidateIncomplete {
+                candidate_id: candidate_id.to_owned(),
+            });
+        }
+    }
+    Ok(Some(bundle))
+}
+
+fn temp_candidate_dir(parent: &Path, candidate_id: &str) -> std::path::PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    parent.join(format!(
+        ".{candidate_id}.tmp-{}-{nanos}",
+        std::process::id()
+    ))
+}
+
+fn required_string(
+    value: &serde_json::Value,
+    key: &str,
+) -> Result<String, SkillifyMaterializeError> {
     value
         .get(key)
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned)
-        .ok_or_else(|| format!("missing string field {key}"))
+        .ok_or_else(|| SkillifyMaterializeError::MissingStringField {
+            field: key.to_owned(),
+        })
 }
 
-fn required_value(value: &serde_json::Value, key: &str) -> Result<serde_json::Value, String> {
+fn required_value(
+    value: &serde_json::Value,
+    key: &str,
+) -> Result<serde_json::Value, SkillifyMaterializeError> {
     value
         .get(key)
         .cloned()
-        .ok_or_else(|| format!("missing field {key}"))
+        .ok_or_else(|| SkillifyMaterializeError::MissingField {
+            field: key.to_owned(),
+        })
 }
 
-fn validate_path_token(label: &str, value: &str) -> Result<(), String> {
+fn validate_path_token(label: &'static str, value: &str) -> Result<(), SkillifyMaterializeError> {
     if value.is_empty()
         || value == "."
         || value == ".."
@@ -194,7 +360,10 @@ fn validate_path_token(label: &str, value: &str) -> Result<(), String> {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
     {
-        return Err(format!("invalid {label} `{value}`"));
+        return Err(SkillifyMaterializeError::InvalidPathToken {
+            label,
+            value: value.to_owned(),
+        });
     }
     Ok(())
 }

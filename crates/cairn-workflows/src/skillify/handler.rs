@@ -4,11 +4,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use cairn_core::contract::job_store::{JobKind, JobPayload};
-use cairn_core::contract::llm_provider::{CompletionOutput, CompletionRequest, LLMProvider};
+use cairn_core::contract::llm_provider::{
+    CompletionOutput, CompletionRequest, LLMProvider, LlmError,
+};
 
 use crate::scheduler::{HandlerOutcome, JobHandler};
 
-use super::materialize::{AuthoredSkillBundle, materialize_bundle};
+use super::materialize::{AuthoredSkillBundle, SkillifyMaterializeError, materialize_bundle};
 
 /// The `JobKind` discriminator stored in `workflow_jobs.kind`.
 pub const SKILLIFY_KIND: &str = "skillify.emit";
@@ -17,6 +19,33 @@ pub const SKILLIFY_KIND: &str = "skillify.emit";
 pub struct SkillifyHandler {
     vault_root: PathBuf,
     llm: Option<Arc<dyn LLMProvider>>,
+}
+
+/// Error from one decoded skillify handler run.
+#[derive(Debug, thiserror::Error)]
+pub enum SkillifyRunError {
+    /// No LLM provider was configured.
+    #[error("skillify: no llm provider configured")]
+    NoLlm,
+    /// LLM provider failed.
+    #[error(transparent)]
+    Llm(#[from] LlmError),
+    /// Provider returned text or another unsupported output shape.
+    #[error("skillify: llm did not return JSON")]
+    NonJsonOutput,
+    /// Materialization or authored bundle validation failed.
+    #[error(transparent)]
+    Materialize(#[from] SkillifyMaterializeError),
+}
+
+impl SkillifyRunError {
+    fn is_permanent(&self) -> bool {
+        match self {
+            Self::NoLlm | Self::NonJsonOutput => true,
+            Self::Materialize(e) => e.is_permanent(),
+            Self::Llm(e) => !matches!(e, LlmError::ProviderUnreachable { .. }),
+        }
+    }
 }
 
 impl SkillifyHandler {
@@ -32,20 +61,21 @@ impl SkillifyHandler {
     /// # Errors
     /// Returns when no LLM is configured, the provider fails, the response is
     /// not valid skill bundle JSON, or bundle materialization fails.
-    pub async fn run_once(
-        &self,
-        payload: super::SkillifyPayload,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let Some(llm) = &self.llm else {
-            return Err("skillify: no llm provider configured".into());
-        };
-
+    pub async fn run_once(&self, payload: super::SkillifyPayload) -> Result<(), SkillifyRunError> {
         let candidate_id = payload.candidate_id.unwrap_or_else(|| {
             format!(
                 "skc_{}",
                 crate::synthetic::sha256_hex(payload.key.as_bytes())
             )
         });
+        if super::materialize::candidate_ready(&self.vault_root, &candidate_id)? {
+            return Ok(());
+        }
+
+        let Some(llm) = &self.llm else {
+            return Err(SkillifyRunError::NoLlm);
+        };
+
         let request = CompletionRequest::builder()
             .prompt(format!(
                 "Create a section 11.b Skillify bundle for key {} with sources {:?}. Return JSON only.",
@@ -70,8 +100,8 @@ impl SkillifyHandler {
             .build();
         let value = match llm.complete(&request).await? {
             CompletionOutput::Json(value) => value,
-            CompletionOutput::Text(_) => return Err("skillify: llm did not return JSON".into()),
-            other => return Err(format!("skillify: unsupported llm output {other:?}").into()),
+            CompletionOutput::Text(_) => return Err(SkillifyRunError::NonJsonOutput),
+            _ => return Err(SkillifyRunError::NonJsonOutput),
         };
         let authored = AuthoredSkillBundle::try_from(value)?;
         materialize_bundle(
@@ -102,9 +132,7 @@ impl JobHandler for SkillifyHandler {
 
         match self.run_once(payload).await {
             Ok(()) => HandlerOutcome::Done,
-            Err(e) if e.to_string().contains("no llm provider configured") => {
-                HandlerOutcome::validation_permanent(e.to_string())
-            }
+            Err(e) if e.is_permanent() => HandlerOutcome::validation_permanent(e.to_string()),
             Err(e) => HandlerOutcome::transient_retry(e.to_string()),
         }
     }
