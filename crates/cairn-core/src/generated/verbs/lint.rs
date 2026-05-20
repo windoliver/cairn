@@ -57,6 +57,11 @@ pub enum Kind {
     SourceRedactSkipped,
     SensorBudgetExceeded,
     SensorPrivacyDenied,
+    SkillMissingArtifact,
+    SkillUnreachable,
+    SkillDuplicateLane,
+    SkillGateFailed,
+    SkillRollbackBroken,
     Stale,
     StaleProfileLine,
     StaleSchema,
@@ -94,6 +99,12 @@ pub struct LintArgs {
     /// When true, resolves live bitemporal edge contradictions by invalidating lower-confidence edges.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fix: Option<bool>,
+    /// When true, writes reviewable Skillify repair plans instead of mutating live skills.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fix_skill_plan: Option<bool>,
+    /// When true, runs Skillify bundle, resolver, gate, and rollback lint checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill: Option<bool>,
     /// When true, writes .cairn/lint-report.md.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub write_report: Option<bool>,

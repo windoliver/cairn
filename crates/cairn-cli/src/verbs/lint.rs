@@ -3029,6 +3029,11 @@ fn kind_key(kind: Kind) -> String {
         Kind::WorkflowStuck => "workflow_stuck",
         Kind::SensorBudgetExceeded => "sensor_budget_exceeded",
         Kind::SensorPrivacyDenied => "sensor_privacy_denied",
+        Kind::SkillMissingArtifact => "skill_missing_artifact",
+        Kind::SkillUnreachable => "skill_unreachable",
+        Kind::SkillDuplicateLane => "skill_duplicate_lane",
+        Kind::SkillGateFailed => "skill_gate_failed",
+        Kind::SkillRollbackBroken => "skill_rollback_broken",
         // `Kind` is `#[non_exhaustive]`; this catch-all only fires when
         // a new variant lands upstream and this file hasn't been
         // updated yet (issue #92 added 4 variants without touching

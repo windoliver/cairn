@@ -8,6 +8,15 @@
           "type": "boolean",
           "x-cairn-auth": "write_capability"
         },
+        "fix_skill_plan": {
+          "description": "When true, writes reviewable Skillify repair plans instead of mutating live skills.",
+          "type": "boolean",
+          "x-cairn-auth": "write_capability"
+        },
+        "skill": {
+          "description": "When true, runs Skillify bundle, resolver, gate, and rollback lint checks.",
+          "type": "boolean"
+        },
         "write_report": {
           "description": "When true, writes .cairn/lint-report.md.",
           "type": "boolean",
@@ -158,6 +167,11 @@
         "source_redact_skipped",
         "sensor_budget_exceeded",
         "sensor_privacy_denied",
+        "skill_missing_artifact",
+        "skill_unreachable",
+        "skill_duplicate_lane",
+        "skill_gate_failed",
+        "skill_rollback_broken",
         "stale",
         "stale_profile_line",
         "stale_schema",

@@ -347,6 +347,14 @@ cairn lint --write-report
 cairn lint --fix
 ```
 
+```bash
+cairn lint --skill
+```
+
+```bash
+cairn lint --fix-skill-plan
+```
+
 ## `cairn forget`
 
 **Use when:**

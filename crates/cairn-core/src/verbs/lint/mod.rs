@@ -443,6 +443,11 @@ fn kind_key(k: Kind) -> String {
         Kind::WorkflowStuck => "workflow_stuck",
         Kind::SensorBudgetExceeded => "sensor_budget_exceeded",
         Kind::SensorPrivacyDenied => "sensor_privacy_denied",
+        Kind::SkillMissingArtifact => "skill_missing_artifact",
+        Kind::SkillUnreachable => "skill_unreachable",
+        Kind::SkillDuplicateLane => "skill_duplicate_lane",
+        Kind::SkillGateFailed => "skill_gate_failed",
+        Kind::SkillRollbackBroken => "skill_rollback_broken",
     }
     .to_owned()
 }
