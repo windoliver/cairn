@@ -58,6 +58,22 @@ fn candidate_id_is_stable_for_same_inputs() {
 }
 
 #[test]
+fn candidate_id_frames_source_ids_and_success_criteria_separately() {
+    let mut first = input(SkillifyOutcome::Success);
+    first.source_record_ids = vec!["a".to_owned()];
+    first.success_criteria = vec!["b".to_owned(), "c".to_owned()];
+
+    let mut second = input(SkillifyOutcome::Success);
+    second.source_record_ids = vec!["a".to_owned(), "b".to_owned()];
+    second.success_criteria = vec!["c".to_owned()];
+
+    let first = first.into_candidate().expect("first candidate");
+    let second = second.into_candidate().expect("second candidate");
+
+    assert_ne!(first.candidate_id, second.candidate_id);
+}
+
+#[test]
 fn failed_trajectory_is_rejected_before_authoring() {
     let err = input(SkillifyOutcome::Failure)
         .into_candidate()

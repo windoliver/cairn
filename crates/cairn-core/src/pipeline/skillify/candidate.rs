@@ -248,18 +248,30 @@ fn candidate_id(
     success_criteria.sort();
 
     let mut hasher = Sha256::new();
-    hash_part(&mut hasher, lane);
-    hash_part(&mut hasher, trigger.as_str_name());
-    for source_record_id in source_record_ids {
+    hash_field(&mut hasher, "lane", lane);
+    hash_field(&mut hasher, "trigger", trigger.as_str_name());
+    hash_list_start(&mut hasher, "source_record_ids", source_record_ids.len());
+    for source_record_id in &source_record_ids {
         hash_part(&mut hasher, &source_record_id);
     }
-    for criterion in success_criteria {
+    hash_list_start(&mut hasher, "success_criteria", success_criteria.len());
+    for criterion in &success_criteria {
         hash_part(&mut hasher, &criterion);
     }
     format!("skc_{:x}", hasher.finalize())
 }
 
+fn hash_field(hasher: &mut Sha256, label: &str, value: &str) {
+    hash_part(hasher, label);
+    hash_part(hasher, value);
+}
+
+fn hash_list_start(hasher: &mut Sha256, label: &str, len: usize) {
+    hash_part(hasher, label);
+    hasher.update(u64::try_from(len).unwrap_or(u64::MAX).to_le_bytes());
+}
+
 fn hash_part(hasher: &mut Sha256, value: &str) {
-    hasher.update(value.len().to_le_bytes());
+    hasher.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_le_bytes());
     hasher.update(value.as_bytes());
 }
