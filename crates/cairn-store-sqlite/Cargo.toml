@@ -45,7 +45,7 @@ sqlite-vec = { workspace = true }
 default = []
 # Exposes sync `rusqlite::Connection` open helpers for integration tests.
 # Not part of the production API — keeps the test surface explicit.
-test-helpers = []
+test-helpers = ["cairn-core/test-fixtures"]
 
 [dev-dependencies]
 cairn-core = { workspace = true, features = ["test-fixtures", "test-helpers"] }

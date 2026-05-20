@@ -320,6 +320,7 @@ fn main() -> ExitCode {
                 verbs::forget::run_without_context(sub)
             }
         }
+        Some(("reindex", sub)) => run_reindex(sub, explicit_vault.as_deref()),
         Some(("hook", sub)) => hooks::run(sub),
         Some(("status", sub)) => run_status(sub, explicit_vault.as_deref()),
         Some(("screen", sub)) => match resolve_vault_and_config(explicit_vault.as_deref()) {
@@ -794,6 +795,28 @@ fn run_admin(matches: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
             "clap subcommand_required(true) on admin ensures a subcommand is always present"
         ),
     }
+}
+
+fn run_reindex(sub: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
+    let (vault_root, _source) = match resolve_vault_or_cwd(explicit_vault) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("cairn reindex: vault resolution error — {e:#}");
+            return ExitCode::from(78); // EX_CONFIG
+        }
+    };
+    if let Some(rc) = enforce_vault_binding("reindex", &vault_root) {
+        return rc;
+    }
+    let config =
+        match cairn_cli::config::load(&vault_root, &cairn_cli::config::CliOverrides::default()) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("cairn reindex: config error — {e:#}");
+                return ExitCode::from(78); // EX_CONFIG
+            }
+        };
+    verbs::reindex::run_with_context(sub, &vault_root, &config)
 }
 
 fn run_backup(matches: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {

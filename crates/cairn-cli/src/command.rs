@@ -40,6 +40,7 @@ pub fn build_command() -> clap::Command {
         .subcommand(verbs::with_json(verbs::with_forget_pin(
             verbs::with_flush_modes(generated::verbs::forget_subcommand()),
         )))
+        .subcommand(verbs::with_json(verbs::reindex::command()))
         .subcommand(hooks::command())
         // Protocol preludes.
         .subcommand(verbs::with_json(with_issuer(

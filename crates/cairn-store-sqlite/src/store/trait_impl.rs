@@ -10,11 +10,13 @@ use async_trait::async_trait;
 use cairn_core::contract::memory_store::{
     AccessUpdate, DecayBatchOutcome, DecayPolicy, Edge, EdgeDir, EdgeKey, GraphNeighborsArgs,
     HybridSearchArgs, HybridSearchPage, IndexStats, KeywordSearchArgs, KeywordSearchPage, ListArgs,
-    ListPage, MemoryStore, MemoryStoreCapabilities, RecordVersion, SemanticSearchArgs,
-    SemanticSearchPage, StoreError, TombstoneReason, UpsertOutcome,
+    ListPage, MemoryStore, MemoryStoreCapabilities, ProjectionApplyItem, ProjectionRecord,
+    RecordVersion, SemanticSearchArgs, SemanticSearchPage, StoreError, TombstoneReason,
+    UpsertOutcome,
 };
 use cairn_core::contract::version::VersionRange;
 use cairn_core::domain::consent_timeline::ConsentModel;
+use cairn_core::domain::projection::{ProjectionCursor, ProjectionLedgerRow, ProjectionSummary};
 use cairn_core::domain::{
     MemoryRecord, MergeStrategy, RecordId, SessionId, SessionMerge, SessionTree, TargetId,
 };
@@ -235,6 +237,49 @@ impl MemoryStore for SqliteMemoryStore {
             return not_initialized("list_consent_models");
         }
         self.do_list_consent_models().await.map_err(Into::into)
+    }
+
+    async fn projection_summaries(&self) -> Result<Vec<ProjectionSummary>, StoreError> {
+        if self.conn.is_none() {
+            return not_initialized("projection_summaries");
+        }
+        self.do_projection_summaries().await.map_err(Into::into)
+    }
+
+    async fn projection_cursors(&self) -> Result<Vec<ProjectionCursor>, StoreError> {
+        if self.conn.is_none() {
+            return not_initialized("projection_cursors");
+        }
+        self.do_projection_records()
+            .await
+            .map(|records| records.into_iter().map(|record| record.cursor).collect())
+            .map_err(Into::into)
+    }
+
+    async fn projection_records(&self) -> Result<Vec<ProjectionRecord>, StoreError> {
+        if self.conn.is_none() {
+            return not_initialized("projection_records");
+        }
+        self.do_projection_records().await.map_err(Into::into)
+    }
+
+    async fn projection_failures(&self) -> Result<Vec<ProjectionLedgerRow>, StoreError> {
+        if self.conn.is_none() {
+            return not_initialized("projection_failures");
+        }
+        self.do_projection_failures().await.map_err(Into::into)
+    }
+
+    async fn apply_projection_items(
+        &self,
+        items: Vec<ProjectionApplyItem>,
+    ) -> Result<(), StoreError> {
+        if self.conn.is_none() {
+            return not_initialized("apply_projection_items");
+        }
+        self.do_apply_projection_items(items)
+            .await
+            .map_err(Into::into)
     }
 
     async fn trace_canvas_lint_snapshot(

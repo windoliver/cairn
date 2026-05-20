@@ -7,11 +7,15 @@
 //! `run_hybrid` and their `_async` siblings) have been collapsed into a
 //! single `run_async` that delegates to `cairn_core::verbs::search::run`.
 
+use std::collections::HashMap;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
 
-use cairn_core::config::EmbeddingProvider;
+use cairn_core::config::{EmbeddingProvider, StoreKind};
+use cairn_core::contract::memory_store::MemoryStore;
 use cairn_core::domain::filter::validate_filter;
+use cairn_core::domain::projection::ProjectionTarget;
 use cairn_core::generated::envelope::ResponseVerb;
 use cairn_core::generated::verbs::search::{SearchArgsFilters, SearchArgsMode};
 use cairn_embeddings_local::EmbeddingModel;
@@ -23,6 +27,9 @@ use super::envelope::{
     new_operation_id, not_found_response, unimplemented_response,
 };
 use super::status;
+use crate::nexus::projection::{
+    ProjectionClient, ProjectionSearchCandidate, ProjectionSearchRequest,
+};
 
 /// Capability that gates `--explain`. Mirrors
 /// `crates/cairn-idl/schema/verbs/search.json`'s
@@ -39,6 +46,17 @@ enum SearchMode {
     Hybrid,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Bm25sMode {
+    Auto,
+    Disabled,
+    Required,
+}
+
+const NEXUS_BM25S_CAPABILITY: &str = "cairn.mcp.v1.search.nexus_bm25s";
+const NEXUS_BM25S_HINT: &str =
+    "projection not current; run `cairn reindex --from-db` with store.kind: nexus-sandbox";
+
 /// Run `cairn search`. `--explain` requires the
 /// `cairn.mcp.v1.policy_trace` capability to be advertised by `status`;
 /// otherwise we fail-closed with `CapabilityUnavailable` (sysexit 69)
@@ -54,6 +72,7 @@ enum SearchMode {
 pub fn run(sub: &ArgMatches, vault_root: std::path::PathBuf) -> ExitCode {
     let json = sub.get_flag("json");
     let explain = sub.get_flag("explain");
+    let bm25s_mode = parse_bm25s_mode(sub);
 
     if explain && !status::p0_capabilities_advertises(EXPLAIN_CAPABILITY) {
         let resp = capability_unavailable_response(ResponseVerb::Search, EXPLAIN_CAPABILITY);
@@ -121,7 +140,9 @@ pub fn run(sub: &ArgMatches, vault_root: std::path::PathBuf) -> ExitCode {
         }
     };
 
-    rt.block_on(async move { run_async(sub, vault_root, json, explain, mode_local).await })
+    rt.block_on(
+        async move { run_async(sub, vault_root, json, explain, mode_local, bm25s_mode).await },
+    )
 }
 
 #[allow(clippy::too_many_lines)]
@@ -134,8 +155,10 @@ async fn run_async(
     json: bool,
     explain: bool,
     mode: SearchMode,
+    bm25s_mode: Bm25sMode,
 ) -> ExitCode {
     let query = sub.get_one::<String>("query").cloned().unwrap_or_default();
+    let query_text = query.clone();
     let include_reasoning = sub.get_flag("include_reasoning");
     // The generated subcommand registers `limit` as `u32`; map to a usize
     // for downstream args. Floor at 1 to avoid degenerate empty-page calls.
@@ -360,7 +383,12 @@ async fn run_async(
     };
 
     match cairn_core::verbs::search::run(&store, &config, &caps, request).await {
-        Ok(outcome) => render_outcome(&outcome, json, mode),
+        Ok(outcome) => {
+            match bm25s_scores(&store, &config, &outcome, &query_text, limit, bm25s_mode).await {
+                Ok(scores) => render_outcome(&outcome, json, mode, scores.as_ref()),
+                Err(err) => emit_bm25s_unavailable(json, &err),
+            }
+        }
         Err(cairn_core::verbs::search::SearchError::CapabilityUnavailable { capability }) => {
             let resp = capability_unavailable_response(ResponseVerb::Search, capability);
             if json {
@@ -419,6 +447,162 @@ async fn run_async(
     }
 }
 
+fn parse_bm25s_mode(sub: &ArgMatches) -> Bm25sMode {
+    match sub.get_one::<String>("bm25s").map(String::as_str) {
+        Some("auto") => Bm25sMode::Auto,
+        Some("required") => Bm25sMode::Required,
+        _ => Bm25sMode::Disabled,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Bm25sUnavailable {
+    reason: String,
+}
+
+fn emit_bm25s_unavailable(json: bool, err: &Bm25sUnavailable) -> ExitCode {
+    let hint = format!("{}; {NEXUS_BM25S_HINT}", err.reason);
+    let resp = capability_unavailable_response_with_hint(
+        ResponseVerb::Search,
+        NEXUS_BM25S_CAPABILITY,
+        Some(&hint),
+    );
+    if json {
+        emit_json(&resp);
+    } else {
+        human_error(
+            "search",
+            "CapabilityUnavailable",
+            &err.reason,
+            &resp.operation_id,
+        );
+        eprintln!("  hint: {NEXUS_BM25S_HINT}");
+    }
+    ExitCode::from(69)
+}
+
+async fn bm25s_scores(
+    store: &dyn MemoryStore,
+    config: &cairn_core::config::CairnConfig,
+    outcome: &cairn_core::verbs::search::SearchOutcome,
+    query: &str,
+    limit: usize,
+    mode: Bm25sMode,
+) -> Result<Option<HashMap<String, f64>>, Bm25sUnavailable> {
+    if mode == Bm25sMode::Disabled {
+        return Ok(None);
+    }
+
+    if config.store.kind != StoreKind::NexusSandbox {
+        return required_or_skip(
+            mode,
+            "Nexus BM25S requires store.kind: nexus-sandbox".to_owned(),
+        );
+    }
+
+    if outcome.candidates.is_empty() {
+        return Ok(None);
+    }
+
+    let summaries = match store.projection_summaries().await {
+        Ok(summaries) => summaries,
+        Err(err) => {
+            return required_or_skip(mode, format!("projection summary unavailable: {err}"));
+        }
+    };
+    let bm25s_summary = summaries
+        .iter()
+        .find(|summary| summary.target == ProjectionTarget::Bm25sLexical);
+    let projection_current = bm25s_summary.is_some_and(|summary| {
+        summary.total_authoritative_items > 0
+            && summary.current_items == summary.total_authoritative_items
+            && summary.lagging_items == 0
+            && summary.failed_items == 0
+    });
+    if !projection_current {
+        return required_or_skip(mode, "projection not current".to_owned());
+    }
+
+    let records = match store.projection_records().await {
+        Ok(records) => records,
+        Err(err) => {
+            return required_or_skip(mode, format!("projection records unavailable: {err}"));
+        }
+    };
+    let records_by_id = records
+        .into_iter()
+        .map(|record| (record.cursor.record_id.as_str().to_owned(), record.cursor))
+        .collect::<HashMap<_, _>>();
+
+    let mut candidates = Vec::with_capacity(outcome.candidates.len());
+    for candidate in &outcome.candidates {
+        let record_id = candidate.record_id.as_str();
+        let Some(cursor) = records_by_id.get(record_id) else {
+            return required_or_skip(mode, format!("projection record missing for {record_id}"));
+        };
+        candidates.push(ProjectionSearchCandidate {
+            record_id: record_id.to_owned(),
+            record_hash: cursor.record_hash.clone(),
+        });
+    }
+
+    let expected_hashes = candidates
+        .iter()
+        .map(|candidate| (candidate.record_id.clone(), candidate.record_hash.clone()))
+        .collect::<HashMap<_, _>>();
+
+    let limit = u32::try_from(limit).unwrap_or(u32::MAX);
+    let client = ProjectionClient::new(
+        config.store.nexus.endpoint.clone(),
+        "/projection/apply".to_owned(),
+        Duration::from_millis(config.store.nexus.health_timeout_ms.min(5_000)),
+    );
+    let response = match client.search(&ProjectionSearchRequest {
+        operation_id: new_operation_id().0,
+        query: query.to_owned(),
+        candidates,
+        limit,
+    }) {
+        Ok(response) => response,
+        Err(err) => return required_or_skip(mode, format!("nexus BM25S unavailable: {err}")),
+    };
+
+    let mut scores = HashMap::new();
+    for hit in response.hits {
+        let Some(expected_hash) = expected_hashes.get(hit.record_id.as_str()) else {
+            return required_or_skip(
+                mode,
+                format!("nexus BM25S returned unknown record {}", hit.record_id),
+            );
+        };
+        if expected_hash != &hit.record_hash {
+            return required_or_skip(
+                mode,
+                format!("nexus BM25S returned stale hash for {}", hit.record_id),
+            );
+        }
+        if hit.score.is_finite() {
+            scores.insert(hit.record_id, hit.score);
+        }
+    }
+
+    if mode == Bm25sMode::Required && scores.is_empty() {
+        return Err(Bm25sUnavailable {
+            reason: "nexus BM25S returned no scores".to_owned(),
+        });
+    }
+
+    Ok(Some(scores))
+}
+
+fn required_or_skip<T>(mode: Bm25sMode, reason: String) -> Result<Option<T>, Bm25sUnavailable> {
+    if mode == Bm25sMode::Required {
+        Err(Bm25sUnavailable { reason })
+    } else {
+        Ok(None)
+    }
+}
+
 fn parse_filters(sub: &ArgMatches) -> Result<Option<SearchArgsFilters>, String> {
     let Some(raw) = sub.get_one::<String>("filters") else {
         return Ok(None);
@@ -443,9 +627,10 @@ fn render_outcome(
     outcome: &cairn_core::verbs::search::SearchOutcome,
     json: bool,
     mode: SearchMode,
+    bm25s_scores: Option<&HashMap<String, f64>>,
 ) -> ExitCode {
     if json {
-        emit_json(&outcome_envelope(outcome, mode));
+        emit_json(&outcome_envelope(outcome, mode, bm25s_scores));
     } else if outcome.candidates.is_empty() {
         println!("search: no results");
     } else {
@@ -506,6 +691,7 @@ fn render_outcome(
 fn outcome_envelope(
     outcome: &cairn_core::verbs::search::SearchOutcome,
     mode: SearchMode,
+    bm25s_scores: Option<&HashMap<String, f64>>,
 ) -> cairn_core::generated::envelope::Response {
     use cairn_core::generated::common::Ulid;
     use cairn_core::generated::envelope::{Response, ResponseData, ResponseStatus};
@@ -518,9 +704,15 @@ fn outcome_envelope(
         .enumerate()
         .map(|(idx, c)| Hit {
             record_id: Ulid(c.record_id.as_str().to_owned()),
-            score: hit_score(mode, idx, c, outcome.explain.as_deref()),
+            score: bm25s_scores
+                .and_then(|scores| scores.get(c.record_id.as_str()).copied())
+                .map_or_else(
+                    || hit_score(mode, idx, c, outcome.explain.as_deref()),
+                    finite_or_zero,
+                ),
             snippet: Some(c.snippet.clone()),
             citation: None,
+            ranking_signals: Some(ranking_signals(mode, c, bm25s_scores)),
             trust: HitTrust::Unknown,
         })
         .collect();
@@ -616,6 +808,44 @@ fn degraded_leg_to_idl(
             source: Some(DegradedLegEntrySource::All),
         },
     }
+}
+
+fn ranking_signals(
+    mode: SearchMode,
+    candidate: &cairn_core::contract::memory_store::SearchCandidate,
+    bm25s_scores: Option<&HashMap<String, f64>>,
+) -> Vec<cairn_core::generated::verbs::search::RankingSignal> {
+    use cairn_core::generated::verbs::search::{RankingSignal, RankingSignalName};
+
+    let mut signals = Vec::new();
+    if matches!(mode, SearchMode::Keyword | SearchMode::Hybrid) {
+        signals.push(RankingSignal {
+            name: RankingSignalName::SqliteFts5,
+            reason: None,
+            score: Some(finite_or_zero(candidate.bm25)),
+            used: true,
+        });
+    }
+    if matches!(mode, SearchMode::Semantic | SearchMode::Hybrid) {
+        let score = candidate
+            .semantic_distance
+            .map(|distance| finite_or_zero(1.0 - f64::from(distance)));
+        signals.push(RankingSignal {
+            name: RankingSignalName::SqliteVec,
+            reason: score.is_none().then(|| "no semantic distance".to_owned()),
+            score,
+            used: score.is_some(),
+        });
+    }
+    if let Some(score) = bm25s_scores.and_then(|scores| scores.get(candidate.record_id.as_str())) {
+        signals.push(RankingSignal {
+            name: RankingSignalName::NexusBm25s,
+            reason: None,
+            score: Some(finite_or_zero(*score)),
+            used: true,
+        });
+    }
+    signals
 }
 
 /// Mode-appropriate ranking score for a single search hit.
@@ -1010,7 +1240,7 @@ mod tests {
             semantic_degraded: true,
         };
 
-        let response = outcome_envelope(&outcome, SearchMode::Hybrid);
+        let response = outcome_envelope(&outcome, SearchMode::Hybrid, None);
         let Some(ResponseData::Search(data)) = response.data else {
             panic!("search outcome must map to search response data");
         };

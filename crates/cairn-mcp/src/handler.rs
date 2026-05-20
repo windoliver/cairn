@@ -61,6 +61,7 @@ fn status_health(
                 cairn_core::generated::status::StatusResponseHealthNexusProjectionState::Disabled,
             endpoint: None,
             data_dir: None,
+            projection_detail: None,
             reason: None,
         },
     }
@@ -1387,6 +1388,7 @@ fn search_outcome_to_result(
             score: hit_score(mode, idx, c, outcome.explain.as_deref()),
             snippet: Some(c.snippet.clone()),
             citation: None,
+            ranking_signals: None,
             trust: HitTrust::Unknown,
         })
         .collect();

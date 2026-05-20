@@ -225,6 +225,40 @@ pub trait MemoryStore: Send + Sync {
         Ok(out)
     }
 
+    /// Aggregate rebuildable Nexus projection ledger state by target.
+    async fn projection_summaries(&self) -> Result<Vec<ProjectionSummary>, StoreError> {
+        Err("capability unavailable: projection_ledger".into())
+    }
+
+    /// Current authoritative projection cursors for active records.
+    async fn projection_cursors(&self) -> Result<Vec<ProjectionCursor>, StoreError> {
+        Ok(self
+            .projection_records()
+            .await?
+            .into_iter()
+            .map(|record| record.cursor)
+            .collect())
+    }
+
+    /// Current authoritative records used to rebuild Nexus projections.
+    async fn projection_records(&self) -> Result<Vec<ProjectionRecord>, StoreError> {
+        Err("capability unavailable: projection_ledger".into())
+    }
+
+    /// Failed projection rows that still apply to current authoritative records.
+    async fn projection_failures(&self) -> Result<Vec<ProjectionLedgerRow>, StoreError> {
+        Err("capability unavailable: projection_ledger".into())
+    }
+
+    /// Apply sidecar projection item states to the authoritative ledger.
+    async fn apply_projection_items(
+        &self,
+        items: Vec<ProjectionApplyItem>,
+    ) -> Result<(), StoreError> {
+        let _ = items;
+        Err("capability unavailable: projection_ledger".into())
+    }
+
     // ── Session trees (#133) ────────────────────────────────────────────────
 
     /// Load the session tree rooted at `root`.
@@ -596,8 +630,29 @@ pub trait MemoryStorePlugin: MemoryStore + Sized {
 use crate::domain::{
     BodyHash, MergeStrategy, RecordId, ScopeTuple, SessionId, SessionMerge, SessionTree, TargetId,
     filter::ValidatedFilter,
+    projection::{ProjectionCursor, ProjectionLedgerRow, ProjectionSummary},
     taxonomy::{MemoryClass, MemoryKind, MemoryVisibility},
 };
+
+/// One sidecar projection ledger row to persist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectionApplyItem {
+    /// Ledger row reported or synthesized by projection rebuild/search handling.
+    pub row: ProjectionLedgerRow,
+}
+
+/// Authoritative record material used to rebuild derived Nexus projections.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectionRecord {
+    /// Current authoritative cursor for this record.
+    pub cursor: ProjectionCursor,
+    /// Record body text used for lexical projection.
+    pub body: String,
+    /// Optional logical source path/id for parser projections.
+    pub source_path: Option<String>,
+    /// Optional source bytes hash for parser projections.
+    pub source_hash: Option<String>,
+}
 
 /// Why a row was tombstoned. Distinguishes user-initiated retraction
 /// (`Update`, `Forget`) from system-initiated lifecycle events

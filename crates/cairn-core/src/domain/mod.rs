@@ -78,7 +78,9 @@ pub use flush_plan::{
 pub use identity::{Identity, IdentityKind};
 pub use intent::VerifiedSignedIntent;
 pub use projection::{
-    ConflictOutcome, MarkdownProjector, ParsedProjection, ProjectedFile, ResyncError,
+    ConflictOutcome, MarkdownProjector, ParsedProjection, ParserProjectionKind, ProjectedFile,
+    ProjectionCursor, ProjectionItemState, ProjectionLedgerRow, ProjectionSummary,
+    ProjectionTarget, ResyncError,
 };
 pub use provenance::Provenance;
 pub use record::{Ed25519Signature, MemoryRecord, RecordId};

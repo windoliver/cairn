@@ -27,6 +27,7 @@ pub mod handshake;
 pub mod ingest;
 pub mod ingest_jsonl;
 pub mod lint;
+pub mod reindex;
 pub mod retrieve;
 pub mod screen;
 pub mod search;

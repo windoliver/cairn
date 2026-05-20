@@ -57,11 +57,34 @@ pub enum HitTrust {
 pub struct Hit {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub citation: Option<String>,
+    /// Per-hit ranking signals used by the surface. SQLite signals are always present; Nexus BM25S is present when the sidecar contributed a score.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ranking_signals: Option<Vec<RankingSignal>>,
     pub record_id: crate::generated::common::Ulid,
     pub score: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snippet: Option<String>,
     pub trust: HitTrust,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RankingSignalName {
+    SqliteFts5,
+    SqliteVec,
+    NexusBm25s,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RankingSignal {
+    pub name: RankingSignalName,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<f64>,
+    pub used: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -76,6 +99,15 @@ pub struct ScoreExplain {
     pub rrf_score: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub semantic_rank: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum SearchArgsBm25s {
+    Auto,
+    Disabled,
+    Required,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -273,6 +305,9 @@ impl SearchArgsMode {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SearchArgs {
+    /// Controls optional Nexus BM25S reranking for keyword search. `disabled` preserves SQLite-only ranking, `auto` uses Nexus when the projection is current and reachable, and `required` fails closed when Nexus BM25S is unavailable or stale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bm25s: Option<SearchArgsBm25s>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub citations: Option<SearchArgsCitations>,
     /// Opaque continuation token from a prior search Data.next_cursor.
@@ -298,6 +333,9 @@ pub struct SearchArgs {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawSearchArgs {
+    /// Controls optional Nexus BM25S reranking for keyword search. `disabled` preserves SQLite-only ranking, `auto` uses Nexus when the projection is current and reachable, and `required` fails closed when Nexus BM25S is unavailable or stale.
+    #[serde(default)]
+    bm25s: Option<SearchArgsBm25s>,
     #[serde(default)]
     citations: Option<SearchArgsCitations>,
     /// Opaque continuation token from a prior search Data.next_cursor.
@@ -328,6 +366,7 @@ impl ::core::convert::TryFrom<RawSearchArgs> for SearchArgs {
             if !(1..=1000).contains(&lim) { return Err("limit: must be in [1, 1000]"); }
         }
         Ok(Self {
+            bm25s: raw.bm25s,
             citations: raw.citations,
             cursor: raw.cursor,
             explain: raw.explain,

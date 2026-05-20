@@ -134,6 +134,8 @@ const M0064_V02_RECORD_SESSION_LINKS: &str = include_str!("sql/0064_v02_record_s
 const M0065_TRACE_CANVAS: &str = include_str!("sql/0065_trace_canvas.sql");
 // Issue #134 follow-up — rebuildable markdown projection cache for lint drift checks.
 const M0066_TRACE_CANVAS_PROJECTION: &str = include_str!("sql/0066_trace_canvas_projection.sql");
+// Issue #105 — authoritative ledger for rebuildable Nexus sidecar projections.
+const M0067_PROJECTION_LEDGER: &str = include_str!("sql/0067_projection_ledger.sql");
 
 /// Canonical SQL for migration 0020 (`workflow_jobs`). Re-exported so
 /// downstream crates (notably `cairn-workflows`, which hashes the
@@ -333,6 +335,7 @@ pub(crate) const MIGRATION_SOURCES: &[(i64, &str, &str)] = &[
         "0066_trace_canvas_projection",
         M0066_TRACE_CANVAS_PROJECTION,
     ),
+    (67, "0067_projection_ledger", M0067_PROJECTION_LEDGER),
 ];
 
 /// All migrations, in order. Returns a fresh `Migrations` set on every call
@@ -400,5 +403,6 @@ pub fn migrations() -> Migrations<'static> {
         M::up(M0064_V02_RECORD_SESSION_LINKS),
         M::up(M0065_TRACE_CANVAS),
         M::up(M0066_TRACE_CANVAS_PROJECTION),
+        M::up(M0067_PROJECTION_LEDGER),
     ])
 }

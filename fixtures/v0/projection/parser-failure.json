@@ -1,0 +1,7 @@
+{
+  "projection_target": "parser_pdf_text",
+  "source_path": "sources/corrupt.pdf",
+  "source_hash": "sha256:pdf-source-corrupt",
+  "expected_state": "failed",
+  "reason": "parser rejected malformed PDF header"
+}

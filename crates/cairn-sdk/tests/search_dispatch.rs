@@ -129,6 +129,7 @@ fn client() -> Sdk {
 
 fn keyword_args(query: &str) -> SearchArgs {
     SearchArgs {
+        bm25s: None,
         citations: None,
         cursor: None,
         filters: None,
@@ -143,6 +144,7 @@ fn keyword_args(query: &str) -> SearchArgs {
 
 fn hybrid_args(query: &str) -> SearchArgs {
     SearchArgs {
+        bm25s: None,
         citations: None,
         cursor: None,
         filters: None,
@@ -200,6 +202,7 @@ async fn semantic_dispatch_rejected_without_model_on_disk() {
     // This test verifies the wired path: semantic succeeds when
     // local_embeddings is true (EmptyStore.search_semantic returns Ok).
     let args = SearchArgs {
+        bm25s: None,
         citations: None,
         cursor: None,
         filters: None,
@@ -225,6 +228,7 @@ async fn semantic_rejected_when_local_embeddings_disabled() {
     config.search.local_embeddings = false;
     let sdk = Sdk::with_store(Arc::new(EmptyStore), config);
     let args = SearchArgs {
+        bm25s: None,
         citations: None,
         cursor: None,
         filters: None,
@@ -293,6 +297,7 @@ fn status_drops_semantic_for_openai_provider_with_local_model() {
 async fn search_semantic_rejected_for_misaligned_provider_model() {
     let sdk = Sdk::with_store(Arc::new(EmptyStore), misaligned_config());
     let args = SearchArgs {
+        bm25s: None,
         citations: None,
         cursor: None,
         filters: None,
@@ -318,6 +323,7 @@ async fn search_semantic_rejected_for_misaligned_provider_model() {
 async fn search_hybrid_rejected_for_misaligned_provider_model() {
     let sdk = Sdk::with_store(Arc::new(EmptyStore), misaligned_config());
     let args = SearchArgs {
+        bm25s: None,
         citations: None,
         cursor: None,
         filters: None,

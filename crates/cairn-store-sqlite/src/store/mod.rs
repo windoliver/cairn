@@ -6,6 +6,7 @@ pub mod forget;
 pub(crate) mod graph_search;
 pub(crate) mod hybrid;
 pub(crate) mod projection;
+pub(crate) mod projection_ledger;
 pub(crate) mod read;
 pub(crate) mod reindex;
 pub(crate) mod reindex_from_db;
@@ -120,6 +121,19 @@ impl SqliteMemoryStore {
 }
 
 impl SqliteMemoryStore {
+    /// Blocking open helper retained for integration tests that drive the
+    /// async store from synchronous `Command`-based fixtures.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the async open path fails or the helper
+    /// runtime cannot be created.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn open(path: &std::path::Path) -> Result<Self, StoreError> {
+        let path = path.to_path_buf();
+        block_on_store(async move { crate::open(path).await })
+    }
+
     /// Expose the underlying async connection for integration tests that need
     /// to insert raw rows (e.g., to seed `record_vectors` before Task 8 lands
     /// embed-on-write). Gated behind `test-helpers` so this surface never
@@ -147,6 +161,144 @@ impl SqliteMemoryStore {
     pub fn incarnation(&self) -> Option<&Arc<str>> {
         self.incarnation.as_ref()
     }
+
+    /// Insert or replace a deterministic active record for projection tests.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the record id is invalid, the store cannot
+    /// be opened, or `SQLite` rejects the fixture row.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn insert_test_record(
+        &self,
+        record_id: &str,
+        body: &str,
+        wal_sequence: u64,
+        record_hash: &str,
+    ) -> Result<(), StoreError> {
+        self.insert_test_record_inner(record_id, body, wal_sequence, record_hash, None)
+    }
+
+    /// Insert or replace a deterministic active record with source metadata
+    /// for projection parser tests.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the record id is invalid, the store cannot
+    /// be opened, or `SQLite` rejects the fixture row.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn insert_test_record_with_source(
+        &self,
+        record_id: &str,
+        body: &str,
+        wal_sequence: u64,
+        record_hash: &str,
+        source_path: &str,
+        source_hash: &str,
+    ) -> Result<(), StoreError> {
+        self.insert_test_record_inner(
+            record_id,
+            body,
+            wal_sequence,
+            record_hash,
+            Some((source_path, source_hash)),
+        )
+    }
+
+    #[cfg(any(test, feature = "test-helpers"))]
+    fn insert_test_record_inner(
+        &self,
+        record_id: &str,
+        body: &str,
+        wal_sequence: u64,
+        record_hash: &str,
+        source: Option<(&str, &str)>,
+    ) -> Result<(), StoreError> {
+        use cairn_core::domain::{RecordId, SourceRef, TargetId};
+
+        let id = RecordId::parse(record_id.to_owned()).map_err(|err| StoreError::Invariant {
+            what: format!("invalid test record id `{record_id}`: {err}"),
+        })?;
+        let target =
+            TargetId::parse(record_id.to_owned()).map_err(|err| StoreError::Invariant {
+                what: format!("invalid test target id `{record_id}`: {err}"),
+            })?;
+        let mut upsert_record = cairn_core::domain::record::tests_export::sample_record();
+        upsert_record.id = id.clone();
+        upsert_record.target_id = target;
+        body.clone_into(&mut upsert_record.body);
+
+        let mut stored_record = upsert_record.clone();
+        if let Some((source_path, source_hash)) = source {
+            source_hash.clone_into(&mut stored_record.provenance.source_hash);
+            stored_record.provenance.source_refs = vec![SourceRef {
+                id: source_path.to_owned(),
+                hash: source_hash.to_owned(),
+            }];
+        }
+        let record_json = serde_json::to_string(&stored_record)?;
+        let store = self.clone();
+        let record_id = id.as_str().to_owned();
+        let body = body.to_owned();
+        let record_hash = record_hash.to_owned();
+
+        block_on_store(async move {
+            if store.do_get(&id).await?.is_none() {
+                let _ = store.do_upsert(&upsert_record).await?;
+            }
+            let conn = store.require_conn("insert_test_record")?.clone();
+            conn.call(move |c| {
+                let wal_sequence = i64::try_from(wal_sequence).map_err(|_| {
+                    tokio_rusqlite::Error::Other(Box::new(StoreError::Invariant {
+                        what: "test wal_sequence overflow".to_owned(),
+                    }))
+                })?;
+                let changed = c.execute(
+                    "UPDATE records
+                     SET version = ?2,
+                         body = ?3,
+                         body_hash = ?4,
+                         record_json = ?5,
+                         active = 1,
+                         tombstoned = 0,
+                         cow_staged = 0
+                     WHERE record_id = ?1",
+                    rusqlite::params![record_id, wal_sequence, body, record_hash, record_json],
+                )?;
+                if changed == 0 {
+                    return Err(tokio_rusqlite::Error::Other(Box::new(
+                        StoreError::Invariant {
+                            what: "test record upsert did not create a row".to_owned(),
+                        },
+                    )));
+                }
+                Ok::<_, tokio_rusqlite::Error>(())
+            })
+            .await?;
+            Ok(())
+        })
+    }
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+fn block_on_store<T, F>(future: F) -> Result<T, StoreError>
+where
+    T: Send + 'static,
+    F: std::future::Future<Output = Result<T, StoreError>> + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| StoreError::Invariant {
+                what: format!("failed to build test runtime: {err}"),
+            })?;
+        runtime.block_on(future)
+    })
+    .join()
+    .map_err(|_| StoreError::Invariant {
+        what: "test runtime thread panicked".to_owned(),
+    })?
 }
 
 impl std::fmt::Debug for SqliteMemoryStore {

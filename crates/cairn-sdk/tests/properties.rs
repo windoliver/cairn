@@ -28,6 +28,7 @@ fn is_capability_unavailable(err: &SdkError) -> bool {
 
 fn search_with_filter(filter: serde_json::Value) -> SearchArgs {
     SearchArgs {
+        bm25s: None,
         citations: None,
         cursor: None,
         filters: Some(SearchArgsFilters::Leaf(filter)),
@@ -326,6 +327,7 @@ async fn forget_record_dry_run_and_human_review_both_true_rejects() {
 #[tokio::test]
 async fn empty_scope_filter_rejects() {
     let args = SearchArgs {
+        bm25s: None,
         citations: None,
         cursor: None,
         filters: None,
@@ -361,6 +363,7 @@ proptest! {
     #[test]
     fn oversized_cursor_rejects(s in "[a-zA-Z0-9]{513,1024}") {
         let args = SearchArgs {
+            bm25s: None,
             citations: None,
             cursor: Some(Cursor(s)),
             filters: None,

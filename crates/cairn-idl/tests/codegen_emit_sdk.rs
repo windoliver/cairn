@@ -272,3 +272,68 @@ fn status_response_includes_split_health_types() {
     assert!(body.contains("pub struct StatusResponseHealthNexusProjection"));
     assert!(body.contains("pub health: StatusResponseHealth"));
 }
+
+#[test]
+fn search_sdk_includes_bm25s_ranking_preference_and_signals() {
+    let files = emit_sdk::emit(&doc()).unwrap();
+    let search = files
+        .iter()
+        .find(|file| {
+            file.path
+                .ends_with("crates/cairn-core/src/generated/verbs/search.rs")
+        })
+        .expect("search SDK output");
+    let body = std::str::from_utf8(&search.bytes).expect("utf-8 search SDK");
+
+    assert!(body.contains("pub enum SearchArgsBm25s"), "{body}");
+    assert!(
+        body.contains("pub bm25s: Option<SearchArgsBm25s>"),
+        "{body}"
+    );
+    assert!(
+        body.contains("pub ranking_signals: Option<Vec<RankingSignal>>"),
+        "{body}"
+    );
+    assert!(body.contains("pub enum RankingSignalName"), "{body}");
+}
+
+#[test]
+fn lint_sdk_includes_projection_findings() {
+    let files = emit_sdk::emit(&doc()).unwrap();
+    let lint = files
+        .iter()
+        .find(|file| {
+            file.path
+                .ends_with("crates/cairn-core/src/generated/verbs/lint.rs")
+        })
+        .expect("lint SDK output");
+    let body = std::str::from_utf8(&lint.bytes).expect("utf-8 lint SDK");
+
+    assert!(body.contains("ProjectionStale"), "{body}");
+    assert!(body.contains("ProjectionMissing"), "{body}");
+    assert!(body.contains("ProjectionFailed"), "{body}");
+    assert!(
+        body.contains("#[serde(rename_all = \"snake_case\")]"),
+        "{body}"
+    );
+}
+
+#[test]
+fn status_sdk_includes_projection_detail() {
+    let files = emit_sdk::emit(&doc()).unwrap();
+    let status = files
+        .iter()
+        .find(|file| {
+            file.path
+                .ends_with("crates/cairn-core/src/generated/status.rs")
+        })
+        .expect("status SDK output");
+    let body = std::str::from_utf8(&status.bytes).expect("utf-8 status SDK");
+
+    assert!(body.contains("pub projection_detail"), "{body}");
+    assert!(
+        body.contains("pub struct StatusResponseHealthNexusProjectionProjectionDetail"),
+        "{body}"
+    );
+    assert!(body.contains("Bm25s"), "{body}");
+}

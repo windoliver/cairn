@@ -154,6 +154,10 @@ cairn search --mode keyword --explain QUERY
 cairn search --mode keyword --include-reasoning QUERY
 ```
 
+```bash
+cairn search --mode keyword --bm25s auto QUERY
+```
+
 ## `cairn retrieve`
 
 **Use when:**

@@ -83,7 +83,44 @@ expression: body
             },
             "endpoint": { "type": "string", "minLength": 1 },
             "data_dir": { "type": "string", "minLength": 1 },
-            "reason": { "type": "string", "minLength": 1 }
+            "reason": { "type": "string", "minLength": 1 },
+            "projection_detail": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["targets"],
+              "properties": {
+                "last_successful_rebuild_at": { "type": "string", "format": "date-time" },
+                "targets": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["target", "state", "total", "current", "lagging", "failed"],
+                    "properties": {
+                      "target": {
+                        "type": "string",
+                        "enum": [
+                          "bm25s",
+                          "parser_pdf_text",
+                          "parser_docx_text",
+                          "parser_video_frame_text",
+                          "parser_vision_caption"
+                        ]
+                      },
+                      "state": {
+                        "type": "string",
+                        "enum": ["current", "stale", "failed", "missing"]
+                      },
+                      "total": { "type": "integer", "minimum": 0 },
+                      "current": { "type": "integer", "minimum": 0 },
+                      "lagging": { "type": "integer", "minimum": 0 },
+                      "failed": { "type": "integer", "minimum": 0 },
+                      "reason": { "type": "string", "minLength": 1 }
+                    }
+                  }
+                }
+              }
+            }
           }
         }
       }

@@ -305,6 +305,9 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("index", "trace_steps_session_turn_idx"),
     ("index", "trace_steps_node_idx"),
     ("index", "trace_steps_result_ref_idx"),
+    // 0067_projection_ledger (issue #105): authoritative sidecar rebuild ledger.
+    ("table", "projection_ledger"),
+    ("index", "projection_ledger_state_idx"),
 ];
 
 /// Identity registry objects share `cairn.db` but are owned by

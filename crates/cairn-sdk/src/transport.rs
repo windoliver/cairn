@@ -191,6 +191,7 @@ impl<T: Transport> Sdk<T> {
                     state: StatusResponseHealthNexusProjectionState::Disabled,
                     endpoint: None,
                     data_dir: None,
+                    projection_detail: None,
                     reason: None,
                 },
             },
@@ -698,6 +699,7 @@ fn envelope_from_outcome(
             score: hit_score(mode, idx, c, outcome.explain.as_deref()),
             snippet: Some(c.snippet.clone()),
             citation: None,
+            ranking_signals: None,
             trust: HitTrust::Unknown,
         })
         .collect();

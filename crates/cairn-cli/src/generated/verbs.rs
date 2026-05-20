@@ -41,6 +41,7 @@ pub fn search_subcommand() -> clap::Command {
         .arg(clap::Arg::new("cursor").long("cursor").value_name("STRING"))
         .arg(clap::Arg::new("explain").long("explain").action(clap::ArgAction::SetTrue))
         .arg(clap::Arg::new("include_reasoning").long("include-reasoning").action(clap::ArgAction::SetTrue))
+        .arg(clap::Arg::new("bm25s").long("bm25s").value_name("ENUM").value_parser(["auto", "disabled", "required"]))
         .arg(clap::Arg::new("query").help("Free-text query string.").required(true))
 }
 

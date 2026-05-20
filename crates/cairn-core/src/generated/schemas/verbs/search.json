@@ -3,6 +3,16 @@
     "Args": {
       "additionalProperties": false,
       "properties": {
+        "bm25s": {
+          "default": "disabled",
+          "description": "Controls optional Nexus BM25S reranking for keyword search. `disabled` preserves SQLite-only ranking, `auto` uses Nexus when the projection is current and reachable, and `required` fails closed when Nexus BM25S is unavailable or stale.",
+          "enum": [
+            "auto",
+            "disabled",
+            "required"
+          ],
+          "type": "string"
+        },
         "citations": {
           "enum": [
             "on",
@@ -150,6 +160,13 @@
         "citation": {
           "type": "string"
         },
+        "ranking_signals": {
+          "description": "Per-hit ranking signals used by the surface. SQLite signals are always present; Nexus BM25S is present when the sidecar contributed a score.",
+          "items": {
+            "$ref": "#/$defs/RankingSignal"
+          },
+          "type": "array"
+        },
         "record_id": {
           "$ref": "../common/primitives.json#/$defs/Ulid"
         },
@@ -172,6 +189,34 @@
         "record_id",
         "score",
         "trust"
+      ],
+      "type": "object"
+    },
+    "RankingSignal": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "enum": [
+            "sqlite_fts5",
+            "sqlite_vec",
+            "nexus_bm25s"
+          ],
+          "type": "string"
+        },
+        "reason": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "score": {
+          "type": "number"
+        },
+        "used": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "used"
       ],
       "type": "object"
     },
@@ -1047,6 +1092,11 @@
         "long": "include-reasoning",
         "name": "include_reasoning",
         "value_source": "bool"
+      },
+      {
+        "long": "bm25s",
+        "name": "bm25s",
+        "value_source": "enum(auto,disabled,required)"
       }
     ],
     "positional": {

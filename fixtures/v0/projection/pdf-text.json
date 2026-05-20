@@ -1,0 +1,7 @@
+{
+  "projection_target": "parser_pdf_text",
+  "source_path": "sources/sample.pdf",
+  "source_hash": "sha256:pdf-source-a",
+  "expected_state": "current",
+  "extracted_text": "Quarterly incident review: projection lag stayed below two records."
+}

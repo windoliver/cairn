@@ -72,7 +72,7 @@ tracing = { workspace = true }
 cairn-sdk = { workspace = true }
 cairn-core = { workspace = true, features = ["test-helpers", "test-fixtures"] }
 cairn-test-fixtures = { workspace = true }
-cairn-store-sqlite = { workspace = true }
+cairn-store-sqlite = { workspace = true, features = ["test-helpers"] }
 insta = { workspace = true }
 async-trait = { workspace = true }
 proptest = { workspace = true }

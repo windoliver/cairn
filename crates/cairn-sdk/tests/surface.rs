@@ -513,6 +513,7 @@ async fn search_rejects_empty_query_with_invalid_args() {
     // Wire format requires non-empty query; SDK must surface it as
     // InvalidArgs instead of capability-checking an unvalidated request.
     let args = SearchArgs {
+        bm25s: None,
         citations: None,
         cursor: None,
         filters: None,
@@ -534,6 +535,7 @@ async fn search_rejects_empty_query_with_invalid_args() {
 #[tokio::test]
 async fn search_rejects_out_of_range_limit_with_invalid_args() {
     let args = SearchArgs {
+        bm25s: None,
         citations: None,
         cursor: None,
         filters: None,
@@ -562,6 +564,7 @@ async fn search_explain_rejects_when_policy_trace_capability_unadvertised() {
     // additionally requires the search-mode capability. Either missing
     // capability is a valid fail-closed signal.
     let args = SearchArgs {
+        bm25s: None,
         citations: None,
         cursor: None,
         filters: None,
@@ -595,6 +598,7 @@ async fn search_explain_false_rejects_unadvertised_keyword_mode() {
     // is also unadvertised, so the call still fails closed — but the
     // failing capability must be the search mode, not policy_trace.
     let args = SearchArgs {
+        bm25s: None,
         citations: None,
         cursor: None,
         filters: None,
@@ -633,6 +637,7 @@ async fn search_rejects_unadvertised_modes_with_capability_unavailable() {
         (SearchArgsMode::Hybrid, "cairn.mcp.v1.search.hybrid"),
     ] {
         let args = SearchArgs {
+            bm25s: None,
             citations: None,
             cursor: None,
             filters: None,
@@ -741,6 +746,7 @@ fn retrieve_tool_call_rejects_empty_fields_with_invalid_args() {
 #[tokio::test]
 async fn search_rejects_empty_and_filter_with_invalid_args() {
     let args = SearchArgs {
+        bm25s: None,
         citations: None,
         cursor: None,
         filters: Some(SearchArgsFilters::And { and: vec![] }),
@@ -771,6 +777,7 @@ async fn search_rejects_excessive_filter_depth_with_invalid_args() {
         };
     }
     let args = SearchArgs {
+        bm25s: None,
         citations: None,
         cursor: None,
         filters: Some(node),
@@ -792,6 +799,7 @@ async fn search_rejects_excessive_filter_depth_with_invalid_args() {
 #[tokio::test]
 async fn search_rejects_malformed_filter_leaf_with_invalid_args() {
     let args = SearchArgs {
+        bm25s: None,
         citations: None,
         cursor: None,
         filters: Some(SearchArgsFilters::Leaf(serde_json::json!({
@@ -831,6 +839,7 @@ async fn search_accepts_extended_filter_operators() {
     ];
     for leaf in valid_leaves {
         let args = SearchArgs {
+            bm25s: None,
             citations: None,
             cursor: None,
             filters: Some(SearchArgsFilters::Leaf(leaf.clone())),
@@ -872,6 +881,7 @@ async fn search_rejects_malformed_extended_filter_operators_with_invalid_args() 
     ];
     for leaf in bad_leaves {
         let args = SearchArgs {
+            bm25s: None,
             citations: None,
             cursor: None,
             filters: Some(SearchArgsFilters::Leaf(leaf.clone())),
@@ -894,6 +904,7 @@ async fn search_rejects_malformed_cursor_with_invalid_args() {
     // Cursor newtype is publicly constructible; the SDK must re-apply the
     // generated Cursor::Deserialize rules (non-empty, ≤ 512 chars).
     let args = SearchArgs {
+        bm25s: None,
         citations: None,
         cursor: Some(Cursor(String::new())),
         filters: None,
@@ -915,6 +926,7 @@ async fn search_rejects_empty_scope_filter_with_invalid_args() {
     // Empty ScopeFilter: every field None — must mirror RawScopeFilter
     // TryFrom's "at least one of [...]" check.
     let args = SearchArgs {
+        bm25s: None,
         citations: None,
         cursor: None,
         filters: None,

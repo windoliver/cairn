@@ -7,13 +7,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context as _;
+use cairn_core::config::StoreKind;
 use cairn_core::contract::memory_store::MemoryStore;
 use cairn_core::contract::source_resolver::{SourceResolver, SourceResolverError};
 use cairn_core::domain::SourceId;
 use cairn_core::domain::folder::{
     FolderPolicy, aggregate_folders, materialize_backlinks, parse_policy, project_index,
 };
-use cairn_core::domain::projection::MarkdownProjector;
+use cairn_core::domain::projection::{
+    MarkdownProjector, ProjectionItemState, ProjectionLedgerRow, ProjectionSummary,
+    ProjectionTarget,
+};
 use cairn_core::generated::common::Ulid;
 use cairn_core::generated::envelope::{
     Response, ResponseData, ResponsePolicyTrace, ResponseStatus, ResponseVerb,
@@ -29,7 +33,10 @@ use clap::ArgMatches;
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 
+use crate::nexus::{self, ProjectionStatusState};
+
 use super::envelope::{emit_json, human_error, new_operation_id, unimplemented_response};
+use super::reindex;
 
 struct VaultFsSourceResolver {
     vault_root: PathBuf,
@@ -1343,6 +1350,7 @@ pub async fn lint_handler(
     // Projection-drift pass: read-only, Warning-severity only. Extracted
     // to keep lint_handler within the line-count limit.
     append_projection_drift_findings(store, vault_root, &mut data).await?;
+    append_nexus_projection_findings(store, config, vault_root, &mut data).await?;
     append_sensor_drop_findings(vault_root, &mut data)?;
 
     let has_error = data.findings.iter().any(|f| {
@@ -2155,6 +2163,197 @@ fn push_projection_finding(
     data.findings.push(f);
 }
 
+async fn append_nexus_projection_findings(
+    store: &dyn MemoryStore,
+    config: &cairn_core::config::CairnConfig,
+    vault_root: &Path,
+    data: &mut LintData,
+) -> anyhow::Result<()> {
+    if !matches!(config.store.kind, StoreKind::NexusSandbox) {
+        return Ok(());
+    }
+
+    let projection = nexus::evaluate_projection_status(vault_root, config);
+    if matches!(projection.state, ProjectionStatusState::Degraded) {
+        push_lint_finding(
+            data,
+            projection_sidecar_unavailable_finding(
+                projection
+                    .reason
+                    .as_deref()
+                    .unwrap_or("Nexus projection sidecar is unavailable"),
+            ),
+        );
+    }
+
+    let summaries = match store.projection_summaries().await {
+        Ok(summaries) => summaries,
+        Err(err) => {
+            push_lint_finding(
+                data,
+                projection_deferred_finding(format!("projection summaries unavailable: {err}")),
+            );
+            return Ok(());
+        }
+    };
+    for summary in &summaries {
+        append_projection_summary_findings(data, summary);
+    }
+
+    match store.projection_failures().await {
+        Ok(failures) => append_projection_failure_findings(data, failures),
+        Err(err) => push_lint_finding(
+            data,
+            projection_deferred_finding(format!("projection failures unavailable: {err}")),
+        ),
+    }
+
+    Ok(())
+}
+
+fn append_projection_summary_findings(data: &mut LintData, summary: &ProjectionSummary) {
+    if summary.failed_items > 0 {
+        push_lint_finding(
+            data,
+            projection_summary_finding(
+                Kind::ProjectionFailed,
+                summary,
+                summary.failed_items,
+                "failed",
+            ),
+        );
+    }
+    if summary.missing_items > 0 {
+        push_lint_finding(
+            data,
+            projection_summary_finding(
+                Kind::ProjectionMissing,
+                summary,
+                summary.missing_items,
+                "missing",
+            ),
+        );
+    }
+    if summary.stale_items > 0 {
+        push_lint_finding(
+            data,
+            projection_summary_finding(
+                Kind::ProjectionStale,
+                summary,
+                summary.stale_items,
+                "stale",
+            ),
+        );
+    }
+}
+
+fn append_projection_failure_findings(data: &mut LintData, failures: Vec<ProjectionLedgerRow>) {
+    for row in failures {
+        let reason = projection_failure_reason(&row);
+        if reason.contains("hash mismatch") {
+            push_lint_finding(
+                data,
+                projection_row_finding(Kind::ProjectionHashMismatch, &row, &reason),
+            );
+        } else if matches!(row.target, ProjectionTarget::Parser(_)) {
+            push_lint_finding(
+                data,
+                projection_row_finding(Kind::ProjectionParserFailed, &row, &reason),
+            );
+        }
+    }
+}
+
+fn projection_summary_finding(
+    kind: Kind,
+    summary: &ProjectionSummary,
+    count: usize,
+    state_label: &str,
+) -> Finding {
+    let target = summary.target.as_key();
+    Finding {
+        entities: Some(vec![
+            format!("projection_target:{target}"),
+            "rebuildable:true".to_owned(),
+        ]),
+        kind,
+        message: format!(
+            "Projection target {target} has {count} {state_label} item(s) \
+             (current={}, lagging={}, total={})",
+            summary.current_items, summary.lagging_items, summary.total_authoritative_items
+        ),
+        severity: Severity::Info,
+        suggested_fix: Some(
+            "run `cairn reindex --from-db` to rebuild Nexus projections".to_owned(),
+        ),
+        target: None,
+        tracking_issue: Some(105),
+    }
+}
+
+fn projection_row_finding(kind: Kind, row: &ProjectionLedgerRow, reason: &str) -> Finding {
+    let projection_target = row.target.as_key();
+    let mut entities = vec![
+        format!("projection_target:{projection_target}"),
+        "rebuildable:true".to_owned(),
+    ];
+    if let Some(source_hash) = row.cursor.source_hash.as_ref() {
+        entities.push(format!("source_hash:{source_hash}"));
+    }
+    Finding {
+        entities: Some(entities),
+        kind,
+        message: format!("Projection target {projection_target} failed: {reason}"),
+        severity: Severity::Info,
+        suggested_fix: Some(
+            "run `cairn reindex --from-db` after fixing the sidecar input".to_owned(),
+        ),
+        target: Some(Target {
+            operation_id: None,
+            path: None,
+            record_id: Some(Ulid(row.cursor.record_id.as_str().to_owned())),
+        }),
+        tracking_issue: Some(105),
+    }
+}
+
+fn projection_sidecar_unavailable_finding(reason: &str) -> Finding {
+    Finding {
+        entities: Some(vec![
+            "projection_target:bm25s_lexical".to_owned(),
+            "rebuildable:true".to_owned(),
+        ]),
+        kind: Kind::ProjectionSidecarUnavailable,
+        message: format!("Nexus projection sidecar is unavailable: {reason}"),
+        severity: Severity::Info,
+        suggested_fix: Some(
+            "start the Nexus sidecar, run `cairn nexus enable`, or set store.nexus.command"
+                .to_owned(),
+        ),
+        target: None,
+        tracking_issue: Some(105),
+    }
+}
+
+fn projection_deferred_finding(message: String) -> Finding {
+    Finding {
+        entities: Some(vec!["projection_ledger".to_owned()]),
+        kind: Kind::DeferredCheck,
+        message,
+        severity: Severity::Info,
+        suggested_fix: Some("inspect .cairn/cairn.db and re-run `cairn lint`".to_owned()),
+        target: None,
+        tracking_issue: Some(105),
+    }
+}
+
+fn projection_failure_reason(row: &ProjectionLedgerRow) -> String {
+    match &row.state {
+        ProjectionItemState::Failed { reason } => reason.clone(),
+        _ => "projection failed".to_owned(),
+    }
+}
+
 async fn append_trace_canvas_findings(
     store: &dyn cairn_core::contract::memory_store::MemoryStore,
     records: &[cairn_core::verbs::lint::LintRecord],
@@ -2289,8 +2488,13 @@ pub fn run(sub: &ArgMatches, vault_root: Option<&Path>) -> ExitCode {
     // --fix resolves WAL edge contradictions via raw rusqlite (no store
     // migration path); keep that path unchanged.
     if fix {
+        let resolved_vault_root = vault_root.map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        let projection_fix_finding = projection_fix_finding(&resolved_vault_root, &operation_id);
         match run_edge_lint(true, vault_root, &operation_id) {
-            Ok(report) => {
+            Ok(mut report) => {
+                if let Some(finding) = projection_fix_finding {
+                    report.findings.push(finding);
+                }
                 let has_blocking_findings = report.findings.iter().any(has_warning_or_error);
                 let data = lint_data(report);
                 let response = committed_response(operation_id, data);
@@ -2629,6 +2833,28 @@ fn run_plan_lint(json: bool, vault_root: Option<&Path>, plan_id: &str) -> ExitCo
     }
 }
 
+fn projection_fix_finding(vault_root: &Path, _operation_id: &Ulid) -> Option<Finding> {
+    let config = crate::config::load(vault_root, &crate::config::CliOverrides::default()).ok()?;
+    if !matches!(config.store.kind, StoreKind::NexusSandbox) {
+        return None;
+    }
+    let projection = nexus::evaluate_projection_status(vault_root, &config);
+    if matches!(projection.state, ProjectionStatusState::Degraded) {
+        return Some(projection_sidecar_unavailable_finding(
+            projection
+                .reason
+                .as_deref()
+                .unwrap_or("Nexus projection sidecar is unavailable"),
+        ));
+    }
+    match reindex::rebuild_from_db(vault_root, &config) {
+        Ok(_) => None,
+        Err(err) => Some(projection_sidecar_unavailable_finding(&format!(
+            "Nexus projection rebuild failed: {err}"
+        ))),
+    }
+}
+
 fn run_edge_lint(
     fix: bool,
     vault_root: Option<&Path>,
@@ -2783,7 +3009,12 @@ fn kind_key(kind: Kind) -> String {
         Kind::IndexDrift => "index_drift",
         Kind::DeferredCheck => "deferred_check",
         Kind::ProjectionDrift => "projection_drift",
+        Kind::ProjectionFailed => "projection_failed",
+        Kind::ProjectionHashMismatch => "projection_hash_mismatch",
         Kind::ProjectionMissing => "projection_missing",
+        Kind::ProjectionParserFailed => "projection_parser_failed",
+        Kind::ProjectionSidecarUnavailable => "projection_sidecar_unavailable",
+        Kind::ProjectionStale => "projection_stale",
         Kind::WrongClassForKind => "wrong_class_for_kind",
         Kind::SourceAfterForget => "source_after_forget",
         Kind::SourceAfterForgetUnknownVersion => "source_after_forget_unknown_version",
