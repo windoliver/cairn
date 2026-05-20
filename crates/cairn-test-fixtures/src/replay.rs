@@ -513,64 +513,39 @@ async fn run_action(
         ReplayAction::AssembleHot {
             story,
             expected_record_ids,
-        } => {
-            let actual = assemble_hot_replay(store)
-                .await
-                .unwrap_or_else(|e| error_value(&e));
-            let expected = json!({ "record_ids": expected_record_ids });
-            report_check(&scenario.id, story, "assemble_hot", None, expected, actual)
-        }
+        } => run_assemble_hot_action(store, scenario, story, expected_record_ids).await,
         ReplayAction::CaptureTrace {
             story,
             session_id,
             expected_trace_events,
         } => {
-            let actual = trace_events_only(store, session_id)
+            run_capture_trace_action(store, scenario, story, session_id, expected_trace_events)
                 .await
-                .unwrap_or_else(|e| error_value(&e));
-            let expected = json!({ "trace_events": expected_trace_events });
-            report_check(&scenario.id, story, "capture_trace", None, expected, actual)
         }
         ReplayAction::Summarize {
             story,
             session_id,
             expected_record_ids,
-        } => {
-            let actual = summarize_replay(store, session_id)
-                .await
-                .unwrap_or_else(|e| error_value(&e));
-            let expected = json!({ "record_ids": expected_record_ids });
-            report_check(&scenario.id, story, "summarize", None, expected, actual)
-        }
+        } => run_summarize_action(store, scenario, story, session_id, expected_record_ids).await,
         ReplayAction::Lint {
             story,
             expected_status,
-        } => {
-            let actual = lint_replay(store).await.unwrap_or_else(|e| error_value(&e));
-            let expected = json!({ "status": expected_status });
-            report_check(&scenario.id, story, "lint", None, expected, actual)
-        }
+        } => run_lint_action(store, scenario, story, expected_status).await,
         ReplayAction::RetrieveSession {
             story,
             session_id,
             expected_turn_ids,
             expected_trace_events,
         } => {
-            let actual = trace_summary(store, Some(session_id), None)
-                .await
-                .unwrap_or_else(|e| error_value(&e));
-            let expected = json!({
-                "turn_ids": expected_turn_ids,
-                "trace_events": expected_trace_events,
-            });
-            report_check(
-                &scenario.id,
+            run_retrieve_session_action(
+                store,
+                scenario,
                 story,
-                "retrieve_session",
-                None,
-                expected,
-                actual,
+                session_id,
+                expected_turn_ids,
+                expected_trace_events,
             )
+            .await
         }
         ReplayAction::RetrieveTurn {
             story,
@@ -578,56 +553,207 @@ async fn run_action(
             turn_id,
             expected_trace_events,
         } => {
-            let actual = trace_summary(store, Some(session_id), Some(turn_id))
-                .await
-                .unwrap_or_else(|e| error_value(&e));
-            let expected = json!({
-                "turn_ids": [turn_id],
-                "trace_events": expected_trace_events,
-            });
-            report_check(&scenario.id, story, "retrieve_turn", None, expected, actual)
+            run_retrieve_turn_action(
+                store,
+                scenario,
+                story,
+                session_id,
+                turn_id,
+                expected_trace_events,
+            )
+            .await
         }
         ReplayAction::RecordPresent {
             story,
             record_id,
             expected_present,
-        } => {
-            let actual = record_present(store, record_id)
-                .await
-                .unwrap_or_else(|e| error_value(&e));
-            let expected = json!({ "present": expected_present });
-            report_check(
-                &scenario.id,
-                story,
-                "record_present",
-                None,
-                expected,
-                actual,
-            )
-        }
+        } => run_record_present_action(store, scenario, story, record_id, *expected_present).await,
         ReplayAction::ForgetRecord {
             story,
             record_id,
             followup_query,
             expected_absent_from_search,
         } => {
-            let actual = forget_record(store, scenario, record_id, followup_query)
-                .await
-                .unwrap_or_else(|e| error_value(&e));
-            let expected = json!({
-                "retrieve_found": false,
-                "search_contains_record": !expected_absent_from_search,
-            });
-            report_check(
-                &scenario.id,
+            run_forget_record_action(
+                store,
+                scenario,
                 story,
-                "forget_record",
-                Some(followup_query.clone()),
-                expected,
-                actual,
+                record_id,
+                followup_query,
+                *expected_absent_from_search,
             )
+            .await
         }
     }
+}
+
+async fn run_assemble_hot_action(
+    store: &SqliteMemoryStore,
+    scenario: &ReplayScenario,
+    story_label: &str,
+    expected_record_ids: &[String],
+) -> ReplayCheckReport {
+    let actual = assemble_hot_replay(store)
+        .await
+        .unwrap_or_else(|e| error_value(&e));
+    let expected = json!({ "record_ids": expected_record_ids });
+    report_check(
+        &scenario.id,
+        story_label,
+        "assemble_hot",
+        None,
+        expected,
+        actual,
+    )
+}
+
+async fn run_capture_trace_action(
+    store: &SqliteMemoryStore,
+    scenario: &ReplayScenario,
+    story_label: &str,
+    session_id: &str,
+    expected_trace_events: &[String],
+) -> ReplayCheckReport {
+    let actual = trace_events_only(store, session_id)
+        .await
+        .unwrap_or_else(|e| error_value(&e));
+    let expected = json!({ "trace_events": expected_trace_events });
+    report_check(
+        &scenario.id,
+        story_label,
+        "capture_trace",
+        None,
+        expected,
+        actual,
+    )
+}
+
+async fn run_summarize_action(
+    store: &SqliteMemoryStore,
+    scenario: &ReplayScenario,
+    story_label: &str,
+    session_id: &str,
+    expected_record_ids: &[String],
+) -> ReplayCheckReport {
+    let actual = summarize_replay(store, session_id)
+        .await
+        .unwrap_or_else(|e| error_value(&e));
+    let expected = json!({ "record_ids": expected_record_ids });
+    report_check(
+        &scenario.id,
+        story_label,
+        "summarize",
+        None,
+        expected,
+        actual,
+    )
+}
+
+async fn run_lint_action(
+    store: &SqliteMemoryStore,
+    scenario: &ReplayScenario,
+    story_label: &str,
+    expected_status: &str,
+) -> ReplayCheckReport {
+    let actual = lint_replay(store).await.unwrap_or_else(|e| error_value(&e));
+    let expected = json!({ "status": expected_status });
+    report_check(&scenario.id, story_label, "lint", None, expected, actual)
+}
+
+async fn run_retrieve_session_action(
+    store: &SqliteMemoryStore,
+    scenario: &ReplayScenario,
+    story_label: &str,
+    session_id: &str,
+    expected_turn_ids: &[String],
+    expected_trace_events: &[String],
+) -> ReplayCheckReport {
+    let actual = trace_summary(store, Some(session_id), None)
+        .await
+        .unwrap_or_else(|e| error_value(&e));
+    let expected = json!({
+        "turn_ids": expected_turn_ids,
+        "trace_events": expected_trace_events,
+    });
+    report_check(
+        &scenario.id,
+        story_label,
+        "retrieve_session",
+        None,
+        expected,
+        actual,
+    )
+}
+
+async fn run_retrieve_turn_action(
+    store: &SqliteMemoryStore,
+    scenario: &ReplayScenario,
+    story_label: &str,
+    session_id: &str,
+    turn_id: &str,
+    expected_trace_events: &[String],
+) -> ReplayCheckReport {
+    let actual = trace_summary(store, Some(session_id), Some(turn_id))
+        .await
+        .unwrap_or_else(|e| error_value(&e));
+    let expected = json!({
+        "turn_ids": [turn_id],
+        "trace_events": expected_trace_events,
+    });
+    report_check(
+        &scenario.id,
+        story_label,
+        "retrieve_turn",
+        None,
+        expected,
+        actual,
+    )
+}
+
+async fn run_record_present_action(
+    store: &SqliteMemoryStore,
+    scenario: &ReplayScenario,
+    story_label: &str,
+    record_id: &str,
+    expected_present: bool,
+) -> ReplayCheckReport {
+    let actual = record_present(store, record_id)
+        .await
+        .unwrap_or_else(|e| error_value(&e));
+    let expected = json!({ "present": expected_present });
+    report_check(
+        &scenario.id,
+        story_label,
+        "record_present",
+        None,
+        expected,
+        actual,
+    )
+}
+
+async fn run_forget_record_action(
+    store: &SqliteMemoryStore,
+    scenario: &ReplayScenario,
+    story_label: &str,
+    record_id: &str,
+    followup_query: &str,
+    expected_absent_from_search: bool,
+) -> ReplayCheckReport {
+    let actual = forget_record(store, scenario, record_id, followup_query)
+        .await
+        .unwrap_or_else(|e| error_value(&e));
+    let expected = json!({
+        "retrieve_found": false,
+        "search_contains_record": !expected_absent_from_search,
+    });
+    report_check(
+        &scenario.id,
+        story_label,
+        "forget_record",
+        Some(followup_query.to_owned()),
+        expected,
+        actual,
+    )
 }
 
 async fn run_search_action(
@@ -1073,7 +1199,7 @@ async fn forget_record(
 
 fn report_check(
     scenario_id: &str,
-    story: &str,
+    story_label: &str,
     verb: &str,
     query: Option<String>,
     expected: Value,
@@ -1082,7 +1208,7 @@ fn report_check(
     let passed = expected == actual;
     ReplayCheckReport {
         scenario_id: scenario_id.to_owned(),
-        story: story.to_owned(),
+        story: story_label.to_owned(),
         verb: verb.to_owned(),
         query,
         message: (!passed).then(|| "expected and actual replay outcomes differ".to_owned()),
