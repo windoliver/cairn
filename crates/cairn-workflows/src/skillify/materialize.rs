@@ -1,0 +1,1 @@
+//! Skillify candidate bundle materialization.
