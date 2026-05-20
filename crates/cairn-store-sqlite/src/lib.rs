@@ -9,8 +9,9 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
 use cairn_core::contract::memory_store::{
-    CONTRACT_VERSION, MemoryStore, MemoryStoreCapabilities, MemoryStoreError, ProjectionApplyItem,
-    RankingSignal, RankingSignalName, SearchHit, SearchMode, SearchRequest, SearchResponse,
+    Bm25sPreference, CONTRACT_VERSION, MemoryStore, MemoryStoreCapabilities, MemoryStoreError,
+    ProjectionApplyItem, RankingSignal, RankingSignalName, SearchHit, SearchMode, SearchRequest,
+    SearchResponse,
 };
 use cairn_core::contract::version::{ContractVersion, VersionRange};
 use cairn_core::domain::projection::{
@@ -179,6 +180,11 @@ impl MemoryStore for SqliteMemoryStore {
     }
 
     async fn search(&self, request: SearchRequest) -> Result<SearchResponse, MemoryStoreError> {
+        if matches!(request.bm25s, Bm25sPreference::Required) {
+            return Err(MemoryStoreError::CapabilityUnavailable(
+                "nexus bm25s ranking".to_owned(),
+            ));
+        }
         if matches!(request.mode, SearchMode::Semantic) {
             return Err(MemoryStoreError::CapabilityUnavailable(
                 "semantic search".to_owned(),

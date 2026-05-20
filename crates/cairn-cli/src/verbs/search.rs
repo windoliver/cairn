@@ -3,8 +3,6 @@
 use std::future::Future;
 use std::path::Path;
 use std::process::ExitCode;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
 
 use cairn_core::config::{CairnConfig, StoreKind};
 use cairn_core::contract::memory_store::{
@@ -26,23 +24,14 @@ use super::envelope::emit_json;
 const DEFAULT_LIMIT: u32 = 10;
 const DIAGNOSTIC_RECORD_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
 
-struct NoopWake;
-
-impl Wake for NoopWake {
-    fn wake(self: Arc<Self>) {}
-}
-
-fn block_on<F: Future>(future: F) -> F::Output {
-    let waker = Waker::from(Arc::new(NoopWake));
-    let mut context = Context::from_waker(&waker);
-    let mut future = Box::pin(future);
-
-    loop {
-        match future.as_mut().poll(&mut context) {
-            Poll::Ready(output) => return output,
-            Poll::Pending => std::thread::yield_now(),
-        }
-    }
+fn block_on<F: Future>(future: F) -> Result<F::Output, ExitCode> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .map_err(|err| {
+            eprintln!("cairn search: failed to initialize async runtime: {err}");
+            ExitCode::FAILURE
+        })?;
+    Ok(runtime.block_on(future))
 }
 
 /// Run `cairn search`.
@@ -172,7 +161,7 @@ fn search_sqlite(
         mode: mode(args.mode),
         limit,
         bm25s,
-    })) {
+    }))? {
         Ok(response) => response,
         Err(MemoryStoreError::CapabilityUnavailable(capability)) => {
             eprintln!("cairn search: CapabilityUnavailable — {capability}");
