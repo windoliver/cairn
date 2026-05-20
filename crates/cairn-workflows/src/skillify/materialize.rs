@@ -350,7 +350,10 @@ fn required_value(
         })
 }
 
-fn validate_path_token(label: &'static str, value: &str) -> Result<(), SkillifyMaterializeError> {
+pub(super) fn validate_path_token(
+    label: &'static str,
+    value: &str,
+) -> Result<(), SkillifyMaterializeError> {
     if value.is_empty()
         || value == "."
         || value == ".."

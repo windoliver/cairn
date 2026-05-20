@@ -84,11 +84,13 @@ impl FlushPlan {
     /// this plan.
     #[must_use]
     pub fn required_schema_version(&self) -> u16 {
-        self.mutations
+        let mutation_version = self
+            .mutations
             .iter()
             .map(PlannedMutation::required_schema_version)
             .max()
-            .unwrap_or(PersistedPlan::BASE_SCHEMA_VERSION)
+            .unwrap_or(PersistedPlan::BASE_SCHEMA_VERSION);
+        mutation_version.max(self.reason.required_schema_version())
     }
 
     /// Whether this plan contains coordination mutations. Keep feature
@@ -428,6 +430,23 @@ pub enum PlanReason {
     },
 }
 
+impl PlanReason {
+    /// Earliest persisted-plan schema version that can encode this reason.
+    #[must_use]
+    pub fn required_schema_version(&self) -> u16 {
+        match self {
+            Self::Skillify { .. } => PersistedPlan::SKILLIFY_SCHEMA_VERSION,
+            Self::UserIngest
+            | Self::SensorCapture { .. }
+            | Self::Promote { .. }
+            | Self::Expire { .. }
+            | Self::Forget { .. }
+            | Self::Evolve { .. }
+            | Self::Reflect { .. } => PersistedPlan::BASE_SCHEMA_VERSION,
+        }
+    }
+}
+
 /// On-disk wrapper persisted under `.cairn/flush/`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedPlan {
@@ -444,8 +463,10 @@ impl PersistedPlan {
     pub const BASE_SCHEMA_VERSION: u16 = 1;
     /// Schema version that introduced `cairn.coord.v1` mutation variants.
     pub const COORD_SCHEMA_VERSION: u16 = 2;
+    /// Schema version that introduced Skillify-specific plan reasons.
+    pub const SKILLIFY_SCHEMA_VERSION: u16 = 3;
     /// Schema version constant — bump when the on-disk shape changes.
-    pub const SCHEMA_VERSION: u16 = Self::COORD_SCHEMA_VERSION;
+    pub const SCHEMA_VERSION: u16 = Self::SKILLIFY_SCHEMA_VERSION;
 
     /// Wrap a [`FlushPlan`] in a [`PersistedPlan`] with [`PlanStatus::Pending`].
     #[must_use]

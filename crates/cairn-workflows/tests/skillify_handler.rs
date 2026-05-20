@@ -7,7 +7,7 @@ use cairn_core::contract::llm_provider::{
     CompletionOutput, CompletionRequest, LLMProvider, LLMProviderCapabilities, LlmError,
 };
 use cairn_core::contract::version::{ContractVersion, VersionRange};
-use cairn_core::domain::flush_plan::PlanReason;
+use cairn_core::domain::flush_plan::{PersistedPlan, PlanReason};
 use cairn_workflows::scheduler::{HandlerOutcome, JobHandler};
 use cairn_workflows::skillify::planner::{SkillifyPlanSource, SkillifyPromotionInput};
 use cairn_workflows::{SkillifyHandler, SkillifyPayload, SkillifyTrigger};
@@ -265,4 +265,46 @@ fn promotion_plan_records_candidate_and_gate_count() {
             gate_count: 10
         } if candidate_id == "skc_fixture"
     ));
+    assert!(plan.placeholder);
+    assert_eq!(
+        PersistedPlan::pending(plan).schema_version,
+        PersistedPlan::SKILLIFY_SCHEMA_VERSION
+    );
+}
+
+#[test]
+fn promotion_plan_rejects_unsafe_candidate_and_invalid_evidence() {
+    let unsafe_candidate = SkillifyPlanSource::plan_promotion(SkillifyPromotionInput {
+        candidate_id: "../escape".to_owned(),
+        skill_target_id: "01HQZX9F5N0000000000000003".to_owned(),
+        evidence_refs: vec!["01HQZX9F5N0000000000000001".to_owned()],
+        gate_count: 10,
+    })
+    .expect_err("unsafe candidate");
+    assert!(unsafe_candidate.contains("invalid candidate id"));
+
+    let invalid_evidence = SkillifyPlanSource::plan_promotion(SkillifyPromotionInput {
+        candidate_id: "skc_fixture".to_owned(),
+        skill_target_id: "01HQZX9F5N0000000000000003".to_owned(),
+        evidence_refs: vec!["not-a-ulid".to_owned()],
+        gate_count: 10,
+    })
+    .expect_err("invalid evidence");
+    assert!(invalid_evidence.contains("invalid evidence ref"));
+}
+
+#[test]
+fn promotion_plan_uses_live_five_minute_ttl() {
+    let plan = SkillifyPlanSource::plan_promotion(SkillifyPromotionInput {
+        candidate_id: "skc_fixture".to_owned(),
+        skill_target_id: "01HQZX9F5N0000000000000003".to_owned(),
+        evidence_refs: vec!["01HQZX9F5N0000000000000001".to_owned()],
+        gate_count: 10,
+    })
+    .expect("plan");
+
+    assert_ne!(plan.issued_at, "2026-05-20T00:00:00Z");
+    let issued = chrono::DateTime::parse_from_rfc3339(&plan.issued_at).expect("issued");
+    let expires = chrono::DateTime::parse_from_rfc3339(&plan.expires_at).expect("expires");
+    assert!(expires > issued);
 }
