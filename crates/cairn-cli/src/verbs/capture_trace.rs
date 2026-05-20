@@ -729,11 +729,19 @@ async fn run_events_handler_inner_no_guard(
                 let final_rows = tx.list_trace_events(&session_id_tx, &turn_str_tx)?;
                 let final_turn_record_ids = final_rows
                     .iter()
+                    .filter(|record| {
+                        trace_record_matches_scope_binding(record, scope_binding_tx.as_ref())
+                    })
                     .map(|record| record.id.as_str().to_owned())
                     .collect::<Vec<_>>();
-                let final_turn_has_stop = final_rows.iter().any(trace_record_is_stop);
-                let final_turn_has_explicit_skillify =
-                    final_rows.iter().any(trace_record_is_explicit_skillify);
+                let final_turn_has_stop = final_rows.iter().any(|record| {
+                    trace_record_matches_scope_binding(record, scope_binding_tx.as_ref())
+                        && trace_record_is_stop(record)
+                });
+                let final_turn_has_explicit_skillify = final_rows.iter().any(|record| {
+                    trace_record_matches_scope_binding(record, scope_binding_tx.as_ref())
+                        && trace_record_is_explicit_skillify(record)
+                });
 
                 if had_stop || tx.turn_summary_exists(&session_id_tx, &turn_str_tx)? {
                     let turn_ordinal = tx.next_turn_ordinal_scoped(
@@ -1137,6 +1145,39 @@ fn trace_record_is_explicit_skillify(record: &cairn_core::domain::MemoryRecord) 
         .and_then(serde_json::Value::as_str)
         == Some("user_message")
         && explicit_skillify_request(&record.body)
+}
+
+fn trace_record_matches_scope_binding(
+    record: &cairn_core::domain::MemoryRecord,
+    scope_binding: Option<&ScopeTuple>,
+) -> bool {
+    let Some(scope_binding) = scope_binding else {
+        return true;
+    };
+    scope_component_matches(
+        scope_binding.tenant.as_deref(),
+        record.scope.tenant.as_deref(),
+    ) && scope_component_matches(
+        scope_binding.workspace.as_deref(),
+        record.scope.workspace.as_deref(),
+    ) && scope_component_matches(
+        scope_binding.project.as_deref(),
+        record.scope.project.as_deref(),
+    ) && scope_component_matches(
+        scope_binding.entity.as_deref(),
+        record.scope.entity.as_deref(),
+    ) && scope_component_matches(scope_binding.user.as_deref(), record.scope.user.as_deref())
+        && scope_component_matches(
+            scope_binding.agent.as_deref(),
+            record.scope.agent.as_deref(),
+        )
+}
+
+fn scope_component_matches(expected: Option<&str>, actual: Option<&str>) -> bool {
+    match expected {
+        Some(expected) => actual == Some(expected),
+        None => true,
+    }
 }
 
 fn skillify_source_dedupe_token(source_record_ids: &[String]) -> String {
@@ -2438,6 +2479,66 @@ mod tests {
         assert_eq!(payload.trigger, cairn_workflows::SkillifyTrigger::Explicit);
         assert_eq!(payload.key, STOP_SESSION_ID);
         assert_eq!(payload.source_record_ids.len(), 2);
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::expect_used,
+        reason = "test: panics surface broken invariants immediately"
+    )]
+    async fn scoped_stop_does_not_use_other_scope_skillify_command() {
+        let store = cairn_store_sqlite::open_in_memory()
+            .await
+            .expect("in-memory store");
+        let jobs = RecordingJobStore::new();
+        let vault = tempfile::tempdir().expect("tempdir");
+        write_skillify_source(vault.path());
+        write_stop_source(vault.path());
+        let consolidation = ConsolidationConfig {
+            enabled: false,
+            ..ConsolidationConfig::default()
+        };
+        let tenant_a = ScopeTuple {
+            tenant: Some("tenant-a".to_owned()),
+            ..ScopeTuple::default()
+        };
+        let tenant_b = ScopeTuple {
+            tenant: Some("tenant-b".to_owned()),
+            ..ScopeTuple::default()
+        };
+
+        run_events_handler_inner_no_guard(
+            &store,
+            vault.path(),
+            vec![explicit_skillify_event()],
+            Some(&tenant_a),
+            None,
+            Some(&jobs),
+            &consolidation,
+            &DreamConfig::default(),
+        )
+        .await
+        .expect("capture_trace tenant a");
+        run_events_handler_inner_no_guard(
+            &store,
+            vault.path(),
+            vec![stop_hook_event()],
+            Some(&tenant_b),
+            None,
+            Some(&jobs),
+            &consolidation,
+            &DreamConfig::default(),
+        )
+        .await
+        .expect("capture_trace tenant b");
+
+        let requests = jobs.requests.lock().expect("invariant: mutex");
+        assert!(
+            requests
+                .iter()
+                .all(|req| req.kind.as_str() != cairn_workflows::SKILLIFY_KIND),
+            "tenant-b Stop must not enqueue from tenant-a explicit command"
+        );
     }
 
     #[test]
