@@ -71,9 +71,20 @@ pub struct SkillLintIssue {
 pub fn lint_skill_snapshot(snapshot: &SkillLintSnapshot) -> Vec<SkillLintIssue> {
     let mut out = Vec::new();
     let mut lanes: BTreeMap<&str, Vec<&SkillLintSkill>> = BTreeMap::new();
+    let mut triggers: BTreeMap<String, Vec<&SkillLintSkill>> = BTreeMap::new();
 
     for skill in &snapshot.skills {
         lanes.entry(&skill.lane).or_default().push(skill);
+        for trigger in &skill.resolver_triggers {
+            let normalized = trigger.trim();
+            if !normalized.is_empty() {
+                triggers
+                    .entry(normalized.to_owned())
+                    .or_default()
+                    .push(skill);
+            }
+        }
+
         let existing: BTreeSet<&str> = skill.existing_paths.iter().map(String::as_str).collect();
         if let Some(uses) = &skill.uses
             && !existing.contains(uses.as_str())
@@ -93,6 +104,34 @@ pub fn lint_skill_snapshot(snapshot: &SkillLintSnapshot) -> Vec<SkillLintIssue> 
                 skill,
                 format!("skill `{}` has no resolver triggers", skill.skill_id),
             ));
+        }
+        for trigger in &skill.resolver_triggers {
+            if trigger.trim().is_empty() {
+                out.push(issue(
+                    SkillLintIssueKind::Unreachable,
+                    skill,
+                    format!("skill `{}` has a blank resolver trigger", skill.skill_id),
+                ));
+            }
+        }
+        match skill.files_to.as_deref().map(str::trim) {
+            None | Some("") => out.push(issue(
+                SkillLintIssueKind::MissingArtifact,
+                skill,
+                format!(
+                    "skill `{}` is missing files_to filing rules",
+                    skill.skill_id
+                ),
+            )),
+            Some(files_to) if !valid_relative_dir(files_to) => out.push(issue(
+                SkillLintIssueKind::MissingArtifact,
+                skill,
+                format!(
+                    "skill `{}` has invalid files_to `{files_to}`",
+                    skill.skill_id
+                ),
+            )),
+            Some(_) => {}
         }
         if !skill.gate_report_passed {
             out.push(issue(
@@ -128,7 +167,55 @@ pub fn lint_skill_snapshot(snapshot: &SkillLintSnapshot) -> Vec<SkillLintIssue> 
         }
     }
 
+    for (trigger, mut skills) in triggers {
+        skills.sort_by(|a, b| {
+            a.skill_id
+                .cmp(&b.skill_id)
+                .then_with(|| a.path.cmp(&b.path))
+        });
+        skills.dedup_by(|a, b| a.skill_id == b.skill_id && a.path == b.path);
+        if skills.len() > 1 {
+            for skill in skills {
+                out.push(issue(
+                    SkillLintIssueKind::DuplicateLane,
+                    skill,
+                    format!("resolver trigger `{trigger}` is used by more than one live skill"),
+                ));
+            }
+        }
+    }
+
+    out.sort_by(|a, b| {
+        a.skill_id
+            .cmp(&b.skill_id)
+            .then_with(|| issue_kind_rank(a.kind).cmp(&issue_kind_rank(b.kind)))
+            .then_with(|| a.path.cmp(&b.path))
+            .then_with(|| a.message.cmp(&b.message))
+    });
+
     out
+}
+
+fn valid_relative_dir(value: &str) -> bool {
+    let path = std::path::Path::new(value);
+    !path.is_absolute()
+        && value.ends_with('/')
+        && path.components().all(|component| {
+            matches!(
+                component,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
+}
+
+fn issue_kind_rank(kind: SkillLintIssueKind) -> u8 {
+    match kind {
+        SkillLintIssueKind::MissingArtifact => 0,
+        SkillLintIssueKind::Unreachable => 1,
+        SkillLintIssueKind::DuplicateLane => 2,
+        SkillLintIssueKind::GateFailed => 3,
+        SkillLintIssueKind::RollbackBroken => 4,
+    }
 }
 
 fn issue(kind: SkillLintIssueKind, skill: &SkillLintSkill, message: String) -> SkillLintIssue {

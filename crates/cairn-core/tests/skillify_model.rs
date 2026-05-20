@@ -249,3 +249,53 @@ fn lint_reports_missing_script_and_duplicate_lane() {
             .any(|finding| finding.kind == SkillLintIssueKind::DuplicateLane)
     );
 }
+
+#[test]
+fn lint_reports_invalid_filing_rules_and_resolver_triggers() {
+    let snapshot = SkillLintSnapshot {
+        skills: vec![
+            SkillLintSkill {
+                skill_id: "skill-b".to_owned(),
+                lane: "deploy.rollback".to_owned(),
+                path: "skills/skill_b.md".to_owned(),
+                uses: None,
+                resolver_triggers: vec!["deploy now".to_owned()],
+                files_to: Some("../../outside".to_owned()),
+                gate_report_passed: true,
+                rollback_version_count: 1,
+                existing_paths: vec!["skills/skill_b.md".to_owned()],
+            },
+            SkillLintSkill {
+                skill_id: "skill-a".to_owned(),
+                lane: "deploy.hotfix".to_owned(),
+                path: "skills/skill_a.md".to_owned(),
+                uses: None,
+                resolver_triggers: vec!["   ".to_owned(), "deploy now".to_owned()],
+                files_to: Some("wiki/summaries/".to_owned()),
+                gate_report_passed: true,
+                rollback_version_count: 1,
+                existing_paths: vec!["skills/skill_a.md".to_owned()],
+            },
+        ],
+    };
+
+    let findings = lint_skill_snapshot(&snapshot);
+
+    assert!(findings.iter().any(
+        |finding| finding.kind == SkillLintIssueKind::MissingArtifact
+            && finding.message.contains("invalid files_to")
+    ));
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.kind == SkillLintIssueKind::Unreachable
+                && finding.message.contains("blank resolver trigger"))
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.kind == SkillLintIssueKind::DuplicateLane
+                && finding.message.contains("resolver trigger `deploy now`"))
+    );
+    assert_eq!(findings[0].skill_id, "skill-a");
+}
