@@ -343,7 +343,7 @@ fn main() -> ExitCode {
                 if let Some(code) = enforce_vault_binding("import", &vault_root) {
                     code
                 } else {
-                    import::run(sub, vault_root)
+                    import::run(sub, &vault_root)
                 }
             }
             Err(e) => {

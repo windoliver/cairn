@@ -59,7 +59,7 @@ pub fn command() -> clap::Command {
 
 /// Run `cairn import`.
 #[must_use]
-pub fn run(sub: &clap::ArgMatches, vault_root: PathBuf) -> std::process::ExitCode {
+pub fn run(sub: &clap::ArgMatches, vault_root: &Path) -> std::process::ExitCode {
     let json = sub.get_flag("json");
     let Some(system) = sub.get_one::<String>("from") else {
         return usage_error(json, "from", "--from is required");
@@ -82,7 +82,7 @@ pub fn run(sub: &clap::ArgMatches, vault_root: PathBuf) -> std::process::ExitCod
         mode: FlushMode::HumanReview,
     })
     .and_then(|report| {
-        write_review_plans(&vault_root, &report).map(|paths| ImportCliSummary {
+        write_review_plans(vault_root, &report).map(|paths| ImportCliSummary {
             system: system.clone(),
             records: report.records.len(),
             ambiguities: report.ambiguities.len(),
@@ -361,6 +361,7 @@ fn is_importable(path: &Path) -> bool {
     )
 }
 
+#[allow(clippy::too_many_lines)]
 fn map_file(path: &Path, root: &Path, raw: &str) -> Result<MappedFile, ImportError> {
     let relative = path.strip_prefix(root).unwrap_or(path);
     let parsed_json = if path
@@ -588,14 +589,6 @@ const fn class_for_kind(kind: MemoryKind) -> MemoryClass {
         | MemoryKind::StrategyFailure
         | MemoryKind::StrategySuccess
         | MemoryKind::Workflow => MemoryClass::Procedural,
-        MemoryKind::Belief
-        | MemoryKind::Entity
-        | MemoryKind::Fact
-        | MemoryKind::KnowledgeGap
-        | MemoryKind::Opinion
-        | MemoryKind::Project
-        | MemoryKind::Reference
-        | MemoryKind::User => MemoryClass::Semantic,
         _ => MemoryClass::Semantic,
     }
 }
