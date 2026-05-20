@@ -166,7 +166,7 @@ impl MemoryStore for SqliteMemoryStore {
 
     fn capabilities(&self) -> &MemoryStoreCapabilities {
         static CAPS: MemoryStoreCapabilities = MemoryStoreCapabilities {
-            fts: false,
+            fts: true,
             vector: false,
             graph_edges: false,
             transactions: false,
@@ -188,9 +188,12 @@ impl MemoryStore for SqliteMemoryStore {
         let conn = self.connection()?;
         let mut stmt = conn
             .prepare(
-                "SELECT record_id, body, bm25(records_fts) AS score
+                "SELECT records_fts.record_id, records_fts.body, bm25(records_fts) AS score
                  FROM records_fts
+                 JOIN records AS r ON r.record_id = records_fts.record_id
                  WHERE records_fts MATCH ?1
+                   AND r.active = 1
+                   AND r.tombstoned = 0
                  ORDER BY score
                  LIMIT ?2",
             )
@@ -269,7 +272,16 @@ impl MemoryStore for SqliteMemoryStore {
         }
         let last_successful_rebuild_at = conn
             .query_row(
-                "SELECT MAX(updated_at) FROM projection_ledger WHERE target = ?1 AND state = 'current'",
+                "SELECT MAX(l.updated_at)
+                 FROM records AS r
+                 JOIN projection_ledger AS l
+                   ON l.target = ?1
+                  AND l.record_id = r.record_id
+                  AND l.record_hash = r.record_hash
+                  AND l.source_hash = ''
+                 WHERE r.active = 1
+                   AND r.tombstoned = 0
+                   AND l.state = 'current'",
                 params![target_key.as_str()],
                 |row| row.get::<_, Option<String>>(0),
             )
