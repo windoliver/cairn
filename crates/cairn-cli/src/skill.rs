@@ -857,15 +857,44 @@ fn merged_claude_hooks(existing: Option<serde_json::Value>) -> serde_json::Value
     let mut hooks = existing
         .and_then(|value| value.as_object().cloned())
         .unwrap_or_default();
-    hooks.insert(
-        "SessionStart".to_owned(),
-        serde_json::json!([
+    let cairn_hook = serde_json::json!({"command": SESSION_START_HOOK_COMMAND});
+    match hooks.remove("SessionStart") {
+        Some(serde_json::Value::Array(mut session_start)) => {
+            if !session_start
+                .iter()
+                .any(|hook| hook_contains_command(hook, SESSION_START_HOOK_COMMAND))
             {
-                "command": SESSION_START_HOOK_COMMAND
+                session_start.push(cairn_hook);
             }
-        ]),
-    );
+            hooks.insert(
+                "SessionStart".to_owned(),
+                serde_json::Value::Array(session_start),
+            );
+        }
+        Some(existing_session_start) => {
+            hooks.insert(
+                "SessionStart".to_owned(),
+                serde_json::json!([existing_session_start, cairn_hook]),
+            );
+        }
+        None => {
+            hooks.insert("SessionStart".to_owned(), serde_json::json!([cairn_hook]));
+        }
+    }
     serde_json::Value::Object(hooks)
+}
+
+fn hook_contains_command(value: &serde_json::Value, command: &str) -> bool {
+    match value {
+        serde_json::Value::String(s) => s == command,
+        serde_json::Value::Array(values) => values
+            .iter()
+            .any(|value| hook_contains_command(value, command)),
+        serde_json::Value::Object(map) => map
+            .values()
+            .any(|value| hook_contains_command(value, command)),
+        _ => false,
+    }
 }
 
 fn write_guarded_markdown(
@@ -1306,6 +1335,28 @@ mod tests {
         );
         let rendered = serde_json::to_string(&merged).expect("json");
         assert!(rendered.contains("cairn ingest --folder . --mode keyword"));
+    }
+
+    #[test]
+    fn claude_settings_merge_preserves_existing_session_start_hooks() {
+        let existing = serde_json::json!({
+            "hooks": {
+                "SessionStart": [{"command": "echo existing"}],
+                "Stop": [{"command": "echo stop"}]
+            }
+        });
+        let merged = merge_claude_settings(existing).expect("merge settings");
+
+        let session_start = merged["hooks"]["SessionStart"]
+            .as_array()
+            .expect("SessionStart hooks array");
+        assert_eq!(session_start[0]["command"], "echo existing");
+        assert!(
+            session_start
+                .iter()
+                .any(|hook| hook["command"] == SESSION_START_HOOK_COMMAND)
+        );
+        assert_eq!(merged["hooks"]["Stop"][0]["command"], "echo stop");
     }
 
     #[test]
