@@ -236,3 +236,26 @@ fn status_json_reports_healthy_nexus_projection_from_health_endpoint() {
         "status must not create projection directories"
     );
 }
+
+#[test]
+fn status_json_reports_projection_detail_for_nexus() {
+    let dir = tempfile::tempdir().unwrap();
+    write_yaml(
+        dir.path(),
+        "store:\n  kind: nexus-sandbox\n  nexus:\n    endpoint: http://127.0.0.1:1\n",
+    );
+
+    let out = cli()
+        .current_dir(dir.path())
+        .args(["status", "--json"])
+        .output()
+        .expect("cairn status --json");
+
+    assert!(out.status.success(), "exit: {:?}", out.status);
+    let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    let value: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+    assert!(
+        value["health"]["nexus_projection"]["projection_detail"].is_object(),
+        "{stdout}"
+    );
+}

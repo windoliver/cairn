@@ -5,15 +5,24 @@
 //! When the store adapter lands, read the incarnation from the daemon table.
 //! For P0 scaffold with no store wired, capabilities is empty.
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use cairn_core::config::StoreKind;
+use cairn_core::contract::memory_store::MemoryStore;
+use cairn_core::domain::projection::{ProjectionSummary, ProjectionTarget};
 use cairn_core::generated::common::Capabilities;
 use cairn_core::generated::status::{
     StatusResponse, StatusResponseHealth, StatusResponseHealthAuthorityDb,
     StatusResponseHealthAuthorityDbState, StatusResponseHealthNexusProjection,
+    StatusResponseHealthNexusProjectionProjectionDetail,
+    StatusResponseHealthNexusProjectionProjectionDetailTargets,
+    StatusResponseHealthNexusProjectionProjectionDetailTargetsState,
+    StatusResponseHealthNexusProjectionProjectionDetailTargetsTarget,
     StatusResponseHealthNexusProjectionState, StatusResponseServerInfo,
 };
+use cairn_store_sqlite::SqliteMemoryStore;
 
 use crate::config::{self, CliOverrides};
 use crate::nexus::{self, ProjectionStatusState};
@@ -22,6 +31,11 @@ use super::envelope::{emit_json, new_operation_id};
 
 fn default_vault_path() -> Result<PathBuf, String> {
     std::env::current_dir().map_err(|err| format!("reading current directory: {err}"))
+}
+
+fn block_on<F: Future>(future: F) -> Option<F::Output> {
+    let runtime = tokio::runtime::Builder::new_current_thread().build().ok()?;
+    Some(runtime.block_on(future))
 }
 
 fn authority_db_health(vault_path: &Path) -> StatusResponseHealthAuthorityDb {
@@ -77,9 +91,74 @@ fn nexus_projection_health(
         state,
         data_dir: projection.data_dir.map(|path| path.display().to_string()),
         endpoint: projection.endpoint,
-        projection_detail: None,
+        projection_detail: projection_detail(vault_path, config),
         reason: projection.reason,
     }
+}
+
+fn projection_detail(
+    vault_path: &Path,
+    config: &cairn_core::config::CairnConfig,
+) -> Option<StatusResponseHealthNexusProjectionProjectionDetail> {
+    if !matches!(config.store.kind, StoreKind::NexusSandbox) {
+        return None;
+    }
+    let summaries = projection_summaries(vault_path);
+    let last_successful_rebuild_at = summaries
+        .iter()
+        .filter_map(|summary| summary.last_successful_rebuild_at.as_ref())
+        .max()
+        .cloned();
+    let targets = summaries.iter().filter_map(status_target).collect();
+    Some(StatusResponseHealthNexusProjectionProjectionDetail {
+        last_successful_rebuild_at,
+        targets,
+    })
+}
+
+fn projection_summaries(vault_path: &Path) -> Vec<ProjectionSummary> {
+    let db_path = vault_path.join(".cairn/cairn.db");
+    if !db_path.exists() {
+        return Vec::new();
+    }
+    let Ok(store) = SqliteMemoryStore::open(&db_path) else {
+        return Vec::new();
+    };
+    match block_on(store.projection_summaries()) {
+        Some(Ok(summaries)) => summaries,
+        _ => Vec::new(),
+    }
+}
+
+fn status_target(
+    summary: &ProjectionSummary,
+) -> Option<StatusResponseHealthNexusProjectionProjectionDetailTargets> {
+    let target = match &summary.target {
+        ProjectionTarget::Bm25sLexical => {
+            StatusResponseHealthNexusProjectionProjectionDetailTargetsTarget::Bm25s
+        }
+        _ => return None,
+    };
+    let state = if summary.failed_items > 0 {
+        StatusResponseHealthNexusProjectionProjectionDetailTargetsState::Failed
+    } else if summary.lagging_items > 0 {
+        StatusResponseHealthNexusProjectionProjectionDetailTargetsState::Stale
+    } else {
+        StatusResponseHealthNexusProjectionProjectionDetailTargetsState::Current
+    };
+    Some(StatusResponseHealthNexusProjectionProjectionDetailTargets {
+        current: usize_to_u64(summary.current_items),
+        failed: usize_to_u64(summary.failed_items),
+        lagging: usize_to_u64(summary.lagging_items),
+        reason: None,
+        state,
+        target,
+        total: usize_to_u64(summary.total_authoritative_items),
+    })
+}
+
+fn usize_to_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
 }
 
 fn render_projection_human(projection: &StatusResponseHealthNexusProjection) -> String {
@@ -167,6 +246,17 @@ pub fn run_for_vault(vault_path: &Path, json: bool) -> ExitCode {
             "nexus_projection: {}",
             render_projection_human(&resp.health.nexus_projection)
         );
+        if let Some(detail) = &resp.health.nexus_projection.projection_detail {
+            for target in &detail.targets {
+                println!(
+                    "projection_target: {} current={} lagging={} failed={}",
+                    projection_target_label(target.target),
+                    target.current,
+                    target.lagging,
+                    target.failed
+                );
+            }
+        }
         if resp.capabilities.is_empty() {
             println!("capabilities: (none - store not wired in this P0 build)");
         } else {
@@ -250,6 +340,15 @@ fn build_profile() -> String {
         "debug".to_owned()
     } else {
         "release".to_owned()
+    }
+}
+
+fn projection_target_label(
+    target: StatusResponseHealthNexusProjectionProjectionDetailTargetsTarget,
+) -> &'static str {
+    match target {
+        StatusResponseHealthNexusProjectionProjectionDetailTargetsTarget::Bm25s => "bm25s_lexical",
+        _ => "unknown",
     }
 }
 
