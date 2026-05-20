@@ -57,7 +57,7 @@ pub fn run(sub: &ArgMatches) -> ExitCode {
         Ok(response) => response,
         Err(err) => {
             eprintln!("cairn reindex: {err}");
-            return ExitCode::FAILURE;
+            return ExitCode::from(69);
         }
     };
     let item_count = response.items.len();
