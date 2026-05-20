@@ -1,7 +1,11 @@
 //! End-to-end coverage for the bundled Cairn Nexus sandbox sidecar stub.
 
-use std::process::Command;
-use std::time::Duration;
+use std::{
+    io::{Read, Write},
+    process::Command,
+    thread,
+    time::Duration,
+};
 
 use cairn_cli::nexus::{NexusSupervisor, ProjectionProbe, SupervisorConfig};
 
@@ -62,4 +66,45 @@ fn bundled_sidecar_serves_health_through_supervisor() {
     }
 
     panic!("bundled sidecar did not become healthy after retries: {last_probe:?}");
+}
+
+#[test]
+fn bundled_sidecar_accepts_split_health_request_line() {
+    let tmp = tempfile::tempdir().unwrap();
+    let vault_dir = tmp.path().join("vault");
+    let data_dir = vault_dir.join("nexus-data");
+    let sqlite_db = vault_dir.join(".cairn").join("cairn.db");
+    let endpoint = format!("http://127.0.0.1:{}", reserve_loopback_port());
+    let mut supervisor = NexusSupervisor::start(SupervisorConfig {
+        command: sidecar_binary(),
+        args: vec!["sandbox".to_owned(), "serve".to_owned()],
+        endpoint: endpoint.clone(),
+        health_path: "/health".to_owned(),
+        data_dir,
+        sqlite_db,
+        health_timeout: Duration::from_secs(5),
+        shutdown_timeout: Duration::from_millis(500),
+    })
+    .unwrap();
+    assert!(matches!(
+        supervisor.wait_until_healthy(),
+        ProjectionProbe::Healthy
+    ));
+
+    let addr = endpoint.strip_prefix("http://").unwrap();
+    let mut stream = std::net::TcpStream::connect(addr).unwrap();
+    stream.write_all(b"GET /hea").unwrap();
+    thread::sleep(Duration::from_millis(50));
+    let _ = stream.write_all(b"lth HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+
+    let mut response = String::new();
+    if let Err(err) = stream.read_to_string(&mut response) {
+        response = format!("read error: {err}");
+    }
+    supervisor.stop().unwrap();
+
+    assert!(
+        response.starts_with("HTTP/1.1 200 OK\r\n"),
+        "split health request should be accepted, got: {response:?}"
+    );
 }

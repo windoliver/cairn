@@ -84,11 +84,9 @@ fn validate_health_path(health_path: &str) -> Result<(), String> {
 
 fn handle_connection(mut stream: TcpStream, health_path: &str) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-    let mut buf = [0_u8; 1024];
-    let Ok(read) = stream.read(&mut buf) else {
+    let Some(request) = read_request_headers(&mut stream) else {
         return;
     };
-    let request = String::from_utf8_lossy(&buf[..read]);
     let expected_prefix = format!("GET {health_path} HTTP/");
     let response = if request.starts_with(&expected_prefix) {
         b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".as_slice()
@@ -96,4 +94,23 @@ fn handle_connection(mut stream: TcpStream, health_path: &str) {
         b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".as_slice()
     };
     let _ = stream.write_all(response);
+}
+
+fn read_request_headers(stream: &mut TcpStream) -> Option<String> {
+    let mut request = Vec::with_capacity(256);
+    let mut byte = [0_u8; 1];
+    while request.len() < 8192 {
+        match stream.read(&mut byte) {
+            Ok(0) if request.is_empty() => return None,
+            Ok(0) => break,
+            Ok(_) => {
+                request.push(byte[0]);
+                if request.ends_with(b"\r\n\r\n") || request.ends_with(b"\n\n") {
+                    break;
+                }
+            }
+            Err(_) => return None,
+        }
+    }
+    Some(String::from_utf8_lossy(&request).into_owned())
 }

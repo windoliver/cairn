@@ -4,7 +4,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -151,13 +151,7 @@ impl NexusSupervisor {
                 ));
             }
 
-            let probe_timeout = remaining.min(HEALTH_POLL_INTERVAL);
-
-            match probe_http_health(
-                &self.config.endpoint,
-                &self.config.health_path,
-                probe_timeout,
-            ) {
+            match probe_http_health(&self.config.endpoint, &self.config.health_path, remaining) {
                 ProjectionProbe::Healthy if Instant::now() <= deadline => {
                     return ProjectionProbe::Healthy;
                 }
@@ -178,6 +172,7 @@ impl NexusSupervisor {
     /// Stop the sidecar process, escalating to force-kill after the shutdown timeout.
     pub fn stop(&mut self) -> std::io::Result<()> {
         if self.child.try_wait()?.is_some() {
+            #[cfg(not(unix))]
             return Ok(());
         }
 
@@ -203,6 +198,8 @@ impl NexusSupervisor {
         let status = Command::new("kill")
             .arg("-TERM")
             .arg(format!("-{}", self.child.id()))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status()?;
         if status.success() || self.child.try_wait()?.is_some() {
             Ok(())
@@ -223,6 +220,8 @@ impl NexusSupervisor {
         let status = Command::new("kill")
             .arg("-KILL")
             .arg(format!("-{}", self.child.id()))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status()?;
         if status.success() || self.child.try_wait()?.is_some() {
             Ok(())
@@ -274,7 +273,7 @@ pub fn evaluate_projection_status(vault_path: &Path, config: &CairnConfig) -> Pr
     match probe_http_health(
         &endpoint,
         &config.store.nexus.health_path,
-        Duration::from_millis(config.store.nexus.health_timeout_ms.min(250)),
+        Duration::from_millis(config.store.nexus.health_timeout_ms),
     ) {
         ProbeResult::Healthy => ProjectionStatus {
             state: ProjectionStatusState::Healthy,
@@ -352,6 +351,14 @@ impl HttpEndpoint {
             Ok(addrs)
         }
     }
+
+    fn host_header_value(&self) -> String {
+        if self.host.contains(':') {
+            format!("[{}]:{}", self.host, self.port)
+        } else {
+            format!("{}:{}", self.host, self.port)
+        }
+    }
 }
 
 /// Probe the Nexus sidecar health endpoint using a minimal HTTP/1.1 request.
@@ -427,8 +434,8 @@ fn probe_addr(
         return ProbeResult::Degraded(format!("setting health write timeout: {err}"));
     }
     let request = format!(
-        "GET {health_path} HTTP/1.1\r\nHost: {}:{}\r\nConnection: close\r\n\r\n",
-        endpoint.host, endpoint.port
+        "GET {health_path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        endpoint.host_header_value()
     );
     if let Err(err) = stream.write_all(request.as_bytes()) {
         return ProbeResult::Degraded(format!("writing health request: {err}"));
@@ -472,6 +479,7 @@ mod tests {
     use std::net::TcpListener;
     use std::path::Path;
     use std::process::Command;
+    use std::sync::mpsc;
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -540,12 +548,34 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn graceful_term_command() -> (String, Vec<String>) {
+        (
+            "/bin/sh".to_owned(),
+            vec![
+                "-c".to_owned(),
+                "trap 'exit 0' TERM; while true; do sleep 1; done".to_owned(),
+            ],
+        )
+    }
+
+    #[cfg(unix)]
     fn descendant_command(pid_file: &Path) -> (String, Vec<String>) {
         (
             "/bin/sh".to_owned(),
             vec![
                 "-c".to_owned(),
                 format!("sleep 30 & echo $! > {}; wait", shell_quote(pid_file)),
+            ],
+        )
+    }
+
+    #[cfg(unix)]
+    fn detached_descendant_command(pid_file: &Path) -> (String, Vec<String>) {
+        (
+            "/bin/sh".to_owned(),
+            vec![
+                "-c".to_owned(),
+                format!("sleep 30 & echo $! > {}; exit 0", shell_quote(pid_file)),
             ],
         )
     }
@@ -662,6 +692,31 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn nexus_stop_stderr_helper_process() {
+        if std::env::var("CAIRN_RUN_STOP_STDERR_HELPER").as_deref() != Ok("1") {
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join(".cairn").join("nexus-data");
+        let (command, args) = graceful_term_command();
+        let mut supervisor = NexusSupervisor::start(SupervisorConfig {
+            command,
+            args,
+            endpoint: "http://127.0.0.1:1".to_owned(),
+            health_path: "/health".to_owned(),
+            data_dir: data_dir.clone(),
+            sqlite_db: data_dir.parent().unwrap().join("cairn.db"),
+            health_timeout: Duration::from_secs(1),
+            shutdown_timeout: Duration::from_millis(500),
+        })
+        .unwrap();
+
+        supervisor.stop().unwrap();
+    }
+
     fn spawn_delayed_health_server(response_delay: Duration) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -674,6 +729,17 @@ mod tests {
             }
         });
         format!("http://{addr}")
+    }
+
+    fn wait_until_not_running(pid: u32) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline {
+            if !process_is_running(pid) {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        !process_is_running(pid)
     }
 
     #[test]
@@ -855,6 +921,22 @@ mod tests {
     }
 
     #[test]
+    fn supervisor_uses_configured_health_timeout_for_each_probe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut supervisor = NexusSupervisor::start(supervisor_config(
+            &tmp.path().join(".cairn").join("nexus-data"),
+            spawn_delayed_health_server(Duration::from_millis(75)),
+            Duration::from_millis(300),
+        ))
+        .unwrap();
+
+        let probe = supervisor.wait_until_healthy();
+
+        assert!(matches!(probe, ProjectionProbe::Healthy));
+        supervisor.stop().unwrap();
+    }
+
+    #[test]
     fn supervisor_force_kills_process_that_ignores_graceful_stop() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path().join(".cairn").join("nexus-data");
@@ -875,6 +957,51 @@ mod tests {
         supervisor.stop().unwrap();
 
         assert!(!process_is_running(pid));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn supervisor_stop_does_not_leak_expected_kill_stderr() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_bin = tmp.path().join("bin");
+        fs::create_dir(&fake_bin).unwrap();
+        let fake_kill = fake_bin.join("kill");
+        fs::write(
+            &fake_kill,
+            "#!/bin/sh\necho fake-kill-stderr:$* >&2\nexec /bin/kill \"$@\"\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&fake_kill).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&fake_kill, permissions).unwrap();
+
+        let mut paths = vec![fake_bin];
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+        let path = std::env::join_paths(paths).unwrap();
+        let output = Command::new(std::env::current_exe().expect("current test executable"))
+            .arg("nexus::tests::nexus_stop_stderr_helper_process")
+            .arg("--exact")
+            .arg("--nocapture")
+            .env("CAIRN_RUN_STOP_STDERR_HELPER", "1")
+            .env("PATH", path)
+            .output()
+            .expect("run helper test process");
+        assert!(
+            output.status.success(),
+            "helper failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains("fake-kill-stderr:"),
+            "expected supervisor cleanup not to leak kill stderr, got:\n{stderr}"
+        );
     }
 
     #[cfg(unix)]
@@ -906,6 +1033,48 @@ mod tests {
         supervisor.stop().unwrap();
 
         assert!(!process_is_running(child_pid));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn supervisor_stop_cleans_descendant_after_wrapper_exits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join(".cairn").join("nexus-data");
+        let child_pid_file = tmp.path().join("child.pid");
+        let (command, args) = detached_descendant_command(&child_pid_file);
+        let mut supervisor = NexusSupervisor::start(SupervisorConfig {
+            command,
+            args,
+            endpoint: "http://127.0.0.1:1".to_owned(),
+            health_path: "/health".to_owned(),
+            data_dir: data_dir.clone(),
+            sqlite_db: data_dir.parent().unwrap().join("cairn.db"),
+            health_timeout: Duration::from_secs(1),
+            shutdown_timeout: Duration::from_millis(100),
+        })
+        .unwrap();
+
+        wait_for_file(&child_pid_file);
+        let child_pid = fs::read_to_string(&child_pid_file)
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline && supervisor.child.try_wait().unwrap().is_none() {
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        supervisor.stop().unwrap();
+
+        let cleaned_up = wait_until_not_running(child_pid);
+        if !cleaned_up {
+            let _ = Command::new("kill")
+                .arg("-KILL")
+                .arg(child_pid.to_string())
+                .status();
+        }
+        assert!(cleaned_up, "descendant process {child_pid} still running");
     }
 
     fn process_is_running(pid: u32) -> bool {
@@ -941,6 +1110,47 @@ mod tests {
         let endpoint = HttpEndpoint::parse("http://[::1]:8765").unwrap();
         assert_eq!(endpoint.host, "::1");
         assert_eq!(endpoint.port, 8765);
+    }
+
+    #[test]
+    fn probe_health_brackets_ipv6_literal_in_host_header() {
+        let listener = match TcpListener::bind("[::1]:0") {
+            Ok(listener) => listener,
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::AddrNotAvailable | std::io::ErrorKind::Unsupported
+                ) =>
+            {
+                return;
+            }
+            Err(err) => panic!("bind IPv6 loopback health server: {err}"),
+        };
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0_u8; 512];
+                let n = stream.read(&mut buf).unwrap();
+                tx.send(String::from_utf8_lossy(&buf[..n]).into_owned())
+                    .unwrap();
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+            }
+        });
+
+        let result = probe_http_health(
+            &format!("http://[::1]:{port}"),
+            "/health",
+            Duration::from_secs(1),
+        );
+
+        assert!(matches!(result, ProbeResult::Healthy));
+        let request = rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        handle.join().unwrap();
+        assert!(
+            request.contains(&format!("Host: [::1]:{port}\r\n")),
+            "IPv6 Host header must be bracketed, got: {request:?}"
+        );
     }
 
     #[test]
@@ -1017,5 +1227,18 @@ mod tests {
             result,
             ProbeResult::Degraded(reason) if reason.contains("health_path")
         ));
+    }
+
+    #[test]
+    fn evaluate_projection_status_honors_configured_health_timeout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = CairnConfig::default();
+        config.store.kind = StoreKind::NexusSandbox;
+        config.store.nexus.endpoint = spawn_delayed_health_server(Duration::from_millis(300));
+        config.store.nexus.health_timeout_ms = 1_000;
+
+        let status = evaluate_projection_status(tmp.path(), &config);
+
+        assert_eq!(status.state, ProjectionStatusState::Healthy);
     }
 }

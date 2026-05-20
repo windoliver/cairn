@@ -55,6 +55,20 @@ fn help_flag_lists_all_eight_verbs() {
 }
 
 #[test]
+fn mcp_help_exits_zero() {
+    let out = cli()
+        .args(["mcp", "--help"])
+        .output()
+        .expect("cairn mcp --help");
+    assert!(out.status.success(), "exit: {:?}", out.status);
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    assert!(
+        stdout.contains("Run the Cairn MCP server over stdio"),
+        "help output missing stdio entry point: {stdout}",
+    );
+}
+
+#[test]
 fn no_args_prints_help_and_fails_closed() {
     // Generated `command()` sets subcommand_required(true) and
     // arg_required_else_help(true), so a bare `cairn` invocation is a clap
