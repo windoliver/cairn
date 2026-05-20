@@ -38,11 +38,6 @@ fn ingest_returns_aborted_internal() {
 }
 
 #[test]
-fn search_returns_aborted_internal() {
-    assert_aborted_internal(&["search", "test query", "--json"]);
-}
-
-#[test]
 fn retrieve_record_returns_aborted_internal() {
     assert_aborted_internal(&["retrieve", "01JXXXXXXXXXXXXXXXXXXXXXXX", "--json"]);
 }
@@ -60,11 +55,6 @@ fn assemble_hot_returns_aborted_internal() {
 #[test]
 fn capture_trace_returns_aborted_internal() {
     assert_aborted_internal(&["capture_trace", "--from", "/dev/null", "--json"]);
-}
-
-#[test]
-fn lint_returns_aborted_internal() {
-    assert_aborted_internal(&["lint", "--json"]);
 }
 
 #[test]

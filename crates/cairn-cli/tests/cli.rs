@@ -1,11 +1,11 @@
 //! End-to-end CLI smoke tests. Invokes the built `cairn` binary and asserts
-//! the P0 stub behaviour: help succeeds, verbs fail closed with `Internal`.
+//! common CLI behaviour: help succeeds, usage errors fail closed, and verb
+//! stubs that are still unwired return `Internal`.
 //!
-//! The CLI tree is generated from the IDL by `cairn-codegen`; the store is
-//! not wired yet (lands in #9), so every verb returns an `aborted` envelope
-//! with `code: "Internal"`. Exit-code contract (spec §5.2):
-//! - simple verb stubs (`ingest`, `search`, …) → exit 1, stderr contains
-//!   `Internal`, or `--json` → stdout contains `"status":"aborted"`.
+//! The CLI tree is generated from the IDL by `cairn-codegen`. Exit-code
+//! contract (spec §5.2):
+//! - unwired verb stubs → exit 1, stderr contains `Internal`, or `--json` →
+//!   stdout contains `"status":"aborted"`.
 //! - clap usage errors (unknown flag, unknown subcommand, missing required
 //!   `ArgGroup`, bare invocation with `subcommand_required`) → 64
 //!   (`EX_USAGE`).
@@ -71,17 +71,12 @@ fn no_args_prints_help_and_fails_closed() {
 
 #[test]
 fn simple_verb_human_mode_exits_one_with_internal() {
-    // After dispatch wiring: verbs with no store adapter exit 1 (generic failure)
+    // After dispatch wiring: unwired verbs exit 1 (generic failure)
     // and print "Internal" to stderr in human mode.
     // `ingest` is excluded: bare `cairn ingest` has no source → exit 64 (usage error).
+    // `search` and `lint` are excluded: they now have projection-aware handlers.
     // `retrieve` and `forget` are excluded: required ArgGroup → exit 64 (usage error).
-    for verb in [
-        "search",
-        "summarize",
-        "assemble_hot",
-        "capture_trace",
-        "lint",
-    ] {
+    for verb in ["summarize", "assemble_hot", "capture_trace"] {
         let out = cli().arg(verb).output().expect("cairn <verb>");
         assert!(
             !out.status.success(),
@@ -98,6 +93,20 @@ fn simple_verb_human_mode_exits_one_with_internal() {
             "verb {verb} stderr missing Internal error code: {stderr:?}",
         );
     }
+}
+
+#[test]
+fn search_with_no_query_exits_64() {
+    let out = cli().arg("search").output().expect("cairn search");
+    assert_eq!(out.status.code(), Some(64), "exit: {:?}", out.status);
+}
+
+#[test]
+fn lint_human_mode_exits_zero() {
+    let out = cli().arg("lint").output().expect("cairn lint");
+    assert!(out.status.success(), "exit: {:?}", out.status);
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    assert!(stdout.contains("lint_findings:"), "{stdout}");
 }
 
 #[test]
