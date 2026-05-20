@@ -1128,8 +1128,8 @@ fn run_skill_install(matches: &ArgMatches) -> ExitCode {
         };
         let harness = agents
             .first()
-            .map(agent_default_harness)
-            .unwrap_or(cairn_cli::skill::Harness::ClaudeCode);
+            .copied()
+            .map_or(cairn_cli::skill::Harness::ClaudeCode, agent_default_harness);
         let project_dir = match std::env::current_dir() {
             Ok(path) => path,
             Err(e) => {
@@ -1196,7 +1196,7 @@ fn run_skill_install(matches: &ArgMatches) -> ExitCode {
     }
 }
 
-fn agent_default_harness(agent: &cairn_cli::skill::Agent) -> cairn_cli::skill::Harness {
+fn agent_default_harness(agent: cairn_cli::skill::Agent) -> cairn_cli::skill::Harness {
     match agent {
         cairn_cli::skill::Agent::ClaudeCode => cairn_cli::skill::Harness::ClaudeCode,
         cairn_cli::skill::Agent::Codex => cairn_cli::skill::Harness::Codex,

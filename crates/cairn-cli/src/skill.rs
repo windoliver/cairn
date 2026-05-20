@@ -788,7 +788,7 @@ Then run:
 <!-- END CAIRN AGENT SKILL -->
 "#;
 
-const CLAUDE_GRAPH_COMMAND: &str = r#"---
+const CLAUDE_GRAPH_COMMAND: &str = r"---
 description: Explore non-obvious Cairn graph connections
 argument-hint: <entity-ids>
 ---
@@ -799,7 +799,7 @@ Use the MCP graph tools for non-obvious connections between known entity ids.
 Prefer `graph.surprising_connections` when comparing multiple entities.
 Do not use graph tools for ordinary file reads or code execution.
 <!-- END CAIRN AGENT SKILL -->
-"#;
+";
 
 impl AgentIntegrationReceipt {
     fn new(agent: Agent) -> Self {
