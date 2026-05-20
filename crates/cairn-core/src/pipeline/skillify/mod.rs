@@ -2,9 +2,13 @@
 //!
 //! Pure data and validation only. Workflow and CLI crates perform I/O.
 
+pub mod artifact;
 pub mod candidate;
+pub mod gate;
 
+pub use artifact::{SkillArtifact, SkillArtifactBundle, SkillArtifactError, SkillArtifactKind};
 pub use candidate::{
     SkillifyCandidate, SkillifyCandidateInput, SkillifyCandidateReject, SkillifyOutcome,
     SkillifySource, SkillifyStatus, SkillifyTrigger,
 };
+pub use gate::{SkillifyGate, SkillifyGateReport, SkillifyGateStatus};

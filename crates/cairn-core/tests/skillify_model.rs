@@ -1,7 +1,9 @@
 #![allow(missing_docs)]
 
 use cairn_core::pipeline::skillify::{
-    SkillifyCandidateInput, SkillifyOutcome, SkillifySource, SkillifyStatus, SkillifyTrigger,
+    SkillArtifact, SkillArtifactBundle, SkillArtifactKind, SkillifyCandidateInput, SkillifyGate,
+    SkillifyGateReport, SkillifyGateStatus, SkillifyOutcome, SkillifySource, SkillifyStatus,
+    SkillifyTrigger,
 };
 
 fn input(outcome: SkillifyOutcome) -> SkillifyCandidateInput {
@@ -95,4 +97,78 @@ fn unverified_trajectory_is_rejected_before_authoring() {
         err.to_string(),
         "skillify candidate rejected: outcome unverified is not eligible for authoring"
     );
+}
+
+fn artifact(kind: SkillArtifactKind, path: &str) -> SkillArtifact {
+    SkillArtifact {
+        kind,
+        path: path.to_owned(),
+        content_sha256: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            .to_owned(),
+        evidence_refs: vec!["01HQZX9F5N0000000000000001".to_owned()],
+        status: "generated".to_owned(),
+    }
+}
+
+#[test]
+fn complete_bundle_has_all_ten_artifacts() {
+    let bundle = SkillArtifactBundle {
+        candidate_id: "skc_fixture".to_owned(),
+        version: 1,
+        artifacts: SkillArtifactKind::required()
+            .iter()
+            .map(|kind| artifact(*kind, &kind.default_relative_path("deploy-hotfix")))
+            .collect(),
+    };
+
+    bundle.validate().expect("complete bundle");
+}
+
+#[test]
+fn missing_artifact_blocks_bundle_validation() {
+    let bundle = SkillArtifactBundle {
+        candidate_id: "skc_fixture".to_owned(),
+        version: 1,
+        artifacts: vec![artifact(
+            SkillArtifactKind::SkillContract,
+            "bundle/skills/skill_deploy.md",
+        )],
+    };
+
+    let err = bundle.validate().expect_err("missing artifacts");
+    assert!(
+        err.to_string()
+            .contains("missing artifact deterministic_script")
+    );
+}
+
+#[test]
+fn path_escape_is_rejected() {
+    let bad = artifact(SkillArtifactKind::DeterministicScript, "../escape.sh");
+    let err = bad.validate_path().expect_err("escape rejected");
+    assert_eq!(
+        err.to_string(),
+        "skillify artifact invalid path `../escape.sh`: path must stay inside the candidate bundle"
+    );
+}
+
+#[test]
+fn gate_report_requires_every_gate_passed() {
+    let report = SkillifyGateReport {
+        candidate_id: "skc_fixture".to_owned(),
+        gates: vec![
+            SkillifyGate {
+                name: "skill_contract".to_owned(),
+                status: SkillifyGateStatus::Passed,
+                message: None,
+            },
+            SkillifyGate {
+                name: "unit_tests".to_owned(),
+                status: SkillifyGateStatus::Failed,
+                message: Some("test failed".to_owned()),
+            },
+        ],
+    };
+
+    assert!(!report.ready_for_promotion());
 }
