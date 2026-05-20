@@ -419,6 +419,13 @@ pub enum PlanReason {
         /// Number of evidence records consulted.
         evidence_count: u32,
     },
+    /// Triggered by the Skillify pipeline after all promotion gates pass.
+    Skillify {
+        /// Stable candidate id from `SkillifyCandidate`.
+        candidate_id: String,
+        /// Number of passing gates recorded in the gate report.
+        gate_count: u32,
+    },
 }
 
 /// On-disk wrapper persisted under `.cairn/flush/`.

@@ -7,7 +7,9 @@ use cairn_core::contract::llm_provider::{
     CompletionOutput, CompletionRequest, LLMProvider, LLMProviderCapabilities, LlmError,
 };
 use cairn_core::contract::version::{ContractVersion, VersionRange};
+use cairn_core::domain::flush_plan::PlanReason;
 use cairn_workflows::scheduler::{HandlerOutcome, JobHandler};
+use cairn_workflows::skillify::planner::{SkillifyPlanSource, SkillifyPromotionInput};
 use cairn_workflows::{SkillifyHandler, SkillifyPayload, SkillifyTrigger};
 use serde_json::json;
 use tempfile::TempDir;
@@ -243,5 +245,24 @@ async fn job_handler_maps_permanent_failures_to_validation_permanent() {
             class: FailureClass::Validation,
             ..
         }
+    ));
+}
+
+#[test]
+fn promotion_plan_records_candidate_and_gate_count() {
+    let plan = SkillifyPlanSource::plan_promotion(SkillifyPromotionInput {
+        candidate_id: "skc_fixture".to_owned(),
+        skill_target_id: "01HQZX9F5N0000000000000003".to_owned(),
+        evidence_refs: vec!["01HQZX9F5N0000000000000001".to_owned()],
+        gate_count: 10,
+    })
+    .expect("plan");
+
+    assert!(matches!(
+        plan.reason,
+        PlanReason::Skillify {
+            ref candidate_id,
+            gate_count: 10
+        } if candidate_id == "skc_fixture"
     ));
 }
