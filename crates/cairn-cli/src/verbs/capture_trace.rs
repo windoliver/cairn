@@ -1102,7 +1102,7 @@ fn trace_text(event: &CaptureEvent, body_bytes: &[u8]) -> anyhow::Result<String>
 
 fn explicit_skillify_request(raw_text: &str) -> bool {
     matches!(
-        raw_text.trim().to_ascii_lowercase().as_str(),
+        raw_text,
         "skillify this" | "skillify it" | "/skillify" | "cairn skillify"
     )
 }
@@ -2339,6 +2339,14 @@ mod tests {
         assert_eq!(payload.trigger, cairn_workflows::SkillifyTrigger::Explicit);
         assert_eq!(payload.key, STOP_SESSION_ID);
         assert_eq!(payload.source_record_ids.len(), 2);
+    }
+
+    #[test]
+    fn explicit_skillify_request_requires_exact_command() {
+        assert!(explicit_skillify_request("skillify this"));
+        assert!(!explicit_skillify_request("Skillify this"));
+        assert!(!explicit_skillify_request(" skillify this"));
+        assert!(!explicit_skillify_request("skillify this\n"));
     }
 
     #[tokio::test]
