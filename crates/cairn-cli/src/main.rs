@@ -38,6 +38,7 @@ fn build_command() -> clap::Command {
         // Management subcommand (plugins already has --json per sub-subcommand).
         .subcommand(plugins_subcommand())
         .subcommand(bootstrap_subcommand())
+        .subcommand(reindex_subcommand())
 }
 
 fn bootstrap_subcommand() -> clap::Command {
@@ -49,6 +50,23 @@ fn bootstrap_subcommand() -> clap::Command {
                 .default_value(".")
                 .value_name("PATH")
                 .help("Vault root directory (default: current directory)"),
+        )
+}
+
+fn reindex_subcommand() -> clap::Command {
+    clap::Command::new("reindex")
+        .about("Rebuild Nexus projection indexes from the authoritative database")
+        .arg(
+            clap::Arg::new("from-db")
+                .long("from-db")
+                .action(clap::ArgAction::SetTrue)
+                .help("Reindex from the authoritative database"),
+        )
+        .arg(
+            clap::Arg::new("json")
+                .long("json")
+                .action(clap::ArgAction::SetTrue)
+                .help("Emit compact JSON"),
         )
 }
 
@@ -111,6 +129,7 @@ fn main() -> ExitCode {
         Some(("handshake", sub)) => verbs::handshake::run(sub.get_flag("json")),
         Some(("plugins", sub)) => run_plugins(sub),
         Some(("bootstrap", sub)) => run_bootstrap(sub),
+        Some(("reindex", sub)) => verbs::reindex::run(sub),
         None => unreachable!("subcommand_required(true) ensures a subcommand is always present"),
         Some((verb, _)) => {
             // Defensive: clap's subcommand_required(true) prevents this in practice.
