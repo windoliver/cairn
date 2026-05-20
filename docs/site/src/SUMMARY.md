@@ -19,6 +19,7 @@
 - [Plugins](usage/plugins.md)
 - [MCP](usage/mcp.md)
 - [Claude Code](usage/claude-code.md)
+- [Codex](usage/codex.md)
 - [Cairn Skill](usage/skill.md)
 - [Claude Code Reference Consumer](usage/claude-code-reference.md)
 
@@ -43,6 +44,8 @@
   - [`cairn setup`](reference/generated/commands/setup.md)
   - [`cairn setup claude-code`](reference/generated/commands/setup-claude-code.md)
   - [`cairn setup claude-code remove`](reference/generated/commands/setup-claude-code-remove.md)
+  - [`cairn setup codex`](reference/generated/commands/setup-codex.md)
+  - [`cairn setup codex remove`](reference/generated/commands/setup-codex-remove.md)
   - [`cairn vault`](reference/generated/commands/vault.md)
   - [`cairn vault add`](reference/generated/commands/vault-add.md)
   - [`cairn vault list`](reference/generated/commands/vault-list.md)

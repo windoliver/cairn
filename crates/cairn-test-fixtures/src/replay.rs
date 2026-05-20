@@ -17,6 +17,7 @@ use cairn_core::domain::taxonomy::{MemoryClass, MemoryKind, MemoryVisibility};
 use cairn_core::domain::trace::TraceEvent;
 use cairn_core::domain::{RecordId, Rfc3339Timestamp, ScopeTuple, TargetId};
 use cairn_core::generated::envelope::RetrieveData;
+use cairn_core::verbs::assemble_hot::{HotMemoryInputs, assemble_hot_with_inputs};
 use cairn_core::verbs::retrieve;
 use cairn_core::verbs::search::{self, SearchError, SearchMode, SearchRequest};
 use cairn_embeddings_local::{EmbeddingModel, MockEmbedder};
@@ -152,6 +153,38 @@ pub struct ReplayRecord {
 pub enum ReplayAction {
     /// Search query expectation.
     Search(ReplaySearchAction),
+    /// Hot-memory assembly expectation.
+    AssembleHot {
+        /// User story label.
+        story: String,
+        /// Expected record ids included in the hot-memory debug trace.
+        expected_record_ids: Vec<String>,
+    },
+    /// Capture-trace-shaped session event expectation.
+    CaptureTrace {
+        /// User story label.
+        story: String,
+        /// Session id to inspect.
+        session_id: String,
+        /// Expected trace events in sequence order.
+        expected_trace_events: Vec<String>,
+    },
+    /// Summary replay expectation.
+    Summarize {
+        /// User story label.
+        story: String,
+        /// Session id to summarize.
+        session_id: String,
+        /// Expected summary record ids.
+        expected_record_ids: Vec<String>,
+    },
+    /// Lint replay expectation.
+    Lint {
+        /// User story label.
+        story: String,
+        /// Expected lint status.
+        expected_status: String,
+    },
     /// Session replay expectation.
     RetrieveSession {
         /// User story label.
@@ -477,6 +510,46 @@ async fn run_action(
 ) -> ReplayCheckReport {
     match action {
         ReplayAction::Search(search) => run_search_action(store, scenario, search).await,
+        ReplayAction::AssembleHot {
+            story,
+            expected_record_ids,
+        } => {
+            let actual = assemble_hot_replay(store)
+                .await
+                .unwrap_or_else(|e| error_value(&e));
+            let expected = json!({ "record_ids": expected_record_ids });
+            report_check(&scenario.id, story, "assemble_hot", None, expected, actual)
+        }
+        ReplayAction::CaptureTrace {
+            story,
+            session_id,
+            expected_trace_events,
+        } => {
+            let actual = trace_events_only(store, session_id)
+                .await
+                .unwrap_or_else(|e| error_value(&e));
+            let expected = json!({ "trace_events": expected_trace_events });
+            report_check(&scenario.id, story, "capture_trace", None, expected, actual)
+        }
+        ReplayAction::Summarize {
+            story,
+            session_id,
+            expected_record_ids,
+        } => {
+            let actual = summarize_replay(store, session_id)
+                .await
+                .unwrap_or_else(|e| error_value(&e));
+            let expected = json!({ "record_ids": expected_record_ids });
+            report_check(&scenario.id, story, "summarize", None, expected, actual)
+        }
+        ReplayAction::Lint {
+            story,
+            expected_status,
+        } => {
+            let actual = lint_replay(store).await.unwrap_or_else(|e| error_value(&e));
+            let expected = json!({ "status": expected_status });
+            report_check(&scenario.id, story, "lint", None, expected, actual)
+        }
         ReplayAction::RetrieveSession {
             story,
             session_id,
@@ -574,6 +647,116 @@ async fn run_search_action(
     )
 }
 
+async fn assemble_hot_replay(store: &SqliteMemoryStore) -> Result<Value, ReplayError> {
+    let records = all_records(store).await?;
+    let pinned = records
+        .iter()
+        .filter(|record| matches!(record.kind, MemoryKind::User | MemoryKind::Feedback))
+        .collect::<Vec<_>>();
+    let projects = records
+        .iter()
+        .filter(|record| record.kind == MemoryKind::Project)
+        .collect::<Vec<_>>();
+    let playbooks = records
+        .iter()
+        .filter(|record| record.kind == MemoryKind::Playbook)
+        .collect::<Vec<_>>();
+    let summaries = records
+        .iter()
+        .filter(|record| record.kind == MemoryKind::Reasoning && record.scope.session_id.is_some())
+        .collect::<Vec<_>>();
+    let user_signals = records
+        .iter()
+        .filter(|record| record.kind == MemoryKind::UserSignal)
+        .collect::<Vec<_>>();
+    let now = Rfc3339Timestamp::parse("2026-04-22T15:00:00Z")
+        .map_err(|e| ReplayError::Store(format!("parse hot-memory now: {e}")))?;
+    let visibility = [MemoryVisibility::Private];
+    let inputs = HotMemoryInputs {
+        purpose_md: "",
+        index_md: "",
+        pinned_candidates: &pinned,
+        project_candidates: &projects,
+        playbook_candidates: &playbooks,
+        rolling_summary_candidates: &summaries,
+        user_signal_candidates: &user_signals,
+        now,
+        scope: ScopeTuple::default(),
+        authorized_visibility: &visibility,
+        include_debug: true,
+    };
+    let config = CairnConfig::default();
+    let data = assemble_hot_with_inputs(&inputs, &config.vault.hot_memory)
+        .map_err(|e| ReplayError::Store(format!("assemble_hot: {e}")))?;
+    let mut ids = data
+        .debug
+        .into_iter()
+        .flat_map(|debug| debug.steps)
+        .flat_map(|step| step.included)
+        .map(|included| included.record_id)
+        .collect::<Vec<_>>();
+    ids.sort();
+    Ok(json!({ "record_ids": ids }))
+}
+
+async fn trace_events_only(
+    store: &SqliteMemoryStore,
+    session_id: &str,
+) -> Result<Value, ReplayError> {
+    let summary = trace_summary(store, Some(session_id), None).await?;
+    Ok(json!({
+        "trace_events": summary
+            .get("trace_events")
+            .cloned()
+            .unwrap_or_else(|| Value::Array(Vec::new())),
+    }))
+}
+
+async fn summarize_replay(
+    store: &SqliteMemoryStore,
+    session_id: &str,
+) -> Result<Value, ReplayError> {
+    let mut ids = all_records(store)
+        .await?
+        .into_iter()
+        .filter(|record| {
+            record.kind == MemoryKind::Reasoning
+                && record.scope.session_id.as_deref() == Some(session_id)
+                && record
+                    .extra_frontmatter
+                    .get("trace_event")
+                    .and_then(Value::as_str)
+                    == Some("turn_summary")
+        })
+        .map(|record| record.id.as_str().to_owned())
+        .collect::<Vec<_>>();
+    ids.sort();
+    Ok(json!({ "record_ids": ids }))
+}
+
+async fn lint_replay(store: &SqliteMemoryStore) -> Result<Value, ReplayError> {
+    let records = all_records(store).await?;
+    let mut seen = BTreeSet::new();
+    for record in &records {
+        record
+            .validate()
+            .map_err(|e| ReplayError::Store(format!("lint record {}: {e}", record.id.as_str())))?;
+        if !seen.insert(record.id.as_str().to_owned()) {
+            return Ok(json!({ "status": "duplicate_record_id" }));
+        }
+        if let Some(event) = record
+            .extra_frontmatter
+            .get("trace_event")
+            .and_then(Value::as_str)
+        {
+            serde_json::from_value::<TraceEvent>(Value::String(event.to_owned())).map_err(|e| {
+                ReplayError::Store(format!("lint trace_event {}: {e}", record.id.as_str()))
+            })?;
+        }
+    }
+    Ok(json!({ "status": "clean" }))
+}
+
 async fn run_search(
     store: &SqliteMemoryStore,
     scenario: &ReplayScenario,
@@ -611,6 +794,17 @@ async fn run_search(
             "message": err.to_string(),
         }),
     }
+}
+
+async fn all_records(store: &SqliteMemoryStore) -> Result<Vec<MemoryRecord>, ReplayError> {
+    store
+        .list(&ListArgs {
+            limit: 1000,
+            ..ListArgs::default()
+        })
+        .await
+        .map(|page| page.records)
+        .map_err(|e| ReplayError::Store(format!("list records: {e}")))
 }
 
 fn search_success_value(outcome: &search::SearchOutcome) -> Value {

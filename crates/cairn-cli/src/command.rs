@@ -284,6 +284,7 @@ fn setup_subcommand() -> clap::Command {
         .subcommand_required(true)
         .arg_required_else_help(true)
         .subcommand(claude_code_setup_subcommand())
+        .subcommand(codex_setup_subcommand())
 }
 
 fn claude_code_setup_subcommand() -> clap::Command {
@@ -329,6 +330,54 @@ fn claude_code_common_args() -> [clap::Arg; 5] {
             .value_name("NAME")
             .default_value("cairn")
             .help("Claude Code MCP server name to configure"),
+        clap::Arg::new("json")
+            .long("json")
+            .action(clap::ArgAction::SetTrue)
+            .help("Emit JSON receipt instead of human-readable output"),
+    ]
+}
+
+fn codex_setup_subcommand() -> clap::Command {
+    clap::Command::new("codex")
+        .about("Register Cairn as a Codex stdio MCP server")
+        .args(codex_common_args())
+        .arg(
+            clap::Arg::new("binary")
+                .long("binary")
+                .value_name("PATH")
+                .value_parser(clap::value_parser!(std::path::PathBuf))
+                .help("Cairn binary path to register as the MCP command"),
+        )
+        .subcommand(
+            clap::Command::new("remove")
+                .about("Remove the Cairn MCP server from Codex config")
+                .args(codex_common_args()),
+        )
+}
+
+fn codex_common_args() -> [clap::Arg; 5] {
+    [
+        clap::Arg::new("scope")
+            .long("scope")
+            .value_name("SCOPE")
+            .default_value("local")
+            .value_parser(clap::builder::EnumValueParser::<setup::codex::CodexScope>::new())
+            .help("Codex config scope: local or project"),
+        clap::Arg::new("project-dir")
+            .long("project-dir")
+            .value_name("PATH")
+            .value_parser(clap::value_parser!(std::path::PathBuf))
+            .help("Project directory used for project Codex config and hooks"),
+        clap::Arg::new("home-dir")
+            .long("home-dir")
+            .value_name("PATH")
+            .value_parser(clap::value_parser!(std::path::PathBuf))
+            .help("Home directory used for local Codex config"),
+        clap::Arg::new("server-name")
+            .long("server-name")
+            .value_name("NAME")
+            .default_value("cairn")
+            .help("Codex MCP server name to configure"),
         clap::Arg::new("json")
             .long("json")
             .action(clap::ArgAction::SetTrue)

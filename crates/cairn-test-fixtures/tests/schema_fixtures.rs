@@ -187,7 +187,11 @@ fn replay_dir() -> std::path::PathBuf {
 
 #[test]
 fn replay_scenarios_deserialize() {
-    for name in ["p0_stories.json", "p0_keyword_only.json"] {
+    for name in [
+        "p0_stories.json",
+        "p0_keyword_only.json",
+        "codex_consumer.json",
+    ] {
         let path = replay_dir().join(name);
         let scenario = cairn_test_fixtures::replay::load_scenario_file(&path)
             .unwrap_or_else(|e| panic!("load {}: {e}", path.display()));
