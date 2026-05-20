@@ -24,6 +24,7 @@ Commands:
   handshake      cairn.mcp.v1 prelude: handshake
   status         cairn.mcp.v1 prelude: status
   plugins        Manage and inspect bundled plugins
+  import         Create reviewed Cairn ingest plans from a legacy memory archive
   bootstrap      Initialize a vault directory tree with the §3 layout
   doctor         Reference-consumer diagnostics
   nexus          Nexus sandbox setup and diagnostics
@@ -67,6 +68,7 @@ Options:
 - [`cairn handshake`](commands/handshake.md) - cairn.mcp.v1 prelude: handshake
 - [`cairn status`](commands/status.md) - cairn.mcp.v1 prelude: status
 - [`cairn plugins`](commands/plugins.md) - Manage and inspect bundled plugins
+- [`cairn import`](commands/import.md) - Create reviewed Cairn ingest plans from a legacy memory archive
 - [`cairn bootstrap`](commands/bootstrap.md) - Initialize a vault directory tree with the §3 layout
 - [`cairn doctor`](commands/doctor.md) - Reference-consumer diagnostics
 - [`cairn nexus`](commands/nexus.md) - Nexus sandbox setup and diagnostics

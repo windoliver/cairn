@@ -13,6 +13,7 @@ pub mod doctor;
 pub(crate) mod generated;
 pub mod hooks;
 pub mod identity;
+pub mod import;
 pub mod llm;
 pub mod mcp;
 pub mod metrics;

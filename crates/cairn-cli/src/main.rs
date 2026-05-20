@@ -9,7 +9,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use cairn_cli::{command, doctor, hooks, identity, nexus_cli, plugins, repair, setup, verbs};
+use cairn_cli::{
+    command, doctor, hooks, identity, import, nexus_cli, plugins, repair, setup, verbs,
+};
 use cairn_core::contract::registry::PluginError;
 use cairn_core::generated::envelope::ResponseVerb;
 use clap::ArgMatches;
@@ -131,6 +133,7 @@ fn subcommand_needs_vault_guard(subcommand: Option<(&str, &ArgMatches)>) -> bool
             | "bootstrap"
             | "setup"
             | "plugins"
+            | "import"
             | "mcp"
             | "admin"
             | "backup"
@@ -335,6 +338,19 @@ fn main() -> ExitCode {
         },
         Some(("handshake", sub)) => run_handshake(sub, explicit_vault.as_deref()),
         Some(("plugins", sub)) => run_plugins(sub),
+        Some(("import", sub)) => match resolve_vault_or_cwd(explicit_vault.as_deref()) {
+            Ok((vault_root, _source)) => {
+                if let Some(code) = enforce_vault_binding("import", &vault_root) {
+                    code
+                } else {
+                    import::run(sub, &vault_root)
+                }
+            }
+            Err(e) => {
+                eprintln!("cairn import: vault resolution error — {e:#}");
+                ExitCode::from(78)
+            }
+        },
         Some(("bootstrap", sub)) => run_bootstrap(sub),
         Some(("doctor", sub)) => doctor::run(sub),
         Some(("nexus", sub)) => run_nexus(sub, explicit_vault.as_deref()),
