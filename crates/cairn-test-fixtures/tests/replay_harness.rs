@@ -138,10 +138,34 @@ fn p0_replay_manifest_uses_canonical_trace_event_names() {
 
 #[test]
 fn replay_manifests_deserialize() {
-    for name in ["p0_stories", "p0_keyword_only"] {
+    for name in ["p0_stories", "p0_keyword_only", "codex_consumer"] {
         let scenario = load_named_scenario(name).expect("load scenario");
         assert_eq!(scenario.id, name);
         assert!(!scenario.records.is_empty());
         assert!(!scenario.actions.is_empty());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn codex_consumer_replay_passes_end_to_end() {
+    let report = run_named_scenario("codex_consumer")
+        .await
+        .expect("run scenario");
+    assert!(report.passed(), "{report:#?}");
+    assert_eq!(report.scenario_id, "codex_consumer");
+    for verb in [
+        "assemble_hot",
+        "capture_trace",
+        "forget_record",
+        "lint",
+        "retrieve_session",
+        "retrieve_turn",
+        "search",
+        "summarize",
+    ] {
+        assert!(
+            report.checks.iter().any(|check| check.verb == verb),
+            "missing check for {verb}: {report:#?}"
+        );
     }
 }

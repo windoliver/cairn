@@ -9,6 +9,15 @@ cairn doctor claude-code
 
 See [Claude Code](claude-code.md) for the full reference-consumer workflow.
 
+For Codex, use:
+
+```bash
+cairn setup codex --vault <name-or-path>
+```
+
+See [Codex](codex.md) for the second-consumer workflow, including the hook
+fallback caveat.
+
 `cairn-mcp` contains the lower-level MCP adapter crate, generated tool
 declarations, plugin manifest, and stdio serving entry point.
 

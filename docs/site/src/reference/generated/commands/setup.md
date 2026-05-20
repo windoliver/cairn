@@ -13,6 +13,7 @@ Usage: cairn setup [OPTIONS] <COMMAND>
 
 Commands:
   claude-code  Register Cairn as a Claude Code stdio MCP server
+  codex        Register Cairn as a Codex stdio MCP server
   help         Print this message or the help of the given subcommand(s)
 
 Options:
@@ -24,3 +25,4 @@ Options:
 ## Subcommands
 
 - [`cairn setup claude-code`](setup-claude-code.md) - Register Cairn as a Claude Code stdio MCP server
+- [`cairn setup codex`](setup-codex.md) - Register Cairn as a Codex stdio MCP server
