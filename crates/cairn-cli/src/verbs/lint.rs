@@ -2440,19 +2440,14 @@ fn push_lint_finding(data: &mut LintData, finding: Finding) {
     data.findings.push(finding);
 }
 
-fn run_skill_lint(
-    json: bool,
-    vault_root: Option<&Path>,
+fn append_skill_lint_findings(
+    vault_root: &Path,
     fix_skill_plan: bool,
     operation_id: &Ulid,
-) -> ExitCode {
-    let vault_root = vault_root.map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+) -> anyhow::Result<Vec<Finding>> {
     let snapshot = match build_skill_lint_snapshot(&vault_root) {
         Ok(snapshot) => snapshot,
-        Err(e) => {
-            emit_aborted(json, operation_id.clone(), &format!("skill lint: {e}"));
-            return ExitCode::FAILURE;
-        }
+        Err(e) => return Err(anyhow::anyhow!("skill lint: {e}")),
     };
     let mut findings = cairn_core::pipeline::skillify::lint_skill_snapshot(&snapshot)
         .into_iter()
@@ -2461,30 +2456,12 @@ fn run_skill_lint(
 
     if fix_skill_plan
         && !findings.is_empty()
-        && let Err(e) = append_skill_fix_plan(&vault_root, operation_id, &mut findings)
+        && let Err(e) = append_skill_fix_plan(vault_root, operation_id, &mut findings)
     {
-        emit_aborted(json, operation_id.clone(), &format!("skill lint: {e}"));
-        return ExitCode::FAILURE;
+        return Err(anyhow::anyhow!("skill lint: {e}"));
     }
 
-    let total = usize_to_u64(findings.len());
-    let has_blocking_findings = findings.iter().any(has_warning_or_error);
-    let data = LintData {
-        summary: edge_summary(&findings, total, 0),
-        findings,
-        report_path: None,
-    };
-    let response = committed_response(operation_id.clone(), data);
-    if json {
-        emit_json(&response);
-    } else if let Some(ResponseData::Lint(data)) = response.data.as_ref() {
-        emit_human(data, &response.operation_id);
-    }
-    if has_blocking_findings {
-        ExitCode::FAILURE
-    } else {
-        ExitCode::SUCCESS
-    }
+    Ok(findings)
 }
 
 fn append_skill_fix_plan(
@@ -2534,25 +2511,81 @@ fn append_skill_fix_plan(
 fn build_skill_lint_snapshot(
     vault_root: &Path,
 ) -> anyhow::Result<cairn_core::pipeline::skillify::SkillLintSnapshot> {
+    #[derive(Debug)]
+    struct SkillSource {
+        path: PathBuf,
+        uses_root: PathBuf,
+        candidate_hint: Option<String>,
+        resolver_path: Option<PathBuf>,
+    }
+
+    let mut sources = Vec::new();
     let skills_dir = vault_root.join("skills");
     let mut skills = Vec::new();
-    if !skills_dir.exists() {
-        return Ok(cairn_core::pipeline::skillify::SkillLintSnapshot { skills });
-    }
 
-    let mut paths = Vec::new();
-    for entry in std::fs::read_dir(&skills_dir)
-        .with_context(|| format!("reading {}", skills_dir.display()))?
-    {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(std::ffi::OsStr::to_str) == Some("md") {
-            paths.push(path);
+    if skills_dir.exists() {
+        for entry in std::fs::read_dir(&skills_dir)
+            .with_context(|| format!("reading {}", skills_dir.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(std::ffi::OsStr::to_str) == Some("md") {
+                sources.push(SkillSource {
+                    path,
+                    uses_root: vault_root.to_path_buf(),
+                    candidate_hint: None,
+                    resolver_path: None,
+                });
+            }
         }
     }
-    paths.sort();
 
-    for path in paths {
+    let candidate_parent = vault_root.join(".cairn/evolution/skillify");
+    if candidate_parent.exists() {
+        for entry in std::fs::read_dir(&candidate_parent)
+            .with_context(|| format!("reading {}", candidate_parent.display()))?
+        {
+            let entry = entry?;
+            let candidate_root = entry.path();
+            if !candidate_root.is_dir() {
+                continue;
+            }
+            let Some(candidate_id) = candidate_root
+                .file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            if !safe_path_token(&candidate_id) {
+                continue;
+            }
+            let bundle_root = candidate_root.join("bundle");
+            let candidate_skills_dir = bundle_root.join("skills");
+            if !candidate_skills_dir.exists() {
+                continue;
+            }
+            for entry in std::fs::read_dir(&candidate_skills_dir)
+                .with_context(|| format!("reading {}", candidate_skills_dir.display()))?
+            {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().and_then(std::ffi::OsStr::to_str) == Some("md") {
+                    sources.push(SkillSource {
+                        path,
+                        uses_root: bundle_root.clone(),
+                        candidate_hint: Some(candidate_id.clone()),
+                        resolver_path: Some(bundle_root.join("resolver/triggers.json")),
+                    });
+                }
+            }
+        }
+    }
+
+    sources.sort_by(|a, b| a.path.cmp(&b.path));
+
+    for source in sources {
+        let path = source.path;
         let body = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
         let Some(frontmatter) = frontmatter(&body) else {
@@ -2567,14 +2600,19 @@ fn build_skill_lint_snapshot(
         let lane = yaml_scalar(frontmatter, "lane").unwrap_or_default();
         let uses = yaml_scalar(frontmatter, "uses");
         let files_to = yaml_scalar(frontmatter, "files_to");
-        let candidate_id = yaml_scalar(frontmatter, "candidate_id").unwrap_or_default();
-        let resolver_triggers = if safe_path_token(&skill_id) {
-            let resolver = vault_root
-                .join(".cairn/resolver/skills")
-                .join(format!("{skill_id}.json"));
-            resolver_triggers(&resolver)?
-        } else {
-            Vec::new()
+        let candidate_id = yaml_scalar(frontmatter, "candidate_id")
+            .or(source.candidate_hint)
+            .unwrap_or_default();
+        let resolver_path = source.resolver_path.or_else(|| {
+            safe_path_token(&skill_id).then(|| {
+                vault_root
+                    .join(".cairn/resolver/skills")
+                    .join(format!("{skill_id}.json"))
+            })
+        });
+        let resolver_triggers = match resolver_path {
+            Some(path) => resolver_triggers(&path)?,
+            None => Vec::new(),
         };
         let safe_candidate_id = safe_path_token(&candidate_id);
         let gate_report_passed = if safe_candidate_id {
@@ -2588,11 +2626,10 @@ fn build_skill_lint_snapshot(
             0
         };
         let mut existing_paths = vec![rel(vault_root, &path)];
-        if let Some(uses) = &uses
-            && safe_vault_relative_path(uses)
-            && vault_root.join(uses).exists()
-        {
-            existing_paths.push(uses.clone());
+        if let Some(uses) = &uses {
+            if let Some(existing) = existing_relative_path(&source.uses_root, uses)? {
+                existing_paths.push(existing);
+            }
         }
         skills.push(cairn_core::pipeline::skillify::SkillLintSkill {
             skill_id,
@@ -2635,9 +2672,10 @@ fn resolver_triggers(path: &Path) -> anyhow::Result<Vec<String>> {
         &std::fs::read(path).with_context(|| format!("reading {}", path.display()))?,
     )
     .with_context(|| format!("parsing {}", path.display()))?;
-    Ok(value
-        .get("triggers")
-        .and_then(serde_json::Value::as_array)
+    let triggers = value
+        .as_array()
+        .or_else(|| value.get("triggers").and_then(serde_json::Value::as_array));
+    Ok(triggers
         .map(|triggers| {
             triggers
                 .iter()
@@ -2697,6 +2735,27 @@ fn safe_vault_relative_path(value: &str) -> bool {
                 std::path::Component::Normal(_) | std::path::Component::CurDir
             )
         })
+}
+
+fn existing_relative_path(root: &Path, value: &str) -> anyhow::Result<Option<String>> {
+    if !safe_vault_relative_path(value) {
+        return Ok(None);
+    }
+    let path = root.join(value);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let root = root
+        .canonicalize()
+        .with_context(|| format!("canonicalizing {}", root.display()))?;
+    let target = path
+        .canonicalize()
+        .with_context(|| format!("canonicalizing {}", path.display()))?;
+    if target.starts_with(&root) {
+        Ok(Some(value.to_owned()))
+    } else {
+        Ok(None)
+    }
 }
 
 fn rel(root: &Path, path: &Path) -> String {
@@ -2763,10 +2822,6 @@ pub fn run(sub: &ArgMatches, vault_root: Option<&Path>) -> ExitCode {
 
     if let Some(plan_id) = plan_id {
         return run_plan_lint(json, vault_root, &plan_id);
-    }
-
-    if skill {
-        return run_skill_lint(json, vault_root, fix_skill_plan, &operation_id);
     }
 
     if fix_markdown_flag {
@@ -2859,6 +2914,15 @@ pub fn run(sub: &ArgMatches, vault_root: Option<&Path>) -> ExitCode {
     // Helper: run edge lint, merge its findings into `data`, recompute
     // summary, emit response. Returns the correct `ExitCode`.
     let emit_merged = |mut data: cairn_core::generated::verbs::lint::LintData| {
+        if skill {
+            match append_skill_lint_findings(&vault_root, fix_skill_plan, &operation_id) {
+                Ok(findings) => data.findings.extend(findings),
+                Err(err) => {
+                    emit_aborted(json, operation_id.clone(), &err.to_string());
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
         // Also run the edge-integrity pass (read-only) so WAL
         // contradiction findings are surfaced alongside vault-level
         // findings. run_edge_lint uses its own rusqlite connection
