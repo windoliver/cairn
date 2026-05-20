@@ -28,10 +28,11 @@ pub fn render_human(registry: &PluginRegistry) -> String {
 
     // Static-width columns wide enough for current bundled plugin names
     // (longest contract = "WorkflowOrchestrator" = 20 chars; longest plugin
-    // name = "cairn-sensors-local" = 19 chars; longest range = "[0.1.0, 0.2.0)" = 14
-    // chars; longest source = "bundled:cairn-sensors-local" = 27 chars).
+    // name = "cairn-frontend-obsidian" = 23 chars; longest range =
+    // "[0.1.0, 0.2.0)" = 14 chars; longest source =
+    // "bundled:cairn-frontend-obsidian" = 31 chars).
     // Width chosen so headers line up without dynamic measurement.
-    let col_name = 22;
+    let col_name = 25;
     let col_contract = 22;
     let col_range = 18;
 
@@ -100,6 +101,7 @@ fn capabilities_for(
                     "vector": c.vector,
                     "graph_edges": c.graph_edges,
                     "transactions": c.transactions,
+                    "per_record_consent_model": c.per_record_consent_model,
                 })
             },
         ),
@@ -137,15 +139,24 @@ fn capabilities_for(
                 })
             },
         ),
-        // `LLMProvider`, `FrontendAdapter`, and `AgentProvider` have no
-        // bundled implementations yet, so their capabilities render as
-        // `{}`. `ContractKind` is `#[non_exhaustive]`; the trailing `_`
-        // arm is a safety net for future variants until this renderer
-        // learns about them.
-        ContractKind::LLMProvider
-        | ContractKind::FrontendAdapter
-        | ContractKind::AgentProvider
-        | _ => serde_json::json!({}),
+        ContractKind::FrontendAdapter => registry.frontend_adapter(name).map_or_else(
+            || serde_json::json!({}),
+            |p| {
+                let c = p.capabilities();
+                serde_json::json!({
+                    "frontmatter": c.frontmatter,
+                    "sidecar_files": c.sidecar_files,
+                    "live_plugin": c.live_plugin,
+                    "graph_view": c.graph_view,
+                    "max_frontmatter_fields": c.max_frontmatter_fields,
+                })
+            },
+        ),
+        // `LLMProvider` and `AgentProvider` have no bundled implementations
+        // yet, so their capabilities render as `{}`. `ContractKind` is
+        // `#[non_exhaustive]`; the trailing `_` arm is a safety net for
+        // future variants until this renderer learns about them.
+        ContractKind::LLMProvider | ContractKind::AgentProvider | _ => serde_json::json!({}),
     }
 }
 
@@ -155,9 +166,15 @@ mod tests {
     use crate::plugins::host::register_all;
 
     #[test]
-    fn human_lists_all_four_bundled_plugins() {
+    fn human_lists_all_seven_bundled_plugins() {
         let reg = register_all().expect("registers");
         let text = render_human(&reg);
+        assert!(text.contains("cairn-frontend-logseq"), "must list logseq");
+        assert!(
+            text.contains("cairn-frontend-obsidian"),
+            "must list obsidian"
+        );
+        assert!(text.contains("cairn-frontend-vscode"), "must list vscode");
         assert!(text.contains("cairn-mcp"), "must list mcp");
         assert!(text.contains("cairn-sensors-local"), "must list sensors");
         assert!(text.contains("cairn-store-sqlite"), "must list store");
@@ -174,11 +191,12 @@ mod tests {
         let json = render_json(&reg);
         let v: serde_json::Value = serde_json::from_str(&json).expect("valid json");
         let plugins = v["plugins"].as_array().expect("array");
-        assert_eq!(plugins.len(), 4);
-        // First plugin alphabetical = cairn-mcp.
-        assert_eq!(plugins[0]["name"], "cairn-mcp");
-        assert_eq!(plugins[0]["contract"], "MCPServer");
-        assert_eq!(plugins[0]["source"], "bundled:cairn-mcp");
+        assert_eq!(plugins.len(), 7);
+        // First plugin alphabetical = cairn-frontend-logseq.
+        assert_eq!(plugins[0]["name"], "cairn-frontend-logseq");
+        assert_eq!(plugins[0]["contract"], "FrontendAdapter");
+        assert_eq!(plugins[0]["source"], "bundled:cairn-frontend-logseq");
+        assert_eq!(plugins[0]["capabilities"]["graph_view"], true);
         assert!(plugins[0]["capabilities"].is_object());
     }
 }

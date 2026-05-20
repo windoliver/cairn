@@ -1,0 +1,51 @@
+---
+source: crates/cairn-frontend-logseq/tests/adapter.rs
+expression: projection_snapshot(&projection)
+---
+{
+  "body": "trusted body",
+  "frontmatter": [
+    [
+      "version",
+      "100"
+    ],
+    [
+      "kind",
+      "user"
+    ],
+    [
+      "visibility",
+      "private"
+    ],
+    [
+      "source_hash",
+      "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ]
+  ],
+  "sidecars": [
+    {
+      "body": "version: 100\nupdated_at: 2026-04-22T14:05:11Z\n",
+      "name": "timeline.md"
+    },
+    {
+      "body": "confidence: 0.7\nsalience: 0.5\n",
+      "name": "evidence.md"
+    },
+    {
+      "body": "visibility: private\nconsent_ref: consent:01HQZ\n",
+      "name": "consent.md"
+    },
+    {
+      "body": "- trusted body\n  id:: 01HQZX9F5N0000000000000000\n",
+      "name": "outline.md"
+    },
+    {
+      "body": "target: 01HQZX9F5N0000000000000000\nsource: 01HQZX9F5N0000000000000001\ntag: pref\n",
+      "name": "backlinks.md"
+    },
+    {
+      "body": "adapter: logseq\nlive_plugin: true\ntarget_hash: sha256:6a06687c64303899a3075ee4c8f413ad9c3674396251b534ddc570c42e8f7571\nversion: 100\n",
+      "name": "live.md"
+    }
+  ]
+}

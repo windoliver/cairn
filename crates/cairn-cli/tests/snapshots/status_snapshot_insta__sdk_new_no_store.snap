@@ -1,0 +1,148 @@
+---
+source: crates/cairn-cli/tests/status_snapshot_insta.rs
+expression: v
+---
+{
+  "capabilities": [
+    "cairn.sensor.v1.screen.ocr.tesseract",
+    "cairn.sensor.v1.screen.xcap"
+  ],
+  "contract": "cairn.mcp.v1",
+  "extensions": [],
+  "health": {
+    "authority_db": {
+      "path": "<masked>",
+      "state": "missing"
+    },
+    "nexus_projection": {
+      "state": "disabled"
+    }
+  },
+  "mcp_graph_tools": {
+    "probe_basis": "config_only",
+    "reason": "vault_not_bound",
+    "state": "no_vault"
+  },
+  "pipeline_dispatch": [
+    {
+      "decision": "bypass",
+      "source_family": "cli"
+    },
+    {
+      "decision": "bypass",
+      "source_family": "clipboard"
+    },
+    {
+      "decision": "bypass",
+      "source_family": "hook"
+    },
+    {
+      "decision": "bypass",
+      "source_family": "ide"
+    },
+    {
+      "decision": "bypass",
+      "source_family": "mcp"
+    },
+    {
+      "decision": "bypass",
+      "source_family": "proactive"
+    },
+    {
+      "decision": "bypass",
+      "source_family": "recording_batch"
+    },
+    {
+      "decision": "bypass",
+      "source_family": "screen"
+    },
+    {
+      "decision": "squash_when_interactive_tty",
+      "source_family": "terminal"
+    },
+    {
+      "decision": "bypass",
+      "source_family": "voice"
+    }
+  ],
+  "sensors": {
+    "local": [
+      {
+        "budget": {},
+        "consent": "missing",
+        "enabled": true,
+        "gate": "privacy_denied",
+        "retention": {},
+        "sensor": "hook"
+      },
+      {
+        "budget": {},
+        "consent": "missing",
+        "enabled": true,
+        "gate": "privacy_denied",
+        "retention": {},
+        "sensor": "ide"
+      },
+      {
+        "budget": {},
+        "consent": "missing",
+        "enabled": false,
+        "gate": "disabled",
+        "retention": {},
+        "sensor": "terminal"
+      },
+      {
+        "budget": {},
+        "consent": "missing",
+        "enabled": false,
+        "gate": "disabled",
+        "retention": {},
+        "sensor": "clipboard"
+      },
+      {
+        "budget": {},
+        "consent": "missing",
+        "enabled": false,
+        "gate": "disabled",
+        "retention": {},
+        "sensor": "voice"
+      },
+      {
+        "budget": {
+          "max_bytes": 16384,
+          "max_items": 12
+        },
+        "consent": "missing",
+        "enabled": false,
+        "gate": "disabled",
+        "retention": {},
+        "sensor": "screen"
+      },
+      {
+        "budget": {},
+        "consent": "missing",
+        "enabled": false,
+        "gate": "disabled",
+        "retention": {},
+        "sensor": "recording"
+      }
+    ],
+    "screen": {
+      "backend": "xcap",
+      "degradation": {
+        "code": "screen.disabled",
+        "message": "screen sensor is disabled in config"
+      },
+      "mode": "off",
+      "ocr_engine": "tesseract",
+      "permission": "not_requested",
+      "state": "disabled"
+    }
+  },
+  "server_info": {
+    "build": "<masked>",
+    "incarnation": "<masked>",
+    "started_at": "<masked>",
+    "version": "<masked>"
+  }
+}

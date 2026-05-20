@@ -1,0 +1,15 @@
+---
+source: crates/cairn-core/src/verbs/lint/checks/workflow_health.rs
+assertion_line: 215
+expression: findings
+---
+[
+  {
+    "kind": "workflow_dead_letter",
+    "message": "workflow dream.light job 01JTESTJOBDEADLETTER0001 dead-lettered after 3 attempts (poison): panic in step 2",
+    "severity": "error",
+    "target": {
+      "operation_id": "01JTESTJOBDEADLETTER0001"
+    }
+  }
+]

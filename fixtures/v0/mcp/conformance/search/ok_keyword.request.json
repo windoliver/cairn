@@ -1,0 +1,8 @@
+{
+  "args": {
+    "mode": "keyword",
+    "query": "user prefers dark mode"
+  },
+  "contract": "cairn.mcp.v1",
+  "verb": "search"
+}

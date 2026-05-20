@@ -8,6 +8,44 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
+pub enum DegradedLegEntryLeg {
+    Semantic,
+    Graph,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum DegradedLegEntryReason {
+    SqlError,
+    CapabilityUnavailable,
+    Timeout,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum DegradedLegEntrySource {
+    All,
+    AuthKeywordSeed,
+    AuthSemanticSeed,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DegradedLegEntry {
+    /// Which hybrid leg degraded.
+    pub leg: DegradedLegEntryLeg,
+    /// Why the leg degraded.
+    pub reason: DegradedLegEntryReason,
+    /// Graph-leg only: which seed source was in flight when the leg degraded. Absent for non-graph legs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<DegradedLegEntrySource>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum HitTrust {
     Verified,
     Unverified,
@@ -24,6 +62,20 @@ pub struct Hit {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snippet: Option<String>,
     pub trust: HitTrust,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScoreExplain {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bm25_rank: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cosine: Option<f64>,
+    pub final_score: f64,
+    pub record_id: crate::generated::common::Ulid,
+    pub rrf_score: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_rank: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -226,8 +278,14 @@ pub struct SearchArgs {
     /// Opaque continuation token from a prior search Data.next_cursor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<crate::generated::common::Cursor>,
+    /// When true, populate policy_trace and data.excluded with per-record exclusions for Tier-2 read filters. Has no effect on the candidate set the caller could see. `explain: true` requires the cairn.mcp.v1.policy_trace capability — servers that do not advertise it MUST reject `explain: true` with CapabilityUnavailable (sysexit 69).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explain: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filters: Option<SearchArgsFilters>,
+    /// When true, include records whose trace blocks contain reasoning content. Default false keeps reasoning-bearing records out of ordinary search results.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_reasoning: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<i64>,
     pub mode: SearchArgsMode,
@@ -245,8 +303,14 @@ struct RawSearchArgs {
     /// Opaque continuation token from a prior search Data.next_cursor.
     #[serde(default)]
     cursor: Option<crate::generated::common::Cursor>,
+    /// When true, populate policy_trace and data.excluded with per-record exclusions for Tier-2 read filters. Has no effect on the candidate set the caller could see. `explain: true` requires the cairn.mcp.v1.policy_trace capability — servers that do not advertise it MUST reject `explain: true` with CapabilityUnavailable (sysexit 69).
+    #[serde(default)]
+    explain: Option<bool>,
     #[serde(default)]
     filters: Option<SearchArgsFilters>,
+    /// When true, include records whose trace blocks contain reasoning content. Default false keeps reasoning-bearing records out of ordinary search results.
+    #[serde(default)]
+    include_reasoning: Option<bool>,
     #[serde(default)]
     limit: Option<i64>,
     mode: SearchArgsMode,
@@ -266,7 +330,9 @@ impl ::core::convert::TryFrom<RawSearchArgs> for SearchArgs {
         Ok(Self {
             citations: raw.citations,
             cursor: raw.cursor,
+            explain: raw.explain,
             filters: raw.filters,
+            include_reasoning: raw.include_reasoning,
             limit: raw.limit,
             mode: raw.mode,
             query: raw.query,
@@ -286,9 +352,21 @@ impl<'de> ::serde::Deserialize<'de> for SearchArgs {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SearchData {
+    /// Per-leg degradation entries when one or more search legs (semantic, graph, or graph seed sources) failed or were unavailable. Empty/absent when every requested leg contributed. Lets callers distinguish a low-recall result from a partial-failure result without inspecting server logs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub degraded_legs: Option<Vec<DegradedLegEntry>>,
+    /// Per-record exclusions; present only when args.explain is true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excluded: Option<Vec<crate::generated::common::RecordExclusion>>,
     pub hits: Vec<Hit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<crate::generated::common::Cursor>,
+    /// Optional per-candidate score-component explanations. Present only when args.explain is true (which itself requires the cairn.mcp.v1.policy_trace capability).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score_explain: Option<Vec<ScoreExplain>>,
+    /// True when the response succeeded after a transient semantic embedding-provider outage. Absent for healthy responses and for fail-closed capability errors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_degraded: Option<bool>,
 }
 
-pub const ARGS_SCHEMA: &[u8] = include_bytes!("../../../../cairn-mcp/src/generated/schemas/verbs/search.json");
+pub const ARGS_SCHEMA: &[u8] = include_bytes!("../schemas/verbs/search.json");

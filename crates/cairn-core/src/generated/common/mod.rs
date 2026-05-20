@@ -5,6 +5,22 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Strict deserializer for optional fields that must reject explicit JSON `null`.
+///
+/// Returns `Some(T)` for a present non-null value. Returns an error for an
+/// explicit `null`. The field-absent case bypasses this function entirely
+/// (handled by `#[serde(default)]`), preserving tri-state semantics.
+///
+/// # Errors
+///
+/// Returns the deserializer's error when input is `null` or otherwise invalid.
+pub fn reject_null_option<'de, T, D>(d: D) -> Result<Option<T>, D::Error>
+where T: ::serde::Deserialize<'de>, D: ::serde::Deserializer<'de> {
+    // Deserialize the value via T directly. If the wire is `null`,
+    // T's deserializer will see `null` and (for non-Option T) reject it.
+    T::deserialize(d).map(Some)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -15,12 +31,16 @@ pub enum Capabilities {
     CairnMcpV1SearchSemantic,
     #[serde(rename = "cairn.mcp.v1.search.hybrid")]
     CairnMcpV1SearchHybrid,
+    #[serde(rename = "cairn.mcp.v1.summarize.narrative")]
+    CairnMcpV1SummarizeNarrative,
     #[serde(rename = "cairn.mcp.v1.retrieve.record")]
     CairnMcpV1RetrieveRecord,
     #[serde(rename = "cairn.mcp.v1.retrieve.session")]
     CairnMcpV1RetrieveSession,
     #[serde(rename = "cairn.mcp.v1.retrieve.turn")]
     CairnMcpV1RetrieveTurn,
+    #[serde(rename = "cairn.mcp.v1.retrieve.tool_call")]
+    CairnMcpV1RetrieveToolCall,
     #[serde(rename = "cairn.mcp.v1.retrieve.folder")]
     CairnMcpV1RetrieveFolder,
     #[serde(rename = "cairn.mcp.v1.retrieve.scope")]
@@ -41,6 +61,34 @@ pub enum Capabilities {
     CairnMcpV1ExtensionFederation,
     #[serde(rename = "cairn.mcp.v1.extension.sessiontree")]
     CairnMcpV1ExtensionSessiontree,
+    #[serde(rename = "cairn.mcp.v1.extension.coord")]
+    CairnMcpV1ExtensionCoord,
+    #[serde(rename = "cairn.mcp.v1.policy_trace")]
+    CairnMcpV1PolicyTrace,
+    #[serde(rename = "cairn.mcp.v1.sensors.pre_compact")]
+    CairnMcpV1SensorsPreCompact,
+    #[serde(rename = "cairn.sensor.v1.screen.xcap")]
+    CairnSensorV1ScreenXcap,
+    #[serde(rename = "cairn.sensor.v1.screen.screenpipe")]
+    CairnSensorV1ScreenScreenpipe,
+    #[serde(rename = "cairn.sensor.v1.screen.ocr.vision")]
+    CairnSensorV1ScreenOcrVision,
+    #[serde(rename = "cairn.sensor.v1.screen.ocr.winrt")]
+    CairnSensorV1ScreenOcrWinrt,
+    #[serde(rename = "cairn.sensor.v1.screen.ocr.tesseract")]
+    CairnSensorV1ScreenOcrTesseract,
+    #[serde(rename = "cairn.mcp.v1.replay.sequence")]
+    CairnMcpV1ReplaySequence,
+    #[serde(rename = "cairn.mcp.v1.replay.challenge")]
+    CairnMcpV1ReplayChallenge,
+    #[serde(rename = "cairn.workflows.v1.consolidation")]
+    CairnWorkflowsV1Consolidation,
+    #[serde(rename = "cairn.workflows.v1.dream")]
+    CairnWorkflowsV1Dream,
+    #[serde(rename = "cairn.workflows.v1.expiration")]
+    CairnWorkflowsV1Expiration,
+    #[serde(rename = "cairn.workflows.v1.evaluation")]
+    CairnWorkflowsV1Evaluation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
@@ -89,10 +137,10 @@ impl<'de> ::serde::Deserialize<'de> for Identity {
     where D: ::serde::Deserializer<'de> {
         let s = <String as ::serde::Deserialize>::deserialize(deserializer)?;
         let tail = if let Some(t) = s.strip_prefix("agt:") { t }
-            else if let Some(t) = s.strip_prefix("usr:") { t }
+            else if let Some(t) = s.strip_prefix("hmn:") { t }
             else if let Some(t) = s.strip_prefix("snr:") { t }
             else {
-            return Err(::serde::de::Error::custom("Identity: must start with one of [agt:, usr:, snr:]"));
+            return Err(::serde::de::Error::custom("Identity: must start with one of [agt:, hmn:, snr:]"));
         };
         if tail.is_empty() {
             return Err(::serde::de::Error::custom("Identity: body after prefix must not be empty"));
@@ -133,6 +181,25 @@ impl<'de> ::serde::Deserialize<'de> for Nonce16Base64 {
         }
         Ok(Nonce16Base64(s))
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RecordExclusionGate {
+    ReadFilterRelevance,
+    ReadFilterStaleness,
+    ReadFilterDedup,
+}
+
+/// Per-record exclusion entry returned on search responses when args.explain is true. Records the caller cannot otherwise see (Tier-1 visibility) never appear here.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecordExclusion {
+    /// Body-free wire code from PolicyDetail.to_wire_string(). Empty string for None; otherwise starts with a lowercase letter and contains only a-z0-9_:=, — no whitespace, no free text.
+    pub detail: String,
+    pub gate: RecordExclusionGate,
+    pub target_id: crate::generated::common::Ulid,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -269,7 +336,11 @@ impl<'de> ::serde::Deserialize<'de> for Ulid {
     where D: ::serde::Deserializer<'de> {
         let s = <String as ::serde::Deserialize>::deserialize(deserializer)?;
         if s.len() != 26 { return Err(::serde::de::Error::custom("ULID: must be 26 chars")); }
-        if !s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'A'..=b'H' | b'J' | b'K' | b'M' | b'N' | b'P'..=b'T' | b'V'..=b'Z')) {
+        let bytes = s.as_bytes();
+        if !matches!(bytes[0], b'0'..=b'7') {
+            return Err(::serde::de::Error::custom("ULID: first char must be 0..=7 to fit 128-bit ULID"));
+        }
+        if !bytes[1..].iter().all(|b| matches!(b, b'0'..=b'9' | b'A'..=b'H' | b'J' | b'K' | b'M' | b'N' | b'P'..=b'T' | b'V'..=b'Z')) {
             return Err(::serde::de::Error::custom("ULID: must be Crockford base32 (uppercase, no I/L/O/U)"));
         }
         Ok(Ulid(s))

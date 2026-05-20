@@ -1,10 +1,32 @@
 /target
 /**/target
 Cargo.lock.bak
+node_modules/
+frontend/**/node_modules/
+frontend/**/dist/
 *.swp
 .DS_Store
 /.claude/
+/.worktrees/
 
 # Stray rustc artifact occasionally emitted at repo root by certain build
 # flows (e.g. some IDE-driven `rustc --emit=metadata` runs).
 *.rmeta
+
+# insta snapshot review artifacts (pending approval).
+*.snap.new
+
+# Repo-local Cairn runtime state (model cache, vault scratch). Both the
+# repo root and any nested working directory may accumulate `.cairn/`
+# trees from running the CLI / tests inside the workspace; ignore them
+# all to keep DB/WAL/SHM artifacts out of commits.
+.cairn/
+
+# Vault scaffold artifacts that the CLI drops into CWD when run outside
+# a real vault (e.g. test runs that resolve CWD as the vault root).
+/index.md
+/log.md
+/purpose.md
+crates/**/index.md
+crates/**/log.md
+crates/**/purpose.md

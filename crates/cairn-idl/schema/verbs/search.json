@@ -20,7 +20,8 @@
       {
         "name": "filters",
         "long": "filters",
-        "value_source": "json"
+        "value_source": "json",
+        "cli_exemplar": "{\"field\":\"kind\",\"op\":\"eq\",\"value\":\"note\"}"
       },
       {
         "name": "citations",
@@ -31,6 +32,16 @@
         "name": "cursor",
         "long": "cursor",
         "value_source": "string"
+      },
+      {
+        "name": "explain",
+        "long": "explain",
+        "value_source": "bool"
+      },
+      {
+        "name": "include_reasoning",
+        "long": "include-reasoning",
+        "value_source": "bool"
       }
     ],
     "positional": {
@@ -41,15 +52,15 @@
   "x-cairn-capability": null,
   "x-cairn-auth": "rebac",
   "x-cairn-skill-triggers": {
-    "positive": [
+    "positive_triggers": [
       "use when you need to recall prior memories by topic, speaker, or time",
       "use to ground an answer in stored evidence instead of parametric guessing"
     ],
-    "negative": [
+    "negative_triggers": [
       "do NOT use when the user just asked a computation question",
       "do NOT use to fetch a known record id \u2014 call retrieve instead"
     ],
-    "exclusivity": "this is the canonical search surface for the active vault"
+    "exclusivity_hints": "this is the canonical search surface for the active vault"
   },
   "type": "object",
   "$defs": {
@@ -104,6 +115,17 @@
         "cursor": {
           "$ref": "../common/primitives.json#/$defs/Cursor",
           "description": "Opaque continuation token from a prior search Data.next_cursor."
+        },
+        "explain": {
+          "type": "boolean",
+          "default": false,
+          "x-cairn-capability-when-true": "cairn.mcp.v1.policy_trace",
+          "description": "When true, populate policy_trace and data.excluded with per-record exclusions for Tier-2 read filters. Has no effect on the candidate set the caller could see. `explain: true` requires the cairn.mcp.v1.policy_trace capability — servers that do not advertise it MUST reject `explain: true` with CapabilityUnavailable (sysexit 69)."
+        },
+        "include_reasoning": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, include records whose trace blocks contain reasoning content. Default false keeps reasoning-bearing records out of ordinary search results."
         }
       }
     },
@@ -122,6 +144,47 @@
         },
         "next_cursor": {
           "$ref": "../common/primitives.json#/$defs/Cursor"
+        },
+        "excluded": {
+          "type": "array",
+          "items": { "$ref": "../common/record_exclusion.json" },
+          "description": "Per-record exclusions; present only when args.explain is true."
+        },
+        "score_explain": {
+          "type": "array",
+          "description": "Optional per-candidate score-component explanations. Present only when args.explain is true (which itself requires the cairn.mcp.v1.policy_trace capability).",
+          "items": { "$ref": "#/$defs/ScoreExplain" }
+        },
+        "semantic_degraded": {
+          "type": "boolean",
+          "description": "True when the response succeeded after a transient semantic embedding-provider outage. Absent for healthy responses and for fail-closed capability errors."
+        },
+        "degraded_legs": {
+          "type": "array",
+          "description": "Per-leg degradation entries when one or more search legs (semantic, graph, or graph seed sources) failed or were unavailable. Empty/absent when every requested leg contributed. Lets callers distinguish a low-recall result from a partial-failure result without inspecting server logs.",
+          "items": { "$ref": "#/$defs/DegradedLegEntry" }
+        }
+      }
+    },
+    "DegradedLegEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["leg", "reason"],
+      "properties": {
+        "leg": {
+          "type": "string",
+          "enum": ["semantic", "graph"],
+          "description": "Which hybrid leg degraded."
+        },
+        "reason": {
+          "type": "string",
+          "enum": ["sql_error", "capability_unavailable", "timeout"],
+          "description": "Why the leg degraded."
+        },
+        "source": {
+          "type": "string",
+          "enum": ["all", "auth_keyword_seed", "auth_semantic_seed"],
+          "description": "Graph-leg only: which seed source was in flight when the leg degraded. Absent for non-graph legs."
         }
       }
     },
@@ -154,6 +217,19 @@
             "unknown"
           ]
         }
+      }
+    },
+    "ScoreExplain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["record_id", "rrf_score", "final_score"],
+      "properties": {
+        "record_id": { "$ref": "../common/primitives.json#/$defs/Ulid" },
+        "bm25_rank": { "type": "integer", "minimum": 1 },
+        "semantic_rank": { "type": "integer", "minimum": 1 },
+        "rrf_score": { "type": "number" },
+        "cosine": { "type": "number" },
+        "final_score": { "type": "number" }
       }
     },
     "filter": {

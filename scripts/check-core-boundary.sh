@@ -15,15 +15,19 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 
 # Emit every dep declared by cairn-core whose name starts with `cairn-`,
-# regardless of kind. An empty result means clean.
+# excluding the self-referential dev-dep used to activate the
+# `test-fixtures` feature for integration tests under `tests/`. An empty
+# result means clean. The self-dep does not introduce adapter-crate
+# coupling — it only flips a feature flag — so the invariant is preserved.
 violations=$(
   cargo metadata --format-version 1 --locked \
     | jq -r '
         .packages[]
         | select(.name == "cairn-core")
         | .dependencies[]
+        | select(.name | startswith("cairn-"))
+        | select(.name != "cairn-core")
         | .name
-        | select(startswith("cairn-"))
       '
 )
 

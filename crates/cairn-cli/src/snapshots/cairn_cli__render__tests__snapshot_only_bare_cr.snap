@@ -1,0 +1,5 @@
+---
+source: crates/cairn-cli/src/render.rs
+expression: "render_for_tty(b\"\\r\\r\\r\")"
+---
+␍␍␍

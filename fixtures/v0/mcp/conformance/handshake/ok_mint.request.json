@@ -1,0 +1,7 @@
+{
+  "args": {
+    "issuer": "hmn:test-user"
+  },
+  "contract": "cairn.mcp.v1",
+  "verb": "handshake"
+}

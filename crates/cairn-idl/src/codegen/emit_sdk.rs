@@ -25,7 +25,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use super::fmt::RustWriter;
+use super::fmt::{RustWriter, write_json_canonical};
 use super::ir::{
     Document, EnumDef, EnumVariant, PreludeDef, Prim, RecursiveEnumDef, RustType, StructDef,
     StructField, TaggedUnionDef, TaggedVariant, TypeName, UntaggedUnionDef, VerbDef, pascal_case,
@@ -49,12 +49,63 @@ pub fn emit(doc: &Document) -> Result<Vec<GeneratedFile>, CodegenError> {
     out.push(emit_verbs_mod(doc));
     for verb in &doc.verbs {
         out.push(emit_verb_file(verb, &common_names)?);
+        out.push(emit_schema_file(
+            &format!("{ROOT}/schemas/verbs/{}.json", verb.id),
+            &verb.args_schema_bytes,
+        )?);
     }
     out.push(emit_common(doc, &common_names)?);
     out.push(emit_errors(doc));
     out.push(emit_envelope(doc, &common_names)?);
     for prelude in &doc.preludes {
         out.push(emit_prelude(prelude, &common_names)?);
+        out.push(emit_schema_file(
+            &format!("{ROOT}/schemas/prelude/{}.json", prelude.id),
+            &prelude.schema_bytes,
+        )?);
+    }
+    for group in ["common", "errors", "capabilities", "extensions", "envelope"] {
+        out.extend(emit_schema_group(group)?);
+    }
+    Ok(out)
+}
+
+fn emit_schema_file(path: &str, bytes: &[u8]) -> Result<GeneratedFile, CodegenError> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|e| CodegenError::Emit(format!("schema {path} is not valid JSON: {e}")))?;
+    Ok(GeneratedFile {
+        path: PathBuf::from(path),
+        bytes: write_json_canonical(&value).into_bytes(),
+    })
+}
+
+fn emit_schema_group(group: &str) -> Result<Vec<GeneratedFile>, CodegenError> {
+    let group_dir = std::path::PathBuf::from(crate::SCHEMA_DIR).join(group);
+    let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(&group_dir)
+        .map_err(|e| {
+            CodegenError::Emit(format!(
+                "schema group {group}: read_dir {}: {e}",
+                group_dir.display()
+            ))
+        })?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("json"))
+        .collect();
+    entries.sort();
+
+    let mut out = Vec::with_capacity(entries.len());
+    for path in &entries {
+        let bytes = std::fs::read(path)
+            .map_err(|e| CodegenError::Emit(format!("read {}: {e}", path.display())))?;
+        let stem = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| CodegenError::Emit(format!("bad filename: {}", path.display())))?;
+        out.push(emit_schema_file(
+            &format!("{ROOT}/schemas/{group}/{stem}"),
+            &bytes,
+        )?);
     }
     Ok(out)
 }
@@ -206,10 +257,7 @@ fn emit_verb_file(
     w.blank();
     write_named_type(&mut w, &verb.data, &data_fallback, common_names)?;
     w.blank();
-    let schema_path = format!(
-        "../../../../cairn-mcp/src/generated/schemas/verbs/{}.json",
-        verb.id
-    );
+    let schema_path = format!("../schemas/verbs/{}.json", verb.id);
     w.line(&format!(
         "pub const ARGS_SCHEMA: &[u8] = include_bytes!(\"{schema_path}\");"
     ));
@@ -232,6 +280,30 @@ fn emit_common(
     w.line("//! Common types shared across verbs (Ulid, Cursor, Identity, ...).");
     w.blank();
     w.line("use serde::{Deserialize, Serialize};");
+    w.blank();
+
+    // Strict tri-state helper for fields annotated `x-cairn-reject-null: true`.
+    // Distinguishes field-absent (default → `None`) from explicit JSON `null`
+    // (rejected) from a real value (deserialized to `Some(_)`). Used to
+    // preserve tri-state semantics for optional fields whose absence carries
+    // a different contract from `null`.
+    w.line("/// Strict deserializer for optional fields that must reject explicit JSON `null`.");
+    w.line("///");
+    w.line("/// Returns `Some(T)` for a present non-null value. Returns an error for an");
+    w.line("/// explicit `null`. The field-absent case bypasses this function entirely");
+    w.line("/// (handled by `#[serde(default)]`), preserving tri-state semantics.");
+    w.line("///");
+    w.line("/// # Errors");
+    w.line("///");
+    w.line("/// Returns the deserializer's error when input is `null` or otherwise invalid.");
+    w.line("pub fn reject_null_option<'de, T, D>(d: D) -> Result<Option<T>, D::Error>");
+    w.line("where T: ::serde::Deserialize<'de>, D: ::serde::Deserializer<'de> {");
+    w.indent();
+    w.line("// Deserialize the value via T directly. If the wire is `null`,");
+    w.line("// T's deserializer will see `null` and (for non-Option T) reject it.");
+    w.line("T::deserialize(d).map(Some)");
+    w.dedent();
+    w.line("}");
     w.blank();
 
     // BTreeMap iterates in sorted key order — deterministic.
@@ -362,12 +434,20 @@ fn write_pattern_newtype_deserialize(w: &mut RustWriter, name: &str) {
     match name {
         "Ulid" => {
             // Crockford base32, 26 chars, alphabet [0-9A-HJKMNP-TV-Z].
+            // ULID is a 128-bit value; 26 base32 chars can encode 130 bits, so
+            // the first character is capped at 7 to reject overflow values.
             // Error messages keep the uppercase "ULID" tag so callers
             // grepping for the IDL primitive name see a consistent token
             // across every call site (SignedIntent's bespoke check uses the
             // same wording — see write_signed_intent_extra_checks).
             w.line("if s.len() != 26 { return Err(::serde::de::Error::custom(\"ULID: must be 26 chars\")); }");
-            w.line("if !s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'A'..=b'H' | b'J' | b'K' | b'M' | b'N' | b'P'..=b'T' | b'V'..=b'Z')) {");
+            w.line("let bytes = s.as_bytes();");
+            w.line("if !matches!(bytes[0], b'0'..=b'7') {");
+            w.indent();
+            w.line("return Err(::serde::de::Error::custom(\"ULID: first char must be 0..=7 to fit 128-bit ULID\"));");
+            w.dedent();
+            w.line("}");
+            w.line("if !bytes[1..].iter().all(|b| matches!(b, b'0'..=b'9' | b'A'..=b'H' | b'J' | b'K' | b'M' | b'N' | b'P'..=b'T' | b'V'..=b'Z')) {");
             w.indent();
             w.line("return Err(::serde::de::Error::custom(\"ULID: must be Crockford base32 (uppercase, no I/L/O/U)\"));");
             w.dedent();
@@ -426,13 +506,13 @@ fn write_pattern_newtype_deserialize(w: &mut RustWriter, name: &str) {
             w.line("}");
         }
         "Identity" => {
-            // ^(agt|usr|snr):[A-Za-z0-9._:-]+$ — mirrors `is_identity`.
+            // ^(agt|hmn|snr):[A-Za-z0-9._:-]+$ — mirrors `is_identity`.
             w.line("let tail = if let Some(t) = s.strip_prefix(\"agt:\") { t }");
-            w.line("    else if let Some(t) = s.strip_prefix(\"usr:\") { t }");
+            w.line("    else if let Some(t) = s.strip_prefix(\"hmn:\") { t }");
             w.line("    else if let Some(t) = s.strip_prefix(\"snr:\") { t }");
             w.line("    else {");
             w.indent();
-            w.line("return Err(::serde::de::Error::custom(\"Identity: must start with one of [agt:, usr:, snr:]\"));");
+            w.line("return Err(::serde::de::Error::custom(\"Identity: must start with one of [agt:, hmn:, snr:]\"));");
             w.dedent();
             w.line("};");
             w.line("if tail.is_empty() {");
@@ -668,10 +748,11 @@ fn write_error_envelope_validator(w: &mut RustWriter, doc: &Document) {
         &[("reason", FieldShape::NonEmptyString)],
         &[("path", FieldShape::NonEmptyString)],
     );
-    write_error_data_arm(
+    write_error_data_arm_with_optional(
         w,
         "CapabilityUnavailable",
         &[("capability", FieldShape::Capability)],
+        &[("remediation", FieldShape::NonEmptyString)],
     );
     write_error_data_arm(w, "UnknownVerb", &[("verb", FieldShape::NonEmptyString)]);
     write_error_data_arm(
@@ -1157,6 +1238,7 @@ fn write_response_envelope(
     w.line("Profile(crate::generated::verbs::retrieve::DataProfile),");
     w.line("Session(crate::generated::verbs::retrieve::DataSession),");
     w.line("Turn(crate::generated::verbs::retrieve::DataTurn),");
+    w.line("ToolCall(crate::generated::verbs::retrieve::DataToolCall),");
     w.line("Folder(crate::generated::verbs::retrieve::DataFolder),");
     w.line("Scope(crate::generated::verbs::retrieve::DataScope),");
     w.dedent();
@@ -1423,6 +1505,11 @@ fn write_response_envelope(
             w.line("<crate::generated::verbs::retrieve::DataTurn as ::serde::Deserialize>::deserialize(payload).map_err(::serde::de::Error::custom)?");
             w.dedent();
             w.line("),");
+            w.line("ResponseTarget::ToolCall => RetrieveData::ToolCall(");
+            w.indent();
+            w.line("<crate::generated::verbs::retrieve::DataToolCall as ::serde::Deserialize>::deserialize(payload).map_err(::serde::de::Error::custom)?");
+            w.dedent();
+            w.line("),");
             w.line("ResponseTarget::Folder => RetrieveData::Folder(");
             w.indent();
             w.line("<crate::generated::verbs::retrieve::DataFolder as ::serde::Deserialize>::deserialize(payload).map_err(::serde::de::Error::custom)?");
@@ -1500,10 +1587,7 @@ fn emit_prelude(
     let fallback = format!("{}Response", pascal_case(&prelude.id));
     write_named_type(&mut w, &prelude.response, &fallback, common_names)?;
     w.blank();
-    let schema_path = format!(
-        "../../../cairn-mcp/src/generated/schemas/prelude/{}.json",
-        prelude.id
-    );
+    let schema_path = format!("schemas/prelude/{}.json", prelude.id);
     w.line(&format!(
         "pub const SCHEMA: &[u8] = include_bytes!(\"{schema_path}\");"
     ));
@@ -1619,6 +1703,32 @@ fn write_struct(
     if let Some(doc) = &s.doc {
         write_doc(w, doc);
     }
+    // `x-cairn-validate: true` — the consuming crate provides hand-written
+    // `TryFrom<<Name>Raw>` and `From<<Name>> for <Name>Raw` impls. Codegen
+    // emits a public `<Name>Raw` mirror struct (Serialize + Deserialize) and
+    // wires the main struct to it via `#[serde(try_from / into)]`.
+    if s.validate {
+        let raw_name = format!("{}Raw", s.name.0);
+        // `Deserialize` must be in the derive list so serde generates the impl
+        // that routes through `TryFrom<{raw_name}>` (triggered by `try_from`).
+        w.line("#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]");
+        w.line(&format!(
+            "#[serde(try_from = \"{raw_name}\", into = \"{raw_name}\")]"
+        ));
+        if s.deny_unknown_fields {
+            w.line("#[serde(deny_unknown_fields)]");
+        }
+        w.line(&format!("pub struct {} {{", s.name.0));
+        w.indent();
+        for field in &s.fields {
+            write_field(w, field, &s.name.0, common, true);
+        }
+        w.dedent();
+        w.line("}");
+        w.blank();
+        write_validate_raw_mirror(w, s, common);
+        return Ok(());
+    }
     // When the struct carries a presence-of-anyOf constraint OR is on the
     // bespoke-validators allow-list, derive only Serialize on the public type
     // and hand-roll Deserialize via a private Raw companion so the constraint
@@ -1661,7 +1771,17 @@ fn write_struct(
 fn struct_has_extra_validators(name: &str) -> bool {
     matches!(
         name,
-        "SearchArgs" | "DataRecord" | "DataSession" | "DataTurn" | "DataFolder" | "RecordRef"
+        "SearchArgs"
+            | "DataRecord"
+            | "DataSession"
+            | "DataTurn"
+            | "DataToolCall"
+            | "DataFolder"
+            | "RecordRef"
+            | "TraceLinkage"
+            | "ProfileLine"
+            | "DataProfile"
+            | "DataProfileSubject"
     )
 }
 
@@ -1722,7 +1842,16 @@ fn write_struct_raw_companion(w: &mut RustWriter, s: &StructDef, common: &BTreeS
     // helper dispatches by struct name.
     if matches!(
         s.name.0.as_str(),
-        "DataRecord" | "DataSession" | "DataTurn" | "DataFolder" | "RecordRef"
+        "DataRecord"
+            | "DataSession"
+            | "DataTurn"
+            | "DataToolCall"
+            | "DataFolder"
+            | "RecordRef"
+            | "TraceLinkage"
+            | "ProfileLine"
+            | "DataProfile"
+            | "DataProfileSubject"
     ) {
         write_retrieve_data_extra_checks(w, &s.name.0);
     }
@@ -1754,6 +1883,28 @@ fn write_struct_raw_companion(w: &mut RustWriter, s: &StructDef, common: &BTreeS
     w.line("Self::try_from(raw).map_err(::serde::de::Error::custom)");
     w.dedent();
     w.line("}");
+    w.dedent();
+    w.line("}");
+}
+
+/// Emit the public `<Name>Raw` mirror struct for a struct marked with
+/// `x-cairn-validate: true`. The mirror has the same public fields and per-field
+/// serde attrs as the main struct but derives both `Serialize` and `Deserialize`.
+/// The consuming crate must provide `TryFrom<<Name>Raw> for <Name>` and
+/// `From<<Name>> for <Name>Raw` — codegen does NOT emit those impls here.
+fn write_validate_raw_mirror(w: &mut RustWriter, s: &StructDef, common: &BTreeSet<String>) {
+    let raw_name = format!("{}Raw", s.name.0);
+    w.line("#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]");
+    if s.deny_unknown_fields {
+        w.line("#[serde(deny_unknown_fields)]");
+    }
+    w.line(&format!("pub struct {raw_name} {{"));
+    w.indent();
+    for field in &s.fields {
+        // Emit with public qualifier and full serde attrs (serializing = true)
+        // so the Raw mirror is symmetric with the main struct's field layout.
+        write_field(w, field, &s.name.0, common, true);
+    }
     w.dedent();
     w.line("}");
 }
@@ -1790,7 +1941,21 @@ fn write_field_inner(
         None
     };
     if matches!(field.ty, RustType::Optional(_)) {
-        if serializing {
+        if field.reject_null {
+            // Tri-state: distinguish field-absent (default → None) from
+            // explicit JSON `null` (rejected) from `[...]`/`{...}`/etc.
+            // The helper is provided by the consuming crate at
+            // `crate::generated::common::reject_null_option`.
+            if serializing {
+                w.line(
+                    "#[serde(default, deserialize_with = \"crate::generated::common::reject_null_option\", skip_serializing_if = \"Option::is_none\")]",
+                );
+            } else {
+                w.line(
+                    "#[serde(default, deserialize_with = \"crate::generated::common::reject_null_option\")]",
+                );
+            }
+        } else if serializing {
             w.line("#[serde(default, skip_serializing_if = \"Option::is_none\")]");
         } else {
             w.line("#[serde(default)]");
@@ -2169,6 +2334,7 @@ fn write_retrieve_args_variant_checks(w: &mut RustWriter, variant: &str) {
         }
         "Turn" => {
             w.line("if session_id.is_empty() { return Err(\"session_id: must not be empty\"); }");
+            w.line("if turn_id.is_empty() { return Err(\"turn_id: must not be empty\"); }");
             w.line("if let Some(inc) = &include {");
             w.indent();
             w.line(
@@ -2184,6 +2350,13 @@ fn write_retrieve_args_variant_checks(w: &mut RustWriter, variant: &str) {
             w.line("}");
             w.dedent();
             w.line("}");
+        }
+        "ToolCall" => {
+            w.line("if session_id.is_empty() { return Err(\"session_id: must not be empty\"); }");
+            w.line("if turn_id.is_empty() { return Err(\"turn_id: must not be empty\"); }");
+            w.line(
+                "if tool_call_id.is_empty() { return Err(\"tool_call_id: must not be empty\"); }",
+            );
         }
         "Folder" => {
             w.line("if path.is_empty() { return Err(\"path: must not be empty\"); }");
@@ -2377,12 +2550,17 @@ fn write_untagged_union_deserialize(
     if !union.is_empty() {
         write_xor_check(w, "raw", union);
     }
-    // Type-specific extra invariants. The IDL annotates `SignedIntent` with
-    // ULID/Identity/Nonce16Base64 patterns, key_version >= 1, sequence ≤
-    // 2^53−1, chain_parents maxItems=64 + uniqueItems. The generic IR
-    // doesn't carry those constraints so a TypeName match keeps the bespoke
-    // checks here while leaving the codegen for other untagged unions
-    // (IngestArgs, ...) untouched.
+    // Type-specific extra invariants. The generic IR lowers XOR membership
+    // for every untagged union, but some roots still need field-level checks
+    // from the source schema.
+    if u.name.0 == "IngestArgs" {
+        write_ingest_args_extra_checks(w);
+    }
+    // The IDL annotates `SignedIntent` with ULID/Identity/Nonce16Base64
+    // patterns, key_version >= 1, sequence ≤ 2^53−1, chain_parents
+    // maxItems=64 + uniqueItems. The generic IR doesn't carry those
+    // constraints so a TypeName match keeps the bespoke checks here while
+    // leaving the codegen for other untagged unions untouched.
     if u.name.0 == "SignedIntent" {
         write_signed_intent_extra_checks(w);
     }
@@ -2416,6 +2594,60 @@ fn write_untagged_union_deserialize(
     w.line("Self::try_from(raw).map_err(::serde::de::Error::custom)");
     w.dedent();
     w.line("}");
+    w.dedent();
+    w.line("}");
+}
+
+/// Emit bespoke field-level validation for `IngestArgs`.
+///
+/// `ingest.json` mixes a top-level XOR (`oneOf`) with scalar constraints on
+/// optional fields. The untagged-union lowering already enforces the source
+/// XOR, but without these checks the generated wire type would ignore the
+/// schema's `minLength` and `minimum` bounds for transcript-import fields.
+///
+/// We intentionally validate the legacy fields too so `IngestArgs` matches the
+/// rest of the generated verb surface:
+///
+/// - `kind`: minLength 1
+/// - `body` / `file` / `folder` / `url` / `jsonl` / `recording`: minLength 1
+/// - `harness` / `session_id` / `session_id_from`: minLength 1
+/// - `tags[*]`: minLength 1
+/// - `limit`: minimum 1
+fn write_ingest_args_extra_checks(w: &mut RustWriter) {
+    w.line("if raw.kind.is_empty() { return Err(\"kind: must not be empty\"); }");
+    for field in [
+        "body",
+        "file",
+        "folder",
+        "url",
+        "jsonl",
+        "recording",
+        "harness",
+        "session_id",
+        "session_id_from",
+    ] {
+        w.line(&format!("if let Some(v) = &raw.{field} {{"));
+        w.indent();
+        w.line(&format!(
+            "if v.is_empty() {{ return Err(\"{field}: must not be empty\"); }}"
+        ));
+        w.dedent();
+        w.line("}");
+    }
+    w.line("if let Some(v) = &raw.tags {");
+    w.indent();
+    w.line("for item in v {");
+    w.indent();
+    w.line("if item.is_empty() { return Err(\"tags: items must not be empty\"); }");
+    w.dedent();
+    w.line("}");
+    w.dedent();
+    w.line("}");
+    w.line("if let Some(lim) = raw.limit {");
+    w.indent();
+    w.line(
+        "if !(1..=4_294_967_295_i64).contains(&lim) { return Err(\"limit: must be in [1, 4294967295]\"); }",
+    );
     w.dedent();
     w.line("}");
 }
@@ -2494,10 +2726,13 @@ fn write_search_args_extra_checks(w: &mut RustWriter) {
 ///
 /// * `DataRecord.kind`: minLength 1.
 /// * `DataSession.session_id`: minLength 1.
-/// * `DataTurn.session_id`: minLength 1. (`turn_id` is u64 in Rust so the IDL
-///   `minimum: 0` is structural; nothing to enforce.)
+/// * `DataTurn.session_id` / `turn_id`: minLength 1.
+/// * `DataToolCall.session_id` / `turn_id` / `tool_call_id`: minLength 1.
 /// * `DataFolder.path`: minLength 1; `DataFolder.depth`: maximum 16.
 /// * `RecordRef.kind`: minLength 1.
+/// * `TraceLinkage` optional string fields: minLength 1 when present.
+/// * `ProfileLine.value`: minLength 1; `ProfileLine.confidence`: in `[0, 1]`;
+///   `ProfileLine.evidence`: minItems 1, uniqueItems (brief §7.1).
 ///
 /// The generic IR strips these constraints during lowering, so without the
 /// hand-rolled check `DataFolder { depth: 999, path: "" }` and
@@ -2517,11 +2752,19 @@ fn write_retrieve_data_extra_checks(w: &mut RustWriter, type_name: &str) {
             );
         }
         "DataTurn" => {
-            // DataTurn.session_id: minLength 1. turn_id is u64, so the IDL
-            // `minimum: 0` is structural — no extra check needed.
+            // DataTurn.session_id / turn_id: minLength 1.
             w.line(
                 "if raw.session_id.is_empty() { return Err(\"session_id: must not be empty\"); }",
             );
+            w.line("if raw.turn_id.is_empty() { return Err(\"turn_id: must not be empty\"); }");
+        }
+        "DataToolCall" => {
+            // DataToolCall.session_id / turn_id / tool_call_id: minLength 1.
+            w.line(
+                "if raw.session_id.is_empty() { return Err(\"session_id: must not be empty\"); }",
+            );
+            w.line("if raw.turn_id.is_empty() { return Err(\"turn_id: must not be empty\"); }");
+            w.line("if raw.tool_call_id.is_empty() { return Err(\"tool_call_id: must not be empty\"); }");
         }
         "DataFolder" => {
             // DataFolder.path: minLength 1; DataFolder.depth: maximum 16.
@@ -2535,6 +2778,192 @@ fn write_retrieve_data_extra_checks(w: &mut RustWriter, type_name: &str) {
         "RecordRef" => {
             // RecordRef.kind: minLength 1.
             w.line("if raw.kind.is_empty() { return Err(\"kind: must not be empty\"); }");
+        }
+        "TraceLinkage" => {
+            // TraceLinkage optional string fields: minLength 1 when present.
+            for field in [
+                "trace_event",
+                "capture_event_id",
+                "parent_event_id",
+                "tool_call_id",
+                "payload_hash",
+            ] {
+                w.line(&format!("if let Some(s) = &raw.{field} {{"));
+                w.indent();
+                w.line(&format!(
+                    "if s.is_empty() {{ return Err(\"{field}: must not be empty\"); }}"
+                ));
+                w.dedent();
+                w.line("}");
+            }
+        }
+        "ProfileLine" => {
+            // ProfileLine.value: minLength 1.
+            w.line("if raw.value.is_empty() { return Err(\"value: must not be empty\"); }");
+            // ProfileLine.confidence: bounded [0.0, 1.0]; reject NaN.
+            w.line("if !(0.0..=1.0).contains(&raw.confidence) || raw.confidence.is_nan() {");
+            w.indent();
+            w.line("return Err(\"confidence: must be in [0, 1]\");");
+            w.dedent();
+            w.line("}");
+            // ProfileLine.evidence: minItems 1, uniqueItems on the inner ULID
+            // string. Mirrors the chain_parents uniqueness check in
+            // `write_signed_intent_extra_checks` to keep cairn-core regex-free.
+            w.line(
+                "if raw.evidence.is_empty() { return Err(\"evidence: must contain at least 1 item\"); }",
+            );
+            w.line("{");
+            w.indent();
+            w.line("let mut seen = ::std::collections::BTreeSet::new();");
+            w.line("for ulid in &raw.evidence {");
+            w.indent();
+            w.line("if !seen.insert(ulid.0.clone()) { return Err(\"evidence: must be unique\"); }");
+            w.dedent();
+            w.line("}");
+            w.dedent();
+            w.line("}");
+        }
+        "DataProfileSubject" => {
+            // DataProfileSubject.user / .agent: minLength 1 when present.
+            // The IR carries the `anyOf` presence rule (already emitted as
+            // `at least one of [user, agent] is required`), but strips the
+            // string `minLength: 1`. Without these checks, `{"user": ""}`
+            // deserializes despite the schema, and the synthesizer's
+            // `BlankSubjectField` error becomes unreachable from the wire.
+            w.line("if let Some(s) = &raw.user {");
+            w.indent();
+            w.line("if s.is_empty() { return Err(\"user: must not be empty\"); }");
+            w.dedent();
+            w.line("}");
+            w.line("if let Some(s) = &raw.agent {");
+            w.indent();
+            w.line("if s.is_empty() { return Err(\"agent: must not be empty\"); }");
+            w.dedent();
+            w.line("}");
+        }
+        "DataProfile" => {
+            // DataProfile.updated_at: RFC3339 `date-time` with minLength 20
+            // Mirrors `cairn_core::domain::Rfc3339Timestamp::parse`'s
+            // accept set so a domain-valid timestamp can always
+            // round-trip through the wire deserializer, AND so the
+            // typed `DataProfile.updated_at` field can be parsed back
+            // into a `Rfc3339Timestamp` without a second validation
+            // gauntlet. The codegen layer cannot depend on
+            // `cairn-core::domain`, so the rules are duplicated here;
+            // the test suite cross-checks the two implementations.
+            //
+            // Caps `len` at 64 (max reasonable RFC3339 form is around
+            // 35 chars: `YYYY-MM-DDTHH:MM:SS.fffffffff+HH:MM`); any
+            // longer string would imply pathological fractional digits
+            // and just allocate memory.
+            w.line(
+                "if !(20..=64).contains(&raw.updated_at.len()) { return Err(\"updated_at: RFC3339 date-time must be 20..=64 chars\"); }",
+            );
+            w.line("if !raw.updated_at.is_ascii() {");
+            w.indent();
+            w.line("return Err(\"updated_at: RFC3339 date-time must be ASCII\");");
+            w.dedent();
+            w.line("}");
+            w.line("{");
+            w.indent();
+            w.line("let bytes = raw.updated_at.as_bytes();");
+            // Date: YYYY-MM-DD digits + ranges.
+            w.line(
+                "if !bytes[..4].iter().all(u8::is_ascii_digit) || bytes[4] != b'-' || !bytes[5..7].iter().all(u8::is_ascii_digit) || bytes[7] != b'-' || !bytes[8..10].iter().all(u8::is_ascii_digit) {",
+            );
+            w.indent();
+            w.line("return Err(\"updated_at: date must be YYYY-MM-DD\");");
+            w.dedent();
+            w.line("}");
+            // u16 year — 4-digit YYYY fits comfortably; the inline
+            // multiplications below stay under u16::MAX.
+            w.line(
+                "let yyyy: u16 = (u16::from(bytes[0] - b'0')) * 1000 + (u16::from(bytes[1] - b'0')) * 100 + (u16::from(bytes[2] - b'0')) * 10 + u16::from(bytes[3] - b'0');",
+            );
+            w.line("let mm = (bytes[5] - b'0') * 10 + (bytes[6] - b'0');");
+            w.line("let dd = (bytes[8] - b'0') * 10 + (bytes[9] - b'0');");
+            w.line(
+                "if !(1..=12).contains(&mm) { return Err(\"updated_at: month out of range\"); }",
+            );
+            // Per-month max-day. Inlined Gregorian rule with leap-year
+            // correction for February — same logic as
+            // `cairn_core::domain::timestamp::days_in_month` so a value
+            // accepted here always parses domain-side.
+            w.line(
+                "let leap = yyyy.is_multiple_of(4) && (!yyyy.is_multiple_of(100) || yyyy.is_multiple_of(400));",
+            );
+            w.line("let max_day: u8 = match mm {");
+            w.indent();
+            w.line("1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,");
+            w.line("4 | 6 | 9 | 11 => 30,");
+            w.line("2 if leap => 29,");
+            w.line("2 => 28,");
+            w.line("_ => 0,");
+            w.dedent();
+            w.line("};");
+            w.line(
+                "if dd < 1 || dd > max_day { return Err(\"updated_at: day out of range for month\"); }",
+            );
+            // Date/time separator (case-insensitive `T`).
+            w.line(
+                "if !matches!(bytes[10], b'T' | b't') { return Err(\"updated_at: expected `T` between date and time\"); }",
+            );
+            // Time: HH:MM:SS digits + ranges.
+            w.line(
+                "if !bytes[11..13].iter().all(u8::is_ascii_digit) || bytes[13] != b':' || !bytes[14..16].iter().all(u8::is_ascii_digit) || bytes[16] != b':' || !bytes[17..19].iter().all(u8::is_ascii_digit) {",
+            );
+            w.indent();
+            w.line("return Err(\"updated_at: time must be HH:MM:SS\");");
+            w.dedent();
+            w.line("}");
+            w.line("let hh = (bytes[11] - b'0') * 10 + (bytes[12] - b'0');");
+            w.line("let mi = (bytes[14] - b'0') * 10 + (bytes[15] - b'0');");
+            w.line("let ss = (bytes[17] - b'0') * 10 + (bytes[18] - b'0');");
+            w.line("if hh > 23 { return Err(\"updated_at: hour out of range\"); }");
+            w.line("if mi > 59 { return Err(\"updated_at: minute out of range\"); }");
+            w.line("if ss > 59 { return Err(\"updated_at: second out of range\"); }");
+            // Trailing fractional + zone — same shape as the domain parser.
+            // Cap at 9 digits (nanosecond precision); higher precision
+            // would silently truncate during chronological comparison.
+            w.line("let mut idx = 19usize;");
+            w.line("if idx < bytes.len() && bytes[idx] == b'.' {");
+            w.indent();
+            w.line("idx += 1;");
+            w.line("let frac_start = idx;");
+            w.line("while idx < bytes.len() && bytes[idx].is_ascii_digit() { idx += 1; }");
+            w.line(
+                "if idx == frac_start { return Err(\"updated_at: fractional must have >=1 digit after `.`\"); }",
+            );
+            w.line(
+                "if idx - frac_start > 9 { return Err(\"updated_at: fractional must be <= 9 digits (ns precision)\"); }",
+            );
+            w.dedent();
+            w.line("}");
+            // Zone: `Z`/`z` or `+/-HH:MM` with digit + range checks.
+            w.line("if idx < bytes.len() && matches!(bytes[idx], b'Z' | b'z') { idx += 1; }");
+            w.line("else if idx + 6 == bytes.len() && matches!(bytes[idx], b'+' | b'-') {");
+            w.indent();
+            w.line("let off = &bytes[idx + 1..];");
+            w.line(
+                "if !off[..2].iter().all(u8::is_ascii_digit) || off[2] != b':' || !off[3..5].iter().all(u8::is_ascii_digit) {",
+            );
+            w.indent();
+            w.line("return Err(\"updated_at: offset must be `+/-HH:MM` digits\");");
+            w.dedent();
+            w.line("}");
+            w.line("let oh = (off[0] - b'0') * 10 + (off[1] - b'0');");
+            w.line("let om = (off[3] - b'0') * 10 + (off[4] - b'0');");
+            w.line("if oh > 23 { return Err(\"updated_at: offset hour out of range\"); }");
+            w.line("if om > 59 { return Err(\"updated_at: offset minute out of range\"); }");
+            w.line("idx = bytes.len();");
+            w.dedent();
+            w.line("}");
+            w.line("else { return Err(\"updated_at: must end with `Z` or `+/-HH:MM` offset\"); }");
+            w.line(
+                "if idx != bytes.len() { return Err(\"updated_at: trailing data after zone\"); }",
+            );
+            w.dedent();
+            w.line("}");
         }
         _ => {
             // Unreachable — the dispatch in write_struct_raw_companion gates
@@ -2569,8 +2998,8 @@ fn write_retrieve_data_extra_checks(w: &mut RustWriter, type_name: &str) {
 ///   (`^ed25519:[0-9a-f]{128}$`).
 /// * `target_hash`: `sha256:` prefix + 64 lowercase hex chars
 ///   (`^sha256:[0-9a-f]{64}$`).
-/// * `issuer`: identity prefix (`agt:`/`usr:`/`snr:`) + non-empty body in
-///   the alphabet `[A-Za-z0-9._:-]+` (`^(agt|usr|snr):[A-Za-z0-9._:-]+$`).
+/// * `issuer`: identity prefix (`agt:`/`hmn:`/`snr:`) + non-empty body in
+///   the alphabet `[A-Za-z0-9._:-]+` (`^(agt|hmn|snr):[A-Za-z0-9._:-]+$`).
 /// * `scope.tenant`/`workspace`/`entity`: `minLength: 1`.
 /// * `issued_at`/`expires_at`: minimal RFC-3339 date-time shape — `len >= 20`,
 ///   ASCII-only, `-` at positions 4/7, `T` at 10, `:` at 13/16, second-pair
@@ -2620,7 +3049,7 @@ fn write_signed_intent_extra_checks(w: &mut RustWriter) {
     // SHA-256 target_hash prefix + 64 lowercase hex chars.
     w.line("if !is_sha256_target_hash(&raw.target_hash) { return Err(\"target_hash: must be \\\"sha256:\\\" + 64 lowercase hex chars\"); }");
     // Identity prefix on issuer.
-    w.line("if !is_identity(&raw.issuer.0) { return Err(\"issuer: must start with one of [agt:, usr:, snr:] followed by a non-empty body in [A-Za-z0-9._:-]\"); }");
+    w.line("if !is_identity(&raw.issuer.0) { return Err(\"issuer: must start with one of [agt:, hmn:, snr:] followed by a non-empty body in [A-Za-z0-9._:-]\"); }");
     // Scope inner string fields — minLength: 1 per IDL.
     w.line("if raw.scope.tenant.is_empty() { return Err(\"scope.tenant: must not be empty\"); }");
     w.line(
@@ -2638,12 +3067,15 @@ fn write_signed_intent_extra_checks(w: &mut RustWriter) {
 /// hand-rolled byte-level checks so we don't have to pull `regex` into
 /// `cairn-core`. Emitted once at module scope.
 fn write_ulid_shape_helper(w: &mut RustWriter) {
-    w.line("/// Return true iff `s` is a valid Crockford base32 ULID — exactly 26 chars");
-    w.line("/// from the alphabet `0123456789ABCDEFGHJKMNPQRSTVWXYZ` (no I, L, O, U).");
+    w.line("/// Return true iff `s` is a valid 128-bit Crockford base32 ULID — exactly 26");
+    w.line("/// chars, first char `0..=7`, then the alphabet");
+    w.line("/// `0123456789ABCDEFGHJKMNPQRSTVWXYZ` (no I, L, O, U).");
     w.line("fn is_ulid_shape(s: &str) -> bool {");
     w.indent();
     w.line("if s.len() != 26 { return false; }");
-    w.line("s.bytes().all(|b| matches!(b,");
+    w.line("let bytes = s.as_bytes();");
+    w.line("if !matches!(bytes[0], b'0'..=b'7') { return false; }");
+    w.line("bytes[1..].iter().all(|b| matches!(b,");
     w.indent();
     w.line("b'0'..=b'9' | b'A'..=b'H' | b'J' | b'K' | b'M' | b'N' | b'P'..=b'T' | b'V'..=b'Z'");
     w.dedent();
@@ -2697,13 +3129,13 @@ fn write_ulid_shape_helper(w: &mut RustWriter) {
     w.dedent();
     w.line("}");
     w.blank();
-    // Identity: ^(agt|usr|snr):[A-Za-z0-9._:-]+$
-    w.line("/// Return true iff `s` starts with `agt:`, `usr:`, or `snr:` followed by a");
+    // Identity: ^(agt|hmn|snr):[A-Za-z0-9._:-]+$
+    w.line("/// Return true iff `s` starts with `agt:`, `hmn:`, or `snr:` followed by a");
     w.line("/// non-empty body in `[A-Za-z0-9._:-]`.");
     w.line("fn is_identity(s: &str) -> bool {");
     w.indent();
     w.line("let tail = if let Some(t) = s.strip_prefix(\"agt:\") { t }");
-    w.line("    else if let Some(t) = s.strip_prefix(\"usr:\") { t }");
+    w.line("    else if let Some(t) = s.strip_prefix(\"hmn:\") { t }");
     w.line("    else if let Some(t) = s.strip_prefix(\"snr:\") { t }");
     w.line("    else { return false; };");
     w.line("if tail.is_empty() { return false; }");
@@ -2721,15 +3153,16 @@ fn write_ulid_shape_helper(w: &mut RustWriter) {
     // obviously-out-of-range values (month=99, hour=25, offset=+99:99) are
     // rejected at the wire boundary. Day-of-month is calendar-aware —
     // 30-/31-day months and leap-year February resolve here, including the
-    // 100/400-year leap-year rule. Leap-second `60` is accepted on any day
-    // (a true leap-second table belongs to a dedicated parser; the IDL
-    // doesn't carry that data). We avoid pulling chrono into cairn-core.
+    // 100/400-year leap-year rule. Leap-second `60` is rejected to match
+    // cairn-core's domain timestamp parser until a dedicated parser can
+    // validate real leap-second instants. We avoid pulling chrono into
+    // cairn-core.
     w.line("/// Return true iff `s` is an RFC-3339 date-time:");
     w.line("/// `YYYY-MM-DDTHH:MM:SS(.fraction)?(Z|+HH:MM|-HH:MM)`. ASCII-only,");
     w.line("/// length >= 20, separators at fixed positions, digits everywhere else,");
     w.line("/// and each numeric field within its RFC-3339 range:");
     w.line("/// month 01-12, day 01-(28|29|30|31) per the calendar, hour 00-23,");
-    w.line("/// minute 00-59, second 00-60 (leap second), offset hour 00-23,");
+    w.line("/// minute 00-59, second 00-59 (leap seconds unsupported), offset hour 00-23,");
     w.line("/// offset minute 00-59. Day-of-month is calendar-aware — Feb 29 is");
     w.line("/// accepted only in leap years (`(year % 4 == 0 && year % 100 != 0)");
     w.line("/// || year % 400 == 0`).");
@@ -2751,9 +3184,7 @@ fn write_ulid_shape_helper(w: &mut RustWriter) {
     w.line("if !(1..=12).contains(&month) { return false; }");
     w.line("let day = two_digit(8);");
     w.line("if day < 1 { return false; }");
-    // Calendar-aware month-length check. Leap-second 60 still permitted on
-    // any timestamp (RFC-3339 §5.6); calendar correctness here is
-    // independent of leap-second handling.
+    // Calendar-aware month-length check.
     w.line("let max_day: u32 = match month {");
     w.indent();
     w.line("1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,");
@@ -2773,8 +3204,8 @@ fn write_ulid_shape_helper(w: &mut RustWriter) {
     w.line("let minute = two_digit(14);");
     w.line("if minute > 59 { return false; }");
     w.line("let second = two_digit(17);");
-    w.line("// RFC-3339 §5.6 permits 60 for leap seconds.");
-    w.line("if second > 60 { return false; }");
+    w.line("// Cairn rejects `:60` until a real leap-second-aware parser is wired in.");
+    w.line("if second > 59 { return false; }");
     w.line("// Optional fractional seconds + mandatory offset (Z or ±HH:MM).");
     w.line("let mut idx = 19;");
     w.line("if idx < b.len() && b[idx] == b'.' {");

@@ -1,0 +1,35 @@
+# P0 Privacy fixture 4 — §14 PII redaction: retrieve must not return raw PII body
+#
+# DEFERRED at v0.1: no automatic PII redaction at ingest time.
+# The retrieve verb returns the stored body. Without redaction at ingest, the
+# body contains raw PII and this assertion would FAIL.
+#
+# Hypothesis: after ingesting a PII-containing record, the retrieved body must
+# have the sensitive span replaced with a masked placeholder (e.g. [EMAIL]).
+#
+# This fixture pairs with redaction_pii_search.yaml. Both are unblocked when
+# Presidio pre-persist redaction is wired (P1+). At that point, remove
+# `deferred: true` from both fixtures.
+scenario: redaction_pii_retrieve
+description: |
+  §14 PII redaction (DEFERRED — no auto-redact at ingest in v0.1).
+  Asserts that the retrieved body does not contain the raw email address.
+  Unblock when Presidio pre-persist redaction is wired (P1+).
+deferred: true
+setup:
+  records:
+    - id: rec_pii_retrieve
+      kind: reference
+      body: "Phone 555-867-5309 and email jane.doe@example-privacy-test.com"
+operations: []
+assertions:
+  # v0.1 gap: retrieve currently returns the verbatim body including PII.
+  # When redaction is wired, these assertions should pass without deferral.
+  retrieve:
+    - id: rec_pii_retrieve
+      # After redaction the body should be present but masked, not the raw PII.
+      # We cannot express "body exists but doesn't contain X" with the current
+      # retrieve DSL (which only checks present vs not_found). A richer
+      # retrieve assertion DSL (body_must_not_contain) would be needed here.
+      # For now, the fixture documents the gap.
+      expect: present

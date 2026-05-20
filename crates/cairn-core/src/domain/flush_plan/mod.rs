@@ -14,7 +14,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{DomainError, Identity, MemoryKind, MemoryRecord, ScopeTuple};
+use crate::domain::{Identity, MemoryKind, MemoryRecord, ScopeTuple, SessionId, TargetId};
 use crate::generated::common::Ulid;
 
 pub mod diff;
@@ -69,75 +69,38 @@ pub struct FlushPlan {
     pub dependencies: Vec<Ulid>,
     /// 5-minute receipt TTL (§5.6). Apply past this is rejected.
     pub expires_at: String,
-}
-
-/// Target lineage key affected by a planned mutation.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
-#[serde(transparent)]
-pub struct TargetId(String);
-
-impl TargetId {
-    /// Parse a non-empty target id.
-    pub fn parse(raw: impl Into<String>) -> Result<Self, DomainError> {
-        let raw = raw.into();
-        if raw.is_empty() {
-            return Err(DomainError::EmptyField { field: "target_id" });
-        }
-        Ok(Self(raw))
-    }
-
-    /// Wire-form target id string.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl<'de> Deserialize<'de> for TargetId {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let raw = String::deserialize(deserializer)?;
-        Self::parse(raw).map_err(serde::de::Error::custom)
-    }
-}
-
-/// Session identifier affected by a planned mutation.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
-#[serde(transparent)]
-pub struct SessionId(String);
-
-impl SessionId {
-    /// Parse a non-empty session id.
-    pub fn parse(raw: impl Into<String>) -> Result<Self, DomainError> {
-        let raw = raw.into();
-        if raw.is_empty() {
-            return Err(DomainError::EmptyField {
-                field: "session_id",
-            });
-        }
-        Ok(Self(raw))
-    }
-
-    /// Wire-form session id string.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl<'de> Deserialize<'de> for SessionId {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let raw = String::deserialize(deserializer)?;
-        Self::parse(raw).map_err(serde::de::Error::custom)
-    }
+    /// `true` when the plan was produced by the CLI stub planner (no live
+    /// ingest pipeline yet, awaiting #9). `apply` honors this by emitting a
+    /// prominent warning and recording `apply_kind = "metadata_only"` in
+    /// the resulting [`PlanStatus::Applied`] — the file moves but no
+    /// `MemoryStore` mutation runs. Defaults to `false` so a real planner's
+    /// plans are treated as authoritative.
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+    pub placeholder: bool,
 }
 
 impl FlushPlan {
+    /// Earliest persisted-plan schema that can represent every mutation in
+    /// this plan.
+    #[must_use]
+    pub fn required_schema_version(&self) -> u16 {
+        self.mutations
+            .iter()
+            .map(PlannedMutation::required_schema_version)
+            .max()
+            .unwrap_or(PersistedPlan::BASE_SCHEMA_VERSION)
+    }
+
+    /// Whether this plan contains coordination mutations. Keep feature
+    /// gating tied to mutation semantics rather than to the persisted
+    /// schema version, which can advance for unrelated mutation families.
+    #[must_use]
+    pub fn contains_coord_mutations(&self) -> bool {
+        self.mutations
+            .iter()
+            .any(PlannedMutation::is_coord_mutation)
+    }
+
     /// Idempotency key per §5.6 — the `operation_id`.
     #[must_use]
     pub fn idempotency_key(&self) -> &Ulid {
@@ -149,6 +112,48 @@ impl FlushPlan {
     pub fn target_hash(&self, target: &TargetId) -> Option<&str> {
         self.target_hashes.get(target.as_str()).map(String::as_str)
     }
+
+    /// Pre-state hash for a session metadata target (issue #289 review
+    /// round 2). `target_hashes` is keyed by string, so session patches
+    /// reuse it under the session id.
+    #[must_use]
+    pub fn session_hash(&self, session: &SessionId) -> Option<&str> {
+        self.target_hashes.get(session.as_str()).map(String::as_str)
+    }
+}
+
+/// One concrete mutation inside a [`FlushPlan`]. Tagged externally for
+/// stable JSON shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PatchTarget {
+    /// Patch the active record for the target.
+    Record(TargetId),
+    /// Patch the session metadata document for the session.
+    Session(SessionId),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+/// Which match occurrence(s) a patch replacement should edit.
+pub enum ReplaceOccurrence {
+    /// Replace the first matching occurrence.
+    First,
+    /// Replace every matching occurrence.
+    All,
+    /// Replace the nth matching occurrence (zero-based).
+    Nth(usize),
+}
+
+/// One string replacement inside a patch mutation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StrReplace {
+    /// Existing substring to find.
+    pub old: String,
+    /// Replacement substring.
+    pub new: String,
+    /// Which occurrence(s) to replace.
+    pub occurrence: ReplaceOccurrence,
 }
 
 /// One concrete mutation inside a [`FlushPlan`]. Tagged externally for
@@ -171,6 +176,20 @@ pub enum PlannedMutation {
         target: TargetId,
         /// Version the caller observed — prevents blind deletes.
         prior_version: u32,
+    },
+    /// Patch an existing record or session metadata document.
+    Patch {
+        /// Which document the string replacements apply to.
+        target: PatchTarget,
+        /// Ordered string replacements applied left-to-right.
+        str_replace: Vec<StrReplace>,
+    },
+    /// Rename an existing target id to a new target id.
+    Rename {
+        /// Existing target lineage key.
+        record_id: TargetId,
+        /// Destination lineage key.
+        new_id: TargetId,
     },
     /// Promote a raw/wiki record to a different memory kind.
     Promote {
@@ -205,6 +224,143 @@ pub enum PlannedMutation {
         /// Path to the diff file (relative to vault root).
         diff_ref: PathBuf,
     },
+    /// Acquire the exclusive coordination lease for an action.
+    LeaseAcquire {
+        /// Action being claimed.
+        action_id: TargetId,
+        /// Actor acquiring the lease.
+        actor: Identity,
+        /// ISO 8601 duration string for the lease TTL.
+        ttl: String,
+        /// RFC 3339 timestamp when the lease expires.
+        expires_at: String,
+    },
+    /// Release a coordination lease held by an actor.
+    LeaseRelease {
+        /// Action whose lease is released.
+        action_id: TargetId,
+        /// Actor releasing the lease.
+        actor: Identity,
+        /// Optional release reason for the audit log.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        reason: Option<String>,
+    },
+    /// Append an inter-agent coordination signal.
+    SignalSend {
+        /// Actor that emitted the signal.
+        from_actor: Identity,
+        /// Actor that should observe the signal.
+        to_actor: Identity,
+        /// Closed signal kind.
+        signal_kind: CoordSignalKind,
+        /// Optional payload record id.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        payload_id: Option<TargetId>,
+    },
+    /// Create a coordination action node.
+    ActionCreate {
+        /// Stable action id.
+        id: TargetId,
+        /// Human-readable title.
+        title: String,
+        /// Action ids that must complete before this action is unblocked.
+        depends_on: Vec<TargetId>,
+        /// Higher priority sorts earlier in frontier results.
+        priority: i32,
+    },
+    /// Update a coordination action's lifecycle status.
+    ActionUpdate {
+        /// Stable action id.
+        id: TargetId,
+        /// New lifecycle status.
+        status: CoordActionStatus,
+        /// Optional transition reason for the audit log.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        reason: Option<String>,
+    },
+    /// Instantiate a declarative coordination routine.
+    RoutineInstantiate {
+        /// Routine template name.
+        routine_name: String,
+        /// Stable routine instance id.
+        instance_id: Ulid,
+        /// String variables passed to the template expander.
+        vars: BTreeMap<String, String>,
+    },
+}
+
+impl PlannedMutation {
+    /// True for mutations owned by the `cairn.coord.v1` extension.
+    #[must_use]
+    pub fn is_coord_mutation(&self) -> bool {
+        matches!(
+            self,
+            Self::LeaseAcquire { .. }
+                | Self::LeaseRelease { .. }
+                | Self::SignalSend { .. }
+                | Self::ActionCreate { .. }
+                | Self::ActionUpdate { .. }
+                | Self::RoutineInstantiate { .. }
+        )
+    }
+
+    /// Earliest persisted-plan schema version that can encode this mutation.
+    #[must_use]
+    pub fn required_schema_version(&self) -> u16 {
+        match self {
+            Self::LeaseAcquire { .. }
+            | Self::LeaseRelease { .. }
+            | Self::SignalSend { .. }
+            | Self::ActionCreate { .. }
+            | Self::ActionUpdate { .. }
+            | Self::RoutineInstantiate { .. } => PersistedPlan::COORD_SCHEMA_VERSION,
+            Self::Upsert { .. }
+            | Self::Delete { .. }
+            | Self::Patch { .. }
+            | Self::Rename { .. }
+            | Self::Promote { .. }
+            | Self::Expire { .. }
+            | Self::ForgetSession { .. }
+            | Self::ForgetRecord { .. }
+            | Self::Evolve { .. } => PersistedPlan::BASE_SCHEMA_VERSION,
+        }
+    }
+}
+
+/// Closed set of coordination signal kinds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CoordSignalKind {
+    /// An action or routine finished successfully.
+    TaskCompleted,
+    /// A lease was released.
+    LeaseReleased,
+    /// Another actor should review the payload or action.
+    RequestReview,
+    /// Progress requires user input.
+    UserInputNeeded,
+    /// The sender hit an error.
+    Error,
+    /// Informational observation.
+    Info,
+}
+
+/// Closed set of coordination action lifecycle statuses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CoordActionStatus {
+    /// Ready once dependencies complete.
+    Pending,
+    /// Claimed or actively running.
+    InProgress,
+    /// Finished successfully.
+    Completed,
+    /// Cannot proceed until an external condition changes.
+    Blocked,
+    /// Intentionally abandoned.
+    Cancelled,
 }
 
 /// Why an expiration was planned (brief §10 `ExpirationWorkflow`).
@@ -256,12 +412,19 @@ pub enum PlanReason {
         /// Version of the skill before this evolution.
         previous_version: u32,
     },
+    /// Triggered by the reflection workflow.
+    Reflect {
+        /// Candidate memory kind produced by reflection.
+        candidate_kind: MemoryKind,
+        /// Number of evidence records consulted.
+        evidence_count: u32,
+    },
 }
 
 /// On-disk wrapper persisted under `.cairn/flush/`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedPlan {
-    /// On-disk schema version. Always `1` in this PR.
+    /// On-disk schema version.
     pub schema_version: u16,
     /// The plan itself.
     pub plan: FlushPlan,
@@ -270,18 +433,83 @@ pub struct PersistedPlan {
 }
 
 impl PersistedPlan {
+    /// Original flush-plan schema used by non-coordination mutations.
+    pub const BASE_SCHEMA_VERSION: u16 = 1;
+    /// Schema version that introduced `cairn.coord.v1` mutation variants.
+    pub const COORD_SCHEMA_VERSION: u16 = 2;
     /// Schema version constant — bump when the on-disk shape changes.
-    pub const SCHEMA_VERSION: u16 = 1;
+    pub const SCHEMA_VERSION: u16 = Self::COORD_SCHEMA_VERSION;
 
     /// Wrap a [`FlushPlan`] in a [`PersistedPlan`] with [`PlanStatus::Pending`].
     #[must_use]
     pub fn pending(plan: FlushPlan) -> Self {
+        let schema_version = plan.required_schema_version();
         Self {
-            schema_version: Self::SCHEMA_VERSION,
+            schema_version,
             plan,
             status: PlanStatus::Pending,
         }
     }
+
+    /// Validate that this binary understands the wrapper version and that the
+    /// wrapper is new enough for the enclosed mutations.
+    pub fn validate_schema_version(&self) -> Result<(), PersistedPlanVersionError> {
+        if self.schema_version > Self::SCHEMA_VERSION {
+            return Err(PersistedPlanVersionError::Unsupported {
+                schema_version: self.schema_version,
+                supported: Self::SCHEMA_VERSION,
+            });
+        }
+
+        let required = self.plan.required_schema_version();
+        if self.schema_version < required {
+            return Err(PersistedPlanVersionError::RequiresNewer {
+                schema_version: self.schema_version,
+                required,
+            });
+        }
+
+        Ok(())
+    }
+}
+
+/// Persisted-plan schema compatibility error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersistedPlanVersionError {
+    /// The plan was written by a newer format than this binary understands.
+    Unsupported {
+        /// Version stored in the plan wrapper.
+        schema_version: u16,
+        /// Highest version supported by this binary.
+        supported: u16,
+    },
+    /// The wrapper version is too old for the enclosed mutation kinds.
+    RequiresNewer {
+        /// Version stored in the plan wrapper.
+        schema_version: u16,
+        /// Minimum version required by the plan content.
+        required: u16,
+    },
+}
+
+/// How a `PlanStatus::Applied` was actually executed.
+///
+/// `MetadataOnly` indicates the plan's lifecycle marker advanced (file moved
+/// from `pending/` to `applied/`) without any `MemoryStore` mutation —
+/// the path the CLI takes today while the WAL state machine (#9) is being
+/// wired. `Full` indicates the WAL apply executed the mutations against the
+/// store. Defaults to `MetadataOnly` so historical plans deserialize as the
+/// honest no-op state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ApplyKind {
+    /// File moved to `applied/` but no `MemoryStore` mutations executed.
+    /// Operator-visible warning is emitted at apply time.
+    #[default]
+    MetadataOnly,
+    /// WAL apply ran and `MemoryStore` reflects the mutations.
+    Full,
 }
 
 /// Lifecycle state of a persisted plan.
@@ -295,6 +523,12 @@ pub enum PlanStatus {
     Applied {
         /// RFC 3339 timestamp of the apply operation.
         at: String,
+        /// Distinguishes a real `MemoryStore`-backed apply from a metadata-only
+        /// move that left the store untouched. The metadata-only path exists
+        /// while the WAL apply integration (#9) lands; once that wires up, all
+        /// applies are `ApplyKind::Full`.
+        #[serde(default)]
+        apply_kind: ApplyKind,
     },
     /// Plan was rejected by the human reviewer.
     Rejected {
@@ -308,7 +542,7 @@ pub enum PlanStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{Identity, ScopeTuple};
+    use crate::domain::{Identity, ScopeTuple, TargetId};
     use crate::generated::common::Ulid;
 
     fn sample_plan() -> FlushPlan {
@@ -316,7 +550,7 @@ mod tests {
             operation_id: Ulid("01HQZK000000000000000000VP".into()),
             issued_at: "2026-05-04T12:00:00Z".into(),
             issuer: Identity::parse("agt:claude-code:opus-4-7:reviewer:v1").unwrap(),
-            principal: Some(Identity::parse("usr:tafeng:v1").unwrap()),
+            principal: Some(Identity::parse("hmn:tafeng:v1").unwrap()),
             scope: ScopeTuple::default(),
             mode: FlushMode::Autonomous,
             mutations: vec![PlannedMutation::Delete {
@@ -328,6 +562,7 @@ mod tests {
             target_hashes: BTreeMap::default(),
             dependencies: vec![],
             expires_at: "2026-05-04T12:05:00Z".into(),
+            placeholder: false,
         }
     }
 
@@ -339,6 +574,79 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&plan).unwrap(),
             serde_json::to_value(&back).unwrap()
+        );
+    }
+
+    fn plan_with(mutations: Vec<PlannedMutation>) -> FlushPlan {
+        let mut p = sample_plan();
+        p.mutations = mutations;
+        p
+    }
+
+    #[test]
+    fn snapshot_delete_plan_json() {
+        let plan = sample_plan();
+        let json = serde_json::to_string_pretty(&PersistedPlan::pending(plan)).unwrap();
+        insta::assert_snapshot!("plan_delete_json", json);
+    }
+
+    #[test]
+    fn snapshot_expire_plan_json() {
+        let plan = plan_with(vec![PlannedMutation::Expire {
+            target: TargetId::parse("01HQZX9F5N0000000000000000").unwrap(),
+            reason: ExpirationReason::TtlExpired,
+        }]);
+        let json = serde_json::to_string_pretty(&PersistedPlan::pending(plan)).unwrap();
+        insta::assert_snapshot!("plan_expire_json", json);
+    }
+
+    #[test]
+    fn coord_mutation_detection_is_explicit() {
+        let mut plan = sample_plan();
+        assert_eq!(
+            plan.required_schema_version(),
+            PersistedPlan::BASE_SCHEMA_VERSION
+        );
+        assert!(!plan.contains_coord_mutations());
+
+        plan.mutations.push(PlannedMutation::ActionCreate {
+            id: TargetId::parse("01HQZK000000000000000ACTN1").unwrap(),
+            title: "coordinate work".into(),
+            depends_on: vec![],
+            priority: 0,
+        });
+        assert_eq!(
+            plan.required_schema_version(),
+            PersistedPlan::COORD_SCHEMA_VERSION
+        );
+        assert!(plan.contains_coord_mutations());
+    }
+
+    #[test]
+    fn snapshot_diff_markdown_for_delete() {
+        let md = diff::render(&sample_plan());
+        insta::assert_snapshot!("diff_delete_md", md);
+    }
+
+    #[test]
+    fn snapshot_status_transitions() {
+        let plan = sample_plan();
+        let mut p = PersistedPlan::pending(plan);
+        p.status = PlanStatus::Applied {
+            at: "2026-05-04T12:01:00Z".into(),
+            apply_kind: ApplyKind::Full,
+        };
+        insta::assert_snapshot!(
+            "status_applied_json",
+            serde_json::to_string_pretty(&p).unwrap()
+        );
+        p.status = PlanStatus::Rejected {
+            at: "2026-05-04T12:02:00Z".into(),
+            reason: "operator rejected".into(),
+        };
+        insta::assert_snapshot!(
+            "status_rejected_json",
+            serde_json::to_string_pretty(&p).unwrap()
         );
     }
 }

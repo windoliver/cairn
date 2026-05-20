@@ -1,0 +1,8 @@
+{
+  "args": {
+    "mode": "fuzzy",
+    "query": "test"
+  },
+  "contract": "cairn.mcp.v1",
+  "verb": "search"
+}

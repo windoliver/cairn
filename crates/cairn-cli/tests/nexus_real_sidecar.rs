@@ -4,8 +4,8 @@
 //!
 //! ```text
 //! CAIRN_REAL_NEXUS_SIDECAR=1 \
-//! CAIRN_REAL_NEXUS_SIDECAR_COMMAND=cairn-nexus-sandbox \
-//! CAIRN_REAL_NEXUS_SIDECAR_ARGS='["sandbox","serve"]' \
+//! CAIRN_REAL_NEXUS_SIDECAR_COMMAND=nexusd \
+//! CAIRN_REAL_NEXUS_SIDECAR_ARGS='["--profile","sandbox","--host","127.0.0.1","--port","8765","--workspace","{vault_dir}","--data-dir","{data_dir}"]' \
 //! CAIRN_REAL_NEXUS_SIDECAR_ENDPOINT=http://127.0.0.1:8765 \
 //! cargo nextest run -p cairn-cli --test nexus_real_sidecar --run-ignored only --locked
 //! ```
@@ -29,13 +29,14 @@ fn require_opt_in() {
 }
 
 fn sidecar_command() -> String {
-    std::env::var("CAIRN_REAL_NEXUS_SIDECAR_COMMAND")
-        .unwrap_or_else(|_| "cairn-nexus-sandbox".to_owned())
+    std::env::var("CAIRN_REAL_NEXUS_SIDECAR_COMMAND").unwrap_or_else(|_| "nexusd".to_owned())
 }
 
 fn sidecar_args() -> Vec<String> {
-    let raw = std::env::var("CAIRN_REAL_NEXUS_SIDECAR_ARGS")
-        .unwrap_or_else(|_| r#"["sandbox","serve"]"#.to_owned());
+    let raw = std::env::var("CAIRN_REAL_NEXUS_SIDECAR_ARGS").unwrap_or_else(|_| {
+        r#"["--profile","sandbox","--host","127.0.0.1","--port","8765","--workspace","{vault_dir}","--data-dir","{data_dir}"]"#
+            .to_owned()
+    });
     if raw.trim_start().starts_with('[') {
         serde_json::from_str(&raw).expect("CAIRN_REAL_NEXUS_SIDECAR_ARGS must be a JSON array")
     } else {
@@ -58,17 +59,32 @@ fn write_config(vault: &Path, endpoint: &str, health_path: &str) {
     std::fs::write(
         config_dir.join("config.yaml"),
         format!(
-            "store:\n  kind: nexus-sandbox\n  nexus:\n    endpoint: {endpoint:?}\n    health_path: {health_path:?}\n    health_timeout_ms: 5000\n    shutdown_timeout_ms: 2000\n"
+            "store:\n  kind: nexus-sandbox\n  nexus:\n    endpoint: {endpoint:?}\n    health_path: {health_path:?}\n    health_timeout_ms: 120000\n    shutdown_timeout_ms: 2000\n"
         ),
     )
     .unwrap();
 }
 
+fn write_vault_id(vault: &Path) {
+    let config_dir = vault.join(".cairn");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(config_dir.join("vault.id"), "01HQZX9F5N0000000000000000")
+        .expect("write vault.id");
+}
+
 fn create_authority_db(vault: &Path) {
     let db_dir = vault.join(".cairn");
     std::fs::create_dir_all(&db_dir).unwrap();
-    let conn = rusqlite::Connection::open(db_dir.join("cairn.db")).unwrap();
-    conn.execute_batch("PRAGMA user_version = 1;").unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    rt.block_on(async {
+        let store = cairn_store_sqlite::open(db_dir.join("cairn.db"))
+            .await
+            .expect("migrate authority db");
+        drop(store);
+    });
 }
 
 #[test]
@@ -84,6 +100,7 @@ fn real_sidecar_lifecycle_and_cli_status_e2e() {
     let health_path = sidecar_health_path();
     create_authority_db(&vault);
     write_config(&vault, &endpoint, &health_path);
+    write_vault_id(&vault);
 
     let mut supervisor = NexusSupervisor::start(SupervisorConfig {
         command: sidecar_command(),
@@ -92,7 +109,7 @@ fn real_sidecar_lifecycle_and_cli_status_e2e() {
         health_path: health_path.clone(),
         data_dir: data_dir.clone(),
         sqlite_db: sqlite_db.clone(),
-        health_timeout: Duration::from_secs(5),
+        health_timeout: Duration::from_mins(2),
         shutdown_timeout: Duration::from_secs(2),
     })
     .unwrap();

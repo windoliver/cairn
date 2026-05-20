@@ -1,0 +1,1046 @@
+import "@testing-library/jest-dom/vitest";
+import { act, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { App, resolveDesktopApiBaseUrl } from "./App";
+
+const api = {
+  vault: vi.fn().mockResolvedValue({
+    id: "desktop-alpha",
+    name: "Desktop Alpha Fixture",
+    root: "fixtures/desktop-gui-alpha",
+    recordCount: 3,
+    folderCount: 2,
+  }),
+  folders: vi
+    .fn()
+    .mockResolvedValue([{ id: "folder-core", name: "Core Memories", parentId: null }]),
+  records: vi.fn().mockResolvedValue([
+    {
+      id: "rec-alpha-001",
+      title: "Project memory scaffold",
+      folderId: "folder-core",
+      kind: "skill",
+      tags: ["alpha"],
+      version: 2,
+      confidence: 0.86,
+    },
+  ]),
+  record: vi.fn().mockResolvedValue({
+    id: "rec-alpha-001",
+    title: "Project memory scaffold",
+    folderId: "folder-core",
+    body: "Markdown body",
+    kind: "skill",
+    tags: ["alpha"],
+    version: 2,
+    backendHash: "sha256:fixture-alpha-001",
+    confidence: 0.86,
+    sourceHash: "sha256:source-alpha-001",
+    links: ["rec-alpha-002"],
+  }),
+  graph: vi.fn().mockResolvedValue({
+    nodes: [
+      {
+        id: "rec-alpha-001",
+        label: "Project memory scaffold",
+        kind: "skill",
+        group: "folder-core",
+      },
+    ],
+    edges: [
+      {
+        id: "rec-alpha-001--rec-alpha-002",
+        source: "rec-alpha-001",
+        target: "rec-alpha-002",
+        label: "wikilink",
+      },
+    ],
+  }),
+  lint: vi.fn().mockResolvedValue([
+    {
+      id: "lint-alpha-001",
+      severity: "warning",
+      recordId: "rec-alpha-001",
+      message: "Source hash is stale",
+    },
+  ]),
+  search: vi.fn().mockResolvedValue([]),
+  previewReconcile: vi.fn(),
+  applyReconcile: vi.fn(),
+};
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.clearAllMocks();
+  vi.unstubAllGlobals();
+  delete window.cairnDesktop;
+});
+
+describe("App", () => {
+  it("prefers the Electron preload API base URL when available", () => {
+    Object.defineProperty(window, "cairnDesktop", {
+      configurable: true,
+      value: { apiBaseUrl: "http://127.0.0.1:49152" },
+    });
+
+    expect(resolveDesktopApiBaseUrl()).toBe("http://127.0.0.1:49152");
+  });
+
+  it("renders the vault inspector and loaded record", async () => {
+    render(<App api={api} />);
+
+    await waitFor(() => expect(screen.getByText("Desktop Alpha Fixture")).toBeInTheDocument());
+    expect(screen.getAllByText("Project memory scaffold").length).toBeGreaterThan(0);
+    expect(screen.getByText("Markdown body")).toBeInTheDocument();
+    expect(screen.getByText("Graph")).toBeInTheDocument();
+    expect(screen.getByText("Lint")).toBeInTheDocument();
+  });
+
+  it("uses a stable default API client across rerenders", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = input.toString();
+      if (url.endsWith("/api/v1/vault")) {
+        return jsonResponse({
+          id: "desktop-alpha",
+          name: "Desktop Alpha Fixture",
+          root: "fixtures/desktop-gui-alpha",
+          recordCount: 1,
+          folderCount: 1,
+        });
+      }
+      if (url.endsWith("/api/v1/folders")) {
+        return jsonResponse([{ id: "folder-core", name: "Core Memories", parentId: null }]);
+      }
+      if (url.endsWith("/api/v1/records")) {
+        return jsonResponse([
+          {
+            id: "rec-alpha-001",
+            title: "Project memory scaffold",
+            folderId: "folder-core",
+            kind: "skill",
+            tags: ["alpha"],
+            version: 2,
+            confidence: 0.86,
+          },
+        ]);
+      }
+      if (url.endsWith("/api/v1/records/rec-alpha-001")) {
+        return jsonResponse({
+          id: "rec-alpha-001",
+          title: "Project memory scaffold",
+          folderId: "folder-core",
+          body: "Markdown body",
+          kind: "skill",
+          tags: ["alpha"],
+          version: 2,
+          backendHash: "sha256:fixture-alpha-001",
+          confidence: 0.86,
+          sourceHash: "sha256:source-alpha-001",
+          links: ["rec-alpha-002"],
+        });
+      }
+      if (url.endsWith("/api/v1/graph")) {
+        return jsonResponse({ nodes: [], edges: [] });
+      }
+      if (url.endsWith("/api/v1/lint")) {
+        return jsonResponse([]);
+      }
+      throw new Error(`Unexpected fetch ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+
+    await screen.findByText("Desktop Alpha Fixture");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+  });
+
+  it("keeps loaded vault data when the initial record detail request fails", async () => {
+    api.record.mockRejectedValueOnce(new Error("Initial record unavailable"));
+
+    render(<App api={api} />);
+
+    expect(await screen.findByText("Initial record unavailable")).toBeInTheDocument();
+    expect(screen.getByText("Desktop Alpha Fixture")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Project memory scaffold/ })).toBeInTheDocument();
+    expect(screen.getByText("Graph")).toBeInTheDocument();
+  });
+
+  it("retries the initial desktop API load after the backend becomes available", async () => {
+    const user = userEvent.setup();
+    api.vault.mockRejectedValueOnce(new Error("Desktop API request failed"));
+
+    render(<App api={api} />);
+
+    expect(await screen.findByText("Desktop API request failed")).toBeInTheDocument();
+    expect(screen.getByText("Loading vault")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Retry desktop API" }));
+
+    expect(await screen.findByText("Desktop Alpha Fixture")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("Markdown body")).toBeInTheDocument();
+  });
+
+  it("automatically retries the initial desktop API load", async () => {
+    vi.useFakeTimers();
+    api.vault.mockRejectedValueOnce(new Error("Desktop API request failed"));
+
+    render(<App api={api} />);
+
+    await act(async () => {});
+    expect(screen.getByText("Desktop API request failed")).toBeInTheDocument();
+
+    await act(async () => {
+      vi.advanceTimersByTime(1000);
+    });
+    await act(async () => {});
+
+    expect(screen.getByText("Desktop Alpha Fixture")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("Markdown body")).toBeInTheDocument();
+  });
+
+  it("shows record selection failures inline", async () => {
+    const user = userEvent.setup();
+    api.records.mockResolvedValueOnce([
+      {
+        id: "rec-alpha-001",
+        title: "Project memory scaffold",
+        folderId: "folder-core",
+        kind: "skill",
+        tags: ["alpha"],
+        version: 2,
+        confidence: 0.86,
+      },
+      {
+        id: "rec-alpha-002",
+        title: "Second memory",
+        folderId: "folder-core",
+        kind: "profile",
+        tags: ["alpha"],
+        version: 1,
+        confidence: 0.72,
+      },
+    ]);
+    api.record
+      .mockResolvedValueOnce({
+        id: "rec-alpha-001",
+        title: "Project memory scaffold",
+        folderId: "folder-core",
+        body: "Markdown body",
+        kind: "skill",
+        tags: ["alpha"],
+        version: 2,
+        backendHash: "sha256:fixture-alpha-001",
+        confidence: 0.86,
+        sourceHash: "sha256:source-alpha-001",
+        links: ["rec-alpha-002"],
+      })
+      .mockRejectedValueOnce(new Error("Record detail unavailable"));
+
+    render(<App api={api} />);
+
+    await screen.findAllByText("Project memory scaffold");
+    await user.click(screen.getByRole("button", { name: /Second memory/ }));
+
+    expect(await screen.findByText("Record detail unavailable")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("Markdown body")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Project memory scaffold/ })).toBeInTheDocument();
+  });
+
+  it("keeps the newest selected record when record detail responses arrive out of order", async () => {
+    const user = userEvent.setup();
+    let resolveSecond: (record: Awaited<ReturnType<typeof api.record>>) => void;
+    const secondRecord = new Promise<Awaited<ReturnType<typeof api.record>>>((resolve) => {
+      resolveSecond = resolve;
+    });
+    api.records.mockResolvedValueOnce([
+      {
+        id: "rec-alpha-001",
+        title: "Project memory scaffold",
+        folderId: "folder-core",
+        kind: "skill",
+        tags: ["alpha"],
+        version: 2,
+        confidence: 0.86,
+      },
+      {
+        id: "rec-alpha-002",
+        title: "Second memory",
+        folderId: "folder-core",
+        kind: "profile",
+        tags: ["alpha"],
+        version: 1,
+        confidence: 0.72,
+      },
+    ]);
+    api.record
+      .mockResolvedValueOnce({
+        id: "rec-alpha-001",
+        title: "Project memory scaffold",
+        folderId: "folder-core",
+        body: "Markdown body",
+        kind: "skill",
+        tags: ["alpha"],
+        version: 2,
+        backendHash: "sha256:fixture-alpha-001",
+        confidence: 0.86,
+        sourceHash: "sha256:source-alpha-001",
+        links: ["rec-alpha-002"],
+      })
+      .mockReturnValueOnce(secondRecord)
+      .mockResolvedValueOnce({
+        id: "rec-alpha-001",
+        title: "Project memory scaffold",
+        folderId: "folder-core",
+        body: "Fresh Markdown body",
+        kind: "skill",
+        tags: ["alpha"],
+        version: 2,
+        backendHash: "sha256:fixture-alpha-001",
+        confidence: 0.86,
+        sourceHash: "sha256:source-alpha-001",
+        links: ["rec-alpha-002"],
+      });
+
+    render(<App api={api} />);
+
+    await screen.findByDisplayValue("Markdown body");
+    await user.click(screen.getByRole("button", { name: /Second memory/ }));
+    await user.click(screen.getByRole("button", { name: /Project memory scaffold/ }));
+    expect(await screen.findByDisplayValue("Fresh Markdown body")).toBeInTheDocument();
+
+    await act(async () => {
+      resolveSecond!({
+        id: "rec-alpha-002",
+        title: "Second memory",
+        folderId: "folder-core",
+        body: "Stale second body",
+        kind: "profile",
+        tags: ["alpha"],
+        version: 1,
+        backendHash: "sha256:fixture-alpha-002",
+        confidence: 0.72,
+        sourceHash: "sha256:source-alpha-002",
+        links: ["rec-alpha-001"],
+      });
+    });
+
+    expect(screen.queryByDisplayValue("Stale second body")).not.toBeInTheDocument();
+    expect(screen.getByDisplayValue("Fresh Markdown body")).toBeInTheDocument();
+  });
+
+  it("reviews a reconcile edit through the backend client", async () => {
+    const user = userEvent.setup();
+    api.previewReconcile.mockResolvedValueOnce({
+      accepted: true,
+      targetId: "rec-alpha-001",
+      expectedVersion: 2,
+      mutableDiff: { body: "Markdown body" },
+      rejectedFields: [],
+    });
+
+    render(<App api={api} />);
+
+    await screen.findAllByText("Project memory scaffold");
+    await user.click(screen.getByRole("button", { name: "Review reconcile" }));
+
+    expect(await screen.findByText("Ready to apply")).toBeInTheDocument();
+    expect(api.previewReconcile).toHaveBeenCalledWith({
+      targetId: "rec-alpha-001",
+      expectedVersion: 2,
+      backendHash: "sha256:fixture-alpha-001",
+      fieldDiff: { body: "Markdown body" },
+    });
+  });
+
+  it("preserves an empty body draft in reconcile requests", async () => {
+    const user = userEvent.setup();
+    api.previewReconcile.mockResolvedValueOnce({
+      accepted: true,
+      targetId: "rec-alpha-001",
+      expectedVersion: 2,
+      mutableDiff: { body: "" },
+      rejectedFields: [],
+    });
+
+    render(<App api={api} />);
+
+    const body = await screen.findByLabelText("Record body");
+    await user.clear(body);
+    await user.click(screen.getByRole("button", { name: "Review reconcile" }));
+
+    expect(api.previewReconcile).toHaveBeenCalledWith({
+      targetId: "rec-alpha-001",
+      expectedVersion: 2,
+      backendHash: "sha256:fixture-alpha-001",
+      fieldDiff: { body: "" },
+    });
+  });
+
+  it("clears reconcile readiness when the reviewed draft changes", async () => {
+    const user = userEvent.setup();
+    api.previewReconcile.mockResolvedValueOnce({
+      accepted: true,
+      targetId: "rec-alpha-001",
+      expectedVersion: 2,
+      mutableDiff: { body: "Markdown body" },
+      rejectedFields: [],
+    });
+
+    render(<App api={api} />);
+
+    const body = await screen.findByLabelText("Record body");
+    await user.click(screen.getByRole("button", { name: "Review reconcile" }));
+    expect(await screen.findByText("Ready to apply")).toBeInTheDocument();
+
+    await user.type(body, " changed");
+
+    expect(screen.queryByRole("button", { name: "Apply reconcile" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Ready to apply")).not.toBeInTheDocument();
+  });
+
+  it("keeps the newest reconcile preview when review responses arrive out of order", async () => {
+    const user = userEvent.setup();
+    let resolveFirst: (preview: Awaited<ReturnType<typeof api.previewReconcile>>) => void;
+    let resolveSecond: (preview: Awaited<ReturnType<typeof api.previewReconcile>>) => void;
+    const firstPreview = new Promise<Awaited<ReturnType<typeof api.previewReconcile>>>(
+      (resolve) => {
+        resolveFirst = resolve;
+      },
+    );
+    const secondPreview = new Promise<Awaited<ReturnType<typeof api.previewReconcile>>>(
+      (resolve) => {
+        resolveSecond = resolve;
+      },
+    );
+    api.previewReconcile.mockReturnValueOnce(firstPreview).mockReturnValueOnce(secondPreview);
+
+    render(<App api={api} />);
+
+    const body = await screen.findByLabelText("Record body");
+    await user.click(screen.getByRole("button", { name: "Review reconcile" }));
+    await user.type(body, " updated");
+    await user.click(screen.getByRole("button", { name: "Review reconcile" }));
+
+    await act(async () => {
+      resolveSecond!({
+        accepted: true,
+        targetId: "rec-alpha-001",
+        expectedVersion: 2,
+        mutableDiff: { body: "Markdown body updated" },
+        rejectedFields: [],
+      });
+    });
+    expect(await screen.findByText("Ready to apply")).toBeInTheDocument();
+
+    await act(async () => {
+      resolveFirst!({
+        accepted: true,
+        targetId: "rec-alpha-001",
+        expectedVersion: 2,
+        mutableDiff: { body: "Markdown body" },
+        rejectedFields: [],
+      });
+    });
+
+    expect(screen.getByText("Ready to apply")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Apply reconcile" })).toBeInTheDocument();
+  });
+
+  it("ignores stale reconcile review failures for the same draft", async () => {
+    const user = userEvent.setup();
+    let rejectFirst: (error: Error) => void;
+    let resolveSecond: (preview: Awaited<ReturnType<typeof api.previewReconcile>>) => void;
+    const firstPreview = new Promise<Awaited<ReturnType<typeof api.previewReconcile>>>(
+      (_resolve, reject) => {
+        rejectFirst = reject;
+      },
+    );
+    const secondPreview = new Promise<Awaited<ReturnType<typeof api.previewReconcile>>>(
+      (resolve) => {
+        resolveSecond = resolve;
+      },
+    );
+    api.previewReconcile.mockReturnValueOnce(firstPreview).mockReturnValueOnce(secondPreview);
+
+    render(<App api={api} />);
+
+    await screen.findAllByText("Project memory scaffold");
+    await user.click(screen.getByRole("button", { name: "Review reconcile" }));
+    await user.click(screen.getByRole("button", { name: "Review reconcile" }));
+
+    await act(async () => {
+      resolveSecond!({
+        accepted: true,
+        targetId: "rec-alpha-001",
+        expectedVersion: 2,
+        mutableDiff: { body: "Markdown body" },
+        rejectedFields: [],
+      });
+    });
+    expect(await screen.findByText("Ready to apply")).toBeInTheDocument();
+
+    await act(async () => {
+      rejectFirst!(new Error("Stale preview failed"));
+    });
+
+    expect(screen.getByText("Ready to apply")).toBeInTheDocument();
+    expect(screen.queryByText("Stale preview failed")).not.toBeInTheDocument();
+  });
+
+  it("shows reconcile review request failures inline", async () => {
+    const user = userEvent.setup();
+    api.previewReconcile.mockRejectedValueOnce(new Error("Preview service unavailable"));
+
+    render(<App api={api} />);
+
+    await screen.findAllByText("Project memory scaffold");
+    await user.click(screen.getByRole("button", { name: "Review reconcile" }));
+
+    expect(await screen.findByText("Preview service unavailable")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Apply reconcile" })).not.toBeInTheDocument();
+  });
+
+  it("shows reconcile apply request failures inline", async () => {
+    const user = userEvent.setup();
+    api.previewReconcile.mockResolvedValueOnce({
+      accepted: true,
+      targetId: "rec-alpha-001",
+      expectedVersion: 2,
+      mutableDiff: { body: "Markdown body" },
+      rejectedFields: [],
+    });
+    api.applyReconcile.mockRejectedValueOnce(new Error("Apply service unavailable"));
+
+    render(<App api={api} />);
+
+    await screen.findAllByText("Project memory scaffold");
+    await user.click(screen.getByRole("button", { name: "Review reconcile" }));
+    await user.click(await screen.findByRole("button", { name: "Apply reconcile" }));
+
+    expect(await screen.findByText("Apply service unavailable")).toBeInTheDocument();
+    expect(screen.queryByText("Applied")).not.toBeInTheDocument();
+  });
+
+  it("does not submit duplicate reconcile applies while apply is pending", async () => {
+    const user = userEvent.setup();
+    let resolveApply: (result: Awaited<ReturnType<typeof api.applyReconcile>>) => void;
+    const applyResult = new Promise<Awaited<ReturnType<typeof api.applyReconcile>>>((resolve) => {
+      resolveApply = resolve;
+    });
+    api.previewReconcile.mockResolvedValueOnce({
+      accepted: true,
+      targetId: "rec-alpha-001",
+      expectedVersion: 2,
+      mutableDiff: { body: "Markdown body" },
+      rejectedFields: [],
+    });
+    api.applyReconcile.mockReturnValueOnce(applyResult);
+
+    render(<App api={api} />);
+
+    await screen.findAllByText("Project memory scaffold");
+    await user.click(screen.getByRole("button", { name: "Review reconcile" }));
+    const applyButton = await screen.findByRole("button", { name: "Apply reconcile" });
+    await user.click(applyButton);
+    await user.click(applyButton);
+
+    expect(api.applyReconcile).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveApply!({
+        accepted: true,
+        record: {
+          id: "rec-alpha-001",
+          title: "Project memory scaffold",
+          folderId: "folder-core",
+          body: "Applied Markdown body",
+          kind: "skill",
+          tags: ["alpha"],
+          version: 3,
+          backendHash: "sha256:fixture-alpha-001-applied",
+          confidence: 0.86,
+          sourceHash: "sha256:source-alpha-001",
+          links: ["rec-alpha-002"],
+        },
+        rejectedFields: [],
+      });
+    });
+    expect(await screen.findByText("Applied")).toBeInTheDocument();
+  });
+
+  it("clears stale pending apply state when the draft changes away and back", async () => {
+    const user = userEvent.setup();
+    let resolveApply: (result: Awaited<ReturnType<typeof api.applyReconcile>>) => void;
+    const applyResult = new Promise<Awaited<ReturnType<typeof api.applyReconcile>>>((resolve) => {
+      resolveApply = resolve;
+    });
+    api.previewReconcile
+      .mockResolvedValueOnce({
+        accepted: true,
+        targetId: "rec-alpha-001",
+        expectedVersion: 2,
+        mutableDiff: { body: "Markdown body" },
+        rejectedFields: [],
+      })
+      .mockResolvedValueOnce({
+        accepted: true,
+        targetId: "rec-alpha-001",
+        expectedVersion: 2,
+        mutableDiff: { body: "Markdown body" },
+        rejectedFields: [],
+      });
+    api.applyReconcile.mockReturnValueOnce(applyResult);
+
+    render(<App api={api} />);
+
+    const body = await screen.findByLabelText("Record body");
+    await user.click(screen.getByRole("button", { name: "Review reconcile" }));
+    const applyButton = await screen.findByRole("button", { name: "Apply reconcile" });
+    await user.click(applyButton);
+
+    await user.type(body, " changed");
+    await user.clear(body);
+    await user.type(body, "Markdown body");
+    await user.click(screen.getByRole("button", { name: "Review reconcile" }));
+
+    expect(await screen.findByRole("button", { name: "Apply reconcile" })).toBeEnabled();
+
+    await act(async () => {
+      resolveApply!({
+        accepted: true,
+        record: {
+          id: "rec-alpha-001",
+          title: "Project memory scaffold",
+          folderId: "folder-core",
+          body: "Applied stale body",
+          kind: "skill",
+          tags: ["alpha"],
+          version: 3,
+          backendHash: "sha256:fixture-alpha-001-applied",
+          confidence: 0.86,
+          sourceHash: "sha256:source-alpha-001",
+          links: ["rec-alpha-002"],
+        },
+        rejectedFields: [],
+      });
+    });
+
+    expect(screen.getByDisplayValue("Markdown body")).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("Applied stale body")).not.toBeInTheDocument();
+  });
+
+  it("clears reconcile readiness when apply is rejected", async () => {
+    const user = userEvent.setup();
+    api.previewReconcile.mockResolvedValueOnce({
+      accepted: true,
+      targetId: "rec-alpha-001",
+      expectedVersion: 2,
+      mutableDiff: { body: "Markdown body" },
+      rejectedFields: [],
+    });
+    api.applyReconcile.mockResolvedValueOnce({
+      accepted: false,
+      record: null,
+      rejectedFields: [
+        {
+          field: "version",
+          code: "version_conflict",
+          message: "Record version changed before apply",
+        },
+      ],
+    });
+
+    render(<App api={api} />);
+
+    await screen.findAllByText("Project memory scaffold");
+    await user.click(screen.getByRole("button", { name: "Review reconcile" }));
+    await user.click(await screen.findByRole("button", { name: "Apply reconcile" }));
+
+    expect(await screen.findByText("Record version changed before apply")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Apply reconcile" })).not.toBeInTheDocument();
+  });
+
+  it("applies a reviewed reconcile edit through the backend client", async () => {
+    const user = userEvent.setup();
+    api.previewReconcile.mockResolvedValueOnce({
+      accepted: true,
+      targetId: "rec-alpha-001",
+      expectedVersion: 2,
+      mutableDiff: { body: "Markdown body" },
+      rejectedFields: [],
+    });
+    api.applyReconcile.mockResolvedValueOnce({
+      accepted: true,
+      record: {
+        id: "rec-alpha-001",
+        title: "Project memory scaffold",
+        folderId: "folder-core",
+        body: "Applied Markdown body",
+        kind: "skill",
+        tags: ["alpha"],
+        version: 3,
+        backendHash: "sha256:fixture-alpha-001-next",
+        confidence: 0.86,
+        sourceHash: "sha256:source-alpha-001",
+        links: ["rec-alpha-002"],
+      },
+      rejectedFields: [],
+    });
+
+    render(<App api={api} />);
+
+    await screen.findAllByText("Project memory scaffold");
+    await user.click(screen.getByRole("button", { name: "Review reconcile" }));
+    await user.click(await screen.findByRole("button", { name: "Apply reconcile" }));
+
+    expect(await screen.findByText("Applied")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("Applied Markdown body")).toBeInTheDocument();
+    expect(api.applyReconcile).toHaveBeenCalledWith({
+      targetId: "rec-alpha-001",
+      expectedVersion: 2,
+      backendHash: "sha256:fixture-alpha-001",
+      fieldDiff: { body: "Markdown body" },
+    });
+  });
+
+  it("clears selection errors after reconcile apply succeeds", async () => {
+    const user = userEvent.setup();
+    api.records.mockResolvedValueOnce([
+      {
+        id: "rec-alpha-001",
+        title: "Project memory scaffold",
+        folderId: "folder-core",
+        kind: "skill",
+        tags: ["alpha"],
+        version: 2,
+        confidence: 0.86,
+      },
+      {
+        id: "rec-alpha-002",
+        title: "Second memory",
+        folderId: "folder-core",
+        kind: "profile",
+        tags: ["alpha"],
+        version: 1,
+        confidence: 0.72,
+      },
+    ]);
+    api.record
+      .mockResolvedValueOnce({
+        id: "rec-alpha-001",
+        title: "Project memory scaffold",
+        folderId: "folder-core",
+        body: "Markdown body",
+        kind: "skill",
+        tags: ["alpha"],
+        version: 2,
+        backendHash: "sha256:fixture-alpha-001",
+        confidence: 0.86,
+        sourceHash: "sha256:source-alpha-001",
+        links: ["rec-alpha-002"],
+      })
+      .mockRejectedValueOnce(new Error("Record detail unavailable"));
+    api.previewReconcile.mockResolvedValueOnce({
+      accepted: true,
+      targetId: "rec-alpha-001",
+      expectedVersion: 2,
+      mutableDiff: { body: "Markdown body" },
+      rejectedFields: [],
+    });
+    api.applyReconcile.mockResolvedValueOnce({
+      accepted: true,
+      record: {
+        id: "rec-alpha-001",
+        title: "Project memory scaffold",
+        folderId: "folder-core",
+        body: "Applied Markdown body",
+        kind: "skill",
+        tags: ["alpha"],
+        version: 3,
+        backendHash: "sha256:fixture-alpha-001-next",
+        confidence: 0.86,
+        sourceHash: "sha256:source-alpha-001",
+        links: ["rec-alpha-002"],
+      },
+      rejectedFields: [],
+    });
+
+    render(<App api={api} />);
+
+    await screen.findByDisplayValue("Markdown body");
+    await user.click(screen.getByRole("button", { name: /Second memory/ }));
+    expect(await screen.findByText("Record detail unavailable")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Review reconcile" }));
+    await user.click(await screen.findByRole("button", { name: "Apply reconcile" }));
+
+    expect(await screen.findByDisplayValue("Applied Markdown body")).toBeInTheDocument();
+    expect(screen.queryByText("Record detail unavailable")).not.toBeInTheDocument();
+  });
+
+  it("updates the selected record summary after reconcile apply succeeds", async () => {
+    const user = userEvent.setup();
+    api.previewReconcile.mockResolvedValueOnce({
+      accepted: true,
+      targetId: "rec-alpha-001",
+      expectedVersion: 2,
+      mutableDiff: { body: "Markdown body" },
+      rejectedFields: [],
+    });
+    api.applyReconcile.mockResolvedValueOnce({
+      accepted: true,
+      record: {
+        id: "rec-alpha-001",
+        title: "Project memory scaffold",
+        folderId: "folder-core",
+        body: "Applied Markdown body",
+        kind: "skill",
+        tags: ["alpha", "applied"],
+        version: 3,
+        backendHash: "sha256:fixture-alpha-001-applied",
+        confidence: 0.86,
+        sourceHash: "sha256:source-alpha-001",
+        links: ["rec-alpha-002"],
+      },
+      rejectedFields: [],
+    });
+
+    render(<App api={api} />);
+
+    await screen.findAllByText("Project memory scaffold");
+    await user.click(screen.getByRole("button", { name: "Review reconcile" }));
+    await user.click(await screen.findByRole("button", { name: "Apply reconcile" }));
+
+    expect(await screen.findByDisplayValue("Applied Markdown body")).toBeInTheDocument();
+    expect(screen.getByText("v3")).toBeInTheDocument();
+    const selectedSummary = screen.getByRole("button", { name: /Project memory scaffold/ });
+    expect(selectedSummary).toHaveTextContent("applied");
+  });
+
+  it("shows the applied backend body when reconcile updates the same record", async () => {
+    const user = userEvent.setup();
+    api.previewReconcile.mockResolvedValueOnce({
+      accepted: true,
+      targetId: "rec-alpha-001",
+      expectedVersion: 2,
+      mutableDiff: { body: "Markdown body changed" },
+      rejectedFields: [],
+    });
+    api.applyReconcile.mockResolvedValueOnce({
+      accepted: true,
+      record: {
+        id: "rec-alpha-001",
+        title: "Project memory scaffold",
+        folderId: "folder-core",
+        body: "Normalized backend body",
+        kind: "skill",
+        tags: ["alpha"],
+        version: 3,
+        backendHash: "sha256:fixture-alpha-001-normalized",
+        confidence: 0.86,
+        sourceHash: "sha256:source-alpha-001",
+        links: ["rec-alpha-002"],
+      },
+      rejectedFields: [],
+    });
+
+    render(<App api={api} />);
+
+    const body = await screen.findByLabelText("Record body");
+    await user.type(body, " changed");
+    await user.click(screen.getByRole("button", { name: "Review reconcile" }));
+    await user.click(await screen.findByRole("button", { name: "Apply reconcile" }));
+
+    expect(await screen.findByDisplayValue("Normalized backend body")).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("Markdown body changed")).not.toBeInTheDocument();
+  });
+
+  it("clears applied status when the applied draft changes again", async () => {
+    const user = userEvent.setup();
+    api.previewReconcile.mockResolvedValueOnce({
+      accepted: true,
+      targetId: "rec-alpha-001",
+      expectedVersion: 2,
+      mutableDiff: { body: "Markdown body" },
+      rejectedFields: [],
+    });
+    api.applyReconcile.mockResolvedValueOnce({
+      accepted: true,
+      record: {
+        id: "rec-alpha-001",
+        title: "Project memory scaffold",
+        folderId: "folder-core",
+        body: "Applied Markdown body",
+        kind: "skill",
+        tags: ["alpha"],
+        version: 3,
+        backendHash: "sha256:fixture-alpha-001-applied",
+        confidence: 0.86,
+        sourceHash: "sha256:source-alpha-001",
+        links: ["rec-alpha-002"],
+      },
+      rejectedFields: [],
+    });
+
+    render(<App api={api} />);
+
+    await screen.findAllByText("Project memory scaffold");
+    await user.click(screen.getByRole("button", { name: "Review reconcile" }));
+    await user.click(await screen.findByRole("button", { name: "Apply reconcile" }));
+    expect(await screen.findByText("Applied")).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText("Record body"), " changed");
+
+    expect(screen.queryByText("Applied")).not.toBeInTheDocument();
+  });
+
+  it("keeps an applied record when an older selection response resolves later", async () => {
+    const user = userEvent.setup();
+    let resolveSecond: (record: Awaited<ReturnType<typeof api.record>>) => void;
+    const secondRecord = new Promise<Awaited<ReturnType<typeof api.record>>>((resolve) => {
+      resolveSecond = resolve;
+    });
+    api.records.mockResolvedValueOnce([
+      {
+        id: "rec-alpha-001",
+        title: "Project memory scaffold",
+        folderId: "folder-core",
+        kind: "skill",
+        tags: ["alpha"],
+        version: 2,
+        confidence: 0.86,
+      },
+      {
+        id: "rec-alpha-002",
+        title: "Second memory",
+        folderId: "folder-core",
+        kind: "profile",
+        tags: ["alpha"],
+        version: 1,
+        confidence: 0.72,
+      },
+    ]);
+    api.record
+      .mockResolvedValueOnce({
+        id: "rec-alpha-001",
+        title: "Project memory scaffold",
+        folderId: "folder-core",
+        body: "Markdown body",
+        kind: "skill",
+        tags: ["alpha"],
+        version: 2,
+        backendHash: "sha256:fixture-alpha-001",
+        confidence: 0.86,
+        sourceHash: "sha256:source-alpha-001",
+        links: ["rec-alpha-002"],
+      })
+      .mockReturnValueOnce(secondRecord);
+    api.previewReconcile.mockResolvedValueOnce({
+      accepted: true,
+      targetId: "rec-alpha-001",
+      expectedVersion: 2,
+      mutableDiff: { body: "Markdown body" },
+      rejectedFields: [],
+    });
+    api.applyReconcile.mockResolvedValueOnce({
+      accepted: true,
+      record: {
+        id: "rec-alpha-001",
+        title: "Project memory scaffold",
+        folderId: "folder-core",
+        body: "Applied first body",
+        kind: "skill",
+        tags: ["alpha"],
+        version: 3,
+        backendHash: "sha256:fixture-alpha-001-applied",
+        confidence: 0.86,
+        sourceHash: "sha256:source-alpha-001",
+        links: ["rec-alpha-002"],
+      },
+      rejectedFields: [],
+    });
+
+    render(<App api={api} />);
+
+    await screen.findByDisplayValue("Markdown body");
+    await user.click(screen.getByRole("button", { name: /Second memory/ }));
+    await user.click(screen.getByRole("button", { name: "Review reconcile" }));
+    await user.click(await screen.findByRole("button", { name: "Apply reconcile" }));
+    expect(await screen.findByDisplayValue("Applied first body")).toBeInTheDocument();
+
+    await act(async () => {
+      resolveSecond!({
+        id: "rec-alpha-002",
+        title: "Second memory",
+        folderId: "folder-core",
+        body: "Stale second body",
+        kind: "profile",
+        tags: ["alpha"],
+        version: 1,
+        backendHash: "sha256:fixture-alpha-002",
+        confidence: 0.72,
+        sourceHash: "sha256:source-alpha-002",
+        links: ["rec-alpha-001"],
+      });
+    });
+
+    expect(screen.queryByDisplayValue("Stale second body")).not.toBeInTheDocument();
+    expect(screen.getByDisplayValue("Applied first body")).toBeInTheDocument();
+  });
+
+  it("keeps newer draft edits when an older reconcile apply resolves later", async () => {
+    const user = userEvent.setup();
+    let resolveApply: (result: Awaited<ReturnType<typeof api.applyReconcile>>) => void;
+    const applyResult = new Promise<Awaited<ReturnType<typeof api.applyReconcile>>>((resolve) => {
+      resolveApply = resolve;
+    });
+    api.previewReconcile.mockResolvedValueOnce({
+      accepted: true,
+      targetId: "rec-alpha-001",
+      expectedVersion: 2,
+      mutableDiff: { body: "Markdown body" },
+      rejectedFields: [],
+    });
+    api.applyReconcile.mockReturnValueOnce(applyResult);
+
+    render(<App api={api} />);
+
+    const body = await screen.findByLabelText("Record body");
+    await user.click(screen.getByRole("button", { name: "Review reconcile" }));
+    await user.click(await screen.findByRole("button", { name: "Apply reconcile" }));
+    await user.type(body, " newer");
+
+    await act(async () => {
+      resolveApply!({
+        accepted: true,
+        record: {
+          id: "rec-alpha-001",
+          title: "Project memory scaffold",
+          folderId: "folder-core",
+          body: "Applied older body",
+          kind: "skill",
+          tags: ["alpha"],
+          version: 3,
+          backendHash: "sha256:fixture-alpha-001-applied",
+          confidence: 0.86,
+          sourceHash: "sha256:source-alpha-001",
+          links: ["rec-alpha-002"],
+        },
+        rejectedFields: [],
+      });
+    });
+
+    expect(screen.getByDisplayValue("Markdown body newer")).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("Applied older body")).not.toBeInTheDocument();
+  });
+});
+
+function jsonResponse(body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    headers: { "content-type": "application/json" },
+  });
+}
