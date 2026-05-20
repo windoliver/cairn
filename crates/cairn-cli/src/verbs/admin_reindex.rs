@@ -7,8 +7,10 @@
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Instant;
 
 use cairn_core::config::CairnConfig;
+use cairn_core::domain::metrics::MetricEvent;
 use clap::ArgMatches;
 use serde::Serialize;
 
@@ -98,7 +100,7 @@ pub fn run(sub: &ArgMatches, vault_root: &Path, config: &CairnConfig) -> ExitCod
 
     if from_db {
         return rt.block_on(async move {
-            run_rebuild_from_db_async(&db_path, &models_root, kind, json).await
+            run_rebuild_from_db_async(vault_root, &db_path, &models_root, kind, json, config).await
         });
     }
 
@@ -235,12 +237,15 @@ async fn run_reindex_async(
 
 #[allow(clippy::too_many_lines)]
 async fn run_rebuild_from_db_async(
+    vault_root: &Path,
     db_path: &Path,
     models_root: &Path,
     kind: cairn_core::config::EmbeddingModelKind,
     json: bool,
+    config: &CairnConfig,
 ) -> ExitCode {
     use anyhow::Context as _;
+    let started = Instant::now();
 
     // Load embedder (CPU-bound). CAIRN_MOCK_EMBEDDER=1 bypasses disk load for tests.
     let embedder: Arc<dyn cairn_embeddings_local::EmbeddingModel> =
@@ -265,6 +270,14 @@ async fn run_rebuild_from_db_async(
         match cairn_store_sqlite::open_with_embedder(db_path, Some(Arc::clone(&embedder))).await {
             Ok(s) => s,
             Err(e) => {
+                emit_projection_rebuild_metric(
+                    vault_root,
+                    config,
+                    started,
+                    "aborted",
+                    0,
+                    Some("store_open"),
+                );
                 return bail(
                     json,
                     "admin reindex",
@@ -276,6 +289,14 @@ async fn run_rebuild_from_db_async(
         };
 
     let Some(raw_conn) = store.raw_conn_for_admin() else {
+        emit_projection_rebuild_metric(
+            vault_root,
+            config,
+            started,
+            "aborted",
+            0,
+            Some("store_unavailable"),
+        );
         return bail(
             json,
             "admin reindex",
@@ -290,6 +311,14 @@ async fn run_rebuild_from_db_async(
     let stats = match cairn_store_sqlite::rebuild_from_db(Arc::clone(&conn)).await {
         Ok(s) => s,
         Err(e) => {
+            emit_projection_rebuild_metric(
+                vault_root,
+                config,
+                started,
+                "aborted",
+                0,
+                Some("rebuild_from_db"),
+            );
             return bail(
                 json,
                 "admin reindex",
@@ -316,6 +345,14 @@ async fn run_rebuild_from_db_async(
                 }
             }
             Err(e) => {
+                emit_projection_rebuild_metric(
+                    vault_root,
+                    config,
+                    started,
+                    "aborted",
+                    stats.fts_rebuilt,
+                    Some("drain_once"),
+                );
                 return bail(
                     json,
                     "admin reindex",
@@ -326,6 +363,15 @@ async fn run_rebuild_from_db_async(
             }
         }
     }
+
+    emit_projection_rebuild_metric(
+        vault_root,
+        config,
+        started,
+        "committed",
+        stats.fts_rebuilt,
+        None,
+    );
 
     let out = RebuildOutput {
         fts_rebuilt: stats.fts_rebuilt,
@@ -346,4 +392,32 @@ async fn run_rebuild_from_db_async(
         );
     }
     ExitCode::SUCCESS
+}
+
+fn emit_projection_rebuild_metric(
+    vault_root: &Path,
+    config: &CairnConfig,
+    started: Instant,
+    status: &str,
+    records_rebuilt: u64,
+    error: Option<&str>,
+) {
+    if !config.observability.enabled || !config.observability.local_metrics {
+        return;
+    }
+    let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let event = MetricEvent::ProjectionRebuild {
+        ts_ms: crate::metrics::now_ms(),
+        projection: "sqlite.from_db".to_owned(),
+        status: status.to_owned(),
+        latency_ms,
+        records_rebuilt,
+        queue_lag_ms: 0,
+        retry_count: 0,
+        error: error.map(str::to_owned),
+        degradation_state: Some("none".to_owned()),
+    };
+    if let Err(err) = crate::metrics::append_local_event_sync(vault_root, &event) {
+        tracing::warn!(error = %err, "projection rebuild metric emit failed");
+    }
 }

@@ -57,6 +57,30 @@ pub enum MetricEvent {
         /// Body-free error class when the search did not commit.
         error: Option<String>,
     },
+    /// Emitted by local sensors after an observation is accepted or
+    /// dropped. Payload bodies, OCR text, transcripts, command output,
+    /// file paths, and raw policy messages are deliberately omitted.
+    #[serde(rename = "sensor_emission")]
+    SensorEmission {
+        /// Wall-clock millis since UNIX epoch.
+        ts_ms: i64,
+        /// Sensor family (`hook`, `terminal`, `clipboard`, ...).
+        sensor: String,
+        /// Response status (`emitted` or `dropped`).
+        status: String,
+        /// Wall-clock latency observed by the sensor surface.
+        latency_ms: u64,
+        /// Sanitized or observed payload size used for budget accounting.
+        bytes: u64,
+        /// Configured sensor byte budget when known.
+        budget_bytes: Option<u64>,
+        /// `bytes / budget_bytes` when a non-zero budget is known.
+        budget_used_ratio: Option<f64>,
+        /// Body-free error class when the observation was dropped.
+        error: Option<String>,
+        /// Degradation state such as `none` or `partial`.
+        degradation_state: Option<String>,
+    },
     /// Emitted for record WAL operations after finalization.
     #[serde(rename = "wal_apply")]
     WalApply {
@@ -97,6 +121,31 @@ pub enum MetricEvent {
         cache_hit: bool,
         /// Snapshot of every source-class watermark at assembly time.
         watermarks: SourceWatermarks,
+    },
+    /// Emitted after an administrative projection rebuild, such as
+    /// `cairn admin reindex --from-db`. Record bodies and projection
+    /// payloads are omitted; only aggregate SRE dimensions are exported.
+    #[serde(rename = "projection_rebuild")]
+    ProjectionRebuild {
+        /// Wall-clock millis since UNIX epoch.
+        ts_ms: i64,
+        /// Projection or rebuild path (`sqlite.from_db`, ...).
+        projection: String,
+        /// Final rebuild status (`committed` or `aborted`).
+        status: String,
+        /// Wall-clock latency observed by the caller.
+        latency_ms: u64,
+        /// Number of projection rows rebuilt when known.
+        records_rebuilt: u64,
+        /// Queue lag in milliseconds when known; zero is the local
+        /// unknown/no-lag sentinel for immediate admin rebuilds.
+        queue_lag_ms: i64,
+        /// Retry count observed by the caller.
+        retry_count: u32,
+        /// Body-free error class when status is not committed.
+        error: Option<String>,
+        /// Degradation state such as `none` or `partial`.
+        degradation_state: Option<String>,
     },
     /// Emitted when an active task-trace canvas is rendered into the
     /// hot-memory current-task section. The payload is intentionally
@@ -405,5 +454,57 @@ mod tests {
         assert!(json.contains("\"budget_used_ratio\":0.25"));
         assert!(!json.contains("secret"));
         assert!(!json.contains("body_text"));
+    }
+
+    #[test]
+    fn sensor_emission_metric_is_body_free_and_exposes_budget() {
+        let event = MetricEvent::SensorEmission {
+            ts_ms: 1,
+            sensor: "clipboard".into(),
+            status: "dropped".into(),
+            latency_ms: 7,
+            bytes: 64,
+            budget_bytes: Some(1024),
+            budget_used_ratio: Some(0.0625),
+            error: Some("privacy_denied".into()),
+            degradation_state: Some("none".into()),
+        };
+        let json = serde_json::to_string(&event).expect("serialize");
+        assert!(json.contains("\"event\":\"sensor_emission\""));
+        assert!(json.contains("\"latency_ms\":7"));
+        assert!(json.contains("\"budget_used_ratio\":0.0625"));
+        assert!(!json.contains("copied secret text"));
+        assert!(!json.contains("body"));
+    }
+
+    #[test]
+    fn projection_rebuild_metric_exposes_queue_and_retry_fields() {
+        let event = MetricEvent::ProjectionRebuild {
+            ts_ms: 1,
+            projection: "sqlite.from_db".into(),
+            status: "committed".into(),
+            latency_ms: 123,
+            records_rebuilt: 3,
+            queue_lag_ms: 42,
+            retry_count: 0,
+            error: None,
+            degradation_state: Some("none".into()),
+        };
+        let json = serde_json::to_string(&event).expect("serialize");
+        assert!(json.contains("\"event\":\"projection_rebuild\""));
+        assert!(json.contains("\"queue_lag_ms\":42"));
+        assert!(json.contains("\"retry_count\":0"));
+        let back: MetricEvent = serde_json::from_str(&json).expect("deserialize");
+        match back {
+            MetricEvent::ProjectionRebuild {
+                records_rebuilt,
+                queue_lag_ms,
+                ..
+            } => {
+                assert_eq!(records_rebuilt, 3);
+                assert_eq!(queue_lag_ms, 42);
+            }
+            _ => panic!("expected ProjectionRebuild"),
+        }
     }
 }

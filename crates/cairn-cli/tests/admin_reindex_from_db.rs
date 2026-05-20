@@ -65,6 +65,25 @@ async fn rebuild_from_db_snapshot() {
         "expected at least 3 records drained (embedded); got: {stdout}"
     );
 
+    let metrics = std::fs::read_to_string(root.join(".cairn/metrics.jsonl"))
+        .expect("projection rebuild metric file");
+    let projection_metric = metrics
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("metric json"))
+        .find(|row| row["event"] == "projection_rebuild")
+        .expect("projection_rebuild metric");
+    assert_eq!(projection_metric["projection"], "sqlite.from_db");
+    assert_eq!(projection_metric["status"], "committed");
+    assert_eq!(projection_metric["records_rebuilt"], 3);
+    assert!(projection_metric["latency_ms"].as_u64().is_some());
+    assert_eq!(projection_metric["retry_count"], 0);
+    assert_eq!(projection_metric["queue_lag_ms"], 0);
+    assert_eq!(projection_metric["error"], serde_json::Value::Null);
+    assert!(
+        !metrics.contains("alpha") && !metrics.contains("bravo") && !metrics.contains("charlie"),
+        "projection metric must not export record bodies: {metrics}"
+    );
+
     insta::assert_snapshot!("admin_reindex_from_db", stdout);
     drop(dir);
 }
