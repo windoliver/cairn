@@ -155,6 +155,10 @@
           "description": "Optional per-candidate score-component explanations. Present only when args.explain is true (which itself requires the cairn.mcp.v1.policy_trace capability).",
           "items": { "$ref": "#/$defs/ScoreExplain" }
         },
+        "semantic_degraded": {
+          "type": "boolean",
+          "description": "True when the response succeeded after a transient semantic embedding-provider outage. Absent for healthy responses and for fail-closed capability errors."
+        },
         "degraded_legs": {
           "type": "array",
           "description": "Per-leg degradation entries when one or more search legs (semantic, graph, or graph seed sources) failed or were unavailable. Empty/absent when every requested leg contributed. Lets callers distinguish a low-recall result from a partial-failure result without inspecting server logs.",

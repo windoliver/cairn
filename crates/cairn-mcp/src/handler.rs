@@ -1424,6 +1424,7 @@ fn search_outcome_to_result(
         excluded: outcome.excluded.map(|items| to_wire_exclusions(&items)),
         score_explain,
         degraded_legs,
+        semantic_degraded: outcome.semantic_degraded.then_some(true),
     };
 
     let response = crate::verb_envelope::committed(
@@ -1518,7 +1519,9 @@ fn degraded_leg_to_idl(
 
     let reason_to_idl = |r: DegradationReason| match r {
         DegradationReason::CapabilityUnavailable => DegradedLegEntryReason::CapabilityUnavailable,
-        DegradationReason::DeadlineExceeded => DegradedLegEntryReason::Timeout,
+        DegradationReason::TransientProviderOutage | DegradationReason::DeadlineExceeded => {
+            DegradedLegEntryReason::Timeout
+        }
         _ => DegradedLegEntryReason::SqlError,
     };
     let source_to_idl = |s: GraphSource| match s {

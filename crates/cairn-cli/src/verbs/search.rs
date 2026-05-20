@@ -280,7 +280,9 @@ async fn run_async(
         _ => None,
     };
     if let Some(capability) = mode_capability {
-        let resp = capability_unavailable_response(ResponseVerb::Search, capability);
+        let hint = openai_provider_unavailable_hint(&config, mode);
+        let resp =
+            capability_unavailable_response_with_hint(ResponseVerb::Search, capability, hint);
         if json {
             emit_json(&resp);
         } else {
@@ -290,7 +292,7 @@ async fn run_async(
                 &format!("capability unavailable: {capability}"),
                 &resp.operation_id,
             );
-            if let Some(hint) = cairn_core::status::remediation_for(capability) {
+            if let Some(hint) = hint.or_else(|| cairn_core::status::remediation_for(capability)) {
                 eprintln!("  hint: {hint}");
             }
         }
@@ -559,6 +561,7 @@ fn outcome_envelope(
             .map(|items| to_wire_exclusions(items)),
         score_explain,
         degraded_legs,
+        semantic_degraded: outcome.semantic_degraded.then_some(true),
     };
 
     Response {
@@ -586,7 +589,9 @@ fn degraded_leg_to_idl(
 
     let reason_to_idl = |r: DegradationReason| match r {
         DegradationReason::CapabilityUnavailable => DegradedLegEntryReason::CapabilityUnavailable,
-        DegradationReason::DeadlineExceeded => DegradedLegEntryReason::Timeout,
+        DegradationReason::TransientProviderOutage | DegradationReason::DeadlineExceeded => {
+            DegradedLegEntryReason::Timeout
+        }
         _ => DegradedLegEntryReason::SqlError,
     };
     let source_to_idl = |s: GraphSource| match s {
@@ -744,6 +749,36 @@ fn openai_feature_gate(provider: EmbeddingProvider, json: bool) -> Option<ExitCo
     }
 }
 
+fn openai_provider_unavailable_hint(
+    config: &cairn_core::config::CairnConfig,
+    mode: SearchMode,
+) -> Option<&'static str> {
+    if config.search.default_provider != EmbeddingProvider::OpenAi {
+        return None;
+    }
+    if !matches!(mode, SearchMode::Semantic | SearchMode::Hybrid) {
+        return None;
+    }
+    #[cfg(feature = "openai")]
+    {
+        let key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
+        if key.trim().is_empty() {
+            return Some("set OPENAI_API_KEY in the environment to enable OpenAI embeddings");
+        }
+        if !cairn_embeddings_openai::config_ready(config.search.embedding_model, key.trim()) {
+            return Some(
+                "set search.embedding_model to an OpenAI text-embedding-3 model \
+                 (e.g. `openai-text-embedding-3-small`) in .cairn/config.yaml",
+            );
+        }
+        None
+    }
+    #[cfg(not(feature = "openai"))]
+    {
+        Some("rebuild with `cargo build --features openai` to enable the OpenAI embedding provider")
+    }
+}
+
 /// Reason an embedder could not be constructed. Carries enough context to
 /// emit an envelope error and an exit code at the verb boundary.
 ///
@@ -842,7 +877,11 @@ async fn resolve_local_embedder(
     // and need deterministic, offline query embedding.
     if std::env::var("CAIRN_MOCK_EMBEDDER").as_deref() == Ok("1") {
         let embedder: Arc<dyn EmbeddingModel> =
-            Arc::new(cairn_embeddings_local::MockEmbedder::new(kind));
+            if std::env::var("CAIRN_MOCK_EMBEDDER_FAIL").as_deref() == Ok("network") {
+                Arc::new(NetworkFailingMockEmbedder { kind })
+            } else {
+                Arc::new(cairn_embeddings_local::MockEmbedder::new(kind))
+            };
         return Ok(embedder);
     }
 
@@ -855,6 +894,33 @@ async fn resolve_local_embedder(
         .map_err(|e| EmbedderInitError::Internal {
             msg: format!("{e:#}"),
         })
+}
+
+struct NetworkFailingMockEmbedder {
+    kind: cairn_core::config::EmbeddingModelKind,
+}
+
+impl EmbeddingModel for NetworkFailingMockEmbedder {
+    fn kind(&self) -> cairn_core::config::EmbeddingModelKind {
+        self.kind
+    }
+
+    fn dim(&self) -> usize {
+        self.kind.dim()
+    }
+
+    fn embed_document(
+        &self,
+        text: &str,
+    ) -> Result<Vec<f32>, cairn_embeddings_local::EmbeddingError> {
+        Ok(cairn_embeddings_local::mock_vector(text))
+    }
+
+    fn embed_query(&self, _text: &str) -> Result<Vec<f32>, cairn_embeddings_local::EmbeddingError> {
+        Err(cairn_embeddings_local::EmbeddingError::Network(
+            "mock semantic provider outage".to_owned(),
+        ))
+    }
 }
 
 #[cfg(feature = "openai")]
@@ -929,5 +995,29 @@ mod tests {
         assert_eq!(finite_option(Some(0.5)), Some(0.5));
         assert_eq!(finite_option(Some(f64::NAN)), Some(0.0));
         assert_eq!(finite_option(Some(f64::INFINITY)), Some(0.0));
+    }
+
+    #[test]
+    fn outcome_envelope_maps_semantic_degraded_true() {
+        use cairn_core::generated::envelope::ResponseData;
+
+        let outcome = cairn_core::verbs::search::SearchOutcome {
+            candidates: Vec::new(),
+            explain: None,
+            policy_trace: Vec::new(),
+            excluded: None,
+            degraded_legs: Vec::new(),
+            semantic_degraded: true,
+        };
+
+        let response = outcome_envelope(&outcome, SearchMode::Hybrid);
+        let Some(ResponseData::Search(data)) = response.data else {
+            panic!("search outcome must map to search response data");
+        };
+        assert_eq!(
+            data.semantic_degraded,
+            Some(true),
+            "semantic_degraded=true must be preserved in the search envelope"
+        );
     }
 }

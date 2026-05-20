@@ -953,6 +953,7 @@ mod tests {
                 reason: cairn_core::search::DegradationReason::CapabilityUnavailable,
                 source: cairn_core::search::GraphSource::All,
             }],
+            semantic_degraded: false,
         });
 
         assert_eq!(

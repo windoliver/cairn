@@ -644,7 +644,9 @@ fn degraded_leg_to_idl(
 
     let reason_to_idl = |r: DegradationReason| match r {
         DegradationReason::CapabilityUnavailable => DegradedLegEntryReason::CapabilityUnavailable,
-        DegradationReason::DeadlineExceeded => DegradedLegEntryReason::Timeout,
+        DegradationReason::TransientProviderOutage | DegradationReason::DeadlineExceeded => {
+            DegradedLegEntryReason::Timeout
+        }
         // SqlError + WorkerPanic + future variants (DegradationReason
         // is #[non_exhaustive]) all surface as SqlError on the wire.
         _ => DegradedLegEntryReason::SqlError,
@@ -736,6 +738,7 @@ fn envelope_from_outcome(
         excluded: outcome.excluded.map(|items| to_wire_exclusions(&items)),
         score_explain,
         degraded_legs,
+        semantic_degraded: outcome.semantic_degraded.then_some(true),
     };
 
     VerbResponse {

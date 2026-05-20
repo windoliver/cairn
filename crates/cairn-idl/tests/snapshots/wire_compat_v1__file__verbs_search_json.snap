@@ -1,5 +1,6 @@
 ---
 source: crates/cairn-idl/tests/wire_compat_v1.rs
+assertion_line: 95
 expression: body
 ---
 {
@@ -158,6 +159,10 @@ expression: body
           "type": "array",
           "description": "Optional per-candidate score-component explanations. Present only when args.explain is true (which itself requires the cairn.mcp.v1.policy_trace capability).",
           "items": { "$ref": "#/$defs/ScoreExplain" }
+        },
+        "semantic_degraded": {
+          "type": "boolean",
+          "description": "True when the response succeeded after a transient semantic embedding-provider outage. Absent for healthy responses and for fail-closed capability errors."
         },
         "degraded_legs": {
           "type": "array",

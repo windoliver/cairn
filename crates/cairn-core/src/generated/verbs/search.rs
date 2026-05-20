@@ -364,6 +364,9 @@ pub struct SearchData {
     /// Optional per-candidate score-component explanations. Present only when args.explain is true (which itself requires the cairn.mcp.v1.policy_trace capability).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub score_explain: Option<Vec<ScoreExplain>>,
+    /// True when the response succeeded after a transient semantic embedding-provider outage. Absent for healthy responses and for fail-closed capability errors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_degraded: Option<bool>,
 }
 
 pub const ARGS_SCHEMA: &[u8] = include_bytes!("../schemas/verbs/search.json");

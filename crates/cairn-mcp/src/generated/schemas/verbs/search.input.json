@@ -97,6 +97,10 @@
             "$ref": "#/$defs/ScoreExplain"
           },
           "type": "array"
+        },
+        "semantic_degraded": {
+          "description": "True when the response succeeded after a transient semantic embedding-provider outage. Absent for healthy responses and for fail-closed capability errors.",
+          "type": "boolean"
         }
       },
       "required": [

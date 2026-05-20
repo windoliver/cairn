@@ -84,6 +84,10 @@ pub struct SearchOutcome {
     /// surfaces it here so partial-result signaling is not silently
     /// dropped between the store and the wire surface. Issue #191.
     pub degraded_legs: Vec<crate::search::DegradedLeg>,
+    /// True when the response succeeded after a transient semantic
+    /// embedding-provider outage. This is derived from `degraded_legs` and is
+    /// never set for fail-closed capability errors.
+    pub semantic_degraded: bool,
 }
 
 fn candidate_has_reasoning(candidate: &SearchCandidate) -> bool {
@@ -250,18 +254,7 @@ pub async fn run(
             reason: e.to_string(),
         })?;
 
-    let visibility = if request.visibility_allowlist.is_empty() {
-        vec![
-            MemoryVisibility::Private,
-            MemoryVisibility::Session,
-            MemoryVisibility::Project,
-            MemoryVisibility::Team,
-            MemoryVisibility::Org,
-            MemoryVisibility::Public,
-        ]
-    } else {
-        request.visibility_allowlist.clone()
-    };
+    let visibility = visibility_allowlist(&request);
 
     let (candidates, explain, read_filter_exclusions, degraded_legs) = match request.mode {
         SearchMode::Keyword => {
@@ -330,13 +323,42 @@ pub async fn run(
         config.search.max_snippet_chars_per_page,
     );
 
+    let semantic_degraded = semantic_degraded(&degraded_legs);
+
     Ok(SearchOutcome {
         candidates,
         explain,
         policy_trace,
         excluded,
         degraded_legs,
+        semantic_degraded,
     })
+}
+
+fn semantic_degraded(degraded_legs: &[crate::search::DegradedLeg]) -> bool {
+    degraded_legs.iter().any(|leg| {
+        matches!(
+            leg,
+            crate::search::DegradedLeg::Semantic {
+                reason: crate::search::DegradationReason::TransientProviderOutage
+            }
+        )
+    })
+}
+
+fn visibility_allowlist(request: &SearchRequest) -> Vec<MemoryVisibility> {
+    if !request.visibility_allowlist.is_empty() {
+        return request.visibility_allowlist.clone();
+    }
+
+    vec![
+        MemoryVisibility::Private,
+        MemoryVisibility::Session,
+        MemoryVisibility::Project,
+        MemoryVisibility::Team,
+        MemoryVisibility::Org,
+        MemoryVisibility::Public,
+    ]
 }
 
 fn search_policy_trace(
@@ -920,10 +942,15 @@ mod tests {
                 Ok(HybridSearchPage {
                     candidates: vec![],
                     explain: None,
-                    degraded_legs: vec![DegradedLeg::Graph {
-                        reason: DegradationReason::CapabilityUnavailable,
-                        source: GraphSource::All,
-                    }],
+                    degraded_legs: vec![
+                        DegradedLeg::Semantic {
+                            reason: DegradationReason::TransientProviderOutage,
+                        },
+                        DegradedLeg::Graph {
+                            reason: DegradationReason::CapabilityUnavailable,
+                            source: GraphSource::All,
+                        },
+                    ],
                 })
             }
         }
@@ -939,8 +966,12 @@ mod tests {
         .expect("hybrid run");
         assert_eq!(
             outcome.degraded_legs.len(),
-            1,
+            2,
             "hybrid must propagate store's degraded_legs through SearchOutcome"
+        );
+        assert!(
+            outcome.semantic_degraded,
+            "transient semantic provider outage must set semantic_degraded"
         );
     }
 

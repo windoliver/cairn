@@ -402,6 +402,7 @@ mod tests {
             hits: Vec::new(),
             next_cursor: None,
             score_explain: None,
+            semantic_degraded: None,
         })
     }
 
