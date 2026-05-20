@@ -1,5 +1,8 @@
 //! Nexus sandbox sidecar lifecycle and health checks.
 
+/// Nexus projection apply HTTP client.
+pub mod projection;
+
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
@@ -341,7 +344,7 @@ impl HttpEndpoint {
         })
     }
 
-    fn socket_addrs(&self) -> Result<Vec<SocketAddr>, String> {
+    pub(crate) fn socket_addrs(&self) -> Result<Vec<SocketAddr>, String> {
         let addrs = (self.host.as_str(), self.port)
             .to_socket_addrs()
             .map_err(|err| format!("resolving endpoint: {err}"))?
