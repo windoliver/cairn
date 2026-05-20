@@ -9,7 +9,7 @@ Install the Cairn skill bundle into the harness skill directory (§18.d)
 ```text
 Install the Cairn skill bundle into the harness skill directory (§18.d)
 
-Usage: cairn skill install [OPTIONS] --harness <HARNESS>
+Usage: cairn skill install [OPTIONS] <--harness <HARNESS>|--agent <AGENT>|--all>
 
 Options:
       --harness <HARNESS>
@@ -26,6 +26,18 @@ Options:
 
       --vault <NAME_OR_PATH>
           Active vault: name from registry or filesystem path (overrides CAIRN_VAULT)
+
+      --agent <AGENT>
+          Write generated agent integration files (claude-code, codex, kiro, cursor)
+
+          Possible values:
+          - claude-code: Claude Code project integration
+          - codex:       Codex/OpenCode project instructions
+          - kiro:        Kiro always-included steering file
+          - cursor:      Cursor always-applied rule file
+
+      --all
+          Write generated integration files for all supported agents
 
       --target-dir <PATH>
           Override the default install path (~/.cairn/skills/cairn/)

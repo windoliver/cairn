@@ -29,6 +29,32 @@ fn graph_tools_registry_lists_five_tools() {
 }
 
 #[test]
+fn graph_tool_descriptions_include_invocation_discipline() {
+    for decl in GRAPH_TOOLS {
+        assert!(
+            decl.description.contains("Use when"),
+            "{} description must include a positive trigger: {}",
+            decl.name,
+            decl.description
+        );
+        assert!(
+            decl.description
+                .contains("Do NOT use for file reads or code execution"),
+            "{} description must include a negative trigger: {}",
+            decl.name,
+            decl.description
+        );
+        assert!(
+            decl.description
+                .contains("Prefer `search` over `query_graph` when you have exact record IDs"),
+            "{} description must include the search exclusivity hint: {}",
+            decl.name,
+            decl.description
+        );
+    }
+}
+
+#[test]
 fn get_entity_args_rejects_both_id_and_name() {
     let v = serde_json::json!({"id": "x", "name": "y"});
     assert!(serde_json::from_value::<GetEntityArgs>(v).is_err());

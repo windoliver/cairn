@@ -165,32 +165,47 @@ pub static GRAPH_TOOLS: &[GraphToolDecl] = &[
     tool!(
         "graph.query",
         "BFS/DFS from a seed entity within hop and token budget. \
-         Discovered nodes are returned id-only to avoid cross-scope name leaks.",
+         Discovered nodes are returned id-only to avoid cross-scope name leaks. \
+         Use when you need to find connections between concepts. \
+         Do NOT use for file reads or code execution. \
+         Prefer `search` over `query_graph` when you have exact record IDs.",
         QueryGraphArgs
     ),
     tool!(
         "graph.get_entity",
         "Look up an entity by id (returns {id, edge_count}) or name \
-         (returns {id, echoed_name, edge_count}).",
+         (returns {id, echoed_name, edge_count}). \
+         Use when you need to resolve a graph concept before traversal. \
+         Do NOT use for file reads or code execution. \
+         Prefer `search` over `query_graph` when you have exact record IDs.",
         GetEntityArgs
     ),
     tool!(
         "graph.get_neighbors",
         "Return one-hop in-scope edges incident to the given id. Optional \
-         relation and min_confidence filters.",
+         relation and min_confidence filters. \
+         Use when you need immediate graph relationships around a known entity. \
+         Do NOT use for file reads or code execution. \
+         Prefer `search` over `query_graph` when you have exact record IDs.",
         GetNeighborsArgs
     ),
     tool!(
         "graph.timeline",
         "Return all currently-visible edges for an entity ordered by valid_at. \
          include_history and include_expired flags opt into broader windows; \
-         scope filter is unconditional.",
+         scope filter is unconditional. \
+         Use when you need time-ordered graph context for a known entity. \
+         Do NOT use for file reads or code execution. \
+         Prefer `search` over `query_graph` when you have exact record IDs.",
         TimelineArgs
     ),
     tool!(
         "graph.surprising_connections",
         "Score in-scope edges between input entities; cross-scope (relative \
-         to the modal records.scope) gets a 2× confidence bonus.",
+         to the modal records.scope) gets a 2x confidence bonus. \
+         Use when you need to find connections between concepts. \
+         Do NOT use for file reads or code execution. \
+         Prefer `search` over `query_graph` when you have exact record IDs.",
         SurprisingArgs
     ),
 ];

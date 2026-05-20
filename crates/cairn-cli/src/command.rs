@@ -251,12 +251,26 @@ fn skill_subcommand() -> clap::Command {
                 .arg(
                     clap::Arg::new("harness")
                         .long("harness")
-                        .required(true)
                         .value_name("HARNESS")
                         .value_parser(clap::builder::EnumValueParser::<skill::Harness>::new())
                         .help(
                             "Target harness (claude-code, codex, gemini, opencode, cursor, custom)",
                         ),
+                )
+                .arg(
+                    clap::Arg::new("agent")
+                        .long("agent")
+                        .value_name("AGENT")
+                        .value_parser(clap::builder::EnumValueParser::<skill::Agent>::new())
+                        .conflicts_with_all(["harness", "all"])
+                        .help("Write generated agent integration files (claude-code, codex, kiro, cursor)"),
+                )
+                .arg(
+                    clap::Arg::new("all")
+                        .long("all")
+                        .action(clap::ArgAction::SetTrue)
+                        .conflicts_with_all(["harness", "agent"])
+                        .help("Write generated integration files for all supported agents"),
                 )
                 .arg(
                     clap::Arg::new("target-dir")
@@ -275,6 +289,11 @@ fn skill_subcommand() -> clap::Command {
                         .long("json")
                         .action(clap::ArgAction::SetTrue)
                         .help("Emit JSON receipt instead of human-readable output"),
+                )
+                .group(
+                    clap::ArgGroup::new("skill-install-target")
+                        .args(["harness", "agent", "all"])
+                        .required(true),
                 ),
         )
 }
