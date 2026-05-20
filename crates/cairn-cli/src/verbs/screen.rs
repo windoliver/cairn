@@ -179,17 +179,22 @@ fn emit_post_capture_drop(err: &CaptureEventBuildError, json: bool) -> ExitCode 
         ),
     };
     if json {
-        emit_json(&serde_json::json!({
-            "status": "dropped",
-            "sensor": "screen",
-            "reason": reason,
-            "error": error,
-            "artifact_created": false,
-        }));
+        emit_json(&post_capture_drop_payload(reason, error));
     } else {
         eprintln!("cairn screen capture: failed to build capture event: {error}");
     }
     code
+}
+
+fn post_capture_drop_payload(reason: &str, error: &str) -> serde_json::Value {
+    serde_json::json!({
+        "status": "dropped",
+        "sensor": "screen",
+        "reason": reason,
+        "error": error,
+        "artifact_created": true,
+        "artifact_removed": true,
+    })
 }
 
 fn emit_skipped_capture(
@@ -285,7 +290,7 @@ fn emit_artifact_cleanup_failed_metric(
     vault_root: &Path,
     config: &CairnConfig,
     observed_bytes: u64,
-    err: &ScreenError,
+    _err: &ScreenError,
     started: Instant,
 ) {
     emit_screen_sensor_metric(
@@ -294,7 +299,7 @@ fn emit_artifact_cleanup_failed_metric(
         ScreenSensorMetric {
             status: "dropped",
             error: Some("artifact_cleanup_failed".to_owned()),
-            degradation_state: Some(screen_error_degradation_state(err).to_owned()),
+            degradation_state: Some("cleanup_failed".to_owned()),
             started,
             observed_bytes,
             budget_bytes: Some(screen_text_budget_bytes(config)),
@@ -309,9 +314,10 @@ fn cleanup_failed_payload(skip: ScreenCaptureSkip, err: &ScreenError) -> serde_j
         "reason": "artifact_cleanup_failed",
         "skip_reason": skip.reason.as_str(),
         "artifact_created": skip.artifact_created,
+        "artifact_removed": false,
         "observed_bytes": skip.observed_bytes,
         "error": screen_error_metric_class(err),
-        "degradation_state": screen_error_degradation_state(err),
+        "degradation_state": "cleanup_failed",
     })
 }
 
@@ -322,8 +328,9 @@ fn post_capture_cleanup_failed_payload(err: &ScreenError) -> serde_json::Value {
         "reason": "artifact_cleanup_failed",
         "skip_reason": "post_capture_validation_failed",
         "artifact_created": true,
+        "artifact_removed": false,
         "error": screen_error_metric_class(err),
-        "degradation_state": screen_error_degradation_state(err),
+        "degradation_state": "cleanup_failed",
     })
 }
 
@@ -865,9 +872,34 @@ mod tests {
         assert_eq!(payload["reason"], "artifact_cleanup_failed");
         assert_eq!(payload["skip_reason"], "privacy_filtered");
         assert_eq!(payload["artifact_created"], true);
+        assert_eq!(payload["artifact_removed"], false);
         assert_eq!(payload["observed_bytes"], 321);
         assert_eq!(payload["error"], "capture_failed");
-        assert_eq!(payload["degradation_state"], "backend_unavailable");
+        assert_eq!(payload["degradation_state"], "cleanup_failed");
+        assert!(!payload.to_string().contains("super-secret"));
+    }
+
+    #[test]
+    fn post_capture_cleanup_failure_payload_uses_cleanup_state() {
+        let payload = post_capture_cleanup_failed_payload(&ScreenError::CaptureFailed(
+            "failed to remove dropped screen capture".to_owned(),
+        ));
+
+        assert_eq!(payload["reason"], "artifact_cleanup_failed");
+        assert_eq!(payload["artifact_created"], true);
+        assert_eq!(payload["artifact_removed"], false);
+        assert_eq!(payload["error"], "capture_failed");
+        assert_eq!(payload["degradation_state"], "cleanup_failed");
+    }
+
+    #[test]
+    fn post_capture_drop_payload_reports_created_then_removed_artifact() {
+        let payload = post_capture_drop_payload("policy_rejected", "policy_rejected");
+
+        assert_eq!(payload["status"], "dropped");
+        assert_eq!(payload["reason"], "policy_rejected");
+        assert_eq!(payload["artifact_created"], true);
+        assert_eq!(payload["artifact_removed"], true);
     }
 
     #[test]
@@ -881,5 +913,44 @@ mod tests {
         assert_eq!(payload["reason"], "permission_missing");
         assert_eq!(payload["error"], "permission_missing");
         assert_eq!(payload["degradation_state"], "permission_missing");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn captured_receipt_json_cleanup_failure_leaves_artifact_and_metrics_cleanup_state() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let vault = tempfile::tempdir().expect("tempdir");
+        let output_dir = vault.path().join("captures");
+        std::fs::create_dir(&output_dir).expect("create output directory");
+        let output_path = output_dir.join("screen.png");
+        std::fs::write(&output_path, b"fake-png").expect("write fake capture");
+        std::fs::set_permissions(&output_dir, std::fs::Permissions::from_mode(0o500))
+            .expect("make output directory non-writable");
+        let config = screen_config_with_text_budget(1024);
+        let mut observation = observation_with_secret_text();
+        observation.captured_at = "not-a-timestamp".to_owned();
+        let receipt = ScreenCaptureReceipt {
+            output_path: output_path.clone(),
+            width: 10,
+            height: 20,
+            observation,
+        };
+
+        let code = emit_captured_receipt(vault.path(), &config, &receipt, Instant::now(), true);
+        std::fs::set_permissions(&output_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("restore directory permissions");
+
+        assert_eq!(code, ExitCode::from(69));
+        assert!(output_path.exists());
+        let metrics = std::fs::read_to_string(vault.path().join(".cairn/metrics.jsonl"))
+            .expect("metrics file");
+        let metric = metrics
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("metric json"))
+            .find(|row| row["error"] == "artifact_cleanup_failed")
+            .expect("artifact cleanup metric");
+        assert_eq!(metric["error"], "artifact_cleanup_failed");
+        assert_eq!(metric["degradation_state"], "cleanup_failed");
     }
 }
