@@ -1,22 +1,74 @@
 #![allow(missing_docs)]
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
+use async_trait::async_trait;
+use cairn_core::config::{DreamConfig, DreamTier, DreamTierConfig};
 use cairn_core::contract::job_store::JobStore;
+use cairn_core::contract::llm_provider::{
+    CompletionOutput, CompletionRequest, LLMProvider, LLMProviderCapabilities, LlmError,
+};
+use cairn_core::contract::memory_store::MemoryStore;
+use cairn_core::contract::version::{ContractVersion, VersionRange};
+use cairn_core::domain::taxonomy::MemoryKind;
+use cairn_test_fixtures::{memstore, sample_record};
+use cairn_workflows::scheduler::{HandlerOutcome, HandlerRegistryBuilder, JobHandler};
 use cairn_workflows::{
-    SkillifyEnqueueDecision, SkillifyPayload, SkillifyTrigger, SqliteJobStore, enqueue_skillify,
+    DreamHandler, DreamPayload, SKILLIFY_KIND, SkillifyEnqueueDecision, SkillifyHandler,
+    SkillifyPayload, SkillifyTrigger, SqliteJobStore, enqueue_skillify,
 };
 use rusqlite::Connection;
 
-fn store() -> Arc<dyn JobStore> {
+struct FakeLlm;
+
+#[async_trait]
+impl LLMProvider for FakeLlm {
+    fn name(&self) -> &'static str {
+        "fake-llm"
+    }
+
+    fn capabilities(&self) -> &LLMProviderCapabilities {
+        static CAPS: LLMProviderCapabilities = LLMProviderCapabilities {
+            json_mode: false,
+            streaming: false,
+            tool_calls: false,
+        };
+        &CAPS
+    }
+
+    fn supported_contract_versions(&self) -> VersionRange {
+        VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+    }
+
+    async fn complete(&self, _req: &CompletionRequest) -> Result<CompletionOutput, LlmError> {
+        Ok(CompletionOutput::Text("deep dream body".to_owned()))
+    }
+}
+
+fn job_store() -> Arc<dyn JobStore> {
     let conn = Connection::open_in_memory().expect("conn");
     cairn_workflows::sqlite_store::install_for_tests(&conn);
     Arc::new(SqliteJobStore::new(conn).expect("store"))
 }
 
+#[test]
+fn registry_accepts_skillify_handler_kind() {
+    let handler = Arc::new(SkillifyHandler::new(PathBuf::from("."), None));
+    let registry = HandlerRegistryBuilder::default().with(handler).build();
+
+    let found = registry
+        .lookup(&cairn_core::contract::job_store::JobKind::new(
+            SKILLIFY_KIND,
+        ))
+        .expect("handler");
+
+    assert_eq!(found.kind().as_str(), SKILLIFY_KIND);
+}
+
 #[tokio::test]
 async fn enqueue_is_idempotent_for_same_key_and_token() {
-    let s = store();
+    let s = job_store();
     let first: SkillifyEnqueueDecision = enqueue_skillify(
         &*s,
         SkillifyTrigger::Explicit,
@@ -56,4 +108,57 @@ fn payload_round_trips_json() {
     let bytes = payload.to_bytes().expect("encode");
     let back = SkillifyPayload::from_bytes(&bytes).expect("decode");
     assert_eq!(payload, back);
+}
+
+#[tokio::test]
+async fn deep_dream_strategy_success_enqueues_skillify() {
+    let store = Arc::new(memstore().await);
+    let mut strategy = sample_record(701);
+    strategy.kind = MemoryKind::StrategySuccess;
+    strategy.body = "successful hotfix deployment procedure".to_owned();
+    store
+        .upsert(&strategy)
+        .await
+        .expect("seed strategy success");
+
+    let jobs = job_store();
+    let dyn_store: Arc<dyn MemoryStore> = store.clone();
+    let handler = DreamHandler::new(
+        dyn_store,
+        DreamConfig {
+            enabled: true,
+            deep_dreaming: DreamTierConfig {
+                window_size_records: 4,
+                ..DreamTierConfig::deep_dreaming_default()
+            },
+            ..DreamConfig::default()
+        },
+        Some(Arc::new(FakeLlm)),
+    )
+    .with_skillify_jobs(jobs.clone());
+    let payload = DreamPayload {
+        tier: DreamTier::DeepDreaming,
+        key: "vault".to_owned(),
+        bound_scope: None,
+    };
+
+    let outcome = handler.handle(&payload.to_bytes().expect("encode")).await;
+
+    assert!(
+        matches!(outcome, HandlerOutcome::Done),
+        "expected Done, got {outcome:?}"
+    );
+    let leased = jobs
+        .lease("test-worker", i64::MAX - 60_000, 30_000)
+        .await
+        .expect("lease")
+        .expect("skillify job queued");
+    assert_eq!(leased.kind.as_str(), SKILLIFY_KIND);
+    let payload = SkillifyPayload::from_bytes(&leased.payload).expect("skillify payload");
+    assert_eq!(payload.trigger, SkillifyTrigger::DeepDream);
+    assert_eq!(payload.key, "vault");
+    assert_eq!(
+        payload.source_record_ids,
+        vec![strategy.id.as_str().to_owned()]
+    );
 }

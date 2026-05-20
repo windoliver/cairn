@@ -15,7 +15,7 @@ use cairn_core::mcp_auth::{ConfigBackedScope, McpSessionScope};
 use cairn_workflows::scheduler::HandlerRegistryBuilder;
 use cairn_workflows::{
     ConsolidationForgetCleanupHandler, ConsolidationHandler, DreamHandler, EvaluationHandler,
-    ExpirationHandler, Scheduler, SchedulerConfig, SqliteJobStore, SystemClock,
+    ExpirationHandler, Scheduler, SchedulerConfig, SkillifyHandler, SqliteJobStore, SystemClock,
     default_golden_checks,
 };
 
@@ -201,7 +201,9 @@ pub fn run(
                 // declines `Permanent` on every dispatch until then,
                 // which matches the §10.2 "where configured" qualifier.
                 let dream_handler =
-                    DreamHandler::new(store_dyn.clone(), config.dream, None);
+                    DreamHandler::new(store_dyn.clone(), config.dream, None)
+                        .with_skillify_jobs(job_store.clone());
+                let skillify_handler = SkillifyHandler::new(vault_root.to_path_buf(), None);
 
                 let expiration_handler = ExpirationHandler::with_job_store(
                     store_dyn.clone(),
@@ -234,6 +236,7 @@ pub fn run(
                     .with(Arc::new(consolidation_handler))
                     .with(Arc::new(forget_cleanup_handler))
                     .with(Arc::new(dream_handler))
+                    .with(Arc::new(skillify_handler))
                     .with(Arc::new(expiration_handler))
                     .with(Arc::new(evaluation_handler))
                     .build();

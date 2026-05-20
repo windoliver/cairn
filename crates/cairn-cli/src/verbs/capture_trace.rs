@@ -62,8 +62,9 @@ use tokio::io::{AsyncBufReadExt as _, BufReader};
 use ulid::Ulid;
 
 use cairn_workflows::{
-    TraceCanvasPayload, TraceCanvasProjection, consolidation::enqueue_if_due_scoped,
-    enqueue_tier_with_dedupe_token, enqueue_trace_canvas_step,
+    SkillifyTrigger, TraceCanvasPayload, TraceCanvasProjection,
+    consolidation::enqueue_if_due_scoped, enqueue_skillify, enqueue_tier_with_dedupe_token,
+    enqueue_trace_canvas_step,
 };
 
 use crate::identity::{guard::refuse_if_degraded, status::ReconciliationReport};
@@ -402,6 +403,7 @@ async fn run_events_handler_inner_no_guard(
         let mut projected: Vec<cairn_core::domain::MemoryRecord> = Vec::with_capacity(group.len());
         let mut trace_canvas_projections: Vec<TraceCanvasProjection> = Vec::new();
         let mut had_stop = false;
+        let mut explicit_skillify_requested = false;
         let mut group_failed = false;
 
         // Track most-recently-seen pre_tool capture_event_id per tool_call_id
@@ -521,6 +523,9 @@ async fn run_events_handler_inner_no_guard(
                     break;
                 }
             };
+            if classified == TraceEvent::UserMessage && explicit_skillify_request(&raw_text) {
+                explicit_skillify_requested = true;
+            }
             let redacted = redact(&raw_text);
             let fenced = fence(&redacted.text);
             let blocks_secret = redacted.spans.iter().any(|span| is_secret_tag(span.tag));
@@ -642,6 +647,10 @@ async fn run_events_handler_inner_no_guard(
         // Per-turn atomic transaction.
         let session_id_tx = session_id.clone();
         let turn_str_tx = turn_str.clone();
+        let projected_record_ids: Vec<String> = projected
+            .iter()
+            .map(|record| record.id.as_str().to_owned())
+            .collect();
         // Clone scope binding for the move closure. None at single-tenant
         // P0; Some when capture_trace is dispatched under a signed verb
         // context with bound tenant/workspace (round-3 adversarial
@@ -847,6 +856,19 @@ async fn run_events_handler_inner_no_guard(
                     dedupe_token,
                     now_ms,
                     scope_binding,
+                )
+                .await;
+            }
+            if explicit_skillify_requested && had_stop {
+                let dedupe_token = skillify_source_dedupe_token(&projected_record_ids);
+                let _ = enqueue_skillify(
+                    js,
+                    SkillifyTrigger::Explicit,
+                    &session_str,
+                    &dedupe_token,
+                    now_ms,
+                    scope_binding,
+                    projected_record_ids.clone(),
                 )
                 .await;
             }
@@ -1076,6 +1098,21 @@ fn trace_text(event: &CaptureEvent, body_bytes: &[u8]) -> anyhow::Result<String>
         CapturePayload::RecordingBatch { .. } => recording_segment_text(body_bytes),
         _ => String::from_utf8(body_bytes.to_vec()).context("routed body is not valid UTF-8"),
     }
+}
+
+fn explicit_skillify_request(raw_text: &str) -> bool {
+    matches!(
+        raw_text.trim().to_ascii_lowercase().as_str(),
+        "skillify this" | "skillify it" | "/skillify" | "cairn skillify"
+    )
+}
+
+fn skillify_source_dedupe_token(source_record_ids: &[String]) -> String {
+    let mut source_record_ids = source_record_ids.to_vec();
+    source_record_ids.sort();
+    let mut hasher = Sha256::new();
+    hasher.update(source_record_ids.join(",").as_bytes());
+    format!("explicit:{:x}", hasher.finalize())
 }
 
 fn classify_trace_event(
@@ -1898,6 +1935,8 @@ mod tests {
     const STOP_SOURCE_HASH: &str =
         "sha256:a11c3d917a2149a4b548217038bc8f2dd2130a1966e0c7af5c4225d81f25a8c3";
     const STOP_SOURCE_REF: &str = "sources/hook/01ARZ3NDEKTSV4RRFFQ69G5FAW.json";
+    const SKILLIFY_EVENT_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAY";
+    const SKILLIFY_SOURCE_REF: &str = "sources/recording_batch/01ARZ3NDEKTSV4RRFFQ69G5FAY.json";
 
     struct RecordingJobStore {
         requests: Mutex<Vec<EnqueueRequest>>,
@@ -2014,6 +2053,57 @@ mod tests {
                 tool_name: None,
             },
             source_family: SourceFamily::Hook,
+        }
+    }
+
+    #[allow(
+        clippy::expect_used,
+        reason = "test fixture: panics surface broken invariants immediately"
+    )]
+    fn write_skillify_source(vault: &Path) {
+        std::fs::create_dir_all(vault.join("sources/recording_batch"))
+            .expect("mkdir recording sources");
+        std::fs::write(
+            vault.join(SKILLIFY_SOURCE_REF),
+            br#"{"segment":{"text":"skillify this"}}"#,
+        )
+        .expect("write skillify source");
+    }
+
+    #[allow(
+        clippy::expect_used,
+        reason = "test fixture: panics surface broken invariants immediately"
+    )]
+    fn explicit_skillify_event() -> CaptureEvent {
+        let sensor =
+            Identity::parse("snr:local:recording:default:v1").expect("valid recording sensor");
+        let captured_at = Rfc3339Timestamp::parse("2026-05-17T12:00:01Z").expect("valid RFC-3339");
+        CaptureEvent {
+            event_id: CaptureEventId::parse(SKILLIFY_EVENT_ID).expect("valid ULID"),
+            sensor_id: sensor.clone(),
+            capture_mode: CaptureMode::Auto,
+            actor_chain: vec![ActorChainEntry {
+                role: ChainRole::Author,
+                identity: sensor,
+                at: captured_at.clone(),
+            }],
+            refs: Some(CaptureRefs {
+                session_id: Some(STOP_SESSION_ID.to_owned()),
+                turn_id: Some("turn-1".to_owned()),
+                tool_id: None,
+            }),
+            payload_hash: PayloadHash::parse(format!(
+                "sha256:{}",
+                test_sha256_hex(r#"{"segment":{"text":"skillify this"}}"#)
+            ))
+            .expect("valid sha256"),
+            payload_ref: SKILLIFY_SOURCE_REF.into(),
+            captured_at,
+            payload: CapturePayload::RecordingBatch {
+                segment_start_ms: 0,
+                segment_duration_ms: 1_000,
+            },
+            source_family: SourceFamily::RecordingBatch,
         }
     }
 
@@ -2178,6 +2268,77 @@ mod tests {
             dream_requests[0].dedupe_key, dream_requests[1].dedupe_key,
             "idempotent Stop-hook replay must target the same dream dedupe slot"
         );
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::expect_used,
+        reason = "test: panics surface broken invariants immediately"
+    )]
+    async fn explicit_skillify_stop_hook_enqueues_skillify_job() {
+        let store = cairn_store_sqlite::open_in_memory()
+            .await
+            .expect("in-memory store");
+        let jobs = RecordingJobStore::new();
+        let vault = tempfile::tempdir().expect("tempdir");
+        write_skillify_source(vault.path());
+        write_stop_source(vault.path());
+        let consolidation = ConsolidationConfig {
+            enabled: false,
+            ..ConsolidationConfig::default()
+        };
+
+        let result = run_events_handler_inner_no_guard(
+            &store,
+            vault.path(),
+            vec![explicit_skillify_event(), stop_hook_event()],
+            None,
+            None,
+            Some(&jobs),
+            &consolidation,
+            &DreamConfig::default(),
+        )
+        .await
+        .expect("capture_trace");
+        assert!(
+            result.failed_turns.is_empty(),
+            "unexpected failed turns: {:?}",
+            result.failed_turns
+        );
+
+        let replay = run_events_handler_inner_no_guard(
+            &store,
+            vault.path(),
+            vec![explicit_skillify_event(), stop_hook_event()],
+            None,
+            None,
+            Some(&jobs),
+            &consolidation,
+            &DreamConfig::default(),
+        )
+        .await
+        .expect("capture_trace replay");
+        assert!(
+            replay.failed_turns.is_empty(),
+            "unexpected replay failed turns: {:?}",
+            replay.failed_turns
+        );
+
+        let requests = jobs.requests.lock().expect("invariant: mutex");
+        let skillify_requests = requests
+            .iter()
+            .filter(|req| req.kind.as_str() == cairn_workflows::SKILLIFY_KIND)
+            .collect::<Vec<_>>();
+        assert_eq!(skillify_requests.len(), 2);
+        assert_eq!(
+            skillify_requests[0].dedupe_key, skillify_requests[1].dedupe_key,
+            "idempotent explicit Skillify replay must target the same dedupe slot"
+        );
+        let payload = cairn_workflows::SkillifyPayload::from_bytes(&skillify_requests[0].payload)
+            .expect("skillify payload");
+        assert_eq!(payload.trigger, cairn_workflows::SkillifyTrigger::Explicit);
+        assert_eq!(payload.key, STOP_SESSION_ID);
+        assert_eq!(payload.source_record_ids.len(), 2);
     }
 
     #[tokio::test]
