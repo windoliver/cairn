@@ -1,9 +1,10 @@
 #![allow(missing_docs)]
 
 use cairn_core::pipeline::skillify::{
-    SkillArtifact, SkillArtifactBundle, SkillArtifactKind, SkillifyCandidateInput, SkillifyGate,
-    SkillifyGateReport, SkillifyGateStatus, SkillifyOutcome, SkillifySource, SkillifyStatus,
-    SkillifyTrigger,
+    SkillArtifact, SkillArtifactBundle, SkillArtifactKind, SkillLintIssueKind, SkillLintSkill,
+    SkillLintSnapshot, SkillifyCandidateInput, SkillifyGate, SkillifyGateReport,
+    SkillifyGateStatus, SkillifyOutcome, SkillifySource, SkillifyStatus, SkillifyTrigger,
+    lint_skill_snapshot,
 };
 
 fn input(outcome: SkillifyOutcome) -> SkillifyCandidateInput {
@@ -202,4 +203,49 @@ fn gate_report_with_all_required_gates_passed_is_ready() {
     };
 
     assert!(report.ready_for_promotion());
+}
+
+#[test]
+fn lint_reports_missing_script_and_duplicate_lane() {
+    let snapshot = SkillLintSnapshot {
+        skills: vec![
+            SkillLintSkill {
+                skill_id: "skill-a".to_owned(),
+                lane: "deploy.hotfix".to_owned(),
+                path: "skills/skill_a.md".to_owned(),
+                uses: Some("skills/scripts/missing.sh".to_owned()),
+                resolver_triggers: vec!["deploy hotfix".to_owned()],
+                files_to: Some("wiki/summaries/".to_owned()),
+                gate_report_passed: true,
+                rollback_version_count: 1,
+                existing_paths: vec!["skills/skill_a.md".to_owned()],
+            },
+            SkillLintSkill {
+                skill_id: "skill-b".to_owned(),
+                lane: "deploy.hotfix".to_owned(),
+                path: "skills/skill_b.md".to_owned(),
+                uses: Some("skills/scripts/b.sh".to_owned()),
+                resolver_triggers: vec!["ship hotfix".to_owned()],
+                files_to: Some("wiki/summaries/".to_owned()),
+                gate_report_passed: true,
+                rollback_version_count: 1,
+                existing_paths: vec![
+                    "skills/skill_b.md".to_owned(),
+                    "skills/scripts/b.sh".to_owned(),
+                ],
+            },
+        ],
+    };
+
+    let findings = lint_skill_snapshot(&snapshot);
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.kind == SkillLintIssueKind::MissingArtifact)
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.kind == SkillLintIssueKind::DuplicateLane)
+    );
 }
