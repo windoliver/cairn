@@ -237,7 +237,10 @@ impl MemoryStore for SqliteMemoryStore {
                 "SELECT r.record_id, r.record_hash, l.record_hash, l.state, l.reason
                  FROM records AS r
                  LEFT JOIN projection_ledger AS l
-                   ON l.target = ?1 AND l.record_id = r.record_id AND l.source_hash = ''
+                   ON l.target = ?1
+                  AND l.record_id = r.record_id
+                  AND l.record_hash = r.record_hash
+                  AND l.source_hash = ''
                  WHERE r.active = 1 AND r.tombstoned = 0",
             )
             .map_err(|err| sqlite_error(&err))?;
