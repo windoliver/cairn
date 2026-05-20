@@ -31,13 +31,14 @@ pub async fn enqueue_skillify(
     bound_scope: Option<&ScopeTuple>,
     source_record_ids: Vec<String>,
 ) -> Result<SkillifyEnqueueDecision, JobStoreError> {
-    let payload = SkillifyPayload {
+    let mut payload = SkillifyPayload {
         trigger,
         key: key.to_owned(),
         candidate_id: None,
         bound_scope: bound_scope.cloned(),
         source_record_ids,
     };
+    payload.candidate_id = Some(payload.derived_candidate_id());
     let bytes = payload
         .to_bytes()
         .map_err(|e| JobStoreError::Backend(e.to_string()))?;

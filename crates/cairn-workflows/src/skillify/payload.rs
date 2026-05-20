@@ -51,6 +51,33 @@ pub struct SkillifyPayload {
 }
 
 impl SkillifyPayload {
+    /// Deterministic candidate id for this source-specific emission request.
+    #[must_use]
+    pub fn derived_candidate_id(&self) -> String {
+        let scope_wire = self
+            .bound_scope
+            .as_ref()
+            .map(ScopeTuple::canonical_wire)
+            .unwrap_or_default();
+        let mut source_record_ids = self.source_record_ids.clone();
+        source_record_ids.sort();
+        let material = format!(
+            "{trigger}\0{scope_wire}\0{key}\0{sources}",
+            trigger = self.trigger.as_str(),
+            key = self.key,
+            sources = source_record_ids.join(",")
+        );
+        format!("skc_{}", crate::synthetic::sha256_hex(material.as_bytes()))
+    }
+
+    /// Explicit candidate id, falling back to the deterministic source id.
+    #[must_use]
+    pub fn candidate_id_or_derive(&self) -> String {
+        self.candidate_id
+            .clone()
+            .unwrap_or_else(|| self.derived_candidate_id())
+    }
+
     /// Recommended `EnqueueRequest::queue_key` for this payload.
     #[must_use]
     pub fn recommended_queue_key(&self) -> String {

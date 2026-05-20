@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use cairn_core::config::{DreamConfig, DreamTier, DreamTierConfig};
-use cairn_core::contract::job_store::JobStore;
+use cairn_core::contract::job_store::{JobKind, JobStore};
 use cairn_core::contract::llm_provider::{
     CompletionOutput, CompletionRequest, LLMProvider, LLMProviderCapabilities, LlmError,
 };
@@ -93,6 +93,68 @@ async fn enqueue_is_idempotent_for_same_key_and_token() {
     .expect("second");
 
     assert_eq!(first, second);
+}
+
+#[tokio::test]
+async fn enqueue_derives_candidate_id_from_source_set() {
+    let s = job_store();
+    let first = enqueue_skillify(
+        &*s,
+        SkillifyTrigger::Explicit,
+        "session-1",
+        "turn-7",
+        1_000,
+        None,
+        vec!["01HQZX9F5N0000000000000001".to_owned()],
+    )
+    .await
+    .expect("first");
+    let second = enqueue_skillify(
+        &*s,
+        SkillifyTrigger::Explicit,
+        "session-1",
+        "turn-8",
+        1_000,
+        None,
+        vec!["01HQZX9F5N0000000000000002".to_owned()],
+    )
+    .await
+    .expect("second");
+
+    let SkillifyEnqueueDecision::Enqueued { job_id: first_id } = first;
+    let SkillifyEnqueueDecision::Enqueued { job_id: second_id } = second;
+    let first = s
+        .lease_specific(
+            &first_id,
+            &JobKind::new(SKILLIFY_KIND),
+            "test-worker",
+            1_000,
+            30_000,
+        )
+        .await
+        .expect("lease first")
+        .expect("first queued");
+    s.complete(&first.job_id, &first.lease, 1_001)
+        .await
+        .expect("complete first");
+    let second = s
+        .lease_specific(
+            &second_id,
+            &JobKind::new(SKILLIFY_KIND),
+            "test-worker",
+            1_002,
+            30_000,
+        )
+        .await
+        .expect("lease second")
+        .expect("second queued");
+
+    let first_payload = SkillifyPayload::from_bytes(&first.payload).expect("first payload");
+    let second_payload = SkillifyPayload::from_bytes(&second.payload).expect("second payload");
+
+    assert!(first_payload.candidate_id.is_some());
+    assert!(second_payload.candidate_id.is_some());
+    assert_ne!(first_payload.candidate_id, second_payload.candidate_id);
 }
 
 #[test]

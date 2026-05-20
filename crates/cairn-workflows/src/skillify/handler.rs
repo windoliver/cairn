@@ -62,12 +62,7 @@ impl SkillifyHandler {
     /// Returns when no LLM is configured, the provider fails, the response is
     /// not valid skill bundle JSON, or bundle materialization fails.
     pub async fn run_once(&self, payload: super::SkillifyPayload) -> Result<(), SkillifyRunError> {
-        let candidate_id = payload.candidate_id.unwrap_or_else(|| {
-            format!(
-                "skc_{}",
-                crate::synthetic::sha256_hex(payload.key.as_bytes())
-            )
-        });
+        let candidate_id = payload.candidate_id_or_derive();
         if super::materialize::candidate_ready(&self.vault_root, &candidate_id)? {
             return Ok(());
         }
