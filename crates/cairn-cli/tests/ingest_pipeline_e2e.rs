@@ -86,6 +86,17 @@ fn keyword_search_hits(vault: &Path, query: &str) -> Vec<serde_json::Value> {
         .clone()
 }
 
+fn assert_ingest_metric_is_body_free(vault: &Path, forbidden: &str, status: &str) {
+    let metrics = fs::read_to_string(vault.join(".cairn/metrics.jsonl")).expect("read metrics");
+    assert!(metrics.contains("\"event\":\"verb_invocation\""));
+    assert!(metrics.contains("\"verb\":\"ingest\""));
+    assert!(metrics.contains(&format!("\"status\":\"{status}\"")));
+    assert!(
+        !metrics.contains(forbidden),
+        "verb metric must not leak body text: {metrics}"
+    );
+}
+
 #[test]
 fn ingest_body_commits_record_through_signed_store() {
     let vault = tempfile::tempdir().expect("temp vault");
@@ -129,10 +140,7 @@ fn ingest_body_commits_record_through_signed_store() {
     let record_id = response["data"]["record_id"]
         .as_str()
         .expect("record_id is string");
-    assert!(
-        !vault.path().join(".cairn/metrics.jsonl").exists(),
-        "signed ingest path should not write the legacy metrics sidecar"
-    );
+    assert_ingest_metric_is_body_free(vault.path(), body, "committed");
 
     let record = active_record_json(vault.path(), record_id);
     assert_eq!(record["id"], record_id);
@@ -178,10 +186,7 @@ fn ingest_rejects_invented_kind_before_store_dispatch() {
     );
     assert_eq!(response["policy_trace"][0]["gate"], "scope_check");
     assert_eq!(response["policy_trace"][0]["result"], "error");
-    assert!(
-        !vault.path().join(".cairn/metrics.jsonl").exists(),
-        "invalid taxonomy should reject before metric append"
-    );
+    assert_ingest_metric_is_body_free(vault.path(), "invented taxonomy value", "aborted");
 }
 
 #[test]
@@ -227,10 +232,7 @@ fn ingest_file_runs_signed_pipeline_without_leaking_file_body() {
         .as_str()
         .expect("record_id is string");
 
-    assert!(
-        !vault.path().join(".cairn/metrics.jsonl").exists(),
-        "signed ingest path should not write the legacy metrics sidecar"
-    );
+    assert_ingest_metric_is_body_free(vault.path(), "Body marker", "committed");
     let record = active_record_json(vault.path(), record_id);
     assert_eq!(record["kind"], "user");
     assert_eq!(

@@ -65,12 +65,13 @@ fn assemble_hot_p95_meets_slo_on_fixture_vault() {
     let mut latencies: Vec<u64> = content
         .lines()
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|v| v["event"] == "hot_prefix_assembled")
         .filter_map(|v| v["latency_ms"].as_u64())
         .collect();
 
     assert!(
         latencies.len() >= 10,
-        "expected >=10 metric events; got {} in {content:?}",
+        "expected >=10 hot-prefix metric events; got {} in {content:?}",
         latencies.len()
     );
 
