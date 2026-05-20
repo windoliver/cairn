@@ -68,6 +68,12 @@ impl ::core::convert::TryFrom<RawDataProfileSubject> for DataProfileSubject {
     type Error = &'static str;
     fn try_from(raw: RawDataProfileSubject) -> Result<Self, Self::Error> {
         if !(raw.user.is_some() || raw.agent.is_some()) { return Err("at least one of [user, agent] is required"); }
+        if let Some(s) = &raw.user {
+            if s.is_empty() { return Err("user: must not be empty"); }
+        }
+        if let Some(s) = &raw.agent {
+            if s.is_empty() { return Err("agent: must not be empty"); }
+        }
         Ok(Self {
             agent: raw.agent,
             user: raw.user,
@@ -83,12 +89,102 @@ impl<'de> ::serde::Deserialize<'de> for DataProfileSubject {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Typed AutoUserProfile (brief §7.1) split into permanent traits (`static`, `is_static = 1`) and current state (`dynamic`, `is_static = 0`). Each half carries `summary`, `historical_summary`, and structured `key_facts`; every fact line records its source-record evidence so record-level forget propagates back to the profile. P0 plain-SQLite aggregation; richer rolling-summary regeneration is P1. Wire field names match the brief's `{static, dynamic, updated_at}` notation; the Rust binding emits them via the `r#static` raw identifier.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DataProfile {
-    /// Free-form profile payload — typed in a later increment once the profile taxonomy lands.
-    pub profile: serde_json::Value,
+    pub dynamic: ProfileHalf,
+    #[serde(rename = "static")]
+    pub r#static: ProfileHalf,
     pub subject: DataProfileSubject,
+    /// RFC3339 timestamp of the most recent contributing source record. Equals the synthesizer clock when the profile is empty. Validator accept set matches `cairn_core::domain::Rfc3339Timestamp::parse` (excluding leap-seconds), so any wire-accepted value also parses domain-side without a second gauntlet.
+    pub updated_at: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDataProfile {
+    dynamic: ProfileHalf,
+    #[serde(rename = "static")]
+    r#static: ProfileHalf,
+    subject: DataProfileSubject,
+    /// RFC3339 timestamp of the most recent contributing source record. Equals the synthesizer clock when the profile is empty. Validator accept set matches `cairn_core::domain::Rfc3339Timestamp::parse` (excluding leap-seconds), so any wire-accepted value also parses domain-side without a second gauntlet.
+    updated_at: String,
+}
+
+impl ::core::convert::TryFrom<RawDataProfile> for DataProfile {
+    type Error = &'static str;
+    fn try_from(raw: RawDataProfile) -> Result<Self, Self::Error> {
+        if !(20..=64).contains(&raw.updated_at.len()) { return Err("updated_at: RFC3339 date-time must be 20..=64 chars"); }
+        if !raw.updated_at.is_ascii() {
+            return Err("updated_at: RFC3339 date-time must be ASCII");
+        }
+        {
+            let bytes = raw.updated_at.as_bytes();
+            if !bytes[..4].iter().all(u8::is_ascii_digit) || bytes[4] != b'-' || !bytes[5..7].iter().all(u8::is_ascii_digit) || bytes[7] != b'-' || !bytes[8..10].iter().all(u8::is_ascii_digit) {
+                return Err("updated_at: date must be YYYY-MM-DD");
+            }
+            let yyyy: u16 = (u16::from(bytes[0] - b'0')) * 1000 + (u16::from(bytes[1] - b'0')) * 100 + (u16::from(bytes[2] - b'0')) * 10 + u16::from(bytes[3] - b'0');
+            let mm = (bytes[5] - b'0') * 10 + (bytes[6] - b'0');
+            let dd = (bytes[8] - b'0') * 10 + (bytes[9] - b'0');
+            if !(1..=12).contains(&mm) { return Err("updated_at: month out of range"); }
+            let leap = yyyy.is_multiple_of(4) && (!yyyy.is_multiple_of(100) || yyyy.is_multiple_of(400));
+            let max_day: u8 = match mm {
+                1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+                4 | 6 | 9 | 11 => 30,
+                2 if leap => 29,
+                2 => 28,
+                _ => 0,
+            };
+            if dd < 1 || dd > max_day { return Err("updated_at: day out of range for month"); }
+            if !matches!(bytes[10], b'T' | b't') { return Err("updated_at: expected `T` between date and time"); }
+            if !bytes[11..13].iter().all(u8::is_ascii_digit) || bytes[13] != b':' || !bytes[14..16].iter().all(u8::is_ascii_digit) || bytes[16] != b':' || !bytes[17..19].iter().all(u8::is_ascii_digit) {
+                return Err("updated_at: time must be HH:MM:SS");
+            }
+            let hh = (bytes[11] - b'0') * 10 + (bytes[12] - b'0');
+            let mi = (bytes[14] - b'0') * 10 + (bytes[15] - b'0');
+            let ss = (bytes[17] - b'0') * 10 + (bytes[18] - b'0');
+            if hh > 23 { return Err("updated_at: hour out of range"); }
+            if mi > 59 { return Err("updated_at: minute out of range"); }
+            if ss > 59 { return Err("updated_at: second out of range"); }
+            let mut idx = 19usize;
+            if idx < bytes.len() && bytes[idx] == b'.' {
+                idx += 1;
+                let frac_start = idx;
+                while idx < bytes.len() && bytes[idx].is_ascii_digit() { idx += 1; }
+                if idx == frac_start { return Err("updated_at: fractional must have >=1 digit after `.`"); }
+                if idx - frac_start > 9 { return Err("updated_at: fractional must be <= 9 digits (ns precision)"); }
+            }
+            if idx < bytes.len() && matches!(bytes[idx], b'Z' | b'z') { idx += 1; }
+            else if idx + 6 == bytes.len() && matches!(bytes[idx], b'+' | b'-') {
+                let off = &bytes[idx + 1..];
+                if !off[..2].iter().all(u8::is_ascii_digit) || off[2] != b':' || !off[3..5].iter().all(u8::is_ascii_digit) {
+                    return Err("updated_at: offset must be `+/-HH:MM` digits");
+                }
+                let oh = (off[0] - b'0') * 10 + (off[1] - b'0');
+                let om = (off[3] - b'0') * 10 + (off[4] - b'0');
+                if oh > 23 { return Err("updated_at: offset hour out of range"); }
+                if om > 59 { return Err("updated_at: offset minute out of range"); }
+                idx = bytes.len();
+            }
+            else { return Err("updated_at: must end with `Z` or `+/-HH:MM` offset"); }
+            if idx != bytes.len() { return Err("updated_at: trailing data after zone"); }
+        }
+        Ok(Self {
+            dynamic: raw.dynamic,
+            r#static: raw.r#static,
+            subject: raw.subject,
+            updated_at: raw.updated_at,
+        })
+    }
+}
+
+impl<'de> ::serde::Deserialize<'de> for DataProfile {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: ::serde::Deserializer<'de> {
+        let raw = RawDataProfile::deserialize(deserializer)?;
+        Self::try_from(raw).map_err(::serde::de::Error::custom)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -183,24 +279,68 @@ impl<'de> ::serde::Deserialize<'de> for DataSession {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct DataToolCall {
+    pub items: Vec<TurnItem>,
+    pub session_id: String,
+    pub tool_call_id: String,
+    pub turn_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDataToolCall {
+    items: Vec<TurnItem>,
+    session_id: String,
+    tool_call_id: String,
+    turn_id: String,
+}
+
+impl ::core::convert::TryFrom<RawDataToolCall> for DataToolCall {
+    type Error = &'static str;
+    fn try_from(raw: RawDataToolCall) -> Result<Self, Self::Error> {
+        if raw.session_id.is_empty() { return Err("session_id: must not be empty"); }
+        if raw.turn_id.is_empty() { return Err("turn_id: must not be empty"); }
+        if raw.tool_call_id.is_empty() { return Err("tool_call_id: must not be empty"); }
+        Ok(Self {
+            items: raw.items,
+            session_id: raw.session_id,
+            tool_call_id: raw.tool_call_id,
+            turn_id: raw.turn_id,
+        })
+    }
+}
+
+impl<'de> ::serde::Deserialize<'de> for DataToolCall {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: ::serde::Deserializer<'de> {
+        let raw = RawDataToolCall::deserialize(deserializer)?;
+        Self::try_from(raw).map_err(::serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct DataTurn {
     pub session_id: String,
-    pub turn: TurnItem,
-    pub turn_id: u64,
+    /// Ordered TurnItems for the turn — one per trace event (user/agent message, pre/post tool, tool output, stop, summary). Sorted by (captured_at, capture_event_id).
+    pub turn: Vec<TurnItem>,
+    pub turn_id: String,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawDataTurn {
     session_id: String,
-    turn: TurnItem,
-    turn_id: u64,
+    /// Ordered TurnItems for the turn — one per trace event (user/agent message, pre/post tool, tool output, stop, summary). Sorted by (captured_at, capture_event_id).
+    turn: Vec<TurnItem>,
+    turn_id: String,
 }
 
 impl ::core::convert::TryFrom<RawDataTurn> for DataTurn {
     type Error = &'static str;
     fn try_from(raw: RawDataTurn) -> Result<Self, Self::Error> {
         if raw.session_id.is_empty() { return Err("session_id: must not be empty"); }
+        if raw.turn_id.is_empty() { return Err("turn_id: must not be empty"); }
         Ok(Self {
             session_id: raw.session_id,
             turn: raw.turn,
@@ -213,6 +353,81 @@ impl<'de> ::serde::Deserialize<'de> for DataTurn {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where D: ::serde::Deserializer<'de> {
         let raw = RawDataTurn::deserialize(deserializer)?;
+        Self::try_from(raw).map_err(::serde::de::Error::custom)
+    }
+}
+
+/// Seven structured fact buckets (brief §7.1). Each bucket is an array of ProfileLine — empty arrays are valid and required so a consumer can rely on every key being present.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeyFacts {
+    pub addressed_issues: Vec<ProfileLine>,
+    pub current_issues: Vec<ProfileLine>,
+    pub devices: Vec<ProfileLine>,
+    pub known_entities: Vec<ProfileLine>,
+    pub preferences: Vec<ProfileLine>,
+    pub recurring_issues: Vec<ProfileLine>,
+    pub software: Vec<ProfileLine>,
+}
+
+/// One half of an AutoUserProfile (brief §7.1). `summary` and `historical_summary` are the rolling DreamWorkflow narratives — they remain empty strings at P0 and are populated by the P1 ConsolidationWorkflow. `key_facts` is the P0 deliverable: structured per-facet ProfileLine arrays.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileHalf {
+    pub historical_summary: String,
+    pub key_facts: KeyFacts,
+    pub summary: String,
+}
+
+/// One profile fact with its evidence trail. `evidence` is the list of source records that contributed; record-level forget removes them from the input set, so re-synthesizing the profile drops the line.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileLine {
+    /// Confidence in [0, 1]. Records with confidence < 0.3 (ConfidenceBand::Uncertain) are excluded from the profile.
+    pub confidence: f64,
+    /// Source-record ULIDs whose bodies contributed to this line. Always non-empty.
+    pub evidence: Vec<crate::generated::common::Ulid>,
+    /// Canonical short statement of the fact (e.g., 'prefers terse explanations', 'M2 MacBook Pro').
+    pub value: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawProfileLine {
+    /// Confidence in [0, 1]. Records with confidence < 0.3 (ConfidenceBand::Uncertain) are excluded from the profile.
+    confidence: f64,
+    /// Source-record ULIDs whose bodies contributed to this line. Always non-empty.
+    evidence: Vec<crate::generated::common::Ulid>,
+    /// Canonical short statement of the fact (e.g., 'prefers terse explanations', 'M2 MacBook Pro').
+    value: String,
+}
+
+impl ::core::convert::TryFrom<RawProfileLine> for ProfileLine {
+    type Error = &'static str;
+    fn try_from(raw: RawProfileLine) -> Result<Self, Self::Error> {
+        if raw.value.is_empty() { return Err("value: must not be empty"); }
+        if !(0.0..=1.0).contains(&raw.confidence) || raw.confidence.is_nan() {
+            return Err("confidence: must be in [0, 1]");
+        }
+        if raw.evidence.is_empty() { return Err("evidence: must contain at least 1 item"); }
+        {
+            let mut seen = ::std::collections::BTreeSet::new();
+            for ulid in &raw.evidence {
+                if !seen.insert(ulid.0.clone()) { return Err("evidence: must be unique"); }
+            }
+        }
+        Ok(Self {
+            confidence: raw.confidence,
+            evidence: raw.evidence,
+            value: raw.value,
+        })
+    }
+}
+
+impl<'de> ::serde::Deserialize<'de> for ProfileLine {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: ::serde::Deserializer<'de> {
+        let raw = RawProfileLine::deserialize(deserializer)?;
         Self::try_from(raw).map_err(::serde::de::Error::custom)
     }
 }
@@ -255,6 +470,80 @@ impl<'de> ::serde::Deserialize<'de> for RecordRef {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TraceLinkage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_event_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_event_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_hash: Option<String>,
+    pub record_id: crate::generated::common::Ulid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_event: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTraceLinkage {
+    #[serde(default)]
+    capture_event_id: Option<String>,
+    #[serde(default)]
+    parent_event_id: Option<String>,
+    #[serde(default)]
+    payload_hash: Option<String>,
+    record_id: crate::generated::common::Ulid,
+    #[serde(default)]
+    sequence: Option<u64>,
+    #[serde(default)]
+    tool_call_id: Option<String>,
+    #[serde(default)]
+    trace_event: Option<String>,
+}
+
+impl ::core::convert::TryFrom<RawTraceLinkage> for TraceLinkage {
+    type Error = &'static str;
+    fn try_from(raw: RawTraceLinkage) -> Result<Self, Self::Error> {
+        if let Some(s) = &raw.trace_event {
+            if s.is_empty() { return Err("trace_event: must not be empty"); }
+        }
+        if let Some(s) = &raw.capture_event_id {
+            if s.is_empty() { return Err("capture_event_id: must not be empty"); }
+        }
+        if let Some(s) = &raw.parent_event_id {
+            if s.is_empty() { return Err("parent_event_id: must not be empty"); }
+        }
+        if let Some(s) = &raw.tool_call_id {
+            if s.is_empty() { return Err("tool_call_id: must not be empty"); }
+        }
+        if let Some(s) = &raw.payload_hash {
+            if s.is_empty() { return Err("payload_hash: must not be empty"); }
+        }
+        Ok(Self {
+            capture_event_id: raw.capture_event_id,
+            parent_event_id: raw.parent_event_id,
+            payload_hash: raw.payload_hash,
+            record_id: raw.record_id,
+            sequence: raw.sequence,
+            tool_call_id: raw.tool_call_id,
+            trace_event: raw.trace_event,
+        })
+    }
+}
+
+impl<'de> ::serde::Deserialize<'de> for TraceLinkage {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: ::serde::Deserializer<'de> {
+        let raw = RawTraceLinkage::deserialize(deserializer)?;
+        Self::try_from(raw).map_err(::serde::de::Error::custom)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -271,11 +560,13 @@ pub struct TurnItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linkage: Option<TraceLinkage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
     pub role: TurnItemRole,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<serde_json::Value>>,
-    pub turn_id: u64,
+    pub turn_id: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -315,6 +606,9 @@ pub enum RetrieveArgs {
         cursor: Option<crate::generated::common::Cursor>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         include: Option<Vec<RetrieveArgsSessionInclude>>,
+        /// Sugar for requesting reasoning blocks in the retrieved session transcript.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        include_reasoning: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit: Option<i64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -326,8 +620,16 @@ pub enum RetrieveArgs {
     Turn {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         include: Option<Vec<RetrieveArgsTurnInclude>>,
+        /// Sugar for requesting reasoning blocks in the retrieved turn.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        include_reasoning: Option<bool>,
         session_id: String,
-        turn_id: u64,
+        turn_id: String,
+    },
+    ToolCall {
+        session_id: String,
+        tool_call_id: String,
+        turn_id: String,
     },
     Folder {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -364,6 +666,9 @@ struct RawRetrieveArgsSession {
     cursor: Option<crate::generated::common::Cursor>,
     #[serde(default)]
     include: Option<Vec<RetrieveArgsSessionInclude>>,
+    /// Sugar for requesting reasoning blocks in the retrieved session transcript.
+    #[serde(default)]
+    include_reasoning: Option<bool>,
     #[serde(default)]
     limit: Option<i64>,
     #[serde(default)]
@@ -379,8 +684,20 @@ struct RawRetrieveArgsTurn {
     #[allow(dead_code)] target: serde::de::IgnoredAny,
     #[serde(default)]
     include: Option<Vec<RetrieveArgsTurnInclude>>,
+    /// Sugar for requesting reasoning blocks in the retrieved turn.
+    #[serde(default)]
+    include_reasoning: Option<bool>,
     session_id: String,
-    turn_id: u64,
+    turn_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRetrieveArgsToolCall {
+    #[allow(dead_code)] target: serde::de::IgnoredAny,
+    session_id: String,
+    tool_call_id: String,
+    turn_id: String,
 }
 
 #[derive(Deserialize)]
@@ -416,6 +733,7 @@ enum RawRetrieveArgs {
     Record(RawRetrieveArgsRecord),
     Session(RawRetrieveArgsSession),
     Turn(RawRetrieveArgsTurn),
+    ToolCall(RawRetrieveArgsToolCall),
     Folder(RawRetrieveArgsFolder),
     Scope(RawRetrieveArgsScope),
     Profile(RawRetrieveArgsProfile),
@@ -438,6 +756,10 @@ impl<'de> ::serde::Deserialize<'de> for RawRetrieveArgs {
             "turn" => {
                 let v = <RawRetrieveArgsTurn as ::serde::Deserialize>::deserialize(value).map_err(::serde::de::Error::custom)?;
                 Ok(Self::Turn(v))
+            },
+            "tool_call" => {
+                let v = <RawRetrieveArgsToolCall as ::serde::Deserialize>::deserialize(value).map_err(::serde::de::Error::custom)?;
+                Ok(Self::ToolCall(v))
             },
             "folder" => {
                 let v = <RawRetrieveArgsFolder as ::serde::Deserialize>::deserialize(value).map_err(::serde::de::Error::custom)?;
@@ -467,6 +789,7 @@ impl ::core::convert::TryFrom<RawRetrieveArgs> for RetrieveArgs {
             RawRetrieveArgs::Session(inner) => {
                 let cursor = inner.cursor;
                 let include = inner.include;
+                let include_reasoning = inner.include_reasoning;
                 let limit = inner.limit;
                 let order = inner.order;
                 let rehydrate = inner.rehydrate;
@@ -482,13 +805,15 @@ impl ::core::convert::TryFrom<RawRetrieveArgs> for RetrieveArgs {
                         if !seen.insert(*item as u8) { return Err("include: items must be unique"); }
                     }
                 }
-                Ok(Self::Session { cursor, include, limit, order, rehydrate, session_id })
+                Ok(Self::Session { cursor, include, include_reasoning, limit, order, rehydrate, session_id })
             },
             RawRetrieveArgs::Turn(inner) => {
                 let include = inner.include;
+                let include_reasoning = inner.include_reasoning;
                 let session_id = inner.session_id;
                 let turn_id = inner.turn_id;
                 if session_id.is_empty() { return Err("session_id: must not be empty"); }
+                if turn_id.is_empty() { return Err("turn_id: must not be empty"); }
                 if let Some(inc) = &include {
                     if inc.is_empty() { return Err("include: must contain at least one item"); }
                     let mut seen = ::std::collections::BTreeSet::new();
@@ -496,7 +821,16 @@ impl ::core::convert::TryFrom<RawRetrieveArgs> for RetrieveArgs {
                         if !seen.insert(*item as u8) { return Err("include: items must be unique"); }
                     }
                 }
-                Ok(Self::Turn { include, session_id, turn_id })
+                Ok(Self::Turn { include, include_reasoning, session_id, turn_id })
+            },
+            RawRetrieveArgs::ToolCall(inner) => {
+                let session_id = inner.session_id;
+                let tool_call_id = inner.tool_call_id;
+                let turn_id = inner.turn_id;
+                if session_id.is_empty() { return Err("session_id: must not be empty"); }
+                if turn_id.is_empty() { return Err("turn_id: must not be empty"); }
+                if tool_call_id.is_empty() { return Err("tool_call_id: must not be empty"); }
+                Ok(Self::ToolCall { session_id, tool_call_id, turn_id })
             },
             RawRetrieveArgs::Folder(inner) => {
                 let depth = inner.depth;
@@ -548,6 +882,7 @@ impl RetrieveArgs {
             Self::Record { .. } => Some("cairn.mcp.v1.retrieve.record"),
             Self::Session { .. } => Some("cairn.mcp.v1.retrieve.session"),
             Self::Turn { .. } => Some("cairn.mcp.v1.retrieve.turn"),
+            Self::ToolCall { .. } => Some("cairn.mcp.v1.retrieve.tool_call"),
             Self::Folder { .. } => Some("cairn.mcp.v1.retrieve.folder"),
             Self::Scope { .. } => Some("cairn.mcp.v1.retrieve.scope"),
             Self::Profile { .. } => Some("cairn.mcp.v1.retrieve.profile"),
@@ -557,4 +892,4 @@ impl RetrieveArgs {
 
 pub type RetrieveData = serde_json::Value;
 
-pub const ARGS_SCHEMA: &[u8] = include_bytes!("../../../../cairn-mcp/src/generated/schemas/verbs/retrieve.json");
+pub const ARGS_SCHEMA: &[u8] = include_bytes!("../schemas/verbs/retrieve.json");

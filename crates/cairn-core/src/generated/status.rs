@@ -95,6 +95,246 @@ pub struct StatusResponseHealth {
     pub nexus_projection: StatusResponseHealthNexusProjection,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatusResponseMcpGraphToolsProbeBasis {
+    Full,
+    ConfigOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatusResponseMcpGraphToolsReason {
+    SingleTenantOff,
+    NoStoreCapability,
+    NoScopeResolver,
+    StoreOpenError,
+    VaultNotBound,
+    ResolverEmpty,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatusResponseMcpGraphToolsState {
+    Available,
+    Unavailable,
+    ProbeFailed,
+    NoVault,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusResponseMcpGraphTools {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub probe_basis: StatusResponseMcpGraphToolsProbeBasis,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<StatusResponseMcpGraphToolsReason>,
+    pub state: StatusResponseMcpGraphToolsState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_count: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatusResponsePipelineDispatchDecision {
+    SquashWhenInteractiveTty,
+    Bypass,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatusResponsePipelineDispatchSourceFamily {
+    Hook,
+    Ide,
+    Terminal,
+    Clipboard,
+    Voice,
+    Screen,
+    RecordingBatch,
+    Cli,
+    Mcp,
+    Proactive,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusResponsePipelineDispatch {
+    /// P0 routing enum — closed. 'squash_when_interactive_tty' admits InteractiveTty Terminal payloads to `squash`; everything else (including non-interactive Terminal) bypasses. Adding values is a wire-contract change (cairn.mcp.v1 → vNext), not an additive update — older clients' generated deserializers will reject unknown values.
+    pub decision: StatusResponsePipelineDispatchDecision,
+    /// Wire-form SourceFamily tag (matches CapturePayload variant).
+    pub source_family: StatusResponsePipelineDispatchSourceFamily,
+    /// Optional tool identifier (e.g., 'Bash', 'Read'). Absent means the decision applies to every tool in this source_family — the P0 default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusResponseSensorsLocalBudget {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_items: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatusResponseSensorsLocalConsent {
+    Enabled,
+    Disabled,
+    Missing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatusResponseSensorsLocalGate {
+    Allowed,
+    Disabled,
+    PrivacyDenied,
+    BudgetExceeded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatusResponseSensorsLocalLastDropReason {
+    Disabled,
+    PrivacyDenied,
+    BudgetExceeded,
+    PolicyRejected,
+    MalformedObservation,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusResponseSensorsLocalRetention {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_days: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatusResponseSensorsLocalSensor {
+    Hook,
+    Ide,
+    Terminal,
+    Clipboard,
+    Voice,
+    Screen,
+    Recording,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusResponseSensorsLocal {
+    pub budget: StatusResponseSensorsLocalBudget,
+    pub consent: StatusResponseSensorsLocalConsent,
+    pub enabled: bool,
+    pub gate: StatusResponseSensorsLocalGate,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_drop_reason: Option<StatusResponseSensorsLocalLastDropReason>,
+    pub retention: StatusResponseSensorsLocalRetention,
+    pub sensor: StatusResponseSensorsLocalSensor,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatusResponseSensorsScreenBackend {
+    Xcap,
+    Screenpipe,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatusResponseSensorsScreenDegradationCode {
+    #[serde(rename = "screen.disabled")]
+    ScreenDisabled,
+    #[serde(rename = "screen.permission_missing")]
+    ScreenPermissionMissing,
+    #[serde(rename = "screen.backend_unavailable")]
+    ScreenBackendUnavailable,
+    #[serde(rename = "screen.degraded")]
+    ScreenDegraded,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusResponseSensorsScreenDegradation {
+    pub code: StatusResponseSensorsScreenDegradationCode,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatusResponseSensorsScreenMode {
+    Off,
+    Snapshot,
+    Continuous,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatusResponseSensorsScreenOcrEngine {
+    Vision,
+    Winrt,
+    Tesseract,
+    Off,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatusResponseSensorsScreenPermission {
+    NotRequested,
+    Granted,
+    Denied,
+    Revoked,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatusResponseSensorsScreenState {
+    Disabled,
+    PermissionMissing,
+    Degraded,
+    Enabled,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusResponseSensorsScreen {
+    pub backend: StatusResponseSensorsScreenBackend,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub degradation: Option<StatusResponseSensorsScreenDegradation>,
+    pub mode: StatusResponseSensorsScreenMode,
+    pub ocr_engine: StatusResponseSensorsScreenOcrEngine,
+    pub permission: StatusResponseSensorsScreenPermission,
+    pub state: StatusResponseSensorsScreenState,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusResponseSensors {
+    /// Per-local-sensor config, consent, and gate state. Optional and additive for issue #88.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local: Option<Vec<StatusResponseSensorsLocal>>,
+    pub screen: StatusResponseSensorsScreen,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StatusResponseServerInfo {
@@ -105,6 +345,30 @@ pub struct StatusResponseServerInfo {
     pub version: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatusResponseWorkflowsWorkflow {
+    Consolidate,
+    Promote,
+    Expire,
+    Reflect,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusResponseWorkflows {
+    /// Plans drained successfully, including idempotent already-applied plans.
+    pub drained_plans: u64,
+    /// Most recent successful plan-drain timestamp for this workflow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_applied_at: Option<String>,
+    /// Plans produced but not yet drained, usually because cancellation stopped between plans.
+    pub pending_plans: u64,
+    /// Stable workflow class name.
+    pub workflow: StatusResponseWorkflowsWorkflow,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StatusResponse {
@@ -112,7 +376,16 @@ pub struct StatusResponse {
     pub contract: String,
     pub extensions: Vec<crate::generated::common::Namespace>,
     pub health: StatusResponseHealth,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_graph_tools: Option<StatusResponseMcpGraphTools>,
+    /// Per-(source_family, tool_id) routing decisions for the Capture → Extract pipeline (issue #217). Each entry tells clients whether captured payloads flow through `squash` (lossy compaction) or `bypass` (raw bytes). Entries MUST be sorted lexicographically by (source_family, tool_id ?? "") for byte-stable status responses across an incarnation (brief §8.0.a). Optional and additive — not in `required[]` so a pre-#217 server's response (no field) deserializes against this schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline_dispatch: Option<Vec<StatusResponsePipelineDispatch>>,
+    pub sensors: StatusResponseSensors,
     pub server_info: StatusResponseServerInfo,
+    /// Runtime workflow-drainer progress for `cairn.admin.v1` status (issue #291). Each entry reports one workflow class; entries are sorted by workflow name for byte-stable status responses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflows: Option<Vec<StatusResponseWorkflows>>,
 }
 
-pub const SCHEMA: &[u8] = include_bytes!("../../../cairn-mcp/src/generated/schemas/prelude/status.json");
+pub const SCHEMA: &[u8] = include_bytes!("schemas/prelude/status.json");

@@ -11,7 +11,6 @@ use cairn_core::domain::projection::{
     ParserProjectionKind, ProjectionCursor, ProjectionItemState, ProjectionLedgerRow,
     ProjectionTarget,
 };
-use cairn_store_sqlite::SqliteMemoryStore;
 use clap::ArgMatches;
 
 use crate::config::{self, CliOverrides};
@@ -20,6 +19,19 @@ use crate::nexus::projection::{
 };
 
 use super::envelope::{emit_json, new_operation_id};
+
+/// Build the top-level `cairn reindex` command.
+#[must_use]
+pub fn command() -> clap::Command {
+    clap::Command::new("reindex")
+        .about("Rebuild Nexus projection sidecar indexes from the authoritative store")
+        .arg(
+            clap::Arg::new("from-db")
+                .long("from-db")
+                .action(clap::ArgAction::SetTrue)
+                .help("Read authoritative records from .cairn/cairn.db"),
+        )
+}
 
 /// Run `cairn reindex`.
 #[must_use]
@@ -50,7 +62,26 @@ pub fn run(sub: &ArgMatches) -> ExitCode {
         return ExitCode::from(78);
     }
 
-    let summary = match rebuild_from_db(&vault_path, &active) {
+    run_with_context(sub, &vault_path, &active)
+}
+
+/// Run `cairn reindex` against an already resolved vault/config pair.
+#[must_use]
+pub fn run_with_context(
+    sub: &ArgMatches,
+    vault_path: &Path,
+    active: &cairn_core::config::CairnConfig,
+) -> ExitCode {
+    if !sub.get_flag("from-db") {
+        eprintln!("cairn reindex: --from-db is required");
+        return ExitCode::from(64);
+    }
+    if active.store.kind != StoreKind::NexusSandbox {
+        eprintln!("cairn reindex: requires store.kind: nexus-sandbox");
+        return ExitCode::from(78);
+    }
+
+    let summary = match rebuild_from_db(vault_path, active) {
         Ok(summary) => summary,
         Err(err) => {
             eprintln!("cairn reindex: {err}");
@@ -92,7 +123,7 @@ pub(crate) fn rebuild_from_db(
         return Err("requires store.kind: nexus-sandbox".to_owned());
     }
     let db_path = vault_path.join(".cairn/cairn.db");
-    let store = SqliteMemoryStore::open(&db_path)
+    let store = block_on(cairn_store_sqlite::open(&db_path))
         .map_err(|err| format!("open {}: {err}", db_path.display()))?;
     let records =
         block_on(store.projection_records()).map_err(|err| format!("projection records: {err}"))?;

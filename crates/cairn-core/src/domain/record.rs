@@ -19,7 +19,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::{
     ActorChainEntry, CanonicalRecordHash, ChainRole, DomainError, EvidenceVector, Identity,
-    IdentityKind, Provenance, Rfc3339Timestamp, ScopeTuple, VerifiedSignedIntent,
+    IdentityKind, Provenance, Rfc3339Timestamp, ScopeTuple, SourceId, TargetId,
+    VerifiedSignedIntent,
     actor_chain::validate_chain,
     taxonomy::{MemoryClass, MemoryKind, MemoryVisibility},
 };
@@ -61,6 +62,48 @@ impl Ed25519Signature {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// Well-known all-zeros sentinel used to mark a record as "no longer
+    /// validly signed by its original author" — see issue #289. Stored
+    /// in place of a real Ed25519 signature after `flush apply` mutates
+    /// the canonical record bytes (Patch/Rename). Downstream verifiers
+    /// MUST treat this value as unsigned and refuse to accept it as
+    /// authorial provenance. Structurally valid `ed25519:` + 128 zeros
+    /// so it survives serialization round-trips through wire types that
+    /// still type `signature` as a non-optional `Ed25519Signature`.
+    pub const FLUSH_MUTATED_SENTINEL: &'static str = concat!(
+        "ed25519:", "00000000", "00000000", "00000000", "00000000", "00000000", "00000000",
+        "00000000", "00000000", "00000000", "00000000", "00000000", "00000000", "00000000",
+        "00000000", "00000000", "00000000",
+    );
+
+    /// Returns the [`Self::FLUSH_MUTATED_SENTINEL`] as a parsed
+    /// [`Ed25519Signature`]. Infallible: the sentinel is a constant
+    /// known to satisfy [`Ed25519Signature::parse`].
+    #[must_use]
+    pub fn flush_mutated_sentinel() -> Self {
+        Self(Self::FLUSH_MUTATED_SENTINEL.to_owned())
+    }
+
+    /// Returns `true` if this signature is the well-known
+    /// [`Self::FLUSH_MUTATED_SENTINEL`] — i.e. the record was rewritten by a
+    /// flush apply mutation and is no longer author-signed.
+    #[must_use]
+    pub fn is_flush_mutated_sentinel(&self) -> bool {
+        self.0 == Self::FLUSH_MUTATED_SENTINEL
+    }
+
+    /// Returns `true` if this signature is structurally a real Ed25519
+    /// signature (NOT the [`Self::FLUSH_MUTATED_SENTINEL`]). Trust boundaries
+    /// that treat a present `signature` field as authorial provenance
+    /// MUST call this before accepting the record as author-signed —
+    /// otherwise a record rewritten by `flush apply` will be
+    /// indistinguishable from an admission-signed record at the wire
+    /// shape. See issue #289 re-loop r4 finding 3.
+    #[must_use]
+    pub fn attests_author(&self) -> bool {
+        !self.is_flush_mutated_sentinel()
     }
 }
 
@@ -140,6 +183,10 @@ impl<'de> Deserialize<'de> for RecordId {
 pub struct MemoryRecord {
     /// ULID — the stable record identifier.
     pub id: RecordId,
+    /// Supersession lineage key. For a fresh fact this equals `id`. On
+    /// supersession (`updates`-edge), the new record carries the prior
+    /// record's `target_id`. Same wire form as `id`. Brief §3, §3.0.
+    pub target_id: TargetId,
     /// Memory kind (§6.1).
     pub kind: MemoryKind,
     /// Memory class (§6.2).
@@ -152,6 +199,8 @@ pub struct MemoryRecord {
     pub scope: ScopeTuple,
     /// Markdown body. Required and non-empty.
     pub body: String,
+    /// Source document ids referenced by this record's frontmatter (§3).
+    pub source_ids: Vec<SourceId>,
     /// Mandatory provenance frontmatter (§6.5).
     pub provenance: Provenance,
     /// Wall-clock instant of the most recent durable update.
@@ -175,9 +224,52 @@ pub struct MemoryRecord {
     /// re-emission via `BTreeMap`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra_frontmatter: BTreeMap<String, serde_json::Value>,
+    /// Per-record consent storage model (Issue #253, brief §14).
+    ///
+    /// **Read-only metadata, ignored on `MemoryStore::upsert`.**
+    ///
+    /// Excluded from the canonical record bytes (`#[serde(skip)]`):
+    /// the field carries store-side authorization metadata, not signed
+    /// payload. Because it sits outside the signature, accepting it
+    /// from ordinary upserts would let any caller flip §6.5
+    /// enforcement by re-submitting the same signed record with a
+    /// different model — a trust-boundary bypass. The store therefore
+    /// **ignores any value the caller supplies on write**: fresh
+    /// inserts get `legacy_event`; supersessions inherit the prior
+    /// active row's column value.
+    ///
+    /// Transitions between models go through a separate privileged
+    /// API in Phase-B (#255) that derives the new value from trusted
+    /// `consent_timeline` state inside the same transaction as the
+    /// timeline append.
+    ///
+    /// On read: the adapter populates `Some(stored_value)` from the
+    /// `records.consent_model` hot column.
+    #[serde(skip)]
+    pub consent_model: Option<crate::domain::consent_timeline::ConsentModel>,
 }
 
 impl MemoryRecord {
+    /// Convenience: `true` if this record's `signature` is the
+    /// [`Ed25519Signature::FLUSH_MUTATED_SENTINEL`] — i.e. it was
+    /// rewritten by a `flush apply` mutation and is no longer
+    /// author-signed. See issue #289 re-loop r4 finding 3.
+    #[must_use]
+    pub fn is_flush_mutated(&self) -> bool {
+        self.signature.is_flush_mutated_sentinel()
+    }
+
+    /// Convenience: `true` if this record's `signature` still attests
+    /// authorial provenance (i.e. it is NOT the flush-mutated
+    /// sentinel). Trust boundaries that gate on "is the author's
+    /// signature still valid for the current payload" should call this
+    /// before any keychain-resident crypto check. See issue #289
+    /// re-loop r4 finding 3.
+    #[must_use]
+    pub fn signature_attests_author(&self) -> bool {
+        self.signature.attests_author()
+    }
+
     /// Validate every domain invariant. Returns the first violation found.
     ///
     /// This is **shape validation only** — it confirms the record is
@@ -284,10 +376,19 @@ impl MemoryRecord {
         //     to `provenance.source_sensor` (otherwise the signature does
         //     not prove sensor participation; unsigned `Sensor` chain
         //     entries are claims, not proof, until P2 countersignatures).
-        //   - Sensor authors are *only* legal for `SensorObservation`. A
-        //     sensor key has narrow trust (raw event capture); allowing it
-        //     to author derived kinds like `Rule`, `Fact`, or `Reasoning`
-        //     would let a low-trust signer mint high-trust memories.
+        //   - Sensor authors are *only* legal for `SensorObservation` and
+        //     `Trace` records. A sensor key has narrow trust (raw event
+        //     capture); allowing it to author derived kinds like `Rule`,
+        //     `Fact`, or `Reasoning` would let a low-trust signer mint
+        //     high-trust memories.
+        //   - `Trace` records are raw-event captures produced by sensors in
+        //     `Auto` mode (brief §5.0, §9.3). `Auto` mode binds the chain
+        //     Author to the sensor_id (`bind_auto_author`), so a sensor
+        //     author on a Trace record is expected and legitimate — the
+        //     sensor captured the agent's activity verbatim. `Trace` records
+        //     can also carry non-sensor authors (e.g. `Proactive` / `Explicit`
+        //     mode events), so the rule is permissive rather than requiring
+        //     `author == source_sensor`.
         let author_is_sensor =
             matches!(author, Some(a) if a.identity.kind() == IdentityKind::Sensor);
         match self.kind {
@@ -303,10 +404,14 @@ impl MemoryRecord {
                     });
                 }
             }
+            // Trace records are raw-event captures: a sensor author is
+            // legitimate (Auto-mode hook events) alongside non-sensor authors
+            // (Proactive/Explicit-mode events). No additional constraint here.
+            MemoryKind::Trace => {}
             other if author_is_sensor => {
                 return Err(DomainError::InvalidIdentity {
                     message: format!(
-                        "sensor identities may only author `sensor_observation` records, not `{}` (derived kinds need a human or agent author)",
+                        "sensor identities may only author `sensor_observation` or `trace` records, not `{}` (derived kinds need a human or agent author)",
                         other.as_str()
                     ),
                 });
@@ -449,7 +554,7 @@ impl MemoryRecord {
     /// confirmed its signature. The chain author's identity is
     /// **not** verified by [`Self::validate`] (which is shape-only),
     /// so binding scope.user to the author would let an attacker forge
-    /// `actor_chain.author = usr:victim` with a syntactically valid but
+    /// `actor_chain.author = hmn:victim` with a syntactically valid but
     /// uncountersigned signature and pollute cross-user memory under
     /// an authorized tenant/workspace/entity. Author-bound containment
     /// returns once a `VerifiedMemoryRecord` token (P1+) proves the
@@ -460,7 +565,7 @@ impl MemoryRecord {
     ) -> Result<(), DomainError> {
         let issuer = intent.issuer.0.as_str();
         if let Some(user) = self.scope.user.as_deref() {
-            let issuer_matches = issuer.starts_with("usr:") && user == issuer;
+            let issuer_matches = issuer.starts_with("hmn:") && user == issuer;
             if !issuer_matches {
                 return Err(DomainError::MalformedScope {
                     message: format!(
@@ -507,7 +612,7 @@ impl MemoryRecord {
     /// `provenance.originating_agent_id` ↔ author binding.
     ///
     /// `scope.user` / `scope.agent` must be canonical *full* identity
-    /// strings (`usr:tafeng`, `agt:claude-code:opus-4-7:main:v1`) so the
+    /// strings (`hmn:tafeng`, `agt:claude-code:opus-4-7:main:v1`) so the
     /// IDL filter sees the same string a query uses. This catches
     /// kind/format mistakes early.
     ///
@@ -538,12 +643,12 @@ impl MemoryRecord {
             let parsed =
                 Identity::parse(user.to_owned()).map_err(|_| DomainError::MalformedScope {
                     message: format!(
-                        "scope.user `{user}` is not a canonical identity (full `usr:` form required)"
+                        "scope.user `{user}` is not a canonical identity (full `hmn:` form required)"
                     ),
                 })?;
             if parsed.kind() != IdentityKind::Human {
                 return Err(DomainError::MalformedScope {
-                    message: format!("scope.user `{user}` must be a human (`usr:`) identity"),
+                    message: format!("scope.user `{user}` must be a human (`hmn:`) identity"),
                 });
             }
         }
@@ -696,33 +801,72 @@ const fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::domain::{ActorChainEntry, ChainRole, Identity};
+/// Cross-crate test fixture re-export.
+///
+/// `sample_record` is the canonical valid `MemoryRecord` factory used by
+/// every test in this crate. Downstream crates (e.g. `cairn-store-sqlite`)
+/// need the same canonical sample for projection / round-trip tests, so the
+/// factory is hosted here under a `cfg(any(test, feature = "test-fixtures"))`
+/// gate. The `test-fixtures` feature is opt-in and intended for
+/// `[dev-dependencies]` only — it never lands in production binaries.
+#[cfg(any(test, feature = "test-fixtures"))]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    reason = "fixture factory for tests; bad inputs would mean the test data \
+              itself is broken and a panic surfaces that immediately"
+)]
+pub mod tests_export {
+    use std::collections::BTreeMap;
 
-    pub(crate) fn sample_record() -> MemoryRecord {
-        // Single human author at P0: scope.user, originating_agent_id, and
-        // chain author all bind to `usr:tafeng`. Delegation chains arrive
-        // with P2 countersignatures.
-        let user_id = Identity::parse("usr:tafeng").expect("valid");
+    use super::{Ed25519Signature, MemoryRecord, RecordId};
+    use crate::contract::memory_store::StoredRecord;
+    use crate::domain::{
+        ActorChainEntry, ChainRole, EvidenceVector, Identity, Provenance, Rfc3339Timestamp,
+        ScopeTuple, SourceId, TargetId,
+        taxonomy::{MemoryClass, MemoryKind, MemoryVisibility},
+    };
+
+    /// Wrap [`sample_record`] in a [`StoredRecord`] at the given store version.
+    /// Used by `MarkdownProjector` tests and other downstream code that needs
+    /// a `StoredRecord` rather than a bare `MemoryRecord`.
+    #[must_use]
+    pub fn sample_stored_record(version: u32) -> StoredRecord {
+        StoredRecord {
+            record: sample_record(),
+            version,
+            schema_version: Some(crate::contract::version::SchemaVersion::current()),
+        }
+    }
+
+    /// Construct a canonical valid [`MemoryRecord`] for tests and adapter
+    /// fixtures. Single human author at P0: `scope.user`,
+    /// `originating_agent_id`, and the chain author all bind to
+    /// `hmn:tafeng`. Delegation chains arrive with P2 countersignatures.
+    #[must_use]
+    pub fn sample_record() -> MemoryRecord {
+        let user_id = Identity::parse("hmn:tafeng").expect("valid");
         MemoryRecord {
             id: RecordId::parse("01HQZX9F5N0000000000000000").expect("valid"),
+            target_id: TargetId::parse("01HQZX9F5N0000000000000000").expect("valid"),
             kind: MemoryKind::User,
             class: MemoryClass::Semantic,
             visibility: MemoryVisibility::Private,
             scope: ScopeTuple {
-                user: Some("usr:tafeng".to_owned()),
+                user: Some("hmn:tafeng".to_owned()),
                 ..ScopeTuple::default()
             },
             body: "user prefers dark mode".to_owned(),
+            source_ids: vec![SourceId::parse("01HQZX9F5N0000000000000001").expect("valid")],
             provenance: Provenance {
                 source_sensor: Identity::parse("snr:local:hook:cc-session:v1").expect("valid"),
                 created_at: Rfc3339Timestamp::parse("2026-04-22T14:02:11Z").expect("valid"),
                 originating_agent_id: user_id.clone(),
+                source_ids: vec![SourceId::parse("01HQZX9F5N0000000000000000").expect("valid")],
                 source_hash: format!("sha256:{}", "a".repeat(64)),
                 consent_ref: "consent:01HQZ".to_owned(),
                 llm_id_if_any: None,
+                source_refs: Vec::new(),
             },
             updated_at: Rfc3339Timestamp::parse("2026-04-22T14:05:11Z").expect("valid"),
             evidence: EvidenceVector::default(),
@@ -737,8 +881,16 @@ mod tests {
                 .expect("valid"),
             tags: vec!["pref".to_owned()],
             extra_frontmatter: BTreeMap::new(),
+            consent_model: None,
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tests_export::sample_record;
+    use super::*;
+    use crate::domain::{ActorChainEntry, ChainRole, Identity};
 
     #[test]
     fn valid_record_passes_validation() {
@@ -910,7 +1062,7 @@ mod tests {
             chain_parents: vec![],
             expires_at: "2026-04-22T14:07:11Z".to_owned(),
             issued_at: "2026-04-22T14:02:11Z".to_owned(),
-            issuer: crate::generated::common::Identity("usr:tafeng".to_owned()),
+            issuer: crate::generated::common::Identity("hmn:tafeng".to_owned()),
             key_version: 1,
             nonce: crate::generated::common::Nonce16Base64("AAAAAAAAAAAAAAAAAAAAAA==".to_owned()),
             operation_id: crate::generated::common::Ulid("01HQZX9F5N0000000000000000".to_owned()),
@@ -1068,7 +1220,7 @@ mod tests {
         r.scope.tenant = Some("acme".to_owned());
         r.scope.workspace = Some("ws".to_owned());
         r.scope.entity = Some("ent".to_owned());
-        r.scope.user = Some("usr:tafeng".to_owned());
+        r.scope.user = Some("hmn:tafeng".to_owned());
         r.actor_chain = vec![ActorChainEntry {
             role: ChainRole::Author,
             identity: agent.clone(),
@@ -1083,19 +1235,19 @@ mod tests {
     #[test]
     fn intent_containment_rejects_user_scope_via_forged_author() {
         // Adversarial path: an attacker constructs a record whose
-        // chain-author identity is `usr:victim` with a syntactically
+        // chain-author identity is `hmn:victim` with a syntactically
         // valid but uncountersigned signature, then sets
-        // `scope.user = usr:victim`. validate() is shape-only, so it
+        // `scope.user = hmn:victim`. validate() is shape-only, so it
         // accepts the well-formed identity and signature wire form.
         // Containment must reject because intent.issuer (the only
-        // cryptographically established identity here) is `usr:tafeng`,
-        // not `usr:victim` — the author claim is unverified.
+        // cryptographically established identity here) is `hmn:tafeng`,
+        // not `hmn:victim` — the author claim is unverified.
         let mut r = sample_record();
         r.scope.tenant = Some("acme".to_owned());
         r.scope.workspace = Some("ws".to_owned());
         r.scope.entity = Some("ent".to_owned());
-        let victim = Identity::parse("usr:victim").expect("valid");
-        r.scope.user = Some("usr:victim".to_owned());
+        let victim = Identity::parse("hmn:victim").expect("valid");
+        r.scope.user = Some("hmn:victim".to_owned());
         r.actor_chain = vec![ActorChainEntry {
             role: ChainRole::Author,
             identity: victim.clone(),
@@ -1103,7 +1255,7 @@ mod tests {
         }];
         r.provenance.originating_agent_id = victim;
         let intent = intent_for(&r, "acme", "ws", "ent", SignedIntentScopeTier::Project);
-        // intent.issuer = usr:tafeng (not usr:victim) — author claim
+        // intent.issuer = hmn:tafeng (not hmn:victim) — author claim
         // is uncountersigned, so containment must not accept it.
         let err = r.validate_against_intent(&intent).unwrap_err();
         assert!(matches!(err, DomainError::MalformedScope { .. }));
@@ -1116,7 +1268,7 @@ mod tests {
         r.scope.tenant = Some("acme".to_owned());
         r.scope.workspace = Some("ws".to_owned());
         r.scope.entity = Some("ent".to_owned());
-        r.scope.user = Some("usr:victim".to_owned());
+        r.scope.user = Some("hmn:victim".to_owned());
         r.actor_chain = vec![ActorChainEntry {
             role: ChainRole::Author,
             identity: agent.clone(),
@@ -1153,7 +1305,7 @@ mod tests {
             0,
             ActorChainEntry {
                 role: ChainRole::Principal,
-                identity: Identity::parse("usr:tafeng").expect("valid"),
+                identity: Identity::parse("hmn:tafeng").expect("valid"),
                 at: Rfc3339Timestamp::parse("2026-04-22T14:02:11Z").expect("valid"),
             },
         );
@@ -1227,9 +1379,9 @@ mod tests {
     fn scope_agent_rejects_human_author() {
         // scope.agent requires an agent author.
         let mut r = sample_record();
-        // Sample author is `usr:tafeng`. Set scope.agent — must reject.
+        // Sample author is `hmn:tafeng`. Set scope.agent — must reject.
         r.scope = ScopeTuple {
-            agent: Some("usr:tafeng".to_owned()),
+            agent: Some("hmn:tafeng".to_owned()),
             ..ScopeTuple::default()
         };
         let err = r.validate().unwrap_err();
@@ -1274,14 +1426,14 @@ mod tests {
     #[test]
     fn agent_author_cannot_forge_user_scope_via_unsigned_principal() {
         // P0 attack: agent signs a record but adds an unsigned `principal:
-        // usr:victim` entry, claiming `scope.user = victim`. With the P0
+        // hmn:victim` entry, claiming `scope.user = victim`. With the P0
         // chain-shape rule the unsigned principal is rejected before the
         // scope cross-check even runs — both gates close the forgery.
         let mut r = sample_record();
         r.actor_chain = vec![
             ActorChainEntry {
                 role: ChainRole::Principal,
-                identity: Identity::parse("usr:victim").expect("valid"),
+                identity: Identity::parse("hmn:victim").expect("valid"),
                 at: Rfc3339Timestamp::parse("2026-04-22T14:02:11Z").expect("valid"),
             },
             ActorChainEntry {
@@ -1332,7 +1484,7 @@ mod tests {
         let mut r = sample_record();
         r.actor_chain = vec![ActorChainEntry {
             role: ChainRole::Author,
-            identity: Identity::parse("usr:tafeng").expect("valid"),
+            identity: Identity::parse("hmn:tafeng").expect("valid"),
             at: Rfc3339Timestamp::parse("2026-04-22T16:00:00Z").expect("valid"),
         }];
         r.updated_at = Rfc3339Timestamp::parse("2026-04-22T14:00:00Z").expect("valid");
@@ -1350,7 +1502,7 @@ mod tests {
         r.updated_at = Rfc3339Timestamp::parse("2026-04-22T13:00:00Z").expect("valid");
         r.actor_chain = vec![ActorChainEntry {
             role: ChainRole::Author,
-            identity: Identity::parse("usr:tafeng").expect("valid"),
+            identity: Identity::parse("hmn:tafeng").expect("valid"),
             at: Rfc3339Timestamp::parse("2026-04-22T14:00:00+02:00").expect("valid"),
         }];
         r.validate()
@@ -1366,5 +1518,32 @@ mod tests {
             .insert("zzz".to_owned(), serde_json::json!("bad"));
         let res: Result<MemoryRecord, _> = serde_json::from_value(value);
         assert!(res.is_err(), "unknown field should reject");
+    }
+
+    #[test]
+    fn target_id_independent_of_id() {
+        let r = sample_record();
+        // For a fresh record the convention is target_id == id, but the type
+        // does not enforce that — supersessions intentionally keep the prior
+        // target_id while issuing a new id.
+        assert_eq!(r.target_id.as_str(), r.id.as_str());
+    }
+
+    #[test]
+    fn target_id_round_trips_in_json() {
+        let mut r = sample_record();
+        let other = TargetId::parse("01HQZX9F5N1234567890ABCDEF").expect("valid");
+        r.target_id = other.clone();
+        let s = serde_json::to_string(&r).expect("ser");
+        let back: MemoryRecord = serde_json::from_str(&s).expect("de");
+        assert_eq!(back.target_id, other);
+    }
+
+    #[test]
+    fn missing_target_id_in_json_rejected() {
+        let mut value = serde_json::to_value(sample_record()).expect("ser");
+        value.as_object_mut().expect("object").remove("target_id");
+        let res: Result<MemoryRecord, _> = serde_json::from_value(value);
+        assert!(res.is_err(), "target_id is required");
     }
 }

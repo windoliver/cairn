@@ -1,0 +1,3 @@
+{
+  "__raw_text": "cairn handshake: capability unavailable: cairn.mcp.v1.replay.challenge\n  hint: signed-intent replay protection requires a wired challenge dispatch path; not available in this build"
+}

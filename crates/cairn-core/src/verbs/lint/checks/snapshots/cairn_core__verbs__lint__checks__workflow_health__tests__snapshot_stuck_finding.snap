@@ -1,0 +1,12 @@
+---
+source: crates/cairn-core/src/verbs/lint/checks/workflow_health.rs
+assertion_line: 223
+expression: findings
+---
+[
+  {
+    "kind": "workflow_stuck",
+    "message": "oldest queued workflow job has waited 900000ms — workers idle?",
+    "severity": "warning"
+  }
+]

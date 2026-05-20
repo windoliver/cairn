@@ -1,0 +1,45 @@
+# P0 Privacy fixture 2 — §14 forget Phase B index purge
+# Verifies that after forget, the record's row is physically gone from the
+# `records` table AND from `record_vectors` (brief §5.6 steps 4-5).
+#
+# What is tested (v0.1 — RUNS end-to-end):
+#   - After forget: `records` has no row with record_id = <actual ULID>
+#     (primary.purge step in the WAL graph deletes the row).
+#   - After forget: `record_vectors` has no row with record_id = <actual ULID>
+#     (vector.drain step runs before primary.purge).
+#
+# Note: `records` is the canonical table; `record_id` is the PRIMARY KEY.
+# `record_vectors` is a sqlite-vec virtual table with `record_id TEXT PRIMARY KEY`.
+#
+# Advisory id "rec_purge" is resolved to the actual ULID by the harness;
+# must_not_contain references the same advisory id so the harness substitutes
+# the real ULID in the SQL query.
+scenario: forget_record_index_purge
+description: |
+  §14 / §5.6 Phase B — after forget, record row is physically purged from
+  `records` and `record_vectors`. Runs end-to-end at v0.1.
+setup:
+  records:
+    - id: rec_purge
+      kind: reference
+      body: "index-purge-sentinel-bravo-7364"
+operations:
+  - verb: forget
+    target: rec_purge
+    mode: record
+assertions:
+  search:
+    - mode: keyword
+      query: "index-purge-sentinel-bravo-7364"
+      must_not_contain_id: rec_purge
+  indexes:
+    # After primary.purge, the row in `records` is physically deleted.
+    # SELECT COUNT(*) FROM records WHERE record_id = <actual_ulid> → 0
+    - table: records
+      column: record_id
+      must_not_contain: rec_purge
+    # After vector.drain, the embedding row is deleted from record_vectors.
+    # SELECT COUNT(*) FROM record_vectors WHERE record_id = <actual_ulid> → 0
+    - table: record_vectors
+      column: record_id
+      must_not_contain: rec_purge

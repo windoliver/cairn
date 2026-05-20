@@ -1,0 +1,5 @@
+---
+source: crates/cairn-cli/tests/search_modes_golden.rs
+expression: stdout
+---
+{"contract":"cairn.mcp.v1","data":{"hits":[{"record_id":"01HQZX9F5N0000000000000001","score":1.0,"snippet":"","trust":"unknown"},{"record_id":"01HQZX9F5N0000000000000002","score":0.5,"snippet":"","trust":"unknown"},{"record_id":"01HQZX9F5N0000000000000000","score":0.3333333333333333,"snippet":"","trust":"unknown"},{"record_id":"01HQZX9F5N0000000000000003","score":0.25,"snippet":"","trust":"unknown"}]},"operation_id":"01XXXXXXXXXXXXXXXXXXXXXXXX","policy_trace":[{"gate":"search.scope","result":"pass"},{"gate":"search.capability","result":"pass"},{"gate":"search.read_filter","result":"pass"}],"status":"committed","verb":"search"}

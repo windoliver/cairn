@@ -3,6 +3,16 @@
     "Args": {
       "additionalProperties": false,
       "properties": {
+        "bm25s": {
+          "default": "disabled",
+          "description": "Controls optional Nexus BM25S reranking for keyword search. `disabled` preserves SQLite-only ranking, `auto` uses Nexus when the projection is current and reachable, and `required` fails closed when Nexus BM25S is unavailable or stale.",
+          "enum": [
+            "auto",
+            "disabled",
+            "required"
+          ],
+          "type": "string"
+        },
         "citations": {
           "enum": [
             "on",
@@ -15,8 +25,19 @@
           "$ref": "../common/primitives.json#/$defs/Cursor",
           "description": "Opaque continuation token from a prior search Data.next_cursor."
         },
+        "explain": {
+          "default": false,
+          "description": "When true, populate policy_trace and data.excluded with per-record exclusions for Tier-2 read filters. Has no effect on the candidate set the caller could see. `explain: true` requires the cairn.mcp.v1.policy_trace capability — servers that do not advertise it MUST reject `explain: true` with CapabilityUnavailable (sysexit 69).",
+          "type": "boolean",
+          "x-cairn-capability-when-true": "cairn.mcp.v1.policy_trace"
+        },
         "filters": {
           "$ref": "#/$defs/filter"
+        },
+        "include_reasoning": {
+          "default": false,
+          "description": "When true, include records whose trace blocks contain reasoning content. Default false keeps reasoning-bearing records out of ordinary search results.",
+          "type": "boolean"
         },
         "limit": {
           "maximum": 1000,
@@ -43,21 +64,6 @@
           "minLength": 1,
           "type": "string"
         },
-        "ranking": {
-          "additionalProperties": false,
-          "properties": {
-            "bm25s": {
-              "default": "auto",
-              "enum": [
-                "auto",
-                "required",
-                "disabled"
-              ],
-              "type": "string"
-            }
-          },
-          "type": "object"
-        },
         "scope": {
           "$ref": "../common/scope_filter.json",
           "description": "Optional narrowing of the already-authorized signed-intent scope. Reuses the closed scope filter grammar — unknown keys and empty values reject at schema validation so a typo cannot silently widen reads."
@@ -72,6 +78,20 @@
     "Data": {
       "additionalProperties": false,
       "properties": {
+        "degraded_legs": {
+          "description": "Per-leg degradation entries when one or more search legs (semantic, graph, or graph seed sources) failed or were unavailable. Empty/absent when every requested leg contributed. Lets callers distinguish a low-recall result from a partial-failure result without inspecting server logs.",
+          "items": {
+            "$ref": "#/$defs/DegradedLegEntry"
+          },
+          "type": "array"
+        },
+        "excluded": {
+          "description": "Per-record exclusions; present only when args.explain is true.",
+          "items": {
+            "$ref": "../common/record_exclusion.json"
+          },
+          "type": "array"
+        },
         "hits": {
           "items": {
             "$ref": "#/$defs/Hit"
@@ -80,10 +100,57 @@
         },
         "next_cursor": {
           "$ref": "../common/primitives.json#/$defs/Cursor"
+        },
+        "score_explain": {
+          "description": "Optional per-candidate score-component explanations. Present only when args.explain is true (which itself requires the cairn.mcp.v1.policy_trace capability).",
+          "items": {
+            "$ref": "#/$defs/ScoreExplain"
+          },
+          "type": "array"
+        },
+        "semantic_degraded": {
+          "description": "True when the response succeeded after a transient semantic embedding-provider outage. Absent for healthy responses and for fail-closed capability errors.",
+          "type": "boolean"
         }
       },
       "required": [
         "hits"
+      ],
+      "type": "object"
+    },
+    "DegradedLegEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "leg": {
+          "description": "Which hybrid leg degraded.",
+          "enum": [
+            "semantic",
+            "graph"
+          ],
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why the leg degraded.",
+          "enum": [
+            "sql_error",
+            "capability_unavailable",
+            "timeout"
+          ],
+          "type": "string"
+        },
+        "source": {
+          "description": "Graph-leg only: which seed source was in flight when the leg degraded. Absent for non-graph legs.",
+          "enum": [
+            "all",
+            "auth_keyword_seed",
+            "auth_semantic_seed"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "leg",
+        "reason"
       ],
       "type": "object"
     },
@@ -94,33 +161,9 @@
           "type": "string"
         },
         "ranking_signals": {
+          "description": "Per-hit ranking signals used by the surface. SQLite signals are always present; Nexus BM25S is present when the sidecar contributed a score.",
           "items": {
-            "additionalProperties": false,
-            "properties": {
-              "name": {
-                "enum": [
-                  "sqlite_fts5",
-                  "sqlite_vec",
-                  "nexus_bm25s"
-                ],
-                "type": "string"
-              },
-              "reason": {
-                "minLength": 1,
-                "type": "string"
-              },
-              "score": {
-                "type": "number"
-              },
-              "used": {
-                "type": "boolean"
-              }
-            },
-            "required": [
-              "name",
-              "used"
-            ],
-            "type": "object"
+            "$ref": "#/$defs/RankingSignal"
           },
           "type": "array"
         },
@@ -145,8 +188,65 @@
       "required": [
         "record_id",
         "score",
-        "trust",
-        "ranking_signals"
+        "trust"
+      ],
+      "type": "object"
+    },
+    "RankingSignal": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "enum": [
+            "sqlite_fts5",
+            "sqlite_vec",
+            "nexus_bm25s"
+          ],
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "score": {
+          "type": "number"
+        },
+        "used": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "used"
+      ],
+      "type": "object"
+    },
+    "ScoreExplain": {
+      "additionalProperties": false,
+      "properties": {
+        "bm25_rank": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "cosine": {
+          "type": "number"
+        },
+        "final_score": {
+          "type": "number"
+        },
+        "record_id": {
+          "$ref": "../common/primitives.json#/$defs/Ulid"
+        },
+        "rrf_score": {
+          "type": "number"
+        },
+        "semantic_rank": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "record_id",
+        "rrf_score",
+        "final_score"
       ],
       "type": "object"
     },

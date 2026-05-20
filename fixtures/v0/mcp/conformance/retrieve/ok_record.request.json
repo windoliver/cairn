@@ -1,0 +1,8 @@
+{
+  "args": {
+    "id": "01HQZX9F5N0000000000000000",
+    "target": "record"
+  },
+  "contract": "cairn.mcp.v1",
+  "verb": "retrieve"
+}

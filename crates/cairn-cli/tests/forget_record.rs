@@ -1,0 +1,473 @@
+//! CLI coverage for wired `cairn forget --record`.
+
+use std::path::Path;
+use std::process::{Command, Output};
+
+use cairn_core::contract::memory_store::MemoryStore;
+use cairn_core::domain::{RecordId, TargetId};
+use cairn_core::generated::envelope::{
+    Response, ResponseData, ResponseStatus, ResponseVerb, RetrieveData,
+};
+use serde_json::Value;
+
+fn cli() -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_cairn"));
+    cmd.env_remove("CAIRN_VAULT");
+    cmd.env_remove("CAIRN_REGISTRY");
+    cmd
+}
+
+fn bootstrap_vault(vault: &Path) {
+    cairn_cli::vault::bootstrap(&cairn_cli::vault::BootstrapOpts {
+        vault_path: vault.to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap vault");
+}
+
+fn run_in_vault(vault: &Path, args: &[&str]) -> Output {
+    cli()
+        .current_dir(vault)
+        .args(args)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run cairn {args:?}: {e}"))
+}
+
+fn run_json_ok(vault: &Path, args: &[&str]) -> Value {
+    let out = run_in_vault(vault, args);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "cairn {args:?} failed\nstderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("cairn {args:?} emitted invalid JSON: {e}"))
+}
+
+fn hit_count(vault: &Path, query: &str) -> usize {
+    let search = run_json_ok(vault, &["search", "--mode", "keyword", query, "--json"]);
+    search["data"]["hits"]
+        .as_array()
+        .unwrap_or_else(|| panic!("search hits must be an array: {search}"))
+        .len()
+}
+
+fn retrieve_record(vault: &Path, record_id: &str) -> Response {
+    let out = run_in_vault(vault, &["retrieve", record_id, "--json"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "retrieve should commit\nstderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "retrieve envelope parse failed: {e}\nstdout: {}",
+            String::from_utf8_lossy(&out.stdout)
+        )
+    })
+}
+
+fn forget_record_wal_operation_id(vault: &Path) -> String {
+    let conn = rusqlite::Connection::open(vault.join(".cairn/cairn.db")).expect("open cairn db");
+    conn.query_row(
+        "SELECT operation_id FROM wal_ops WHERE kind = 'forget_record'",
+        [],
+        |row| row.get(0),
+    )
+    .expect("forget_record wal op")
+}
+
+fn pinned_value(vault: &Path, record_id: &str) -> i64 {
+    let conn = rusqlite::Connection::open(vault.join(".cairn/cairn.db")).expect("open cairn db");
+    conn.query_row(
+        "SELECT pinned FROM records WHERE record_id = ?1",
+        [record_id],
+        |row| row.get(0),
+    )
+    .expect("pinned value")
+}
+
+fn seed_record_direct(vault: &Path, body: &str) -> String {
+    let db = vault.join(".cairn/cairn.db");
+    let body = body.to_owned();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    rt.block_on(async move {
+        let store = cairn_store_sqlite::open(db).await.expect("open store");
+        let mut record = cairn_core::domain::record::tests_export::sample_record();
+        let id = "01HQZX9F5N0000000000000313";
+        record.id = RecordId::parse(id).expect("valid id");
+        record.target_id = TargetId::parse(id).expect("valid target");
+        record.body = body;
+        store.upsert(&record).await.expect("seed record");
+        id.to_owned()
+    })
+}
+
+fn seed_superseded_record_direct(vault: &Path) -> (String, String) {
+    let db = vault.join(".cairn/cairn.db");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    rt.block_on(async move {
+        let store = cairn_store_sqlite::open(db).await.expect("open store");
+        let mut record = cairn_core::domain::record::tests_export::sample_record();
+        let id = "01HQZX9F5N0000000000000323";
+        record.id = RecordId::parse(id).expect("valid id");
+        record.target_id = TargetId::parse(id).expect("valid target");
+        "issue313 old superseded pin target".clone_into(&mut record.body);
+        let first = store.upsert(&record).await.expect("seed v1");
+
+        "issue313 active successor pin target".clone_into(&mut record.body);
+        let second = store.upsert(&record).await.expect("seed v2");
+        assert_ne!(first.record_id, second.record_id);
+        (
+            first.record_id.as_str().to_owned(),
+            second.record_id.as_str().to_owned(),
+        )
+    })
+}
+
+#[test]
+fn forget_pin_marks_record_without_deleting_it() {
+    let dir = tempfile::tempdir().expect("temp vault");
+    bootstrap_vault(dir.path());
+
+    let record_id = seed_record_direct(
+        dir.path(),
+        "issue313pinunique record should remain readable",
+    );
+
+    let out = run_in_vault(dir.path(), &["forget", "--pin", &record_id, "--json"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "forget --pin should commit\nstderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert_eq!(pinned_value(dir.path(), &record_id), 1);
+    assert_eq!(hit_count(dir.path(), "issue313pinunique"), 1);
+    let response: Value = serde_json::from_slice(&out.stdout).expect("pin response json");
+    assert!(
+        response
+            .pointer("/data/tombstones")
+            .is_none_or(serde_json::Value::is_null),
+        "pinning should not report tombstones: {response}",
+    );
+}
+
+#[test]
+fn forget_pin_rejects_superseded_record_id() {
+    let dir = tempfile::tempdir().expect("temp vault");
+    bootstrap_vault(dir.path());
+
+    let (old_record_id, active_record_id) = seed_superseded_record_direct(dir.path());
+
+    let out = run_in_vault(dir.path(), &["forget", "--pin", &old_record_id, "--json"]);
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "forget --pin old version should fail\nstderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let response: Value =
+        serde_json::from_slice(&out.stdout).expect("superseded pin response json");
+    assert_eq!(response["status"], "aborted");
+    assert_eq!(response["error"]["code"], "NotFound");
+    assert_eq!(pinned_value(dir.path(), &old_record_id), 0);
+    assert_eq!(pinned_value(dir.path(), &active_record_id), 0);
+
+    let out = run_in_vault(
+        dir.path(),
+        &["forget", "--pin", &active_record_id, "--json"],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "forget --pin active successor should commit\nstderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert_eq!(pinned_value(dir.path(), &active_record_id), 1);
+}
+
+#[test]
+fn forget_pin_rejects_missing_record() {
+    let dir = tempfile::tempdir().expect("temp vault");
+    bootstrap_vault(dir.path());
+
+    let out = run_in_vault(
+        dir.path(),
+        &["forget", "--pin", "01HQZX9F5N0000000000000BAD", "--json"],
+    );
+
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "forget --pin missing record should fail\nstderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let response: Value = serde_json::from_slice(&out.stdout).expect("missing pin response json");
+    assert_eq!(response["status"], "aborted");
+    assert_eq!(response["error"]["code"], "NotFound");
+}
+
+#[test]
+fn forget_record_json_commits_in_bound_vault() {
+    let dir = tempfile::tempdir().expect("temp vault");
+    bootstrap_vault(dir.path());
+
+    let body = "issue58forgetunique body survives until record forget";
+    let ingest = run_json_ok(
+        dir.path(),
+        &["ingest", "--kind", "reference", "--body", body, "--json"],
+    );
+    let record_id = ingest["data"]["record_id"]
+        .as_str()
+        .expect("ingest record_id")
+        .to_owned();
+    assert_eq!(hit_count(dir.path(), "issue58forgetunique"), 1);
+    let before = retrieve_record(dir.path(), &record_id);
+    let Some(ResponseData::Retrieve(RetrieveData::Record(before))) = before.data else {
+        panic!("retrieve before forget must return record data");
+    };
+    assert_eq!(before.record_id.0, record_id);
+    assert_eq!(before.body.as_deref(), Some(body));
+
+    let out = run_in_vault(dir.path(), &["forget", "--record", &record_id, "--json"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "forget should commit\nstderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    let resp: Response = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("forget envelope parse failed: {e}\nstdout: {stdout:?}"));
+    assert_eq!(resp.contract, "cairn.mcp.v1");
+    assert!(matches!(resp.status, ResponseStatus::Committed));
+    assert!(matches!(resp.verb, ResponseVerb::Forget));
+    let response_operation_id = resp.operation_id.0.clone();
+    let data = resp.data.expect("committed forget must carry data");
+    let ResponseData::Forget(data) = data else {
+        panic!("forget response must carry ForgetData");
+    };
+    assert_eq!(data.deleted_count, 1);
+    assert_eq!(data.plan_ref, None);
+    assert_eq!(
+        data.tombstones
+            .expect("forget should report tombstones")
+            .into_iter()
+            .map(|id| id.0)
+            .collect::<Vec<_>>(),
+        vec![record_id.clone()]
+    );
+
+    assert_eq!(
+        forget_record_wal_operation_id(dir.path()),
+        format!("forget_record-{response_operation_id}")
+    );
+    assert_eq!(hit_count(dir.path(), "issue58forgetunique"), 0);
+
+    let after = retrieve_record(dir.path(), &record_id);
+    let Some(ResponseData::Retrieve(RetrieveData::Record(after))) = after.data else {
+        panic!("retrieve after forget must return typed empty record data");
+    };
+    assert_eq!(after.record_id.0, record_id);
+    assert_eq!(after.kind, "unknown");
+    assert!(
+        after.body.is_none(),
+        "retrieve after record forget must not return forgotten body"
+    );
+}
+
+#[test]
+fn forget_record_human_mode_commits_and_removes_search_hit() {
+    let dir = tempfile::tempdir().expect("temp vault");
+    bootstrap_vault(dir.path());
+
+    let body = "issue58humanforget body must disappear";
+    let ingest = run_json_ok(
+        dir.path(),
+        &["ingest", "--kind", "reference", "--body", body, "--json"],
+    );
+    let record_id = ingest["data"]["record_id"]
+        .as_str()
+        .expect("ingest record_id")
+        .to_owned();
+    assert_eq!(hit_count(dir.path(), "issue58humanforget"), 1);
+
+    let out = run_in_vault(dir.path(), &["forget", "--record", &record_id]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "human forget should commit\nstderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    assert_eq!(
+        stdout.trim(),
+        format!("cairn forget: committed record {record_id} (deleted 1)")
+    );
+    assert_eq!(hit_count(dir.path(), "issue58humanforget"), 0);
+}
+
+#[test]
+fn forget_record_second_cli_call_reports_not_found_without_body_leak() {
+    let dir = tempfile::tempdir().expect("temp vault");
+    bootstrap_vault(dir.path());
+
+    let body = "issue58secondforget body must not leak";
+    let ingest = run_json_ok(
+        dir.path(),
+        &["ingest", "--kind", "reference", "--body", body, "--json"],
+    );
+    let record_id = ingest["data"]["record_id"]
+        .as_str()
+        .expect("ingest record_id")
+        .to_owned();
+    let first = run_in_vault(dir.path(), &["forget", "--record", &record_id, "--json"]);
+    assert_eq!(
+        first.status.code(),
+        Some(0),
+        "first forget should commit\nstderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&first.stderr),
+        String::from_utf8_lossy(&first.stdout)
+    );
+
+    let second = run_in_vault(dir.path(), &["forget", "--record", &record_id, "--json"]);
+    assert_eq!(
+        second.status.code(),
+        Some(1),
+        "second forget should surface not found\nstderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&second.stderr),
+        String::from_utf8_lossy(&second.stdout)
+    );
+    let stdout = String::from_utf8(second.stdout).expect("utf-8 stdout");
+    let v: Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("not-found JSON parse failed: {e}\nstdout: {stdout:?}"));
+    assert_eq!(v["contract"], "cairn.mcp.v1");
+    assert_eq!(v["status"], "aborted");
+    assert_eq!(v["verb"], "forget");
+    assert_eq!(v["error"]["code"], "NotFound");
+    assert_eq!(v["error"]["data"]["target"], "record");
+    assert!(
+        !stdout.contains(body),
+        "second forget response must not leak forgotten body"
+    );
+}
+
+fn assert_capability_unavailable(vault: Option<&Path>, args: &[&str], capability: &str) {
+    let mut cmd = cli();
+    if let Some(vault) = vault {
+        cmd.current_dir(vault);
+    }
+    let out = cmd
+        .args(args)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run cairn {args:?}: {e}"));
+    assert_eq!(
+        out.status.code(),
+        Some(69),
+        "cairn {args:?} should exit 69\nstderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    let v: Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("rejection JSON parse failed: {e}\nstdout: {stdout:?}"));
+    assert_eq!(v["contract"], "cairn.mcp.v1");
+    assert_eq!(v["status"], "rejected");
+    assert_eq!(v["verb"], "forget");
+    assert_eq!(v["error"]["code"], "CapabilityUnavailable");
+    assert_eq!(v["error"]["data"]["capability"], capability);
+}
+
+#[test]
+#[ignore = "session forget is now wired (#328); test asserts pre-merge unavailable behavior"]
+fn forget_session_and_scope_remain_capability_unavailable() {
+    assert_capability_unavailable(
+        None,
+        &[
+            "forget",
+            "--session",
+            "01JXXXXXXXXXXXXXXXXXXXXXXX",
+            "--json",
+        ],
+        "cairn.mcp.v1.forget.session",
+    );
+    assert_capability_unavailable(
+        None,
+        &["forget", "--scope", r#"{"tenant":"default"}"#, "--json"],
+        "cairn.mcp.v1.forget.scope",
+    );
+}
+
+#[test]
+#[ignore = "session forget is now wired (#328); test asserts pre-merge unavailable behavior"]
+fn forget_session_and_scope_ignore_malformed_vault_config() {
+    let dir = tempfile::tempdir().expect("temp vault");
+    bootstrap_vault(dir.path());
+    std::fs::write(
+        dir.path().join(".cairn/config.yaml"),
+        b": :\nnot: [valid yaml",
+    )
+    .expect("write malformed config");
+
+    assert_capability_unavailable(
+        Some(dir.path()),
+        &[
+            "forget",
+            "--session",
+            "01JXXXXXXXXXXXXXXXXXXXXXXX",
+            "--json",
+        ],
+        "cairn.mcp.v1.forget.session",
+    );
+    assert_capability_unavailable(
+        Some(dir.path()),
+        &["forget", "--scope", r#"{"tenant":"default"}"#, "--json"],
+        "cairn.mcp.v1.forget.scope",
+    );
+}
+
+#[test]
+#[ignore = "session forget is now wired (#328); test asserts pre-merge unavailable behavior"]
+fn forget_session_and_scope_ignore_invalid_explicit_vault() {
+    assert_capability_unavailable(
+        None,
+        &[
+            "--vault",
+            "definitely-not-a-vault-name",
+            "forget",
+            "--session",
+            "01JXXXXXXXXXXXXXXXXXXXXXXX",
+            "--json",
+        ],
+        "cairn.mcp.v1.forget.session",
+    );
+    assert_capability_unavailable(
+        None,
+        &[
+            "--vault",
+            "definitely-not-a-vault-name",
+            "forget",
+            "--scope",
+            r#"{"tenant":"default"}"#,
+            "--json",
+        ],
+        "cairn.mcp.v1.forget.scope",
+    );
+}

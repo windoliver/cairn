@@ -3,11 +3,9 @@
 use std::path::Path;
 
 use cairn_core::{
-    contract::memory_store::{
-        Bm25sPreference, MemoryStore, ProjectionApplyItem, RankingSignalName, SearchMode,
-        SearchRequest,
-    },
+    contract::memory_store::{KeywordSearchArgs, MemoryStore, ProjectionApplyItem},
     domain::{
+        ScopeTuple,
         projection::{
             ParserProjectionKind, ProjectionCursor, ProjectionItemState, ProjectionLedgerRow,
             ProjectionTarget,
@@ -87,23 +85,22 @@ async fn sqlite_search_returns_fts_signal_without_projection_mutation() {
         .expect("insert test record");
 
     let response = store
-        .search(SearchRequest {
+        .search_keyword(&KeywordSearchArgs {
             query: "projection".to_owned(),
-            mode: SearchMode::Keyword,
+            filter: None,
+            auth_scope: ScopeTuple::default(),
+            visibility_allowlist: Vec::new(),
             limit: 10,
-            bm25s: Bm25sPreference::Disabled,
+            cursor: None,
+            with_explain: false,
         })
         .await
         .expect("search");
 
-    assert_eq!(response.hits.len(), 1);
+    assert_eq!(response.candidates.len(), 1);
     assert_eq!(
-        response.hits[0].record_id.as_str(),
+        response.candidates[0].record_id.as_str(),
         "01ARZ3NDEKTSV4RRFFQ69G5FAV"
-    );
-    assert_eq!(
-        response.hits[0].ranking_signals[0].name,
-        RankingSignalName::SqliteFts5
     );
 }
 
@@ -130,16 +127,19 @@ async fn sqlite_search_filters_tombstoned_authoritative_records() {
         .expect("tombstone record");
 
     let response = store
-        .search(SearchRequest {
+        .search_keyword(&KeywordSearchArgs {
             query: "projection".to_owned(),
-            mode: SearchMode::Keyword,
+            filter: None,
+            auth_scope: ScopeTuple::default(),
+            visibility_allowlist: Vec::new(),
             limit: 10,
-            bm25s: Bm25sPreference::Disabled,
+            cursor: None,
+            with_explain: false,
         })
         .await
         .expect("search");
 
-    assert!(response.hits.is_empty());
+    assert!(response.candidates.is_empty());
 }
 
 #[tokio::test]

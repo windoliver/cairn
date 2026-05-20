@@ -252,10 +252,10 @@ The same split Karpathy's LLM‑Wiki pattern prescribes: the LLM compiles and ma
 1. A source lands in `sources/` (drag‑drop, web clip, source sensor).
 2. `Capture → Extract → Filter → Classify → Store` writes one or more records into `raw/`.
 3. `ConsolidationWorkflow` + `PromotionWorkflow` merge / compress / promote records into `wiki/` pages and `skills/` procedures.
-4. `wiki/` pages link to `raw/` records (via frontmatter `source_ids`) which link to `sources/` documents (via frontmatter `origin`). The trail is auditable end to end.
+4. `wiki/` pages link to `raw/` records (via `provenance.source_ids` in frontmatter) which link to `sources/` documents (via frontmatter `origin`). The trail is auditable end to end.
 5. `EvaluationWorkflow` + `lint` detect orphans, contradictions, stale claims, and data gaps across all three layers.
 
-**Memory file format.** YAML frontmatter (id, kind, class, visibility, scope, confidence, salience, created, updated, origin, source_ids, provenance, tags, links) + markdown body. Pure functions read/write the frontmatter; LLM calls author the body. Humans rarely edit `raw/` or `wiki/` directly — when they do, the next `ConsolidationWorkflow` pass reconciles.
+**Memory file format.** YAML frontmatter (id, kind, class, visibility, scope, confidence, salience, created, updated, origin, provenance `{source_sensor, created_at, llm_id_if_any, originating_agent_id, source_ids, source_hash, consent_ref}`, tags, links) + markdown body. Pure functions read/write the frontmatter; LLM calls author the body. Humans rarely edit `raw/` or `wiki/` directly — when they do, the next `ConsolidationWorkflow` pass reconciles.
 
 **Git is first‑class.** The vault is a git repo. Version history, branching, and collaboration come free. Humans curate sources + schema; the LLM edits records + wiki; merge conflicts are resolved by `ConsolidationWorkflow`.
 
@@ -2262,7 +2262,7 @@ Confidence is a single scalar; **Evidence** is the multi‑factor vector that dr
 
 ### 6.5 Provenance (mandatory on every record)
 
-`{source_sensor, created_at, llm_id_if_any, originating_agent_id, source_hash, consent_ref}` — always present. Never optional.
+`{source_sensor, created_at, llm_id_if_any, originating_agent_id, source_ids, source_hash, consent_ref}` — always present. Never optional. `source_ids` is the source-document pointer set; `source_hash` is the content-addressable evidence hash for the bytes the record was derived from.
 
 ---
 
@@ -2371,13 +2371,23 @@ Cairn exposes one set of eight verbs through four surfaces. **The CLI is the gro
 | Verb | CLI | MCP | SDK (Rust) |
 |------|-----|-----|------------|
 | 1 | `cairn ingest --kind user --body "..."` | `{verb:"ingest", args:{kind,body,...}}` | `cairn::ingest(IngestArgs {...})` |
-| 2 | `cairn search "query" [--mode semantic]` | `{verb:"search", args:{...}}` | `cairn::search(SearchArgs {...})` |
+| 2 | `cairn search "query" [--mode keyword\|semantic\|hybrid]` | `{verb:"search", args:{...}}` | `cairn::search(SearchArgs {...})` |
 | 3 | `cairn retrieve <record-id>`<br>`cairn retrieve --session <id> [--limit K --order desc --rehydrate]`<br>`cairn retrieve --session <id> --turn <n> [--include tool_calls,reasoning]`<br>`cairn retrieve --folder <path>`<br>`cairn retrieve --scope <expr>`<br>`cairn retrieve --profile [--user <id>] [--agent <id>]` | `{verb:"retrieve", args: RetrieveArgs}` (discriminated union — see §8.0.c) | `cairn::retrieve(RetrieveArgs::{Record,Session,Turn,Folder,Scope,Profile}{…})` |
 | 4 | `cairn summarize <record-ids...> [--persist]` | `{verb:"summarize", args:{...}}` | `cairn::summarize(SumArgs {...})` |
 | 5 | `cairn assemble_hot [--session <id>]` | `{verb:"assemble_hot", args:{...}}` | `cairn::assemble_hot(...)` |
 | 6 | `cairn capture_trace --from <file>` | `{verb:"capture_trace", args:{...}}` | `cairn::capture_trace(...)` |
 | 7 | `cairn lint [--write-report]` | `{verb:"lint", args:{...}}` | `cairn::lint(LintArgs {...})` |
 | 8 | `cairn forget --record <id> \| --session <id>` | `{verb:"forget", args:{mode,...}}` | `cairn::forget(ForgetArgs {...})` |
+
+**Search verb flags (CLI / MCP `args` keys):**
+
+| Flag             | Type                                | Default                          | Notes                                                                                               |
+|------------------|-------------------------------------|----------------------------------|-----------------------------------------------------------------------------------------------------|
+| `--mode`         | `keyword \| semantic \| hybrid`     | `hybrid` (else `keyword`)        | Capability-gated. `semantic` / `hybrid` require `cairn.mcp.v1.search.semantic` / `.hybrid`; absence yields `CapabilityUnavailable` (sysexit 69). |
+| `--rerank-blend` | `f32` ∈ [0.0, 1.0]                  | from `search.rerank_blend` (0.7) | Used when `--mode hybrid`. Blends `α·normalize(rrf) + (1−α)·cos`; pure cosine at 0.0, pure RRF at 1.0. |
+| `--embed`        | `local \| openai`                   | from `search.default_provider`   | OpenAI requires the `openai` Cargo feature compiled into `cairn-cli` and `OPENAI_API_KEY` set; otherwise yields `CapabilityUnavailable`. |
+
+`hybrid` runs FTS5 BM25 + sqlite-vec ANN in parallel via `tokio::try_join!`, fuses with reciprocal-rank fusion (default `rrf_k=60`), then re-ranks the top `rerank_topk` (default `20`) with cosine similarity blended at `--rerank-blend`. Field-weighted BM25 (`kind`, `class`, `scope`, `body` at `[10.0, 10.0, 5.0, 1.0]`) is configured via `search.fts_column_weights`.
 
 **What lives where in the binary:**
 
@@ -2701,7 +2711,7 @@ All sources produce the same `CaptureEvent` schema, signed with the sensor's `Se
 
 | Sensor | Priority | What it captures | Backed by | Privacy |
 |--------|----------|------------------|-----------|---------|
-| Hook sensor | P0 | `SessionStart`, `UserPromptSubmit`, `PostToolUse`, `PreCompact`, `Stop` — harness‑agnostic (CC / Codex / Gemini) | harness hook protocol | harness‑scoped |
+| Hook sensor | P0 | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop` — harness‑agnostic (CC / Codex / Gemini) | harness hook protocol | harness‑scoped |
 | IDE sensor | P0 | file edits, diagnostics, tests run, language server events | LSP client in Rust core | opt‑in per project |
 | Terminal sensor | P0 | captured commands + outputs | shell integration scripts | opt‑in, secret‑scrubbed |
 | Clipboard sensor | P0 | clipboard snapshots | [`arboard`](https://github.com/1Password/arboard) (Apache-2) | opt‑in |
@@ -2783,9 +2793,9 @@ No external product name is baked in; the pipeline is composed from the same loc
 |------|------|-----------------|
 | `SessionStart` | startup / resume | `assemble_hot` builds the prefix; semantic re‑index runs in background |
 | `UserPromptSubmit` | every message | lightweight classifier emits routing hints |
-| `PostToolUse` | after `.md` write | validate frontmatter, wikilinks, orphan status |
-| `PreCompact` | before context compaction | snapshot the transcript to `raw/trace_*.md` for later ACE distillation |
-| `Stop` | end of session | trigger end‑of‑session Dream pass + orphan check |
+| `PreToolUse` | before tool execution | record the planned tool call as a trace event |
+| `PostToolUse` | after tool execution | record the tool result and validate markdown writes when applicable |
+| `Stop` | end of session | persist the stop trace event and enqueue post-turn work |
 
 Hooks are plain scripts executed via `cairn hook <name>` (Rust binary on `$PATH`). A single Cairn binary wires identically into CC's `.claude/settings.json`, Codex's `.codex/hooks.json`, and Gemini's `.gemini/settings.json`.
 
@@ -3064,7 +3074,7 @@ Capture is not naive logging. It fires on these explicit signals (recorded as th
 | Agent said "I don't know" / retrieval returned nothing | `knowledge_gap` |
 | Novel entity / fact / rule encountered | `entity` / `fact` / `rule` |
 | User stated a preference or constraint | `user` |
-| Session boundary (`PreCompact`, `Stop`) | `trace` + `reasoning` |
+| Tool and session boundaries (`PreToolUse`, `PostToolUse`, `Stop`) | `trace` + `reasoning` |
 | Sensor event passed policy gate | `sensor_observation` |
 | Derived user‑behavior signal | `user_signal` |
 
@@ -3838,7 +3848,7 @@ Electron app with an Obsidian‑compatible knowledge graph at `WorkDir/knowledge
 Effect‑ts coding agent with **no persistent memory layer**. "Memory" = `AGENTS.md` / `CLAUDE.md` / `CONTEXT.md` discovered in order + session history in SQLite + a structured compaction summary (`Goal` / `Constraints` / `Progress` / `Decisions`) with `PRUNE_PROTECTED_TOOLS`.
 
 - **Migration**: `cairn import --from opencode` reads `AGENTS.md` + `CLAUDE.md` + last N compaction summaries; seeds `purpose.md` + initial `user` / `rule` / `project` / `strategy_*` records.
-- **Runtime**: OpenCode keeps its Effect runtime, session DB, compaction state machine, and `PRUNE_PROTECTED_TOOLS` intact. Register `cairn mcp` as an MCP server; OpenCode's `PreCompact` hook routes the structured summary into Cairn as typed records; `SessionStart` pulls the hot prefix from Cairn via `assemble_hot`.
+- **Runtime**: OpenCode keeps its Effect runtime, session DB, compaction state machine, and `PRUNE_PROTECTED_TOOLS` intact. Register `cairn mcp` as an MCP server; OpenCode's structured compaction summary routes into Cairn as typed records through `capture_trace`; `SessionStart` pulls the hot prefix from Cairn via `assemble_hot`.
 - **Cairn wins**: adds the cross‑session persistent memory OpenCode lacks without disturbing the compaction flow. Skills become portable (OpenCode's `PRUNE_PROTECTED_TOOLS = ["skill"]` maps to `pinned: true` in Cairn). Structured summary template is preserved via Cairn's `project` + `rule` + `strategy_success` kinds.
 
 ### Koi v1 (this repo, `archive/v1/`) — forge · context‑arena · ACE
@@ -4296,7 +4306,7 @@ The MCP server is still available (`cairn mcp`) for harnesses that prefer the wi
 ## 19. Sequencing
 
 **v0.1 — Minimum substrate (all P0).** Covers US1, US2 active‑session reload, US3, US4 rolling‑summary path, US5, US7 **all three search modes** (keyword + semantic + hybrid via local embeddings), and US8 record‑level delete (see §18.c capability matrix for the authoritative mapping).
-Headless only. **SQLite + statically-linked `sqlite-vec` + pure-Rust `candle` embedding runtime** — `.cairn/cairn.db` with FTS5 for keyword + `sqlite-vec` ANN for semantic over locally-computed vectors (default model `bge-small-en-v1.5` or `all-MiniLM-L6-v2`, ~25 MB, downloaded to `.cairn/models/` on first run). **Zero Python, zero Nexus, zero embedding key, zero external services**; single Rust binary installs via `brew install cairn` or `cargo install cairn` and runs offline after the one-time model fetch. Eight core MCP verbs (`ingest`, `search`, `retrieve`, `summarize`, `assemble_hot`, `capture_trace`, `lint`, `forget`) with the full §8.0.b envelope; `forget` advertises `mode: "record"` capability only; `search` advertises `keyword` + `semantic` + `hybrid` by default (droppable via `search.local_embeddings: false` — then only keyword, rejecting the others with `CapabilityUnavailable`). **Local sensors bundled in the P0 binary: hooks, IDE, terminal, clipboard, voice (sherpa-onnx direct C FFI + cpal mic), screen (`xcap` + OS-native OCR, runtime off by default — see [ADR 0003](decisions/0003-screen-sensor-packaging.md)), neuroskill — plus the §9.1.a recording-to-text batch pipeline** (`cairn ingest --recording <path>`). `DreamWorkflow` (LLMDreamWorker only) + `ExpirationWorkflow` + `EvaluationWorkflow` + `ConsolidationWorkflow` (rolling‑summary path only). §5.6 WAL with `upsert`, `forget_record`, and `expire` state machines. Five hooks. Vault on disk. `cairn bootstrap`. **Working set budget:** Rust core ~15 MB + embedding model ~25 MB + sherpa-onnx runtime+models ~100 MB + default screen backend (`xcap` + OS OCR) ~20 MB + optional screenpipe subprocess ~500 MB (opt-in via `--features screenpipe-runtime`) → **~160 MB for the always-on default** (all P0 sensors present, screen runtime off until enabled), ~660 MB with the heavy screenpipe build. Smaller than Chrome; one static install artifact.
+Headless only. **SQLite + statically-linked `sqlite-vec` + pure-Rust `candle` embedding runtime** — `.cairn/cairn.db` with FTS5 for keyword + `sqlite-vec` ANN for semantic over locally-computed vectors (default model `bge-small-en-v1.5` or `all-MiniLM-L6-v2`, ~25 MB, downloaded to `.cairn/models/` on first run). **Zero Python, zero Nexus, zero embedding key, zero external services**; single Rust binary installs via `brew install cairn` or `cargo install cairn` and runs offline after the one-time model fetch. Eight core MCP verbs (`ingest`, `search`, `retrieve`, `summarize`, `assemble_hot`, `capture_trace`, `lint`, `forget`) with the full §8.0.b envelope; `forget` advertises `mode: "record"` capability only; `search` advertises `keyword` + `semantic` + `hybrid` by default (droppable via `search.local_embeddings: false` — then only keyword, rejecting the others with `CapabilityUnavailable`). **Local sensors bundled in the P0 binary: hooks, IDE, terminal, clipboard, voice (sherpa-onnx direct C FFI + cpal mic), screen (`xcap` + OS-native OCR, runtime off by default — see [ADR 0003](decisions/0003-screen-sensor-packaging.md)), neuroskill — plus the §9.1.a recording-to-text batch pipeline** (`cairn ingest --recording <path>`). `DreamWorkflow` (LLMDreamWorker only) + `ExpirationWorkflow` + `EvaluationWorkflow` + `ConsolidationWorkflow` (rolling‑summary path only). §5.6 WAL with `upsert`, `forget_record`, and `expire` state machines. Five hooks. Vault on disk. `cairn bootstrap`. **Working set budget:** Rust core ~36 MB (measured release build with statically-linked `sqlite-vec` + `candle`) + embedding model ~128 MB (`bge-small-en-v1.5` ONNX, measured) + sherpa-onnx runtime+models ~100 MB + default screen backend (`xcap` + OS OCR) ~20 MB + optional screenpipe subprocess ~500 MB (opt-in via `--features screenpipe-runtime`) → **~284 MB for the always-on default** (all P0 sensors present, screen runtime off until enabled), ~784 MB with the heavy screenpipe build. The original ~160 MB / ~660 MB design targets assumed a 15 MB binary and 25 MB model; the measured numbers came in higher (issue #99 §19 gate). Still smaller than a Chrome window; one static install artifact.
 
 **Reference consumer for v0.1: Claude Code.** Chosen because (a) it is the first harness with a stable hook surface in shipping form, (b) Cairn's five hooks map 1:1 to CC's native events, (c) the primary maintainer already uses CC daily so dogfood signal is immediate, and (d) the CC MCP registration format is a documented reference every other harness (Codex, Gemini) can adapt. Codex integration ships in v0.2 as the second consumer.
 

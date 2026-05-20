@@ -20,14 +20,19 @@ use cairn_core::{
 use cairn_store_sqlite::SqliteMemoryStore;
 
 const RECORD_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+const TEST_VAULT_ID: &str = "01HQZX9F5N0000000000000000";
+const TEST_BODY_HASH: &str =
+    "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 fn cli() -> std::process::Command {
     std::process::Command::new(env!("CARGO_BIN_EXE_cairn"))
 }
 
 fn write_config(dir: &tempfile::TempDir, body: &str) {
-    std::fs::create_dir(dir.path().join(".cairn")).expect("mkdir");
-    std::fs::write(dir.path().join(".cairn/config.yaml"), body).expect("config");
+    let cairn_dir = dir.path().join(".cairn");
+    std::fs::create_dir_all(&cairn_dir).expect("mkdir");
+    std::fs::write(cairn_dir.join("vault.id"), TEST_VAULT_ID).expect("vault id");
+    std::fs::write(cairn_dir.join("config.yaml"), body).expect("config");
 }
 
 fn seed_sqlite_record(dir: &tempfile::TempDir) {
@@ -38,7 +43,7 @@ fn seed_sqlite_record(dir: &tempfile::TempDir) {
             RECORD_ID,
             "projection search maps sqlite ranking signals",
             1,
-            "hash-1",
+            TEST_BODY_HASH,
         )
         .expect("insert test record");
 }
@@ -59,7 +64,7 @@ fn seed_current_bm25s_projection(dir: &tempfile::TempDir) {
             cursor: ProjectionCursor {
                 record_id: RecordId::parse(RECORD_ID).expect("record id"),
                 wal_sequence: 1,
-                record_hash: "hash-1".to_owned(),
+                record_hash: TEST_BODY_HASH.to_owned(),
                 source_hash: None,
             },
             state: ProjectionItemState::Current,
@@ -126,7 +131,12 @@ fn search_json_returns_empty_hits_for_empty_store() {
         String::from_utf8_lossy(&out.stderr)
     );
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("search json");
-    assert!(value["hits"].as_array().expect("hits array").is_empty());
+    assert!(
+        value["data"]["hits"]
+            .as_array()
+            .expect("hits array")
+            .is_empty()
+    );
 }
 
 #[test]
@@ -155,13 +165,13 @@ fn search_json_maps_sqlite_ranking_signal() {
         String::from_utf8_lossy(&out.stderr)
     );
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("search json");
-    assert_eq!(value["hits"][0]["record_id"], RECORD_ID);
+    assert_eq!(value["data"]["hits"][0]["record_id"], RECORD_ID);
     assert_eq!(
-        value["hits"][0]["ranking_signals"][0]["name"],
+        value["data"]["hits"][0]["ranking_signals"][0]["name"],
         "sqlite_fts5"
     );
-    assert_eq!(value["hits"][0]["ranking_signals"][0]["used"], true);
-    assert!(value["hits"][0]["ranking_signals"][0]["score"].is_number());
+    assert_eq!(value["data"]["hits"][0]["ranking_signals"][0]["used"], true);
+    assert!(value["data"]["hits"][0]["ranking_signals"][0]["score"].is_number());
 }
 
 #[test]
@@ -197,7 +207,7 @@ fn search_required_bm25s_uses_nexus_signal_when_available() {
     let request = request_rx.recv().expect("bm25s search request");
     assert!(request.starts_with("POST /projection/search HTTP/1.1\r\n"));
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("search json");
-    let signals = value["hits"][0]["ranking_signals"]
+    let signals = value["data"]["hits"][0]["ranking_signals"]
         .as_array()
         .expect("ranking signals");
     assert!(signals.iter().any(|signal| {
@@ -232,9 +242,9 @@ fn search_required_bm25s_fails_closed_when_projection_ledger_missing() {
         .expect("cairn search");
 
     assert!(!out.status.success(), "expected fail-closed search");
-    let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
-    assert!(stderr.contains("CapabilityUnavailable"), "{stderr}");
-    assert!(stderr.contains("projection not current"), "{stderr}");
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    assert!(stdout.contains("CapabilityUnavailable"), "{stdout}");
+    assert!(stdout.contains("projection not current"), "{stdout}");
 }
 
 #[test]
@@ -257,8 +267,8 @@ fn search_required_bm25s_fails_closed_without_nexus() {
         .expect("cairn search");
 
     assert!(!out.status.success(), "expected fail-closed search");
-    let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
-    assert!(stderr.contains("CapabilityUnavailable"), "{stderr}");
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    assert!(stdout.contains("CapabilityUnavailable"), "{stdout}");
 }
 
 #[test]
@@ -285,6 +295,6 @@ fn search_required_bm25s_fails_closed_when_nexus_ranker_unavailable() {
         .expect("cairn search");
 
     assert!(!out.status.success(), "expected fail-closed search");
-    let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
-    assert!(stderr.contains("CapabilityUnavailable"), "{stderr}");
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    assert!(stdout.contains("CapabilityUnavailable"), "{stdout}");
 }

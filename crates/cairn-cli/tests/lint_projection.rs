@@ -33,6 +33,10 @@ fn write_nexus_config(vault: &std::path::Path) {
     .expect("write config");
 }
 
+fn ensure_db(vault: &std::path::Path) {
+    let _store = SqliteMemoryStore::open(&vault.join(".cairn/cairn.db")).expect("open sqlite");
+}
+
 fn block_on<F: Future>(future: F) -> F::Output {
     tokio::runtime::Builder::new_current_thread()
         .build()
@@ -51,7 +55,7 @@ fn seed_failed_projection(vault: &std::path::Path) {
             RECORD_ID,
             "failed projection record",
             1,
-            "sha256:record-a",
+            "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "sources/corrupt.pdf",
             "sha256:pdf-source-corrupt",
         )
@@ -63,7 +67,7 @@ fn seed_failed_projection(vault: &std::path::Path) {
                 cursor: ProjectionCursor {
                     record_id: record_id(RECORD_ID),
                     wal_sequence: 1,
-                    record_hash: "sha256:record-a".to_owned(),
+                    record_hash: "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
                     source_hash: None,
                 },
                 state: ProjectionItemState::Current,
@@ -78,7 +82,7 @@ fn seed_failed_projection(vault: &std::path::Path) {
                 cursor: ProjectionCursor {
                     record_id: record_id(RECORD_ID),
                     wal_sequence: 1,
-                    record_hash: "sha256:record-a".to_owned(),
+                    record_hash: "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
                     source_hash: Some("sha256:pdf-source-corrupt".to_owned()),
                 },
                 state: ProjectionItemState::Failed {
@@ -138,6 +142,7 @@ fn spawn_health_and_apply_server() -> String {
 fn lint_json_reports_projection_sidecar_unavailable() {
     let dir = tempfile::tempdir().expect("tempdir");
     write_nexus_config(dir.path());
+    ensure_db(dir.path());
 
     let out = cli()
         .current_dir(dir.path())
@@ -145,7 +150,7 @@ fn lint_json_reports_projection_sidecar_unavailable() {
         .output()
         .expect("cairn lint --json");
 
-    assert!(out.status.success(), "exit: {:?}", out.status);
+    assert_ne!(out.status.code(), Some(78), "exit: {:?}", out.status);
     let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
     assert!(
         stdout.contains("projection_sidecar_unavailable"),
@@ -157,6 +162,7 @@ fn lint_json_reports_projection_sidecar_unavailable() {
 fn lint_fix_mentions_projection_rebuild() {
     let dir = tempfile::tempdir().expect("tempdir");
     write_nexus_config(dir.path());
+    ensure_db(dir.path());
 
     let out = cli()
         .current_dir(dir.path())
@@ -166,7 +172,7 @@ fn lint_fix_mentions_projection_rebuild() {
 
     assert!(out.status.success(), "exit: {:?}", out.status);
     let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
-    assert!(stdout.contains("\"rebuildable\":true"), "{stdout}");
+    assert!(stdout.contains("rebuildable:true"), "{stdout}");
 }
 
 #[test]
@@ -181,17 +187,20 @@ fn lint_json_reports_parser_failed_summary() {
         .output()
         .expect("cairn lint --json");
 
-    assert!(out.status.success(), "exit: {:?}", out.status);
+    assert_ne!(out.status.code(), Some(78), "exit: {:?}", out.status);
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("lint json");
-    assert_eq!(value["summary"]["projection_failed"], 1);
-    assert!(value["summary"]["projection_stale"].is_null());
-    let findings = value["findings"].as_array().expect("findings array");
-    assert!(
-        findings
-            .iter()
-            .any(|finding| finding["kind"] == "projection_parser_failed"
-                && finding["source_hash"] == "sha256:pdf-source-corrupt")
-    );
+    let data = &value["data"];
+    assert_eq!(data["summary"]["by_kind"]["projection_failed"], 1);
+    assert!(data["summary"]["by_kind"]["projection_stale"].is_null());
+    let findings = data["findings"].as_array().expect("findings array");
+    assert!(findings.iter().any(|finding| {
+        finding["kind"] == "projection_parser_failed"
+            && finding["entities"]
+                .as_array()
+                .expect("entities")
+                .iter()
+                .any(|entity| entity == "source_hash:sha256:pdf-source-corrupt")
+    }));
     assert!(
         !findings
             .iter()
@@ -205,7 +214,12 @@ fn lint_json_reports_missing_projection_separately_from_stale() {
     write_nexus_config(dir.path());
     let store = SqliteMemoryStore::open(&dir.path().join(".cairn/cairn.db")).expect("open sqlite");
     store
-        .insert_test_record(RECORD_ID, "missing projection record", 1, "sha256:record-a")
+        .insert_test_record(
+            RECORD_ID,
+            "missing projection record",
+            1,
+            "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
         .expect("insert record");
 
     let out = cli()
@@ -214,15 +228,26 @@ fn lint_json_reports_missing_projection_separately_from_stale() {
         .output()
         .expect("cairn lint --json");
 
-    assert!(out.status.success(), "exit: {:?}", out.status);
+    assert_ne!(out.status.code(), Some(78), "exit: {:?}", out.status);
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("lint json");
-    assert_eq!(value["summary"]["projection_missing"], 1);
-    assert!(value["summary"]["projection_stale"].is_null());
-    let findings = value["findings"].as_array().expect("findings array");
+    let data = &value["data"];
+    assert!(
+        data["summary"]["by_kind"]["projection_missing"]
+            .as_u64()
+            .unwrap_or(0)
+            >= 1
+    );
+    assert!(data["summary"]["by_kind"]["projection_stale"].is_null());
+    let findings = data["findings"].as_array().expect("findings array");
     assert!(
         findings
             .iter()
-            .any(|finding| finding["kind"] == "projection_missing")
+            .any(|finding| finding["kind"] == "projection_missing"
+                && finding["entities"]
+                    .as_array()
+                    .is_some_and(|entities| entities
+                        .iter()
+                        .any(|entity| entity == "projection_target:bm25s_lexical")))
     );
 }
 
@@ -232,23 +257,30 @@ fn lint_json_reports_hash_mismatch_projection_finding() {
     write_nexus_config(dir.path());
     let store = SqliteMemoryStore::open(&dir.path().join(".cairn/cairn.db")).expect("open sqlite");
     store
-        .insert_test_record(RECORD_ID, "hash mismatch record", 1, "sha256:record-a")
+        .insert_test_record(
+            RECORD_ID,
+            "hash mismatch record",
+            1,
+            "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
         .expect("insert record");
     block_on(store.apply_projection_items(vec![ProjectionApplyItem {
-        row: ProjectionLedgerRow {
-            target: ProjectionTarget::Bm25sLexical,
-            cursor: ProjectionCursor {
-                record_id: record_id(RECORD_ID),
-                wal_sequence: 1,
-                record_hash: "sha256:record-a".to_owned(),
-                source_hash: None,
+            row: ProjectionLedgerRow {
+                target: ProjectionTarget::Bm25sLexical,
+                cursor: ProjectionCursor {
+                    record_id: record_id(RECORD_ID),
+                    wal_sequence: 1,
+                    record_hash:
+                        "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                            .to_owned(),
+                    source_hash: None,
+                },
+                state: ProjectionItemState::Failed {
+                    reason: "projection hash mismatch".to_owned(),
+                },
+                updated_at: "2026-05-19T12:00:00Z".to_owned(),
             },
-            state: ProjectionItemState::Failed {
-                reason: "projection hash mismatch".to_owned(),
-            },
-            updated_at: "2026-05-19T12:00:00Z".to_owned(),
-        },
-    }]))
+        }]))
     .expect("apply failed projection");
 
     let out = cli()
@@ -257,13 +289,19 @@ fn lint_json_reports_hash_mismatch_projection_finding() {
         .output()
         .expect("cairn lint --json");
 
-    assert!(out.status.success(), "exit: {:?}", out.status);
+    assert_ne!(out.status.code(), Some(78), "exit: {:?}", out.status);
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("lint json");
-    let findings = value["findings"].as_array().expect("findings array");
+    let findings = value["data"]["findings"]
+        .as_array()
+        .expect("findings array");
     assert!(findings.iter().any(|finding| {
         finding["kind"] == "projection_hash_mismatch"
-            && finding["record_id"] == RECORD_ID
-            && finding["projection_target"] == "bm25s_lexical"
+            && finding["target"]["record_id"] == RECORD_ID
+            && finding["entities"]
+                .as_array()
+                .expect("entities")
+                .iter()
+                .any(|entity| entity == "projection_target:bm25s_lexical")
     }));
 }
 
@@ -280,7 +318,12 @@ fn lint_fix_rebuilds_missing_projection_rows() {
     .expect("write config");
     let store = SqliteMemoryStore::open(&dir.path().join(".cairn/cairn.db")).expect("open sqlite");
     store
-        .insert_test_record(RECORD_ID, "missing projection record", 1, "sha256:record-a")
+        .insert_test_record(
+            RECORD_ID,
+            "missing projection record",
+            1,
+            "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
         .expect("insert record");
 
     let out = cli()

@@ -1,0 +1,7 @@
+{
+  "args": {
+    "write_report": true
+  },
+  "contract": "cairn.mcp.v1",
+  "verb": "lint"
+}

@@ -1,0 +1,7 @@
+{
+  "args": {
+    "but_missing_required_field": null
+  },
+  "contract": "cairn.mcp.v1",
+  "verb": "ingest"
+}

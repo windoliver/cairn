@@ -11,8 +11,19 @@ use std::{
 use cairn_core::{contract::memory_store::MemoryStore, domain::projection::ProjectionTarget};
 use cairn_store_sqlite::SqliteMemoryStore;
 
+const TEST_VAULT_ID: &str = "01HQZX9F5N0000000000000000";
+const TEST_BODY_HASH: &str =
+    "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
 fn cli() -> std::process::Command {
     std::process::Command::new(env!("CARGO_BIN_EXE_cairn"))
+}
+
+fn write_vault_config(dir: &tempfile::TempDir, body: impl AsRef<str>) {
+    let cairn_dir = dir.path().join(".cairn");
+    std::fs::create_dir_all(&cairn_dir).expect("mkdir");
+    std::fs::write(cairn_dir.join("vault.id"), TEST_VAULT_ID).expect("vault id");
+    std::fs::write(cairn_dir.join("config.yaml"), body.as_ref()).expect("config");
 }
 
 fn spawn_projection_server() -> (String, mpsc::Receiver<String>) {
@@ -96,12 +107,7 @@ fn reindex_help_lists_from_db() {
 #[test]
 fn reindex_from_db_requires_nexus_sandbox() {
     let dir = tempfile::tempdir().expect("tempdir");
-    std::fs::create_dir(dir.path().join(".cairn")).expect("mkdir");
-    std::fs::write(
-        dir.path().join(".cairn/config.yaml"),
-        "store:\n  kind: sqlite\n",
-    )
-    .expect("config");
+    write_vault_config(&dir, "store:\n  kind: sqlite\n");
 
     let out = cli()
         .current_dir(dir.path())
@@ -121,14 +127,12 @@ fn reindex_from_db_requires_nexus_sandbox() {
 fn reindex_from_db_posts_to_projection_endpoint() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (endpoint, request_rx) = spawn_projection_server();
-    std::fs::create_dir(dir.path().join(".cairn")).expect("mkdir");
-    std::fs::write(
-        dir.path().join(".cairn/config.yaml"),
+    write_vault_config(
+        &dir,
         format!(
             "store:\n  kind: nexus-sandbox\n  nexus:\n    endpoint: \"{endpoint}\"\n    health_path: /health\n"
         ),
-    )
-    .expect("config");
+    );
 
     let out = cli()
         .current_dir(dir.path())
@@ -162,14 +166,12 @@ fn reindex_from_db_posts_to_projection_endpoint() {
 fn reindex_from_db_posts_records_and_updates_projection_ledger() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (endpoint, request_rx) = spawn_projection_server();
-    std::fs::create_dir(dir.path().join(".cairn")).expect("mkdir");
-    std::fs::write(
-        dir.path().join(".cairn/config.yaml"),
+    write_vault_config(
+        &dir,
         format!(
             "store:\n  kind: nexus-sandbox\n  nexus:\n    endpoint: \"{endpoint}\"\n    health_path: /health\n"
         ),
-    )
-    .expect("config");
+    );
     let db_path = dir.path().join(".cairn/cairn.db");
     let store = SqliteMemoryStore::open(&db_path).expect("open sqlite");
     store
@@ -177,7 +179,7 @@ fn reindex_from_db_posts_records_and_updates_projection_ledger() {
             "01ARZ3NDEKTSV4RRFFQ69G5FAV",
             "projection rebuild source record",
             1,
-            "sha256:record-a",
+            TEST_BODY_HASH,
         )
         .expect("insert record");
 
@@ -223,21 +225,19 @@ fn reindex_from_db_posts_records_and_updates_projection_ledger() {
 fn reindex_from_db_fails_when_projection_response_omits_requested_record() {
     let dir = tempfile::tempdir().expect("tempdir");
     let endpoint = spawn_incomplete_projection_server();
-    std::fs::create_dir(dir.path().join(".cairn")).expect("mkdir");
-    std::fs::write(
-        dir.path().join(".cairn/config.yaml"),
+    write_vault_config(
+        &dir,
         format!(
             "store:\n  kind: nexus-sandbox\n  nexus:\n    endpoint: \"{endpoint}\"\n    health_path: /health\n"
         ),
-    )
-    .expect("config");
+    );
     let store = SqliteMemoryStore::open(&dir.path().join(".cairn/cairn.db")).expect("open sqlite");
     store
         .insert_test_record(
             "01ARZ3NDEKTSV4RRFFQ69G5FAV",
             "projection rebuild source record",
             1,
-            "sha256:record-a",
+            TEST_BODY_HASH,
         )
         .expect("insert record");
 
@@ -256,14 +256,12 @@ fn reindex_from_db_fails_when_projection_response_omits_requested_record() {
 fn reindex_from_db_posts_parser_projection_for_source_records() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (endpoint, request_rx) = spawn_projection_server();
-    std::fs::create_dir(dir.path().join(".cairn")).expect("mkdir");
-    std::fs::write(
-        dir.path().join(".cairn/config.yaml"),
+    write_vault_config(
+        &dir,
         format!(
             "store:\n  kind: nexus-sandbox\n  nexus:\n    endpoint: \"{endpoint}\"\n    health_path: /health\n"
         ),
-    )
-    .expect("config");
+    );
     let db_path = dir.path().join(".cairn/cairn.db");
     let store = SqliteMemoryStore::open(&db_path).expect("open sqlite");
     store
@@ -271,7 +269,7 @@ fn reindex_from_db_posts_parser_projection_for_source_records() {
             "01ARZ3NDEKTSV4RRFFQ69G5FAV",
             "parser projection source",
             1,
-            "sha256:record-a",
+            TEST_BODY_HASH,
             "sources/sample.pdf",
             "sha256:pdf-source-a",
         )
@@ -320,12 +318,10 @@ fn reindex_from_db_posts_parser_projection_for_source_records() {
 #[test]
 fn reindex_from_db_reports_projection_endpoint_unavailable() {
     let dir = tempfile::tempdir().expect("tempdir");
-    std::fs::create_dir(dir.path().join(".cairn")).expect("mkdir");
-    std::fs::write(
-        dir.path().join(".cairn/config.yaml"),
+    write_vault_config(
+        &dir,
         "store:\n  kind: nexus-sandbox\n  nexus:\n    endpoint: \"http://127.0.0.1:9\"\n    health_path: /health\n",
-    )
-    .expect("config");
+    );
 
     let out = cli()
         .current_dir(dir.path())

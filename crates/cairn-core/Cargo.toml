@@ -10,20 +10,80 @@ homepage.workspace = true
 readme.workspace = true
 description = "Cairn verb layer, domain types, and error enums. No I/O, no adapters."
 
+[features]
+default = []
+# Re-exports the in-tree `sample_record` factory under
+# `cairn_core::domain::record::tests_export` so adapter crates can build the
+# same canonical fixture from `[dev-dependencies]`. Never enable in
+# production builds.
+test-fixtures = []
+# Off-by-default. Exposes test-only constructors for types that are
+# otherwise opaque (e.g. `PurgeAcknowledgement::for_test`). Enable in
+# `[dev-dependencies]` of integration tests, never in production builds.
+test-helpers = []
+# Off-by-default smoke target. Used only by the `filter-smoke` CI job
+# to compile and run the §5.2 Filter pipeline against the *normal*
+# (non-dev) dependency graph — feature unification through dev-deps
+# (proptest / insta etc.) previously masked a missing `regex`
+# `unicode-case` feature that panicked downstream binaries on first
+# call. Enabling this feature does not change library behavior.
+smoke = []
+# Off-by-default. Exposes a stable byte-in / output-out fuzz
+# entrypoint (`pipeline::squash::fuzz_entrypoint`) for cargo-fuzz
+# targets. Bypasses the (still `pub(crate)`) `try_from_terminal_event`
+# constructor by building a synthetic terminal event internally — the
+# squash gate's eligibility is independent of capture metadata for
+# fuzz purposes. Never enable in production: the `try_from_*` gate
+# exists for a reason (see `pipeline/mod.rs`).
+fuzz = []
+
 [dependencies]
+aho-corasick = { workspace = true }
+tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_json_canonicalizer = { workspace = true }
+yaml_serde = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
+blake3 = { workspace = true }
 toml = { workspace = true }
 sha2 = { workspace = true }
+regex = { workspace = true, features = ["unicode-perl", "unicode-case"] }
+unicode-normalization = { workspace = true }
+bon = { workspace = true }
+ulid = { workspace = true }
+zeroize = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand_core = { workspace = true }
+chrono = { workspace = true }
+jsonschema = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros", "time"] }
+twox-hash = { workspace = true }
+smallvec = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }
 proptest = { workspace = true }
 insta = { workspace = true }
 rusqlite = { workspace = true }
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["rt", "macros", "time"] }
+rand_core = { workspace = true }
+rand = { workspace = true }
+rstest = { workspace = true }
+tempfile = { workspace = true }
+tracing-test = "0.2"
+# Self-dep activates the `test-fixtures` feature for integration tests
+# under `tests/`. Cargo's `[dev-dependencies]` is the standard hook for
+# turning a library feature on for tests without leaking it into the
+# default-feature production build.
+cairn-core = { workspace = true, features = ["test-fixtures"] }
+
+[[bin]]
+name = "filter_smoke"
+path = "src/bin/filter_smoke.rs"
+required-features = ["smoke"]
+
 
 [lints]
 workspace = true

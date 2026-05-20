@@ -7,7 +7,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -15,6 +15,8 @@ use cairn_core::config::{CairnConfig, StoreKind};
 
 const MAX_STATUS_LINE_BYTES: usize = 1024;
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const PROJECTION_SETUP_HINT: &str =
+    "run `cairn nexus enable`, or set `store.nexus.command` to a compatible `nexusd` daemon";
 
 /// Parsed HTTP endpoint for the Nexus sidecar health probe.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +84,12 @@ pub enum ProjectionStatusState {
     Degraded,
 }
 
+/// Actionable remediation appended to degraded Nexus projection status.
+#[must_use]
+pub fn projection_setup_hint() -> &'static str {
+    PROJECTION_SETUP_HINT
+}
+
 /// Running Nexus sandbox sidecar process.
 #[derive(Debug)]
 pub struct NexusSupervisor {
@@ -89,6 +97,9 @@ pub struct NexusSupervisor {
     pub child: Child,
     /// Supervisor configuration used to launch the child.
     pub config: SupervisorConfig,
+    /// Isolated child process group used for descendant cleanup on Unix.
+    #[cfg(unix)]
+    process_group: Option<i32>,
 }
 
 impl NexusSupervisor {
@@ -96,9 +107,11 @@ impl NexusSupervisor {
     pub fn start(config: SupervisorConfig) -> std::io::Result<Self> {
         let vault_dir = derive_vault_dir(&config.sqlite_db)?;
         fs::create_dir_all(&config.data_dir)?;
+        let args = expand_sidecar_args(&config.args, &config, vault_dir);
         let mut command = Command::new(&config.command);
         command
-            .args(&config.args)
+            .args(&args)
+            .current_dir(&config.data_dir)
             .env("CAIRN_VAULT_DIR", vault_dir)
             .env("CAIRN_NEXUS_DATA_DIR", &config.data_dir)
             .env("CAIRN_NEXUS_ENDPOINT", &config.endpoint)
@@ -111,7 +124,14 @@ impl NexusSupervisor {
             command.process_group(0);
         }
         let child = command.spawn()?;
-        Ok(Self { child, config })
+        #[cfg(unix)]
+        let process_group = isolated_child_process_group(child.id());
+        Ok(Self {
+            child,
+            config,
+            #[cfg(unix)]
+            process_group,
+        })
     }
 
     /// Poll the configured HTTP health endpoint until it is healthy or times out.
@@ -188,10 +208,13 @@ impl NexusSupervisor {
         let deadline = Instant::now() + self.config.shutdown_timeout;
         while Instant::now() < deadline {
             if self.child.try_wait()?.is_some() {
-                #[cfg(not(unix))]
-                return Ok(());
                 #[cfg(unix)]
-                break;
+                {
+                    if self.process_group.is_some() {
+                        break;
+                    }
+                }
+                return Ok(());
             }
             thread::sleep(Duration::from_millis(10));
         }
@@ -203,16 +226,14 @@ impl NexusSupervisor {
 
     #[cfg(unix)]
     fn terminate_gracefully(&mut self) -> std::io::Result<()> {
-        let status = Command::new("kill")
-            .arg("-TERM")
-            .arg(format!("-{}", self.child.id()))
-            .status()?;
-        if status.success() || self.child.try_wait()?.is_some() {
-            Ok(())
+        if let Some(process_group) = self.process_group {
+            match signal_process_group(process_group, UnixSignal::Term) {
+                Ok(()) => Ok(()),
+                Err(_) if self.child.try_wait()?.is_some() => Ok(()),
+                Err(err) => Err(err),
+            }
         } else {
-            Err(std::io::Error::other(format!(
-                "kill -TERM exited with status {status}"
-            )))
+            self.child.kill()
         }
     }
 
@@ -223,12 +244,12 @@ impl NexusSupervisor {
 
     #[cfg(unix)]
     fn force_kill(&mut self) -> std::io::Result<()> {
-        let status = Command::new("kill")
-            .arg("-KILL")
-            .arg(format!("-{}", self.child.id()))
-            .status()?;
-        if status.success() || self.child.try_wait()?.is_some() {
-            Ok(())
+        if let Some(process_group) = self.process_group {
+            match signal_process_group(process_group, UnixSignal::Kill) {
+                Ok(()) => Ok(()),
+                Err(_) if self.child.try_wait()?.is_some() => Ok(()),
+                Err(_) => self.child.kill(),
+            }
         } else {
             self.child.kill()
         }
@@ -238,6 +259,110 @@ impl NexusSupervisor {
     fn force_kill(&mut self) -> std::io::Result<()> {
         self.child.kill()
     }
+}
+
+fn expand_sidecar_args(
+    args: &[String],
+    config: &SupervisorConfig,
+    vault_dir: &Path,
+) -> Vec<String> {
+    args.iter()
+        .map(|arg| expand_sidecar_arg(arg, config, vault_dir))
+        .collect()
+}
+
+fn expand_sidecar_arg(arg: &str, config: &SupervisorConfig, vault_dir: &Path) -> String {
+    arg.replace("{vault_dir}", &vault_dir.display().to_string())
+        .replace("{data_dir}", &config.data_dir.display().to_string())
+        .replace("{sqlite_db}", &config.sqlite_db.display().to_string())
+        .replace("{endpoint}", &config.endpoint)
+        .replace("{health_path}", &config.health_path)
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug)]
+enum UnixSignal {
+    Term,
+    Kill,
+}
+
+#[cfg(unix)]
+impl UnixSignal {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Term => "TERM",
+            Self::Kill => "KILL",
+        }
+    }
+}
+
+#[cfg(unix)]
+fn isolated_child_process_group(child_pid: u32) -> Option<i32> {
+    let child_pid = i32::try_from(child_pid).ok()?;
+    let process_group = process_group_for_pid(child_pid).ok()?;
+    if process_group <= 1 {
+        return None;
+    }
+    let current_process_group = current_process_group().ok()?;
+    if process_group == current_process_group || process_group != child_pid {
+        return None;
+    }
+    Some(process_group)
+}
+
+#[cfg(unix)]
+fn signal_process_group(process_group: i32, signal: UnixSignal) -> std::io::Result<()> {
+    if process_group <= 1 || Some(process_group) == current_process_group().ok() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "refusing to signal unsafe process group",
+        ));
+    }
+    let status = Command::new("kill")
+        .arg(format!("-{}", signal.name()))
+        .arg("--")
+        .arg(format!("-{process_group}"))
+        .stderr(Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "kill exited with status {status}"
+        )))
+    }
+}
+
+#[cfg(unix)]
+fn current_process_group() -> std::io::Result<i32> {
+    let pid = i32::try_from(std::process::id()).map_err(|err| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("current process id does not fit i32: {err}"),
+        )
+    })?;
+    process_group_for_pid(pid)
+}
+
+#[cfg(unix)]
+fn process_group_for_pid(pid: i32) -> std::io::Result<i32> {
+    let output = Command::new("ps")
+        .args(["-o", "pgid=", "-p", &pid.to_string()])
+        .output()?;
+    if !output.status.success() {
+        return Err(std::io::Error::other(format!(
+            "ps exited with status {}",
+            output.status
+        )));
+    }
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+    stdout.trim().parse::<i32>().map_err(|err| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("parsing process group from ps output {stdout:?}: {err}"),
+        )
+    })
 }
 
 fn derive_vault_dir(sqlite_db: &Path) -> std::io::Result<&Path> {
@@ -289,8 +414,16 @@ pub fn evaluate_projection_status(vault_path: &Path, config: &CairnConfig) -> Pr
             state: ProjectionStatusState::Degraded,
             data_dir: Some(data_dir),
             endpoint: Some(endpoint),
-            reason: Some(reason),
+            reason: Some(reason_with_setup_hint(reason)),
         },
+    }
+}
+
+fn reason_with_setup_hint(reason: String) -> String {
+    if reason.contains("cairn nexus enable") || reason.contains("cairn nexus setup") {
+        reason
+    } else {
+        format!("{reason}; {}", projection_setup_hint())
     }
 }
 
@@ -586,7 +719,7 @@ mod tests {
                 vec![
                     "-c".to_owned(),
                     format!(
-                        "printf '%s\n%s\n%s\n%s\n%s\n' \"$CAIRN_VAULT_DIR\" \"$CAIRN_NEXUS_DATA_DIR\" \"$CAIRN_SQLITE_DB\" \"$CAIRN_NEXUS_ENDPOINT\" \"$CAIRN_NEXUS_HEALTH_PATH\" > {}; sleep 10",
+                        "printf '%s\n%s\n%s\n%s\n%s\n%s\n' \"$CAIRN_VAULT_DIR\" \"$CAIRN_NEXUS_DATA_DIR\" \"$CAIRN_SQLITE_DB\" \"$CAIRN_NEXUS_ENDPOINT\" \"$CAIRN_NEXUS_HEALTH_PATH\" \"$(pwd)\" > {}; sleep 10",
                         shell_quote(output)
                     ),
                 ],
@@ -600,7 +733,7 @@ mod tests {
                     "-NoProfile".to_owned(),
                     "-Command".to_owned(),
                     format!(
-                        "[IO.File]::WriteAllLines('{}', @($env:CAIRN_VAULT_DIR, $env:CAIRN_NEXUS_DATA_DIR, $env:CAIRN_SQLITE_DB, $env:CAIRN_NEXUS_ENDPOINT, $env:CAIRN_NEXUS_HEALTH_PATH)); Start-Sleep -Seconds 10",
+                        "[IO.File]::WriteAllLines('{}', @($env:CAIRN_VAULT_DIR, $env:CAIRN_NEXUS_DATA_DIR, $env:CAIRN_SQLITE_DB, $env:CAIRN_NEXUS_ENDPOINT, $env:CAIRN_NEXUS_HEALTH_PATH, (Get-Location).Path)); Start-Sleep -Seconds 10",
                         output.display()
                     ),
                 ],
@@ -657,8 +790,7 @@ mod tests {
 
         let listener = TcpListener::bind(("127.0.0.1", port)).unwrap();
         fs::write(data_dir.join("helper-ready"), b"ready").unwrap();
-        for stream in listener.incoming() {
-            let mut stream = stream.unwrap();
+        if let Ok((mut stream, _)) = listener.accept() {
             let mut buf = [0_u8; 512];
             let _ = stream.read(&mut buf);
             let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
@@ -770,19 +902,68 @@ mod tests {
 
         wait_for_file(&env_file);
         let captured = fs::read_to_string(&env_file).unwrap();
-        let lines = captured.lines().collect::<Vec<_>>();
+        let lines = captured.lines().map(str::to_owned).collect::<Vec<String>>();
+        let expected_cwd = fs::canonicalize(&data_dir).unwrap().display().to_string();
 
         assert_eq!(
             lines,
             vec![
-                vault_dir.to_str().unwrap(),
-                data_dir.to_str().unwrap(),
-                sqlite_db.to_str().unwrap(),
-                "http://127.0.0.1:1",
-                "/health",
+                vault_dir.display().to_string(),
+                data_dir.display().to_string(),
+                sqlite_db.display().to_string(),
+                "http://127.0.0.1:1".to_owned(),
+                "/health".to_owned(),
+                expected_cwd,
             ]
         );
         supervisor.stop().unwrap();
+    }
+
+    #[test]
+    fn supervisor_expands_launch_arg_tokens() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault_dir = tmp.path().join("vault");
+        let data_dir = vault_dir.join("nexus-data");
+        let sqlite_db = vault_dir.join(".cairn").join("cairn.db");
+        let config = SupervisorConfig {
+            command: "nexusd".to_owned(),
+            args: vec![
+                "--workspace".to_owned(),
+                "{vault_dir}".to_owned(),
+                "--data-dir".to_owned(),
+                "{data_dir}".to_owned(),
+                "--db".to_owned(),
+                "{sqlite_db}".to_owned(),
+                "--endpoint".to_owned(),
+                "{endpoint}".to_owned(),
+                "--health".to_owned(),
+                "{health_path}".to_owned(),
+            ],
+            endpoint: "http://127.0.0.1:8765".to_owned(),
+            health_path: "/health".to_owned(),
+            data_dir: data_dir.clone(),
+            sqlite_db: sqlite_db.clone(),
+            health_timeout: Duration::from_secs(1),
+            shutdown_timeout: Duration::from_secs(1),
+        };
+
+        let args = expand_sidecar_args(&config.args, &config, &vault_dir);
+
+        assert_eq!(
+            args,
+            vec![
+                "--workspace".to_owned(),
+                vault_dir.display().to_string(),
+                "--data-dir".to_owned(),
+                data_dir.display().to_string(),
+                "--db".to_owned(),
+                sqlite_db.display().to_string(),
+                "--endpoint".to_owned(),
+                "http://127.0.0.1:8765".to_owned(),
+                "--health".to_owned(),
+                "/health".to_owned(),
+            ]
+        );
     }
 
     #[test]
@@ -823,6 +1004,27 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn supervisor_records_isolated_process_group_before_group_signaling() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join(".cairn").join("nexus-data");
+        let mut supervisor = NexusSupervisor::start(supervisor_config(
+            &data_dir,
+            closed_endpoint(),
+            Duration::from_millis(100),
+        ))
+        .unwrap();
+
+        let process_group = supervisor
+            .process_group
+            .expect("supervisor should record an isolated child process group");
+
+        assert_eq!(process_group, i32::try_from(supervisor.child.id()).unwrap());
+        assert_ne!(process_group, current_process_group().unwrap());
+        supervisor.stop().unwrap();
     }
 
     #[test]
@@ -874,9 +1076,14 @@ mod tests {
         })
         .unwrap();
         let pid = supervisor.child.id();
+        let started = Instant::now();
 
         supervisor.stop().unwrap();
 
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "force-kill path should not wait for the stubborn child to exit naturally"
+        );
         assert!(!process_is_running(pid));
     }
 
@@ -905,9 +1112,14 @@ mod tests {
             .trim()
             .parse::<u32>()
             .unwrap();
+        let started = Instant::now();
 
         supervisor.stop().unwrap();
 
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "process-group shutdown should not wait for the descendant to exit naturally"
+        );
         assert!(!process_is_running(child_pid));
     }
 

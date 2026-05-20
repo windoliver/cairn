@@ -1,0 +1,28 @@
+# Memory budget gate manifest. Brief §19 working-set budget.
+# Owners adjust this file via PR; see docs/superpowers/specs/2026-05-15-issue-99-release-gates-design.md §5.
+#
+# `enforced = false` entries are tracked for future P1 work but do NOT count
+# toward `budget_mb` or trigger per-asset failures. They surface in the report
+# with size_mb=0 (skipped) so reviewers can see what is still deferred.
+
+[profile.default]
+binary = "target/release/cairn"
+assets = [
+  # bge-small-en-v1.5 actual download: ~128 MB (134 MB on disk).
+  # The original spec estimated 25 MB; the real model is larger.
+  { source = "embedding_model", expected_mb = 128, enforced = true },
+  { source = "sherpa_onnx_voice", expected_mb = 100, enforced = false },
+  { source = "screen_default", expected_mb = 20, enforced = false },
+]
+# Binary (~36 MB) + embedding model (~128 MB) = ~164 MB measured.
+# Budget raised to reflect the real bge-small-en-v1.5 footprint.
+budget_mb = 200
+
+[profile.screenpipe]
+extends = "default"
+features = ["screenpipe-runtime"]
+assets_add = [
+  { source = "screenpipe_runtime", expected_mb = 500, enforced = false },
+]
+# Same enforced budget as default; screenpipe_runtime is deferred (not enforced).
+budget_mb = 200

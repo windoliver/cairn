@@ -1,0 +1,20 @@
+---
+source: crates/cairn-core/src/verbs/lint/checks/taxonomy_conventions.rs
+assertion_line: 232
+expression: findings
+---
+[
+  {
+    "entities": [
+      "01ARZ3NDEKTSV4RRFFQ69G5FAA",
+      "01ARZ3NDEKTSV4RRFFQ69G5FAB"
+    ],
+    "kind": "misclassified_profile",
+    "message": "multiple profile records use well_known_id `profile:hmn:alice`: 01ARZ3NDEKTSV4RRFFQ69G5FAA, 01ARZ3NDEKTSV4RRFFQ69G5FAB; see docs/design/taxonomy-conventions.md",
+    "severity": "warning",
+    "suggested_fix": "keep at most one profile well-known record per actor in the vault",
+    "target": {
+      "record_id": "01ARZ3NDEKTSV4RRFFQ69G5FAA"
+    }
+  }
+]

@@ -1,0 +1,51 @@
+{
+  "id": "p0_keyword_only",
+  "description": "P0 degraded keyword-only replay scenario with local embeddings disabled.",
+  "config": {
+    "local_embeddings": false
+  },
+  "records": [
+    {
+      "id": "01HQZX9F5N00000000000000B0",
+      "kind": "fact",
+      "class": "semantic",
+      "visibility": "private",
+      "body": "keyword only mode still finds rust memory safety"
+    }
+  ],
+  "actions": [
+    {
+      "verb": "search",
+      "story": "US7",
+      "mode": "keyword",
+      "query": "rust memory safety",
+      "limit": 1,
+      "expected": {
+        "status": "hits",
+        "record_ids": ["01HQZX9F5N00000000000000B0"]
+      }
+    },
+    {
+      "verb": "search",
+      "story": "US7",
+      "mode": "semantic",
+      "query": "keyword only mode still finds rust memory safety",
+      "limit": 1,
+      "expected": {
+        "status": "capability_unavailable",
+        "capability": "cairn.mcp.v1.search.semantic"
+      }
+    },
+    {
+      "verb": "search",
+      "story": "US7",
+      "mode": "hybrid",
+      "query": "keyword only mode still finds rust memory safety",
+      "limit": 1,
+      "expected": {
+        "status": "capability_unavailable",
+        "capability": "cairn.mcp.v1.search.hybrid"
+      }
+    }
+  ]
+}

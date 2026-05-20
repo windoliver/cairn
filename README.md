@@ -9,7 +9,14 @@
 
 ---
 
-> **Status:** Pre-v0.1. The P0 Rust workspace scaffold is in place (eight crates: `cairn-core`, `cairn-cli`, `cairn-mcp`, `cairn-store-sqlite`, `cairn-sensors-local`, `cairn-workflows`, `cairn-idl`, `cairn-test-fixtures`). No verb behaviour or storage code is implemented yet — the scaffold exists to accept the eight-verb implementation in follow-up issues. See `docs/design/architecture.md`.
+> **Status:** Pre-v0.1. The P0 Rust workspace is in place (eight crates:
+> `cairn-core`, `cairn-cli`, `cairn-mcp`, `cairn-store-sqlite`,
+> `cairn-sensors-local`, `cairn-workflows`, `cairn-idl`,
+> `cairn-test-fixtures`). The IDL/codegen surfaces, config bootstrap,
+> `status`, `handshake`, `plugins list`, and `plugins verify` are implemented.
+> The eight memory verbs are exposed but still fail closed as P0 stubs until
+> storage and dispatch land. See `docs/design/architecture.md` and
+> `docs/site/src/index.md`.
 
 Cairn is a memory framework for agent loops. It gives local and cloud agents a shared substrate for per-turn capture, search, retrieval, rolling summaries, trace learning, hot-memory assembly, promotion to reusable playbooks, and auditable forget-me flows.
 
@@ -41,6 +48,99 @@ Cairn's public surface is intentionally small: eight verbs, exposed consistently
 | `forget` | Tombstone, drain indexes, and physically purge records through auditable delete flows. |
 
 The CLI is the ground truth. MCP, SDK bindings, and the Cairn skill are thin surfaces over the same contract.
+
+## Current Usage
+
+Build and inspect the implemented surfaces:
+
+```bash
+cargo build -p cairn-cli --locked
+cargo run -p cairn-cli --locked -- status --json
+cargo run -p cairn-cli --locked -- handshake --json
+cargo run -p cairn-cli --locked -- bootstrap --vault-path .
+cargo run -p cairn-cli --locked -- plugins list
+cargo run -p cairn-cli --locked -- plugins verify
+```
+
+### Local Screen Sensor Setup
+
+The screen sensor is opt-in. The default backend is the in-process `xcap`
+runtime, which probes desktop capture during `cairn status` when enabled and can
+write a one-shot PNG with `cairn screen capture`. OCR uses the issue-86
+fallback path, `tesseract`, when it is installed; without it, `ocr.engine: auto`
+captures screenshots and active-window metadata but reports an OCR degradation.
+
+To prepare macOS for live screen capture:
+
+1. Open **System Settings > Privacy & Security > Screen & System Audio Recording**
+   ([Apple's screen/audio recording privacy pane](https://support.apple.com/guide/mac-help/mchld6aa7d23/mac)).
+2. Enable the app that launches `cairn`:
+   - **Terminal** when running `cairn` from Terminal.
+   - **iTerm** when running from iTerm.
+   - **Visual Studio Code** when running from the VS Code terminal.
+   - **Codex** when running from the Codex desktop app, if it appears there.
+   - A packaged **Cairn.app** when one exists.
+3. Quit and reopen the enabled app so macOS applies the permission.
+
+Install OCR when you want captured screen text to enter the normal pipeline:
+
+```bash
+brew install tesseract
+```
+
+Enable the sensor in `.cairn/config.yaml`:
+
+```yaml
+sensors:
+  screen:
+    enabled: true
+    backend: xcap
+```
+
+You can verify the OS permission outside Cairn with:
+
+```bash
+screencapture -x /tmp/cairn-screen-permission-test.png
+file /tmp/cairn-screen-permission-test.png
+```
+
+You can verify Cairn's current screen status surface with:
+
+```bash
+cargo run -p cairn-cli --locked -- status --json | jq '.sensors.screen'
+```
+
+When permission is available, the status probe reports `state: "enabled"` and
+`permission: "granted"`. To capture a real PNG:
+
+```bash
+cargo run -p cairn-cli --locked -- screen capture --output /tmp/cairn-screen.png --json
+file /tmp/cairn-screen.png
+```
+
+The JSON receipt includes a validated `capture_event`; OCR text is policy
+checked and redacted before it contributes to the event payload hash.
+
+To use screenpipe as the opt-in primary path, build the feature and run the
+screenpipe daemon:
+
+```bash
+npx screenpipe@latest record
+cargo run -p cairn-cli --features screenpipe-runtime --locked -- status --json | jq '.sensors.screen'
+```
+
+Set `CAIRN_SCREENPIPE_URL` if the daemon is not on `http://localhost:3030`.
+Set `CAIRN_SCREENPIPE_SPAWN=1` to let the screenpipe backend try
+`screenpipe record` or `npx screenpipe@latest record` when the daemon is not
+already running.
+
+The docs site source lives in `docs/site/`. Generated usage/reference pages are
+committed under `docs/site/src/reference/generated/` and kept fresh by:
+
+```bash
+cargo run -p cairn-cli --bin cairn-docgen --locked -- --check
+mdbook build docs/site
+```
 
 ## Architecture
 
@@ -76,7 +176,9 @@ Nothing should be thrown away when moving up a level. The same vault, record IDs
 
 ## Target P0
 
-The first shippable version is scoped to the smallest useful memory substrate:
+The first shippable version is scoped to the smallest useful memory substrate.
+The list below is target scope, not a claim that every item works in this
+pre-v0.1 scaffold:
 
 - Single Rust binary with no required runtime service.
 - One local `.cairn/cairn.db` SQLite file for records, WAL state, consent journal, locks, and replay metadata.
@@ -86,7 +188,7 @@ The first shippable version is scoped to the smallest useful memory substrate:
 - Five harness hooks plus opt-in local sensors for IDE, terminal, clipboard, voice, screen, and recording-to-text capture.
 - Record-level `forget` with index drains and physical purge.
 - Capability-gated search behavior: semantic and hybrid are advertised by default; if `search.local_embeddings: false` is set and no P1 provider is configured, those modes are removed from capabilities and rejected with `CapabilityUnavailable`.
-- **No bundled LLM runtime.** The `LLMProvider` is optional at P0 and operator-configured. With no provider set, `ingest`, `retrieve`, keyword/semantic/hybrid `search`, `forget`, `capture_trace`, and `lint` all keep working; `LLMExtractor`, `LLMDreamWorker`, `summarize`, and `assemble_hot` fail closed with `CapabilityUnavailable { code: "llm.not_configured" }` (CLI exit `78`). See [ADR 0001](docs/design/decisions/0001-llm-default.md).
+- **No bundled LLM runtime.** The `LLMProvider` is optional at P0 and operator-configured. Target P0 behavior is that non-LLM paths keep working without a provider while LLM-backed enrichment fails closed with `CapabilityUnavailable { code: "llm.not_configured" }` (CLI exit `78`). In the current scaffold, the memory verbs are exposed but still fail closed until storage and dispatch land. See [ADR 0001](docs/design/decisions/0001-llm-default.md).
 
 ## LLM provider (optional)
 
@@ -165,13 +267,13 @@ This README follows the latest design brief rule: v0.1 ships keyword, semantic, 
 
 ## Contributing
 
-Cairn is still at the design stage. The highest-value contributions right now are:
+Cairn is still pre-v0.1. The highest-value contributions right now are:
 
 - tightening the P0 scope,
 - resolving capability/versioning contradictions,
-- turning the eight verbs into precise request/response schemas,
+- wiring the eight P0 verb implementations behind the generated schemas,
 - defining conformance tests for each surface,
-- and cutting the first Rust crate layout.
+- and keeping generated docs/code in sync with user-facing changes.
 
 ## License
 

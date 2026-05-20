@@ -1,0 +1,10 @@
+{"sessionId":"sess-fixture","timestamp":"2026-05-09T00:00:01Z","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}
+{"sessionId":"sess-fixture","timestamp":"2026-05-09T00:00:02Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"consider tools","signature":"sig_a"}]}}
+{"sessionId":"sess-fixture","timestamp":"2026-05-09T00:00:03Z","message":{"role":"assistant","content":[{"type":"text","text":"I will search."}]}}
+{"sessionId":"sess-fixture","timestamp":"2026-05-09T00:00:04Z","message":{"role":"assistant","content":[{"type":"tool_use","name":"rg","input":{"pattern":"foo"},"id":"tool-1"}]}}
+{"sessionId":"sess-fixture","timestamp":"2026-05-09T00:00:05Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"3 matches","is_error":false}]}}
+{"sessionId":"sess-fixture","timestamp":"2026-05-09T00:00:06Z","message":{"role":"assistant","content":[{"type":"text","text":"Found 3 hits"}]}}
+{"sessionId":"sess-fixture","timestamp":"2026-05-09T00:00:07Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"summarize","signature":"sig_b"}]}}
+{"sessionId":"sess-fixture","timestamp":"2026-05-09T00:00:08Z","message":{"role":"assistant","content":[{"type":"text","text":"Summary: foo appears in 3 spots."}]}}
+{"sessionId":"sess-fixture","timestamp":"2026-05-09T00:00:09Z","message":{"role":"user","content":[{"type":"text","text":"thanks"}]}}
+{"sessionId":"sess-fixture","timestamp":"2026-05-09T00:00:10Z","message":{"role":"assistant","content":[{"type":"text","text":"you're welcome"}]}}
