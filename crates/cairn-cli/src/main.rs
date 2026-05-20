@@ -327,6 +327,24 @@ fn main() -> ExitCode {
             Ok((vault_root, _source, config)) => verbs::screen::run(sub, &vault_root, &config),
             Err(code) => code,
         },
+        Some(("session", sub)) => match resolve_vault_or_cwd(explicit_vault.as_deref()) {
+            Ok((vault_root, source)) => {
+                if source == VaultResolutionSource::CwdFallback {
+                    eprintln!(
+                        "cairn session: no Cairn vault found from cwd {} \
+                         — pass --vault, run from inside a vault, or `cairn bootstrap`",
+                        vault_root.display()
+                    );
+                    ExitCode::from(78)
+                } else {
+                    verbs::session::run(sub, &vault_root)
+                }
+            }
+            Err(e) => {
+                eprintln!("cairn session: vault resolution error — {e:#}");
+                ExitCode::from(78)
+            }
+        },
         Some(("sensor", sub)) => match resolve_vault_and_config(explicit_vault.as_deref()) {
             Ok((vault_root, _source, config)) => {
                 if let Some(code) = enforce_vault_binding("sensor", &vault_root) {

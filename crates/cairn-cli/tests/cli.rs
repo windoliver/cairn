@@ -17,6 +17,8 @@ use std::io::Write as _;
 use std::path::Path;
 use std::process::Command;
 
+use cairn_core::domain::Identity;
+use cairn_core::domain::session::SessionIdentity;
 use sha2::{Digest, Sha256};
 
 /// Path to the built CLI binary. Cargo sets `CARGO_BIN_EXE_<name>` for every
@@ -67,6 +69,15 @@ fn enable_local_sensor(vault: &Path, sensor: &str) {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+fn session_identity(project_root: &str) -> SessionIdentity {
+    SessionIdentity::new(
+        Identity::parse("hmn:cli-session-tree").expect("valid user identity"),
+        Identity::parse("agt:cli:test:session-tree:v1").expect("valid agent identity"),
+        Some(project_root.to_owned()),
+    )
+    .expect("valid session identity")
 }
 
 fn seed_consent_journal_vault(seed_sql: &str) -> tempfile::TempDir {
@@ -287,6 +298,99 @@ fn ingest_recording_conflicts_with_jsonl_before_jsonl_dispatch() {
             && stderr.contains("got 2"),
         "recording/jsonl conflict should fail source counting before JSONL dispatch, stderr: {stderr}",
     );
+}
+
+#[test]
+fn session_tree_subcommand_parses_scriptable_json_inspection() {
+    let matches = cairn_cli::command::build_command()
+        .try_get_matches_from([
+            "cairn",
+            "session",
+            "tree",
+            "01JTS6R4J70000000000000000",
+            "--json",
+        ])
+        .expect("session tree command parses");
+
+    let Some(("session", session)) = matches.subcommand() else {
+        panic!("expected session subcommand");
+    };
+    let Some(("tree", tree)) = session.subcommand() else {
+        panic!("expected session tree subcommand");
+    };
+    assert_eq!(
+        tree.get_one::<String>("session").map(String::as_str),
+        Some("01JTS6R4J70000000000000000")
+    );
+    assert!(tree.get_flag("json"));
+}
+
+#[test]
+fn session_tree_json_inspects_seeded_vault_tree() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    cairn_cli::vault::bootstrap(&cairn_cli::vault::BootstrapOpts {
+        vault_path: dir.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap vault");
+
+    let db_path = dir.path().join(".cairn/cairn.db");
+    let (root_id, child_id) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime")
+        .block_on(async {
+            let store = cairn_store_sqlite::open(&db_path)
+                .await
+                .expect("open store");
+            let root = store
+                .create_session(
+                    &session_identity("/cli-session-tree-root"),
+                    cairn_store_sqlite::NewSessionMetadata::default(),
+                )
+                .await
+                .expect("create root session");
+            let child = store
+                .create_session(
+                    &session_identity("/cli-session-tree-child"),
+                    cairn_store_sqlite::NewSessionMetadata::default(),
+                )
+                .await
+                .expect("create child session");
+            store
+                .record_session_fork(&root.id, &child.id, "turn-2")
+                .await
+                .expect("record fork");
+            (root.id, child.id)
+        });
+
+    let out = cli()
+        .current_dir(dir.path())
+        .args(["session", "tree", root_id.as_str(), "--json"])
+        .output()
+        .expect("cairn session tree --json");
+
+    assert!(
+        out.status.success(),
+        "session tree failed: {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let body: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("session tree stdout is json");
+    assert_eq!(body["root"], root_id.as_str());
+    assert_eq!(body["nodes"].as_array().expect("nodes array").len(), 2);
+    let child = body["nodes"]
+        .as_array()
+        .expect("nodes array")
+        .iter()
+        .find(|node| node["id"] == child_id.as_str())
+        .expect("child node present");
+    assert_eq!(child["parentId"], root_id.as_str());
+    assert_eq!(child["branchKind"], "fork");
+    assert_eq!(child["atTurnId"], "turn-2");
+    assert!(body["merges"].as_array().expect("merges array").is_empty());
 }
 
 #[test]

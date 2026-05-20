@@ -186,6 +186,7 @@ async fn smoke_loads_all_desktop_alpha_surfaces() {
         "/api/v1/folders",
         "/api/v1/records",
         "/api/v1/graph",
+        "/api/v1/session-tree",
         "/api/v1/search?q=alpha",
         "/api/v1/lint",
     ] {
@@ -201,6 +202,37 @@ async fn smoke_loads_all_desktop_alpha_surfaces() {
             .expect("response");
         assert_eq!(response.status(), StatusCode::OK, "{path}");
     }
+}
+
+#[tokio::test]
+async fn session_tree_endpoint_returns_fixture_tree() {
+    let app = router(DesktopRepository::from_fixture(
+        DesktopFixture::load_default().expect("fixture"),
+    ));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/session-tree")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let json: Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["root"], "01JTS6R4J70000000000000000");
+    assert_eq!(json["nodes"].as_array().expect("nodes").len(), 3);
+    assert!(json["nodes"].as_array().expect("nodes").iter().any(|node| {
+        node["id"] == "01JTS6R4J70000000000000002"
+            && node["parentId"] == "01JTS6R4J70000000000000000"
+            && node["branchKind"] == "tool_spawned"
+    }));
+    assert_eq!(json["merges"].as_array().expect("merges").len(), 1);
 }
 
 #[tokio::test]

@@ -51,6 +51,46 @@
       "links": []
     }
   ],
+  "sessionTree": {
+    "root": "01JTS6R4J70000000000000000",
+    "nodes": [
+      {
+        "id": "01JTS6R4J70000000000000000",
+        "parentId": null,
+        "branchKind": null,
+        "atTurnId": null,
+        "toolCallId": null,
+        "children": ["01JTS6R4J70000000000000001", "01JTS6R4J70000000000000002"]
+      },
+      {
+        "id": "01JTS6R4J70000000000000001",
+        "parentId": "01JTS6R4J70000000000000000",
+        "branchKind": "fork",
+        "atTurnId": "turn-2",
+        "toolCallId": null,
+        "children": []
+      },
+      {
+        "id": "01JTS6R4J70000000000000002",
+        "parentId": "01JTS6R4J70000000000000000",
+        "branchKind": "tool_spawned",
+        "atTurnId": "turn-3",
+        "toolCallId": "call-desktop-review",
+        "children": []
+      }
+    ],
+    "merges": [
+      {
+        "source": "01JTS6R4J70000000000000002",
+        "destination": "01JTS6R4J70000000000000000",
+        "strategy": "reasoning_summary",
+        "summaryRecordId": "rec-alpha-002",
+        "firstTurnId": null,
+        "lastTurnId": null,
+        "appliedAtTurnId": "turn-4"
+      }
+    ]
+  },
   "lintFindings": [
     {
       "id": "lint-alpha-001",

@@ -10,6 +10,7 @@ import type {
   DesktopReconcilePreview,
   DesktopReconcilePreviewRequest,
   DesktopSearchResult,
+  DesktopSessionTree,
   DesktopVaultSummary,
 } from "./types";
 
@@ -38,6 +39,10 @@ export class DesktopApiClient {
 
   graph(): Promise<DesktopGraph> {
     return this.get("/api/v1/graph");
+  }
+
+  sessionTree(): Promise<DesktopSessionTree> {
+    return this.get("/api/v1/session-tree");
   }
 
   search(query: string): Promise<DesktopSearchResult[]> {

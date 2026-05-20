@@ -1313,6 +1313,7 @@ pub async fn lint_handler(
     let mut data = run_checks(&inputs).await;
 
     append_trace_canvas_findings(store, &lint_records, &source_resolver, &mut data).await?;
+    append_session_tree_findings(vault_root, &mut data).await?;
 
     if index_stats_skipped {
         push_index_stats_skipped(&mut data);
@@ -1707,6 +1708,55 @@ fn push_workflow_jobs_reader_unavailable(
         if let Some(n) = entry.as_u64() {
             *entry = serde_json::Value::from(n.saturating_add(1));
         }
+    }
+}
+
+async fn append_session_tree_findings(
+    vault_root: &Path,
+    data: &mut LintData,
+) -> anyhow::Result<()> {
+    let db_path = vault_root.join(".cairn/cairn.db");
+    if !db_path.is_file() {
+        return Ok(());
+    }
+    let findings = cairn_store_sqlite::lint_session_tree_metadata(&db_path)
+        .await
+        .map_err(|e| anyhow::anyhow!("session tree lint: {e}"))?;
+    for finding in &findings {
+        push_lint_finding(data, session_tree_lint_finding(finding));
+    }
+    Ok(())
+}
+
+fn session_tree_lint_finding(finding: &cairn_store_sqlite::SessionTreeLintFinding) -> Finding {
+    let (kind, severity, fix) = match finding.check_id {
+        "orphaned_branch" | "broken_lineage" => (
+            Kind::Orphan,
+            Severity::Error,
+            "repair session_tree_nodes lineage or remove the orphaned branch row",
+        ),
+        "stale_merge_summary" => (
+            Kind::MissingSummary,
+            Severity::Warning,
+            "rebuild or update the merge summary record referenced by session_tree_merges",
+        ),
+        _ => (
+            Kind::MalformedRecord,
+            Severity::Warning,
+            "repair inconsistent session_tree branch or merge metadata",
+        ),
+    };
+    Finding {
+        entities: Some(vec![
+            format!("session_id:{}", finding.session_id),
+            format!("session_tree_check:{}", finding.check_id),
+        ]),
+        kind,
+        message: format!("session_tree: {}", finding.message),
+        severity,
+        suggested_fix: Some(fix.to_owned()),
+        target: None,
+        tracking_issue: Some(135),
     }
 }
 

@@ -292,6 +292,58 @@ async fn session_tree_branch_lookup_rejects_parent_cycle_without_hanging() {
 }
 
 #[tokio::test]
+async fn session_tree_lint_reports_broken_lineage_fixture() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("sessions.db");
+    {
+        let conn = cairn_store_sqlite::open_sync(&db_path).expect("open sync");
+        let root = "01JTS6R4J7000000000000000D";
+        let child = "01JTS6R4J7000000000000000E";
+        let missing_parent = "01JTS6R4J7000000000000000F";
+        for (session_id, project_root) in [
+            (root, "/lint-root"),
+            (child, "/lint-child"),
+            (missing_parent, "/lint-missing-parent"),
+        ] {
+            conn.execute(
+                "INSERT INTO sessions \
+                   (session_id, user_id, agent_id, project_root, title, \
+                    created_at, last_activity_at, ended_at) \
+                 VALUES (?1, 'hmn:alice', 'agt:claude-code:opus-4-7:main:v1', ?2, '', 0, 0, NULL)",
+                rusqlite::params![session_id, project_root],
+            )
+            .expect("insert session");
+        }
+        conn.execute(
+            "INSERT INTO session_tree_nodes \
+               (session_id, parent_session_id, at_turn_id, branch_kind, tool_call_id, created_at) \
+             VALUES (?1, NULL, NULL, NULL, NULL, 0)",
+            rusqlite::params![root],
+        )
+        .expect("insert root node");
+        conn.execute(
+            "INSERT INTO session_tree_nodes \
+               (session_id, parent_session_id, at_turn_id, branch_kind, tool_call_id, created_at) \
+             VALUES (?1, ?2, 'turn-4', 'fork', NULL, 0)",
+            rusqlite::params![child, missing_parent],
+        )
+        .expect("insert broken child node");
+    }
+
+    let findings = cairn_store_sqlite::lint_session_tree_metadata(&db_path)
+        .await
+        .expect("lint session tree metadata");
+
+    assert!(
+        findings.iter().any(|finding| {
+            finding.check_id == "broken_lineage"
+                && finding.session_id == "01JTS6R4J7000000000000000E"
+        }),
+        "expected broken_lineage finding, got {findings:?}"
+    );
+}
+
+#[tokio::test]
 async fn missing_session_tree_returns_none() {
     let store = open_in_memory().await.expect("open");
     let missing = SessionId::parse("01JTS6R4J70000000000000000").expect("valid session id");

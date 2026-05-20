@@ -57,6 +57,20 @@ const api = {
       },
     ],
   }),
+  sessionTree: vi.fn().mockResolvedValue({
+    root: "session-root",
+    nodes: [
+      {
+        id: "session-root",
+        parentId: null,
+        branchKind: null,
+        atTurnId: null,
+        toolCallId: null,
+        children: [],
+      },
+    ],
+    merges: [],
+  }),
   lint: vi.fn().mockResolvedValue([
     {
       id: "lint-alpha-001",
@@ -143,6 +157,9 @@ describe("App", () => {
       if (url.endsWith("/api/v1/graph")) {
         return jsonResponse({ nodes: [], edges: [] });
       }
+      if (url.endsWith("/api/v1/session-tree")) {
+        return jsonResponse({ root: "session-root", nodes: [], merges: [] });
+      }
       if (url.endsWith("/api/v1/lint")) {
         return jsonResponse([]);
       }
@@ -155,7 +172,7 @@ describe("App", () => {
     await screen.findByText("Desktop Alpha Fixture");
     await new Promise((resolve) => setTimeout(resolve, 50));
 
-    expect(fetchMock).toHaveBeenCalledTimes(6);
+    expect(fetchMock).toHaveBeenCalledTimes(7);
   });
 
   it("keeps loaded vault data when the initial record detail request fails", async () => {

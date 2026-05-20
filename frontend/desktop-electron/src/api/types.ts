@@ -34,6 +34,27 @@ export type DesktopGraph = {
   edges: Array<{ id: string; source: string; target: string; label: string }>;
 };
 
+export type DesktopSessionTree = {
+  root: string;
+  nodes: Array<{
+    id: string;
+    parentId: string | null;
+    branchKind: string | null;
+    atTurnId: string | null;
+    toolCallId: string | null;
+    children: string[];
+  }>;
+  merges: Array<{
+    source: string;
+    destination: string;
+    strategy: string;
+    summaryRecordId: string | null;
+    firstTurnId: string | null;
+    lastTurnId: string | null;
+    appliedAtTurnId: string;
+  }>;
+};
+
 export type DesktopSearchResult = {
   recordId: string;
   title: string;
