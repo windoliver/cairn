@@ -172,3 +172,34 @@ fn gate_report_requires_every_gate_passed() {
 
     assert!(!report.ready_for_promotion());
 }
+
+#[test]
+fn gate_report_with_single_passed_gate_is_not_ready() {
+    let report = SkillifyGateReport {
+        candidate_id: "skc_fixture".to_owned(),
+        gates: vec![SkillifyGate {
+            name: "skill_contract".to_owned(),
+            status: SkillifyGateStatus::Passed,
+            message: None,
+        }],
+    };
+
+    assert!(!report.ready_for_promotion());
+}
+
+#[test]
+fn gate_report_with_all_required_gates_passed_is_ready() {
+    let report = SkillifyGateReport {
+        candidate_id: "skc_fixture".to_owned(),
+        gates: SkillArtifactKind::required()
+            .iter()
+            .map(|kind| SkillifyGate {
+                name: kind.as_str().to_owned(),
+                status: SkillifyGateStatus::Passed,
+                message: None,
+            })
+            .collect(),
+    };
+
+    assert!(report.ready_for_promotion());
+}

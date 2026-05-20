@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::SkillArtifactKind;
+
 /// Status for one skillify promotion gate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -39,12 +41,13 @@ pub struct SkillifyGateReport {
 }
 
 impl SkillifyGateReport {
-    /// Returns true when every gate passed and at least one gate ran.
+    /// Returns true when every required gate is present and all reported gates passed.
     pub fn ready_for_promotion(&self) -> bool {
-        !self.gates.is_empty()
-            && self
-                .gates
+        self.gates
+            .iter()
+            .all(|gate| gate.status == SkillifyGateStatus::Passed)
+            && SkillArtifactKind::required()
                 .iter()
-                .all(|gate| gate.status == SkillifyGateStatus::Passed)
+                .all(|required| self.gates.iter().any(|gate| gate.name == required.as_str()))
     }
 }
