@@ -51,6 +51,14 @@ fn assemble_hot(vault: &Path) {
     );
 }
 
+fn hot_prefix_metrics(content: &str) -> Vec<serde_json::Value> {
+    content
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|metric| metric["event"] == "hot_prefix_assembled")
+        .collect()
+}
+
 #[test]
 fn assemble_hot_writes_one_metrics_line_per_call() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -62,9 +70,9 @@ fn assemble_hot_writes_one_metrics_line_per_call() {
     // First call → cache miss → 1 line.
     assemble_hot(dir.path());
     let content1 = std::fs::read_to_string(&metrics_path).expect("read metrics #1");
-    assert_eq!(content1.lines().count(), 1, "after 1 call");
-    let line1: serde_json::Value =
-        serde_json::from_str(content1.lines().next().unwrap()).expect("parse #1");
+    let metrics1 = hot_prefix_metrics(&content1);
+    assert_eq!(metrics1.len(), 1, "after 1 call: {content1}");
+    let line1 = &metrics1[0];
     assert_eq!(line1["event"], "hot_prefix_assembled");
     assert_eq!(
         line1["cache_hit"], false,
@@ -74,9 +82,9 @@ fn assemble_hot_writes_one_metrics_line_per_call() {
     // Second call → cache hit → 2 lines, last line cache_hit: true.
     assemble_hot(dir.path());
     let content2 = std::fs::read_to_string(&metrics_path).expect("read metrics #2");
-    let all_lines: Vec<&str> = content2.lines().collect();
-    assert_eq!(all_lines.len(), 2, "after 2 calls");
-    let line2: serde_json::Value = serde_json::from_str(all_lines[1]).expect("parse #2");
+    let metrics2 = hot_prefix_metrics(&content2);
+    assert_eq!(metrics2.len(), 2, "after 2 calls: {content2}");
+    let line2 = &metrics2[1];
     assert_eq!(line2["event"], "hot_prefix_assembled");
     assert_eq!(
         line2["cache_hit"], true,
@@ -117,15 +125,15 @@ fn watermark_bump_invalidates_cache_across_cli_calls() {
     assemble_hot(dir.path());
 
     let content = std::fs::read_to_string(&metrics_path).expect("read metrics");
-    let lines: Vec<&str> = content.lines().collect();
+    let metrics = hot_prefix_metrics(&content);
     assert_eq!(
-        lines.len(),
+        metrics.len(),
         3,
-        "expected 3 metric lines, got {}: {content}",
-        lines.len()
+        "expected 3 hot-prefix metric lines, got {}: {content}",
+        metrics.len()
     );
 
-    let last: serde_json::Value = serde_json::from_str(lines[2]).expect("parse last");
+    let last = &metrics[2];
     assert_eq!(
         last["cache_hit"], false,
         "watermark bump must invalidate the cache; last metric line: {last}"

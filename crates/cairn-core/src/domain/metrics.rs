@@ -14,6 +14,90 @@ use crate::domain::hot_prefix::SourceWatermarks;
 #[serde(tag = "event")]
 #[non_exhaustive]
 pub enum MetricEvent {
+    /// Emitted once per observed verb invocation. The payload is
+    /// intentionally body-free: it records dimensions needed for SRE
+    /// dashboards without carrying query text, record bodies, snippets,
+    /// source paths, or raw error messages.
+    #[serde(rename = "verb_invocation")]
+    VerbInvocation {
+        /// Wall-clock millis since UNIX epoch.
+        ts_ms: i64,
+        /// Verb name (`ingest`, `search`, `assemble_hot`, ...).
+        verb: String,
+        /// Surface that handled the verb (`cli`, `mcp`, `sdk`).
+        surface: String,
+        /// Body-free mode/classification such as `keyword`, `hybrid`,
+        /// or `record`.
+        mode: Option<String>,
+        /// Response status (`committed`, `aborted`, `rejected`).
+        status: String,
+        /// Wall-clock latency observed by the surface.
+        latency_ms: u64,
+        /// Body-free error class when status is not committed.
+        error: Option<String>,
+        /// Budget usage ratio when the verb has an explicit budget.
+        budget_used_ratio: Option<f64>,
+        /// Degradation state such as `none` or `partial`.
+        degradation_state: Option<String>,
+    },
+    /// Emitted for local search modes after a response is produced.
+    /// Query text and snippets are deliberately omitted.
+    #[serde(rename = "search_completed")]
+    SearchCompleted {
+        /// Wall-clock millis since UNIX epoch.
+        ts_ms: i64,
+        /// Search mode (`keyword`, `semantic`, `hybrid`).
+        mode: String,
+        /// Number of hits returned to the caller.
+        hit_count: u32,
+        /// Response latency in milliseconds.
+        latency_ms: u64,
+        /// Degradation state such as `none` or `partial`.
+        degradation_state: String,
+        /// Body-free error class when the search did not commit.
+        error: Option<String>,
+    },
+    /// Emitted by local sensors after an observation is accepted or
+    /// dropped. Payload bodies, OCR text, transcripts, command output,
+    /// file paths, and raw policy messages are deliberately omitted.
+    #[serde(rename = "sensor_emission")]
+    SensorEmission {
+        /// Wall-clock millis since UNIX epoch.
+        ts_ms: i64,
+        /// Sensor family (`hook`, `terminal`, `clipboard`, ...).
+        sensor: String,
+        /// Response status (`emitted` or `dropped`).
+        status: String,
+        /// Wall-clock latency observed by the sensor surface.
+        latency_ms: u64,
+        /// Sanitized or observed payload size used for budget accounting.
+        bytes: u64,
+        /// Configured sensor byte budget when known.
+        budget_bytes: Option<u64>,
+        /// `bytes / budget_bytes` when a non-zero budget is known.
+        budget_used_ratio: Option<f64>,
+        /// Body-free error class when the observation was dropped.
+        error: Option<String>,
+        /// Degradation state such as `none` or `partial`.
+        degradation_state: Option<String>,
+    },
+    /// Emitted for record WAL operations after finalization.
+    #[serde(rename = "wal_apply")]
+    WalApply {
+        /// Wall-clock millis since UNIX epoch.
+        ts_ms: i64,
+        /// WAL kind (`upsert`, `forget_record`, `expire`).
+        kind: String,
+        /// Operation id.
+        operation_id: String,
+        /// Final WAL state (`committed`, `aborted`, ...).
+        state: String,
+        /// Apply latency in milliseconds.
+        latency_ms: u64,
+        /// Retry count observed by the caller. Record WAL applies are
+        /// single-pass today, so this is currently zero.
+        retry_count: u32,
+    },
     /// Emitted exactly once per `assemble_hot` call.
     #[serde(rename = "hot_prefix_assembled")]
     HotPrefixAssembled {
@@ -37,6 +121,31 @@ pub enum MetricEvent {
         cache_hit: bool,
         /// Snapshot of every source-class watermark at assembly time.
         watermarks: SourceWatermarks,
+    },
+    /// Emitted after an administrative projection rebuild, such as
+    /// `cairn admin reindex --from-db`. Record bodies and projection
+    /// payloads are omitted; only aggregate SRE dimensions are exported.
+    #[serde(rename = "projection_rebuild")]
+    ProjectionRebuild {
+        /// Wall-clock millis since UNIX epoch.
+        ts_ms: i64,
+        /// Projection or rebuild path (`sqlite.from_db`, ...).
+        projection: String,
+        /// Final rebuild status (`committed` or `aborted`).
+        status: String,
+        /// Wall-clock latency observed by the caller.
+        latency_ms: u64,
+        /// Number of projection rows rebuilt when known.
+        records_rebuilt: u64,
+        /// Queue lag in milliseconds when known; zero is the local
+        /// unknown/no-lag sentinel for immediate admin rebuilds.
+        queue_lag_ms: i64,
+        /// Retry count observed by the caller.
+        retry_count: u32,
+        /// Body-free error class when status is not committed.
+        error: Option<String>,
+        /// Degradation state such as `none` or `partial`.
+        degradation_state: Option<String>,
     },
     /// Emitted when an active task-trace canvas is rendered into the
     /// hot-memory current-task section. The payload is intentionally
@@ -323,6 +432,79 @@ mod tests {
                 assert_eq!(will_retry_at_ms, Some(1_500));
             }
             _ => panic!("expected WorkflowJobFailed"),
+        }
+    }
+
+    #[test]
+    fn verb_invocation_metric_is_body_free() {
+        let event = MetricEvent::VerbInvocation {
+            ts_ms: 1,
+            verb: "ingest".into(),
+            surface: "cli".into(),
+            mode: Some("body".into()),
+            status: "committed".into(),
+            latency_ms: 12,
+            error: None,
+            budget_used_ratio: Some(0.25),
+            degradation_state: Some("none".into()),
+        };
+        let json = serde_json::to_string(&event).expect("serialize");
+        assert!(json.contains("\"event\":\"verb_invocation\""));
+        assert!(json.contains("\"verb\":\"ingest\""));
+        assert!(json.contains("\"budget_used_ratio\":0.25"));
+        assert!(!json.contains("secret"));
+        assert!(!json.contains("body_text"));
+    }
+
+    #[test]
+    fn sensor_emission_metric_is_body_free_and_exposes_budget() {
+        let event = MetricEvent::SensorEmission {
+            ts_ms: 1,
+            sensor: "clipboard".into(),
+            status: "dropped".into(),
+            latency_ms: 7,
+            bytes: 64,
+            budget_bytes: Some(1024),
+            budget_used_ratio: Some(0.0625),
+            error: Some("privacy_denied".into()),
+            degradation_state: Some("none".into()),
+        };
+        let json = serde_json::to_string(&event).expect("serialize");
+        assert!(json.contains("\"event\":\"sensor_emission\""));
+        assert!(json.contains("\"latency_ms\":7"));
+        assert!(json.contains("\"budget_used_ratio\":0.0625"));
+        assert!(!json.contains("copied secret text"));
+        assert!(!json.contains("body"));
+    }
+
+    #[test]
+    fn projection_rebuild_metric_exposes_queue_and_retry_fields() {
+        let event = MetricEvent::ProjectionRebuild {
+            ts_ms: 1,
+            projection: "sqlite.from_db".into(),
+            status: "committed".into(),
+            latency_ms: 123,
+            records_rebuilt: 3,
+            queue_lag_ms: 42,
+            retry_count: 0,
+            error: None,
+            degradation_state: Some("none".into()),
+        };
+        let json = serde_json::to_string(&event).expect("serialize");
+        assert!(json.contains("\"event\":\"projection_rebuild\""));
+        assert!(json.contains("\"queue_lag_ms\":42"));
+        assert!(json.contains("\"retry_count\":0"));
+        let back: MetricEvent = serde_json::from_str(&json).expect("deserialize");
+        match back {
+            MetricEvent::ProjectionRebuild {
+                records_rebuilt,
+                queue_lag_ms,
+                ..
+            } => {
+                assert_eq!(records_rebuilt, 3);
+                assert_eq!(queue_lag_ms, 42);
+            }
+            _ => panic!("expected ProjectionRebuild"),
         }
     }
 }

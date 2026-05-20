@@ -104,4 +104,21 @@ async fn wired_assemble_hot_returns_committed_prefix() {
     );
     assert!(envelope["data"]["bytes"].as_u64().expect("bytes") <= 64);
     assert!(envelope["data"]["segments"].is_array());
+
+    let metrics =
+        std::fs::read_to_string(vault.path().join(".cairn/metrics.jsonl")).expect("metrics file");
+    assert!(
+        metrics.lines().any(|line| {
+            let event: serde_json::Value = serde_json::from_str(line).expect("metric JSON");
+            event["event"] == "verb_invocation"
+                && event["surface"] == "mcp"
+                && event["verb"] == "assemble_hot"
+                && event["status"] == "committed"
+        }),
+        "assemble_hot MCP call should emit a committed verb metric: {metrics}"
+    );
+    assert!(
+        !metrics.contains("mcp purpose text"),
+        "metric output must not include source body text: {metrics}"
+    );
 }

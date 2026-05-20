@@ -275,6 +275,113 @@ pub struct ScreenCaptureReceipt {
     pub observation: ScreenObservation,
 }
 
+/// Body-free reason a configured screen capture produced no artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScreenCaptureSkipReason {
+    /// Screen capture is disabled in config.
+    Disabled,
+    /// The focused application did not match `allow_apps`.
+    AllowList,
+    /// Password-field or OCR-off privacy filtering dropped the artifact.
+    PrivacyFiltered,
+    /// A screen policy rejected the captured observation.
+    PolicyRejected,
+}
+
+impl ScreenCaptureSkipReason {
+    /// Convert to a local sensor drop reason for telemetry.
+    #[must_use]
+    pub fn drop_reason(self) -> DropReason {
+        match self {
+            Self::Disabled => DropReason::Disabled,
+            Self::AllowList => DropReason::PolicyRejected("allow_apps".to_owned()),
+            Self::PrivacyFiltered => DropReason::PolicyRejected("privacy_filtered".to_owned()),
+            Self::PolicyRejected => DropReason::PolicyRejected("policy_rejected".to_owned()),
+        }
+    }
+
+    /// Stable CLI/API reason string.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::AllowList => "allow_apps",
+            Self::PrivacyFiltered => "privacy_filtered",
+            Self::PolicyRejected => "policy_rejected",
+        }
+    }
+
+    /// Human-facing description that does not expose captured content.
+    #[must_use]
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::Disabled => "screen sensor is disabled in config",
+            Self::AllowList => "skipped by screen allow_apps policy",
+            Self::PrivacyFiltered => "dropped by screen privacy filter",
+            Self::PolicyRejected => "dropped by screen policy",
+        }
+    }
+}
+
+/// Body-free skip details for a screen PNG capture attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScreenCaptureSkip {
+    /// Stable skip reason.
+    pub reason: ScreenCaptureSkipReason,
+    /// Body-free count of bytes observed before the skip.
+    pub observed_bytes: u64,
+    /// Whether a capture artifact was created before the skip decision.
+    pub artifact_created: bool,
+}
+
+impl ScreenCaptureSkip {
+    const fn before_capture(reason: ScreenCaptureSkipReason) -> Self {
+        Self {
+            reason,
+            observed_bytes: 0,
+            artifact_created: false,
+        }
+    }
+
+    fn after_capture(reason: ScreenCaptureSkipReason, observation: &ScreenObservation) -> Self {
+        Self {
+            reason,
+            observed_bytes: screen_observation_observed_bytes(observation),
+            artifact_created: true,
+        }
+    }
+}
+
+/// Result of a configured screen PNG capture attempt.
+// Keep the receipt by value because callers immediately match on this
+// short-lived runtime boundary result.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScreenCaptureOutcome {
+    /// Capture produced a PNG receipt.
+    Captured(ScreenCaptureReceipt),
+    /// Capture was intentionally skipped before returning an artifact.
+    Skipped(ScreenCaptureSkip),
+    /// Capture was skipped after an artifact was written, but cleanup failed.
+    CleanupFailed {
+        /// Skip context that led to artifact cleanup.
+        skip: ScreenCaptureSkip,
+        /// Cleanup failure.
+        error: ScreenError,
+    },
+}
+
+impl ScreenCaptureOutcome {
+    /// Convert to the legacy optional receipt shape while preserving cleanup failures.
+    pub fn into_result_receipt(self) -> Result<Option<ScreenCaptureReceipt>, ScreenError> {
+        match self {
+            Self::Captured(receipt) => Ok(Some(receipt)),
+            Self::Skipped(_) => Ok(None),
+            Self::CleanupFailed { error, .. } => Err(error),
+        }
+    }
+}
+
 #[cfg(any(test, feature = "screenpipe-runtime"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ScreenpipeFrameCapture {
@@ -284,7 +391,7 @@ struct ScreenpipeFrameCapture {
 }
 
 /// Errors emitted by the screen runtime boundary.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 pub enum ScreenError {
     /// Capture is unavailable for the current configuration.
     #[error("screen capture unavailable: {0:?}")]
@@ -367,27 +474,6 @@ pub fn emit(config: &LocalSensorConfig, observation: ScreenEventObservation) -> 
         };
     }
 
-    let raw_len = observation
-        .observation
-        .text
-        .len()
-        .saturating_add(observation.observation.app.len())
-        .saturating_add(observation.observation.window_title.len())
-        .saturating_add(observation.observation.url.as_ref().map_or(0, String::len))
-        .saturating_add(
-            observation
-                .observation
-                .bounding_boxes
-                .len()
-                .saturating_mul(std::mem::size_of::<BoundingBox>()),
-        );
-    if !config.screen.budget.allows(1, raw_len) {
-        return EmitOutcome::Dropped {
-            sensor: SensorKind::Screen,
-            reason: DropReason::BudgetExceeded,
-        };
-    }
-
     if observation.observation.app.trim().is_empty() {
         return EmitOutcome::Dropped {
             sensor: SensorKind::Screen,
@@ -431,6 +517,13 @@ pub fn emit(config: &LocalSensorConfig, observation: ScreenEventObservation) -> 
             };
         }
     };
+
+    if !config.screen.budget.allows(1, sanitized_payload.len()) {
+        return EmitOutcome::Dropped {
+            sensor: SensorKind::Screen,
+            reason: DropReason::BudgetExceeded,
+        };
+    }
 
     let payload = CapturePayload::Screen {
         app: observation.observation.app,
@@ -486,6 +579,45 @@ fn sanitize_screen_text(text: &str) -> Result<String, DropReason> {
         PolicyAction::Sanitized(text) => Ok(text),
         PolicyAction::Rejected(reason) => Err(DropReason::PolicyRejected(reason)),
     }
+}
+
+/// Return the sanitized payload byte count used for screen budget enforcement.
+///
+/// # Errors
+/// Returns [`DropReason`] when local privacy policy rejects a field, or
+/// [`serde_json::Error`] if payload serialization fails.
+pub fn screen_observation_budgeted_payload_bytes(
+    observation: &ScreenObservation,
+) -> Result<usize, DropReason> {
+    let sanitized = sanitize_screen_fields(observation)?;
+    raw_payload_bytes(
+        observation,
+        &sanitized.text,
+        &sanitized.window_title,
+        sanitized.url.as_deref(),
+    )
+    .map(|bytes| bytes.len())
+    .map_err(|err| {
+        DropReason::MalformedObservation(format!("screen payload serialization failed: {err}"))
+    })
+}
+
+/// Return a body-free count of raw screen observation bytes.
+#[must_use]
+pub fn screen_observation_observed_bytes(observation: &ScreenObservation) -> u64 {
+    let string_bytes = observation
+        .text
+        .len()
+        .saturating_add(observation.app.len())
+        .saturating_add(observation.window_title.len())
+        .saturating_add(observation.url.as_ref().map_or(0, String::len))
+        .saturating_add(observation.captured_at.len())
+        .saturating_add(observation.sensor_label.len());
+    let box_bytes = observation
+        .bounding_boxes
+        .len()
+        .saturating_mul(std::mem::size_of::<BoundingBox>());
+    u64::try_from(string_bytes.saturating_add(box_bytes)).unwrap_or(u64::MAX)
 }
 
 fn raw_payload_bytes(
@@ -791,14 +923,16 @@ where
     B: ScreenCaptureRuntime,
     P: ScreenPolicy,
 {
-    /// Capture a single PNG snapshot, returning `None` when disabled or filtered out.
-    pub fn capture_png_snapshot(
+    /// Capture a single PNG snapshot with a structured skip outcome.
+    pub fn capture_png_snapshot_outcome(
         &self,
         config: &ScreenSensorConfig,
         output_path: &Path,
-    ) -> Result<Option<ScreenCaptureReceipt>, ScreenError> {
+    ) -> Result<ScreenCaptureOutcome, ScreenError> {
         if !config.enabled {
-            return Ok(None);
+            return Ok(ScreenCaptureOutcome::Skipped(
+                ScreenCaptureSkip::before_capture(ScreenCaptureSkipReason::Disabled),
+            ));
         }
 
         let probe = self.backend.probe(config);
@@ -816,25 +950,66 @@ where
                 .as_ref()
                 .is_some_and(|app| config.allow_apps.contains(app))
         {
-            return Ok(None);
+            return Ok(ScreenCaptureOutcome::Skipped(
+                ScreenCaptureSkip::before_capture(ScreenCaptureSkipReason::AllowList),
+            ));
         }
 
         self.admit_frame(config.budget.max_frames_per_minute)?;
 
         let mut receipt = self.backend.capture_png_snapshot(config, output_path)?;
         if !config.allow_apps.is_empty() && !config.allow_apps.contains(&receipt.observation.app) {
-            return Ok(None);
+            let skip = ScreenCaptureSkip::after_capture(
+                ScreenCaptureSkipReason::AllowList,
+                &receipt.observation,
+            );
+            if let Err(error) = remove_capture_artifact(&receipt.output_path) {
+                return Ok(ScreenCaptureOutcome::CleanupFailed { skip, error });
+            }
+            return Ok(ScreenCaptureOutcome::Skipped(skip));
         }
         if should_drop_capture_artifact(config, &receipt.observation) {
-            remove_capture_artifact(&receipt.output_path)?;
-            return Ok(None);
+            let skip = ScreenCaptureSkip::after_capture(
+                ScreenCaptureSkipReason::PrivacyFiltered,
+                &receipt.observation,
+            );
+            if let Err(error) = remove_capture_artifact(&receipt.output_path) {
+                return Ok(ScreenCaptureOutcome::CleanupFailed { skip, error });
+            }
+            return Ok(ScreenCaptureOutcome::Skipped(skip));
         }
         truncate_text_to_budget(
             &mut receipt.observation.text,
             config.budget.max_text_bytes_per_event,
         );
-        receipt.observation = self.policy.apply(receipt.observation)?;
-        Ok(Some(receipt))
+        let pre_policy_observation = receipt.observation;
+        receipt.observation = match self.policy.apply(pre_policy_observation.clone()) {
+            Ok(observation) => observation,
+            Err(error) => {
+                let skip = ScreenCaptureSkip::after_capture(
+                    ScreenCaptureSkipReason::PolicyRejected,
+                    &pre_policy_observation,
+                );
+                if let Err(cleanup_error) = remove_capture_artifact(&receipt.output_path) {
+                    return Ok(ScreenCaptureOutcome::CleanupFailed {
+                        skip,
+                        error: cleanup_error,
+                    });
+                }
+                return Err(error);
+            }
+        };
+        Ok(ScreenCaptureOutcome::Captured(receipt))
+    }
+
+    /// Capture a single PNG snapshot, returning `None` when disabled or filtered out.
+    pub fn capture_png_snapshot(
+        &self,
+        config: &ScreenSensorConfig,
+        output_path: &Path,
+    ) -> Result<Option<ScreenCaptureReceipt>, ScreenError> {
+        self.capture_png_snapshot_outcome(config, output_path)?
+            .into_result_receipt()
     }
 }
 
@@ -898,21 +1073,29 @@ pub fn capture_png_snapshot_configured(
     config: &ScreenSensorConfig,
     output_path: &Path,
 ) -> Result<Option<ScreenCaptureReceipt>, ScreenError> {
+    capture_png_snapshot_outcome_configured(config, output_path)?.into_result_receipt()
+}
+
+/// Capture a PNG snapshot through configured backends with structured skip reasons.
+pub fn capture_png_snapshot_outcome_configured(
+    config: &ScreenSensorConfig,
+    output_path: &Path,
+) -> Result<ScreenCaptureOutcome, ScreenError> {
     match config.backend {
         ScreenBackend::Xcap => ScreenSensor::with_frame_budget(
             XcapBackendRuntime,
             NoopScreenPolicy,
             configured_frame_budget(ScreenBackend::Xcap),
         )
-        .capture_png_snapshot(config, output_path),
+        .capture_png_snapshot_outcome(config, output_path),
         ScreenBackend::Screenpipe => {
             let primary = ScreenSensor::with_frame_budget(
                 ScreenpipeBackendRuntime,
                 NoopScreenPolicy,
                 configured_frame_budget(ScreenBackend::Screenpipe),
             );
-            match primary.capture_png_snapshot(config, output_path) {
-                Ok(receipt) => Ok(receipt),
+            match primary.capture_png_snapshot_outcome(config, output_path) {
+                Ok(outcome) => Ok(outcome),
                 Err(err) if can_fallback_from_screenpipe(&err) => {
                     let mut fallback_config = config.clone();
                     fallback_config.backend = ScreenBackend::Xcap;
@@ -921,7 +1104,7 @@ pub fn capture_png_snapshot_configured(
                         NoopScreenPolicy,
                         configured_frame_budget(ScreenBackend::Xcap),
                     )
-                    .capture_png_snapshot(&fallback_config, output_path)
+                    .capture_png_snapshot_outcome(&fallback_config, output_path)
                 }
                 Err(err) => Err(err),
             }
@@ -1946,6 +2129,12 @@ mod tests {
         config
     }
 
+    fn screen_local_config_with_byte_budget(max_bytes: usize) -> LocalSensorConfig {
+        let mut config = screen_enabled_local_config();
+        config.screen.budget.max_bytes = Some(max_bytes);
+        config
+    }
+
     fn payload_hash(bytes: &[u8]) -> String {
         format!("sha256:{:x}", Sha256::digest(bytes))
     }
@@ -2014,6 +2203,52 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[derive(Clone)]
+    struct CleanupFailingBackend {
+        probe: ScreenProbe,
+        observation: ScreenObservation,
+    }
+
+    #[cfg(unix)]
+    impl ScreenBackendRuntime for CleanupFailingBackend {
+        fn probe(&self, _config: &ScreenSensorConfig) -> ScreenProbe {
+            self.probe.clone()
+        }
+
+        fn capture_snapshot(
+            &self,
+            _config: &ScreenSensorConfig,
+        ) -> Result<ScreenObservation, ScreenError> {
+            Ok(self.observation.clone())
+        }
+    }
+
+    #[cfg(unix)]
+    impl ScreenCaptureRuntime for CleanupFailingBackend {
+        fn capture_png_snapshot(
+            &self,
+            _config: &ScreenSensorConfig,
+            output_path: &std::path::Path,
+        ) -> Result<ScreenCaptureReceipt, ScreenError> {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            std::fs::write(output_path, b"fake-png")
+                .map_err(|err| ScreenError::CaptureFailed(err.to_string()))?;
+            let parent = output_path
+                .parent()
+                .expect("test output path has parent directory");
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o500))
+                .map_err(|err| ScreenError::CaptureFailed(err.to_string()))?;
+            Ok(ScreenCaptureReceipt {
+                output_path: output_path.to_path_buf(),
+                width: 10,
+                height: 20,
+                observation: self.observation.clone(),
+            })
+        }
+    }
+
     #[test]
     fn fake_backend_writes_png_receipt_and_metadata() {
         let backend = FakeBackend {
@@ -2065,6 +2300,75 @@ mod tests {
 
         assert!(result.is_none());
         assert!(!output_path.exists());
+    }
+
+    #[test]
+    fn png_capture_outcome_distinguishes_privacy_filtered_skip() {
+        let backend = FakeBackend {
+            probe: fake_probe(),
+            observation: fake_observation("password=abc123"),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let output_path = dir.path().join("snapshot.png");
+        let sensor = ScreenSensor::new(backend, NoopScreenPolicy);
+
+        let outcome = sensor
+            .capture_png_snapshot_outcome(&enabled_config(), &output_path)
+            .unwrap();
+
+        let ScreenCaptureOutcome::Skipped(skip) = outcome else {
+            panic!("expected privacy skip");
+        };
+        assert_eq!(skip.reason, ScreenCaptureSkipReason::PrivacyFiltered);
+        assert!(skip.artifact_created);
+        assert!(skip.observed_bytes > 0);
+        assert!(!output_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn png_capture_cleanup_failure_preserves_privacy_skip_context() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let backend = CleanupFailingBackend {
+            probe: fake_probe(),
+            observation: fake_observation("password=abc123"),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let output_path = dir.path().join("snapshot.png");
+        let sensor = ScreenSensor::new(backend, NoopScreenPolicy);
+
+        let outcome = sensor
+            .capture_png_snapshot_outcome(&enabled_config(), &output_path)
+            .unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let ScreenCaptureOutcome::CleanupFailed { skip, error } = outcome else {
+            panic!("expected cleanup failure");
+        };
+        assert_eq!(skip.reason, ScreenCaptureSkipReason::PrivacyFiltered);
+        assert!(skip.artifact_created);
+        assert!(skip.observed_bytes > 0);
+        assert!(matches!(error, ScreenError::CaptureFailed(_)));
+        assert!(output_path.exists());
+    }
+
+    #[test]
+    fn cleanup_failure_conversion_preserves_error() {
+        let skip = ScreenCaptureSkip {
+            reason: ScreenCaptureSkipReason::PrivacyFiltered,
+            observed_bytes: 42,
+            artifact_created: true,
+        };
+        let outcome = ScreenCaptureOutcome::CleanupFailed {
+            skip,
+            error: ScreenError::CaptureFailed("cleanup failed".to_owned()),
+        };
+
+        let err = outcome
+            .into_result_receipt()
+            .expect_err("cleanup failure must not become None");
+        assert_eq!(err, ScreenError::CaptureFailed("cleanup failed".to_owned()));
     }
 
     #[test]
@@ -2150,8 +2454,10 @@ mod tests {
     fn allow_list_drops_unlisted_apps() {
         let mut config = enabled_config();
         config.allow_apps = vec!["Terminal".to_owned()];
+        let mut probe = fake_probe();
+        probe.focused_app = Some("Terminal".to_owned());
         let backend = FakeBackend {
-            probe: fake_probe(),
+            probe,
             observation: fake_observation("meeting notes"),
         };
         let sensor = ScreenSensor::new(backend, NoopScreenPolicy);
@@ -2159,6 +2465,33 @@ mod tests {
         let result = sensor.capture_snapshot(&config).unwrap();
 
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn png_capture_outcome_distinguishes_allow_list_skip() {
+        let mut config = enabled_config();
+        config.allow_apps = vec!["Terminal".to_owned()];
+        let mut probe = fake_probe();
+        probe.focused_app = Some("Terminal".to_owned());
+        let backend = FakeBackend {
+            probe,
+            observation: fake_observation("meeting notes"),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let output_path = dir.path().join("snapshot.png");
+        let sensor = ScreenSensor::new(backend, NoopScreenPolicy);
+
+        let outcome = sensor
+            .capture_png_snapshot_outcome(&config, &output_path)
+            .unwrap();
+
+        let ScreenCaptureOutcome::Skipped(skip) = outcome else {
+            panic!("expected allow-list skip");
+        };
+        assert_eq!(skip.reason, ScreenCaptureSkipReason::AllowList);
+        assert!(skip.artifact_created);
+        assert!(skip.observed_bytes > 0);
+        assert!(!output_path.exists());
     }
 
     #[test]
@@ -2307,6 +2640,27 @@ mod tests {
     }
 
     #[test]
+    fn rejecting_policy_removes_png_artifact() {
+        let backend = FakeBackend {
+            probe: fake_probe(),
+            observation: fake_observation("meeting notes"),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let output_path = dir.path().join("snapshot.png");
+        let sensor = ScreenSensor::new(backend, RejectingPolicy);
+
+        let err = sensor
+            .capture_png_snapshot_outcome(&enabled_config(), &output_path)
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            ScreenError::CaptureFailed("rejected by policy".to_owned())
+        );
+        assert!(!output_path.exists());
+    }
+
+    #[test]
     fn screen_observation_emits_valid_capture_event() {
         let outcome = emit(
             &screen_enabled_local_config(),
@@ -2344,6 +2698,32 @@ mod tests {
         event
             .validate_for_capture()
             .expect("screen event validates");
+    }
+
+    #[test]
+    fn screen_emit_budgets_sanitized_payload_not_only_ocr_text() {
+        let mut observation = fake_observation("ok");
+        observation.window_title = "w".repeat(512);
+        let payload_bytes =
+            screen_observation_budgeted_payload_bytes(&observation).expect("payload bytes");
+
+        let outcome = emit(
+            &screen_local_config_with_byte_budget(payload_bytes - 1),
+            ScreenEventObservation {
+                event_id: event_id(),
+                captured_at: captured_at(),
+                observation,
+                refs: None,
+            },
+        );
+
+        assert_eq!(
+            outcome,
+            EmitOutcome::Dropped {
+                sensor: SensorKind::Screen,
+                reason: DropReason::BudgetExceeded,
+            }
+        );
     }
 
     #[test]

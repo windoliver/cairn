@@ -1,5 +1,6 @@
 ---
 source: crates/cairn-core/src/config/mod.rs
+assertion_line: 2729
 expression: json
 ---
 {
@@ -212,6 +213,14 @@ expression: json
     "stdio": {
       "single_tenant": false
     }
+  },
+  "observability": {
+    "enabled": true,
+    "local_metrics": true,
+    "local_traces": true,
+    "exporter": "none",
+    "endpoint": null,
+    "redact_sensitive_fields": true
   },
   "consolidation": {
     "enabled": true,

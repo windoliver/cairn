@@ -8,6 +8,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Instant;
 
 use cairn_cli::{
     command, doctor, hooks, identity, import, nexus_cli, plugins, repair, setup, verbs,
@@ -149,6 +150,108 @@ fn subcommand_needs_vault_guard(subcommand: Option<(&str, &ArgMatches)>) -> bool
     )
 }
 
+fn exit_status_name(code: ExitCode) -> &'static str {
+    if code == ExitCode::SUCCESS {
+        "committed"
+    } else {
+        "aborted"
+    }
+}
+
+fn observed_cli_verb<F>(
+    verb: &'static str,
+    mode: Option<&str>,
+    vault_root: &Path,
+    config: &cairn_core::config::CairnConfig,
+    run: F,
+) -> ExitCode
+where
+    F: FnOnce() -> ExitCode,
+{
+    let start = Instant::now();
+    let code = if config.observability.enabled && config.observability.local_traces {
+        let span = tracing::info_span!(
+            "cairn.verb",
+            surface = "cli",
+            verb,
+            mode = mode.unwrap_or(""),
+            request_id = tracing::field::Empty
+        );
+        let _guard = span.enter();
+        run()
+    } else {
+        run()
+    };
+    let latency_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let error = (code != ExitCode::SUCCESS).then_some("nonzero_exit");
+    cairn_cli::metrics::emit_verb_invocation_sync(
+        vault_root,
+        config,
+        verb,
+        mode,
+        exit_status_name(code),
+        latency_ms,
+        error,
+    );
+    code
+}
+
+fn ingest_mode(sub: &ArgMatches) -> Option<&'static str> {
+    if sub.get_one::<std::path::PathBuf>("recording").is_some() {
+        Some("recording")
+    } else if sub.get_one::<std::path::PathBuf>("jsonl").is_some() {
+        Some("jsonl")
+    } else if sub.get_one::<std::path::PathBuf>("folder").is_some() {
+        Some("folder")
+    } else if sub.get_one::<std::path::PathBuf>("file").is_some() {
+        Some("file")
+    } else if sub.contains_id("url") && sub.get_one::<String>("url").is_some() {
+        Some("url")
+    } else if sub.contains_id("body") && sub.get_one::<String>("body").is_some() {
+        Some("body")
+    } else {
+        None
+    }
+}
+
+fn search_mode(sub: &ArgMatches) -> Option<&str> {
+    sub.get_one::<String>("mode").map(String::as_str)
+}
+
+fn retrieve_mode(sub: &ArgMatches) -> &'static str {
+    if sub.contains_id("profile") && sub.get_flag("profile") {
+        "profile"
+    } else if sub.contains_id("session_id") && sub.get_one::<String>("session_id").is_some() {
+        "session"
+    } else if sub.contains_id("path") && sub.get_one::<String>("path").is_some() {
+        "folder"
+    } else if sub.contains_id("scope") && sub.get_one::<String>("scope").is_some() {
+        "scope"
+    } else {
+        "record"
+    }
+}
+
+fn forget_mode(sub: &ArgMatches) -> Option<&'static str> {
+    if sub.contains_id("session_id") && sub.get_one::<String>("session_id").is_some() {
+        Some("session")
+    } else if sub.contains_id("record_id") && sub.get_one::<String>("record_id").is_some() {
+        Some("record")
+    } else if sub.contains_id("scope") && sub.get_one::<String>("scope").is_some() {
+        Some("scope")
+    } else {
+        None
+    }
+}
+
+fn screen_mode(sub: &ArgMatches) -> Option<&str> {
+    sub.subcommand_name()
+}
+
+fn sensor_mode(sub: &ArgMatches) -> Option<&str> {
+    sub.subcommand_name()
+}
+
 #[allow(clippy::too_many_lines)] // top-level dispatch table; per-subcommand splits would scatter the verb wiring without untangling anything.
 fn main() -> ExitCode {
     let matches = match command::build_command().try_get_matches() {
@@ -251,25 +354,61 @@ fn main() -> ExitCode {
 
     match matches.subcommand() {
         Some(("ingest", sub)) => match resolve_vault_and_config(explicit_vault.as_deref()) {
-            Ok((vault_root, _source, config)) => verbs::ingest::run(sub, vault_root, config),
+            Ok((vault_root, _source, config)) => {
+                let metric_root = vault_root.clone();
+                let metric_config = config.clone();
+                observed_cli_verb(
+                    "ingest",
+                    ingest_mode(sub),
+                    &metric_root,
+                    &metric_config,
+                    || verbs::ingest::run(sub, vault_root, config),
+                )
+            }
             Err(code) => code,
         },
         Some(("search", sub)) => match resolve_vault_or_cwd(explicit_vault.as_deref()) {
             // search has its own internal vault-binding gate, so the
             // resolution source doesn't change behaviour here — it only
             // needs the resolved path.
-            Ok((vault_root, _source)) => verbs::search::run(sub, vault_root),
+            Ok((vault_root, _source)) => {
+                let config = cairn_cli::config::load(
+                    &vault_root,
+                    &cairn_cli::config::CliOverrides::default(),
+                )
+                .unwrap_or_default();
+                let metric_root = vault_root.clone();
+                observed_cli_verb("search", search_mode(sub), &metric_root, &config, || {
+                    verbs::search::run(sub, vault_root)
+                })
+            }
             Err(e) => {
                 eprintln!("cairn search: vault resolution error — {e:#}");
                 ExitCode::from(78) // EX_CONFIG
             }
         },
         Some(("retrieve", sub)) => match resolve_vault_and_config(explicit_vault.as_deref()) {
-            Ok((vault_root, _source, config)) => verbs::retrieve::run(sub, vault_root, config),
+            Ok((vault_root, _source, config)) => {
+                let metric_root = vault_root.clone();
+                let metric_config = config.clone();
+                observed_cli_verb(
+                    "retrieve",
+                    Some(retrieve_mode(sub)),
+                    &metric_root,
+                    &metric_config,
+                    || verbs::retrieve::run(sub, vault_root, config),
+                )
+            }
             Err(code) => code,
         },
         Some(("summarize", sub)) => match resolve_vault_and_config(explicit_vault.as_deref()) {
-            Ok((vault_root, _source, config)) => verbs::summarize::run(sub, vault_root, config),
+            Ok((vault_root, _source, config)) => {
+                let metric_root = vault_root.clone();
+                let metric_config = config.clone();
+                observed_cli_verb("summarize", None, &metric_root, &metric_config, || {
+                    verbs::summarize::run(sub, vault_root, config)
+                })
+            }
             Err(code) => code,
         },
         Some(("assemble_hot", sub)) => run_assemble_hot(sub, explicit_vault.as_deref()),
@@ -299,7 +438,11 @@ fn main() -> ExitCode {
                 ) {
                     rc
                 } else {
-                    verbs::capture_trace::run(sub, vault_root, config)
+                    let metric_root = vault_root.clone();
+                    let metric_config = config.clone();
+                    observed_cli_verb("capture_trace", None, &metric_root, &metric_config, || {
+                        verbs::capture_trace::run(sub, vault_root, config)
+                    })
                 }
             }
             Err(code) => code,
@@ -312,7 +455,15 @@ fn main() -> ExitCode {
             if verbs::forget::requires_vault_context(sub) {
                 match resolve_vault_and_config(explicit_vault.as_deref()) {
                     Ok((vault_root, _source, config)) => {
-                        verbs::forget::run(sub, vault_root, config)
+                        let metric_root = vault_root.clone();
+                        let metric_config = config.clone();
+                        observed_cli_verb(
+                            "forget",
+                            forget_mode(sub),
+                            &metric_root,
+                            &metric_config,
+                            || verbs::forget::run(sub, vault_root, config),
+                        )
                     }
                     Err(code) => code,
                 }
@@ -324,7 +475,12 @@ fn main() -> ExitCode {
         Some(("hook", sub)) => hooks::run(sub),
         Some(("status", sub)) => run_status(sub, explicit_vault.as_deref()),
         Some(("screen", sub)) => match resolve_vault_and_config(explicit_vault.as_deref()) {
-            Ok((vault_root, _source, config)) => verbs::screen::run(sub, &vault_root, &config),
+            Ok((vault_root, _source, config)) => {
+                let metric_root = vault_root.clone();
+                observed_cli_verb("screen", screen_mode(sub), &metric_root, &config, || {
+                    verbs::screen::run(sub, &vault_root, &config)
+                })
+            }
             Err(code) => code,
         },
         Some(("sensor", sub)) => match resolve_vault_and_config(explicit_vault.as_deref()) {
@@ -332,7 +488,15 @@ fn main() -> ExitCode {
                 if let Some(code) = enforce_vault_binding("sensor", &vault_root) {
                     code
                 } else {
-                    verbs::sensor::run(sub, &vault_root, config)
+                    let metric_root = vault_root.clone();
+                    let metric_config = config.clone();
+                    observed_cli_verb(
+                        "sensor",
+                        sensor_mode(sub),
+                        &metric_root,
+                        &metric_config,
+                        || verbs::sensor::run(sub, &vault_root, config),
+                    )
                 }
             }
             Err(code) => code,
@@ -730,7 +894,11 @@ fn run_assemble_hot(sub: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode 
                 return ExitCode::from(78); // EX_CONFIG
             }
         };
-    verbs::assemble_hot::run(sub, vault_root, config)
+    let metric_root = vault_root.clone();
+    let metric_config = config.clone();
+    observed_cli_verb("assemble_hot", None, &metric_root, &metric_config, || {
+        verbs::assemble_hot::run(sub, vault_root, config)
+    })
 }
 
 fn run_admin(matches: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {

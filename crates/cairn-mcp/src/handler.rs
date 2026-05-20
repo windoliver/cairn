@@ -7,8 +7,10 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    io::Write,
     path::{Path, PathBuf},
     sync::Arc,
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use rmcp::{
@@ -23,7 +25,7 @@ use rmcp::{
 use cairn_core::config::CairnConfig;
 use cairn_core::contract::memory_store::{ListArgs, MemoryStore};
 use cairn_core::domain::{
-    MemoryKind, MemoryRecord, MemoryVisibility, Rfc3339Timestamp, ScopeTuple,
+    MemoryKind, MemoryRecord, MemoryVisibility, Rfc3339Timestamp, ScopeTuple, metrics::MetricEvent,
 };
 use cairn_core::generated::envelope::{ResponseData, ResponseVerb};
 use cairn_core::generated::verbs::assemble_hot::{AssembleHotArgs, HotMemoryDebug};
@@ -31,6 +33,7 @@ use cairn_core::mcp_auth::{McpAuthContext, McpGraphAvailability, McpTransport};
 
 use cairn_store_sqlite::SqliteMemoryStore;
 use cairn_store_sqlite::entity_graph::queries::GraphQueries;
+use tracing::Instrument;
 
 use crate::generated::TOOLS;
 
@@ -695,6 +698,10 @@ impl ServerHandler for CairnMcpHandler {
     /// and a store is wired, dispatches through
     /// [`cairn_core::verbs::search::run`]. All other verbs (or `"search"` with
     /// no store wired) fall back to [`dispatch_stub`].
+    #[allow(
+        clippy::too_many_lines,
+        reason = "central MCP dispatch table keeps tool routing auditable"
+    )]
     fn call_tool(
         &self,
         request: CallToolRequestParams,
@@ -704,117 +711,208 @@ impl ServerHandler for CairnMcpHandler {
         let name = request.name.clone();
         let arguments = request.arguments.clone();
         let request_id = context.id.to_string();
+        let metric_vault_root = self.vault_root.clone();
+        let metric_config = self.config.clone();
 
         async move {
-            // Prelude tool routing (`handshake`) — accept the call iff
-            // (a) the tool name is in PRELUDE_TOOLS, AND
-            // (b) a sqlite store is wired, AND
-            // (c) `REPLAY_CHALLENGE_WIRED` is true (read at dispatch time
-            //     so a future PR that flips the flag does not need to
-            //     touch this branch).
-            // The wired/unwired gate lives inside `prelude_tools::dispatch`
-            // so production and direct unit-test entry points share one
-            // implementation.
-            if crate::prelude_tools::is_prelude_tool(name.as_ref()) {
-                return Ok(crate::prelude_tools::dispatch(
-                    name.as_ref(),
-                    arguments,
-                    self.sqlite_store.clone(),
-                    cairn_core::status::wiring::REPLAY_CHALLENGE_WIRED,
-                )
-                .await);
-            }
-
-            // Graph tool routing — single-pass resolution, no TOCTOU.
-            if crate::graph_tools::GRAPH_TOOLS
-                .iter()
-                .any(|d| d.name == name.as_ref())
-            {
-                let ctx = self.auth_context_for(&request_id);
-                let Ok(req) = self.materialize_graph_request(&ctx) else {
-                    return Ok(capability_unavailable_result(&name));
-                };
-                let queries = GraphQueries::new(req.store, req.allowed, req.now_ms);
-                return Ok(crate::graph_tools::dispatch(&queries, &name, arguments).await);
-            }
-
-            if crate::coord_tools::is_coord_tool(name.as_ref()) {
-                if !crate::coord_tools::runtime_ready(&self.build_status_response().capabilities) {
-                    return Ok(capability_unavailable_result(&name));
+            let verb_name = name.to_string();
+            let started = Instant::now();
+            let call = async {
+                // Prelude tool routing (`handshake`) — accept the call iff
+                // (a) the tool name is in PRELUDE_TOOLS, AND
+                // (b) a sqlite store is wired, AND
+                // (c) `REPLAY_CHALLENGE_WIRED` is true (read at dispatch time
+                //     so a future PR that flips the flag does not need to
+                //     touch this branch).
+                // The wired/unwired gate lives inside `prelude_tools::dispatch`
+                // so production and direct unit-test entry points share one
+                // implementation.
+                if crate::prelude_tools::is_prelude_tool(name.as_ref()) {
+                    return Ok(crate::prelude_tools::dispatch(
+                        name.as_ref(),
+                        arguments,
+                        self.sqlite_store.clone(),
+                        cairn_core::status::wiring::REPLAY_CHALLENGE_WIRED,
+                    )
+                    .await);
                 }
-                return Ok(crate::coord_tools::dispatch(&name, arguments));
-            }
 
-            let request_verb = crate::verb_envelope::core_verb_for_tool(name.as_ref());
-            let store = self.store.clone();
-            let sqlite_store = self.sqlite_store.clone();
-            let scope = self.scope.clone();
-            let vault_root = self.vault_root.clone();
-            let principal = self.principal.clone();
-            let config = self.config.clone();
-
-            let Some(request_verb) = request_verb else {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "cairn: unknown verb '{name}'. Available verbs: {}",
-                    TOOLS.iter().map(|d| d.name).collect::<Vec<_>>().join(", ")
-                ))]));
-            };
-
-            let typed_args = match crate::verb_envelope::parse_args(request_verb, arguments) {
-                Ok(args) => args,
-                Err(response) => {
-                    return Ok(crate::verb_envelope::call_result_from_response(&response));
+                // Graph tool routing — single-pass resolution, no TOCTOU.
+                if crate::graph_tools::GRAPH_TOOLS
+                    .iter()
+                    .any(|d| d.name == name.as_ref())
+                {
+                    let ctx = self.auth_context_for(&request_id);
+                    let Ok(req) = self.materialize_graph_request(&ctx) else {
+                        return Ok(capability_unavailable_result(&name));
+                    };
+                    let queries = GraphQueries::new(req.store, req.allowed, req.now_ms);
+                    return Ok(crate::graph_tools::dispatch(&queries, &name, arguments).await);
                 }
-            };
 
-            if name.as_ref() == "search"
-                && let Some(store) = store
-            {
-                let cairn_core::generated::envelope::RequestArgs::Search(args) = typed_args else {
-                    let response = crate::verb_envelope::invalid_args_response(
-                        crate::verb_envelope::response_verb(request_verb),
-                        "args",
-                        "expected search arguments",
-                    );
-                    return Ok(crate::verb_envelope::call_result_from_response(&response));
-                };
-                return Ok(handle_search(store, config, args).await);
-            }
-
-            if name.as_ref() == "assemble_hot"
-                && let (Some(sqlite_store), Some(scope), Some(vault_root)) =
-                    (sqlite_store, scope, vault_root)
-            {
-                let cairn_core::generated::envelope::RequestArgs::AssembleHot(args) = typed_args
-                else {
-                    let response = crate::verb_envelope::invalid_args_response(
-                        crate::verb_envelope::response_verb(request_verb),
-                        "args",
-                        "expected assemble_hot arguments",
-                    );
-                    return Ok(crate::verb_envelope::call_result_from_response(&response));
-                };
-                let ctx = McpAuthContext::new(&principal, &request_id);
-                let allowed_scopes = match scope.allowed_scopes(&ctx) {
-                    Ok(scopes) if !scopes.is_empty() => scopes,
-                    Ok(_) | Err(_) => {
+                if crate::coord_tools::is_coord_tool(name.as_ref()) {
+                    if !crate::coord_tools::runtime_ready(
+                        &self.build_status_response().capabilities,
+                    ) {
                         return Ok(capability_unavailable_result(&name));
                     }
-                };
-                return Ok(handle_assemble_hot(
-                    sqlite_store,
-                    vault_root,
-                    config,
-                    principal,
-                    allowed_scopes,
-                    args,
-                )
-                .await);
-            }
+                    return Ok(crate::coord_tools::dispatch(&name, arguments));
+                }
 
-            Ok(dispatch_stub(&name))
+                let request_verb = crate::verb_envelope::core_verb_for_tool(name.as_ref());
+                let store = self.store.clone();
+                let sqlite_store = self.sqlite_store.clone();
+                let scope = self.scope.clone();
+                let vault_root = self.vault_root.clone();
+                let principal = self.principal.clone();
+                let config = self.config.clone();
+
+                let Some(request_verb) = request_verb else {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "cairn: unknown verb '{name}'. Available verbs: {}",
+                        TOOLS.iter().map(|d| d.name).collect::<Vec<_>>().join(", ")
+                    ))]));
+                };
+
+                let typed_args = match crate::verb_envelope::parse_args(request_verb, arguments) {
+                    Ok(args) => args,
+                    Err(response) => {
+                        return Ok(crate::verb_envelope::call_result_from_response(&response));
+                    }
+                };
+
+                if name.as_ref() == "search"
+                    && let Some(store) = store
+                {
+                    let cairn_core::generated::envelope::RequestArgs::Search(args) = typed_args
+                    else {
+                        let response = crate::verb_envelope::invalid_args_response(
+                            crate::verb_envelope::response_verb(request_verb),
+                            "args",
+                            "expected search arguments",
+                        );
+                        return Ok(crate::verb_envelope::call_result_from_response(&response));
+                    };
+                    return Ok(handle_search(store, config, args).await);
+                }
+
+                if name.as_ref() == "assemble_hot"
+                    && let (Some(sqlite_store), Some(scope), Some(vault_root)) =
+                        (sqlite_store, scope, vault_root)
+                {
+                    let cairn_core::generated::envelope::RequestArgs::AssembleHot(args) =
+                        typed_args
+                    else {
+                        let response = crate::verb_envelope::invalid_args_response(
+                            crate::verb_envelope::response_verb(request_verb),
+                            "args",
+                            "expected assemble_hot arguments",
+                        );
+                        return Ok(crate::verb_envelope::call_result_from_response(&response));
+                    };
+                    let ctx = McpAuthContext::new(&principal, &request_id);
+                    let allowed_scopes = match scope.allowed_scopes(&ctx) {
+                        Ok(scopes) if !scopes.is_empty() => scopes,
+                        Ok(_) | Err(_) => {
+                            return Ok(capability_unavailable_result(&name));
+                        }
+                    };
+                    return Ok(handle_assemble_hot(
+                        sqlite_store,
+                        vault_root,
+                        config,
+                        principal,
+                        allowed_scopes,
+                        args,
+                    )
+                    .await);
+                }
+
+                Ok(dispatch_stub(&name))
+            };
+            let result = if metric_config.observability.enabled
+                && metric_config.observability.local_traces
+            {
+                let span = tracing::info_span!(
+                    "cairn.verb",
+                    surface = "mcp",
+                    verb = %verb_name,
+                    mode = tracing::field::Empty,
+                    request_id = %request_id
+                );
+                call.instrument(span).await
+            } else {
+                call.await
+            };
+
+            emit_mcp_verb_invocation_sync(
+                metric_vault_root.as_deref(),
+                &metric_config,
+                &verb_name,
+                &result,
+                u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            );
+            result
         }
     }
+}
+
+fn emit_mcp_verb_invocation_sync(
+    vault_root: Option<&Path>,
+    config: &CairnConfig,
+    verb: &str,
+    result: &Result<CallToolResult, rmcp::ErrorData>,
+    latency_ms: u64,
+) {
+    if !config.observability.enabled || !config.observability.local_metrics {
+        return;
+    }
+    let Some(vault_root) = vault_root else {
+        return;
+    };
+    let (status, error) = match result {
+        Ok(result) if result.is_error.unwrap_or(false) => ("rejected", Some("tool_error")),
+        Ok(_) => ("committed", None),
+        Err(_) => ("aborted", Some("protocol_error")),
+    };
+    let event = MetricEvent::VerbInvocation {
+        ts_ms: current_time_ms(),
+        verb: verb.to_owned(),
+        surface: "mcp".to_owned(),
+        mode: None,
+        status: status.to_owned(),
+        latency_ms,
+        error: error.map(str::to_owned),
+        budget_used_ratio: None,
+        degradation_state: Some("none".to_owned()),
+    };
+    if let Err(err) = append_local_metric_sync(vault_root, &event) {
+        tracing::warn!(error = %err, verb, "mcp verb metric emit failed");
+    }
+}
+
+fn append_local_metric_sync(
+    vault_root: &Path,
+    event: &MetricEvent,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let path = vault_root.join(".cairn").join("metrics.jsonl");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    serde_json::to_writer(&mut file, event)?;
+    file.write_all(b"\n")?;
+    Ok(())
+}
+
+fn current_time_ms() -> i64 {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0_u128, |duration| duration.as_millis());
+    i64::try_from(millis).unwrap_or(i64::MAX)
 }
 
 /// Dispatch `assemble_hot` against a wired `SQLite` store and vault root.

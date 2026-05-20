@@ -64,9 +64,18 @@ fn folder_ingest_keyword_dry_run_json_succeeds_without_writes() {
 
     assert_eq!(out.status.code(), Some(0), "exit: {:?}", out.status);
     assert!(
-        !dir.path().join(".cairn").exists(),
-        "dry-run must not create vault state"
+        !dir.path().join(".cairn/cairn.db").exists(),
+        "dry-run must not create the store"
     );
+    assert!(
+        !dir.path().join(".cairn/cache").exists(),
+        "dry-run must not create extraction cache state"
+    );
+    let metrics = std::fs::read_to_string(dir.path().join(".cairn/metrics.jsonl"))
+        .expect("read dry-run verb metric");
+    assert!(metrics.contains("\"event\":\"verb_invocation\""));
+    assert!(metrics.contains("\"verb\":\"ingest\""));
+    assert!(metrics.contains("\"mode\":\"folder\""));
     let v = json_stdout(&out);
     for field in [
         "cached",
