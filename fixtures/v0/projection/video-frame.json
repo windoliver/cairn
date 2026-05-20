@@ -1,0 +1,7 @@
+{
+  "projection_target": "parser_video_frame_text",
+  "source_path": "sources/sample-frame.json",
+  "source_hash": "sha256:video-frame-a",
+  "expected_state": "current",
+  "extracted_text": "Frame 12 shows terminal output with cairn reindex --from-db."
+}

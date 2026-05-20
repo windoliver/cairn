@@ -132,3 +132,23 @@ fn reindex_from_db_reports_projection_endpoint_unavailable() {
     let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
     assert!(stderr.contains("projection endpoint"), "{stderr}");
 }
+
+#[test]
+fn projection_parser_fixtures_are_present_and_typed() {
+    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("fixtures/v0/projection");
+    for name in [
+        "pdf-text.json",
+        "docx-text.json",
+        "video-frame.json",
+        "vision-caption.json",
+        "parser-failure.json",
+    ] {
+        let bytes = std::fs::read(fixture_dir.join(name)).expect("read projection fixture");
+        let value: serde_json::Value = serde_json::from_slice(&bytes).expect("projection fixture json");
+        assert!(value["projection_target"].as_str().is_some(), "{name}: {value:#}");
+        assert!(value["source_hash"].as_str().is_some(), "{name}: {value:#}");
+        assert!(value["expected_state"].as_str().is_some(), "{name}: {value:#}");
+    }
+}

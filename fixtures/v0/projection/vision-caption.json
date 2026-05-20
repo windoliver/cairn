@@ -1,0 +1,7 @@
+{
+  "projection_target": "parser_vision_caption",
+  "source_path": "sources/sample-image.png",
+  "source_hash": "sha256:vision-source-a",
+  "expected_state": "current",
+  "extracted_text": "A dashboard panel shows projection targets with zero lag."
+}
