@@ -178,6 +178,10 @@ pub enum ObservabilityExporter {
 /// Local-first observability configuration (§15, §19 v0.2).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "user-facing config uses independent feature toggles"
+)]
 pub struct ObservabilityConfig {
     /// Master switch for spans and metrics.
     pub enabled: bool,

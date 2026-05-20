@@ -218,17 +218,17 @@ fn search_mode(sub: &ArgMatches) -> Option<&str> {
     sub.get_one::<String>("mode").map(String::as_str)
 }
 
-fn retrieve_mode(sub: &ArgMatches) -> Option<&'static str> {
+fn retrieve_mode(sub: &ArgMatches) -> &'static str {
     if sub.contains_id("profile") && sub.get_flag("profile") {
-        Some("profile")
+        "profile"
     } else if sub.contains_id("session_id") && sub.get_one::<String>("session_id").is_some() {
-        Some("session")
+        "session"
     } else if sub.contains_id("path") && sub.get_one::<String>("path").is_some() {
-        Some("folder")
+        "folder"
     } else if sub.contains_id("scope") && sub.get_one::<String>("scope").is_some() {
-        Some("scope")
+        "scope"
     } else {
-        Some("record")
+        "record"
     }
 }
 
@@ -393,7 +393,7 @@ fn main() -> ExitCode {
                 let metric_config = config.clone();
                 observed_cli_verb(
                     "retrieve",
-                    retrieve_mode(sub),
+                    Some(retrieve_mode(sub)),
                     &metric_root,
                     &metric_config,
                     || verbs::retrieve::run(sub, vault_root, config),

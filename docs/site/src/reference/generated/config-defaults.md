@@ -164,6 +164,13 @@ pipeline:
 mcp:
   stdio:
     single_tenant: false
+observability:
+  enabled: true
+  local_metrics: true
+  local_traces: true
+  exporter: none
+  endpoint: null
+  redact_sensitive_fields: true
 consolidation:
   enabled: true
   window_size_turns: 8

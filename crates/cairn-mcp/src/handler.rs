@@ -698,6 +698,10 @@ impl ServerHandler for CairnMcpHandler {
     /// and a store is wired, dispatches through
     /// [`cairn_core::verbs::search::run`]. All other verbs (or `"search"` with
     /// no store wired) fall back to [`dispatch_stub`].
+    #[allow(
+        clippy::too_many_lines,
+        reason = "central MCP dispatch table keeps tool routing auditable"
+    )]
     fn call_tool(
         &self,
         request: CallToolRequestParams,

@@ -109,7 +109,7 @@ async fn serve_with_relay_completes_initialize_handshake() {
     let (mut client_read_half, server_output) = tokio::io::duplex(65_536);
 
     let _server_task = tokio::spawn(async move {
-        serve_stdio_with_store_io(
+        Box::pin(serve_stdio_with_store_io(
             store_dyn,
             f.store,
             scope,
@@ -117,7 +117,7 @@ async fn serve_with_relay_completes_initialize_handshake() {
             principal,
             server_input,
             server_output,
-        )
+        ))
         .await
         .ok();
     });
@@ -160,7 +160,7 @@ async fn serve_with_relay_tools_list_includes_graph_tools() {
     let (mut client_read_half, server_output) = tokio::io::duplex(65_536);
 
     let _server_task = tokio::spawn(async move {
-        serve_stdio_with_store_io(
+        Box::pin(serve_stdio_with_store_io(
             store_dyn,
             f.store,
             scope,
@@ -168,7 +168,7 @@ async fn serve_with_relay_tools_list_includes_graph_tools() {
             principal,
             server_input,
             server_output,
-        )
+        ))
         .await
         .ok();
     });
