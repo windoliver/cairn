@@ -902,6 +902,7 @@ async fn run_search(
             include_reasoning: false,
             visibility_allowlist: vec![],
             auth_scope: ScopeTuple::default(),
+            rebac: cairn_core::rebac::RebacContext::default(),
             model_label: config.search.embedding_model.as_str().to_owned(),
             filter: None,
             explain: false,

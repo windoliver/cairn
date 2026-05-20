@@ -10,6 +10,7 @@ use std::fmt::Write as _;
 
 use crate::domain::MemoryVisibility;
 use crate::pipeline::filter::{DiscardReason, RedactionTag};
+use crate::rebac::{RebacAction, RebacDecisionKind};
 
 /// Body-free metadata for a gate outcome. Serializes via
 /// [`Self::to_wire_string`] into a short stable code; the empty string
@@ -30,6 +31,15 @@ pub enum PolicyDetail {
     ScopeMismatch {
         /// Minimum visibility tier the operation required.
         required_tier: MemoryVisibility,
+    },
+    /// `ReBAC` decision metadata for a shared-tier read or write.
+    Rebac {
+        /// Operation that was evaluated.
+        action: RebacAction,
+        /// Visibility tier that was evaluated.
+        tier: MemoryVisibility,
+        /// Body-free allow/deny reason.
+        reason: RebacDecisionKind,
     },
     /// Stable error code. Construction is validated; a free-text
     /// message cannot be slipped in via `&'static str`.
@@ -121,6 +131,16 @@ impl PolicyDetail {
             Self::ScopeMismatch { required_tier } => {
                 format!("scope_required:{}", required_tier.as_str())
             }
+            Self::Rebac {
+                action,
+                tier,
+                reason,
+            } => format!(
+                "rebac:{}:{}:{}",
+                action.as_str(),
+                tier.as_str(),
+                reason.as_str()
+            ),
             Self::ErrorCode(c) => format!("error:{}", c.as_str()),
         }
     }

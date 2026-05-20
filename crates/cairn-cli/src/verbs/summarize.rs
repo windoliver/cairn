@@ -47,6 +47,7 @@ struct ReadAuthorization {
     scope: ScopeTuple,
     max_visibility: MemoryVisibility,
     issuer: Identity,
+    rebac: cairn_core::rebac::RebacContext,
 }
 
 /// Run `cairn summarize`.
@@ -174,7 +175,7 @@ async fn load_source_records(
         .list(&ListArgs {
             record_ids,
             scope: Some(auth.scope.clone()),
-            visibility_allowlist: visibility_allowlist(auth.max_visibility),
+            visibility_allowlist: read_visibility_allowlist(auth),
             limit,
             ..ListArgs::default()
         })
@@ -545,15 +546,23 @@ async fn signed_read_authorization(
             },
         ));
     }
+    let scope = ScopeTuple {
+        tenant: Some(verified.as_inner().scope.tenant.clone()),
+        workspace: Some(verified.as_inner().scope.workspace.clone()),
+        entity: Some(verified.as_inner().scope.entity.clone()),
+        ..ScopeTuple::default()
+    };
+    let max_visibility = intent_tier_to_visibility(verified.as_inner().scope.tier);
     Ok(ReadAuthorization {
         operation_id,
-        scope: ScopeTuple {
-            tenant: Some(verified.as_inner().scope.tenant.clone()),
-            workspace: Some(verified.as_inner().scope.workspace.clone()),
-            entity: Some(verified.as_inner().scope.entity.clone()),
-            ..ScopeTuple::default()
-        },
-        max_visibility: intent_tier_to_visibility(verified.as_inner().scope.tier),
+        scope: scope.clone(),
+        max_visibility,
+        rebac: cairn_core::rebac::RebacContext::for_scope(
+            issuer.clone(),
+            &scope,
+            cairn_core::rebac::RebacAction::Read,
+            max_visibility,
+        ),
         issuer,
     })
 }
@@ -617,8 +626,14 @@ async fn signed_summary_admission(
         intent,
     );
     let verified = super::signed::verify_request(ctx, request).await?;
+    let rebac = cairn_core::rebac::RebacContext::for_scope(
+        issuer.clone(),
+        &record.scope,
+        cairn_core::rebac::RebacAction::Write,
+        record.visibility,
+    );
     record
-        .validate_against_intent(&verified)
+        .validate_against_intent_with_rebac(&verified, &rebac)
         .map_err(|e| super::signed::rejected_from_domain(ResponseVerb::Summarize, e))?;
     SignedAdmission::new(verified, WalActionKind::Upsert, None, payload).map_err(|e| {
         super::signed::aborted(ResponseVerb::Summarize, format!("signed admission: {e}"))
@@ -679,18 +694,14 @@ fn summarize_args_hash(args: &SummarizeArgs) -> Result<String, Response> {
         .map_err(|e| super::signed::aborted(ResponseVerb::Summarize, format!("args hash: {e}")))
 }
 
-fn visibility_allowlist(max: MemoryVisibility) -> Vec<MemoryVisibility> {
-    [
-        MemoryVisibility::Private,
-        MemoryVisibility::Session,
-        MemoryVisibility::Project,
-        MemoryVisibility::Team,
-        MemoryVisibility::Org,
-        MemoryVisibility::Public,
-    ]
-    .into_iter()
-    .filter(|visibility| *visibility <= max)
-    .collect()
+fn read_visibility_allowlist(auth: &ReadAuthorization) -> Vec<MemoryVisibility> {
+    auth.rebac
+        .allowed_visibilities_up_to(
+            cairn_core::rebac::RebacAction::Read,
+            &auth.scope,
+            auth.max_visibility,
+        )
+        .0
 }
 
 fn intent_tier_to_visibility(tier: SignedIntentScopeTier) -> MemoryVisibility {
@@ -718,7 +729,7 @@ fn read_policy_trace(
     } else {
         "legacy_event".to_owned()
     };
-    vec![
+    let mut trace = vec![
         ResponsePolicyTrace {
             detail: Some("signed_scope_verified".to_owned()),
             gate: "read.scope".to_owned(),
@@ -734,7 +745,20 @@ fn read_policy_trace(
             gate: "read.consent".to_owned(),
             result: ResponsePolicyTraceResult::Pass,
         },
-    ]
+    ];
+    let rebac_trace = auth
+        .rebac
+        .allowed_visibilities_up_to(
+            cairn_core::rebac::RebacAction::Read,
+            &auth.scope,
+            auth.max_visibility,
+        )
+        .1
+        .into_iter()
+        .map(cairn_core::rebac::RebacDecision::to_policy_trace_entry)
+        .collect::<Vec<_>>();
+    trace.extend(cairn_core::policy_trace::to_wire(&rebac_trace));
+    trace
 }
 
 fn summarize_args_from_matches(sub: &ArgMatches) -> Result<SummarizeArgs, Response> {

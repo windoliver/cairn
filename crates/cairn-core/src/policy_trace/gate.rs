@@ -37,6 +37,8 @@ pub enum PolicyGate {
     SearchCapability,
     /// Search read-filter aggregation gate.
     SearchReadFilter,
+    /// `ReBAC` relation gate for shared-tier reads and writes.
+    Rebac,
     /// Local sensor consent gate.
     SensorConsent,
 }
@@ -59,6 +61,7 @@ impl PolicyGate {
             Self::SearchScope => "search.scope",
             Self::SearchCapability => "search.capability",
             Self::SearchReadFilter => "search.read_filter",
+            Self::Rebac => "rebac",
             Self::SensorConsent => "sensor_consent",
         }
     }
