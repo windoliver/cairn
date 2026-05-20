@@ -321,11 +321,11 @@ fn apply(vault: &Path, m: &ArgMatches) -> ExitCode {
     }
 
     // Issue #289 review (re-loop r2) finding 1: fail closed on
-    // unsupported mutation kinds. Previously a mixed plan (Patch +
-    // Upsert, say) would silently take the metadata-only path and
-    // publish Applied without executing the reviewed Patch — that is
+    // unsupported mutation kinds. Previously a mixed plan containing
+    // unwired variants would silently take the metadata-only path and
+    // publish Applied without executing the reviewed mutation — that is
     // data loss, not reduced coverage. Non-placeholder plans must
-    // contain only `Patch`/`Rename` to advance through the real
+    // contain only mutations wired through the real
     // executor; anything else stays pending until a follow-up wires
     // the remaining variants.
     // Re-loop r9 finding 1: a non-placeholder plan with no mutations
@@ -350,10 +350,10 @@ fn apply(vault: &Path, m: &ArgMatches) -> ExitCode {
     {
         eprintln!(
             "cairn flush apply: plan {id} contains mutation kind \
-             `{}` which is not yet wired by issue #289's real executor. \
+             `{}` which is not yet wired by the real executor. \
              Refusing to apply — the plan stays pending until a follow-up \
              implements the remaining `PlannedMutation` variants. (Auto- \
-             publishing as metadata-only would drop the reviewed Patch/Rename \
+             publishing as metadata-only would drop reviewed \
              mutations.)",
             unsupported_kind_name(unsupported),
         );
@@ -449,28 +449,31 @@ fn apply(vault: &Path, m: &ArgMatches) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Issue #289 only wires `Patch` and `Rename` through the real executor.
+/// Mutations currently wired through the real executor.
 /// Plans containing any other variant are refused so mixed plans do not
 /// silently drop reviewed mutations on the floor.
 fn is_real_apply_supported(m: &cairn_core::domain::flush_plan::PlannedMutation) -> bool {
     use cairn_core::domain::flush_plan::PlannedMutation;
     matches!(
         m,
-        PlannedMutation::Patch { .. } | PlannedMutation::Rename { .. }
+        PlannedMutation::Patch { .. }
+            | PlannedMutation::Rename { .. }
+            | PlannedMutation::Upsert { .. }
     )
 }
 
 fn unsupported_kind_name(m: &cairn_core::domain::flush_plan::PlannedMutation) -> &'static str {
     use cairn_core::domain::flush_plan::PlannedMutation;
     match m {
-        PlannedMutation::Upsert { .. } => "Upsert",
         PlannedMutation::Delete { .. } => "Delete",
         PlannedMutation::Promote { .. } => "Promote",
         PlannedMutation::Expire { .. } => "Expire",
         PlannedMutation::ForgetSession { .. } => "ForgetSession",
         PlannedMutation::ForgetRecord { .. } => "ForgetRecord",
         PlannedMutation::Evolve { .. } => "Evolve",
-        PlannedMutation::Patch { .. } | PlannedMutation::Rename { .. } => "<supported>",
+        PlannedMutation::Patch { .. }
+        | PlannedMutation::Rename { .. }
+        | PlannedMutation::Upsert { .. } => "<supported>",
         _ => "<unknown>",
     }
 }

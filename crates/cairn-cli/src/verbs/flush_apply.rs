@@ -103,6 +103,9 @@ fn check_scope(
             };
             enforce_record_scope(plan, &stored.record, target)
         }
+        PlannedMutation::Upsert { record, .. } => {
+            enforce_record_scope(plan, record, &record.target_id)
+        }
         PlannedMutation::Patch {
             target: PatchTarget::Session(session_id),
             ..
@@ -267,8 +270,36 @@ fn check_drift(
             target: PatchTarget::Session(session_id),
             ..
         } => check_session_drift(tx, plan, session_id),
+        PlannedMutation::Upsert {
+            record,
+            prior_version: Some(prior_version),
+        } => check_upsert_prior_version(tx, record, *prior_version),
         _ => Ok(()),
     }
+}
+
+fn check_upsert_prior_version(
+    tx: &mut cairn_store_sqlite::StoreTx<'_>,
+    record: &cairn_core::domain::MemoryRecord,
+    prior_version: u32,
+) -> Result<(), StoreError> {
+    let Some(stored) = tx.get_active_by_target(&record.target_id)? else {
+        return Err(StoreError::PatchTargetMissing {
+            target_id: record.target_id.as_str().to_owned(),
+        });
+    };
+    if stored.version != prior_version {
+        return Err(StoreError::Invariant {
+            what: format!(
+                "flush apply drift: upsert target `{}` live version `{}` does not match plan \
+                 prior_version `{}`; live record changed between plan creation and apply",
+                record.target_id.as_str(),
+                stored.version,
+                prior_version,
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn check_record_drift(
@@ -375,6 +406,10 @@ fn apply_mutation(
         } => apply_session_patch(tx, operation_id, mutation_seq, session_id, str_replace),
         PlannedMutation::Rename { record_id, new_id } => {
             apply_rename(tx, operation_id, record_id, new_id)
+        }
+        PlannedMutation::Upsert { record, .. } => {
+            let _ = tx.upsert(record)?;
+            Ok(())
         }
         other => Err(StoreError::Invariant {
             what: format!("flush apply does not yet support mutation kind `{other:?}`"),
@@ -777,5 +812,95 @@ fn patch_substring_missing(target_label: &str, needle: &str, occurrence: &str) -
         target: target_label.to_owned(),
         needle: needle.to_owned(),
         occurrence: occurrence.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use cairn_core::domain::flush_plan::{FlushMode, PlanReason};
+    use cairn_core::domain::{Identity, RecordId, ScopeTuple};
+    use cairn_core::generated::common::Ulid;
+    use cairn_test_fixtures::store::sample_record;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn real_apply_supports_upsert_review_plans() {
+        let sqlite = Arc::new(cairn_store_sqlite::open_in_memory().await.expect("store"));
+        let store: Arc<dyn MemoryStore> = sqlite.clone();
+        let record = sample_record();
+        let plan = FlushPlan {
+            operation_id: Ulid("01HQZX9F5N0000000000000001".into()),
+            issued_at: "2026-05-20T12:00:00Z".into(),
+            issuer: Identity::parse("agt:cairn-cli:koi-import:v1").expect("issuer"),
+            principal: None,
+            scope: ScopeTuple::default(),
+            mode: FlushMode::HumanReview,
+            mutations: vec![PlannedMutation::Upsert {
+                record: Box::new(record.clone()),
+                prior_version: None,
+            }],
+            reason: PlanReason::UserIngest,
+            source_events: vec![],
+            target_hashes: BTreeMap::new(),
+            dependencies: vec![],
+            expires_at: "2026-05-20T12:05:00Z".into(),
+            placeholder: false,
+        };
+
+        apply_real_plan(&store, &sqlite, &plan)
+            .await
+            .expect("upsert review plan applies");
+
+        let stored = store.get(&record.id).await.expect("read record");
+        assert_eq!(
+            stored.as_ref().map(|r| &r.target_id),
+            Some(&record.target_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn real_apply_rejects_stale_upsert_prior_version() {
+        let sqlite = Arc::new(cairn_store_sqlite::open_in_memory().await.expect("store"));
+        let store: Arc<dyn MemoryStore> = sqlite.clone();
+        let existing = sample_record();
+        store.upsert(&existing).await.expect("seed existing record");
+
+        let mut changed = existing.clone();
+        changed.id = RecordId::parse("01HQZX9F5N0000000000000002").expect("record id");
+        changed.body = "updated body from stale review plan".to_owned();
+        let plan = FlushPlan {
+            operation_id: Ulid("01HQZX9F5N0000000000000003".into()),
+            issued_at: "2026-05-20T12:00:00Z".into(),
+            issuer: Identity::parse("agt:cairn-cli:koi-import:v1").expect("issuer"),
+            principal: None,
+            scope: ScopeTuple::default(),
+            mode: FlushMode::HumanReview,
+            mutations: vec![PlannedMutation::Upsert {
+                record: Box::new(changed),
+                prior_version: Some(2),
+            }],
+            reason: PlanReason::UserIngest,
+            source_events: vec![],
+            target_hashes: BTreeMap::new(),
+            dependencies: vec![],
+            expires_at: "2026-05-20T12:05:00Z".into(),
+            placeholder: false,
+        };
+
+        let err = apply_real_plan(&store, &sqlite, &plan)
+            .await
+            .expect_err("stale upsert must fail");
+        assert!(
+            err.to_string().contains("prior_version `2`"),
+            "unexpected error: {err:#}"
+        );
+        let still_existing = store.get(&existing.id).await.expect("read existing");
+        assert_eq!(
+            still_existing.as_ref().map(|r| &r.body),
+            Some(&existing.body)
+        );
     }
 }
