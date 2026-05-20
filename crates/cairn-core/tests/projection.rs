@@ -68,6 +68,8 @@ fn summary_counts_lag_and_failures() {
     assert_eq!(summary.total_authoritative_items, 4);
     assert_eq!(summary.current_items, 1);
     assert_eq!(summary.lagging_items, 3);
+    assert_eq!(summary.missing_items, 1);
+    assert_eq!(summary.stale_items, 1);
     assert_eq!(summary.failed_items, 1);
     assert_eq!(summary.target.as_key(), "parser_docx_text");
 }

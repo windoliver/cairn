@@ -11,7 +11,7 @@ use std::process::ExitCode;
 
 use cairn_core::config::StoreKind;
 use cairn_core::contract::memory_store::MemoryStore;
-use cairn_core::domain::projection::{ProjectionSummary, ProjectionTarget};
+use cairn_core::domain::projection::{ParserProjectionKind, ProjectionSummary, ProjectionTarget};
 use cairn_core::generated::common::Capabilities;
 use cairn_core::generated::status::{
     StatusResponse, StatusResponseHealth, StatusResponseHealthAuthorityDb,
@@ -136,6 +136,18 @@ fn status_target(
     let target = match &summary.target {
         ProjectionTarget::Bm25sLexical => {
             StatusResponseHealthNexusProjectionProjectionDetailTargetsTarget::Bm25s
+        }
+        ProjectionTarget::Parser(ParserProjectionKind::PdfText) => {
+            StatusResponseHealthNexusProjectionProjectionDetailTargetsTarget::ParserPdfText
+        }
+        ProjectionTarget::Parser(ParserProjectionKind::DocxText) => {
+            StatusResponseHealthNexusProjectionProjectionDetailTargetsTarget::ParserDocxText
+        }
+        ProjectionTarget::Parser(ParserProjectionKind::VideoFrameText) => {
+            StatusResponseHealthNexusProjectionProjectionDetailTargetsTarget::ParserVideoFrameText
+        }
+        ProjectionTarget::Parser(ParserProjectionKind::VisionCaption) => {
+            StatusResponseHealthNexusProjectionProjectionDetailTargetsTarget::ParserVisionCaption
         }
         _ => return None,
     };
@@ -348,6 +360,18 @@ fn projection_target_label(
 ) -> &'static str {
     match target {
         StatusResponseHealthNexusProjectionProjectionDetailTargetsTarget::Bm25s => "bm25s_lexical",
+        StatusResponseHealthNexusProjectionProjectionDetailTargetsTarget::ParserPdfText => {
+            "parser_pdf_text"
+        }
+        StatusResponseHealthNexusProjectionProjectionDetailTargetsTarget::ParserDocxText => {
+            "parser_docx_text"
+        }
+        StatusResponseHealthNexusProjectionProjectionDetailTargetsTarget::ParserVideoFrameText => {
+            "parser_video_frame_text"
+        }
+        StatusResponseHealthNexusProjectionProjectionDetailTargetsTarget::ParserVisionCaption => {
+            "parser_vision_caption"
+        }
         _ => "unknown",
     }
 }

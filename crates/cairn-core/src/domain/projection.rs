@@ -55,6 +55,19 @@ impl ProjectionTarget {
             Self::Parser(kind) => format!("parser_{}", kind.as_key()),
         }
     }
+
+    /// Parse a stable projection target key.
+    #[must_use]
+    pub fn from_key(raw: &str) -> Option<Self> {
+        match raw {
+            "bm25s_lexical" => Some(Self::Bm25sLexical),
+            "parser_pdf_text" => Some(Self::Parser(ParserProjectionKind::PdfText)),
+            "parser_docx_text" => Some(Self::Parser(ParserProjectionKind::DocxText)),
+            "parser_video_frame_text" => Some(Self::Parser(ParserProjectionKind::VideoFrameText)),
+            "parser_vision_caption" => Some(Self::Parser(ParserProjectionKind::VisionCaption)),
+            _ => None,
+        }
+    }
 }
 
 /// Authoritative cursor used to decide whether a projection item is current.
@@ -123,6 +136,10 @@ pub struct ProjectionSummary {
     pub current_items: usize,
     /// Count of missing or stale projection rows.
     pub lagging_items: usize,
+    /// Count of rows with no projection ledger entry.
+    pub missing_items: usize,
+    /// Count of rows whose ledger entry is older than the authoritative hash.
+    pub stale_items: usize,
     /// Count of failed projection rows.
     pub failed_items: usize,
     /// Latest successful rebuild timestamp.
@@ -143,11 +160,20 @@ impl ProjectionSummary {
     {
         let mut current_items = 0usize;
         let mut lagging_items = 0usize;
+        let mut missing_items = 0usize;
+        let mut stale_items = 0usize;
         let mut failed_items = 0usize;
         for state in states {
             match state {
                 ProjectionItemState::Current => current_items += 1,
-                ProjectionItemState::Stale | ProjectionItemState::Missing => lagging_items += 1,
+                ProjectionItemState::Stale => {
+                    lagging_items += 1;
+                    stale_items += 1;
+                }
+                ProjectionItemState::Missing => {
+                    lagging_items += 1;
+                    missing_items += 1;
+                }
                 ProjectionItemState::Failed { .. } => {
                     lagging_items += 1;
                     failed_items += 1;
@@ -159,6 +185,8 @@ impl ProjectionSummary {
             total_authoritative_items,
             current_items,
             lagging_items,
+            missing_items,
+            stale_items,
             failed_items,
             last_successful_rebuild_at,
         }

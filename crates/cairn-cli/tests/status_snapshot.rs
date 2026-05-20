@@ -7,6 +7,18 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use cairn_core::{
+    contract::memory_store::{MemoryStore, ProjectionApplyItem},
+    domain::{
+        projection::{
+            ParserProjectionKind, ProjectionCursor, ProjectionItemState, ProjectionLedgerRow,
+            ProjectionTarget,
+        },
+        record::RecordId,
+    },
+};
+use cairn_store_sqlite::SqliteMemoryStore;
+
 fn cli() -> Command {
     Command::new(env!("CARGO_BIN_EXE_cairn"))
 }
@@ -53,6 +65,13 @@ fn spawn_health_server() -> (String, thread::JoinHandle<()>) {
         }
     });
     (format!("http://{addr}"), handle)
+}
+
+fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("test runtime")
+        .block_on(future)
 }
 
 #[test]
@@ -257,5 +276,58 @@ fn status_json_reports_projection_detail_for_nexus() {
     assert!(
         value["health"]["nexus_projection"]["projection_detail"].is_object(),
         "{stdout}"
+    );
+}
+
+#[test]
+fn status_json_reports_parser_projection_detail_for_nexus() {
+    let dir = tempfile::tempdir().unwrap();
+    write_yaml(
+        dir.path(),
+        "store:\n  kind: nexus-sandbox\n  nexus:\n    endpoint: http://127.0.0.1:1\n",
+    );
+    let store = SqliteMemoryStore::open(&dir.path().join(".cairn/cairn.db")).expect("open sqlite");
+    store
+        .insert_test_record_with_source(
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "parser source record",
+            1,
+            "sha256:record-a",
+            "sources/corrupt.pdf",
+            "sha256:pdf-source-corrupt",
+        )
+        .expect("insert record");
+    block_on(store.apply_projection_items(vec![ProjectionApplyItem {
+        row: ProjectionLedgerRow {
+            target: ProjectionTarget::Parser(ParserProjectionKind::PdfText),
+            cursor: ProjectionCursor {
+                record_id: RecordId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").expect("record id"),
+                wal_sequence: 1,
+                record_hash: "sha256:record-a".to_owned(),
+                source_hash: Some("sha256:pdf-source-corrupt".to_owned()),
+            },
+            state: ProjectionItemState::Failed {
+                reason: "parser failed".to_owned(),
+            },
+            updated_at: "2026-05-19T12:00:00Z".to_owned(),
+        },
+    }]))
+    .expect("apply parser row");
+
+    let out = cli()
+        .current_dir(dir.path())
+        .args(["status", "--json"])
+        .output()
+        .expect("cairn status --json");
+
+    assert!(out.status.success(), "exit: {:?}", out.status);
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("status json");
+    let targets = value["health"]["nexus_projection"]["projection_detail"]["targets"]
+        .as_array()
+        .expect("targets");
+    assert!(
+        targets
+            .iter()
+            .any(|target| target["target"] == "parser_pdf_text" && target["failed"] == 1)
     );
 }

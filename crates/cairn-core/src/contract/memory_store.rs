@@ -100,6 +100,8 @@ pub struct RankingSignal {
 pub struct SearchHit {
     /// Authoritative record id.
     pub record_id: RecordId,
+    /// Hash of the authoritative record used to validate derived rankings.
+    pub record_hash: String,
     /// Final normalized score.
     pub score: f64,
     /// Optional snippet.
@@ -120,6 +122,19 @@ pub struct SearchResponse {
 pub struct ProjectionApplyItem {
     /// Ledger row to persist.
     pub row: ProjectionLedgerRow,
+}
+
+/// Authoritative record material needed for a projection rebuild.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectionRecord {
+    /// Current projection cursor for this record/source.
+    pub cursor: ProjectionCursor,
+    /// Authoritative record body used for lexical projection.
+    pub body: String,
+    /// Optional vault-relative source path for parser projections.
+    pub source_path: Option<String>,
+    /// Optional source hash for parser projections.
+    pub source_hash: Option<String>,
 }
 
 /// Errors from the memory store contract.
@@ -169,6 +184,20 @@ pub trait MemoryStore: Send + Sync {
         ))
     }
 
+    /// Return authoritative records and source metadata for projection rebuilds.
+    async fn projection_records(&self) -> Result<Vec<ProjectionRecord>, MemoryStoreError> {
+        Err(MemoryStoreError::CapabilityUnavailable(
+            "projection_records".to_owned(),
+        ))
+    }
+
+    /// Return failed projection ledger rows for diagnostics.
+    async fn projection_failures(&self) -> Result<Vec<ProjectionLedgerRow>, MemoryStoreError> {
+        Err(MemoryStoreError::CapabilityUnavailable(
+            "projection_failures".to_owned(),
+        ))
+    }
+
     /// Persist sidecar projection results into the authoritative projection ledger.
     async fn apply_projection_items(
         &self,
@@ -212,6 +241,7 @@ mod tests {
                 hits: vec![SearchHit {
                     record_id: RecordId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV")
                         .expect("valid test ULID"),
+                    record_hash: "sha256:record-a".to_owned(),
                     score: 1.0,
                     snippet: Some("projection".to_owned()),
                     ranking_signals: vec![RankingSignal {
@@ -229,6 +259,14 @@ mod tests {
         }
 
         async fn projection_cursors(&self) -> Result<Vec<ProjectionCursor>, MemoryStoreError> {
+            Ok(vec![])
+        }
+
+        async fn projection_records(&self) -> Result<Vec<ProjectionRecord>, MemoryStoreError> {
+            Ok(vec![])
+        }
+
+        async fn projection_failures(&self) -> Result<Vec<ProjectionLedgerRow>, MemoryStoreError> {
             Ok(vec![])
         }
 

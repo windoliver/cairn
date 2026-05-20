@@ -31,9 +31,56 @@ pub struct ProjectionRequestItem {
     /// Authoritative record hash.
     pub record_hash: String,
     /// Optional source hash.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub source_hash: Option<String>,
+    /// Optional source path for parser projections.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
     /// Authoritative body text for lexical projection.
     pub body: String,
+}
+
+/// BM25S ranking request sent to the Nexus projection endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProjectionSearchRequest {
+    /// Operation id for idempotency/correlation.
+    pub operation_id: String,
+    /// Free-text query.
+    pub query: String,
+    /// Candidate records from the authoritative `SQLite` store.
+    pub candidates: Vec<ProjectionSearchCandidate>,
+    /// Maximum results to return.
+    pub limit: u32,
+}
+
+/// Candidate record for BM25S ranking.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProjectionSearchCandidate {
+    /// Authoritative record id.
+    pub record_id: String,
+    /// Current authoritative record hash.
+    pub record_hash: String,
+}
+
+/// BM25S ranking response from Nexus.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ProjectionSearchResponse {
+    /// Ranked hits.
+    pub hits: Vec<ProjectionSearchHit>,
+}
+
+/// One BM25S ranked hit.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ProjectionSearchHit {
+    /// Authoritative record id.
+    pub record_id: String,
+    /// Record hash used by Nexus.
+    pub record_hash: String,
+    /// BM25S score.
+    pub score: f64,
+    /// Optional skipped/stale reason.
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// Sidecar response to an apply request.
@@ -87,19 +134,39 @@ impl ProjectionClient {
         validate_apply_path(&self.apply_path)?;
         let body = serde_json::to_vec(request)
             .map_err(|err| format!("serialize projection request: {err}"))?;
-        let endpoint = HttpEndpoint::parse(&self.endpoint)?;
-        self.apply_to_addrs(&endpoint, endpoint.socket_addrs()?, &body)
+        self.post_json(&self.apply_path, &body)
     }
 
-    fn apply_to_addrs(
+    /// POST one BM25S ranking request.
+    pub fn search(
         &self,
+        request: &ProjectionSearchRequest,
+    ) -> Result<ProjectionSearchResponse, String> {
+        let body = serde_json::to_vec(request)
+            .map_err(|err| format!("serialize projection search request: {err}"))?;
+        self.post_json("/projection/search", &body)
+    }
+
+    fn post_json<T: for<'de> Deserialize<'de>>(
+        &self,
+        path: &str,
+        body: &[u8],
+    ) -> Result<T, String> {
+        validate_apply_path(path)?;
+        let endpoint = HttpEndpoint::parse(&self.endpoint)?;
+        self.apply_to_addrs(path, &endpoint, endpoint.socket_addrs()?, body)
+    }
+
+    fn apply_to_addrs<T: for<'de> Deserialize<'de>>(
+        &self,
+        path: &str,
         endpoint: &HttpEndpoint,
         addrs: Vec<SocketAddr>,
         body: &[u8],
-    ) -> Result<ProjectionApplyResponse, String> {
+    ) -> Result<T, String> {
         let mut failures = Vec::new();
         for addr in addrs {
-            match self.apply_to_addr(endpoint, addr, body) {
+            match self.apply_to_addr(path, endpoint, addr, body) {
                 Ok(response) => return Ok(response),
                 Err(err) => failures.push(format!("{addr}: {err}")),
             }
@@ -110,12 +177,13 @@ impl ProjectionClient {
         ))
     }
 
-    fn apply_to_addr(
+    fn apply_to_addr<T: for<'de> Deserialize<'de>>(
         &self,
+        path: &str,
         endpoint: &HttpEndpoint,
         addr: SocketAddr,
         body: &[u8],
-    ) -> Result<ProjectionApplyResponse, String> {
+    ) -> Result<T, String> {
         let mut stream = TcpStream::connect_timeout(&addr, self.timeout)
             .map_err(|err| format!("connect projection endpoint: {err}"))?;
         stream
@@ -126,7 +194,7 @@ impl ProjectionClient {
             .map_err(|err| format!("set projection write timeout: {err}"))?;
         let request_head = format!(
             "POST {} HTTP/1.1\r\nHost: {}:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            self.apply_path,
+            path,
             endpoint.host,
             endpoint.port,
             body.len()
@@ -301,8 +369,13 @@ mod tests {
         let request = empty_request();
         let body = serde_json::to_vec(&request).expect("serialize request");
 
-        let response = client
-            .apply_to_addrs(&endpoint, vec![closed_addr(), good_addr], &body)
+        let response: ProjectionApplyResponse = client
+            .apply_to_addrs(
+                "/projection/apply",
+                &endpoint,
+                vec![closed_addr(), good_addr],
+                &body,
+            )
             .expect("projection response");
 
         assert_eq!(response, ProjectionApplyResponse { items: vec![] });

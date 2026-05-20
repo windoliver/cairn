@@ -77,7 +77,13 @@
                     "properties": {
                       "target": {
                         "type": "string",
-                        "enum": ["bm25s"]
+                        "enum": [
+                          "bm25s",
+                          "parser_pdf_text",
+                          "parser_docx_text",
+                          "parser_video_frame_text",
+                          "parser_vision_caption"
+                        ]
                       },
                       "state": {
                         "type": "string",

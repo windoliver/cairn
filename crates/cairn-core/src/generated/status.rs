@@ -38,6 +38,10 @@ pub enum StatusResponseHealthNexusProjectionProjectionDetailTargetsState {
 #[non_exhaustive]
 pub enum StatusResponseHealthNexusProjectionProjectionDetailTargetsTarget {
     Bm25s,
+    ParserPdfText,
+    ParserDocxText,
+    ParserVideoFrameText,
+    ParserVisionCaption,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
