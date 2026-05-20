@@ -10,28 +10,33 @@
 
 use assert_cmd::Command;
 use cairn_test_fixtures::{RecordSpec, build_hybrid_test_vault};
+use serde_json::Value;
 
-/// Replace the per-call `operation_id` ULID in the IDL response envelope
-/// with a fixed placeholder so the golden snapshot stays deterministic
-/// across runs (round-8 review #1).
-fn redact_operation_id(json: &str) -> String {
-    const KEY: &str = "\"operation_id\":\"";
-    const ULID_LEN: usize = 26;
+/// Normalize volatile fields so the snapshot asserts wire shape, ordering, and
+/// explain content without pinning platform-specific float noise.
+fn normalize_search_snapshot(json: &str) -> String {
     const PLACEHOLDER: &str = "01XXXXXXXXXXXXXXXXXXXXXXXX";
-    let mut out = String::with_capacity(json.len());
-    let mut rest = json;
-    while let Some(idx) = rest.find(KEY) {
-        out.push_str(&rest[..idx + KEY.len()]);
-        let value_start = idx + KEY.len();
-        if rest[value_start..].len() >= ULID_LEN {
-            out.push_str(PLACEHOLDER);
-            rest = &rest[value_start + ULID_LEN..];
-        } else {
-            rest = &rest[value_start..];
+
+    let mut value: Value = serde_json::from_str(json).expect("search output must be json");
+    value["operation_id"] = Value::String(PLACEHOLDER.to_owned());
+
+    if let Some(hits) = value["data"]["hits"].as_array_mut() {
+        for hit in hits {
+            if let Some(signals) = hit["ranking_signals"].as_array_mut() {
+                for signal in signals {
+                    if let Some(score) = signal["score"].as_f64() {
+                        let rounded = (score * 1_000_000.0).round() / 1_000_000.0;
+                        signal["score"] = Value::Number(
+                            serde_json::Number::from_f64(rounded)
+                                .expect("rounded score must be finite"),
+                        );
+                    }
+                }
+            }
         }
     }
-    out.push_str(rest);
-    out
+
+    serde_json::to_string(&value).expect("normalized search output must serialize")
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -105,7 +110,7 @@ async fn hybrid_explain_block_snapshot() {
         hits.len()
     );
 
-    insta::assert_snapshot!("search_explain_json", redact_operation_id(&stdout));
+    insta::assert_snapshot!("search_explain_json", normalize_search_snapshot(&stdout));
     drop(dir);
 }
 

@@ -285,13 +285,16 @@ fn search_sdk_includes_bm25s_ranking_preference_and_signals() {
         .expect("search SDK output");
     let body = std::str::from_utf8(&search.bytes).expect("utf-8 search SDK");
 
-    assert!(body.contains("pub struct SearchArgsRanking"), "{body}");
-    assert!(body.contains("pub enum SearchArgsRankingBm25s"), "{body}");
+    assert!(body.contains("pub enum SearchArgsBm25s"), "{body}");
     assert!(
-        body.contains("pub ranking_signals: Vec<HitRankingSignals>"),
+        body.contains("pub bm25s: Option<SearchArgsBm25s>"),
         "{body}"
     );
-    assert!(body.contains("pub enum HitRankingSignalsName"), "{body}");
+    assert!(
+        body.contains("pub ranking_signals: Option<Vec<RankingSignal>>"),
+        "{body}"
+    );
+    assert!(body.contains("pub enum RankingSignalName"), "{body}");
 }
 
 #[test]
@@ -309,7 +312,10 @@ fn lint_sdk_includes_projection_findings() {
     assert!(body.contains("ProjectionStale"), "{body}");
     assert!(body.contains("ProjectionMissing"), "{body}");
     assert!(body.contains("ProjectionFailed"), "{body}");
-    assert!(body.contains("projection_stale"), "{body}");
+    assert!(
+        body.contains("#[serde(rename_all = \"snake_case\")]"),
+        "{body}"
+    );
 }
 
 #[test]

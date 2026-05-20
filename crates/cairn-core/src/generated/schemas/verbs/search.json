@@ -204,6 +204,7 @@
           "type": "string"
         },
         "reason": {
+          "minLength": 1,
           "type": "string"
         },
         "score": {

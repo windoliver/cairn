@@ -228,8 +228,9 @@ fn current_projection_records(
             .provenance
             .source_refs
             .first()
-            .map(|source| (Some(source.id.clone()), Some(source.hash.clone())))
-            .unwrap_or((None, None));
+            .map_or((None, None), |source| {
+                (Some(source.id.clone()), Some(source.hash.clone()))
+            });
         records.push(ProjectionRecord {
             cursor: ProjectionCursor {
                 record_id: parse_record_id(&record_id)?,

@@ -440,8 +440,8 @@ fn search_schema_exposes_bm25s_ranking_preference() {
     let parsed: serde_json::Value = serde_json::from_slice(&search.bytes).expect("search json");
 
     assert_eq!(
-        parsed["$defs"]["Args"]["properties"]["ranking"]["properties"]["bm25s"]["enum"],
-        serde_json::json!(["auto", "required", "disabled"])
+        parsed["$defs"]["Args"]["properties"]["bm25s"]["enum"],
+        serde_json::json!(["auto", "disabled", "required"])
     );
     assert!(
         parsed["$defs"]["Hit"]["properties"]["ranking_signals"].is_object(),
@@ -460,8 +460,7 @@ fn lint_schema_exposes_projection_finding_kinds() {
         })
         .expect("lint MCP schema");
     let parsed: serde_json::Value = serde_json::from_slice(&lint.bytes).expect("lint json");
-    let kinds =
-        &parsed["$defs"]["Data"]["properties"]["findings"]["items"]["properties"]["kind"]["enum"];
+    let kinds = &parsed["$defs"]["Kind"]["enum"];
 
     assert!(
         kinds

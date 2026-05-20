@@ -24,6 +24,7 @@ Options:
       --cursor <STRING>
       --explain
       --include-reasoning
+      --bm25s <ENUM>                 [possible values: auto, disabled, required]
       --scope-tenant <TENANT>        Narrow auth_scope.tenant on every search leg (issue #191)
       --scope-workspace <WORKSPACE>  Narrow auth_scope.workspace on every search leg
       --scope-user <HMN_USER_ID>     Narrow auth_scope.user (must be canonical `hmn:…` form)

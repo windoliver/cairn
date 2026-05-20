@@ -2180,7 +2180,8 @@ async fn append_nexus_projection_findings(
             projection_sidecar_unavailable_finding(
                 projection
                     .reason
-                    .unwrap_or_else(|| "Nexus projection sidecar is unavailable".to_owned()),
+                    .as_deref()
+                    .unwrap_or("Nexus projection sidecar is unavailable"),
             ),
         );
     }
@@ -2252,12 +2253,12 @@ fn append_projection_failure_findings(data: &mut LintData, failures: Vec<Project
         if reason.contains("hash mismatch") {
             push_lint_finding(
                 data,
-                projection_row_finding(Kind::ProjectionHashMismatch, row, reason),
+                projection_row_finding(Kind::ProjectionHashMismatch, &row, &reason),
             );
         } else if matches!(row.target, ProjectionTarget::Parser(_)) {
             push_lint_finding(
                 data,
-                projection_row_finding(Kind::ProjectionParserFailed, row, reason),
+                projection_row_finding(Kind::ProjectionParserFailed, &row, &reason),
             );
         }
     }
@@ -2290,7 +2291,7 @@ fn projection_summary_finding(
     }
 }
 
-fn projection_row_finding(kind: Kind, row: ProjectionLedgerRow, reason: String) -> Finding {
+fn projection_row_finding(kind: Kind, row: &ProjectionLedgerRow, reason: &str) -> Finding {
     let projection_target = row.target.as_key();
     let mut entities = vec![
         format!("projection_target:{projection_target}"),
@@ -2316,7 +2317,7 @@ fn projection_row_finding(kind: Kind, row: ProjectionLedgerRow, reason: String) 
     }
 }
 
-fn projection_sidecar_unavailable_finding(reason: String) -> Finding {
+fn projection_sidecar_unavailable_finding(reason: &str) -> Finding {
     Finding {
         entities: Some(vec![
             "projection_target:bm25s_lexical".to_owned(),
@@ -2842,12 +2843,13 @@ fn projection_fix_finding(vault_root: &Path, _operation_id: &Ulid) -> Option<Fin
         return Some(projection_sidecar_unavailable_finding(
             projection
                 .reason
-                .unwrap_or_else(|| "Nexus projection sidecar is unavailable".to_owned()),
+                .as_deref()
+                .unwrap_or("Nexus projection sidecar is unavailable"),
         ));
     }
     match reindex::rebuild_from_db(vault_root, &config) {
         Ok(_) => None,
-        Err(err) => Some(projection_sidecar_unavailable_finding(format!(
+        Err(err) => Some(projection_sidecar_unavailable_finding(&format!(
             "Nexus projection rebuild failed: {err}"
         ))),
     }

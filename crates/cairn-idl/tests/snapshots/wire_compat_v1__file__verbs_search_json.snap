@@ -1,6 +1,5 @@
 ---
 source: crates/cairn-idl/tests/wire_compat_v1.rs
-assertion_line: 95
 expression: body
 ---
 {
@@ -47,6 +46,11 @@ expression: body
         "name": "include_reasoning",
         "long": "include-reasoning",
         "value_source": "bool"
+      },
+      {
+        "name": "bm25s",
+        "long": "bm25s",
+        "value_source": "enum(auto,disabled,required)"
       }
     ],
     "positional": {
@@ -131,6 +135,16 @@ expression: body
           "type": "boolean",
           "default": false,
           "description": "When true, include records whose trace blocks contain reasoning content. Default false keeps reasoning-bearing records out of ordinary search results."
+        },
+        "bm25s": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "disabled",
+            "required"
+          ],
+          "default": "disabled",
+          "description": "Controls optional Nexus BM25S reranking for keyword search. `disabled` preserves SQLite-only ranking, `auto` uses Nexus when the projection is current and reachable, and `required` fails closed when Nexus BM25S is unavailable or stale."
         }
       }
     },
@@ -221,6 +235,41 @@ expression: body
             "unverified",
             "unknown"
           ]
+        },
+        "ranking_signals": {
+          "type": "array",
+          "description": "Per-hit ranking signals used by the surface. SQLite signals are always present; Nexus BM25S is present when the sidecar contributed a score.",
+          "items": {
+            "$ref": "#/$defs/RankingSignal"
+          }
+        }
+      }
+    },
+    "RankingSignal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "used"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "enum": [
+            "sqlite_fts5",
+            "sqlite_vec",
+            "nexus_bm25s"
+          ]
+        },
+        "used": {
+          "type": "boolean"
+        },
+        "score": {
+          "type": "number"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
         }
       }
     },

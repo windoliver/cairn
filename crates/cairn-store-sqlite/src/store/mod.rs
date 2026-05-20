@@ -167,7 +167,7 @@ impl SqliteMemoryStore {
     /// # Errors
     ///
     /// Returns [`StoreError`] when the record id is invalid, the store cannot
-    /// be opened, or SQLite rejects the fixture row.
+    /// be opened, or `SQLite` rejects the fixture row.
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn insert_test_record(
         &self,
@@ -185,7 +185,7 @@ impl SqliteMemoryStore {
     /// # Errors
     ///
     /// Returns [`StoreError`] when the record id is invalid, the store cannot
-    /// be opened, or SQLite rejects the fixture row.
+    /// be opened, or `SQLite` rejects the fixture row.
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn insert_test_record_with_source(
         &self,
@@ -226,11 +226,11 @@ impl SqliteMemoryStore {
         let mut upsert_record = cairn_core::domain::record::tests_export::sample_record();
         upsert_record.id = id.clone();
         upsert_record.target_id = target;
-        upsert_record.body = body.to_owned();
+        body.clone_into(&mut upsert_record.body);
 
         let mut stored_record = upsert_record.clone();
         if let Some((source_path, source_hash)) = source {
-            stored_record.provenance.source_hash = source_hash.to_owned();
+            source_hash.clone_into(&mut stored_record.provenance.source_hash);
             stored_record.provenance.source_refs = vec![SourceRef {
                 id: source_path.to_owned(),
                 hash: source_hash.to_owned(),

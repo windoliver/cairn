@@ -264,7 +264,8 @@
           "type": "number"
         },
         "reason": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         }
       }
     },
