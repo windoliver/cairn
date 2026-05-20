@@ -47,6 +47,7 @@ pub mod pre_compact;
 pub mod profile;
 pub mod reflection;
 pub mod salience;
+pub mod skillify;
 pub(crate) mod squash;
 pub mod turn;
 
