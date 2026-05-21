@@ -5,7 +5,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cairn_agent_core::{
-    AgentToolExecutor, CairnAgentProvider, ToolExecution, UnconfiguredCairnAgentProvider,
+    AgentToolExecutor, CairnAgentProvider, CairnCliToolExecutor, ToolExecution,
+    UnconfiguredCairnAgentProvider,
 };
 use cairn_core::contract::version::{ContractVersion, VersionRange};
 use cairn_core::contract::{
@@ -120,6 +121,7 @@ impl AgentToolExecutor for RecordingToolExecutor {
         &self,
         _call: &AgentToolCall,
         _args: serde_json::Value,
+        _wall_clock_remaining: Duration,
     ) -> Result<ToolExecution, AgentProviderError> {
         *self.calls.lock().expect("call counter lock is available") += 1;
         Ok(self.result.clone())
@@ -143,7 +145,14 @@ impl AgentToolExecutor for SlowToolExecutor {
         &self,
         _call: &AgentToolCall,
         _args: serde_json::Value,
+        wall_clock_remaining: Duration,
     ) -> Result<ToolExecution, AgentProviderError> {
+        if self.delay > wall_clock_remaining {
+            tokio::time::sleep(wall_clock_remaining).await;
+            return Err(AgentProviderError::BudgetExceeded {
+                limit: "wall_clock".to_string(),
+            });
+        }
         tokio::time::sleep(self.delay).await;
         Ok(self.result.clone())
     }
@@ -365,6 +374,68 @@ async fn provider_aborts_when_tool_exceeds_wall_clock_budget() {
         run.abort_error,
         Some(AgentProviderError::BudgetExceeded { ref limit }) if limit == "wall_clock"
     ));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn provider_kills_cli_subprocess_when_tool_exceeds_wall_clock_budget() {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "cairn-agent-core-timeout-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time after epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&temp_root).expect("create temp root");
+    let script_path = temp_root.join("sleeping-cairn");
+    let marker_path = temp_root.join("marker");
+    let mut script = std::fs::File::create(&script_path).expect("create script");
+    writeln!(
+        script,
+        "#!/bin/sh\nsleep 1\nprintf marker > '{}'\nprintf '{{\"ok\":true}}\\n'\n",
+        marker_path.display()
+    )
+    .expect("write script");
+    let mut perms = std::fs::metadata(&script_path)
+        .expect("script metadata")
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&script_path, perms).expect("chmod script");
+
+    let llm = Arc::new(SequenceLlm::new([CompletionOutput::Json(json!({
+        "action": "tool",
+        "tool": { "verb": "search", "write_report": false, "persist": false },
+        "args": { "query": "budget" }
+    }))]));
+    let tools = Arc::new(CairnCliToolExecutor::new(script_path.to_string_lossy()));
+    let provider = CairnAgentProvider::new(llm, tools);
+    let started = std::time::Instant::now();
+
+    let run = provider
+        .spawn(request_with_wall_clock(AgentOutputSchema::Json, 2, 300))
+        .await
+        .expect("wall-clock exhaustion returns aborted run");
+
+    assert!(
+        started.elapsed() < Duration::from_millis(700),
+        "provider should return before the script sleep completes"
+    );
+    assert_eq!(run.status, AgentRunStatus::Aborted);
+    assert!(matches!(
+        run.abort_error,
+        Some(AgentProviderError::BudgetExceeded { ref limit }) if limit == "wall_clock"
+    ));
+
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert!(
+        !marker_path.exists(),
+        "timed-out subprocess should be killed before writing marker"
+    );
+    let _ = std::fs::remove_dir_all(temp_root);
 }
 
 #[tokio::test]

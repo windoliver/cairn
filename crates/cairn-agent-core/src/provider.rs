@@ -129,19 +129,10 @@ impl AgentProvider for CairnAgentProvider {
                             policy_trace,
                         ));
                     };
-                    let execution = match timeout(remaining, self.tools.execute(&tool, args)).await
-                    {
-                        Ok(Ok(execution)) => execution,
-                        Ok(Err(err)) => {
+                    let execution = match self.tools.execute(&tool, args, remaining).await {
+                        Ok(execution) => execution,
+                        Err(err) => {
                             return Ok(aborted_run(err, &meter, tool_calls, policy_trace));
-                        }
-                        Err(_elapsed) => {
-                            return Ok(aborted_run(
-                                wall_clock_exceeded(),
-                                &meter,
-                                tool_calls,
-                                policy_trace,
-                            ));
                         }
                     };
 

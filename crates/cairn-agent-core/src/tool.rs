@@ -1,4 +1,5 @@
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use cairn_core::contract::{AgentProviderError, AgentToolCall, CairnVerb};
 
@@ -19,6 +20,7 @@ pub trait AgentToolExecutor: Send + Sync {
         &self,
         call: &AgentToolCall,
         args: serde_json::Value,
+        wall_clock_remaining: Duration,
     ) -> Result<ToolExecution, AgentProviderError>;
 }
 
@@ -50,17 +52,17 @@ impl AgentToolExecutor for CairnCliToolExecutor {
         &self,
         call: &AgentToolCall,
         args: serde_json::Value,
+        wall_clock_remaining: Duration,
     ) -> Result<ToolExecution, AgentProviderError> {
         let argv = build_argv(call, &args)?;
         let command = self.command.clone();
-        let output = tokio::task::spawn_blocking(move || Command::new(command).args(argv).output())
-            .await
-            .map_err(|source| AgentProviderError::ProviderUnavailable {
-                message: format!("tool task join failed: {source}"),
-            })?
-            .map_err(|source| AgentProviderError::ProviderUnavailable {
-                message: format!("failed to execute cairn cli: {source}"),
-            })?;
+        let output = tokio::task::spawn_blocking(move || {
+            run_child_with_timeout(command, argv, wall_clock_remaining)
+        })
+        .await
+        .map_err(|source| AgentProviderError::ProviderUnavailable {
+            message: format!("tool task join failed: {source}"),
+        })??;
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -87,6 +89,58 @@ impl AgentToolExecutor for CairnCliToolExecutor {
             output: parsed,
             cost_units: 1,
         })
+    }
+}
+
+fn run_child_with_timeout(
+    command: String,
+    argv: Vec<String>,
+    wall_clock_remaining: Duration,
+) -> Result<Output, AgentProviderError> {
+    if wall_clock_remaining.is_zero() {
+        return Err(wall_clock_exceeded());
+    }
+
+    let mut child = Command::new(command)
+        .args(argv)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|source| AgentProviderError::ProviderUnavailable {
+            message: format!("failed to execute cairn cli: {source}"),
+        })?;
+    let started = Instant::now();
+
+    loop {
+        if child
+            .try_wait()
+            .map_err(|source| AgentProviderError::ProviderUnavailable {
+                message: format!("failed waiting for cairn cli: {source}"),
+            })?
+            .is_some()
+        {
+            return child.wait_with_output().map_err(|source| {
+                AgentProviderError::ProviderUnavailable {
+                    message: format!("failed collecting cairn cli output: {source}"),
+                }
+            });
+        }
+
+        let elapsed = started.elapsed();
+        if elapsed >= wall_clock_remaining {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(wall_clock_exceeded());
+        }
+
+        let remaining = wall_clock_remaining.saturating_sub(elapsed);
+        std::thread::sleep(remaining.min(Duration::from_millis(5)));
+    }
+}
+
+fn wall_clock_exceeded() -> AgentProviderError {
+    AgentProviderError::BudgetExceeded {
+        limit: "wall_clock".to_string(),
     }
 }
 
