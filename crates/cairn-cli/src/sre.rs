@@ -87,8 +87,8 @@ fn build_report_with_bench(
             id_hash: "sha256:local-vault".into(),
             name: vault_root
                 .file_name()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "vault".into()),
+                .map(|s| stable_string(&s.to_string_lossy(), "local_vault"))
+                .unwrap_or_else(|| "local_vault".into()),
         },
         workflow: SreWorkflowSummary {
             status: SreStatus::Unknown,
