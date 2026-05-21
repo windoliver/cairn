@@ -350,6 +350,49 @@ fn build_chain_accepts_regex_and_agent_with_provider() {
     assert!(chain.is_ok());
 }
 
+#[tokio::test]
+async fn build_chain_applies_agent_max_turns_to_request_budget() {
+    let config = ExtractConfig {
+        chain: vec![
+            ExtractorEntry {
+                worker: ExtractorWorkerKind::Regex,
+                kinds: vec![],
+                trigger: None,
+                budget: ConfigExtractBudget::default(),
+            },
+            ExtractorEntry {
+                worker: ExtractorWorkerKind::Agent,
+                kinds: vec![],
+                trigger: None,
+                budget: ConfigExtractBudget {
+                    max_tokens: Some(2048),
+                    max_wall_ms: Some(3000),
+                    max_turns: Some(7),
+                },
+            },
+        ],
+    };
+    let provider = Arc::new(RecordingAgentProvider::returning(successful_run()));
+    let chain = build_extract_chain(
+        &config,
+        ExtractProviders {
+            llm: None,
+            agent: Some(provider.clone()),
+        },
+    )
+    .expect("valid chain");
+    let event = cli_event();
+    let input = body_input(&event, "Use shard alpha for refunds.");
+
+    chain.run(&input).await.expect("chain run ok");
+
+    let request = provider.last_request();
+    assert_eq!(request.cost_budget.max_turns, 7);
+    assert_eq!(request.cost_budget.max_tool_calls, 7);
+    assert_eq!(request.cost_budget.max_cost_units, 2048);
+    assert_eq!(request.wall_clock_budget.max_millis, 3000);
+}
+
 #[test]
 fn parser_accepts_drafts_discards_and_evidence() {
     let event_id = CaptureEventId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").expect("valid ulid");

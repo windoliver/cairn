@@ -75,7 +75,11 @@ pub fn build_extract_chain(
                     .agent
                     .clone()
                     .ok_or(ExtractBuildError::MissingAgentProvider)?;
-                workers.push(Box::new(AgentExtractor::new(provider).with_budget(budget)));
+                let mut extractor = AgentExtractor::new(provider).with_budget(budget);
+                if let Some(max_turns) = entry.budget.max_turns {
+                    extractor = extractor.with_turn_budget(max_turns);
+                }
+                workers.push(Box::new(extractor));
             }
             ExtractorWorkerKind::Custom(name) => {
                 return Err(ExtractBuildError::UnsupportedWorker {

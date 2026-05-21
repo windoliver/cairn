@@ -31,6 +31,8 @@ const DEFAULT_AGENT_TOOL_CALL_BUDGET: u32 = 4;
 pub struct AgentExtractor {
     provider: Arc<dyn AgentProvider>,
     budget: ExtractBudget,
+    max_turns: u32,
+    max_tool_calls: u32,
 }
 
 impl AgentExtractor {
@@ -41,6 +43,8 @@ impl AgentExtractor {
         Self {
             provider,
             budget: ExtractBudget::agent_default(),
+            max_turns: DEFAULT_AGENT_TURN_BUDGET,
+            max_tool_calls: DEFAULT_AGENT_TOOL_CALL_BUDGET,
         }
     }
 
@@ -48,6 +52,20 @@ impl AgentExtractor {
     #[must_use]
     pub fn with_budget(mut self, budget: ExtractBudget) -> Self {
         self.budget = budget;
+        self
+    }
+
+    /// Override the agent turn and tool-call budgets. Zero normalizes to the
+    /// default so provider request validation remains fail-closed.
+    #[must_use]
+    pub fn with_turn_budget(mut self, max_turns: u32) -> Self {
+        let max_turns = if max_turns == 0 {
+            DEFAULT_AGENT_TURN_BUDGET
+        } else {
+            max_turns
+        };
+        self.max_turns = max_turns;
+        self.max_tool_calls = max_turns;
         self
     }
 
@@ -62,8 +80,8 @@ impl AgentExtractor {
             scope: AgentScope::read_only(),
             tool_allowlist: AgentToolAllowlist::read_only_cairn(),
             cost_budget: AgentCostBudget {
-                max_turns: agent_turn_budget(&self.budget),
-                max_tool_calls: agent_tool_call_budget(&self.budget),
+                max_turns: self.max_turns,
+                max_tool_calls: self.max_tool_calls,
                 max_cost_units: u64::from(self.budget.max_response_tokens.unwrap_or(4096).max(1)),
             },
             wall_clock_budget: AgentWallClockBudget {
@@ -75,14 +93,6 @@ impl AgentExtractor {
         request.validate()?;
         Ok(request)
     }
-}
-
-fn agent_turn_budget(_: &ExtractBudget) -> u32 {
-    DEFAULT_AGENT_TURN_BUDGET
-}
-
-fn agent_tool_call_budget(_: &ExtractBudget) -> u32 {
-    DEFAULT_AGENT_TOOL_CALL_BUDGET
 }
 
 fn empty_result() -> ExtractResult {
