@@ -54,13 +54,13 @@ pub fn run_report(matches: &ArgMatches, vault_root: &Path) -> ExitCode {
 
 /// Build a scrubbed local SRE report from vault-local metrics.
 #[must_use]
-pub fn build_report(vault_root: &Path, _config: &cairn_core::config::CairnConfig) -> SreReport {
-    build_report_with_bench(vault_root, _config, None).expect("no bench dir cannot fail")
+pub fn build_report(vault_root: &Path, config: &cairn_core::config::CairnConfig) -> SreReport {
+    build_report_with_bench(vault_root, config, None).expect("no bench dir cannot fail")
 }
 
 fn build_report_with_bench(
     vault_root: &Path,
-    _config: &cairn_core::config::CairnConfig,
+    config: &cairn_core::config::CairnConfig,
     bench_report_dir: Option<&Path>,
 ) -> Result<SreReport, String> {
     let events = read_metric_events(vault_root);
@@ -73,7 +73,7 @@ fn build_report_with_bench(
             _ => None,
         })
         .collect();
-    let search_modes = summarize_search(&events);
+    let search_modes = summarize_search(&events, config, vault_root);
     let p95 = percentile_u64(&rehydration_latencies, 0.95);
     let rehydration_status = classify_threshold(p95, SLO_COLD_REHYDRATE_MS);
     let gates = load_bench_gates(bench_report_dir)?;
@@ -130,7 +130,12 @@ fn read_metric_events(vault_root: &Path) -> Vec<MetricEvent> {
         .collect()
 }
 
-fn summarize_search(events: &[MetricEvent]) -> Vec<SreSearchModeSummary> {
+fn summarize_search(
+    events: &[MetricEvent],
+    config: &cairn_core::config::CairnConfig,
+    vault_root: &Path,
+) -> Vec<SreSearchModeSummary> {
+    let caps = search_capabilities(config, vault_root);
     ["keyword", "semantic", "hybrid"]
         .into_iter()
         .map(|mode| {
@@ -158,9 +163,15 @@ fn summarize_search(events: &[MetricEvent]) -> Vec<SreSearchModeSummary> {
                     }
                 }
             }
+            let advertised = match mode {
+                "keyword" => caps.keyword_search,
+                "semantic" => caps.semantic_search,
+                "hybrid" => caps.hybrid_search,
+                _ => false,
+            };
             SreSearchModeSummary {
                 mode: mode.into(),
-                advertised: true,
+                advertised,
                 invocations,
                 degraded,
                 failed,
@@ -177,6 +188,20 @@ fn summarize_search(events: &[MetricEvent]) -> Vec<SreSearchModeSummary> {
             }
         })
         .collect()
+}
+
+fn search_capabilities(
+    config: &cairn_core::config::CairnConfig,
+    vault_root: &Path,
+) -> cairn_core::config::CapabilitySet {
+    let models_root = vault_root.join(".cairn").join("models");
+    let cache = cairn_embeddings_local::ModelCache::new(&models_root);
+    let kind = config.search.embedding_model;
+    let mock_embedder = std::env::var("CAIRN_MOCK_EMBEDDER").as_deref() == Ok("1");
+    let model_present = mock_embedder || cache.is_present(kind);
+    let provider_ready =
+        crate::verbs::embedding_provider_ready(config, model_present, Some(vault_root));
+    config.capabilities(provider_ready)
 }
 
 fn rollup_search_status(modes: &[SreSearchModeSummary]) -> SreStatus {
@@ -331,10 +356,10 @@ fn rollup_status(statuses: impl IntoIterator<Item = SreStatus>) -> SreStatus {
             SreStatus::Ok => {}
         }
     }
-    if saw_unknown {
-        SreStatus::Unknown
-    } else if saw_warning {
+    if saw_warning {
         SreStatus::Warning
+    } else if saw_unknown {
+        SreStatus::Unknown
     } else {
         SreStatus::Ok
     }

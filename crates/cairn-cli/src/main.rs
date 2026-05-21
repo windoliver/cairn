@@ -946,7 +946,15 @@ fn run_admin(matches: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
     // bubbling a malformed `.cairn/config.yaml` as the primary
     // diagnostic — a non-vault config has no business shaping the
     // operator-facing error here (round-8 review #2).
-    if let Some(rc) = enforce_vault_binding("admin", &vault_root) {
+    let is_sre_report = matches.subcommand().is_some_and(|(name, sub)| {
+        name == "sre" && matches!(sub.subcommand(), Some(("report", _)))
+    });
+    let binding_result = if is_sre_report {
+        enforce_vault_binding_path_free("admin sre report", &vault_root)
+    } else {
+        enforce_vault_binding("admin", &vault_root)
+    };
+    if let Some(rc) = binding_result {
         return rc;
     }
 
@@ -1056,6 +1064,20 @@ fn enforce_vault_binding(verb: &str, vault_root: &std::path::Path) -> Option<Exi
         }
         verbs::status::VaultBinding::Invalid(reason) => {
             eprintln!("cairn {verb}: vault binding error — {reason}");
+            Some(ExitCode::from(78)) // EX_CONFIG
+        }
+    }
+}
+
+fn enforce_vault_binding_path_free(verb: &str, vault_root: &std::path::Path) -> Option<ExitCode> {
+    match verbs::status::probe_vault_binding(vault_root) {
+        verbs::status::VaultBinding::Bound => None,
+        verbs::status::VaultBinding::Unbound => {
+            eprintln!("cairn {verb}: no Cairn vault; run `cairn bootstrap` first");
+            Some(ExitCode::from(78)) // EX_CONFIG
+        }
+        verbs::status::VaultBinding::Invalid(_reason) => {
+            eprintln!("cairn {verb}: vault binding error");
             Some(ExitCode::from(78)) // EX_CONFIG
         }
     }

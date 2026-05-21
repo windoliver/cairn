@@ -101,6 +101,47 @@ fn admin_sre_report_marks_unobserved_search_unknown() {
 }
 
 #[test]
+fn admin_sre_report_marks_unadvertised_search_modes() {
+    let dir = bootstrap_vault();
+    let config = dir.path().join(".cairn/config.yaml");
+    let raw = std::fs::read_to_string(&config).expect("read config");
+    assert!(
+        raw.contains("local_embeddings: true"),
+        "bootstrap config: {raw}"
+    );
+    std::fs::write(
+        &config,
+        raw.replace("local_embeddings: true", "local_embeddings: false"),
+    )
+    .expect("write config");
+
+    let output = cairn()
+        .current_dir(dir.path())
+        .args(["admin", "sre", "report", "--json"])
+        .output()
+        .expect("run sre report");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json = json_stdout(&output);
+    let modes = json["search"]["modes"].as_array().expect("search modes");
+    let advertised = |name: &str| {
+        modes
+            .iter()
+            .find(|mode| mode["mode"] == name)
+            .expect("mode")["advertised"]
+            .as_bool()
+            .expect("advertised bool")
+    };
+    assert!(advertised("keyword"));
+    assert!(!advertised("semantic"));
+    assert!(!advertised("hybrid"));
+}
+
+#[test]
 fn admin_sre_report_human_summarizes_sections() {
     let dir = bootstrap_vault();
     let metrics = dir.path().join(".cairn/metrics.jsonl");
@@ -129,7 +170,7 @@ fn admin_sre_report_human_summarizes_sections() {
 }
 
 #[test]
-fn admin_sre_report_human_prioritizes_unknown_over_warning() {
+fn admin_sre_report_human_reports_warning_when_degraded_search_present() {
     let dir = bootstrap_vault();
     let metrics = dir.path().join(".cairn/metrics.jsonl");
     std::fs::write(
@@ -151,7 +192,33 @@ fn admin_sre_report_human_prioritizes_unknown_over_warning() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("SRE status: unknown"), "stdout: {stdout}");
+    assert!(stdout.contains("SRE status: warning"), "stdout: {stdout}");
+}
+
+#[test]
+fn admin_sre_report_search_warns_when_observed_mode_degrades() {
+    let dir = bootstrap_vault();
+    let metrics = dir.path().join(".cairn/metrics.jsonl");
+    std::fs::write(
+        &metrics,
+        r#"{"event":"search_completed","ts_ms":2,"mode":"semantic","hit_count":0,"latency_ms":42,"degradation_state":"partial","error":null}
+"#,
+    )
+    .expect("write metrics");
+
+    let output = cairn()
+        .current_dir(dir.path())
+        .args(["admin", "sre", "report", "--json"])
+        .output()
+        .expect("run sre report");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json = json_stdout(&output);
+    assert_eq!(json["search"]["status"], "warning");
 }
 
 #[test]
@@ -219,6 +286,35 @@ fn admin_sre_report_bad_bench_dir_error_is_path_free() {
     assert_eq!(output.status.code(), Some(78));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("bench-report-dir"), "stderr: {stderr}");
+    assert_forbidden_fragments_absent(&stderr);
+}
+
+#[test]
+fn admin_sre_report_unbound_vault_error_is_path_free() {
+    let parent = tempfile::tempdir().expect("parent dir");
+    let vault = parent
+        .path()
+        .join("SECRET_PRIVATE_TOKEN private body query text");
+    std::fs::create_dir(&vault).expect("create vault dir");
+
+    let output = cairn()
+        .args([
+            "--vault",
+            vault.to_str().expect("utf8"),
+            "admin",
+            "sre",
+            "report",
+        ])
+        .output()
+        .expect("run sre report");
+
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(78));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cairn admin sre report:"),
+        "stderr: {stderr}"
+    );
     assert_forbidden_fragments_absent(&stderr);
 }
 
