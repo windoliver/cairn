@@ -1,12 +1,13 @@
 //! Operator-facing SRE report builder and renderers.
 
-use std::{path::Path, process::ExitCode};
+use std::{collections::BTreeMap, path::Path, process::ExitCode};
 
 use cairn_core::domain::metrics::MetricEvent;
 use cairn_core::domain::{
     SreDetail, SreGateResult, SreGateSummary, SreMeasurement, SrePrivacySummary,
-    SreProjectionSummary, SreRehydrationSummary, SreReport, SreSearchModeSummary, SreSearchSummary,
-    SreStatus, SreVaultSummary, SreWorkflowSummary, classify_threshold,
+    SreProjectionSummary, SreProjectionTargetSummary, SreRehydrationSummary, SreReport,
+    SreSearchModeSummary, SreSearchSummary, SreStatus, SreVaultSummary, SreWorkflowKindSummary,
+    SreWorkflowSummary, classify_threshold,
 };
 use clap::ArgMatches;
 use serde::Deserialize;
@@ -76,6 +77,8 @@ fn build_report_with_bench(
         })
         .collect();
     let search_modes = summarize_search(&events, config, vault_root);
+    let workflow = summarize_workflow(&events);
+    let projection = summarize_projection(&events);
     let p95 = percentile_u64(&rehydration_latencies, 0.95);
     let rehydration_status = classify_threshold(p95, SLO_COLD_REHYDRATE_MS);
     let mut gates = load_bench_gates(bench_report_dir)?;
@@ -87,13 +90,7 @@ fn build_report_with_bench(
             id_hash: "sha256:local-vault".into(),
             name: "local_vault".into(),
         },
-        workflow: SreWorkflowSummary {
-            status: SreStatus::Unknown,
-            oldest_queued_age_ms: None,
-            longest_held_lease_ms: None,
-            dead_letter_count: 0,
-            kinds: Vec::new(),
-        },
+        workflow,
         rehydration: SreRehydrationSummary {
             status: rehydration_status,
             latest_latency_ms: rehydration_latencies.last().copied(),
@@ -102,12 +99,7 @@ fn build_report_with_bench(
             sample_count: rehydration_latencies.len() as u64,
             last_gate: None,
         },
-        projection: SreProjectionSummary {
-            status: SreStatus::Unknown,
-            nexus_state: "unknown".into(),
-            nexus_reason: None,
-            targets: Vec::new(),
-        },
+        projection,
         search: SreSearchSummary {
             status: rollup_search_status(&search_modes),
             modes: search_modes,
@@ -176,12 +168,269 @@ fn is_known_metric_event(event_name: &str) -> bool {
     )
 }
 
+const WORKFLOW_BACKLOG_THRESHOLD_MS: i64 = 300_000;
+
+#[derive(Default)]
+struct WorkflowKindAggregate {
+    leased: u64,
+    done_recent: u64,
+    failed_recent: u64,
+    oldest_queued_age_ms: Option<i64>,
+    last_success_ts_ms: Option<i64>,
+    dead_letters: usize,
+}
+
+fn summarize_workflow(events: &[MetricEvent]) -> SreWorkflowSummary {
+    let mut kinds: BTreeMap<String, WorkflowKindAggregate> = BTreeMap::new();
+    let mut saw_workflow_event = false;
+    let mut oldest_queued_age_ms: Option<i64> = None;
+    let mut latest_ts_ms: Option<i64> = None;
+
+    for event in events {
+        match event {
+            MetricEvent::WorkflowJobStarted {
+                ts_ms,
+                kind,
+                queue_lag_ms,
+                ..
+            } => {
+                saw_workflow_event = true;
+                latest_ts_ms = Some(latest_ts_ms.map_or(*ts_ms, |latest| latest.max(*ts_ms)));
+                let kind = workflow_kind_label(kind);
+                let entry = kinds.entry(kind).or_default();
+                entry.leased = entry.leased.saturating_add(1);
+                if *queue_lag_ms >= 0 {
+                    entry.oldest_queued_age_ms = Some(
+                        entry
+                            .oldest_queued_age_ms
+                            .map_or(*queue_lag_ms, |current| current.max(*queue_lag_ms)),
+                    );
+                    oldest_queued_age_ms = Some(
+                        oldest_queued_age_ms
+                            .map_or(*queue_lag_ms, |current| current.max(*queue_lag_ms)),
+                    );
+                }
+            }
+            MetricEvent::WorkflowJobCompleted { ts_ms, kind, .. } => {
+                saw_workflow_event = true;
+                latest_ts_ms = Some(latest_ts_ms.map_or(*ts_ms, |latest| latest.max(*ts_ms)));
+                let kind = workflow_kind_label(kind);
+                let entry = kinds.entry(kind).or_default();
+                entry.done_recent = entry.done_recent.saturating_add(1);
+                entry.last_success_ts_ms = Some(
+                    entry
+                        .last_success_ts_ms
+                        .map_or(*ts_ms, |current| current.max(*ts_ms)),
+                );
+            }
+            MetricEvent::WorkflowJobFailed {
+                ts_ms,
+                kind,
+                disposition,
+                ..
+            } => {
+                saw_workflow_event = true;
+                latest_ts_ms = Some(latest_ts_ms.map_or(*ts_ms, |latest| latest.max(*ts_ms)));
+                let kind = workflow_kind_label(kind);
+                let entry = kinds.entry(kind).or_default();
+                entry.failed_recent = entry.failed_recent.saturating_add(1);
+                if disposition == "permanent" {
+                    entry.dead_letters = entry.dead_letters.saturating_add(1);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if !saw_workflow_event {
+        return SreWorkflowSummary {
+            status: SreStatus::Unknown,
+            oldest_queued_age_ms: None,
+            longest_held_lease_ms: None,
+            dead_letter_count: 0,
+            kinds: Vec::new(),
+        };
+    }
+
+    let latest_ts_ms = latest_ts_ms.unwrap_or(0);
+    let mut dead_letter_count = 0_usize;
+    let kinds: Vec<SreWorkflowKindSummary> = kinds
+        .into_iter()
+        .map(|(kind, aggregate)| {
+            dead_letter_count = dead_letter_count.saturating_add(aggregate.dead_letters);
+            let status = if aggregate.failed_recent > 0 || aggregate.dead_letters > 0 {
+                SreStatus::Warning
+            } else {
+                SreStatus::Ok
+            };
+            SreWorkflowKindSummary {
+                kind,
+                queued: 0,
+                leased: aggregate.leased,
+                done_recent: aggregate.done_recent,
+                failed_recent: aggregate.failed_recent,
+                oldest_queued_age_ms: aggregate.oldest_queued_age_ms,
+                last_success_age_ms: aggregate
+                    .last_success_ts_ms
+                    .map(|success_ts| latest_ts_ms.saturating_sub(success_ts).max(0)),
+                backlog_threshold_ms: WORKFLOW_BACKLOG_THRESHOLD_MS,
+                status,
+            }
+        })
+        .collect();
+
+    let status = if kinds.iter().any(|kind| kind.status == SreStatus::Warning) {
+        SreStatus::Warning
+    } else {
+        SreStatus::Ok
+    };
+
+    SreWorkflowSummary {
+        status,
+        oldest_queued_age_ms,
+        longest_held_lease_ms: None,
+        dead_letter_count,
+        kinds,
+    }
+}
+
+#[derive(Default)]
+struct ProjectionTargetAggregate {
+    current: u64,
+    failed: u64,
+    max_lag_ms: Option<i64>,
+    last_rebuild_latency_ms: Option<u64>,
+    degraded: bool,
+}
+
+fn summarize_projection(events: &[MetricEvent]) -> SreProjectionSummary {
+    let mut targets: BTreeMap<String, ProjectionTargetAggregate> = BTreeMap::new();
+    let mut saw_projection_event = false;
+
+    for event in events {
+        let MetricEvent::ProjectionRebuild {
+            projection,
+            status,
+            latency_ms,
+            records_rebuilt,
+            queue_lag_ms,
+            error,
+            degradation_state,
+            ..
+        } = event
+        else {
+            continue;
+        };
+        saw_projection_event = true;
+        let target = projection_target_label(projection);
+        let entry = targets.entry(target).or_default();
+        if status == "committed" {
+            entry.current = entry.current.saturating_add(*records_rebuilt);
+        } else {
+            entry.failed = entry.failed.saturating_add(1);
+        }
+        if error.is_some()
+            || degradation_state
+                .as_deref()
+                .is_some_and(|state| state != "none")
+        {
+            entry.degraded = true;
+        }
+        if *queue_lag_ms >= 0 {
+            entry.max_lag_ms = Some(
+                entry
+                    .max_lag_ms
+                    .map_or(*queue_lag_ms, |current| current.max(*queue_lag_ms)),
+            );
+        }
+        entry.last_rebuild_latency_ms = Some(*latency_ms);
+    }
+
+    if !saw_projection_event {
+        return SreProjectionSummary {
+            status: SreStatus::Unknown,
+            nexus_state: "unknown".into(),
+            nexus_reason: None,
+            targets: Vec::new(),
+        };
+    }
+
+    let targets: Vec<SreProjectionTargetSummary> = targets
+        .into_iter()
+        .map(|(target, aggregate)| {
+            let status = if aggregate.failed > 0 || aggregate.degraded {
+                SreStatus::Warning
+            } else {
+                SreStatus::Ok
+            };
+            SreProjectionTargetSummary {
+                target,
+                current: aggregate.current,
+                stale: 0,
+                failed: aggregate.failed,
+                missing: 0,
+                max_lag_ms: aggregate.max_lag_ms,
+                last_rebuild_latency_ms: aggregate.last_rebuild_latency_ms,
+                status,
+            }
+        })
+        .collect();
+    let status = if targets
+        .iter()
+        .any(|target| target.status == SreStatus::Warning)
+    {
+        SreStatus::Warning
+    } else {
+        SreStatus::Ok
+    };
+    SreProjectionSummary {
+        status,
+        nexus_state: if status == SreStatus::Warning {
+            "degraded".into()
+        } else {
+            "healthy".into()
+        },
+        nexus_reason: if status == SreStatus::Warning {
+            Some("projection_rebuild_warning".into())
+        } else {
+            None
+        },
+        targets,
+    }
+}
+
+fn workflow_kind_label(raw: &str) -> String {
+    match raw {
+        "dream.light" => raw.to_owned(),
+        _ => "redacted_workflow".to_owned(),
+    }
+}
+
+fn projection_target_label(raw: &str) -> String {
+    match raw {
+        "sqlite.from_db" => raw.to_owned(),
+        _ => "redacted_projection".to_owned(),
+    }
+}
+
 fn summarize_search(
     events: &[MetricEvent],
     config: &cairn_core::config::CairnConfig,
     vault_root: &Path,
 ) -> Vec<SreSearchModeSummary> {
     let caps = search_capabilities(config, vault_root);
+    let search_completed_observations: Vec<(&str, i64, u64)> = events
+        .iter()
+        .filter_map(|event| match event {
+            MetricEvent::SearchCompleted {
+                mode,
+                ts_ms,
+                latency_ms,
+                ..
+            } => Some((mode.as_str(), *ts_ms, *latency_ms)),
+            _ => None,
+        })
+        .collect();
     ["keyword", "semantic", "hybrid"]
         .into_iter()
         .map(|mode| {
@@ -190,7 +439,9 @@ fn summarize_search(
             let mut failed = 0_u64;
             let mut latencies = Vec::new();
             for event in events {
-                let Some(observation) = search_observation(event, mode) else {
+                let Some(observation) =
+                    search_observation(event, mode, &search_completed_observations)
+                else {
                     continue;
                 };
                 invocations += 1;
@@ -235,7 +486,11 @@ struct SearchObservation {
     failed: bool,
 }
 
-fn search_observation(event: &MetricEvent, mode: &str) -> Option<SearchObservation> {
+fn search_observation(
+    event: &MetricEvent,
+    mode: &str,
+    search_completed_observations: &[(&str, i64, u64)],
+) -> Option<SearchObservation> {
     match event {
         MetricEvent::SearchCompleted {
             mode: event_mode,
@@ -249,7 +504,9 @@ fn search_observation(event: &MetricEvent, mode: &str) -> Option<SearchObservati
             failed: error.is_some(),
         }),
         MetricEvent::VerbInvocation {
+            ts_ms,
             verb,
+            surface,
             mode: Some(event_mode),
             status,
             latency_ms,
@@ -258,6 +515,12 @@ fn search_observation(event: &MetricEvent, mode: &str) -> Option<SearchObservati
             ..
         } if verb == "search"
             && event_mode == mode
+            && (surface != "cli"
+                || !search_completed_observations.contains(&(
+                    event_mode.as_str(),
+                    *ts_ms,
+                    *latency_ms,
+                )))
             && (status != "committed" || error.is_some()) =>
         {
             Some(SearchObservation {

@@ -177,6 +177,41 @@ fn admin_sre_report_does_not_double_count_completed_cli_search() {
 }
 
 #[test]
+fn admin_sre_report_does_not_double_count_failed_cli_search() {
+    let dir = bootstrap_vault();
+    let metrics = dir.path().join(".cairn/metrics.jsonl");
+    std::fs::write(
+        &metrics,
+        r#"{"event":"search_completed","ts_ms":1,"mode":"semantic","hit_count":0,"latency_ms":41,"degradation_state":"failed","error":"provider_unavailable"}
+{"event":"verb_invocation","ts_ms":1,"verb":"search","surface":"cli","mode":"semantic","status":"aborted","latency_ms":41,"error":"provider_unavailable","budget_used_ratio":null,"degradation_state":"failed"}
+"#,
+    )
+    .expect("write metrics");
+
+    let output = cairn()
+        .current_dir(dir.path())
+        .args(["admin", "sre", "report", "--json"])
+        .output()
+        .expect("run sre report");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json = json_stdout(&output);
+    let modes = json["search"]["modes"].as_array().expect("search modes");
+    let semantic = modes
+        .iter()
+        .find(|mode| mode["mode"] == "semantic")
+        .expect("semantic mode");
+    assert_eq!(semantic["invocations"], 1);
+    assert_eq!(semantic["failed"], 1);
+    assert_eq!(semantic["degraded"], 1);
+    assert_eq!(semantic["status"], "fail");
+}
+
+#[test]
 fn admin_sre_report_tolerates_unknown_metric_events() {
     let dir = bootstrap_vault();
     let metrics = dir.path().join(".cairn/metrics.jsonl");
@@ -277,6 +312,107 @@ fn admin_sre_report_marks_unadvertised_search_modes() {
     assert!(advertised("keyword"));
     assert!(!advertised("semantic"));
     assert!(!advertised("hybrid"));
+}
+
+#[test]
+fn admin_sre_report_summarizes_workflow_metrics_safely() {
+    let dir = bootstrap_vault();
+    let metrics = dir.path().join(".cairn/metrics.jsonl");
+    std::fs::write(
+        &metrics,
+        r#"{"event":"workflow_job_started","ts_ms":1000,"job_id":"job-SECRET_PRIVATE_TOKEN","kind":"dream.light","attempts":1,"queue_lag_ms":120,"dedupe_key":"/Users/alice private body query text"}
+{"event":"workflow_job_completed","ts_ms":2000,"job_id":"job-SECRET_PRIVATE_TOKEN","kind":"dream.light","attempts":1,"duration_ms":40}
+{"event":"workflow_job_failed","ts_ms":3000,"job_id":"job-SECRET_PRIVATE_TOKEN","kind":"SECRET_PRIVATE_TOKEN private body query text","attempts":2,"disposition":"permanent","failure_class":"provider_error","last_error":"/Users/alice private body query text","will_retry_at_ms":null}
+"#,
+    )
+    .expect("write metrics");
+
+    let output = cairn()
+        .current_dir(dir.path())
+        .args(["admin", "sre", "report", "--json"])
+        .output()
+        .expect("run sre report");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json = json_stdout(&output);
+    assert_eq!(json["workflow"]["status"], "warning");
+    assert_eq!(json["workflow"]["oldest_queued_age_ms"], 120);
+    assert_eq!(json["workflow"]["dead_letter_count"], 1);
+    let kinds = json["workflow"]["kinds"]
+        .as_array()
+        .expect("workflow kinds");
+    let dream = kinds
+        .iter()
+        .find(|kind| kind["kind"] == "dream.light")
+        .expect("dream.light kind");
+    assert_eq!(dream["leased"], 1);
+    assert_eq!(dream["done_recent"], 1);
+    assert_eq!(dream["oldest_queued_age_ms"], 120);
+    let redacted = kinds
+        .iter()
+        .find(|kind| kind["kind"] == "redacted_workflow")
+        .expect("redacted workflow kind");
+    assert_eq!(redacted["failed_recent"], 1);
+    assert_eq!(redacted["status"], "warning");
+    assert_forbidden_fragments_absent(&stdout);
+}
+
+#[test]
+fn admin_sre_report_summarizes_projection_metrics_safely() {
+    let dir = bootstrap_vault();
+    let metrics = dir.path().join(".cairn/metrics.jsonl");
+    std::fs::write(
+        &metrics,
+        r#"{"event":"projection_rebuild","ts_ms":1000,"projection":"sqlite.from_db","status":"committed","latency_ms":88,"records_rebuilt":7,"queue_lag_ms":40,"retry_count":0,"error":null,"degradation_state":"none"}
+{"event":"projection_rebuild","ts_ms":2000,"projection":"SECRET_PRIVATE_TOKEN private body query text","status":"aborted","latency_ms":99,"records_rebuilt":0,"queue_lag_ms":55,"retry_count":1,"error":"/Users/alice private body query text","degradation_state":"partial"}
+"#,
+    )
+    .expect("write metrics");
+
+    let output = cairn()
+        .current_dir(dir.path())
+        .args(["admin", "sre", "report", "--json"])
+        .output()
+        .expect("run sre report");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json = json_stdout(&output);
+    assert_eq!(json["projection"]["status"], "warning");
+    assert_eq!(json["projection"]["nexus_state"], "degraded");
+    assert_eq!(
+        json["projection"]["nexus_reason"],
+        "projection_rebuild_warning"
+    );
+    let targets = json["projection"]["targets"]
+        .as_array()
+        .expect("projection targets");
+    let sqlite = targets
+        .iter()
+        .find(|target| target["target"] == "sqlite.from_db")
+        .expect("sqlite target");
+    assert_eq!(sqlite["current"], 7);
+    assert_eq!(sqlite["failed"], 0);
+    assert_eq!(sqlite["max_lag_ms"], 40);
+    assert_eq!(sqlite["last_rebuild_latency_ms"], 88);
+    let redacted = targets
+        .iter()
+        .find(|target| target["target"] == "redacted_projection")
+        .expect("redacted projection target");
+    assert_eq!(redacted["failed"], 1);
+    assert_eq!(redacted["max_lag_ms"], 55);
+    assert_eq!(redacted["last_rebuild_latency_ms"], 99);
+    assert_eq!(redacted["status"], "warning");
+    assert_forbidden_fragments_absent(&stdout);
 }
 
 #[test]
