@@ -341,6 +341,23 @@ fn promotion_gate_rejects_revoked_receipt() {
 }
 
 #[test]
+fn promotion_gate_rejects_non_human_signer() {
+    let record = scoped_record();
+    let mut receipt = signed_receipt();
+    receipt.payload.human_identity =
+        Identity::parse("agt:cairn-cli:default:reader:v1").expect("agent");
+    receipt.signature = signature_for(&receipt.payload);
+    let now = Rfc3339Timestamp::parse("2026-05-21T12:30:00Z").expect("now");
+    let revocation = SharingRevocationState::default();
+    let rebac = rebac_for_team_write();
+
+    assert_promotion_rejection_detail(
+        promotion_input(&record, &receipt, &now, &revocation, &rebac),
+        SharingDecisionKind::NotHuman,
+    );
+}
+
+#[test]
 fn promotion_gate_rejects_missing_rebac_write_relation() {
     let record = scoped_record();
     let receipt = signed_receipt();

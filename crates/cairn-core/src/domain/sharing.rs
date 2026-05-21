@@ -336,6 +336,15 @@ impl SignedShareLink {
 pub fn verify_promotion_gate(
     input: PromotionGateInput<'_>,
 ) -> Result<PolicyTraceEntry, SharingGateRejection> {
+    if input.receipt.payload.human_identity.kind() != crate::domain::IdentityKind::Human {
+        return Err(reject_promotion(
+            SharingDecisionKind::NotHuman,
+            DomainError::Unauthorized {
+                message: "promotion receipt signer must be a human identity".to_owned(),
+            },
+        ));
+    }
+
     if let Err(error) = input.receipt.validate_shape() {
         return Err(reject_promotion(SharingDecisionKind::InvalidShape, error));
     }
@@ -353,15 +362,6 @@ pub fn verify_promotion_gate(
         return Err(reject_promotion(
             SharingDecisionKind::BadSignature,
             DomainError::InvalidSignature,
-        ));
-    }
-
-    if input.receipt.payload.human_identity.kind() != crate::domain::IdentityKind::Human {
-        return Err(reject_promotion(
-            SharingDecisionKind::NotHuman,
-            DomainError::Unauthorized {
-                message: "promotion receipt signer must be a human identity".to_owned(),
-            },
         ));
     }
 
