@@ -1,6 +1,7 @@
 //! SRE release gate subcommand.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::Context;
 use cairn_core::domain::{
@@ -15,9 +16,17 @@ use crate::gates::report::GateOutcome;
 use crate::gates::thresholds::{SLO_COLD_REHYDRATE_MS, SLO_MIGRATION_BACKLOG_MS};
 
 const SCHEMA_VERSION: u32 = 1;
-const FIXTURE_WORKFLOW_AGE_MS: f64 = 120_000.0;
+const COLD_REHYDRATE_BENCH: &str = "cold_rehydrate_p95";
+const FIXTURE_WORKFLOW_AGE_MS_F64: f64 = 120_000.0;
+const FIXTURE_WORKFLOW_AGE_MS_I64: i64 = 120_000;
+const FIXTURE_LONGEST_HELD_LEASE_MS: i64 = 30_000;
+const FIXTURE_LAST_SUCCESS_AGE_MS: i64 = 60_000;
+const FIXTURE_MIGRATION_BACKLOG_THRESHOLD_MS: i64 = 600_000;
 const FIXTURE_COLD_REHYDRATE_P95_MS: f64 = 2_250.0;
+const FIXTURE_LATEST_REHYDRATE_MS: u64 = 2_200;
+const FIXTURE_REHYDRATE_SAMPLES: u64 = 5;
 const FIXTURE_PROJECTION_STALE_FAILED: f64 = 0.0;
+const SEEDED_FORBIDDEN_DETAIL: &str = "SECRET_PRIVATE_TOKEN /Users/alice private body query text";
 const FORBIDDEN_FRAGMENTS: &[&str] = &[
     "SECRET_PRIVATE_TOKEN",
     "/Users/alice",
@@ -36,6 +45,14 @@ pub struct SreArgs {
     #[arg(long)]
     pub fixtures_only: bool,
 
+    /// Path to criterion's output dir for lifecycle measurements.
+    #[arg(long, default_value = "target/criterion")]
+    pub criterion_dir: PathBuf,
+
+    /// Skip running the lifecycle bench and reuse the existing criterion output.
+    #[arg(long)]
+    pub no_run: bool,
+
     /// Also refresh `sre.baseline.json` with the generated SRE fixture report.
     #[arg(long)]
     pub refresh_baseline: bool,
@@ -48,6 +65,8 @@ impl SreArgs {
         Self {
             out_dir: "target/cairn-bench".into(),
             fixtures_only: true,
+            criterion_dir: "target/criterion".into(),
+            no_run: false,
             refresh_baseline: false,
         }
     }
@@ -58,7 +77,18 @@ impl SreArgs {
 /// # Errors
 /// Returns an error if report serialization or filesystem writes fail.
 pub fn run(args: &SreArgs) -> anyhow::Result<GateOutcome> {
-    let mut report = fixture_report(!args.fixtures_only);
+    let cold_measurement = if args.fixtures_only {
+        ColdMeasurement::FixturesOnly
+    } else {
+        if !args.no_run {
+            run_lifecycle_criterion()?;
+        }
+        match load_cold_rehydrate_p95(&args.criterion_dir)? {
+            Some(measured_ms) => ColdMeasurement::Measured(measured_ms),
+            None => ColdMeasurement::MissingInput,
+        }
+    };
+    let mut report = fixture_report(cold_measurement);
     let forbidden = forbidden_fragment_count(&serde_json::to_string(&report)?);
     set_privacy_check(&mut report, forbidden);
 
@@ -71,11 +101,22 @@ pub fn run(args: &SreArgs) -> anyhow::Result<GateOutcome> {
     }
 
     print_human_summary(&report);
-    Ok(if report.ok {
-        GateOutcome::Pass
-    } else {
-        GateOutcome::Fail
-    })
+    Ok(
+        if matches!(cold_measurement, ColdMeasurement::MissingInput) {
+            GateOutcome::MissingInput
+        } else if report.ok {
+            GateOutcome::Pass
+        } else {
+            GateOutcome::Fail
+        },
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ColdMeasurement {
+    FixturesOnly,
+    MissingInput,
+    Measured(f64),
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -95,40 +136,36 @@ struct BenchSreDashboard {
     privacy: SrePrivacySummary,
 }
 
-fn fixture_report(include_cold_rehydrate_gate: bool) -> BenchSreReport {
+fn fixture_report(cold_measurement: ColdMeasurement) -> BenchSreReport {
     let migration_status =
-        classify_threshold(Some(FIXTURE_WORKFLOW_AGE_MS), SLO_MIGRATION_BACKLOG_MS);
+        classify_threshold(Some(FIXTURE_WORKFLOW_AGE_MS_F64), SLO_MIGRATION_BACKLOG_MS);
     let migration_backlog = gate(
         "migration_backlog",
         migration_status,
-        FIXTURE_WORKFLOW_AGE_MS,
+        Some(FIXTURE_WORKFLOW_AGE_MS_F64),
         SLO_MIGRATION_BACKLOG_MS,
         "ms",
+        fixture_detail(),
     );
     let projection_lag = gate(
         "projection_lag_fixture",
         classify_threshold(Some(FIXTURE_PROJECTION_STALE_FAILED), 0.0),
-        FIXTURE_PROJECTION_STALE_FAILED,
+        Some(FIXTURE_PROJECTION_STALE_FAILED),
         0.0,
         "count",
+        fixture_detail(),
     );
-    let cold_rehydrate = gate(
-        "cold_rehydrate_p95",
-        classify_threshold(Some(FIXTURE_COLD_REHYDRATE_P95_MS), SLO_COLD_REHYDRATE_MS),
-        FIXTURE_COLD_REHYDRATE_P95_MS,
-        SLO_COLD_REHYDRATE_MS,
-        "ms",
-    );
+    let cold_rehydrate = cold_rehydrate_gate(cold_measurement);
 
     let mut checks = vec![migration_backlog.clone(), projection_lag.clone()];
-    if include_cold_rehydrate_gate {
+    if let Some(cold_rehydrate) = cold_rehydrate.clone() {
         checks.push(cold_rehydrate.clone());
     }
     checks.push(privacy_check(0, SreStatus::Ok));
 
     let dashboard = BenchSreDashboard {
         workflow: workflow_dashboard(migration_status),
-        rehydration: rehydration_dashboard(include_cold_rehydrate_gate.then_some(cold_rehydrate)),
+        rehydration: rehydration_dashboard(cold_measurement, cold_rehydrate),
         projection: projection_dashboard(projection_lag.status),
         search: search_dashboard(),
         privacy: SrePrivacySummary {
@@ -148,8 +185,8 @@ fn fixture_report(include_cold_rehydrate_gate: bool) -> BenchSreReport {
 fn workflow_dashboard(status: SreStatus) -> SreWorkflowSummary {
     SreWorkflowSummary {
         status,
-        oldest_queued_age_ms: Some(FIXTURE_WORKFLOW_AGE_MS as i64),
-        longest_held_lease_ms: Some(30_000),
+        oldest_queued_age_ms: Some(FIXTURE_WORKFLOW_AGE_MS_I64),
+        longest_held_lease_ms: Some(FIXTURE_LONGEST_HELD_LEASE_MS),
         dead_letter_count: 0,
         kinds: vec![SreWorkflowKindSummary {
             kind: "migration".to_owned(),
@@ -157,22 +194,65 @@ fn workflow_dashboard(status: SreStatus) -> SreWorkflowSummary {
             leased: 0,
             done_recent: 3,
             failed_recent: 0,
-            oldest_queued_age_ms: Some(FIXTURE_WORKFLOW_AGE_MS as i64),
-            last_success_age_ms: Some(60_000),
-            backlog_threshold_ms: SLO_MIGRATION_BACKLOG_MS as i64,
+            oldest_queued_age_ms: Some(FIXTURE_WORKFLOW_AGE_MS_I64),
+            last_success_age_ms: Some(FIXTURE_LAST_SUCCESS_AGE_MS),
+            backlog_threshold_ms: FIXTURE_MIGRATION_BACKLOG_THRESHOLD_MS,
             status,
         }],
     }
 }
 
-fn rehydration_dashboard(last_gate: Option<SreGateResult>) -> SreRehydrationSummary {
-    SreRehydrationSummary {
-        status: classify_threshold(Some(FIXTURE_COLD_REHYDRATE_P95_MS), SLO_COLD_REHYDRATE_MS),
-        latest_latency_ms: Some(2_200),
-        p95_latency_ms: Some(measurement(FIXTURE_COLD_REHYDRATE_P95_MS)),
-        slo_ms: measurement(SLO_COLD_REHYDRATE_MS),
-        sample_count: 5,
-        last_gate,
+fn cold_rehydrate_gate(cold_measurement: ColdMeasurement) -> Option<SreGateResult> {
+    match cold_measurement {
+        ColdMeasurement::FixturesOnly => None,
+        ColdMeasurement::MissingInput => Some(gate(
+            COLD_REHYDRATE_BENCH,
+            SreStatus::Unknown,
+            None,
+            SLO_COLD_REHYDRATE_MS,
+            "ms",
+            fixture_detail(),
+        )),
+        ColdMeasurement::Measured(measured_ms) => Some(gate(
+            COLD_REHYDRATE_BENCH,
+            classify_threshold(Some(measured_ms), SLO_COLD_REHYDRATE_MS),
+            Some(measured_ms),
+            SLO_COLD_REHYDRATE_MS,
+            "ms",
+            fixture_detail(),
+        )),
+    }
+}
+
+fn rehydration_dashboard(
+    cold_measurement: ColdMeasurement,
+    last_gate: Option<SreGateResult>,
+) -> SreRehydrationSummary {
+    match cold_measurement {
+        ColdMeasurement::FixturesOnly => SreRehydrationSummary {
+            status: classify_threshold(Some(FIXTURE_COLD_REHYDRATE_P95_MS), SLO_COLD_REHYDRATE_MS),
+            latest_latency_ms: Some(FIXTURE_LATEST_REHYDRATE_MS),
+            p95_latency_ms: Some(measurement(FIXTURE_COLD_REHYDRATE_P95_MS)),
+            slo_ms: measurement(SLO_COLD_REHYDRATE_MS),
+            sample_count: FIXTURE_REHYDRATE_SAMPLES,
+            last_gate,
+        },
+        ColdMeasurement::MissingInput => SreRehydrationSummary {
+            status: SreStatus::Unknown,
+            latest_latency_ms: None,
+            p95_latency_ms: None,
+            slo_ms: measurement(SLO_COLD_REHYDRATE_MS),
+            sample_count: 0,
+            last_gate,
+        },
+        ColdMeasurement::Measured(measured_ms) => SreRehydrationSummary {
+            status: classify_threshold(Some(measured_ms), SLO_COLD_REHYDRATE_MS),
+            latest_latency_ms: None,
+            p95_latency_ms: Some(measurement(measured_ms)),
+            slo_ms: measurement(SLO_COLD_REHYDRATE_MS),
+            sample_count: 1,
+            last_gate,
+        },
     }
 }
 
@@ -209,7 +289,7 @@ fn search_dashboard() -> SreSearchSummary {
     }
 }
 
-fn set_privacy_check(report: &mut BenchSreReport, forbidden_count: u64) {
+fn set_privacy_check(report: &mut BenchSreReport, forbidden_count: u32) {
     let status = if forbidden_count == 0 {
         SreStatus::Ok
     } else {
@@ -225,37 +305,36 @@ fn set_privacy_check(report: &mut BenchSreReport, forbidden_count: u64) {
     } else {
         report.checks.push(privacy);
     }
-    report.dashboard.privacy = SrePrivacySummary {
-        scrubbed: true,
-        forbidden_field_count: forbidden_count,
-    };
+    report.dashboard.privacy = privacy_summary(forbidden_count);
     report.ok = checks_pass(&report.checks);
 }
 
-fn privacy_check(forbidden_count: u64, status: SreStatus) -> SreGateResult {
+fn privacy_check(forbidden_count: u32, status: SreStatus) -> SreGateResult {
     gate(
         "sre_privacy_scrub",
         status,
-        forbidden_count as f64,
+        Some(f64::from(forbidden_count)),
         0.0,
         "forbidden_fields",
+        Some(SreDetail::from_raw(SEEDED_FORBIDDEN_DETAIL)),
     )
 }
 
 fn gate(
     name: impl Into<String>,
     status: SreStatus,
-    measured: f64,
+    measured: Option<f64>,
     threshold: f64,
     unit: impl Into<String>,
+    detail: Option<SreDetail>,
 ) -> SreGateResult {
     SreGateResult {
         name: name.into(),
         status,
-        measured: Some(measurement(measured)),
+        measured: measured.map(measurement),
         threshold: Some(measurement(threshold)),
         unit: unit.into(),
-        detail: fixture_detail(),
+        detail,
     }
 }
 
@@ -271,11 +350,44 @@ fn checks_pass(checks: &[SreGateResult]) -> bool {
     checks.iter().all(|check| check.status == SreStatus::Ok)
 }
 
-fn forbidden_fragment_count(serialized: &str) -> u64 {
-    FORBIDDEN_FRAGMENTS
-        .iter()
-        .filter(|fragment| serialized.contains(**fragment))
-        .count() as u64
+fn forbidden_fragment_count(serialized: &str) -> u32 {
+    u32::try_from(
+        FORBIDDEN_FRAGMENTS
+            .iter()
+            .filter(|fragment| serialized.contains(**fragment))
+            .count(),
+    )
+    .expect("forbidden fragment count fits in u32")
+}
+
+fn load_cold_rehydrate_p95(criterion_dir: &Path) -> anyhow::Result<Option<f64>> {
+    if !criterion_dir.is_dir() {
+        return Ok(None);
+    }
+    let measured = crate::latency::harness::parse_criterion_dir(criterion_dir)?;
+    Ok(measured.get(COLD_REHYDRATE_BENCH).copied())
+}
+
+fn run_lifecycle_criterion() -> anyhow::Result<()> {
+    let status = Command::new("cargo")
+        .args([
+            "bench",
+            "-p",
+            "cairn-bench",
+            "--bench",
+            "lifecycle",
+            "--locked",
+        ])
+        .status()?;
+    anyhow::ensure!(status.success(), "criterion lifecycle run failed");
+    Ok(())
+}
+
+fn privacy_summary(forbidden_field_count: u32) -> SrePrivacySummary {
+    SrePrivacySummary {
+        scrubbed: true,
+        forbidden_field_count: u64::from(forbidden_field_count),
+    }
 }
 
 fn print_human_summary(report: &BenchSreReport) {
