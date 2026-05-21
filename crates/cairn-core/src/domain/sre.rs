@@ -17,7 +17,7 @@ pub enum SreStatus {
 }
 
 /// Sanitized body-free detail class for SRE gate output.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct SreDetail(String);
 
@@ -58,6 +58,16 @@ impl SreDetail {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for SreDetail {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Ok(Self::stable(&raw).unwrap_or_else(|| Self::from_raw(&raw)))
     }
 }
 

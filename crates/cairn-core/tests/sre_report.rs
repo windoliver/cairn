@@ -106,6 +106,31 @@ fn stable_detail_rejects_privacy_risk_text() {
 }
 
 #[test]
+fn sre_detail_deserialization_scrubs_raw_text() {
+    let raw = r#"{
+        "name":"privacy_gate",
+        "status":"fail",
+        "measured":1.0,
+        "threshold":0.0,
+        "unit":"count",
+        "detail":"SECRET_PRIVATE_TOKEN from /Users/alice/private body query text"
+    }"#;
+
+    let gate: SreGateResult = serde_json::from_str(raw).expect("deserialize gate");
+    assert_eq!(
+        gate.detail.as_ref().map(SreDetail::as_str),
+        Some("redacted")
+    );
+
+    let json = serde_json::to_string(&gate).expect("serialize gate");
+    assert!(json.contains("\"detail\":\"redacted\""));
+    assert!(!json.contains("SECRET_PRIVATE_TOKEN"));
+    assert!(!json.contains("/Users/alice"));
+    assert!(!json.contains("private body"));
+    assert!(!json.contains("query text"));
+}
+
+#[test]
 fn measurements_reject_non_finite_values() {
     assert!(SreMeasurement::new(1.0).is_some());
     assert!(SreMeasurement::new(f64::NAN).is_none());
