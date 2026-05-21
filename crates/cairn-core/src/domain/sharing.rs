@@ -365,6 +365,19 @@ pub fn verify_promotion_gate(
         ));
     }
 
+    if input.record.visibility != input.from_tier {
+        return Err(reject_promotion(
+            SharingDecisionKind::TierMismatch,
+            DomainError::UnsupportedVisibility {
+                value: format!(
+                    "record visibility `{}` does not match requested from_tier `{}`",
+                    input.record.visibility.as_str(),
+                    input.from_tier.as_str()
+                ),
+            },
+        ));
+    }
+
     let target_hash_matches = CanonicalRecordHash::compute(input.record)
         .map(|hash| hash.as_str() == input.receipt.payload.target_hash)
         .unwrap_or(false);
@@ -437,6 +450,15 @@ pub fn verify_promotion_gate(
             SharingDecisionKind::Revoked,
             DomainError::Unauthorized {
                 message: "promotion receipt or signer key was revoked".to_owned(),
+            },
+        ));
+    }
+
+    if input.rebac.principal() != Some(&input.receipt.payload.human_identity) {
+        return Err(reject_promotion(
+            SharingDecisionKind::NoRebacRelation,
+            DomainError::ScopeDenied {
+                message: "ReBAC principal does not match promotion receipt signer".to_owned(),
             },
         ));
     }
