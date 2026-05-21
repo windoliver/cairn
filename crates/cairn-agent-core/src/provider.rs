@@ -4,11 +4,12 @@ use cairn_core::config::ExtractBudget;
 use cairn_core::contract::agent_provider::CONTRACT_VERSION;
 use cairn_core::contract::version::{ContractVersion, VersionRange};
 use cairn_core::contract::{
-    AgentBudgetConsumed, AgentOutput, AgentProvider, AgentProviderCapabilities, AgentProviderError,
-    AgentProviderPlugin, AgentRun, AgentRunMeter, AgentRunStatus, AgentSpawnRequest,
-    AgentToolAttempt, AgentToolPolicyOutcome, CompletionOutput, CompletionRequest, LLMProvider,
-    LlmError, evaluate_tool_policy,
+    AgentBudgetConsumed, AgentOutput, AgentOutputSchema, AgentProvider, AgentProviderCapabilities,
+    AgentProviderError, AgentProviderPlugin, AgentRun, AgentRunMeter, AgentRunStatus,
+    AgentSpawnRequest, AgentToolAttempt, AgentToolPolicyOutcome, CompletionOutput,
+    CompletionRequest, LLMProvider, LlmError, evaluate_tool_policy,
 };
+use tokio::time::{Duration, Instant, timeout};
 
 use crate::action::{AgentAction, parse_action};
 use crate::tool::AgentToolExecutor;
@@ -53,26 +54,39 @@ impl AgentProvider for CairnAgentProvider {
         let mut tool_calls = Vec::new();
         let mut policy_trace = Vec::new();
         let mut history = Vec::new();
+        let deadline = Instant::now() + Duration::from_millis(request.wall_clock_budget.max_millis);
 
         for _ in 0..request.cost_budget.max_turns {
             if let Err(err) = meter.charge_turn(1) {
                 return Ok(aborted_run(err, &meter, tool_calls, policy_trace));
             }
 
-            let completion = match self
-                .llm
-                .complete(
-                    &CompletionRequest::builder()
-                        .prompt(render_prompt(&request.prompt, &history))
-                        .maybe_budget(completion_budget(&request))
-                        .build(),
-                )
-                .await
+            let Some(remaining) = remaining_wall_clock(deadline) else {
+                return Ok(aborted_run(
+                    wall_clock_exceeded(),
+                    &meter,
+                    tool_calls,
+                    policy_trace,
+                ));
+            };
+            let completion_request = CompletionRequest::builder()
+                .prompt(render_prompt(&request.prompt, &history))
+                .maybe_budget(completion_budget(&request))
+                .build();
+            let completion = match timeout(remaining, self.llm.complete(&completion_request)).await
             {
-                Ok(completion) => completion,
-                Err(err) => {
+                Ok(Ok(completion)) => completion,
+                Ok(Err(err)) => {
                     let mapped = map_llm_error(err);
                     return Ok(aborted_run(mapped, &meter, tool_calls, policy_trace));
+                }
+                Err(_elapsed) => {
+                    return Ok(aborted_run(
+                        wall_clock_exceeded(),
+                        &meter,
+                        tool_calls,
+                        policy_trace,
+                    ));
                 }
             };
 
@@ -107,9 +121,28 @@ impl AgentProvider for CairnAgentProvider {
                     });
                     policy_trace.push(format!("{:?}:{outcome:?}", tool.verb));
 
-                    let execution = match self.tools.execute(&tool, args).await {
-                        Ok(execution) => execution,
-                        Err(err) => return Ok(aborted_run(err, &meter, tool_calls, policy_trace)),
+                    let Some(remaining) = remaining_wall_clock(deadline) else {
+                        return Ok(aborted_run(
+                            wall_clock_exceeded(),
+                            &meter,
+                            tool_calls,
+                            policy_trace,
+                        ));
+                    };
+                    let execution = match timeout(remaining, self.tools.execute(&tool, args)).await
+                    {
+                        Ok(Ok(execution)) => execution,
+                        Ok(Err(err)) => {
+                            return Ok(aborted_run(err, &meter, tool_calls, policy_trace));
+                        }
+                        Err(_elapsed) => {
+                            return Ok(aborted_run(
+                                wall_clock_exceeded(),
+                                &meter,
+                                tool_calls,
+                                policy_trace,
+                            ));
+                        }
                     };
 
                     if let Err(err) = meter.charge_cost_units(execution.cost_units) {
@@ -118,10 +151,14 @@ impl AgentProvider for CairnAgentProvider {
                     history.push(render_tool_history(&tool, &execution.output));
                 }
                 AgentAction::Final { output } => {
+                    let output = match final_output_for_schema(output, &request.output_schema) {
+                        Ok(output) => output,
+                        Err(err) => return Ok(aborted_run(err, &meter, tool_calls, policy_trace)),
+                    };
                     let run = AgentRun {
                         status: AgentRunStatus::Completed,
                         abort_error: None,
-                        output: AgentOutput::Json(output),
+                        output,
                         budget_consumed: meter.consumed(),
                         tool_calls,
                         policy_trace,
@@ -221,6 +258,31 @@ fn completion_to_action(completion: CompletionOutput) -> Result<AgentAction, Age
         _ => Err(AgentProviderError::InvalidOutput {
             message: "unsupported completion output variant".to_string(),
         }),
+    }
+}
+
+fn final_output_for_schema(
+    output: serde_json::Value,
+    schema: &AgentOutputSchema,
+) -> Result<AgentOutput, AgentProviderError> {
+    match schema {
+        AgentOutputSchema::Json => Ok(AgentOutput::Json(output)),
+        AgentOutputSchema::Text => output
+            .as_str()
+            .map(|text| AgentOutput::Text(text.to_string()))
+            .ok_or_else(|| AgentProviderError::InvalidOutput {
+                message: "text output schema requires string final output".to_string(),
+            }),
+    }
+}
+
+fn remaining_wall_clock(deadline: Instant) -> Option<Duration> {
+    deadline.checked_duration_since(Instant::now())
+}
+
+fn wall_clock_exceeded() -> AgentProviderError {
+    AgentProviderError::BudgetExceeded {
+        limit: "wall_clock".to_string(),
     }
 }
 

@@ -2,6 +2,7 @@
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use cairn_agent_core::{
     AgentToolExecutor, CairnAgentProvider, ToolExecution, UnconfiguredCairnAgentProvider,
@@ -59,6 +60,42 @@ impl LLMProvider for SequenceLlm {
     }
 }
 
+struct SlowLlm {
+    delay: Duration,
+    output: CompletionOutput,
+}
+
+impl SlowLlm {
+    fn new(delay: Duration, output: CompletionOutput) -> Self {
+        Self { delay, output }
+    }
+}
+
+#[async_trait::async_trait]
+impl LLMProvider for SlowLlm {
+    fn name(&self) -> &str {
+        "slow-llm"
+    }
+
+    fn capabilities(&self) -> &LLMProviderCapabilities {
+        static CAPS: LLMProviderCapabilities = LLMProviderCapabilities {
+            json_mode: true,
+            streaming: false,
+            tool_calls: false,
+        };
+        &CAPS
+    }
+
+    fn supported_contract_versions(&self) -> VersionRange {
+        VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+    }
+
+    async fn complete(&self, _req: &CompletionRequest) -> Result<CompletionOutput, LlmError> {
+        tokio::time::sleep(self.delay).await;
+        Ok(self.output.clone())
+    }
+}
+
 struct RecordingToolExecutor {
     calls: Mutex<u32>,
     result: ToolExecution,
@@ -89,6 +126,29 @@ impl AgentToolExecutor for RecordingToolExecutor {
     }
 }
 
+struct SlowToolExecutor {
+    delay: Duration,
+    result: ToolExecution,
+}
+
+impl SlowToolExecutor {
+    fn new(delay: Duration, result: ToolExecution) -> Self {
+        Self { delay, result }
+    }
+}
+
+#[async_trait::async_trait]
+impl AgentToolExecutor for SlowToolExecutor {
+    async fn execute(
+        &self,
+        _call: &AgentToolCall,
+        _args: serde_json::Value,
+    ) -> Result<ToolExecution, AgentProviderError> {
+        tokio::time::sleep(self.delay).await;
+        Ok(self.result.clone())
+    }
+}
+
 fn request(output_schema: AgentOutputSchema, max_turns: u32) -> AgentSpawnRequest {
     AgentSpawnRequest {
         identity: AgentIdentity::new("agt:cairn-agent-core:test").expect("valid identity"),
@@ -102,6 +162,17 @@ fn request(output_schema: AgentOutputSchema, max_turns: u32) -> AgentSpawnReques
         wall_clock_budget: AgentWallClockBudget { max_millis: 1_000 },
         output_schema,
         prompt: "Find related records".to_string(),
+    }
+}
+
+fn request_with_wall_clock(
+    output_schema: AgentOutputSchema,
+    max_turns: u32,
+    max_millis: u64,
+) -> AgentSpawnRequest {
+    AgentSpawnRequest {
+        wall_clock_budget: AgentWallClockBudget { max_millis },
+        ..request(output_schema, max_turns)
     }
 }
 
@@ -165,6 +236,51 @@ async fn provider_returns_final_json_and_consumed_budget() {
 }
 
 #[tokio::test]
+async fn provider_returns_final_text_for_text_schema() {
+    let llm = Arc::new(SequenceLlm::new([CompletionOutput::Json(json!({
+        "action": "final",
+        "output": "done"
+    }))]));
+    let tools = Arc::new(RecordingToolExecutor::new(ToolExecution {
+        output: json!({}),
+        cost_units: 0,
+    }));
+    let provider = CairnAgentProvider::new(llm, tools);
+
+    let run = provider
+        .spawn(request(AgentOutputSchema::Text, 2))
+        .await
+        .expect("run returns trace state");
+
+    assert_eq!(run.status, AgentRunStatus::Completed);
+    assert_eq!(run.output, AgentOutput::Text("done".to_string()));
+}
+
+#[tokio::test]
+async fn provider_aborts_final_non_string_for_text_schema() {
+    let llm = Arc::new(SequenceLlm::new([CompletionOutput::Json(json!({
+        "action": "final",
+        "output": { "not": "text" }
+    }))]));
+    let tools = Arc::new(RecordingToolExecutor::new(ToolExecution {
+        output: json!({}),
+        cost_units: 0,
+    }));
+    let provider = CairnAgentProvider::new(llm, tools);
+
+    let run = provider
+        .spawn(request(AgentOutputSchema::Text, 2))
+        .await
+        .expect("invalid final output returns aborted run");
+
+    assert_eq!(run.status, AgentRunStatus::Aborted);
+    assert!(matches!(
+        run.abort_error,
+        Some(AgentProviderError::InvalidOutput { .. })
+    ));
+}
+
+#[tokio::test]
 async fn provider_aborts_when_turn_budget_exhausted() {
     let llm = Arc::new(SequenceLlm::new([
         CompletionOutput::Json(json!({
@@ -194,6 +310,61 @@ async fn provider_aborts_when_turn_budget_exhausted() {
         Some(AgentProviderError::BudgetExceeded { ref limit }) if limit == "turns"
     ));
     assert_eq!(run.budget_consumed.turns, 1);
+}
+
+#[tokio::test]
+async fn provider_aborts_when_llm_exceeds_wall_clock_budget() {
+    let llm = Arc::new(SlowLlm::new(
+        Duration::from_millis(50),
+        CompletionOutput::Json(json!({
+            "action": "final",
+            "output": { "answer": "late" }
+        })),
+    ));
+    let tools = Arc::new(RecordingToolExecutor::new(ToolExecution {
+        output: json!({}),
+        cost_units: 0,
+    }));
+    let provider = CairnAgentProvider::new(llm, tools);
+
+    let run = provider
+        .spawn(request_with_wall_clock(AgentOutputSchema::Json, 2, 5))
+        .await
+        .expect("wall-clock exhaustion returns aborted run");
+
+    assert_eq!(run.status, AgentRunStatus::Aborted);
+    assert!(matches!(
+        run.abort_error,
+        Some(AgentProviderError::BudgetExceeded { ref limit }) if limit == "wall_clock"
+    ));
+}
+
+#[tokio::test]
+async fn provider_aborts_when_tool_exceeds_wall_clock_budget() {
+    let llm = Arc::new(SequenceLlm::new([CompletionOutput::Json(json!({
+        "action": "tool",
+        "tool": { "verb": "search", "write_report": false, "persist": false },
+        "args": { "query": "budget" }
+    }))]));
+    let tools = Arc::new(SlowToolExecutor::new(
+        Duration::from_millis(50),
+        ToolExecution {
+            output: json!({ "records": [] }),
+            cost_units: 1,
+        },
+    ));
+    let provider = CairnAgentProvider::new(llm, tools);
+
+    let run = provider
+        .spawn(request_with_wall_clock(AgentOutputSchema::Json, 2, 5))
+        .await
+        .expect("wall-clock exhaustion returns aborted run");
+
+    assert_eq!(run.status, AgentRunStatus::Aborted);
+    assert!(matches!(
+        run.abort_error,
+        Some(AgentProviderError::BudgetExceeded { ref limit }) if limit == "wall_clock"
+    ));
 }
 
 #[tokio::test]
