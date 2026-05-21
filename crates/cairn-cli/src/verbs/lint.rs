@@ -2562,15 +2562,23 @@ fn build_skill_lint_snapshot(
             }
             let bundle_root = candidate_root.join("bundle");
             let candidate_skills_dir = bundle_root.join("skills");
-            if !candidate_skills_dir.exists() {
+            if !candidate_skills_dir.is_dir() {
+                push_candidate_lint_placeholder(
+                    &mut skills,
+                    vault_root,
+                    &candidate_id,
+                    &candidate_skills_dir.join("skill.md"),
+                )?;
                 continue;
             }
+            let mut found_skill_markdown = false;
             for entry in std::fs::read_dir(&candidate_skills_dir)
                 .with_context(|| format!("reading {}", candidate_skills_dir.display()))?
             {
                 let entry = entry?;
                 let path = entry.path();
                 if path.extension().and_then(std::ffi::OsStr::to_str) == Some("md") {
+                    found_skill_markdown = true;
                     sources.push(SkillSource {
                         path,
                         uses_root: bundle_root.clone(),
@@ -2578,6 +2586,14 @@ fn build_skill_lint_snapshot(
                         resolver_path: Some(bundle_root.join("resolver/triggers.json")),
                     });
                 }
+            }
+            if !found_skill_markdown {
+                push_candidate_lint_placeholder(
+                    &mut skills,
+                    vault_root,
+                    &candidate_id,
+                    &candidate_skills_dir.join("skill.md"),
+                )?;
             }
         }
     }
@@ -2589,6 +2605,9 @@ fn build_skill_lint_snapshot(
         let body = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
         let Some(frontmatter) = frontmatter(&body) else {
+            if let Some(candidate_id) = &source.candidate_hint {
+                push_candidate_lint_placeholder(&mut skills, vault_root, candidate_id, &path)?;
+            }
             continue;
         };
         let skill_id = yaml_scalar(frontmatter, "skill_id").unwrap_or_else(|| {
@@ -2645,6 +2664,32 @@ fn build_skill_lint_snapshot(
     }
 
     Ok(cairn_core::pipeline::skillify::SkillLintSnapshot { skills })
+}
+
+fn push_candidate_lint_placeholder(
+    skills: &mut Vec<cairn_core::pipeline::skillify::SkillLintSkill>,
+    vault_root: &Path,
+    candidate_id: &str,
+    path: &Path,
+) -> anyhow::Result<()> {
+    let path = rel(vault_root, path);
+    let existing_paths = if vault_root.join(&path).is_file() {
+        vec![path.clone()]
+    } else {
+        Vec::new()
+    };
+    skills.push(cairn_core::pipeline::skillify::SkillLintSkill {
+        skill_id: candidate_id.to_owned(),
+        lane: format!("candidate.{candidate_id}"),
+        path,
+        uses: None,
+        resolver_triggers: Vec::new(),
+        files_to: None,
+        gate_report_passed: candidate_gate_report_passed(vault_root, candidate_id)?,
+        rollback_version_count: rollback_version_count(vault_root, candidate_id),
+        existing_paths,
+    });
+    Ok(())
 }
 
 fn frontmatter(body: &str) -> Option<&str> {
@@ -2743,6 +2788,12 @@ fn existing_relative_path(root: &Path, value: &str) -> anyhow::Result<Option<Str
     }
     let path = root.join(value);
     if !path.exists() {
+        return Ok(None);
+    }
+    if !std::fs::metadata(&path)
+        .with_context(|| format!("reading metadata for {}", path.display()))?
+        .is_file()
+    {
         return Ok(None);
     }
     let root = root

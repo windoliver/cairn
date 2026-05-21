@@ -154,6 +154,29 @@ fn path_escape_is_rejected() {
 }
 
 #[test]
+fn empty_artifact_path_is_rejected() {
+    let bad = artifact(SkillArtifactKind::DeterministicScript, "");
+    let err = bad.validate_path().expect_err("empty path rejected");
+    assert_eq!(
+        err.to_string(),
+        "skillify artifact invalid path ``: path must stay inside the candidate bundle"
+    );
+}
+
+#[test]
+fn artifact_path_must_be_under_bundle_directory() {
+    let bad = artifact(
+        SkillArtifactKind::DeterministicScript,
+        "scripts/deploy-hotfix.sh",
+    );
+    let err = bad.validate_path().expect_err("non-bundle path rejected");
+    assert_eq!(
+        err.to_string(),
+        "skillify artifact invalid path `scripts/deploy-hotfix.sh`: path must stay inside the candidate bundle"
+    );
+}
+
+#[test]
 fn gate_report_requires_every_gate_passed() {
     let report = SkillifyGateReport {
         candidate_id: "skc_fixture".to_owned(),

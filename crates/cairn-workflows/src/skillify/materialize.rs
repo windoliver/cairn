@@ -306,7 +306,23 @@ fn read_existing_bundle(
     }
     bundle.validate()?;
     for artifact in &bundle.artifacts {
-        if !root.join(&artifact.path).exists() {
+        let artifact_path = root.join(&artifact.path);
+        let metadata = match fs::metadata(&artifact_path) {
+            Ok(metadata) => metadata,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(SkillifyMaterializeError::ExistingCandidateIncomplete {
+                    candidate_id: candidate_id.to_owned(),
+                });
+            }
+            Err(e) => return Err(SkillifyMaterializeError::Io(e)),
+        };
+        if !metadata.is_file() {
+            return Err(SkillifyMaterializeError::ExistingCandidateIncomplete {
+                candidate_id: candidate_id.to_owned(),
+            });
+        }
+        let bytes = fs::read(&artifact_path)?;
+        if sha256_prefixed(&bytes) != artifact.content_sha256 {
             return Err(SkillifyMaterializeError::ExistingCandidateIncomplete {
                 candidate_id: candidate_id.to_owned(),
             });

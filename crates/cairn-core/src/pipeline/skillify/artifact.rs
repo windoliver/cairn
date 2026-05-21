@@ -110,13 +110,16 @@ impl SkillArtifact {
     /// parent/root/prefix components.
     pub fn validate_path(&self) -> Result<(), SkillArtifactError> {
         let path = Path::new(&self.path);
+        let components = path.components().collect::<Vec<_>>();
+        let under_bundle = matches!(
+            components.as_slice(),
+            [Component::Normal(first), Component::Normal(_), ..] if *first == "bundle"
+        );
         if path.is_absolute()
-            || path.components().any(|component| {
-                matches!(
-                    component,
-                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
-                )
-            })
+            || !under_bundle
+            || components
+                .iter()
+                .any(|component| !matches!(component, Component::Normal(_)))
         {
             return Err(SkillArtifactError::InvalidPath {
                 path: self.path.clone(),

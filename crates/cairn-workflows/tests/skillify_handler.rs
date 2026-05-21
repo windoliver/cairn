@@ -8,7 +8,14 @@ use cairn_core::contract::llm_provider::{
 };
 use cairn_core::contract::version::{ContractVersion, VersionRange};
 use cairn_core::domain::flush_plan::{PersistedPlan, PlanReason};
+use cairn_core::pipeline::skillify::{
+    SkillArtifact, SkillArtifactBundle, SkillArtifactKind, SkillifyGate, SkillifyGateReport,
+    SkillifyGateStatus,
+};
 use cairn_workflows::scheduler::{HandlerOutcome, JobHandler};
+use cairn_workflows::skillify::materialize::{
+    AuthoredSkillBundle, candidate_ready, materialize_bundle,
+};
 use cairn_workflows::skillify::planner::{SkillifyPlanSource, SkillifyPromotionInput};
 use cairn_workflows::{SkillifyHandler, SkillifyPayload, SkillifyTrigger};
 use serde_json::json;
@@ -97,6 +104,24 @@ fn payload() -> SkillifyPayload {
         candidate_id: Some("skc_fixture".to_owned()),
         bound_scope: None,
         source_record_ids: vec!["01HQZX9F5N0000000000000001".to_owned()],
+    }
+}
+
+fn authored_bundle(slug: &str) -> AuthoredSkillBundle {
+    AuthoredSkillBundle {
+        lane: "deploy.hotfix".to_owned(),
+        slug: slug.to_owned(),
+        skill_markdown: format!(
+            "---\nname: {slug}\nlane: deploy.hotfix\ntriggers: [\"deploy hotfix\"]\nuses: scripts/{slug}.sh\nfiles_to: wiki/summaries/\n---\nRun the script."
+        ),
+        script: format!("#!/usr/bin/env bash\nset -euo pipefail\necho {slug}\n"),
+        unit_tests: json!({"command": format!("bash scripts/{slug}.sh")}),
+        integration_tests: json!({"command": format!("bash scripts/{slug}.sh")}),
+        llm_evals: json!([{"intent": "deploy hotfix", "must_call": slug}]),
+        resolver_triggers: json!(["deploy hotfix"]),
+        resolver_eval: json!([{"intent": "deploy hotfix", "expected_skill": slug}]),
+        smoke: json!({"prompt": "deploy hotfix", "expected_skill": slug}),
+        filing_rules: json!({"files_to": "wiki/summaries/"}),
     }
 }
 
@@ -246,6 +271,100 @@ async fn job_handler_maps_permanent_failures_to_validation_permanent() {
             ..
         }
     ));
+}
+
+#[test]
+fn existing_candidate_rejects_empty_artifact_paths() {
+    let temp = TempDir::new().expect("temp");
+    let candidate_id = "skc_empty_path";
+    let root = temp
+        .path()
+        .join(".cairn/evolution/skillify")
+        .join(candidate_id);
+    std::fs::create_dir_all(&root).expect("candidate root");
+    let bundle = SkillArtifactBundle {
+        candidate_id: candidate_id.to_owned(),
+        version: 1,
+        artifacts: SkillArtifactKind::required()
+            .iter()
+            .map(|kind| SkillArtifact {
+                kind: *kind,
+                path: String::new(),
+                content_sha256:
+                    "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                        .to_owned(),
+                evidence_refs: vec!["01HQZX9F5N0000000000000001".to_owned()],
+                status: "generated".to_owned(),
+            })
+            .collect(),
+    };
+    let report = SkillifyGateReport {
+        candidate_id: candidate_id.to_owned(),
+        gates: SkillArtifactKind::required()
+            .iter()
+            .map(|kind| SkillifyGate {
+                name: kind.as_str().to_owned(),
+                status: SkillifyGateStatus::Passed,
+                message: None,
+            })
+            .collect(),
+    };
+    std::fs::write(
+        root.join("manifest.json"),
+        serde_json::to_vec_pretty(&bundle).expect("manifest json"),
+    )
+    .expect("manifest");
+    std::fs::write(
+        root.join("gate-report.json"),
+        serde_json::to_vec_pretty(&report).expect("report json"),
+    )
+    .expect("report");
+
+    let err = candidate_ready(temp.path(), candidate_id).expect_err("empty path not ready");
+    assert!(err.to_string().contains("invalid path"));
+}
+
+#[test]
+fn existing_candidate_rejects_directory_artifact_path() {
+    let temp = TempDir::new().expect("temp");
+    materialize_bundle(
+        temp.path(),
+        "skc_directory_artifact",
+        &authored_bundle("deploy-hotfix"),
+        &["01HQZX9F5N0000000000000001".to_owned()],
+    )
+    .expect("materialize");
+    let script = temp
+        .path()
+        .join(".cairn/evolution/skillify/skc_directory_artifact/bundle/scripts/deploy-hotfix.sh");
+    std::fs::remove_file(&script).expect("remove script");
+    std::fs::create_dir(&script).expect("directory at script path");
+
+    let err = candidate_ready(temp.path(), "skc_directory_artifact")
+        .expect_err("directory artifact not ready");
+    assert!(err.to_string().contains("incomplete"));
+}
+
+#[test]
+fn existing_candidate_rejects_artifact_content_hash_mismatch() {
+    let temp = TempDir::new().expect("temp");
+    materialize_bundle(
+        temp.path(),
+        "skc_hash_mismatch",
+        &authored_bundle("deploy-hotfix"),
+        &["01HQZX9F5N0000000000000001".to_owned()],
+    )
+    .expect("materialize");
+    std::fs::write(
+        temp.path()
+            .join(".cairn/evolution/skillify/skc_hash_mismatch/bundle/scripts/deploy-hotfix.sh"),
+        "#!/usr/bin/env bash\necho changed\n",
+    )
+    .expect("tamper script");
+
+    let err =
+        candidate_ready(temp.path(), "skc_hash_mismatch").expect_err("tampered artifact not ready");
+    assert!(err.to_string().contains("incomplete"));
 }
 
 #[test]

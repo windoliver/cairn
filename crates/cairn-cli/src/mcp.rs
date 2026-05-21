@@ -10,6 +10,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use cairn_core::config::CairnConfig;
+use cairn_core::contract::LLMProvider;
 use cairn_core::domain::ScopeTuple;
 use cairn_core::mcp_auth::{ConfigBackedScope, McpSessionScope};
 use cairn_workflows::scheduler::HandlerRegistryBuilder;
@@ -49,6 +50,22 @@ pub fn resolve_scope_components(config: &CairnConfig) -> Option<ResolvedMcpScope
 #[must_use]
 pub(crate) fn store_db_path(vault_root: &std::path::Path) -> std::path::PathBuf {
     vault_root.join(".cairn/cairn.db")
+}
+
+fn workflow_llm_provider(config: &CairnConfig) -> Option<Arc<dyn LLMProvider>> {
+    if config.llm.provider.is_none() {
+        return None;
+    }
+    match cairn_llm_openai_compat::build_llm_provider(&config.llm) {
+        Ok(provider) => {
+            let provider: Arc<dyn LLMProvider> = Arc::from(provider);
+            Some(provider)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "workflow LLM provider unavailable");
+            None
+        }
+    }
 }
 
 /// Run the MCP stdio server.
@@ -196,14 +213,12 @@ pub fn run(
                 let store_dyn: Arc<dyn cairn_core::contract::memory_store::MemoryStore> =
                     sqlite_store.clone();
 
-                // DreamHandler: no LLMProvider is wired at P0 — issue
-                // #144 lands the first concrete provider. The handler
-                // declines `Permanent` on every dispatch until then,
-                // which matches the §10.2 "where configured" qualifier.
+                let llm_provider = workflow_llm_provider(config);
                 let dream_handler =
-                    DreamHandler::new(store_dyn.clone(), config.dream, None)
+                    DreamHandler::new(store_dyn.clone(), config.dream, llm_provider.clone())
                         .with_skillify_jobs(job_store.clone());
-                let skillify_handler = SkillifyHandler::new(vault_root.to_path_buf(), None);
+                let skillify_handler =
+                    SkillifyHandler::new(vault_root.to_path_buf(), llm_provider.clone());
 
                 let expiration_handler = ExpirationHandler::with_job_store(
                     store_dyn.clone(),
@@ -304,11 +319,9 @@ pub fn run(
                     sqlite_store.clone();
                 let readiness = cairn_mcp::WorkflowReadiness {
                     consolidation: true,
-                    // Brief §15 fail-closed: only advertise dream when an
-                    // LLMProvider is configured. The handler short-circuits
-                    // to `Permanent` otherwise (issue #91 follow-up; #144
-                    // lands the first concrete LLMProvider plugin).
-                    dream: config.dream.enabled && config.llm.provider.is_some(),
+                    // Brief §15 fail-closed: advertise dream only when the
+                    // workflow handlers have a concrete LLM provider.
+                    dream: config.dream.enabled && llm_provider.is_some(),
                     expiration: config.expiration.enabled,
                     evaluation: config.evaluation.enabled,
                 };
@@ -353,7 +366,7 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cairn_core::config::CairnConfig;
+    use cairn_core::config::{CairnConfig, LlmProvider};
     use cairn_core::domain::ScopeTuple;
 
     fn principal() -> ScopeTuple {
@@ -384,5 +397,21 @@ mod tests {
         cfg.mcp.stdio.single_tenant = true;
         cfg.mcp.stdio.principal = None;
         assert!(resolve_scope_components(&cfg).is_none());
+    }
+
+    #[test]
+    fn workflow_llm_provider_is_absent_without_provider_config() {
+        let cfg = CairnConfig::default();
+        assert!(workflow_llm_provider(&cfg).is_none());
+    }
+
+    #[test]
+    fn workflow_llm_provider_uses_configured_provider() {
+        let mut cfg = CairnConfig::default();
+        cfg.llm.provider = Some(LlmProvider::OpenaiCompatible);
+
+        let provider = workflow_llm_provider(&cfg).expect("provider");
+        assert_eq!(provider.name(), "openai-compatible");
+        assert!(provider.capabilities().json_mode);
     }
 }
