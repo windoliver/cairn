@@ -83,7 +83,7 @@ pub const AGENT_EXTRACTOR_OUTPUT_SCHEMA: &str = r##"{
         "claim": { "type": "string", "minLength": 1 },
         "record_id": {
           "anyOf": [
-            { "type": "string", "minLength": 1 },
+            { "type": "string" },
             { "type": "null" }
           ]
         }

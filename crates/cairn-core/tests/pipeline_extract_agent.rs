@@ -70,3 +70,46 @@ fn parser_rejects_invalid_confidence() {
         }
     ));
 }
+
+#[test]
+fn parser_accepts_empty_record_id_but_rejects_empty_tool_and_claim() {
+    let event_id = CaptureEventId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").expect("valid ulid");
+    let valid = serde_json::json!({
+        "drafts": [],
+        "discards": [],
+        "evidence": [{"tool": "retrieve", "record_id": "", "claim": "matched note"}]
+    });
+
+    let parsed = parse_agent_response(&event_id, "source", valid).expect("valid evidence");
+    assert_eq!(parsed.evidence[0].record_id.as_deref(), Some(""));
+
+    let empty_tool = serde_json::json!({
+        "drafts": [],
+        "discards": [],
+        "evidence": [{"tool": "", "claim": "matched note"}]
+    });
+    let err =
+        parse_agent_response(&event_id, "source", empty_tool).expect_err("tool must be non-empty");
+    assert!(matches!(
+        err,
+        AgentParseError::InvalidField {
+            field: "evidence",
+            ..
+        }
+    ));
+
+    let empty_claim = serde_json::json!({
+        "drafts": [],
+        "discards": [],
+        "evidence": [{"tool": "retrieve", "claim": ""}]
+    });
+    let err = parse_agent_response(&event_id, "source", empty_claim)
+        .expect_err("claim must be non-empty");
+    assert!(matches!(
+        err,
+        AgentParseError::InvalidField {
+            field: "evidence",
+            ..
+        }
+    ));
+}

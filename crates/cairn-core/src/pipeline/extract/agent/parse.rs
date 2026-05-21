@@ -164,7 +164,12 @@ fn parse_evidence(value: &Value, field: &'static str) -> Result<AgentEvidence, A
     let claim = non_empty_string(object.get("claim"), field)?.to_owned();
     let record_id = match object.get("record_id") {
         None | Some(Value::Null) => None,
-        Some(value) => Some(non_empty_string(Some(value), field)?.to_owned()),
+        Some(value) => Some(
+            value
+                .as_str()
+                .ok_or_else(|| invalid(field, "expected string or null record_id"))?
+                .to_owned(),
+        ),
     };
 
     Ok(AgentEvidence {
