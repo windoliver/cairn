@@ -1,5 +1,6 @@
 //! SRE report DTO serialization and classifier coverage.
 
+use cairn_core::domain::metrics::MetricEvent;
 use cairn_core::domain::sre::{
     SreDetail, SreGateResult, SreGateSummary, SreMeasurement, SrePrivacySummary,
     SreProjectionSummary, SreRehydrationSummary, SreReport, SreSearchSummary, SreStatus,
@@ -146,4 +147,25 @@ fn threshold_classification_rejects_non_finite_inputs() {
     assert_eq!(classify_threshold(None, 2.0), SreStatus::Unknown);
     assert_eq!(classify_threshold(Some(f64::NAN), 2.0), SreStatus::Unknown);
     assert_eq!(classify_threshold(Some(1.0), f64::NAN), SreStatus::Unknown);
+}
+
+#[test]
+fn rehydration_completed_metric_is_body_free() {
+    let event = MetricEvent::RehydrationCompleted {
+        ts_ms: 1_700_000_000_000,
+        target: "session".into(),
+        source_tier: "cold".into(),
+        restored_tier: "warm".into(),
+        status: "committed".into(),
+        latency_ms: 2_900,
+        bytes_restored: 9_500_000,
+        record_count: 240,
+        error: None,
+    };
+
+    let json = serde_json::to_string(&event).expect("serialize");
+    assert!(json.contains("\"event\":\"rehydration_completed\""));
+    assert!(json.contains("\"target\":\"session\""));
+    assert!(!json.contains("session_id"));
+    assert!(!json.contains("body"));
 }
