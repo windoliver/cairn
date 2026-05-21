@@ -198,6 +198,26 @@ impl AgentToolCall {
             || matches!(self.verb, CairnVerb::Summarize) && self.persist
             || matches!(self.verb, CairnVerb::Lint) && self.write_report
     }
+
+    /// Validate that verb-specific flags are attached only to their owning verbs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentProviderError::InvalidRequest`] when `persist` is set on
+    /// a non-`summarize` call or `write_report` is set on a non-`lint` call.
+    pub fn validate(&self) -> Result<(), AgentProviderError> {
+        if self.persist && !matches!(self.verb, CairnVerb::Summarize) {
+            return Err(AgentProviderError::invalid_request(
+                "persist is valid only for summarize",
+            ));
+        }
+        if self.write_report && !matches!(self.verb, CairnVerb::Lint) {
+            return Err(AgentProviderError::invalid_request(
+                "write_report is valid only for lint",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Tool calls an agent-mode run may attempt.
@@ -284,7 +304,8 @@ impl AgentSpawnRequest {
     /// # Errors
     ///
     /// Returns [`AgentProviderError::InvalidRequest`] for empty prompts, empty
-    /// allowlists, zero budgets, or non-mutating verbs listed as mutation grants.
+    /// allowlists, invalid tool flags, zero budgets, or non-mutating verbs
+    /// listed as mutation grants.
     pub fn validate(&self) -> Result<(), AgentProviderError> {
         if self.prompt.trim().is_empty() {
             return Err(AgentProviderError::invalid_request("prompt is empty"));
@@ -293,6 +314,9 @@ impl AgentSpawnRequest {
             return Err(AgentProviderError::invalid_request(
                 "tool allowlist is empty",
             ));
+        }
+        for tool in &self.tool_allowlist.tools {
+            tool.validate()?;
         }
         if self.cost_budget.max_turns == 0 {
             return Err(AgentProviderError::invalid_request(
@@ -387,7 +411,8 @@ pub struct AgentToolAttempt {
 /// can return trace or budget state. `Ok(AgentRun { status: Aborted,
 /// abort_error: Some(_), .. })` is for providers returning trace and budget
 /// state with a typed abort reason.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentRun {
     /// Run status.
     pub status: AgentRunStatus,
@@ -404,7 +429,8 @@ pub struct AgentRun {
 }
 
 /// Errors returned by `AgentProvider` implementations and policy helpers.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, thiserror::Error)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum AgentProviderError {
     /// Request failed local validation.
@@ -429,7 +455,7 @@ pub enum AgentProviderError {
     #[error("agent budget exceeded: {limit}")]
     BudgetExceeded {
         /// Budget dimension that was exceeded.
-        limit: &'static str,
+        limit: String,
     },
     /// Wall-clock budget was exhausted.
     #[error("agent wall-clock budget exceeded")]
@@ -598,6 +624,34 @@ mod tests {
     }
 
     #[test]
+    fn request_validation_rejects_persist_on_non_summarize_tool() {
+        let mut request = base_request();
+        request.tool_allowlist.tools.push(AgentToolCall {
+            verb: CairnVerb::Search,
+            write_report: false,
+            persist: true,
+        });
+        let err = request
+            .validate()
+            .expect_err("persist flag rejects outside summarize");
+        assert!(matches!(err, AgentProviderError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn request_validation_rejects_write_report_on_non_lint_tool() {
+        let mut request = base_request();
+        request.tool_allowlist.tools.push(AgentToolCall {
+            verb: CairnVerb::Search,
+            write_report: true,
+            persist: false,
+        });
+        let err = request
+            .validate()
+            .expect_err("write_report flag rejects outside lint");
+        assert!(matches!(err, AgentProviderError::InvalidRequest { .. }));
+    }
+
+    #[test]
     fn identity_rejects_empty_or_non_agent_values() {
         assert!(AgentIdentity::new("").is_err());
         assert!(AgentIdentity::new("agt:").is_err());
@@ -615,7 +669,9 @@ mod tests {
     fn aborted_run_can_carry_typed_error() {
         let run = AgentRun {
             status: AgentRunStatus::Aborted,
-            abort_error: Some(AgentProviderError::BudgetExceeded { limit: "turns" }),
+            abort_error: Some(AgentProviderError::BudgetExceeded {
+                limit: "turns".to_string(),
+            }),
             output: AgentOutput::Empty,
             budget_consumed: AgentBudgetConsumed {
                 turns: 1,
@@ -629,7 +685,9 @@ mod tests {
         assert_eq!(run.status, AgentRunStatus::Aborted);
         assert_eq!(
             run.abort_error,
-            Some(AgentProviderError::BudgetExceeded { limit: "turns" })
+            Some(AgentProviderError::BudgetExceeded {
+                limit: "turns".to_string(),
+            })
         );
     }
 
@@ -637,7 +695,9 @@ mod tests {
     fn aborted_run_serializes_abort_error() {
         let run = AgentRun {
             status: AgentRunStatus::Aborted,
-            abort_error: Some(AgentProviderError::BudgetExceeded { limit: "turns" }),
+            abort_error: Some(AgentProviderError::BudgetExceeded {
+                limit: "turns".to_string(),
+            }),
             output: AgentOutput::Empty,
             budget_consumed: AgentBudgetConsumed {
                 turns: 1,
@@ -650,9 +710,30 @@ mod tests {
 
         let value = serde_json::to_value(&run).expect("agent run serializes");
 
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "status": "aborted",
+                "abort_error": {
+                    "kind": "budget_exceeded",
+                    "limit": "turns",
+                },
+                "output": "empty",
+                "budget_consumed": {
+                    "turns": 1,
+                    "tool_calls": 0,
+                    "cost_units": 0,
+                },
+                "tool_calls": [],
+                "policy_trace": ["turn budget exceeded"],
+            })
+        );
         assert_eq!(value["status"], "aborted");
-        assert!(value.get("abort_error").is_some());
-        assert!(value["abort_error"].to_string().contains("BudgetExceeded"));
-        assert!(value["abort_error"].to_string().contains("turns"));
+        assert_eq!(value["abort_error"]["kind"], "budget_exceeded");
+        assert_eq!(value["abort_error"]["limit"], "turns");
+
+        let roundtrip: AgentRun =
+            serde_json::from_value(value).expect("serialized agent run deserializes");
+        assert_eq!(roundtrip, run);
     }
 }
