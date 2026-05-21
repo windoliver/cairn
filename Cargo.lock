@@ -667,6 +667,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "cairn-agent-core"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "cairn-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "cairn-bench"
 version = "0.0.1"
 dependencies = [

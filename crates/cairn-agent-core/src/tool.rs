@@ -96,10 +96,18 @@ fn build_argv(
 ) -> Result<Vec<String>, AgentProviderError> {
     match call.verb {
         CairnVerb::Search => {
-            let mut argv = vec!["search".to_string(), "--json".to_string()];
-            if let Some(query) = first_string(args, &["q", "query"]) {
-                argv.push(query.to_string());
-            }
+            let Some(query) = first_string(args, &["q", "query"]) else {
+                return Err(AgentProviderError::InvalidRequest {
+                    message: "search tool requires `q` or `query`".to_string(),
+                });
+            };
+            let argv = vec![
+                "search".to_string(),
+                "--mode".to_string(),
+                "keyword".to_string(),
+                query.to_string(),
+                "--json".to_string(),
+            ];
             Ok(argv)
         }
         CairnVerb::Retrieve => {
@@ -110,14 +118,12 @@ fn build_argv(
             Ok(argv)
         }
         CairnVerb::Lint if !call.write_report && !call.persist => {
-            let mut argv = vec![
-                "lint".to_string(),
-                "--dry-run".to_string(),
-                "--json".to_string(),
-            ];
-            if let Some(target) = first_string(args, &["target", "path"]) {
-                argv.push(target.to_string());
+            let mut argv = vec!["lint".to_string()];
+            if let Some(plan) = first_string(args, &["plan"]) {
+                argv.push("--plan".to_string());
+                argv.push(plan.to_string());
             }
+            argv.push("--json".to_string());
             Ok(argv)
         }
         CairnVerb::Lint => Err(AgentProviderError::ToolNotAllowed {
@@ -131,4 +137,67 @@ fn first_string<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Option<&'a s
     keys.iter()
         .find_map(|key| value.get(*key).and_then(serde_json::Value::as_str))
         .filter(|s| !s.trim().is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use cairn_core::contract::{AgentProviderError, AgentToolCall, CairnVerb};
+
+    use super::build_argv;
+
+    #[test]
+    fn search_argv_uses_keyword_mode_query_then_json() {
+        let argv = build_argv(
+            &AgentToolCall::new(CairnVerb::Search),
+            &serde_json::json!({ "query": "prior decision" }),
+        )
+        .expect("search argv builds");
+
+        assert_eq!(
+            argv,
+            ["search", "--mode", "keyword", "prior decision", "--json"]
+        );
+    }
+
+    #[test]
+    fn search_argv_accepts_short_query_key() {
+        let argv = build_argv(
+            &AgentToolCall::new(CairnVerb::Search),
+            &serde_json::json!({ "q": "short" }),
+        )
+        .expect("search argv builds");
+
+        assert_eq!(argv, ["search", "--mode", "keyword", "short", "--json"]);
+    }
+
+    #[test]
+    fn lint_argv_is_read_only_json_without_dry_run() {
+        let argv = build_argv(
+            &AgentToolCall::lint_dry(),
+            &serde_json::json!({ "target": "ignored" }),
+        )
+        .expect("lint argv builds");
+
+        assert_eq!(argv, ["lint", "--json"]);
+    }
+
+    #[test]
+    fn lint_argv_denies_write_report() {
+        let err = build_argv(
+            &AgentToolCall {
+                verb: CairnVerb::Lint,
+                write_report: true,
+                persist: false,
+            },
+            &serde_json::json!({}),
+        )
+        .expect_err("write-report lint is denied");
+
+        assert!(matches!(
+            err,
+            AgentProviderError::ToolNotAllowed {
+                verb: CairnVerb::Lint
+            }
+        ));
+    }
 }
