@@ -1,0 +1,5 @@
+---
+source: crates/cairn-cli/tests/search_modes_golden.rs
+expression: stdout
+---
+{"contract":"cairn.mcp.v1","data":{"hits":[]},"operation_id":"01XXXXXXXXXXXXXXXXXXXXXXXX","policy_trace":[{"gate":"search.scope","result":"pass"},{"gate":"search.capability","result":"pass"},{"detail":"rebac:read:project:missing_principal","gate":"rebac","result":"deny"},{"detail":"rebac:read:team:missing_principal","gate":"rebac","result":"deny"},{"detail":"rebac:read:org:missing_principal","gate":"rebac","result":"deny"},{"detail":"rebac:read:public:missing_principal","gate":"rebac","result":"deny"},{"gate":"search.read_filter","result":"pass"}],"status":"committed","verb":"search"}

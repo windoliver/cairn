@@ -1,0 +1,449 @@
+---
+source: crates/cairn-idl/tests/wire_compat_v1.rs
+expression: body
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/prelude/status.json",
+  "title": "Cairn status response",
+  "x-cairn-contract": "cairn.mcp.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract", "server_info", "capabilities", "extensions", "health", "sensors"],
+  "properties": {
+    "contract": { "const": "cairn.mcp.v1" },
+    "mcp_graph_tools": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "probe_basis"],
+      "properties": {
+        "state": { "type": "string", "enum": ["available", "unavailable",
+                            "probe_failed", "no_vault"] },
+        "reason": {
+          "type": "string",
+          "enum": ["single_tenant_off", "no_store_capability",
+                   "no_scope_resolver", "store_open_error",
+                   "vault_not_bound", "resolver_empty"]
+        },
+        "tool_count": { "type": "integer", "minimum": 0 },
+        "probe_basis": { "type": "string", "enum": ["full", "config_only"] },
+        "error": { "type": "string", "minLength": 1 }
+      }
+    },
+    "server_info": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "build", "started_at", "incarnation"],
+      "properties": {
+        "version":     { "type": "string", "minLength": 1 },
+        "build":       { "type": "string", "minLength": 1 },
+        "started_at":  { "type": "string", "format": "date-time" },
+        "incarnation": {
+          "allOf": [{ "$ref": "../common/primitives.json#/$defs/Ulid" }],
+          "description": "ULID minted at daemon start."
+        }
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "../capabilities/capabilities.json" }
+    },
+    "extensions": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "../extensions/registry.json#/$defs/namespace" }
+    },
+    "health": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["authority_db", "nexus_projection"],
+      "properties": {
+        "authority_db": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "path"],
+          "properties": {
+            "state": {
+              "type": "string",
+              "enum": ["healthy", "missing", "unavailable"]
+            },
+            "path": { "type": "string", "minLength": 1 },
+            "reason": { "type": "string", "minLength": 1 }
+          }
+        },
+        "nexus_projection": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state"],
+          "properties": {
+            "state": {
+              "type": "string",
+              "enum": ["disabled", "healthy", "degraded"]
+            },
+            "endpoint": { "type": "string", "minLength": 1 },
+            "data_dir": { "type": "string", "minLength": 1 },
+            "reason": { "type": "string", "minLength": 1 },
+            "projection_detail": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["targets"],
+              "properties": {
+                "last_successful_rebuild_at": { "type": "string", "format": "date-time" },
+                "targets": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["target", "state", "total", "current", "lagging", "failed"],
+                    "properties": {
+                      "target": {
+                        "type": "string",
+                        "enum": [
+                          "bm25s",
+                          "parser_pdf_text",
+                          "parser_docx_text",
+                          "parser_video_frame_text",
+                          "parser_vision_caption"
+                        ]
+                      },
+                      "state": {
+                        "type": "string",
+                        "enum": ["current", "stale", "failed", "missing"]
+                      },
+                      "total": { "type": "integer", "minimum": 0 },
+                      "current": { "type": "integer", "minimum": 0 },
+                      "lagging": { "type": "integer", "minimum": 0 },
+                      "failed": { "type": "integer", "minimum": 0 },
+                      "reason": { "type": "string", "minLength": 1 }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "sensors": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["screen"],
+      "properties": {
+        "screen": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["backend", "state", "mode", "ocr_engine", "permission"],
+          "properties": {
+            "backend": {
+              "type": "string",
+              "enum": ["xcap", "screenpipe"]
+            },
+            "state": {
+              "type": "string",
+              "enum": ["disabled", "permission_missing", "degraded", "enabled"]
+            },
+            "mode": {
+              "type": "string",
+              "enum": ["off", "snapshot", "continuous"]
+            },
+            "ocr_engine": {
+              "type": "string",
+              "enum": ["vision", "winrt", "tesseract", "off"]
+            },
+            "permission": {
+              "type": "string",
+              "enum": ["not_requested", "granted", "denied", "revoked"]
+            },
+            "degradation": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "message"],
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "enum": [
+                    "screen.disabled",
+                    "screen.permission_missing",
+                    "screen.backend_unavailable",
+                    "screen.degraded"
+                  ]
+                },
+                "message": { "type": "string", "minLength": 1 }
+              }
+            }
+          }
+        },
+        "local": {
+          "type": "array",
+          "description": "Per-local-sensor config, consent, and gate state. Optional and additive for issue #88.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["sensor", "enabled", "consent", "gate", "budget", "retention"],
+            "properties": {
+              "sensor": {
+                "type": "string",
+                "enum": ["hook", "ide", "terminal", "clipboard", "voice", "screen", "recording"]
+              },
+              "enabled": { "type": "boolean" },
+              "consent": {
+                "type": "string",
+                "enum": ["enabled", "disabled", "missing"]
+              },
+              "gate": {
+                "type": "string",
+                "enum": ["allowed", "disabled", "privacy_denied", "budget_exceeded"]
+              },
+              "budget": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "max_items": { "type": "integer", "minimum": 1 },
+                  "max_bytes": { "type": "integer", "minimum": 1 }
+                }
+              },
+              "retention": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "max_days": { "type": "integer", "minimum": 1 }
+                }
+              },
+              "last_drop_reason": {
+                "type": "string",
+                "enum": ["disabled", "privacy_denied", "budget_exceeded", "policy_rejected", "malformed_observation"]
+              }
+            }
+          }
+        }
+      }
+    },
+    "workflows": {
+      "type": "array",
+      "uniqueItems": true,
+      "description": "Runtime workflow-drainer progress for `cairn.admin.v1` status (issue #291). Each entry reports one workflow class; entries are sorted by workflow name for byte-stable status responses.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["workflow", "drained_plans", "pending_plans"],
+        "properties": {
+          "workflow": {
+            "type": "string",
+            "enum": ["consolidate", "promote", "expire", "reflect"],
+            "description": "Stable workflow class name."
+          },
+          "drained_plans": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Plans drained successfully, including idempotent already-applied plans."
+          },
+          "pending_plans": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Plans produced but not yet drained, usually because cancellation stopped between plans."
+          },
+          "last_applied_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Most recent successful plan-drain timestamp for this workflow."
+          }
+        }
+      }
+    },
+    "pipeline_dispatch": {
+      "type": "array",
+      "uniqueItems": true,
+      "description": "Per-(source_family, tool_id) routing decisions for the Capture → Extract pipeline (issue #217). Each entry tells clients whether captured payloads flow through `squash` (lossy compaction) or `bypass` (raw bytes). Entries MUST be sorted lexicographically by (source_family, tool_id ?? \"\") for byte-stable status responses across an incarnation (brief §8.0.a). Optional and additive — not in `required[]` so a pre-#217 server's response (no field) deserializes against this schema.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source_family", "decision"],
+        "properties": {
+          "source_family": {
+            "type": "string",
+            "enum": ["hook", "ide", "terminal", "clipboard", "voice", "screen", "recording_batch", "cli", "mcp", "proactive"],
+            "description": "Wire-form SourceFamily tag (matches CapturePayload variant)."
+          },
+          "tool_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Optional tool identifier (e.g., 'Bash', 'Read'). Absent means the decision applies to every tool in this source_family — the P0 default."
+          },
+          "decision": {
+            "type": "string",
+            "enum": ["squash_when_interactive_tty", "bypass"],
+            "description": "P0 routing enum — closed. 'squash_when_interactive_tty' admits InteractiveTty Terminal payloads to `squash`; everything else (including non-interactive Terminal) bypasses. Adding values is a wire-contract change (cairn.mcp.v1 → vNext), not an additive update — older clients' generated deserializers will reject unknown values."
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "$comment": "aggregate extension ↔ capability binding",
+      "if": {
+        "properties": {
+          "extensions": {
+            "contains": { "properties": { "name": { "const": "cairn.aggregate.v1" } }, "required": ["name"] }
+          }
+        },
+        "required": ["extensions"]
+      },
+      "then": {
+        "properties": {
+          "capabilities": { "contains": { "const": "cairn.mcp.v1.extension.aggregate" } }
+        },
+        "required": ["capabilities"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "capabilities": { "contains": { "const": "cairn.mcp.v1.extension.aggregate" } }
+        },
+        "required": ["capabilities"]
+      },
+      "then": {
+        "properties": {
+          "extensions": {
+            "contains": { "properties": { "name": { "const": "cairn.aggregate.v1" } }, "required": ["name"] }
+          }
+        },
+        "required": ["extensions"]
+      }
+    },
+    {
+      "$comment": "admin extension ↔ capability binding",
+      "if": {
+        "properties": {
+          "extensions": {
+            "contains": { "properties": { "name": { "const": "cairn.admin.v1" } }, "required": ["name"] }
+          }
+        },
+        "required": ["extensions"]
+      },
+      "then": {
+        "properties": {
+          "capabilities": { "contains": { "const": "cairn.mcp.v1.extension.admin" } }
+        },
+        "required": ["capabilities"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "capabilities": { "contains": { "const": "cairn.mcp.v1.extension.admin" } }
+        },
+        "required": ["capabilities"]
+      },
+      "then": {
+        "properties": {
+          "extensions": {
+            "contains": { "properties": { "name": { "const": "cairn.admin.v1" } }, "required": ["name"] }
+          }
+        },
+        "required": ["extensions"]
+      }
+    },
+    {
+      "$comment": "federation extension ↔ capability binding",
+      "if": {
+        "properties": {
+          "extensions": {
+            "contains": { "properties": { "name": { "const": "cairn.federation.v1" } }, "required": ["name"] }
+          }
+        },
+        "required": ["extensions"]
+      },
+      "then": {
+        "properties": {
+          "capabilities": { "contains": { "const": "cairn.mcp.v1.extension.federation" } }
+        },
+        "required": ["capabilities"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "capabilities": { "contains": { "const": "cairn.mcp.v1.extension.federation" } }
+        },
+        "required": ["capabilities"]
+      },
+      "then": {
+        "properties": {
+          "extensions": {
+            "contains": { "properties": { "name": { "const": "cairn.federation.v1" } }, "required": ["name"] }
+          }
+        },
+        "required": ["extensions"]
+      }
+    },
+    {
+      "$comment": "sessiontree extension ↔ capability binding",
+      "if": {
+        "properties": {
+          "extensions": {
+            "contains": { "properties": { "name": { "const": "cairn.sessiontree.v1" } }, "required": ["name"] }
+          }
+        },
+        "required": ["extensions"]
+      },
+      "then": {
+        "properties": {
+          "capabilities": { "contains": { "const": "cairn.mcp.v1.extension.sessiontree" } }
+        },
+        "required": ["capabilities"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "capabilities": { "contains": { "const": "cairn.mcp.v1.extension.sessiontree" } }
+        },
+        "required": ["capabilities"]
+      },
+      "then": {
+        "properties": {
+          "extensions": {
+            "contains": { "properties": { "name": { "const": "cairn.sessiontree.v1" } }, "required": ["name"] }
+          }
+        },
+        "required": ["extensions"]
+      }
+    },
+    {
+      "$comment": "coord extension ↔ capability binding",
+      "if": {
+        "properties": {
+          "extensions": {
+            "contains": { "properties": { "name": { "const": "cairn.coord.v1" } }, "required": ["name"] }
+          }
+        },
+        "required": ["extensions"]
+      },
+      "then": {
+        "properties": {
+          "capabilities": { "contains": { "const": "cairn.mcp.v1.extension.coord" } }
+        },
+        "required": ["capabilities"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "capabilities": { "contains": { "const": "cairn.mcp.v1.extension.coord" } }
+        },
+        "required": ["capabilities"]
+      },
+      "then": {
+        "properties": {
+          "extensions": {
+            "contains": { "properties": { "name": { "const": "cairn.coord.v1" } }, "required": ["name"] }
+          }
+        },
+        "required": ["extensions"]
+      }
+    }
+  ]
+}

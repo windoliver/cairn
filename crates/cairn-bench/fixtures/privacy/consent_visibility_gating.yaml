@@ -1,0 +1,38 @@
+# P0 Privacy fixture 6 — §14 / §3 consent visibility gating
+#
+# DEFERRED at v0.1: `cairn ingest --visibility` is not wired.
+# The ingest CLI does not accept a --visibility flag at v0.1; all ingested
+# records default to `private` visibility regardless of the fixture's
+# `visibility:` field on the record (the harness ignores that field at
+# ingest time because the CLI has no such flag).
+#
+# Hypothesis: a record ingested with `visibility: project` should NOT appear
+# in a default search (which runs in `private` scope). Only a search
+# explicitly targeting `project` scope should surface it.
+#
+# When `cairn ingest --visibility project` is wired (P1+), remove `deferred: true`
+# and add `--visibility project` handling to the harness's ingest_record().
+scenario: consent_visibility_gating
+description: |
+  §14 / §3 consent visibility (DEFERRED — --visibility not wired on ingest at v0.1).
+  A project-scoped record must not appear in a default (private-scope) search.
+  Unblock when cairn ingest --visibility is wired (P1+).
+deferred: true
+setup:
+  records:
+    - id: rec_project_scope
+      kind: reference
+      # visibility: project is advisory — the harness cannot pass it to the CLI
+      # at v0.1 because --visibility is not a wired flag on cairn ingest.
+      visibility: project
+      body: "project-scope-sentinel-charlie-5541"
+operations: []
+assertions:
+  search:
+    # v0.1 gap: all records default to private; this assertion would pass
+    # trivially (not because scoping works, but because visibility isn't set).
+    # When --visibility is wired, the record would be ingested as project-scoped
+    # and a private search would correctly miss it.
+    - mode: keyword
+      query: "project-scope-sentinel-charlie-5541"
+      must_not_contain_id: rec_project_scope

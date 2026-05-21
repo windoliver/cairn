@@ -1,0 +1,13 @@
+{
+  "cases": {
+    "ok_record": {
+      "kind": "stub"
+    },
+    "err_mode_session_unsupported": {
+      "kind": "stub"
+    },
+    "err_mode_scope_unsupported": {
+      "kind": "stub"
+    }
+  }
+}

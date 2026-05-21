@@ -1,0 +1,77 @@
+[package]
+name = "cairn-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+description = "BrainBench retrieval-quality scorecard runner for Cairn."
+
+[[bin]]
+name = "cairn-bench"
+path = "src/main.rs"
+
+[features]
+default = []
+# Opt-in: enables the OpenAI embedding adapter column in the scorecard.
+# Requires OPENAI_API_KEY at runtime. Default builds stay offline.
+openai = ["dep:cairn-embeddings-openai"]
+
+[dependencies]
+# Adapter dispatch (Task 11) wires cairn-core, cairn-embeddings-local, and
+# cairn-store-sqlite into the binary. cairn-core is pulled with the
+# `test-fixtures` feature: cairn-bench is developer/eval tooling (parallel
+# to `cargo bench`), not a user-facing CLI, and reusing `sample_record`
+# avoids hand-cloning a schema-drift-fragile MemoryRecord literal.
+cairn-core = { workspace = true, features = ["test-fixtures"] }
+cairn-embeddings-local = { workspace = true }
+cairn-embeddings-openai = { workspace = true, optional = true }
+cairn-sdk = { workspace = true }
+cairn-store-sqlite = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true, features = ["clock", "std"] }
+clap = { workspace = true, features = ["derive"] }
+# `EmbeddingCache::save` takes an OS-level exclusive flock around the
+# load-merge-persist sequence so two parallel bench processes cannot
+# interleave reads and atomic renames and silently lose one another's
+# additions. fs4 is already in the transitive tree (sqlite-vec).
+fs4 = { version = "0.13", features = ["sync"] }
+rusqlite = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+# Runtime: `EmbeddingCache::save` writes to a sibling temp file and
+# atomically renames so a kill or disk-full event mid-write cannot
+# corrupt the only cache (which holds expensive OpenAI embeddings).
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+toml = { workspace = true }
+tracing = { workspace = true }
+walkdir = { workspace = true }
+yaml_serde = { workspace = true }
+
+[dev-dependencies]
+cairn-cli = { path = "../cairn-cli" }
+cairn-test-fixtures = { workspace = true }
+criterion = { workspace = true }
+insta = { workspace = true, features = ["json", "yaml"] }
+jsonschema = { workspace = true }
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "latency"
+harness = false
+
+[[bench]]
+name = "lifecycle"
+harness = false
+
+[package.metadata.cargo-machete]
+ignored = ["cairn-sdk", "tracing"]

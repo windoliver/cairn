@@ -669,6 +669,19 @@ pub trait AgentProvider: Send + Sync {
     async fn spawn(&self, request: AgentSpawnRequest) -> Result<AgentRun, AgentProviderError>;
 }
 
+/// Static identity descriptor for an [`AgentProvider`] plugin (§4.1).
+///
+/// Carries the two associated consts the `register_plugin_with!` macro checks
+/// before construction. See [`MemoryStorePlugin`](crate::contract::MemoryStorePlugin)
+/// for the design rationale.
+#[doc(hidden)]
+pub trait AgentProviderPlugin: AgentProvider + Sized {
+    /// Stable plugin name, checked statically before construction (§4.1).
+    const NAME: &'static str;
+    /// Version range checked statically before construction (§4.1).
+    const SUPPORTED_VERSIONS: VersionRange;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

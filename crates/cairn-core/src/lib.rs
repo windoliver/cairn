@@ -10,6 +10,18 @@
 
 pub mod config;
 pub mod contract;
+pub mod coord;
 pub mod domain;
+pub mod error;
 pub mod generated;
+pub mod mcp_auth;
+pub mod pipeline;
+pub mod policy_trace;
+pub mod rebac;
+pub mod replay;
+pub mod search;
+pub mod status;
+pub mod time;
+pub mod verbs;
 pub mod verifier;
+pub mod wal;

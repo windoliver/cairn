@@ -12,6 +12,6 @@ minor = 2
 patch = 0
 
 [features]
-durable = false
-crash_safe = false
+durable = true
+crash_safe = true
 cron_schedules = false

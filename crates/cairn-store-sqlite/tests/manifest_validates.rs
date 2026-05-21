@@ -25,6 +25,14 @@ fn register_populates_registry() {
     let mut reg = cairn_core::contract::registry::PluginRegistry::new();
     cairn_store_sqlite::register(&mut reg).expect("registers");
     let name = PluginName::new("cairn-store-sqlite").expect("valid");
-    assert!(reg.memory_store(&name).is_some());
+    let store = reg.memory_store(&name).expect("registered store");
+    assert!(store.capabilities().fts);
     assert!(reg.parsed_manifest(&name).is_some());
+    assert_eq!(
+        reg.parsed_manifest(&name)
+            .expect("manifest")
+            .features()
+            .get("fts"),
+        Some(&true)
+    );
 }

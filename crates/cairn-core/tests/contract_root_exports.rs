@@ -9,11 +9,11 @@ use cairn_core::contract::{
     AgentProvider, AgentProviderCapabilities, AgentProviderError, AgentRun, AgentRunMeter,
     AgentRunStatus, AgentScope, AgentSpawnRequest, AgentToolAllowlist, AgentToolAttempt,
     AgentToolCall, AgentToolPolicyOutcome, AgentWallClockBudget, CairnVerb, ContractKind,
-    ContractVersion, FrontendAdapter, FrontendAdapterCapabilities, LLMProvider,
-    LLMProviderCapabilities, MCPServer, MCPServerCapabilities, MemoryStore,
-    MemoryStoreCapabilities, PluginError, PluginManifest, PluginName, PluginRegistry,
-    SensorIngress, SensorIngressCapabilities, VersionRange, WorkflowOrchestrator,
-    WorkflowOrchestratorCapabilities, evaluate_tool_policy, validate_output,
+    ContractVersion, FrontendAdapter, FrontendAdapterCapabilities, FrontendFieldClass,
+    FrontendFieldPolicy, FrontendReconcileError, LLMProvider, LLMProviderCapabilities, MCPServer,
+    MCPServerCapabilities, MemoryStore, MemoryStoreCapabilities, PluginError, PluginManifest,
+    PluginName, PluginRegistry, SensorIngress, SensorIngressCapabilities, VersionRange,
+    WorkflowOrchestrator, WorkflowOrchestratorCapabilities, evaluate_tool_policy, validate_output,
 };
 
 #[test]
@@ -88,6 +88,14 @@ fn agent_provider_contract_types_constructible_from_root() {
         limit: "turns".to_string(),
     };
     assert!(budget_err.to_string().contains("turns"));
+}
+
+#[test]
+fn frontend_contract_types_are_reachable() {
+    let _: FrontendAdapterCapabilities = FrontendAdapterCapabilities::default();
+    let _: FrontendFieldClass = FrontendFieldClass::UserContent;
+    let _ = FrontendFieldPolicy::is_mutable_from_frontend("body");
+    let _: FrontendReconcileError = FrontendReconcileError::UnsignedIntent;
 }
 
 mod compile_only {

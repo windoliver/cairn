@@ -1,0 +1,146 @@
+{
+  "id": "codex_consumer",
+  "description": "Codex consumer replay scenario covering hot memory, capture_trace-shaped events, search, retrieve, summarize, lint, and record forget.",
+  "config": {
+    "local_embeddings": false
+  },
+  "records": [
+    {
+      "id": "01HQZX9F5N0000000000000C00",
+      "kind": "trace",
+      "class": "episodic",
+      "visibility": "private",
+      "body": "codex session user asked to preserve branch worktree context",
+      "session_id": "codex-session",
+      "turn_id": "1",
+      "sequence": 1,
+      "trace_event": "user_message"
+    },
+    {
+      "id": "01HQZX9F5N0000000000000C01",
+      "kind": "trace",
+      "class": "episodic",
+      "visibility": "private",
+      "body": "codex agent created branch and inspected issue one nineteen",
+      "session_id": "codex-session",
+      "turn_id": "1",
+      "sequence": 2,
+      "trace_event": "agent_message"
+    },
+    {
+      "id": "01HQZX9F5N0000000000000C02",
+      "kind": "trace",
+      "class": "episodic",
+      "visibility": "private",
+      "body": "rg tool call searched for codex consumer blueprint",
+      "session_id": "codex-session",
+      "turn_id": "1",
+      "sequence": 3,
+      "trace_event": "pre_tool",
+      "tool_name": "rg",
+      "tool_call_id": "call_rg_codex_blueprint"
+    },
+    {
+      "id": "01HQZX9F5N0000000000000C03",
+      "kind": "trace",
+      "class": "episodic",
+      "visibility": "private",
+      "body": "rg tool result found codex setup and skill install surfaces",
+      "session_id": "codex-session",
+      "turn_id": "1",
+      "sequence": 4,
+      "trace_event": "tool_output",
+      "tool_name": "rg",
+      "tool_call_id": "call_rg_codex_blueprint",
+      "parent_event_id": "01HQZX9F5N0000000000000C02"
+    },
+    {
+      "id": "01HQZX9F5N0000000000000C04",
+      "kind": "user",
+      "class": "semantic",
+      "visibility": "private",
+      "body": "user wants Codex work to stay inside an isolated branch worktree"
+    },
+    {
+      "id": "01HQZX9F5N0000000000000C05",
+      "kind": "reasoning",
+      "class": "semantic",
+      "visibility": "private",
+      "body": "codex hot memory summary covers issue 119 consumer setup replay and docs",
+      "session_id": "codex-session",
+      "turn_id": "summary",
+      "sequence": 5,
+      "trace_event": "turn_summary"
+    },
+    {
+      "id": "01HQZX9F5N0000000000000C06",
+      "kind": "fact",
+      "class": "semantic",
+      "visibility": "private",
+      "body": "temporary codex secret should disappear after forget"
+    },
+    {
+      "id": "01HQZX9F5N0000000000000C07",
+      "kind": "playbook",
+      "class": "procedural",
+      "visibility": "private",
+      "body": "codex consumer setup uses mcp server config plus skill fallback"
+    }
+  ],
+  "actions": [
+    {
+      "verb": "capture_trace",
+      "story": "CODEX_CAPTURE_TRACE",
+      "session_id": "codex-session",
+      "expected_trace_events": ["user_message", "agent_message", "pre_tool", "tool_output", "turn_summary"]
+    },
+    {
+      "verb": "retrieve_session",
+      "story": "CODEX_RETRIEVE_SESSION",
+      "session_id": "codex-session",
+      "expected_turn_ids": ["1"],
+      "expected_trace_events": ["user_message", "agent_message", "pre_tool", "tool_output", "turn_summary"]
+    },
+    {
+      "verb": "assemble_hot",
+      "story": "CODEX_HOT_MEMORY",
+      "expected_record_ids": ["01HQZX9F5N0000000000000C04", "01HQZX9F5N0000000000000C07"]
+    },
+    {
+      "verb": "retrieve_turn",
+      "story": "CODEX_RETRIEVE_TOOL_EVENTS",
+      "session_id": "codex-session",
+      "turn_id": "1",
+      "expected_trace_events": ["user_message", "agent_message", "pre_tool", "tool_output"]
+    },
+    {
+      "verb": "summarize",
+      "story": "CODEX_SUMMARIZE",
+      "session_id": "codex-session",
+      "expected_record_ids": ["01HQZX9F5N0000000000000C05"]
+    },
+    {
+      "verb": "lint",
+      "story": "CODEX_LINT_FIXTURE",
+      "expected_status": "clean"
+    },
+    {
+      "verb": "search",
+      "story": "CODEX_SEARCH",
+      "mode": "keyword",
+      "query": "codex consumer setup",
+      "limit": 1,
+      "expected": {
+        "status": "hits",
+        "record_ids": ["01HQZX9F5N0000000000000C07"]
+      }
+    },
+    {
+      "verb": "forget_record",
+      "story": "CODEX_FORGET",
+      "record_id": "01HQZX9F5N0000000000000C06",
+      "followup_query": "temporary codex secret",
+      "expected_absent_from_search": true
+    }
+  ]
+}

@@ -1,6 +1,7 @@
 # Cairn test fixtures
 
 Golden records, config, envelopes, search filters, and plugin manifests for CI schema validation.
+Replay fixtures add deterministic temp-vault scenarios and machine-readable reports for CI gates.
 
 ## Layout
 
@@ -11,6 +12,7 @@ fixtures/
     ├── config/            ← CairnConfig JSON examples
     ├── envelopes/         ← SignedIntent + Response wire fixtures
     ├── search-filters/    ← SearchArgsFilters + SearchArgs examples
+    ├── replay/            ← P0 replay scenarios + golden expectations
     └── manifests/         ← plugin.toml manifests for each ContractKind
 ```
 

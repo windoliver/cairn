@@ -1,0 +1,14 @@
+---
+source: crates/cairn-mcp/tests/graph_tools_manifest.rs
+expression: names
+---
+[
+  "assemble_hot",
+  "capture_trace",
+  "forget",
+  "ingest",
+  "lint",
+  "retrieve",
+  "search",
+  "summarize"
+]

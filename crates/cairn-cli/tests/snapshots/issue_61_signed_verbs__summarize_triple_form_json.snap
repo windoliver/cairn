@@ -1,0 +1,73 @@
+---
+source: crates/cairn-cli/tests/issue_61_signed_verbs.rs
+expression: "serde_json::to_string_pretty(&snapshot_json).expect(\"snapshot string\")"
+---
+{
+  "contract": "cairn.mcp.v1",
+  "data": {
+    "concepts": [
+      {
+        "kind": "topic",
+        "name": "alpha",
+        "salience": 0.5
+      },
+      {
+        "kind": "topic",
+        "name": "beta",
+        "salience": 0.5
+      },
+      {
+        "kind": "topic",
+        "name": "project",
+        "salience": 1.0
+      }
+    ],
+    "digest": "2 records summarized: Alpha detail for the project; Beta detail for the project",
+    "facts": [
+      {
+        "confidence": "extracted",
+        "object": "Alpha detail for the project",
+        "predicate": "states",
+        "source_record_ids": [
+          "01XXXXXXXXXXXXXXXXXXXXXXXX"
+        ],
+        "subject": "alpha"
+      },
+      {
+        "confidence": "extracted",
+        "object": "Beta detail for the project",
+        "predicate": "states",
+        "source_record_ids": [
+          "01XXXXXXXXXXXXXXXXXXXXXXXX"
+        ],
+        "subject": "beta"
+      }
+    ],
+    "narrative": ""
+  },
+  "operation_id": "01XXXXXXXXXXXXXXXXXXXXXXXX",
+  "policy_trace": [
+    {
+      "detail": "signed_scope_verified",
+      "gate": "read.scope",
+      "result": "pass"
+    },
+    {
+      "detail": "tier<=project",
+      "gate": "read.visibility",
+      "result": "pass"
+    },
+    {
+      "detail": "legacy_event",
+      "gate": "read.consent",
+      "result": "pass"
+    },
+    {
+      "detail": "rebac:read:project:allowed",
+      "gate": "rebac",
+      "result": "pass"
+    }
+  ],
+  "status": "committed",
+  "verb": "summarize"
+}

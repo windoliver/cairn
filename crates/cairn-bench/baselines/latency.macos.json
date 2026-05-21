@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "runner": "macos",
+  "captured_at": "2026-05-19T19:27:44.278152+00:00",
+  "commit": "5d85b62b0824dfe55dd6efdb27f35f62b3d081c2",
+  "metrics": {
+    "assemble_hot_p95": 150.362755125,
+    "capture_trace_p95": 147.16,
+    "retrieve_p95": 149.79,
+    "search_hybrid_p95": 131.64,
+    "search_keyword_p95": 107.58350829999999,
+    "search_semantic_p95": 99.32,
+    "wal_apply_p95": 112.77,
+    "workflow_enqueue_p95": 121.9505105
+  },
+  "regression_pct": {
+    "assemble_hot_p95": 25.0,
+    "capture_trace_p95": 25.0,
+    "retrieve_p95": 25.0,
+    "search_hybrid_p95": 25.0,
+    "search_keyword_p95": 25.0,
+    "search_semantic_p95": 25.0,
+    "wal_apply_p95": 25.0,
+    "workflow_enqueue_p95": 25.0
+  }
+}

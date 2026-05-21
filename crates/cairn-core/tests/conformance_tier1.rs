@@ -7,15 +7,20 @@
 use std::sync::Arc;
 
 use cairn_core::contract::conformance::{CaseStatus, Tier, run_conformance_for_plugin};
+use cairn_core::contract::frontend_adapter::{FrontendAdapter, FrontendAdapterCapabilities};
 use cairn_core::contract::manifest::PluginManifest;
 use cairn_core::contract::mcp_server::{MCPServer, MCPServerCapabilities};
-use cairn_core::contract::memory_store::{MemoryStore, MemoryStoreCapabilities};
+use cairn_core::contract::memory_store::{
+    Edge, EdgeDir, EdgeKey, KeywordSearchArgs, KeywordSearchPage, ListArgs, ListPage, MemoryStore,
+    MemoryStoreCapabilities, RecordVersion, StoreError, TombstoneReason, UpsertOutcome,
+};
 use cairn_core::contract::registry::{PluginName, PluginRegistry};
 use cairn_core::contract::sensor_ingress::{SensorIngress, SensorIngressCapabilities};
 use cairn_core::contract::version::{ContractVersion, VersionRange};
 use cairn_core::contract::workflow_orchestrator::{
     WorkflowOrchestrator, WorkflowOrchestratorCapabilities,
 };
+use cairn_core::domain::{MemoryRecord, RecordId, TargetId};
 
 const STORE_MANIFEST: &str = r#"
 name = "stub-store"
@@ -23,12 +28,12 @@ contract = "MemoryStore"
 
 [contract_version_range.min]
 major = 0
-minor = 1
+minor = 5
 patch = 0
 
 [contract_version_range.max_exclusive]
 major = 0
-minor = 2
+minor = 6
 patch = 0
 
 [features]
@@ -53,11 +58,47 @@ impl MemoryStore for StubStore {
             vector: false,
             graph_edges: false,
             transactions: false,
+            per_record_consent_model: false,
+
+            graph_search: false,
         };
         &CAPS
     }
     fn supported_contract_versions(&self) -> VersionRange {
-        VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+        VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 6, 0))
+    }
+    async fn upsert(&self, _r: &MemoryRecord) -> Result<UpsertOutcome, StoreError> {
+        Err("stub: upsert not implemented".into())
+    }
+    async fn get(&self, _id: &RecordId) -> Result<Option<MemoryRecord>, StoreError> {
+        Ok(None)
+    }
+    async fn list(&self, _args: &ListArgs) -> Result<ListPage, StoreError> {
+        Ok(ListPage {
+            records: vec![],
+            next_cursor: None,
+        })
+    }
+    async fn tombstone(&self, _id: &RecordId, _r: TombstoneReason) -> Result<(), StoreError> {
+        Ok(())
+    }
+    async fn versions(&self, _t: &TargetId) -> Result<Vec<RecordVersion>, StoreError> {
+        Ok(vec![])
+    }
+    async fn put_edge(&self, _e: &Edge) -> Result<(), StoreError> {
+        Ok(())
+    }
+    async fn remove_edge(&self, _k: &EdgeKey) -> Result<bool, StoreError> {
+        Ok(false)
+    }
+    async fn neighbours(&self, _id: &RecordId, _d: EdgeDir) -> Result<Vec<Edge>, StoreError> {
+        Ok(vec![])
+    }
+    async fn search_keyword(
+        &self,
+        _args: &KeywordSearchArgs<'_>,
+    ) -> Result<KeywordSearchPage, StoreError> {
+        Err("stub: search_keyword not implemented".into())
     }
 }
 
@@ -158,6 +199,107 @@ fn tier1_cases_pass_for_well_formed_mcp_server() {
     assert!(ids.contains(&"arc_pointer_stable"));
     assert!(ids.contains(&"capability_self_consistency_floor"));
     assert!(ids.contains(&"manifest_features_match_capabilities"));
+}
+
+const FRONTEND_MANIFEST: &str = r#"
+name = "stub-frontend"
+contract = "FrontendAdapter"
+
+[contract_version_range.min]
+major = 0
+minor = 1
+patch = 0
+
+[contract_version_range.max_exclusive]
+major = 0
+minor = 2
+patch = 0
+
+[features]
+frontmatter = false
+sidecar_files = false
+live_plugin = false
+graph_view = false
+"#;
+
+#[derive(Default)]
+struct StubFrontend;
+
+#[async_trait::async_trait]
+impl FrontendAdapter for StubFrontend {
+    fn name(&self) -> &'static str {
+        "stub-frontend"
+    }
+    fn capabilities(&self) -> &FrontendAdapterCapabilities {
+        static CAPS: FrontendAdapterCapabilities = FrontendAdapterCapabilities {
+            frontmatter: false,
+            sidecar_files: false,
+            live_plugin: false,
+            graph_view: false,
+            max_frontmatter_fields: 0,
+        };
+        &CAPS
+    }
+    fn supported_contract_versions(&self) -> VersionRange {
+        VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+    }
+}
+
+#[test]
+fn tier1_cases_pass_for_well_formed_frontend_adapter() {
+    let mut reg = PluginRegistry::new();
+    let name = PluginName::new("stub-frontend").expect("valid");
+    let manifest = PluginManifest::parse_toml(FRONTEND_MANIFEST).expect("manifest parses");
+    reg.register_frontend_adapter_with_manifest(name.clone(), manifest, Arc::new(StubFrontend))
+        .expect("registers");
+
+    let outcomes = run_conformance_for_plugin(&reg, &name);
+
+    let tier1: Vec<_> = outcomes.iter().filter(|o| o.tier == Tier::One).collect();
+    assert_eq!(tier1.len(), 4, "expect 4 tier-1 cases");
+    for id in [
+        "manifest_matches_host",
+        "arc_pointer_stable",
+        "capability_self_consistency_floor",
+        "manifest_features_match_capabilities",
+    ] {
+        let outcome = tier1
+            .iter()
+            .find(|outcome| outcome.id == id)
+            .expect("required tier-1 case exists");
+        assert!(
+            matches!(outcome.status, CaseStatus::Ok),
+            "tier-1 case {} must pass, got {:?}",
+            outcome.id,
+            outcome.status
+        );
+    }
+}
+
+#[test]
+fn mcp_tool_conformance_stays_pending_when_core_cannot_exercise_stdio() {
+    let mut reg = PluginRegistry::new();
+    let name = PluginName::new("stub-mcp").expect("valid");
+    let manifest = PluginManifest::parse_toml(MCP_MANIFEST).expect("manifest parses");
+    reg.register_mcp_server_with_manifest(name.clone(), manifest, Arc::new(StubMcpServer))
+        .expect("registers");
+
+    let outcomes = run_conformance_for_plugin(&reg, &name);
+    let tool_case = outcomes
+        .iter()
+        .find(|outcome| outcome.id == "initialize_and_list_tools")
+        .expect("tool conformance case exists");
+
+    assert!(
+        matches!(
+            tool_case.status,
+            CaseStatus::Pending {
+                reason: "stdio advertised, but core cannot exercise initialize/tools-list without the MCP adapter"
+            }
+        ),
+        "stdio-capable MCP server should stay pending until adapter-level conformance, got {:?}",
+        tool_case.status
+    );
 }
 
 const SENSOR_MANIFEST: &str = r#"

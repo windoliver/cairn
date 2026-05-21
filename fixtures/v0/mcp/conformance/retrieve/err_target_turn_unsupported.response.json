@@ -1,0 +1,15 @@
+{
+  "contract": "cairn.mcp.v1",
+  "error": {
+    "code": "InvalidArgs",
+    "data": {
+      "field": "args",
+      "reason": "invalid type: integer `1`, expected a string"
+    },
+    "message": "invalid args: args: invalid type: integer `1`, expected a string"
+  },
+  "operation_id": "<OPERATION_ID>",
+  "policy_trace": [],
+  "status": "rejected",
+  "verb": "retrieve"
+}

@@ -18,6 +18,7 @@
 //! §4 for the full design.
 
 pub mod agent_provider;
+pub mod frontend_adapter;
 pub mod mcp_server;
 pub mod memory_store;
 pub mod sensor_ingress;
@@ -120,23 +121,21 @@ pub fn run_conformance_for_plugin(
         ContractKind::SensorIngress => sensor_ingress::run(registry, name),
         ContractKind::MCPServer => mcp_server::run(registry, name),
         ContractKind::AgentProvider => agent_provider::run(registry, name),
-        // P0 ships no bundled plugins for these — return a single Failed
+        ContractKind::FrontendAdapter => frontend_adapter::run(registry, name),
+        // P0 ships no bundled LLM provider plugin yet — return a single Failed
         // sentinel so `cairn plugins verify` cannot pass a manifest whose
         // contract has no conformance runner. Once these contracts get
         // bundled plugins, add per-contract `run` modules and route here.
-        kind @ (ContractKind::LLMProvider | ContractKind::FrontendAdapter) => {
-            vec![CaseOutcome {
-                id: "no_conformance_runner",
-                tier: Tier::One,
-                status: CaseStatus::Failed {
-                    message: format!(
-                        "no conformance runner registered for contract {kind:?}; \
+        ContractKind::LLMProvider => vec![CaseOutcome {
+            id: "no_conformance_runner",
+            tier: Tier::One,
+            status: CaseStatus::Failed {
+                message: "no conformance runner registered for contract LLMProvider; \
                          add a per-contract `run` module under \
                          `cairn-core::contract::conformance`"
-                    ),
-                },
-            }]
-        }
+                    .to_string(),
+            },
+        }],
     }
 }
 

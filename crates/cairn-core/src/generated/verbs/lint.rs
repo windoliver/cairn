@@ -7,51 +7,134 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct LintArgs {
-    /// When true, writes .cairn/lint-report.md.
+pub struct Finding {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub write_report: Option<bool>,
+    pub entities: Option<Vec<String>>,
+    pub kind: Kind,
+    pub message: String,
+    pub severity: Severity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggested_fix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<Target>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracking_issue: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
-pub enum LintDataFindingsKind {
+pub enum Kind {
+    BrokenActorChain,
+    BrokenSourceLink,
+    ContradictoryEdge,
     Contradiction,
-    Orphan,
-    Stale,
-    MissingConcept,
     DataGap,
+    DeferredCheck,
+    AmbiguousEdge,
+    HotMemoryOverBudget,
+    IndexDrift,
+    MalformedRecord,
+    MisclassifiedProfile,
+    MissingConcept,
+    MissingProvenance,
+    MissingSummary,
+    Orphan,
+    OrphanInsight,
+    ProjectionDrift,
+    ProjectionFailed,
+    ProjectionHashMismatch,
+    ProjectionMissing,
+    ProjectionParserFailed,
+    ProjectionSidecarUnavailable,
+    ProjectionStale,
+    SourceAfterForget,
+    SourceAfterForgetUnknownVersion,
+    SourceHashMismatch,
+    SourceLinkDangling,
+    SourceLinkLegacyDuplicate,
+    SourceLinkMissing,
+    SourceRedactSkipped,
+    SensorBudgetExceeded,
+    SensorPrivacyDenied,
+    SkillMissingArtifact,
+    SkillUnreachable,
+    SkillDuplicateLane,
+    SkillGateFailed,
+    SkillRollbackBroken,
+    Stale,
+    StaleProfileLine,
+    StaleSchema,
+    WorkflowDeadLetter,
+    WorkflowOverdue,
+    WorkflowStaleSummary,
+    WorkflowStuck,
+    WrongClassForKind,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Severity {
+    Error,
+    Warning,
+    Info,
+}
+
+/// At most one field SHOULD be set; consumers may treat multiple as the most-specific available.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct LintDataFindings {
-    pub kind: LintDataFindingsKind,
-    pub message: String,
+pub struct Target {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<crate::generated::common::Ulid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub record_id: Option<crate::generated::common::Ulid>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct LintArgs {
+    /// When true, resolves live bitemporal edge contradictions by invalidating lower-confidence edges.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fix: Option<bool>,
+    /// When true, writes reviewable Skillify repair plans instead of mutating live skills.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fix_skill_plan: Option<bool>,
+    /// When true, runs Skillify bundle, resolver, gate, and rollback lint checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill: Option<bool>,
+    /// When true, writes .cairn/lint-report.md.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_report: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LintDataSummaryBySeverity {
+    pub error: u64,
+    pub info: u64,
+    pub warning: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LintDataSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub contradictions: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub orphans: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stale: Option<u64>,
+    pub auto_resolved: Option<u64>,
+    pub by_kind: serde_json::Value,
+    pub by_severity: LintDataSummaryBySeverity,
     pub total: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LintData {
-    pub findings: Vec<LintDataFindings>,
+    pub findings: Vec<Finding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report_path: Option<String>,
     pub summary: LintDataSummary,
 }
 
-pub const ARGS_SCHEMA: &[u8] = include_bytes!("../../../../cairn-mcp/src/generated/schemas/verbs/lint.json");
+pub const ARGS_SCHEMA: &[u8] = include_bytes!("../schemas/verbs/lint.json");

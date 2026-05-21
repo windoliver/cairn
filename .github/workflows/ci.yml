@@ -61,6 +61,7 @@ jobs:
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: lint
+          cache-bin: "false"
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: cargo clippy --workspace --all-targets -- -D warnings
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
@@ -81,13 +82,18 @@ jobs:
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: test-${{ matrix.os }}
+          cache-bin: "false"
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-nextest
         uses: taiki-e/install-action@787505cde8a44ea468a00478fe52baf23b15bccd # v2.75.21
         with:
           tool: cargo-nextest
       - name: cargo nextest run --workspace
-        run: cargo nextest run --workspace --locked --no-fail-fast
+        # macOS runners can leave the `cargo` shim resolving through
+        # rustup-init after install-action updates ~/.cargo/bin. Call the
+        # installed nextest binary directly; install-action verifies this
+        # exact entrypoint before the step runs.
+        run: cargo-nextest nextest run --workspace --locked --no-fail-fast
       - name: cargo test --doc --workspace
         run: cargo test --doc --workspace --locked
 
@@ -104,9 +110,117 @@ jobs:
         with:
           shared-key: core-boundary
           cache-targets: "false"
+          cache-bin: "false"
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: scripts/check-core-boundary.sh
         run: ./scripts/check-core-boundary.sh
+
+  gates:
+    name: gates / latency + memory + privacy
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            cmd: "all"
+          - runner: macos-latest
+            cmd: "all --skip memory"
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: gates-${{ matrix.runner }}
+          cache-bin: "false"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build cairn + cairn-bench binaries
+        # Build both binaries explicitly. The bench harness shells out to the
+        # `cairn` CLI via the CAIRN_BIN_PATH baked by build.rs; without an
+        # explicit cargo build for cairn-cli, a cold or restored cache can
+        # leave target/release/cairn missing or stale.
+        run: |
+          cargo build --release --locked -p cairn-cli --bin cairn
+          cargo build --release --locked -p cairn-bench
+          test -x ./target/release/cairn || { echo "missing target/release/cairn after build"; exit 1; }
+          test -x ./target/release/cairn-bench || { echo "missing target/release/cairn-bench after build"; exit 1; }
+      - name: Run gates
+        run: ./target/release/cairn-bench ${{ matrix.cmd }}
+        env:
+          CAIRN_MOCK_EMBEDDER: "1"
+          # Use file-backed keystore on Linux runners — gnome-keyring +
+          # Secret Service isn't pre-configured in GHA's ubuntu-latest
+          # and our headless bench subprocesses need a working keystore.
+          # macOS Keychain works headlessly via the OS keystore.
+          CAIRN_KEYSTORE: ${{ matrix.runner == 'ubuntu-latest' && 'file' || '' }}
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bench-reports-${{ matrix.runner }}
+          path: target/cairn-bench/*.json
+          retention-days: 14
+
+  lint-readonly-sources:
+    name: invariant / lint never writes sources (§3, #257)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: scripts/check-lint-readonly-sources.sh
+        run: ./scripts/check-lint-readonly-sources.sh
+
+  os-locks:
+    name: invariant / no OS advisory locks (§5.6)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: scripts/check-no-os-locks.sh
+        run: ./scripts/check-no-os-locks.sh
+
+  filter-smoke:
+    # Exercises §5.2 redact + fence against the *non-dev* dependency
+    # graph. `cargo run --bin` does not activate dev-dependencies, so
+    # this catches the regex feature-unification bug class — where a
+    # missing feature in cairn-core's normal deps is masked at test
+    # time by proptest / insta pulling the feature in transitively
+    # but panics on first call from a downstream binary.
+    name: smoke / cairn-core filter pipeline (no dev-deps)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: filter-smoke
+          cache-bin: "false"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: cargo run -p cairn-core --bin filter_smoke
+        run: cargo run -p cairn-core --bin filter_smoke --features smoke --locked --release
+
+  cli-mcp-smoke:
+    name: smoke / cairn cli+mcp verb dispatch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: cli-mcp-smoke
+          cache-bin: "false"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: cargo test -p cairn-cli --test status_snapshot --test handshake_tests --test mcp_handshake_e2e
+        run: cargo test -p cairn-cli --locked --test status_snapshot --test handshake_tests --test mcp_handshake_e2e
 
   plugins-verify:
     name: plugins / cairn plugins verify
@@ -120,6 +234,7 @@ jobs:
         uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
         with:
           shared-key: plugins-verify
+          cache-bin: "false"
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: cairn plugins verify (default mode)
         run: cargo run -p cairn-cli --locked -- plugins verify
@@ -149,6 +264,7 @@ jobs:
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: build-${{ matrix.os }}
+          cache-bin: "false"
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: cargo check --workspace --all-targets
         run: cargo check --workspace --all-targets --locked
@@ -165,6 +281,102 @@ jobs:
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: codegen-drift
+          cache-bin: "false"
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: cargo run -p cairn-idl --bin cairn-codegen -- --check
         run: cargo run -p cairn-idl --bin cairn-codegen --locked -- --check
+
+  contract-drift:
+    name: contract-drift / wire-compat + capability matrix (§8.0.a, §15, #98)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: contract-drift
+          cache-bin: "false"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@787505cde8a44ea468a00478fe52baf23b15bccd # v2.75.21
+        with:
+          tool: cargo-nextest
+      - name: cairn-codegen --check (IDL → generated)
+        run: cargo run -p cairn-idl --bin cairn-codegen --locked -- --check
+      - name: cairn-docgen --check (IDL → docs)
+        run: cargo run -p cairn-cli --bin cairn-docgen --locked -- --check
+      - name: wire-compat fixtures (manifest fingerprint + per-file + inventory)
+        run: cargo-nextest nextest run -p cairn-idl --test wire_compat_v1 --locked
+      - name: capability matrix v0.1 (pure advertise())
+        run: cargo-nextest nextest run -p cairn-core --test capability_matrix_v1 --locked
+      - name: per-surface status snapshots (CLI default + degraded configs)
+        run: cargo-nextest nextest run -p cairn-cli --test status_snapshot_insta --locked
+      - name: per-surface CLI ↔ SDK parity
+        run: cargo-nextest nextest run -p cairn-cli --test sdk_cli_parity --locked
+      - name: per-surface SDK transport capability filter
+        # Whole `surface` test module — covers advertise / post-filter
+        # (retrieve/forget) / unavailable fail-closed paths in one shot
+        # so a future SDK-only capability regression cannot slip past a
+        # too-narrow nextest filter. Issue #98 round-6 finding.
+        run: cargo-nextest nextest run -p cairn-sdk --test surface --locked
+      - name: per-surface MCP initialize ↔ status parity
+        run: cargo-nextest nextest run -p cairn-mcp --test init_status_parity --locked
+
+  bench-full:
+    # Manual-trigger BrainBench scorecard run against the staged
+    # world-v1 fixture (241 pages). Fetches the BGE model from
+    # HuggingFace on first run; uses OPENAI_API_KEY if supplied as a
+    # repo secret, otherwise the OpenAI column is skipped. Per-PR
+    # coverage of cairn-bench lives in the regular `test` job
+    # (unit tests in report::tests + cache::tests + adapter::tests).
+    name: bench / world-v1 (manual)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: bench-full
+          cache-bin: "false"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: cairn-bench (full corpus)
+        env:
+          BENCH_FETCH_MODELS: "1"
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "${OPENAI_API_KEY:-}" ]; then
+            cargo run --release -p cairn-bench --features openai --locked -- \
+              scorecard \
+              --fixture fixtures/v0/brainbench-world-v1 \
+              --out-dir target/bench-full
+          else
+            echo "OPENAI_API_KEY secret not set — running with --skip-openai."
+            cargo run --release -p cairn-bench --locked -- \
+              scorecard \
+              --fixture fixtures/v0/brainbench-world-v1 \
+              --out-dir target/bench-full --skip-openai
+          fi
+          test -f target/bench-full/report.md
+          test -f target/bench-full/per-query.jsonl
+          echo "::group::report.md"
+          cat target/bench-full/report.md
+          echo "::endgroup::"
+      - name: Upload bench artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: brainbench-${{ github.run_id }}
+          path: |
+            target/bench-full/report.md
+            target/bench-full/per-query.jsonl
+          retention-days: 30

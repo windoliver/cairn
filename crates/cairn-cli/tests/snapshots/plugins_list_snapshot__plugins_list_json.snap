@@ -6,6 +6,54 @@ expression: json
   "plugins": [
     {
       "capabilities": {
+        "frontmatter": true,
+        "graph_view": true,
+        "live_plugin": true,
+        "max_frontmatter_fields": 14,
+        "sidecar_files": true
+      },
+      "contract": "FrontendAdapter",
+      "contract_version_range": {
+        "max_exclusive": "0.2.0",
+        "min": "0.1.0"
+      },
+      "name": "cairn-frontend-logseq",
+      "source": "bundled:cairn-frontend-logseq"
+    },
+    {
+      "capabilities": {
+        "frontmatter": true,
+        "graph_view": true,
+        "live_plugin": true,
+        "max_frontmatter_fields": 16,
+        "sidecar_files": true
+      },
+      "contract": "FrontendAdapter",
+      "contract_version_range": {
+        "max_exclusive": "0.2.0",
+        "min": "0.1.0"
+      },
+      "name": "cairn-frontend-obsidian",
+      "source": "bundled:cairn-frontend-obsidian"
+    },
+    {
+      "capabilities": {
+        "frontmatter": true,
+        "graph_view": false,
+        "live_plugin": true,
+        "max_frontmatter_fields": 12,
+        "sidecar_files": true
+      },
+      "contract": "FrontendAdapter",
+      "contract_version_range": {
+        "max_exclusive": "0.2.0",
+        "min": "0.1.0"
+      },
+      "name": "cairn-frontend-vscode",
+      "source": "bundled:cairn-frontend-vscode"
+    },
+    {
+      "capabilities": {
         "extensions": false,
         "http_streamable": false,
         "sse": false,
@@ -21,9 +69,9 @@ expression: json
     },
     {
       "capabilities": {
-        "batches": false,
-        "consent_aware": false,
-        "streaming": false
+        "batches": true,
+        "consent_aware": true,
+        "streaming": true
       },
       "contract": "SensorIngress",
       "contract_version_range": {
@@ -35,24 +83,25 @@ expression: json
     },
     {
       "capabilities": {
-        "fts": false,
-        "graph_edges": false,
-        "transactions": false,
+        "fts": true,
+        "graph_edges": true,
+        "per_record_consent_model": true,
+        "transactions": true,
         "vector": false
       },
       "contract": "MemoryStore",
       "contract_version_range": {
-        "max_exclusive": "0.2.0",
-        "min": "0.1.0"
+        "max_exclusive": "0.6.0",
+        "min": "0.5.0"
       },
       "name": "cairn-store-sqlite",
       "source": "bundled:cairn-store-sqlite"
     },
     {
       "capabilities": {
-        "crash_safe": false,
+        "crash_safe": true,
         "cron_schedules": false,
-        "durable": false
+        "durable": true
       },
       "contract": "WorkflowOrchestrator",
       "contract_version_range": {

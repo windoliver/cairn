@@ -1,0 +1,8 @@
+{
+  "args": {
+    "body": "User prefers dark mode in all editors.",
+    "kind": "preference"
+  },
+  "contract": "cairn.mcp.v1",
+  "verb": "ingest"
+}

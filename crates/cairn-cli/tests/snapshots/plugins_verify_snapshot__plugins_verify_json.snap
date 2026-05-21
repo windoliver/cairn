@@ -27,6 +27,174 @@ expression: json
           "tier": 1
         },
         {
+          "id": "rejects_immutable_field_edits",
+          "status": "ok",
+          "tier": 2
+        },
+        {
+          "id": "rejects_replayed_operation",
+          "status": "ok",
+          "tier": 2
+        },
+        {
+          "id": "rejects_tampered_target_hash",
+          "status": "ok",
+          "tier": 2
+        },
+        {
+          "id": "quarantines_unrecognized_principal",
+          "status": "ok",
+          "tier": 2
+        },
+        {
+          "id": "honors_optimistic_version_check",
+          "status": "ok",
+          "tier": 2
+        },
+        {
+          "id": "rejects_expired_signed_intent",
+          "status": "ok",
+          "tier": 2
+        }
+      ],
+      "contract": "FrontendAdapter",
+      "name": "cairn-frontend-logseq"
+    },
+    {
+      "cases": [
+        {
+          "id": "manifest_matches_host",
+          "status": "ok",
+          "tier": 1
+        },
+        {
+          "id": "arc_pointer_stable",
+          "status": "ok",
+          "tier": 1
+        },
+        {
+          "id": "capability_self_consistency_floor",
+          "status": "ok",
+          "tier": 1
+        },
+        {
+          "id": "manifest_features_match_capabilities",
+          "status": "ok",
+          "tier": 1
+        },
+        {
+          "id": "rejects_immutable_field_edits",
+          "status": "ok",
+          "tier": 2
+        },
+        {
+          "id": "rejects_replayed_operation",
+          "status": "ok",
+          "tier": 2
+        },
+        {
+          "id": "rejects_tampered_target_hash",
+          "status": "ok",
+          "tier": 2
+        },
+        {
+          "id": "quarantines_unrecognized_principal",
+          "status": "ok",
+          "tier": 2
+        },
+        {
+          "id": "honors_optimistic_version_check",
+          "status": "ok",
+          "tier": 2
+        },
+        {
+          "id": "rejects_expired_signed_intent",
+          "status": "ok",
+          "tier": 2
+        }
+      ],
+      "contract": "FrontendAdapter",
+      "name": "cairn-frontend-obsidian"
+    },
+    {
+      "cases": [
+        {
+          "id": "manifest_matches_host",
+          "status": "ok",
+          "tier": 1
+        },
+        {
+          "id": "arc_pointer_stable",
+          "status": "ok",
+          "tier": 1
+        },
+        {
+          "id": "capability_self_consistency_floor",
+          "status": "ok",
+          "tier": 1
+        },
+        {
+          "id": "manifest_features_match_capabilities",
+          "status": "ok",
+          "tier": 1
+        },
+        {
+          "id": "rejects_immutable_field_edits",
+          "status": "ok",
+          "tier": 2
+        },
+        {
+          "id": "rejects_replayed_operation",
+          "status": "ok",
+          "tier": 2
+        },
+        {
+          "id": "rejects_tampered_target_hash",
+          "status": "ok",
+          "tier": 2
+        },
+        {
+          "id": "quarantines_unrecognized_principal",
+          "status": "ok",
+          "tier": 2
+        },
+        {
+          "id": "honors_optimistic_version_check",
+          "status": "ok",
+          "tier": 2
+        },
+        {
+          "id": "rejects_expired_signed_intent",
+          "status": "ok",
+          "tier": 2
+        }
+      ],
+      "contract": "FrontendAdapter",
+      "name": "cairn-frontend-vscode"
+    },
+    {
+      "cases": [
+        {
+          "id": "manifest_matches_host",
+          "status": "ok",
+          "tier": 1
+        },
+        {
+          "id": "arc_pointer_stable",
+          "status": "ok",
+          "tier": 1
+        },
+        {
+          "id": "capability_self_consistency_floor",
+          "status": "ok",
+          "tier": 1
+        },
+        {
+          "id": "manifest_features_match_capabilities",
+          "status": "ok",
+          "tier": 1
+        },
+        {
           "id": "initialize_and_list_tools",
           "reason": "stdio advertised, but core cannot exercise initialize/tools-list without the MCP adapter",
           "status": "pending",
@@ -147,7 +315,7 @@ expression: json
   ],
   "summary": {
     "failed": 0,
-    "ok": 16,
+    "ok": 46,
     "pending": 6
   }
 }

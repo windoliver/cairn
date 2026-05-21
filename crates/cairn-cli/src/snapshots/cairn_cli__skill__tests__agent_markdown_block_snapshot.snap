@@ -1,0 +1,16 @@
+---
+source: crates/cairn-cli/src/skill.rs
+expression: "render_agent_markdown_block(Agent::Codex)"
+---
+<!-- BEGIN CAIRN AGENT SKILL -->
+## Cairn Memory Layer (Codex / OpenCode)
+
+Cairn is the persistent memory and knowledge-graph layer for this project.
+
+- Use Cairn when persistent memory, recall from previous sessions, or graph-aware connections would help.
+- Do not use Cairn tools for ordinary file reads or code execution.
+- Prefer exact `cairn search` / `cairn retrieve` paths when the user names a known record or concept; use graph exploration only for non-obvious connections.
+- At session start, run `cairn ingest --folder . --mode keyword` in the project root.
+- Use `cairn assemble_hot` when you need a hot-memory prefix for the current session.
+- `/remember` maps to `cairn ingest`; `/forget` maps to `cairn forget` after explicit user confirmation.
+<!-- END CAIRN AGENT SKILL -->

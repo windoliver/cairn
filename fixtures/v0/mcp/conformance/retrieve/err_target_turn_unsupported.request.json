@@ -1,0 +1,9 @@
+{
+  "args": {
+    "target": "turn",
+    "session_id": "01HQZX9F5N0000000000000000",
+    "turn_id": 1
+  },
+  "contract": "cairn.mcp.v1",
+  "verb": "retrieve"
+}

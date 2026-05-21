@@ -1,0 +1,19 @@
+[book]
+title = "Cairn"
+description = "User and maintainer documentation for the Cairn agent memory framework."
+authors = ["Cairn contributors"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "../../target/mdbook"
+create-missing = false
+
+[output.html]
+git-repository-url = "https://github.com/windoliver/cairn"
+edit-url-template = "https://github.com/windoliver/cairn/edit/main/docs/site/{path}"
+site-url = "/cairn/"
+additional-css = []
+
+[output.html.search]
+enable = true

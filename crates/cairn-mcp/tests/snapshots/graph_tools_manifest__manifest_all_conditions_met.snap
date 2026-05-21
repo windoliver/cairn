@@ -1,0 +1,19 @@
+---
+source: crates/cairn-mcp/tests/graph_tools_manifest.rs
+expression: names
+---
+[
+  "assemble_hot",
+  "capture_trace",
+  "forget",
+  "graph.get_entity",
+  "graph.get_neighbors",
+  "graph.query",
+  "graph.surprising_connections",
+  "graph.timeline",
+  "ingest",
+  "lint",
+  "retrieve",
+  "search",
+  "summarize"
+]

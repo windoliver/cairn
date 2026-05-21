@@ -9,8 +9,9 @@ use thiserror::Error;
 #[non_exhaustive]
 pub enum DomainError {
     /// `provenance` is missing one of `source_sensor`, `created_at`,
-    /// `originating_agent_id`, `source_hash`, or `consent_ref`. §6.5 makes
-    /// every component mandatory; only `llm_id_if_any` is optional.
+    /// `originating_agent_id`, `source_ids`, `source_hash`, or
+    /// `consent_ref`. §6.5 makes every component mandatory; only
+    /// `llm_id_if_any` is optional.
     #[error("provenance: missing required field `{field}`")]
     MissingProvenance {
         /// Name of the missing provenance field.
@@ -100,4 +101,168 @@ pub enum DomainError {
         /// Name of the empty field.
         field: &'static str,
     },
+
+    /// A `CaptureEvent` (§5.0.a / §9) was malformed — missing fields, bad
+    /// shape for its [`crate::domain::SourceFamily`] variant, or violated
+    /// an internal invariant unrelated to identity/scope/timestamps.
+    #[error("capture: {message}")]
+    MalformedCapture {
+        /// Specific reason the capture event was rejected.
+        message: String,
+    },
+
+    /// A [`crate::domain::SourceFamily`] string did not parse to one of the
+    /// declared families (§9.1).
+    #[error("source_family: unsupported family `{value}`")]
+    UnsupportedSourceFamily {
+        /// Family string that failed to parse.
+        value: String,
+    },
+
+    /// A [`crate::domain::CaptureMode`] string did not parse to `auto`,
+    /// `explicit`, or `proactive` (§5.0.a).
+    #[error("capture_mode: unsupported mode `{value}`")]
+    UnsupportedCaptureMode {
+        /// Mode string that failed to parse.
+        value: String,
+    },
+
+    /// A `SensorLabel` (the `body` portion of a `snr:` identity, §9.1) was
+    /// not present in the declared P0 manifest. Sensors may not emit
+    /// `CaptureEvent`s under labels they have not registered.
+    #[error("sensor_label: undeclared label `{label}`")]
+    UndeclaredSensor {
+        /// Label string that failed manifest validation.
+        label: String,
+    },
+
+    /// The `actor_chain` author for a [`crate::domain::CaptureMode`] did
+    /// not match the §5.0.a attribution rule
+    /// (Mode A → sensor, Mode B → human, Mode C → agent).
+    #[error("attribution: {message}")]
+    AttributionMismatch {
+        /// Specific reason the mode/author pairing was rejected.
+        message: String,
+    },
+
+    /// A payload hash string did not match `sha256:<64 lowercase hex>` —
+    /// the same shape `CanonicalRecordHash` and `target_hash` use.
+    #[error("payload_hash: {message}")]
+    InvalidPayloadHash {
+        /// Specific reason the hash string was rejected.
+        message: String,
+    },
+
+    /// A `SessionId` (§8.1) was empty or contained characters outside
+    /// `[A-Za-z0-9._:-]`.
+    #[error("session_id: {message}")]
+    InvalidSessionId {
+        /// Specific reason the session identifier was rejected.
+        message: String,
+    },
+
+    /// A session `project_root` failed normalization (§8.1) — most often
+    /// because it was a relative path. Two callers in different CWDs
+    /// passing the same relative string would otherwise collapse into one
+    /// session, breaking the `(user, agent, project_root)` isolation rule.
+    #[error("project_root: {message}")]
+    InvalidProjectRoot {
+        /// Specific reason the project root was rejected.
+        message: String,
+    },
+
+    /// Cryptographic verification of [`crate::generated::envelope::SignedIntent::signature`]
+    /// against the canonical-JSON encoding of the rest of the envelope failed
+    /// (§4.2 + §8.0.b).
+    #[error("signature: cryptographic verification failed")]
+    InvalidSignature,
+
+    /// The clock's current instant is outside `[issued_at − skew, expires_at)`.
+    #[error("intent expired: issued_at={issued_at}, expires_at={expires_at}, now={now}")]
+    ExpiredIntent {
+        /// Wire-form `issued_at` from the rejected envelope.
+        issued_at: String,
+        /// Wire-form `expires_at` from the rejected envelope.
+        expires_at: String,
+        /// Wall-clock instant at the time of the check.
+        now: String,
+    },
+
+    /// The issuer's key is not in [`crate::domain::identity::records::ProvisioningState::Active`].
+    /// `Pending`, `RevokePending`, `Revoked`, `PurgePending`, and `Purged` all reject.
+    #[error("issuer key not Active for {id}@v{key_version}: state={state:?}")]
+    RevokedKey {
+        /// The rejected issuer.
+        id: crate::domain::Identity,
+        /// The key version associated with the revoked key entry.
+        key_version: crate::domain::identity::keys::KeyVersion,
+        /// The lifecycle state observed in the registry.
+        state: crate::domain::identity::records::ProvisioningState,
+    },
+
+    /// `intent.key_version` does not match the version held in the
+    /// registry for this issuer. Raised by `resolve_issuer` (registry lookup).
+    #[error("key version mismatch for {id}: intent={intent}, registry has {current:?}")]
+    KeyVersionMismatch {
+        /// The issuer the envelope referenced.
+        id: crate::domain::Identity,
+        /// Version requested by the envelope.
+        intent: crate::domain::identity::keys::KeyVersion,
+        /// Highest known version in the registry; `None` if the issuer is
+        /// unknown to the registry.
+        current: Option<crate::domain::identity::keys::KeyVersion>,
+    },
+
+    /// Envelope scope `(tenant, workspace, tier)` does not match the
+    /// vault's `ScopePolicy`.
+    #[error("scope denied: {message}")]
+    ScopeDenied {
+        /// Free-form reason describing which dimension failed.
+        message: String,
+    },
+
+    /// Envelope failed an authorization check that does not fall under any
+    /// other variant — for example, a caller-bug guard where the resolved
+    /// issuer's identity does not match the envelope issuer.
+    #[error("unauthorized: {message}")]
+    Unauthorized {
+        /// Free-form reason.
+        message: String,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_signature_display() {
+        let err = DomainError::InvalidSignature;
+        assert_eq!(
+            err.to_string(),
+            "signature: cryptographic verification failed"
+        );
+    }
+
+    #[test]
+    fn expired_intent_display() {
+        let err = DomainError::ExpiredIntent {
+            issued_at: "2026-04-22T14:02:11Z".into(),
+            expires_at: "2026-04-22T14:07:11Z".into(),
+            now: "2026-04-22T15:00:00Z".into(),
+        };
+        assert!(err.to_string().contains("expired"));
+        assert!(err.to_string().contains("now=2026-04-22T15:00:00Z"));
+    }
+
+    #[test]
+    fn scope_denied_display() {
+        let err = DomainError::ScopeDenied {
+            message: "tenant: expected acme, got other".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "scope denied: tenant: expected acme, got other"
+        );
+    }
 }

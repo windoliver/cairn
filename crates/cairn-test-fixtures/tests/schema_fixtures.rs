@@ -34,6 +34,7 @@ fn v0_directory_structure_exists() {
         "config",
         "envelopes",
         "search-filters",
+        "replay",
         "manifests",
     ] {
         let p = base.join(sub);
@@ -176,6 +177,31 @@ fn filter_or_with_not_deserializes() {
 fn search_args_keyword_deserializes() {
     let a: SearchArgs = load_json(filters_dir().join("search-args-keyword.json"));
     insta::assert_json_snapshot!("search_args_keyword", &a);
+}
+
+// ── Replay scenarios ─────────────────────────────────────────────────────────
+
+fn replay_dir() -> std::path::PathBuf {
+    v0().join("replay")
+}
+
+#[test]
+fn replay_scenarios_deserialize() {
+    for name in [
+        "p0_stories.json",
+        "p0_keyword_only.json",
+        "codex_consumer.json",
+    ] {
+        let path = replay_dir().join(name);
+        let scenario = cairn_test_fixtures::replay::load_scenario_file(&path)
+            .unwrap_or_else(|e| panic!("load {}: {e}", path.display()));
+        assert_eq!(
+            path.file_stem().and_then(std::ffi::OsStr::to_str),
+            Some(scenario.id.as_str())
+        );
+        assert!(!scenario.records.is_empty());
+        assert!(!scenario.actions.is_empty());
+    }
 }
 
 // ── Plugin manifests ──────────────────────────────────────────────────────────

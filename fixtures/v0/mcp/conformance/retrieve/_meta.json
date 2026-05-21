@@ -1,0 +1,10 @@
+{
+  "cases": {
+    "ok_record": {
+      "kind": "stub"
+    },
+    "err_target_turn_unsupported": {
+      "kind": "invalid_args"
+    }
+  }
+}

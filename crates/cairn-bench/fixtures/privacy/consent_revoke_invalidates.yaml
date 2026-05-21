@@ -1,0 +1,40 @@
+# P0 Privacy fixture 7 — §14 consent revoke invalidates access
+#
+# DEFERRED at v0.1: no `cairn revoke` CLI surface.
+# Consent revocation is defined in brief §14 but is a P1+ capability.
+# The `FixtureOp::Revoke` variant exists in the harness but the CLI op is
+# skipped with an eprintln (no CLI surface at v0.1).
+#
+# Hypothesis: after revoking a consent receipt, any record covered by that
+# consent must no longer appear in search results (revoke propagates like
+# a forget for the covered scope).
+#
+# When `cairn revoke --receipt <id>` is wired (P1+):
+#   1. Remove `deferred: true`.
+#   2. Implement ingest with `--consent-receipt` flag to capture the receipt id.
+#   3. Map the receipt id into a Revoke op in the harness.
+#   4. Assert search no longer surfaces the covered record.
+scenario: consent_revoke_invalidates
+description: |
+  §14 consent revoke (DEFERRED — no CLI revoke surface at v0.1).
+  After revoking a consent receipt, the covered record must be invisible.
+  Unblock when cairn revoke --receipt is wired (P1+).
+deferred: true
+setup:
+  records:
+    - id: rec_revoke
+      kind: reference
+      body: "revoke-sentinel-delta-3317"
+operations:
+  # Revoke is skipped by the harness at v0.1 — no CLI surface.
+  # The receipt_id is a placeholder; actual ids are issued by cairn at ingest.
+  - verb: revoke
+    receipt_id: "placeholder-receipt-id"
+assertions:
+  search:
+    # After revoke, the record should be invisible to search.
+    # v0.1 gap: revoke is not run, so this would trivially pass (record is
+    # still present and findable) — which is NOT a correct pass. Deferred.
+    - mode: keyword
+      query: "revoke-sentinel-delta-3317"
+      must_not_contain_id: rec_revoke

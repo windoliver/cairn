@@ -1,0 +1,7 @@
+{
+  "projection_target": "parser_docx_text",
+  "source_path": "sources/sample.docx",
+  "source_hash": "sha256:docx-source-a",
+  "expected_state": "current",
+  "extracted_text": "Runbook update: rebuild Nexus projections after restoring a vault backup."
+}

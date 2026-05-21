@@ -2,6 +2,42 @@
 source: crates/cairn-cli/tests/plugins_verify_snapshot.rs
 expression: text
 ---
+cairn-frontend-logseq (FrontendAdapter)
+  tier-1 manifest_matches_host                    ok
+  tier-1 arc_pointer_stable                       ok
+  tier-1 capability_self_consistency_floor        ok
+  tier-1 manifest_features_match_capabilities     ok
+  tier-2 rejects_immutable_field_edits            ok
+  tier-2 rejects_replayed_operation               ok
+  tier-2 rejects_tampered_target_hash             ok
+  tier-2 quarantines_unrecognized_principal       ok
+  tier-2 honors_optimistic_version_check          ok
+  tier-2 rejects_expired_signed_intent            ok
+
+cairn-frontend-obsidian (FrontendAdapter)
+  tier-1 manifest_matches_host                    ok
+  tier-1 arc_pointer_stable                       ok
+  tier-1 capability_self_consistency_floor        ok
+  tier-1 manifest_features_match_capabilities     ok
+  tier-2 rejects_immutable_field_edits            ok
+  tier-2 rejects_replayed_operation               ok
+  tier-2 rejects_tampered_target_hash             ok
+  tier-2 quarantines_unrecognized_principal       ok
+  tier-2 honors_optimistic_version_check          ok
+  tier-2 rejects_expired_signed_intent            ok
+
+cairn-frontend-vscode (FrontendAdapter)
+  tier-1 manifest_matches_host                    ok
+  tier-1 arc_pointer_stable                       ok
+  tier-1 capability_self_consistency_floor        ok
+  tier-1 manifest_features_match_capabilities     ok
+  tier-2 rejects_immutable_field_edits            ok
+  tier-2 rejects_replayed_operation               ok
+  tier-2 rejects_tampered_target_hash             ok
+  tier-2 quarantines_unrecognized_principal       ok
+  tier-2 honors_optimistic_version_check          ok
+  tier-2 rejects_expired_signed_intent            ok
+
 cairn-mcp (MCPServer)
   tier-1 manifest_matches_host                    ok
   tier-1 arc_pointer_stable                       ok
@@ -32,4 +68,4 @@ cairn-workflows (WorkflowOrchestrator)
   tier-1 manifest_features_match_capabilities     ok
   tier-2 enqueue_then_complete                    pending (real impl pending)
 
-Summary: 4 plugins, 16 ok, 6 pending, 0 failed
+Summary: 7 plugins, 46 ok, 6 pending, 0 failed
