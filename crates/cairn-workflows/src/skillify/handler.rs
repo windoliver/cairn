@@ -10,7 +10,10 @@ use cairn_core::contract::llm_provider::{
 
 use crate::scheduler::{HandlerOutcome, JobHandler};
 
-use super::materialize::{AuthoredSkillBundle, SkillifyMaterializeError, materialize_bundle};
+use super::materialize::{
+    AuthoredSkillBundle, SkillifyMaterializeError, candidate_materialized,
+    materialize_blocked_candidate, materialize_bundle,
+};
 
 /// The `JobKind` discriminator stored in `workflow_jobs.kind`.
 pub const SKILLIFY_KIND: &str = "skillify.emit";
@@ -63,11 +66,16 @@ impl SkillifyHandler {
     /// not valid skill bundle JSON, or bundle materialization fails.
     pub async fn run_once(&self, payload: super::SkillifyPayload) -> Result<(), SkillifyRunError> {
         let candidate_id = payload.candidate_id_or_derive();
-        if super::materialize::candidate_ready(&self.vault_root, &candidate_id)? {
+        if candidate_materialized(&self.vault_root, &candidate_id)? {
             return Ok(());
         }
 
         let Some(llm) = &self.llm else {
+            materialize_blocked_candidate(
+                &self.vault_root,
+                &candidate_id,
+                "llm provider not configured",
+            )?;
             return Err(SkillifyRunError::NoLlm);
         };
 

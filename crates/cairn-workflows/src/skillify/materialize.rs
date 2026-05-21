@@ -10,6 +10,11 @@ use cairn_core::pipeline::skillify::{
 };
 use sha2::{Digest, Sha256};
 
+struct ExistingCandidateBundle {
+    bundle: SkillArtifactBundle,
+    report: SkillifyGateReport,
+}
+
 /// Structured skill bundle authored by an LLM before materialization.
 #[derive(Debug, Clone)]
 pub struct AuthoredSkillBundle {
@@ -128,7 +133,51 @@ pub fn candidate_ready(
     let root = vault_root
         .join(".cairn/evolution/skillify")
         .join(candidate_id);
-    read_existing_bundle(&root, candidate_id).map(|bundle| bundle.is_some())
+    read_existing_bundle(&root, candidate_id)
+        .map(|existing| existing.is_some_and(|existing| existing.report.ready_for_promotion()))
+}
+
+/// Return true when the candidate has a complete materialized bundle,
+/// regardless of whether promotion gates have passed.
+///
+/// # Errors
+/// Returns an error when the candidate id is unsafe or an existing candidate
+/// directory is malformed.
+pub fn candidate_materialized(
+    vault_root: &Path,
+    candidate_id: &str,
+) -> Result<bool, SkillifyMaterializeError> {
+    validate_path_token("candidate id", candidate_id)?;
+    let root = vault_root
+        .join(".cairn/evolution/skillify")
+        .join(candidate_id);
+    read_existing_bundle(&root, candidate_id).map(|existing| existing.is_some())
+}
+
+/// Write a lint-visible blocked candidate marker when authoring cannot start.
+///
+/// # Errors
+/// Returns when the candidate id is unsafe or the marker cannot be written.
+pub fn materialize_blocked_candidate(
+    vault_root: &Path,
+    candidate_id: &str,
+    message: &str,
+) -> Result<(), SkillifyMaterializeError> {
+    validate_path_token("candidate id", candidate_id)?;
+    if candidate_materialized(vault_root, candidate_id)? {
+        return Ok(());
+    }
+
+    let root = vault_root
+        .join(".cairn/evolution/skillify")
+        .join(candidate_id);
+    fs::create_dir_all(&root)?;
+    let report = blocked_gate_report(candidate_id, message);
+    fs::write(
+        root.join("gate-report.json"),
+        serde_json::to_vec_pretty(&report)?,
+    )?;
+    Ok(())
 }
 
 /// Materialize a candidate bundle under `.cairn/evolution/skillify/{candidate_id}`.
@@ -148,7 +197,10 @@ pub fn materialize_bundle(
     fs::create_dir_all(&parent)?;
     let root = parent.join(candidate_id);
     if let Some(existing) = read_existing_bundle(&root, candidate_id)? {
-        return Ok(existing);
+        return Ok(existing.bundle);
+    }
+    if blocked_placeholder_exists(&root, candidate_id)? {
+        fs::remove_dir_all(&root)?;
     }
 
     let temp_root = temp_candidate_dir(&parent, candidate_id);
@@ -167,7 +219,7 @@ pub fn materialize_bundle(
         Err(e) if root.exists() => {
             let _ = fs::remove_dir_all(&temp_root);
             if let Some(existing) = read_existing_bundle(&root, candidate_id)? {
-                Ok(existing)
+                Ok(existing.bundle)
             } else {
                 Err(SkillifyMaterializeError::Io(e))
             }
@@ -268,7 +320,7 @@ fn materialize_new_bundle(
     )?;
     let report = SkillifyGateReport {
         candidate_id: candidate_id.to_owned(),
-        gates: required_passed_gates(),
+        gates: required_blocked_gates("gate not executed"),
     };
     fs::write(
         root.join("gate-report.json"),
@@ -281,7 +333,7 @@ fn materialize_new_bundle(
 fn read_existing_bundle(
     root: &Path,
     candidate_id: &str,
-) -> Result<Option<SkillArtifactBundle>, SkillifyMaterializeError> {
+) -> Result<Option<ExistingCandidateBundle>, SkillifyMaterializeError> {
     if !root.exists() {
         return Ok(None);
     }
@@ -289,6 +341,9 @@ fn read_existing_bundle(
     let manifest_path = root.join("manifest.json");
     let gate_report_path = root.join("gate-report.json");
     if !manifest_path.exists() || !gate_report_path.exists() {
+        if blocked_placeholder_exists(root, candidate_id)? {
+            return Ok(None);
+        }
         return Err(SkillifyMaterializeError::ExistingCandidateIncomplete {
             candidate_id: candidate_id.to_owned(),
         });
@@ -296,10 +351,7 @@ fn read_existing_bundle(
 
     let bundle: SkillArtifactBundle = serde_json::from_slice(&fs::read(&manifest_path)?)?;
     let report: SkillifyGateReport = serde_json::from_slice(&fs::read(&gate_report_path)?)?;
-    if bundle.candidate_id != candidate_id
-        || report.candidate_id != candidate_id
-        || !report.ready_for_promotion()
-    {
+    if bundle.candidate_id != candidate_id || report.candidate_id != candidate_id {
         return Err(SkillifyMaterializeError::ExistingCandidateIncomplete {
             candidate_id: candidate_id.to_owned(),
         });
@@ -328,7 +380,20 @@ fn read_existing_bundle(
             });
         }
     }
-    Ok(Some(bundle))
+    Ok(Some(ExistingCandidateBundle { bundle, report }))
+}
+
+fn blocked_placeholder_exists(
+    root: &Path,
+    candidate_id: &str,
+) -> Result<bool, SkillifyMaterializeError> {
+    let manifest_path = root.join("manifest.json");
+    let gate_report_path = root.join("gate-report.json");
+    if manifest_path.exists() || !gate_report_path.exists() {
+        return Ok(false);
+    }
+    let report: SkillifyGateReport = serde_json::from_slice(&fs::read(&gate_report_path)?)?;
+    Ok(report.candidate_id == candidate_id && !report.ready_for_promotion())
 }
 
 fn temp_candidate_dir(parent: &Path, candidate_id: &str) -> std::path::PathBuf {
@@ -393,13 +458,20 @@ fn sha256_prefixed(bytes: &[u8]) -> String {
     format!("sha256:{:x}", h.finalize())
 }
 
-fn required_passed_gates() -> Vec<SkillifyGate> {
+fn blocked_gate_report(candidate_id: &str, message: &str) -> SkillifyGateReport {
+    SkillifyGateReport {
+        candidate_id: candidate_id.to_owned(),
+        gates: required_blocked_gates(message),
+    }
+}
+
+fn required_blocked_gates(message: &str) -> Vec<SkillifyGate> {
     SkillArtifactKind::required()
         .iter()
         .map(|kind| SkillifyGate {
             name: kind.as_str().to_owned(),
-            status: SkillifyGateStatus::Passed,
-            message: None,
+            status: SkillifyGateStatus::Blocked,
+            message: Some(message.to_owned()),
         })
         .collect()
 }

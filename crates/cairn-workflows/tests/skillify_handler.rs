@@ -162,8 +162,9 @@ async fn handler_materializes_candidate_bundle_from_llm_json() {
             .as_array()
             .expect("gates")
             .iter()
-            .all(|gate| gate["status"] == "passed")
+            .all(|gate| gate["status"] == "blocked")
     );
+    assert!(!candidate_ready(temp.path(), "skc_fixture").expect("candidate readiness"));
 }
 
 #[tokio::test]
@@ -271,6 +272,37 @@ async fn job_handler_maps_permanent_failures_to_validation_permanent() {
             ..
         }
     ));
+}
+
+#[tokio::test]
+async fn handler_without_llm_writes_lint_visible_blocked_candidate() {
+    let temp = TempDir::new().expect("temp");
+    let handler = SkillifyHandler::new(temp.path().to_path_buf(), None);
+
+    let outcome = handler
+        .handle(&payload().to_bytes().expect("payload"))
+        .await;
+
+    assert!(matches!(
+        outcome,
+        HandlerOutcome::Permanent {
+            class: FailureClass::Validation,
+            ..
+        }
+    ));
+    let root = temp.path().join(".cairn/evolution/skillify/skc_fixture");
+    assert!(root.join("gate-report.json").exists());
+    assert!(!root.join("manifest.json").exists());
+    let report: SkillifyGateReport =
+        serde_json::from_slice(&std::fs::read(root.join("gate-report.json")).expect("report"))
+            .expect("gate report");
+    assert!(!report.ready_for_promotion());
+    assert!(
+        report
+            .gates
+            .iter()
+            .all(|gate| gate.status == SkillifyGateStatus::Blocked)
+    );
 }
 
 #[test]
