@@ -114,7 +114,7 @@ fn admin_sre_report_counts_search_verb_invocation_failures() {
     let metrics = dir.path().join(".cairn/metrics.jsonl");
     std::fs::write(
         &metrics,
-        r#"{"event":"verb_invocation","ts_ms":1,"verb":"search","surface":"cli","mode":"semantic","status":"rejected","latency_ms":77,"error":"provider_unavailable","budget_used_ratio":null,"degradation_state":"partial","private":"SECRET_PRIVATE_TOKEN /Users/alice private body query text"}
+        r#"{"event":"verb_invocation","ts_ms":1,"verb":"search","surface":"mcp","mode":"semantic","status":"rejected","latency_ms":77,"error":"provider_unavailable","budget_used_ratio":null,"degradation_state":"partial","private":"SECRET_PRIVATE_TOKEN /Users/alice private body query text"}
 "#,
     )
     .expect("write metrics");
@@ -142,6 +142,38 @@ fn admin_sre_report_counts_search_verb_invocation_failures() {
     assert_eq!(semantic["degraded"], 1);
     assert_eq!(semantic["status"], "fail");
     assert_forbidden_fragments_absent(&stdout);
+}
+
+#[test]
+fn admin_sre_report_does_not_double_count_completed_cli_search() {
+    let dir = bootstrap_vault();
+    let metrics = dir.path().join(".cairn/metrics.jsonl");
+    std::fs::write(
+        &metrics,
+        r#"{"event":"search_completed","ts_ms":1,"mode":"keyword","hit_count":1,"latency_ms":41,"degradation_state":"none","error":null}
+{"event":"verb_invocation","ts_ms":1,"verb":"search","surface":"cli","mode":"keyword","status":"committed","latency_ms":41,"error":null,"budget_used_ratio":null,"degradation_state":"none"}
+"#,
+    )
+    .expect("write metrics");
+
+    let output = cairn()
+        .current_dir(dir.path())
+        .args(["admin", "sre", "report", "--json"])
+        .output()
+        .expect("run sre report");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json = json_stdout(&output);
+    let modes = json["search"]["modes"].as_array().expect("search modes");
+    let keyword = modes
+        .iter()
+        .find(|mode| mode["mode"] == "keyword")
+        .expect("keyword mode");
+    assert_eq!(keyword["invocations"], 1);
 }
 
 #[test]

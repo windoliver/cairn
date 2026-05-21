@@ -250,20 +250,22 @@ fn search_observation(event: &MetricEvent, mode: &str) -> Option<SearchObservati
         }),
         MetricEvent::VerbInvocation {
             verb,
-            surface,
             mode: Some(event_mode),
             status,
             latency_ms,
             error,
             degradation_state,
             ..
-        } if verb == "search" && surface == "cli" && event_mode == mode => {
+        } if verb == "search"
+            && event_mode == mode
+            && (status != "committed" || error.is_some()) =>
+        {
             Some(SearchObservation {
                 latency_ms: *latency_ms,
                 degraded: degradation_state
                     .as_deref()
                     .is_some_and(|state| state != "none"),
-                failed: status != "committed" || error.is_some(),
+                failed: true,
             })
         }
         _ => None,
