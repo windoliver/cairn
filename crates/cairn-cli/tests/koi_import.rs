@@ -113,6 +113,10 @@ fn upsert_record_id_containing(plan: &PersistedPlan, needle: &str) -> String {
         .unwrap_or_else(|| panic!("expected an upsert containing {needle:?}: {plan:?}"))
 }
 
+#[allow(
+    clippy::type_complexity,
+    reason = "scope tuple mirrors the persisted record fields asserted by the fixture"
+)]
 fn upsert_record_scope_containing(
     plan: &PersistedPlan,
     needle: &str,
@@ -237,6 +241,10 @@ fn koi_v1_import_plan_applies_to_search_retrieve_lint_and_forget() {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "end-to-end import fixture keeps workflow steps together"
+)]
 fn opencode_import_plan_applies_to_search_retrieve_lint_and_forget() {
     let vault = tempfile::tempdir().expect("temp vault");
     bootstrap_vault(vault.path());

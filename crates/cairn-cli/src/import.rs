@@ -236,10 +236,10 @@ pub struct RowboatImportOptions {
     pub mode: FlushMode,
 }
 
-/// Options for mapping an OpenCode archive into Cairn review plans.
+/// Options for mapping an `OpenCode` archive into Cairn review plans.
 #[derive(Debug, Clone)]
 pub struct OpenCodeImportOptions {
-    /// Path to an OpenCode project/session archive root.
+    /// Path to an `OpenCode` project/session archive root.
     pub source: PathBuf,
     /// Maximum records per generated review plan.
     pub batch_size: usize,
@@ -587,7 +587,7 @@ pub fn map_rowboat_archive(opts: &RowboatImportOptions) -> Result<KoiImportRepor
     })
 }
 
-/// Map OpenCode project instructions, session parts, and compaction summaries
+/// Map `OpenCode` project instructions, session parts, and compaction summaries
 /// into valid Cairn records and pending review plans.
 ///
 /// This bridge performs no database writes. The resulting plans can be reviewed
@@ -1267,6 +1267,10 @@ fn map_opencode_json(
     Ok(mapped)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "OpenCode scope fields map one-for-one"
+)]
 fn map_opencode_summary(
     relative: &Path,
     summary: &Value,
@@ -1381,7 +1385,11 @@ fn opencode_skill_ids(part: &Value) -> Vec<String> {
     ids.into_iter().collect()
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "OpenCode record mapping keeps provenance, scope, and metadata together"
+)]
 fn map_opencode_record(
     relative: &Path,
     role: &str,
@@ -2386,6 +2394,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "fixture covers the importer mapping matrix"
+    )]
     fn opencode_import_maps_instructions_summaries_and_session_parts() {
         let archive = tempfile::tempdir().expect("archive");
         fs::write(
