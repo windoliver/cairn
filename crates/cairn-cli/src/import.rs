@@ -1925,6 +1925,7 @@ fn map_hermes_sections(
     let sections = hermes_sections(raw);
     let mut records = Vec::new();
     let mut items = Vec::new();
+    let mut skill_item = None;
     for (idx, body) in sections.into_iter().enumerate() {
         let kind = hermes_kind(default_kind, &body);
         let record = hermes_record(relative, idx, &body, kind, skill_id)?;
@@ -1941,7 +1942,7 @@ fn map_hermes_sections(
             },
         };
         if let Some(skill_id) = skill_id {
-            items.push(ExternalImportItem {
+            skill_item.get_or_insert_with(|| ExternalImportItem {
                 kind: ExternalImportItemKind::Skill,
                 source_path: relative.to_path_buf(),
                 legacy_id: Some(skill_id.to_owned()),
@@ -1952,6 +1953,9 @@ fn map_hermes_sections(
         }
         items.push(item);
         records.push(record);
+    }
+    if let Some(skill_item) = skill_item {
+        items.push(skill_item);
     }
     Ok(MappedHermesFile { records, items })
 }
@@ -2004,28 +2008,6 @@ fn hermes_record(
         path: relative.to_path_buf(),
         source,
     })?;
-    let mut extra_frontmatter = BTreeMap::new();
-    extra_frontmatter.insert(
-        "hermes_agent_source_path".to_owned(),
-        Value::String(slash_normalized_path(relative)),
-    );
-    extra_frontmatter.insert(
-        "hermes_agent_section_index".to_owned(),
-        Value::Number(section_index.into()),
-    );
-    extra_frontmatter.insert(
-        "hermes_agent_body_hash".to_owned(),
-        Value::String(body_hash),
-    );
-    if let Some(skill_id) = skill_id {
-        extra_frontmatter.insert(
-            "hermes_agent_skill_id".to_owned(),
-            Value::String(skill_id.to_owned()),
-        );
-    }
-    let tags = skill_id
-        .map(|skill_id| vec!["hermes-agent".to_owned(), format!("skill:{skill_id}")])
-        .unwrap_or_else(|| vec!["hermes-agent".to_owned()]);
     let record = MemoryRecord {
         id: RecordId::parse(deterministic_ulid(&identity_seed, "record").0).map_err(|source| {
             ImportError::Domain {
@@ -2042,33 +2024,17 @@ fn hermes_record(
         kind,
         class: class_for_kind(kind),
         visibility: MemoryVisibility::Private,
-        scope: ScopeTuple {
-            tenant: Some("default".to_owned()),
-            workspace: Some("my-vault".to_owned()),
-            entity: Some("ingest".to_owned()),
-            user: Some(HERMES_IMPORT_AUTHOR.to_owned()),
-            ..ScopeTuple::default()
-        },
+        scope: hermes_scope(),
         body: body.to_owned(),
         source_ids: vec![source_id.clone()],
-        provenance: Provenance {
-            source_sensor: Identity::parse(HERMES_IMPORT_SENSOR).map_err(|source| {
-                ImportError::Domain {
-                    path: relative.to_path_buf(),
-                    source,
-                }
-            })?,
-            created_at: issued_at.clone(),
-            originating_agent_id: author.clone(),
-            source_ids: vec![source_id],
-            source_hash: source_hash.clone(),
-            consent_ref: "consent:hermes-agent-import".to_owned(),
-            llm_id_if_any: None,
-            source_refs: vec![SourceRef {
-                id: source_ref_id,
-                hash: source_hash,
-            }],
-        },
+        provenance: hermes_provenance(
+            relative,
+            &issued_at,
+            author.clone(),
+            source_id,
+            source_ref_id,
+            source_hash,
+        )?,
         updated_at: issued_at.clone(),
         evidence: EvidenceVector::default(),
         salience: if kind == MemoryKind::Playbook {
@@ -2090,8 +2056,8 @@ fn hermes_record(
             path: relative.to_path_buf(),
             source,
         })?,
-        tags,
-        extra_frontmatter,
+        tags: hermes_tags(skill_id),
+        extra_frontmatter: hermes_extra_frontmatter(relative, section_index, body_hash, skill_id),
         consent_model: None,
     };
     record.validate().map_err(|source| ImportError::Domain {
@@ -2099,6 +2065,79 @@ fn hermes_record(
         source,
     })?;
     Ok(record)
+}
+
+fn hermes_scope() -> ScopeTuple {
+    ScopeTuple {
+        tenant: Some("default".to_owned()),
+        workspace: Some("my-vault".to_owned()),
+        entity: Some("ingest".to_owned()),
+        user: Some(HERMES_IMPORT_AUTHOR.to_owned()),
+        ..ScopeTuple::default()
+    }
+}
+
+fn hermes_provenance(
+    relative: &Path,
+    issued_at: &Rfc3339Timestamp,
+    author: Identity,
+    source_id: SourceId,
+    source_ref_id: String,
+    source_hash: String,
+) -> Result<Provenance, ImportError> {
+    Ok(Provenance {
+        source_sensor: Identity::parse(HERMES_IMPORT_SENSOR).map_err(|source| {
+            ImportError::Domain {
+                path: relative.to_path_buf(),
+                source,
+            }
+        })?,
+        created_at: issued_at.clone(),
+        originating_agent_id: author,
+        source_ids: vec![source_id],
+        source_hash: source_hash.clone(),
+        consent_ref: "consent:hermes-agent-import".to_owned(),
+        llm_id_if_any: None,
+        source_refs: vec![SourceRef {
+            id: source_ref_id,
+            hash: source_hash,
+        }],
+    })
+}
+
+fn hermes_extra_frontmatter(
+    relative: &Path,
+    section_index: usize,
+    body_hash: String,
+    skill_id: Option<&str>,
+) -> BTreeMap<String, Value> {
+    let mut extra_frontmatter = BTreeMap::new();
+    extra_frontmatter.insert(
+        "hermes_agent_source_path".to_owned(),
+        Value::String(slash_normalized_path(relative)),
+    );
+    extra_frontmatter.insert(
+        "hermes_agent_section_index".to_owned(),
+        Value::Number(section_index.into()),
+    );
+    extra_frontmatter.insert(
+        "hermes_agent_body_hash".to_owned(),
+        Value::String(body_hash),
+    );
+    if let Some(skill_id) = skill_id {
+        extra_frontmatter.insert(
+            "hermes_agent_skill_id".to_owned(),
+            Value::String(skill_id.to_owned()),
+        );
+    }
+    extra_frontmatter
+}
+
+fn hermes_tags(skill_id: Option<&str>) -> Vec<String> {
+    skill_id.map_or_else(
+        || vec!["hermes-agent".to_owned()],
+        |skill_id| vec!["hermes-agent".to_owned(), format!("skill:{skill_id}")],
+    )
 }
 
 fn hermes_legacy_id(relative: &Path, section_index: usize) -> String {

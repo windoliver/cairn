@@ -3,6 +3,7 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
+use cairn_core::domain::MemoryKind;
 use cairn_core::domain::flush_plan::{PersistedPlan, PlannedMutation};
 
 fn cli() -> Command {
@@ -82,6 +83,19 @@ fn record_id_containing(plan: &PersistedPlan, needle: &str) -> String {
         .unwrap_or_else(|| panic!("expected imported record containing `{needle}`: {plan:?}"))
 }
 
+fn record_kind_containing(plan: &PersistedPlan, needle: &str) -> MemoryKind {
+    plan.plan
+        .mutations
+        .iter()
+        .find_map(|mutation| match mutation {
+            PlannedMutation::Upsert { record, .. } if record.body.contains(needle) => {
+                Some(record.kind)
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("expected imported record containing `{needle}`: {plan:?}"))
+}
+
 fn hit_record_ids(vault: &Path, query: &str) -> Vec<String> {
     let search = run_json_ok(vault, &["search", "--mode", "keyword", query, "--json"]);
     search["data"]["hits"]
@@ -113,7 +127,8 @@ fn write_hermes_fixture(archive: &Path) {
     .expect("write SOUL.md");
     std::fs::write(
         archive.join("skills/review-plan.md"),
-        "§ Playbook: review imported Hermes records before applying them.",
+        "§ Playbook: review imported Hermes records before applying them.\n\
+         § Playbook: validate imported Hermes records after applying them.",
     )
     .expect("write skill");
 }
@@ -152,11 +167,15 @@ fn hermes_agent_import_plan_applies_to_search_retrieve_lint_and_forget() {
             "--json",
         ],
     );
-    assert_eq!(import["records"], 5, "import summary: {import}");
+    assert_eq!(import["records"], 6, "import summary: {import}");
     assert_eq!(import["plans"], 1, "import summary: {import}");
 
     let (operation_id, pending) = single_pending_plan(vault.path());
     let record_id = record_id_containing(&pending, "heliotrope");
+    assert_eq!(
+        record_kind_containing(&pending, "trajectory candidate"),
+        MemoryKind::Trace
+    );
 
     run_json_ok(vault.path(), &["flush", "apply", &operation_id, "--json"]);
 
@@ -204,7 +223,7 @@ fn hermes_agent_import_json_emits_manifest_sections_and_skill_items() {
         ],
     );
 
-    assert_eq!(import["records"], 5, "import summary: {import}");
+    assert_eq!(import["records"], 6, "import summary: {import}");
     assert_eq!(
         import["manifest"]["system"], "hermes-agent",
         "manifest: {import}"
@@ -218,6 +237,16 @@ fn hermes_agent_import_json_emits_manifest_sections_and_skill_items() {
                 && item["legacy_id"] == "review-plan"
                 && item["skill_ids"] == serde_json::json!(["review-plan"])),
         "skill manifest item should be emitted: {import}"
+    );
+    assert_eq!(
+        import["manifest"]["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .filter(|item| item["kind"] == "skill" && item["legacy_id"] == "review-plan")
+            .count(),
+        1,
+        "skill manifest item should be emitted once per skill file: {import}"
     );
     assert!(
         import["migration_report"]["findings"]
