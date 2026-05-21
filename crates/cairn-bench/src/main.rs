@@ -23,9 +23,11 @@ enum Cmd {
     Memory(cairn_bench::memory::MemoryArgs),
     /// Privacy leakage gate: parse fixtures and optionally run them.
     Privacy(cairn_bench::privacy::PrivacyArgs),
-    /// Run latency + memory + privacy and exit non-zero on any failure.
+    /// SRE release gate: writes `sre.json` for `cairn admin sre report` import.
+    Sre(cairn_bench::sre::SreArgs),
+    /// Run latency + memory + privacy + SRE and exit non-zero on any failure.
     All {
-        /// Skip one or more gates by name (latency, memory, privacy).
+        /// Skip one or more gates by name (latency, memory, privacy, sre).
         #[arg(long)]
         skip: Vec<String>,
     },
@@ -46,6 +48,10 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::Privacy(args) => {
             let outcome = cairn_bench::privacy::run(&args)?;
+            std::process::exit(outcome.exit_code().into());
+        }
+        Cmd::Sre(args) => {
+            let outcome = cairn_bench::sre::run(&args)?;
             std::process::exit(outcome.exit_code().into());
         }
         Cmd::All { skip } => {
