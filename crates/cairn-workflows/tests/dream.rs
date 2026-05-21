@@ -78,6 +78,7 @@ async fn no_llm_returns_permanent() {
             ..DreamConfig::default()
         },
         None,
+        None,
     );
     let payload = DreamPayload {
         tier: DreamTier::LightSleep,
@@ -108,6 +109,7 @@ async fn with_llm_upserts_dream_record() {
         Some(Arc::new(FakeLlm {
             body: "deterministic dream body",
         })),
+        None,
     );
     let payload = DreamPayload {
         tier: DreamTier::LightSleep,
@@ -162,6 +164,7 @@ async fn rem_sleep_records_tier_worker_budget_and_source_evidence() {
         Some(Arc::new(FakeLlm {
             body: "rem dream body",
         })),
+        None,
     );
     let payload = DreamPayload {
         tier: DreamTier::RemSleep,
@@ -221,6 +224,7 @@ async fn budget_exceeded_retries_without_upsert() {
             body: "x".repeat((DreamConfig::COMPLETION_BUDGET_FLOOR as usize * 4) + 1),
             prompt: Arc::new(Mutex::new(None)),
         })),
+        None,
     );
     let payload = DreamPayload {
         tier: DreamTier::LightSleep,
@@ -273,6 +277,7 @@ async fn hybrid_worker_prunes_duplicate_bodies_before_prompting() {
             body: "hybrid body".into(),
             prompt: prompt.clone(),
         })),
+        None,
     );
     let payload = DreamPayload {
         tier: DreamTier::RemSleep,
@@ -358,6 +363,7 @@ async fn second_run_skips_llm_when_target_already_exists() {
             ..DreamConfig::default()
         },
         Some(llm as Arc<dyn LLMProvider>),
+        None,
     );
     let payload = DreamPayload {
         tier: DreamTier::LightSleep,
@@ -402,6 +408,7 @@ async fn replay_is_idempotent() {
             ..DreamConfig::default()
         },
         Some(Arc::new(FakeLlm { body: "stable" })),
+        None,
     );
     let payload = DreamPayload {
         tier: DreamTier::LightSleep,

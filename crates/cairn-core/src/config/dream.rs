@@ -280,6 +280,14 @@ impl DreamConfig {
         }
     }
 
+    /// Returns true when any configured dream tier selects the agent worker.
+    #[must_use]
+    pub const fn requires_agent_provider(&self) -> bool {
+        matches!(self.light_sleep.worker, DreamWorkerMode::Agent)
+            || matches!(self.rem_sleep.worker, DreamWorkerMode::Agent)
+            || matches!(self.deep_dreaming.worker, DreamWorkerMode::Agent)
+    }
+
     /// Validate semantic invariants the serde layer cannot express.
     ///
     /// # Errors
@@ -389,6 +397,16 @@ mod tests {
         let err = cfg.validate().expect_err("agent mode must budget tools");
         assert!(matches!(err, DreamConfigError::AgentToolBudgetZero { tier }
             if tier == DreamTier::DeepDreaming));
+    }
+
+    #[test]
+    fn requires_agent_provider_when_any_tier_uses_agent_worker() {
+        let mut cfg = DreamConfig::default();
+        assert!(!cfg.requires_agent_provider());
+
+        cfg.rem_sleep.worker = DreamWorkerMode::Agent;
+        cfg.rem_sleep.max_tool_calls = 1;
+        assert!(cfg.requires_agent_provider());
     }
 
     #[test]

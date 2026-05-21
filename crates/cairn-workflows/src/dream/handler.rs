@@ -18,6 +18,7 @@
 use std::sync::Arc;
 
 use cairn_core::config::{DreamConfig, DreamTier, DreamTierConfig, DreamWorkerMode, ExtractBudget};
+use cairn_core::contract::AgentProvider;
 use cairn_core::contract::job_store::{FailureClass, JobKind, JobPayload, JobStore};
 use cairn_core::contract::llm_provider::{CompletionOutput, CompletionRequest, LLMProvider};
 use cairn_core::contract::memory_store::{ListArgs, MemoryStore, TombstoneReason};
@@ -47,6 +48,7 @@ pub struct DreamHandler {
     store: Arc<dyn MemoryStore>,
     config: DreamConfig,
     llm: Option<Arc<dyn LLMProvider>>,
+    agent: Option<Arc<dyn AgentProvider>>,
     skillify_jobs: Option<Arc<dyn JobStore>>,
 }
 
@@ -60,11 +62,13 @@ impl DreamHandler {
         store: Arc<dyn MemoryStore>,
         config: DreamConfig,
         llm: Option<Arc<dyn LLMProvider>>,
+        agent: Option<Arc<dyn AgentProvider>>,
     ) -> Self {
         Self {
             store,
             config,
             llm,
+            agent,
             skillify_jobs: None,
         }
     }
@@ -559,6 +563,21 @@ impl JobHandler for DreamHandler {
             }
         };
 
+        let tier_config = self.config.tier_config(payload.tier);
+        if matches!(tier_config.worker, DreamWorkerMode::Agent) && self.agent.is_none() {
+            warn!(
+                key = %payload.key,
+                tier = %payload.tier,
+                "dream: no AgentProvider wired — declining permanently \
+                 (the capability gate in status hides agent dream \
+                 until an agent runtime lands)"
+            );
+            return HandlerOutcome::Permanent {
+                reason: "no agent provider configured".into(),
+                class: FailureClass::Validation,
+            };
+        }
+
         if self.llm.is_none() {
             warn!(
                 key = %payload.key,
@@ -605,6 +624,7 @@ mod tests {
                 ..DreamConfig::default()
             },
             None,
+            None,
         );
         let p = DreamPayload {
             tier: DreamTier::LightSleep,
@@ -619,7 +639,7 @@ mod tests {
     #[tokio::test]
     async fn handle_returns_permanent_when_decode_fails() {
         let store: Arc<dyn MemoryStore> = Arc::new(NoopMemoryStore::default());
-        let h = DreamHandler::new(store, DreamConfig::default(), None);
+        let h = DreamHandler::new(store, DreamConfig::default(), None, None);
         let outcome = h.handle(&b"{not json".to_vec()).await;
         assert!(matches!(outcome, HandlerOutcome::Permanent { .. }));
     }

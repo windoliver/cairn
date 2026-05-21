@@ -152,11 +152,22 @@ fn capabilities_for(
                 })
             },
         ),
-        // `LLMProvider` and `AgentProvider` have no bundled implementations
-        // yet, so their capabilities render as `{}`. `ContractKind` is
+        ContractKind::AgentProvider => registry.agent_provider(name).map_or_else(
+            || serde_json::json!({}),
+            |p| {
+                let c = p.capabilities();
+                serde_json::json!({
+                    "honors_cost_budget": c.honors_cost_budget,
+                    "scope_enforced": c.scope_enforced,
+                    "mcp_tools": c.mcp_tools,
+                    "cli_subprocess_tools": c.cli_subprocess_tools,
+                })
+            },
+        ),
+        // `LLMProvider` has no bundled implementation yet. `ContractKind` is
         // `#[non_exhaustive]`; the trailing `_` arm is a safety net for
         // future variants until this renderer learns about them.
-        ContractKind::LLMProvider | ContractKind::AgentProvider | _ => serde_json::json!({}),
+        _ => serde_json::json!({}),
     }
 }
 
@@ -166,9 +177,10 @@ mod tests {
     use crate::plugins::host::register_all;
 
     #[test]
-    fn human_lists_all_seven_bundled_plugins() {
+    fn human_lists_all_eight_bundled_plugins() {
         let reg = register_all().expect("registers");
         let text = render_human(&reg);
+        assert!(text.contains("cairn-agent-core"), "must list agent core");
         assert!(text.contains("cairn-frontend-logseq"), "must list logseq");
         assert!(
             text.contains("cairn-frontend-obsidian"),
@@ -179,6 +191,7 @@ mod tests {
         assert!(text.contains("cairn-sensors-local"), "must list sensors");
         assert!(text.contains("cairn-store-sqlite"), "must list store");
         assert!(text.contains("cairn-workflows"), "must list workflows");
+        assert!(text.contains("AgentProvider"));
         assert!(text.contains("MCPServer"));
         assert!(text.contains("MemoryStore"));
         assert!(text.contains("[0.1.0, 0.2.0)"));
@@ -191,12 +204,15 @@ mod tests {
         let json = render_json(&reg);
         let v: serde_json::Value = serde_json::from_str(&json).expect("valid json");
         let plugins = v["plugins"].as_array().expect("array");
-        assert_eq!(plugins.len(), 7);
-        // First plugin alphabetical = cairn-frontend-logseq.
-        assert_eq!(plugins[0]["name"], "cairn-frontend-logseq");
-        assert_eq!(plugins[0]["contract"], "FrontendAdapter");
-        assert_eq!(plugins[0]["source"], "bundled:cairn-frontend-logseq");
-        assert_eq!(plugins[0]["capabilities"]["graph_view"], true);
+        assert_eq!(plugins.len(), 8);
+        // First plugin alphabetical = cairn-agent-core.
+        assert_eq!(plugins[0]["name"], "cairn-agent-core");
+        assert_eq!(plugins[0]["contract"], "AgentProvider");
+        assert_eq!(plugins[0]["source"], "bundled:cairn-agent-core");
+        assert_eq!(plugins[0]["capabilities"]["honors_cost_budget"], true);
+        assert_eq!(plugins[0]["capabilities"]["scope_enforced"], true);
+        assert_eq!(plugins[0]["capabilities"]["mcp_tools"], false);
+        assert_eq!(plugins[0]["capabilities"]["cli_subprocess_tools"], true);
         assert!(plugins[0]["capabilities"].is_object());
     }
 }

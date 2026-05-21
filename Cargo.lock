@@ -719,6 +719,7 @@ dependencies = [
  "assert_cmd",
  "async-trait",
  "base64 0.22.1",
+ "cairn-agent-core",
  "cairn-core",
  "cairn-embeddings-local",
  "cairn-embeddings-openai",

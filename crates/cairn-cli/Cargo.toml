@@ -31,6 +31,7 @@ name = "cairn-docgen"
 path = "src/bin/cairn-docgen.rs"
 
 [dependencies]
+cairn-agent-core = { workspace = true }
 cairn-core = { workspace = true }
 cairn-embeddings-local = { workspace = true }
 cairn-embeddings-openai = { workspace = true, optional = true }

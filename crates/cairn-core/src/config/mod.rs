@@ -149,6 +149,12 @@ pub enum ConfigError {
         /// The config field selecting agent mode.
         field: &'static str,
     },
+    /// The bundled agent provider runtime is selected but no LLM provider is set.
+    #[error("{field} uses agent mode but llm.provider is not configured")]
+    AgentModeWithoutLlmProvider {
+        /// The config field selecting agent mode.
+        field: &'static str,
+    },
     /// A `${VAR}` placeholder in the YAML file references an unset env var.
     #[error("unresolved env var in config: ${{{0}}}")]
     UnresolvedEnvVar(String),
@@ -1910,11 +1916,19 @@ impl CairnConfig {
         }
 
         let agent_configured = self.agent_provider.kind.is_some();
+        let llm_configured = self.llm.provider.is_some();
         for entry in &self.pipeline.extract.chain {
-            if matches!(entry.worker, ExtractorWorkerKind::Agent) && !agent_configured {
-                return Err(ConfigError::AgentModeWithoutProvider {
-                    field: "pipeline.extract.chain[].worker",
-                });
+            if matches!(entry.worker, ExtractorWorkerKind::Agent) {
+                if !agent_configured {
+                    return Err(ConfigError::AgentModeWithoutProvider {
+                        field: "pipeline.extract.chain[].worker",
+                    });
+                }
+                if !llm_configured {
+                    return Err(ConfigError::AgentModeWithoutLlmProvider {
+                        field: "pipeline.extract.chain[].worker",
+                    });
+                }
             }
         }
         for (field, tier) in [
@@ -1922,8 +1936,13 @@ impl CairnConfig {
             ("dream.rem_sleep.worker", self.dream.rem_sleep),
             ("dream.deep_dreaming.worker", self.dream.deep_dreaming),
         ] {
-            if matches!(tier.worker, DreamWorkerMode::Agent) && !agent_configured {
-                return Err(ConfigError::AgentModeWithoutProvider { field });
+            if matches!(tier.worker, DreamWorkerMode::Agent) {
+                if !agent_configured {
+                    return Err(ConfigError::AgentModeWithoutProvider { field });
+                }
+                if !llm_configured {
+                    return Err(ConfigError::AgentModeWithoutLlmProvider { field });
+                }
             }
         }
 
@@ -2809,6 +2828,39 @@ mod tests {
             .validate()
             .expect_err("agent dream needs tool budget");
         assert!(matches!(err, ConfigError::InvalidDream { .. }));
+    }
+
+    #[test]
+    fn agent_modes_require_llm_provider_for_bundled_runtime() {
+        let mut config = CairnConfig::default();
+        config.agent_provider.kind = Some(AgentProviderKind::CairnCore);
+        config.pipeline.extract.chain.push(ExtractorEntry {
+            worker: ExtractorWorkerKind::Agent,
+            kinds: vec![],
+            trigger: None,
+            budget: ExtractBudget::default(),
+        });
+
+        let err = config
+            .validate()
+            .expect_err("bundled agent runtime needs llm provider");
+        assert!(
+            matches!(err, ConfigError::AgentModeWithoutLlmProvider { field }
+            if field == "pipeline.extract.chain[].worker")
+        );
+
+        config.pipeline.extract.chain.clear();
+        config.dream.enabled = true;
+        config.dream.deep_dreaming.worker = DreamWorkerMode::Agent;
+        config.dream.deep_dreaming.max_tool_calls = 1;
+
+        let err = config
+            .validate()
+            .expect_err("agent dream runtime needs llm provider");
+        assert!(
+            matches!(err, ConfigError::AgentModeWithoutLlmProvider { field }
+            if field == "dream.deep_dreaming.worker")
+        );
     }
 
     #[test]

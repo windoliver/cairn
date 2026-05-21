@@ -95,6 +95,7 @@ async fn three_workflows_drain_through_one_scheduler() {
             ..DreamConfig::default()
         },
         Some(Arc::new(StubLlm) as Arc<dyn LLMProvider>),
+        None,
     );
     let expiration = ExpirationHandler::with_job_store(
         dyn_store.clone(),
