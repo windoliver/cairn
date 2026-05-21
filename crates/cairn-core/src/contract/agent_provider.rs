@@ -661,6 +661,131 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Clone)]
+    enum ScriptStep {
+        Turn { cost_units: u64 },
+        Tool(AgentToolCall),
+        Output(AgentOutput),
+    }
+
+    struct ScriptedAgentProvider {
+        steps: Vec<ScriptStep>,
+    }
+
+    impl ScriptedAgentProvider {
+        fn new(steps: Vec<ScriptStep>) -> Self {
+            Self { steps }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AgentProvider for ScriptedAgentProvider {
+        fn name(&self) -> &'static str {
+            "scripted-agent"
+        }
+
+        fn capabilities(&self) -> &AgentProviderCapabilities {
+            static CAPS: AgentProviderCapabilities = AgentProviderCapabilities {
+                honors_cost_budget: true,
+                scope_enforced: true,
+                mcp_tools: false,
+                cli_subprocess_tools: true,
+            };
+            &CAPS
+        }
+
+        fn supported_contract_versions(&self) -> VersionRange {
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+        }
+
+        async fn spawn(&self, request: AgentSpawnRequest) -> Result<AgentRun, AgentProviderError> {
+            run_scripted_agent(&request, &self.steps)
+        }
+    }
+
+    fn run_scripted_agent(
+        request: &AgentSpawnRequest,
+        steps: &[ScriptStep],
+    ) -> Result<AgentRun, AgentProviderError> {
+        request.validate()?;
+        let mut meter = AgentRunMeter::new(request);
+        let mut output = AgentOutput::Empty;
+        let mut attempts = Vec::new();
+        let mut policy_trace = Vec::new();
+
+        for step in steps {
+            match step {
+                ScriptStep::Turn { cost_units } => {
+                    meter.charge_turn(1)?;
+                    meter.charge_cost_units(*cost_units)?;
+                }
+                ScriptStep::Tool(call) => {
+                    let outcome = evaluate_tool_policy(request, call)?;
+                    meter.charge_tool_call()?;
+                    attempts.push(AgentToolAttempt {
+                        call: call.clone(),
+                        outcome,
+                        reason: format!("{outcome:?}"),
+                    });
+                    policy_trace.push(format!("{:?}:{outcome:?}", call.verb));
+                }
+                ScriptStep::Output(next) => {
+                    validate_output(&request.output_schema, next)?;
+                    output = next.clone();
+                }
+            }
+        }
+
+        Ok(AgentRun {
+            status: AgentRunStatus::Completed,
+            abort_error: None,
+            output,
+            budget_consumed: meter.consumed(),
+            tool_calls: attempts,
+            policy_trace,
+        })
+    }
+
+    #[tokio::test]
+    async fn scripted_spawn_completes_read_only_flow() {
+        let provider = ScriptedAgentProvider::new(vec![
+            ScriptStep::Turn { cost_units: 10 },
+            ScriptStep::Tool(AgentToolCall::new(CairnVerb::Search)),
+            ScriptStep::Output(AgentOutput::Text("done".to_string())),
+        ]);
+        let run = provider
+            .spawn(base_request())
+            .await
+            .expect("read-only flow completes");
+        assert_eq!(run.status, AgentRunStatus::Completed);
+        assert_eq!(run.abort_error, None);
+        assert_eq!(run.budget_consumed.turns, 1);
+        assert_eq!(run.budget_consumed.tool_calls, 1);
+        assert_eq!(run.budget_consumed.cost_units, 10);
+        assert_eq!(
+            run.tool_calls[0].outcome,
+            AgentToolPolicyOutcome::AllowedReadOnly
+        );
+    }
+
+    #[tokio::test]
+    async fn scripted_spawn_aborts_on_budget_exhaustion() {
+        let provider = ScriptedAgentProvider::new(vec![
+            ScriptStep::Turn { cost_units: 1 },
+            ScriptStep::Turn { cost_units: 1 },
+            ScriptStep::Turn { cost_units: 1 },
+            ScriptStep::Turn { cost_units: 1 },
+        ]);
+        let err = provider
+            .spawn(base_request())
+            .await
+            .expect_err("fourth turn exceeds budget");
+        assert!(matches!(
+            err,
+            AgentProviderError::BudgetExceeded { ref limit } if limit == "turns"
+        ));
+    }
+
     #[test]
     fn read_only_allowlist_contains_only_read_verbs() {
         let allowlist = AgentToolAllowlist::read_only_cairn();

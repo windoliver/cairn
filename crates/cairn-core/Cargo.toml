@@ -23,6 +23,7 @@ async-trait = { workspace = true }
 proptest = { workspace = true }
 insta = { workspace = true }
 rusqlite = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
 
 [lints]
 workspace = true
