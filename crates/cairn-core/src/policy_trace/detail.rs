@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use crate::domain::MemoryVisibility;
+use crate::domain::sharing::{SharingDecisionKind, SharingPolicyAction, SharingPolicySubject};
 use crate::pipeline::filter::{DiscardReason, RedactionTag};
 use crate::rebac::{RebacAction, RebacDecisionKind};
 
@@ -40,6 +41,15 @@ pub enum PolicyDetail {
         tier: MemoryVisibility,
         /// Body-free allow/deny reason.
         reason: RebacDecisionKind,
+    },
+    /// Signed sharing gate decision metadata.
+    Sharing {
+        /// Consent receipt or share link.
+        subject: SharingPolicySubject,
+        /// Promote or grant.
+        action: SharingPolicyAction,
+        /// Body-free allow/deny reason.
+        reason: SharingDecisionKind,
     },
     /// Stable error code. Construction is validated; a free-text
     /// message cannot be slipped in via `&'static str`.
@@ -139,6 +149,16 @@ impl PolicyDetail {
                 "rebac:{}:{}:{}",
                 action.as_str(),
                 tier.as_str(),
+                reason.as_str()
+            ),
+            Self::Sharing {
+                subject,
+                action,
+                reason,
+            } => format!(
+                "{}:{}:{}",
+                subject.as_detail_str(),
+                action.as_str(),
                 reason.as_str()
             ),
             Self::ErrorCode(c) => format!("error:{}", c.as_str()),

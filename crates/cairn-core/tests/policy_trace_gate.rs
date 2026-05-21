@@ -14,6 +14,8 @@ fn display_matches_wire_vocabulary() {
         (PolicyGate::ScopeCheck, "scope_check"),
         (PolicyGate::ForgetCapability, "forget_capability"),
         (PolicyGate::Rebac, "rebac"),
+        (PolicyGate::ConsentReceipt, "consent_receipt"),
+        (PolicyGate::ShareLink, "share_link"),
         (PolicyGate::ConsentJournalAppend, "consent_journal_append"),
         (PolicyGate::ReadFilterRelevance, "read_filter_relevance"),
         (PolicyGate::ReadFilterStaleness, "read_filter_staleness"),

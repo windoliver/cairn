@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 
 use cairn_core::domain::MemoryVisibility;
+use cairn_core::domain::sharing::{SharingDecisionKind, SharingPolicyAction, SharingPolicySubject};
 use cairn_core::pipeline::filter::{DiscardReason, RedactionTag};
 use cairn_core::policy_trace::{PolicyDetail, PolicyErrorCode};
 use cairn_core::rebac::{RebacAction, RebacDecisionKind};
@@ -52,6 +53,26 @@ fn rebac_detail_serializes_action_tier_and_reason() {
         reason: RebacDecisionKind::DeniedNoRelation,
     };
     assert_eq!(d.to_wire_string(), "rebac:read:project:no_relation");
+}
+
+#[test]
+fn consent_receipt_detail_serializes_action_and_reason() {
+    let d = PolicyDetail::Sharing {
+        subject: SharingPolicySubject::ConsentReceipt,
+        action: SharingPolicyAction::Promote,
+        reason: SharingDecisionKind::TargetMismatch,
+    };
+    assert_eq!(d.to_wire_string(), "consent:promote:target_mismatch");
+}
+
+#[test]
+fn share_link_detail_serializes_action_and_reason() {
+    let d = PolicyDetail::Sharing {
+        subject: SharingPolicySubject::ShareLink,
+        action: SharingPolicyAction::Grant,
+        reason: SharingDecisionKind::Revoked,
+    };
+    assert_eq!(d.to_wire_string(), "share_link:grant:revoked");
 }
 
 #[test]

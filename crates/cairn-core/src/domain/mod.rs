@@ -44,6 +44,7 @@ pub mod scope;
 pub mod sensor_policy;
 pub mod session;
 pub mod session_tree;
+pub mod sharing;
 pub mod source_id;
 pub mod source_ref;
 pub mod target_id;
@@ -93,6 +94,12 @@ pub use session::{
 pub use session_tree::{
     BranchKind, MergeStrategy, SessionMerge, SessionParent, SessionTree, SessionTreeError,
     SessionTreeNode,
+};
+pub use sharing::{
+    PromotionConsentPayload, PromotionConsentReceipt, PromotionGateInput, ShareLinkGateInput,
+    ShareLinkJournalDecision, ShareLinkPayload, SharingDecisionKind, SharingGateRejection,
+    SharingPolicyAction, SharingPolicySubject, SharingRevocationState, SignedShareLink,
+    verify_promotion_gate, verify_share_link_grant,
 };
 pub use source_id::SourceId;
 pub use source_ref::{SourceRef, validate_source_refs};
