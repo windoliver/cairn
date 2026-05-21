@@ -1,6 +1,6 @@
 //! Operator-facing SRE report builder and renderers.
 
-use std::{collections::BTreeMap, path::Path, process::ExitCode};
+use std::{collections::BTreeMap, fmt::Write as _, path::Path, process::ExitCode};
 
 use cairn_core::domain::metrics::MetricEvent;
 use cairn_core::domain::{
@@ -65,7 +65,6 @@ pub fn run_report(matches: &ArgMatches, vault_root: &Path) -> ExitCode {
 /// # Errors
 /// Returns [`SreReportBuildError::WorkflowStateUnavailable`] when an existing
 /// workflow database cannot be read safely.
-#[must_use]
 pub fn build_report(
     vault_root: &Path,
     config: &cairn_core::config::CairnConfig,
@@ -78,7 +77,6 @@ pub fn build_report(
 /// # Errors
 /// Returns [`SreReportBuildError::WorkflowStateUnavailable`] when an existing
 /// workflow database cannot be read safely.
-#[must_use]
 pub fn try_build_report(
     vault_root: &Path,
     config: &cairn_core::config::CairnConfig,
@@ -107,7 +105,7 @@ fn build_report_with_bench(
     let workflow = summarize_workflow(&events, vault_root, captured_at_ms)
         .map_err(|()| SreReportBuildError::WorkflowStateUnavailable)?;
     let projection = summarize_projection(&events);
-    let p95 = percentile_u64(&rehydration_latencies, 0.95);
+    let p95 = p95_u64(&rehydration_latencies);
     let rehydration_status = classify_threshold(p95, SLO_COLD_REHYDRATE_MS);
     let mut gates = load_bench_gates(bench_report_dir).map_err(SreReportBuildError::Bench)?;
     add_metric_parse_gate(&mut gates, metrics.parse_error_count);
@@ -223,10 +221,10 @@ fn vault_id_hash(vault_root: &Path) -> String {
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "unknown-vault".to_owned());
     let digest = Sha256::digest(raw.as_bytes());
-    let hex = digest
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in &digest {
+        write!(&mut hex, "{byte:02x}").expect("write to string");
+    }
     format!("sha256:{hex}")
 }
 
@@ -668,7 +666,7 @@ fn summarize_search(
                 invocations,
                 degraded,
                 failed,
-                p95_latency_ms: percentile_u64(&latencies, 0.95).and_then(SreMeasurement::new),
+                p95_latency_ms: p95_u64(&latencies).and_then(SreMeasurement::new),
                 status: if invocations == 0 {
                     SreStatus::Unknown
                 } else if failed > 0 {
@@ -775,14 +773,19 @@ fn rollup_search_status(modes: &[SreSearchModeSummary]) -> SreStatus {
     rollup_status(modes.iter().map(|mode| mode.status))
 }
 
-fn percentile_u64(values: &[u64], percentile: f64) -> Option<f64> {
+fn p95_u64(values: &[u64]) -> Option<f64> {
     if values.is_empty() {
         return None;
     }
     let mut sorted = values.to_vec();
     sorted.sort_unstable();
-    let idx = ((sorted.len() - 1) as f64 * percentile).round() as usize;
-    sorted.get(idx).map(|value| *value as f64)
+    let idx = (sorted.len() - 1).saturating_mul(95).saturating_add(50) / 100;
+    sorted.get(idx).map(|value| f64_from_u64(*value))
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn f64_from_u64(value: u64) -> f64 {
+    value as f64
 }
 
 #[derive(Deserialize)]
@@ -897,7 +900,7 @@ fn add_metric_parse_gate(gates: &mut SreGateSummary, parse_error_count: u64) {
     gates.gates.push(SreGateResult {
         name: "metric_parse_errors".into(),
         status: SreStatus::Warning,
-        measured: SreMeasurement::new(parse_error_count as f64),
+        measured: SreMeasurement::new(f64_from_u64(parse_error_count)),
         threshold: SreMeasurement::new(0.0),
         unit: "count".into(),
         detail: Some(SreDetail::from_raw("SECRET")),
