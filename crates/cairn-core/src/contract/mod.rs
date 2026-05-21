@@ -38,7 +38,13 @@ pub use manifest::{ContractKind, PluginManifest};
 pub use registry::{PluginError, PluginName, PluginRegistry};
 pub use version::{ContractVersion, VersionRange};
 
-pub use agent_provider::{AgentProvider, AgentProviderCapabilities};
+pub use agent_provider::{
+    AgentBudgetConsumed, AgentCostBudget, AgentIdentity, AgentOutput, AgentOutputSchema,
+    AgentProvider, AgentProviderCapabilities, AgentProviderError, AgentRun, AgentRunMeter,
+    AgentRunStatus, AgentScope, AgentSpawnRequest, AgentToolAllowlist, AgentToolAttempt,
+    AgentToolCall, AgentToolPolicyOutcome, AgentWallClockBudget, CairnVerb, evaluate_tool_policy,
+    validate_output,
+};
 pub use frontend_adapter::{FrontendAdapter, FrontendAdapterCapabilities};
 pub use llm_provider::{LLMProvider, LLMProviderCapabilities};
 pub use mcp_server::{MCPServer, MCPServerCapabilities};
