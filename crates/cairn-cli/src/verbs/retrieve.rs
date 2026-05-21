@@ -15,6 +15,7 @@ use cairn_core::contract::memory_store::{ListArgs, MemoryStore};
 use cairn_core::domain::canonical::canonical_bytes_signed_intent;
 use cairn_core::domain::consent_timeline::ConsentModel;
 use cairn_core::domain::identity::keys::SecretHandle;
+use cairn_core::domain::metrics::MetricEvent;
 use cairn_core::domain::taxonomy::MemoryVisibility;
 use cairn_core::domain::{
     Identity, MemoryKind, MemoryRecord, RecordId, ScopeTuple, SessionId, TreeReadRecord,
@@ -172,6 +173,7 @@ async fn run_async(args: RetrieveArgs, vault_root: PathBuf, config: CairnConfig)
                     rehydrate: rehydrate.unwrap_or(false),
                     read_budget_chars,
                 },
+                &ctx.config,
                 &auth,
             )
             .await
@@ -302,6 +304,7 @@ async fn retrieve_session(
     store: &SqliteMemoryStore,
     vault_root: &Path,
     request: SessionRetrieveRequest,
+    config: &CairnConfig,
     auth: &ReadAuthorization,
 ) -> Response {
     let SessionRetrieveRequest {
@@ -314,23 +317,15 @@ async fn retrieve_session(
         read_budget_chars,
     } = request;
     let rehydrate_started = rehydrate.then(Instant::now);
-    let target_session = match SessionId::parse(session_id.clone()) {
-        Ok(session_id) => session_id,
-        Err(e) => return super::signed::rejected_from_domain(ResponseVerb::Retrieve, e),
-    };
-    let order = order.unwrap_or(RetrieveArgsSessionOrder::Asc);
-    let start = match parse_session_cursor(cursor.as_ref(), order) {
-        Ok(start) => start,
+    let plan = match session_retrieve_plan(&session_id, limit, order, cursor.as_ref()) {
+        Ok(plan) => plan,
         Err(resp) => return resp,
     };
-    let requested_limit = limit
-        .and_then(|v| usize::try_from(v).ok())
-        .unwrap_or(usize::MAX);
     let (hot_records, mut tree_policy_trace) = match session_records_for_retrieve(
         store,
         auth,
         &session_id,
-        &target_session,
+        &plan.target_session,
         read_budget_chars,
     )
     .await
@@ -338,46 +333,34 @@ async fn retrieve_session(
         Ok(records) => records,
         Err(resp) => return resp,
     };
-    let (records, source_tier) = if rehydrate {
-        match cold_records_for_hot(vault_root, &session_id, &hot_records) {
-            Ok(Some(cold_records)) => (cold_records, "cold"),
-            Ok(None) => (hot_records, "hot_or_warm"),
-            Err(error) => {
-                return super::signed::aborted(
-                    ResponseVerb::Retrieve,
-                    format!("cold rehydrate: {error:#}"),
-                );
-            }
-        }
-    } else {
-        (hot_records, "hot_or_warm")
+    let rehydrated = match session_records_with_optional_rehydrate(
+        vault_root,
+        &session_id,
+        hot_records,
+        rehydrate,
+    ) {
+        Ok(records) => records,
+        Err(error) => return cold_rehydrate_error(vault_root, config, rehydrate_started, &error),
     };
     let (include_reasoning, include_tool_calls) = session_include_flags(include.as_deref());
-    let groups = session_turn_groups(records, order);
-    let total_groups = groups.len();
-    let groups = groups
-        .into_iter()
-        .skip(start)
-        .take(requested_limit)
-        .collect::<Vec<_>>();
-    let (groups, mut budget_report) = trim_groups_to_budget(
-        groups,
-        read_budget_chars,
-        include_reasoning,
-        include_tool_calls,
+    let rehydration_stats = rehydrated.stats();
+    let window = session_response_window(
+        rehydrated,
+        SessionWindowRequest {
+            order: plan.order,
+            start: plan.start,
+            requested_limit: plan.requested_limit,
+            read_budget_chars,
+            include_reasoning,
+            include_tool_calls,
+            rehydrate_started,
+        },
     );
-    if let Some(started) = rehydrate_started {
-        budget_report.rehydrate = Some(RehydrateReport {
-            elapsed_ms: started.elapsed().as_millis(),
-            source_tier,
-        });
-    }
-    let next_offset = start.saturating_add(groups.len());
-    let next_cursor = (next_offset < total_groups).then(|| session_cursor(order, next_offset));
-    let records = groups
-        .into_iter()
-        .flat_map(|group| group.records)
-        .collect::<Vec<_>>();
+    let SessionResponseWindow {
+        records,
+        next_cursor,
+        budget_report,
+    } = window;
     let mut response = committed_after_access(
         store,
         auth,
@@ -396,7 +379,244 @@ async fn retrieve_session(
         tree_policy_trace.clear();
     }
     response.policy_trace.append(&mut tree_policy_trace);
+    emit_rehydration_completion_metric(
+        vault_root,
+        config,
+        rehydrate_started,
+        rehydration_stats,
+        response.status,
+    );
     response
+}
+
+fn cold_rehydrate_error(
+    vault_root: &Path,
+    config: &CairnConfig,
+    started: Option<Instant>,
+    error: &anyhow::Error,
+) -> Response {
+    if let Some(started) = started {
+        emit_rehydration_metric(
+            vault_root,
+            config,
+            RehydrationMetric {
+                started,
+                source_tier: "cold",
+                restored_tier: "warm",
+                status: "aborted",
+                bytes_restored: 0,
+                record_count: 0,
+                error: Some("cold_bundle_read"),
+            },
+        );
+    }
+    super::signed::aborted(ResponseVerb::Retrieve, format!("cold rehydrate: {error:#}"))
+}
+
+struct SessionRetrievePlan {
+    target_session: SessionId,
+    order: RetrieveArgsSessionOrder,
+    start: usize,
+    requested_limit: usize,
+}
+
+fn session_retrieve_plan(
+    session_id: &str,
+    limit: Option<i64>,
+    order: Option<RetrieveArgsSessionOrder>,
+    cursor: Option<&Cursor>,
+) -> Result<SessionRetrievePlan, Response> {
+    let target_session = SessionId::parse(session_id.to_owned())
+        .map_err(|err| super::signed::rejected_from_domain(ResponseVerb::Retrieve, err))?;
+    let order = order.unwrap_or(RetrieveArgsSessionOrder::Asc);
+    let start = parse_session_cursor(cursor, order)?;
+    let requested_limit = limit
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(usize::MAX);
+    Ok(SessionRetrievePlan {
+        target_session,
+        order,
+        start,
+        requested_limit,
+    })
+}
+
+struct RehydratedSessionRecords {
+    records: Vec<MemoryRecord>,
+    source_tier: &'static str,
+    restored_tier: &'static str,
+    byte_count: u64,
+    record_count: u64,
+}
+
+impl RehydratedSessionRecords {
+    fn stats(&self) -> RehydrationStats {
+        RehydrationStats {
+            source_tier: self.source_tier,
+            restored_tier: self.restored_tier,
+            byte_count: self.byte_count,
+            record_count: self.record_count,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RehydrationStats {
+    source_tier: &'static str,
+    restored_tier: &'static str,
+    byte_count: u64,
+    record_count: u64,
+}
+
+#[derive(Clone, Copy)]
+struct SessionWindowRequest {
+    order: RetrieveArgsSessionOrder,
+    start: usize,
+    requested_limit: usize,
+    read_budget_chars: usize,
+    include_reasoning: bool,
+    include_tool_calls: bool,
+    rehydrate_started: Option<Instant>,
+}
+
+struct SessionResponseWindow {
+    records: Vec<MemoryRecord>,
+    next_cursor: Option<Cursor>,
+    budget_report: BudgetReport,
+}
+
+fn session_response_window(
+    rehydrated: RehydratedSessionRecords,
+    request: SessionWindowRequest,
+) -> SessionResponseWindow {
+    let groups = session_turn_groups(rehydrated.records, request.order);
+    let total_groups = groups.len();
+    let groups = groups
+        .into_iter()
+        .skip(request.start)
+        .take(request.requested_limit)
+        .collect::<Vec<_>>();
+    let (groups, mut budget_report) = trim_groups_to_budget(
+        groups,
+        request.read_budget_chars,
+        request.include_reasoning,
+        request.include_tool_calls,
+    );
+    if let Some(started) = request.rehydrate_started {
+        budget_report.rehydrate = Some(RehydrateReport {
+            elapsed_ms: started.elapsed().as_millis(),
+            source_tier: rehydrated.source_tier,
+        });
+    }
+    let next_offset = request.start.saturating_add(groups.len());
+    let next_cursor =
+        (next_offset < total_groups).then(|| session_cursor(request.order, next_offset));
+    let records = groups
+        .into_iter()
+        .flat_map(|group| group.records)
+        .collect::<Vec<_>>();
+    SessionResponseWindow {
+        records,
+        next_cursor,
+        budget_report,
+    }
+}
+
+fn session_records_with_optional_rehydrate(
+    vault_root: &Path,
+    session_id: &str,
+    hot_records: Vec<MemoryRecord>,
+    rehydrate: bool,
+) -> anyhow::Result<RehydratedSessionRecords> {
+    let (records, source_tier, restored_tier) = if rehydrate {
+        match cold_records_for_hot(vault_root, session_id, &hot_records)? {
+            Some(cold_records) => (cold_records, "cold", "warm"),
+            None => (hot_records, "hot_or_warm", "hot_or_warm"),
+        }
+    } else {
+        (hot_records, "hot_or_warm", "hot_or_warm")
+    };
+    let record_count = u64::try_from(records.len()).unwrap_or(u64::MAX);
+    let byte_count = records
+        .iter()
+        .map(|record| record.body.len())
+        .try_fold(0_u64, |total, bytes| {
+            let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+            total.checked_add(bytes).ok_or(())
+        })
+        .unwrap_or(u64::MAX);
+    Ok(RehydratedSessionRecords {
+        records,
+        source_tier,
+        restored_tier,
+        byte_count,
+        record_count,
+    })
+}
+
+fn response_status_label(status: ResponseStatus) -> &'static str {
+    match status {
+        ResponseStatus::Committed => "committed",
+        ResponseStatus::Aborted => "aborted",
+        ResponseStatus::Rejected => "rejected",
+        _ => "unknown",
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RehydrationMetric<'a> {
+    started: Instant,
+    source_tier: &'a str,
+    restored_tier: &'a str,
+    status: &'a str,
+    bytes_restored: u64,
+    record_count: u64,
+    error: Option<&'a str>,
+}
+
+fn emit_rehydration_completion_metric(
+    vault_root: &Path,
+    config: &CairnConfig,
+    started: Option<Instant>,
+    summary: RehydrationStats,
+    response_status: ResponseStatus,
+) {
+    if let Some(started) = started {
+        emit_rehydration_metric(
+            vault_root,
+            config,
+            RehydrationMetric {
+                started,
+                source_tier: summary.source_tier,
+                restored_tier: summary.restored_tier,
+                status: response_status_label(response_status),
+                bytes_restored: summary.byte_count,
+                record_count: summary.record_count,
+                error: (response_status != ResponseStatus::Committed)
+                    .then_some("retrieve_response"),
+            },
+        );
+    }
+}
+
+fn emit_rehydration_metric(vault_root: &Path, config: &CairnConfig, metric: RehydrationMetric<'_>) {
+    if !config.observability.enabled || !config.observability.local_metrics {
+        return;
+    }
+    let event = MetricEvent::RehydrationCompleted {
+        ts_ms: crate::metrics::now_ms(),
+        target: "session".to_owned(),
+        source_tier: metric.source_tier.to_owned(),
+        restored_tier: metric.restored_tier.to_owned(),
+        status: metric.status.to_owned(),
+        latency_ms: u64::try_from(metric.started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        bytes_restored: metric.bytes_restored,
+        record_count: metric.record_count,
+        error: metric.error.map(str::to_owned),
+    };
+    if let Err(err) = crate::metrics::append_local_event_sync(vault_root, &event) {
+        tracing::warn!(error = %err, "rehydration metric emit failed");
+    }
 }
 
 async fn session_records_for_retrieve(

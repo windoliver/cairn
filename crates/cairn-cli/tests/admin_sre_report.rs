@@ -1,6 +1,17 @@
 //! Integration coverage for `cairn admin sre report`.
 
-use std::process::Command;
+use std::{future::Future, process::Command};
+
+use cairn_core::{
+    contract::memory_store::{MemoryStore, ProjectionApplyItem},
+    domain::{
+        projection::{
+            ProjectionCursor, ProjectionItemState, ProjectionLedgerRow, ProjectionTarget,
+        },
+        record::RecordId,
+    },
+};
+use cairn_store_sqlite::SqliteMemoryStore;
 
 fn cairn() -> Command {
     Command::new(env!("CARGO_BIN_EXE_cairn"))
@@ -40,6 +51,56 @@ fn assert_forbidden_fragments_absent(output: &str) {
 
 fn json_stdout(output: &std::process::Output) -> serde_json::Value {
     serde_json::from_slice(&output.stdout).expect("json stdout")
+}
+
+fn block_on<F: Future>(future: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("test runtime")
+        .block_on(future)
+}
+
+fn now_epoch_ms() -> i64 {
+    i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_millis(),
+    )
+    .expect("epoch millis fit i64")
+}
+
+fn record_id(raw: &str) -> RecordId {
+    RecordId::parse(raw).expect("valid test ULID")
+}
+
+fn create_workflow_jobs_table(conn: &rusqlite::Connection) {
+    conn.execute_batch(
+        "CREATE TABLE workflow_jobs (
+            job_id TEXT NOT NULL PRIMARY KEY,
+            kind TEXT NOT NULL,
+            payload BLOB NOT NULL,
+            state TEXT NOT NULL,
+            attempts INTEGER NOT NULL,
+            delivery_count INTEGER NOT NULL,
+            max_attempts INTEGER NOT NULL,
+            base_backoff_ms INTEGER NOT NULL,
+            backoff_multiplier INTEGER NOT NULL,
+            max_backoff_ms INTEGER NOT NULL,
+            next_run_at INTEGER NOT NULL,
+            enqueued_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            lease_owner TEXT,
+            lease_nonce TEXT,
+            lease_started INTEGER,
+            lease_expires_at INTEGER,
+            failure_class TEXT,
+            dead_letter_at_ms INTEGER,
+            completed_at_ms INTEGER,
+            last_error TEXT
+        );",
+    )
+    .expect("create workflow_jobs table");
 }
 
 fn insert_workflow_row(
@@ -83,6 +144,133 @@ fn insert_workflow_row(
     let params: Vec<&dyn rusqlite::ToSql> = row.iter().map(|(_, value)| *value).collect();
     conn.execute(&sql, rusqlite::params_from_iter(params))
         .expect("insert workflow row");
+}
+
+fn seed_current_workflow_state(conn: &rusqlite::Connection, now_ms: i64) {
+    insert_workflow_row(
+        conn,
+        "queued-tier",
+        "expire.tier",
+        "queued",
+        now_ms - 742_000,
+        &[],
+    );
+    insert_workflow_row(
+        conn,
+        "leased-dream",
+        "dream.light",
+        "leased",
+        now_ms,
+        &[
+            ("lease_owner", &"worker"),
+            ("lease_nonce", &"nonce"),
+            ("lease_started", &1_i64),
+            ("lease_expires_at", &(now_ms - 90_000)),
+        ],
+    );
+    insert_workflow_row(
+        conn,
+        "done-dream",
+        "dream.light",
+        "done",
+        now_ms,
+        &[("completed_at_ms", &(now_ms - 2_500))],
+    );
+    insert_workflow_row(
+        conn,
+        "dead-tier",
+        "expire.tier",
+        "failed",
+        now_ms,
+        &[
+            ("attempts", &3_i64),
+            ("delivery_count", &3_i64),
+            ("failure_class", &"provider"),
+            ("dead_letter_at_ms", &(now_ms - 1_000)),
+            (
+                "last_error",
+                &"SECRET_PRIVATE_TOKEN /Users/alice private body query text",
+            ),
+        ],
+    );
+}
+
+fn seed_projection_ledger_state(vault: &std::path::Path) {
+    let store = SqliteMemoryStore::open(&vault.join(".cairn/cairn.db")).expect("open sqlite");
+    for (record_id, body, sequence, hash) in [
+        (
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "current projection",
+            1,
+            "sha256:record-current",
+        ),
+        (
+            "01BRZ3NDEKTSV4RRFFQ69G5FAV",
+            "stale projection",
+            2,
+            "sha256:record-stale-new",
+        ),
+        (
+            "01CRZ3NDEKTSV4RRFFQ69G5FAV",
+            "missing projection",
+            3,
+            "sha256:record-missing",
+        ),
+        (
+            "01DRZ3NDEKTSV4RRFFQ69G5FAV",
+            "failed projection",
+            4,
+            "sha256:record-failed",
+        ),
+    ] {
+        store
+            .insert_test_record(record_id, body, sequence, hash)
+            .expect("insert projection test record");
+    }
+    block_on(store.apply_projection_items(vec![
+        ProjectionApplyItem {
+            row: ProjectionLedgerRow {
+                target: ProjectionTarget::Bm25sLexical,
+                cursor: ProjectionCursor {
+                    record_id: record_id("01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+                    wal_sequence: 1,
+                    record_hash: "sha256:record-current".to_owned(),
+                    source_hash: None,
+                },
+                state: ProjectionItemState::Current,
+                updated_at: "2026-05-19T12:00:00Z".to_owned(),
+            },
+        },
+        ProjectionApplyItem {
+            row: ProjectionLedgerRow {
+                target: ProjectionTarget::Bm25sLexical,
+                cursor: ProjectionCursor {
+                    record_id: record_id("01BRZ3NDEKTSV4RRFFQ69G5FAV"),
+                    wal_sequence: 1,
+                    record_hash: "sha256:record-stale-old".to_owned(),
+                    source_hash: None,
+                },
+                state: ProjectionItemState::Current,
+                updated_at: "2026-05-19T12:00:00Z".to_owned(),
+            },
+        },
+        ProjectionApplyItem {
+            row: ProjectionLedgerRow {
+                target: ProjectionTarget::Bm25sLexical,
+                cursor: ProjectionCursor {
+                    record_id: record_id("01DRZ3NDEKTSV4RRFFQ69G5FAV"),
+                    wal_sequence: 4,
+                    record_hash: "sha256:record-failed".to_owned(),
+                    source_hash: None,
+                },
+                state: ProjectionItemState::Failed {
+                    reason: "projection failed".to_owned(),
+                },
+                updated_at: "2026-05-19T12:00:00Z".to_owned(),
+            },
+        },
+    ]))
+    .expect("apply projection rows");
 }
 
 #[test]
@@ -252,6 +440,41 @@ fn admin_sre_report_counts_search_verb_invocation_failures() {
     assert_eq!(semantic["degraded"], 1);
     assert_eq!(semantic["status"], "fail");
     assert_forbidden_fragments_absent(&stdout);
+}
+
+#[test]
+fn admin_sre_report_counts_successful_mcp_search_invocations() {
+    let dir = bootstrap_vault();
+    let metrics = dir.path().join(".cairn/metrics.jsonl");
+    std::fs::write(
+        &metrics,
+        r#"{"event":"verb_invocation","ts_ms":1,"verb":"search","surface":"mcp","mode":"semantic","status":"committed","latency_ms":77,"error":null,"budget_used_ratio":null,"degradation_state":"none"}
+"#,
+    )
+    .expect("write metrics");
+
+    let output = cairn()
+        .current_dir(dir.path())
+        .args(["admin", "sre", "report", "--json"])
+        .output()
+        .expect("run sre report");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json = json_stdout(&output);
+    let modes = json["search"]["modes"].as_array().expect("search modes");
+    let semantic = modes
+        .iter()
+        .find(|mode| mode["mode"] == "semantic")
+        .expect("semantic mode");
+    assert_eq!(semantic["invocations"], 1);
+    assert_eq!(semantic["failed"], 0);
+    assert_eq!(semantic["degraded"], 0);
+    assert_eq!(semantic["p95_latency_ms"], 77.0);
+    assert_eq!(semantic["status"], "ok");
 }
 
 #[test]
@@ -487,7 +710,7 @@ fn admin_sre_report_summarizes_workflow_metrics_safely() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json = json_stdout(&output);
     assert_eq!(json["workflow"]["status"], "warning");
-    assert_eq!(json["workflow"]["oldest_queued_age_ms"], 742000);
+    assert_eq!(json["workflow"]["oldest_queued_age_ms"], 742_000);
     assert_eq!(json["workflow"]["dead_letter_count"], 1);
     let kinds = json["workflow"]["kinds"]
         .as_array()
@@ -504,7 +727,7 @@ fn admin_sre_report_summarizes_workflow_metrics_safely() {
         .find(|kind| kind["kind"] == "expire.tier")
         .expect("expire.tier kind");
     assert_eq!(expire["leased"], 1);
-    assert_eq!(expire["oldest_queued_age_ms"], 742000);
+    assert_eq!(expire["oldest_queued_age_ms"], 742_000);
     assert_eq!(expire["status"], "warning");
     let redacted = kinds
         .iter()
@@ -518,84 +741,11 @@ fn admin_sre_report_summarizes_workflow_metrics_safely() {
 #[test]
 fn admin_sre_report_prefers_db_workflow_current_state() {
     let dir = bootstrap_vault();
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system time")
-        .as_millis() as i64;
+    let now_ms = now_epoch_ms();
     let conn =
         rusqlite::Connection::open(dir.path().join(".cairn/cairn.db")).expect("open cairn db");
-    conn.execute_batch(
-        "CREATE TABLE workflow_jobs (
-            job_id TEXT NOT NULL PRIMARY KEY,
-            kind TEXT NOT NULL,
-            payload BLOB NOT NULL,
-            state TEXT NOT NULL,
-            attempts INTEGER NOT NULL,
-            delivery_count INTEGER NOT NULL,
-            max_attempts INTEGER NOT NULL,
-            base_backoff_ms INTEGER NOT NULL,
-            backoff_multiplier INTEGER NOT NULL,
-            max_backoff_ms INTEGER NOT NULL,
-            next_run_at INTEGER NOT NULL,
-            enqueued_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL,
-            lease_owner TEXT,
-            lease_nonce TEXT,
-            lease_started INTEGER,
-            lease_expires_at INTEGER,
-            failure_class TEXT,
-            dead_letter_at_ms INTEGER,
-            completed_at_ms INTEGER,
-            last_error TEXT
-        );",
-    )
-    .expect("create workflow_jobs table");
-    insert_workflow_row(
-        &conn,
-        "queued-tier",
-        "expire.tier",
-        "queued",
-        now_ms - 742_000,
-        &[],
-    );
-    insert_workflow_row(
-        &conn,
-        "leased-dream",
-        "dream.light",
-        "leased",
-        now_ms,
-        &[
-            ("lease_owner", &"worker"),
-            ("lease_nonce", &"nonce"),
-            ("lease_started", &1_i64),
-            ("lease_expires_at", &(now_ms + 60_000)),
-        ],
-    );
-    insert_workflow_row(
-        &conn,
-        "done-dream",
-        "dream.light",
-        "done",
-        now_ms,
-        &[("completed_at_ms", &(now_ms - 2_500))],
-    );
-    insert_workflow_row(
-        &conn,
-        "dead-tier",
-        "expire.tier",
-        "failed",
-        now_ms,
-        &[
-            ("attempts", &3_i64),
-            ("delivery_count", &3_i64),
-            ("failure_class", &"provider"),
-            ("dead_letter_at_ms", &(now_ms - 1_000)),
-            (
-                "last_error",
-                &"SECRET_PRIVATE_TOKEN /Users/alice private body query text",
-            ),
-        ],
-    );
+    create_workflow_jobs_table(&conn);
+    seed_current_workflow_state(&conn, now_ms);
     drop(conn);
     let metrics = dir.path().join(".cairn/metrics.jsonl");
     std::fs::write(
@@ -621,6 +771,12 @@ fn admin_sre_report_prefers_db_workflow_current_state() {
     let json = json_stdout(&output);
     assert_eq!(json["workflow"]["status"], "warning");
     assert_eq!(json["workflow"]["dead_letter_count"], 1);
+    assert!(
+        json["workflow"]["longest_held_lease_ms"]
+            .as_i64()
+            .expect("longest held lease")
+            >= 90_000
+    );
     assert!(
         json["workflow"]["oldest_queued_age_ms"]
             .as_i64()
@@ -761,6 +917,39 @@ fn admin_sre_report_summarizes_projection_metrics_safely() {
     assert_eq!(redacted["last_rebuild_latency_ms"], 99);
     assert_eq!(redacted["status"], "warning");
     assert_forbidden_fragments_absent(&stdout);
+}
+
+#[test]
+fn admin_sre_report_reads_projection_ledger_state() {
+    let dir = bootstrap_vault();
+    seed_projection_ledger_state(dir.path());
+
+    let output = cairn()
+        .current_dir(dir.path())
+        .args(["admin", "sre", "report", "--json"])
+        .output()
+        .expect("run sre report");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json = json_stdout(&output);
+    let targets = json["projection"]["targets"]
+        .as_array()
+        .expect("projection targets");
+    let bm25s = targets
+        .iter()
+        .find(|target| target["target"] == "bm25s_lexical")
+        .expect("bm25s target");
+    assert_eq!(bm25s["current"], 1);
+    assert_eq!(bm25s["stale"], 1);
+    assert_eq!(bm25s["missing"], 1);
+    assert_eq!(bm25s["failed"], 1);
+    assert_eq!(bm25s["status"], "warning");
+    assert_eq!(json["projection"]["status"], "warning");
+    assert_eq!(json["projection"]["nexus_state"], "degraded");
 }
 
 #[test]
@@ -1158,7 +1347,7 @@ fn admin_sre_report_rejects_schema_invalid_sre_json() {
         .join("SECRET_PRIVATE_TOKEN private body query text");
     std::fs::create_dir(&bench).expect("create bench dir");
 
-    for body in [r#"{}"#, r#"{"checks":[{}]}"#] {
+    for body in [r"{}", r#"{"checks":[{}]}"#] {
         std::fs::write(bench.join("sre.json"), body).expect("write schema-invalid report");
         let output = cairn()
             .current_dir(dir.path())

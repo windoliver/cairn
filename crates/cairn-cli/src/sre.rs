@@ -2,9 +2,10 @@
 
 use std::{collections::BTreeMap, fmt::Write as _, path::Path, process::ExitCode};
 
+use cairn_core::contract::memory_store::MemoryStore;
 use cairn_core::domain::metrics::MetricEvent;
 use cairn_core::domain::{
-    SreDetail, SreGateResult, SreGateSummary, SreMeasurement, SrePrivacySummary,
+    ProjectionSummary, SreDetail, SreGateResult, SreGateSummary, SreMeasurement, SrePrivacySummary,
     SreProjectionSummary, SreProjectionTargetSummary, SreRehydrationSummary, SreReport,
     SreSearchModeSummary, SreSearchSummary, SreStatus, SreVaultSummary, SreWorkflowKindSummary,
     SreWorkflowSummary, classify_threshold,
@@ -104,7 +105,7 @@ fn build_report_with_bench(
     let search_modes = summarize_search(&events, config, vault_root);
     let workflow = summarize_workflow(&events, vault_root, captured_at_ms)
         .map_err(|()| SreReportBuildError::WorkflowStateUnavailable)?;
-    let projection = summarize_projection(&events);
+    let projection = summarize_projection(&events, vault_root);
     let p95 = p95_u64(&rehydration_latencies);
     let rehydration_status = classify_threshold(p95, SLO_COLD_REHYDRATE_MS);
     let mut gates = load_bench_gates(bench_report_dir).map_err(SreReportBuildError::Bench)?;
@@ -238,6 +239,7 @@ struct WorkflowKindAggregate {
     done_recent: u64,
     failed_recent: u64,
     oldest_queued_age_ms: Option<i64>,
+    longest_held_lease_ms: Option<i64>,
     last_success_ts_ms: Option<i64>,
     dead_letters: usize,
 }
@@ -356,6 +358,7 @@ fn read_workflow_db_state(
     let mut stmt = conn
         .prepare(
             "SELECT kind, state, next_run_at, completed_at_ms, dead_letter_at_ms \
+                    , lease_started, lease_expires_at \
              FROM workflow_jobs",
         )
         .map_err(|_err| ())?;
@@ -367,6 +370,8 @@ fn read_workflow_db_state(
         let next_run_at: i64 = row.get(2).map_err(|_err| ())?;
         let completed_at_ms: Option<i64> = row.get(3).map_err(|_err| ())?;
         let dead_letter_at_ms: Option<i64> = row.get(4).map_err(|_err| ())?;
+        let lease_started: Option<i64> = row.get(5).map_err(|_err| ())?;
+        let lease_expires_at: Option<i64> = row.get(6).map_err(|_err| ())?;
         let entry = kinds.entry(kind).or_default();
         match state.as_str() {
             "queued" => {
@@ -380,6 +385,16 @@ fn read_workflow_db_state(
             }
             "leased" => {
                 entry.leased = entry.leased.saturating_add(1);
+                let held_ms = lease_started
+                    .or(lease_expires_at)
+                    .map(|lease_marker| captured_at_ms.saturating_sub(lease_marker).max(0));
+                if let Some(held_ms) = held_ms {
+                    entry.longest_held_lease_ms = Some(
+                        entry
+                            .longest_held_lease_ms
+                            .map_or(held_ms, |current| current.max(held_ms)),
+                    );
+                }
             }
             _ => {}
         }
@@ -412,6 +427,13 @@ fn merge_workflow_recent(
                     .map_or(success_ts, |current| current.max(success_ts)),
             );
         }
+        if let Some(held_ms) = recent.longest_held_lease_ms {
+            entry.longest_held_lease_ms = Some(
+                entry
+                    .longest_held_lease_ms
+                    .map_or(held_ms, |current| current.max(held_ms)),
+            );
+        }
     }
 }
 
@@ -433,6 +455,10 @@ fn workflow_summary_from_kinds(
         .values()
         .filter_map(|aggregate| aggregate.oldest_queued_age_ms)
         .max();
+    let longest_held_lease_ms = kinds
+        .values()
+        .filter_map(|aggregate| aggregate.longest_held_lease_ms)
+        .max();
     let mut dead_letter_count = 0_usize;
     let kinds: Vec<SreWorkflowKindSummary> = kinds
         .into_iter()
@@ -442,6 +468,9 @@ fn workflow_summary_from_kinds(
                 || aggregate.dead_letters > 0
                 || aggregate
                     .oldest_queued_age_ms
+                    .is_some_and(|age_ms| age_ms > WORKFLOW_BACKLOG_THRESHOLD_MS)
+                || aggregate
+                    .longest_held_lease_ms
                     .is_some_and(|age_ms| age_ms > WORKFLOW_BACKLOG_THRESHOLD_MS)
             {
                 SreStatus::Warning
@@ -473,7 +502,7 @@ fn workflow_summary_from_kinds(
     SreWorkflowSummary {
         status,
         oldest_queued_age_ms,
-        longest_held_lease_ms: None,
+        longest_held_lease_ms,
         dead_letter_count,
         kinds,
     }
@@ -482,13 +511,97 @@ fn workflow_summary_from_kinds(
 #[derive(Default)]
 struct ProjectionTargetAggregate {
     current: u64,
+    stale: u64,
     failed: u64,
+    missing: u64,
     max_lag_ms: Option<i64>,
     last_rebuild_latency_ms: Option<u64>,
     degraded: bool,
 }
 
-fn summarize_projection(events: &[MetricEvent]) -> SreProjectionSummary {
+fn summarize_projection(events: &[MetricEvent], vault_root: &Path) -> SreProjectionSummary {
+    if let Some(summary) = summarize_projection_store(vault_root) {
+        return summary;
+    }
+    summarize_projection_metrics(events)
+}
+
+fn summarize_projection_store(vault_root: &Path) -> Option<SreProjectionSummary> {
+    let db_path = vault_root.join(".cairn/cairn.db");
+    if !db_path.exists() {
+        return None;
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    let summaries = runtime.block_on(async {
+        let store = cairn_store_sqlite::open(&db_path).await.ok()?;
+        store.projection_summaries().await.ok()
+    })?;
+    let has_projection_state = summaries.iter().any(|summary| {
+        summary.total_authoritative_items > 0
+            || summary.current_items > 0
+            || summary.lagging_items > 0
+            || summary.failed_items > 0
+            || summary.last_successful_rebuild_at.is_some()
+    });
+    has_projection_state.then(|| projection_summary_from_store(summaries))
+}
+
+fn projection_summary_from_store(summaries: Vec<ProjectionSummary>) -> SreProjectionSummary {
+    let targets = summaries
+        .into_iter()
+        .filter(|summary| {
+            summary.total_authoritative_items > 0
+                || summary.current_items > 0
+                || summary.lagging_items > 0
+                || summary.failed_items > 0
+                || summary.last_successful_rebuild_at.is_some()
+        })
+        .map(|summary| {
+            let status = if summary.lagging_items > 0 || summary.failed_items > 0 {
+                SreStatus::Warning
+            } else {
+                SreStatus::Ok
+            };
+            SreProjectionTargetSummary {
+                target: summary.target.as_key(),
+                current: u64::try_from(summary.current_items).unwrap_or(u64::MAX),
+                stale: u64::try_from(summary.stale_items).unwrap_or(u64::MAX),
+                failed: u64::try_from(summary.failed_items).unwrap_or(u64::MAX),
+                missing: u64::try_from(summary.missing_items).unwrap_or(u64::MAX),
+                max_lag_ms: None,
+                last_rebuild_latency_ms: None,
+                status,
+            }
+        })
+        .collect::<Vec<_>>();
+    let status = if targets
+        .iter()
+        .any(|target| target.status == SreStatus::Warning)
+    {
+        SreStatus::Warning
+    } else {
+        SreStatus::Ok
+    };
+    SreProjectionSummary {
+        status,
+        nexus_state: if status == SreStatus::Warning {
+            "degraded".into()
+        } else {
+            "healthy".into()
+        },
+        nexus_reason: if status == SreStatus::Warning {
+            Some("projection_ledger_warning".into())
+        } else {
+            None
+        },
+        targets,
+    }
+}
+
+fn summarize_projection_metrics(events: &[MetricEvent]) -> SreProjectionSummary {
     let mut targets: BTreeMap<String, ProjectionTargetAggregate> = BTreeMap::new();
     let mut saw_projection_event = false;
 
@@ -551,9 +664,9 @@ fn summarize_projection(events: &[MetricEvent]) -> SreProjectionSummary {
             SreProjectionTargetSummary {
                 target,
                 current: aggregate.current,
-                stale: 0,
+                stale: aggregate.stale,
                 failed: aggregate.failed,
-                missing: 0,
+                missing: aggregate.missing,
                 max_lag_ms: aggregate.max_lag_ms,
                 last_rebuild_latency_ms: aggregate.last_rebuild_latency_ms,
                 status,
@@ -604,7 +717,12 @@ fn workflow_kind_label(raw: &str) -> String {
 
 fn projection_target_label(raw: &str) -> String {
     match raw {
-        "sqlite.from_db" => raw.to_owned(),
+        "sqlite.from_db"
+        | "bm25s_lexical"
+        | "parser_pdf_text"
+        | "parser_docx_text"
+        | "parser_video_frame_text"
+        | "parser_vision_caption" => raw.to_owned(),
         _ => "redacted_projection".to_owned(),
     }
 }
@@ -618,16 +736,9 @@ fn summarize_search(
     let search_completed_observations: Vec<SearchCompletedObservation<'_>> = events
         .iter()
         .filter_map(|event| match event {
-            MetricEvent::SearchCompleted {
-                mode,
-                ts_ms,
-                degradation_state,
-                error,
-                ..
-            } => Some(SearchCompletedObservation {
+            MetricEvent::SearchCompleted { mode, ts_ms, .. } => Some(SearchCompletedObservation {
                 mode: mode.as_str(),
                 ts_ms: *ts_ms,
-                actionable: error.is_some() || degradation_state != "none",
             }),
             _ => None,
         })
@@ -690,7 +801,6 @@ struct SearchObservation {
 struct SearchCompletedObservation<'a> {
     mode: &'a str,
     ts_ms: i64,
-    actionable: bool,
 }
 
 fn search_observation(
@@ -723,33 +833,31 @@ fn search_observation(
         } if verb == "search"
             && event_mode == mode
             && (surface != "cli"
-                || !has_nearby_actionable_search_completed(
+                || !has_nearby_search_completed(
                     search_completed_observations,
                     event_mode,
                     *ts_ms,
-                ))
-            && (status != "committed" || error.is_some()) =>
+                )) =>
         {
             Some(SearchObservation {
                 latency_ms: *latency_ms,
                 degraded: degradation_state
                     .as_deref()
                     .is_some_and(|state| state != "none"),
-                failed: true,
+                failed: status != "committed" || error.is_some(),
             })
         }
         _ => None,
     }
 }
 
-fn has_nearby_actionable_search_completed(
+fn has_nearby_search_completed(
     observations: &[SearchCompletedObservation<'_>],
     mode: &str,
     verb_ts_ms: i64,
 ) -> bool {
     observations.iter().any(|observation| {
         observation.mode == mode
-            && observation.actionable
             && observation.ts_ms <= verb_ts_ms
             && verb_ts_ms.saturating_sub(observation.ts_ms) <= CLI_SEARCH_DEDUPE_LOOKBACK_MS
     })

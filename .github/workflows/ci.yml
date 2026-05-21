@@ -116,7 +116,7 @@ jobs:
         run: ./scripts/check-core-boundary.sh
 
   gates:
-    name: gates / latency + memory + privacy
+    name: gates / latency + memory + privacy + SRE smoke
     strategy:
       fail-fast: false
       matrix:

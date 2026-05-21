@@ -1144,6 +1144,25 @@ fn retrieve_session_rehydrate_adds_body_free_trace() {
         !detail.contains("turn one user"),
         "rehydrate trace must be body-free: {detail}"
     );
+    let metrics_raw =
+        std::fs::read_to_string(vault.path().join(".cairn/metrics.jsonl")).expect("metrics jsonl");
+    assert!(
+        !metrics_raw.contains("alice@example.com") && !metrics_raw.contains("turn one user"),
+        "rehydration metric must be body-free: {metrics_raw}"
+    );
+    let metric = metrics_raw
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|event| event["event"] == "rehydration_completed")
+        .expect("rehydration metric");
+    assert_eq!(metric["target"], "session");
+    assert_eq!(metric["source_tier"], "hot_or_warm");
+    assert_eq!(metric["status"], "committed");
+    assert_eq!(metric["error"], serde_json::Value::Null);
+    assert!(
+        metric["latency_ms"].as_u64().is_some(),
+        "latency metric: {metric}"
+    );
 }
 
 #[test]
@@ -1284,6 +1303,20 @@ fn retrieve_session_rehydrates_from_cold_bundle_after_archive() {
         !detail.contains("turn one user"),
         "rehydrate trace must remain body-free: {detail}"
     );
+    let metrics_raw =
+        std::fs::read_to_string(vault.path().join(".cairn/metrics.jsonl")).expect("metrics jsonl");
+    assert!(
+        !metrics_raw.contains("alice@example.com") && !metrics_raw.contains("turn one user"),
+        "cold rehydration metric must be body-free: {metrics_raw}"
+    );
+    let metric = metrics_raw
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|event| event["event"] == "rehydration_completed")
+        .expect("rehydration metric");
+    assert_eq!(metric["source_tier"], "cold");
+    assert_eq!(metric["status"], "committed");
+    assert_eq!(metric["record_count"], 5);
 }
 
 #[test]

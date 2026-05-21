@@ -346,6 +346,13 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+.sreInlineMetrics {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  justify-content: flex-end;
+}
+
 .sreStatusBadge {
   border: 1px solid #cfd7d2;
   border-radius: 999px;

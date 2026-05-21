@@ -40,7 +40,7 @@ export function SreWorkspace({
           icon={<Activity size={18} />}
           title="Workflow"
           status={report.workflow.status}
-          detail={`${report.workflow.dead_letter_count} dead-letter`}
+          detail={`${report.workflow.dead_letter_count} dead-letter · ${formatMs(report.workflow.longest_held_lease_ms)} held`}
         />
         <StatusCard
           icon={<Gauge size={18} />}
@@ -58,13 +58,14 @@ export function SreWorkspace({
           icon={<Search size={18} />}
           title="Search"
           status={report.search.status}
-          detail={`${report.search.modes.length} modes`}
+          detail={`${report.search.modes.length} modes · ${totalSearchFailures(report)} failed`}
         />
       </div>
 
       <div className="srePanelGrid">
         <section className="srePanel">
           <h3>Workflow Jobs</h3>
+          <MetricRow label="held lease" value={formatMs(report.workflow.longest_held_lease_ms)} />
           <table>
             <thead>
               <tr>
@@ -72,6 +73,8 @@ export function SreWorkspace({
                 <th>Queued</th>
                 <th>Leased</th>
                 <th>Oldest</th>
+                <th>Last Success</th>
+                <th>Threshold</th>
                 <th>Status</th>
               </tr>
             </thead>
@@ -82,6 +85,8 @@ export function SreWorkspace({
                   <td>{kind.queued}</td>
                   <td>{kind.leased}</td>
                   <td>{formatMs(kind.oldest_queued_age_ms)}</td>
+                  <td>{formatMs(kind.last_success_age_ms)}</td>
+                  <td>{formatMs(kind.backlog_threshold_ms)}</td>
                   <td>
                     <StatusBadge status={kind.status} />
                   </td>
@@ -110,8 +115,12 @@ export function SreWorkspace({
           {report.projection.targets.map((target) => (
             <div className="sreMetricRow" key={target.target}>
               <span>{target.target}</span>
-              <span>
-                {target.stale} stale · {target.failed} failed
+              <span className="sreInlineMetrics">
+                <span>{target.current} current</span>
+                <span>{target.stale} stale</span>
+                <span>{target.missing} missing</span>
+                <span>{target.failed} failed</span>
+                <span>{formatMs(target.max_lag_ms)} lag</span>
               </span>
               <StatusBadge status={target.status} />
             </div>
@@ -123,8 +132,12 @@ export function SreWorkspace({
           {report.search.modes.map((mode) => (
             <div className="sreMetricRow" key={mode.mode}>
               <span>{mode.mode}</span>
-              <span>
-                {mode.degraded}/{mode.invocations} degraded
+              <span className="sreInlineMetrics">
+                <span>{mode.failed} failed</span>
+                <span>
+                  {mode.degraded}/{mode.invocations} degraded
+                </span>
+                <span>{formatMs(mode.p95_latency_ms)} p95</span>
               </span>
               <StatusBadge status={mode.status} />
             </div>
@@ -136,8 +149,15 @@ export function SreWorkspace({
           {report.gates.gates.map((gate) => (
             <div className="sreMetricRow" key={gate.name}>
               <span>{gate.name}</span>
-              <span>
-                {formatMeasurement(gate.measured)} {gate.unit}
+              <span className="sreInlineMetrics">
+                <span>
+                  {formatMeasurement(gate.measured)}
+                  {gate.unit}
+                </span>
+                <span>
+                  threshold {formatMeasurement(gate.threshold)}
+                  {gate.unit}
+                </span>
               </span>
               <StatusBadge status={gate.status} />
             </div>
@@ -193,7 +213,11 @@ function formatMs(value: number | null): string {
   if (value === null) {
     return "unknown";
   }
-  return `${Math.round(value)}ms`;
+  const rounded = Math.round(value);
+  if (Math.abs(rounded) >= 1000) {
+    return `${Math.round(rounded / 1000)}s`;
+  }
+  return `${rounded}ms`;
 }
 
 function formatMeasurement(value: number | null): string {
@@ -201,4 +225,8 @@ function formatMeasurement(value: number | null): string {
     return "unknown";
   }
   return Number.isInteger(value) ? String(value) : value.toFixed(1);
+}
+
+function totalSearchFailures(report: DesktopSreReport): number {
+  return report.search.modes.reduce((total, mode) => total + mode.failed, 0);
 }

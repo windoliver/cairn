@@ -11,7 +11,7 @@ const report: DesktopSreReport = {
   workflow: {
     status: "warning",
     oldest_queued_age_ms: 742000,
-    longest_held_lease_ms: null,
+    longest_held_lease_ms: 91000,
     dead_letter_count: 1,
     kinds: [
       {
@@ -39,7 +39,18 @@ const report: DesktopSreReport = {
     status: "warning",
     nexus_state: "degraded",
     nexus_reason: "sidecar_unavailable",
-    targets: [],
+    targets: [
+      {
+        target: "bm25s_lexical",
+        current: 11,
+        stale: 1,
+        failed: 2,
+        missing: 3,
+        max_lag_ms: 4500,
+        last_rebuild_latency_ms: 88,
+        status: "warning",
+      },
+    ],
   },
   search: {
     status: "warning",
@@ -81,6 +92,11 @@ describe("SreWorkspace", () => {
     expect(screen.getByText("Search")).toBeInTheDocument();
     expect(screen.getByText("Release Gates")).toBeInTheDocument();
     expect(screen.getByText("expire.tier")).toBeInTheDocument();
+    expect(screen.getByText("91s")).toBeInTheDocument();
+    expect(screen.getByText("50s")).toBeInTheDocument();
+    expect(screen.getByText("2 failed")).toBeInTheDocument();
+    expect(screen.getByText("54ms p95")).toBeInTheDocument();
+    expect(screen.getByText("threshold 600000ms")).toBeInTheDocument();
     expect(screen.queryByText(/SECRET_PRIVATE_TOKEN/)).not.toBeInTheDocument();
   });
 

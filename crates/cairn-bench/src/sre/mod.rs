@@ -17,7 +17,6 @@ use crate::gates::thresholds::{SLO_COLD_REHYDRATE_MS, SLO_MIGRATION_BACKLOG_MS};
 
 const SCHEMA_VERSION: u32 = 1;
 const COLD_REHYDRATE_BENCH: &str = "cold_rehydrate_p95";
-const FIXTURE_WORKFLOW_AGE_MS_F64: f64 = 120_000.0;
 const FIXTURE_WORKFLOW_AGE_MS_I64: i64 = 120_000;
 const FIXTURE_LONGEST_HELD_LEASE_MS: i64 = 30_000;
 const FIXTURE_LAST_SUCCESS_AGE_MS: i64 = 60_000;
@@ -56,6 +55,10 @@ pub struct SreArgs {
     /// Also refresh `sre.baseline.json` with the generated SRE fixture report.
     #[arg(long)]
     pub refresh_baseline: bool,
+
+    /// `SQLite` workflow database to use for migration backlog gates.
+    #[arg(long)]
+    pub workflow_db: Option<PathBuf>,
 }
 
 impl SreArgs {
@@ -68,6 +71,7 @@ impl SreArgs {
             criterion_dir: "target/criterion".into(),
             no_run: false,
             refresh_baseline: false,
+            workflow_db: None,
         }
     }
 }
@@ -77,6 +81,8 @@ impl SreArgs {
 /// # Errors
 /// Returns an error if report serialization or filesystem writes fail.
 pub fn run(args: &SreArgs) -> anyhow::Result<GateOutcome> {
+    std::fs::create_dir_all(&args.out_dir).context("create SRE output dir")?;
+    let workflow_measurement = workflow_measurement(args)?;
     let cold_measurement = if args.fixtures_only {
         ColdMeasurement::FixturesOnly
     } else {
@@ -88,11 +94,10 @@ pub fn run(args: &SreArgs) -> anyhow::Result<GateOutcome> {
             None => ColdMeasurement::MissingInput,
         }
     };
-    let mut report = fixture_report(cold_measurement);
+    let mut report = fixture_report(cold_measurement, workflow_measurement);
     let forbidden = forbidden_fragment_count(&serde_json::to_string(&report)?);
     set_privacy_check(&mut report, forbidden);
 
-    std::fs::create_dir_all(&args.out_dir).context("create SRE output dir")?;
     let encoded = serde_json::to_vec_pretty(&report)?;
     std::fs::write(args.out_dir.join("sre.json"), &encoded).context("write sre.json")?;
     if args.refresh_baseline {
@@ -119,6 +124,13 @@ enum ColdMeasurement {
     Measured(f64),
 }
 
+#[derive(Debug, Clone, Copy)]
+struct WorkflowMeasurement {
+    queued: i64,
+    held_lease: Option<i64>,
+    last_success: Option<i64>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct BenchSreReport {
     schema_version: u32,
@@ -136,13 +148,187 @@ struct BenchSreDashboard {
     privacy: SrePrivacySummary,
 }
 
-fn fixture_report(cold_measurement: ColdMeasurement) -> BenchSreReport {
-    let migration_status =
-        classify_threshold(Some(FIXTURE_WORKFLOW_AGE_MS_F64), SLO_MIGRATION_BACKLOG_MS);
+fn workflow_measurement(args: &SreArgs) -> anyhow::Result<WorkflowMeasurement> {
+    let workflow_db = if let Some(path) = &args.workflow_db {
+        path.clone()
+    } else {
+        let path = args.out_dir.join("workflow-fixture.sqlite");
+        write_fixture_workflow_db(&path)?;
+        path
+    };
+    read_workflow_measurement(&workflow_db)
+        .with_context(|| format!("read workflow fixture {}", workflow_db.display()))
+}
+
+fn write_fixture_workflow_db(path: &Path) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).context("create workflow fixture dir")?;
+    }
+    if path.exists() {
+        std::fs::remove_file(path).context("remove stale workflow fixture")?;
+    }
+    let conn = rusqlite::Connection::open(path).context("open workflow fixture")?;
+    create_workflow_jobs_table(&conn)?;
+    let now_ms = 1_800_000_i64;
+    insert_workflow_job(
+        &conn,
+        WorkflowFixtureRow {
+            job_id: "queued-migration",
+            kind: "expire.tier",
+            state: "queued",
+            next_run_at: now_ms - FIXTURE_WORKFLOW_AGE_MS_I64,
+            updated_at: now_ms,
+            lease_started: None,
+            lease_expires_at: None,
+            completed_at_ms: None,
+        },
+    )?;
+    insert_workflow_job(
+        &conn,
+        WorkflowFixtureRow {
+            job_id: "leased-migration",
+            kind: "expire.tier",
+            state: "leased",
+            next_run_at: now_ms,
+            updated_at: now_ms,
+            lease_started: Some(now_ms - FIXTURE_LONGEST_HELD_LEASE_MS),
+            lease_expires_at: Some(now_ms + FIXTURE_LONGEST_HELD_LEASE_MS),
+            completed_at_ms: None,
+        },
+    )?;
+    insert_workflow_job(
+        &conn,
+        WorkflowFixtureRow {
+            job_id: "done-migration",
+            kind: "expire.tier",
+            state: "done",
+            next_run_at: now_ms,
+            updated_at: now_ms,
+            lease_started: None,
+            lease_expires_at: None,
+            completed_at_ms: Some(now_ms - FIXTURE_LAST_SUCCESS_AGE_MS),
+        },
+    )?;
+    Ok(())
+}
+
+fn read_workflow_measurement(path: &Path) -> anyhow::Result<WorkflowMeasurement> {
+    let conn = rusqlite::Connection::open(path).context("open workflow database")?;
+    let reference_now_ms = query_reference_now_ms(&conn)?;
+    let oldest_next_run_at = conn
+        .query_row(
+            "SELECT MIN(next_run_at) FROM workflow_jobs WHERE state = 'queued'",
+            [],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .context("query queued workflow age")?;
+    let longest_held_lease_ms = conn
+        .query_row(
+            "SELECT MIN(lease_started) FROM workflow_jobs \
+             WHERE state = 'leased' AND lease_started IS NOT NULL",
+            [],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .context("query leased workflow age")?
+        .map(|lease_started| reference_now_ms.saturating_sub(lease_started).max(0));
+    let last_completed_at = conn
+        .query_row(
+            "SELECT MAX(completed_at_ms) FROM workflow_jobs WHERE completed_at_ms IS NOT NULL",
+            [],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .context("query workflow last success")?;
+    Ok(WorkflowMeasurement {
+        queued: oldest_next_run_at.map_or(0, |next_run_at| {
+            reference_now_ms.saturating_sub(next_run_at).max(0)
+        }),
+        held_lease: longest_held_lease_ms,
+        last_success: last_completed_at
+            .map(|completed_at| reference_now_ms.saturating_sub(completed_at).max(0)),
+    })
+}
+
+fn query_reference_now_ms(conn: &rusqlite::Connection) -> anyhow::Result<i64> {
+    conn.query_row("SELECT MAX(updated_at) FROM workflow_jobs", [], |row| {
+        row.get::<_, Option<i64>>(0)
+    })
+    .context("query workflow reference time")
+    .map(|now_ms| now_ms.unwrap_or(0))
+}
+
+fn create_workflow_jobs_table(conn: &rusqlite::Connection) -> anyhow::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE workflow_jobs (
+            job_id TEXT NOT NULL PRIMARY KEY,
+            kind TEXT NOT NULL,
+            payload BLOB NOT NULL,
+            state TEXT NOT NULL,
+            attempts INTEGER NOT NULL,
+            delivery_count INTEGER NOT NULL,
+            max_attempts INTEGER NOT NULL,
+            base_backoff_ms INTEGER NOT NULL,
+            backoff_multiplier INTEGER NOT NULL,
+            max_backoff_ms INTEGER NOT NULL,
+            next_run_at INTEGER NOT NULL,
+            enqueued_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            lease_owner TEXT,
+            lease_nonce TEXT,
+            lease_started INTEGER,
+            lease_expires_at INTEGER,
+            failure_class TEXT,
+            dead_letter_at_ms INTEGER,
+            completed_at_ms INTEGER,
+            last_error TEXT
+        );",
+    )
+    .context("create workflow_jobs fixture table")
+}
+
+#[derive(Clone, Copy)]
+struct WorkflowFixtureRow {
+    job_id: &'static str,
+    kind: &'static str,
+    state: &'static str,
+    next_run_at: i64,
+    updated_at: i64,
+    lease_started: Option<i64>,
+    lease_expires_at: Option<i64>,
+    completed_at_ms: Option<i64>,
+}
+
+fn insert_workflow_job(conn: &rusqlite::Connection, row: WorkflowFixtureRow) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT INTO workflow_jobs (
+            job_id, kind, payload, state, attempts, delivery_count, max_attempts,
+            base_backoff_ms, backoff_multiplier, max_backoff_ms, next_run_at,
+            enqueued_at, updated_at, lease_started, lease_expires_at, completed_at_ms
+        ) VALUES (?1, ?2, x'', ?3, 0, 0, 3, 1, 2, 60000, ?4, ?5, ?5, ?6, ?7, ?8)",
+        rusqlite::params![
+            row.job_id,
+            row.kind,
+            row.state,
+            row.next_run_at,
+            row.updated_at,
+            row.lease_started,
+            row.lease_expires_at,
+            row.completed_at_ms,
+        ],
+    )
+    .context("insert workflow fixture row")?;
+    Ok(())
+}
+
+fn fixture_report(
+    cold_measurement: ColdMeasurement,
+    workflow_measurement: WorkflowMeasurement,
+) -> BenchSreReport {
+    let oldest_queued_age_ms = measurement_i64(workflow_measurement.queued);
+    let migration_status = classify_threshold(Some(oldest_queued_age_ms), SLO_MIGRATION_BACKLOG_MS);
     let migration_backlog = gate(
         "migration_backlog",
         migration_status,
-        Some(FIXTURE_WORKFLOW_AGE_MS_F64),
+        Some(oldest_queued_age_ms),
         SLO_MIGRATION_BACKLOG_MS,
         "ms",
         fixture_detail(),
@@ -164,7 +350,7 @@ fn fixture_report(cold_measurement: ColdMeasurement) -> BenchSreReport {
     checks.push(privacy_check(0, SreStatus::Ok));
 
     let dashboard = BenchSreDashboard {
-        workflow: workflow_dashboard(migration_status),
+        workflow: workflow_dashboard(migration_status, workflow_measurement),
         rehydration: rehydration_dashboard(cold_measurement, cold_rehydrate),
         projection: projection_dashboard(projection_lag.status),
         search: search_dashboard(),
@@ -182,20 +368,20 @@ fn fixture_report(cold_measurement: ColdMeasurement) -> BenchSreReport {
     }
 }
 
-fn workflow_dashboard(status: SreStatus) -> SreWorkflowSummary {
+fn workflow_dashboard(status: SreStatus, measurement: WorkflowMeasurement) -> SreWorkflowSummary {
     SreWorkflowSummary {
         status,
-        oldest_queued_age_ms: Some(FIXTURE_WORKFLOW_AGE_MS_I64),
-        longest_held_lease_ms: Some(FIXTURE_LONGEST_HELD_LEASE_MS),
+        oldest_queued_age_ms: Some(measurement.queued),
+        longest_held_lease_ms: measurement.held_lease,
         dead_letter_count: 0,
         kinds: vec![SreWorkflowKindSummary {
-            kind: "migration".to_owned(),
+            kind: "expire.tier".to_owned(),
             queued: 1,
             leased: 0,
             done_recent: 3,
             failed_recent: 0,
-            oldest_queued_age_ms: Some(FIXTURE_WORKFLOW_AGE_MS_I64),
-            last_success_age_ms: Some(FIXTURE_LAST_SUCCESS_AGE_MS),
+            oldest_queued_age_ms: Some(measurement.queued),
+            last_success_age_ms: measurement.last_success,
             backlog_threshold_ms: FIXTURE_MIGRATION_BACKLOG_THRESHOLD_MS,
             status,
         }],
@@ -342,6 +528,10 @@ fn measurement(value: f64) -> SreMeasurement {
     SreMeasurement::new(value).expect("finite SRE fixture measurement")
 }
 
+fn measurement_i64(value: i64) -> f64 {
+    value.to_string().parse().expect("i64 parses as f64")
+}
+
 fn fixture_detail() -> Option<SreDetail> {
     SreDetail::stable("fixture")
 }
@@ -361,10 +551,7 @@ fn forbidden_fragment_count(serialized: &str) -> u32 {
 }
 
 fn load_cold_rehydrate_p95(criterion_dir: &Path) -> anyhow::Result<Option<f64>> {
-    let sample_path = criterion_dir
-        .join(COLD_REHYDRATE_BENCH)
-        .join("new")
-        .join("sample.json");
+    let sample_path = criterion_sample_path(criterion_dir);
     if !sample_path.exists() {
         return Ok(None);
     }
@@ -373,6 +560,13 @@ fn load_cold_rehydrate_p95(criterion_dir: &Path) -> anyhow::Result<Option<f64>> 
     let sample: CriterionSample = serde_json::from_slice(&bytes)
         .with_context(|| format!("parse criterion sample {}", sample_path.display()))?;
     sample.p95_ms(&sample_path)
+}
+
+fn criterion_sample_path(criterion_dir: &Path) -> PathBuf {
+    criterion_dir
+        .join(COLD_REHYDRATE_BENCH)
+        .join("new")
+        .join("sample.json")
 }
 
 #[derive(Debug, Deserialize)]
@@ -415,6 +609,40 @@ impl CriterionSample {
 }
 
 fn run_lifecycle_criterion(criterion_dir: &Path) -> anyhow::Result<()> {
+    let build_status = Command::new("cargo")
+        .args([
+            "build",
+            "-p",
+            "cairn-cli",
+            "--bin",
+            "cairn",
+            "--release",
+            "--locked",
+        ])
+        .status()
+        .context("spawn release cairn build")?;
+    anyhow::ensure!(build_status.success(), "release cairn binary build failed");
+
+    let cargo_bench_output = cargo_bench_criterion_dir();
+    let fallback_bench_dir = cargo_bench_output.join(COLD_REHYDRATE_BENCH);
+    if fallback_bench_dir.exists() {
+        std::fs::remove_dir_all(&fallback_bench_dir).with_context(|| {
+            format!(
+                "remove stale lifecycle criterion output {}",
+                fallback_bench_dir.display()
+            )
+        })?;
+    }
+    let requested_bench_dir = criterion_dir.join(COLD_REHYDRATE_BENCH);
+    if requested_bench_dir.exists() {
+        std::fs::remove_dir_all(&requested_bench_dir).with_context(|| {
+            format!(
+                "remove stale requested criterion output {}",
+                requested_bench_dir.display()
+            )
+        })?;
+    }
+
     let status = Command::new("cargo")
         .env("CRITERION_HOME", criterion_dir)
         .args([
@@ -427,6 +655,60 @@ fn run_lifecycle_criterion(criterion_dir: &Path) -> anyhow::Result<()> {
         ])
         .status()?;
     anyhow::ensure!(status.success(), "criterion lifecycle run failed");
+    import_cargo_bench_criterion_output(criterion_dir, &cargo_bench_output)?;
+    Ok(())
+}
+
+fn cargo_bench_criterion_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("criterion")
+}
+
+fn import_cargo_bench_criterion_output(
+    criterion_dir: &Path,
+    cargo_bench_output: &Path,
+) -> anyhow::Result<()> {
+    if criterion_sample_path(criterion_dir).exists() {
+        return Ok(());
+    }
+
+    let source = cargo_bench_output.join(COLD_REHYDRATE_BENCH);
+    if !source.join("new").join("sample.json").exists() {
+        return Ok(());
+    }
+
+    let destination = criterion_dir.join(COLD_REHYDRATE_BENCH);
+    if destination.exists() {
+        std::fs::remove_dir_all(&destination)
+            .with_context(|| format!("replace criterion output {}", destination.display()))?;
+    }
+    copy_dir_all(&source, &destination)
+}
+
+fn copy_dir_all(source: &Path, destination: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(destination)
+        .with_context(|| format!("create criterion output {}", destination.display()))?;
+    for entry in std::fs::read_dir(source)
+        .with_context(|| format!("read criterion output {}", source.display()))?
+    {
+        let entry = entry.with_context(|| format!("read criterion output {}", source.display()))?;
+        let file_type = entry.file_type().with_context(|| {
+            format!("inspect criterion output entry {}", entry.path().display())
+        })?;
+        let next_destination = destination.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_all(&entry.path(), &next_destination)?;
+        } else if file_type.is_file() {
+            std::fs::copy(entry.path(), &next_destination).with_context(|| {
+                format!(
+                    "copy criterion output {} to {}",
+                    entry.path().display(),
+                    next_destination.display()
+                )
+            })?;
+        }
+    }
     Ok(())
 }
 
