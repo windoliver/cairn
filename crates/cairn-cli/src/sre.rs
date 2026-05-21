@@ -169,6 +169,7 @@ fn is_known_metric_event(event_name: &str) -> bool {
 }
 
 const WORKFLOW_BACKLOG_THRESHOLD_MS: i64 = 300_000;
+const CLI_SEARCH_DEDUPE_LOOKBACK_MS: i64 = 5_000;
 
 #[derive(Default)]
 struct WorkflowKindAggregate {
@@ -419,15 +420,20 @@ fn summarize_search(
     vault_root: &Path,
 ) -> Vec<SreSearchModeSummary> {
     let caps = search_capabilities(config, vault_root);
-    let search_completed_observations: Vec<(&str, i64, u64)> = events
+    let search_completed_observations: Vec<SearchCompletedObservation<'_>> = events
         .iter()
         .filter_map(|event| match event {
             MetricEvent::SearchCompleted {
                 mode,
                 ts_ms,
-                latency_ms,
+                degradation_state,
+                error,
                 ..
-            } => Some((mode.as_str(), *ts_ms, *latency_ms)),
+            } => Some(SearchCompletedObservation {
+                mode: mode.as_str(),
+                ts_ms: *ts_ms,
+                actionable: error.is_some() || degradation_state != "none",
+            }),
             _ => None,
         })
         .collect();
@@ -486,10 +492,16 @@ struct SearchObservation {
     failed: bool,
 }
 
+struct SearchCompletedObservation<'a> {
+    mode: &'a str,
+    ts_ms: i64,
+    actionable: bool,
+}
+
 fn search_observation(
     event: &MetricEvent,
     mode: &str,
-    search_completed_observations: &[(&str, i64, u64)],
+    search_completed_observations: &[SearchCompletedObservation<'_>],
 ) -> Option<SearchObservation> {
     match event {
         MetricEvent::SearchCompleted {
@@ -516,11 +528,11 @@ fn search_observation(
         } if verb == "search"
             && event_mode == mode
             && (surface != "cli"
-                || !search_completed_observations.contains(&(
-                    event_mode.as_str(),
+                || !has_nearby_actionable_search_completed(
+                    search_completed_observations,
+                    event_mode,
                     *ts_ms,
-                    *latency_ms,
-                )))
+                ))
             && (status != "committed" || error.is_some()) =>
         {
             Some(SearchObservation {
@@ -533,6 +545,19 @@ fn search_observation(
         }
         _ => None,
     }
+}
+
+fn has_nearby_actionable_search_completed(
+    observations: &[SearchCompletedObservation<'_>],
+    mode: &str,
+    verb_ts_ms: i64,
+) -> bool {
+    observations.iter().any(|observation| {
+        observation.mode == mode
+            && observation.actionable
+            && observation.ts_ms <= verb_ts_ms
+            && verb_ts_ms.saturating_sub(observation.ts_ms) <= CLI_SEARCH_DEDUPE_LOOKBACK_MS
+    })
 }
 
 fn search_capabilities(

@@ -182,8 +182,8 @@ fn admin_sre_report_does_not_double_count_failed_cli_search() {
     let metrics = dir.path().join(".cairn/metrics.jsonl");
     std::fs::write(
         &metrics,
-        r#"{"event":"search_completed","ts_ms":1,"mode":"semantic","hit_count":0,"latency_ms":41,"degradation_state":"failed","error":"provider_unavailable"}
-{"event":"verb_invocation","ts_ms":1,"verb":"search","surface":"cli","mode":"semantic","status":"aborted","latency_ms":41,"error":"provider_unavailable","budget_used_ratio":null,"degradation_state":"failed"}
+        r#"{"event":"search_completed","ts_ms":1000,"mode":"semantic","hit_count":0,"latency_ms":41,"degradation_state":"failed","error":"provider_unavailable"}
+{"event":"verb_invocation","ts_ms":1200,"verb":"search","surface":"cli","mode":"semantic","status":"aborted","latency_ms":55,"error":"provider_unavailable","budget_used_ratio":null,"degradation_state":"failed"}
 "#,
     )
     .expect("write metrics");
@@ -206,6 +206,41 @@ fn admin_sre_report_does_not_double_count_failed_cli_search() {
         .find(|mode| mode["mode"] == "semantic")
         .expect("semantic mode");
     assert_eq!(semantic["invocations"], 1);
+    assert_eq!(semantic["failed"], 1);
+    assert_eq!(semantic["degraded"], 1);
+    assert_eq!(semantic["status"], "fail");
+}
+
+#[test]
+fn admin_sre_report_counts_standalone_cli_search_preflight_failures() {
+    let dir = bootstrap_vault();
+    let metrics = dir.path().join(".cairn/metrics.jsonl");
+    std::fs::write(
+        &metrics,
+        r#"{"event":"search_completed","ts_ms":1000,"mode":"semantic","hit_count":1,"latency_ms":41,"degradation_state":"none","error":null}
+{"event":"verb_invocation","ts_ms":9000,"verb":"search","surface":"cli","mode":"semantic","status":"rejected","latency_ms":12,"error":"capability_unavailable","budget_used_ratio":null,"degradation_state":"partial"}
+"#,
+    )
+    .expect("write metrics");
+
+    let output = cairn()
+        .current_dir(dir.path())
+        .args(["admin", "sre", "report", "--json"])
+        .output()
+        .expect("run sre report");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json = json_stdout(&output);
+    let modes = json["search"]["modes"].as_array().expect("search modes");
+    let semantic = modes
+        .iter()
+        .find(|mode| mode["mode"] == "semantic")
+        .expect("semantic mode");
+    assert_eq!(semantic["invocations"], 2);
     assert_eq!(semantic["failed"], 1);
     assert_eq!(semantic["degraded"], 1);
     assert_eq!(semantic["status"], "fail");
