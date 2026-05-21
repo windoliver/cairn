@@ -74,6 +74,41 @@ fn admin_sre_report_json_is_body_free() {
 }
 
 #[test]
+fn admin_sre_report_surfaces_metric_parse_errors_safely() {
+    let dir = bootstrap_vault();
+    let metrics = dir.path().join(".cairn/metrics.jsonl");
+    std::fs::write(
+        &metrics,
+        r#"{"event":"rehydration_completed","ts_ms":1,"target":"session","source_tier":"cold","restored_tier":"warm","status":"committed","latency_ms":2100,"bytes_restored":1000,"record_count":2,"error":null}
+not json SECRET_PRIVATE_TOKEN /Users/alice private body query text
+"#,
+    )
+    .expect("write metrics");
+
+    let output = cairn()
+        .current_dir(dir.path())
+        .args(["admin", "sre", "report", "--json"])
+        .output()
+        .expect("run sre report");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json = json_stdout(&output);
+    let gates = json["gates"]["gates"].as_array().expect("gates");
+    let parse_gate = gates
+        .iter()
+        .find(|gate| gate["name"] == "metric_parse_errors")
+        .expect("metric_parse_errors gate");
+    assert_eq!(parse_gate["status"], "warning");
+    assert_eq!(parse_gate["measured"], 1.0);
+    assert_forbidden_fragments_absent(&stdout);
+}
+
+#[test]
 fn admin_sre_report_marks_unobserved_search_unknown() {
     let dir = bootstrap_vault();
 

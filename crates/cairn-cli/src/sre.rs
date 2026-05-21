@@ -63,7 +63,8 @@ fn build_report_with_bench(
     config: &cairn_core::config::CairnConfig,
     bench_report_dir: Option<&Path>,
 ) -> Result<SreReport, String> {
-    let events = read_metric_events(vault_root);
+    let metrics = read_metric_events(vault_root);
+    let events = metrics.events;
     let rehydration_latencies: Vec<u64> = events
         .iter()
         .filter_map(|event| match event {
@@ -76,7 +77,8 @@ fn build_report_with_bench(
     let search_modes = summarize_search(&events, config, vault_root);
     let p95 = percentile_u64(&rehydration_latencies, 0.95);
     let rehydration_status = classify_threshold(p95, SLO_COLD_REHYDRATE_MS);
-    let gates = load_bench_gates(bench_report_dir)?;
+    let mut gates = load_bench_gates(bench_report_dir)?;
+    add_metric_parse_gate(&mut gates, metrics.parse_error_count);
     Ok(SreReport {
         schema_version: 1,
         captured_at_ms: metrics::now_ms(),
@@ -117,14 +119,31 @@ fn build_report_with_bench(
     })
 }
 
-fn read_metric_events(vault_root: &Path) -> Vec<MetricEvent> {
+struct ReadMetricEvents {
+    events: Vec<MetricEvent>,
+    parse_error_count: u64,
+}
+
+fn read_metric_events(vault_root: &Path) -> ReadMetricEvents {
     let path = vault_root.join(".cairn/metrics.jsonl");
     let Ok(raw) = std::fs::read_to_string(path) else {
-        return Vec::new();
+        return ReadMetricEvents {
+            events: Vec::new(),
+            parse_error_count: 0,
+        };
     };
-    raw.lines()
-        .filter_map(|line| serde_json::from_str::<MetricEvent>(line).ok())
-        .collect()
+    let mut events = Vec::new();
+    let mut parse_error_count = 0_u64;
+    for line in raw.lines() {
+        match serde_json::from_str::<MetricEvent>(line) {
+            Ok(event) => events.push(event),
+            Err(_err) => parse_error_count = parse_error_count.saturating_add(1),
+        }
+    }
+    ReadMetricEvents {
+        events,
+        parse_error_count,
+    }
 }
 
 fn summarize_search(
@@ -315,6 +334,21 @@ fn rollup_gate_status(gates: &[SreGateResult]) -> SreStatus {
     } else {
         SreStatus::Ok
     }
+}
+
+fn add_metric_parse_gate(gates: &mut SreGateSummary, parse_error_count: u64) {
+    if parse_error_count == 0 {
+        return;
+    }
+    gates.gates.push(SreGateResult {
+        name: "metric_parse_errors".into(),
+        status: SreStatus::Warning,
+        measured: SreMeasurement::new(parse_error_count as f64),
+        threshold: SreMeasurement::new(0.0),
+        unit: "count".into(),
+        detail: Some(SreDetail::from_raw("SECRET")),
+    });
+    gates.status = rollup_gate_status(&gates.gates);
 }
 
 /// Render a compact operator-readable SRE report.
