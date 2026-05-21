@@ -9,6 +9,7 @@
 
 // Submodules land in subsequent tasks.
 
+pub mod agent;
 pub mod body;
 pub mod chain;
 pub mod draft;
