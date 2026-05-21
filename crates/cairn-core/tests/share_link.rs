@@ -6,7 +6,7 @@ use cairn_core::domain::sharing::{
     SharingRevocationState, SignedShareLink, verify_share_link_grant,
 };
 use cairn_core::domain::{
-    self, ConsentEvent, ConsentKind, Ed25519Signature, Identity, MemoryVisibility,
+    self, ConsentEvent, ConsentKind, ConsentPayload, Ed25519Signature, Identity, MemoryVisibility,
     Rfc3339Timestamp, ScopeTuple,
 };
 use cairn_core::policy_trace::{PolicyGate, PolicyOutcome};
@@ -114,6 +114,25 @@ fn assert_link_shape_err(
         .validate_shape()
         .expect_err(&format!("{name} should fail shape validation"));
     assert!(expected(err), "{name} returned unexpected error");
+}
+
+fn assert_body_free_event(event: &ConsentEvent) {
+    let serialized = serde_json::to_value(event).expect("json").to_string();
+    for banned in [
+        "\"body\"",
+        "\"text\"",
+        "\"content\"",
+        "\"raw\"",
+        "\"snippet\"",
+        "\"command\"",
+        "\"url\"",
+        "\"title\"",
+        "\"file_path\"",
+        "\"input\"",
+        "\"message\"",
+    ] {
+        assert!(!serialized.contains(banned), "banned field {banned}");
+    }
 }
 
 #[test]
@@ -561,20 +580,50 @@ fn share_link_grant_consent_event_is_body_free_and_valid() {
     };
 
     event.validate().expect("journal event valid");
-    let serialized = serde_json::to_value(&event).expect("json").to_string();
-    for banned in [
-        "\"body\"",
-        "\"text\"",
-        "\"content\"",
-        "\"raw\"",
-        "\"snippet\"",
-        "\"command\"",
-        "\"url\"",
-        "\"title\"",
-        "\"file_path\"",
-        "\"input\"",
-        "\"message\"",
-    ] {
-        assert!(!serialized.contains(banned), "banned field {banned}");
+    assert_body_free_event(&event);
+    assert_eq!(
+        event.subject,
+        format!("share_link:{}", link.link_id.to_ascii_lowercase())
+    );
+    match &event.payload {
+        ConsentPayload::Decision {
+            subject_code,
+            policy_code,
+        } => {
+            assert_eq!(subject_code, &event.subject);
+            assert_eq!(policy_code, &Some("grant".to_owned()));
+        }
+        payload => panic!("unexpected payload: {payload:?}"),
+    }
+}
+
+#[test]
+fn share_link_revoke_consent_event_is_body_free_and_valid() {
+    let link = signed_link();
+    let (subject, payload) = link.decision_payload(ShareLinkJournalDecision::Revoke);
+    let event = ConsentEvent {
+        consent_id: "01HQZX9F5N0000000000000007".to_owned(),
+        kind: ConsentKind::Revoke,
+        actor: Identity::parse("hmn:tafeng").expect("human"),
+        subject,
+        scope: "tenant=default,workspace=vault-a,entity=session".to_owned(),
+        op_id: Some(link.payload.operation_id.clone()),
+        sensor_id: None,
+        payload,
+        decided_at: Rfc3339Timestamp::parse("2026-05-21T12:30:00Z").expect("decided"),
+        expires_at: Some(link.payload.expires_at.clone()),
+    };
+
+    event.validate().expect("journal event valid");
+    assert_body_free_event(&event);
+    match &event.payload {
+        ConsentPayload::Decision {
+            subject_code,
+            policy_code,
+        } => {
+            assert_eq!(subject_code, &event.subject);
+            assert_eq!(policy_code, &Some("revoke".to_owned()));
+        }
+        payload => panic!("unexpected payload: {payload:?}"),
     }
 }
