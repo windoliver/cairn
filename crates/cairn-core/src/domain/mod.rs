@@ -96,9 +96,10 @@ pub use session_tree::{
     SessionTreeNode,
 };
 pub use sharing::{
-    PromotionConsentPayload, PromotionConsentReceipt, PromotionGateInput, ShareLinkPayload,
-    SharingDecisionKind, SharingGateRejection, SharingPolicyAction, SharingPolicySubject,
-    SharingRevocationState, SignedShareLink, verify_promotion_gate,
+    PromotionConsentPayload, PromotionConsentReceipt, PromotionGateInput, ShareLinkGateInput,
+    ShareLinkPayload, SharingDecisionKind, SharingGateRejection, SharingPolicyAction,
+    SharingPolicySubject, SharingRevocationState, SignedShareLink, verify_promotion_gate,
+    verify_share_link_grant,
 };
 pub use source_id::SourceId;
 pub use source_ref::{SourceRef, validate_source_refs};

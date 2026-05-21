@@ -1,10 +1,14 @@
 //! Signed share-link shape and signature tests.
 
 use cairn_core::domain::identity::keys::SigningKey;
-use cairn_core::domain::sharing::{ShareLinkPayload, SharingRevocationState, SignedShareLink};
+use cairn_core::domain::sharing::{
+    ShareLinkGateInput, ShareLinkPayload, SharingDecisionKind, SharingRevocationState,
+    SignedShareLink, verify_share_link_grant,
+};
 use cairn_core::domain::{
     self, Ed25519Signature, Identity, MemoryVisibility, Rfc3339Timestamp, ScopeTuple,
 };
+use cairn_core::policy_trace::{PolicyGate, PolicyOutcome};
 
 fn signer() -> SigningKey {
     SigningKey::from_bytes(&[9_u8; 32])
@@ -58,6 +62,35 @@ fn signed_link() -> SignedShareLink {
         payload,
         signature,
     }
+}
+
+fn share_link_input<'a>(
+    link: &'a SignedShareLink,
+    now: &'a Rfc3339Timestamp,
+    revocation: &'a SharingRevocationState,
+    signer_key: &'a ed25519_dalek::VerifyingKey,
+) -> ShareLinkGateInput<'a> {
+    ShareLinkGateInput {
+        link,
+        now,
+        expected_target_hash: &link.payload.target_hash,
+        signer_key,
+        revocation,
+        max_tier: MemoryVisibility::Team,
+    }
+}
+
+fn assert_share_link_rejection_detail(
+    input: ShareLinkGateInput<'_>,
+    expected: SharingDecisionKind,
+) {
+    let rejection = verify_share_link_grant(input).expect_err("share-link gate should reject");
+    assert_eq!(rejection.trace.gate, PolicyGate::ShareLink);
+    assert_eq!(rejection.trace.outcome, PolicyOutcome::Deny);
+    assert_eq!(
+        rejection.trace.detail.to_wire_string(),
+        format!("share_link:grant:{}", expected.as_str())
+    );
 }
 
 fn assert_link_shape_err(
@@ -250,4 +283,95 @@ fn sharing_revocation_state_serializes_and_denies_unknown_fields() {
     }))
     .expect_err("unknown field rejected");
     assert!(err.to_string().contains("unknown field"));
+}
+
+#[test]
+fn share_link_gate_allows_valid_link() {
+    let link = signed_link();
+    let now = Rfc3339Timestamp::parse("2026-05-21T12:30:00Z").expect("now");
+    let revocation = SharingRevocationState::default();
+    let signer_key = signer().verifying_key();
+
+    let trace = verify_share_link_grant(share_link_input(&link, &now, &revocation, &signer_key))
+        .expect("share-link gate allows valid link");
+
+    assert_eq!(trace.gate, PolicyGate::ShareLink);
+    assert_eq!(trace.outcome, PolicyOutcome::Pass);
+    assert_eq!(trace.detail.to_wire_string(), "share_link:grant:allowed");
+}
+
+#[test]
+fn share_link_gate_allows_bearer_link_with_expiry_and_revocation_checks() {
+    let mut link = signed_link();
+    link.payload.grantee = None;
+    link.signature = signature_for(&link.payload);
+    let now = Rfc3339Timestamp::parse("2026-05-21T12:30:00Z").expect("now");
+    let revocation = SharingRevocationState::default();
+    let signer_key = signer().verifying_key();
+
+    let trace = verify_share_link_grant(share_link_input(&link, &now, &revocation, &signer_key))
+        .expect("share-link gate allows bearer link");
+
+    assert_eq!(trace.gate, PolicyGate::ShareLink);
+    assert_eq!(trace.outcome, PolicyOutcome::Pass);
+    assert_eq!(trace.detail.to_wire_string(), "share_link:grant:allowed");
+}
+
+#[test]
+fn share_link_gate_rejects_expired_link() {
+    let link = signed_link();
+    let now = Rfc3339Timestamp::parse("2026-05-23T12:30:00Z").expect("now");
+    let revocation = SharingRevocationState::default();
+    let signer_key = signer().verifying_key();
+
+    assert_share_link_rejection_detail(
+        share_link_input(&link, &now, &revocation, &signer_key),
+        SharingDecisionKind::Expired,
+    );
+}
+
+#[test]
+fn share_link_gate_rejects_revoked_link() {
+    let link = signed_link();
+    let now = Rfc3339Timestamp::parse("2026-05-21T12:30:00Z").expect("now");
+    let mut revocation = SharingRevocationState::default();
+    revocation
+        .revoked_share_link_ids
+        .insert("share-01HQZX9F5N0000000000000004".to_owned());
+    let signer_key = signer().verifying_key();
+
+    assert_share_link_rejection_detail(
+        share_link_input(&link, &now, &revocation, &signer_key),
+        SharingDecisionKind::Revoked,
+    );
+}
+
+#[test]
+fn share_link_gate_rejects_target_hash_mismatch() {
+    let link = signed_link();
+    let now = Rfc3339Timestamp::parse("2026-05-21T12:30:00Z").expect("now");
+    let revocation = SharingRevocationState::default();
+    let signer_key = signer().verifying_key();
+    let expected_target_hash = format!("sha256:{}", "0".repeat(64));
+    let input = ShareLinkGateInput {
+        expected_target_hash: &expected_target_hash,
+        ..share_link_input(&link, &now, &revocation, &signer_key)
+    };
+
+    assert_share_link_rejection_detail(input, SharingDecisionKind::TargetMismatch);
+}
+
+#[test]
+fn share_link_gate_rejects_tier_above_authorized_max() {
+    let mut link = signed_link();
+    link.payload.grant_tier = MemoryVisibility::Org;
+    link.signature = signature_for(&link.payload);
+    let now = Rfc3339Timestamp::parse("2026-05-21T12:30:00Z").expect("now");
+    let revocation = SharingRevocationState::default();
+    let signer_key = signer().verifying_key();
+
+    assert_share_link_rejection_detail(
+        share_link_input(&link, &now, &revocation, &signer_key),
+        SharingDecisionKind::TierMismatch,
+    );
 }

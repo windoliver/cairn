@@ -219,6 +219,22 @@ pub struct PromotionGateInput<'a> {
     pub rebac: &'a RebacContext,
 }
 
+/// Inputs for signed share-link grant evaluation.
+pub struct ShareLinkGateInput<'a> {
+    /// Signed link being evaluated.
+    pub link: &'a SignedShareLink,
+    /// Evaluation timestamp.
+    pub now: &'a Rfc3339Timestamp,
+    /// Expected record-set or grant-manifest hash.
+    pub expected_target_hash: &'a str,
+    /// Verifying key for `link.payload.issuer`.
+    pub signer_key: &'a VerifyingKey,
+    /// Revocation state supplied by store/identity layer.
+    pub revocation: &'a SharingRevocationState,
+    /// Maximum tier the issuer may grant.
+    pub max_tier: MemoryVisibility,
+}
+
 /// Denial with both typed error and body-free trace.
 #[derive(Debug)]
 pub struct SharingGateRejection {
@@ -486,6 +502,95 @@ pub fn verify_promotion_gate(
     ))
 }
 
+/// Verify a signed share link before honoring the grant.
+pub fn verify_share_link_grant(
+    input: ShareLinkGateInput<'_>,
+) -> Result<PolicyTraceEntry, SharingGateRejection> {
+    if input.link.payload.issuer.kind() != crate::domain::IdentityKind::Human {
+        return Err(reject_share_link(
+            SharingDecisionKind::NotHuman,
+            DomainError::Unauthorized {
+                message: "share link issuer must be a human identity".to_owned(),
+            },
+        ));
+    }
+
+    if let Err(error) = input.link.validate_shape() {
+        return Err(reject_share_link(SharingDecisionKind::InvalidShape, error));
+    }
+
+    let signature_result = (|| {
+        let bytes = crate::domain::canonical::canonical_bytes(&input.link.payload)
+            .map_err(|_| DomainError::InvalidSignature)?;
+        let signature = decode_signature(&input.link.signature)?;
+        input
+            .signer_key
+            .verify(&bytes, &signature)
+            .map_err(|_| DomainError::InvalidSignature)
+    })();
+    if signature_result.is_err() {
+        return Err(reject_share_link(
+            SharingDecisionKind::BadSignature,
+            DomainError::InvalidSignature,
+        ));
+    }
+
+    if input.link.payload.target_hash != input.expected_target_hash {
+        return Err(reject_share_link(
+            SharingDecisionKind::TargetMismatch,
+            DomainError::InvalidPayloadHash {
+                message: "share link target_hash does not match expected target".to_owned(),
+            },
+        ));
+    }
+
+    if input.link.payload.grant_tier > input.max_tier {
+        return Err(reject_share_link(
+            SharingDecisionKind::TierMismatch,
+            DomainError::UnsupportedVisibility {
+                value: format!(
+                    "share link grant_tier `{}` exceeds authorized max `{}`",
+                    input.link.payload.grant_tier.as_str(),
+                    input.max_tier.as_str()
+                ),
+            },
+        ));
+    }
+
+    if input.now.cmp_chronological(&input.link.payload.expires_at) != std::cmp::Ordering::Less {
+        return Err(reject_share_link(
+            SharingDecisionKind::Expired,
+            DomainError::ExpiredIntent {
+                issued_at: input.link.payload.issued_at.as_str().to_owned(),
+                expires_at: input.link.payload.expires_at.as_str().to_owned(),
+                now: input.now.as_str().to_owned(),
+            },
+        ));
+    }
+
+    if input.revocation.signer_key_revoked
+        || input
+            .revocation
+            .revoked_share_link_ids
+            .contains(&input.link.link_id)
+    {
+        return Err(reject_share_link(
+            SharingDecisionKind::Revoked,
+            DomainError::Unauthorized {
+                message: "share link or signer key was revoked".to_owned(),
+            },
+        ));
+    }
+
+    Ok(sharing_trace(
+        PolicyGate::ShareLink,
+        PolicyOutcome::Pass,
+        SharingPolicySubject::ShareLink,
+        SharingPolicyAction::Grant,
+        SharingDecisionKind::Allowed,
+    ))
+}
+
 fn reject_promotion(reason: SharingDecisionKind, error: DomainError) -> SharingGateRejection {
     SharingGateRejection {
         error,
@@ -494,6 +599,19 @@ fn reject_promotion(reason: SharingDecisionKind, error: DomainError) -> SharingG
             PolicyOutcome::Deny,
             SharingPolicySubject::ConsentReceipt,
             SharingPolicyAction::Promote,
+            reason,
+        ),
+    }
+}
+
+fn reject_share_link(reason: SharingDecisionKind, error: DomainError) -> SharingGateRejection {
+    SharingGateRejection {
+        error,
+        trace: sharing_trace(
+            PolicyGate::ShareLink,
+            PolicyOutcome::Deny,
+            SharingPolicySubject::ShareLink,
+            SharingPolicyAction::Grant,
             reason,
         ),
     }
