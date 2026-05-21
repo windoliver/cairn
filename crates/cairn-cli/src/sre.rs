@@ -279,10 +279,10 @@ fn rollup_gate_status(gates: &[SreGateResult]) -> SreStatus {
             SreStatus::Ok => {}
         }
     }
-    if saw_warning {
-        SreStatus::Warning
-    } else if saw_unknown {
+    if saw_unknown {
         SreStatus::Unknown
+    } else if saw_warning {
+        SreStatus::Warning
     } else {
         SreStatus::Ok
     }
