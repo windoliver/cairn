@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cairn.local/schemas/bench/per-query.schema.json",
+  "title": "Cairn BrainBench per-query row",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "adapter",
+    "query_id",
+    "hits",
+    "p_at_5",
+    "r_at_5",
+    "mrr",
+    "ndcg_at_5"
+  ],
+  "properties": {
+    "adapter": {
+      "type": "string",
+      "minLength": 1
+    },
+    "query_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "hits": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "p_at_5": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "r_at_5": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "mrr": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "ndcg_at_5": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    }
+  }
+}

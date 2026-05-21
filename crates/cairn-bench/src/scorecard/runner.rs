@@ -103,13 +103,12 @@ async fn run_bm25_adapter(fixture: &Fixture) -> anyhow::Result<AdapterResults> {
 
 async fn run_vector_bge_adapter(fixture: &Fixture) -> anyhow::Result<AdapterResults> {
     let kind = EmbeddingModelKind::BgeSmallEnV1_5;
-    let cache_for_fetch = ModelCache::new(std::path::Path::new(".cairn/models"));
-    if !cache_for_fetch.is_present(kind) {
-        let _report = tokio::task::spawn_blocking(move || cache_for_fetch.fetch(kind)).await??;
-    }
-    let cache_for_load = ModelCache::new(std::path::Path::new(".cairn/models"));
-    let embedder: Arc<dyn EmbeddingModel> =
-        tokio::task::spawn_blocking(move || cache_for_load.ensure(kind)).await??;
+    let Some(embedder) = load_bge_embedder(kind).await? else {
+        return Ok(skipped(
+            "vector-bge",
+            "BGE model absent; set BENCH_FETCH_MODELS=1 to fetch",
+        ));
+    };
     let store = open_in_memory_with_embedder(Some(Arc::clone(&embedder))).await?;
     let id_to_slug = ingest_pages(&store, &fixture.pages).await?;
     let adapter = VectorAdapter {
@@ -123,13 +122,12 @@ async fn run_vector_bge_adapter(fixture: &Fixture) -> anyhow::Result<AdapterResu
 
 async fn run_hybrid_bge_adapter(fixture: &Fixture) -> anyhow::Result<AdapterResults> {
     let kind = EmbeddingModelKind::BgeSmallEnV1_5;
-    let cache_for_fetch = ModelCache::new(std::path::Path::new(".cairn/models"));
-    if !cache_for_fetch.is_present(kind) {
-        let _report = tokio::task::spawn_blocking(move || cache_for_fetch.fetch(kind)).await??;
-    }
-    let cache_for_load = ModelCache::new(std::path::Path::new(".cairn/models"));
-    let embedder: Arc<dyn EmbeddingModel> =
-        tokio::task::spawn_blocking(move || cache_for_load.ensure(kind)).await??;
+    let Some(embedder) = load_bge_embedder(kind).await? else {
+        return Ok(skipped(
+            "hybrid-bge-rrf",
+            "BGE model absent; set BENCH_FETCH_MODELS=1 to fetch",
+        ));
+    };
     let store = open_in_memory_with_embedder_and_config(
         Some(Arc::clone(&embedder)),
         [10.0, 10.0, 5.0, 1.0],
@@ -150,13 +148,12 @@ async fn run_hybrid_bge_adapter(fixture: &Fixture) -> anyhow::Result<AdapterResu
 
 async fn run_graph_hybrid_bge_adapter(fixture: &Fixture) -> anyhow::Result<AdapterResults> {
     let kind = EmbeddingModelKind::BgeSmallEnV1_5;
-    let cache_for_fetch = ModelCache::new(std::path::Path::new(".cairn/models"));
-    if !cache_for_fetch.is_present(kind) {
-        let _report = tokio::task::spawn_blocking(move || cache_for_fetch.fetch(kind)).await??;
-    }
-    let cache_for_load = ModelCache::new(std::path::Path::new(".cairn/models"));
-    let embedder: Arc<dyn EmbeddingModel> =
-        tokio::task::spawn_blocking(move || cache_for_load.ensure(kind)).await??;
+    let Some(embedder) = load_bge_embedder(kind).await? else {
+        return Ok(skipped(
+            "graph-hybrid-bge",
+            "BGE model absent; set BENCH_FETCH_MODELS=1 to fetch",
+        ));
+    };
     let store = open_in_memory_with_embedder_and_config(
         Some(Arc::clone(&embedder)),
         [10.0, 10.0, 5.0, 1.0],
@@ -176,6 +173,26 @@ async fn run_graph_hybrid_bge_adapter(fixture: &Fixture) -> anyhow::Result<Adapt
         rerank_topk: 20,
     };
     run_adapter(&adapter, &fixture.queries).await
+}
+
+async fn load_bge_embedder(
+    kind: EmbeddingModelKind,
+) -> anyhow::Result<Option<Arc<dyn EmbeddingModel>>> {
+    let cache_for_fetch = ModelCache::new(std::path::Path::new(".cairn/models"));
+    if !cache_for_fetch.is_present(kind) {
+        if !fetch_models_enabled_from(std::env::var("BENCH_FETCH_MODELS").ok().as_deref()) {
+            return Ok(None);
+        }
+        let _report = tokio::task::spawn_blocking(move || cache_for_fetch.fetch(kind)).await??;
+    }
+    let cache_for_load = ModelCache::new(std::path::Path::new(".cairn/models"));
+    let embedder: Arc<dyn EmbeddingModel> =
+        tokio::task::spawn_blocking(move || cache_for_load.ensure(kind)).await??;
+    Ok(Some(embedder))
+}
+
+fn fetch_models_enabled_from(value: Option<&str>) -> bool {
+    matches!(value, Some("1"))
 }
 
 #[cfg(feature = "openai")]
@@ -252,4 +269,17 @@ async fn run_adapter<A: Adapter + ?Sized>(
         runs.push((q.id.clone(), hits, m));
     }
     Ok((adapter.name().to_owned(), runs))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fetch_models_enabled_from;
+
+    #[test]
+    fn bench_fetch_models_is_opt_in_only() {
+        assert!(!fetch_models_enabled_from(None));
+        assert!(!fetch_models_enabled_from(Some("")));
+        assert!(!fetch_models_enabled_from(Some("true")));
+        assert!(fetch_models_enabled_from(Some("1")));
+    }
 }

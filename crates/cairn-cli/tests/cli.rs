@@ -740,6 +740,57 @@ fn no_args_prints_help_and_fails_closed() {
 }
 
 #[test]
+fn bench_subcommand_accepts_scorecard_args_without_vault_context() {
+    let out = cli()
+        .args(["bench", "--help"])
+        .output()
+        .expect("cairn bench --help");
+    assert!(
+        out.status.success(),
+        "bench help should not require vault context; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    assert!(
+        stdout.contains("cairn-bench"),
+        "bench help should explain the delegated harness: {stdout}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn bench_subcommand_forwards_args_to_configured_harness_binary() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fake = dir.path().join("fake-cairn-bench");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\nprintf 'fake-cairn-bench:'\nprintf ' <%s>' \"$@\"\nprintf '\\n'\n",
+    )
+    .expect("write fake bench");
+    let mut perms = std::fs::metadata(&fake).expect("metadata").permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&fake, perms).expect("chmod fake bench");
+
+    let out = cli()
+        .env("CAIRN_BENCH_BIN", &fake)
+        .args(["bench", "scorecard", "--fixture", "mini", "--skip-openai"])
+        .output()
+        .expect("cairn bench scorecard");
+    assert!(
+        out.status.success(),
+        "fake bench should succeed; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    assert!(
+        stdout.contains("fake-cairn-bench: <scorecard> <--fixture> <mini> <--skip-openai>"),
+        "bench wrapper should forward arguments unchanged: {stdout}"
+    );
+}
+
+#[test]
 fn capture_trace_empty_file_exits_zero() {
     let vault = tempfile::tempdir().expect("temp vault");
     cairn_cli::vault::bootstrap(&cairn_cli::vault::BootstrapOpts {

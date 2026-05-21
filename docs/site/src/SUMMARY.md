@@ -40,6 +40,7 @@
   - [`cairn plugins list`](reference/generated/commands/plugins-list.md)
   - [`cairn plugins verify`](reference/generated/commands/plugins-verify.md)
   - [`cairn bootstrap`](reference/generated/commands/bootstrap.md)
+  - [`cairn bench`](reference/generated/commands/bench.md)
   - [`cairn mcp`](reference/generated/commands/mcp.md)
   - [`cairn setup`](reference/generated/commands/setup.md)
   - [`cairn setup claude-code`](reference/generated/commands/setup-claude-code.md)
@@ -67,6 +68,7 @@
 - [IDL](reference/idl.md)
 - [Rust API](reference/rust-api.md)
 - [Policy Gates](reference/policy-gates.md)
+- [Bench Scorecards](reference/bench/index.md)
 
 # Maintainers
 

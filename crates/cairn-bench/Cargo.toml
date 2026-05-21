@@ -60,6 +60,7 @@ cairn-cli = { path = "../cairn-cli" }
 cairn-test-fixtures = { workspace = true }
 criterion = { workspace = true }
 insta = { workspace = true, features = ["json", "yaml"] }
+jsonschema = { workspace = true }
 
 [lints]
 workspace = true
