@@ -281,7 +281,12 @@ pub fn advertise(gates: &CapabilityGates) -> Vec<Capabilities> {
     // violation, and `DreamHandler` short-circuits to `Permanent` when no
     // provider is wired. Hold the capability back in that case even when
     // `dream.enabled = true` in config.
-    if wiring::DREAM_WORKFLOW_WIRED && gates.dream_runtime_ready && gates.llm_configured {
+    let dream_provider_ready = if cfg.agent_dream {
+        true
+    } else {
+        gates.llm_configured
+    };
+    if wiring::DREAM_WORKFLOW_WIRED && gates.dream_runtime_ready && dream_provider_ready {
         out.push(Capabilities::CairnWorkflowsV1Dream);
     }
     if wiring::EXPIRATION_WORKFLOW_WIRED && gates.expiration_runtime_ready {

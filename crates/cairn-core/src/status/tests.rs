@@ -10,6 +10,7 @@ fn cap_set_default(model: bool, embed_on: bool) -> CapabilitySet {
         hybrid_search: model && embed_on,
         llm_extract: false,
         agent_extract: false,
+        agent_dream: false,
         screen_capture_enabled: false,
         graph_edges: false,
         policy_trace: true,
@@ -246,6 +247,20 @@ fn dream_capability_requires_wiring_runtime_ready_and_llm_provider() {
 }
 
 #[test]
+fn dream_capability_allows_agent_dream_without_llm_provider() {
+    let mut g = gates(true, true, None);
+    g.dream_runtime_ready = true;
+    g.llm_configured = false;
+    g.config.agent_dream = true;
+    let caps = advertise(&g);
+    assert_eq!(
+        caps.contains(&Capabilities::CairnWorkflowsV1Dream),
+        wiring::DREAM_WORKFLOW_WIRED,
+        "agent dream uses the configured agent provider, not LLMProvider"
+    );
+}
+
+#[test]
 fn expiration_capability_requires_wiring_and_runtime_ready() {
     let mut g = gates(true, true, None);
     g.expiration_runtime_ready = false;
@@ -409,6 +424,7 @@ mod remediation_tests {
             hybrid_search: true,
             llm_extract: false,
             agent_extract: false,
+            agent_dream: false,
             screen_capture_enabled: false,
             graph_edges: false,
             policy_trace: true,
@@ -487,6 +503,7 @@ mod prop_tests {
                 hybrid_search: hyb,
                 llm_extract: false,
                 agent_extract: false,
+                agent_dream: false,
                 screen_capture_enabled: false,
                 graph_edges: false,
                 policy_trace: pt,

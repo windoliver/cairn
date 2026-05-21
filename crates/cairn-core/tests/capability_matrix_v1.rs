@@ -55,6 +55,7 @@ fn gates_full() -> CapabilityGates {
             hybrid_search: true,
             llm_extract: true,
             agent_extract: false,
+            agent_dream: false,
             screen_capture_enabled: false,
             graph_edges: false,
             policy_trace: true,
