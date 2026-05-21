@@ -11,6 +11,7 @@ import type {
   DesktopReconcilePreviewRequest,
   DesktopSearchResult,
   DesktopSessionTree,
+  DesktopSreReport,
   DesktopVaultSummary,
 } from "./types";
 
@@ -51,6 +52,10 @@ export class DesktopApiClient {
 
   lint(): Promise<DesktopLintFinding[]> {
     return this.get("/api/v1/lint");
+  }
+
+  sre(): Promise<DesktopSreReport> {
+    return this.get("/api/v1/sre");
   }
 
   previewReconcile(request: DesktopReconcilePreviewRequest): Promise<DesktopReconcilePreview> {

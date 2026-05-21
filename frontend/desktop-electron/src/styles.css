@@ -95,8 +95,38 @@ textarea {
 
 .workspace {
   display: grid;
-  grid-template-rows: minmax(360px, 1fr) 280px;
+  grid-template-rows: auto minmax(360px, 1fr) 280px;
   min-width: 0;
+}
+
+.workspace.sreMode {
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.workspaceSwitch {
+  align-items: center;
+  border-bottom: 1px solid #d8ddd4;
+  display: flex;
+  gap: 8px;
+  padding: 10px 20px;
+}
+
+.workspaceSwitch button {
+  align-items: center;
+  background: transparent;
+  border: 1px solid #cfd7d2;
+  border-radius: 6px;
+  color: inherit;
+  cursor: pointer;
+  display: flex;
+  gap: 8px;
+  min-height: 34px;
+  padding: 6px 10px;
+}
+
+.workspaceSwitch button.active {
+  background: #e9f2ec;
+  border-color: #789a84;
 }
 
 .recordDetail {
@@ -190,4 +220,152 @@ textarea {
   color: #fff;
   cursor: pointer;
   padding: 4px 8px;
+}
+
+.sreWorkspace {
+  display: grid;
+  gap: 14px;
+  overflow: auto;
+  padding: 20px;
+}
+
+.sreHeader {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+}
+
+.sreHeader h2 {
+  font-size: 18px;
+  margin: 0 0 4px;
+}
+
+.sreHeader span {
+  color: #57636b;
+}
+
+.sreSummaryStrip {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.sreStatusCard {
+  align-items: center;
+  border: 1px solid #d8ddd4;
+  border-radius: 6px;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  min-height: 72px;
+  padding: 10px;
+}
+
+.sreStatusCard h3 {
+  font-size: 13px;
+  margin: 0 0 4px;
+}
+
+.sreStatusCard p,
+.srePanelLead {
+  color: #57636b;
+  font-size: 12px;
+  margin: 0;
+}
+
+.sreCardStatus {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+}
+
+.status-ok {
+  background: #edf7ef;
+}
+
+.status-warning {
+  background: #fff7e6;
+}
+
+.status-fail {
+  background: #fff2f0;
+}
+
+.status-unknown {
+  background: #f3f4f3;
+}
+
+.srePanelGrid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.srePanel {
+  border: 1px solid #d8ddd4;
+  border-radius: 6px;
+  overflow: auto;
+  padding: 12px;
+}
+
+.srePanelWide {
+  grid-column: 1 / -1;
+}
+
+.srePanel h3 {
+  font-size: 14px;
+  margin: 0 0 10px;
+}
+
+.srePanel table {
+  border-collapse: collapse;
+  table-layout: fixed;
+  width: 100%;
+}
+
+.srePanel th,
+.srePanel td {
+  border-bottom: 1px solid #e2e6df;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  padding: 6px;
+  text-align: left;
+}
+
+.sreMetricRow {
+  align-items: center;
+  border-bottom: 1px solid #e2e6df;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  min-height: 32px;
+}
+
+.sreMetricRow span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.sreStatusBadge {
+  border: 1px solid #cfd7d2;
+  border-radius: 999px;
+  font-size: 11px;
+  padding: 2px 7px;
+  text-transform: uppercase;
+}
+
+@media (max-width: 900px) {
+  .app {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    border-bottom: 1px solid #d8ddd4;
+    border-right: 0;
+  }
+
+  .sreSummaryStrip,
+  .srePanelGrid {
+    grid-template-columns: 1fr;
+  }
 }

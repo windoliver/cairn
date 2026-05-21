@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Activity, BookOpen } from "lucide-react";
 import { DesktopApiClient } from "./api/client";
 import type {
   DesktopFolder,
@@ -7,12 +8,14 @@ import type {
   DesktopRecordDetail,
   DesktopRecordSummary,
   DesktopSessionTree,
+  DesktopSreReport,
   DesktopVaultSummary,
 } from "./api/types";
 import { GraphPanel } from "./components/GraphPanel";
 import { LintPanel } from "./components/LintPanel";
 import { RecordDetail } from "./components/RecordDetail";
 import { SearchPanel } from "./components/SearchPanel";
+import { SreWorkspace } from "./components/SreWorkspace";
 import { VaultSidebar } from "./components/VaultSidebar";
 import "./styles.css";
 
@@ -25,10 +28,13 @@ export type DesktopApi = Pick<
   | "graph"
   | "sessionTree"
   | "lint"
+  | "sre"
   | "search"
   | "previewReconcile"
   | "applyReconcile"
 >;
+
+type Workspace = "records" | "sre";
 
 type AppState = {
   vault: DesktopVaultSummary | null;
@@ -38,6 +44,8 @@ type AppState = {
   graph: DesktopGraph | null;
   sessionTree: DesktopSessionTree | null;
   lint: DesktopLintFinding[];
+  sre: DesktopSreReport | null;
+  sreError: string | null;
   error: string | null;
 };
 
@@ -57,15 +65,35 @@ export function App({
     graph: null,
     sessionTree: null,
     lint: [],
+    sre: null,
+    sreError: null,
     error: null,
   });
+  const [workspace, setWorkspace] = useState<Workspace>("records");
   const selectionSequence = useRef(0);
   const loadSequence = useRef(0);
 
   const loadDesktopData = useCallback(async () => {
     const sequence = loadSequence.current + 1;
     loadSequence.current = sequence;
-    setState((current) => ({ ...current, error: null }));
+    setState((current) => ({ ...current, error: null, sre: null, sreError: null }));
+    void api
+      .sre()
+      .then((sre) => {
+        if (loadSequence.current === sequence) {
+          setState((current) => ({ ...current, sre, sreError: null }));
+        }
+      })
+      .catch(() => {
+        if (loadSequence.current === sequence) {
+          setState((current) => ({
+            ...current,
+            sre: null,
+            sreError: "SRE report unavailable",
+          }));
+        }
+      });
+
     try {
       const [vault, folders, records, graph, sessionTree, lint] = await Promise.all([
         api.vault(),
@@ -86,7 +114,17 @@ export function App({
         }
       }
       if (loadSequence.current === sequence) {
-        setState({ vault, folders, records, selected, graph, sessionTree, lint, error });
+        setState((current) => ({
+          ...current,
+          vault,
+          folders,
+          records,
+          selected,
+          graph,
+          sessionTree,
+          lint,
+          error,
+        }));
       }
     } catch (error) {
       if (loadSequence.current === sequence) {
@@ -165,21 +203,47 @@ export function App({
         selectedId={selectedId}
         onSelectRecord={(id) => void selectRecord(id)}
       />
-      <section className="workspace">
-        <RecordDetail
-          record={state.selected}
-          api={api}
-          onRecordApplied={applyRecord}
-        />
-        <div className="lowerPanels">
-          <GraphPanel graph={state.graph} sessionTree={state.sessionTree} />
-          <SearchPanel
-            api={api}
-            selectedId={selectedId}
-            onSelectRecord={(id) => void selectRecord(id)}
-          />
-          <LintPanel findings={state.lint} />
+      <section className={workspace === "sre" ? "workspace sreMode" : "workspace"}>
+        <div className="workspaceSwitch" aria-label="Workspace switcher">
+          <button
+            type="button"
+            className={workspace === "records" ? "active" : ""}
+            aria-pressed={workspace === "records"}
+            onClick={() => setWorkspace("records")}
+          >
+            <BookOpen size={16} aria-hidden="true" />
+            Records
+          </button>
+          <button
+            type="button"
+            className={workspace === "sre" ? "active" : ""}
+            aria-pressed={workspace === "sre"}
+            onClick={() => setWorkspace("sre")}
+          >
+            <Activity size={16} aria-hidden="true" />
+            SRE
+          </button>
         </div>
+        {workspace === "records" ? (
+          <>
+            <RecordDetail
+              record={state.selected}
+              api={api}
+              onRecordApplied={applyRecord}
+            />
+            <div className="lowerPanels">
+              <GraphPanel graph={state.graph} sessionTree={state.sessionTree} />
+              <SearchPanel
+                api={api}
+                selectedId={selectedId}
+                onSelectRecord={(id) => void selectRecord(id)}
+              />
+              <LintPanel findings={state.lint} />
+            </div>
+          </>
+        ) : (
+          <SreWorkspace report={state.sre} error={state.sreError} />
+        )}
       </section>
     </main>
   );
