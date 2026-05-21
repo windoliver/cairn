@@ -62,8 +62,9 @@ use tokio::io::{AsyncBufReadExt as _, BufReader};
 use ulid::Ulid;
 
 use cairn_workflows::{
-    TraceCanvasPayload, TraceCanvasProjection, consolidation::enqueue_if_due_scoped,
-    enqueue_tier_with_dedupe_token, enqueue_trace_canvas_step,
+    SkillifyTrigger, TraceCanvasPayload, TraceCanvasProjection,
+    consolidation::enqueue_if_due_scoped, enqueue_skillify, enqueue_tier_with_dedupe_token,
+    enqueue_trace_canvas_step,
 };
 
 use crate::identity::{guard::refuse_if_degraded, status::ReconciliationReport};
@@ -77,6 +78,13 @@ use super::envelope::{emit_json, human_error, invalid_args_response, new_operati
 const DEFAULT_TENANT: &str = "default";
 const CAPTURE_TRACE_ENTITY: &str = "ingest";
 const DIRECT_BLOCKS_TURN_PREFIX: &str = "trace-blocks";
+
+struct CaptureTurnOutcome {
+    session_event_count: u64,
+    final_turn_record_ids: Vec<String>,
+    final_turn_has_stop: bool,
+    final_turn_has_explicit_skillify: bool,
+}
 
 /// Result returned by [`run_handler`] on success.
 #[derive(Debug, serde::Serialize)]
@@ -718,8 +726,24 @@ async fn run_events_handler_inner_no_guard(
                 // so list_trace_turns + latest_consolidation_watermark
                 // advance correctly even when turns share an event count
                 // (round-2 adversarial review #1).
+                let final_rows = tx.list_trace_events(&session_id_tx, &turn_str_tx)?;
+                let final_turn_record_ids = final_rows
+                    .iter()
+                    .filter(|record| {
+                        trace_record_matches_scope_binding(record, scope_binding_tx.as_ref())
+                    })
+                    .map(|record| record.id.as_str().to_owned())
+                    .collect::<Vec<_>>();
+                let final_turn_has_stop = final_rows.iter().any(|record| {
+                    trace_record_matches_scope_binding(record, scope_binding_tx.as_ref())
+                        && trace_record_is_stop(record)
+                });
+                let final_turn_has_explicit_skillify = final_rows.iter().any(|record| {
+                    trace_record_matches_scope_binding(record, scope_binding_tx.as_ref())
+                        && trace_record_is_explicit_skillify(record)
+                });
+
                 if had_stop || tx.turn_summary_exists(&session_id_tx, &turn_str_tx)? {
-                    let final_rows = tx.list_trace_events(&session_id_tx, &turn_str_tx)?;
                     let turn_ordinal = tx.next_turn_ordinal_scoped(
                         &session_id_tx,
                         &turn_str_tx,
@@ -739,19 +763,26 @@ async fn run_events_handler_inner_no_guard(
                     })?;
                     tx.upsert_trace(&summary)?;
                 }
-                tx.count_trace_events_for_session(&session_id_tx)
+                let session_event_count = tx.count_trace_events_for_session(&session_id_tx)?;
+                Ok(CaptureTurnOutcome {
+                    session_event_count,
+                    final_turn_record_ids,
+                    final_turn_has_stop,
+                    final_turn_has_explicit_skillify,
+                })
             })
             .await;
 
         // Destructure the per-turn tx outcome: failures push onto
         // failed_turns and skip the post-commit observers below.
-        let successful_capture_trace_writes = match result {
-            Ok(count) => count,
+        let turn_outcome = match result {
+            Ok(outcome) => outcome,
             Err(e) => {
                 failed_turns.push((session_str, turn_str, e.to_string()));
                 continue;
             }
         };
+        let successful_capture_trace_writes = turn_outcome.session_event_count;
 
         // After a successful turn commit, attempt to enqueue a consolidation
         // job. Two queries feed the trigger:
@@ -847,6 +878,20 @@ async fn run_events_handler_inner_no_guard(
                     dedupe_token,
                     now_ms,
                     scope_binding,
+                )
+                .await;
+            }
+            if turn_outcome.final_turn_has_explicit_skillify && turn_outcome.final_turn_has_stop {
+                let dedupe_token =
+                    skillify_source_dedupe_token(&turn_outcome.final_turn_record_ids);
+                let _ = enqueue_skillify(
+                    js,
+                    SkillifyTrigger::Explicit,
+                    &session_str,
+                    &dedupe_token,
+                    now_ms,
+                    scope_binding,
+                    turn_outcome.final_turn_record_ids.clone(),
                 )
                 .await;
             }
@@ -1076,6 +1121,71 @@ fn trace_text(event: &CaptureEvent, body_bytes: &[u8]) -> anyhow::Result<String>
         CapturePayload::RecordingBatch { .. } => recording_segment_text(body_bytes),
         _ => String::from_utf8(body_bytes.to_vec()).context("routed body is not valid UTF-8"),
     }
+}
+
+fn explicit_skillify_request(raw_text: &str) -> bool {
+    matches!(
+        raw_text,
+        "skillify this" | "skillify it" | "/skillify" | "cairn skillify"
+    )
+}
+
+fn trace_record_is_stop(record: &cairn_core::domain::MemoryRecord) -> bool {
+    record
+        .extra_frontmatter
+        .get("trace_event")
+        .and_then(serde_json::Value::as_str)
+        == Some("stop")
+}
+
+fn trace_record_is_explicit_skillify(record: &cairn_core::domain::MemoryRecord) -> bool {
+    record
+        .extra_frontmatter
+        .get("trace_event")
+        .and_then(serde_json::Value::as_str)
+        == Some("user_message")
+        && explicit_skillify_request(&record.body)
+}
+
+fn trace_record_matches_scope_binding(
+    record: &cairn_core::domain::MemoryRecord,
+    scope_binding: Option<&ScopeTuple>,
+) -> bool {
+    let Some(scope_binding) = scope_binding else {
+        return true;
+    };
+    scope_component_matches(
+        scope_binding.tenant.as_deref(),
+        record.scope.tenant.as_deref(),
+    ) && scope_component_matches(
+        scope_binding.workspace.as_deref(),
+        record.scope.workspace.as_deref(),
+    ) && scope_component_matches(
+        scope_binding.project.as_deref(),
+        record.scope.project.as_deref(),
+    ) && scope_component_matches(
+        scope_binding.entity.as_deref(),
+        record.scope.entity.as_deref(),
+    ) && scope_component_matches(scope_binding.user.as_deref(), record.scope.user.as_deref())
+        && scope_component_matches(
+            scope_binding.agent.as_deref(),
+            record.scope.agent.as_deref(),
+        )
+}
+
+fn scope_component_matches(expected: Option<&str>, actual: Option<&str>) -> bool {
+    match expected {
+        Some(expected) => actual == Some(expected),
+        None => true,
+    }
+}
+
+fn skillify_source_dedupe_token(source_record_ids: &[String]) -> String {
+    let mut source_record_ids = source_record_ids.to_vec();
+    source_record_ids.sort();
+    let mut hasher = Sha256::new();
+    hasher.update(source_record_ids.join(",").as_bytes());
+    format!("explicit:{:x}", hasher.finalize())
 }
 
 fn classify_trace_event(
@@ -1898,6 +2008,8 @@ mod tests {
     const STOP_SOURCE_HASH: &str =
         "sha256:a11c3d917a2149a4b548217038bc8f2dd2130a1966e0c7af5c4225d81f25a8c3";
     const STOP_SOURCE_REF: &str = "sources/hook/01ARZ3NDEKTSV4RRFFQ69G5FAW.json";
+    const SKILLIFY_EVENT_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAY";
+    const SKILLIFY_SOURCE_REF: &str = "sources/recording_batch/01ARZ3NDEKTSV4RRFFQ69G5FAY.json";
 
     struct RecordingJobStore {
         requests: Mutex<Vec<EnqueueRequest>>,
@@ -2014,6 +2126,57 @@ mod tests {
                 tool_name: None,
             },
             source_family: SourceFamily::Hook,
+        }
+    }
+
+    #[allow(
+        clippy::expect_used,
+        reason = "test fixture: panics surface broken invariants immediately"
+    )]
+    fn write_skillify_source(vault: &Path) {
+        std::fs::create_dir_all(vault.join("sources/recording_batch"))
+            .expect("mkdir recording sources");
+        std::fs::write(
+            vault.join(SKILLIFY_SOURCE_REF),
+            br#"{"segment":{"text":"skillify this"}}"#,
+        )
+        .expect("write skillify source");
+    }
+
+    #[allow(
+        clippy::expect_used,
+        reason = "test fixture: panics surface broken invariants immediately"
+    )]
+    fn explicit_skillify_event() -> CaptureEvent {
+        let sensor =
+            Identity::parse("snr:local:recording:default:v1").expect("valid recording sensor");
+        let captured_at = Rfc3339Timestamp::parse("2026-05-17T12:00:01Z").expect("valid RFC-3339");
+        CaptureEvent {
+            event_id: CaptureEventId::parse(SKILLIFY_EVENT_ID).expect("valid ULID"),
+            sensor_id: sensor.clone(),
+            capture_mode: CaptureMode::Auto,
+            actor_chain: vec![ActorChainEntry {
+                role: ChainRole::Author,
+                identity: sensor,
+                at: captured_at.clone(),
+            }],
+            refs: Some(CaptureRefs {
+                session_id: Some(STOP_SESSION_ID.to_owned()),
+                turn_id: Some("turn-1".to_owned()),
+                tool_id: None,
+            }),
+            payload_hash: PayloadHash::parse(format!(
+                "sha256:{}",
+                test_sha256_hex(r#"{"segment":{"text":"skillify this"}}"#)
+            ))
+            .expect("valid sha256"),
+            payload_ref: SKILLIFY_SOURCE_REF.into(),
+            captured_at,
+            payload: CapturePayload::RecordingBatch {
+                segment_start_ms: 0,
+                segment_duration_ms: 1_000,
+            },
+            source_family: SourceFamily::RecordingBatch,
         }
     }
 
@@ -2178,6 +2341,212 @@ mod tests {
             dream_requests[0].dedupe_key, dream_requests[1].dedupe_key,
             "idempotent Stop-hook replay must target the same dream dedupe slot"
         );
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::expect_used,
+        reason = "test: panics surface broken invariants immediately"
+    )]
+    async fn explicit_skillify_stop_hook_enqueues_skillify_job() {
+        let store = cairn_store_sqlite::open_in_memory()
+            .await
+            .expect("in-memory store");
+        let jobs = RecordingJobStore::new();
+        let vault = tempfile::tempdir().expect("tempdir");
+        write_skillify_source(vault.path());
+        write_stop_source(vault.path());
+        let consolidation = ConsolidationConfig {
+            enabled: false,
+            ..ConsolidationConfig::default()
+        };
+
+        let result = run_events_handler_inner_no_guard(
+            &store,
+            vault.path(),
+            vec![explicit_skillify_event(), stop_hook_event()],
+            None,
+            None,
+            Some(&jobs),
+            &consolidation,
+            &DreamConfig::default(),
+        )
+        .await
+        .expect("capture_trace");
+        assert!(
+            result.failed_turns.is_empty(),
+            "unexpected failed turns: {:?}",
+            result.failed_turns
+        );
+
+        let replay = run_events_handler_inner_no_guard(
+            &store,
+            vault.path(),
+            vec![explicit_skillify_event(), stop_hook_event()],
+            None,
+            None,
+            Some(&jobs),
+            &consolidation,
+            &DreamConfig::default(),
+        )
+        .await
+        .expect("capture_trace replay");
+        assert!(
+            replay.failed_turns.is_empty(),
+            "unexpected replay failed turns: {:?}",
+            replay.failed_turns
+        );
+
+        let requests = jobs.requests.lock().expect("invariant: mutex");
+        let skillify_requests = requests
+            .iter()
+            .filter(|req| req.kind.as_str() == cairn_workflows::SKILLIFY_KIND)
+            .collect::<Vec<_>>();
+        assert_eq!(skillify_requests.len(), 2);
+        assert_eq!(
+            skillify_requests[0].dedupe_key, skillify_requests[1].dedupe_key,
+            "idempotent explicit Skillify replay must target the same dedupe slot"
+        );
+        let payload = cairn_workflows::SkillifyPayload::from_bytes(&skillify_requests[0].payload)
+            .expect("skillify payload");
+        assert_eq!(payload.trigger, cairn_workflows::SkillifyTrigger::Explicit);
+        assert_eq!(payload.key, STOP_SESSION_ID);
+        assert_eq!(payload.source_record_ids.len(), 2);
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::expect_used,
+        reason = "test: panics surface broken invariants immediately"
+    )]
+    async fn explicit_skillify_persisted_before_stop_enqueues_on_close() {
+        let store = cairn_store_sqlite::open_in_memory()
+            .await
+            .expect("in-memory store");
+        let jobs = RecordingJobStore::new();
+        let vault = tempfile::tempdir().expect("tempdir");
+        write_skillify_source(vault.path());
+        write_stop_source(vault.path());
+        let consolidation = ConsolidationConfig {
+            enabled: false,
+            ..ConsolidationConfig::default()
+        };
+
+        let first = run_events_handler_inner_no_guard(
+            &store,
+            vault.path(),
+            vec![explicit_skillify_event()],
+            None,
+            None,
+            Some(&jobs),
+            &consolidation,
+            &DreamConfig::default(),
+        )
+        .await
+        .expect("capture_trace first batch");
+        assert!(
+            first.failed_turns.is_empty(),
+            "unexpected first failed turns: {:?}",
+            first.failed_turns
+        );
+
+        let second = run_events_handler_inner_no_guard(
+            &store,
+            vault.path(),
+            vec![stop_hook_event()],
+            None,
+            None,
+            Some(&jobs),
+            &consolidation,
+            &DreamConfig::default(),
+        )
+        .await
+        .expect("capture_trace stop batch");
+        assert!(
+            second.failed_turns.is_empty(),
+            "unexpected second failed turns: {:?}",
+            second.failed_turns
+        );
+
+        let requests = jobs.requests.lock().expect("invariant: mutex");
+        let skillify_requests = requests
+            .iter()
+            .filter(|req| req.kind.as_str() == cairn_workflows::SKILLIFY_KIND)
+            .collect::<Vec<_>>();
+        assert_eq!(skillify_requests.len(), 1);
+        let payload = cairn_workflows::SkillifyPayload::from_bytes(&skillify_requests[0].payload)
+            .expect("skillify payload");
+        assert_eq!(payload.trigger, cairn_workflows::SkillifyTrigger::Explicit);
+        assert_eq!(payload.key, STOP_SESSION_ID);
+        assert_eq!(payload.source_record_ids.len(), 2);
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::expect_used,
+        reason = "test: panics surface broken invariants immediately"
+    )]
+    async fn scoped_stop_does_not_use_other_scope_skillify_command() {
+        let store = cairn_store_sqlite::open_in_memory()
+            .await
+            .expect("in-memory store");
+        let jobs = RecordingJobStore::new();
+        let vault = tempfile::tempdir().expect("tempdir");
+        write_skillify_source(vault.path());
+        write_stop_source(vault.path());
+        let consolidation = ConsolidationConfig {
+            enabled: false,
+            ..ConsolidationConfig::default()
+        };
+        let tenant_a = ScopeTuple {
+            tenant: Some("tenant-a".to_owned()),
+            ..ScopeTuple::default()
+        };
+        let tenant_b = ScopeTuple {
+            tenant: Some("tenant-b".to_owned()),
+            ..ScopeTuple::default()
+        };
+
+        run_events_handler_inner_no_guard(
+            &store,
+            vault.path(),
+            vec![explicit_skillify_event()],
+            Some(&tenant_a),
+            None,
+            Some(&jobs),
+            &consolidation,
+            &DreamConfig::default(),
+        )
+        .await
+        .expect("capture_trace tenant a");
+        run_events_handler_inner_no_guard(
+            &store,
+            vault.path(),
+            vec![stop_hook_event()],
+            Some(&tenant_b),
+            None,
+            Some(&jobs),
+            &consolidation,
+            &DreamConfig::default(),
+        )
+        .await
+        .expect("capture_trace tenant b");
+
+        let requests = jobs.requests.lock().expect("invariant: mutex");
+        assert!(
+            requests
+                .iter()
+                .all(|req| req.kind.as_str() != cairn_workflows::SKILLIFY_KIND),
+            "tenant-b Stop must not enqueue from tenant-a explicit command"
+        );
+    }
+
+    #[test]
+    fn explicit_skillify_request_requires_exact_command() {
+        assert!(explicit_skillify_request("skillify this"));
+        assert!(!explicit_skillify_request("Skillify this"));
+        assert!(!explicit_skillify_request(" skillify this"));
+        assert!(!explicit_skillify_request("skillify this\n"));
     }
 
     #[tokio::test]

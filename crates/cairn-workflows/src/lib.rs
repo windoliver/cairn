@@ -17,6 +17,7 @@ pub mod expiration;
 pub mod planners;
 pub mod salience_decay;
 pub mod scheduler;
+pub mod skillify;
 pub mod sqlite_apply;
 pub mod sqlite_store;
 pub mod synthetic;
@@ -51,6 +52,10 @@ pub use planners::{
     ConsolidatePlanSource, ExpirePlanSource, PromotePlanSource, ReflectionPlanSource,
 };
 pub use scheduler::{Clock, MockClock, Scheduler, SchedulerConfig, SystemClock};
+pub use skillify::{
+    SKILLIFY_KIND, SkillifyEnqueueDecision, SkillifyHandler, SkillifyPayload, SkillifyTrigger,
+    enqueue_skillify,
+};
 pub use sqlite_apply::SqliteFlushPlanApply;
 pub use sqlite_store::{SqliteJobStore, SqliteJobStoreInitError};
 pub use trace_canvas::{

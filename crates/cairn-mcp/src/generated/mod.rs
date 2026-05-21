@@ -137,6 +137,7 @@ pub const TOOLS: &[ToolDecl] = &[
         auth: "read_only",
         auth_overrides: &[
             AuthOverride { path: "fix", auth: "write_capability" },
+            AuthOverride { path: "fix_skill_plan", auth: "write_capability" },
             AuthOverride { path: "write_report", auth: "write_capability" },
         ],
         capability_overrides: &[],

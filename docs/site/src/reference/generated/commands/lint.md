@@ -16,6 +16,8 @@ Options:
                               CAIRN_VAULT)
       --write-report
       --fix
+      --skill
+      --fix-skill-plan
       --plan <ULID>           Lint the pending FlushPlan with this id (issue #289 — surfaces rename
                               target collisions before apply)
       --fix-folders           Regenerate folder _index.md sidecars and backlinks for every non-empty

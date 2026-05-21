@@ -14,7 +14,9 @@ expression: body
     "command": "lint",
     "flags": [
       { "name": "write_report", "long": "write-report", "value_source": "bool" },
-      { "name": "fix", "long": "fix", "value_source": "bool" }
+      { "name": "fix", "long": "fix", "value_source": "bool" },
+      { "name": "skill", "long": "skill", "value_source": "bool" },
+      { "name": "fix_skill_plan", "long": "fix-skill-plan", "value_source": "bool" }
     ]
   },
   "x-cairn-skill-triggers": {
@@ -41,6 +43,15 @@ expression: body
           "type": "boolean",
           "x-cairn-auth": "write_capability",
           "description": "When true, resolves live bitemporal edge contradictions by invalidating lower-confidence edges."
+        },
+        "skill": {
+          "type": "boolean",
+          "description": "When true, runs Skillify bundle, resolver, gate, and rollback lint checks."
+        },
+        "fix_skill_plan": {
+          "type": "boolean",
+          "x-cairn-auth": "write_capability",
+          "description": "When true, writes reviewable Skillify repair plans instead of mutating live skills."
         }
       }
     },
@@ -83,6 +94,11 @@ expression: body
         "source_redact_skipped",
         "sensor_budget_exceeded",
         "sensor_privacy_denied",
+        "skill_missing_artifact",
+        "skill_unreachable",
+        "skill_duplicate_lane",
+        "skill_gate_failed",
+        "skill_rollback_broken",
         "stale",
         "stale_profile_line",
         "stale_schema",

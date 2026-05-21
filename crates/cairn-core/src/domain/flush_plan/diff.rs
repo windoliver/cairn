@@ -3,7 +3,7 @@
 
 use std::fmt::Write as _;
 
-use super::{FlushPlan, PatchTarget, PlannedMutation, ReplaceOccurrence};
+use super::{FlushPlan, PatchTarget, PlanReason, PlannedMutation, ReplaceOccurrence};
 
 /// Maximum body excerpt length per mutation, characters.
 pub const MAX_BODY_EXCERPT: usize = 4096;
@@ -27,7 +27,7 @@ pub fn render(plan: &FlushPlan) -> String {
     }
     writeln!(&mut out, "- **Issued:** {}", plan.issued_at).ok();
     writeln!(&mut out, "- **Expires:** {}", plan.expires_at).ok();
-    writeln!(&mut out, "- **Reason:** `{:?}`", plan.reason).ok();
+    write_reason(&mut out, &plan.reason);
     writeln!(&mut out, "- **Mutations:** {}", plan.mutations.len()).ok();
     writeln!(&mut out).ok();
     for (i, m) in plan.mutations.iter().enumerate() {
@@ -212,6 +212,24 @@ pub fn render(plan: &FlushPlan) -> String {
         writeln!(&mut out).ok();
     }
     out
+}
+
+fn write_reason(out: &mut String, reason: &PlanReason) {
+    match reason {
+        PlanReason::Skillify {
+            candidate_id,
+            gate_count,
+        } => {
+            writeln!(
+                out,
+                "- **Reason:** Skillify candidate `{candidate_id}` passed {gate_count} gates"
+            )
+            .ok();
+        }
+        other => {
+            writeln!(out, "- **Reason:** `{other:?}`").ok();
+        }
+    }
 }
 
 #[cfg(test)]

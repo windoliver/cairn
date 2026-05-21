@@ -17,8 +17,8 @@
 
 use std::sync::Arc;
 
-use cairn_core::config::{DreamConfig, DreamTierConfig, DreamWorkerMode, ExtractBudget};
-use cairn_core::contract::job_store::{FailureClass, JobKind, JobPayload};
+use cairn_core::config::{DreamConfig, DreamTier, DreamTierConfig, DreamWorkerMode, ExtractBudget};
+use cairn_core::contract::job_store::{FailureClass, JobKind, JobPayload, JobStore};
 use cairn_core::contract::llm_provider::{CompletionOutput, CompletionRequest, LLMProvider};
 use cairn_core::contract::memory_store::{ListArgs, MemoryStore, TombstoneReason};
 use cairn_core::domain::{
@@ -29,6 +29,7 @@ use tracing::{info, warn};
 
 use crate::dream::DreamPayload;
 use crate::scheduler::{HandlerOutcome, JobHandler};
+use crate::skillify::{SkillifyTrigger, enqueue_skillify};
 use crate::synthetic::{SyntheticRecordSpec, build_synthetic_record};
 
 /// The `JobKind` discriminator stored in `workflow_jobs.kind`.
@@ -46,6 +47,7 @@ pub struct DreamHandler {
     store: Arc<dyn MemoryStore>,
     config: DreamConfig,
     llm: Option<Arc<dyn LLMProvider>>,
+    skillify_jobs: Option<Arc<dyn JobStore>>,
 }
 
 impl DreamHandler {
@@ -59,7 +61,19 @@ impl DreamHandler {
         config: DreamConfig,
         llm: Option<Arc<dyn LLMProvider>>,
     ) -> Self {
-        Self { store, config, llm }
+        Self {
+            store,
+            config,
+            llm,
+            skillify_jobs: None,
+        }
+    }
+
+    /// Attach the job store used for follow-up Skillify emissions.
+    #[must_use]
+    pub fn with_skillify_jobs(mut self, job_store: Arc<dyn JobStore>) -> Self {
+        self.skillify_jobs = Some(job_store);
+        self
     }
 
     #[allow(
@@ -211,7 +225,7 @@ impl DreamHandler {
         // self-tombstone failed could remain active indefinitely.
         let target_id = crate::synthetic::stable_target_id(&target_key)?;
         if let Some(existing) = self.store.get_active_by_target(&target_id).await? {
-            let existing_sources: Vec<String> = existing
+            let mut existing_sources: Vec<String> = existing
                 .record
                 .extra_frontmatter
                 .get("dream")
@@ -223,12 +237,20 @@ impl DreamHandler {
                         .collect()
                 })
                 .unwrap_or_default();
+            existing_sources.sort();
             let mut any_stale = false;
+            let mut has_strategy_success = false;
             for source_str in &existing_sources {
                 let source_id = cairn_core::domain::RecordId::parse(source_str.clone())?;
-                if self.store.get(&source_id).await?.is_none() {
-                    any_stale = true;
-                    break;
+                match self.store.get(&source_id).await? {
+                    Some(source) if source.kind == MemoryKind::StrategySuccess => {
+                        has_strategy_success = true;
+                    }
+                    Some(_) => {}
+                    None => {
+                        any_stale = true;
+                        break;
+                    }
                 }
             }
             if any_stale {
@@ -243,6 +265,15 @@ impl DreamHandler {
                     .await?;
                 // Fall through and let this attempt re-distill.
             } else {
+                let existing_sources_hash =
+                    crate::synthetic::sha256_hex(existing_sources.join(",").as_bytes());
+                self.enqueue_skillify_after_deep_dream(
+                    &payload,
+                    has_strategy_success,
+                    &existing_sources_hash,
+                    &existing_sources,
+                )
+                .await?;
                 info!(
                     key = %payload.key,
                     target_id = target_id.as_str(),
@@ -393,6 +424,17 @@ impl DreamHandler {
             }
         }
 
+        let has_strategy_success = filtered
+            .iter()
+            .any(|record| record.kind == MemoryKind::StrategySuccess);
+        self.enqueue_skillify_after_deep_dream(
+            &payload,
+            has_strategy_success,
+            &sources_hash,
+            &source_record_ids,
+        )
+        .await?;
+
         if outcome.content_changed {
             info!(key = %payload.key, "dream: upserted distillation record");
         } else {
@@ -400,6 +442,42 @@ impl DreamHandler {
         }
         Ok(())
     }
+
+    async fn enqueue_skillify_after_deep_dream(
+        &self,
+        payload: &DreamPayload,
+        has_strategy_success: bool,
+        sources_hash: &str,
+        source_record_ids: &[String],
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if payload.tier != DreamTier::DeepDreaming || !has_strategy_success {
+            return Ok(());
+        }
+        let Some(job_store) = self.skillify_jobs.as_ref() else {
+            return Ok(());
+        };
+        enqueue_skillify(
+            &**job_store,
+            SkillifyTrigger::DeepDream,
+            &payload.key,
+            sources_hash,
+            now_ms(),
+            payload.bound_scope.as_ref(),
+            source_record_ids.to_vec(),
+        )
+        .await?;
+        Ok(())
+    }
+}
+
+fn now_ms() -> i64 {
+    i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(i64::MAX)
 }
 
 fn scope_for(payload: &DreamPayload) -> ScopeTuple {
