@@ -260,6 +260,13 @@ fn dream_capability_allows_agent_dream_without_llm_provider() {
         "agent dream intent alone must not advertise without runtime agent provider"
     );
 
+    g.llm_configured = true;
+    let caps = advertise(&g);
+    assert!(
+        !caps.contains(&Capabilities::CairnWorkflowsV1Dream),
+        "agent dream must not fall back to LLMProvider when runtime agent provider is absent"
+    );
+
     g.agent_configured = true;
     let caps = advertise(&g);
     assert_eq!(
