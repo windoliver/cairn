@@ -232,6 +232,10 @@ pub struct PromotionGateInput<'a> {
     pub now: &'a Rfc3339Timestamp,
     /// WAL operation id being applied.
     pub operation_id: &'a str,
+    /// Human signer identity used to resolve `signer_key`.
+    pub signer_identity: &'a Identity,
+    /// Human signer key version used to resolve `signer_key`.
+    pub signer_key_version: u32,
     /// Human signer verifying key.
     pub signer_key: &'a VerifyingKey,
     /// Apply-time revocation state.
@@ -414,6 +418,15 @@ pub fn verify_promotion_gate(
 
     if let Err(error) = input.receipt.validate_shape() {
         return Err(reject_promotion(SharingDecisionKind::InvalidShape, error));
+    }
+
+    if input.signer_identity != &input.receipt.payload.human_identity
+        || input.signer_key_version != input.receipt.payload.key_version
+    {
+        return Err(reject_promotion(
+            SharingDecisionKind::BadSignature,
+            DomainError::InvalidSignature,
+        ));
     }
 
     let signature_result = (|| {
@@ -722,10 +735,30 @@ fn validate_id(field: &'static str, value: &str) -> Result<(), DomainError> {
 }
 
 fn validate_ulid(field: &'static str, value: &str) -> Result<(), DomainError> {
-    ulid::Ulid::from_string(value).map_err(|_| DomainError::MalformedScope {
-        message: format!("{field} must be a ULID"),
-    })?;
+    if value.len() != 26 {
+        return Err(DomainError::MalformedScope {
+            message: format!("{field} must be a 26-char ULID"),
+        });
+    }
+    let bytes = value.as_bytes();
+    if !matches!(bytes[0], b'0'..=b'7') {
+        return Err(DomainError::MalformedScope {
+            message: format!("{field} first char must be 0..=7"),
+        });
+    }
+    if !bytes[1..].iter().copied().all(is_crockford_base32) {
+        return Err(DomainError::MalformedScope {
+            message: format!("{field} must be uppercase Crockford base32"),
+        });
+    }
     Ok(())
+}
+
+fn is_crockford_base32(b: u8) -> bool {
+    matches!(
+        b,
+        b'0'..=b'9' | b'A'..=b'H' | b'J' | b'K' | b'M' | b'N' | b'P'..=b'T' | b'V'..=b'Z'
+    )
 }
 
 fn validate_bound_id(

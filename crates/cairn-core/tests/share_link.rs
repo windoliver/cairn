@@ -220,6 +220,22 @@ fn share_link_shape_rejects_required_bad_fields() {
             |e| matches!(e, domain::DomainError::MalformedScope { .. }),
         ),
         (
+            "lowercase operation_id",
+            |l| {
+                l.payload.operation_id = "01hqzx9f5n0000000000000004".to_owned();
+                l.link_id = "share-01hqzx9f5n0000000000000004".to_owned();
+            },
+            |e| matches!(e, domain::DomainError::MalformedScope { .. }),
+        ),
+        (
+            "overflow operation_id",
+            |l| {
+                l.payload.operation_id = "81HQZX9F5N0000000000000004".to_owned();
+                l.link_id = "share-81HQZX9F5N0000000000000004".to_owned();
+            },
+            |e| matches!(e, domain::DomainError::MalformedScope { .. }),
+        ),
+        (
             "malformed nonce",
             |l| l.payload.nonce = "not-base64".to_owned(),
             |e| matches!(e, domain::DomainError::MissingSignature { .. }),

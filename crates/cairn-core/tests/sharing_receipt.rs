@@ -162,6 +162,36 @@ fn promotion_receipt_shape_rejects_required_bad_fields() {
             |e| matches!(e, domain::DomainError::MalformedScope { .. }),
         ),
         (
+            "lowercase operation_id",
+            |r| {
+                r.payload.operation_id = "01hqzx9f5n0000000000000002".to_owned();
+                r.receipt_id = "rcpt-01hqzx9f5n0000000000000002".to_owned();
+            },
+            |e| matches!(e, domain::DomainError::MalformedScope { .. }),
+        ),
+        (
+            "overflow operation_id",
+            |r| {
+                r.payload.operation_id = "81HQZX9F5N0000000000000002".to_owned();
+                r.receipt_id = "rcpt-81HQZX9F5N0000000000000002".to_owned();
+            },
+            |e| matches!(e, domain::DomainError::MalformedScope { .. }),
+        ),
+        (
+            "lowercase chain_parent",
+            |r| {
+                r.payload.chain_parents = vec!["01hqzx9f5n0000000000000003".to_owned()];
+            },
+            |e| matches!(e, domain::DomainError::MalformedScope { .. }),
+        ),
+        (
+            "overflow chain_parent",
+            |r| {
+                r.payload.chain_parents = vec!["81HQZX9F5N0000000000000003".to_owned()];
+            },
+            |e| matches!(e, domain::DomainError::MalformedScope { .. }),
+        ),
+        (
             "malformed nonce",
             |r| r.payload.nonce = "not-base64".to_owned(),
             |e| matches!(e, domain::DomainError::MissingSignature { .. }),
@@ -275,6 +305,8 @@ fn promotion_input<'a>(
         receipt,
         now,
         operation_id: "01HQZX9F5N0000000000000002",
+        signer_identity: &receipt.payload.human_identity,
+        signer_key_version: receipt.payload.key_version,
         signer_key: signer_verifying_key(),
         revocation,
         rebac,
@@ -339,6 +371,41 @@ fn promotion_gate_rejects_bad_signature() {
 
     assert_promotion_rejection_detail(
         promotion_input(&record, &receipt, &now, &revocation, &rebac),
+        SharingDecisionKind::BadSignature,
+    );
+}
+
+#[test]
+fn promotion_gate_rejects_signer_identity_context_mismatch() {
+    let record = scoped_record();
+    let receipt = signed_receipt();
+    let now = Rfc3339Timestamp::parse("2026-05-21T12:30:00Z").expect("now");
+    let revocation = SharingRevocationState::default();
+    let rebac = rebac_for_team_write();
+    let other = Identity::parse("hmn:other").expect("human");
+
+    assert_promotion_rejection_detail(
+        PromotionGateInput {
+            signer_identity: &other,
+            ..promotion_input(&record, &receipt, &now, &revocation, &rebac)
+        },
+        SharingDecisionKind::BadSignature,
+    );
+}
+
+#[test]
+fn promotion_gate_rejects_signer_key_version_context_mismatch() {
+    let record = scoped_record();
+    let receipt = signed_receipt();
+    let now = Rfc3339Timestamp::parse("2026-05-21T12:30:00Z").expect("now");
+    let revocation = SharingRevocationState::default();
+    let rebac = rebac_for_team_write();
+
+    assert_promotion_rejection_detail(
+        PromotionGateInput {
+            signer_key_version: receipt.payload.key_version + 1,
+            ..promotion_input(&record, &receipt, &now, &revocation, &rebac)
+        },
         SharingDecisionKind::BadSignature,
     );
 }
