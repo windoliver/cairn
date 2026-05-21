@@ -70,6 +70,7 @@ fn gates_full() -> CapabilityGates {
         model_present: true,
         embedding_provider_ready: true,
         llm_configured: true,
+        agent_configured: false,
         contract_phase: Phase::V0_1,
         consolidation_runtime_ready: true,
         dream_runtime_ready: true,

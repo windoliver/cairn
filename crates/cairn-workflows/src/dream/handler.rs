@@ -321,6 +321,7 @@ impl DreamHandler {
                 "worker":             match tier_config.worker {
                     DreamWorkerMode::Llm => "llm",
                     DreamWorkerMode::Hybrid => "hybrid",
+                    DreamWorkerMode::Agent => "agent",
                 },
                 "cadence":            tier_config.cadence,
                 "input_window":       tier_config.input_window,
@@ -518,6 +519,7 @@ pub fn render_dream_prompt(
     s.push_str(match tier_config.worker {
         DreamWorkerMode::Llm => "llm",
         DreamWorkerMode::Hybrid => "hybrid",
+        DreamWorkerMode::Agent => "agent",
     });
     s.push('\n');
     s.push_str("Key: ");

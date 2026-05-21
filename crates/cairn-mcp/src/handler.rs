@@ -457,6 +457,7 @@ impl CairnMcpHandler {
             model_present,
             embedding_provider_ready,
             llm_configured: self.config.llm.provider.is_some(),
+            agent_configured: false,
             // Tie advertisement to BOTH the scheduler-runtime flag AND
             // the config opt-in. The scheduler can be alive while
             // consolidation.enabled=false (the trigger short-circuits

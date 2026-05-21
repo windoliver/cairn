@@ -30,6 +30,7 @@ fn gates(bound: bool, model_present: bool, store: Option<StoreCaps>) -> Capabili
         // cloud-provider decoupling construct gates directly (see below).
         embedding_provider_ready: model_present,
         llm_configured: false,
+        agent_configured: false,
         consolidation_runtime_ready: false,
         dream_runtime_ready: false,
         expiration_runtime_ready: false,
@@ -252,6 +253,14 @@ fn dream_capability_allows_agent_dream_without_llm_provider() {
     g.dream_runtime_ready = true;
     g.llm_configured = false;
     g.config.agent_dream = true;
+    g.agent_configured = false;
+    let caps = advertise(&g);
+    assert!(
+        !caps.contains(&Capabilities::CairnWorkflowsV1Dream),
+        "agent dream intent alone must not advertise without runtime agent provider"
+    );
+
+    g.agent_configured = true;
     let caps = advertise(&g);
     assert_eq!(
         caps.contains(&Capabilities::CairnWorkflowsV1Dream),
@@ -441,6 +450,7 @@ mod remediation_tests {
             model_present: true,
             embedding_provider_ready: true,
             llm_configured: true,
+            agent_configured: false,
             contract_phase: Phase::V0_1,
             consolidation_runtime_ready: false,
             dream_runtime_ready: false,
@@ -531,6 +541,7 @@ mod prop_tests {
                     model_present: model,
                     embedding_provider_ready: embed_ready,
                     llm_configured: llm,
+                    agent_configured: false,
                     consolidation_runtime_ready: false,
                     dream_runtime_ready: false,
                     expiration_runtime_ready: false,
@@ -609,6 +620,7 @@ fn openai_provider_without_key_drops_semantic_and_hybrid() {
         // Cloud provider not ready (feature flag off or API key missing)
         embedding_provider_ready: false,
         llm_configured: false,
+        agent_configured: false,
         consolidation_runtime_ready: false,
         dream_runtime_ready: false,
         expiration_runtime_ready: false,
