@@ -614,11 +614,19 @@ pub fn map_opencode_archive(opts: &OpenCodeImportOptions) -> Result<KoiImportRep
     {
         let path = entry.path();
         let relative = path.strip_prefix(&opts.source).unwrap_or(path);
+        let is_instruction = is_opencode_instruction_file(path);
+        let is_json = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext == "json");
+        if !is_instruction && !is_json {
+            continue;
+        }
         let raw = fs::read_to_string(path).map_err(|source| ImportError::Io {
             path: path.to_path_buf(),
             source,
         })?;
-        let mapped = if is_opencode_instruction_file(path) {
+        let mapped = if is_instruction {
             let kind = match path.file_name().and_then(|name| name.to_str()) {
                 Some("AGENTS.md") => MemoryKind::Project,
                 Some("CLAUDE.md" | "CONTEXT.md") => MemoryKind::Rule,
@@ -640,14 +648,8 @@ pub fn map_opencode_archive(opts: &OpenCodeImportOptions) -> Result<KoiImportRep
                 None,
                 None,
             )?]
-        } else if path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .is_some_and(|ext| ext == "json")
-        {
-            map_opencode_json(path, relative, &raw)?
         } else {
-            continue;
+            map_opencode_json(path, relative, &raw)?
         };
 
         for mapped_file in mapped {
@@ -1261,8 +1263,8 @@ fn map_opencode_json(
         )?);
     }
     let file_findings = findings_from_file(Some(&json), relative, &[]);
-    for mapped_file in &mut mapped {
-        mapped_file.findings.extend(file_findings.clone());
+    if let Some(first_mapped_file) = mapped.first_mut() {
+        first_mapped_file.findings.extend(file_findings);
     }
     Ok(mapped)
 }
@@ -1898,7 +1900,11 @@ fn is_supported_manifest_field(field: &str) -> bool {
             | "kind"
             | "tags"
             | "scope"
+            | "summary"
+            | "compaction_summary"
+            | "parts"
             | "created_at"
+            | "updated_at"
             | "session"
             | "session_id"
             | "skill"
@@ -2410,6 +2416,8 @@ mod tests {
             "# Rules\n\nNever write directly to the memory store during migration.",
         )
         .expect("write claude");
+        fs::write(archive.path().join("screenshot.bin"), [0, 159, 146, 150])
+            .expect("write ignored binary");
         fs::create_dir_all(archive.path().join("sessions")).expect("sessions dir");
         fs::write(
             archive.path().join("sessions").join("session.json"),
@@ -2494,6 +2502,23 @@ mod tests {
                     && finding.field == "api_token"
             }),
             "privacy fields should be review findings: {:?}",
+            report.findings
+        );
+        assert_eq!(
+            report
+                .findings
+                .iter()
+                .filter(|finding| finding.field == "api_token")
+                .count(),
+            1,
+            "file-level findings should not be duplicated for every mapped session record"
+        );
+        assert!(
+            report
+                .findings
+                .iter()
+                .all(|finding| finding.field != "summary" && finding.field != "parts"),
+            "OpenCode summary and parts are handled fields, not unsupported findings: {:?}",
             report.findings
         );
         assert!(
