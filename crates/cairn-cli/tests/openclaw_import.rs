@@ -1,4 +1,4 @@
-//! Consumer acceptance coverage for the OpenClaw migration bridge.
+//! Consumer acceptance coverage for the `OpenClaw` migration bridge.
 
 use std::path::Path;
 use std::process::{Command, Output};
@@ -18,6 +18,16 @@ fn bootstrap_vault(vault: &Path) {
         force: false,
     })
     .expect("bootstrap vault");
+}
+
+fn set_vault_name(vault: &Path, name: &str) {
+    let config_path = vault.join(".cairn/config.yaml");
+    let config = std::fs::read_to_string(&config_path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", config_path.display()));
+    let updated = config.replacen("name: my-vault", &format!("name: {name}"), 1);
+    assert_ne!(updated, config, "default vault name should be present");
+    std::fs::write(&config_path, updated)
+        .unwrap_or_else(|e| panic!("write {}: {e}", config_path.display()));
 }
 
 fn run_in_vault(vault: &Path, args: &[&str]) -> Output {
@@ -169,6 +179,7 @@ fn openclaw_import_plan_applies_to_search_retrieve_lint_and_forget() {
 fn openclaw_import_json_emits_manifest_and_kind_hints() {
     let vault = tempfile::tempdir().expect("temp vault");
     bootstrap_vault(vault.path());
+    set_vault_name(vault.path(), "openclaw-vault");
     let archive = tempfile::tempdir().expect("openclaw archive");
     let memory_dir = archive.path().join("memory");
     std::fs::create_dir_all(&memory_dir).expect("memory dir");
@@ -226,5 +237,15 @@ fn openclaw_import_json_emits_manifest_and_kind_hints() {
     assert_eq!(
         import["migration_report"]["unsupported_fields"], 0,
         "markdown-only OpenClaw fixtures should not report unsupported fields: {import}"
+    );
+
+    let (_operation_id, pending) = single_pending_plan(vault.path());
+    assert!(
+        pending.plan.mutations.iter().all(|mutation| matches!(
+            mutation,
+            PlannedMutation::Upsert { record, .. }
+                if record.scope.workspace.as_deref() == Some("openclaw-vault")
+        )),
+        "OpenClaw imports without explicit scope should use the configured vault workspace: {pending:?}"
     );
 }

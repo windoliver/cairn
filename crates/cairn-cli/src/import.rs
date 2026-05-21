@@ -121,41 +121,8 @@ pub fn run(sub: &clap::ArgMatches, vault_root: &Path) -> std::process::ExitCode 
         Ok(default_workspace) => default_workspace,
         Err(code) => return code,
     };
-    let report = match system.as_str() {
-        "koi-v1" => map_archive(
-            ImportSystem::KoiV1,
-            &KoiImportOptions {
-                source: archive.clone(),
-                batch_size,
-                mode: FlushMode::HumanReview,
-            },
-            &default_workspace,
-        ),
-        "openclaw" => map_archive(
-            ImportSystem::OpenClaw,
-            &KoiImportOptions {
-                source: archive.clone(),
-                batch_size,
-                mode: FlushMode::HumanReview,
-            },
-            &default_workspace,
-        ),
-        "rowboat" => map_rowboat_archive(&RowboatImportOptions {
-            source: archive.clone(),
-            batch_size,
-            mode: FlushMode::HumanReview,
-        }),
-        "opencode" => map_opencode_archive(&OpenCodeImportOptions {
-            source: archive.clone(),
-            batch_size,
-            mode: FlushMode::HumanReview,
-        }),
-        "hermes-agent" => map_hermes_agent_archive(&KoiImportOptions {
-            source: archive.clone(),
-            batch_size,
-            mode: FlushMode::HumanReview,
-        }),
-        _ => return usage_error(json, "from", "unsupported import source"),
+    let Some(report) = create_import_report(system, archive, batch_size, &default_workspace) else {
+        return usage_error(json, "from", "unsupported import system");
     };
     match report.and_then(|report| {
         let migration_report = MigrationReportSummary::from_report(&report);
@@ -220,6 +187,51 @@ pub fn run(sub: &clap::ArgMatches, vault_root: &Path) -> std::process::ExitCode 
             std::process::ExitCode::from(1)
         }
     }
+}
+
+fn create_import_report(
+    system: &str,
+    archive: &Path,
+    batch_size: usize,
+    default_workspace: &str,
+) -> Option<Result<KoiImportReport, ImportError>> {
+    let source = archive.to_path_buf();
+    Some(match system {
+        "koi-v1" => map_archive(
+            ImportSystem::KoiV1,
+            &KoiImportOptions {
+                source,
+                batch_size,
+                mode: FlushMode::HumanReview,
+            },
+            default_workspace,
+        ),
+        "openclaw" => map_archive(
+            ImportSystem::OpenClaw,
+            &KoiImportOptions {
+                source,
+                batch_size,
+                mode: FlushMode::HumanReview,
+            },
+            default_workspace,
+        ),
+        "rowboat" => map_rowboat_archive(&RowboatImportOptions {
+            source,
+            batch_size,
+            mode: FlushMode::HumanReview,
+        }),
+        "opencode" => map_opencode_archive(&OpenCodeImportOptions {
+            source,
+            batch_size,
+            mode: FlushMode::HumanReview,
+        }),
+        "hermes-agent" => map_hermes_agent_archive(&KoiImportOptions {
+            source,
+            batch_size,
+            mode: FlushMode::HumanReview,
+        }),
+        _ => return None,
+    })
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -1249,11 +1261,7 @@ fn findings_from_rowboat_json_object(
 }
 
 fn is_importable(system: ImportSystem, path: &Path, root: &Path) -> bool {
-    let importable_extension = matches!(
-        path.extension().and_then(|ext| ext.to_str()),
-        Some("json" | "md" | "txt")
-    );
-    if !importable_extension {
+    if !has_importable_extension(path) {
         return false;
     }
     if system == ImportSystem::KoiV1 {
@@ -1268,6 +1276,13 @@ fn is_importable(system: ImportSystem, path: &Path, root: &Path) -> bool {
         (components.next(), components.next()),
         (Some("MEMORY.md" | "SOUL.md"), None)
             | (Some("memory" | "sessions" | "transcripts"), Some(_))
+    )
+}
+
+fn has_importable_extension(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|ext| ext.to_str()),
+        Some("json" | "md" | "txt")
     )
 }
 
@@ -1961,7 +1976,7 @@ pub fn map_hermes_agent_archive(opts: &KoiImportOptions) -> Result<KoiImportRepo
             .filter(|entry| entry.file_type().is_file())
         {
             let path = entry.path();
-            if !is_importable(path) {
+            if !has_importable_extension(path) {
                 continue;
             }
             let raw = fs::read_to_string(path).map_err(|source| ImportError::Io {
@@ -2610,8 +2625,8 @@ mod tests {
     use cairn_core::domain::{FlushMode, MemoryClass, MemoryKind, PlannedMutation};
 
     use super::{
-        ExternalImportFindingKind, ExternalImportItemKind, KoiImportOptions, map_koi_v1_archive,
-        write_review_plans,
+        ExternalImportFindingKind, ExternalImportItemKind, ImportSystem, KoiImportOptions,
+        map_archive, map_koi_v1_archive, write_review_plans,
     };
 
     #[test]
@@ -2693,6 +2708,33 @@ mod tests {
                     && ambiguity.fallback == "extra_frontmatter.koi_v1_scope_project"),
             "project scope fallback should be reported for review: {:?}",
             report.ambiguities
+        );
+    }
+
+    #[test]
+    fn koi_v1_import_uses_configured_default_workspace_when_scope_omits_it() {
+        let archive = tempfile::tempdir().expect("archive");
+        fs::write(
+            archive.path().join("memory.json"),
+            r#"{"text":"Scoped by vault config.","kind":"reference"}"#,
+        )
+        .expect("write fixture");
+
+        let report = map_archive(
+            ImportSystem::KoiV1,
+            &KoiImportOptions {
+                source: archive.path().to_path_buf(),
+                batch_size: 64,
+                mode: FlushMode::HumanReview,
+            },
+            "research-vault",
+        )
+        .expect("map archive");
+
+        assert_eq!(report.records.len(), 1);
+        assert_eq!(
+            report.records[0].scope.workspace.as_deref(),
+            Some("research-vault")
         );
     }
 
