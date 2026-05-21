@@ -269,7 +269,23 @@ fn rollup_gate_status(gates: &[SreGateResult]) -> SreStatus {
     if gates.is_empty() {
         return SreStatus::Unknown;
     }
-    rollup_status(gates.iter().map(|gate| gate.status))
+    let mut saw_warning = false;
+    let mut saw_unknown = false;
+    for gate in gates {
+        match gate.status {
+            SreStatus::Fail => return SreStatus::Fail,
+            SreStatus::Warning => saw_warning = true,
+            SreStatus::Unknown => saw_unknown = true,
+            SreStatus::Ok => {}
+        }
+    }
+    if saw_warning {
+        SreStatus::Warning
+    } else if saw_unknown {
+        SreStatus::Unknown
+    } else {
+        SreStatus::Ok
+    }
 }
 
 /// Render a compact operator-readable SRE report.

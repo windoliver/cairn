@@ -180,6 +180,45 @@ fn admin_sre_report_rejects_malformed_bench_sre_json() {
 }
 
 #[test]
+fn admin_sre_report_preserves_unknown_gate_rollup() {
+    let dir = bootstrap_vault();
+    let bench = tempfile::tempdir().expect("bench dir");
+    std::fs::write(
+        bench.path().join("sre.json"),
+        r#"{"checks":[{"name":"future_gate","status":"unknown","measured":1,"threshold":2,"unit":"ms","detail":"fixture"}]}"#,
+    )
+    .expect("write bench sre report");
+
+    let output = cairn()
+        .current_dir(dir.path())
+        .args([
+            "admin",
+            "sre",
+            "report",
+            "--json",
+            "--bench-report-dir",
+            bench.path().to_str().expect("utf8"),
+        ])
+        .output()
+        .expect("run sre report");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("\"name\":\"future_gate\""),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"gates\":{\"status\":\"unknown\""),
+        "stdout: {stdout}"
+    );
+}
+
+#[test]
 fn admin_sre_report_scrubs_imported_gate_labels() {
     let dir = bootstrap_vault();
     let bench = tempfile::tempdir().expect("bench dir");
