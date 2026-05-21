@@ -10,8 +10,10 @@ use cairn_core::domain::{
     SreWorkflowSummary, classify_threshold,
 };
 use clap::ArgMatches;
+use rusqlite::OpenFlags;
 use serde::Deserialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::{config, metrics};
 
@@ -67,6 +69,7 @@ fn build_report_with_bench(
 ) -> Result<SreReport, String> {
     let metrics = read_metric_events(vault_root);
     let events = metrics.events;
+    let captured_at_ms = metrics::now_ms();
     let rehydration_latencies: Vec<u64> = events
         .iter()
         .filter_map(|event| match event {
@@ -77,7 +80,7 @@ fn build_report_with_bench(
         })
         .collect();
     let search_modes = summarize_search(&events, config, vault_root);
-    let workflow = summarize_workflow(&events);
+    let workflow = summarize_workflow(&events, vault_root, captured_at_ms);
     let projection = summarize_projection(&events);
     let p95 = percentile_u64(&rehydration_latencies, 0.95);
     let rehydration_status = classify_threshold(p95, SLO_COLD_REHYDRATE_MS);
@@ -85,9 +88,9 @@ fn build_report_with_bench(
     add_metric_parse_gate(&mut gates, metrics.parse_error_count);
     Ok(SreReport {
         schema_version: 1,
-        captured_at_ms: metrics::now_ms(),
+        captured_at_ms,
         vault: SreVaultSummary {
-            id_hash: "sha256:local-vault".into(),
+            id_hash: vault_id_hash(vault_root),
             name: "local_vault".into(),
         },
         workflow,
@@ -168,11 +171,26 @@ fn is_known_metric_event(event_name: &str) -> bool {
     )
 }
 
+fn vault_id_hash(vault_root: &Path) -> String {
+    let raw = std::fs::read_to_string(vault_root.join(".cairn/vault.id"))
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "unknown-vault".to_owned());
+    let digest = Sha256::digest(raw.as_bytes());
+    let hex = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("sha256:{hex}")
+}
+
 const WORKFLOW_BACKLOG_THRESHOLD_MS: i64 = 300_000;
 const CLI_SEARCH_DEDUPE_LOOKBACK_MS: i64 = 1_000;
 
 #[derive(Default)]
 struct WorkflowKindAggregate {
+    queued: u64,
     leased: u64,
     done_recent: u64,
     failed_recent: u64,
@@ -181,40 +199,56 @@ struct WorkflowKindAggregate {
     dead_letters: usize,
 }
 
-fn summarize_workflow(events: &[MetricEvent]) -> SreWorkflowSummary {
+struct ActiveWorkflowJob {
+    kind: String,
+    queue_lag_ms: Option<i64>,
+}
+
+fn summarize_workflow(
+    events: &[MetricEvent],
+    vault_root: &Path,
+    captured_at_ms: i64,
+) -> SreWorkflowSummary {
+    let recent = summarize_workflow_metrics(events, false);
+    if let Some(mut current) = read_workflow_db_state(vault_root, captured_at_ms) {
+        merge_workflow_recent(&mut current, recent);
+        return workflow_summary_from_kinds(current, captured_at_ms);
+    }
+
+    workflow_summary_from_kinds(summarize_workflow_metrics(events, true), captured_at_ms)
+}
+
+fn summarize_workflow_metrics(
+    events: &[MetricEvent],
+    include_active_jobs: bool,
+) -> BTreeMap<String, WorkflowKindAggregate> {
     let mut kinds: BTreeMap<String, WorkflowKindAggregate> = BTreeMap::new();
-    let mut saw_workflow_event = false;
-    let mut oldest_queued_age_ms: Option<i64> = None;
-    let mut latest_ts_ms: Option<i64> = None;
+    let mut active_jobs: BTreeMap<String, ActiveWorkflowJob> = BTreeMap::new();
 
     for event in events {
         match event {
             MetricEvent::WorkflowJobStarted {
-                ts_ms,
+                job_id,
                 kind,
                 queue_lag_ms,
                 ..
             } => {
-                saw_workflow_event = true;
-                latest_ts_ms = Some(latest_ts_ms.map_or(*ts_ms, |latest| latest.max(*ts_ms)));
                 let kind = workflow_kind_label(kind);
-                let entry = kinds.entry(kind).or_default();
-                entry.leased = entry.leased.saturating_add(1);
-                if *queue_lag_ms >= 0 {
-                    entry.oldest_queued_age_ms = Some(
-                        entry
-                            .oldest_queued_age_ms
-                            .map_or(*queue_lag_ms, |current| current.max(*queue_lag_ms)),
-                    );
-                    oldest_queued_age_ms = Some(
-                        oldest_queued_age_ms
-                            .map_or(*queue_lag_ms, |current| current.max(*queue_lag_ms)),
-                    );
-                }
+                kinds.entry(kind.clone()).or_default();
+                active_jobs.insert(
+                    job_id.clone(),
+                    ActiveWorkflowJob {
+                        kind,
+                        queue_lag_ms: (*queue_lag_ms >= 0).then_some(*queue_lag_ms),
+                    },
+                );
             }
-            MetricEvent::WorkflowJobCompleted { ts_ms, kind, .. } => {
-                saw_workflow_event = true;
-                latest_ts_ms = Some(latest_ts_ms.map_or(*ts_ms, |latest| latest.max(*ts_ms)));
+            MetricEvent::WorkflowJobCompleted {
+                ts_ms,
+                job_id,
+                kind,
+                ..
+            } => {
                 let kind = workflow_kind_label(kind);
                 let entry = kinds.entry(kind).or_default();
                 entry.done_recent = entry.done_recent.saturating_add(1);
@@ -223,27 +257,123 @@ fn summarize_workflow(events: &[MetricEvent]) -> SreWorkflowSummary {
                         .last_success_ts_ms
                         .map_or(*ts_ms, |current| current.max(*ts_ms)),
                 );
+                active_jobs.remove(job_id);
             }
             MetricEvent::WorkflowJobFailed {
-                ts_ms,
+                job_id,
                 kind,
                 disposition,
                 ..
             } => {
-                saw_workflow_event = true;
-                latest_ts_ms = Some(latest_ts_ms.map_or(*ts_ms, |latest| latest.max(*ts_ms)));
                 let kind = workflow_kind_label(kind);
                 let entry = kinds.entry(kind).or_default();
                 entry.failed_recent = entry.failed_recent.saturating_add(1);
                 if disposition == "permanent" {
                     entry.dead_letters = entry.dead_letters.saturating_add(1);
                 }
+                active_jobs.remove(job_id);
             }
             _ => {}
         }
     }
 
-    if !saw_workflow_event {
+    if include_active_jobs {
+        for active in active_jobs.into_values() {
+            let entry = kinds.entry(active.kind).or_default();
+            entry.leased = entry.leased.saturating_add(1);
+            if let Some(queue_lag_ms) = active.queue_lag_ms {
+                entry.oldest_queued_age_ms = Some(
+                    entry
+                        .oldest_queued_age_ms
+                        .map_or(queue_lag_ms, |current| current.max(queue_lag_ms)),
+                );
+            }
+        }
+    }
+
+    kinds
+}
+
+fn read_workflow_db_state(
+    vault_root: &Path,
+    captured_at_ms: i64,
+) -> Option<BTreeMap<String, WorkflowKindAggregate>> {
+    let path = vault_root.join(".cairn/cairn.db");
+    if !path.exists() {
+        return None;
+    }
+    let conn = rusqlite::Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT kind, state, next_run_at, completed_at_ms, dead_letter_at_ms \
+             FROM workflow_jobs",
+        )
+        .ok()?;
+    let mut rows = stmt.query([]).ok()?;
+    let mut kinds: BTreeMap<String, WorkflowKindAggregate> = BTreeMap::new();
+    while let Some(row) = rows.next().ok()? {
+        let kind = workflow_kind_label(&row.get::<_, String>(0).ok()?);
+        let state: String = row.get(1).ok()?;
+        let next_run_at: i64 = row.get(2).ok()?;
+        let completed_at_ms: Option<i64> = row.get(3).ok()?;
+        let dead_letter_at_ms: Option<i64> = row.get(4).ok()?;
+        let entry = kinds.entry(kind).or_default();
+        match state.as_str() {
+            "queued" => {
+                entry.queued = entry.queued.saturating_add(1);
+                let age_ms = captured_at_ms.saturating_sub(next_run_at).max(0);
+                entry.oldest_queued_age_ms = Some(
+                    entry
+                        .oldest_queued_age_ms
+                        .map_or(age_ms, |current| current.max(age_ms)),
+                );
+            }
+            "leased" => {
+                entry.leased = entry.leased.saturating_add(1);
+            }
+            _ => {}
+        }
+        if let Some(completed_at_ms) = completed_at_ms {
+            entry.last_success_ts_ms = Some(
+                entry
+                    .last_success_ts_ms
+                    .map_or(completed_at_ms, |current| current.max(completed_at_ms)),
+            );
+        }
+        if dead_letter_at_ms.is_some() {
+            entry.dead_letters = entry.dead_letters.saturating_add(1);
+        }
+    }
+    Some(kinds)
+}
+
+fn merge_workflow_recent(
+    current: &mut BTreeMap<String, WorkflowKindAggregate>,
+    recent: BTreeMap<String, WorkflowKindAggregate>,
+) {
+    for (kind, recent) in recent {
+        let entry = current.entry(kind).or_default();
+        entry.done_recent = entry.done_recent.saturating_add(recent.done_recent);
+        entry.failed_recent = entry.failed_recent.saturating_add(recent.failed_recent);
+        if let Some(success_ts) = recent.last_success_ts_ms {
+            entry.last_success_ts_ms = Some(
+                entry
+                    .last_success_ts_ms
+                    .map_or(success_ts, |current| current.max(success_ts)),
+            );
+        }
+    }
+}
+
+fn workflow_summary_from_kinds(
+    kinds: BTreeMap<String, WorkflowKindAggregate>,
+    captured_at_ms: i64,
+) -> SreWorkflowSummary {
+    if kinds.is_empty() {
         return SreWorkflowSummary {
             status: SreStatus::Unknown,
             oldest_queued_age_ms: None,
@@ -253,7 +383,10 @@ fn summarize_workflow(events: &[MetricEvent]) -> SreWorkflowSummary {
         };
     }
 
-    let latest_ts_ms = latest_ts_ms.unwrap_or(0);
+    let oldest_queued_age_ms = kinds
+        .values()
+        .filter_map(|aggregate| aggregate.oldest_queued_age_ms)
+        .max();
     let mut dead_letter_count = 0_usize;
     let kinds: Vec<SreWorkflowKindSummary> = kinds
         .into_iter()
@@ -271,14 +404,14 @@ fn summarize_workflow(events: &[MetricEvent]) -> SreWorkflowSummary {
             };
             SreWorkflowKindSummary {
                 kind,
-                queued: 0,
+                queued: aggregate.queued,
                 leased: aggregate.leased,
                 done_recent: aggregate.done_recent,
                 failed_recent: aggregate.failed_recent,
                 oldest_queued_age_ms: aggregate.oldest_queued_age_ms,
                 last_success_age_ms: aggregate
                     .last_success_ts_ms
-                    .map(|success_ts| latest_ts_ms.saturating_sub(success_ts).max(0)),
+                    .map(|success_ts| captured_at_ms.saturating_sub(success_ts).max(0)),
                 backlog_threshold_ms: WORKFLOW_BACKLOG_THRESHOLD_MS,
                 status,
             }

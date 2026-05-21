@@ -42,6 +42,49 @@ fn json_stdout(output: &std::process::Output) -> serde_json::Value {
     serde_json::from_slice(&output.stdout).expect("json stdout")
 }
 
+fn insert_workflow_row(
+    conn: &rusqlite::Connection,
+    job_id: &str,
+    kind: &str,
+    state: &str,
+    next_run_at: i64,
+    extras: &[(&str, &dyn rusqlite::ToSql)],
+) {
+    let payload: Vec<u8> = Vec::new();
+    let mut row: Vec<(&str, &dyn rusqlite::ToSql)> = vec![
+        ("job_id", &job_id),
+        ("kind", &kind),
+        ("payload", &payload),
+        ("state", &state),
+        ("attempts", &0_i64),
+        ("delivery_count", &0_i64),
+        ("max_attempts", &3_i64),
+        ("base_backoff_ms", &1_i64),
+        ("backoff_multiplier", &2_i64),
+        ("max_backoff_ms", &60_000_i64),
+        ("next_run_at", &next_run_at),
+        ("enqueued_at", &0_i64),
+        ("updated_at", &0_i64),
+    ];
+    for (name, value) in extras {
+        if let Some(slot) = row.iter_mut().find(|(column, _)| column == name) {
+            slot.1 = *value;
+        } else {
+            row.push((name, *value));
+        }
+    }
+    let columns: Vec<&str> = row.iter().map(|(name, _)| *name).collect();
+    let placeholders: Vec<String> = (1..=columns.len()).map(|idx| format!("?{idx}")).collect();
+    let sql = format!(
+        "INSERT INTO workflow_jobs ({}) VALUES ({})",
+        columns.join(", "),
+        placeholders.join(", ")
+    );
+    let params: Vec<&dyn rusqlite::ToSql> = row.iter().map(|(_, value)| *value).collect();
+    conn.execute(&sql, rusqlite::params_from_iter(params))
+        .expect("insert workflow row");
+}
+
 #[test]
 fn admin_sre_report_json_is_body_free() {
     let dir = bootstrap_vault();
@@ -71,6 +114,73 @@ fn admin_sre_report_json_is_body_free() {
     assert!(stdout.contains("\"sample_count\":1"));
     assert!(stdout.contains("\"mode\":\"semantic\""));
     assert_forbidden_fragments_absent(&stdout);
+}
+
+#[test]
+fn admin_sre_report_hashes_vault_ids_without_leaking_raw_identity() {
+    let first = bootstrap_vault();
+    let second = bootstrap_vault();
+    let first_id = std::fs::read_to_string(first.path().join(".cairn/vault.id"))
+        .expect("first vault id")
+        .trim()
+        .to_owned();
+    let second_id = std::fs::read_to_string(second.path().join(".cairn/vault.id"))
+        .expect("second vault id")
+        .trim()
+        .to_owned();
+    assert_ne!(first_id, second_id, "bootstrap should create distinct ids");
+
+    let run_report = |dir: &tempfile::TempDir| {
+        cairn()
+            .current_dir(dir.path())
+            .args(["admin", "sre", "report", "--json"])
+            .output()
+            .expect("run sre report")
+    };
+    let first_output = run_report(&first);
+    let second_output = run_report(&second);
+    assert!(
+        first_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&first_output.stderr)
+    );
+    assert!(
+        second_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&second_output.stderr)
+    );
+
+    let first_stdout = String::from_utf8_lossy(&first_output.stdout);
+    let second_stdout = String::from_utf8_lossy(&second_output.stdout);
+    let first_json = json_stdout(&first_output);
+    let second_json = json_stdout(&second_output);
+    let first_hash = first_json["vault"]["id_hash"].as_str().expect("first hash");
+    let second_hash = second_json["vault"]["id_hash"]
+        .as_str()
+        .expect("second hash");
+    assert_ne!(first_hash, second_hash);
+    for hash in [first_hash, second_hash] {
+        assert!(hash.starts_with("sha256:"), "hash: {hash}");
+        assert_eq!(hash.len(), "sha256:".len() + 64, "hash: {hash}");
+    }
+    assert_eq!(first_json["vault"]["name"], "local_vault");
+    assert_eq!(second_json["vault"]["name"], "local_vault");
+    for (stdout, raw_id, dir) in [
+        (&first_stdout, first_id.as_str(), first.path()),
+        (&second_stdout, second_id.as_str(), second.path()),
+    ] {
+        assert!(!stdout.contains(raw_id), "stdout leaked vault id: {stdout}");
+        assert!(
+            !stdout.contains(dir.to_string_lossy().as_ref()),
+            "stdout leaked vault path: {stdout}"
+        );
+        if let Some(name) = dir.file_name().and_then(|name| name.to_str()) {
+            assert!(
+                !stdout.contains(name),
+                "stdout leaked vault directory name: {stdout}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -386,9 +496,9 @@ fn admin_sre_report_summarizes_workflow_metrics_safely() {
         .iter()
         .find(|kind| kind["kind"] == "dream.light")
         .expect("dream.light kind");
-    assert_eq!(dream["leased"], 1);
+    assert_eq!(dream["leased"], 0);
     assert_eq!(dream["done_recent"], 1);
-    assert_eq!(dream["oldest_queued_age_ms"], 120);
+    assert!(dream["oldest_queued_age_ms"].is_null());
     let expire = kinds
         .iter()
         .find(|kind| kind["kind"] == "expire.tier")
@@ -402,6 +512,145 @@ fn admin_sre_report_summarizes_workflow_metrics_safely() {
         .expect("redacted workflow kind");
     assert_eq!(redacted["failed_recent"], 1);
     assert_eq!(redacted["status"], "warning");
+    assert_forbidden_fragments_absent(&stdout);
+}
+
+#[test]
+fn admin_sre_report_prefers_db_workflow_current_state() {
+    let dir = bootstrap_vault();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time")
+        .as_millis() as i64;
+    let conn =
+        rusqlite::Connection::open(dir.path().join(".cairn/cairn.db")).expect("open cairn db");
+    conn.execute_batch(
+        "CREATE TABLE workflow_jobs (
+            job_id TEXT NOT NULL PRIMARY KEY,
+            kind TEXT NOT NULL,
+            payload BLOB NOT NULL,
+            state TEXT NOT NULL,
+            attempts INTEGER NOT NULL,
+            delivery_count INTEGER NOT NULL,
+            max_attempts INTEGER NOT NULL,
+            base_backoff_ms INTEGER NOT NULL,
+            backoff_multiplier INTEGER NOT NULL,
+            max_backoff_ms INTEGER NOT NULL,
+            next_run_at INTEGER NOT NULL,
+            enqueued_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            lease_owner TEXT,
+            lease_nonce TEXT,
+            lease_started INTEGER,
+            lease_expires_at INTEGER,
+            failure_class TEXT,
+            dead_letter_at_ms INTEGER,
+            completed_at_ms INTEGER,
+            last_error TEXT
+        );",
+    )
+    .expect("create workflow_jobs table");
+    insert_workflow_row(
+        &conn,
+        "queued-tier",
+        "expire.tier",
+        "queued",
+        now_ms - 742_000,
+        &[],
+    );
+    insert_workflow_row(
+        &conn,
+        "leased-dream",
+        "dream.light",
+        "leased",
+        now_ms,
+        &[
+            ("lease_owner", &"worker"),
+            ("lease_nonce", &"nonce"),
+            ("lease_started", &1_i64),
+            ("lease_expires_at", &(now_ms + 60_000)),
+        ],
+    );
+    insert_workflow_row(
+        &conn,
+        "done-dream",
+        "dream.light",
+        "done",
+        now_ms,
+        &[("completed_at_ms", &(now_ms - 2_500))],
+    );
+    insert_workflow_row(
+        &conn,
+        "dead-tier",
+        "expire.tier",
+        "failed",
+        now_ms,
+        &[
+            ("attempts", &3_i64),
+            ("delivery_count", &3_i64),
+            ("failure_class", &"provider"),
+            ("dead_letter_at_ms", &(now_ms - 1_000)),
+            (
+                "last_error",
+                &"SECRET_PRIVATE_TOKEN /Users/alice private body query text",
+            ),
+        ],
+    );
+    drop(conn);
+    let metrics = dir.path().join(".cairn/metrics.jsonl");
+    std::fs::write(
+        &metrics,
+        r#"{"event":"workflow_job_started","ts_ms":1000,"job_id":"metric-job","kind":"dream.light","attempts":1,"queue_lag_ms":999999,"dedupe_key":null}
+{"event":"workflow_job_completed","ts_ms":2000,"job_id":"metric-job","kind":"dream.light","attempts":1,"duration_ms":40}
+"#,
+    )
+    .expect("write metrics");
+
+    let output = cairn()
+        .current_dir(dir.path())
+        .args(["admin", "sre", "report", "--json"])
+        .output()
+        .expect("run sre report");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json = json_stdout(&output);
+    assert_eq!(json["workflow"]["status"], "warning");
+    assert_eq!(json["workflow"]["dead_letter_count"], 1);
+    assert!(
+        json["workflow"]["oldest_queued_age_ms"]
+            .as_i64()
+            .expect("oldest queued age")
+            >= 742_000
+    );
+    let kinds = json["workflow"]["kinds"]
+        .as_array()
+        .expect("workflow kinds");
+    let dream = kinds
+        .iter()
+        .find(|kind| kind["kind"] == "dream.light")
+        .expect("dream.light kind");
+    assert_eq!(dream["leased"], 1);
+    assert_eq!(dream["queued"], 0);
+    assert_eq!(dream["done_recent"], 1);
+    assert!(
+        dream["last_success_age_ms"]
+            .as_i64()
+            .expect("last success age")
+            >= 2_500
+    );
+    let expire = kinds
+        .iter()
+        .find(|kind| kind["kind"] == "expire.tier")
+        .expect("expire.tier kind");
+    assert_eq!(expire["queued"], 1);
+    assert_eq!(expire["leased"], 0);
+    assert_eq!(expire["failed_recent"], 0);
+    assert_eq!(expire["status"], "warning");
     assert_forbidden_fragments_absent(&stdout);
 }
 
