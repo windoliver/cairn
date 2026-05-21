@@ -44,6 +44,7 @@ pub mod scope;
 pub mod sensor_policy;
 pub mod session;
 pub mod session_tree;
+pub mod sharing;
 pub mod source_id;
 pub mod source_ref;
 pub mod target_id;
@@ -94,6 +95,7 @@ pub use session_tree::{
     BranchKind, MergeStrategy, SessionMerge, SessionParent, SessionTree, SessionTreeError,
     SessionTreeNode,
 };
+pub use sharing::{SharingDecisionKind, SharingPolicyAction, SharingPolicySubject};
 pub use source_id::SourceId;
 pub use source_ref::{SourceRef, validate_source_refs};
 pub use target_id::TargetId;
