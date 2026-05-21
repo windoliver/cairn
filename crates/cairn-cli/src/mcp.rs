@@ -10,7 +10,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use cairn_agent_core::{CairnAgentProvider, CairnCliToolExecutor};
-use cairn_core::config::CairnConfig;
+use cairn_core::config::{AgentProviderKind, CairnConfig};
 use cairn_core::contract::{AgentProvider, LLMProvider};
 use cairn_core::domain::ScopeTuple;
 use cairn_core::mcp_auth::{ConfigBackedScope, McpSessionScope};
@@ -71,7 +71,10 @@ fn workflow_agent_provider(
     config: &CairnConfig,
     llm: Option<Arc<dyn LLMProvider>>,
 ) -> Option<Arc<dyn AgentProvider>> {
-    config.agent_provider.kind.as_ref()?;
+    match config.agent_provider.kind.as_ref()? {
+        AgentProviderKind::CairnCore => {}
+        _ => return None,
+    }
     let llm = llm?;
     let tools = Arc::new(CairnCliToolExecutor::new(
         config.agent_provider.command.clone(),
@@ -389,7 +392,7 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cairn_core::config::{AgentProviderKind, CairnConfig, LlmProvider};
+    use cairn_core::config::{CairnConfig, LlmProvider};
     use cairn_core::domain::ScopeTuple;
 
     fn principal() -> ScopeTuple {
@@ -453,6 +456,16 @@ mod tests {
         cfg.agent_provider.kind = Some(AgentProviderKind::CairnCore);
 
         assert!(workflow_agent_provider(&cfg, None).is_none());
+    }
+
+    #[test]
+    fn workflow_agent_provider_is_absent_for_custom_provider_kind() {
+        let mut cfg = CairnConfig::default();
+        cfg.llm.provider = Some(LlmProvider::OpenaiCompatible);
+        cfg.agent_provider.kind = Some(AgentProviderKind::Custom("external-agent".to_string()));
+        let llm = workflow_llm_provider(&cfg);
+
+        assert!(workflow_agent_provider(&cfg, llm).is_none());
     }
 
     #[test]

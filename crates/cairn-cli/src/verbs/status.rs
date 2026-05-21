@@ -16,7 +16,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use anyhow::Context as _;
-use cairn_core::config::{CairnConfig, EmbeddingModelKind, ScreenBackend};
+use cairn_core::config::{AgentProviderKind, CairnConfig, EmbeddingModelKind, ScreenBackend};
 use cairn_core::domain::identity::keys::VaultId;
 use cairn_core::domain::{BudgetObservation, LocalSensorName, SensorGateReason};
 use cairn_core::generated::common::Capabilities;
@@ -608,7 +608,10 @@ fn compute_embedding_provider_ready(
 }
 
 fn agent_runtime_configured(config: &CairnConfig) -> bool {
-    config.agent_provider.kind.is_some() && config.llm.provider.is_some()
+    matches!(
+        config.agent_provider.kind,
+        Some(AgentProviderKind::CairnCore)
+    ) && config.llm.provider.is_some()
 }
 
 fn dream_runtime_ready_for_config(
@@ -1463,6 +1466,16 @@ mod tests {
         assert!(
             !caps.contains(&Capabilities::CairnWorkflowsV1Dream),
             "agent dream must fail closed without the LLM backing the bundled runtime; got {caps:?}"
+        );
+
+        config.llm.provider = Some(cairn_core::config::LlmProvider::OpenaiCompatible);
+        config.agent_provider.kind = Some(cairn_core::config::AgentProviderKind::Custom(
+            "external-agent".to_string(),
+        ));
+        let caps = compute_capabilities(Some(tmp.path()), Some(&config), true);
+        assert!(
+            !caps.contains(&Capabilities::CairnWorkflowsV1Dream),
+            "custom agent providers must fail closed until actual provider resolution exists; got {caps:?}"
         );
     }
 

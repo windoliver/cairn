@@ -1916,6 +1916,8 @@ impl CairnConfig {
         }
 
         let agent_configured = self.agent_provider.kind.is_some();
+        let bundled_agent_configured =
+            matches!(self.agent_provider.kind, Some(AgentProviderKind::CairnCore));
         let llm_configured = self.llm.provider.is_some();
         for entry in &self.pipeline.extract.chain {
             if matches!(entry.worker, ExtractorWorkerKind::Agent) {
@@ -1924,7 +1926,7 @@ impl CairnConfig {
                         field: "pipeline.extract.chain[].worker",
                     });
                 }
-                if !llm_configured {
+                if bundled_agent_configured && !llm_configured {
                     return Err(ConfigError::AgentModeWithoutLlmProvider {
                         field: "pipeline.extract.chain[].worker",
                     });
@@ -1940,7 +1942,7 @@ impl CairnConfig {
                 if !agent_configured {
                     return Err(ConfigError::AgentModeWithoutProvider { field });
                 }
-                if !llm_configured {
+                if bundled_agent_configured && !llm_configured {
                     return Err(ConfigError::AgentModeWithoutLlmProvider { field });
                 }
             }
@@ -2861,6 +2863,33 @@ mod tests {
             matches!(err, ConfigError::AgentModeWithoutLlmProvider { field }
             if field == "dream.deep_dreaming.worker")
         );
+    }
+
+    #[test]
+    fn custom_agent_provider_does_not_require_bundled_llm_provider() {
+        let mut config = CairnConfig::default();
+        config.agent_provider.kind = Some(AgentProviderKind::Custom("external-agent".to_string()));
+        config.pipeline.extract.chain.push(ExtractorEntry {
+            worker: ExtractorWorkerKind::Agent,
+            kinds: vec![],
+            trigger: None,
+            budget: ExtractBudget {
+                max_tokens: Some(2048),
+                max_wall_ms: Some(30_000),
+                max_turns: Some(4),
+            },
+        });
+        config
+            .validate()
+            .expect("custom provider config should not inherit bundled runtime LLM requirement");
+
+        config.pipeline.extract.chain.clear();
+        config.dream.enabled = true;
+        config.dream.deep_dreaming.worker = DreamWorkerMode::Agent;
+        config.dream.deep_dreaming.max_tool_calls = 1;
+        config
+            .validate()
+            .expect("custom agent dream should not inherit bundled runtime LLM requirement");
     }
 
     #[test]
