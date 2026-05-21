@@ -10,7 +10,7 @@ use cairn_core::domain::{
     SreStatus, SreWorkflowKindSummary, SreWorkflowSummary, classify_threshold,
 };
 use clap::Args;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::gates::report::GateOutcome;
 use crate::gates::thresholds::{SLO_COLD_REHYDRATE_MS, SLO_MIGRATION_BACKLOG_MS};
@@ -81,7 +81,7 @@ pub fn run(args: &SreArgs) -> anyhow::Result<GateOutcome> {
         ColdMeasurement::FixturesOnly
     } else {
         if !args.no_run {
-            run_lifecycle_criterion()?;
+            run_lifecycle_criterion(&args.criterion_dir)?;
         }
         match load_cold_rehydrate_p95(&args.criterion_dir)? {
             Some(measured_ms) => ColdMeasurement::Measured(measured_ms),
@@ -361,15 +361,62 @@ fn forbidden_fragment_count(serialized: &str) -> u32 {
 }
 
 fn load_cold_rehydrate_p95(criterion_dir: &Path) -> anyhow::Result<Option<f64>> {
-    if !criterion_dir.is_dir() {
+    let sample_path = criterion_dir
+        .join(COLD_REHYDRATE_BENCH)
+        .join("new")
+        .join("sample.json");
+    if !sample_path.exists() {
         return Ok(None);
     }
-    let measured = crate::latency::harness::parse_criterion_dir(criterion_dir)?;
-    Ok(measured.get(COLD_REHYDRATE_BENCH).copied())
+    let bytes = std::fs::read(&sample_path)
+        .with_context(|| format!("read criterion sample {}", sample_path.display()))?;
+    let sample: CriterionSample = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse criterion sample {}", sample_path.display()))?;
+    sample.p95_ms(&sample_path)
 }
 
-fn run_lifecycle_criterion() -> anyhow::Result<()> {
+#[derive(Debug, Deserialize)]
+struct CriterionSample {
+    times: Vec<f64>,
+    iters: Vec<f64>,
+}
+
+impl CriterionSample {
+    fn p95_ms(&self, sample_path: &Path) -> anyhow::Result<Option<f64>> {
+        if self.times.is_empty() {
+            return Ok(None);
+        }
+        anyhow::ensure!(
+            self.times.len() == self.iters.len(),
+            "criterion sample times/iters length mismatch in {}",
+            sample_path.display()
+        );
+        let mut per_iter_ms = Vec::with_capacity(self.times.len());
+        for (time_ns, iters) in self.times.iter().zip(&self.iters) {
+            anyhow::ensure!(
+                time_ns.is_finite() && *time_ns >= 0.0,
+                "invalid criterion sample time in {}",
+                sample_path.display()
+            );
+            anyhow::ensure!(
+                iters.is_finite() && *iters > 0.0,
+                "invalid criterion sample iteration count in {}",
+                sample_path.display()
+            );
+            per_iter_ms.push(time_ns / iters / 1_000_000.0);
+        }
+        per_iter_ms.sort_by(f64::total_cmp);
+        let idx = (per_iter_ms.len() - 1)
+            .saturating_mul(95)
+            .saturating_add(50)
+            / 100;
+        Ok(per_iter_ms.get(idx).copied())
+    }
+}
+
+fn run_lifecycle_criterion(criterion_dir: &Path) -> anyhow::Result<()> {
     let status = Command::new("cargo")
+        .env("CRITERION_HOME", criterion_dir)
         .args([
             "bench",
             "-p",

@@ -33,12 +33,31 @@ fn check<'a>(report: &'a Value, name: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("missing check `{name}` in {}", report["checks"]))
 }
 
+fn write_criterion_sample(criterion_dir: &Path, bench: &str, sample_ms: &[f64]) {
+    let sample_dir = criterion_dir.join(bench).join("new");
+    std::fs::create_dir_all(&sample_dir).expect("create criterion sample dir");
+    let times = sample_ms
+        .iter()
+        .map(|sample| sample * 1_000_000.0)
+        .collect::<Vec<_>>();
+    let iters = vec![1.0; sample_ms.len()];
+    std::fs::write(
+        sample_dir.join("sample.json"),
+        serde_json::json!({
+            "times": times,
+            "iters": iters,
+        })
+        .to_string(),
+    )
+    .expect("write sample.json");
+}
+
 fn write_criterion_estimate(criterion_dir: &Path, bench: &str, estimate_ms: f64) {
-    let estimates = criterion_dir.join(bench).join("new");
-    std::fs::create_dir_all(&estimates).expect("create criterion estimate dir");
+    let estimate_dir = criterion_dir.join(bench).join("new");
+    std::fs::create_dir_all(&estimate_dir).expect("create criterion estimate dir");
     let point_estimate_ns = estimate_ms * 1_000_000.0;
     std::fs::write(
-        estimates.join("estimates.json"),
+        estimate_dir.join("estimates.json"),
         format!(r#"{{"median":{{"point_estimate":{point_estimate_ns}}}}}"#),
     )
     .expect("write estimates.json");
@@ -126,8 +145,8 @@ fn fixtures_only_writes_importable_body_free_sre_json() {
         let detail = check.get("detail").and_then(Value::as_str);
         if check["name"] == "sre_privacy_scrub" {
             assert_eq!(detail, Some("redacted"), "unexpected detail: {check}");
-        } else if let Some(detail) = detail {
-            assert_eq!(detail, "fixture", "unexpected detail: {check}");
+        } else {
+            assert_eq!(detail, Some("fixture"), "unexpected detail: {check}");
         }
     }
 }
@@ -158,7 +177,11 @@ fn full_mode_missing_criterion_output_exits_missing_input() {
 fn full_mode_above_slo_criterion_output_fails_cold_rehydrate_gate() {
     let criterion = tempfile::tempdir().expect("criterion dir");
     let out = tempfile::tempdir().expect("out dir");
-    write_criterion_estimate(criterion.path(), "cold_rehydrate_p95", 3_500.0);
+    write_criterion_sample(
+        criterion.path(),
+        "cold_rehydrate_p95",
+        &[2_000.0, 2_500.0, 3_500.0],
+    );
 
     let output = cli()
         .args([
@@ -184,7 +207,11 @@ fn full_mode_above_slo_criterion_output_fails_cold_rehydrate_gate() {
 fn full_mode_under_slo_criterion_output_passes_cold_rehydrate_gate() {
     let criterion = tempfile::tempdir().expect("criterion dir");
     let out = tempfile::tempdir().expect("out dir");
-    write_criterion_estimate(criterion.path(), "cold_rehydrate_p95", 2_500.0);
+    write_criterion_sample(
+        criterion.path(),
+        "cold_rehydrate_p95",
+        &[1_800.0, 2_100.0, 2_500.0],
+    );
 
     let output = cli()
         .args([
@@ -209,4 +236,34 @@ fn full_mode_under_slo_criterion_output_passes_cold_rehydrate_gate() {
     assert_eq!(cold["status"], "ok");
     assert_eq!(cold["measured"], 2_500.0);
     assert_eq!(cold["threshold"], 3_000.0);
+}
+
+#[test]
+fn full_mode_uses_sample_p95_not_estimates_median() {
+    let criterion = tempfile::tempdir().expect("criterion dir");
+    let out = tempfile::tempdir().expect("out dir");
+    write_criterion_estimate(criterion.path(), "cold_rehydrate_p95", 2_000.0);
+    write_criterion_sample(
+        criterion.path(),
+        "cold_rehydrate_p95",
+        &[2_000.0, 2_100.0, 3_500.0],
+    );
+
+    let output = cli()
+        .args([
+            "sre",
+            "--no-run",
+            "--criterion-dir",
+            criterion.path().to_str().expect("utf8"),
+            "--out-dir",
+            out.path().to_str().expect("utf8"),
+        ])
+        .output()
+        .expect("run sre gate");
+
+    assert_exit(output.status, 1);
+    let report = read_report(out.path());
+    let cold = check(&report, "cold_rehydrate_p95");
+    assert_eq!(cold["status"], "fail");
+    assert_eq!(cold["measured"], 3_500.0);
 }
