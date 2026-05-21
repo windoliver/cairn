@@ -28,6 +28,7 @@ Commands:
   import         Create reviewed Cairn ingest plans from a legacy memory archive
   bootstrap      Initialize a vault directory tree with the §3 layout
   doctor         Reference-consumer diagnostics
+  bench          Run Cairn benchmark scorecards and release gates via cairn-bench
   nexus          Nexus sandbox setup and diagnostics
   setup          Configure harness integrations
   mcp            Start an MCP stdio server. Reads MCP frames from stdin, dispatches to the eight
@@ -73,6 +74,7 @@ Options:
 - [`cairn import`](commands/import.md) - Create reviewed Cairn ingest plans from a legacy memory archive
 - [`cairn bootstrap`](commands/bootstrap.md) - Initialize a vault directory tree with the §3 layout
 - [`cairn doctor`](commands/doctor.md) - Reference-consumer diagnostics
+- [`cairn bench`](commands/bench.md) - Run Cairn benchmark scorecards and release gates via cairn-bench
 - [`cairn nexus`](commands/nexus.md) - Nexus sandbox setup and diagnostics
 - [`cairn setup`](commands/setup.md) - Configure harness integrations
 - [`cairn mcp`](commands/mcp.md) - Start an MCP stdio server. Reads MCP frames from stdin, dispatches to the eight cairn verbs, writes responses to stdout. Blocks until stdin closes.

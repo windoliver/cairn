@@ -684,6 +684,7 @@ dependencies = [
  "criterion",
  "fs4",
  "insta",
+ "jsonschema",
  "rusqlite",
  "serde",
  "serde_json",

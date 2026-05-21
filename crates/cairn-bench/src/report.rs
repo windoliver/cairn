@@ -138,6 +138,8 @@ pub fn write_report(out_dir: &Path, fixture: &Fixture, all_runs: &[AdapterResult
         )?;
     }
     writeln!(md)?;
+    write_release_gates(&mut md, &all_rows)?;
+    writeln!(md)?;
     writeln!(
         md,
         "_Cairn adapters reproduce live; upstream reference adapters captured once from gbrain-evals 8dab7f7._"
@@ -162,6 +164,89 @@ pub fn write_report(out_dir: &Path, fixture: &Fixture, all_runs: &[AdapterResult
         }
     }
     Ok(())
+}
+
+fn write_release_gates(mut md: impl Write, rows: &[AggregateRow]) -> Result<()> {
+    let by_adapter: std::collections::BTreeMap<&str, &AggregateRow> =
+        rows.iter().map(|row| (row.adapter.as_str(), row)).collect();
+
+    writeln!(md, "## Release Gates")?;
+    writeln!(md)?;
+    writeln!(md, "| Result | Gate | Detail |")?;
+    writeln!(md, "|---|---|---|")?;
+    write_offline_hybrid_gate(&mut md, &by_adapter)?;
+    write_openai_ratio_gate(&mut md, &by_adapter)?;
+    Ok(())
+}
+
+fn write_offline_hybrid_gate(
+    mut md: impl Write,
+    rows: &std::collections::BTreeMap<&str, &AggregateRow>,
+) -> Result<()> {
+    let gate = "`hybrid-bge-rrf` P@5 strictly greater than `bm25-only` and `vector-bge`";
+    let Some(hybrid) = measured_row(rows, "hybrid-bge-rrf") else {
+        writeln!(md, "| N/A | {gate} | `hybrid-bge-rrf` was not measured. |")?;
+        return Ok(());
+    };
+    let Some(bm25) = measured_row(rows, "bm25-only") else {
+        writeln!(md, "| N/A | {gate} | `bm25-only` was not measured. |")?;
+        return Ok(());
+    };
+    let Some(vector) = measured_row(rows, "vector-bge") else {
+        writeln!(md, "| N/A | {gate} | `vector-bge` was not measured. |")?;
+        return Ok(());
+    };
+
+    let passed = hybrid.p_at_5 > bm25.p_at_5 && hybrid.p_at_5 > vector.p_at_5;
+    writeln!(
+        md,
+        "| {} | {gate} | hybrid={:.3}, bm25={:.3}, vector={:.3} |",
+        pass_fail(passed),
+        hybrid.p_at_5,
+        bm25.p_at_5,
+        vector.p_at_5
+    )?;
+    Ok(())
+}
+
+fn write_openai_ratio_gate(
+    mut md: impl Write,
+    rows: &std::collections::BTreeMap<&str, &AggregateRow>,
+) -> Result<()> {
+    let gate = "`hybrid-bge-rrf` P@5 >= 70% of `hybrid-openai-rrf` P@5";
+    let Some(hybrid) = measured_row(rows, "hybrid-bge-rrf") else {
+        writeln!(md, "| N/A | {gate} | `hybrid-bge-rrf` was not measured. |")?;
+        return Ok(());
+    };
+    let Some(openai) = measured_row(rows, "hybrid-openai-rrf") else {
+        writeln!(md, "| N/A | {gate} | `hybrid-openai-rrf` was skipped. |")?;
+        return Ok(());
+    };
+
+    let threshold = openai.p_at_5 * 0.70;
+    let passed = hybrid.p_at_5 >= threshold;
+    writeln!(
+        md,
+        "| {} | {gate} | hybrid={:.3}, openai={:.3}, threshold={:.3} |",
+        pass_fail(passed),
+        hybrid.p_at_5,
+        openai.p_at_5,
+        threshold
+    )?;
+    Ok(())
+}
+
+fn measured_row<'a>(
+    rows: &'a std::collections::BTreeMap<&str, &AggregateRow>,
+    adapter: &str,
+) -> Option<&'a AggregateRow> {
+    rows.get(adapter)
+        .copied()
+        .filter(|row| row.graded_queries > 0)
+}
+
+fn pass_fail(passed: bool) -> &'static str {
+    if passed { "PASS" } else { "FAIL" }
 }
 
 /// Average per-query metrics for each cairn adapter into one
@@ -209,6 +294,9 @@ fn aggregate_cairn(runs: &[AdapterResults]) -> Vec<AggregateRow> {
 mod tests {
     use std::collections::BTreeMap;
 
+    use jsonschema::Validator;
+    use serde_json::Value;
+
     use super::{AdapterResults, aggregate_cairn, write_report};
     use crate::fixture::{
         AdapterBaseline, AggregateMetrics, Fixture, Page, Query, QueryResult, UpstreamBaseline,
@@ -242,6 +330,12 @@ mod tests {
             mrr: p,
             ndcg_at_5: p,
         }
+    }
+
+    fn per_query_schema() -> Validator {
+        let schema: Value = serde_json::from_str(include_str!("../schemas/per-query.schema.json"))
+            .expect("per-query schema is valid JSON");
+        Validator::new(&schema).expect("per-query schema compiles")
     }
 
     #[test]
@@ -291,6 +385,14 @@ mod tests {
         assert!(lines[0].contains("\"hits\":[\"alice\"]"));
         assert!(lines[1].contains("\"adapter\":\"vector-bge\""));
         assert!(lines[1].contains("\"hits\":[\"bob\",\"alice\"]"));
+
+        let schema = per_query_schema();
+        for line in lines {
+            let row: Value = serde_json::from_str(line).expect("jsonl row is JSON");
+            schema.validate(&row).unwrap_or_else(|err| {
+                panic!("per-query row failed schema validation: {err}; row={row}");
+            });
+        }
     }
 
     #[test]
@@ -346,6 +448,59 @@ mod tests {
             .expect("read per-query.jsonl");
         assert_eq!(jsonl.lines().count(), 1);
         assert!(jsonl.contains("\"adapter\":\"bm25-only\""));
+    }
+
+    #[test]
+    fn release_gate_section_reports_pass_fail_and_na() {
+        let fixture = Fixture {
+            pages: vec![synthetic_page("alice")],
+            queries: vec![synthetic_query("q1", &["alice"])],
+            upstream: None,
+        };
+        let runs: Vec<AdapterResults> = vec![
+            (
+                "bm25-only".to_owned(),
+                vec![(
+                    "q1".to_owned(),
+                    vec!["alice".to_owned()],
+                    synthetic_metrics(0.4),
+                )],
+            ),
+            (
+                "vector-bge".to_owned(),
+                vec![(
+                    "q1".to_owned(),
+                    vec!["alice".to_owned()],
+                    synthetic_metrics(0.5),
+                )],
+            ),
+            (
+                "hybrid-bge-rrf".to_owned(),
+                vec![(
+                    "q1".to_owned(),
+                    vec!["alice".to_owned()],
+                    synthetic_metrics(0.8),
+                )],
+            ),
+            (
+                "hybrid-openai-rrf".to_owned(),
+                vec![(
+                    "q1".to_owned(),
+                    vec!["alice".to_owned()],
+                    synthetic_metrics(0.9),
+                )],
+            ),
+        ];
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_report(dir.path(), &fixture, &runs).expect("write_report");
+
+        let md = std::fs::read_to_string(dir.path().join("report.md")).expect("read report.md");
+        assert!(md.contains("## Release Gates"));
+        assert!(md.contains(
+            "PASS | `hybrid-bge-rrf` P@5 strictly greater than `bm25-only` and `vector-bge`"
+        ));
+        assert!(md.contains("PASS | `hybrid-bge-rrf` P@5 >= 70% of `hybrid-openai-rrf` P@5"));
     }
 
     #[test]

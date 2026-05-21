@@ -350,16 +350,19 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: cairn-bench (full corpus)
         env:
+          BENCH_FETCH_MODELS: "1"
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           set -euo pipefail
           if [ -n "${OPENAI_API_KEY:-}" ]; then
             cargo run --release -p cairn-bench --features openai --locked -- \
+              scorecard \
               --fixture fixtures/v0/brainbench-world-v1 \
               --out-dir target/bench-full
           else
             echo "OPENAI_API_KEY secret not set — running with --skip-openai."
             cargo run --release -p cairn-bench --locked -- \
+              scorecard \
               --fixture fixtures/v0/brainbench-world-v1 \
               --out-dir target/bench-full --skip-openai
           fi

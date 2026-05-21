@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use cairn_cli::{
-    command, doctor, hooks, identity, import, nexus_cli, plugins, repair, setup, verbs,
+    bench, command, doctor, hooks, identity, import, nexus_cli, plugins, repair, setup, verbs,
 };
 use cairn_core::contract::registry::PluginError;
 use cairn_core::generated::envelope::ResponseVerb;
@@ -138,6 +138,7 @@ fn subcommand_needs_vault_guard(subcommand: Option<(&str, &ArgMatches)>) -> bool
             | "admin"
             | "backup"
             | "llm"
+            | "bench"
             | "nexus"
             | "identity"
             | "coord"
@@ -354,6 +355,7 @@ fn main() -> ExitCode {
         },
         Some(("bootstrap", sub)) => run_bootstrap(sub),
         Some(("doctor", sub)) => doctor::run(sub),
+        Some(("bench", sub)) => bench::run(sub),
         Some(("nexus", sub)) => run_nexus(sub, explicit_vault.as_deref()),
         Some(("mcp", _sub)) => {
             let (vault_root, source, config) =
