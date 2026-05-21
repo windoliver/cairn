@@ -38,6 +38,10 @@ fn assert_forbidden_fragments_absent(output: &str) {
     }
 }
 
+fn json_stdout(output: &std::process::Output) -> serde_json::Value {
+    serde_json::from_slice(&output.stdout).expect("json stdout")
+}
+
 #[test]
 fn admin_sre_report_json_is_body_free() {
     let dir = bootstrap_vault();
@@ -70,6 +74,33 @@ fn admin_sre_report_json_is_body_free() {
 }
 
 #[test]
+fn admin_sre_report_marks_unobserved_search_unknown() {
+    let dir = bootstrap_vault();
+
+    let output = cairn()
+        .current_dir(dir.path())
+        .args(["admin", "sre", "report", "--json"])
+        .output()
+        .expect("run sre report");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json = json_stdout(&output);
+    assert_eq!(json["search"]["status"], "unknown");
+    assert!(
+        json["search"]["modes"]
+            .as_array()
+            .expect("search modes")
+            .iter()
+            .any(|mode| mode["invocations"] == 0 && mode["status"] == "unknown"),
+        "json: {json}"
+    );
+}
+
+#[test]
 fn admin_sre_report_human_summarizes_sections() {
     let dir = bootstrap_vault();
     let metrics = dir.path().join(".cairn/metrics.jsonl");
@@ -95,6 +126,32 @@ fn admin_sre_report_human_summarizes_sections() {
     assert!(stdout.contains("search:"));
     assert!(stdout.contains("gates:"));
     assert_forbidden_fragments_absent(&stdout);
+}
+
+#[test]
+fn admin_sre_report_human_prioritizes_unknown_over_warning() {
+    let dir = bootstrap_vault();
+    let metrics = dir.path().join(".cairn/metrics.jsonl");
+    std::fs::write(
+        &metrics,
+        r#"{"event":"search_completed","ts_ms":2,"mode":"semantic","hit_count":0,"latency_ms":42,"degradation_state":"partial","error":null}
+"#,
+    )
+    .expect("write metrics");
+
+    let output = cairn()
+        .current_dir(dir.path())
+        .args(["admin", "sre", "report"])
+        .output()
+        .expect("run sre report");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("SRE status: unknown"), "stdout: {stdout}");
 }
 
 #[test]
@@ -137,6 +194,32 @@ fn admin_sre_report_rejects_bad_bench_report_dir() {
     assert_eq!(output.status.code(), Some(78));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("bench-report-dir"), "stderr: {stderr}");
+}
+
+#[test]
+fn admin_sre_report_bad_bench_dir_error_is_path_free() {
+    let dir = bootstrap_vault();
+    let missing = dir
+        .path()
+        .join("SECRET_PRIVATE_TOKEN private body query text");
+
+    let output = cairn()
+        .current_dir(dir.path())
+        .args([
+            "admin",
+            "sre",
+            "report",
+            "--bench-report-dir",
+            missing.to_str().expect("utf8"),
+        ])
+        .output()
+        .expect("run sre report");
+
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(78));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("bench-report-dir"), "stderr: {stderr}");
+    assert_forbidden_fragments_absent(&stderr);
 }
 
 #[test]
@@ -196,6 +279,37 @@ fn admin_sre_report_rejects_malformed_bench_sre_json() {
     assert_eq!(output.status.code(), Some(78));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("sre.json"), "stderr: {stderr}");
+}
+
+#[test]
+fn admin_sre_report_rejects_schema_invalid_sre_json() {
+    let dir = bootstrap_vault();
+    let parent = tempfile::tempdir().expect("bench parent");
+    let bench = parent
+        .path()
+        .join("SECRET_PRIVATE_TOKEN private body query text");
+    std::fs::create_dir(&bench).expect("create bench dir");
+
+    for body in [r#"{}"#, r#"{"checks":[{}]}"#] {
+        std::fs::write(bench.join("sre.json"), body).expect("write schema-invalid report");
+        let output = cairn()
+            .current_dir(dir.path())
+            .args([
+                "admin",
+                "sre",
+                "report",
+                "--bench-report-dir",
+                bench.to_str().expect("utf8"),
+            ])
+            .output()
+            .expect("run sre report");
+
+        assert!(!output.status.success(), "body: {body}");
+        assert_eq!(output.status.code(), Some(78), "body: {body}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("sre.json"), "stderr: {stderr}");
+        assert_forbidden_fragments_absent(&stderr);
+    }
 }
 
 #[test]

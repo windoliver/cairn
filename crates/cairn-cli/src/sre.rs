@@ -24,16 +24,13 @@ pub fn run_report(matches: &ArgMatches, vault_root: &Path) -> ExitCode {
     if let Some(dir) = bench_report_dir
         && !dir.is_dir()
     {
-        eprintln!(
-            "cairn admin sre report: bench-report-dir error - {} is not a directory",
-            dir.display()
-        );
+        eprintln!("cairn admin sre report: bench-report-dir is not a directory");
         return ExitCode::from(78);
     }
     let config = match config::load(vault_root, &config::CliOverrides::default()) {
         Ok(config) => config,
-        Err(err) => {
-            eprintln!("cairn admin sre report: config error - {err:#}");
+        Err(_err) => {
+            eprintln!("cairn admin sre report: config error");
             return ExitCode::from(78);
         }
     };
@@ -112,11 +109,7 @@ fn build_report_with_bench(
             targets: Vec::new(),
         },
         search: SreSearchSummary {
-            status: if search_modes.iter().any(|mode| mode.status != SreStatus::Ok) {
-                SreStatus::Warning
-            } else {
-                SreStatus::Ok
-            },
+            status: rollup_search_status(&search_modes),
             modes: search_modes,
         },
         gates,
@@ -172,7 +165,11 @@ fn summarize_search(events: &[MetricEvent]) -> Vec<SreSearchModeSummary> {
                 degraded,
                 failed,
                 p95_latency_ms: percentile_u64(&latencies, 0.95).and_then(SreMeasurement::new),
-                status: if failed > 0 || degraded > 0 {
+                status: if invocations == 0 {
+                    SreStatus::Unknown
+                } else if failed > 0 {
+                    SreStatus::Fail
+                } else if degraded > 0 {
                     SreStatus::Warning
                 } else {
                     SreStatus::Ok
@@ -180,6 +177,10 @@ fn summarize_search(events: &[MetricEvent]) -> Vec<SreSearchModeSummary> {
             }
         })
         .collect()
+}
+
+fn rollup_search_status(modes: &[SreSearchModeSummary]) -> SreStatus {
+    rollup_status(modes.iter().map(|mode| mode.status))
 }
 
 fn percentile_u64(values: &[u64], percentile: f64) -> Option<f64> {
@@ -194,20 +195,16 @@ fn percentile_u64(values: &[u64], percentile: f64) -> Option<f64> {
 
 #[derive(Deserialize)]
 struct BenchSreReport {
-    #[serde(default)]
-    checks: Vec<BenchSreCheck>,
+    checks: Option<Vec<BenchSreCheck>>,
 }
 
 #[derive(Deserialize)]
 struct BenchSreCheck {
-    #[serde(default)]
-    name: String,
-    #[serde(default)]
-    status: String,
+    name: Option<String>,
+    status: Option<String>,
     measured: Option<f64>,
     threshold: Option<f64>,
-    #[serde(default)]
-    unit: String,
+    unit: Option<String>,
     detail: Option<String>,
 }
 
@@ -219,24 +216,28 @@ fn load_bench_gates(bench_report_dir: Option<&Path>) -> Result<SreGateSummary, S
     if !path.exists() {
         return Ok(empty_gate_summary());
     }
-    let raw = std::fs::read_to_string(&path)
-        .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
-    let report: BenchSreReport = serde_json::from_str(&raw)
-        .map_err(|err| format!("failed to parse {}: {err}", path.display()))?;
-    let gates: Vec<SreGateResult> = report
-        .checks
+    let raw = std::fs::read_to_string(&path).map_err(|_err| "failed to read sre.json")?;
+    let report: BenchSreReport =
+        serde_json::from_str(&raw).map_err(|_err| "failed to parse sre.json")?;
+    let checks = report.checks.ok_or("invalid sre.json schema")?;
+    let gates: Vec<SreGateResult> = checks
         .into_iter()
-        .map(|check| SreGateResult {
-            name: stable_string(&check.name, "redacted_gate"),
-            status: parse_gate_status(&check.status),
-            measured: check.measured.and_then(SreMeasurement::new),
-            threshold: check.threshold.and_then(SreMeasurement::new),
-            unit: stable_string(&check.unit, "redacted"),
-            detail: check.detail.map(|detail| {
-                SreDetail::stable(&detail).unwrap_or_else(|| SreDetail::from_raw(&detail))
-            }),
+        .map(|check| {
+            let name = check.name.ok_or("invalid sre.json schema")?;
+            let status = check.status.ok_or("invalid sre.json schema")?;
+            let unit = check.unit.ok_or("invalid sre.json schema")?;
+            Ok(SreGateResult {
+                name: stable_string(&name, "redacted_gate"),
+                status: parse_gate_status(&status),
+                measured: check.measured.and_then(SreMeasurement::new),
+                threshold: check.threshold.and_then(SreMeasurement::new),
+                unit: stable_string(&unit, "redacted"),
+                detail: check.detail.map(|detail| {
+                    SreDetail::stable(&detail).unwrap_or_else(|| SreDetail::from_raw(&detail))
+                }),
+            })
         })
-        .collect();
+        .collect::<Result<_, &'static str>>()?;
     Ok(SreGateSummary {
         status: rollup_gate_status(&gates),
         gates,
@@ -257,7 +258,7 @@ fn empty_gate_summary() -> SreGateSummary {
 }
 
 fn parse_gate_status(status: &str) -> SreStatus {
-    match status {
+    match status.to_ascii_lowercase().as_str() {
         "ok" | "pass" | "passed" => SreStatus::Ok,
         "warning" | "warn" => SreStatus::Warning,
         "fail" | "failed" => SreStatus::Fail,
@@ -330,10 +331,10 @@ fn rollup_status(statuses: impl IntoIterator<Item = SreStatus>) -> SreStatus {
             SreStatus::Ok => {}
         }
     }
-    if saw_warning {
-        SreStatus::Warning
-    } else if saw_unknown {
+    if saw_unknown {
         SreStatus::Unknown
+    } else if saw_warning {
+        SreStatus::Warning
     } else {
         SreStatus::Ok
     }
