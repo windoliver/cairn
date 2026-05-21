@@ -11,6 +11,9 @@ use crate::contract::conformance::{
 };
 use crate::contract::registry::{PluginName, PluginRegistry};
 
+const TOOL_ATTEMPT_PENDING_REASON: &str = "provider tool-attempt behavior requires a provider-specific conformance harness; host policy helper covered by unit tests";
+const BUDGET_PENDING_REASON: &str = "budget overrun behavior requires a provider-specific conformance harness; budget metering helper covered by unit tests";
+
 /// Run tier-1 + tier-2 cases for an `AgentProvider` plugin.
 #[must_use]
 pub fn run(registry: &PluginRegistry, name: &PluginName) -> Vec<CaseOutcome> {
@@ -42,10 +45,10 @@ pub fn run(registry: &PluginRegistry, name: &PluginName) -> Vec<CaseOutcome> {
                 ("cli_subprocess_tools", caps.cli_subprocess_tools),
             ],
         ),
-        tier2_allowlist_rejects_unlisted_tool(),
-        tier2_mutating_verb_requires_scope(),
+        tier2_allowlist_rejects_unlisted_tool(&*plugin),
+        tier2_mutating_verb_requires_scope(&*plugin),
         tier2_budget_exhaustion_aborts_cleanly(&*plugin),
-        tier2_writes_are_wal_routed(),
+        tier2_writes_are_wal_routed(&*plugin),
     ]
 }
 
@@ -113,7 +116,48 @@ fn tier1_capability_self_consistency_floor(plugin: &dyn AgentProvider) -> CaseOu
     }
 }
 
-fn tier2_allowlist_rejects_unlisted_tool() -> CaseOutcome {
+fn tier2_allowlist_rejects_unlisted_tool(provider: &dyn AgentProvider) -> CaseOutcome {
+    scope_enforced_or_pending("allowlist_rejects_unlisted_tool", provider)
+}
+
+fn tier2_mutating_verb_requires_scope(provider: &dyn AgentProvider) -> CaseOutcome {
+    scope_enforced_or_pending("mutating_verb_requires_scope", provider)
+}
+
+fn tier2_budget_exhaustion_aborts_cleanly(provider: &dyn AgentProvider) -> CaseOutcome {
+    let status = if provider.capabilities().honors_cost_budget {
+        CaseStatus::Pending {
+            reason: BUDGET_PENDING_REASON,
+        }
+    } else {
+        CaseStatus::Failed {
+            message: "provider must advertise honors_cost_budget=true to verify budget enforcement"
+                .to_string(),
+        }
+    };
+    CaseOutcome {
+        id: "budget_exhaustion_aborts_cleanly",
+        tier: Tier::Two,
+        status,
+    }
+}
+
+fn tier2_writes_are_wal_routed(provider: &dyn AgentProvider) -> CaseOutcome {
+    scope_enforced_or_pending("writes_are_wal_routed", provider)
+}
+
+fn scope_enforced_or_pending(id: &'static str, provider: &dyn AgentProvider) -> CaseOutcome {
+    if provider.capabilities().scope_enforced {
+        return pending(id, Tier::Two, TOOL_ATTEMPT_PENDING_REASON);
+    }
+    failed(
+        id,
+        Tier::Two,
+        "provider must advertise scope_enforced=true to verify tool policy enforcement".to_string(),
+    )
+}
+
+fn host_policy_allowlist_rejects_unlisted_tool() -> CaseOutcome {
     let id = "allowlist_rejects_unlisted_tool";
     let request = conformance_request();
     if let Err(err) = request.validate() {
@@ -142,7 +186,7 @@ fn tier2_allowlist_rejects_unlisted_tool() -> CaseOutcome {
     }
 }
 
-fn tier2_mutating_verb_requires_scope() -> CaseOutcome {
+fn host_policy_mutating_verb_requires_scope() -> CaseOutcome {
     let id = "mutating_verb_requires_scope";
     let mut request = conformance_request();
     request
@@ -175,22 +219,7 @@ fn tier2_mutating_verb_requires_scope() -> CaseOutcome {
     }
 }
 
-fn tier2_budget_exhaustion_aborts_cleanly(provider: &dyn AgentProvider) -> CaseOutcome {
-    let status = if provider.capabilities().honors_cost_budget {
-        CaseStatus::Ok
-    } else {
-        CaseStatus::Failed {
-            message: "provider must advertise honors_cost_budget=true".to_string(),
-        }
-    };
-    CaseOutcome {
-        id: "budget_exhaustion_aborts_cleanly",
-        tier: Tier::Two,
-        status,
-    }
-}
-
-fn tier2_writes_are_wal_routed() -> CaseOutcome {
+fn host_policy_writes_are_wal_routed() -> CaseOutcome {
     let id = "writes_are_wal_routed";
     let mut request = conformance_request();
     request.scope = AgentScope::with_mutations(vec![CairnVerb::Ingest]);
@@ -222,6 +251,14 @@ fn tier2_writes_are_wal_routed() -> CaseOutcome {
     }
 }
 
+fn pending(id: &'static str, tier: Tier, reason: &'static str) -> CaseOutcome {
+    CaseOutcome {
+        id,
+        tier,
+        status: CaseStatus::Pending { reason },
+    }
+}
+
 fn conformance_request() -> AgentSpawnRequest {
     AgentSpawnRequest {
         identity: AgentIdentity::new("agt:conformance:v1").expect("valid conformance identity"),
@@ -250,9 +287,18 @@ fn failed(id: &'static str, tier: Tier, message: String) -> CaseOutcome {
 mod tests {
     use super::*;
     use crate::contract::agent_provider::{AgentProviderCapabilities, AgentRun};
+    use crate::contract::manifest::PluginManifest;
     use crate::contract::version::{ContractVersion, VersionRange};
 
-    struct StubAgent;
+    struct StubAgent {
+        caps: AgentProviderCapabilities,
+    }
+
+    impl StubAgent {
+        fn new(caps: AgentProviderCapabilities) -> Self {
+            Self { caps }
+        }
+    }
 
     #[async_trait::async_trait]
     impl AgentProvider for StubAgent {
@@ -261,13 +307,7 @@ mod tests {
         }
 
         fn capabilities(&self) -> &AgentProviderCapabilities {
-            static CAPS: AgentProviderCapabilities = AgentProviderCapabilities {
-                honors_cost_budget: true,
-                scope_enforced: true,
-                mcp_tools: false,
-                cli_subprocess_tools: true,
-            };
-            &CAPS
+            &self.caps
         }
 
         fn supported_contract_versions(&self) -> VersionRange {
@@ -281,19 +321,131 @@ mod tests {
         }
     }
 
+    fn truthful_caps() -> AgentProviderCapabilities {
+        AgentProviderCapabilities {
+            honors_cost_budget: true,
+            scope_enforced: true,
+            mcp_tools: false,
+            cli_subprocess_tools: true,
+        }
+    }
+
+    fn registry_with(caps: AgentProviderCapabilities) -> (PluginRegistry, PluginName) {
+        let mut registry = PluginRegistry::new();
+        let name = PluginName::new("stub-agent-provider").expect("valid plugin name");
+        let manifest = PluginManifest::parse_toml(&format!(
+            r#"
+name = "stub-agent-provider"
+contract = "AgentProvider"
+
+[contract_version_range.min]
+major = 0
+minor = 1
+patch = 0
+
+[contract_version_range.max_exclusive]
+major = 0
+minor = 2
+patch = 0
+
+[features]
+honors_cost_budget = {}
+scope_enforced = {}
+mcp_tools = {}
+cli_subprocess_tools = {}
+"#,
+            caps.honors_cost_budget, caps.scope_enforced, caps.mcp_tools, caps.cli_subprocess_tools
+        ))
+        .expect("manifest parses");
+        registry
+            .register_agent_provider_with_manifest(
+                name.clone(),
+                manifest,
+                std::sync::Arc::new(StubAgent::new(caps)),
+            )
+            .expect("stub registers");
+        (registry, name)
+    }
+
+    fn outcome<'a>(outcomes: &'a [CaseOutcome], id: &str) -> &'a CaseOutcome {
+        outcomes
+            .iter()
+            .find(|outcome| outcome.id == id)
+            .unwrap_or_else(|| panic!("missing outcome {id}"))
+    }
+
     #[test]
-    fn tier2_policy_cases_pass() {
-        let provider = StubAgent;
+    fn host_policy_cases_pass() {
         let cases = [
-            tier2_allowlist_rejects_unlisted_tool(),
-            tier2_mutating_verb_requires_scope(),
-            tier2_budget_exhaustion_aborts_cleanly(&provider),
-            tier2_writes_are_wal_routed(),
+            host_policy_allowlist_rejects_unlisted_tool(),
+            host_policy_mutating_verb_requires_scope(),
+            host_policy_writes_are_wal_routed(),
         ];
 
         for outcome in cases {
             assert_eq!(outcome.tier, Tier::Two, "case {}", outcome.id);
             assert_eq!(outcome.status, CaseStatus::Ok, "case {}", outcome.id);
         }
+    }
+
+    #[test]
+    fn run_reports_provider_behavior_pending_for_truthful_caps() {
+        let (registry, name) = registry_with(truthful_caps());
+        let outcomes = run(&registry, &name);
+
+        for id in [
+            "allowlist_rejects_unlisted_tool",
+            "mutating_verb_requires_scope",
+            "writes_are_wal_routed",
+        ] {
+            assert_eq!(
+                outcome(&outcomes, id).status,
+                CaseStatus::Pending {
+                    reason: "provider tool-attempt behavior requires a provider-specific conformance harness; host policy helper covered by unit tests",
+                },
+                "case {id}"
+            );
+        }
+        assert_eq!(
+            outcome(&outcomes, "budget_exhaustion_aborts_cleanly").status,
+            CaseStatus::Pending {
+                reason: "budget overrun behavior requires a provider-specific conformance harness; budget metering helper covered by unit tests",
+            }
+        );
+    }
+
+    #[test]
+    fn run_fails_provider_behavior_cases_when_required_capabilities_are_false() {
+        let (registry, name) = registry_with(AgentProviderCapabilities {
+            honors_cost_budget: false,
+            scope_enforced: false,
+            mcp_tools: false,
+            cli_subprocess_tools: true,
+        });
+        let outcomes = run(&registry, &name);
+
+        for id in [
+            "allowlist_rejects_unlisted_tool",
+            "mutating_verb_requires_scope",
+            "writes_are_wal_routed",
+        ] {
+            let CaseStatus::Failed { message } = &outcome(&outcomes, id).status else {
+                panic!("case {id} should fail");
+            };
+            assert!(
+                message.contains("scope_enforced=true"),
+                "case {id} message was {message}"
+            );
+        }
+
+        let CaseStatus::Failed { message } =
+            &outcome(&outcomes, "budget_exhaustion_aborts_cleanly").status
+        else {
+            panic!("budget case should fail");
+        };
+        assert!(
+            message.contains("honors_cost_budget=true"),
+            "message was {message}"
+        );
     }
 }
