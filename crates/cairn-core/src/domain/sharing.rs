@@ -227,6 +227,12 @@ pub struct ShareLinkGateInput<'a> {
     pub now: &'a Rfc3339Timestamp,
     /// Expected record-set or grant-manifest hash.
     pub expected_target_hash: &'a str,
+    /// Principal attempting to redeem the link. `None` is allowed only for bearer links.
+    pub requesting_principal: Option<&'a Identity>,
+    /// Issuer identity used to resolve `signer_key`.
+    pub issuer: &'a Identity,
+    /// Issuer key version used to resolve `signer_key`.
+    pub issuer_key_version: u32,
     /// Verifying key for `link.payload.issuer`.
     pub signer_key: &'a VerifyingKey,
     /// Revocation state supplied by store/identity layer.
@@ -519,6 +525,15 @@ pub fn verify_share_link_grant(
         return Err(reject_share_link(SharingDecisionKind::InvalidShape, error));
     }
 
+    if input.issuer != &input.link.payload.issuer
+        || input.issuer_key_version != input.link.payload.key_version
+    {
+        return Err(reject_share_link(
+            SharingDecisionKind::BadSignature,
+            DomainError::InvalidSignature,
+        ));
+    }
+
     let signature_result = (|| {
         let bytes = crate::domain::canonical::canonical_bytes(&input.link.payload)
             .map_err(|_| DomainError::InvalidSignature)?;
@@ -533,6 +548,17 @@ pub fn verify_share_link_grant(
             SharingDecisionKind::BadSignature,
             DomainError::InvalidSignature,
         ));
+    }
+
+    if let Some(expected_grantee) = &input.link.payload.grantee {
+        if input.requesting_principal != Some(expected_grantee) {
+            return Err(reject_share_link(
+                SharingDecisionKind::ScopeMismatch,
+                DomainError::ScopeDenied {
+                    message: "share link grantee does not match requesting principal".to_owned(),
+                },
+            ));
+        }
     }
 
     if input.link.payload.target_hash != input.expected_target_hash {
