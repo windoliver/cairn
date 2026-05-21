@@ -227,11 +227,11 @@ fn load_bench_gates(bench_report_dir: Option<&Path>) -> Result<SreGateSummary, S
         .checks
         .into_iter()
         .map(|check| SreGateResult {
-            name: check.name,
+            name: stable_string(&check.name, "redacted_gate"),
             status: parse_gate_status(&check.status),
             measured: check.measured.and_then(SreMeasurement::new),
             threshold: check.threshold.and_then(SreMeasurement::new),
-            unit: check.unit,
+            unit: stable_string(&check.unit, "redacted"),
             detail: check.detail.map(|detail| {
                 SreDetail::stable(&detail).unwrap_or_else(|| SreDetail::from_raw(&detail))
             }),
@@ -241,6 +241,12 @@ fn load_bench_gates(bench_report_dir: Option<&Path>) -> Result<SreGateSummary, S
         status: rollup_gate_status(&gates),
         gates,
     })
+}
+
+fn stable_string(raw: &str, fallback: &str) -> String {
+    SreDetail::stable(raw)
+        .map(|detail| detail.as_str().to_owned())
+        .unwrap_or_else(|| fallback.to_owned())
 }
 
 fn empty_gate_summary() -> SreGateSummary {
