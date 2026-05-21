@@ -17,9 +17,9 @@ use cairn_core::domain::{
 };
 use cairn_core::pipeline::extract::agent::{AgentExtractor, AgentParseError, parse_agent_response};
 use cairn_core::pipeline::extract::{
-    BodyResolution, ExtractBudget, ExtractBuildError, ExtractChain, ExtractInput, ExtractOutput,
-    ExtractProviders, ExtractorWorker, RegexExtractor, ResolvedBody, UserIngestPayloadKind,
-    build_extract_chain,
+    BodyResolution, ExtractBudget, ExtractBuildError, ExtractChain, ExtractError, ExtractInput,
+    ExtractOutput, ExtractProviders, ExtractorWorker, RegexExtractor, ResolvedBody, TextSpan,
+    UserIngestPayloadKind, build_extract_chain,
 };
 
 fn ts() -> Rfc3339Timestamp {
@@ -185,6 +185,87 @@ async fn agent_extractor_builds_read_only_request_and_returns_drafts() {
     assert_eq!(request.wall_clock_budget.max_millis, 1234);
     assert!(request.prompt.contains("Use shard alpha for refunds."));
     assert!(request.prompt.contains(event.event_id.as_str()));
+}
+
+#[tokio::test]
+async fn agent_extractor_prompt_omits_text_outside_restricted_eligible_spans() {
+    let provider = Arc::new(RecordingAgentProvider::returning(AgentRun {
+        status: AgentRunStatus::Completed,
+        abort_error: None,
+        output: AgentOutput::Json(serde_json::json!({
+            "drafts": [{
+                "kind": "fact",
+                "body": "Visible memory fact.",
+                "confidence": 0.91,
+                "span": {"start": 8, "end": 19}
+            }],
+            "discards": [],
+            "evidence": []
+        })),
+        budget_consumed: AgentBudgetConsumed {
+            turns: 1,
+            tool_calls: 0,
+            cost_units: 1,
+        },
+        tool_calls: vec![],
+        policy_trace: vec![],
+    }));
+    let extractor = AgentExtractor::new(provider.clone());
+    let event = cli_event();
+    let body = "VISIBLE memory fact. SECRET token must not leave.";
+    let resolved = ResolvedBody::from_user_ingest(body, &event.payload, UserIngestPayloadKind::Cli)
+        .expect("matching variant");
+    let input = ExtractInput {
+        event: &event,
+        body: BodyResolution::Resolved(resolved),
+        eligible_spans: Some(vec![TextSpan::new(0, 20)]),
+    };
+
+    let result = extractor.extract(&input).await.expect("extract ok");
+
+    let ExtractOutput::Draft(draft) = &result.outputs[0] else {
+        panic!("expected draft");
+    };
+    assert_eq!(draft.source_span, Some(TextSpan::new(8, 19)));
+
+    let request = provider.last_request();
+    assert!(request.prompt.contains("VISIBLE memory fact"));
+    assert!(!request.prompt.contains("SECRET token"));
+    assert!(request.prompt.contains("0..20"));
+}
+
+#[tokio::test]
+async fn agent_extractor_aborted_run_surfaces_original_abort_error() {
+    let provider = Arc::new(RecordingAgentProvider::returning(AgentRun {
+        status: AgentRunStatus::Aborted,
+        abort_error: Some(AgentProviderError::BudgetExceeded {
+            limit: "turns".to_owned(),
+        }),
+        output: AgentOutput::Empty,
+        budget_consumed: AgentBudgetConsumed {
+            turns: 4,
+            tool_calls: 0,
+            cost_units: 10,
+        },
+        tool_calls: vec![],
+        policy_trace: vec![],
+    }));
+    let extractor = AgentExtractor::new(provider);
+    let event = cli_event();
+    let input = body_input(&event, "Use shard alpha for refunds.");
+
+    let err = extractor
+        .extract(&input)
+        .await
+        .expect_err("aborted run should be provider error");
+
+    assert!(matches!(
+        err,
+        ExtractError::AgentProvider {
+            source: AgentProviderError::BudgetExceeded { ref limit },
+            ..
+        } if limit == "turns"
+    ));
 }
 
 #[tokio::test]

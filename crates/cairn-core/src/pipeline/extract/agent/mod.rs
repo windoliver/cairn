@@ -54,7 +54,7 @@ impl AgentExtractor {
     fn spawn_request(
         &self,
         source_event: &CaptureEventId,
-        source_text: &str,
+        prompt_source_text: &str,
         spans: &[TextSpan],
     ) -> Result<AgentSpawnRequest, AgentProviderError> {
         let request = AgentSpawnRequest {
@@ -70,7 +70,7 @@ impl AgentExtractor {
                 max_millis: u64::from(self.budget.max_wall_ms.max(1)),
             },
             output_schema: AgentOutputSchema::Json,
-            prompt: render_agent_extract_prompt(source_event, source_text, spans),
+            prompt: render_agent_extract_prompt(source_event, prompt_source_text, spans),
         };
         request.validate()?;
         Ok(request)
@@ -106,6 +106,38 @@ fn agent_error(source: AgentProviderError) -> ExtractError {
         worker: "agent",
         source,
     }
+}
+
+fn eligible_prompt_source(body: &str, spans: &[TextSpan]) -> String {
+    let body_len = u32::try_from(body.len()).unwrap_or(u32::MAX);
+    if spans.len() == 1 && spans[0].start == 0 && spans[0].end == body_len {
+        return body.to_owned();
+    }
+
+    let mut source = String::new();
+    source.push_str(
+        "Only the following eligible excerpts are available. Output spans must use original source byte offsets.\n",
+    );
+    for span in spans {
+        let start = span.start as usize;
+        let end = span.end as usize;
+        let Some(excerpt) = body.get(start..end) else {
+            tracing::warn!(
+                start = span.start,
+                end = span.end,
+                "agent.eligible_span_not_utf8_boundary"
+            );
+            continue;
+        };
+        source.push_str("\noriginal_bytes ");
+        source.push_str(&span.start.to_string());
+        source.push_str("..");
+        source.push_str(&span.end.to_string());
+        source.push_str(":\n");
+        source.push_str(excerpt);
+        source.push('\n');
+    }
+    source
 }
 
 #[async_trait::async_trait]
@@ -151,7 +183,11 @@ impl ExtractorWorker for AgentExtractor {
         };
 
         let request = self
-            .spawn_request(&input.event.event_id, body, &eligible_spans)
+            .spawn_request(
+                &input.event.event_id,
+                &eligible_prompt_source(body, &eligible_spans),
+                &eligible_spans,
+            )
             .map_err(agent_error)?;
 
         if self
@@ -183,9 +219,6 @@ impl ExtractorWorker for AgentExtractor {
             })?
             .map_err(agent_error)?;
 
-        let output_schema = AgentOutputSchema::Json;
-        run.validate(&output_schema).map_err(agent_error)?;
-
         if run.status == AgentRunStatus::Aborted {
             let source = run
                 .abort_error
@@ -194,6 +227,9 @@ impl ExtractorWorker for AgentExtractor {
                 });
             return Err(agent_error(source));
         }
+
+        let output_schema = AgentOutputSchema::Json;
+        run.validate(&output_schema).map_err(agent_error)?;
 
         let AgentOutput::Json(value) = run.output else {
             return Err(agent_error(AgentProviderError::InvalidOutput {
