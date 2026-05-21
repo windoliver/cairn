@@ -1,4 +1,4 @@
-//! Consumer acceptance coverage for the Koi v1 migration bridge.
+//! Consumer acceptance coverage for external memory migration bridges.
 
 use std::path::Path;
 use std::process::{Command, Output};
@@ -30,6 +30,24 @@ fn run_in_vault(vault: &Path, args: &[&str]) -> Output {
 
 fn run_json_ok(vault: &Path, args: &[&str]) -> serde_json::Value {
     let out = run_in_vault(vault, args);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "cairn {args:?} failed\nstderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("cairn {args:?} emitted invalid JSON: {e}"))
+}
+
+fn run_json_ok_with_issuer(vault: &Path, args: &[&str], issuer: &str) -> serde_json::Value {
+    let out = cli()
+        .current_dir(vault)
+        .env("CAIRN_ISSUER", issuer)
+        .args(args)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run cairn {args:?}: {e}"));
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -77,6 +95,52 @@ fn upsert_record_id(plan: &PersistedPlan) -> String {
         );
     };
     record.id.as_str().to_owned()
+}
+
+fn upsert_record_id_containing(plan: &PersistedPlan, needle: &str) -> String {
+    plan.plan
+        .mutations
+        .iter()
+        .find_map(|mutation| {
+            let PlannedMutation::Upsert { record, .. } = mutation else {
+                return None;
+            };
+            record
+                .body
+                .contains(needle)
+                .then(|| record.id.as_str().to_owned())
+        })
+        .unwrap_or_else(|| panic!("expected an upsert containing {needle:?}: {plan:?}"))
+}
+
+fn upsert_record_scope_containing(
+    plan: &PersistedPlan,
+    needle: &str,
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
+    plan.plan
+        .mutations
+        .iter()
+        .find_map(|mutation| {
+            let PlannedMutation::Upsert { record, .. } = mutation else {
+                return None;
+            };
+            record.body.contains(needle).then(|| {
+                (
+                    record.scope.tenant.clone(),
+                    record.scope.workspace.clone(),
+                    record.scope.entity.clone(),
+                    record.scope.user.clone(),
+                    record.scope.agent.clone(),
+                )
+            })
+        })
+        .unwrap_or_else(|| panic!("expected an upsert containing {needle:?}: {plan:?}"))
 }
 
 fn hit_record_ids(vault: &Path, query: &str) -> Vec<String> {
@@ -169,6 +233,166 @@ fn koi_v1_import_plan_applies_to_search_retrieve_lint_and_forget() {
     assert!(
         hit_record_ids(vault.path(), "calico").is_empty(),
         "forgotten import should leave keyword search"
+    );
+}
+
+#[test]
+fn opencode_import_plan_applies_to_search_retrieve_lint_and_forget() {
+    let vault = tempfile::tempdir().expect("temp vault");
+    bootstrap_vault(vault.path());
+    run_json_ok(vault.path(), &["identity", "init-defaults", "--json"]);
+    run_json_ok(
+        vault.path(),
+        &[
+            "identity",
+            "provision",
+            "human",
+            "opencode-import",
+            "--json",
+        ],
+    );
+    run_json_ok(
+        vault.path(),
+        &["identity", "provision", "human", "tafeng", "--json"],
+    );
+    run_json_ok(
+        vault.path(),
+        &[
+            "identity",
+            "provision",
+            "agent",
+            "opencode:default:import",
+            "--json",
+        ],
+    );
+    run_json_ok(
+        vault.path(),
+        &[
+            "identity",
+            "provision",
+            "sensor",
+            "opencode:import:local",
+            "--json",
+        ],
+    );
+    let archive = tempfile::tempdir().expect("opencode archive");
+    std::fs::write(
+        archive.path().join("AGENTS.md"),
+        "# OpenCode Instructions\n\nProject purpose includes migration persistence.",
+    )
+    .expect("write opencode instructions");
+    std::fs::create_dir_all(archive.path().join("sessions")).expect("sessions dir");
+    std::fs::write(
+        archive.path().join("memory.json"),
+        serde_json::json!({
+            "id": "opencode-memory-001",
+            "kind": "reference",
+            "text": "OpenCode retrieve acceptance stores opencoderetrieve marker.",
+            "scope": {
+                "tenant": "default",
+                "workspace": "my-vault",
+                "entity": "ingest",
+                "user": "hmn:tafeng"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write opencode memory");
+    std::fs::write(
+        archive.path().join("sessions").join("session.json"),
+        serde_json::json!({
+            "id": "ses_issue_156",
+            "session_id": "ses_issue_156",
+            "created_at": "2026-04-01T10:00:00Z",
+            "scope": {
+                "tenant": "default",
+                "workspace": "my-vault",
+                "entity": "ingest",
+                "user": "hmn:tafeng"
+            },
+            "summary": {
+                "Goal": "Migrate OpenCode memory through reviewable plans.",
+                "Constraints": ["Preserve typed part ordering."],
+                "Progress": "Imported zephyrcheckpoint session part.",
+                "Decisions": ["Use Cairn FlushPlans."]
+            },
+            "parts": [
+                {"id": "p1", "type": "user", "text": "Please preserve zephyrcheckpoint in imported traces."},
+                {"id": "p2", "type": "tool", "tool": "skill", "text": "Loaded migration skill."}
+            ]
+        })
+        .to_string(),
+    )
+    .expect("write opencode session");
+
+    let import = run_json_ok(
+        vault.path(),
+        &[
+            "import",
+            "--from",
+            "opencode",
+            archive.path().to_str().expect("utf-8 archive path"),
+            "--batch-size",
+            "64",
+            "--json",
+        ],
+    );
+    assert_eq!(import["manifest"]["system"], "opencode", "import: {import}");
+    assert_eq!(import["records"], 8, "import summary: {import}");
+    assert_eq!(import["plans"], 1, "import summary: {import}");
+    assert!(
+        import["manifest"]["items"]
+            .as_array()
+            .expect("manifest items")
+            .iter()
+            .any(|item| item["kind"] == "skill" && item["legacy_id"] == "skill"),
+        "OpenCode skill tool part should emit a skill manifest item: {import}"
+    );
+
+    let (operation_id, pending) = single_pending_plan(vault.path());
+    let record_id = upsert_record_id_containing(&pending, "Please preserve zephyrcheckpoint");
+    let retrieve_record_id = upsert_record_id_containing(&pending, "opencoderetrieve");
+    assert_eq!(
+        upsert_record_scope_containing(&pending, "Please preserve zephyrcheckpoint"),
+        (
+            Some("default".to_owned()),
+            Some("my-vault".to_owned()),
+            Some("ingest".to_owned()),
+            Some("hmn:tafeng".to_owned()),
+            None
+        )
+    );
+
+    run_json_ok(vault.path(), &["flush", "apply", &operation_id, "--json"]);
+
+    let hits = hit_record_ids(vault.path(), "zephyrcheckpoint");
+    assert!(
+        hits.contains(&record_id),
+        "search should find imported OpenCode trace {record_id}; hits: {hits:?}"
+    );
+
+    let retrieve = run_json_ok_with_issuer(
+        vault.path(),
+        &["retrieve", &retrieve_record_id, "--json"],
+        "hmn:tafeng:v1",
+    );
+    assert_eq!(
+        retrieve["data"]["body"], "OpenCode retrieve acceptance stores opencoderetrieve marker.",
+        "retrieve should expose imported OpenCode record body: {retrieve}"
+    );
+
+    let lint_out = run_in_vault(vault.path(), &["lint", "--json"]);
+    let lint = json_output(&lint_out, &["lint", "--json"]);
+    assert_eq!(lint["status"], "committed", "lint should complete: {lint}");
+    assert_eq!(
+        lint["data"]["summary"]["by_severity"]["error"], 0,
+        "OpenCode imported records should not produce lint errors: {lint}"
+    );
+
+    run_json_ok(vault.path(), &["forget", "--record", &record_id, "--json"]);
+    assert!(
+        !hit_record_ids(vault.path(), "zephyrcheckpoint").contains(&record_id),
+        "forgotten OpenCode trace should leave keyword search"
     );
 }
 

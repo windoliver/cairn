@@ -21,6 +21,8 @@ const KOI_IMPORT_AUTHOR: &str = "hmn:koi-import:v1";
 const KOI_IMPORT_SENSOR: &str = "snr:koi-v1:import:local:v1";
 const ROWBOAT_IMPORT_AUTHOR: &str = "hmn:rowboat-import:v1";
 const ROWBOAT_IMPORT_SENSOR: &str = "snr:rowboat:import:local:v1";
+const OPENCODE_IMPORT_AUTHOR: &str = "hmn:opencode-import:v1";
+const OPENCODE_IMPORT_SENSOR: &str = "snr:opencode:import:local:v1";
 const SOURCE_HASH_PREFIX: &str = "sha256:";
 
 /// Build the `cairn import` CLI subcommand.
@@ -33,7 +35,7 @@ pub fn command() -> clap::Command {
                 .long("from")
                 .required(true)
                 .value_name("SYSTEM")
-                .value_parser(["koi-v1", "rowboat"])
+                .value_parser(["koi-v1", "rowboat", "opencode"])
                 .help("Legacy memory system to import"),
         )
         .arg(
@@ -86,7 +88,12 @@ pub fn run(sub: &clap::ArgMatches, vault_root: &Path) -> std::process::ExitCode 
             batch_size,
             mode: FlushMode::HumanReview,
         }),
-        _ => return usage_error(json, "from", "unsupported import system"),
+        "opencode" => map_opencode_archive(&OpenCodeImportOptions {
+            source: archive.clone(),
+            batch_size,
+            mode: FlushMode::HumanReview,
+        }),
+        _ => return usage_error(json, "from", "unsupported import source"),
     };
     match report.and_then(|report| {
         let migration_report = MigrationReportSummary::from_report(&report);
@@ -226,6 +233,17 @@ pub struct RowboatImportOptions {
     /// Maximum records per generated review plan.
     pub batch_size: usize,
     /// Plan dispatch mode. Issue #155 uses [`FlushMode::HumanReview`].
+    pub mode: FlushMode,
+}
+
+/// Options for mapping an OpenCode archive into Cairn review plans.
+#[derive(Debug, Clone)]
+pub struct OpenCodeImportOptions {
+    /// Path to an OpenCode project/session archive root.
+    pub source: PathBuf,
+    /// Maximum records per generated review plan.
+    pub batch_size: usize,
+    /// Plan dispatch mode. Issue #156 uses [`FlushMode::HumanReview`].
     pub mode: FlushMode,
 }
 
@@ -558,6 +576,109 @@ pub fn map_rowboat_archive(opts: &RowboatImportOptions) -> Result<KoiImportRepor
     Ok(KoiImportReport {
         manifest: ExternalImportManifest {
             system: "rowboat".to_owned(),
+            items,
+            unsupported_fields,
+            privacy_sensitive_fields,
+        },
+        records,
+        ambiguities,
+        findings,
+        plans,
+    })
+}
+
+/// Map OpenCode project instructions, session parts, and compaction summaries
+/// into valid Cairn records and pending review plans.
+///
+/// This bridge performs no database writes. The resulting plans can be reviewed
+/// and later applied through the ordinary flush path.
+pub fn map_opencode_archive(opts: &OpenCodeImportOptions) -> Result<KoiImportReport, ImportError> {
+    if opts.batch_size == 0 {
+        return Err(ImportError::InvalidBatchSize);
+    }
+    if !opts.source.is_dir() {
+        return Err(ImportError::SourceNotDirectory {
+            archive: opts.source.clone(),
+        });
+    }
+
+    let mut records = Vec::new();
+    let mut ambiguities = Vec::new();
+    let mut findings = Vec::new();
+    let mut items = Vec::new();
+    for entry in WalkDir::new(&opts.source)
+        .sort_by_file_name()
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+    {
+        let path = entry.path();
+        let relative = path.strip_prefix(&opts.source).unwrap_or(path);
+        let raw = fs::read_to_string(path).map_err(|source| ImportError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let mapped = if is_opencode_instruction_file(path) {
+            let kind = match path.file_name().and_then(|name| name.to_str()) {
+                Some("AGENTS.md") => MemoryKind::Project,
+                Some("CLAUDE.md" | "CONTEXT.md") => MemoryKind::Rule,
+                _ => MemoryKind::Reference,
+            };
+            vec![map_opencode_record(
+                relative,
+                "instruction",
+                raw.trim().to_owned(),
+                kind,
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+                BTreeMap::new(),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )?]
+        } else if path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext == "json")
+        {
+            map_opencode_json(path, relative, &raw)?
+        } else {
+            continue;
+        };
+
+        for mapped_file in mapped {
+            ambiguities.extend(mapped_file.ambiguities);
+            findings.extend(mapped_file.findings);
+            items.extend(mapped_file.items);
+            records.push(mapped_file.record);
+        }
+    }
+
+    let plans = plan_records_for_system(
+        &opts.source,
+        &records,
+        opts.batch_size,
+        opts.mode,
+        OPENCODE_IMPORT_AUTHOR,
+        "opencode",
+    )?;
+    let unsupported_fields = findings
+        .iter()
+        .filter(|finding| finding.kind == ExternalImportFindingKind::Unsupported)
+        .cloned()
+        .collect();
+    let privacy_sensitive_fields = findings
+        .iter()
+        .filter(|finding| finding.kind == ExternalImportFindingKind::PrivacySensitive)
+        .cloned()
+        .collect();
+    Ok(KoiImportReport {
+        manifest: ExternalImportManifest {
+            system: "opencode".to_owned(),
             items,
             unsupported_fields,
             privacy_sensitive_fields,
@@ -1034,6 +1155,411 @@ fn is_importable(path: &Path) -> bool {
     )
 }
 
+fn is_opencode_instruction_file(path: &Path) -> bool {
+    matches!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some("AGENTS.md" | "CLAUDE.md" | "CONTEXT.md")
+    )
+}
+
+fn map_opencode_json(
+    _path: &Path,
+    relative: &Path,
+    raw: &str,
+) -> Result<Vec<MappedFile>, ImportError> {
+    let json = serde_json::from_str::<Value>(raw).map_err(|source| ImportError::Json {
+        path: relative.to_path_buf(),
+        source,
+    })?;
+    let session_id = session_ids_from_json(Some(&json)).into_iter().next();
+    let scope_tenant = scope_string(json.get("scope"), "tenant");
+    let scope_workspace = scope_string(json.get("scope"), "workspace");
+    let scope_entity = scope_string(json.get("scope"), "entity");
+    let scope_user = scope_string(json.get("scope"), "user");
+    let scope_agent = scope_string(json.get("scope"), "agent");
+    let created_at = json
+        .get("created_at")
+        .or_else(|| json.get("updated_at"))
+        .and_then(Value::as_str);
+    let mut mapped = Vec::new();
+    if let Some(summary) = json
+        .get("summary")
+        .or_else(|| json.get("compaction_summary"))
+    {
+        mapped.extend(map_opencode_summary(
+            relative,
+            summary,
+            session_id.as_deref(),
+            created_at,
+            scope_tenant.as_deref(),
+            scope_workspace.as_deref(),
+            scope_entity.as_deref(),
+            scope_user.as_deref(),
+            scope_agent.as_deref(),
+        )?);
+    }
+    if let Some(parts) = json.get("parts").and_then(Value::as_array) {
+        for (idx, part) in parts.iter().enumerate() {
+            let body = part_text(part)
+                .or_else(|| serde_json::to_string(part).ok())
+                .unwrap_or_default();
+            if body.trim().is_empty() {
+                continue;
+            }
+            let mut extra = BTreeMap::new();
+            extra.insert(
+                "opencode_part_order".to_owned(),
+                serde_json::json!(idx as u64),
+            );
+            if let Some(part_type) = part
+                .get("type")
+                .or_else(|| part.get("role"))
+                .and_then(Value::as_str)
+            {
+                extra.insert(
+                    "opencode_part_type".to_owned(),
+                    Value::String(part_type.to_owned()),
+                );
+            }
+            if let Some(tool) = part.get("tool").and_then(Value::as_str) {
+                extra.insert("opencode_tool".to_owned(), Value::String(tool.to_owned()));
+            }
+            mapped.push(map_opencode_record(
+                relative,
+                &format!("part-{idx}"),
+                body.trim().to_owned(),
+                MemoryKind::Trace,
+                created_at,
+                session_id.as_deref(),
+                Vec::new(),
+                opencode_skill_ids(part),
+                extra,
+                scope_tenant.as_deref(),
+                scope_workspace.as_deref(),
+                scope_entity.as_deref(),
+                scope_user.as_deref(),
+                scope_agent.as_deref(),
+            )?);
+        }
+    }
+    if mapped.is_empty() {
+        mapped.push(map_opencode_record(
+            relative,
+            "json",
+            extract_body(&json).unwrap_or_else(|| raw.trim().to_owned()),
+            MemoryKind::Reference,
+            created_at,
+            session_id.as_deref(),
+            Vec::new(),
+            Vec::new(),
+            BTreeMap::new(),
+            scope_tenant.as_deref(),
+            scope_workspace.as_deref(),
+            scope_entity.as_deref(),
+            scope_user.as_deref(),
+            scope_agent.as_deref(),
+        )?);
+    }
+    let file_findings = findings_from_file(Some(&json), relative, &[]);
+    for mapped_file in &mut mapped {
+        mapped_file.findings.extend(file_findings.clone());
+    }
+    Ok(mapped)
+}
+
+fn map_opencode_summary(
+    relative: &Path,
+    summary: &Value,
+    session_id: Option<&str>,
+    created_at: Option<&str>,
+    scope_tenant: Option<&str>,
+    scope_workspace: Option<&str>,
+    scope_entity: Option<&str>,
+    scope_user: Option<&str>,
+    scope_agent: Option<&str>,
+) -> Result<Vec<MappedFile>, ImportError> {
+    let Some(map) = summary.as_object() else {
+        return Ok(Vec::new());
+    };
+    let fields = [
+        ("Goal", MemoryKind::User, "summary-goal"),
+        ("goal", MemoryKind::User, "summary-goal"),
+        ("Constraints", MemoryKind::Rule, "summary-constraints"),
+        ("constraints", MemoryKind::Rule, "summary-constraints"),
+        ("Progress", MemoryKind::StrategySuccess, "summary-progress"),
+        ("progress", MemoryKind::StrategySuccess, "summary-progress"),
+        (
+            "Decisions",
+            MemoryKind::StrategySuccess,
+            "summary-decisions",
+        ),
+        (
+            "decisions",
+            MemoryKind::StrategySuccess,
+            "summary-decisions",
+        ),
+    ];
+    let mut seen = BTreeSet::new();
+    let mut records = Vec::new();
+    for (field, kind, role) in fields {
+        if seen.contains(role) {
+            continue;
+        }
+        let Some(value) = map.get(field) else {
+            continue;
+        };
+        let Some(body) = summary_field_text(value) else {
+            continue;
+        };
+        seen.insert(role);
+        let mut extra = BTreeMap::new();
+        extra.insert(
+            "opencode_summary_field".to_owned(),
+            Value::String(field.to_owned()),
+        );
+        records.push(map_opencode_record(
+            relative,
+            role,
+            body,
+            kind,
+            created_at,
+            session_id,
+            Vec::new(),
+            Vec::new(),
+            extra,
+            scope_tenant,
+            scope_workspace,
+            scope_entity,
+            scope_user,
+            scope_agent,
+        )?);
+    }
+    Ok(records)
+}
+
+fn part_text(part: &Value) -> Option<String> {
+    ["text", "content", "body", "message"]
+        .iter()
+        .find_map(|key| part.get(*key).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|body| !body.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn summary_field_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => {
+            let text = text.trim();
+            (!text.is_empty()).then(|| text.to_owned())
+        }
+        Value::Array(items) => {
+            let lines = items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(|line| format!("- {line}"))
+                .collect::<Vec<_>>();
+            (!lines.is_empty()).then(|| lines.join("\n"))
+        }
+        _ => None,
+    }
+}
+
+fn opencode_skill_ids(part: &Value) -> Vec<String> {
+    let mut ids = BTreeSet::new();
+    if part
+        .get("tool")
+        .and_then(Value::as_str)
+        .is_some_and(|tool| tool == "skill")
+    {
+        ids.insert("skill".to_owned());
+    }
+    if let Some(skills) = part.get("skills") {
+        ids.extend(id_values(skills));
+    }
+    ids.into_iter().collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn map_opencode_record(
+    relative: &Path,
+    role: &str,
+    body: String,
+    kind: MemoryKind,
+    created_at: Option<&str>,
+    session_id: Option<&str>,
+    tags: Vec<String>,
+    skill_ids: Vec<String>,
+    mut extra_frontmatter: BTreeMap<String, Value>,
+    scope_tenant: Option<&str>,
+    scope_workspace: Option<&str>,
+    scope_entity: Option<&str>,
+    scope_user: Option<&str>,
+    scope_agent: Option<&str>,
+) -> Result<MappedFile, ImportError> {
+    let body_hash = format!("{:x}", Sha256::digest(body.as_bytes()));
+    extra_frontmatter.insert(
+        "opencode_source_path".to_owned(),
+        Value::String(slash_normalized_path(relative)),
+    );
+    extra_frontmatter.insert(
+        "opencode_body_hash".to_owned(),
+        Value::String(body_hash.clone()),
+    );
+    extra_frontmatter.insert(
+        "opencode_record_role".to_owned(),
+        Value::String(role.to_owned()),
+    );
+    if let Some(session_id) = session_id {
+        extra_frontmatter.insert(
+            "opencode_session_id".to_owned(),
+            Value::String(session_id.to_owned()),
+        );
+    }
+    let issued_at = Rfc3339Timestamp::parse(
+        created_at
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("2026-01-01T00:00:00Z")
+            .to_owned(),
+    )
+    .map_err(|source| ImportError::Domain {
+        path: relative.to_path_buf(),
+        source,
+    })?;
+    let author = Identity::parse(OPENCODE_IMPORT_AUTHOR).map_err(|source| ImportError::Domain {
+        path: relative.to_path_buf(),
+        source,
+    })?;
+    let identity_seed = format!(
+        "opencode:{}:{role}:{body_hash}",
+        slash_normalized_path(relative)
+    );
+    let source_id =
+        SourceId::parse(deterministic_ulid(&identity_seed, "source").0).map_err(|source| {
+            ImportError::Domain {
+                path: relative.to_path_buf(),
+                source,
+            }
+        })?;
+    let source_ref_id = source_id.as_str().to_owned();
+    let source_hash = format!("{SOURCE_HASH_PREFIX}{body_hash}");
+    let record = MemoryRecord {
+        id: RecordId::parse(deterministic_ulid(&identity_seed, "record").0).map_err(|source| {
+            ImportError::Domain {
+                path: relative.to_path_buf(),
+                source,
+            }
+        })?,
+        target_id: TargetId::parse(deterministic_ulid(&identity_seed, "target").0).map_err(
+            |source| ImportError::Domain {
+                path: relative.to_path_buf(),
+                source,
+            },
+        )?,
+        kind,
+        class: class_for_kind(kind),
+        visibility: MemoryVisibility::Private,
+        scope: ScopeTuple {
+            tenant: scope_tenant.map(ToOwned::to_owned),
+            workspace: scope_workspace.map(ToOwned::to_owned),
+            entity: scope_entity.map(ToOwned::to_owned),
+            session_id: session_id.map(ToOwned::to_owned),
+            user: scope_user
+                .filter(|user| user.starts_with("hmn:"))
+                .map(ToOwned::to_owned)
+                .or_else(|| Some(OPENCODE_IMPORT_AUTHOR.to_owned())),
+            agent: scope_agent
+                .filter(|agent| agent.starts_with("agt:"))
+                .map(ToOwned::to_owned),
+            ..ScopeTuple::default()
+        },
+        body,
+        source_ids: vec![source_id.clone()],
+        provenance: Provenance {
+            source_sensor: Identity::parse(OPENCODE_IMPORT_SENSOR).map_err(|source| {
+                ImportError::Domain {
+                    path: relative.to_path_buf(),
+                    source,
+                }
+            })?,
+            created_at: issued_at.clone(),
+            originating_agent_id: author.clone(),
+            source_ids: vec![source_id],
+            source_hash: source_hash.clone(),
+            consent_ref: "consent:opencode-import".to_owned(),
+            llm_id_if_any: None,
+            source_refs: vec![SourceRef {
+                id: source_ref_id,
+                hash: source_hash,
+            }],
+        },
+        updated_at: issued_at.clone(),
+        evidence: EvidenceVector::default(),
+        salience: 0.5,
+        confidence: 0.7,
+        actor_chain: vec![ActorChainEntry {
+            role: ChainRole::Author,
+            identity: author,
+            at: issued_at,
+        }],
+        signature: cairn_core::domain::record::Ed25519Signature::parse(format!(
+            "ed25519:{}",
+            "c".repeat(128)
+        ))
+        .map_err(|source| ImportError::Domain {
+            path: relative.to_path_buf(),
+            source,
+        })?,
+        tags,
+        extra_frontmatter,
+        consent_model: None,
+    };
+    record.validate().map_err(|source| ImportError::Domain {
+        path: relative.to_path_buf(),
+        source,
+    })?;
+    let item = ExternalImportItem {
+        kind: ExternalImportItemKind::Record,
+        source_path: relative.to_path_buf(),
+        legacy_id: Some(format!("opencode:{role}")),
+        session_ids: session_id.into_iter().map(ToOwned::to_owned).collect(),
+        skill_ids,
+        provenance: ExternalImportProvenance {
+            source_sensor: OPENCODE_IMPORT_SENSOR.to_owned(),
+            source_hash: record.provenance.source_hash.clone(),
+            source_refs: record.provenance.source_refs.clone(),
+        },
+    };
+    let mut items = vec![item.clone()];
+    items.extend(
+        item.session_ids
+            .iter()
+            .map(|session_id| ExternalImportItem {
+                kind: ExternalImportItemKind::Session,
+                source_path: item.source_path.clone(),
+                legacy_id: Some(session_id.clone()),
+                session_ids: vec![session_id.clone()],
+                skill_ids: Vec::new(),
+                provenance: item.provenance.clone(),
+            }),
+    );
+    items.extend(item.skill_ids.iter().map(|skill_id| ExternalImportItem {
+        kind: ExternalImportItemKind::Skill,
+        source_path: item.source_path.clone(),
+        legacy_id: Some(skill_id.clone()),
+        session_ids: Vec::new(),
+        skill_ids: vec![skill_id.clone()],
+        provenance: item.provenance.clone(),
+    }));
+    Ok(MappedFile {
+        record,
+        ambiguities: Vec::new(),
+        findings: Vec::new(),
+        items,
+    })
+}
+
 #[allow(clippy::too_many_lines)]
 fn map_file(path: &Path, root: &Path, raw: &str) -> Result<MappedFile, ImportError> {
     let relative = path.strip_prefix(root).unwrap_or(path);
@@ -1445,8 +1971,26 @@ fn plan_records(
     batch_size: usize,
     mode: FlushMode,
 ) -> Result<Vec<FlushPlan>, ImportError> {
+    plan_records_for_system(
+        source_root,
+        records,
+        batch_size,
+        mode,
+        author_identity,
+        system,
+    )
+}
+
+fn plan_records_for_system(
+    source_root: &Path,
+    records: &[MemoryRecord],
+    batch_size: usize,
+    mode: FlushMode,
+    author_id: &str,
+    system: &str,
+) -> Result<Vec<FlushPlan>, ImportError> {
     let mut plans = Vec::new();
-    let author = Identity::parse(author_identity).map_err(|source| ImportError::Domain {
+    let author = Identity::parse(author_id).map_err(|source| ImportError::Domain {
         path: source_root.to_path_buf(),
         source,
     })?;
@@ -1455,7 +1999,7 @@ fn plan_records(
         let expires_at = (chrono::Utc::now() + chrono::Duration::minutes(5))
             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         plans.push(FlushPlan {
-            operation_id: deterministic_operation_id(system, source_root, idx, chunk),
+            operation_id: deterministic_operation_id(source_root, system, idx, chunk),
             issued_at,
             issuer: author.clone(),
             principal: None,
@@ -1481,8 +2025,8 @@ fn plan_records(
 }
 
 fn deterministic_operation_id(
-    system: &str,
     source_root: &Path,
+    system: &str,
     batch_index: usize,
     records: &[MemoryRecord],
 ) -> Ulid {
@@ -1839,5 +2383,150 @@ mod tests {
             report.records[0].provenance.source_hash,
             report.records[1].provenance.source_hash
         );
+    }
+
+    #[test]
+    fn opencode_import_maps_instructions_summaries_and_session_parts() {
+        let archive = tempfile::tempdir().expect("archive");
+        fs::write(
+            archive.path().join("AGENTS.md"),
+            "# Project Memory\n\nUse deterministic import review plans.",
+        )
+        .expect("write agents");
+        fs::write(
+            archive.path().join("CLAUDE.md"),
+            "# Rules\n\nNever write directly to the memory store during migration.",
+        )
+        .expect("write claude");
+        fs::create_dir_all(archive.path().join("sessions")).expect("sessions dir");
+        fs::write(
+            archive.path().join("sessions").join("session.json"),
+            r#"{
+              "id": "ses_01",
+              "session_id": "ses_01",
+              "created_at": "2026-04-01T10:00:00Z",
+              "summary": {
+                "Goal": "Build an OpenCode bridge.",
+                "Constraints": ["Preserve ordering.", "No direct DB writes."],
+                "Progress": "Mapped session parts into trace records.",
+                "Decisions": ["Use reviewable FlushPlans."]
+              },
+              "parts": [
+                {"id": "p1", "type": "user", "text": "Please import OpenCode memory."},
+                {"id": "p2", "type": "tool", "tool": "skill", "text": "Loaded migration skill."},
+                {"id": "p3", "type": "assistant", "text": "Drafted an import plan."}
+              ],
+              "unsupported_private_state": true,
+              "api_token": "redacted-before-review"
+            }"#,
+        )
+        .expect("write session");
+
+        let report = super::map_opencode_archive(&super::OpenCodeImportOptions {
+            source: archive.path().to_path_buf(),
+            batch_size: 64,
+            mode: FlushMode::HumanReview,
+        })
+        .expect("map opencode archive");
+
+        assert_eq!(report.manifest.system, "opencode");
+        assert_eq!(report.records.len(), 9);
+        assert!(
+            report
+                .records
+                .iter()
+                .all(|record| record.validate().is_ok())
+        );
+        assert!(report.records.iter().any(|record| {
+            record.kind == MemoryKind::Project && record.body.contains("Project Memory")
+        }));
+        assert!(report.records.iter().any(|record| {
+            record.kind == MemoryKind::Rule && record.body.contains("Never write directly")
+        }));
+        assert!(report.records.iter().any(|record| {
+            record.kind == MemoryKind::User && record.body.contains("Build an OpenCode bridge")
+        }));
+        assert!(report.records.iter().any(|record| {
+            record.kind == MemoryKind::StrategySuccess
+                && record.body.contains("Use reviewable FlushPlans")
+        }));
+        let trace_orders = report
+            .records
+            .iter()
+            .filter(|record| record.kind == MemoryKind::Trace)
+            .map(|record| {
+                record.extra_frontmatter["opencode_part_order"]
+                    .as_u64()
+                    .expect("part order")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(trace_orders, vec![0, 1, 2]);
+        assert!(report.manifest.items.iter().any(|item| {
+            item.kind == ExternalImportItemKind::Session
+                && item.legacy_id.as_deref() == Some("ses_01")
+        }));
+        assert!(report.manifest.items.iter().any(|item| {
+            item.kind == ExternalImportItemKind::Skill && item.legacy_id.as_deref() == Some("skill")
+        }));
+        assert!(
+            report.findings.iter().any(|finding| {
+                finding.kind == ExternalImportFindingKind::Unsupported
+                    && finding.field == "unsupported_private_state"
+            }),
+            "unsupported OpenCode fields should be review findings: {:?}",
+            report.findings
+        );
+        assert!(
+            report.findings.iter().any(|finding| {
+                finding.kind == ExternalImportFindingKind::PrivacySensitive
+                    && finding.field == "api_token"
+            }),
+            "privacy fields should be review findings: {:?}",
+            report.findings
+        );
+        assert!(
+            report
+                .plans
+                .iter()
+                .all(|plan| plan.mode == FlushMode::HumanReview)
+        );
+    }
+
+    #[test]
+    fn opencode_cli_writes_pending_review_plans_and_source_artifacts() {
+        let archive = tempfile::tempdir().expect("archive");
+        fs::write(
+            archive.path().join("AGENTS.md"),
+            "Project purpose from OpenCode.",
+        )
+        .expect("write agents");
+        let vault = tempfile::tempdir().expect("vault");
+
+        let report = super::map_opencode_archive(&super::OpenCodeImportOptions {
+            source: archive.path().to_path_buf(),
+            batch_size: 1,
+            mode: FlushMode::HumanReview,
+        })
+        .expect("map opencode archive");
+        let written = write_review_plans(vault.path(), &report).expect("write plans");
+
+        assert_eq!(written.len(), 1);
+        let source_id = report.records[0].provenance.source_ids[0].as_str();
+        assert_eq!(
+            fs::read_to_string(vault.path().join(source_id)).expect("source artifact"),
+            report.records[0].body
+        );
+        let plan_path = written[0].join(format!("{}.plan.json", report.plans[0].operation_id.0));
+        let raw = fs::read_to_string(plan_path).expect("plan json");
+        let persisted: cairn_core::domain::flush_plan::PersistedPlan =
+            serde_json::from_str(&raw).expect("persisted plan");
+        assert!(matches!(
+            persisted.status,
+            cairn_core::domain::flush_plan::PlanStatus::Pending
+        ));
+        assert!(matches!(
+            persisted.plan.mutations.first(),
+            Some(PlannedMutation::Upsert { .. })
+        ));
     }
 }
