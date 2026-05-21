@@ -83,13 +83,6 @@ fn share_link_input<'a>(
     }
 }
 
-fn assert_share_link_rejection_detail(
-    input: ShareLinkGateInput<'_>,
-    expected: SharingDecisionKind,
-) {
-    assert_share_link_rejection(input, expected, |_| true);
-}
-
 fn assert_share_link_rejection(
     input: ShareLinkGateInput<'_>,
     expected: SharingDecisionKind,
@@ -447,7 +440,9 @@ fn share_link_gate_rejects_target_hash_mismatch() {
         ..share_link_input(&link, &now, &revocation, &signer_key)
     };
 
-    assert_share_link_rejection_detail(input, SharingDecisionKind::TargetMismatch);
+    assert_share_link_rejection(input, SharingDecisionKind::TargetMismatch, |err| {
+        matches!(err, domain::DomainError::InvalidPayloadHash { .. })
+    });
 }
 
 #[test]
@@ -459,9 +454,10 @@ fn share_link_gate_rejects_tier_above_authorized_max() {
     let revocation = SharingRevocationState::default();
     let signer_key = signer().verifying_key();
 
-    assert_share_link_rejection_detail(
+    assert_share_link_rejection(
         share_link_input(&link, &now, &revocation, &signer_key),
         SharingDecisionKind::TierMismatch,
+        |err| matches!(err, domain::DomainError::UnsupportedVisibility { .. }),
     );
 }
 
@@ -473,9 +469,10 @@ fn share_link_gate_rejects_invalid_shape() {
     let revocation = SharingRevocationState::default();
     let signer_key = signer().verifying_key();
 
-    assert_share_link_rejection_detail(
+    assert_share_link_rejection(
         share_link_input(&link, &now, &revocation, &signer_key),
         SharingDecisionKind::InvalidShape,
+        |err| matches!(err, domain::DomainError::MissingSignature { .. }),
     );
 }
 
