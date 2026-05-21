@@ -256,3 +256,48 @@ fn hermes_agent_import_json_emits_manifest_sections_and_skill_items() {
         "plain Hermes markdown fixture should not require field review: {import}"
     );
 }
+
+#[test]
+fn hermes_agent_import_preserves_nested_skill_identity() {
+    let vault = tempfile::tempdir().expect("temp vault");
+    bootstrap_vault(vault.path());
+    let archive = tempfile::tempdir().expect("hermes archive");
+    std::fs::create_dir_all(archive.path().join("skills/frontend")).expect("frontend skills dir");
+    std::fs::create_dir_all(archive.path().join("skills/backend")).expect("backend skills dir");
+    std::fs::write(
+        archive.path().join("skills/frontend/review.md"),
+        "§ Frontend review playbook",
+    )
+    .expect("write frontend skill");
+    std::fs::write(
+        archive.path().join("skills/backend/review.md"),
+        "§ Backend review playbook",
+    )
+    .expect("write backend skill");
+
+    let import = run_json_ok(
+        vault.path(),
+        &[
+            "import",
+            "--from",
+            "hermes-agent",
+            archive.path().to_str().expect("utf-8 archive path"),
+            "--batch-size",
+            "16",
+            "--json",
+        ],
+    );
+
+    let skill_ids: std::collections::BTreeSet<_> = import["manifest"]["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .filter(|item| item["kind"] == "skill")
+        .map(|item| item["legacy_id"].as_str().expect("legacy_id"))
+        .collect();
+    assert_eq!(
+        skill_ids,
+        std::collections::BTreeSet::from(["backend/review", "frontend/review"]),
+        "nested skill paths should remain distinct: {import}"
+    );
+}
