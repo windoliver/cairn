@@ -95,7 +95,10 @@ pub use session_tree::{
     BranchKind, MergeStrategy, SessionMerge, SessionParent, SessionTree, SessionTreeError,
     SessionTreeNode,
 };
-pub use sharing::{SharingDecisionKind, SharingPolicyAction, SharingPolicySubject};
+pub use sharing::{
+    PromotionConsentPayload, PromotionConsentReceipt, ShareLinkPayload, SharingDecisionKind,
+    SharingPolicyAction, SharingPolicySubject, SharingRevocationState, SignedShareLink,
+};
 pub use source_id::SourceId;
 pub use source_ref::{SourceRef, validate_source_refs};
 pub use target_id::TargetId;
