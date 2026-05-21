@@ -235,6 +235,107 @@ async fn agent_extractor_prompt_omits_text_outside_restricted_eligible_spans() {
 }
 
 #[tokio::test]
+async fn agent_extractor_rejects_when_all_outputs_are_outside_eligible_spans() {
+    let provider = Arc::new(RecordingAgentProvider::returning(AgentRun {
+        status: AgentRunStatus::Completed,
+        abort_error: None,
+        output: AgentOutput::Json(serde_json::json!({
+            "drafts": [{
+                "kind": "fact",
+                "body": "Secret token must not leave.",
+                "confidence": 0.91,
+                "span": {"start": 21, "end": 48}
+            }],
+            "discards": [],
+            "evidence": []
+        })),
+        budget_consumed: AgentBudgetConsumed {
+            turns: 1,
+            tool_calls: 0,
+            cost_units: 1,
+        },
+        tool_calls: vec![],
+        policy_trace: vec![],
+    }));
+    let extractor = AgentExtractor::new(provider);
+    let event = cli_event();
+    let body = "VISIBLE memory fact. SECRET token must not leave.";
+    let resolved = ResolvedBody::from_user_ingest(body, &event.payload, UserIngestPayloadKind::Cli)
+        .expect("matching variant");
+    let input = ExtractInput {
+        event: &event,
+        body: BodyResolution::Resolved(resolved),
+        eligible_spans: Some(vec![TextSpan::new(0, 20)]),
+    };
+
+    let err = extractor
+        .extract(&input)
+        .await
+        .expect_err("all out-of-eligibility outputs should fail");
+
+    assert!(matches!(
+        err,
+        ExtractError::SpanOutOfBounds { worker: "agent" }
+    ));
+}
+
+#[tokio::test]
+async fn agent_extractor_drops_out_of_eligibility_items_and_keeps_valid_items() {
+    let provider = Arc::new(RecordingAgentProvider::returning(AgentRun {
+        status: AgentRunStatus::Completed,
+        abort_error: None,
+        output: AgentOutput::Json(serde_json::json!({
+            "drafts": [
+                {
+                    "kind": "fact",
+                    "body": "Visible memory fact.",
+                    "confidence": 0.91,
+                    "span": {"start": 8, "end": 19}
+                },
+                {
+                    "kind": "fact",
+                    "body": "Secret token must not leave.",
+                    "confidence": 0.91,
+                    "span": {"start": 21, "end": 48}
+                }
+            ],
+            "discards": [{
+                "reason": "outside eligible span",
+                "span": {"start": 21, "end": 48}
+            }],
+            "evidence": []
+        })),
+        budget_consumed: AgentBudgetConsumed {
+            turns: 1,
+            tool_calls: 0,
+            cost_units: 1,
+        },
+        tool_calls: vec![],
+        policy_trace: vec![],
+    }));
+    let extractor = AgentExtractor::new(provider);
+    let event = cli_event();
+    let body = "VISIBLE memory fact. SECRET token must not leave.";
+    let resolved = ResolvedBody::from_user_ingest(body, &event.payload, UserIngestPayloadKind::Cli)
+        .expect("matching variant");
+    let input = ExtractInput {
+        event: &event,
+        body: BodyResolution::Resolved(resolved),
+        eligible_spans: Some(vec![TextSpan::new(0, 20)]),
+    };
+
+    let result = extractor.extract(&input).await.expect("extract ok");
+
+    assert_eq!(result.outputs.len(), 1);
+    let ExtractOutput::Draft(draft) = &result.outputs[0] else {
+        panic!("expected draft");
+    };
+    assert_eq!(draft.body, "Visible memory fact.");
+    assert_eq!(draft.source_span, Some(TextSpan::new(8, 19)));
+    assert!(result.discards.is_empty());
+}
+
+#[tokio::test]
 async fn agent_extractor_aborted_run_surfaces_original_abort_error() {
     let provider = Arc::new(RecordingAgentProvider::returning(AgentRun {
         status: AgentRunStatus::Aborted,

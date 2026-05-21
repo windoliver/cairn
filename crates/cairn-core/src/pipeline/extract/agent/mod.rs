@@ -18,8 +18,8 @@ use crate::contract::agent_provider::{
 use crate::domain::CaptureEventId;
 use crate::pipeline::extract::body::BodyResolution;
 use crate::pipeline::extract::{
-    ExtractBudget, ExtractError, ExtractInput, ExtractOutput, ExtractResult, ExtractorWorker,
-    TextSpan, TruncationReason, WorkerRole,
+    DiscardCandidate, ExtractBudget, ExtractError, ExtractInput, ExtractOutput, ExtractResult,
+    ExtractorWorker, MemoryDraft, TextSpan, TruncationReason, WorkerRole,
 };
 
 const AGENT_EXTRACTOR_IDENTITY: &str = "agt:cairn-extractor:v1";
@@ -150,6 +150,22 @@ fn eligible_prompt_source(body: &str, spans: &[TextSpan]) -> String {
     source
 }
 
+fn span_in_eligibility(span: TextSpan, eligible_spans: &[TextSpan]) -> bool {
+    eligible_spans
+        .iter()
+        .any(|eligible| eligible.start <= span.start && span.end <= eligible.end)
+}
+
+fn draft_in_eligibility(draft: &MemoryDraft, eligible_spans: &[TextSpan]) -> bool {
+    draft
+        .source_span
+        .is_some_and(|span| span_in_eligibility(span, eligible_spans))
+}
+
+fn discard_in_eligibility(discard: &DiscardCandidate, eligible_spans: &[TextSpan]) -> bool {
+    span_in_eligibility(discard.source_span, eligible_spans)
+}
+
 #[async_trait::async_trait]
 impl ExtractorWorker for AgentExtractor {
     fn name(&self) -> &'static str {
@@ -247,11 +263,24 @@ impl ExtractorWorker for AgentExtractor {
             }));
         };
 
-        let parsed = parse_agent_response(&input.event.event_id, body, value).map_err(|err| {
-            agent_error(AgentProviderError::InvalidOutput {
-                message: err.to_string(),
-            })
-        })?;
+        let mut parsed =
+            parse_agent_response(&input.event.event_id, body, value).map_err(|err| {
+                agent_error(AgentProviderError::InvalidOutput {
+                    message: err.to_string(),
+                })
+            })?;
+
+        let emitted_items = parsed.drafts.len().saturating_add(parsed.discards.len());
+        parsed
+            .drafts
+            .retain(|draft| draft_in_eligibility(draft, &eligible_spans));
+        parsed
+            .discards
+            .retain(|discard| discard_in_eligibility(discard, &eligible_spans));
+
+        if emitted_items > 0 && parsed.drafts.is_empty() && parsed.discards.is_empty() {
+            return Err(ExtractError::SpanOutOfBounds { worker: "agent" });
+        }
 
         let mut outputs: Vec<ExtractOutput> = parsed
             .drafts
