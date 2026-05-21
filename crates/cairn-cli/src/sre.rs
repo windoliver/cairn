@@ -169,7 +169,7 @@ fn is_known_metric_event(event_name: &str) -> bool {
 }
 
 const WORKFLOW_BACKLOG_THRESHOLD_MS: i64 = 300_000;
-const CLI_SEARCH_DEDUPE_LOOKBACK_MS: i64 = 5_000;
+const CLI_SEARCH_DEDUPE_LOOKBACK_MS: i64 = 1_000;
 
 #[derive(Default)]
 struct WorkflowKindAggregate {
@@ -259,7 +259,12 @@ fn summarize_workflow(events: &[MetricEvent]) -> SreWorkflowSummary {
         .into_iter()
         .map(|(kind, aggregate)| {
             dead_letter_count = dead_letter_count.saturating_add(aggregate.dead_letters);
-            let status = if aggregate.failed_recent > 0 || aggregate.dead_letters > 0 {
+            let status = if aggregate.failed_recent > 0
+                || aggregate.dead_letters > 0
+                || aggregate
+                    .oldest_queued_age_ms
+                    .is_some_and(|age_ms| age_ms > WORKFLOW_BACKLOG_THRESHOLD_MS)
+            {
                 SreStatus::Warning
             } else {
                 SreStatus::Ok
@@ -402,7 +407,18 @@ fn summarize_projection(events: &[MetricEvent]) -> SreProjectionSummary {
 
 fn workflow_kind_label(raw: &str) -> String {
     match raw {
-        "dream.light" => raw.to_owned(),
+        "dream.light"
+        | "dream.rem"
+        | "dream.deep"
+        | "dream.distill_window"
+        | "expire.tier"
+        | "expiration.sweep"
+        | "evaluate.sweep"
+        | "evaluation.golden_checks"
+        | "trace.canvas"
+        | "trace_canvas.materialize_step"
+        | "consolidation.rolling_summary"
+        | "consolidation.forget_cleanup" => raw.to_owned(),
         _ => "redacted_workflow".to_owned(),
     }
 }

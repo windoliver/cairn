@@ -217,8 +217,8 @@ fn admin_sre_report_counts_standalone_cli_search_preflight_failures() {
     let metrics = dir.path().join(".cairn/metrics.jsonl");
     std::fs::write(
         &metrics,
-        r#"{"event":"search_completed","ts_ms":1000,"mode":"semantic","hit_count":1,"latency_ms":41,"degradation_state":"none","error":null}
-{"event":"verb_invocation","ts_ms":9000,"verb":"search","surface":"cli","mode":"semantic","status":"rejected","latency_ms":12,"error":"capability_unavailable","budget_used_ratio":null,"degradation_state":"partial"}
+        r#"{"event":"search_completed","ts_ms":1000,"mode":"semantic","hit_count":0,"latency_ms":41,"degradation_state":"failed","error":"provider_unavailable"}
+{"event":"verb_invocation","ts_ms":4500,"verb":"search","surface":"cli","mode":"semantic","status":"rejected","latency_ms":12,"error":"capability_unavailable","budget_used_ratio":null,"degradation_state":"partial"}
 "#,
     )
     .expect("write metrics");
@@ -241,8 +241,8 @@ fn admin_sre_report_counts_standalone_cli_search_preflight_failures() {
         .find(|mode| mode["mode"] == "semantic")
         .expect("semantic mode");
     assert_eq!(semantic["invocations"], 2);
-    assert_eq!(semantic["failed"], 1);
-    assert_eq!(semantic["degraded"], 1);
+    assert_eq!(semantic["failed"], 2);
+    assert_eq!(semantic["degraded"], 2);
     assert_eq!(semantic["status"], "fail");
 }
 
@@ -357,6 +357,7 @@ fn admin_sre_report_summarizes_workflow_metrics_safely() {
         &metrics,
         r#"{"event":"workflow_job_started","ts_ms":1000,"job_id":"job-SECRET_PRIVATE_TOKEN","kind":"dream.light","attempts":1,"queue_lag_ms":120,"dedupe_key":"/Users/alice private body query text"}
 {"event":"workflow_job_completed","ts_ms":2000,"job_id":"job-SECRET_PRIVATE_TOKEN","kind":"dream.light","attempts":1,"duration_ms":40}
+{"event":"workflow_job_started","ts_ms":2500,"job_id":"job-tier","kind":"expire.tier","attempts":1,"queue_lag_ms":742000,"dedupe_key":null}
 {"event":"workflow_job_failed","ts_ms":3000,"job_id":"job-SECRET_PRIVATE_TOKEN","kind":"SECRET_PRIVATE_TOKEN private body query text","attempts":2,"disposition":"permanent","failure_class":"provider_error","last_error":"/Users/alice private body query text","will_retry_at_ms":null}
 "#,
     )
@@ -376,7 +377,7 @@ fn admin_sre_report_summarizes_workflow_metrics_safely() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json = json_stdout(&output);
     assert_eq!(json["workflow"]["status"], "warning");
-    assert_eq!(json["workflow"]["oldest_queued_age_ms"], 120);
+    assert_eq!(json["workflow"]["oldest_queued_age_ms"], 742000);
     assert_eq!(json["workflow"]["dead_letter_count"], 1);
     let kinds = json["workflow"]["kinds"]
         .as_array()
@@ -388,6 +389,13 @@ fn admin_sre_report_summarizes_workflow_metrics_safely() {
     assert_eq!(dream["leased"], 1);
     assert_eq!(dream["done_recent"], 1);
     assert_eq!(dream["oldest_queued_age_ms"], 120);
+    let expire = kinds
+        .iter()
+        .find(|kind| kind["kind"] == "expire.tier")
+        .expect("expire.tier kind");
+    assert_eq!(expire["leased"], 1);
+    assert_eq!(expire["oldest_queued_age_ms"], 742000);
+    assert_eq!(expire["status"], "warning");
     let redacted = kinds
         .iter()
         .find(|kind| kind["kind"] == "redacted_workflow")
