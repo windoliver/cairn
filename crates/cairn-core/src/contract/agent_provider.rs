@@ -387,7 +387,7 @@ pub struct AgentToolAttempt {
 /// can return trace or budget state. `Ok(AgentRun { status: Aborted,
 /// abort_error: Some(_), .. })` is for providers returning trace and budget
 /// state with a typed abort reason.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct AgentRun {
     /// Run status.
     pub status: AgentRunStatus,
@@ -404,7 +404,7 @@ pub struct AgentRun {
 }
 
 /// Errors returned by `AgentProvider` implementations and policy helpers.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, thiserror::Error)]
 #[non_exhaustive]
 pub enum AgentProviderError {
     /// Request failed local validation.
@@ -631,5 +631,28 @@ mod tests {
             run.abort_error,
             Some(AgentProviderError::BudgetExceeded { limit: "turns" })
         );
+    }
+
+    #[test]
+    fn aborted_run_serializes_abort_error() {
+        let run = AgentRun {
+            status: AgentRunStatus::Aborted,
+            abort_error: Some(AgentProviderError::BudgetExceeded { limit: "turns" }),
+            output: AgentOutput::Empty,
+            budget_consumed: AgentBudgetConsumed {
+                turns: 1,
+                tool_calls: 0,
+                cost_units: 0,
+            },
+            tool_calls: Vec::new(),
+            policy_trace: vec!["turn budget exceeded".to_string()],
+        };
+
+        let value = serde_json::to_value(&run).expect("agent run serializes");
+
+        assert_eq!(value["status"], "aborted");
+        assert!(value.get("abort_error").is_some());
+        assert!(value["abort_error"].to_string().contains("BudgetExceeded"));
+        assert!(value["abort_error"].to_string().contains("turns"));
     }
 }
