@@ -4,11 +4,12 @@ use std::{path::Path, process::ExitCode};
 
 use cairn_core::domain::metrics::MetricEvent;
 use cairn_core::domain::{
-    SreGateSummary, SreMeasurement, SrePrivacySummary, SreProjectionSummary, SreRehydrationSummary,
-    SreReport, SreSearchModeSummary, SreSearchSummary, SreStatus, SreVaultSummary,
-    SreWorkflowSummary, classify_threshold,
+    SreDetail, SreGateResult, SreGateSummary, SreMeasurement, SrePrivacySummary,
+    SreProjectionSummary, SreRehydrationSummary, SreReport, SreSearchModeSummary, SreSearchSummary,
+    SreStatus, SreVaultSummary, SreWorkflowSummary, classify_threshold,
 };
 use clap::ArgMatches;
+use serde::Deserialize;
 
 use crate::{config, metrics};
 
@@ -19,6 +20,16 @@ pub const SLO_COLD_REHYDRATE_MS: f64 = 3_000.0;
 #[must_use]
 pub fn run_report(matches: &ArgMatches, vault_root: &Path) -> ExitCode {
     let json = matches.get_flag("json");
+    let bench_report_dir = matches.get_one::<String>("bench-report-dir").map(Path::new);
+    if let Some(dir) = bench_report_dir
+        && !dir.is_dir()
+    {
+        eprintln!(
+            "cairn admin sre report: bench-report-dir error - {} is not a directory",
+            dir.display()
+        );
+        return ExitCode::from(78);
+    }
     let config = match config::load(vault_root, &config::CliOverrides::default()) {
         Ok(config) => config,
         Err(err) => {
@@ -26,7 +37,13 @@ pub fn run_report(matches: &ArgMatches, vault_root: &Path) -> ExitCode {
             return ExitCode::from(78);
         }
     };
-    let report = build_report(vault_root, &config);
+    let report = match build_report_with_bench(vault_root, &config, bench_report_dir) {
+        Ok(report) => report,
+        Err(err) => {
+            eprintln!("cairn admin sre report: bench-report-dir error - {err}");
+            return ExitCode::from(78);
+        }
+    };
     if json {
         println!(
             "{}",
@@ -41,6 +58,14 @@ pub fn run_report(matches: &ArgMatches, vault_root: &Path) -> ExitCode {
 /// Build a scrubbed local SRE report from vault-local metrics.
 #[must_use]
 pub fn build_report(vault_root: &Path, _config: &cairn_core::config::CairnConfig) -> SreReport {
+    build_report_with_bench(vault_root, _config, None).expect("no bench dir cannot fail")
+}
+
+fn build_report_with_bench(
+    vault_root: &Path,
+    _config: &cairn_core::config::CairnConfig,
+    bench_report_dir: Option<&Path>,
+) -> Result<SreReport, String> {
     let events = read_metric_events(vault_root);
     let rehydration_latencies: Vec<u64> = events
         .iter()
@@ -54,7 +79,8 @@ pub fn build_report(vault_root: &Path, _config: &cairn_core::config::CairnConfig
     let search_modes = summarize_search(&events);
     let p95 = percentile_u64(&rehydration_latencies, 0.95);
     let rehydration_status = classify_threshold(p95, SLO_COLD_REHYDRATE_MS);
-    SreReport {
+    let gates = load_bench_gates(bench_report_dir)?;
+    Ok(SreReport {
         schema_version: 1,
         captured_at_ms: metrics::now_ms(),
         vault: SreVaultSummary {
@@ -93,15 +119,12 @@ pub fn build_report(vault_root: &Path, _config: &cairn_core::config::CairnConfig
             },
             modes: search_modes,
         },
-        gates: SreGateSummary {
-            status: SreStatus::Unknown,
-            gates: Vec::new(),
-        },
+        gates,
         privacy: SrePrivacySummary {
             scrubbed: true,
             forbidden_field_count: 0,
         },
-    }
+    })
 }
 
 fn read_metric_events(vault_root: &Path) -> Vec<MetricEvent> {
@@ -169,6 +192,80 @@ fn percentile_u64(values: &[u64], percentile: f64) -> Option<f64> {
     sorted.get(idx).map(|value| *value as f64)
 }
 
+#[derive(Deserialize)]
+struct BenchSreReport {
+    #[serde(default)]
+    checks: Vec<BenchSreCheck>,
+}
+
+#[derive(Deserialize)]
+struct BenchSreCheck {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    status: String,
+    measured: Option<f64>,
+    threshold: Option<f64>,
+    #[serde(default)]
+    unit: String,
+    detail: Option<String>,
+}
+
+fn load_bench_gates(bench_report_dir: Option<&Path>) -> Result<SreGateSummary, String> {
+    let Some(dir) = bench_report_dir else {
+        return Ok(empty_gate_summary());
+    };
+    let path = dir.join("sre.json");
+    if !path.exists() {
+        return Ok(empty_gate_summary());
+    }
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+    let report: BenchSreReport = serde_json::from_str(&raw)
+        .map_err(|err| format!("failed to parse {}: {err}", path.display()))?;
+    let gates: Vec<SreGateResult> = report
+        .checks
+        .into_iter()
+        .map(|check| SreGateResult {
+            name: check.name,
+            status: parse_gate_status(&check.status),
+            measured: check.measured.and_then(SreMeasurement::new),
+            threshold: check.threshold.and_then(SreMeasurement::new),
+            unit: check.unit,
+            detail: check.detail.map(|detail| {
+                SreDetail::stable(&detail).unwrap_or_else(|| SreDetail::from_raw(&detail))
+            }),
+        })
+        .collect();
+    Ok(SreGateSummary {
+        status: rollup_gate_status(&gates),
+        gates,
+    })
+}
+
+fn empty_gate_summary() -> SreGateSummary {
+    SreGateSummary {
+        status: SreStatus::Unknown,
+        gates: Vec::new(),
+    }
+}
+
+fn parse_gate_status(status: &str) -> SreStatus {
+    match status {
+        "ok" | "pass" | "passed" => SreStatus::Ok,
+        "warning" | "warn" => SreStatus::Warning,
+        "fail" | "failed" => SreStatus::Fail,
+        _ => SreStatus::Unknown,
+    }
+}
+
+fn rollup_gate_status(gates: &[SreGateResult]) -> SreStatus {
+    if gates.is_empty() {
+        return SreStatus::Unknown;
+    }
+    rollup_status(gates.iter().map(|gate| gate.status))
+}
+
 /// Render a compact operator-readable SRE report.
 #[must_use]
 pub fn render_human(report: &SreReport) -> String {
@@ -186,11 +283,31 @@ pub fn render_human(report: &SreReport) -> String {
 }
 
 fn status_text(report: &SreReport) -> &'static str {
-    if matches!(report.workflow.status, SreStatus::Fail | SreStatus::Warning)
-        || matches!(report.search.status, SreStatus::Fail | SreStatus::Warning)
-    {
-        "warning"
+    match rollup_status([
+        report.workflow.status,
+        report.rehydration.status,
+        report.projection.status,
+        report.search.status,
+        report.gates.status,
+    ]) {
+        SreStatus::Fail => "fail",
+        SreStatus::Warning => "warning",
+        SreStatus::Ok | SreStatus::Unknown => "ok",
+    }
+}
+
+fn rollup_status(statuses: impl IntoIterator<Item = SreStatus>) -> SreStatus {
+    let mut saw_warning = false;
+    for status in statuses {
+        match status {
+            SreStatus::Fail => return SreStatus::Fail,
+            SreStatus::Warning => saw_warning = true,
+            SreStatus::Ok | SreStatus::Unknown => {}
+        }
+    }
+    if saw_warning {
+        SreStatus::Warning
     } else {
-        "ok"
+        SreStatus::Ok
     }
 }
