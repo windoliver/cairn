@@ -8,8 +8,11 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{
-    DomainError, Ed25519Signature, Identity, MemoryVisibility, Rfc3339Timestamp, ScopeTuple,
+    CanonicalRecordHash, DomainError, Ed25519Signature, Identity, MemoryRecord, MemoryVisibility,
+    Rfc3339Timestamp, ScopeTuple,
 };
+use crate::policy_trace::{PolicyDetail, PolicyGate, PolicyOutcome, PolicyTraceEntry};
+use crate::rebac::{RebacAction, RebacContext};
 
 const MAX_TARGET_ID_HASHES: usize = 64;
 
@@ -194,6 +197,37 @@ pub struct SharingRevocationState {
     pub signer_key_revoked: bool,
 }
 
+/// Inputs for the shared-tier promotion gate.
+pub struct PromotionGateInput<'a> {
+    /// Record being promoted.
+    pub record: &'a MemoryRecord,
+    /// Current visibility tier requested by the apply operation.
+    pub from_tier: MemoryVisibility,
+    /// Target visibility tier requested by the apply operation.
+    pub to_tier: MemoryVisibility,
+    /// Signed consent receipt authorizing the promotion.
+    pub receipt: &'a PromotionConsentReceipt,
+    /// Apply-time wall clock.
+    pub now: &'a Rfc3339Timestamp,
+    /// WAL operation id being applied.
+    pub operation_id: &'a str,
+    /// Human signer verifying key.
+    pub signer_key: &'a VerifyingKey,
+    /// Apply-time revocation state.
+    pub revocation: &'a SharingRevocationState,
+    /// Apply-time `ReBAC` relation context.
+    pub rebac: &'a RebacContext,
+}
+
+/// Denial with both typed error and body-free trace.
+#[derive(Debug)]
+pub struct SharingGateRejection {
+    /// Typed domain error for the caller.
+    pub error: DomainError,
+    /// Body-free policy trace for audit and response surfaces.
+    pub trace: PolicyTraceEntry,
+}
+
 impl PromotionConsentReceipt {
     /// Validate body-free shape before or after signature verification.
     pub fn validate_shape(&self) -> Result<(), DomainError> {
@@ -295,6 +329,170 @@ impl SignedShareLink {
         key.verify(&bytes, &signature)
             .map_err(|_| DomainError::InvalidSignature)
     }
+}
+
+/// Verify that a signed consent receipt authorizes a shared-tier promotion at
+/// apply time.
+pub fn verify_promotion_gate(
+    input: PromotionGateInput<'_>,
+) -> Result<PolicyTraceEntry, SharingGateRejection> {
+    if let Err(error) = input.receipt.validate_shape() {
+        return Err(reject_promotion(SharingDecisionKind::InvalidShape, error));
+    }
+
+    let signature_result = (|| {
+        let bytes = crate::domain::canonical::canonical_bytes(&input.receipt.payload)
+            .map_err(|_| DomainError::InvalidSignature)?;
+        let signature = decode_signature(&input.receipt.signature)?;
+        input
+            .signer_key
+            .verify(&bytes, &signature)
+            .map_err(|_| DomainError::InvalidSignature)
+    })();
+    if signature_result.is_err() {
+        return Err(reject_promotion(
+            SharingDecisionKind::BadSignature,
+            DomainError::InvalidSignature,
+        ));
+    }
+
+    if input.receipt.payload.human_identity.kind() != crate::domain::IdentityKind::Human {
+        return Err(reject_promotion(
+            SharingDecisionKind::NotHuman,
+            DomainError::Unauthorized {
+                message: "promotion receipt signer must be a human identity".to_owned(),
+            },
+        ));
+    }
+
+    let target_hash_matches = CanonicalRecordHash::compute(input.record)
+        .map(|hash| hash.as_str() == input.receipt.payload.target_hash)
+        .unwrap_or(false);
+    if !target_hash_matches {
+        return Err(reject_promotion(
+            SharingDecisionKind::TargetMismatch,
+            DomainError::InvalidPayloadHash {
+                message: "promotion receipt target_hash does not match record".to_owned(),
+            },
+        ));
+    }
+
+    if input.receipt.payload.scope != input.record.scope {
+        return Err(reject_promotion(
+            SharingDecisionKind::ScopeMismatch,
+            DomainError::ScopeDenied {
+                message: "promotion receipt scope does not match record scope".to_owned(),
+            },
+        ));
+    }
+
+    if input.receipt.payload.operation_id != input.operation_id {
+        return Err(reject_promotion(
+            SharingDecisionKind::ScopeMismatch,
+            DomainError::ScopeDenied {
+                message: "promotion receipt operation_id does not match apply operation".to_owned(),
+            },
+        ));
+    }
+
+    if input.receipt.payload.from_tier != input.from_tier
+        || input.receipt.payload.to_tier != input.to_tier
+    {
+        return Err(reject_promotion(
+            SharingDecisionKind::TierMismatch,
+            DomainError::UnsupportedVisibility {
+                value: format!(
+                    "receipt tiers {}->{} do not match requested {}->{}",
+                    input.receipt.payload.from_tier.as_str(),
+                    input.receipt.payload.to_tier.as_str(),
+                    input.from_tier.as_str(),
+                    input.to_tier.as_str()
+                ),
+            },
+        ));
+    }
+
+    if input
+        .now
+        .cmp_chronological(&input.receipt.payload.expires_at)
+        != std::cmp::Ordering::Less
+    {
+        return Err(reject_promotion(
+            SharingDecisionKind::Expired,
+            DomainError::ExpiredIntent {
+                issued_at: input.receipt.payload.issued_at.as_str().to_owned(),
+                expires_at: input.receipt.payload.expires_at.as_str().to_owned(),
+                now: input.now.as_str().to_owned(),
+            },
+        ));
+    }
+
+    if input.revocation.signer_key_revoked
+        || input
+            .revocation
+            .revoked_receipt_ids
+            .contains(&input.receipt.receipt_id)
+    {
+        return Err(reject_promotion(
+            SharingDecisionKind::Revoked,
+            DomainError::Unauthorized {
+                message: "promotion receipt or signer key was revoked".to_owned(),
+            },
+        ));
+    }
+
+    let rebac_decision = input.rebac.evaluate(
+        RebacAction::Write,
+        &input.receipt.payload.scope,
+        input.to_tier,
+    );
+    if !rebac_decision.allowed() {
+        return Err(reject_promotion(
+            SharingDecisionKind::NoRebacRelation,
+            DomainError::ScopeDenied {
+                message: "missing ReBAC write relation for promotion".to_owned(),
+            },
+        ));
+    }
+
+    Ok(sharing_trace(
+        PolicyGate::ConsentReceipt,
+        PolicyOutcome::Pass,
+        SharingPolicySubject::ConsentReceipt,
+        SharingPolicyAction::Promote,
+        SharingDecisionKind::Allowed,
+    ))
+}
+
+fn reject_promotion(reason: SharingDecisionKind, error: DomainError) -> SharingGateRejection {
+    SharingGateRejection {
+        error,
+        trace: sharing_trace(
+            PolicyGate::ConsentReceipt,
+            PolicyOutcome::Deny,
+            SharingPolicySubject::ConsentReceipt,
+            SharingPolicyAction::Promote,
+            reason,
+        ),
+    }
+}
+
+fn sharing_trace(
+    gate: PolicyGate,
+    outcome: PolicyOutcome,
+    subject: SharingPolicySubject,
+    action: SharingPolicyAction,
+    reason: SharingDecisionKind,
+) -> PolicyTraceEntry {
+    PolicyTraceEntry::new(
+        gate,
+        outcome,
+        PolicyDetail::Sharing {
+            subject,
+            action,
+            reason,
+        },
+    )
 }
 
 fn validate_id(field: &'static str, value: &str) -> Result<(), DomainError> {

@@ -1,15 +1,26 @@
 //! Promotion consent receipt shape and signature tests.
 
+use std::sync::OnceLock;
+
 use cairn_core::domain::identity::keys::SigningKey;
 use cairn_core::domain::record::tests_export::sample_record;
-use cairn_core::domain::sharing::{PromotionConsentPayload, PromotionConsentReceipt};
+use cairn_core::domain::sharing::{
+    PromotionConsentPayload, PromotionConsentReceipt, PromotionGateInput, SharingDecisionKind,
+    SharingRevocationState, verify_promotion_gate,
+};
 use cairn_core::domain::{
     self, CanonicalRecordHash, Ed25519Signature, Identity, MemoryVisibility, Rfc3339Timestamp,
     ScopeTuple,
 };
+use cairn_core::rebac::{RebacAction, RebacContext, RebacRelation};
 
 fn signer() -> SigningKey {
     SigningKey::from_bytes(&[7_u8; 32])
+}
+
+fn signer_verifying_key() -> &'static ed25519_dalek::VerifyingKey {
+    static KEY: OnceLock<ed25519_dalek::VerifyingKey> = OnceLock::new();
+    KEY.get_or_init(|| signer().verifying_key())
 }
 
 fn signature_for<T: serde::Serialize>(payload: &T) -> Ed25519Signature {
@@ -219,4 +230,126 @@ fn promotion_receipt_denies_unknown_wrapper_and_payload_fields() {
     }))
     .expect_err("payload unknown field rejected");
     assert!(payload_err.to_string().contains("unknown field"));
+}
+
+fn rebac_for_team_write() -> RebacContext {
+    let principal = Identity::parse("hmn:tafeng").expect("human");
+    let scope = receipt_scope();
+    RebacContext::new(
+        principal.clone(),
+        vec![RebacRelation::new(
+            principal,
+            RebacAction::Write,
+            scope,
+            MemoryVisibility::Team,
+        )],
+    )
+}
+
+fn promotion_input<'a>(
+    record: &'a cairn_core::domain::MemoryRecord,
+    receipt: &'a PromotionConsentReceipt,
+    now: &'a Rfc3339Timestamp,
+    revocation: &'a SharingRevocationState,
+    rebac: &'a RebacContext,
+) -> PromotionGateInput<'a> {
+    PromotionGateInput {
+        record,
+        from_tier: MemoryVisibility::Private,
+        to_tier: MemoryVisibility::Team,
+        receipt,
+        now,
+        operation_id: "01HQZX9F5N0000000000000002",
+        signer_key: signer_verifying_key(),
+        revocation,
+        rebac,
+    }
+}
+
+fn assert_promotion_rejection_detail(input: PromotionGateInput<'_>, expected: SharingDecisionKind) {
+    let rejection = verify_promotion_gate(input).expect_err("promotion gate should reject");
+    assert_eq!(
+        rejection.trace.detail.to_wire_string(),
+        format!("consent:promote:{}", expected.as_str())
+    );
+}
+
+#[test]
+fn promotion_gate_allows_valid_receipt_and_rebac_relation() {
+    let record = scoped_record();
+    let receipt = signed_receipt();
+    let now = Rfc3339Timestamp::parse("2026-05-21T12:30:00Z").expect("now");
+    let revocation = SharingRevocationState::default();
+    let rebac = rebac_for_team_write();
+
+    let trace = verify_promotion_gate(promotion_input(
+        &record,
+        &receipt,
+        &now,
+        &revocation,
+        &rebac,
+    ))
+    .expect("promotion gate allows valid receipt");
+
+    assert_eq!(trace.detail.to_wire_string(), "consent:promote:allowed");
+}
+
+#[test]
+fn promotion_gate_rejects_expired_receipt_at_apply_time() {
+    let record = scoped_record();
+    let receipt = signed_receipt();
+    let now = Rfc3339Timestamp::parse("2026-05-23T12:30:00Z").expect("now");
+    let revocation = SharingRevocationState::default();
+    let rebac = rebac_for_team_write();
+
+    assert_promotion_rejection_detail(
+        promotion_input(&record, &receipt, &now, &revocation, &rebac),
+        SharingDecisionKind::Expired,
+    );
+}
+
+#[test]
+fn promotion_gate_rejects_target_hash_mismatch() {
+    let mut record = scoped_record();
+    let receipt = signed_receipt();
+    record.body.push_str(" changed after signing");
+    let now = Rfc3339Timestamp::parse("2026-05-21T12:30:00Z").expect("now");
+    let revocation = SharingRevocationState::default();
+    let rebac = rebac_for_team_write();
+
+    assert_promotion_rejection_detail(
+        promotion_input(&record, &receipt, &now, &revocation, &rebac),
+        SharingDecisionKind::TargetMismatch,
+    );
+}
+
+#[test]
+fn promotion_gate_rejects_revoked_receipt() {
+    let record = scoped_record();
+    let receipt = signed_receipt();
+    let now = Rfc3339Timestamp::parse("2026-05-21T12:30:00Z").expect("now");
+    let mut revocation = SharingRevocationState::default();
+    revocation
+        .revoked_receipt_ids
+        .insert("rcpt-01HQZX9F5N0000000000000002".to_owned());
+    let rebac = rebac_for_team_write();
+
+    assert_promotion_rejection_detail(
+        promotion_input(&record, &receipt, &now, &revocation, &rebac),
+        SharingDecisionKind::Revoked,
+    );
+}
+
+#[test]
+fn promotion_gate_rejects_missing_rebac_write_relation() {
+    let record = scoped_record();
+    let receipt = signed_receipt();
+    let now = Rfc3339Timestamp::parse("2026-05-21T12:30:00Z").expect("now");
+    let revocation = SharingRevocationState::default();
+    let rebac = RebacContext::for_principal(Identity::parse("hmn:tafeng").expect("human"));
+
+    assert_promotion_rejection_detail(
+        promotion_input(&record, &receipt, &now, &revocation, &rebac),
+        SharingDecisionKind::NoRebacRelation,
+    );
 }
