@@ -563,6 +563,32 @@ pub struct AgentRun {
     pub policy_trace: Vec<String>,
 }
 
+impl AgentRun {
+    /// Validate run-level invariants before a host trusts provider output.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentProviderError::InvalidRequest`] when status and abort
+    /// fields disagree, or [`AgentProviderError::InvalidOutput`] when output
+    /// does not match the requested schema.
+    pub fn validate(&self, output_schema: &AgentOutputSchema) -> Result<(), AgentProviderError> {
+        match (self.status, &self.abort_error) {
+            (AgentRunStatus::Completed, Some(_)) => {
+                return Err(AgentProviderError::invalid_request(
+                    "completed agent run must not include abort_error",
+                ));
+            }
+            (AgentRunStatus::Aborted, None) => {
+                return Err(AgentProviderError::invalid_request(
+                    "aborted agent run must include abort_error",
+                ));
+            }
+            (AgentRunStatus::Completed, None) | (AgentRunStatus::Aborted, Some(_)) => {}
+        }
+        validate_output(output_schema, &self.output)
+    }
+}
+
 /// Errors returned by `AgentProvider` implementations and policy helpers.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, thiserror::Error)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -637,7 +663,9 @@ pub trait AgentProvider: Send + Sync {
     /// must fail closed before invoking a denied tool. Return `Err(_)` when the
     /// provider aborts before it can return trace or budget state; return an
     /// aborted [`AgentRun`] with `abort_error` when trace and budget state are
-    /// available.
+    /// available. Implementations should return only runs accepted by
+    /// [`AgentRun::validate`]; hosts should validate successful runs before
+    /// trusting output.
     async fn spawn(&self, request: AgentSpawnRequest) -> Result<AgentRun, AgentProviderError>;
 }
 
@@ -736,14 +764,16 @@ mod tests {
             }
         }
 
-        Ok(AgentRun {
+        let run = AgentRun {
             status: AgentRunStatus::Completed,
             abort_error: None,
             output,
             budget_consumed: meter.consumed(),
             tool_calls: attempts,
             policy_trace,
-        })
+        };
+        run.validate(&request.output_schema)?;
+        Ok(run)
     }
 
     #[tokio::test]
@@ -1012,12 +1042,50 @@ mod tests {
         };
 
         assert_eq!(run.status, AgentRunStatus::Aborted);
+        run.validate(&AgentOutputSchema::Text)
+            .expect("aborted run with typed error validates");
         assert_eq!(
             run.abort_error,
             Some(AgentProviderError::BudgetExceeded {
                 limit: "turns".to_string(),
             })
         );
+    }
+
+    #[test]
+    fn run_validation_rejects_completed_run_with_abort_error() {
+        let run = AgentRun {
+            status: AgentRunStatus::Completed,
+            abort_error: Some(AgentProviderError::BudgetExceeded {
+                limit: "turns".to_string(),
+            }),
+            output: AgentOutput::Text("done".to_string()),
+            budget_consumed: AgentBudgetConsumed::default(),
+            tool_calls: Vec::new(),
+            policy_trace: Vec::new(),
+        };
+
+        let err = run
+            .validate(&AgentOutputSchema::Text)
+            .expect_err("completed run cannot carry abort error");
+        assert!(matches!(err, AgentProviderError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn run_validation_rejects_aborted_run_without_abort_error() {
+        let run = AgentRun {
+            status: AgentRunStatus::Aborted,
+            abort_error: None,
+            output: AgentOutput::Empty,
+            budget_consumed: AgentBudgetConsumed::default(),
+            tool_calls: Vec::new(),
+            policy_trace: Vec::new(),
+        };
+
+        let err = run
+            .validate(&AgentOutputSchema::Text)
+            .expect_err("aborted run must carry abort error");
+        assert!(matches!(err, AgentProviderError::InvalidRequest { .. }));
     }
 
     #[test]
