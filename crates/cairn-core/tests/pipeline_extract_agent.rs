@@ -72,6 +72,66 @@ fn parser_rejects_invalid_confidence() {
 }
 
 #[test]
+fn parser_rejects_confidence_that_only_rounds_into_range_as_f32() {
+    let event_id = CaptureEventId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").expect("valid ulid");
+    let value = serde_json::json!({
+        "drafts": [{
+            "kind": "fact",
+            "body": "rounded confidence",
+            "confidence": 1.00000001,
+            "span": {"start": 0, "end": 3}
+        }],
+        "discards": [],
+        "evidence": []
+    });
+
+    let err =
+        parse_agent_response(&event_id, "short", value).expect_err("confidence must be checked");
+    assert!(matches!(
+        err,
+        AgentParseError::InvalidField {
+            field: "drafts.confidence",
+            ..
+        }
+    ));
+}
+
+#[test]
+fn parser_rejects_unknown_top_level_fields() {
+    let event_id = CaptureEventId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").expect("valid ulid");
+    let value = serde_json::json!({
+        "drafts": [],
+        "discards": [],
+        "evidence": [],
+        "unexpected": true
+    });
+
+    let err = parse_agent_response(&event_id, "source", value)
+        .expect_err("top-level object must reject unknown fields");
+    assert!(matches!(err, AgentParseError::InvalidField { .. }));
+}
+
+#[test]
+fn parser_rejects_unknown_draft_fields() {
+    let event_id = CaptureEventId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").expect("valid ulid");
+    let value = serde_json::json!({
+        "drafts": [{
+            "kind": "fact",
+            "body": "extra field",
+            "confidence": 0.9,
+            "span": {"start": 0, "end": 3},
+            "unexpected": true
+        }],
+        "discards": [],
+        "evidence": []
+    });
+
+    let err = parse_agent_response(&event_id, "source", value)
+        .expect_err("draft object must reject unknown fields");
+    assert!(matches!(err, AgentParseError::InvalidField { .. }));
+}
+
+#[test]
 fn parser_accepts_empty_record_id_but_rejects_empty_tool_and_claim() {
     let event_id = CaptureEventId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").expect("valid ulid");
     let valid = serde_json::json!({

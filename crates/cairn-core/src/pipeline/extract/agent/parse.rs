@@ -1,6 +1,7 @@
 //! Deterministic parser for read-only agent extractor output.
 
 use serde_json::Value;
+use serde_json::map::Map;
 
 use crate::domain::CaptureEventId;
 use crate::domain::taxonomy::MemoryKind;
@@ -62,6 +63,7 @@ pub fn parse_agent_response(
     value: Value,
 ) -> Result<ParsedAgentResponse, AgentParseError> {
     let object = value.as_object().ok_or(AgentParseError::NotObject)?;
+    reject_unknown_keys(object, "output", &["drafts", "discards", "evidence"])?;
 
     let drafts_value = required_array(object.get("drafts"), "drafts")?;
     let discards_value = required_array(object.get("discards"), "discards")?;
@@ -108,6 +110,11 @@ fn parse_draft(
     let object = value
         .as_object()
         .ok_or_else(|| invalid("drafts", "expected object"))?;
+    reject_unknown_keys(
+        object,
+        "drafts",
+        &["kind", "body", "confidence", "span", "evidence"],
+    )?;
 
     let kind_raw = non_empty_string(object.get("kind"), "drafts.kind")?;
     let kind =
@@ -117,6 +124,12 @@ fn parse_draft(
         .get("confidence")
         .and_then(Value::as_f64)
         .ok_or_else(|| invalid("drafts.confidence", "expected number"))?;
+    if !confidence_raw.is_finite() || !(0.0..=1.0).contains(&confidence_raw) {
+        return Err(invalid_owned(
+            "drafts.confidence",
+            format!("confidence {confidence_raw} is outside [0.0, 1.0]"),
+        ));
+    }
     #[allow(clippy::cast_possible_truncation)]
     let confidence_f32 = confidence_raw as f32;
     let confidence = Confidence::try_from(confidence_f32)
@@ -146,6 +159,7 @@ fn parse_discard(source_text: &str, value: &Value) -> Result<DiscardCandidate, A
     let object = value
         .as_object()
         .ok_or_else(|| invalid("discards", "expected object"))?;
+    reject_unknown_keys(object, "discards", &["reason", "span"])?;
     let reason_text = non_empty_string(object.get("reason"), "discards.reason")?;
     let source_span = parse_span(object.get("span"), "discards.span", source_text)?;
 
@@ -160,6 +174,7 @@ fn parse_evidence(value: &Value, field: &'static str) -> Result<AgentEvidence, A
     let object = value
         .as_object()
         .ok_or_else(|| invalid(field, "expected object"))?;
+    reject_unknown_keys(object, field, &["tool", "record_id", "claim"])?;
     let tool = non_empty_string(object.get("tool"), field)?.to_owned();
     let claim = non_empty_string(object.get("claim"), field)?.to_owned();
     let record_id = match object.get("record_id") {
@@ -187,6 +202,7 @@ fn parse_span(
     let object = value
         .and_then(Value::as_object)
         .ok_or_else(|| invalid(field, "expected object"))?;
+    reject_unknown_keys(object, field, &["start", "end"])?;
     let start = object
         .get("start")
         .and_then(Value::as_u64)
@@ -227,6 +243,17 @@ fn non_empty_string<'a>(
         return Err(invalid(field, "expected non-empty string"));
     }
     Ok(value)
+}
+
+fn reject_unknown_keys(
+    object: &Map<String, Value>,
+    field: &'static str,
+    allowed: &[&str],
+) -> Result<(), AgentParseError> {
+    if let Some(key) = object.keys().find(|key| !allowed.contains(&key.as_str())) {
+        return Err(invalid_owned(field, format!("unknown field `{key}`")));
+    }
+    Ok(())
 }
 
 fn parse_discard_reason(value: &str) -> DiscardReason {
