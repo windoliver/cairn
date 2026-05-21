@@ -181,7 +181,8 @@ pub struct ShareLinkPayload {
 }
 
 /// Revocation state supplied by the store or identity layer at evaluation time.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SharingRevocationState {
     /// Receipt ids that can no longer authorize promotion.
     pub revoked_receipt_ids: BTreeSet<String>,

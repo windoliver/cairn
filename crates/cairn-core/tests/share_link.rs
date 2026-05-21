@@ -1,7 +1,7 @@
 //! Signed share-link shape and signature tests.
 
 use cairn_core::domain::identity::keys::SigningKey;
-use cairn_core::domain::sharing::{ShareLinkPayload, SignedShareLink};
+use cairn_core::domain::sharing::{ShareLinkPayload, SharingRevocationState, SignedShareLink};
 use cairn_core::domain::{
     Ed25519Signature, Identity, MemoryVisibility, Rfc3339Timestamp, ScopeTuple,
 };
@@ -91,4 +91,28 @@ fn share_link_shape_rejects_empty_target_id_hashes() {
         err,
         cairn_core::domain::DomainError::InvalidPayloadHash { .. }
     ));
+}
+
+#[test]
+fn sharing_revocation_state_serializes_and_denies_unknown_fields() {
+    let mut state = SharingRevocationState::default();
+    state
+        .revoked_receipt_ids
+        .insert("rcpt-01HQZX9F5N0000000000000002".to_owned());
+    state
+        .revoked_share_link_ids
+        .insert("share-01HQZX9F5N0000000000000004".to_owned());
+    state.signer_key_revoked = true;
+
+    let json = serde_json::to_value(&state).expect("serialize revocation state");
+    assert_eq!(json["signer_key_revoked"], true);
+
+    let err = serde_json::from_value::<SharingRevocationState>(serde_json::json!({
+        "revoked_receipt_ids": [],
+        "revoked_share_link_ids": [],
+        "signer_key_revoked": false,
+        "unexpected": true
+    }))
+    .expect_err("unknown field rejected");
+    assert!(err.to_string().contains("unknown field"));
 }
