@@ -26,7 +26,7 @@ pub struct AgentProviderCapabilities {
 }
 
 /// Stable identity for a spawned agent.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(transparent)]
 pub struct AgentIdentity(String);
 
@@ -44,9 +44,19 @@ impl AgentIdentity {
                 "agent identity is empty",
             ));
         }
+        if raw.chars().any(char::is_whitespace) {
+            return Err(AgentProviderError::invalid_request(
+                "agent identity must not contain whitespace",
+            ));
+        }
         if !raw.starts_with("agt:") {
             return Err(AgentProviderError::invalid_request(
                 "agent identity must start with `agt:`",
+            ));
+        }
+        if raw.strip_prefix("agt:").is_some_and(str::is_empty) {
+            return Err(AgentProviderError::invalid_request(
+                "agent identity must include a non-empty agent name",
             ));
         }
         Ok(Self(raw))
@@ -56,6 +66,16 @@ impl AgentIdentity {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for AgentIdentity {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = <String as serde::Deserialize>::deserialize(deserializer)?;
+        Self::new(raw).map_err(serde::de::Error::custom)
     }
 }
 
@@ -123,7 +143,7 @@ impl CairnVerb {
     pub const fn can_mutate(self) -> bool {
         matches!(
             self,
-            Self::Ingest | Self::Summarize | Self::CaptureTrace | Self::Forget
+            Self::Ingest | Self::Summarize | Self::CaptureTrace | Self::Lint | Self::Forget
         )
     }
 }
@@ -134,8 +154,8 @@ impl CairnVerb {
 pub struct AgentToolCall {
     /// Verb being requested.
     pub verb: CairnVerb,
-    /// Whether `lint` is constrained to dry-run behavior.
-    pub dry_run: bool,
+    /// Whether `lint` writes `.cairn/lint-report.md`.
+    pub write_report: bool,
     /// Whether `summarize` requests persistence.
     pub persist: bool,
 }
@@ -146,17 +166,17 @@ impl AgentToolCall {
     pub const fn new(verb: CairnVerb) -> Self {
         Self {
             verb,
-            dry_run: false,
+            write_report: false,
             persist: false,
         }
     }
 
-    /// Build `cairn lint --dry`.
+    /// Build read-only `cairn lint` without report writing.
     #[must_use]
     pub const fn lint_dry() -> Self {
         Self {
             verb: CairnVerb::Lint,
-            dry_run: true,
+            write_report: false,
             persist: false,
         }
     }
@@ -166,7 +186,7 @@ impl AgentToolCall {
     pub const fn summarize_persist() -> Self {
         Self {
             verb: CairnVerb::Summarize,
-            dry_run: false,
+            write_report: false,
             persist: true,
         }
     }
@@ -174,7 +194,9 @@ impl AgentToolCall {
     /// True when this call can mutate the vault.
     #[must_use]
     pub const fn is_mutating(&self) -> bool {
-        self.verb.is_mutating() || matches!(self.verb, CairnVerb::Summarize) && self.persist
+        self.verb.is_mutating()
+            || matches!(self.verb, CairnVerb::Summarize) && self.persist
+            || matches!(self.verb, CairnVerb::Lint) && self.write_report
     }
 }
 
@@ -360,11 +382,17 @@ pub struct AgentToolAttempt {
 }
 
 /// Completed or aborted agent run.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+///
+/// `Err(_)` from [`AgentProvider::spawn`] is for providers aborting before they
+/// can return trace or budget state. `Ok(AgentRun { status: Aborted,
+/// abort_error: Some(_), .. })` is for providers returning trace and budget
+/// state with a typed abort reason.
+#[derive(Debug, Clone, PartialEq)]
 pub struct AgentRun {
     /// Run status.
     pub status: AgentRunStatus,
+    /// Typed abort reason when `status` is [`AgentRunStatus::Aborted`].
+    pub abort_error: Option<AgentProviderError>,
     /// Final output, if any.
     pub output: AgentOutput,
     /// Budget consumed before completion or abort.
@@ -445,7 +473,10 @@ pub trait AgentProvider: Send + Sync {
     /// # Errors
     ///
     /// Returns typed provider, policy, budget, and output errors. Implementations
-    /// must fail closed before invoking a denied tool.
+    /// must fail closed before invoking a denied tool. Return `Err(_)` when the
+    /// provider aborts before it can return trace or budget state; return an
+    /// aborted [`AgentRun`] with `abort_error` when trace and budget state are
+    /// available.
     async fn spawn(&self, request: AgentSpawnRequest) -> Result<AgentRun, AgentProviderError>;
 }
 
@@ -476,6 +507,11 @@ mod tests {
         assert!(allowlist.allows(&AgentToolCall::new(CairnVerb::Retrieve)));
         assert!(allowlist.allows(&AgentToolCall::lint_dry()));
         assert!(!allowlist.allows(&AgentToolCall::new(CairnVerb::Forget)));
+        assert!(!allowlist.allows(&AgentToolCall {
+            verb: CairnVerb::Lint,
+            write_report: true,
+            persist: false,
+        }));
     }
 
     #[test]
@@ -488,6 +524,15 @@ mod tests {
         assert!(!CairnVerb::Lint.is_mutating());
         assert!(!AgentToolCall::new(CairnVerb::Summarize).is_mutating());
         assert!(AgentToolCall::summarize_persist().is_mutating());
+        assert!(
+            AgentToolCall {
+                verb: CairnVerb::Lint,
+                write_report: true,
+                persist: false,
+            }
+            .is_mutating()
+        );
+        assert!(!AgentToolCall::lint_dry().write_report);
     }
 
     #[test]
@@ -507,9 +552,84 @@ mod tests {
     }
 
     #[test]
+    fn request_validation_rejects_empty_allowlist() {
+        let mut request = base_request();
+        request.tool_allowlist.tools.clear();
+        let err = request.validate().expect_err("empty allowlist rejects");
+        assert!(matches!(err, AgentProviderError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn request_validation_rejects_zero_tool_call_budget() {
+        let mut request = base_request();
+        request.cost_budget.max_tool_calls = 0;
+        let err = request
+            .validate()
+            .expect_err("zero tool call budget rejects");
+        assert!(matches!(err, AgentProviderError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn request_validation_rejects_zero_cost_unit_budget() {
+        let mut request = base_request();
+        request.cost_budget.max_cost_units = 0;
+        let err = request.validate().expect_err("zero cost budget rejects");
+        assert!(matches!(err, AgentProviderError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn request_validation_rejects_zero_wall_clock_budget() {
+        let mut request = base_request();
+        request.wall_clock_budget.max_millis = 0;
+        let err = request
+            .validate()
+            .expect_err("zero wall-clock budget rejects");
+        assert!(matches!(err, AgentProviderError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn request_validation_rejects_non_mutating_scope_entries() {
+        let mut request = base_request();
+        request.scope = AgentScope::with_mutations(vec![CairnVerb::Search]);
+        let err = request
+            .validate()
+            .expect_err("non-mutating scope entries reject");
+        assert!(matches!(err, AgentProviderError::InvalidRequest { .. }));
+    }
+
+    #[test]
     fn identity_rejects_empty_or_non_agent_values() {
         assert!(AgentIdentity::new("").is_err());
+        assert!(AgentIdentity::new("agt:").is_err());
+        assert!(AgentIdentity::new("agt:cairn librarian:v2").is_err());
         assert!(AgentIdentity::new("hmn:tafeng:v1").is_err());
         assert!(AgentIdentity::new("agt:cairn-librarian:v2").is_ok());
+    }
+
+    #[test]
+    fn identity_deserialization_rejects_non_agent_values() {
+        assert!(serde_json::from_str::<AgentIdentity>(r#""hmn:tafeng:v1""#).is_err());
+    }
+
+    #[test]
+    fn aborted_run_can_carry_typed_error() {
+        let run = AgentRun {
+            status: AgentRunStatus::Aborted,
+            abort_error: Some(AgentProviderError::BudgetExceeded { limit: "turns" }),
+            output: AgentOutput::Empty,
+            budget_consumed: AgentBudgetConsumed {
+                turns: 1,
+                tool_calls: 0,
+                cost_units: 0,
+            },
+            tool_calls: Vec::new(),
+            policy_trace: vec!["turn budget exceeded".to_string()],
+        };
+
+        assert_eq!(run.status, AgentRunStatus::Aborted);
+        assert_eq!(
+            run.abort_error,
+            Some(AgentProviderError::BudgetExceeded { limit: "turns" })
+        );
     }
 }
