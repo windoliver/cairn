@@ -98,6 +98,25 @@ fn admin_sre_report_human_summarizes_sections() {
 }
 
 #[test]
+fn admin_sre_report_human_reports_unknown_when_sections_unknown() {
+    let dir = bootstrap_vault();
+
+    let output = cairn()
+        .current_dir(dir.path())
+        .args(["admin", "sre", "report"])
+        .output()
+        .expect("run sre report");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("SRE status: unknown"), "stdout: {stdout}");
+}
+
+#[test]
 fn admin_sre_report_rejects_bad_bench_report_dir() {
     let dir = bootstrap_vault();
     let missing = dir.path().join("missing-bench-reports");

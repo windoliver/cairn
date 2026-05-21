@@ -314,21 +314,26 @@ fn status_text(report: &SreReport) -> &'static str {
     ]) {
         SreStatus::Fail => "fail",
         SreStatus::Warning => "warning",
-        SreStatus::Ok | SreStatus::Unknown => "ok",
+        SreStatus::Unknown => "unknown",
+        SreStatus::Ok => "ok",
     }
 }
 
 fn rollup_status(statuses: impl IntoIterator<Item = SreStatus>) -> SreStatus {
     let mut saw_warning = false;
+    let mut saw_unknown = false;
     for status in statuses {
         match status {
             SreStatus::Fail => return SreStatus::Fail,
             SreStatus::Warning => saw_warning = true,
-            SreStatus::Ok | SreStatus::Unknown => {}
+            SreStatus::Unknown => saw_unknown = true,
+            SreStatus::Ok => {}
         }
     }
     if saw_warning {
         SreStatus::Warning
+    } else if saw_unknown {
+        SreStatus::Unknown
     } else {
         SreStatus::Ok
     }
