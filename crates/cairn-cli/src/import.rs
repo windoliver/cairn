@@ -1,6 +1,6 @@
 //! Migration bridge entrypoints for legacy memory systems.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -82,10 +82,13 @@ pub fn run(sub: &clap::ArgMatches, vault_root: &Path) -> std::process::ExitCode 
         mode: FlushMode::HumanReview,
     })
     .and_then(|report| {
+        let migration_report = MigrationReportSummary::from_report(&report);
         write_review_plans(vault_root, &report).map(|paths| ImportCliSummary {
             system: system.clone(),
+            manifest: report.manifest,
             records: report.records.len(),
             ambiguities: report.ambiguities.len(),
+            migration_report,
             plans: report.plans.len(),
             pending_dirs: paths,
         })
@@ -105,6 +108,18 @@ pub fn run(sub: &clap::ArgMatches, vault_root: &Path) -> std::process::ExitCode 
                     println!(
                         "cairn import: {} ambiguous field(s) require review",
                         summary.ambiguities
+                    );
+                }
+                if summary.migration_report.unsupported_fields > 0 {
+                    println!(
+                        "cairn import: {} unsupported field(s) require review",
+                        summary.migration_report.unsupported_fields
+                    );
+                }
+                if summary.migration_report.privacy_sensitive_fields > 0 {
+                    println!(
+                        "cairn import: {} privacy-sensitive field(s) require review",
+                        summary.migration_report.privacy_sensitive_fields
                     );
                 }
             }
@@ -134,10 +149,35 @@ pub fn run(sub: &clap::ArgMatches, vault_root: &Path) -> std::process::ExitCode 
 #[derive(Debug, serde::Serialize)]
 struct ImportCliSummary {
     system: String,
+    manifest: ExternalImportManifest,
     records: usize,
     ambiguities: usize,
+    migration_report: MigrationReportSummary,
     plans: usize,
     pending_dirs: Vec<PathBuf>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct MigrationReportSummary {
+    ambiguous_fields: usize,
+    unsupported_fields: usize,
+    privacy_sensitive_fields: usize,
+    findings: Vec<ExternalImportFinding>,
+}
+
+impl MigrationReportSummary {
+    fn from_report(report: &KoiImportReport) -> Self {
+        Self {
+            ambiguous_fields: report
+                .findings
+                .iter()
+                .filter(|finding| finding.kind == ExternalImportFindingKind::Ambiguous)
+                .count(),
+            unsupported_fields: report.manifest.unsupported_fields.len(),
+            privacy_sensitive_fields: report.manifest.privacy_sensitive_fields.len(),
+            findings: report.findings.clone(),
+        }
+    }
 }
 
 fn usage_error(json: bool, field: &str, message: &str) -> std::process::ExitCode {
@@ -184,13 +224,97 @@ pub struct ImportAmbiguity {
     pub reason: String,
 }
 
+/// Neutral category for one imported legacy artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalImportItemKind {
+    /// A Cairn memory record import candidate.
+    Record,
+    /// A legacy session descriptor discovered during import.
+    Session,
+    /// A legacy skill descriptor discovered during import.
+    Skill,
+}
+
+/// Neutral review finding category emitted by a migration bridge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalImportFindingKind {
+    /// A legacy field mapped through a conservative fallback.
+    Ambiguous,
+    /// A legacy field has no Cairn target yet.
+    Unsupported,
+    /// A legacy field name or payload looks privacy-sensitive.
+    PrivacySensitive,
+}
+
+/// Provenance and source-hash metadata for one import manifest item.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ExternalImportProvenance {
+    /// Import sensor identity used for the resulting Cairn record.
+    pub source_sensor: String,
+    /// Hash of the source body that will back the Cairn record.
+    pub source_hash: String,
+    /// Source references attached to the resulting Cairn provenance.
+    pub source_refs: Vec<SourceRef>,
+}
+
+/// One importable item in the neutral external-memory manifest.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ExternalImportItem {
+    /// Kind of legacy artifact represented by this item.
+    pub kind: ExternalImportItemKind,
+    /// Path to the source artifact relative to the archive root.
+    pub source_path: PathBuf,
+    /// Legacy system identifier, when present.
+    pub legacy_id: Option<String>,
+    /// Session ids referenced by the item.
+    pub session_ids: Vec<String>,
+    /// Skill ids referenced by the item.
+    pub skill_ids: Vec<String>,
+    /// Provenance and source-hash metadata for review.
+    pub provenance: ExternalImportProvenance,
+}
+
+/// Neutral manifest shared by external-memory migration bridges.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ExternalImportManifest {
+    /// Legacy memory system identifier, such as `koi-v1`.
+    pub system: String,
+    /// Importable records, sessions, and skills discovered in the archive.
+    pub items: Vec<ExternalImportItem>,
+    /// Unsupported fields found while building the manifest.
+    pub unsupported_fields: Vec<ExternalImportFinding>,
+    /// Privacy-sensitive fields found while building the manifest.
+    pub privacy_sensitive_fields: Vec<ExternalImportFinding>,
+}
+
+/// One migration report finding requiring human review.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ExternalImportFinding {
+    /// Source file where the finding was observed.
+    pub path: PathBuf,
+    /// Finding category.
+    pub kind: ExternalImportFindingKind,
+    /// Legacy field name or inferred Cairn field.
+    pub field: String,
+    /// Chosen fallback wire value, when a fallback exists.
+    pub fallback: Option<String>,
+    /// Human-readable reason for review.
+    pub reason: String,
+}
+
 /// Koi import mapping output.
 #[derive(Debug, Clone)]
 pub struct KoiImportReport {
+    /// Neutral manifest for records, sessions, skills, provenance, and hashes.
+    pub manifest: ExternalImportManifest,
     /// Valid Cairn records derived from the archive.
     pub records: Vec<MemoryRecord>,
     /// Review notes for fields that could not be mapped confidently.
     pub ambiguities: Vec<ImportAmbiguity>,
+    /// Neutral migration findings for human review.
+    pub findings: Vec<ExternalImportFinding>,
     /// Review plans containing the mapped records as upsert mutations.
     pub plans: Vec<FlushPlan>,
 }
@@ -274,6 +398,8 @@ pub fn map_koi_v1_archive(opts: &KoiImportOptions) -> Result<KoiImportReport, Im
 
     let mut records = Vec::new();
     let mut ambiguities = Vec::new();
+    let mut findings = Vec::new();
+    let mut items = Vec::new();
     for entry in WalkDir::new(&opts.source)
         .sort_by_file_name()
         .into_iter()
@@ -290,13 +416,32 @@ pub fn map_koi_v1_archive(opts: &KoiImportOptions) -> Result<KoiImportReport, Im
         })?;
         let mapped = map_file(path, &opts.source, &raw)?;
         ambiguities.extend(mapped.ambiguities);
+        findings.extend(mapped.findings);
+        items.extend(mapped.items);
         records.push(mapped.record);
     }
 
     let plans = plan_records(&opts.source, &records, opts.batch_size, opts.mode)?;
+    let unsupported_fields = findings
+        .iter()
+        .filter(|finding| finding.kind == ExternalImportFindingKind::Unsupported)
+        .cloned()
+        .collect();
+    let privacy_sensitive_fields = findings
+        .iter()
+        .filter(|finding| finding.kind == ExternalImportFindingKind::PrivacySensitive)
+        .cloned()
+        .collect();
     Ok(KoiImportReport {
+        manifest: ExternalImportManifest {
+            system: "koi-v1".to_owned(),
+            items,
+            unsupported_fields,
+            privacy_sensitive_fields,
+        },
         records,
         ambiguities,
+        findings,
         plans,
     })
 }
@@ -352,6 +497,8 @@ pub fn write_review_plans(
 struct MappedFile {
     record: MemoryRecord,
     ambiguities: Vec<ImportAmbiguity>,
+    findings: Vec<ExternalImportFinding>,
+    items: Vec<ExternalImportItem>,
 }
 
 fn is_importable(path: &Path) -> bool {
@@ -529,9 +676,45 @@ fn map_file(path: &Path, root: &Path, raw: &str) -> Result<MappedFile, ImportErr
         path: relative.to_path_buf(),
         source,
     })?;
+    let item = ExternalImportItem {
+        kind: ExternalImportItemKind::Record,
+        source_path: relative.to_path_buf(),
+        legacy_id: legacy_id(parsed_json.as_ref()),
+        session_ids: session_ids_from_json(parsed_json.as_ref()),
+        skill_ids: skill_ids_from_json(parsed_json.as_ref()),
+        provenance: ExternalImportProvenance {
+            source_sensor: KOI_IMPORT_SENSOR.to_owned(),
+            source_hash: record.provenance.source_hash.clone(),
+            source_refs: record.provenance.source_refs.clone(),
+        },
+    };
+    let mut items = vec![item.clone()];
+    items.extend(
+        item.session_ids
+            .iter()
+            .map(|session_id| ExternalImportItem {
+                kind: ExternalImportItemKind::Session,
+                source_path: item.source_path.clone(),
+                legacy_id: Some(session_id.clone()),
+                session_ids: vec![session_id.clone()],
+                skill_ids: Vec::new(),
+                provenance: item.provenance.clone(),
+            }),
+    );
+    items.extend(item.skill_ids.iter().map(|skill_id| ExternalImportItem {
+        kind: ExternalImportItemKind::Skill,
+        source_path: item.source_path.clone(),
+        legacy_id: Some(skill_id.clone()),
+        session_ids: Vec::new(),
+        skill_ids: vec![skill_id.clone()],
+        provenance: item.provenance.clone(),
+    }));
+    let findings = findings_from_file(parsed_json.as_ref(), relative, &ambiguities);
     Ok(MappedFile {
         record,
         ambiguities,
+        findings,
+        items,
     })
 }
 
@@ -542,6 +725,141 @@ fn extract_body(json: &Value) -> Option<String> {
         .map(str::trim)
         .filter(|body| !body.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn legacy_id(json: Option<&Value>) -> Option<String> {
+    json.and_then(|json| json.get("id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn session_ids_from_json(json: Option<&Value>) -> Vec<String> {
+    let mut ids = BTreeSet::new();
+    if let Some(scope_id) = json
+        .and_then(|json| json.get("scope"))
+        .and_then(|scope| scope_string(Some(scope), "session_id"))
+    {
+        ids.insert(scope_id);
+    }
+    if let Some(session_id) = json.and_then(|json| json.get("session_id")) {
+        ids.extend(id_values(session_id));
+    }
+    if let Some(session) = json.and_then(|json| json.get("session")) {
+        ids.extend(id_values(session));
+    }
+    ids.into_iter().collect()
+}
+
+fn skill_ids_from_json(json: Option<&Value>) -> Vec<String> {
+    let mut ids = BTreeSet::new();
+    if let Some(skill) = json.and_then(|json| json.get("skill")) {
+        ids.extend(id_values(skill));
+    }
+    if let Some(skills) = json.and_then(|json| json.get("skills")) {
+        ids.extend(id_values(skills));
+    }
+    ids.into_iter().collect()
+}
+
+fn id_values(value: &Value) -> Vec<String> {
+    match value {
+        Value::String(id) => normalized_id(id).into_iter().collect(),
+        Value::Object(map) => map
+            .get("id")
+            .or_else(|| map.get("name"))
+            .and_then(Value::as_str)
+            .and_then(normalized_id)
+            .into_iter()
+            .collect(),
+        Value::Array(values) => values.iter().flat_map(id_values).collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn normalized_id(id: &str) -> Option<String> {
+    let id = id.trim();
+    (!id.is_empty()).then(|| id.to_owned())
+}
+
+fn findings_from_file(
+    json: Option<&Value>,
+    relative: &Path,
+    ambiguities: &[ImportAmbiguity],
+) -> Vec<ExternalImportFinding> {
+    let mut findings = ambiguities
+        .iter()
+        .map(|ambiguity| ExternalImportFinding {
+            path: ambiguity.path.clone(),
+            kind: ExternalImportFindingKind::Ambiguous,
+            field: ambiguity.field.to_owned(),
+            fallback: Some(ambiguity.fallback.clone()),
+            reason: ambiguity.reason.clone(),
+        })
+        .collect::<Vec<_>>();
+
+    let Some(Value::Object(map)) = json else {
+        return findings;
+    };
+    for key in map.keys() {
+        if is_supported_manifest_field(key) {
+            continue;
+        }
+        let (kind, reason) = if is_privacy_sensitive_field(key) {
+            (
+                ExternalImportFindingKind::PrivacySensitive,
+                "legacy field name looks privacy-sensitive and requires review".to_owned(),
+            )
+        } else {
+            (
+                ExternalImportFindingKind::Unsupported,
+                "legacy field has no neutral Cairn import-manifest target".to_owned(),
+            )
+        };
+        findings.push(ExternalImportFinding {
+            path: relative.to_path_buf(),
+            kind,
+            field: key.clone(),
+            fallback: None,
+            reason,
+        });
+    }
+    findings
+}
+
+fn is_supported_manifest_field(field: &str) -> bool {
+    matches!(
+        field,
+        "id" | "body"
+            | "text"
+            | "content"
+            | "memory"
+            | "kind"
+            | "tags"
+            | "scope"
+            | "created_at"
+            | "session"
+            | "session_id"
+            | "skill"
+            | "skills"
+            | "provenance"
+            | "source_hash"
+    )
+}
+
+fn is_privacy_sensitive_field(field: &str) -> bool {
+    let field = field.to_ascii_lowercase();
+    [
+        "api_key",
+        "credential",
+        "password",
+        "private_key",
+        "secret",
+        "token",
+    ]
+    .iter()
+    .any(|marker| field.contains(marker))
 }
 
 fn scope_from_json(json: Option<&Value>) -> ScopeTuple {
@@ -678,7 +996,10 @@ mod tests {
 
     use cairn_core::domain::{FlushMode, MemoryClass, MemoryKind, PlannedMutation};
 
-    use super::{KoiImportOptions, map_koi_v1_archive, write_review_plans};
+    use super::{
+        ExternalImportFindingKind, ExternalImportItemKind, KoiImportOptions, map_koi_v1_archive,
+        write_review_plans,
+    };
 
     #[test]
     fn koi_v1_json_maps_to_valid_records_and_ambiguity_report() {
@@ -759,6 +1080,110 @@ mod tests {
                     && ambiguity.fallback == "extra_frontmatter.koi_v1_scope_project"),
             "project scope fallback should be reported for review: {:?}",
             report.ambiguities
+        );
+    }
+
+    #[test]
+    fn koi_v1_report_exposes_neutral_manifest_and_review_findings() {
+        let archive = tempfile::tempdir().expect("archive");
+        fs::write(
+            archive.path().join("memory.json"),
+            r#"{
+              "id": "pref-tone",
+              "text": "User prefers direct, compact updates.",
+              "kind": "user",
+              "created_at": "2026-02-03T04:05:06Z",
+              "tags": ["koi", "preference"],
+              "scope": {
+                "tenant": "default",
+                "workspace": "my-vault",
+                "project": "koi-project",
+                "session_id": "session-42",
+                "entity": "ingest",
+                "user": "hmn:sophia"
+              },
+              "skills": [
+                {"id": "skill-tone", "name": "Tone Memory"}
+              ],
+              "legacy_embedding": [0.1, 0.2],
+              "api_token": "redacted-before-review"
+            }"#,
+        )
+        .expect("write fixture");
+
+        let report = map_koi_v1_archive(&KoiImportOptions {
+            source: archive.path().to_path_buf(),
+            batch_size: 64,
+            mode: FlushMode::HumanReview,
+        })
+        .expect("map archive");
+
+        assert_eq!(report.manifest.system, "koi-v1");
+        assert_eq!(report.manifest.items.len(), 3);
+        let item = report
+            .manifest
+            .items
+            .iter()
+            .find(|item| item.kind == ExternalImportItemKind::Record)
+            .expect("record item");
+        assert_eq!(item.kind, ExternalImportItemKind::Record);
+        assert_eq!(item.source_path, std::path::PathBuf::from("memory.json"));
+        assert_eq!(item.legacy_id.as_deref(), Some("pref-tone"));
+        assert_eq!(item.session_ids, vec!["session-42"]);
+        assert_eq!(item.skill_ids, vec!["skill-tone"]);
+        assert_eq!(item.provenance.source_sensor, "snr:koi-v1:import:local:v1");
+        assert_eq!(
+            item.provenance.source_hash,
+            report.records[0].provenance.source_hash
+        );
+        assert_eq!(
+            item.provenance.source_refs,
+            report.records[0].provenance.source_refs
+        );
+        assert!(report.manifest.items.iter().any(|item| {
+            item.kind == ExternalImportItemKind::Session
+                && item.legacy_id.as_deref() == Some("session-42")
+        }));
+        assert!(report.manifest.items.iter().any(|item| {
+            item.kind == ExternalImportItemKind::Skill
+                && item.legacy_id.as_deref() == Some("skill-tone")
+        }));
+
+        assert!(
+            report
+                .plans
+                .iter()
+                .all(|plan| plan.mode == FlushMode::HumanReview)
+        );
+        assert!(report.plans.iter().all(|plan| {
+            plan.mutations
+                .iter()
+                .all(|mutation| matches!(mutation, PlannedMutation::Upsert { .. }))
+        }));
+
+        assert!(
+            report.findings.iter().any(|finding| {
+                finding.kind == ExternalImportFindingKind::Ambiguous
+                    && finding.field == "scope.project"
+            }),
+            "project scope fallback should be a neutral ambiguous finding: {:?}",
+            report.findings
+        );
+        assert!(
+            report.findings.iter().any(|finding| {
+                finding.kind == ExternalImportFindingKind::Unsupported
+                    && finding.field == "legacy_embedding"
+            }),
+            "unsupported fields should be reported for review: {:?}",
+            report.findings
+        );
+        assert!(
+            report.findings.iter().any(|finding| {
+                finding.kind == ExternalImportFindingKind::PrivacySensitive
+                    && finding.field == "api_token"
+            }),
+            "privacy-sensitive fields should be reported for review: {:?}",
+            report.findings
         );
     }
 

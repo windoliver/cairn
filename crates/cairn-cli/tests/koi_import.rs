@@ -171,3 +171,70 @@ fn koi_v1_import_plan_applies_to_search_retrieve_lint_and_forget() {
         "forgotten import should leave keyword search"
     );
 }
+
+#[test]
+fn koi_v1_import_json_emits_manifest_and_migration_report() {
+    let vault = tempfile::tempdir().expect("temp vault");
+    bootstrap_vault(vault.path());
+    let archive = tempfile::tempdir().expect("koi archive");
+    std::fs::write(
+        archive.path().join("memory.json"),
+        serde_json::json!({
+            "id": "koi-legacy-002",
+            "kind": "reference",
+            "text": "koi migration report fixture",
+            "scope": {
+                "project": "legacy-project",
+                "session_id": "legacy-session"
+            },
+            "skills": [{"id": "legacy-skill"}],
+            "legacy_embedding": [0.1, 0.2],
+            "api_token": "redacted-before-review"
+        })
+        .to_string(),
+    )
+    .expect("write koi fixture");
+
+    let import = run_json_ok(
+        vault.path(),
+        &[
+            "import",
+            "--from",
+            "koi-v1",
+            archive.path().to_str().expect("utf-8 archive path"),
+            "--batch-size",
+            "1",
+            "--json",
+        ],
+    );
+
+    assert_eq!(import["records"], 1, "import summary: {import}");
+    assert_eq!(import["manifest"]["system"], "koi-v1", "manifest: {import}");
+    assert_eq!(
+        import["manifest"]["items"].as_array().expect("items").len(),
+        3,
+        "record, session, and skill manifest items should be emitted: {import}"
+    );
+    assert_eq!(
+        import["migration_report"]["ambiguous_fields"], 1,
+        "project scope fallback should be counted: {import}"
+    );
+    assert_eq!(
+        import["migration_report"]["unsupported_fields"], 1,
+        "unsupported legacy field should be counted: {import}"
+    );
+    assert_eq!(
+        import["migration_report"]["privacy_sensitive_fields"], 1,
+        "privacy-sensitive legacy field should be counted: {import}"
+    );
+    assert!(
+        import["migration_report"]["findings"]
+            .as_array()
+            .expect("findings")
+            .iter()
+            .any(
+                |finding| finding["field"] == "api_token" && finding["kind"] == "privacy_sensitive"
+            ),
+        "privacy-sensitive finding should be emitted: {import}"
+    );
+}
