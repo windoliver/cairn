@@ -131,11 +131,24 @@ impl AgentToolExecutor for RecordingToolExecutor {
 struct SlowToolExecutor {
     delay: Duration,
     result: ToolExecution,
+    honors_wall_clock: bool,
 }
 
 impl SlowToolExecutor {
     fn new(delay: Duration, result: ToolExecution) -> Self {
-        Self { delay, result }
+        Self {
+            delay,
+            result,
+            honors_wall_clock: true,
+        }
+    }
+
+    fn non_cooperative(delay: Duration, result: ToolExecution) -> Self {
+        Self {
+            delay,
+            result,
+            honors_wall_clock: false,
+        }
     }
 }
 
@@ -147,7 +160,7 @@ impl AgentToolExecutor for SlowToolExecutor {
         _args: serde_json::Value,
         wall_clock_remaining: Duration,
     ) -> Result<ToolExecution, AgentProviderError> {
-        if self.delay > wall_clock_remaining {
+        if self.honors_wall_clock && self.delay > wall_clock_remaining {
             tokio::time::sleep(wall_clock_remaining).await;
             return Err(AgentProviderError::BudgetExceeded {
                 limit: "wall_clock".to_string(),
@@ -369,6 +382,39 @@ async fn provider_aborts_when_tool_exceeds_wall_clock_budget() {
         .await
         .expect("wall-clock exhaustion returns aborted run");
 
+    assert_eq!(run.status, AgentRunStatus::Aborted);
+    assert!(matches!(
+        run.abort_error,
+        Some(AgentProviderError::BudgetExceeded { ref limit }) if limit == "wall_clock"
+    ));
+}
+
+#[tokio::test]
+async fn provider_times_out_non_cooperative_tool_executor() {
+    let llm = Arc::new(SequenceLlm::new([CompletionOutput::Json(json!({
+        "action": "tool",
+        "tool": { "verb": "search", "write_report": false, "persist": false },
+        "args": { "query": "budget" }
+    }))]));
+    let tools = Arc::new(SlowToolExecutor::non_cooperative(
+        Duration::from_millis(100),
+        ToolExecution {
+            output: json!({ "records": [] }),
+            cost_units: 1,
+        },
+    ));
+    let provider = CairnAgentProvider::new(llm, tools);
+    let started = std::time::Instant::now();
+
+    let run = provider
+        .spawn(request_with_wall_clock(AgentOutputSchema::Json, 2, 10))
+        .await
+        .expect("provider-level timeout returns aborted run");
+
+    assert!(
+        started.elapsed() < Duration::from_millis(80),
+        "provider should not wait for a non-cooperative executor"
+    );
     assert_eq!(run.status, AgentRunStatus::Aborted);
     assert!(matches!(
         run.abort_error,
