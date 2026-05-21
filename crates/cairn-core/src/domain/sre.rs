@@ -1,6 +1,6 @@
 //! Body-free SRE report DTOs and pure classifiers.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 /// Roll-up health state for SRE dashboard sections and gates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -14,6 +14,90 @@ pub enum SreStatus {
     Fail,
     /// The state cannot be computed from the available inputs.
     Unknown,
+}
+
+/// Sanitized body-free detail class for SRE gate output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SreDetail(String);
+
+impl SreDetail {
+    /// Builds a detail class from raw text by applying SRE scrubbing.
+    #[must_use]
+    pub fn from_raw(raw: &str) -> Self {
+        Self(scrub_detail(raw).to_owned())
+    }
+
+    /// Builds a detail from an already stable class if it is body-free.
+    #[must_use]
+    pub fn stable(class: impl AsRef<str>) -> Option<Self> {
+        let class = class.as_ref();
+        if class.is_empty()
+            || !class
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || ch == '.')
+        {
+            return None;
+        }
+
+        let lower = class.to_ascii_lowercase();
+        if lower.contains("secret")
+            || lower.contains("private")
+            || lower.contains("body")
+            || lower.contains("query")
+            || lower.contains('/')
+            || lower.contains('\\')
+        {
+            None
+        } else {
+            Some(Self(class.to_owned()))
+        }
+    }
+
+    /// Returns the stable detail class.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Finite numeric measurement serialized as a JSON number.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub struct SreMeasurement(f64);
+
+impl SreMeasurement {
+    /// Builds a measurement when the value is finite.
+    #[must_use]
+    pub fn new(value: f64) -> Option<Self> {
+        value.is_finite().then_some(Self(value))
+    }
+
+    /// Returns the numeric measurement.
+    #[must_use]
+    pub fn get(self) -> f64 {
+        self.0
+    }
+}
+
+impl Serialize for SreMeasurement {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_f64(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for SreMeasurement {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = f64::deserialize(deserializer)?;
+        Self::new(value).ok_or_else(|| {
+            de::Error::invalid_value(de::Unexpected::Float(value), &"a finite SRE measurement")
+        })
+    }
 }
 
 /// Body-free vault identity for an SRE report.
@@ -94,9 +178,9 @@ pub struct SreRehydrationSummary {
     /// Latest observed latency in milliseconds.
     pub latest_latency_ms: Option<u64>,
     /// P95 latency in milliseconds.
-    pub p95_latency_ms: Option<f64>,
+    pub p95_latency_ms: Option<SreMeasurement>,
     /// Latency SLO in milliseconds.
-    pub slo_ms: f64,
+    pub slo_ms: SreMeasurement,
     /// Number of samples used for latency statistics.
     pub sample_count: u64,
     /// Most recent rehydration gate result.
@@ -160,7 +244,7 @@ pub struct SreSearchModeSummary {
     /// Failed invocation count.
     pub failed: u64,
     /// P95 latency in milliseconds.
-    pub p95_latency_ms: Option<f64>,
+    pub p95_latency_ms: Option<SreMeasurement>,
     /// Health status for this search mode.
     pub status: SreStatus,
 }
@@ -182,13 +266,13 @@ pub struct SreGateResult {
     /// Gate status.
     pub status: SreStatus,
     /// Optional measured value.
-    pub measured: Option<f64>,
+    pub measured: Option<SreMeasurement>,
     /// Optional threshold value.
-    pub threshold: Option<f64>,
+    pub threshold: Option<SreMeasurement>,
     /// Display unit for measured and threshold values.
     pub unit: String,
     /// Optional body-free detail class.
-    pub detail: Option<String>,
+    pub detail: Option<SreDetail>,
 }
 
 /// Privacy summary for the SRE report.
@@ -213,7 +297,12 @@ pub fn classify_count_status(count: u64) -> SreStatus {
 /// Classifies a measured value against a threshold.
 #[must_use]
 pub fn classify_threshold(measured: Option<f64>, threshold: f64) -> SreStatus {
+    if !threshold.is_finite() {
+        return SreStatus::Unknown;
+    }
+
     match measured {
+        Some(value) if !value.is_finite() => SreStatus::Unknown,
         Some(value) if value <= threshold => SreStatus::Ok,
         Some(_) => SreStatus::Fail,
         None => SreStatus::Unknown,

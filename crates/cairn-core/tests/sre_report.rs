@@ -1,13 +1,15 @@
 //! SRE report DTO serialization and classifier coverage.
 
 use cairn_core::domain::sre::{
-    SreGateResult, SreGateSummary, SrePrivacySummary, SreProjectionSummary, SreRehydrationSummary,
-    SreReport, SreSearchSummary, SreStatus, SreVaultSummary, SreWorkflowKindSummary,
-    SreWorkflowSummary, classify_count_status, scrub_detail,
+    SreDetail, SreGateResult, SreGateSummary, SreMeasurement, SrePrivacySummary,
+    SreProjectionSummary, SreRehydrationSummary, SreReport, SreSearchSummary, SreStatus,
+    SreVaultSummary, SreWorkflowKindSummary, SreWorkflowSummary, classify_count_status,
+    classify_threshold, scrub_detail,
 };
 
 #[test]
 fn sre_report_serializes_body_free_shape() {
+    let raw_detail = "record body SECRET_PRIVATE_TOKEN from /Users/alice/vault/raw.md query text";
     let report = SreReport {
         schema_version: 1,
         captured_at_ms: 1_700_000_000_000,
@@ -35,16 +37,16 @@ fn sre_report_serializes_body_free_shape() {
         rehydration: SreRehydrationSummary {
             status: SreStatus::Ok,
             latest_latency_ms: Some(2_100),
-            p95_latency_ms: Some(2_210.0),
-            slo_ms: 3_000.0,
+            p95_latency_ms: SreMeasurement::new(2_210.0),
+            slo_ms: SreMeasurement::new(3_000.0).expect("finite SLO"),
             sample_count: 12,
             last_gate: Some(SreGateResult {
                 name: "cold_rehydrate_p95".into(),
                 status: SreStatus::Ok,
-                measured: Some(2_210.0),
-                threshold: Some(3_000.0),
+                measured: SreMeasurement::new(2_210.0),
+                threshold: SreMeasurement::new(3_000.0),
                 unit: "ms".into(),
-                detail: None,
+                detail: Some(SreDetail::from_raw(raw_detail)),
             }),
         },
         projection: SreProjectionSummary {
@@ -70,6 +72,9 @@ fn sre_report_serializes_body_free_shape() {
     let json = serde_json::to_string(&report).expect("serialize SRE report");
     assert!(json.contains("\"schema_version\":1"));
     assert!(json.contains("\"status\":\"warning\""));
+    assert!(json.contains("\"detail\":\"redacted\""));
+    assert!(!json.contains("SECRET_PRIVATE_TOKEN"));
+    assert!(!json.contains("/Users/alice"));
     assert!(!json.contains("private body"));
     assert!(!json.contains("query text"));
 }
@@ -84,4 +89,36 @@ fn status_classification_warns_when_count_is_positive() {
 fn scrub_detail_maps_raw_text_to_stable_class() {
     let raw = "record body SECRET_PRIVATE_TOKEN from /Users/alice/vault/raw.md";
     assert_eq!(scrub_detail(raw), "redacted");
+}
+
+#[test]
+fn stable_detail_rejects_privacy_risk_text() {
+    assert_eq!(
+        SreDetail::stable("latency.ok-1")
+            .expect("stable detail class")
+            .as_str(),
+        "latency.ok-1"
+    );
+    assert!(SreDetail::stable("").is_none());
+    assert!(SreDetail::stable("private_body").is_none());
+    assert!(SreDetail::stable("query.text").is_none());
+    assert!(SreDetail::stable("/Users/alice").is_none());
+}
+
+#[test]
+fn measurements_reject_non_finite_values() {
+    assert!(SreMeasurement::new(1.0).is_some());
+    assert!(SreMeasurement::new(f64::NAN).is_none());
+    assert!(SreMeasurement::new(f64::INFINITY).is_none());
+    assert!(SreMeasurement::new(f64::NEG_INFINITY).is_none());
+}
+
+#[test]
+fn threshold_classification_rejects_non_finite_inputs() {
+    assert_eq!(classify_threshold(Some(1.0), 2.0), SreStatus::Ok);
+    assert_eq!(classify_threshold(Some(2.0), 2.0), SreStatus::Ok);
+    assert_eq!(classify_threshold(Some(3.0), 2.0), SreStatus::Fail);
+    assert_eq!(classify_threshold(None, 2.0), SreStatus::Unknown);
+    assert_eq!(classify_threshold(Some(f64::NAN), 2.0), SreStatus::Unknown);
+    assert_eq!(classify_threshold(Some(1.0), f64::NAN), SreStatus::Unknown);
 }

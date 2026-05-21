@@ -105,10 +105,10 @@ pub use sharing::{
 pub use source_id::SourceId;
 pub use source_ref::{SourceRef, validate_source_refs};
 pub use sre::{
-    SreGateResult, SreGateSummary, SrePrivacySummary, SreProjectionSummary,
-    SreProjectionTargetSummary, SreRehydrationSummary, SreReport, SreSearchModeSummary,
-    SreSearchSummary, SreStatus, SreVaultSummary, SreWorkflowKindSummary, SreWorkflowSummary,
-    classify_count_status, classify_threshold, scrub_detail,
+    SreDetail, SreGateResult, SreGateSummary, SreMeasurement, SrePrivacySummary,
+    SreProjectionSummary, SreProjectionTargetSummary, SreRehydrationSummary, SreReport,
+    SreSearchModeSummary, SreSearchSummary, SreStatus, SreVaultSummary, SreWorkflowKindSummary,
+    SreWorkflowSummary, classify_count_status, classify_threshold, scrub_detail,
 };
 pub use target_id::TargetId;
 pub use taxonomy::{MemoryClass, MemoryKind, MemoryVisibility};
