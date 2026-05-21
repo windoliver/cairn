@@ -1420,6 +1420,7 @@ async fn handle_search(
         include_reasoning: args.include_reasoning.unwrap_or(false),
         visibility_allowlist: vec![],
         auth_scope,
+        rebac: cairn_core::rebac::RebacContext::default(),
         model_label: config.search.embedding_model.as_str().to_owned(),
         filter: args.filters.clone(),
         explain: args.explain.unwrap_or(false),

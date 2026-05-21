@@ -23,6 +23,7 @@ use crate::pipeline::explain::{Candidate as ExplainCandidate, ExplainConfig, exp
 use crate::policy_trace::{
     PolicyDetail, PolicyGate, PolicyOutcome, PolicyTraceEntry, RecordExclusion,
 };
+use crate::rebac::{RebacAction, RebacContext, RebacDecision, all_visibilities};
 use crate::search::{ScoreExplain, token_budget_trim};
 
 /// Mode requested by the caller.
@@ -54,6 +55,10 @@ pub struct SearchRequest {
     /// (keyword, semantic, graph, graph-only hydration). Issue #191.
     /// Use [`ScopeTuple::default`] when no narrowing is required.
     pub auth_scope: ScopeTuple,
+    /// `ReBAC` context for shared-tier read access. Empty context fails closed
+    /// for `project`, `team`, `org`, and `public`, while local tiers remain
+    /// available.
+    pub rebac: RebacContext,
     /// Active embedding model label (for semantic + hybrid).
     pub model_label: String,
     /// Optional recall-narrowing metadata filter.
@@ -254,7 +259,7 @@ pub async fn run(
             reason: e.to_string(),
         })?;
 
-    let visibility = visibility_allowlist(&request);
+    let (visibility, rebac_decisions) = visibility_allowlist(&request);
 
     let (candidates, explain, read_filter_exclusions, degraded_legs) = match request.mode {
         SearchMode::Keyword => {
@@ -314,7 +319,7 @@ pub async fn run(
     let (candidates, explain) =
         filter_reasoning_candidates(candidates, explain, request.include_reasoning);
 
-    let policy_trace = search_policy_trace(&read_filter_exclusions);
+    let policy_trace = search_policy_trace(&read_filter_exclusions, &rebac_decisions);
     let excluded = request.explain.then_some(read_filter_exclusions);
 
     let (candidates, explain) = token_budget_trim(
@@ -346,38 +351,42 @@ fn semantic_degraded(degraded_legs: &[crate::search::DegradedLeg]) -> bool {
     })
 }
 
-fn visibility_allowlist(request: &SearchRequest) -> Vec<MemoryVisibility> {
-    if !request.visibility_allowlist.is_empty() {
-        return request.visibility_allowlist.clone();
-    }
-
-    vec![
-        MemoryVisibility::Private,
-        MemoryVisibility::Session,
-        MemoryVisibility::Project,
-        MemoryVisibility::Team,
-        MemoryVisibility::Org,
-        MemoryVisibility::Public,
-    ]
+fn visibility_allowlist(request: &SearchRequest) -> (Vec<MemoryVisibility>, Vec<RebacDecision>) {
+    let requested = if request.visibility_allowlist.is_empty() {
+        all_visibilities().to_vec()
+    } else {
+        request.visibility_allowlist.clone()
+    };
+    request
+        .rebac
+        .filter_visibility_allowlist(RebacAction::Read, &request.auth_scope, &requested)
 }
 
 fn search_policy_trace(
     read_filter_exclusions: &[crate::policy_trace::RecordExclusion],
+    rebac_decisions: &[RebacDecision],
 ) -> Vec<PolicyTraceEntry> {
     let read_filter_outcome = if read_filter_exclusions.is_empty() {
         PolicyOutcome::Pass
     } else {
         PolicyOutcome::Deny
     };
-    vec![
+    let mut trace = vec![
         PolicyTraceEntry::pass(PolicyGate::SearchScope),
         PolicyTraceEntry::pass(PolicyGate::SearchCapability),
-        PolicyTraceEntry::new(
-            PolicyGate::SearchReadFilter,
-            read_filter_outcome,
-            PolicyDetail::None,
-        ),
-    ]
+    ];
+    trace.extend(
+        rebac_decisions
+            .iter()
+            .copied()
+            .map(RebacDecision::to_policy_trace_entry),
+    );
+    trace.push(PolicyTraceEntry::new(
+        PolicyGate::SearchReadFilter,
+        read_filter_outcome,
+        PolicyDetail::None,
+    ));
+    trace
 }
 
 async fn search_keyword_backfilled(
@@ -749,10 +758,63 @@ mod tests {
             include_reasoning: false,
             visibility_allowlist: vec![],
             auth_scope: ScopeTuple::default(),
+            rebac: crate::rebac::RebacContext::default(),
             model_label: "MiniLM-L6-v2".to_owned(),
             filter: None,
             explain: false,
         }
+    }
+
+    #[test]
+    fn default_search_visibility_fails_closed_for_shared_tiers() {
+        let request = req(SearchMode::Keyword);
+        let (allowed, decisions) = visibility_allowlist(&request);
+
+        assert_eq!(
+            allowed,
+            vec![MemoryVisibility::Private, MemoryVisibility::Session]
+        );
+        assert_eq!(decisions.len(), 4, "one decision per shared tier");
+        assert!(
+            decisions.iter().all(|decision| !decision.allowed()),
+            "shared tiers must deny without ReBAC relations"
+        );
+    }
+
+    #[test]
+    fn search_visibility_allows_shared_tier_with_matching_rebac_relation() {
+        let principal = crate::domain::Identity::parse("agt:cairn:test:reader:v1").expect("valid");
+        let scope = ScopeTuple {
+            tenant: Some("acme".to_owned()),
+            workspace: Some("eng".to_owned()),
+            entity: Some("ingest".to_owned()),
+            ..ScopeTuple::default()
+        };
+        let mut request = req(SearchMode::Keyword);
+        request.auth_scope = scope.clone();
+        request.rebac = crate::rebac::RebacContext::new(
+            principal.clone(),
+            vec![crate::rebac::RebacRelation::new(
+                principal,
+                crate::rebac::RebacAction::Read,
+                scope,
+                MemoryVisibility::Project,
+            )],
+        );
+
+        let (allowed, decisions) = visibility_allowlist(&request);
+
+        assert!(allowed.contains(&MemoryVisibility::Project));
+        assert!(
+            !allowed.contains(&MemoryVisibility::Team),
+            "relations are exact by shared tier"
+        );
+        assert!(
+            decisions
+                .iter()
+                .any(|decision| decision.tier == MemoryVisibility::Project && decision.allowed()),
+            "project-tier relation should be visible in policy trace decisions"
+        );
     }
 
     #[tokio::test]

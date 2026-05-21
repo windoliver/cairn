@@ -95,6 +95,7 @@ struct ReadAuthorization {
     scope: ScopeTuple,
     max_visibility: MemoryVisibility,
     issuer: Identity,
+    rebac: cairn_core::rebac::RebacContext,
 }
 
 struct LoadedHotBodies {
@@ -647,7 +648,7 @@ async fn build_explain_debug(
         cairn_core::domain::Rfc3339Timestamp::parse("1970-01-01T00:00:00Z").expect("epoch literal")
     });
 
-    let auth_vis = effective_explain_visibility(auth.max_visibility);
+    let auth_vis = effective_explain_visibility(auth);
     let inputs = HotMemoryInputs {
         purpose_md: &purpose_md,
         index_md: &index_md,
@@ -685,19 +686,14 @@ async fn build_explain_debug(
 /// Visibility tiers admitted to the explain trace. Mirrors the tiers
 /// `load_records_for_kinds` will populate (Project / Private / Session)
 /// — never broader than `auth.max_visibility`.
-fn effective_explain_visibility(max: MemoryVisibility) -> Vec<MemoryVisibility> {
-    let cap = effective_read_visibility(max);
-    [
-        MemoryVisibility::Private,
-        MemoryVisibility::Session,
-        MemoryVisibility::Project,
-        MemoryVisibility::Team,
-        MemoryVisibility::Org,
-        MemoryVisibility::Public,
-    ]
-    .into_iter()
-    .filter(|v| *v <= cap)
-    .collect()
+fn effective_explain_visibility(auth: &ReadAuthorization) -> Vec<MemoryVisibility> {
+    auth.rebac
+        .allowed_visibilities_up_to(
+            cairn_core::rebac::RebacAction::Read,
+            &auth.scope,
+            effective_read_visibility(auth.max_visibility),
+        )
+        .0
 }
 
 async fn load_records_for_kinds(
@@ -884,6 +880,12 @@ async fn list_records_for_visibility(
     limit: usize,
 ) -> Result<Vec<MemoryRecord>, Response> {
     if visibility > effective_read_visibility(auth.max_visibility) {
+        return Ok(Vec::new());
+    }
+    let decision = auth
+        .rebac
+        .evaluate(cairn_core::rebac::RebacAction::Read, &scope, visibility);
+    if !decision.allowed() {
         return Ok(Vec::new());
     }
     let page = store
@@ -1239,15 +1241,23 @@ async fn signed_read_authorization(
             },
         ));
     }
+    let scope = ScopeTuple {
+        tenant: Some(verified.as_inner().scope.tenant.clone()),
+        workspace: Some(verified.as_inner().scope.workspace.clone()),
+        entity: Some(verified.as_inner().scope.entity.clone()),
+        ..ScopeTuple::default()
+    };
+    let max_visibility = intent_tier_to_visibility(verified.as_inner().scope.tier);
     Ok(ReadAuthorization {
         operation_id,
-        scope: ScopeTuple {
-            tenant: Some(verified.as_inner().scope.tenant.clone()),
-            workspace: Some(verified.as_inner().scope.workspace.clone()),
-            entity: Some(verified.as_inner().scope.entity.clone()),
-            ..ScopeTuple::default()
-        },
-        max_visibility: intent_tier_to_visibility(verified.as_inner().scope.tier),
+        scope: scope.clone(),
+        max_visibility,
+        rebac: cairn_core::rebac::RebacContext::for_scope(
+            issuer.clone(),
+            &scope,
+            cairn_core::rebac::RebacAction::Read,
+            max_visibility,
+        ),
         issuer,
     })
 }
@@ -1314,7 +1324,7 @@ fn read_policy_trace(
     } else {
         "legacy_event".to_owned()
     };
-    vec![
+    let mut trace = vec![
         ResponsePolicyTrace {
             detail: Some(format!(
                 "signed_scope_verified,files={loaded_files},records={}",
@@ -1336,7 +1346,20 @@ fn read_policy_trace(
             gate: "read.consent".to_owned(),
             result: ResponsePolicyTraceResult::Pass,
         },
-    ]
+    ];
+    let rebac_trace = auth
+        .rebac
+        .allowed_visibilities_up_to(
+            cairn_core::rebac::RebacAction::Read,
+            &auth.scope,
+            effective_read_visibility(auth.max_visibility),
+        )
+        .1
+        .into_iter()
+        .map(cairn_core::rebac::RebacDecision::to_policy_trace_entry)
+        .collect::<Vec<_>>();
+    trace.extend(cairn_core::policy_trace::to_wire(&rebac_trace));
+    trace
 }
 
 fn merge_policy_trace(mut prefix: Vec<ResponsePolicyTrace>, mut resp: Response) -> Response {
@@ -1615,16 +1638,27 @@ mod tests {
             .await
             .expect("canvas active");
 
+        let issuer = Identity::parse(DEFAULT_ASSEMBLE_ISSUER).expect("valid issuer");
+        let scope = ScopeTuple {
+            tenant: Some(DEFAULT_TENANT.to_owned()),
+            workspace: Some(config.vault.name.clone()),
+            entity: Some(ASSEMBLE_ENTITY.to_owned()),
+            ..ScopeTuple::default()
+        };
         let auth = ReadAuthorization {
             operation_id: Ulid("01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned()),
-            scope: ScopeTuple {
-                tenant: Some(DEFAULT_TENANT.to_owned()),
-                workspace: Some(config.vault.name.clone()),
-                entity: Some(ASSEMBLE_ENTITY.to_owned()),
-                ..ScopeTuple::default()
-            },
+            scope: scope.clone(),
             max_visibility: MemoryVisibility::Project,
-            issuer: Identity::parse(DEFAULT_ASSEMBLE_ISSUER).expect("valid issuer"),
+            rebac: cairn_core::rebac::RebacContext::new(
+                issuer.clone(),
+                vec![cairn_core::rebac::RebacRelation::new(
+                    issuer.clone(),
+                    cairn_core::rebac::RebacAction::Read,
+                    scope,
+                    MemoryVisibility::Project,
+                )],
+            ),
+            issuer,
         };
 
         let loaded = load_hot_bodies(&store, vault.path(), &config, &auth, Some(session_id), 4096)

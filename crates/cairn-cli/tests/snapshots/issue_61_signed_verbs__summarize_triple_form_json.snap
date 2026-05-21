@@ -1,6 +1,5 @@
 ---
 source: crates/cairn-cli/tests/issue_61_signed_verbs.rs
-assertion_line: 353
 expression: "serde_json::to_string_pretty(&snapshot_json).expect(\"snapshot string\")"
 ---
 {
@@ -61,6 +60,11 @@ expression: "serde_json::to_string_pretty(&snapshot_json).expect(\"snapshot stri
     {
       "detail": "legacy_event",
       "gate": "read.consent",
+      "result": "pass"
+    },
+    {
+      "detail": "rebac:read:project:allowed",
+      "gate": "rebac",
       "result": "pass"
     }
   ],

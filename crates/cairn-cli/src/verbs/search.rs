@@ -389,6 +389,7 @@ async fn run_async(
             agent: sub.get_one::<String>("scope-agent").cloned(),
             ..Default::default()
         },
+        rebac: cairn_core::rebac::RebacContext::default(),
         model_label: kind.as_str().to_owned(),
         filter,
         explain,

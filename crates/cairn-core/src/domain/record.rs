@@ -455,6 +455,19 @@ impl MemoryRecord {
         &self,
         intent: &VerifiedSignedIntent,
     ) -> Result<(), DomainError> {
+        self.validate_against_intent_with_rebac(intent, &crate::rebac::RebacContext::default())
+    }
+
+    /// Pre-store containment plus `ReBAC` check for shared-tier writes.
+    ///
+    /// Private/session records remain local and do not require any `ReBAC`
+    /// relation. `project`, `team`, `org`, and `public` records require a
+    /// matching write relation for the signed intent issuer.
+    pub fn validate_against_intent_with_rebac(
+        &self,
+        intent: &VerifiedSignedIntent,
+        rebac: &crate::rebac::RebacContext,
+    ) -> Result<(), DomainError> {
         // Run the full shape validation first so containment never
         // approves a record that fails domain invariants. Skipping
         // this would let an adapter persist a malformed record (empty
@@ -545,7 +558,48 @@ impl MemoryRecord {
                 ),
             });
         }
-        self.validate_scope_principals_against_intent(intent)
+        self.validate_scope_principals_against_intent(intent)?;
+        self.validate_rebac_write_against_intent(intent, rebac)
+    }
+
+    fn validate_rebac_write_against_intent(
+        &self,
+        intent: &crate::generated::envelope::SignedIntent,
+        rebac: &crate::rebac::RebacContext,
+    ) -> Result<(), DomainError> {
+        if !crate::rebac::is_shared_tier(self.visibility) {
+            return Ok(());
+        }
+        let issuer =
+            Identity::parse(intent.issuer.0.clone()).map_err(|_| DomainError::Unauthorized {
+                message: format!(
+                    "SignedIntent.issuer `{}` is not a parseable identity",
+                    intent.issuer.0
+                ),
+            })?;
+        if rebac.principal() != Some(&issuer) {
+            return Err(DomainError::ScopeDenied {
+                message: format!(
+                    "rebac principal must match SignedIntent.issuer `{issuer}` for shared-tier write"
+                ),
+            });
+        }
+        let decision = rebac.evaluate(
+            crate::rebac::RebacAction::Write,
+            &self.scope,
+            self.visibility,
+        );
+        if decision.allowed() {
+            return Ok(());
+        }
+        Err(DomainError::ScopeDenied {
+            message: format!(
+                "rebac denied {} on {} tier: {}",
+                decision.action.as_str(),
+                decision.tier.as_str(),
+                decision.kind.as_str()
+            ),
+        })
     }
 
     /// scope.user / scope.agent must bind to a cryptographically
@@ -1146,6 +1200,45 @@ mod tests {
         let intent = intent_for(&r, "acme", "ws", "ent", SignedIntentScopeTier::Project);
         r.validate_against_intent(&intent)
             .expect("scope contained, visibility ≤ tier, target hash matches");
+    }
+
+    #[test]
+    fn intent_containment_rejects_project_write_without_rebac_relation() {
+        let mut r = sample_record();
+        r.scope.tenant = Some("acme".to_owned());
+        r.scope.workspace = Some("ws".to_owned());
+        r.scope.entity = Some("ent".to_owned());
+        r.visibility = MemoryVisibility::Project;
+        let intent = intent_for(&r, "acme", "ws", "ent", SignedIntentScopeTier::Project);
+
+        let err = r.validate_against_intent(&intent).unwrap_err();
+
+        assert!(matches!(err, DomainError::ScopeDenied { .. }));
+    }
+
+    #[test]
+    fn intent_containment_accepts_project_write_with_rebac_relation() {
+        use crate::rebac::{RebacAction, RebacContext, RebacRelation};
+
+        let mut r = sample_record();
+        r.scope.tenant = Some("acme".to_owned());
+        r.scope.workspace = Some("ws".to_owned());
+        r.scope.entity = Some("ent".to_owned());
+        r.visibility = MemoryVisibility::Project;
+        let intent = intent_for(&r, "acme", "ws", "ent", SignedIntentScopeTier::Project);
+        let principal = Identity::parse("hmn:tafeng").expect("valid identity");
+        let rebac = RebacContext::new(
+            principal.clone(),
+            vec![RebacRelation::new(
+                principal,
+                RebacAction::Write,
+                r.scope.clone(),
+                MemoryVisibility::Project,
+            )],
+        );
+
+        r.validate_against_intent_with_rebac(&intent, &rebac)
+            .expect("matching ReBAC write relation authorizes project tier");
     }
 
     #[test]

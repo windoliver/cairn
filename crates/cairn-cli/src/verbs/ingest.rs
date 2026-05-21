@@ -914,8 +914,14 @@ async fn signed_ingest_admission(
         intent,
     );
     let verified = super::signed::verify_request(ctx, request).await?;
+    let rebac = cairn_core::rebac::RebacContext::for_scope(
+        issuer.clone(),
+        &record.scope,
+        cairn_core::rebac::RebacAction::Write,
+        record.visibility,
+    );
     record
-        .validate_against_intent(&verified)
+        .validate_against_intent_with_rebac(&verified, &rebac)
         .map_err(|e| super::signed::rejected_from_domain(ResponseVerb::Ingest, e))?;
     SignedAdmission::new(verified, WalActionKind::Upsert, None, payload)
         .map_err(|e| super::signed::aborted(ResponseVerb::Ingest, format!("signed admission: {e}")))

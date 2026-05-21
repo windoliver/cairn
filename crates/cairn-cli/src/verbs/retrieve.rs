@@ -46,6 +46,7 @@ struct ReadAuthorization {
     operation_id: Ulid,
     scope: ScopeTuple,
     max_visibility: MemoryVisibility,
+    rebac: cairn_core::rebac::RebacContext,
 }
 
 #[derive(Debug)]
@@ -750,15 +751,23 @@ async fn signed_read_authorization(
             },
         ));
     }
+    let scope = ScopeTuple {
+        tenant: Some(verified.as_inner().scope.tenant.clone()),
+        workspace: Some(verified.as_inner().scope.workspace.clone()),
+        entity: Some(verified.as_inner().scope.entity.clone()),
+        ..ScopeTuple::default()
+    };
+    let max_visibility = intent_tier_to_visibility(verified.as_inner().scope.tier);
     Ok(ReadAuthorization {
         operation_id,
-        scope: ScopeTuple {
-            tenant: Some(verified.as_inner().scope.tenant.clone()),
-            workspace: Some(verified.as_inner().scope.workspace.clone()),
-            entity: Some(verified.as_inner().scope.entity.clone()),
-            ..ScopeTuple::default()
-        },
-        max_visibility: intent_tier_to_visibility(verified.as_inner().scope.tier),
+        scope: scope.clone(),
+        max_visibility,
+        rebac: cairn_core::rebac::RebacContext::for_scope(
+            issuer,
+            &scope,
+            cairn_core::rebac::RebacAction::Read,
+            max_visibility,
+        ),
     })
 }
 
@@ -812,7 +821,7 @@ fn retrieve_entity(args: &RetrieveArgs) -> String {
 fn scoped_list_args(auth: &ReadAuthorization) -> ListArgs {
     ListArgs {
         scope: Some(auth.scope.clone()),
-        visibility_allowlist: visibility_allowlist(auth.max_visibility),
+        visibility_allowlist: read_visibility_allowlist(auth),
         limit: 1000,
         ..ListArgs::default()
     }
@@ -867,18 +876,14 @@ fn merge_scope_value(current: &mut Option<String>, requested: Option<&String>) -
     }
 }
 
-fn visibility_allowlist(max: MemoryVisibility) -> Vec<MemoryVisibility> {
-    [
-        MemoryVisibility::Private,
-        MemoryVisibility::Session,
-        MemoryVisibility::Project,
-        MemoryVisibility::Team,
-        MemoryVisibility::Org,
-        MemoryVisibility::Public,
-    ]
-    .into_iter()
-    .filter(|visibility| *visibility <= max)
-    .collect()
+fn read_visibility_allowlist(auth: &ReadAuthorization) -> Vec<MemoryVisibility> {
+    auth.rebac
+        .allowed_visibilities_up_to(
+            cairn_core::rebac::RebacAction::Read,
+            &auth.scope,
+            auth.max_visibility,
+        )
+        .0
 }
 
 fn intent_tier_to_visibility(tier: SignedIntentScopeTier) -> MemoryVisibility {
@@ -924,6 +929,18 @@ fn read_policy_trace(
             result: ResponsePolicyTraceResult::Pass,
         },
     ];
+    let rebac_trace = auth
+        .rebac
+        .allowed_visibilities_up_to(
+            cairn_core::rebac::RebacAction::Read,
+            &auth.scope,
+            auth.max_visibility,
+        )
+        .1
+        .into_iter()
+        .map(cairn_core::rebac::RebacDecision::to_policy_trace_entry)
+        .collect::<Vec<_>>();
+    trace.extend(cairn_core::policy_trace::to_wire(&rebac_trace));
     if let Some(budget) = budget {
         trace.push(ResponsePolicyTrace {
             detail: Some(format!(

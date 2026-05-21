@@ -232,7 +232,7 @@ async fn search_tool_with_store_returns_success_envelope() {
     );
     assert_eq!(
         envelope.policy_trace.len(),
-        3,
+        7,
         "successful search should forward core policy trace entries"
     );
     assert_eq!(envelope.policy_trace[0].gate, "search.scope");
@@ -245,9 +245,19 @@ async fn search_tool_with_store_returns_success_envelope() {
         envelope.policy_trace[1].result,
         ResponsePolicyTraceResult::Pass
     ));
-    assert_eq!(envelope.policy_trace[2].gate, "search.read_filter");
+    for (index, tier) in ["project", "team", "org", "public"].into_iter().enumerate() {
+        let entry = &envelope.policy_trace[2 + index];
+        assert_eq!(entry.gate, "rebac");
+        assert!(matches!(entry.result, ResponsePolicyTraceResult::Deny));
+        assert_eq!(
+            entry.detail.as_deref(),
+            Some(format!("rebac:read:{tier}:missing_principal").as_str())
+        );
+    }
+
+    assert_eq!(envelope.policy_trace[6].gate, "search.read_filter");
     assert!(matches!(
-        envelope.policy_trace[2].result,
+        envelope.policy_trace[6].result,
         ResponsePolicyTraceResult::Pass
     ));
     assert!(envelope.error.is_none());

@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use cairn_core::domain::MemoryVisibility;
 use cairn_core::pipeline::filter::{DiscardReason, RedactionTag};
 use cairn_core::policy_trace::{PolicyDetail, PolicyErrorCode};
+use cairn_core::rebac::{RebacAction, RebacDecisionKind};
 
 #[test]
 fn none_is_empty_string() {
@@ -41,6 +42,16 @@ fn scope_mismatch_emits_required_tier_only() {
         required_tier: MemoryVisibility::Project,
     };
     assert_eq!(d.to_wire_string(), "scope_required:project");
+}
+
+#[test]
+fn rebac_detail_serializes_action_tier_and_reason() {
+    let d = PolicyDetail::Rebac {
+        action: RebacAction::Read,
+        tier: MemoryVisibility::Project,
+        reason: RebacDecisionKind::DeniedNoRelation,
+    };
+    assert_eq!(d.to_wire_string(), "rebac:read:project:no_relation");
 }
 
 #[test]
