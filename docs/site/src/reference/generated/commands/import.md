@@ -15,7 +15,7 @@ Arguments:
   <PATH>  Legacy archive root to scan
 
 Options:
-      --from <SYSTEM>         Legacy memory system to import [possible values: koi-v1]
+      --from <SYSTEM>         Legacy memory system to import [possible values: koi-v1, rowboat]
       --vault <NAME_OR_PATH>  Active vault: name from registry or filesystem path (overrides
                               CAIRN_VAULT)
       --batch-size <U32>      Maximum records per pending review plan [default: 64]
