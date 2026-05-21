@@ -61,9 +61,29 @@ pub fn run_report(matches: &ArgMatches, vault_root: &Path) -> ExitCode {
 }
 
 /// Build a scrubbed local SRE report from vault-local metrics.
+///
+/// # Errors
+/// Returns [`SreReportBuildError::WorkflowStateUnavailable`] when an existing
+/// workflow database cannot be read safely.
 #[must_use]
-pub fn build_report(vault_root: &Path, config: &cairn_core::config::CairnConfig) -> SreReport {
-    build_report_with_bench(vault_root, config, None).expect("no bench dir cannot fail")
+pub fn build_report(
+    vault_root: &Path,
+    config: &cairn_core::config::CairnConfig,
+) -> Result<SreReport, SreReportBuildError> {
+    try_build_report(vault_root, config)
+}
+
+/// Try to build a scrubbed local SRE report from vault-local metrics.
+///
+/// # Errors
+/// Returns [`SreReportBuildError::WorkflowStateUnavailable`] when an existing
+/// workflow database cannot be read safely.
+#[must_use]
+pub fn try_build_report(
+    vault_root: &Path,
+    config: &cairn_core::config::CairnConfig,
+) -> Result<SreReport, SreReportBuildError> {
+    build_report_with_bench(vault_root, config, None)
 }
 
 fn build_report_with_bench(
@@ -120,11 +140,25 @@ fn build_report_with_bench(
     })
 }
 
-#[derive(Debug)]
-enum SreReportBuildError {
+/// Errors raised while building an SRE report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SreReportBuildError {
+    /// Optional bench report input was present but could not be parsed.
     Bench(String),
+    /// Existing workflow state storage could not be read safely.
     WorkflowStateUnavailable,
 }
+
+impl std::fmt::Display for SreReportBuildError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Bench(reason) => write!(formatter, "bench report error: {reason}"),
+            Self::WorkflowStateUnavailable => formatter.write_str("workflow state unavailable"),
+        }
+    }
+}
+
+impl std::error::Error for SreReportBuildError {}
 
 struct ReadMetricEvents {
     events: Vec<MetricEvent>,

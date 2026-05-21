@@ -694,6 +694,23 @@ fn admin_sre_report_fails_safely_when_workflow_db_unavailable() {
 }
 
 #[test]
+fn admin_sre_try_build_report_returns_workflow_db_error() {
+    let dir = bootstrap_vault();
+    std::fs::write(dir.path().join(".cairn/cairn.db"), b"not a sqlite database")
+        .expect("write corrupt db");
+    let config = cairn_cli::config::load(dir.path(), &cairn_cli::config::CliOverrides::default())
+        .expect("load config");
+
+    let err = cairn_cli::sre::try_build_report(dir.path(), &config)
+        .expect_err("corrupt workflow db should be reported");
+
+    assert_eq!(
+        err,
+        cairn_cli::sre::SreReportBuildError::WorkflowStateUnavailable
+    );
+}
+
+#[test]
 fn admin_sre_report_summarizes_projection_metrics_safely() {
     let dir = bootstrap_vault();
     let metrics = dir.path().join(".cairn/metrics.jsonl");
