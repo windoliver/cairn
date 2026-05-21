@@ -11,6 +11,8 @@ use crate::domain::{
     DomainError, Ed25519Signature, Identity, MemoryVisibility, Rfc3339Timestamp, ScopeTuple,
 };
 
+const MAX_TARGET_ID_HASHES: usize = 64;
+
 /// Policy-trace subject for sharing gates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -197,6 +199,12 @@ impl PromotionConsentReceipt {
     pub fn validate_shape(&self) -> Result<(), DomainError> {
         validate_id("receipt_id", &self.receipt_id)?;
         validate_ulid("operation_id", &self.payload.operation_id)?;
+        validate_bound_id(
+            "receipt_id",
+            &self.receipt_id,
+            "rcpt-",
+            &self.payload.operation_id,
+        )?;
         validate_nonce(&self.payload.nonce)?;
         validate_chain_parents(&self.payload.chain_parents)?;
         validate_target_hash(&self.payload.target_hash)?;
@@ -243,16 +251,15 @@ impl SignedShareLink {
     pub fn validate_shape(&self) -> Result<(), DomainError> {
         validate_id("link_id", &self.link_id)?;
         validate_ulid("operation_id", &self.payload.operation_id)?;
+        validate_bound_id(
+            "link_id",
+            &self.link_id,
+            "share-",
+            &self.payload.operation_id,
+        )?;
         validate_nonce(&self.payload.nonce)?;
         validate_target_hash(&self.payload.target_hash)?;
-        if self.payload.target_id_hashes.is_empty() {
-            return Err(DomainError::InvalidPayloadHash {
-                message: "target_id_hashes must not be empty".to_owned(),
-            });
-        }
-        for h in &self.payload.target_id_hashes {
-            validate_hash("target_id_hashes", h)?;
-        }
+        validate_target_id_hashes(&self.payload.target_id_hashes)?;
         validate_shared_tier("grant_tier", self.payload.grant_tier)?;
         self.payload.scope.validate()?;
         if self.payload.issuer.kind() != crate::domain::IdentityKind::Human {
@@ -309,6 +316,21 @@ fn validate_ulid(field: &'static str, value: &str) -> Result<(), DomainError> {
     ulid::Ulid::from_string(value).map_err(|_| DomainError::MalformedScope {
         message: format!("{field} must be a ULID"),
     })?;
+    Ok(())
+}
+
+fn validate_bound_id(
+    field: &'static str,
+    value: &str,
+    prefix: &str,
+    operation_id: &str,
+) -> Result<(), DomainError> {
+    let expected = format!("{prefix}{operation_id}");
+    if value != expected {
+        return Err(DomainError::MalformedScope {
+            message: format!("{field} must equal `{expected}`"),
+        });
+    }
     Ok(())
 }
 
@@ -378,6 +400,30 @@ fn validate_hash(field: &'static str, value: &str) -> Result<(), DomainError> {
             "{field} must be sha256:<64 lowercase hex> or hash:<32..=128 lowercase hex>"
         ),
     })
+}
+
+fn validate_target_id_hashes(values: &[String]) -> Result<(), DomainError> {
+    if values.is_empty() {
+        return Err(DomainError::InvalidPayloadHash {
+            message: "target_id_hashes must not be empty".to_owned(),
+        });
+    }
+    if values.len() > MAX_TARGET_ID_HASHES {
+        return Err(DomainError::InvalidPayloadHash {
+            message: format!("target_id_hashes exceeds {MAX_TARGET_ID_HASHES} items"),
+        });
+    }
+
+    let mut seen = BTreeSet::new();
+    for value in values {
+        validate_hash("target_id_hashes", value)?;
+        if !seen.insert(value) {
+            return Err(DomainError::InvalidPayloadHash {
+                message: "target_id_hashes must be unique".to_owned(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn validate_shared_promotion_tiers(
