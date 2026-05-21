@@ -347,6 +347,141 @@ impl AgentSpawnRequest {
     }
 }
 
+/// Evaluate a proposed tool call against the request allowlist and scope.
+///
+/// # Errors
+///
+/// Returns [`AgentProviderError::InvalidRequest`] for invalid flag
+/// combinations, [`AgentProviderError::ToolNotAllowed`] when the call is not
+/// exactly allowlisted, or [`AgentProviderError::MutatingVerbNotScoped`] when a
+/// mutating allowlisted call lacks write scope.
+pub fn evaluate_tool_policy(
+    request: &AgentSpawnRequest,
+    call: &AgentToolCall,
+) -> Result<AgentToolPolicyOutcome, AgentProviderError> {
+    call.validate()?;
+    if !request.tool_allowlist.allows(call) {
+        return Err(AgentProviderError::ToolNotAllowed { verb: call.verb });
+    }
+    if call.is_mutating() {
+        if request.scope.permits_mutation(call.verb) {
+            return Ok(AgentToolPolicyOutcome::AllowedWalRoutedMutation);
+        }
+        return Err(AgentProviderError::MutatingVerbNotScoped { verb: call.verb });
+    }
+    Ok(AgentToolPolicyOutcome::AllowedReadOnly)
+}
+
+/// In-memory cost budget meter for an agent-mode run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentRunMeter {
+    budget: AgentCostBudget,
+    consumed: AgentBudgetConsumed,
+}
+
+impl AgentRunMeter {
+    /// Build a meter initialized from a spawn request budget.
+    #[must_use]
+    pub const fn new(request: &AgentSpawnRequest) -> Self {
+        Self {
+            budget: request.cost_budget,
+            consumed: AgentBudgetConsumed {
+                turns: 0,
+                tool_calls: 0,
+                cost_units: 0,
+            },
+        }
+    }
+
+    /// Return the consumed budget counters.
+    #[must_use]
+    pub const fn consumed(&self) -> AgentBudgetConsumed {
+        self.consumed
+    }
+
+    /// Charge agent turns against the request budget.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentProviderError::BudgetExceeded`] if the charge would
+    /// overflow or exceed `max_turns`. Failed charges do not mutate counters.
+    pub fn charge_turn(&mut self, turns: u32) -> Result<(), AgentProviderError> {
+        let Some(next_turns) = self.consumed.turns.checked_add(turns) else {
+            return Err(Self::budget_exceeded("turns"));
+        };
+        if next_turns > self.budget.max_turns {
+            return Err(Self::budget_exceeded("turns"));
+        }
+        self.consumed.turns = next_turns;
+        Ok(())
+    }
+
+    /// Charge one admitted tool call against the request budget.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentProviderError::BudgetExceeded`] if the charge would
+    /// overflow or exceed `max_tool_calls`. Failed charges do not mutate
+    /// counters.
+    pub fn charge_tool_call(&mut self) -> Result<(), AgentProviderError> {
+        let Some(next_tool_calls) = self.consumed.tool_calls.checked_add(1) else {
+            return Err(Self::budget_exceeded("tool_calls"));
+        };
+        if next_tool_calls > self.budget.max_tool_calls {
+            return Err(Self::budget_exceeded("tool_calls"));
+        }
+        self.consumed.tool_calls = next_tool_calls;
+        Ok(())
+    }
+
+    /// Charge provider-defined cost units against the request budget.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentProviderError::BudgetExceeded`] if the charge would
+    /// overflow or exceed `max_cost_units`. Failed charges do not mutate
+    /// counters.
+    pub fn charge_cost_units(&mut self, units: u64) -> Result<(), AgentProviderError> {
+        let Some(next_cost_units) = self.consumed.cost_units.checked_add(units) else {
+            return Err(Self::budget_exceeded("cost_units"));
+        };
+        if next_cost_units > self.budget.max_cost_units {
+            return Err(Self::budget_exceeded("cost_units"));
+        }
+        self.consumed.cost_units = next_cost_units;
+        Ok(())
+    }
+
+    fn budget_exceeded(limit: &str) -> AgentProviderError {
+        AgentProviderError::BudgetExceeded {
+            limit: limit.to_string(),
+        }
+    }
+}
+
+/// Validate a provider output value against the requested output schema.
+///
+/// # Errors
+///
+/// Returns [`AgentProviderError::InvalidOutput`] when non-empty output does not
+/// match the requested schema.
+pub fn validate_output(
+    schema: &AgentOutputSchema,
+    output: &AgentOutput,
+) -> Result<(), AgentProviderError> {
+    match (schema, output) {
+        (_, AgentOutput::Empty)
+        | (AgentOutputSchema::Text, AgentOutput::Text(_))
+        | (AgentOutputSchema::Json, AgentOutput::Json(_)) => Ok(()),
+        (AgentOutputSchema::Text, AgentOutput::Json(_)) => Err(AgentProviderError::InvalidOutput {
+            message: "text output schema rejects json output".to_string(),
+        }),
+        (AgentOutputSchema::Json, AgentOutput::Text(_)) => Err(AgentProviderError::InvalidOutput {
+            message: "json output schema rejects text output".to_string(),
+        }),
+    }
+}
+
 /// Agent run status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -649,6 +784,75 @@ mod tests {
             .validate()
             .expect_err("write_report flag rejects outside lint");
         assert!(matches!(err, AgentProviderError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn policy_rejects_unallowlisted_tool() {
+        let request = base_request();
+        let err = evaluate_tool_policy(&request, &AgentToolCall::new(CairnVerb::Forget))
+            .expect_err("forget is not allowlisted");
+        assert!(matches!(
+            err,
+            AgentProviderError::ToolNotAllowed {
+                verb: CairnVerb::Forget
+            }
+        ));
+    }
+
+    #[test]
+    fn policy_rejects_allowlisted_mutation_without_scope() {
+        let mut request = base_request();
+        request
+            .tool_allowlist
+            .tools
+            .push(AgentToolCall::new(CairnVerb::Ingest));
+        let err = evaluate_tool_policy(&request, &AgentToolCall::new(CairnVerb::Ingest))
+            .expect_err("ingest needs write scope");
+        assert!(matches!(
+            err,
+            AgentProviderError::MutatingVerbNotScoped {
+                verb: CairnVerb::Ingest
+            }
+        ));
+    }
+
+    #[test]
+    fn policy_marks_scoped_mutation_as_wal_routed() {
+        let mut request = base_request();
+        request.scope = AgentScope::with_mutations(vec![CairnVerb::Ingest]);
+        request
+            .tool_allowlist
+            .tools
+            .push(AgentToolCall::new(CairnVerb::Ingest));
+        let outcome = evaluate_tool_policy(&request, &AgentToolCall::new(CairnVerb::Ingest))
+            .expect("scoped ingest is admitted");
+        assert_eq!(outcome, AgentToolPolicyOutcome::AllowedWalRoutedMutation);
+    }
+
+    #[test]
+    fn metered_context_rejects_turn_budget_overrun() {
+        let request = base_request();
+        let mut meter = AgentRunMeter::new(&request);
+        meter.charge_turn(1).expect("first turn admitted");
+        meter.charge_turn(1).expect("second turn admitted");
+        meter.charge_turn(1).expect("third turn admitted");
+        let err = meter
+            .charge_turn(1)
+            .expect_err("fourth turn exceeds budget");
+        assert!(matches!(
+            err,
+            AgentProviderError::BudgetExceeded { ref limit } if limit == "turns"
+        ));
+    }
+
+    #[test]
+    fn output_validation_rejects_json_when_text_requested() {
+        let err = validate_output(
+            &AgentOutputSchema::Text,
+            &AgentOutput::Json(serde_json::json!({})),
+        )
+        .expect_err("json is not text");
+        assert!(matches!(err, AgentProviderError::InvalidOutput { .. }));
     }
 
     #[test]
