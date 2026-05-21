@@ -41,6 +41,7 @@ pub fn router(repo: DesktopRepository) -> Router {
         .route("/api/v1/records", get(records))
         .route("/api/v1/records/{id}", get(record))
         .route("/api/v1/graph", get(graph))
+        .route("/api/v1/session-tree", get(session_tree))
         .route("/api/v1/search", get(search))
         .route("/api/v1/lint", get(lint))
         .route("/api/v1/reconcile/preview", post(reconcile_preview))
@@ -88,6 +89,12 @@ async fn record(
 
 async fn graph(State(state): State<DesktopServerState>) -> Json<crate::model::DesktopGraph> {
     Json(state.repo.graph())
+}
+
+async fn session_tree(
+    State(state): State<DesktopServerState>,
+) -> Json<crate::model::DesktopSessionTree> {
+    Json(state.repo.session_tree())
 }
 
 #[derive(Debug, Deserialize)]

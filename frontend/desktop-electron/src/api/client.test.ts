@@ -28,6 +28,21 @@ describe("DesktopApiClient", () => {
     expect(records[0].id).toBe("rec-alpha-001");
   });
 
+  it("loads session tree data from the backend", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ root: "session-root", nodes: [], merges: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const client = new DesktopApiClient("http://127.0.0.1:4000");
+    const tree = await client.sessionTree();
+
+    expect(fetchMock).toHaveBeenCalledWith("http://127.0.0.1:4000/api/v1/session-tree");
+    expect(tree.root).toBe("session-root");
+  });
+
   it("normalizes trailing slashes in the backend base URL", async () => {
     fetchMock.mockResolvedValueOnce(
       new Response(JSON.stringify([{ id: "rec-alpha-001", title: "Project memory scaffold" }]), {

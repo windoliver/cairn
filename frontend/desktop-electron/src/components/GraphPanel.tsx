@@ -1,12 +1,23 @@
-import type { DesktopGraph } from "../api/types";
+import type { DesktopGraph, DesktopSessionTree } from "../api/types";
 
-export function GraphPanel({ graph }: { graph: DesktopGraph | null }) {
+export function GraphPanel({
+  graph,
+  sessionTree,
+}: {
+  graph: DesktopGraph | null;
+  sessionTree?: DesktopSessionTree | null;
+}) {
   const layout = graph ? layoutGraph(graph) : null;
 
   return (
     <section className="panel">
       <h2>Graph</h2>
-      <p>{graph ? `${graph.nodes.length} nodes · ${graph.edges.length} edges` : "Loading graph"}</p>
+      <p>{graph ? `${countLabel(graph.nodes.length, "node")} · ${countLabel(graph.edges.length, "edge")}` : "Loading graph"}</p>
+      {sessionTree && (
+        <p className="panelMeta">
+          Session tree {countLabel(sessionTree.nodes.length, "node")} · {countLabel(sessionTree.merges.length, "merge")}
+        </p>
+      )}
       {layout && (
         <svg aria-label="Derived graph view" className="graphCanvas" viewBox="0 0 320 180" role="img">
           {layout.edges.map((edge) => (
@@ -31,6 +42,10 @@ export function GraphPanel({ graph }: { graph: DesktopGraph | null }) {
       )}
     </section>
   );
+}
+
+function countLabel(count: number, singular: string) {
+  return `${count} ${count === 1 ? singular : `${singular}s`}`;
 }
 
 function layoutGraph(graph: DesktopGraph) {

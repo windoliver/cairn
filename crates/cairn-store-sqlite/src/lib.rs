@@ -23,6 +23,7 @@ pub mod open;
 pub mod record_wal;
 pub mod repair;
 pub mod replay;
+pub mod session_tree_lint;
 pub mod store;
 pub mod trace_canvas;
 pub mod trace_window;
@@ -48,6 +49,7 @@ pub use open::{
 };
 #[cfg(any(test, feature = "test-helpers"))]
 pub use open::{open_in_memory_sync, open_sync};
+pub use session_tree_lint::{SessionTreeLintFinding, lint_session_tree_metadata};
 pub use store::SqliteMemoryStore;
 pub use store::reindex::{DrainStats, drain_once};
 pub use store::reindex_from_db::{RebuildStats, rebuild_from_db};

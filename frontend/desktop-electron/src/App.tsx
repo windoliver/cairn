@@ -6,6 +6,7 @@ import type {
   DesktopLintFinding,
   DesktopRecordDetail,
   DesktopRecordSummary,
+  DesktopSessionTree,
   DesktopVaultSummary,
 } from "./api/types";
 import { GraphPanel } from "./components/GraphPanel";
@@ -22,6 +23,7 @@ export type DesktopApi = Pick<
   | "records"
   | "record"
   | "graph"
+  | "sessionTree"
   | "lint"
   | "search"
   | "previewReconcile"
@@ -34,6 +36,7 @@ type AppState = {
   records: DesktopRecordSummary[];
   selected: DesktopRecordDetail | null;
   graph: DesktopGraph | null;
+  sessionTree: DesktopSessionTree | null;
   lint: DesktopLintFinding[];
   error: string | null;
 };
@@ -52,6 +55,7 @@ export function App({
     records: [],
     selected: null,
     graph: null,
+    sessionTree: null,
     lint: [],
     error: null,
   });
@@ -63,11 +67,12 @@ export function App({
     loadSequence.current = sequence;
     setState((current) => ({ ...current, error: null }));
     try {
-      const [vault, folders, records, graph, lint] = await Promise.all([
+      const [vault, folders, records, graph, sessionTree, lint] = await Promise.all([
         api.vault(),
         api.folders(),
         api.records(),
         api.graph(),
+        api.sessionTree(),
         api.lint(),
       ]);
       let selected: DesktopRecordDetail | null = null;
@@ -81,7 +86,7 @@ export function App({
         }
       }
       if (loadSequence.current === sequence) {
-        setState({ vault, folders, records, selected, graph, lint, error });
+        setState({ vault, folders, records, selected, graph, sessionTree, lint, error });
       }
     } catch (error) {
       if (loadSequence.current === sequence) {
@@ -167,7 +172,7 @@ export function App({
           onRecordApplied={applyRecord}
         />
         <div className="lowerPanels">
-          <GraphPanel graph={state.graph} />
+          <GraphPanel graph={state.graph} sessionTree={state.sessionTree} />
           <SearchPanel
             api={api}
             selectedId={selectedId}

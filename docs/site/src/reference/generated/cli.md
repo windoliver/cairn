@@ -39,6 +39,7 @@ Commands:
   backup         Audit and manage registered vault backups
   llm            LLM provider diagnostics (ADR 0001)
   screen         Screen sensor diagnostics
+  session        Inspect session-tree metadata (brief §5.7)
   sensor         Manage local sensor consent and policy gates
   repair         Operator repair commands for blocked vault state
   identity       Manage vault identities (§3.5 / §4.1)
@@ -84,6 +85,7 @@ Options:
 - [`cairn backup`](commands/backup.md) - Audit and manage registered vault backups
 - [`cairn llm`](commands/llm.md) - LLM provider diagnostics (ADR 0001)
 - [`cairn screen`](commands/screen.md) - Screen sensor diagnostics
+- [`cairn session`](commands/session.md) - Inspect session-tree metadata (brief §5.7)
 - [`cairn sensor`](commands/sensor.md) - Manage local sensor consent and policy gates
 - [`cairn repair`](commands/repair.md) - Operator repair commands for blocked vault state
 - [`cairn identity`](commands/identity.md) - Manage vault identities (§3.5 / §4.1)

@@ -118,6 +118,56 @@ pub struct DesktopGraphEdge {
     pub label: String,
 }
 
+/// Session tree response exposed to GUI adapters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopSessionTree {
+    /// Root session id.
+    pub root: String,
+    /// Session nodes in parent-before-child order.
+    pub nodes: Vec<DesktopSessionTreeNode>,
+    /// Explicit merge events.
+    pub merges: Vec<DesktopSessionTreeMerge>,
+}
+
+/// Session tree node.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopSessionTreeNode {
+    /// Session id.
+    pub id: String,
+    /// Parent session id, absent for the root.
+    pub parent_id: Option<String>,
+    /// Branch kind such as `fork`, `clone`, or `tool_spawned`.
+    pub branch_kind: Option<String>,
+    /// Turn boundary where this branch diverged.
+    pub at_turn_id: Option<String>,
+    /// Tool call that spawned this branch, if any.
+    pub tool_call_id: Option<String>,
+    /// Child session ids.
+    pub children: Vec<String>,
+}
+
+/// Session tree merge event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopSessionTreeMerge {
+    /// Source branch.
+    pub source: String,
+    /// Destination session.
+    pub destination: String,
+    /// Merge strategy.
+    pub strategy: String,
+    /// Reasoning summary record id for `reasoning_summary` merges.
+    pub summary_record_id: Option<String>,
+    /// First source turn for `controlled_splice` merges.
+    pub first_turn_id: Option<String>,
+    /// Last source turn for `controlled_splice` merges.
+    pub last_turn_id: Option<String>,
+    /// Destination turn where the merge landed.
+    pub applied_at_turn_id: String,
+}
+
 /// Search result shown in the search panel.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

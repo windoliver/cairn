@@ -13,7 +13,7 @@ use crate::{
         DesktopFolder, DesktopGraph, DesktopGraphEdge, DesktopGraphNode, DesktopLintFinding,
         DesktopReconcileApplyRequest, DesktopReconcileApplyResult, DesktopReconcilePreview,
         DesktopReconcilePreviewRequest, DesktopRecordDetail, DesktopRecordSummary,
-        DesktopRejectedField, DesktopSearchResult, DesktopVaultSummary,
+        DesktopRejectedField, DesktopSearchResult, DesktopSessionTree, DesktopVaultSummary,
     },
 };
 
@@ -102,6 +102,12 @@ impl DesktopRepository {
             .collect();
 
         DesktopGraph { nodes, edges }
+    }
+
+    /// Return session-tree data for visualization.
+    #[must_use]
+    pub fn session_tree(&self) -> DesktopSessionTree {
+        self.fixture().session_tree.clone()
     }
 
     /// Return deterministic fixture search results.

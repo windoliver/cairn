@@ -12,7 +12,10 @@ use cairn_core::contract::frontend_adapter::FrontendFieldPolicy;
 
 use crate::{
     error::{DesktopError, DesktopResult},
-    model::{DesktopFolder, DesktopLintFinding, DesktopRecordDetail, DesktopVaultSummary},
+    model::{
+        DesktopFolder, DesktopLintFinding, DesktopRecordDetail, DesktopSessionTree,
+        DesktopVaultSummary,
+    },
 };
 
 /// Built-in fixture path used by tests and local development.
@@ -28,6 +31,8 @@ pub struct DesktopFixture {
     pub folders: Vec<DesktopFolder>,
     /// Fixture records.
     pub records: Vec<DesktopRecordDetail>,
+    /// Fixture session tree.
+    pub session_tree: DesktopSessionTree,
     /// Fixture lint findings.
     pub lint_findings: Vec<DesktopLintFinding>,
     /// Fixture reconcile examples.
@@ -68,6 +73,7 @@ impl DesktopFixture {
         self.validate_counts()?;
         let folder_ids = self.validate_folders()?;
         let record_ids = self.validate_records(&folder_ids)?;
+        self.validate_session_tree()?;
         self.validate_lint_findings(&record_ids)?;
         self.validate_reconcile_examples(&record_ids)
     }
@@ -196,6 +202,70 @@ impl DesktopFixture {
                     message: format!(
                         "lint finding {} references unknown recordId {}",
                         finding.id, record_id
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_session_tree(&self) -> DesktopResult<()> {
+        let mut node_ids = BTreeSet::new();
+        for node in &self.session_tree.nodes {
+            if !node_ids.insert(node.id.as_str()) {
+                return Err(DesktopError::Fixture {
+                    message: format!("duplicate session tree node {}", node.id),
+                });
+            }
+        }
+        if !node_ids.contains(self.session_tree.root.as_str()) {
+            return Err(DesktopError::Fixture {
+                message: format!(
+                    "sessionTree root {} has no matching node",
+                    self.session_tree.root
+                ),
+            });
+        }
+        for node in &self.session_tree.nodes {
+            if node.id == self.session_tree.root && node.parent_id.is_some() {
+                return Err(DesktopError::Fixture {
+                    message: format!("sessionTree root {} must not have parentId", node.id),
+                });
+            }
+            if node.id != self.session_tree.root && node.parent_id.is_none() {
+                return Err(DesktopError::Fixture {
+                    message: format!("sessionTree node {} is missing parentId", node.id),
+                });
+            }
+            if let Some(parent_id) = &node.parent_id
+                && !node_ids.contains(parent_id.as_str())
+            {
+                return Err(DesktopError::Fixture {
+                    message: format!(
+                        "sessionTree node {} references unknown parentId {}",
+                        node.id, parent_id
+                    ),
+                });
+            }
+            for child in &node.children {
+                if !node_ids.contains(child.as_str()) {
+                    return Err(DesktopError::Fixture {
+                        message: format!(
+                            "sessionTree node {} references unknown child {}",
+                            node.id, child
+                        ),
+                    });
+                }
+            }
+        }
+        for merge in &self.session_tree.merges {
+            if !node_ids.contains(merge.source.as_str())
+                || !node_ids.contains(merge.destination.as_str())
+            {
+                return Err(DesktopError::Fixture {
+                    message: format!(
+                        "sessionTree merge {} -> {} references unknown session",
+                        merge.source, merge.destination
                     ),
                 });
             }
