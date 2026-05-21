@@ -655,6 +655,45 @@ fn admin_sre_report_prefers_db_workflow_current_state() {
 }
 
 #[test]
+fn admin_sre_report_fails_safely_when_workflow_db_unavailable() {
+    let parent = tempfile::tempdir().expect("parent dir");
+    let vault = parent
+        .path()
+        .join("SECRET_PRIVATE_TOKEN private body query text");
+    std::fs::create_dir(&vault).expect("create vault dir");
+    let bootstrap = cairn()
+        .args(["bootstrap", "--vault-path", vault.to_str().expect("utf8")])
+        .output()
+        .expect("bootstrap");
+    assert!(
+        bootstrap.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&bootstrap.stderr)
+    );
+    std::fs::write(vault.join(".cairn/cairn.db"), b"not a sqlite database")
+        .expect("write corrupt db");
+
+    let output = cairn()
+        .current_dir(&vault)
+        .args(["admin", "sre", "report", "--json"])
+        .output()
+        .expect("run sre report");
+
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(69));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("workflow state unavailable"),
+        "stderr: {stderr}"
+    );
+    assert_forbidden_fragments_absent(&stderr);
+    assert!(
+        !stderr.contains(vault.to_string_lossy().as_ref()),
+        "stderr leaked path: {stderr}"
+    );
+}
+
+#[test]
 fn admin_sre_report_summarizes_projection_metrics_safely() {
     let dir = bootstrap_vault();
     let metrics = dir.path().join(".cairn/metrics.jsonl");

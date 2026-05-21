@@ -40,9 +40,13 @@ pub fn run_report(matches: &ArgMatches, vault_root: &Path) -> ExitCode {
     };
     let report = match build_report_with_bench(vault_root, &config, bench_report_dir) {
         Ok(report) => report,
-        Err(err) => {
+        Err(SreReportBuildError::Bench(err)) => {
             eprintln!("cairn admin sre report: bench-report-dir error - {err}");
             return ExitCode::from(78);
+        }
+        Err(SreReportBuildError::WorkflowStateUnavailable) => {
+            eprintln!("cairn admin sre report: workflow state unavailable");
+            return ExitCode::from(69);
         }
     };
     if json {
@@ -66,7 +70,7 @@ fn build_report_with_bench(
     vault_root: &Path,
     config: &cairn_core::config::CairnConfig,
     bench_report_dir: Option<&Path>,
-) -> Result<SreReport, String> {
+) -> Result<SreReport, SreReportBuildError> {
     let metrics = read_metric_events(vault_root);
     let events = metrics.events;
     let captured_at_ms = metrics::now_ms();
@@ -80,11 +84,12 @@ fn build_report_with_bench(
         })
         .collect();
     let search_modes = summarize_search(&events, config, vault_root);
-    let workflow = summarize_workflow(&events, vault_root, captured_at_ms);
+    let workflow = summarize_workflow(&events, vault_root, captured_at_ms)
+        .map_err(|()| SreReportBuildError::WorkflowStateUnavailable)?;
     let projection = summarize_projection(&events);
     let p95 = percentile_u64(&rehydration_latencies, 0.95);
     let rehydration_status = classify_threshold(p95, SLO_COLD_REHYDRATE_MS);
-    let mut gates = load_bench_gates(bench_report_dir)?;
+    let mut gates = load_bench_gates(bench_report_dir).map_err(SreReportBuildError::Bench)?;
     add_metric_parse_gate(&mut gates, metrics.parse_error_count);
     Ok(SreReport {
         schema_version: 1,
@@ -113,6 +118,12 @@ fn build_report_with_bench(
             forbidden_field_count: 0,
         },
     })
+}
+
+#[derive(Debug)]
+enum SreReportBuildError {
+    Bench(String),
+    WorkflowStateUnavailable,
 }
 
 struct ReadMetricEvents {
@@ -208,14 +219,17 @@ fn summarize_workflow(
     events: &[MetricEvent],
     vault_root: &Path,
     captured_at_ms: i64,
-) -> SreWorkflowSummary {
+) -> Result<SreWorkflowSummary, ()> {
     let recent = summarize_workflow_metrics(events, false);
-    if let Some(mut current) = read_workflow_db_state(vault_root, captured_at_ms) {
+    if let Some(mut current) = read_workflow_db_state(vault_root, captured_at_ms)? {
         merge_workflow_recent(&mut current, recent);
-        return workflow_summary_from_kinds(current, captured_at_ms);
+        return Ok(workflow_summary_from_kinds(current, captured_at_ms));
     }
 
-    workflow_summary_from_kinds(summarize_workflow_metrics(events, true), captured_at_ms)
+    Ok(workflow_summary_from_kinds(
+        summarize_workflow_metrics(events, true),
+        captured_at_ms,
+    ))
 }
 
 fn summarize_workflow_metrics(
@@ -297,30 +311,30 @@ fn summarize_workflow_metrics(
 fn read_workflow_db_state(
     vault_root: &Path,
     captured_at_ms: i64,
-) -> Option<BTreeMap<String, WorkflowKindAggregate>> {
+) -> Result<Option<BTreeMap<String, WorkflowKindAggregate>>, ()> {
     let path = vault_root.join(".cairn/cairn.db");
     if !path.exists() {
-        return None;
+        return Ok(None);
     }
     let conn = rusqlite::Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
-    .ok()?;
+    .map_err(|_err| ())?;
     let mut stmt = conn
         .prepare(
             "SELECT kind, state, next_run_at, completed_at_ms, dead_letter_at_ms \
              FROM workflow_jobs",
         )
-        .ok()?;
-    let mut rows = stmt.query([]).ok()?;
+        .map_err(|_err| ())?;
+    let mut rows = stmt.query([]).map_err(|_err| ())?;
     let mut kinds: BTreeMap<String, WorkflowKindAggregate> = BTreeMap::new();
-    while let Some(row) = rows.next().ok()? {
-        let kind = workflow_kind_label(&row.get::<_, String>(0).ok()?);
-        let state: String = row.get(1).ok()?;
-        let next_run_at: i64 = row.get(2).ok()?;
-        let completed_at_ms: Option<i64> = row.get(3).ok()?;
-        let dead_letter_at_ms: Option<i64> = row.get(4).ok()?;
+    while let Some(row) = rows.next().map_err(|_err| ())? {
+        let kind = workflow_kind_label(&row.get::<_, String>(0).map_err(|_err| ())?);
+        let state: String = row.get(1).map_err(|_err| ())?;
+        let next_run_at: i64 = row.get(2).map_err(|_err| ())?;
+        let completed_at_ms: Option<i64> = row.get(3).map_err(|_err| ())?;
+        let dead_letter_at_ms: Option<i64> = row.get(4).map_err(|_err| ())?;
         let entry = kinds.entry(kind).or_default();
         match state.as_str() {
             "queued" => {
@@ -348,7 +362,7 @@ fn read_workflow_db_state(
             entry.dead_letters = entry.dead_letters.saturating_add(1);
         }
     }
-    Some(kinds)
+    Ok(Some(kinds))
 }
 
 fn merge_workflow_recent(
