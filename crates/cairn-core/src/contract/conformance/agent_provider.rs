@@ -1,10 +1,6 @@
 //! Conformance cases for `AgentProvider` plugins.
 
-use crate::contract::agent_provider::{
-    AgentCostBudget, AgentIdentity, AgentOutputSchema, AgentProvider, AgentProviderError,
-    AgentScope, AgentSpawnRequest, AgentToolAllowlist, AgentToolCall, AgentToolPolicyOutcome,
-    AgentWallClockBudget, CONTRACT_VERSION, CairnVerb, evaluate_tool_policy,
-};
+use crate::contract::agent_provider::{AgentProvider, CONTRACT_VERSION};
 use crate::contract::conformance::{
     CaseOutcome, CaseStatus, Tier, tier1_manifest_features_match_capabilities,
     tier1_manifest_matches_host,
@@ -157,121 +153,11 @@ fn scope_enforced_or_pending(id: &'static str, provider: &dyn AgentProvider) -> 
     )
 }
 
-fn host_policy_allowlist_rejects_unlisted_tool() -> CaseOutcome {
-    let id = "allowlist_rejects_unlisted_tool";
-    let request = conformance_request();
-    if let Err(err) = request.validate() {
-        return failed(
-            id,
-            Tier::Two,
-            format!("conformance request is invalid: {err}"),
-        );
-    }
-    let call = AgentToolCall::new(CairnVerb::Forget);
-    let status = match evaluate_tool_policy(&request, &call) {
-        Err(AgentProviderError::ToolNotAllowed {
-            verb: CairnVerb::Forget,
-        }) => CaseStatus::Ok,
-        Err(err) => CaseStatus::Failed {
-            message: format!("expected ToolNotAllowed for forget, got {err}"),
-        },
-        Ok(outcome) => CaseStatus::Failed {
-            message: format!("expected ToolNotAllowed for forget, got {outcome:?}"),
-        },
-    };
-    CaseOutcome {
-        id,
-        tier: Tier::Two,
-        status,
-    }
-}
-
-fn host_policy_mutating_verb_requires_scope() -> CaseOutcome {
-    let id = "mutating_verb_requires_scope";
-    let mut request = conformance_request();
-    request
-        .tool_allowlist
-        .tools
-        .push(AgentToolCall::new(CairnVerb::Ingest));
-    if let Err(err) = request.validate() {
-        return failed(
-            id,
-            Tier::Two,
-            format!("conformance request is invalid: {err}"),
-        );
-    }
-    let call = AgentToolCall::new(CairnVerb::Ingest);
-    let status = match evaluate_tool_policy(&request, &call) {
-        Err(AgentProviderError::MutatingVerbNotScoped {
-            verb: CairnVerb::Ingest,
-        }) => CaseStatus::Ok,
-        Err(err) => CaseStatus::Failed {
-            message: format!("expected MutatingVerbNotScoped for ingest, got {err}"),
-        },
-        Ok(outcome) => CaseStatus::Failed {
-            message: format!("expected MutatingVerbNotScoped for ingest, got {outcome:?}"),
-        },
-    };
-    CaseOutcome {
-        id,
-        tier: Tier::Two,
-        status,
-    }
-}
-
-fn host_policy_writes_are_wal_routed() -> CaseOutcome {
-    let id = "writes_are_wal_routed";
-    let mut request = conformance_request();
-    request.scope = AgentScope::with_mutations(vec![CairnVerb::Ingest]);
-    request
-        .tool_allowlist
-        .tools
-        .push(AgentToolCall::new(CairnVerb::Ingest));
-    if let Err(err) = request.validate() {
-        return failed(
-            id,
-            Tier::Two,
-            format!("conformance request is invalid: {err}"),
-        );
-    }
-    let call = AgentToolCall::new(CairnVerb::Ingest);
-    let status = match evaluate_tool_policy(&request, &call) {
-        Ok(AgentToolPolicyOutcome::AllowedWalRoutedMutation) => CaseStatus::Ok,
-        Ok(outcome) => CaseStatus::Failed {
-            message: format!("expected AllowedWalRoutedMutation for ingest, got {outcome:?}"),
-        },
-        Err(err) => CaseStatus::Failed {
-            message: format!("expected AllowedWalRoutedMutation for ingest, got {err}"),
-        },
-    };
-    CaseOutcome {
-        id,
-        tier: Tier::Two,
-        status,
-    }
-}
-
 fn pending(id: &'static str, tier: Tier, reason: &'static str) -> CaseOutcome {
     CaseOutcome {
         id,
         tier,
         status: CaseStatus::Pending { reason },
-    }
-}
-
-fn conformance_request() -> AgentSpawnRequest {
-    AgentSpawnRequest {
-        identity: AgentIdentity::new("agt:conformance:v1").expect("valid conformance identity"),
-        scope: AgentScope::read_only(),
-        tool_allowlist: AgentToolAllowlist::read_only_cairn(),
-        cost_budget: AgentCostBudget {
-            max_turns: 1,
-            max_tool_calls: 1,
-            max_cost_units: 1,
-        },
-        wall_clock_budget: AgentWallClockBudget { max_millis: 1 },
-        output_schema: AgentOutputSchema::Text,
-        prompt: "conformance".to_string(),
     }
 }
 
@@ -286,7 +172,12 @@ fn failed(id: &'static str, tier: Tier, message: String) -> CaseOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contract::agent_provider::{AgentProviderCapabilities, AgentRun};
+    use crate::contract::agent_provider::{
+        AgentCostBudget, AgentIdentity, AgentOutputSchema, AgentProviderCapabilities,
+        AgentProviderError, AgentRun, AgentScope, AgentSpawnRequest, AgentToolAllowlist,
+        AgentToolCall, AgentToolPolicyOutcome, AgentWallClockBudget, CairnVerb,
+        evaluate_tool_policy,
+    };
     use crate::contract::manifest::PluginManifest;
     use crate::contract::version::{ContractVersion, VersionRange};
 
@@ -374,6 +265,116 @@ cli_subprocess_tools = {}
             .unwrap_or_else(|| panic!("missing outcome {id}"))
     }
 
+    fn conformance_request() -> AgentSpawnRequest {
+        AgentSpawnRequest {
+            identity: AgentIdentity::new("agt:conformance:v1").expect("valid conformance identity"),
+            scope: AgentScope::read_only(),
+            tool_allowlist: AgentToolAllowlist::read_only_cairn(),
+            cost_budget: AgentCostBudget {
+                max_turns: 1,
+                max_tool_calls: 1,
+                max_cost_units: 1,
+            },
+            wall_clock_budget: AgentWallClockBudget { max_millis: 1 },
+            output_schema: AgentOutputSchema::Text,
+            prompt: "conformance".to_string(),
+        }
+    }
+
+    fn host_policy_allowlist_rejects_unlisted_tool() -> CaseOutcome {
+        let id = "allowlist_rejects_unlisted_tool";
+        let request = conformance_request();
+        if let Err(err) = request.validate() {
+            return failed(
+                id,
+                Tier::Two,
+                format!("conformance request is invalid: {err}"),
+            );
+        }
+        let call = AgentToolCall::new(CairnVerb::Forget);
+        let status = match evaluate_tool_policy(&request, &call) {
+            Err(AgentProviderError::ToolNotAllowed {
+                verb: CairnVerb::Forget,
+            }) => CaseStatus::Ok,
+            Err(err) => CaseStatus::Failed {
+                message: format!("expected ToolNotAllowed for forget, got {err}"),
+            },
+            Ok(outcome) => CaseStatus::Failed {
+                message: format!("expected ToolNotAllowed for forget, got {outcome:?}"),
+            },
+        };
+        CaseOutcome {
+            id,
+            tier: Tier::Two,
+            status,
+        }
+    }
+
+    fn host_policy_mutating_verb_requires_scope() -> CaseOutcome {
+        let id = "mutating_verb_requires_scope";
+        let mut request = conformance_request();
+        request
+            .tool_allowlist
+            .tools
+            .push(AgentToolCall::new(CairnVerb::Ingest));
+        if let Err(err) = request.validate() {
+            return failed(
+                id,
+                Tier::Two,
+                format!("conformance request is invalid: {err}"),
+            );
+        }
+        let call = AgentToolCall::new(CairnVerb::Ingest);
+        let status = match evaluate_tool_policy(&request, &call) {
+            Err(AgentProviderError::MutatingVerbNotScoped {
+                verb: CairnVerb::Ingest,
+            }) => CaseStatus::Ok,
+            Err(err) => CaseStatus::Failed {
+                message: format!("expected MutatingVerbNotScoped for ingest, got {err}"),
+            },
+            Ok(outcome) => CaseStatus::Failed {
+                message: format!("expected MutatingVerbNotScoped for ingest, got {outcome:?}"),
+            },
+        };
+        CaseOutcome {
+            id,
+            tier: Tier::Two,
+            status,
+        }
+    }
+
+    fn host_policy_writes_are_wal_routed() -> CaseOutcome {
+        let id = "writes_are_wal_routed";
+        let mut request = conformance_request();
+        request.scope = AgentScope::with_mutations(vec![CairnVerb::Ingest]);
+        request
+            .tool_allowlist
+            .tools
+            .push(AgentToolCall::new(CairnVerb::Ingest));
+        if let Err(err) = request.validate() {
+            return failed(
+                id,
+                Tier::Two,
+                format!("conformance request is invalid: {err}"),
+            );
+        }
+        let call = AgentToolCall::new(CairnVerb::Ingest);
+        let status = match evaluate_tool_policy(&request, &call) {
+            Ok(AgentToolPolicyOutcome::AllowedWalRoutedMutation) => CaseStatus::Ok,
+            Ok(outcome) => CaseStatus::Failed {
+                message: format!("expected AllowedWalRoutedMutation for ingest, got {outcome:?}"),
+            },
+            Err(err) => CaseStatus::Failed {
+                message: format!("expected AllowedWalRoutedMutation for ingest, got {err}"),
+            },
+        };
+        CaseOutcome {
+            id,
+            tier: Tier::Two,
+            status,
+        }
+    }
+
     #[test]
     fn host_policy_cases_pass() {
         let cases = [
@@ -446,6 +447,25 @@ cli_subprocess_tools = {}
         assert!(
             message.contains("honors_cost_budget=true"),
             "message was {message}"
+        );
+    }
+
+    #[test]
+    fn run_conformance_routes_agent_provider_to_runner() {
+        let (registry, name) = registry_with(truthful_caps());
+        let outcomes = crate::contract::conformance::run_conformance_for_plugin(&registry, &name);
+
+        assert!(
+            outcomes
+                .iter()
+                .all(|outcome| outcome.id != "no_conformance_runner"),
+            "AgentProvider should route to its conformance runner"
+        );
+        assert!(
+            outcomes
+                .iter()
+                .any(|outcome| outcome.id == "allowlist_rejects_unlisted_tool"),
+            "AgentProvider conformance output should include the stable tier-2 case"
         );
     }
 }
