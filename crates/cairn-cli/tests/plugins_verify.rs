@@ -28,8 +28,8 @@ fn plugins_verify_json_default_succeeds() {
     assert_eq!(v["summary"]["failed"], 0, "no tier-1 failures expected");
     assert_eq!(
         v["plugins"].as_array().expect("plugins array").len(),
-        7,
-        "all seven bundled plugins must be reported"
+        8,
+        "all eight bundled plugins must be reported"
     );
 }
 

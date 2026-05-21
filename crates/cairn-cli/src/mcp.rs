@@ -340,11 +340,12 @@ pub fn run(
                 let readiness = cairn_mcp::WorkflowReadiness {
                     consolidation: true,
                     agent_runtime: agent_provider.is_some(),
-                    // Brief §15 fail-closed: advertise dream only when the
-                    // configured worker runtime has its concrete provider.
+                    // Task 5 wires the provider but Task 6 owns agent dream
+                    // dispatch. Keep agent-mode dream withheld until the
+                    // handler actually routes through AgentProvider::spawn.
                     dream: config.dream.enabled
                         && if config.dream.requires_agent_provider() {
-                            agent_provider.is_some()
+                            false
                         } else {
                             llm_provider.is_some()
                         },

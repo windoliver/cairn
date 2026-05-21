@@ -436,8 +436,7 @@ fn compute_capabilities(
         // boot-path gating used for consolidation (config opt-in + single-tenant
         // mcp serve + bound principal).
         let agent_configured = agent_runtime_configured(config);
-        let dream_runtime_ready =
-            dream_runtime_ready_for_config(config, single_tenant_ready, agent_configured);
+        let dream_runtime_ready = dream_runtime_ready_for_config(config, single_tenant_ready);
         let expiration_runtime_ready = config.expiration.enabled && single_tenant_ready;
         let evaluation_runtime_ready = config.evaluation.enabled && single_tenant_ready;
 
@@ -573,8 +572,7 @@ fn capabilities_for_config(config: &CairnConfig, model_present: bool) -> Vec<Cap
         config.mcp.stdio.single_tenant && config.mcp.stdio.principal.is_some();
     let consolidation_runtime_ready = config.consolidation.enabled && single_tenant_ready;
     let agent_configured = agent_runtime_configured(config);
-    let dream_runtime_ready =
-        dream_runtime_ready_for_config(config, single_tenant_ready, agent_configured);
+    let dream_runtime_ready = dream_runtime_ready_for_config(config, single_tenant_ready);
     let expiration_runtime_ready = config.expiration.enabled && single_tenant_ready;
     let evaluation_runtime_ready = config.evaluation.enabled && single_tenant_ready;
     cairn_core::status::advertise(&cairn_core::status::CapabilityGates {
@@ -614,15 +612,11 @@ fn agent_runtime_configured(config: &CairnConfig) -> bool {
     ) && config.llm.provider.is_some()
 }
 
-fn dream_runtime_ready_for_config(
-    config: &CairnConfig,
-    single_tenant_ready: bool,
-    agent_configured: bool,
-) -> bool {
+fn dream_runtime_ready_for_config(config: &CairnConfig, single_tenant_ready: bool) -> bool {
     config.dream.enabled
         && single_tenant_ready
         && if config.dream.requires_agent_provider() {
-            agent_configured
+            false
         } else {
             config.llm.provider.is_some()
         }
@@ -1434,7 +1428,7 @@ mod tests {
     }
 
     #[test]
-    fn compute_capabilities_agent_dream_requires_agent_runtime() {
+    fn compute_capabilities_agent_dream_is_withheld_until_agent_dispatch_exists() {
         let mut config = CairnConfig::default();
         config.llm.provider = Some(cairn_core::config::LlmProvider::OpenaiCompatible);
         config.agent_provider.kind = Some(cairn_core::config::AgentProviderKind::CairnCore);
@@ -1457,8 +1451,8 @@ mod tests {
 
         let caps = compute_capabilities(Some(tmp.path()), Some(&config), true);
         assert!(
-            caps.contains(&Capabilities::CairnWorkflowsV1Dream),
-            "agent dream is advertised only once agent runtime inputs are configured; got {caps:?}"
+            !caps.contains(&Capabilities::CairnWorkflowsV1Dream),
+            "agent dream must stay withheld until Task 6 routes DreamWorkerMode::Agent through AgentProvider::spawn; got {caps:?}"
         );
 
         config.llm.provider = None;
