@@ -19,6 +19,8 @@ use walkdir::WalkDir;
 
 const KOI_IMPORT_AUTHOR: &str = "hmn:koi-import:v1";
 const KOI_IMPORT_SENSOR: &str = "snr:koi-v1:import:local:v1";
+const ROWBOAT_IMPORT_AUTHOR: &str = "hmn:rowboat-import:v1";
+const ROWBOAT_IMPORT_SENSOR: &str = "snr:rowboat:import:local:v1";
 const SOURCE_HASH_PREFIX: &str = "sha256:";
 
 /// Build the `cairn import` CLI subcommand.
@@ -31,7 +33,7 @@ pub fn command() -> clap::Command {
                 .long("from")
                 .required(true)
                 .value_name("SYSTEM")
-                .value_parser(["koi-v1"])
+                .value_parser(["koi-v1", "rowboat"])
                 .help("Legacy memory system to import"),
         )
         .arg(
@@ -64,9 +66,6 @@ pub fn run(sub: &clap::ArgMatches, vault_root: &Path) -> std::process::ExitCode 
     let Some(system) = sub.get_one::<String>("from") else {
         return usage_error(json, "from", "--from is required");
     };
-    if system != "koi-v1" {
-        return usage_error(json, "from", "only --from koi-v1 is supported");
-    }
     let Some(archive) = sub.get_one::<PathBuf>("archive") else {
         return usage_error(json, "archive", "archive path is required");
     };
@@ -76,12 +75,20 @@ pub fn run(sub: &clap::ArgMatches, vault_root: &Path) -> std::process::ExitCode 
         .unwrap_or(64)
         .try_into()
         .unwrap_or(64_usize);
-    match map_koi_v1_archive(&KoiImportOptions {
-        source: archive.clone(),
-        batch_size,
-        mode: FlushMode::HumanReview,
-    })
-    .and_then(|report| {
+    let report = match system.as_str() {
+        "koi-v1" => map_koi_v1_archive(&KoiImportOptions {
+            source: archive.clone(),
+            batch_size,
+            mode: FlushMode::HumanReview,
+        }),
+        "rowboat" => map_rowboat_archive(&RowboatImportOptions {
+            source: archive.clone(),
+            batch_size,
+            mode: FlushMode::HumanReview,
+        }),
+        _ => return usage_error(json, "from", "unsupported import system"),
+    };
+    match report.and_then(|report| {
         let migration_report = MigrationReportSummary::from_report(&report);
         write_review_plans(vault_root, &report).map(|paths| ImportCliSummary {
             system: system.clone(),
@@ -211,6 +218,17 @@ pub struct KoiImportOptions {
     pub mode: FlushMode,
 }
 
+/// Options for mapping a Rowboat workspace into Cairn review plans.
+#[derive(Debug, Clone)]
+pub struct RowboatImportOptions {
+    /// Path to the Rowboat work directory.
+    pub source: PathBuf,
+    /// Maximum records per generated review plan.
+    pub batch_size: usize,
+    /// Plan dispatch mode. Issue #155 uses [`FlushMode::HumanReview`].
+    pub mode: FlushMode,
+}
+
 /// One ambiguous legacy field that fell back to a conservative Cairn value.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ImportAmbiguity {
@@ -323,16 +341,16 @@ pub struct KoiImportReport {
 #[derive(Debug, Error)]
 pub enum ImportError {
     /// Source archive could not be read.
-    #[error("koi import source `{}` is not a directory", .archive.display())]
+    #[error("import source `{}` is not a directory", .archive.display())]
     SourceNotDirectory {
         /// Requested archive root.
         archive: PathBuf,
     },
     /// Batch size must be nonzero.
-    #[error("koi import batch size must be greater than zero")]
+    #[error("import batch size must be greater than zero")]
     InvalidBatchSize,
     /// File I/O failed.
-    #[error("koi import I/O for `{path}`: {source}")]
+    #[error("import I/O for `{path}`: {source}")]
     Io {
         /// File path being read or written.
         path: PathBuf,
@@ -341,7 +359,7 @@ pub enum ImportError {
         source: std::io::Error,
     },
     /// A JSON source file was malformed.
-    #[error("koi import JSON parse for `{path}`: {source}")]
+    #[error("import JSON parse for `{path}`: {source}")]
     Json {
         /// Source file being parsed.
         path: PathBuf,
@@ -351,7 +369,7 @@ pub enum ImportError {
     },
     /// Existing source artifact bytes do not match the imported record.
     #[error(
-        "koi import source artifact conflict for `{}`: existing hash `{existing}` does not match expected `{expected}`",
+        "import source artifact conflict for `{}`: existing hash `{existing}` does not match expected `{expected}`",
         .path.display()
     )]
     SourceArtifactConflict {
@@ -363,7 +381,7 @@ pub enum ImportError {
         existing: String,
     },
     /// A mapped record failed domain validation.
-    #[error("koi import record build for `{path}`: {source}")]
+    #[error("import record build for `{path}`: {source}")]
     Domain {
         /// Source path being mapped.
         path: PathBuf,
@@ -372,7 +390,7 @@ pub enum ImportError {
         source: cairn_core::domain::DomainError,
     },
     /// A review plan could not be serialized.
-    #[error("koi import plan serialize for `{path}`: {source}")]
+    #[error("import plan serialize for `{path}`: {source}")]
     Serialize {
         /// Plan path being written.
         path: PathBuf,
@@ -421,7 +439,14 @@ pub fn map_koi_v1_archive(opts: &KoiImportOptions) -> Result<KoiImportReport, Im
         records.push(mapped.record);
     }
 
-    let plans = plan_records(&opts.source, &records, opts.batch_size, opts.mode)?;
+    let plans = plan_records(
+        "koi-v1",
+        KOI_IMPORT_AUTHOR,
+        &opts.source,
+        &records,
+        opts.batch_size,
+        opts.mode,
+    )?;
     let unsupported_fields = findings
         .iter()
         .filter(|finding| finding.kind == ExternalImportFindingKind::Unsupported)
@@ -435,6 +460,104 @@ pub fn map_koi_v1_archive(opts: &KoiImportOptions) -> Result<KoiImportReport, Im
     Ok(KoiImportReport {
         manifest: ExternalImportManifest {
             system: "koi-v1".to_owned(),
+            items,
+            unsupported_fields,
+            privacy_sensitive_fields,
+        },
+        records,
+        ambiguities,
+        findings,
+        plans,
+    })
+}
+
+/// Map a Rowboat work directory into valid Cairn records and pending review plans.
+///
+/// This bridge imports knowledge markdown notes only. Rowboat sync state is
+/// preserved as manifest context and migration-report findings for review.
+pub fn map_rowboat_archive(opts: &RowboatImportOptions) -> Result<KoiImportReport, ImportError> {
+    if opts.batch_size == 0 {
+        return Err(ImportError::InvalidBatchSize);
+    }
+    if !opts.source.is_dir() {
+        return Err(ImportError::SourceNotDirectory {
+            archive: opts.source.clone(),
+        });
+    }
+
+    let state = read_rowboat_state(&opts.source)?;
+    let mut records = Vec::new();
+    let mut ambiguities = Vec::new();
+    let mut findings = Vec::new();
+    let mut items = Vec::new();
+    let knowledge_root = opts.source.join("knowledge");
+    if knowledge_root.is_dir() {
+        for entry in WalkDir::new(&knowledge_root)
+            .sort_by_file_name()
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_file())
+        {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+                continue;
+            }
+            let raw = fs::read_to_string(path).map_err(|source| ImportError::Io {
+                path: path.to_path_buf(),
+                source,
+            })?;
+            let mapped = map_rowboat_note(path, &opts.source, &raw, &state.workflow_ids)?;
+            ambiguities.extend(mapped.ambiguities);
+            findings.extend(mapped.findings);
+            items.extend(mapped.items);
+            records.push(mapped.record);
+        }
+    }
+    findings.extend(state.findings);
+    items.extend(state.workflow_ids.into_iter().map(|workflow_id| {
+        let provenance = records.first().map_or_else(
+            || ExternalImportProvenance {
+                source_sensor: ROWBOAT_IMPORT_SENSOR.to_owned(),
+                source_hash: format!("{SOURCE_HASH_PREFIX}{:x}", Sha256::digest([])),
+                source_refs: Vec::new(),
+            },
+            |record| ExternalImportProvenance {
+                source_sensor: ROWBOAT_IMPORT_SENSOR.to_owned(),
+                source_hash: record.provenance.source_hash.clone(),
+                source_refs: record.provenance.source_refs.clone(),
+            },
+        );
+        ExternalImportItem {
+            kind: ExternalImportItemKind::Skill,
+            source_path: PathBuf::from("agent_notes_state.json"),
+            legacy_id: Some(workflow_id.clone()),
+            session_ids: Vec::new(),
+            skill_ids: vec![workflow_id],
+            provenance,
+        }
+    }));
+
+    let plans = plan_records(
+        "rowboat",
+        ROWBOAT_IMPORT_AUTHOR,
+        &opts.source,
+        &records,
+        opts.batch_size,
+        opts.mode,
+    )?;
+    let unsupported_fields = findings
+        .iter()
+        .filter(|finding| finding.kind == ExternalImportFindingKind::Unsupported)
+        .cloned()
+        .collect();
+    let privacy_sensitive_fields = findings
+        .iter()
+        .filter(|finding| finding.kind == ExternalImportFindingKind::PrivacySensitive)
+        .cloned()
+        .collect();
+    Ok(KoiImportReport {
+        manifest: ExternalImportManifest {
+            system: "rowboat".to_owned(),
             items,
             unsupported_fields,
             privacy_sensitive_fields,
@@ -494,11 +617,414 @@ pub fn write_review_plans(
     Ok(vec![pending])
 }
 
+struct RowboatState {
+    workflow_ids: Vec<String>,
+    findings: Vec<ExternalImportFinding>,
+}
+
 struct MappedFile {
     record: MemoryRecord,
     ambiguities: Vec<ImportAmbiguity>,
     findings: Vec<ExternalImportFinding>,
     items: Vec<ExternalImportItem>,
+}
+
+fn read_rowboat_state(root: &Path) -> Result<RowboatState, ImportError> {
+    let path = root.join("agent_notes_state.json");
+    if !path.exists() {
+        return Ok(RowboatState {
+            workflow_ids: Vec::new(),
+            findings: Vec::new(),
+        });
+    }
+    let raw = fs::read_to_string(&path).map_err(|source| ImportError::Io {
+        path: path.clone(),
+        source,
+    })?;
+    let json = serde_json::from_str::<Value>(&raw).map_err(|source| ImportError::Json {
+        path: PathBuf::from("agent_notes_state.json"),
+        source,
+    })?;
+    let workflow_ids = json
+        .get("workflows")
+        .map(id_values)
+        .unwrap_or_default()
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let findings = findings_from_rowboat_json_object(
+        json.as_object(),
+        Path::new("agent_notes_state.json"),
+        &["last_sync_at", "workflows"],
+    );
+    Ok(RowboatState {
+        workflow_ids,
+        findings,
+    })
+}
+
+fn map_rowboat_note(
+    path: &Path,
+    root: &Path,
+    raw: &str,
+    workflow_ids: &[String],
+) -> Result<MappedFile, ImportError> {
+    let relative = path.strip_prefix(root).unwrap_or(path);
+    let (frontmatter, body) = split_markdown_frontmatter(raw);
+    let note_type = frontmatter
+        .get("type")
+        .or_else(|| frontmatter.get("note_type"))
+        .map(String::as_str);
+    let kind = rowboat_kind(note_type);
+    let class = class_for_kind(kind);
+    let issued_at = Rfc3339Timestamp::parse(
+        frontmatter
+            .get("created_at")
+            .or_else(|| frontmatter.get("updated_at"))
+            .cloned()
+            .unwrap_or_else(|| "2026-01-01T00:00:00Z".to_owned()),
+    )
+    .map_err(|source| ImportError::Domain {
+        path: relative.to_path_buf(),
+        source,
+    })?;
+    let author = Identity::parse(ROWBOAT_IMPORT_AUTHOR).map_err(|source| ImportError::Domain {
+        path: relative.to_path_buf(),
+        source,
+    })?;
+    let body = body.trim().to_owned();
+    let body_hash = format!("{:x}", Sha256::digest(body.as_bytes()));
+    let extra_frontmatter = rowboat_extra_frontmatter(
+        relative,
+        &frontmatter,
+        note_type,
+        &body,
+        &body_hash,
+        workflow_ids,
+    );
+    let tags = note_type
+        .into_iter()
+        .map(|value| format!("rowboat:{value}"))
+        .chain(std::iter::once("rowboat".to_owned()))
+        .collect::<Vec<_>>();
+    let identity_seed = format!("{}:{body_hash}", slash_normalized_path(relative));
+    let record = build_rowboat_record(RowboatRecordBuild {
+        relative,
+        identity_seed: &identity_seed,
+        kind,
+        class,
+        body,
+        source_hash: format!("{SOURCE_HASH_PREFIX}{body_hash}"),
+        issued_at,
+        author,
+        tags,
+        extra_frontmatter,
+    })?;
+    record.validate().map_err(|source| ImportError::Domain {
+        path: relative.to_path_buf(),
+        source,
+    })?;
+    let item = ExternalImportItem {
+        kind: ExternalImportItemKind::Record,
+        source_path: relative.to_path_buf(),
+        legacy_id: rowboat_legacy_id(&frontmatter),
+        session_ids: Vec::new(),
+        skill_ids: workflow_ids.to_vec(),
+        provenance: ExternalImportProvenance {
+            source_sensor: ROWBOAT_IMPORT_SENSOR.to_owned(),
+            source_hash: record.provenance.source_hash.clone(),
+            source_refs: record.provenance.source_refs.clone(),
+        },
+    };
+    let findings = findings_from_rowboat_object(
+        Some(&frontmatter),
+        relative,
+        &[
+            "type",
+            "note_type",
+            "source",
+            "rowboat_id",
+            "id",
+            "created_at",
+            "updated_at",
+        ],
+    );
+    Ok(MappedFile {
+        record,
+        ambiguities: Vec::new(),
+        findings,
+        items: vec![item],
+    })
+}
+
+struct RowboatRecordBuild<'a> {
+    relative: &'a Path,
+    identity_seed: &'a str,
+    kind: MemoryKind,
+    class: MemoryClass,
+    body: String,
+    source_hash: String,
+    issued_at: Rfc3339Timestamp,
+    author: Identity,
+    tags: Vec<String>,
+    extra_frontmatter: BTreeMap<String, Value>,
+}
+
+fn rowboat_extra_frontmatter(
+    relative: &Path,
+    frontmatter: &BTreeMap<String, String>,
+    note_type: Option<&str>,
+    body: &str,
+    body_hash: &str,
+    workflow_ids: &[String],
+) -> BTreeMap<String, Value> {
+    let mut extra = BTreeMap::from([
+        (
+            "rowboat_source_path".to_owned(),
+            Value::String(slash_normalized_path(relative)),
+        ),
+        (
+            "rowboat_body_hash".to_owned(),
+            Value::String(body_hash.to_owned()),
+        ),
+    ]);
+    if let Some(note_type) = note_type {
+        extra.insert(
+            "rowboat_note_type".to_owned(),
+            Value::String(note_type.to_owned()),
+        );
+    }
+    if let Some(source) = frontmatter.get("source") {
+        extra.insert("rowboat_source".to_owned(), Value::String(source.clone()));
+    }
+    if let Some(rowboat_id) = rowboat_legacy_id(frontmatter) {
+        extra.insert("rowboat_id".to_owned(), Value::String(rowboat_id));
+    }
+    let wikilinks = rowboat_wikilinks(body);
+    if !wikilinks.is_empty() {
+        extra.insert("rowboat_wikilinks".to_owned(), serde_json::json!(wikilinks));
+    }
+    if !workflow_ids.is_empty() {
+        extra.insert(
+            "rowboat_workflow_ids".to_owned(),
+            serde_json::json!(workflow_ids),
+        );
+    }
+    extra
+}
+
+fn build_rowboat_record(args: RowboatRecordBuild<'_>) -> Result<MemoryRecord, ImportError> {
+    let source_id =
+        SourceId::parse(deterministic_ulid(args.identity_seed, "source").0).map_err(|source| {
+            ImportError::Domain {
+                path: args.relative.to_path_buf(),
+                source,
+            }
+        })?;
+    let source_ref_id = source_id.as_str().to_owned();
+    let source_hash = args.source_hash.clone();
+    let provenance = rowboat_provenance(source_id.clone(), source_ref_id, source_hash, &args)?;
+    Ok(MemoryRecord {
+        id: RecordId::parse(deterministic_ulid(args.identity_seed, "record").0).map_err(
+            |source| ImportError::Domain {
+                path: args.relative.to_path_buf(),
+                source,
+            },
+        )?,
+        target_id: TargetId::parse(deterministic_ulid(args.identity_seed, "target").0).map_err(
+            |source| ImportError::Domain {
+                path: args.relative.to_path_buf(),
+                source,
+            },
+        )?,
+        kind: args.kind,
+        class: args.class,
+        visibility: MemoryVisibility::Private,
+        scope: rowboat_scope(),
+        body: args.body,
+        source_ids: vec![source_id.clone()],
+        provenance,
+        updated_at: args.issued_at.clone(),
+        evidence: EvidenceVector::default(),
+        salience: 0.5,
+        confidence: 0.7,
+        actor_chain: vec![ActorChainEntry {
+            role: ChainRole::Author,
+            identity: args.author,
+            at: args.issued_at,
+        }],
+        signature: placeholder_import_signature(args.relative)?,
+        tags: args.tags,
+        extra_frontmatter: args.extra_frontmatter,
+        consent_model: None,
+    })
+}
+
+fn rowboat_scope() -> ScopeTuple {
+    ScopeTuple {
+        tenant: Some("default".to_owned()),
+        workspace: Some("my-vault".to_owned()),
+        entity: Some("ingest".to_owned()),
+        user: ROWBOAT_IMPORT_AUTHOR.to_owned().into(),
+        ..ScopeTuple::default()
+    }
+}
+
+fn rowboat_provenance(
+    source_id: SourceId,
+    source_ref_id: String,
+    source_hash: String,
+    args: &RowboatRecordBuild<'_>,
+) -> Result<Provenance, ImportError> {
+    Ok(Provenance {
+        source_sensor: Identity::parse(ROWBOAT_IMPORT_SENSOR).map_err(|source| {
+            ImportError::Domain {
+                path: args.relative.to_path_buf(),
+                source,
+            }
+        })?,
+        created_at: args.issued_at.clone(),
+        originating_agent_id: args.author.clone(),
+        source_ids: vec![source_id],
+        source_hash: source_hash.clone(),
+        consent_ref: "consent:rowboat-import".to_owned(),
+        llm_id_if_any: None,
+        source_refs: vec![SourceRef {
+            id: source_ref_id,
+            hash: source_hash,
+        }],
+    })
+}
+
+fn placeholder_import_signature(
+    relative: &Path,
+) -> Result<cairn_core::domain::record::Ed25519Signature, ImportError> {
+    cairn_core::domain::record::Ed25519Signature::parse(format!("ed25519:{}", "b".repeat(128)))
+        .map_err(|source| ImportError::Domain {
+            path: relative.to_path_buf(),
+            source,
+        })
+}
+
+fn rowboat_legacy_id(frontmatter: &BTreeMap<String, String>) -> Option<String> {
+    frontmatter
+        .get("rowboat_id")
+        .or_else(|| frontmatter.get("id"))
+        .cloned()
+}
+
+fn split_markdown_frontmatter(raw: &str) -> (BTreeMap<String, String>, &str) {
+    let Some(rest) = raw.strip_prefix("---\n") else {
+        return (BTreeMap::new(), raw);
+    };
+    let Some(end) = rest.find("\n---\n") else {
+        return (BTreeMap::new(), raw);
+    };
+    let frontmatter_raw = &rest[..end];
+    let body = &rest[end + "\n---\n".len()..];
+    let mut frontmatter = BTreeMap::new();
+    for line in frontmatter_raw.lines() {
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = value.trim().trim_matches('"');
+        if !key.is_empty() && !value.is_empty() {
+            frontmatter.insert(key.to_owned(), value.to_owned());
+        }
+    }
+    (frontmatter, body)
+}
+
+fn rowboat_kind(note_type: Option<&str>) -> MemoryKind {
+    match note_type {
+        Some("People" | "Organizations" | "Projects") => MemoryKind::Entity,
+        _ => MemoryKind::Reference,
+    }
+}
+
+fn rowboat_wikilinks(body: &str) -> Vec<String> {
+    let mut links = BTreeSet::new();
+    let mut rest = body;
+    while let Some(start) = rest.find("[[") {
+        let after_start = &rest[start + 2..];
+        let Some(end) = after_start.find("]]") else {
+            break;
+        };
+        let link = after_start[..end].trim();
+        if !link.is_empty() {
+            links.insert(link.to_owned());
+        }
+        rest = &after_start[end + 2..];
+    }
+    links.into_iter().collect()
+}
+
+fn findings_from_rowboat_object(
+    map: Option<&BTreeMap<String, String>>,
+    relative: &Path,
+    supported: &[&str],
+) -> Vec<ExternalImportFinding> {
+    let Some(map) = map else {
+        return Vec::new();
+    };
+    map.keys()
+        .filter(|key| !supported.contains(&key.as_str()))
+        .map(|key| {
+            let (kind, reason) = if is_privacy_sensitive_field(key) {
+                (
+                    ExternalImportFindingKind::PrivacySensitive,
+                    "legacy field name looks privacy-sensitive and requires review".to_owned(),
+                )
+            } else {
+                (
+                    ExternalImportFindingKind::Unsupported,
+                    "Rowboat field has no neutral Cairn import-manifest target".to_owned(),
+                )
+            };
+            ExternalImportFinding {
+                path: relative.to_path_buf(),
+                kind,
+                field: key.clone(),
+                fallback: None,
+                reason,
+            }
+        })
+        .collect()
+}
+
+fn findings_from_rowboat_json_object(
+    map: Option<&serde_json::Map<String, Value>>,
+    relative: &Path,
+    supported: &[&str],
+) -> Vec<ExternalImportFinding> {
+    let Some(map) = map else {
+        return Vec::new();
+    };
+    map.keys()
+        .filter(|key| !supported.contains(&key.as_str()))
+        .map(|key| {
+            let (kind, reason) = if is_privacy_sensitive_field(key) {
+                (
+                    ExternalImportFindingKind::PrivacySensitive,
+                    "legacy field name looks privacy-sensitive and requires review".to_owned(),
+                )
+            } else {
+                (
+                    ExternalImportFindingKind::Unsupported,
+                    "Rowboat state field has no neutral Cairn import-manifest target".to_owned(),
+                )
+            };
+            ExternalImportFinding {
+                path: relative.to_path_buf(),
+                kind,
+                field: key.clone(),
+                fallback: None,
+                reason,
+            }
+        })
+        .collect()
 }
 
 fn is_importable(path: &Path) -> bool {
@@ -912,13 +1438,15 @@ const fn class_for_kind(kind: MemoryKind) -> MemoryClass {
 }
 
 fn plan_records(
+    system: &str,
+    author_identity: &str,
     source_root: &Path,
     records: &[MemoryRecord],
     batch_size: usize,
     mode: FlushMode,
 ) -> Result<Vec<FlushPlan>, ImportError> {
     let mut plans = Vec::new();
-    let author = Identity::parse(KOI_IMPORT_AUTHOR).map_err(|source| ImportError::Domain {
+    let author = Identity::parse(author_identity).map_err(|source| ImportError::Domain {
         path: source_root.to_path_buf(),
         source,
     })?;
@@ -927,7 +1455,7 @@ fn plan_records(
         let expires_at = (chrono::Utc::now() + chrono::Duration::minutes(5))
             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         plans.push(FlushPlan {
-            operation_id: deterministic_operation_id(source_root, idx, chunk),
+            operation_id: deterministic_operation_id(system, source_root, idx, chunk),
             issued_at,
             issuer: author.clone(),
             principal: None,
@@ -953,13 +1481,16 @@ fn plan_records(
 }
 
 fn deterministic_operation_id(
+    system: &str,
     source_root: &Path,
     batch_index: usize,
     records: &[MemoryRecord],
 ) -> Ulid {
     let mut hasher = Sha256::new();
     hasher.update(slash_normalized_path(source_root).as_bytes());
-    hasher.update(b":koi-v1:");
+    hasher.update(b":");
+    hasher.update(system.as_bytes());
+    hasher.update(b":");
     hasher.update(batch_index.to_be_bytes());
     for record in records {
         hasher.update(b":");
