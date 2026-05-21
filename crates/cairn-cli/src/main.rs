@@ -970,6 +970,12 @@ fn run_admin(matches: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
         }
         Some(("snapshot", sub)) => verbs::admin_snapshot::run(sub, &vault_root),
         Some(("restore", sub)) => verbs::admin_restore::run(sub, &vault_root),
+        Some(("sre", sub)) => match sub.subcommand() {
+            Some(("report", s)) => cairn_cli::sre::run_report(s, &vault_root),
+            _ => unreachable!(
+                "clap subcommand_required(true) on admin sre ensures a subcommand is present"
+            ),
+        },
         Some(("workflow", sub)) => match sub.subcommand() {
             Some(("run-failing", s)) => verbs::admin_workflow::run_failing(s, &vault_root),
             Some(("run-succeeding", s)) => verbs::admin_workflow::run_succeeding(s, &vault_root),
