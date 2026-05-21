@@ -5,9 +5,8 @@
 //! and assert capability self-consistency. Every plugin must pass tier-1
 //! to be considered conformant.
 //!
-//! Tier-2 cases exercise verb behaviour. They are stubbed `Pending` until
-//! per-impl PRs land — at which point each contract module's tier-2 case
-//! body is replaced with a real check.
+//! Tier-2 cases exercise verb behaviour. Some contract modules still return
+//! `Pending` until per-impl PRs replace those bodies with real checks.
 //!
 //! The suite lives in `cairn-core` (rather than `cairn-test-fixtures`)
 //! because `cairn plugins verify` is a production code path. All cases
@@ -18,6 +17,7 @@
 //! See `docs/superpowers/specs/2026-04-25-plugin-host-list-verify-design.md`
 //! §4 for the full design.
 
+pub mod agent_provider;
 pub mod frontend_adapter;
 pub mod mcp_server;
 pub mod memory_store;
@@ -120,24 +120,22 @@ pub fn run_conformance_for_plugin(
         ContractKind::WorkflowOrchestrator => workflow_orchestrator::run(registry, name),
         ContractKind::SensorIngress => sensor_ingress::run(registry, name),
         ContractKind::MCPServer => mcp_server::run(registry, name),
+        ContractKind::AgentProvider => agent_provider::run(registry, name),
         ContractKind::FrontendAdapter => frontend_adapter::run(registry, name),
-        // P0 ships no bundled plugins for these — return a single Failed
+        // P0 ships no bundled LLM provider plugin yet — return a single Failed
         // sentinel so `cairn plugins verify` cannot pass a manifest whose
         // contract has no conformance runner. Once these contracts get
         // bundled plugins, add per-contract `run` modules and route here.
-        kind @ (ContractKind::LLMProvider | ContractKind::AgentProvider) => {
-            vec![CaseOutcome {
-                id: "no_conformance_runner",
-                tier: Tier::One,
-                status: CaseStatus::Failed {
-                    message: format!(
-                        "no conformance runner registered for contract {kind:?}; \
+        ContractKind::LLMProvider => vec![CaseOutcome {
+            id: "no_conformance_runner",
+            tier: Tier::One,
+            status: CaseStatus::Failed {
+                message: "no conformance runner registered for contract LLMProvider; \
                          add a per-contract `run` module under \
                          `cairn-core::contract::conformance`"
-                    ),
-                },
-            }]
-        }
+                    .to_string(),
+            },
+        }],
     }
 }
 

@@ -277,7 +277,7 @@ fn tier1_cases_pass_for_well_formed_frontend_adapter() {
 }
 
 #[test]
-fn mcp_tool_conformance_passes_when_stdio_is_advertised() {
+fn mcp_tool_conformance_stays_pending_when_core_cannot_exercise_stdio() {
     let mut reg = PluginRegistry::new();
     let name = PluginName::new("stub-mcp").expect("valid");
     let manifest = PluginManifest::parse_toml(MCP_MANIFEST).expect("manifest parses");
@@ -291,8 +291,13 @@ fn mcp_tool_conformance_passes_when_stdio_is_advertised() {
         .expect("tool conformance case exists");
 
     assert!(
-        matches!(tool_case.status, CaseStatus::Ok),
-        "stdio-capable MCP server should pass tool availability conformance, got {:?}",
+        matches!(
+            tool_case.status,
+            CaseStatus::Pending {
+                reason: "stdio advertised, but core cannot exercise initialize/tools-list without the MCP adapter"
+            }
+        ),
+        "stdio-capable MCP server should stay pending until adapter-level conformance, got {:?}",
         tool_case.status
     );
 }

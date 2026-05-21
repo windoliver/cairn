@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use cairn_core::config::CairnConfig;
 use cairn_core::contract::agent_provider::{
-    AgentProvider, AgentProviderCapabilities, AgentProviderPlugin,
+    AgentProvider, AgentProviderCapabilities, AgentProviderError, AgentProviderPlugin, AgentRun,
+    AgentSpawnRequest,
 };
 use cairn_core::contract::frontend_adapter::{
     FrontendAdapter, FrontendAdapterCapabilities, FrontendAdapterError, FrontendAdapterPlugin,
@@ -813,12 +814,16 @@ mod agent_provider_factory_plugin {
         fn supported_contract_versions(&self) -> VersionRange {
             Self::SUPPORTED_VERSIONS
         }
+
+        async fn spawn(&self, _request: AgentSpawnRequest) -> Result<AgentRun, AgentProviderError> {
+            unimplemented!("filled after provider implementations land")
+        }
     }
 
     impl AgentProviderPlugin for StubAgent {
         const NAME: &'static str = "stub-agent-factory";
         const SUPPORTED_VERSIONS: VersionRange =
-            VersionRange::new(ContractVersion::new(0, 0, 1), ContractVersion::new(0, 1, 0));
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0));
     }
 
     register_plugin_with!(

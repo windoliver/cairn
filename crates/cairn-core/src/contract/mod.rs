@@ -52,7 +52,13 @@ pub use manifest::{ContractKind, PluginManifest};
 pub use registry::{PluginError, PluginName, PluginRegistry};
 pub use version::{ContractVersion, VersionRange};
 
-pub use agent_provider::{AgentProvider, AgentProviderCapabilities, AgentProviderPlugin};
+pub use agent_provider::{
+    AgentBudgetConsumed, AgentCostBudget, AgentIdentity, AgentOutput, AgentOutputSchema,
+    AgentProvider, AgentProviderCapabilities, AgentProviderError, AgentProviderPlugin, AgentRun,
+    AgentRunMeter, AgentRunStatus, AgentScope, AgentSpawnRequest, AgentToolAllowlist,
+    AgentToolAttempt, AgentToolCall, AgentToolPolicyOutcome, AgentWallClockBudget, CairnVerb,
+    evaluate_tool_policy, validate_output,
+};
 pub use consent_journal::{
     ConsentJournalReader, MalformedSourceForget, MalformedSourceForgetReason, SourceForget,
     TargetReplayKey,

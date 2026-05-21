@@ -5,11 +5,15 @@
 #![allow(missing_docs)]
 
 use cairn_core::contract::{
-    AgentProvider, AgentProviderCapabilities, ContractKind, ContractVersion, FrontendAdapter,
-    FrontendAdapterCapabilities, LLMProvider, LLMProviderCapabilities, MCPServer,
+    AgentBudgetConsumed, AgentCostBudget, AgentIdentity, AgentOutput, AgentOutputSchema,
+    AgentProvider, AgentProviderCapabilities, AgentProviderError, AgentRun, AgentRunMeter,
+    AgentRunStatus, AgentScope, AgentSpawnRequest, AgentToolAllowlist, AgentToolAttempt,
+    AgentToolCall, AgentToolPolicyOutcome, AgentWallClockBudget, CairnVerb, ContractKind,
+    ContractVersion, FrontendAdapter, FrontendAdapterCapabilities, FrontendFieldClass,
+    FrontendFieldPolicy, FrontendReconcileError, LLMProvider, LLMProviderCapabilities, MCPServer,
     MCPServerCapabilities, MemoryStore, MemoryStoreCapabilities, PluginError, PluginManifest,
     PluginName, PluginRegistry, SensorIngress, SensorIngressCapabilities, VersionRange,
-    WorkflowOrchestrator, WorkflowOrchestratorCapabilities,
+    WorkflowOrchestrator, WorkflowOrchestratorCapabilities, evaluate_tool_policy, validate_output,
 };
 
 #[test]
@@ -36,9 +40,58 @@ fn capability_structs_default() {
 }
 
 #[test]
-fn frontend_contract_types_are_reachable() {
-    use cairn_core::contract::{FrontendFieldClass, FrontendFieldPolicy, FrontendReconcileError};
+fn agent_provider_contract_types_constructible_from_root() {
+    let identity = AgentIdentity::new("agt:root-export:v1").expect("valid identity");
+    let request = AgentSpawnRequest {
+        identity,
+        scope: AgentScope::read_only(),
+        tool_allowlist: AgentToolAllowlist::read_only_cairn(),
+        cost_budget: AgentCostBudget {
+            max_turns: 1,
+            max_tool_calls: 1,
+            max_cost_units: 1,
+        },
+        wall_clock_budget: AgentWallClockBudget { max_millis: 1 },
+        output_schema: AgentOutputSchema::Text,
+        prompt: "root export".to_string(),
+    };
+    let mut meter = AgentRunMeter::new(&request);
+    meter.charge_turn(1).expect("turn budget available");
+    let attempt = AgentToolAttempt {
+        call: AgentToolCall::new(CairnVerb::Search),
+        outcome: AgentToolPolicyOutcome::AllowedReadOnly,
+        reason: "allowed".to_string(),
+    };
+    let run = AgentRun {
+        status: AgentRunStatus::Completed,
+        abort_error: None,
+        output: AgentOutput::Text("ok".to_string()),
+        budget_consumed: AgentBudgetConsumed {
+            turns: 1,
+            tool_calls: 0,
+            cost_units: 0,
+        },
+        tool_calls: vec![attempt],
+        policy_trace: Vec::new(),
+    };
+    assert_eq!(run.status, AgentRunStatus::Completed);
+    assert!(matches!(
+        evaluate_tool_policy(&request, &AgentToolCall::new(CairnVerb::Search)),
+        Ok(AgentToolPolicyOutcome::AllowedReadOnly)
+    ));
+    validate_output(&AgentOutputSchema::Text, &run.output).expect("text output validates");
+    let err = AgentProviderError::ToolNotAllowed {
+        verb: CairnVerb::Forget,
+    };
+    assert!(err.to_string().contains("tool not allowed"));
+    let budget_err = AgentProviderError::BudgetExceeded {
+        limit: "turns".to_string(),
+    };
+    assert!(budget_err.to_string().contains("turns"));
+}
 
+#[test]
+fn frontend_contract_types_are_reachable() {
     let _: FrontendAdapterCapabilities = FrontendAdapterCapabilities::default();
     let _: FrontendFieldClass = FrontendFieldClass::UserContent;
     let _ = FrontendFieldPolicy::is_mutable_from_frontend("body");

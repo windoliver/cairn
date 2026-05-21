@@ -196,7 +196,8 @@ expression: json
         },
         {
           "id": "initialize_and_list_tools",
-          "status": "ok",
+          "reason": "stdio advertised, but core cannot exercise initialize/tools-list without the MCP adapter",
+          "status": "pending",
           "tier": 2
         }
       ],
@@ -314,7 +315,7 @@ expression: json
   ],
   "summary": {
     "failed": 0,
-    "ok": 47,
-    "pending": 5
+    "ok": 46,
+    "pending": 6
   }
 }

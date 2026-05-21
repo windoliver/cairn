@@ -79,7 +79,12 @@ fn plugins_verify_json_reports_mcp_stdio_runtime_e2e() {
         .expect("cairn-mcp plugin present");
 
     assert_case_status(mcp, "manifest_features_match_capabilities", "ok");
-    assert_case_status(mcp, "initialize_and_list_tools", "ok");
+    let initialize = find_case(mcp, "initialize_and_list_tools");
+    assert_eq!(initialize["status"], "pending", "case: {initialize}");
+    assert_eq!(
+        initialize["reason"],
+        "stdio advertised, but core cannot exercise initialize/tools-list without the MCP adapter"
+    );
 }
 
 #[test]
@@ -204,12 +209,15 @@ fn plugins_list_json_reports_mcp_stdio_capability_e2e() {
     assert_eq!(mcp["capabilities"]["http_streamable"], false);
 }
 
-fn assert_case_status(plugin: &serde_json::Value, case_id: &str, expected: &str) {
+fn find_case<'a>(plugin: &'a serde_json::Value, case_id: &str) -> &'a serde_json::Value {
     let cases = plugin["cases"].as_array().expect("cases array");
-    let case = cases
+    cases
         .iter()
         .find(|case| case["id"] == case_id)
-        .unwrap_or_else(|| panic!("missing conformance case {case_id}: {plugin}"));
+        .unwrap_or_else(|| panic!("missing conformance case {case_id}: {plugin}"))
+}
 
+fn assert_case_status(plugin: &serde_json::Value, case_id: &str, expected: &str) {
+    let case = find_case(plugin, case_id);
     assert_eq!(case["status"], expected, "case {case_id}: {case}");
 }
