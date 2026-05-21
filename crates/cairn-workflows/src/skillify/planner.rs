@@ -31,7 +31,7 @@ impl SkillifyPlanSource {
     ///
     /// # Errors
     /// Returns an error when the target id or issuer identity is invalid.
-    pub fn plan_promotion(input: SkillifyPromotionInput) -> Result<FlushPlan, String> {
+    pub fn plan_promotion(input: &SkillifyPromotionInput) -> Result<FlushPlan, String> {
         validate_path_token("candidate id", &input.candidate_id).map_err(|e| e.to_string())?;
         let target = TargetId::parse(input.skill_target_id.clone())
             .map_err(|e| format!("invalid skill target id: {e}"))?;

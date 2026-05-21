@@ -53,9 +53,7 @@ pub(crate) fn store_db_path(vault_root: &std::path::Path) -> std::path::PathBuf 
 }
 
 fn workflow_llm_provider(config: &CairnConfig) -> Option<Arc<dyn LLMProvider>> {
-    if config.llm.provider.is_none() {
-        return None;
-    }
+    config.llm.provider.as_ref()?;
     match cairn_llm_openai_compat::build_llm_provider(&config.llm) {
         Ok(provider) => {
             let provider: Arc<dyn LLMProvider> = Arc::from(provider);

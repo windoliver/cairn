@@ -1146,6 +1146,8 @@ fn capture_trace_returns_internal_stub() {
 fn lint_returns_internal_stub() {
     let args = LintArgs {
         fix: None,
+        fix_skill_plan: None,
+        skill: None,
         write_report: None,
     };
     assert_unimplemented("lint", sdk().lint(&args));

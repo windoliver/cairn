@@ -49,7 +49,7 @@ struct FailingLlm;
 
 #[async_trait::async_trait]
 impl LLMProvider for FailingLlm {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "failing-llm"
     }
 
@@ -75,7 +75,7 @@ impl LLMProvider for FailingLlm {
 
 #[async_trait::async_trait]
 impl LLMProvider for JsonLlm {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "json-llm"
     }
 
@@ -401,7 +401,7 @@ fn existing_candidate_rejects_artifact_content_hash_mismatch() {
 
 #[test]
 fn promotion_plan_records_candidate_and_gate_count() {
-    let plan = SkillifyPlanSource::plan_promotion(SkillifyPromotionInput {
+    let plan = SkillifyPlanSource::plan_promotion(&SkillifyPromotionInput {
         candidate_id: "skc_fixture".to_owned(),
         skill_target_id: "01HQZX9F5N0000000000000003".to_owned(),
         evidence_refs: vec!["01HQZX9F5N0000000000000001".to_owned()],
@@ -425,7 +425,7 @@ fn promotion_plan_records_candidate_and_gate_count() {
 
 #[test]
 fn promotion_plan_rejects_unsafe_candidate_and_invalid_evidence() {
-    let unsafe_candidate = SkillifyPlanSource::plan_promotion(SkillifyPromotionInput {
+    let unsafe_candidate = SkillifyPlanSource::plan_promotion(&SkillifyPromotionInput {
         candidate_id: "../escape".to_owned(),
         skill_target_id: "01HQZX9F5N0000000000000003".to_owned(),
         evidence_refs: vec!["01HQZX9F5N0000000000000001".to_owned()],
@@ -434,7 +434,7 @@ fn promotion_plan_rejects_unsafe_candidate_and_invalid_evidence() {
     .expect_err("unsafe candidate");
     assert!(unsafe_candidate.contains("invalid candidate id"));
 
-    let invalid_evidence = SkillifyPlanSource::plan_promotion(SkillifyPromotionInput {
+    let invalid_evidence = SkillifyPlanSource::plan_promotion(&SkillifyPromotionInput {
         candidate_id: "skc_fixture".to_owned(),
         skill_target_id: "01HQZX9F5N0000000000000003".to_owned(),
         evidence_refs: vec!["not-a-ulid".to_owned()],
@@ -446,7 +446,7 @@ fn promotion_plan_rejects_unsafe_candidate_and_invalid_evidence() {
 
 #[test]
 fn promotion_plan_uses_live_five_minute_ttl() {
-    let plan = SkillifyPlanSource::plan_promotion(SkillifyPromotionInput {
+    let plan = SkillifyPlanSource::plan_promotion(&SkillifyPromotionInput {
         candidate_id: "skc_fixture".to_owned(),
         skill_target_id: "01HQZX9F5N0000000000000003".to_owned(),
         evidence_refs: vec!["01HQZX9F5N0000000000000001".to_owned()],

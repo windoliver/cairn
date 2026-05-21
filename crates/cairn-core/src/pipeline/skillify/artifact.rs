@@ -31,7 +31,8 @@ pub enum SkillArtifactKind {
 }
 
 impl SkillArtifactKind {
-    /// Return this artifact kind's stable snake_case name.
+    /// Return this artifact kind's stable `snake_case` name.
+    #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::SkillContract => "skill_contract",
@@ -48,6 +49,7 @@ impl SkillArtifactKind {
     }
 
     /// Required artifact kinds in gate evaluation order.
+    #[must_use]
     pub const fn required() -> &'static [Self; 10] {
         &[
             Self::SkillContract,
@@ -64,6 +66,7 @@ impl SkillArtifactKind {
     }
 
     /// Default bundle-relative path for this artifact kind.
+    #[must_use]
     pub fn default_relative_path(self, slug: &str) -> String {
         match self {
             Self::SkillContract => format!("bundle/skills/skill_{slug}.md"),

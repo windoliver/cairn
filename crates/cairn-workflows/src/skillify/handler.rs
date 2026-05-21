@@ -101,10 +101,8 @@ impl SkillifyHandler {
                 ]
             }))
             .build();
-        let value = match llm.complete(&request).await? {
-            CompletionOutput::Json(value) => value,
-            CompletionOutput::Text(_) => return Err(SkillifyRunError::NonJsonOutput),
-            _ => return Err(SkillifyRunError::NonJsonOutput),
+        let CompletionOutput::Json(value) = llm.complete(&request).await? else {
+            return Err(SkillifyRunError::NonJsonOutput);
         };
         let authored = AuthoredSkillBundle::try_from(value)?;
         materialize_bundle(

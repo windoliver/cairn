@@ -42,6 +42,7 @@ pub struct SkillifyGateReport {
 
 impl SkillifyGateReport {
     /// Returns true when every required gate is present and all reported gates passed.
+    #[must_use]
     pub fn ready_for_promotion(&self) -> bool {
         self.gates
             .iter()

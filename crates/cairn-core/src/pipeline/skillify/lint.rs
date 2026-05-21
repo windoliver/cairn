@@ -74,87 +74,109 @@ pub fn lint_skill_snapshot(snapshot: &SkillLintSnapshot) -> Vec<SkillLintIssue> 
     let mut triggers: BTreeMap<String, Vec<&SkillLintSkill>> = BTreeMap::new();
 
     for skill in &snapshot.skills {
-        lanes.entry(&skill.lane).or_default().push(skill);
-        for trigger in &skill.resolver_triggers {
-            let normalized = trigger.trim();
-            if !normalized.is_empty() {
-                triggers
-                    .entry(normalized.to_owned())
-                    .or_default()
-                    .push(skill);
-            }
-        }
+        index_skill(skill, &mut lanes, &mut triggers);
+        lint_single_skill(skill, &mut out);
+    }
 
-        let existing: BTreeSet<&str> = skill.existing_paths.iter().map(String::as_str).collect();
-        if let Some(uses) = &skill.uses
-            && !existing.contains(uses.as_str())
-        {
-            out.push(issue(
-                SkillLintIssueKind::MissingArtifact,
-                skill,
-                format!(
-                    "skill `{}` references missing script `{uses}`",
-                    skill.skill_id
-                ),
-            ));
+    append_duplicate_lane_issues(lanes, &mut out);
+    append_duplicate_trigger_issues(triggers, &mut out);
+    sort_issues(&mut out);
+
+    out
+}
+
+fn index_skill<'a>(
+    skill: &'a SkillLintSkill,
+    lanes: &mut BTreeMap<&'a str, Vec<&'a SkillLintSkill>>,
+    triggers: &mut BTreeMap<String, Vec<&'a SkillLintSkill>>,
+) {
+    lanes.entry(skill.lane.as_str()).or_default().push(skill);
+    for trigger in &skill.resolver_triggers {
+        let normalized = trigger.trim();
+        if !normalized.is_empty() {
+            triggers
+                .entry(normalized.to_owned())
+                .or_default()
+                .push(skill);
         }
-        if skill.resolver_triggers.is_empty() {
+    }
+}
+
+fn lint_single_skill(skill: &SkillLintSkill, out: &mut Vec<SkillLintIssue>) {
+    let existing: BTreeSet<&str> = skill.existing_paths.iter().map(String::as_str).collect();
+    if let Some(uses) = &skill.uses
+        && !existing.contains(uses.as_str())
+    {
+        out.push(issue(
+            SkillLintIssueKind::MissingArtifact,
+            skill,
+            format!(
+                "skill `{}` references missing script `{uses}`",
+                skill.skill_id
+            ),
+        ));
+    }
+    if skill.resolver_triggers.is_empty() {
+        out.push(issue(
+            SkillLintIssueKind::Unreachable,
+            skill,
+            format!("skill `{}` has no resolver triggers", skill.skill_id),
+        ));
+    }
+    for trigger in &skill.resolver_triggers {
+        if trigger.trim().is_empty() {
             out.push(issue(
                 SkillLintIssueKind::Unreachable,
                 skill,
-                format!("skill `{}` has no resolver triggers", skill.skill_id),
-            ));
-        }
-        for trigger in &skill.resolver_triggers {
-            if trigger.trim().is_empty() {
-                out.push(issue(
-                    SkillLintIssueKind::Unreachable,
-                    skill,
-                    format!("skill `{}` has a blank resolver trigger", skill.skill_id),
-                ));
-            }
-        }
-        match skill.files_to.as_deref().map(str::trim) {
-            None | Some("") => out.push(issue(
-                SkillLintIssueKind::MissingArtifact,
-                skill,
-                format!(
-                    "skill `{}` is missing files_to filing rules",
-                    skill.skill_id
-                ),
-            )),
-            Some(files_to) if !valid_relative_dir(files_to) => out.push(issue(
-                SkillLintIssueKind::MissingArtifact,
-                skill,
-                format!(
-                    "skill `{}` has invalid files_to `{files_to}`",
-                    skill.skill_id
-                ),
-            )),
-            Some(_) => {}
-        }
-        if !skill.gate_report_passed {
-            out.push(issue(
-                SkillLintIssueKind::GateFailed,
-                skill,
-                format!(
-                    "skill `{}` does not have a passing gate report",
-                    skill.skill_id
-                ),
-            ));
-        }
-        if skill.rollback_version_count == 0 {
-            out.push(issue(
-                SkillLintIssueKind::RollbackBroken,
-                skill,
-                format!(
-                    "skill `{}` has no rollback version metadata",
-                    skill.skill_id
-                ),
+                format!("skill `{}` has a blank resolver trigger", skill.skill_id),
             ));
         }
     }
+    match skill.files_to.as_deref().map(str::trim) {
+        None | Some("") => out.push(issue(
+            SkillLintIssueKind::MissingArtifact,
+            skill,
+            format!(
+                "skill `{}` is missing files_to filing rules",
+                skill.skill_id
+            ),
+        )),
+        Some(files_to) if !valid_relative_dir(files_to) => out.push(issue(
+            SkillLintIssueKind::MissingArtifact,
+            skill,
+            format!(
+                "skill `{}` has invalid files_to `{files_to}`",
+                skill.skill_id
+            ),
+        )),
+        Some(_) => {}
+    }
+    if !skill.gate_report_passed {
+        out.push(issue(
+            SkillLintIssueKind::GateFailed,
+            skill,
+            format!(
+                "skill `{}` does not have a passing gate report",
+                skill.skill_id
+            ),
+        ));
+    }
+    if skill.rollback_version_count == 0 {
+        out.push(issue(
+            SkillLintIssueKind::RollbackBroken,
+            skill,
+            format!(
+                "skill `{}` has no rollback version metadata",
+                skill.skill_id
+            ),
+        ));
+    }
+}
 
+fn append_duplicate_lane_issues(
+    lanes: BTreeMap<&str, Vec<&SkillLintSkill>>,
+    out: &mut Vec<SkillLintIssue>,
+) {
     for (lane, skills) in lanes {
         if skills.len() > 1 {
             for skill in skills {
@@ -166,7 +188,12 @@ pub fn lint_skill_snapshot(snapshot: &SkillLintSnapshot) -> Vec<SkillLintIssue> 
             }
         }
     }
+}
 
+fn append_duplicate_trigger_issues(
+    triggers: BTreeMap<String, Vec<&SkillLintSkill>>,
+    out: &mut Vec<SkillLintIssue>,
+) {
     for (trigger, mut skills) in triggers {
         skills.sort_by(|a, b| {
             a.skill_id
@@ -184,7 +211,9 @@ pub fn lint_skill_snapshot(snapshot: &SkillLintSnapshot) -> Vec<SkillLintIssue> 
             }
         }
     }
+}
 
+fn sort_issues(out: &mut [SkillLintIssue]) {
     out.sort_by(|a, b| {
         a.skill_id
             .cmp(&b.skill_id)
@@ -192,8 +221,6 @@ pub fn lint_skill_snapshot(snapshot: &SkillLintSnapshot) -> Vec<SkillLintIssue> 
             .then_with(|| a.path.cmp(&b.path))
             .then_with(|| a.message.cmp(&b.message))
     });
-
-    out
 }
 
 fn valid_relative_dir(value: &str) -> bool {

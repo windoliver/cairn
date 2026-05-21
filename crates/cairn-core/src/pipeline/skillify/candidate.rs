@@ -44,6 +44,7 @@ pub enum SkillifyOutcome {
 
 impl SkillifyOutcome {
     /// Returns true when this outcome may proceed to authoring.
+    #[must_use]
     pub const fn is_eligible(self) -> bool {
         matches!(self, Self::Success)
     }
@@ -252,11 +253,11 @@ fn candidate_id(
     hash_field(&mut hasher, "trigger", trigger.as_str_name());
     hash_list_start(&mut hasher, "source_record_ids", source_record_ids.len());
     for source_record_id in &source_record_ids {
-        hash_part(&mut hasher, &source_record_id);
+        hash_part(&mut hasher, source_record_id);
     }
     hash_list_start(&mut hasher, "success_criteria", success_criteria.len());
     for criterion in &success_criteria {
-        hash_part(&mut hasher, &criterion);
+        hash_part(&mut hasher, criterion);
     }
     format!("skc_{:x}", hasher.finalize())
 }
