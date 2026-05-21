@@ -647,6 +647,7 @@ pub fn map_opencode_archive(opts: &OpenCodeImportOptions) -> Result<KoiImportRep
                 None,
                 None,
                 None,
+                None,
             )?]
         } else {
             map_opencode_json(path, relative, &raw)?
@@ -1164,6 +1165,10 @@ fn is_opencode_instruction_file(path: &Path) -> bool {
     )
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "OpenCode JSON mapping keeps summary, parts, fallback records, and findings together"
+)]
 fn map_opencode_json(
     _path: &Path,
     relative: &Path,
@@ -1241,25 +1246,32 @@ fn map_opencode_json(
                 scope_entity.as_deref(),
                 scope_user.as_deref(),
                 scope_agent.as_deref(),
+                None,
             )?);
         }
     }
     if mapped.is_empty() {
+        let kind = json
+            .get("kind")
+            .and_then(Value::as_str)
+            .and_then(|kind| MemoryKind::parse(kind).ok())
+            .unwrap_or(MemoryKind::Reference);
         mapped.push(map_opencode_record(
             relative,
             "json",
             extract_body(&json).unwrap_or_else(|| raw.trim().to_owned()),
-            MemoryKind::Reference,
+            kind,
             created_at,
             session_id.as_deref(),
-            Vec::new(),
-            Vec::new(),
+            tags_from_json(Some(&json)),
+            skill_ids_from_json(Some(&json)),
             BTreeMap::new(),
             scope_tenant.as_deref(),
             scope_workspace.as_deref(),
             scope_entity.as_deref(),
             scope_user.as_deref(),
             scope_agent.as_deref(),
+            legacy_id(Some(&json)),
         )?);
     }
     let file_findings = findings_from_file(Some(&json), relative, &[]);
@@ -1338,6 +1350,7 @@ fn map_opencode_summary(
             scope_entity,
             scope_user,
             scope_agent,
+            None,
         )?);
     }
     Ok(records)
@@ -1407,6 +1420,7 @@ fn map_opencode_record(
     scope_entity: Option<&str>,
     scope_user: Option<&str>,
     scope_agent: Option<&str>,
+    legacy_id: Option<String>,
 ) -> Result<MappedFile, ImportError> {
     let body_hash = format!("{:x}", Sha256::digest(body.as_bytes()));
     extra_frontmatter.insert(
@@ -1532,7 +1546,7 @@ fn map_opencode_record(
     let item = ExternalImportItem {
         kind: ExternalImportItemKind::Record,
         source_path: relative.to_path_buf(),
-        legacy_id: Some(format!("opencode:{role}")),
+        legacy_id: legacy_id.or_else(|| Some(format!("opencode:{role}"))),
         session_ids: session_id.into_iter().map(ToOwned::to_owned).collect(),
         skill_ids,
         provenance: ExternalImportProvenance {
@@ -1795,6 +1809,19 @@ fn legacy_id(json: Option<&Value>) -> Option<String> {
         .map(str::trim)
         .filter(|id| !id.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn tags_from_json(json: Option<&Value>) -> Vec<String> {
+    json.and_then(|json| json.get("tags").and_then(Value::as_array))
+        .map(|tags| {
+            tags.iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|tag| !tag.is_empty())
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
 }
 
 fn session_ids_from_json(json: Option<&Value>) -> Vec<String> {
@@ -2418,6 +2445,23 @@ mod tests {
         .expect("write claude");
         fs::write(archive.path().join("screenshot.bin"), [0, 159, 146, 150])
             .expect("write ignored binary");
+        fs::write(
+            archive.path().join("memory.json"),
+            r#"{
+              "id": "json-memory-01",
+              "kind": "rule",
+              "text": "OpenCode fallback JSON preserves typed metadata.",
+              "tags": ["opencode", "fallback"],
+              "skills": [{"id": "json-skill"}],
+              "scope": {
+                "tenant": "default",
+                "workspace": "metadata",
+                "entity": "import",
+                "user": "hmn:tafeng"
+              }
+            }"#,
+        )
+        .expect("write fallback json");
         fs::create_dir_all(archive.path().join("sessions")).expect("sessions dir");
         fs::write(
             archive.path().join("sessions").join("session.json"),
@@ -2450,7 +2494,7 @@ mod tests {
         .expect("map opencode archive");
 
         assert_eq!(report.manifest.system, "opencode");
-        assert_eq!(report.records.len(), 9);
+        assert_eq!(report.records.len(), 10);
         assert!(
             report
                 .records
@@ -2463,6 +2507,14 @@ mod tests {
         assert!(report.records.iter().any(|record| {
             record.kind == MemoryKind::Rule && record.body.contains("Never write directly")
         }));
+        let json_record = report
+            .records
+            .iter()
+            .find(|record| record.body.contains("fallback JSON preserves"))
+            .expect("fallback JSON record");
+        assert_eq!(json_record.kind, MemoryKind::Rule);
+        assert_eq!(json_record.scope.user.as_deref(), Some("hmn:tafeng"));
+        assert!(json_record.tags.iter().any(|tag| tag == "fallback"));
         assert!(report.records.iter().any(|record| {
             record.kind == MemoryKind::User && record.body.contains("Build an OpenCode bridge")
         }));
@@ -2487,6 +2539,15 @@ mod tests {
         }));
         assert!(report.manifest.items.iter().any(|item| {
             item.kind == ExternalImportItemKind::Skill && item.legacy_id.as_deref() == Some("skill")
+        }));
+        assert!(report.manifest.items.iter().any(|item| {
+            item.kind == ExternalImportItemKind::Record
+                && item.legacy_id.as_deref() == Some("json-memory-01")
+                && item.skill_ids == vec!["json-skill"]
+        }));
+        assert!(report.manifest.items.iter().any(|item| {
+            item.kind == ExternalImportItemKind::Skill
+                && item.legacy_id.as_deref() == Some("json-skill")
         }));
         assert!(
             report.findings.iter().any(|finding| {
