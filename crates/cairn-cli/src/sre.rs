@@ -10,6 +10,7 @@ use cairn_core::domain::{
 };
 use clap::ArgMatches;
 use serde::Deserialize;
+use serde_json::Value;
 
 use crate::{config, metrics};
 
@@ -135,7 +136,18 @@ fn read_metric_events(vault_root: &Path) -> ReadMetricEvents {
     let mut events = Vec::new();
     let mut parse_error_count = 0_u64;
     for line in raw.lines() {
-        match serde_json::from_str::<MetricEvent>(line) {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            parse_error_count = parse_error_count.saturating_add(1);
+            continue;
+        };
+        let Some(event_name) = value.get("event").and_then(Value::as_str) else {
+            parse_error_count = parse_error_count.saturating_add(1);
+            continue;
+        };
+        if !is_known_metric_event(event_name) {
+            continue;
+        }
+        match serde_json::from_value::<MetricEvent>(value) {
             Ok(event) => events.push(event),
             Err(_err) => parse_error_count = parse_error_count.saturating_add(1),
         }
@@ -144,6 +156,24 @@ fn read_metric_events(vault_root: &Path) -> ReadMetricEvents {
         events,
         parse_error_count,
     }
+}
+
+fn is_known_metric_event(event_name: &str) -> bool {
+    matches!(
+        event_name,
+        "verb_invocation"
+            | "search_completed"
+            | "sensor_emission"
+            | "wal_apply"
+            | "hot_prefix_assembled"
+            | "projection_rebuild"
+            | "trace_canvas_rendered"
+            | "evaluation_completed"
+            | "rehydration_completed"
+            | "workflow_job_started"
+            | "workflow_job_completed"
+            | "workflow_job_failed"
+    )
 }
 
 fn summarize_search(
@@ -160,23 +190,16 @@ fn summarize_search(
             let mut failed = 0_u64;
             let mut latencies = Vec::new();
             for event in events {
-                if let MetricEvent::SearchCompleted {
-                    mode: event_mode,
-                    latency_ms,
-                    degradation_state,
-                    error,
-                    ..
-                } = event
-                    && event_mode == mode
-                {
-                    invocations += 1;
-                    latencies.push(*latency_ms);
-                    if degradation_state != "none" {
-                        degraded += 1;
-                    }
-                    if error.is_some() {
-                        failed += 1;
-                    }
+                let Some(observation) = search_observation(event, mode) else {
+                    continue;
+                };
+                invocations += 1;
+                latencies.push(observation.latency_ms);
+                if observation.degraded {
+                    degraded += 1;
+                }
+                if observation.failed {
+                    failed += 1;
                 }
             }
             let advertised = match mode {
@@ -204,6 +227,47 @@ fn summarize_search(
             }
         })
         .collect()
+}
+
+struct SearchObservation {
+    latency_ms: u64,
+    degraded: bool,
+    failed: bool,
+}
+
+fn search_observation(event: &MetricEvent, mode: &str) -> Option<SearchObservation> {
+    match event {
+        MetricEvent::SearchCompleted {
+            mode: event_mode,
+            latency_ms,
+            degradation_state,
+            error,
+            ..
+        } if event_mode == mode => Some(SearchObservation {
+            latency_ms: *latency_ms,
+            degraded: degradation_state != "none",
+            failed: error.is_some(),
+        }),
+        MetricEvent::VerbInvocation {
+            verb,
+            surface,
+            mode: Some(event_mode),
+            status,
+            latency_ms,
+            error,
+            degradation_state,
+            ..
+        } if verb == "search" && surface == "cli" && event_mode == mode => {
+            Some(SearchObservation {
+                latency_ms: *latency_ms,
+                degraded: degradation_state
+                    .as_deref()
+                    .is_some_and(|state| state != "none"),
+                failed: status != "committed" || error.is_some(),
+            })
+        }
+        _ => None,
+    }
 }
 
 fn search_capabilities(
@@ -285,7 +349,10 @@ fn load_bench_gates(bench_report_dir: Option<&Path>) -> Result<SreGateSummary, S
 
 fn allowlisted_gate_name(raw: &str) -> String {
     match raw {
-        "migration_backlog" | "sre_privacy_scrub" | "cold_rehydrate_p95" => raw.to_owned(),
+        "migration_backlog"
+        | "sre_privacy_scrub"
+        | "cold_rehydrate_p95"
+        | "projection_lag_fixture" => raw.to_owned(),
         _ => "redacted_gate".to_owned(),
     }
 }

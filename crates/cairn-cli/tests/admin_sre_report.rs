@@ -109,6 +109,77 @@ not json SECRET_PRIVATE_TOKEN /Users/alice private body query text
 }
 
 #[test]
+fn admin_sre_report_counts_search_verb_invocation_failures() {
+    let dir = bootstrap_vault();
+    let metrics = dir.path().join(".cairn/metrics.jsonl");
+    std::fs::write(
+        &metrics,
+        r#"{"event":"verb_invocation","ts_ms":1,"verb":"search","surface":"cli","mode":"semantic","status":"rejected","latency_ms":77,"error":"provider_unavailable","budget_used_ratio":null,"degradation_state":"partial","private":"SECRET_PRIVATE_TOKEN /Users/alice private body query text"}
+"#,
+    )
+    .expect("write metrics");
+
+    let output = cairn()
+        .current_dir(dir.path())
+        .args(["admin", "sre", "report", "--json"])
+        .output()
+        .expect("run sre report");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json = json_stdout(&output);
+    let modes = json["search"]["modes"].as_array().expect("search modes");
+    let semantic = modes
+        .iter()
+        .find(|mode| mode["mode"] == "semantic")
+        .expect("semantic mode");
+    assert_eq!(semantic["invocations"], 1);
+    assert_eq!(semantic["failed"], 1);
+    assert_eq!(semantic["degraded"], 1);
+    assert_eq!(semantic["status"], "fail");
+    assert_forbidden_fragments_absent(&stdout);
+}
+
+#[test]
+fn admin_sre_report_tolerates_unknown_metric_events() {
+    let dir = bootstrap_vault();
+    let metrics = dir.path().join(".cairn/metrics.jsonl");
+    std::fs::write(
+        &metrics,
+        r#"{"event":"future_metric","private":"SECRET_PRIVATE_TOKEN /Users/alice private body query text"}
+{"event":"rehydration_completed","ts_ms":1,"target":"session","source_tier":"cold","restored_tier":"warm","status":"committed","latency_ms":2100,"bytes_restored":1000,"record_count":2,"error":null}
+"#,
+    )
+    .expect("write metrics");
+
+    let output = cairn()
+        .current_dir(dir.path())
+        .args(["admin", "sre", "report", "--json"])
+        .output()
+        .expect("run sre report");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json = json_stdout(&output);
+    let gates = json["gates"]["gates"].as_array().expect("gates");
+    assert!(
+        gates
+            .iter()
+            .all(|gate| gate["name"] != "metric_parse_errors"),
+        "json: {json}"
+    );
+    assert_forbidden_fragments_absent(&stdout);
+}
+
+#[test]
 fn admin_sre_report_marks_unobserved_search_unknown() {
     let dir = bootstrap_vault();
 
@@ -408,6 +479,43 @@ fn admin_sre_report_uses_bench_sre_gates() {
     assert!(stdout.contains("\"migration_backlog\""));
     assert!(stdout.contains("\"status\":\"fail\""));
     assert_forbidden_fragments_absent(&stdout);
+}
+
+#[test]
+fn admin_sre_report_keeps_projection_lag_fixture_gate_name() {
+    let dir = bootstrap_vault();
+    let bench = tempfile::tempdir().expect("bench dir");
+    std::fs::write(
+        bench.path().join("sre.json"),
+        r#"{"checks":[{"name":"projection_lag_fixture","status":"warning","measured":2,"threshold":0,"unit":"count","detail":"fixture"}]}"#,
+    )
+    .expect("write bench sre report");
+
+    let output = cairn()
+        .current_dir(dir.path())
+        .args([
+            "admin",
+            "sre",
+            "report",
+            "--json",
+            "--bench-report-dir",
+            bench.path().to_str().expect("utf8"),
+        ])
+        .output()
+        .expect("run sre report");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json = json_stdout(&output);
+    let gates = json["gates"]["gates"].as_array().expect("gates");
+    let projection_gate = gates
+        .iter()
+        .find(|gate| gate["name"] == "projection_lag_fixture")
+        .expect("projection lag gate");
+    assert_eq!(projection_gate["status"], "warning");
 }
 
 #[test]
