@@ -11,6 +11,15 @@ use cairn_core::domain::{
 };
 use cairn_core::policy_trace::{PolicyGate, PolicyOutcome};
 
+type ShareLinkMutator = fn(&mut SignedShareLink);
+type ShareLinkErrorPredicate = fn(domain::DomainError) -> bool;
+
+struct ShareLinkShapeCase {
+    name: &'static str,
+    mutate: ShareLinkMutator,
+    expected: ShareLinkErrorPredicate,
+}
+
 fn signer() -> SigningKey {
     SigningKey::from_bytes(&[9_u8; 32])
 }
@@ -201,79 +210,75 @@ fn share_link_shape_rejects_too_many_and_duplicate_target_id_hashes() {
 
 #[test]
 fn share_link_shape_rejects_required_bad_fields() {
-    let cases: &[(
-        &str,
-        fn(&mut SignedShareLink),
-        fn(domain::DomainError) -> bool,
-    )] = &[
-        (
-            "malformed link_id",
-            |l| l.link_id = "bad id".to_owned(),
-            |e| matches!(e, domain::DomainError::MalformedScope { .. }),
-        ),
-        (
-            "malformed operation_id",
-            |l| {
+    let cases: &[ShareLinkShapeCase] = &[
+        ShareLinkShapeCase {
+            name: "malformed link_id",
+            mutate: |l| l.link_id = "bad id".to_owned(),
+            expected: |e| matches!(e, domain::DomainError::MalformedScope { .. }),
+        },
+        ShareLinkShapeCase {
+            name: "malformed operation_id",
+            mutate: |l| {
                 l.payload.operation_id = "not-a-ulid".to_owned();
                 l.link_id = "share-not-a-ulid".to_owned();
             },
-            |e| matches!(e, domain::DomainError::MalformedScope { .. }),
-        ),
-        (
-            "lowercase operation_id",
-            |l| {
+            expected: |e| matches!(e, domain::DomainError::MalformedScope { .. }),
+        },
+        ShareLinkShapeCase {
+            name: "lowercase operation_id",
+            mutate: |l| {
                 l.payload.operation_id = "01hqzx9f5n0000000000000004".to_owned();
                 l.link_id = "share-01hqzx9f5n0000000000000004".to_owned();
             },
-            |e| matches!(e, domain::DomainError::MalformedScope { .. }),
-        ),
-        (
-            "overflow operation_id",
-            |l| {
+            expected: |e| matches!(e, domain::DomainError::MalformedScope { .. }),
+        },
+        ShareLinkShapeCase {
+            name: "overflow operation_id",
+            mutate: |l| {
                 l.payload.operation_id = "81HQZX9F5N0000000000000004".to_owned();
                 l.link_id = "share-81HQZX9F5N0000000000000004".to_owned();
             },
-            |e| matches!(e, domain::DomainError::MalformedScope { .. }),
-        ),
-        (
-            "malformed nonce",
-            |l| l.payload.nonce = "not-base64".to_owned(),
-            |e| matches!(e, domain::DomainError::MissingSignature { .. }),
-        ),
-        (
-            "bad target_hash",
-            |l| {
+            expected: |e| matches!(e, domain::DomainError::MalformedScope { .. }),
+        },
+        ShareLinkShapeCase {
+            name: "malformed nonce",
+            mutate: |l| l.payload.nonce = "not-base64".to_owned(),
+            expected: |e| matches!(e, domain::DomainError::MissingSignature { .. }),
+        },
+        ShareLinkShapeCase {
+            name: "bad target_hash",
+            mutate: |l| {
                 l.payload.target_hash = format!("sha256:{}", "C".repeat(64));
             },
-            |e| matches!(e, domain::DomainError::InvalidPayloadHash { .. }),
-        ),
-        (
-            "invalid tier",
-            |l| l.payload.grant_tier = MemoryVisibility::Private,
-            |e| matches!(e, domain::DomainError::UnsupportedVisibility { .. }),
-        ),
-        (
-            "non-human issuer",
-            |l| {
+            expected: |e| matches!(e, domain::DomainError::InvalidPayloadHash { .. }),
+        },
+        ShareLinkShapeCase {
+            name: "invalid tier",
+            mutate: |l| l.payload.grant_tier = MemoryVisibility::Private,
+            expected: |e| matches!(e, domain::DomainError::UnsupportedVisibility { .. }),
+        },
+        ShareLinkShapeCase {
+            name: "non-human issuer",
+            mutate: |l| {
                 l.payload.issuer =
                     Identity::parse("agt:cairn-cli:default:reader:v1").expect("agent");
             },
-            |e| matches!(e, domain::DomainError::Unauthorized { .. }),
-        ),
-        (
-            "zero key_version",
-            |l| l.payload.key_version = 0,
-            |e| matches!(e, domain::DomainError::Unauthorized { .. }),
-        ),
-        (
-            "expires at issued_at",
-            |l| l.payload.expires_at = l.payload.issued_at.clone(),
-            |e| matches!(e, domain::DomainError::ExpiredIntent { .. }),
-        ),
+            expected: |e| matches!(e, domain::DomainError::Unauthorized { .. }),
+        },
+        ShareLinkShapeCase {
+            name: "zero key_version",
+            mutate: |l| l.payload.key_version = 0,
+            expected: |e| matches!(e, domain::DomainError::Unauthorized { .. }),
+        },
+        ShareLinkShapeCase {
+            name: "expires at issued_at",
+            mutate: |l| l.payload.expires_at = l.payload.issued_at.clone(),
+            expected: |e| matches!(e, domain::DomainError::ExpiredIntent { .. }),
+        },
     ];
 
-    for (name, mutate, expected) in cases {
-        assert_link_shape_err(name, *mutate, *expected);
+    for case in cases {
+        assert_link_shape_err(case.name, case.mutate, case.expected);
     }
 }
 

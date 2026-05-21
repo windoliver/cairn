@@ -15,6 +15,15 @@ use cairn_core::domain::{
 use cairn_core::policy_trace::{PolicyGate, PolicyOutcome};
 use cairn_core::rebac::{RebacAction, RebacContext, RebacRelation};
 
+type ReceiptMutator = fn(&mut PromotionConsentReceipt);
+type ReceiptErrorPredicate = fn(domain::DomainError) -> bool;
+
+struct ReceiptShapeCase {
+    name: &'static str,
+    mutate: ReceiptMutator,
+    expected: ReceiptErrorPredicate,
+}
+
 fn signer() -> SigningKey {
     SigningKey::from_bytes(&[7_u8; 32])
 }
@@ -143,93 +152,89 @@ fn promotion_receipt_rejects_rewrapped_receipt_id() {
 
 #[test]
 fn promotion_receipt_shape_rejects_required_bad_fields() {
-    let cases: &[(
-        &str,
-        fn(&mut PromotionConsentReceipt),
-        fn(domain::DomainError) -> bool,
-    )] = &[
-        (
-            "malformed receipt_id",
-            |r| r.receipt_id = "bad id".to_owned(),
-            |e| matches!(e, domain::DomainError::MalformedScope { .. }),
-        ),
-        (
-            "malformed operation_id",
-            |r| {
+    let cases: &[ReceiptShapeCase] = &[
+        ReceiptShapeCase {
+            name: "malformed receipt_id",
+            mutate: |r| r.receipt_id = "bad id".to_owned(),
+            expected: |e| matches!(e, domain::DomainError::MalformedScope { .. }),
+        },
+        ReceiptShapeCase {
+            name: "malformed operation_id",
+            mutate: |r| {
                 r.payload.operation_id = "not-a-ulid".to_owned();
                 r.receipt_id = "rcpt-not-a-ulid".to_owned();
             },
-            |e| matches!(e, domain::DomainError::MalformedScope { .. }),
-        ),
-        (
-            "lowercase operation_id",
-            |r| {
+            expected: |e| matches!(e, domain::DomainError::MalformedScope { .. }),
+        },
+        ReceiptShapeCase {
+            name: "lowercase operation_id",
+            mutate: |r| {
                 r.payload.operation_id = "01hqzx9f5n0000000000000002".to_owned();
                 r.receipt_id = "rcpt-01hqzx9f5n0000000000000002".to_owned();
             },
-            |e| matches!(e, domain::DomainError::MalformedScope { .. }),
-        ),
-        (
-            "overflow operation_id",
-            |r| {
+            expected: |e| matches!(e, domain::DomainError::MalformedScope { .. }),
+        },
+        ReceiptShapeCase {
+            name: "overflow operation_id",
+            mutate: |r| {
                 r.payload.operation_id = "81HQZX9F5N0000000000000002".to_owned();
                 r.receipt_id = "rcpt-81HQZX9F5N0000000000000002".to_owned();
             },
-            |e| matches!(e, domain::DomainError::MalformedScope { .. }),
-        ),
-        (
-            "lowercase chain_parent",
-            |r| {
+            expected: |e| matches!(e, domain::DomainError::MalformedScope { .. }),
+        },
+        ReceiptShapeCase {
+            name: "lowercase chain_parent",
+            mutate: |r| {
                 r.payload.chain_parents = vec!["01hqzx9f5n0000000000000003".to_owned()];
             },
-            |e| matches!(e, domain::DomainError::MalformedScope { .. }),
-        ),
-        (
-            "overflow chain_parent",
-            |r| {
+            expected: |e| matches!(e, domain::DomainError::MalformedScope { .. }),
+        },
+        ReceiptShapeCase {
+            name: "overflow chain_parent",
+            mutate: |r| {
                 r.payload.chain_parents = vec!["81HQZX9F5N0000000000000003".to_owned()];
             },
-            |e| matches!(e, domain::DomainError::MalformedScope { .. }),
-        ),
-        (
-            "malformed nonce",
-            |r| r.payload.nonce = "not-base64".to_owned(),
-            |e| matches!(e, domain::DomainError::MissingSignature { .. }),
-        ),
-        (
-            "bad target_hash",
-            |r| {
+            expected: |e| matches!(e, domain::DomainError::MalformedScope { .. }),
+        },
+        ReceiptShapeCase {
+            name: "malformed nonce",
+            mutate: |r| r.payload.nonce = "not-base64".to_owned(),
+            expected: |e| matches!(e, domain::DomainError::MissingSignature { .. }),
+        },
+        ReceiptShapeCase {
+            name: "bad target_hash",
+            mutate: |r| {
                 r.payload.target_hash = format!("sha256:{}", "A".repeat(64));
             },
-            |e| matches!(e, domain::DomainError::InvalidPayloadHash { .. }),
-        ),
-        (
-            "invalid tier",
-            |r| r.payload.to_tier = MemoryVisibility::Private,
-            |e| matches!(e, domain::DomainError::UnsupportedVisibility { .. }),
-        ),
-        (
-            "non-human signer",
-            |r| {
+            expected: |e| matches!(e, domain::DomainError::InvalidPayloadHash { .. }),
+        },
+        ReceiptShapeCase {
+            name: "invalid tier",
+            mutate: |r| r.payload.to_tier = MemoryVisibility::Private,
+            expected: |e| matches!(e, domain::DomainError::UnsupportedVisibility { .. }),
+        },
+        ReceiptShapeCase {
+            name: "non-human signer",
+            mutate: |r| {
                 r.payload.human_identity =
                     Identity::parse("agt:cairn-cli:default:reader:v1").expect("agent");
             },
-            |e| matches!(e, domain::DomainError::Unauthorized { .. }),
-        ),
-        (
-            "zero key_version",
-            |r| r.payload.key_version = 0,
-            |e| matches!(e, domain::DomainError::Unauthorized { .. }),
-        ),
-        (
-            "expires at issued_at",
-            |r| r.payload.expires_at = r.payload.issued_at.clone(),
-            |e| matches!(e, domain::DomainError::ExpiredIntent { .. }),
-        ),
+            expected: |e| matches!(e, domain::DomainError::Unauthorized { .. }),
+        },
+        ReceiptShapeCase {
+            name: "zero key_version",
+            mutate: |r| r.payload.key_version = 0,
+            expected: |e| matches!(e, domain::DomainError::Unauthorized { .. }),
+        },
+        ReceiptShapeCase {
+            name: "expires at issued_at",
+            mutate: |r| r.payload.expires_at = r.payload.issued_at.clone(),
+            expected: |e| matches!(e, domain::DomainError::ExpiredIntent { .. }),
+        },
     ];
 
-    for (name, mutate, expected) in cases {
-        assert_receipt_shape_err(name, *mutate, *expected);
+    for case in cases {
+        assert_receipt_shape_err(case.name, case.mutate, case.expected);
     }
 }
 

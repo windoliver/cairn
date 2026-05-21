@@ -78,7 +78,7 @@ pub enum SharingDecisionKind {
     Revoked,
     /// Issuer or signer was not a human identity.
     NotHuman,
-    /// ReBAC denied the shared-tier write.
+    /// `ReBAC` denied the shared-tier write.
     NoRebacRelation,
     /// Shape validation failed before signature verification.
     InvalidShape,
@@ -219,6 +219,7 @@ pub struct SharingRevocationState {
 }
 
 /// Inputs for the shared-tier promotion gate.
+#[derive(Clone, Copy)]
 pub struct PromotionGateInput<'a> {
     /// Record being promoted.
     pub record: &'a MemoryRecord,
@@ -245,6 +246,7 @@ pub struct PromotionGateInput<'a> {
 }
 
 /// Inputs for signed share-link grant evaluation.
+#[derive(Clone, Copy)]
 pub struct ShareLinkGateInput<'a> {
     /// Signed link being evaluated.
     pub link: &'a SignedShareLink,
@@ -407,6 +409,21 @@ impl SignedShareLink {
 pub fn verify_promotion_gate(
     input: PromotionGateInput<'_>,
 ) -> Result<PolicyTraceEntry, SharingGateRejection> {
+    verify_promotion_receipt(input)?;
+    verify_promotion_target(input)?;
+    verify_promotion_freshness(input)?;
+    verify_promotion_rebac(input)?;
+
+    Ok(sharing_trace(
+        PolicyGate::ConsentReceipt,
+        PolicyOutcome::Pass,
+        SharingPolicySubject::ConsentReceipt,
+        SharingPolicyAction::Promote,
+        SharingDecisionKind::Allowed,
+    ))
+}
+
+fn verify_promotion_receipt(input: PromotionGateInput<'_>) -> Result<(), SharingGateRejection> {
     if input.receipt.payload.human_identity.kind() != crate::domain::IdentityKind::Human {
         return Err(reject_promotion(
             SharingDecisionKind::NotHuman,
@@ -444,7 +461,10 @@ pub fn verify_promotion_gate(
             DomainError::InvalidSignature,
         ));
     }
+    Ok(())
+}
 
+fn verify_promotion_target(input: PromotionGateInput<'_>) -> Result<(), SharingGateRejection> {
     if input.record.visibility != input.from_tier {
         return Err(reject_promotion(
             SharingDecisionKind::TierMismatch,
@@ -459,8 +479,7 @@ pub fn verify_promotion_gate(
     }
 
     let target_hash_matches = CanonicalRecordHash::compute(input.record)
-        .map(|hash| hash.as_str() == input.receipt.payload.target_hash)
-        .unwrap_or(false);
+        .is_ok_and(|hash| hash.as_str() == input.receipt.payload.target_hash);
     if !target_hash_matches {
         return Err(reject_promotion(
             SharingDecisionKind::TargetMismatch,
@@ -504,7 +523,10 @@ pub fn verify_promotion_gate(
             },
         ));
     }
+    Ok(())
+}
 
+fn verify_promotion_freshness(input: PromotionGateInput<'_>) -> Result<(), SharingGateRejection> {
     if input
         .now
         .cmp_chronological(&input.receipt.payload.expires_at)
@@ -533,7 +555,10 @@ pub fn verify_promotion_gate(
             },
         ));
     }
+    Ok(())
+}
 
+fn verify_promotion_rebac(input: PromotionGateInput<'_>) -> Result<(), SharingGateRejection> {
     if input.rebac.principal() != Some(&input.receipt.payload.human_identity) {
         return Err(reject_promotion(
             SharingDecisionKind::NoRebacRelation,
@@ -556,14 +581,7 @@ pub fn verify_promotion_gate(
             },
         ));
     }
-
-    Ok(sharing_trace(
-        PolicyGate::ConsentReceipt,
-        PolicyOutcome::Pass,
-        SharingPolicySubject::ConsentReceipt,
-        SharingPolicyAction::Promote,
-        SharingDecisionKind::Allowed,
-    ))
+    Ok(())
 }
 
 /// Verify a signed share link before honoring the grant.
@@ -608,15 +626,15 @@ pub fn verify_share_link_grant(
         ));
     }
 
-    if let Some(expected_grantee) = &input.link.payload.grantee {
-        if input.requesting_principal != Some(expected_grantee) {
-            return Err(reject_share_link(
-                SharingDecisionKind::ScopeMismatch,
-                DomainError::ScopeDenied {
-                    message: "share link grantee does not match requesting principal".to_owned(),
-                },
-            ));
-        }
+    if let Some(expected_grantee) = &input.link.payload.grantee
+        && input.requesting_principal != Some(expected_grantee)
+    {
+        return Err(reject_share_link(
+            SharingDecisionKind::ScopeMismatch,
+            DomainError::ScopeDenied {
+                message: "share link grantee does not match requesting principal".to_owned(),
+            },
+        ));
     }
 
     if input.link.payload.target_hash != input.expected_target_hash {
@@ -827,15 +845,17 @@ fn validate_target_hash(value: &str) -> Result<(), DomainError> {
 }
 
 fn validate_hash(field: &'static str, value: &str) -> Result<(), DomainError> {
-    if let Some(hex) = value.strip_prefix("sha256:") {
-        if hex.len() == 64 && is_lowercase_hex(hex) {
-            return Ok(());
-        }
+    if let Some(hex) = value.strip_prefix("sha256:")
+        && hex.len() == 64
+        && is_lowercase_hex(hex)
+    {
+        return Ok(());
     }
-    if let Some(hex) = value.strip_prefix("hash:") {
-        if (32..=128).contains(&hex.len()) && is_lowercase_hex(hex) {
-            return Ok(());
-        }
+    if let Some(hex) = value.strip_prefix("hash:")
+        && (32..=128).contains(&hex.len())
+        && is_lowercase_hex(hex)
+    {
+        return Ok(());
     }
     Err(DomainError::InvalidPayloadHash {
         message: format!(
