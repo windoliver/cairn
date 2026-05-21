@@ -2,11 +2,12 @@
 
 use cairn_core::domain::identity::keys::SigningKey;
 use cairn_core::domain::sharing::{
-    ShareLinkGateInput, ShareLinkPayload, SharingDecisionKind, SharingRevocationState,
-    SignedShareLink, verify_share_link_grant,
+    ShareLinkGateInput, ShareLinkJournalDecision, ShareLinkPayload, SharingDecisionKind,
+    SharingRevocationState, SignedShareLink, verify_share_link_grant,
 };
 use cairn_core::domain::{
-    self, Ed25519Signature, Identity, MemoryVisibility, Rfc3339Timestamp, ScopeTuple,
+    self, ConsentEvent, ConsentKind, Ed25519Signature, Identity, MemoryVisibility,
+    Rfc3339Timestamp, ScopeTuple,
 };
 use cairn_core::policy_trace::{PolicyGate, PolicyOutcome};
 
@@ -540,4 +541,40 @@ fn share_link_gate_rejects_issuer_key_version_context_mismatch() {
         SharingDecisionKind::BadSignature,
         |err| matches!(err, domain::DomainError::InvalidSignature),
     );
+}
+
+#[test]
+fn share_link_grant_consent_event_is_body_free_and_valid() {
+    let link = signed_link();
+    let (subject, payload) = link.decision_payload(ShareLinkJournalDecision::Grant);
+    let event = ConsentEvent {
+        consent_id: "01HQZX9F5N0000000000000006".to_owned(),
+        kind: ConsentKind::Grant,
+        actor: Identity::parse("hmn:tafeng").expect("human"),
+        subject,
+        scope: "tenant=default,workspace=vault-a,entity=session".to_owned(),
+        op_id: Some(link.payload.operation_id.clone()),
+        sensor_id: None,
+        payload,
+        decided_at: Rfc3339Timestamp::parse("2026-05-21T12:30:00Z").expect("decided"),
+        expires_at: Some(link.payload.expires_at.clone()),
+    };
+
+    event.validate().expect("journal event valid");
+    let serialized = serde_json::to_value(&event).expect("json").to_string();
+    for banned in [
+        "\"body\"",
+        "\"text\"",
+        "\"content\"",
+        "\"raw\"",
+        "\"snippet\"",
+        "\"command\"",
+        "\"url\"",
+        "\"title\"",
+        "\"file_path\"",
+        "\"input\"",
+        "\"message\"",
+    ] {
+        assert!(!serialized.contains(banned), "banned field {banned}");
+    }
 }

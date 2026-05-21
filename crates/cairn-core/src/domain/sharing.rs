@@ -8,8 +8,8 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{
-    CanonicalRecordHash, DomainError, Ed25519Signature, Identity, MemoryRecord, MemoryVisibility,
-    Rfc3339Timestamp, ScopeTuple,
+    CanonicalRecordHash, ConsentPayload, DomainError, Ed25519Signature, Identity, MemoryRecord,
+    MemoryVisibility, Rfc3339Timestamp, ScopeTuple,
 };
 use crate::policy_trace::{PolicyDetail, PolicyGate, PolicyOutcome, PolicyTraceEntry};
 use crate::rebac::{RebacAction, RebacContext};
@@ -99,6 +99,27 @@ impl SharingDecisionKind {
             Self::NotHuman => "not_human",
             Self::NoRebacRelation => "no_rebac_relation",
             Self::InvalidShape => "invalid_shape",
+        }
+    }
+}
+
+/// Consent journal decision for a share link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShareLinkJournalDecision {
+    /// Link grant.
+    Grant,
+    /// Link revoke.
+    Revoke,
+}
+
+impl ShareLinkJournalDecision {
+    /// Body-free policy code.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Grant => "grant",
+            Self::Revoke => "revoke",
         }
     }
 }
@@ -251,6 +272,17 @@ pub struct SharingGateRejection {
 }
 
 impl PromotionConsentReceipt {
+    /// Build the body-free `ConsentPayload` for a promotion journal row.
+    #[must_use]
+    pub fn promote_consent_payload(&self) -> ConsentPayload {
+        ConsentPayload::PromoteReceipt {
+            target_id_hash: self.payload.target_id_hash.clone(),
+            from_tier: self.payload.from_tier,
+            to_tier: self.payload.to_tier,
+            receipt_id: self.receipt_id.clone(),
+        }
+    }
+
     /// Validate body-free shape before or after signature verification.
     pub fn validate_shape(&self) -> Result<(), DomainError> {
         validate_id("receipt_id", &self.receipt_id)?;
@@ -303,6 +335,19 @@ impl PromotionConsentReceipt {
 }
 
 impl SignedShareLink {
+    /// Build the body-free subject and `ConsentPayload` for a share-link journal row.
+    #[must_use]
+    pub fn decision_payload(&self, decision: ShareLinkJournalDecision) -> (String, ConsentPayload) {
+        let subject_code = format!("share_link:{}", self.link_id.to_ascii_lowercase());
+        (
+            subject_code.clone(),
+            ConsentPayload::Decision {
+                subject_code,
+                policy_code: Some(decision.as_str().to_owned()),
+            },
+        )
+    }
+
     /// Validate body-free shape before or after signature verification.
     pub fn validate_shape(&self) -> Result<(), DomainError> {
         validate_id("link_id", &self.link_id)?;

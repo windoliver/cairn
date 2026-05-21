@@ -9,8 +9,8 @@ use cairn_core::domain::sharing::{
     SharingRevocationState, verify_promotion_gate,
 };
 use cairn_core::domain::{
-    self, CanonicalRecordHash, Ed25519Signature, Identity, MemoryVisibility, Rfc3339Timestamp,
-    ScopeTuple,
+    self, CanonicalRecordHash, ConsentEvent, ConsentKind, Ed25519Signature, Identity,
+    MemoryVisibility, Rfc3339Timestamp, ScopeTuple,
 };
 use cairn_core::policy_trace::{PolicyGate, PolicyOutcome};
 use cairn_core::rebac::{RebacAction, RebacContext, RebacRelation};
@@ -513,4 +513,41 @@ fn promotion_gate_rejects_missing_rebac_write_relation() {
         promotion_input(&record, &receipt, &now, &revocation, &rebac),
         SharingDecisionKind::NoRebacRelation,
     );
+}
+
+#[test]
+fn promotion_receipt_consent_event_is_body_free_and_valid() {
+    let receipt = signed_receipt();
+    let payload = receipt.promote_consent_payload();
+    let event = ConsentEvent {
+        consent_id: "01HQZX9F5N0000000000000005".to_owned(),
+        kind: ConsentKind::PromoteReceipt,
+        actor: Identity::parse("hmn:tafeng").expect("human"),
+        subject: receipt.payload.target_id_hash.clone(),
+        scope: "tenant=default,workspace=vault-a,entity=ingest,user=hmn:tafeng".to_owned(),
+        op_id: Some(receipt.payload.operation_id.clone()),
+        sensor_id: None,
+        payload,
+        decided_at: Rfc3339Timestamp::parse("2026-05-21T12:30:00Z").expect("decided"),
+        expires_at: Some(receipt.payload.expires_at.clone()),
+    };
+
+    event.validate().expect("journal event valid");
+    let value = serde_json::to_value(&event).expect("json");
+    let serialized = value.to_string();
+    for banned in [
+        "\"body\"",
+        "\"text\"",
+        "\"content\"",
+        "\"raw\"",
+        "\"snippet\"",
+        "\"command\"",
+        "\"url\"",
+        "\"title\"",
+        "\"file_path\"",
+        "\"input\"",
+        "\"message\"",
+    ] {
+        assert!(!serialized.contains(banned), "banned field {banned}");
+    }
 }
