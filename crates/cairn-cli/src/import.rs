@@ -19,6 +19,8 @@ use walkdir::WalkDir;
 
 const KOI_IMPORT_AUTHOR: &str = "hmn:koi-import:v1";
 const KOI_IMPORT_SENSOR: &str = "snr:koi-v1:import:local:v1";
+const OPENCLAW_IMPORT_AUTHOR: &str = "hmn:openclaw-import:v1";
+const OPENCLAW_IMPORT_SENSOR: &str = "snr:openclaw:import:local:v1";
 const ROWBOAT_IMPORT_AUTHOR: &str = "hmn:rowboat-import:v1";
 const ROWBOAT_IMPORT_SENSOR: &str = "snr:rowboat:import:local:v1";
 const OPENCODE_IMPORT_AUTHOR: &str = "hmn:opencode-import:v1";
@@ -26,6 +28,42 @@ const OPENCODE_IMPORT_SENSOR: &str = "snr:opencode:import:local:v1";
 const HERMES_IMPORT_AUTHOR: &str = "hmn:hermes-import:v1";
 const HERMES_IMPORT_SENSOR: &str = "snr:hermes-agent:import:local:v1";
 const SOURCE_HASH_PREFIX: &str = "sha256:";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImportSystem {
+    KoiV1,
+    OpenClaw,
+}
+
+impl ImportSystem {
+    const fn spec(self) -> ImportSpec {
+        match self {
+            Self::KoiV1 => ImportSpec {
+                system: "koi-v1",
+                author: KOI_IMPORT_AUTHOR,
+                sensor: KOI_IMPORT_SENSOR,
+                consent_ref: "consent:koi-v1-import",
+                frontmatter_prefix: "koi_v1",
+            },
+            Self::OpenClaw => ImportSpec {
+                system: "openclaw",
+                author: OPENCLAW_IMPORT_AUTHOR,
+                sensor: OPENCLAW_IMPORT_SENSOR,
+                consent_ref: "consent:openclaw-import",
+                frontmatter_prefix: "openclaw",
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ImportSpec {
+    system: &'static str,
+    author: &'static str,
+    sensor: &'static str,
+    consent_ref: &'static str,
+    frontmatter_prefix: &'static str,
+}
 
 /// Build the `cairn import` CLI subcommand.
 #[must_use]
@@ -37,7 +75,7 @@ pub fn command() -> clap::Command {
                 .long("from")
                 .required(true)
                 .value_name("SYSTEM")
-                .value_parser(["koi-v1", "rowboat", "opencode", "hermes-agent"])
+                .value_parser(["koi-v1", "openclaw", "rowboat", "opencode", "hermes-agent"])
                 .help("Legacy memory system to import"),
         )
         .arg(
@@ -79,12 +117,29 @@ pub fn run(sub: &clap::ArgMatches, vault_root: &Path) -> std::process::ExitCode 
         .unwrap_or(64)
         .try_into()
         .unwrap_or(64_usize);
+    let default_workspace = match configured_default_workspace(vault_root, json) {
+        Ok(default_workspace) => default_workspace,
+        Err(code) => return code,
+    };
     let report = match system.as_str() {
-        "koi-v1" => map_koi_v1_archive(&KoiImportOptions {
-            source: archive.clone(),
-            batch_size,
-            mode: FlushMode::HumanReview,
-        }),
+        "koi-v1" => map_archive(
+            ImportSystem::KoiV1,
+            &KoiImportOptions {
+                source: archive.clone(),
+                batch_size,
+                mode: FlushMode::HumanReview,
+            },
+            &default_workspace,
+        ),
+        "openclaw" => map_archive(
+            ImportSystem::OpenClaw,
+            &KoiImportOptions {
+                source: archive.clone(),
+                batch_size,
+                mode: FlushMode::HumanReview,
+            },
+            &default_workspace,
+        ),
         "rowboat" => map_rowboat_archive(&RowboatImportOptions {
             source: archive.clone(),
             batch_size,
@@ -199,6 +254,32 @@ impl MigrationReportSummary {
             findings: report.findings.clone(),
         }
     }
+}
+
+fn configured_default_workspace(
+    vault_root: &Path,
+    json: bool,
+) -> Result<String, std::process::ExitCode> {
+    crate::config::load(vault_root, &crate::config::CliOverrides::default())
+        .map(|config| config.vault.name)
+        .map_err(|err| {
+            if json {
+                let response = serde_json::json!({
+                    "status": "error",
+                    "error": {
+                        "code": "ConfigError",
+                        "message": err.to_string(),
+                    }
+                });
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&response).unwrap_or_else(|_| "{}".to_owned())
+                );
+            } else {
+                eprintln!("cairn import: config error — {err:#}");
+            }
+            std::process::ExitCode::from(78)
+        })
 }
 
 fn usage_error(json: bool, field: &str, message: &str) -> std::process::ExitCode {
@@ -430,6 +511,14 @@ pub enum ImportError {
 /// This bridge performs no database writes. The resulting plans can be reviewed
 /// and later applied through the ordinary flush path.
 pub fn map_koi_v1_archive(opts: &KoiImportOptions) -> Result<KoiImportReport, ImportError> {
+    map_archive(ImportSystem::KoiV1, opts, "my-vault")
+}
+
+fn map_archive(
+    system: ImportSystem,
+    opts: &KoiImportOptions,
+    default_workspace: &str,
+) -> Result<KoiImportReport, ImportError> {
     if opts.batch_size == 0 {
         return Err(ImportError::InvalidBatchSize);
     }
@@ -443,6 +532,7 @@ pub fn map_koi_v1_archive(opts: &KoiImportOptions) -> Result<KoiImportReport, Im
     let mut ambiguities = Vec::new();
     let mut findings = Vec::new();
     let mut items = Vec::new();
+    let spec = system.spec();
     for entry in WalkDir::new(&opts.source)
         .sort_by_file_name()
         .into_iter()
@@ -450,14 +540,14 @@ pub fn map_koi_v1_archive(opts: &KoiImportOptions) -> Result<KoiImportReport, Im
         .filter(|entry| entry.file_type().is_file())
     {
         let path = entry.path();
-        if !is_importable(path) {
+        if !is_importable(system, path, &opts.source) {
             continue;
         }
         let raw = fs::read_to_string(path).map_err(|source| ImportError::Io {
             path: path.to_path_buf(),
             source,
         })?;
-        let mapped = map_file(path, &opts.source, &raw)?;
+        let mapped = map_file(path, &opts.source, &raw, spec, default_workspace)?;
         ambiguities.extend(mapped.ambiguities);
         findings.extend(mapped.findings);
         items.extend(mapped.items);
@@ -465,8 +555,8 @@ pub fn map_koi_v1_archive(opts: &KoiImportOptions) -> Result<KoiImportReport, Im
     }
 
     let plans = plan_records(
-        "koi-v1",
-        KOI_IMPORT_AUTHOR,
+        spec.system,
+        spec.author,
         &opts.source,
         &records,
         opts.batch_size,
@@ -484,7 +574,7 @@ pub fn map_koi_v1_archive(opts: &KoiImportOptions) -> Result<KoiImportReport, Im
         .collect();
     Ok(KoiImportReport {
         manifest: ExternalImportManifest {
-            system: "koi-v1".to_owned(),
+            system: spec.system.to_owned(),
             items,
             unsupported_fields,
             privacy_sensitive_fields,
@@ -1158,10 +1248,26 @@ fn findings_from_rowboat_json_object(
         .collect()
 }
 
-fn is_importable(path: &Path) -> bool {
-    matches!(
+fn is_importable(system: ImportSystem, path: &Path, root: &Path) -> bool {
+    let importable_extension = matches!(
         path.extension().and_then(|ext| ext.to_str()),
         Some("json" | "md" | "txt")
+    );
+    if !importable_extension {
+        return false;
+    }
+    if system == ImportSystem::KoiV1 {
+        return true;
+    }
+
+    let relative = path.strip_prefix(root).unwrap_or(path);
+    let mut components = relative
+        .components()
+        .filter_map(|component| component.as_os_str().to_str());
+    matches!(
+        (components.next(), components.next()),
+        (Some("MEMORY.md" | "SOUL.md"), None)
+            | (Some("memory" | "sessions" | "transcripts"), Some(_))
     )
 }
 
@@ -1592,7 +1698,13 @@ fn map_opencode_record(
 }
 
 #[allow(clippy::too_many_lines)]
-fn map_file(path: &Path, root: &Path, raw: &str) -> Result<MappedFile, ImportError> {
+fn map_file(
+    path: &Path,
+    root: &Path,
+    raw: &str,
+    spec: ImportSpec,
+    default_workspace: &str,
+) -> Result<MappedFile, ImportError> {
     let relative = path.strip_prefix(root).unwrap_or(path);
     let parsed_json = if path
         .extension()
@@ -1618,12 +1730,16 @@ fn map_file(path: &Path, root: &Path, raw: &str) -> Result<MappedFile, ImportErr
         .as_ref()
         .and_then(|json| json.get("kind").and_then(Value::as_str))
         .and_then(|kind| MemoryKind::parse(kind).ok())
+        .or_else(|| kind_hint_for_path(spec, relative))
         .unwrap_or_else(|| {
             ambiguities.push(ImportAmbiguity {
                 path: relative.to_path_buf(),
                 field: "kind",
                 fallback: MemoryKind::Reference.as_str().to_owned(),
-                reason: "legacy Koi item did not declare a Cairn memory kind".to_owned(),
+                reason: format!(
+                    "legacy {} item did not declare a Cairn memory kind",
+                    spec.system
+                ),
             });
             MemoryKind::Reference
         });
@@ -1639,25 +1755,28 @@ fn map_file(path: &Path, root: &Path, raw: &str) -> Result<MappedFile, ImportErr
         path: relative.to_path_buf(),
         source,
     })?;
-    let author = Identity::parse(KOI_IMPORT_AUTHOR).map_err(|source| ImportError::Domain {
+    let author = Identity::parse(spec.author).map_err(|source| ImportError::Domain {
         path: relative.to_path_buf(),
         source,
     })?;
-    let scope = scope_from_json(parsed_json.as_ref());
+    let scope = scope_from_json(parsed_json.as_ref(), spec, default_workspace);
     let mut extra_frontmatter = BTreeMap::new();
     extra_frontmatter.insert(
-        "koi_v1_source_path".to_owned(),
+        format!("{}_source_path", spec.frontmatter_prefix),
         Value::String(slash_normalized_path(relative)),
     );
     extra_frontmatter.insert(
-        "koi_v1_body_hash".to_owned(),
+        format!("{}_body_hash", spec.frontmatter_prefix),
         Value::String(body_hash.clone()),
     );
     if let Some(id) = parsed_json
         .as_ref()
         .and_then(|json| json.get("id").and_then(Value::as_str))
     {
-        extra_frontmatter.insert("koi_v1_id".to_owned(), Value::String(id.to_owned()));
+        extra_frontmatter.insert(
+            format!("{}_id", spec.frontmatter_prefix),
+            Value::String(id.to_owned()),
+        );
     }
     if let Some(project) = parsed_json
         .as_ref()
@@ -1665,13 +1784,16 @@ fn map_file(path: &Path, root: &Path, raw: &str) -> Result<MappedFile, ImportErr
         .and_then(|scope| scope_string(Some(scope), "project"))
     {
         extra_frontmatter.insert(
-            "koi_v1_scope_project".to_owned(),
+            format!("{}_scope_project", spec.frontmatter_prefix),
             Value::String(project.clone()),
         );
         ambiguities.push(ImportAmbiguity {
             path: relative.to_path_buf(),
             field: "scope.project",
-            fallback: "extra_frontmatter.koi_v1_scope_project".to_owned(),
+            fallback: format!(
+                "extra_frontmatter.{}_scope_project",
+                spec.frontmatter_prefix
+            ),
             reason: "Cairn records cannot yet use project as an addressable scope dimension"
                 .to_owned(),
         });
@@ -1717,17 +1839,15 @@ fn map_file(path: &Path, root: &Path, raw: &str) -> Result<MappedFile, ImportErr
         body,
         source_ids: vec![source_id.clone()],
         provenance: Provenance {
-            source_sensor: Identity::parse(KOI_IMPORT_SENSOR).map_err(|source| {
-                ImportError::Domain {
-                    path: relative.to_path_buf(),
-                    source,
-                }
+            source_sensor: Identity::parse(spec.sensor).map_err(|source| ImportError::Domain {
+                path: relative.to_path_buf(),
+                source,
             })?,
             created_at: issued_at.clone(),
             originating_agent_id: author.clone(),
             source_ids: vec![source_id],
             source_hash: source_hash.clone(),
-            consent_ref: "consent:koi-v1-import".to_owned(),
+            consent_ref: spec.consent_ref.to_owned(),
             llm_id_if_any: None,
             source_refs: vec![SourceRef {
                 id: source_ref_id,
@@ -1766,7 +1886,7 @@ fn map_file(path: &Path, root: &Path, raw: &str) -> Result<MappedFile, ImportErr
         session_ids: session_ids_from_json(parsed_json.as_ref()),
         skill_ids: skill_ids_from_json(parsed_json.as_ref()),
         provenance: ExternalImportProvenance {
-            source_sensor: KOI_IMPORT_SENSOR.to_owned(),
+            source_sensor: spec.sensor.to_owned(),
             source_hash: record.provenance.source_hash.clone(),
             source_refs: record.provenance.source_refs.clone(),
         },
@@ -2317,21 +2437,36 @@ fn is_privacy_sensitive_field(field: &str) -> bool {
     .any(|marker| field.contains(marker))
 }
 
-fn scope_from_json(json: Option<&Value>) -> ScopeTuple {
+fn kind_hint_for_path(spec: ImportSpec, relative: &Path) -> Option<MemoryKind> {
+    if spec.system != "openclaw" {
+        return None;
+    }
+    let relative = slash_normalized_path(relative);
+    match relative.as_str() {
+        "MEMORY.md" => Some(MemoryKind::User),
+        "SOUL.md" => Some(MemoryKind::Rule),
+        _ => relative
+            .strip_prefix("memory/")
+            .and_then(|path| path.rsplit('/').next())
+            .and_then(|file_name| file_name.rsplit_once('.').map(|(stem, _)| stem))
+            .and_then(|stem| MemoryKind::parse(stem).ok()),
+    }
+}
+
+fn scope_from_json(json: Option<&Value>, spec: ImportSpec, default_workspace: &str) -> ScopeTuple {
     let scope = json.and_then(|json| json.get("scope"));
     ScopeTuple {
-        tenant: scope_string(scope, "tenant"),
-        workspace: scope_string(scope, "workspace"),
+        tenant: scope_string(scope, "tenant").or_else(|| Some("default".to_owned())),
+        workspace: scope_string(scope, "workspace").or_else(|| Some(default_workspace.to_owned())),
         project: None,
         session_id: scope_string(scope, "session_id"),
-        entity: scope_string(scope, "entity"),
+        entity: scope_string(scope, "entity").or_else(|| Some("ingest".to_owned())),
         user: scope
             .and_then(|scope| scope.get("user"))
             .and_then(Value::as_str)
             .filter(|value| value.starts_with("hmn:"))
-            .unwrap_or(KOI_IMPORT_AUTHOR)
-            .to_owned()
-            .into(),
+            .map(ToOwned::to_owned)
+            .or_else(|| (spec.system == "koi-v1").then(|| KOI_IMPORT_AUTHOR.to_owned())),
         agent: scope
             .and_then(|scope| scope.get("agent"))
             .and_then(Value::as_str)
