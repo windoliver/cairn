@@ -341,14 +341,14 @@ fn search_human_detail(search: &SreSearchSummary) -> String {
         .iter()
         .filter(|mode| mode.degraded > 0 || mode.failed > 0)
         .map(|mode| {
+            let mut parts = Vec::new();
             if mode.failed > 0 {
-                format!("{} failed {}/{}", mode.mode, mode.failed, mode.invocations)
-            } else {
-                format!(
-                    "{} degraded {}/{}",
-                    mode.mode, mode.degraded, mode.invocations
-                )
+                parts.push(format!("failed {}/{}", mode.failed, mode.invocations));
             }
+            if mode.degraded > 0 {
+                parts.push(format!("degraded {}/{}", mode.degraded, mode.invocations));
+            }
+            format!("{} {}", mode.mode, parts.join(" "))
         })
         .collect();
     if details.is_empty() {

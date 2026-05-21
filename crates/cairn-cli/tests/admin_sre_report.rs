@@ -706,6 +706,36 @@ fn admin_sre_report_human_includes_safe_actionable_details() {
 }
 
 #[test]
+fn admin_sre_report_human_shows_search_failures_and_degradations() {
+    let dir = bootstrap_vault();
+    let metrics = dir.path().join(".cairn/metrics.jsonl");
+    std::fs::write(
+        &metrics,
+        r#"{"event":"search_completed","ts_ms":1,"mode":"semantic","hit_count":0,"latency_ms":42,"degradation_state":"partial","error":null}
+{"event":"search_completed","ts_ms":2,"mode":"semantic","hit_count":0,"latency_ms":43,"degradation_state":"partial","error":"provider_unavailable"}
+"#,
+    )
+    .expect("write metrics");
+
+    let output = cairn()
+        .current_dir(dir.path())
+        .args(["admin", "sre", "report"])
+        .output()
+        .expect("run sre report");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("semantic"), "stdout: {stdout}");
+    assert!(stdout.contains("failed 1/2"), "stdout: {stdout}");
+    assert!(stdout.contains("degraded 2/2"), "stdout: {stdout}");
+    assert_forbidden_fragments_absent(&stdout);
+}
+
+#[test]
 fn admin_sre_report_human_rolls_up_rehydration_failures() {
     let dir = bootstrap_vault();
     let metrics = dir.path().join(".cairn/metrics.jsonl");
