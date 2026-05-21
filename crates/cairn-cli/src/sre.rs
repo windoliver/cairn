@@ -82,10 +82,7 @@ fn build_report_with_bench(
         captured_at_ms: metrics::now_ms(),
         vault: SreVaultSummary {
             id_hash: "sha256:local-vault".into(),
-            name: vault_root
-                .file_name()
-                .map(|s| stable_string(&s.to_string_lossy(), "local_vault"))
-                .unwrap_or_else(|| "local_vault".into()),
+            name: "local_vault".into(),
         },
         workflow: SreWorkflowSummary {
             status: SreStatus::Unknown,
@@ -252,11 +249,11 @@ fn load_bench_gates(bench_report_dir: Option<&Path>) -> Result<SreGateSummary, S
             let status = check.status.ok_or("invalid sre.json schema")?;
             let unit = check.unit.ok_or("invalid sre.json schema")?;
             Ok(SreGateResult {
-                name: stable_string(&name, "redacted_gate"),
+                name: allowlisted_gate_name(&name),
                 status: parse_gate_status(&status),
                 measured: check.measured.and_then(SreMeasurement::new),
                 threshold: check.threshold.and_then(SreMeasurement::new),
-                unit: stable_string(&unit, "redacted"),
+                unit: allowlisted_gate_unit(&unit),
                 detail: check.detail.map(|detail| {
                     SreDetail::stable(&detail).unwrap_or_else(|| SreDetail::from_raw(&detail))
                 }),
@@ -269,10 +266,18 @@ fn load_bench_gates(bench_report_dir: Option<&Path>) -> Result<SreGateSummary, S
     })
 }
 
-fn stable_string(raw: &str, fallback: &str) -> String {
-    SreDetail::stable(raw)
-        .map(|detail| detail.as_str().to_owned())
-        .unwrap_or_else(|| fallback.to_owned())
+fn allowlisted_gate_name(raw: &str) -> String {
+    match raw {
+        "migration_backlog" | "sre_privacy_scrub" | "cold_rehydrate_p95" => raw.to_owned(),
+        _ => "redacted_gate".to_owned(),
+    }
+}
+
+fn allowlisted_gate_unit(raw: &str) -> String {
+    match raw {
+        "ms" | "count" | "forbidden_fields" | "bytes" | "records" => raw.to_owned(),
+        _ => "redacted".to_owned(),
+    }
 }
 
 fn empty_gate_summary() -> SreGateSummary {
@@ -318,7 +323,7 @@ fn rollup_gate_status(gates: &[SreGateResult]) -> SreStatus {
 #[must_use]
 pub fn render_human(report: &SreReport) -> String {
     format!(
-        "SRE status: {overall}\nworkflow: {workflow:?}\nrehydration: {rehydration:?} (p95 {p95:?} / {slo:.0}ms)\nprojection: {projection:?}\nsearch: {search:?}\ngates: {gates:?}",
+        "SRE status: {overall}\nworkflow: {workflow:?}\nrehydration: {rehydration:?} (p95 {p95:?} / {slo:.0}ms)\nprojection: {projection:?}\nsearch: {search:?}{search_detail}\ngates: {gates:?}{gate_detail}",
         overall = status_text(report),
         workflow = report.workflow.status,
         rehydration = report.rehydration.status,
@@ -326,8 +331,47 @@ pub fn render_human(report: &SreReport) -> String {
         slo = report.rehydration.slo_ms.get(),
         projection = report.projection.status,
         search = report.search.status,
+        search_detail = search_human_detail(&report.search),
         gates = report.gates.status,
+        gate_detail = gate_human_detail(&report.gates),
     )
+}
+
+fn search_human_detail(search: &SreSearchSummary) -> String {
+    let details: Vec<String> = search
+        .modes
+        .iter()
+        .filter(|mode| mode.degraded > 0 || mode.failed > 0)
+        .map(|mode| {
+            if mode.failed > 0 {
+                format!("{} failed {}/{}", mode.mode, mode.failed, mode.invocations)
+            } else {
+                format!(
+                    "{} degraded {}/{}",
+                    mode.mode, mode.degraded, mode.invocations
+                )
+            }
+        })
+        .collect();
+    if details.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", details.join(", "))
+    }
+}
+
+fn gate_human_detail(gates: &SreGateSummary) -> String {
+    let details: Vec<&str> = gates
+        .gates
+        .iter()
+        .filter(|gate| gate.status != SreStatus::Ok)
+        .map(|gate| gate.name.as_str())
+        .collect();
+    if details.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", details.join(", "))
+    }
 }
 
 fn status_text(report: &SreReport) -> &'static str {

@@ -930,8 +930,15 @@ fn run_admin(matches: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
     // (round-4 review #1).
     // admin gates every subcommand below via `enforce_vault_binding`,
     // so the resolution source isn't load-bearing here — discard it.
+    let is_sre_report = matches.subcommand().is_some_and(|(name, sub)| {
+        name == "sre" && matches!(sub.subcommand(), Some(("report", _)))
+    });
     let (vault_root, _source) = match resolve_vault_or_cwd(explicit_vault) {
         Ok(v) => v,
+        Err(_e) if is_sre_report => {
+            eprintln!("cairn admin sre report: vault resolution error");
+            return ExitCode::from(78); // EX_CONFIG
+        }
         Err(e) => {
             eprintln!("cairn admin: vault resolution error — {e:#}");
             return ExitCode::from(78); // EX_CONFIG
@@ -946,9 +953,6 @@ fn run_admin(matches: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
     // bubbling a malformed `.cairn/config.yaml` as the primary
     // diagnostic — a non-vault config has no business shaping the
     // operator-facing error here (round-8 review #2).
-    let is_sre_report = matches.subcommand().is_some_and(|(name, sub)| {
-        name == "sre" && matches!(sub.subcommand(), Some(("report", _)))
-    });
     let binding_result = if is_sre_report {
         enforce_vault_binding_path_free("admin sre report", &vault_root)
     } else {
