@@ -254,9 +254,7 @@ fn load_bench_gates(bench_report_dir: Option<&Path>) -> Result<SreGateSummary, S
                 measured: check.measured.and_then(SreMeasurement::new),
                 threshold: check.threshold.and_then(SreMeasurement::new),
                 unit: allowlisted_gate_unit(&unit),
-                detail: check.detail.map(|detail| {
-                    SreDetail::stable(&detail).unwrap_or_else(|| SreDetail::from_raw(&detail))
-                }),
+                detail: check.detail.map(|_detail| SreDetail::from_raw("SECRET")),
             })
         })
         .collect::<Result<_, &'static str>>()?;

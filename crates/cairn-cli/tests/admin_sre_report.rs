@@ -430,6 +430,42 @@ fn admin_sre_report_scrubs_stable_looking_untrusted_labels() {
 }
 
 #[test]
+fn admin_sre_report_redacts_stable_looking_imported_gate_detail() {
+    let dir = bootstrap_vault();
+    let bench = tempfile::tempdir().expect("bench dir");
+    std::fs::write(
+        bench.path().join("sre.json"),
+        r#"{"checks":[{"name":"migration_backlog","status":"fail","measured":1,"threshold":0,"unit":"ms","detail":"customer_acme_board"}]}"#,
+    )
+    .expect("write bench sre report");
+
+    let output = cairn()
+        .current_dir(dir.path())
+        .args([
+            "admin",
+            "sre",
+            "report",
+            "--json",
+            "--bench-report-dir",
+            bench.path().to_str().expect("utf8"),
+        ])
+        .output()
+        .expect("run sre report");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("customer_acme_board"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("\"detail\":\"redacted\""),
+        "stdout: {stdout}"
+    );
+}
+
+#[test]
 fn admin_sre_report_rejects_malformed_bench_sre_json() {
     let dir = bootstrap_vault();
     let bench = tempfile::tempdir().expect("bench dir");
