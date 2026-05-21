@@ -193,7 +193,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl AgentProvider for StubAgent {
-        fn name(&self) -> &str {
+        fn name(&self) -> &'static str {
             "stub-agent-provider"
         }
 
