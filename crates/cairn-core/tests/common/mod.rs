@@ -22,7 +22,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use cairn_core::contract::consent_lookup::{
-    ConsentLookup, ConsentLookupError, FederationAcceptRecord,
+    ConsentLookup, ConsentLookupError, FederationAcceptRecord, StoredRevocation, StoredShareLink,
 };
 use cairn_core::contract::federation_outbox::{FederationOutbox, FederationOutboxError};
 use cairn_core::contract::job_store::EnqueueRequest;
@@ -37,7 +37,7 @@ use cairn_core::domain::federation::{
     DedupKey, FederationEnvelope, FederationEnvelopeKind, PeerEndpoint,
 };
 use cairn_core::domain::identity::keys::SigningKey;
-use cairn_core::domain::sharing::ShareLinkPayload;
+use cairn_core::domain::sharing::{ShareLinkPayload, SignedShareLink};
 use cairn_core::domain::time::{Clock, FixedClock};
 use cairn_core::domain::{
     ActorChainEntry, BodyHash, ChainRole, ConsentEvent, ConsentKind, Ed25519Signature,
@@ -46,7 +46,8 @@ use cairn_core::domain::{
 };
 use cairn_core::rebac::{RebacAction, RebacContext, RebacRelation};
 use cairn_core::verbs::accept_share::AcceptShareDeps;
-use cairn_core::verbs::propose_share::ProposeShareDeps;
+use cairn_core::verbs::propose_share::{ProposeShareDeps, ProposeShareRequest, propose_share};
+use cairn_core::verbs::revoke_share::RevokeShareDeps;
 use chrono::{DateTime, Utc};
 use sha2::{Digest as _, Sha256};
 use ulid::Ulid;
@@ -227,6 +228,32 @@ impl FederationOutbox for InMemoryOutbox {
         guard.tombstones.extend(tombstone_ids.iter().cloned());
         Ok(())
     }
+
+    async fn record_share_revoke_grant(
+        &self,
+        event: &ConsentEvent,
+        job: EnqueueRequest,
+    ) -> Result<(), FederationOutboxError> {
+        // Mirror the propose-side dedup gate: a duplicate dedupe_key
+        // means a parallel revoke raced our `find_revocation` lookup;
+        // surface `DuplicateJob` so the verb maps it to
+        // `DuplicateNonce`.
+        let mut guard = self
+            .inner
+            .lock()
+            .expect("invariant: outbox mutex poisoned only on prior test panic");
+        if let Some(dedupe_key) = job.dedupe_key.as_ref()
+            && guard
+                .jobs
+                .iter()
+                .any(|j| j.dedupe_key.as_deref() == Some(dedupe_key.as_str()))
+        {
+            return Err(FederationOutboxError::DuplicateJob);
+        }
+        guard.events.push(event.clone());
+        guard.jobs.push(job);
+        Ok(())
+    }
 }
 
 impl InMemoryOutbox {
@@ -283,6 +310,10 @@ impl InMemoryOutbox {
 pub struct TestCtx {
     pub store: InMemoryStore,
     pub outbox: InMemoryOutbox,
+    /// Issuer-side consent lookup. The T7 propose tests don't read from
+    /// it, but T9 needs it (the revoke verb's `find_share_link` /
+    /// `find_revocation` lookups).
+    pub consent_lookup: InMemoryConsentLookup,
     pub signing_key: SigningKey,
     pub signer: Identity,
     pub clock: FixedClock,
@@ -310,6 +341,7 @@ impl TestCtx {
     fn build(with_relation: bool, federation_ready: bool) -> Self {
         let store = InMemoryStore::default();
         let outbox = InMemoryOutbox::default();
+        let consent_lookup = InMemoryConsentLookup::default();
         let signing_key = SigningKey::from_bytes(&[7_u8; 32]);
         let signer = Identity::parse("hmn:alice").expect("invariant: valid human identity");
 
@@ -340,6 +372,7 @@ impl TestCtx {
         Self {
             store,
             outbox,
+            consent_lookup,
             signing_key,
             signer,
             clock,
@@ -455,6 +488,72 @@ impl TestCtx {
             federation_ready: self.federation_ready,
         }
     }
+
+    /// Build a [`RevokeShareDeps`] snapshot from the current ctx — used
+    /// by the `revoke_share` (issuer) tests.
+    pub fn revoke_deps(&self) -> RevokeShareDeps<'_> {
+        RevokeShareDeps {
+            outbox: &self.outbox,
+            consent_lookup: &self.consent_lookup,
+            signing_key: &self.signing_key,
+            signer_identity: &self.signer,
+            signer_key_version: 1,
+            clock: &self.clock,
+            federation_ready: self.federation_ready,
+        }
+    }
+
+    pub async fn count_consent_events(&self, link_id: &str, kind: ConsentKind) -> usize {
+        tokio::task::yield_now().await;
+        self.outbox.count_events(link_id, kind)
+    }
+
+    /// Mint a fresh propose share link, seed the consent-lookup fake so
+    /// the revoke verb can resolve it back, and return the response.
+    ///
+    /// Mirrors the production flow: a `propose_share` call atomically
+    /// commits the consent row + propagation job; the timeline
+    /// projection (T12) materialises the resulting
+    /// [`StoredShareLink`]. Here we short-circuit by writing the
+    /// fixture directly so the T9 verb tests don't depend on T12
+    /// landing first.
+    pub async fn mint_propose_share(&self) -> ProposeOutcome {
+        let record_id = self.insert_project_record("hello-revoke").await;
+        let req = ProposeShareRequest {
+            record_ids: vec![record_id],
+            grantee: Some(self.bob_identity()),
+            scope: self.scope(),
+            grant_tier: MemoryVisibility::Team,
+            expires_at: self.in_one_hour(),
+            peer: Some(self.peer_endpoint()),
+        };
+        let resp = propose_share(req, &self.deps())
+            .await
+            .expect("invariant: propose_share happy path must succeed in mint_propose_share");
+        // Mirror the propose row into the consent-lookup projection so
+        // `revoke_share::find_share_link` resolves it back.
+        self.consent_lookup
+            .record_share_link(StoredShareLink {
+                link_id: resp.link.link_id.clone(),
+                payload: resp.link.payload.clone(),
+                peer: Some(self.peer_endpoint().0.clone()),
+            });
+        ProposeOutcome {
+            link: resp.link,
+            operation_id: resp.operation_id,
+        }
+    }
+}
+
+/// Outcome of [`TestCtx::mint_propose_share`].
+///
+/// Mirrors the public [`cairn_core::verbs::propose_share::ProposeShareResponse`]
+/// shape but lives in the test crate so revoke tests can grab the
+/// `link_id` without a `use` of the verb response type.
+#[derive(Debug, Clone)]
+pub struct ProposeOutcome {
+    pub link: SignedShareLink,
+    pub operation_id: String,
 }
 
 // ---------- ReceiverCtx (T8: accept_share) ----------------------------
@@ -468,6 +567,8 @@ impl TestCtx {
 pub struct InMemoryConsentLookup {
     accepts: Mutex<BTreeMap<String, FederationAcceptRecord>>,
     revoked: Mutex<std::collections::HashSet<String>>,
+    share_links: Mutex<BTreeMap<String, StoredShareLink>>,
+    revocations: Mutex<BTreeMap<String, StoredRevocation>>,
 }
 
 #[async_trait]
@@ -497,6 +598,28 @@ impl ConsentLookup for InMemoryConsentLookup {
             .expect("invariant: consent-lookup mutex poisoned only on prior test panic");
         Ok(guard.contains(link_id))
     }
+
+    async fn find_share_link(
+        &self,
+        link_id: &str,
+    ) -> Result<Option<StoredShareLink>, ConsentLookupError> {
+        let guard = self
+            .share_links
+            .lock()
+            .expect("invariant: consent-lookup mutex poisoned only on prior test panic");
+        Ok(guard.get(link_id).cloned())
+    }
+
+    async fn find_revocation(
+        &self,
+        link_id: &str,
+    ) -> Result<Option<StoredRevocation>, ConsentLookupError> {
+        let guard = self
+            .revocations
+            .lock()
+            .expect("invariant: consent-lookup mutex poisoned only on prior test panic");
+        Ok(guard.get(link_id).cloned())
+    }
 }
 
 impl InMemoryConsentLookup {
@@ -520,6 +643,29 @@ impl InMemoryConsentLookup {
             .lock()
             .expect("invariant: consent-lookup mutex poisoned only on prior test panic");
         guard.insert(link_id.to_owned());
+    }
+
+    /// Insert a `StoredShareLink` keyed by `link_id` so the revoke
+    /// verb's `find_share_link` lookup resolves it.
+    pub fn record_share_link(&self, link: StoredShareLink) {
+        let mut guard = self
+            .share_links
+            .lock()
+            .expect("invariant: consent-lookup mutex poisoned only on prior test panic");
+        guard.insert(link.link_id.clone(), link);
+    }
+
+    /// Mirror a successful revoke into the lookup so the next call's
+    /// `find_revocation` short-circuits and replays the original
+    /// `(operation_id, SignedRevocation)`. In production the
+    /// `cairn-store-sqlite` adapter materialises this from the consent
+    /// projection inside the same transaction as the apply.
+    pub fn record_revocation(&self, link_id: &str, rec: StoredRevocation) {
+        let mut guard = self
+            .revocations
+            .lock()
+            .expect("invariant: consent-lookup mutex poisoned only on prior test panic");
+        guard.insert(link_id.to_owned(), rec);
     }
 }
 

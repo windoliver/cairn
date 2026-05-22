@@ -124,4 +124,27 @@ pub trait FederationOutbox: Send + Sync {
         event: &ConsentEvent,
         tombstone_ids: &[String],
     ) -> Result<(), FederationOutboxError>;
+
+    /// Atomically append `event` to the consent journal AND enqueue an
+    /// outbound revoke `job` (issuer-side revoke path; brief §12.a).
+    ///
+    /// Mirrors [`Self::record_share_grant`] structurally — the verb that
+    /// minted the original propose row also owns the revoke pair. Both
+    /// rows MUST land in one transaction so a half-written revoke can
+    /// never claim to be audited while the propagation job is missing.
+    ///
+    /// # Errors
+    ///
+    /// * [`FederationOutboxError::DuplicateJob`] when the propagation
+    ///   job's `(kind, dedupe_key)` already exists. The verb caller
+    ///   treats this as an idempotent replay.
+    /// * [`FederationOutboxError::ConsentRejected`] when the consent
+    ///   event itself fails adapter-side validation.
+    /// * [`FederationOutboxError::Backend`] for opaque adapter I/O
+    ///   failures.
+    async fn record_share_revoke_grant(
+        &self,
+        event: &ConsentEvent,
+        job: EnqueueRequest,
+    ) -> Result<(), FederationOutboxError>;
 }
