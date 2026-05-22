@@ -53,6 +53,10 @@ pub fn build_extract_chain(
     config: &ExtractConfig,
     providers: ExtractProviders,
 ) -> Result<ExtractChain, ExtractBuildError> {
+    let ExtractProviders {
+        llm: llm_provider,
+        agent: agent_provider,
+    } = providers;
     let mut workers: Vec<Box<dyn ExtractorWorker>> = Vec::with_capacity(config.chain.len());
     for entry in &config.chain {
         let budget = pipeline_budget_from_config(&entry.budget, &entry.worker);
@@ -64,15 +68,13 @@ pub fn build_extract_chain(
                 )));
             }
             ExtractorWorkerKind::Llm => {
-                let provider = providers
-                    .llm
+                let provider = llm_provider
                     .clone()
                     .ok_or(ExtractBuildError::MissingLlmProvider)?;
                 workers.push(Box::new(LLMExtractor::new(provider).with_budget(budget)));
             }
             ExtractorWorkerKind::Agent => {
-                let provider = providers
-                    .agent
+                let provider = agent_provider
                     .clone()
                     .ok_or(ExtractBuildError::MissingAgentProvider)?;
                 let mut extractor = AgentExtractor::new(provider).with_budget(budget);
@@ -96,10 +98,11 @@ fn pipeline_budget_from_config(
     worker: &ExtractorWorkerKind,
 ) -> ExtractBudget {
     let mut b = match worker {
-        ExtractorWorkerKind::Regex => ExtractBudget::regex_default(),
+        ExtractorWorkerKind::Regex | ExtractorWorkerKind::Custom(_) => {
+            ExtractBudget::regex_default()
+        }
         ExtractorWorkerKind::Llm => ExtractBudget::llm_default(),
         ExtractorWorkerKind::Agent => ExtractBudget::agent_default(),
-        ExtractorWorkerKind::Custom(_) => ExtractBudget::regex_default(),
     };
     if let Some(max_wall_ms) = entry_budget.max_wall_ms {
         b.max_wall_ms = max_wall_ms;

@@ -8,6 +8,7 @@ use crate::pipeline::extract::TextSpan;
 use super::AGENT_EXTRACTOR_OUTPUT_SCHEMA;
 
 /// Render the prompt given to the read-only agent extractor runtime.
+#[must_use]
 pub fn render_agent_extract_prompt(
     source_event: &CaptureEventId,
     source_text: &str,

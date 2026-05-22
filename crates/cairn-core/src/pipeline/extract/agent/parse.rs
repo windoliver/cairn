@@ -62,8 +62,10 @@ pub fn parse_agent_response(
     source_text: &str,
     value: Value,
 ) -> Result<ParsedAgentResponse, AgentParseError> {
-    let object = value.as_object().ok_or(AgentParseError::NotObject)?;
-    reject_unknown_keys(object, "output", &["drafts", "discards", "evidence"])?;
+    let Value::Object(object) = value else {
+        return Err(AgentParseError::NotObject);
+    };
+    reject_unknown_keys(&object, "output", &["drafts", "discards", "evidence"])?;
 
     let drafts_value = required_array(object.get("drafts"), "drafts")?;
     let discards_value = required_array(object.get("discards"), "discards")?;
@@ -262,7 +264,6 @@ fn parse_discard_reason(value: &str) -> DiscardReason {
         "tool_lookup" => DiscardReason::ToolLookup,
         "competing_source" => DiscardReason::CompetingSource,
         "low_salience" => DiscardReason::LowSalience,
-        "other" => DiscardReason::Other,
         _ => DiscardReason::Other,
     }
 }

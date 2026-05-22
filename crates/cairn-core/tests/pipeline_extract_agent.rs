@@ -103,7 +103,7 @@ impl RecordingAgentProvider {
 
 #[async_trait::async_trait]
 impl AgentProvider for RecordingAgentProvider {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "recording-agent"
     }
 
@@ -507,9 +507,8 @@ fn build_chain_rejects_agent_entry_without_provider() {
         ],
     };
 
-    let err = match build_extract_chain(&config, ExtractProviders::default()) {
-        Ok(_) => panic!("missing agent provider should fail"),
-        Err(err) => err,
+    let Err(err) = build_extract_chain(&config, ExtractProviders::default()) else {
+        panic!("missing agent provider should fail");
     };
     assert!(matches!(err, ExtractBuildError::MissingAgentProvider));
 }
@@ -667,7 +666,7 @@ fn parser_rejects_confidence_that_only_rounds_into_range_as_f32() {
         "drafts": [{
             "kind": "fact",
             "body": "rounded confidence",
-            "confidence": 1.00000001,
+            "confidence": 1.000_000_01,
             "span": {"start": 0, "end": 3}
         }],
         "discards": [],

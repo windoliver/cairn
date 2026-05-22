@@ -23,7 +23,7 @@ pub enum DreamPlanError {
     Store(#[from] StoreError),
 }
 
-/// Build the autonomous one-upsert FlushPlan used by dream distillation.
+/// Build the autonomous one-upsert `FlushPlan` used by dream distillation.
 pub fn build_dream_plan(
     record: MemoryRecord,
     issuer: &str,
@@ -68,7 +68,7 @@ pub fn build_dream_plan(
     })
 }
 
-/// Apply a dream FlushPlan after validating it contains exactly one upsert.
+/// Apply a dream `FlushPlan` after validating it contains exactly one upsert.
 pub(crate) async fn apply_dream_plan(
     store: &dyn MemoryStore,
     plan: FlushPlan,

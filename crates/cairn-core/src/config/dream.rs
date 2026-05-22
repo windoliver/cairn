@@ -389,8 +389,10 @@ mod tests {
 
     #[test]
     fn agent_worker_requires_nonzero_tool_budget() {
-        let mut cfg = DreamConfig::default();
-        cfg.enabled = true;
+        let mut cfg = DreamConfig {
+            enabled: true,
+            ..DreamConfig::default()
+        };
         cfg.deep_dreaming.worker = DreamWorkerMode::Agent;
         cfg.deep_dreaming.max_tool_calls = 0;
 

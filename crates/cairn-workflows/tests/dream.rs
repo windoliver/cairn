@@ -93,7 +93,7 @@ impl RecordingAgentProvider {
 
 #[async_trait]
 impl AgentProvider for RecordingAgentProvider {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "recording-agent"
     }
 
@@ -244,9 +244,11 @@ async fn agent_dream_outputs_evidence_and_budget_metadata() {
         "expected Done, got {outcome:?}"
     );
 
-    let requests = requests.lock().expect("requests lock");
-    assert_eq!(requests.len(), 1);
-    let request = &requests[0];
+    let request = {
+        let requests = requests.lock().expect("requests lock");
+        assert_eq!(requests.len(), 1);
+        requests[0].clone()
+    };
     assert_eq!(request.identity.as_str(), "agt:cairn-librarian:v2");
     assert_eq!(request.scope, AgentScope::read_only());
     assert_eq!(

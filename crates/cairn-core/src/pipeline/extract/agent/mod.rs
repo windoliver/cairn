@@ -166,6 +166,39 @@ fn discard_in_eligibility(discard: &DiscardCandidate, eligible_spans: &[TextSpan
     span_in_eligibility(discard.source_span, eligible_spans)
 }
 
+fn resolved_body_and_eligible_spans<'a>(
+    input: &'a ExtractInput<'a>,
+) -> Result<Option<(&'a str, Vec<TextSpan>)>, ExtractError> {
+    let body = match &input.body {
+        BodyResolution::NotApplicable => return Ok(None),
+        BodyResolution::Failed(e) => {
+            return Err(ExtractError::BodyResolution {
+                event_id: input.event.event_id.as_str().to_owned(),
+                source: e.clone(),
+            });
+        }
+        BodyResolution::Resolved(rb) => rb.text(),
+    };
+
+    if body.is_empty() {
+        return Ok(None);
+    }
+
+    let eligible_spans = match &input.eligible_spans {
+        None => {
+            let body_len = u32::try_from(body.len()).unwrap_or(u32::MAX);
+            if body_len == 0 {
+                return Ok(None);
+            }
+            vec![TextSpan::new(0, body_len)]
+        }
+        Some(spans) if spans.is_empty() => return Ok(None),
+        Some(spans) => spans.clone(),
+    };
+
+    Ok(Some((body, eligible_spans)))
+}
+
 #[async_trait::async_trait]
 impl ExtractorWorker for AgentExtractor {
     fn name(&self) -> &'static str {
@@ -181,31 +214,8 @@ impl ExtractorWorker for AgentExtractor {
     }
 
     async fn extract(&self, input: &ExtractInput<'_>) -> Result<ExtractResult, ExtractError> {
-        let body = match &input.body {
-            BodyResolution::NotApplicable => return Ok(empty_result()),
-            BodyResolution::Failed(e) => {
-                return Err(ExtractError::BodyResolution {
-                    event_id: input.event.event_id.as_str().to_owned(),
-                    source: e.clone(),
-                });
-            }
-            BodyResolution::Resolved(rb) => rb.text(),
-        };
-
-        if body.is_empty() {
+        let Some((body, eligible_spans)) = resolved_body_and_eligible_spans(input)? else {
             return Ok(empty_result());
-        }
-
-        let eligible_spans = match &input.eligible_spans {
-            None => {
-                let body_len = u32::try_from(body.len()).unwrap_or(u32::MAX);
-                if body_len == 0 {
-                    return Ok(empty_result());
-                }
-                vec![TextSpan::new(0, body_len)]
-            }
-            Some(spans) if spans.is_empty() => return Ok(empty_result()),
-            Some(spans) => spans.clone(),
         };
 
         let request = self

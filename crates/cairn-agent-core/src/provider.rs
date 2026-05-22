@@ -35,7 +35,7 @@ impl CairnAgentProvider {
 
 #[async_trait::async_trait]
 impl AgentProvider for CairnAgentProvider {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "cairn-agent-core"
     }
 
@@ -61,36 +61,7 @@ impl AgentProvider for CairnAgentProvider {
                 return Ok(aborted_run(err, &meter, tool_calls, policy_trace));
             }
 
-            let Some(remaining) = remaining_wall_clock(deadline) else {
-                return Ok(aborted_run(
-                    wall_clock_exceeded(),
-                    &meter,
-                    tool_calls,
-                    policy_trace,
-                ));
-            };
-            let completion_request = CompletionRequest::builder()
-                .prompt(render_prompt(&request.prompt, &history))
-                .maybe_budget(completion_budget(&request))
-                .build();
-            let completion = match timeout(remaining, self.llm.complete(&completion_request)).await
-            {
-                Ok(Ok(completion)) => completion,
-                Ok(Err(err)) => {
-                    let mapped = map_llm_error(err);
-                    return Ok(aborted_run(mapped, &meter, tool_calls, policy_trace));
-                }
-                Err(_elapsed) => {
-                    return Ok(aborted_run(
-                        wall_clock_exceeded(),
-                        &meter,
-                        tool_calls,
-                        policy_trace,
-                    ));
-                }
-            };
-
-            let action = match completion_to_action(completion) {
+            let action = match self.next_action(&request, &history, deadline).await {
                 Ok(action) => action,
                 Err(err) => return Ok(aborted_run(err, &meter, tool_calls, policy_trace)),
             };
@@ -235,17 +206,39 @@ fn supported_versions() -> VersionRange {
     VersionRange::new(CONTRACT_VERSION, ContractVersion::new(0, 2, 0))
 }
 
-fn completion_budget(request: &AgentSpawnRequest) -> Option<ExtractBudget> {
-    Some(ExtractBudget {
-        max_tokens: Some(request.cost_budget.max_cost_units.min(u64::from(u32::MAX)) as u32),
-        max_wall_ms: Some(
-            request
-                .wall_clock_budget
-                .max_millis
-                .min(u64::from(u32::MAX)) as u32,
-        ),
+impl CairnAgentProvider {
+    async fn next_action(
+        &self,
+        request: &AgentSpawnRequest,
+        history: &[String],
+        deadline: Instant,
+    ) -> Result<AgentAction, AgentProviderError> {
+        let Some(remaining) = remaining_wall_clock(deadline) else {
+            return Err(wall_clock_exceeded());
+        };
+        let completion_request = CompletionRequest::builder()
+            .prompt(render_prompt(&request.prompt, history))
+            .budget(completion_budget(request))
+            .build();
+        let completion = match timeout(remaining, self.llm.complete(&completion_request)).await {
+            Ok(Ok(completion)) => completion,
+            Ok(Err(err)) => return Err(map_llm_error(err)),
+            Err(_elapsed) => return Err(wall_clock_exceeded()),
+        };
+        completion_to_action(completion)
+    }
+}
+
+fn completion_budget(request: &AgentSpawnRequest) -> ExtractBudget {
+    ExtractBudget {
+        max_tokens: Some(clamp_to_u32(request.cost_budget.max_cost_units)),
+        max_wall_ms: Some(clamp_to_u32(request.wall_clock_budget.max_millis)),
         max_turns: Some(request.cost_budget.max_turns),
-    })
+    }
+}
+
+fn clamp_to_u32(value: u64) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 fn completion_to_action(completion: CompletionOutput) -> Result<AgentAction, AgentProviderError> {

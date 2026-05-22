@@ -51,10 +51,10 @@ impl AgentToolExecutor for CairnCliToolExecutor {
     async fn execute(
         &self,
         call: &AgentToolCall,
-        args: serde_json::Value,
+        tool_args: serde_json::Value,
         wall_clock_remaining: Duration,
     ) -> Result<ToolExecution, AgentProviderError> {
-        let argv = build_argv(call, &args)?;
+        let argv = build_argv(call, &tool_args)?;
         let command = self.command.clone();
         let output = tokio::task::spawn_blocking(move || {
             run_child_with_timeout(command, argv, wall_clock_remaining)
@@ -146,11 +146,11 @@ fn wall_clock_exceeded() -> AgentProviderError {
 
 fn build_argv(
     call: &AgentToolCall,
-    args: &serde_json::Value,
+    tool_args: &serde_json::Value,
 ) -> Result<Vec<String>, AgentProviderError> {
     match call.verb {
         CairnVerb::Search => {
-            let Some(query) = first_string(args, &["q", "query"]) else {
+            let Some(query) = first_string(tool_args, &["q", "query"]) else {
                 return Err(AgentProviderError::InvalidRequest {
                     message: "search tool requires `q` or `query`".to_string(),
                 });
@@ -166,14 +166,14 @@ fn build_argv(
         }
         CairnVerb::Retrieve => {
             let mut argv = vec!["retrieve".to_string(), "--json".to_string()];
-            if let Some(id) = first_string(args, &["id", "record_id", "key"]) {
+            if let Some(id) = first_string(tool_args, &["id", "record_id", "key"]) {
                 argv.push(id.to_string());
             }
             Ok(argv)
         }
         CairnVerb::Lint if !call.write_report && !call.persist => {
             let mut argv = vec!["lint".to_string()];
-            if let Some(plan) = first_string(args, &["plan"]) {
+            if let Some(plan) = first_string(tool_args, &["plan"]) {
                 argv.push("--plan".to_string());
                 argv.push(plan.to_string());
             }

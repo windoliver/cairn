@@ -32,7 +32,7 @@ impl SequenceLlm {
 
 #[async_trait::async_trait]
 impl LLMProvider for SequenceLlm {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "sequence-llm"
     }
 
@@ -74,7 +74,7 @@ impl SlowLlm {
 
 #[async_trait::async_trait]
 impl LLMProvider for SlowLlm {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "slow-llm"
     }
 
@@ -575,7 +575,7 @@ async fn unconfigured_provider_registers_but_spawn_unavailable() {
     let name = PluginName::new("cairn-agent-core").expect("valid plugin name");
     assert!(registry.agent_provider(&name).is_some());
 
-    let provider = UnconfiguredCairnAgentProvider::default();
+    let provider = UnconfiguredCairnAgentProvider;
 
     assert_eq!(provider.name(), "cairn-agent-core");
     assert_eq!(

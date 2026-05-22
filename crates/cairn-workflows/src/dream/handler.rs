@@ -4,7 +4,7 @@
 //! `window_size_records` recent records bound by the payload's scope.
 //! The `hybrid` mode first prunes duplicate bodies, then uses the same
 //! bounded LLM distillation call. The `agent` mode delegates synthesis
-//! to a read-only AgentProvider worker. All modes upsert a
+//! to a read-only `AgentProvider` worker. All modes upsert a
 //! deterministic `reasoning` record carrying tier, worker, budget, and
 //! source evidence metadata. When the configured worker runtime is not
 //! wired the handler returns
