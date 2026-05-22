@@ -616,7 +616,7 @@ fn dream_runtime_ready_for_config(config: &CairnConfig, single_tenant_ready: boo
     config.dream.enabled
         && single_tenant_ready
         && if config.dream.requires_agent_provider() {
-            false
+            agent_runtime_configured(config)
         } else {
             config.llm.provider.is_some()
         }
@@ -1428,7 +1428,7 @@ mod tests {
     }
 
     #[test]
-    fn compute_capabilities_agent_dream_is_withheld_until_agent_dispatch_exists() {
+    fn compute_capabilities_agent_dream_requires_agent_runtime() {
         let mut config = CairnConfig::default();
         config.llm.provider = Some(cairn_core::config::LlmProvider::OpenaiCompatible);
         config.agent_provider.kind = Some(cairn_core::config::AgentProviderKind::CairnCore);
@@ -1451,8 +1451,8 @@ mod tests {
 
         let caps = compute_capabilities(Some(tmp.path()), Some(&config), true);
         assert!(
-            !caps.contains(&Capabilities::CairnWorkflowsV1Dream),
-            "agent dream must stay withheld until Task 6 routes DreamWorkerMode::Agent through AgentProvider::spawn; got {caps:?}"
+            caps.contains(&Capabilities::CairnWorkflowsV1Dream),
+            "agent dream is advertised once agent dispatch exists and the bundled runtime is configured; got {caps:?}"
         );
 
         config.llm.provider = None;

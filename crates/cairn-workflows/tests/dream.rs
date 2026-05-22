@@ -5,12 +5,17 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use cairn_core::config::{DreamConfig, DreamTier, DreamTierConfig};
+use cairn_core::config::{DreamConfig, DreamTier, DreamTierConfig, DreamWorkerMode};
 use cairn_core::contract::llm_provider::{
     CompletionOutput, CompletionRequest, LLMProvider, LLMProviderCapabilities, LlmError,
 };
 use cairn_core::contract::memory_store::{ListArgs, MemoryStore};
 use cairn_core::contract::version::{ContractVersion, VersionRange};
+use cairn_core::contract::{
+    AgentBudgetConsumed, AgentOutput, AgentOutputSchema, AgentProvider, AgentProviderCapabilities,
+    AgentProviderError, AgentRun, AgentRunStatus, AgentScope, AgentSpawnRequest,
+    AgentToolAllowlist,
+};
 use cairn_core::domain::taxonomy::MemoryKind;
 use cairn_test_fixtures::{memstore, sample_record};
 use cairn_workflows::scheduler::{HandlerOutcome, JobHandler};
@@ -68,6 +73,91 @@ impl LLMProvider for CapturingLlm {
     }
 }
 
+struct RecordingAgentProvider {
+    requests: Arc<Mutex<Vec<AgentSpawnRequest>>>,
+    run: Mutex<AgentRun>,
+}
+
+impl RecordingAgentProvider {
+    fn new(run: AgentRun) -> Self {
+        Self {
+            requests: Arc::new(Mutex::new(Vec::new())),
+            run: Mutex::new(run),
+        }
+    }
+
+    fn requests(&self) -> Arc<Mutex<Vec<AgentSpawnRequest>>> {
+        self.requests.clone()
+    }
+}
+
+#[async_trait]
+impl AgentProvider for RecordingAgentProvider {
+    fn name(&self) -> &str {
+        "recording-agent"
+    }
+
+    fn capabilities(&self) -> &AgentProviderCapabilities {
+        static CAPS: AgentProviderCapabilities = AgentProviderCapabilities {
+            honors_cost_budget: true,
+            scope_enforced: true,
+            mcp_tools: false,
+            cli_subprocess_tools: true,
+        };
+        &CAPS
+    }
+
+    fn supported_contract_versions(&self) -> VersionRange {
+        VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+    }
+
+    async fn spawn(&self, request: AgentSpawnRequest) -> Result<AgentRun, AgentProviderError> {
+        self.requests.lock().expect("requests lock").push(request);
+        Ok(self.run.lock().expect("run lock").clone())
+    }
+}
+
+fn completed_agent_dream_run() -> AgentRun {
+    AgentRun {
+        status: AgentRunStatus::Completed,
+        abort_error: None,
+        output: AgentOutput::Json(serde_json::json!({
+            "body": "agent synthesized dream body",
+            "evidence": [
+                {
+                    "tool": "search",
+                    "record_id": "01HQZX9F5N0000000000000031",
+                    "claim": "Seeded records support the synthesis."
+                }
+            ]
+        })),
+        budget_consumed: AgentBudgetConsumed {
+            turns: 2,
+            tool_calls: 1,
+            cost_units: 17,
+        },
+        tool_calls: Vec::new(),
+        policy_trace: vec!["search allowed read-only".to_string()],
+    }
+}
+
+fn aborted_agent_budget_run() -> AgentRun {
+    AgentRun {
+        status: AgentRunStatus::Aborted,
+        abort_error: Some(AgentProviderError::BudgetExceeded {
+            limit: "turns".to_string(),
+        }),
+        output: AgentOutput::Empty,
+        budget_consumed: AgentBudgetConsumed {
+            turns: 1,
+            tool_calls: 0,
+            cost_units: 0,
+        },
+        tool_calls: Vec::new(),
+        policy_trace: vec!["turn budget exhausted".to_string()],
+    }
+}
+
 #[tokio::test]
 async fn no_llm_returns_permanent() {
     let store: Arc<dyn MemoryStore> = Arc::new(memstore().await);
@@ -88,6 +178,155 @@ async fn no_llm_returns_permanent() {
     let bytes = payload.to_bytes().expect("encode");
     let outcome = handler.handle(&bytes).await;
     assert!(matches!(outcome, HandlerOutcome::Permanent { .. }));
+}
+
+#[tokio::test]
+async fn agent_dream_outputs_evidence_and_budget_metadata() {
+    let store = Arc::new(memstore().await);
+    let mut first = sample_record(31);
+    first.body = "source excerpt alpha".into();
+    let mut second = sample_record(32);
+    second.body = "source excerpt beta".into();
+    store.upsert(&first).await.expect("seed first");
+    store.upsert(&second).await.expect("seed second");
+
+    let agent = Arc::new(RecordingAgentProvider::new(completed_agent_dream_run()));
+    let requests = agent.requests();
+    let dyn_store: Arc<dyn MemoryStore> = store.clone();
+    let handler = DreamHandler::new(
+        dyn_store,
+        DreamConfig {
+            enabled: true,
+            deep_dreaming: DreamTierConfig {
+                worker: DreamWorkerMode::Agent,
+                window_size_records: 4,
+                completion_token_budget: 256,
+                max_wall_ms: 1_000,
+                max_tool_calls: 2,
+                ..DreamTierConfig::deep_dreaming_default()
+            },
+            ..DreamConfig::default()
+        },
+        None,
+        Some(agent),
+    );
+    let payload = DreamPayload {
+        tier: DreamTier::DeepDreaming,
+        key: "sess-agent".into(),
+        bound_scope: None,
+    };
+
+    let outcome = handler.handle(&payload.to_bytes().expect("encode")).await;
+    assert!(
+        matches!(outcome, HandlerOutcome::Done),
+        "expected Done, got {outcome:?}"
+    );
+
+    let requests = requests.lock().expect("requests lock");
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(request.identity.as_str(), "agt:cairn-librarian:v2");
+    assert_eq!(request.scope, AgentScope::read_only());
+    assert_eq!(
+        request.tool_allowlist,
+        AgentToolAllowlist::read_only_cairn()
+    );
+    assert_eq!(request.output_schema, AgentOutputSchema::Json);
+    assert_eq!(request.cost_budget.max_turns, 2);
+    assert_eq!(request.cost_budget.max_tool_calls, 2);
+    assert!(request.prompt.contains("01HQZX9F5N000000000000001F"));
+    assert!(request.prompt.contains("01HQZX9F5N0000000000000020"));
+    assert!(request.prompt.contains("source excerpt alpha"));
+    assert!(request.prompt.contains("source excerpt beta"));
+
+    let listed = store
+        .list(&ListArgs {
+            limit: 100,
+            ..ListArgs::default()
+        })
+        .await
+        .expect("list");
+    let dreams: Vec<_> = listed
+        .records
+        .iter()
+        .filter(|r| r.kind == MemoryKind::Reasoning && r.body == "agent synthesized dream body")
+        .collect();
+    assert_eq!(dreams.len(), 1, "exactly one agent dream should be written");
+    let dream_meta = dreams[0]
+        .extra_frontmatter
+        .get("dream")
+        .expect("dream metadata");
+    assert_eq!(dream_meta["worker"], "agent");
+    assert_eq!(dream_meta["evidence"][0]["tool"], "search");
+    assert_eq!(
+        dream_meta["evidence"][0]["claim"],
+        "Seeded records support the synthesis."
+    );
+    assert_eq!(dream_meta["budget_consumed"]["turns"], 2);
+    assert_eq!(dream_meta["budget_consumed"]["tool_calls"], 1);
+    assert_eq!(dream_meta["budget_consumed"]["cost_units"], 17);
+    assert_eq!(dream_meta["policy_trace"][0], "search allowed read-only");
+    let metadata_wire = serde_json::to_string(dream_meta).expect("metadata json");
+    assert!(!metadata_wire.contains("source excerpt alpha"));
+    assert!(!metadata_wire.contains("source excerpt beta"));
+}
+
+#[tokio::test]
+async fn agent_dream_budget_abort_is_permanent_without_upsert() {
+    let store = Arc::new(memstore().await);
+    store.upsert(&sample_record(41)).await.expect("seed record");
+
+    let agent = Arc::new(RecordingAgentProvider::new(aborted_agent_budget_run()));
+    let requests = agent.requests();
+    let dyn_store: Arc<dyn MemoryStore> = store.clone();
+    let handler = DreamHandler::new(
+        dyn_store,
+        DreamConfig {
+            enabled: true,
+            deep_dreaming: DreamTierConfig {
+                worker: DreamWorkerMode::Agent,
+                window_size_records: 4,
+                completion_token_budget: 256,
+                max_wall_ms: 1_000,
+                max_tool_calls: 1,
+                ..DreamTierConfig::deep_dreaming_default()
+            },
+            ..DreamConfig::default()
+        },
+        None,
+        Some(agent),
+    );
+    let payload = DreamPayload {
+        tier: DreamTier::DeepDreaming,
+        key: "sess-agent-abort".into(),
+        bound_scope: None,
+    };
+
+    let outcome = handler.handle(&payload.to_bytes().expect("encode")).await;
+    let HandlerOutcome::Permanent { reason, .. } = outcome else {
+        panic!("expected Permanent, got {outcome:?}");
+    };
+    assert!(reason.contains("agent budget exceeded: turns"));
+    assert_eq!(
+        requests.lock().expect("requests lock").len(),
+        1,
+        "agent abort classification must come from AgentProvider::spawn"
+    );
+
+    let listed = store
+        .list(&ListArgs {
+            limit: 100,
+            ..ListArgs::default()
+        })
+        .await
+        .expect("list");
+    assert!(
+        listed
+            .records
+            .iter()
+            .all(|r| r.kind != MemoryKind::Reasoning),
+        "aborted agent dream must not upsert a reasoning record"
+    );
 }
 
 #[tokio::test]
