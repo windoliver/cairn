@@ -383,6 +383,43 @@ async fn with_llm_upserts_dream_record() {
 }
 
 #[tokio::test]
+async fn llm_dream_remains_available_when_agent_mode_is_not_configured() {
+    let store = Arc::new(memstore().await);
+    store.upsert(&sample_record(33)).await.expect("seed");
+
+    let llm = Arc::new(FakeLlm {
+        body: "llm fallback dream body",
+    });
+    let dyn_store: Arc<dyn MemoryStore> = store.clone();
+    let handler = DreamHandler::new(
+        dyn_store,
+        DreamConfig {
+            enabled: true,
+            light_sleep: DreamTierConfig {
+                worker: DreamWorkerMode::Llm,
+                window_size_records: 4,
+                ..DreamTierConfig::light_sleep_default()
+            },
+            ..DreamConfig::default()
+        },
+        Some(llm as Arc<dyn LLMProvider>),
+        None,
+    );
+    let payload = DreamPayload {
+        tier: DreamTier::LightSleep,
+        key: "sess-llm-no-agent".into(),
+        bound_scope: None,
+    };
+
+    let outcome = handler.handle(&payload.to_bytes().expect("encode")).await;
+
+    assert!(
+        matches!(outcome, HandlerOutcome::Done),
+        "expected Done, got {outcome:?}"
+    );
+}
+
+#[tokio::test]
 async fn rem_sleep_records_tier_worker_budget_and_source_evidence() {
     let store = Arc::new(memstore().await);
     store.upsert(&sample_record(11)).await.expect("seed record");

@@ -226,6 +226,90 @@ async fn provider_rejects_unlisted_tool_before_executor_runs() {
     assert_eq!(tools.call_count(), 0);
 }
 
+async fn assert_policy_denial_before_executor_runs(
+    tool: serde_json::Value,
+    args: serde_json::Value,
+    expected: impl FnOnce(&AgentProviderError) -> bool,
+) {
+    let llm = Arc::new(SequenceLlm::new([CompletionOutput::Json(json!({
+        "action": "tool",
+        "tool": tool,
+        "args": args
+    }))]));
+    let tools = Arc::new(RecordingToolExecutor::new(ToolExecution {
+        output: json!({ "unexpected": true }),
+        cost_units: 1,
+    }));
+    let provider = CairnAgentProvider::new(llm, tools.clone());
+
+    let run = provider
+        .spawn(request(AgentOutputSchema::Json, 3))
+        .await
+        .expect("policy denial returns an aborted run");
+
+    assert_eq!(run.status, AgentRunStatus::Aborted);
+    let err = run
+        .abort_error
+        .as_ref()
+        .expect("policy denial should preserve the abort error");
+    assert!(expected(err), "unexpected abort error: {err:?}");
+    assert_eq!(tools.call_count(), 0);
+}
+
+#[tokio::test]
+async fn provider_blocks_forget_before_executor_runs() {
+    assert_policy_denial_before_executor_runs(
+        json!({ "verb": "forget", "write_report": false, "persist": false }),
+        json!({ "record_id": "01HQZX9F5N00000000000000AA" }),
+        |err| {
+            matches!(
+                err,
+                AgentProviderError::ToolNotAllowed {
+                    verb: CairnVerb::Forget
+                } | AgentProviderError::MutatingVerbNotScoped {
+                    verb: CairnVerb::Forget
+                }
+            )
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn provider_blocks_lint_write_report_before_executor_runs() {
+    assert_policy_denial_before_executor_runs(
+        json!({ "verb": "lint", "write_report": true, "persist": false }),
+        json!({ "plan": "weekly" }),
+        |err| {
+            matches!(
+                err,
+                AgentProviderError::ToolNotAllowed {
+                    verb: CairnVerb::Lint
+                } | AgentProviderError::MutatingVerbNotScoped {
+                    verb: CairnVerb::Lint
+                }
+            )
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn provider_blocks_search_persist_flag_before_executor_runs() {
+    assert_policy_denial_before_executor_runs(
+        json!({ "verb": "search", "write_report": false, "persist": true }),
+        json!({ "query": "refund shard" }),
+        |err| {
+            matches!(
+                err,
+                AgentProviderError::InvalidRequest { message }
+                    if message == "persist is valid only for summarize"
+            )
+        },
+    )
+    .await;
+}
+
 #[tokio::test]
 async fn provider_returns_final_json_and_consumed_budget() {
     let llm = Arc::new(SequenceLlm::new([

@@ -152,6 +152,21 @@ fn successful_run() -> AgentRun {
     }
 }
 
+fn agent_run_with_json(output: serde_json::Value) -> AgentRun {
+    AgentRun {
+        status: AgentRunStatus::Completed,
+        abort_error: None,
+        output: AgentOutput::Json(output),
+        budget_consumed: AgentBudgetConsumed {
+            turns: 1,
+            tool_calls: 1,
+            cost_units: 1,
+        },
+        tool_calls: vec![],
+        policy_trace: vec![],
+    }
+}
+
 #[tokio::test]
 async fn agent_extractor_builds_read_only_request_and_returns_drafts() {
     let provider = Arc::new(RecordingAgentProvider::returning(successful_run()));
@@ -185,6 +200,67 @@ async fn agent_extractor_builds_read_only_request_and_returns_drafts() {
     assert_eq!(request.wall_clock_budget.max_millis, 1234);
     assert!(request.prompt.contains("Use shard alpha for refunds."));
     assert!(request.prompt.contains(event.event_id.as_str()));
+}
+
+#[tokio::test]
+async fn agent_extraction_improves_ambiguous_high_stakes_fixture() {
+    let body = "This is how chargeback reviews work: use shard alpha only after legal approval. \
+                The earlier beta shard note was wrong.";
+    let event = cli_event();
+    let input = body_input(&event, body);
+    let regex_only = RegexExtractor::builtin()
+        .extract(&input)
+        .await
+        .expect("regex result");
+    assert!(
+        regex_only.outputs.is_empty(),
+        "fixture should need agent interpretation, got {:?}",
+        regex_only.outputs
+    );
+    assert!(
+        !regex_only.llm_eligible_spans.is_empty(),
+        "regex gate must leave an eligible span for augmenting workers"
+    );
+
+    let provider = Arc::new(RecordingAgentProvider::returning(agent_run_with_json(
+        serde_json::json!({
+            "drafts": [{
+                "kind": "rule",
+                "body": "Chargeback reviews use shard alpha only after legal approval.",
+                "confidence": 0.93,
+                "span": {"start": 0, "end": body.len()},
+                "evidence": [{
+                    "tool": "retrieve",
+                    "claim": "source text contains legal approval condition"
+                }]
+            }],
+            "discards": [{
+                "reason": "source says the beta shard note was wrong",
+                "span": {"start": 0, "end": body.len()}
+            }],
+            "evidence": [{
+                "tool": "retrieve",
+                "claim": "source text contains legal approval condition"
+            }]
+        }),
+    )));
+    let agent_chain = ExtractChain::new(vec![
+        Box::new(RegexExtractor::builtin()),
+        Box::new(AgentExtractor::new(provider)),
+    ])
+    .expect("agent chain");
+
+    let improved = agent_chain.run(&input).await.expect("agent result");
+
+    assert!(regex_only.outputs.len() < improved.outputs.len());
+    assert!(improved.outputs.iter().any(|output| {
+        matches!(
+            output,
+            ExtractOutput::Draft(draft)
+                if draft.body.contains("legal approval")
+                    && draft.kind_hint.kind() == MemoryKind::Rule
+        )
+    }));
 }
 
 #[tokio::test]
@@ -386,6 +462,28 @@ async fn augmenting_agent_failure_is_chain_failure_not_gate_failure() {
 
     let result = chain.run(&input).await.expect("augmenting failure is Ok");
 
+    assert_eq!(result.failures.len(), 1);
+    assert_eq!(result.failures[0].worker, "agent");
+}
+
+#[tokio::test]
+async fn agent_budget_failure_preserves_regex_outputs() {
+    let provider = Arc::new(RecordingAgentProvider::failing(
+        AgentProviderError::BudgetExceeded {
+            limit: "turns".to_owned(),
+        },
+    ));
+    let chain = ExtractChain::new(vec![
+        Box::new(RegexExtractor::builtin()),
+        Box::new(AgentExtractor::new(provider)),
+    ])
+    .expect("valid chain");
+    let event = cli_event();
+    let input = body_input(&event, "Remember refund shard alpha.");
+
+    let result = chain.run(&input).await.expect("augmenting failure is Ok");
+
+    assert!(!result.outputs.is_empty(), "regex result remains available");
     assert_eq!(result.failures.len(), 1);
     assert_eq!(result.failures[0].worker, "agent");
 }
