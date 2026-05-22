@@ -5,107 +5,6 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Seven-dimensional scope tuple (brief §6). At least one field must be set.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ScopeTuple {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub entity: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tenant: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub user: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawScopeTuple {
-    #[serde(default)]
-    agent: Option<String>,
-    #[serde(default)]
-    entity: Option<String>,
-    #[serde(default)]
-    project: Option<String>,
-    #[serde(default)]
-    session_id: Option<String>,
-    #[serde(default)]
-    tenant: Option<String>,
-    #[serde(default)]
-    user: Option<String>,
-    #[serde(default)]
-    workspace: Option<String>,
-}
-
-impl ::core::convert::TryFrom<RawScopeTuple> for ScopeTuple {
-    type Error = &'static str;
-    fn try_from(raw: RawScopeTuple) -> Result<Self, Self::Error> {
-        if !(raw.tenant.is_some() || raw.workspace.is_some() || raw.project.is_some() || raw.session_id.is_some() || raw.entity.is_some() || raw.user.is_some() || raw.agent.is_some()) { return Err("at least one of [tenant, workspace, project, session_id, entity, user, agent] is required"); }
-        Ok(Self {
-            agent: raw.agent,
-            entity: raw.entity,
-            project: raw.project,
-            session_id: raw.session_id,
-            tenant: raw.tenant,
-            user: raw.user,
-            workspace: raw.workspace,
-        })
-    }
-}
-
-impl<'de> ::serde::Deserialize<'de> for ScopeTuple {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where D: ::serde::Deserializer<'de> {
-        let raw = RawScopeTuple::deserialize(deserializer)?;
-        Self::try_from(raw).map_err(::serde::de::Error::custom)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum ShareLinkPayloadGrantTier {
-    Session,
-    Project,
-    Team,
-    Org,
-    Public,
-}
-
-/// Body-free payload for a signed share-link grant (brief §12.a). Matches domain::sharing::ShareLinkPayload.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ShareLinkPayload {
-    pub expires_at: String,
-    pub grant_tier: ShareLinkPayloadGrantTier,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub grantee: Option<crate::generated::common::Identity>,
-    pub issued_at: String,
-    pub issuer: crate::generated::common::Identity,
-    pub key_version: i64,
-    pub nonce: crate::generated::common::Nonce16Base64,
-    pub operation_id: crate::generated::common::Ulid,
-    pub scope: ScopeTuple,
-    pub target_hash: String,
-    pub target_id_hashes: Vec<String>,
-}
-
-/// Signed share link authorizing a bounded grant (brief §12.a). Matches domain::sharing::SignedShareLink.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SignedShareLink {
-    pub link_id: String,
-    pub payload: ShareLinkPayload,
-    pub signature: crate::generated::common::Ed25519Signature,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -127,13 +26,13 @@ pub struct ProposeShareArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer: Option<String>,
     pub record_ids: Vec<crate::generated::common::Ulid>,
-    pub scope: ScopeTuple,
+    pub scope: crate::generated::common::ScopeTuple,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProposeShareData {
-    pub link: SignedShareLink,
+    pub link: crate::generated::common::SignedShareLink,
     pub operation_id: crate::generated::common::Ulid,
 }
 

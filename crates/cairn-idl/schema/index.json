@@ -22,7 +22,9 @@
     "common": [
       "common/primitives.json",
       "common/record_exclusion.json",
-      "common/scope_filter.json"
+      "common/scope_filter.json",
+      "common/sharing.json",
+      "common/federation_envelope.json"
     ],
     "prelude": [
       "prelude/status.json",

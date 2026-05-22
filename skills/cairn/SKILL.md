@@ -422,7 +422,7 @@ cairn propose-share --record-ids 01H8XGJWBWBAQ4N1NQK1A8X9YZ --scope '{"tenant":"
 **Example:**
 
 ```bash
-cairn accept-share --envelope '{"kind":"propose","issuer_key_id":"hmn:alice"}'
+cairn accept-share --envelope '{"kind":"revoke","issuer_key_id":"hmn:alice","revocation":{"link_id":"link-abc","revoked_at":"2026-05-22T00:00:00Z","issuer":"hmn:alice","key_version":1,"signature":"ed25519:aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"}}'
 ```
 
 ## `cairn revoke_share`
