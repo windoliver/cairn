@@ -18,6 +18,7 @@ Commands:
   reindex              Re-embed records into the ANN index
   snapshot             Prepare a vault backup snapshot
   restore              Prepare a restore operation from a backup
+  sre                  Operator SRE dashboards and scrubbed local reports
   help                 Print this message or the help of the given subcommand(s)
 
 Options:
@@ -34,3 +35,4 @@ Options:
 - [`cairn admin reindex`](admin-reindex.md) - Re-embed records into the ANN index
 - [`cairn admin snapshot`](admin-snapshot.md) - Prepare a vault backup snapshot
 - [`cairn admin restore`](admin-restore.md) - Prepare a restore operation from a backup
+- [`cairn admin sre`](admin-sre.md) - Operator SRE dashboards and scrubbed local reports
