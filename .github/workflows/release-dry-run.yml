@@ -12,8 +12,11 @@ name: release-dry-run
 #      intra-workspace deps) survive a full `cargo publish --dry-run`,
 #      including the post-package verify build with the registry-
 #      rewritten manifest.
-#   3. The single Rust binary builds in release mode on Ubuntu and macOS.
-#   4. Generated artifacts (binary + cargo-package archives) are uploaded
+#   3. The Rust CLI binary builds in release mode on Ubuntu and macOS,
+#      and SRE release gates fail the dry run on breached service budgets.
+#   4. The Electron desktop renderer installs, tests, and builds so desktop
+#      SRE surfaces are covered before release.
+#   5. Generated artifacts (binary + SRE reports + cargo-package archives) are uploaded
 #      so reviewers can inspect them on the run page.
 #
 # Known limitation: downstream workspace crates
@@ -183,14 +186,19 @@ jobs:
         env:
           CAIRN_MOCK_EMBEDDER: "1"
           CAIRN_KEYSTORE: ${{ matrix.os == 'ubuntu-latest' && 'file' || '' }}
-      - name: Lifecycle benches (informational)
-        run: cargo bench -p cairn-bench --bench lifecycle --locked
-        continue-on-error: true
+      - name: SRE release gates
+        run: cargo run -p cairn-bench --release --locked -- sre
         env:
           CAIRN_MOCK_EMBEDDER: "1"
-          # Use file-backed keystore on Linux so headless bench subprocesses
-          # do not strand identities in the OS keychain on macOS either.
           CAIRN_KEYSTORE: "file"
+      - name: Upload SRE gate report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sre-gate-report-${{ matrix.os }}
+          path: target/cairn-bench/sre.json
+          if-no-files-found: error
+          retention-days: 7
       - name: Upload binary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -198,6 +206,28 @@ jobs:
           path: dist/cairn
           if-no-files-found: error
           retention-days: 7
+
+  desktop-electron:
+    name: desktop / Electron renderer
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Setup Node.js
+        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/desktop-electron/package-lock.json
+      - name: npm ci
+        working-directory: frontend/desktop-electron
+        run: npm ci
+      - name: npm test
+        working-directory: frontend/desktop-electron
+        run: npm test
+      - name: npm run build
+        working-directory: frontend/desktop-electron
+        run: npm run build
 
   install-smoke:
     name: install-smoke / ${{ matrix.os }}

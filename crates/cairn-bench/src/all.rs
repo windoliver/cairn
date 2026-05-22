@@ -1,18 +1,19 @@
-//! `all` subcommand — runs latency + memory + privacy in order; worst exit code wins.
+//! `all` subcommand — runs latency + memory + privacy + SRE in order; worst exit code wins.
 
 use crate::gates::report::GateOutcome;
 use crate::latency::LatencyArgs;
 use crate::memory::MemoryArgs;
 use crate::privacy::PrivacyArgs;
+use crate::sre::SreArgs;
 
 /// Arguments for the `all` subcommand.
 #[derive(Debug, Default)]
 pub struct AllArgs {
-    /// Gates to skip (latency, memory, privacy).
+    /// Gates to skip (latency, memory, privacy, sre).
     pub skip: Vec<String>,
 }
 
-/// Run latency → memory → privacy gates. Returns the worst outcome.
+/// Run latency → memory → privacy → SRE gates. Returns the worst outcome.
 ///
 /// # Errors
 /// Returns the first error from any gate's infrastructure (cargo bench failure,
@@ -34,6 +35,11 @@ pub fn run(args: &AllArgs) -> anyhow::Result<GateOutcome> {
     if !args.skip.iter().any(|s| s == "privacy") {
         println!("== privacy gate ==");
         let outcome = crate::privacy::run(&PrivacyArgs::default_for_ci())?;
+        worst = worst.worst_of(outcome);
+    }
+    if !args.skip.iter().any(|s| s == "sre") {
+        println!("== sre gate ==");
+        let outcome = crate::sre::run(&SreArgs::default_for_ci())?;
         worst = worst.worst_of(outcome);
     }
     Ok(worst)

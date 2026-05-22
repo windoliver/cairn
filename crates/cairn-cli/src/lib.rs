@@ -27,5 +27,6 @@ pub mod sensor_gate;
 pub mod session_source;
 pub mod setup;
 pub mod skill;
+pub mod sre;
 pub mod vault;
 pub mod verbs;

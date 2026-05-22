@@ -5,7 +5,15 @@ use std::{
     sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 
-use cairn_core::contract::frontend_adapter::FrontendFieldPolicy;
+use cairn_core::{
+    contract::frontend_adapter::FrontendFieldPolicy,
+    domain::{
+        SreDetail, SreGateResult, SreGateSummary, SreMeasurement, SrePrivacySummary,
+        SreProjectionSummary, SreProjectionTargetSummary, SreRehydrationSummary, SreReport,
+        SreSearchModeSummary, SreSearchSummary, SreStatus, SreVaultSummary, SreWorkflowKindSummary,
+        SreWorkflowSummary,
+    },
+};
 
 use crate::{
     fixture::DesktopFixture,
@@ -13,7 +21,8 @@ use crate::{
         DesktopFolder, DesktopGraph, DesktopGraphEdge, DesktopGraphNode, DesktopLintFinding,
         DesktopReconcileApplyRequest, DesktopReconcileApplyResult, DesktopReconcilePreview,
         DesktopReconcilePreviewRequest, DesktopRecordDetail, DesktopRecordSummary,
-        DesktopRejectedField, DesktopSearchResult, DesktopSessionTree, DesktopVaultSummary,
+        DesktopRejectedField, DesktopSearchResult, DesktopSessionTree, DesktopSreReport,
+        DesktopVaultSummary,
     },
 };
 
@@ -146,6 +155,29 @@ impl DesktopRepository {
     #[must_use]
     pub fn lint_findings(&self) -> Vec<DesktopLintFinding> {
         self.fixture().lint_findings.clone()
+    }
+
+    /// Return deterministic fixture SRE data for the desktop dashboard alpha.
+    #[must_use]
+    pub fn sre_report(&self) -> DesktopSreReport {
+        let vault = self.vault();
+        SreReport {
+            schema_version: 1,
+            captured_at_ms: 1_700_000_000_000,
+            vault: SreVaultSummary {
+                id_hash: "sha256:desktop-alpha".to_string(),
+                name: vault.name,
+            },
+            workflow: fixture_sre_workflow(),
+            rehydration: fixture_sre_rehydration(),
+            projection: fixture_sre_projection(),
+            search: fixture_sre_search(),
+            gates: fixture_sre_gates(),
+            privacy: SrePrivacySummary {
+                scrubbed: true,
+                forbidden_field_count: 0,
+            },
+        }
     }
 
     /// Preview a reconcile request without mutating backend state.
@@ -311,6 +343,129 @@ impl DesktopRepository {
 
     fn fixture_mut(&self) -> RwLockWriteGuard<'_, DesktopFixture> {
         self.fixture.write().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+fn measurement(value: f64) -> SreMeasurement {
+    SreMeasurement::new(value).expect("finite desktop SRE fixture measurement")
+}
+
+fn fixture_sre_workflow() -> SreWorkflowSummary {
+    SreWorkflowSummary {
+        status: SreStatus::Warning,
+        oldest_queued_age_ms: Some(742_000),
+        longest_held_lease_ms: Some(125_000),
+        dead_letter_count: 1,
+        kinds: vec![
+            SreWorkflowKindSummary {
+                kind: "expire.tier".to_string(),
+                queued: 2,
+                leased: 1,
+                done_recent: 3,
+                failed_recent: 0,
+                oldest_queued_age_ms: Some(742_000),
+                last_success_age_ms: Some(50_000),
+                backlog_threshold_ms: 600_000,
+                status: SreStatus::Warning,
+            },
+            SreWorkflowKindSummary {
+                kind: "projection.rebuild".to_string(),
+                queued: 0,
+                leased: 0,
+                done_recent: 5,
+                failed_recent: 0,
+                oldest_queued_age_ms: None,
+                last_success_age_ms: Some(12_000),
+                backlog_threshold_ms: 600_000,
+                status: SreStatus::Ok,
+            },
+        ],
+    }
+}
+
+fn fixture_sre_rehydration() -> SreRehydrationSummary {
+    SreRehydrationSummary {
+        status: SreStatus::Ok,
+        latest_latency_ms: Some(2_100),
+        p95_latency_ms: Some(measurement(2_210.0)),
+        slo_ms: measurement(3_000.0),
+        sample_count: 12,
+        last_gate: Some(SreGateResult {
+            name: "cold_rehydrate_p95".to_string(),
+            status: SreStatus::Ok,
+            measured: Some(measurement(2_210.0)),
+            threshold: Some(measurement(3_000.0)),
+            unit: "ms".to_string(),
+            detail: SreDetail::stable("desktop_fixture"),
+        }),
+    }
+}
+
+fn fixture_sre_projection() -> SreProjectionSummary {
+    SreProjectionSummary {
+        status: SreStatus::Warning,
+        nexus_state: "degraded".to_string(),
+        nexus_reason: Some("sidecar_unavailable".to_string()),
+        targets: vec![SreProjectionTargetSummary {
+            target: "nexus".to_string(),
+            current: 128,
+            stale: 2,
+            failed: 0,
+            missing: 0,
+            max_lag_ms: Some(90_000),
+            last_rebuild_latency_ms: Some(410),
+            status: SreStatus::Warning,
+        }],
+    }
+}
+
+fn fixture_sre_search() -> SreSearchSummary {
+    SreSearchSummary {
+        status: SreStatus::Warning,
+        modes: vec![
+            SreSearchModeSummary {
+                mode: "keyword".to_string(),
+                advertised: true,
+                invocations: 64,
+                degraded: 0,
+                failed: 0,
+                p95_latency_ms: Some(measurement(18.0)),
+                status: SreStatus::Ok,
+            },
+            SreSearchModeSummary {
+                mode: "semantic".to_string(),
+                advertised: true,
+                invocations: 42,
+                degraded: 3,
+                failed: 0,
+                p95_latency_ms: Some(measurement(54.0)),
+                status: SreStatus::Warning,
+            },
+        ],
+    }
+}
+
+fn fixture_sre_gates() -> SreGateSummary {
+    SreGateSummary {
+        status: SreStatus::Warning,
+        gates: vec![
+            SreGateResult {
+                name: "migration_backlog".to_string(),
+                status: SreStatus::Warning,
+                measured: Some(measurement(742_000.0)),
+                threshold: Some(measurement(600_000.0)),
+                unit: "ms".to_string(),
+                detail: SreDetail::stable("desktop_fixture"),
+            },
+            SreGateResult {
+                name: "sre_privacy_scrub".to_string(),
+                status: SreStatus::Ok,
+                measured: Some(measurement(0.0)),
+                threshold: Some(measurement(0.0)),
+                unit: "forbidden_fields".to_string(),
+                detail: SreDetail::stable("redacted"),
+            },
+        ],
     }
 }
 

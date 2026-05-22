@@ -500,7 +500,26 @@ fn admin_subcommand() -> clap::Command {
         .subcommand(admin_reindex_subcommand())
         .subcommand(admin_snapshot_subcommand())
         .subcommand(admin_restore_subcommand())
+        .subcommand(admin_sre_subcommand())
         .subcommand(admin_workflow_subcommand())
+}
+
+fn admin_sre_subcommand() -> clap::Command {
+    clap::Command::new("sre")
+        .about("Operator SRE dashboards and scrubbed local reports")
+        .subcommand_required(true)
+        .arg_required_else_help(true)
+        .subcommand(
+            clap::Command::new("report")
+                .about("Render workflow, rehydration, projection, search, and gate summaries")
+                .arg(json_arg("Emit JSON output"))
+                .arg(
+                    clap::Arg::new("bench-report-dir")
+                        .long("bench-report-dir")
+                        .value_name("PATH")
+                        .help("Directory containing cairn-bench JSON reports"),
+                ),
+        )
 }
 
 fn backup_subcommand() -> clap::Command {

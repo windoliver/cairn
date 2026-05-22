@@ -142,4 +142,50 @@ describe("DesktopApiClient", () => {
     });
     expect(result.accepted).toBe(true);
   });
+
+  it("loads the SRE report", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          schema_version: 1,
+          captured_at_ms: 1700000000000,
+          vault: { id_hash: "sha256:vault", name: "Fixture" },
+          workflow: {
+            status: "warning",
+            oldest_queued_age_ms: 742000,
+            longest_held_lease_ms: null,
+            dead_letter_count: 1,
+            kinds: [],
+          },
+          rehydration: {
+            status: "ok",
+            latest_latency_ms: 2100,
+            p95_latency_ms: 2210,
+            slo_ms: 3000,
+            sample_count: 12,
+            last_gate: null,
+          },
+          projection: {
+            status: "warning",
+            nexus_state: "degraded",
+            nexus_reason: "sidecar_unavailable",
+            targets: [],
+          },
+          search: { status: "warning", modes: [] },
+          gates: { status: "warning", gates: [] },
+          privacy: { scrubbed: true, forbidden_field_count: 0 },
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      ),
+    );
+
+    const client = new DesktopApiClient("http://127.0.0.1:4000");
+    const report = await client.sre();
+
+    expect(fetchMock).toHaveBeenCalledWith("http://127.0.0.1:4000/api/v1/sre");
+    expect(report.workflow.status).toBe("warning");
+  });
 });

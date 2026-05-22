@@ -192,6 +192,30 @@ pub enum MetricEvent {
         /// Subset of `checks_run` that returned `CheckOutcome::Failed`.
         failed: u32,
     },
+    /// Emitted after a cold-tier rehydration attempt completes. The
+    /// payload is body-free: target is a coarse class, not an identifier,
+    /// and error is a stable class rather than a raw provider message.
+    #[serde(rename = "rehydration_completed")]
+    RehydrationCompleted {
+        /// Wall-clock millis since UNIX epoch.
+        ts_ms: i64,
+        /// Coarse target class, such as `session`; never a raw session id.
+        target: String,
+        /// Tier before rehydration, such as `cold`.
+        source_tier: String,
+        /// Tier after rehydration, such as `warm`.
+        restored_tier: String,
+        /// Final status (`committed`, `aborted`, or `rejected`).
+        status: String,
+        /// Wall-clock latency observed by the caller.
+        latency_ms: u64,
+        /// Bytes restored, rounded or exact depending on caller visibility.
+        bytes_restored: u64,
+        /// Count of restored records.
+        record_count: u64,
+        /// Body-free error class when status is not committed.
+        error: Option<String>,
+    },
     /// Emitted on every successful `JobStore::lease` return (issue
     /// #92, spec §4.6). Marks the moment a worker has taken
     /// ownership of a queued row. Emitted **after** the lease commit

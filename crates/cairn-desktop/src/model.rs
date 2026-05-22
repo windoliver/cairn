@@ -4,6 +4,9 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+/// SRE report shown by the desktop dashboard.
+pub type DesktopSreReport = cairn_core::domain::SreReport;
+
 /// Summary of the loaded desktop vault.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

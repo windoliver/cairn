@@ -713,6 +713,7 @@ impl ServerHandler for CairnMcpHandler {
         let request_id = context.id.to_string();
         let metric_vault_root = self.vault_root.clone();
         let metric_config = self.config.clone();
+        let metric_mode = mcp_metric_mode(name.as_ref(), arguments.as_ref());
 
         async move {
             let verb_name = name.to_string();
@@ -837,7 +838,7 @@ impl ServerHandler for CairnMcpHandler {
                     "cairn.verb",
                     surface = "mcp",
                     verb = %verb_name,
-                    mode = tracing::field::Empty,
+                    mode = metric_mode.unwrap_or(""),
                     request_id = %request_id
                 );
                 call.instrument(span).await
@@ -849,6 +850,7 @@ impl ServerHandler for CairnMcpHandler {
                 metric_vault_root.as_deref(),
                 &metric_config,
                 &verb_name,
+                metric_mode,
                 &result,
                 u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             );
@@ -861,6 +863,7 @@ fn emit_mcp_verb_invocation_sync(
     vault_root: Option<&Path>,
     config: &CairnConfig,
     verb: &str,
+    mode: Option<&str>,
     result: &Result<CallToolResult, rmcp::ErrorData>,
     latency_ms: u64,
 ) {
@@ -879,7 +882,7 @@ fn emit_mcp_verb_invocation_sync(
         ts_ms: current_time_ms(),
         verb: verb.to_owned(),
         surface: "mcp".to_owned(),
-        mode: None,
+        mode: mode.map(str::to_owned),
         status: status.to_owned(),
         latency_ms,
         error: error.map(str::to_owned),
@@ -888,6 +891,21 @@ fn emit_mcp_verb_invocation_sync(
     };
     if let Err(err) = append_local_metric_sync(vault_root, &event) {
         tracing::warn!(error = %err, verb, "mcp verb metric emit failed");
+    }
+}
+
+fn mcp_metric_mode(
+    tool_name: &str,
+    arguments: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Option<&'static str> {
+    if tool_name != "search" {
+        return None;
+    }
+    match arguments?.get("mode")?.as_str()? {
+        "keyword" => Some("keyword"),
+        "semantic" => Some("semantic"),
+        "hybrid" => Some("hybrid"),
+        _ => None,
     }
 }
 
@@ -1800,5 +1818,29 @@ mod tests_plan_a {
                 "MCP status must not advertise {cap:?} until MCP retrieve dispatch is wired"
             );
         }
+    }
+
+    #[test]
+    fn mcp_search_verb_metric_includes_search_mode() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = CairnConfig::default();
+        let result = Ok(CallToolResult::success(vec![Content::text("{}")]));
+
+        emit_mcp_verb_invocation_sync(
+            Some(dir.path()),
+            &cfg,
+            "search",
+            Some("semantic"),
+            &result,
+            12,
+        );
+
+        let raw = std::fs::read_to_string(dir.path().join(".cairn/metrics.jsonl"))
+            .expect("metrics jsonl");
+        let event: serde_json::Value = serde_json::from_str(raw.trim()).expect("metric json");
+        assert_eq!(event["event"], "verb_invocation");
+        assert_eq!(event["verb"], "search");
+        assert_eq!(event["surface"], "mcp");
+        assert_eq!(event["mode"], "semantic");
     }
 }

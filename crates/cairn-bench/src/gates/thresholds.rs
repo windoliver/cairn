@@ -26,3 +26,6 @@ pub const SLO_FORGET_PHASE_B_MS: f64 = 30_000.0;
 
 /// Brief §15: cold-rehydration (≤ 10 MB session) < 3 s p95.
 pub const SLO_COLD_REHYDRATE_MS: f64 = 3_000.0;
+
+/// Workflow migration backlog gate: oldest queued migration < 10 minutes.
+pub const SLO_MIGRATION_BACKLOG_MS: f64 = 600_000.0;

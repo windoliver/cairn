@@ -79,6 +79,47 @@ const api = {
       message: "Source hash is stale",
     },
   ]),
+  sre: vi.fn().mockResolvedValue({
+    schema_version: 1,
+    captured_at_ms: 1700000000000,
+    vault: { id_hash: "sha256:vault", name: "Desktop Alpha Fixture" },
+    workflow: {
+      status: "warning",
+      oldest_queued_age_ms: 742000,
+      longest_held_lease_ms: null,
+      dead_letter_count: 1,
+      kinds: [
+        {
+          kind: "expire.tier",
+          queued: 2,
+          leased: 1,
+          done_recent: 3,
+          failed_recent: 0,
+          oldest_queued_age_ms: 742000,
+          last_success_age_ms: 50000,
+          backlog_threshold_ms: 600000,
+          status: "warning",
+        },
+      ],
+    },
+    rehydration: {
+      status: "ok",
+      latest_latency_ms: 2100,
+      p95_latency_ms: 2210,
+      slo_ms: 3000,
+      sample_count: 12,
+      last_gate: null,
+    },
+    projection: {
+      status: "warning",
+      nexus_state: "degraded",
+      nexus_reason: "sidecar_unavailable",
+      targets: [],
+    },
+    search: { status: "warning", modes: [] },
+    gates: { status: "warning", gates: [] },
+    privacy: { scrubbed: true, forbidden_field_count: 0 },
+  }),
   search: vi.fn().mockResolvedValue([]),
   previewReconcile: vi.fn(),
   applyReconcile: vi.fn(),
@@ -163,6 +204,37 @@ describe("App", () => {
       if (url.endsWith("/api/v1/lint")) {
         return jsonResponse([]);
       }
+      if (url.endsWith("/api/v1/sre")) {
+        return jsonResponse({
+          schema_version: 1,
+          captured_at_ms: 1700000000000,
+          vault: { id_hash: "sha256:vault", name: "Desktop Alpha Fixture" },
+          workflow: {
+            status: "warning",
+            oldest_queued_age_ms: 742000,
+            longest_held_lease_ms: null,
+            dead_letter_count: 1,
+            kinds: [],
+          },
+          rehydration: {
+            status: "ok",
+            latest_latency_ms: 2100,
+            p95_latency_ms: 2210,
+            slo_ms: 3000,
+            sample_count: 12,
+            last_gate: null,
+          },
+          projection: {
+            status: "warning",
+            nexus_state: "degraded",
+            nexus_reason: "sidecar_unavailable",
+            targets: [],
+          },
+          search: { status: "warning", modes: [] },
+          gates: { status: "warning", gates: [] },
+          privacy: { scrubbed: true, forbidden_field_count: 0 },
+        });
+      }
       throw new Error(`Unexpected fetch ${url}`);
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -172,7 +244,79 @@ describe("App", () => {
     await screen.findByText("Desktop Alpha Fixture");
     await new Promise((resolve) => setTimeout(resolve, 50));
 
-    expect(fetchMock).toHaveBeenCalledTimes(7);
+    expect(fetchMock).toHaveBeenCalledTimes(8);
+  });
+
+  it("switches to the SRE workspace", async () => {
+    const user = userEvent.setup();
+    render(<App api={api} />);
+
+    await screen.findByText("Desktop Alpha Fixture");
+    await user.click(screen.getByRole("button", { name: "SRE" }));
+
+    expect(await screen.findByText("Workflow")).toBeInTheDocument();
+    expect(screen.getByText("Rehydration")).toBeInTheDocument();
+    expect(api.sre).toHaveBeenCalled();
+  });
+
+  it("keeps the records workspace usable when SRE loading fails", async () => {
+    const user = userEvent.setup();
+    api.sre.mockRejectedValueOnce(new Error("SECRET_PRIVATE_TOKEN /Users/alice"));
+
+    render(<App api={api} />);
+
+    expect(await screen.findByText("Desktop Alpha Fixture")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("Markdown body")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "SRE" }));
+
+    expect(await screen.findByText("SRE report unavailable")).toBeInTheDocument();
+    expect(screen.queryByText(/SECRET_PRIVATE_TOKEN/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/\/Users\/alice/)).not.toBeInTheDocument();
+  });
+
+  it("does not wait for SRE loading before showing records", async () => {
+    let resolveSre: (report: Awaited<ReturnType<typeof api.sre>>) => void;
+    const pendingSre = new Promise<Awaited<ReturnType<typeof api.sre>>>((resolve) => {
+      resolveSre = resolve;
+    });
+    api.sre.mockReturnValueOnce(pendingSre);
+
+    render(<App api={api} />);
+
+    expect(await screen.findByText("Desktop Alpha Fixture")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("Markdown body")).toBeInTheDocument();
+
+    await act(async () => {
+      resolveSre!({
+        schema_version: 1,
+        captured_at_ms: 1700000000000,
+        vault: { id_hash: "sha256:vault", name: "Desktop Alpha Fixture" },
+        workflow: {
+          status: "warning",
+          oldest_queued_age_ms: 742000,
+          longest_held_lease_ms: null,
+          dead_letter_count: 1,
+          kinds: [],
+        },
+        rehydration: {
+          status: "ok",
+          latest_latency_ms: 2100,
+          p95_latency_ms: 2210,
+          slo_ms: 3000,
+          sample_count: 12,
+          last_gate: null,
+        },
+        projection: {
+          status: "warning",
+          nexus_state: "degraded",
+          nexus_reason: "sidecar_unavailable",
+          targets: [],
+        },
+        search: { status: "warning", modes: [] },
+        gates: { status: "warning", gates: [] },
+        privacy: { scrubbed: true, forbidden_field_count: 0 },
+      });
+    });
   });
 
   it("keeps loaded vault data when the initial record detail request fails", async () => {
@@ -387,6 +531,7 @@ describe("App", () => {
 
     const body = await screen.findByLabelText("Record body");
     await user.clear(body);
+    await waitFor(() => expect(body).toHaveValue(""));
     await user.click(screen.getByRole("button", { name: "Review reconcile" }));
 
     expect(api.previewReconcile).toHaveBeenCalledWith({

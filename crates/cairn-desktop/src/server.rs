@@ -44,6 +44,7 @@ pub fn router(repo: DesktopRepository) -> Router {
         .route("/api/v1/session-tree", get(session_tree))
         .route("/api/v1/search", get(search))
         .route("/api/v1/lint", get(lint))
+        .route("/api/v1/sre", get(sre))
         .route("/api/v1/reconcile/preview", post(reconcile_preview))
         .route("/api/v1/reconcile/apply", post(reconcile_apply))
         .layer(CorsLayer::permissive())
@@ -116,6 +117,10 @@ async fn lint(
     State(state): State<DesktopServerState>,
 ) -> Json<Vec<crate::model::DesktopLintFinding>> {
     Json(state.repo.lint_findings())
+}
+
+async fn sre(State(state): State<DesktopServerState>) -> Json<crate::model::DesktopSreReport> {
+    Json(state.repo.sre_report())
 }
 
 async fn reconcile_preview(

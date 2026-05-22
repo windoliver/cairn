@@ -98,6 +98,86 @@ export type DesktopReconcileApplyResult = {
   rejectedFields: DesktopRejectedField[];
 };
 
+export type SreStatus = "ok" | "warning" | "fail" | "unknown";
+
+export type DesktopSreGateResult = {
+  name: string;
+  status: SreStatus;
+  measured: number | null;
+  threshold: number | null;
+  unit: string;
+  detail: string | null;
+};
+
+export type DesktopSreReport = {
+  schema_version: number;
+  captured_at_ms: number;
+  vault: {
+    id_hash: string;
+    name: string;
+  };
+  workflow: {
+    status: SreStatus;
+    oldest_queued_age_ms: number | null;
+    longest_held_lease_ms: number | null;
+    dead_letter_count: number;
+    kinds: Array<{
+      kind: string;
+      queued: number;
+      leased: number;
+      done_recent: number;
+      failed_recent: number;
+      oldest_queued_age_ms: number | null;
+      last_success_age_ms: number | null;
+      backlog_threshold_ms: number;
+      status: SreStatus;
+    }>;
+  };
+  rehydration: {
+    status: SreStatus;
+    latest_latency_ms: number | null;
+    p95_latency_ms: number | null;
+    slo_ms: number;
+    sample_count: number;
+    last_gate: DesktopSreGateResult | null;
+  };
+  projection: {
+    status: SreStatus;
+    nexus_state: string;
+    nexus_reason: string | null;
+    targets: Array<{
+      target: string;
+      current: number;
+      stale: number;
+      failed: number;
+      missing: number;
+      max_lag_ms: number | null;
+      last_rebuild_latency_ms: number | null;
+      status: SreStatus;
+    }>;
+  };
+  search: {
+    status: SreStatus;
+    modes: Array<{
+      mode: string;
+      advertised: boolean;
+      invocations: number;
+      degraded: number;
+      failed: number;
+      p95_latency_ms: number | null;
+      status: SreStatus;
+    }>;
+  };
+  gates: {
+    status: SreStatus;
+    gates: DesktopSreGateResult[];
+  };
+  privacy: {
+    scrubbed: boolean;
+    forbidden_field_count: number;
+  };
+};
+
 export type DesktopApiError = Error & {
   code: string;
   status: number;
