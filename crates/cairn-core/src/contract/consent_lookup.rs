@@ -13,6 +13,7 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::domain::consent_timeline::{ConsentTimelineEvent, CoveringGrant};
+use crate::domain::federation::DedupKey;
 use crate::domain::{Rfc3339Timestamp, SensorLabel};
 
 /// Errors raised by [`ConsentLookup`] implementations.
@@ -28,6 +29,18 @@ pub enum ConsentLookupError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+}
+
+/// Prior receiver-side `accept_share` apply, surfaced for idempotent
+/// replay (brief §12.a). The journal lookup returns the original
+/// `applied_records` so a duplicate envelope can reproduce the first
+/// reply byte-for-byte without re-running the apply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FederationAcceptRecord {
+    /// Stable share-link id of the previously applied envelope.
+    pub link_id: String,
+    /// Record ids the original apply upserted, in commit order.
+    pub applied_records: Vec<String>,
 }
 
 /// Read-only access to the `consent_timeline`. Implementations must be
@@ -60,6 +73,47 @@ pub trait ConsentLookup: Send + Sync {
     ) -> Result<Option<CoveringGrant>, ConsentLookupError> {
         let events = self.timeline(consent_ref).await?;
         Ok(CoveringGrant::resolve(&events, sensor, scope, at))
+    }
+
+    /// Idempotency lookup for `accept_share` (brief §12.a).
+    ///
+    /// Returns `Some(record)` when a [`crate::domain::ConsentKind::FederationAccept`]
+    /// row has already been committed for the
+    /// `(issuer_key_id, link_id, nonce)` tuple in `dedup`. Returns
+    /// `None` for a first-seen envelope.
+    ///
+    /// The verb layer treats a hit as a duplicate Ack: it replies with
+    /// the original `applied_records` and emits no new consent event.
+    ///
+    /// The default impl returns `None` so a runtime that does not yet
+    /// wire the federation timeline projection (T12) advertises no
+    /// dedup state — the capability gate keeps `accept_share` from
+    /// being called against such a runtime in production.
+    ///
+    /// # Errors
+    /// Returns [`ConsentLookupError::Backend`] on adapter I/O failure.
+    async fn find_federation_accept(
+        &self,
+        _dedup: DedupKey<'_>,
+    ) -> Result<Option<FederationAcceptRecord>, ConsentLookupError> {
+        Ok(None)
+    }
+
+    /// Revocation check for `accept_share` (brief §12.a).
+    ///
+    /// Returns `true` when a [`crate::domain::ConsentKind::FederationRevoke`]
+    /// row has been committed for `link_id`. The verb layer rejects a
+    /// subsequent propose envelope as
+    /// [`crate::error::federation::FederationError::Revoked`].
+    ///
+    /// The default impl returns `false` so a runtime that does not yet
+    /// wire the federation timeline projection (T12) does not spuriously
+    /// reject inbound envelopes.
+    ///
+    /// # Errors
+    /// Returns [`ConsentLookupError::Backend`] on adapter I/O failure.
+    async fn is_link_revoked(&self, _link_id: &str) -> Result<bool, ConsentLookupError> {
+        Ok(false)
     }
 }
 

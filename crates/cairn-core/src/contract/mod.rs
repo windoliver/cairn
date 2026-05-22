@@ -67,7 +67,7 @@ pub use consent_journal::{
     ConsentJournalReader, MalformedSourceForget, MalformedSourceForgetReason, SourceForget,
     TargetReplayKey,
 };
-pub use consent_lookup::{ConsentLookup, ConsentLookupError};
+pub use consent_lookup::{ConsentLookup, ConsentLookupError, FederationAcceptRecord};
 pub use federation_outbox::{FederationOutbox, FederationOutboxError};
 pub use federation_transport::{FederationTransport, SendOutcome, TransportReason};
 pub use frontend_adapter::{

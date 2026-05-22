@@ -17,6 +17,10 @@ pub use crate::generated::common::{
     FederationEnvelope, FederationEnvelopeKind, MemoryRecordStub, SignedRevocation,
 };
 
+use crate::domain::sharing::{ShareLinkPayload, SignedShareLink};
+use crate::domain::{DomainError, Ed25519Signature, Identity, MemoryVisibility, Rfc3339Timestamp};
+use crate::generated::common::SignedShareLink as WireSignedShareLink;
+
 /// Pluggable peer address. The `FederationTransport` interprets this;
 /// core only stores and forwards it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -55,5 +59,83 @@ impl FederationEnvelopeExt for FederationEnvelope {
             link_id: link.link_id.as_str(),
             nonce: link.payload.nonce.0.as_str(),
         })
+    }
+}
+
+/// Convert a wire-form [`WireSignedShareLink`] (generated from the IDL)
+/// into the hand-written [`SignedShareLink`] domain type so the verb
+/// layer can call `validate_shape` / `verify_signature` directly.
+///
+/// Both shapes serialize identically; this conversion threads the
+/// strongly-typed primitives (`Ed25519Signature`, `Rfc3339Timestamp`,
+/// `Identity`, `MemoryVisibility`) through their `parse` constructors
+/// so any malformed field surfaces as a [`DomainError`] before the
+/// signature check runs.
+///
+/// # Errors
+///
+/// Returns the first [`DomainError`] from any of the typed parsers
+/// (signature, timestamps, identity, visibility, `key_version`).
+pub fn signed_share_link_from_wire(
+    wire: &WireSignedShareLink,
+) -> Result<SignedShareLink, DomainError> {
+    let signature = Ed25519Signature::parse(wire.signature.0.clone())?;
+    let issued_at = Rfc3339Timestamp::parse(wire.payload.issued_at.clone())?;
+    let expires_at = Rfc3339Timestamp::parse(wire.payload.expires_at.clone())?;
+    let issuer = Identity::parse(wire.payload.issuer.0.clone())?;
+    let grantee = match &wire.payload.grantee {
+        Some(g) => Some(Identity::parse(g.0.clone())?),
+        None => None,
+    };
+    let grant_tier = MemoryVisibility::parse(grant_tier_to_wire(wire.payload.grant_tier))?;
+    let key_version: u32 =
+        wire.payload
+            .key_version
+            .try_into()
+            .map_err(|_| DomainError::Unauthorized {
+                message: "share link key_version must fit in u32".to_owned(),
+            })?;
+
+    let scope = crate::domain::ScopeTuple {
+        agent: wire.payload.scope.agent.clone(),
+        entity: wire.payload.scope.entity.clone(),
+        project: wire.payload.scope.project.clone(),
+        session_id: wire.payload.scope.session_id.clone(),
+        tenant: wire.payload.scope.tenant.clone(),
+        user: wire.payload.scope.user.clone(),
+        workspace: wire.payload.scope.workspace.clone(),
+    };
+
+    let payload = ShareLinkPayload {
+        operation_id: wire.payload.operation_id.0.clone(),
+        nonce: wire.payload.nonce.0.clone(),
+        target_hash: wire.payload.target_hash.clone(),
+        target_id_hashes: wire.payload.target_id_hashes.clone(),
+        scope,
+        grant_tier,
+        grantee,
+        issuer,
+        issued_at,
+        expires_at,
+        key_version,
+    };
+
+    Ok(SignedShareLink {
+        link_id: wire.link_id.clone(),
+        payload,
+        signature,
+    })
+}
+
+const fn grant_tier_to_wire(
+    tier: crate::generated::common::ShareLinkPayloadGrantTier,
+) -> &'static str {
+    use crate::generated::common::ShareLinkPayloadGrantTier as T;
+    match tier {
+        T::Session => "session",
+        T::Project => "project",
+        T::Team => "team",
+        T::Org => "org",
+        T::Public => "public",
     }
 }

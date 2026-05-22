@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::contract::job_store::EnqueueRequest;
-use crate::domain::ConsentEvent;
+use crate::domain::{ConsentEvent, MemoryRecord};
 
 /// Failures raised by [`FederationOutbox`] implementations.
 #[derive(Debug, Error)]
@@ -82,5 +82,46 @@ pub trait FederationOutbox: Send + Sync {
         &self,
         event: &ConsentEvent,
         job: EnqueueRequest,
+    ) -> Result<(), FederationOutboxError>;
+
+    /// Atomically append `event` to the consent journal AND upsert each
+    /// inbound record in `upserts` (receiver-side apply path).
+    ///
+    /// Implementations MUST treat all writes as a single transaction —
+    /// the upserts and the [`ConsentEvent::FederationAccept`] row land
+    /// together or not at all. A partial apply would orphan inbound
+    /// records without an audit trail, exactly the failure mode the
+    /// brief's WAL invariant forbids.
+    ///
+    /// # Errors
+    ///
+    /// * [`FederationOutboxError::ConsentRejected`] when the consent
+    ///   event fails adapter-side validation.
+    /// * [`FederationOutboxError::Backend`] for opaque adapter I/O
+    ///   failures (record upsert collisions, disk failures, …).
+    async fn record_share_accept(
+        &self,
+        event: &ConsentEvent,
+        upserts: &[MemoryRecord],
+    ) -> Result<(), FederationOutboxError>;
+
+    /// Atomically append `event` to the consent journal AND tombstone
+    /// each record id in `tombstone_ids` (receiver-side revoke path).
+    ///
+    /// Implementations MUST treat all writes as a single transaction.
+    /// `tombstone_ids` may be empty when no prior records were applied
+    /// under the revoked link; the consent event still lands so the
+    /// audit trail records the revoke decision.
+    ///
+    /// # Errors
+    ///
+    /// * [`FederationOutboxError::ConsentRejected`] when the consent
+    ///   event fails adapter-side validation.
+    /// * [`FederationOutboxError::Backend`] for opaque adapter I/O
+    ///   failures.
+    async fn record_share_revoke(
+        &self,
+        event: &ConsentEvent,
+        tombstone_ids: &[String],
     ) -> Result<(), FederationOutboxError>;
 }
