@@ -256,6 +256,9 @@ pub fn advertise(gates: &CapabilityGates) -> Vec<Capabilities> {
     if phase >= Phase::V0_3 && wiring::coord_extension_ready() {
         out.push(Capabilities::CairnMcpV1ExtensionCoord);
     }
+    if phase >= Phase::V0_3 && wiring::federation_extension_ready() {
+        out.push(Capabilities::CairnMcpV1ExtensionFederation);
+    }
 
     // ── replay (held back per brief §15 fail-closed) ─────────────────────
     if wiring::REPLAY_SEQUENCE_WIRED {

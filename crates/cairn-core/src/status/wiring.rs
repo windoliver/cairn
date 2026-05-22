@@ -126,3 +126,32 @@ pub const EXPIRATION_WORKFLOW_WIRED: bool = true;
 /// still requires `evaluation.enabled = true` in config plus a
 /// single-tenant `cairn mcp serve` host.
 pub const EVALUATION_WORKFLOW_WIRED: bool = true;
+
+/// `cairn.federation.v1` extension capability registration (issue #123).
+///
+/// Held back until every dispatch path lands. Mirror of the coord
+/// extension flow: each downstream task flips one constant; the
+/// readiness function below ANDs them.
+pub const FEDERATION_EXTENSION_WIRED: bool = false;
+
+/// `propose_share` + `revoke_share` verb dispatch wired through CLI/SDK/MCP.
+pub const FEDERATION_PROPOSE_DISPATCH_WIRED: bool = false;
+
+/// `accept_share` verb dispatch wired (inbound receive path).
+pub const FEDERATION_ACCEPT_DISPATCH_WIRED: bool = false;
+
+/// `PropagationWorkflow` handler registered on the scheduler.
+pub const FEDERATION_WORKFLOW_WIRED: bool = false;
+
+/// `cairn.federation.v1` MCP tool declarations wired (rmcp registration).
+pub const FEDERATION_MCP_TOOLS_WIRED: bool = false;
+
+/// Single readiness source for advertising `cairn.federation.v1`.
+#[must_use]
+pub const fn federation_extension_ready() -> bool {
+    FEDERATION_EXTENSION_WIRED
+        && FEDERATION_PROPOSE_DISPATCH_WIRED
+        && FEDERATION_ACCEPT_DISPATCH_WIRED
+        && FEDERATION_WORKFLOW_WIRED
+        && FEDERATION_MCP_TOOLS_WIRED
+}

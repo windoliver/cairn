@@ -615,6 +615,25 @@ fn openai_provider_without_key_drops_semantic_and_hybrid() {
 }
 
 #[test]
+fn federation_extension_ready_off_by_default() {
+    assert!(!crate::status::wiring::federation_extension_ready());
+}
+
+#[test]
+fn federation_capability_omitted_when_unwired() {
+    // Build a fully-bound V0_3 gate — the phase that enables the extension.
+    // With all federation wiring constants `false`, the capability MUST be
+    // absent regardless of phase.
+    let mut g = gates(true, false, None);
+    g.contract_phase = Phase::V0_3;
+    let caps = advertise(&g);
+    assert!(
+        !caps.contains(&Capabilities::CairnMcpV1ExtensionFederation),
+        "federation capability advertised while wiring constants are false; got {caps:?}"
+    );
+}
+
+#[test]
 fn extension_namespaces_follow_advertised_extension_capabilities() {
     let extensions = extension_namespaces(&[
         Capabilities::CairnMcpV1SearchKeyword,
