@@ -27,6 +27,7 @@ pub mod agent_provider;
 pub mod conformance;
 pub mod consent_journal;
 pub mod consent_lookup;
+pub mod federation_outbox;
 pub mod federation_transport;
 pub mod frontend_adapter;
 pub mod hot_prefix_cache;
@@ -67,6 +68,7 @@ pub use consent_journal::{
     TargetReplayKey,
 };
 pub use consent_lookup::{ConsentLookup, ConsentLookupError};
+pub use federation_outbox::{FederationOutbox, FederationOutboxError};
 pub use federation_transport::{FederationTransport, SendOutcome, TransportReason};
 pub use frontend_adapter::{
     FrontendAdapter, FrontendAdapterCapabilities, FrontendAdapterError, FrontendAdapterPlugin,

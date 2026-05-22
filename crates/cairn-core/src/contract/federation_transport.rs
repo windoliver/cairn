@@ -43,9 +43,5 @@ pub trait FederationTransport: Send + Sync {
     /// classifying the network outcome as `Ack`, `Transient`, or
     /// `Permanent`; it must not retry internally — retry policy lives
     /// in the scheduler.
-    async fn send(
-        &self,
-        envelope: &FederationEnvelope,
-        peer: &PeerEndpoint,
-    ) -> SendOutcome;
+    async fn send(&self, envelope: &FederationEnvelope, peer: &PeerEndpoint) -> SendOutcome;
 }

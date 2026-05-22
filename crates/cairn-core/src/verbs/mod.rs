@@ -7,6 +7,7 @@
 pub mod assemble_hot;
 pub mod ingest;
 pub mod lint;
+pub mod propose_share;
 pub mod retrieve;
 pub mod search;
 pub mod summarize;
