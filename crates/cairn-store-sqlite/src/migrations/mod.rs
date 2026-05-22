@@ -137,8 +137,7 @@ const M0066_TRACE_CANVAS_PROJECTION: &str = include_str!("sql/0066_trace_canvas_
 // Issue #105 — authoritative ledger for rebuildable Nexus sidecar projections.
 const M0067_PROJECTION_LEDGER: &str = include_str!("sql/0067_projection_ledger.sql");
 // Issue #123 — extend consent_journal_kind_domain trigger for federation kinds.
-const M0068_FEDERATION_CONSENT_KINDS: &str =
-    include_str!("sql/0068_federation_consent_kinds.sql");
+const M0068_FEDERATION_CONSENT_KINDS: &str = include_str!("sql/0068_federation_consent_kinds.sql");
 
 /// Canonical SQL for migration 0020 (`workflow_jobs`). Re-exported so
 /// downstream crates (notably `cairn-workflows`, which hashes the
