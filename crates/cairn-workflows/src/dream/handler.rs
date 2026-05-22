@@ -18,6 +18,7 @@
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use cairn_core::config::{DreamConfig, DreamTier, DreamTierConfig, DreamWorkerMode, ExtractBudget};
 use cairn_core::contract::job_store::{FailureClass, JobKind, JobPayload, JobStore};
@@ -558,7 +559,19 @@ impl DreamHandler {
             prompt: render_agent_dream_prompt(&payload.key, records, tier_config),
         };
 
-        let run = agent.spawn(request).await.map_err(classify_agent_error)?;
+        let run = match tokio::time::timeout(
+            Duration::from_millis(u64::from(tier_config.max_wall_ms)),
+            agent.spawn(request),
+        )
+        .await
+        {
+            Ok(result) => result.map_err(classify_agent_error)?,
+            Err(_elapsed) => {
+                return Err(classify_agent_error(AgentProviderError::BudgetExceeded {
+                    limit: "wall_clock".to_owned(),
+                }));
+            }
+        };
         if run.status == AgentRunStatus::Aborted {
             let err =
                 run.abort_error
@@ -793,9 +806,15 @@ fn reject_source_excerpt(
     if value.len() < 16 {
         return Ok(());
     }
+    let value_tokens = tokenize_for_excerpt_check(&value);
     for record in records {
         let body = normalize_for_excerpt_check(&record.body);
-        if body.len() >= 16 && (value.contains(&body) || body.contains(&value)) {
+        let body_tokens = tokenize_for_excerpt_check(&body);
+        if body.len() >= 16
+            && (value.contains(&body)
+                || body.contains(&value)
+                || has_shared_source_excerpt_window(&body_tokens, &value_tokens))
+        {
             return Err(classify_agent_error(AgentProviderError::InvalidOutput {
                 message: format!("{field} must not quote source record body"),
             }));
@@ -805,11 +824,42 @@ fn reject_source_excerpt(
 }
 
 fn normalize_for_excerpt_check(value: &str) -> String {
-    value
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_lowercase()
+    tokenize_for_excerpt_check(value).join(" ")
+}
+
+fn tokenize_for_excerpt_check(value: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    for ch in value.chars() {
+        if ch.is_alphanumeric() {
+            current.extend(ch.to_lowercase());
+        } else if !current.is_empty() {
+            tokens.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
+fn has_shared_source_excerpt_window(body_tokens: &[String], value_tokens: &[String]) -> bool {
+    const MIN_QUOTED_WORDS: usize = 5;
+    const MIN_QUOTED_CHARS: usize = 24;
+
+    if body_tokens.len() < MIN_QUOTED_WORDS || value_tokens.len() < MIN_QUOTED_WORDS {
+        return false;
+    }
+    body_tokens.windows(MIN_QUOTED_WORDS).any(|body_window| {
+        excerpt_window_chars(body_window) >= MIN_QUOTED_CHARS
+            && value_tokens
+                .windows(MIN_QUOTED_WORDS)
+                .any(|value_window| value_window == body_window)
+    })
+}
+
+fn excerpt_window_chars(window: &[String]) -> usize {
+    window.iter().map(String::len).sum::<usize>() + window.len().saturating_sub(1)
 }
 
 fn classify_agent_error(error: AgentProviderError) -> Box<dyn std::error::Error + Send + Sync> {

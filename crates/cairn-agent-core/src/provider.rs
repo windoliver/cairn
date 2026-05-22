@@ -61,7 +61,10 @@ impl AgentProvider for CairnAgentProvider {
                 return Ok(aborted_run(err, &meter, tool_calls, policy_trace));
             }
 
-            let action = match self.next_action(&request, &history, deadline).await {
+            let action = match self
+                .next_action(&request, &history, deadline, &mut meter)
+                .await
+            {
                 Ok(action) => action,
                 Err(err) => return Ok(aborted_run(err, &meter, tool_calls, policy_trace)),
             };
@@ -212,6 +215,7 @@ impl CairnAgentProvider {
         request: &AgentSpawnRequest,
         history: &[String],
         deadline: Instant,
+        meter: &mut AgentRunMeter,
     ) -> Result<AgentAction, AgentProviderError> {
         let Some(remaining) = remaining_wall_clock(deadline) else {
             return Err(wall_clock_exceeded());
@@ -225,8 +229,22 @@ impl CairnAgentProvider {
             Ok(Err(err)) => return Err(map_llm_error(err)),
             Err(_elapsed) => return Err(wall_clock_exceeded()),
         };
+        meter.charge_cost_units(completion_cost_units(&completion))?;
         completion_to_action(completion)
     }
+}
+
+fn completion_cost_units(completion: &CompletionOutput) -> u64 {
+    match completion {
+        CompletionOutput::Text(text) => estimated_token_units(text),
+        CompletionOutput::Json(value) => estimated_token_units(&value.to_string()),
+        _ => 1,
+    }
+}
+
+fn estimated_token_units(wire: &str) -> u64 {
+    let bytes = u64::try_from(wire.len()).unwrap_or(u64::MAX);
+    bytes.saturating_add(3).saturating_div(4).max(1)
 }
 
 fn completion_budget(request: &AgentSpawnRequest) -> ExtractBudget {

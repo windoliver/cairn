@@ -198,6 +198,16 @@ fn request_with_wall_clock(
     }
 }
 
+fn request_with_cost_units(
+    output_schema: AgentOutputSchema,
+    max_turns: u32,
+    max_cost_units: u64,
+) -> AgentSpawnRequest {
+    let mut req = request(output_schema, max_turns);
+    req.cost_budget.max_cost_units = max_cost_units;
+    req
+}
+
 #[tokio::test]
 async fn provider_rejects_unlisted_tool_before_executor_runs() {
     let llm = Arc::new(SequenceLlm::new([CompletionOutput::Json(json!({
@@ -338,7 +348,36 @@ async fn provider_returns_final_json_and_consumed_budget() {
     assert!(matches!(run.output, AgentOutput::Json(_)));
     assert_eq!(run.budget_consumed.turns, 2);
     assert_eq!(run.budget_consumed.tool_calls, 1);
-    assert_eq!(run.budget_consumed.cost_units, 7);
+    assert!(
+        run.budget_consumed.cost_units > 7,
+        "LLM completions should be charged in addition to tool cost"
+    );
+}
+
+#[tokio::test]
+async fn provider_aborts_when_llm_completion_exceeds_cost_budget() {
+    let llm = Arc::new(SequenceLlm::new([CompletionOutput::Json(json!({
+        "action": "final",
+        "output": {
+            "answer": "this completion is larger than the one-unit run cost budget"
+        }
+    }))]));
+    let tools = Arc::new(RecordingToolExecutor::new(ToolExecution {
+        output: json!({}),
+        cost_units: 0,
+    }));
+    let provider = CairnAgentProvider::new(llm, tools);
+
+    let run = provider
+        .spawn(request_with_cost_units(AgentOutputSchema::Json, 2, 1))
+        .await
+        .expect("cost exhaustion returns an aborted run");
+
+    assert_eq!(run.status, AgentRunStatus::Aborted);
+    assert!(matches!(
+        run.abort_error,
+        Some(AgentProviderError::BudgetExceeded { ref limit }) if limit == "cost_units"
+    ));
 }
 
 #[tokio::test]

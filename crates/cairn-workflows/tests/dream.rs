@@ -3,6 +3,7 @@
 //! when none is configured (issue #91).
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use cairn_core::config::{DreamConfig, DreamTier, DreamTierConfig, DreamWorkerMode};
@@ -117,6 +118,47 @@ impl AgentProvider for RecordingAgentProvider {
     }
 }
 
+struct SlowAgentProvider {
+    requests: Arc<Mutex<Vec<AgentSpawnRequest>>>,
+    delay: Duration,
+}
+
+impl SlowAgentProvider {
+    fn new(delay: Duration) -> Self {
+        Self {
+            requests: Arc::new(Mutex::new(Vec::new())),
+            delay,
+        }
+    }
+}
+
+#[async_trait]
+impl AgentProvider for SlowAgentProvider {
+    fn name(&self) -> &'static str {
+        "slow-agent"
+    }
+
+    fn capabilities(&self) -> &AgentProviderCapabilities {
+        static CAPS: AgentProviderCapabilities = AgentProviderCapabilities {
+            honors_cost_budget: true,
+            scope_enforced: true,
+            mcp_tools: false,
+            cli_subprocess_tools: true,
+        };
+        &CAPS
+    }
+
+    fn supported_contract_versions(&self) -> VersionRange {
+        VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+    }
+
+    async fn spawn(&self, request: AgentSpawnRequest) -> Result<AgentRun, AgentProviderError> {
+        self.requests.lock().expect("requests lock").push(request);
+        tokio::time::sleep(self.delay).await;
+        Ok(completed_agent_dream_run())
+    }
+}
+
 fn completed_agent_dream_run() -> AgentRun {
     AgentRun {
         status: AgentRunStatus::Completed,
@@ -163,6 +205,31 @@ fn raw_evidence_agent_dream_run() -> AgentRun {
     }
 }
 
+fn partial_raw_evidence_agent_dream_run() -> AgentRun {
+    AgentRun {
+        status: AgentRunStatus::Completed,
+        abort_error: None,
+        output: AgentOutput::Json(serde_json::json!({
+            "body": "agent synthesized dream body",
+            "evidence": [
+                {
+                    "record_id": "01HQZX9F5N000000000000001F",
+                    "claim": "The agent copied raw copied source phrase epsilon into metadata."
+                }
+            ]
+        })),
+        budget_consumed: AgentBudgetConsumed {
+            turns: 1,
+            tool_calls: 0,
+            cost_units: 1,
+        },
+        tool_calls: Vec::new(),
+        policy_trace: vec![
+            "The policy trace also copied raw copied source phrase epsilon.".to_string(),
+        ],
+    }
+}
+
 fn aborted_agent_budget_run() -> AgentRun {
     AgentRun {
         status: AgentRunStatus::Aborted,
@@ -178,6 +245,49 @@ fn aborted_agent_budget_run() -> AgentRun {
         tool_calls: Vec::new(),
         policy_trace: vec!["turn budget exhausted".to_string()],
     }
+}
+
+#[tokio::test]
+async fn agent_dream_times_out_non_cooperative_provider() {
+    let store = Arc::new(memstore().await);
+    store.upsert(&sample_record(39)).await.expect("seed record");
+
+    let agent = Arc::new(SlowAgentProvider::new(Duration::from_millis(200)));
+    let dyn_store: Arc<dyn MemoryStore> = store;
+    let handler = DreamHandler::new(
+        dyn_store,
+        DreamConfig {
+            enabled: true,
+            deep_dreaming: DreamTierConfig {
+                worker: DreamWorkerMode::Agent,
+                window_size_records: 4,
+                completion_token_budget: 256,
+                max_wall_ms: 10,
+                max_tool_calls: 1,
+                ..DreamTierConfig::deep_dreaming_default()
+            },
+            ..DreamConfig::default()
+        },
+        None,
+        Some(agent),
+    );
+    let payload = DreamPayload {
+        tier: DreamTier::DeepDreaming,
+        key: "sess-agent-timeout".into(),
+        bound_scope: None,
+    };
+
+    let started = std::time::Instant::now();
+    let outcome = handler.handle(&payload.to_bytes().expect("encode")).await;
+
+    assert!(
+        started.elapsed() < Duration::from_millis(120),
+        "handler should enforce max_wall_ms around AgentProvider::spawn"
+    );
+    let HandlerOutcome::Permanent { reason, .. } = outcome else {
+        panic!("expected Permanent, got {outcome:?}");
+    };
+    assert!(reason.contains("agent budget exceeded: wall_clock"));
 }
 
 #[tokio::test]
@@ -292,6 +402,48 @@ async fn agent_dream_outputs_evidence_and_budget_metadata() {
     let metadata_wire = serde_json::to_string(dream_meta).expect("metadata json");
     assert!(!metadata_wire.contains("source excerpt alpha"));
     assert!(!metadata_wire.contains("source excerpt beta"));
+}
+
+#[tokio::test]
+async fn agent_dream_rejects_embedded_source_excerpt_metadata() {
+    let store = Arc::new(memstore().await);
+    let mut first = sample_record(31);
+    first.body = "alpha beta raw copied source phrase epsilon zeta eta theta".into();
+    store.upsert(&first).await.expect("seed first");
+
+    let agent = Arc::new(RecordingAgentProvider::new(
+        partial_raw_evidence_agent_dream_run(),
+    ));
+    let dyn_store: Arc<dyn MemoryStore> = store.clone();
+    let handler = DreamHandler::new(
+        dyn_store,
+        DreamConfig {
+            enabled: true,
+            deep_dreaming: DreamTierConfig {
+                worker: DreamWorkerMode::Agent,
+                window_size_records: 4,
+                completion_token_budget: 256,
+                max_wall_ms: 1_000,
+                max_tool_calls: 1,
+                ..DreamTierConfig::deep_dreaming_default()
+            },
+            ..DreamConfig::default()
+        },
+        None,
+        Some(agent),
+    );
+    let payload = DreamPayload {
+        tier: DreamTier::DeepDreaming,
+        key: "sess-agent-partial-raw-evidence".into(),
+        bound_scope: None,
+    };
+
+    let outcome = handler.handle(&payload.to_bytes().expect("encode")).await;
+
+    let HandlerOutcome::Permanent { reason, .. } = outcome else {
+        panic!("expected Permanent, got {outcome:?}");
+    };
+    assert!(reason.contains("must not quote source record body"));
 }
 
 #[tokio::test]
