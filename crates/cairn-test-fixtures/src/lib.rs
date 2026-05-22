@@ -7,6 +7,7 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod fake_consent_lookup;
+pub mod federation;
 pub mod flush_plan;
 pub mod graph;
 pub mod hybrid_vault;
