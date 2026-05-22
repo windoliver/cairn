@@ -1,14 +1,29 @@
 //! Conformance cases for `AgentProvider` plugins.
 
-use crate::contract::agent_provider::{AgentProvider, CONTRACT_VERSION};
+use std::sync::Arc;
+
+use crate::contract::agent_provider::{
+    AgentCostBudget, AgentIdentity, AgentOutputSchema, AgentProvider, AgentProviderError,
+    AgentRunStatus, AgentScope, AgentSpawnRequest, AgentToolAllowlist, AgentToolCall,
+    AgentToolPolicyOutcome, AgentWallClockBudget, CONTRACT_VERSION, CairnVerb,
+};
 use crate::contract::conformance::{
     CaseOutcome, CaseStatus, Tier, tier1_manifest_features_match_capabilities,
     tier1_manifest_matches_host,
 };
 use crate::contract::registry::{PluginName, PluginRegistry};
 
-const TOOL_ATTEMPT_PENDING_REASON: &str = "provider tool-attempt behavior requires a provider-specific conformance harness; host policy helper covered by unit tests";
-const BUDGET_PENDING_REASON: &str = "budget overrun behavior requires a provider-specific conformance harness; budget metering helper covered by unit tests";
+/// Prompt marker for the allowlist conformance case.
+pub const ALLOWLIST_REJECTS_UNLISTED_TOOL_PROMPT: &str =
+    "agent_provider.conformance.allowlist_rejects_unlisted_tool";
+/// Prompt marker for the mutating-scope conformance case.
+pub const MUTATING_VERB_REQUIRES_SCOPE_PROMPT: &str =
+    "agent_provider.conformance.mutating_verb_requires_scope";
+/// Prompt marker for the budget exhaustion conformance case.
+pub const BUDGET_EXHAUSTION_ABORTS_CLEANLY_PROMPT: &str =
+    "agent_provider.conformance.budget_exhaustion_aborts_cleanly";
+/// Prompt marker for the WAL-routed mutation conformance case.
+pub const WRITES_ARE_WAL_ROUTED_PROMPT: &str = "agent_provider.conformance.writes_are_wal_routed";
 
 /// Run tier-1 + tier-2 cases for an `AgentProvider` plugin.
 #[must_use]
@@ -41,10 +56,10 @@ pub fn run(registry: &PluginRegistry, name: &PluginName) -> Vec<CaseOutcome> {
                 ("cli_subprocess_tools", caps.cli_subprocess_tools),
             ],
         ),
-        tier2_allowlist_rejects_unlisted_tool(&*plugin),
-        tier2_mutating_verb_requires_scope(&*plugin),
-        tier2_budget_exhaustion_aborts_cleanly(&*plugin),
-        tier2_writes_are_wal_routed(&*plugin),
+        tier2_allowlist_rejects_unlisted_tool(plugin.clone()),
+        tier2_mutating_verb_requires_scope(plugin.clone()),
+        tier2_budget_exhaustion_aborts_cleanly(plugin.clone()),
+        tier2_writes_are_wal_routed(plugin.clone()),
     ]
 }
 
@@ -112,52 +127,208 @@ fn tier1_capability_self_consistency_floor(plugin: &dyn AgentProvider) -> CaseOu
     }
 }
 
-fn tier2_allowlist_rejects_unlisted_tool(provider: &dyn AgentProvider) -> CaseOutcome {
-    scope_enforced_or_pending("allowlist_rejects_unlisted_tool", provider)
-}
-
-fn tier2_mutating_verb_requires_scope(provider: &dyn AgentProvider) -> CaseOutcome {
-    scope_enforced_or_pending("mutating_verb_requires_scope", provider)
-}
-
-fn tier2_budget_exhaustion_aborts_cleanly(provider: &dyn AgentProvider) -> CaseOutcome {
-    let status = if provider.capabilities().honors_cost_budget {
-        CaseStatus::Pending {
-            reason: BUDGET_PENDING_REASON,
-        }
-    } else {
-        CaseStatus::Failed {
-            message: "provider must advertise honors_cost_budget=true to verify budget enforcement"
+fn tier2_allowlist_rejects_unlisted_tool(provider: Arc<dyn AgentProvider>) -> CaseOutcome {
+    let id = "allowlist_rejects_unlisted_tool";
+    if !provider.capabilities().scope_enforced {
+        return failed(
+            id,
+            Tier::Two,
+            "provider must advertise scope_enforced=true to verify tool policy enforcement"
                 .to_string(),
-        }
+        );
+    }
+    let request = match conformance_request(ALLOWLIST_REJECTS_UNLISTED_TOOL_PROMPT) {
+        Ok(request) => request,
+        Err(message) => return failed(id, Tier::Two, message),
     };
+    match spawn_conformance(provider, request) {
+        Ok(run)
+            if run.status == AgentRunStatus::Aborted
+                && matches!(
+                    run.abort_error,
+                    Some(AgentProviderError::ToolNotAllowed {
+                        verb: CairnVerb::Forget
+                    })
+                )
+                && run.tool_calls.iter().any(|attempt| {
+                    attempt.call.verb == CairnVerb::Forget
+                        && attempt.outcome == AgentToolPolicyOutcome::Denied
+                }) =>
+        {
+            ok(id)
+        }
+        Ok(run) => failed(
+            id,
+            Tier::Two,
+            format!("expected denied forget tool attempt, got {run:?}"),
+        ),
+        Err(message) => failed(id, Tier::Two, message),
+    }
+}
+
+fn tier2_mutating_verb_requires_scope(provider: Arc<dyn AgentProvider>) -> CaseOutcome {
+    let id = "mutating_verb_requires_scope";
+    if !provider.capabilities().scope_enforced {
+        return failed(
+            id,
+            Tier::Two,
+            "provider must advertise scope_enforced=true to verify tool policy enforcement"
+                .to_string(),
+        );
+    }
+    let mut request = match conformance_request(MUTATING_VERB_REQUIRES_SCOPE_PROMPT) {
+        Ok(request) => request,
+        Err(message) => return failed(id, Tier::Two, message),
+    };
+    request
+        .tool_allowlist
+        .tools
+        .push(AgentToolCall::new(CairnVerb::Ingest));
+    match spawn_conformance(provider, request) {
+        Ok(run)
+            if run.status == AgentRunStatus::Aborted
+                && matches!(
+                    run.abort_error,
+                    Some(AgentProviderError::MutatingVerbNotScoped {
+                        verb: CairnVerb::Ingest
+                    })
+                )
+                && run.tool_calls.iter().any(|attempt| {
+                    attempt.call.verb == CairnVerb::Ingest
+                        && attempt.outcome == AgentToolPolicyOutcome::Denied
+                }) =>
+        {
+            ok(id)
+        }
+        Ok(run) => failed(
+            id,
+            Tier::Two,
+            format!("expected unscoped ingest denial, got {run:?}"),
+        ),
+        Err(message) => failed(id, Tier::Two, message),
+    }
+}
+
+fn tier2_budget_exhaustion_aborts_cleanly(provider: Arc<dyn AgentProvider>) -> CaseOutcome {
+    let id = "budget_exhaustion_aborts_cleanly";
+    if !provider.capabilities().honors_cost_budget {
+        return failed(
+            id,
+            Tier::Two,
+            "provider must advertise honors_cost_budget=true to verify budget enforcement"
+                .to_string(),
+        );
+    }
+    let mut request = match conformance_request(BUDGET_EXHAUSTION_ABORTS_CLEANLY_PROMPT) {
+        Ok(request) => request,
+        Err(message) => return failed(id, Tier::Two, message),
+    };
+    request.cost_budget.max_tool_calls = 1;
+    match spawn_conformance(provider, request) {
+        Ok(run)
+            if run.status == AgentRunStatus::Aborted
+                && matches!(
+                    run.abort_error,
+                    Some(AgentProviderError::BudgetExceeded { ref limit })
+                        if limit == "tool_calls"
+                )
+                && run.budget_consumed.tool_calls == 1 =>
+        {
+            ok(id)
+        }
+        Ok(run) => failed(
+            id,
+            Tier::Two,
+            format!("expected clean tool-call budget abort, got {run:?}"),
+        ),
+        Err(message) => failed(id, Tier::Two, message),
+    }
+}
+
+fn tier2_writes_are_wal_routed(provider: Arc<dyn AgentProvider>) -> CaseOutcome {
+    let id = "writes_are_wal_routed";
+    if !provider.capabilities().scope_enforced {
+        return failed(
+            id,
+            Tier::Two,
+            "provider must advertise scope_enforced=true to verify tool policy enforcement"
+                .to_string(),
+        );
+    }
+    let mut request = match conformance_request(WRITES_ARE_WAL_ROUTED_PROMPT) {
+        Ok(request) => request,
+        Err(message) => return failed(id, Tier::Two, message),
+    };
+    request.scope = AgentScope::with_mutations(vec![CairnVerb::Ingest]);
+    request
+        .tool_allowlist
+        .tools
+        .push(AgentToolCall::new(CairnVerb::Ingest));
+    match spawn_conformance(provider, request) {
+        Ok(run)
+            if run.tool_calls.iter().any(|attempt| {
+                attempt.call.verb == CairnVerb::Ingest
+                    && attempt.outcome == AgentToolPolicyOutcome::AllowedWalRoutedMutation
+            }) =>
+        {
+            ok(id)
+        }
+        Ok(run) => failed(
+            id,
+            Tier::Two,
+            format!("expected WAL-routed ingest tool attempt, got {run:?}"),
+        ),
+        Err(message) => failed(id, Tier::Two, message),
+    }
+}
+
+fn conformance_request(prompt: &'static str) -> Result<AgentSpawnRequest, String> {
+    Ok(AgentSpawnRequest {
+        identity: AgentIdentity::new("agt:conformance:v1")
+            .map_err(|err| format!("conformance identity is invalid: {err}"))?,
+        scope: AgentScope::read_only(),
+        tool_allowlist: AgentToolAllowlist::read_only_cairn(),
+        cost_budget: AgentCostBudget {
+            max_turns: 3,
+            max_tool_calls: 2,
+            max_cost_units: 32,
+        },
+        wall_clock_budget: AgentWallClockBudget { max_millis: 1_000 },
+        output_schema: AgentOutputSchema::Text,
+        prompt: prompt.to_string(),
+    })
+}
+
+fn spawn_conformance(
+    provider: Arc<dyn AgentProvider>,
+    request: AgentSpawnRequest,
+) -> Result<crate::contract::agent_provider::AgentRun, String> {
+    if let Err(err) = request.validate() {
+        return Err(format!("conformance request is invalid: {err}"));
+    }
+    let output_schema = request.output_schema.clone();
+    let handle = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .map_err(|err| format!("failed to build conformance runtime: {err}"))?;
+        runtime
+            .block_on(provider.spawn(request))
+            .map_err(|err| format!("provider returned pre-run error: {err}"))
+    });
+    let run = handle
+        .join()
+        .map_err(|_| "provider conformance runtime panicked".to_string())??;
+    run.validate(&output_schema)
+        .map_err(|err| format!("provider returned invalid run: {err}"))?;
+    Ok(run)
+}
+
+fn ok(id: &'static str) -> CaseOutcome {
     CaseOutcome {
-        id: "budget_exhaustion_aborts_cleanly",
+        id,
         tier: Tier::Two,
-        status,
-    }
-}
-
-fn tier2_writes_are_wal_routed(provider: &dyn AgentProvider) -> CaseOutcome {
-    scope_enforced_or_pending("writes_are_wal_routed", provider)
-}
-
-fn scope_enforced_or_pending(id: &'static str, provider: &dyn AgentProvider) -> CaseOutcome {
-    if provider.capabilities().scope_enforced {
-        return pending(id, Tier::Two, TOOL_ATTEMPT_PENDING_REASON);
-    }
-    failed(
-        id,
-        Tier::Two,
-        "provider must advertise scope_enforced=true to verify tool policy enforcement".to_string(),
-    )
-}
-
-fn pending(id: &'static str, tier: Tier, reason: &'static str) -> CaseOutcome {
-    CaseOutcome {
-        id,
-        tier,
-        status: CaseStatus::Pending { reason },
+        status: CaseStatus::Ok,
     }
 }
 
@@ -173,9 +344,7 @@ fn failed(id: &'static str, tier: Tier, message: String) -> CaseOutcome {
 mod tests {
     use super::*;
     use crate::contract::agent_provider::{
-        AgentCostBudget, AgentIdentity, AgentOutputSchema, AgentProviderCapabilities,
-        AgentProviderError, AgentRun, AgentScope, AgentSpawnRequest, AgentToolAllowlist,
-        AgentToolCall, AgentToolPolicyOutcome, AgentWallClockBudget, CairnVerb,
+        AgentBudgetConsumed, AgentOutput, AgentProviderCapabilities, AgentRun, AgentToolAttempt,
         evaluate_tool_policy,
     };
     use crate::contract::manifest::PluginManifest;
@@ -212,6 +381,97 @@ mod tests {
         }
     }
 
+    struct ConformingAgent {
+        caps: AgentProviderCapabilities,
+    }
+
+    #[async_trait::async_trait]
+    impl AgentProvider for ConformingAgent {
+        fn name(&self) -> &'static str {
+            "stub-agent-provider"
+        }
+
+        fn capabilities(&self) -> &AgentProviderCapabilities {
+            &self.caps
+        }
+
+        fn supported_contract_versions(&self) -> VersionRange {
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+        }
+
+        async fn spawn(&self, request: AgentSpawnRequest) -> Result<AgentRun, AgentProviderError> {
+            request.validate()?;
+            match request.prompt.as_str() {
+                ALLOWLIST_REJECTS_UNLISTED_TOOL_PROMPT => {
+                    let call = AgentToolCall::new(CairnVerb::Forget);
+                    let err = evaluate_tool_policy(&request, &call).expect_err("forget denied");
+                    Ok(aborted_for_policy(call, &err))
+                }
+                MUTATING_VERB_REQUIRES_SCOPE_PROMPT => {
+                    let call = AgentToolCall::new(CairnVerb::Ingest);
+                    let err = evaluate_tool_policy(&request, &call).expect_err("ingest denied");
+                    Ok(aborted_for_policy(call, &err))
+                }
+                BUDGET_EXHAUSTION_ABORTS_CLEANLY_PROMPT => Ok(AgentRun {
+                    status: AgentRunStatus::Aborted,
+                    abort_error: Some(AgentProviderError::BudgetExceeded {
+                        limit: "tool_calls".to_string(),
+                    }),
+                    output: AgentOutput::Empty,
+                    budget_consumed: AgentBudgetConsumed {
+                        turns: 2,
+                        tool_calls: 1,
+                        cost_units: 1,
+                    },
+                    tool_calls: Vec::new(),
+                    policy_trace: vec!["budget:tool_calls".to_string()],
+                }),
+                WRITES_ARE_WAL_ROUTED_PROMPT => {
+                    let call = AgentToolCall::new(CairnVerb::Ingest);
+                    let outcome = evaluate_tool_policy(&request, &call).expect("ingest is scoped");
+                    Ok(AgentRun {
+                        status: AgentRunStatus::Completed,
+                        abort_error: None,
+                        output: AgentOutput::Text("ok".to_string()),
+                        budget_consumed: AgentBudgetConsumed {
+                            turns: 1,
+                            tool_calls: 1,
+                            cost_units: 1,
+                        },
+                        tool_calls: vec![AgentToolAttempt {
+                            call,
+                            outcome,
+                            reason: format!("{outcome:?}"),
+                        }],
+                        policy_trace: vec!["Ingest:AllowedWalRoutedMutation".to_string()],
+                    })
+                }
+                other => Err(AgentProviderError::InvalidRequest {
+                    message: format!("unknown conformance prompt {other}"),
+                }),
+            }
+        }
+    }
+
+    fn aborted_for_policy(call: AgentToolCall, err: &AgentProviderError) -> AgentRun {
+        AgentRun {
+            status: AgentRunStatus::Aborted,
+            abort_error: Some(err.clone()),
+            output: AgentOutput::Empty,
+            budget_consumed: AgentBudgetConsumed {
+                turns: 1,
+                tool_calls: 0,
+                cost_units: 0,
+            },
+            tool_calls: vec![AgentToolAttempt {
+                call,
+                outcome: AgentToolPolicyOutcome::Denied,
+                reason: err.to_string(),
+            }],
+            policy_trace: vec!["denied".to_string()],
+        }
+    }
+
     fn truthful_caps() -> AgentProviderCapabilities {
         AgentProviderCapabilities {
             honors_cost_budget: true,
@@ -222,6 +482,13 @@ mod tests {
     }
 
     fn registry_with(caps: AgentProviderCapabilities) -> (PluginRegistry, PluginName) {
+        registry_with_provider(std::sync::Arc::new(StubAgent::new(caps)), caps)
+    }
+
+    fn registry_with_provider(
+        provider: std::sync::Arc<dyn AgentProvider>,
+        caps: AgentProviderCapabilities,
+    ) -> (PluginRegistry, PluginName) {
         let mut registry = PluginRegistry::new();
         let name = PluginName::new("stub-agent-provider").expect("valid plugin name");
         let manifest = PluginManifest::parse_toml(&format!(
@@ -249,11 +516,7 @@ cli_subprocess_tools = {}
         ))
         .expect("manifest parses");
         registry
-            .register_agent_provider_with_manifest(
-                name.clone(),
-                manifest,
-                std::sync::Arc::new(StubAgent::new(caps)),
-            )
+            .register_agent_provider_with_manifest(name.clone(), manifest, provider)
             .expect("stub registers");
         (registry, name)
     }
@@ -390,7 +653,27 @@ cli_subprocess_tools = {}
     }
 
     #[test]
-    fn run_reports_provider_behavior_pending_for_truthful_caps() {
+    fn run_reports_provider_behavior_ok_for_conforming_agent() {
+        let (registry, name) = registry_with_provider(
+            std::sync::Arc::new(ConformingAgent {
+                caps: truthful_caps(),
+            }),
+            truthful_caps(),
+        );
+        let outcomes = run(&registry, &name);
+
+        for id in [
+            "allowlist_rejects_unlisted_tool",
+            "mutating_verb_requires_scope",
+            "writes_are_wal_routed",
+            "budget_exhaustion_aborts_cleanly",
+        ] {
+            assert_eq!(outcome(&outcomes, id).status, CaseStatus::Ok, "case {id}");
+        }
+    }
+
+    #[test]
+    fn run_fails_provider_behavior_cases_when_provider_unavailable() {
         let (registry, name) = registry_with(truthful_caps());
         let outcomes = run(&registry, &name);
 
@@ -398,21 +681,16 @@ cli_subprocess_tools = {}
             "allowlist_rejects_unlisted_tool",
             "mutating_verb_requires_scope",
             "writes_are_wal_routed",
+            "budget_exhaustion_aborts_cleanly",
         ] {
-            assert_eq!(
-                outcome(&outcomes, id).status,
-                CaseStatus::Pending {
-                    reason: "provider tool-attempt behavior requires a provider-specific conformance harness; host policy helper covered by unit tests",
-                },
-                "case {id}"
+            let CaseStatus::Failed { message } = &outcome(&outcomes, id).status else {
+                panic!("case {id} should fail");
+            };
+            assert!(
+                message.contains("provider returned pre-run error"),
+                "case {id} message was {message}"
             );
         }
-        assert_eq!(
-            outcome(&outcomes, "budget_exhaustion_aborts_cleanly").status,
-            CaseStatus::Pending {
-                reason: "budget overrun behavior requires a provider-specific conformance harness; budget metering helper covered by unit tests",
-            }
-        );
     }
 
     #[test]

@@ -1632,7 +1632,12 @@ fn agent_default_harness(agent: cairn_cli::skill::Agent) -> cairn_cli::skill::Ha
 }
 
 fn run_plugins(matches: &ArgMatches) -> ExitCode {
-    let registry = match plugins::host::register_all() {
+    let registry_result = if matches.subcommand_name() == Some("verify") {
+        plugins::host::register_all_for_verify()
+    } else {
+        plugins::host::register_all()
+    };
+    let registry = match registry_result {
         Ok(r) => r,
         // EX_CONFIG (78) — bundled plugin.toml failed to parse.
         Err(PluginError::InvalidManifest(msg)) => {

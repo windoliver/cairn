@@ -28,26 +28,22 @@ expression: json
         },
         {
           "id": "allowlist_rejects_unlisted_tool",
-          "reason": "provider tool-attempt behavior requires a provider-specific conformance harness; host policy helper covered by unit tests",
-          "status": "pending",
+          "status": "ok",
           "tier": 2
         },
         {
           "id": "mutating_verb_requires_scope",
-          "reason": "provider tool-attempt behavior requires a provider-specific conformance harness; host policy helper covered by unit tests",
-          "status": "pending",
+          "status": "ok",
           "tier": 2
         },
         {
           "id": "budget_exhaustion_aborts_cleanly",
-          "reason": "budget overrun behavior requires a provider-specific conformance harness; budget metering helper covered by unit tests",
-          "status": "pending",
+          "status": "ok",
           "tier": 2
         },
         {
           "id": "writes_are_wal_routed",
-          "reason": "provider tool-attempt behavior requires a provider-specific conformance harness; host policy helper covered by unit tests",
-          "status": "pending",
+          "status": "ok",
           "tier": 2
         }
       ],
@@ -365,7 +361,7 @@ expression: json
   ],
   "summary": {
     "failed": 0,
-    "ok": 50,
-    "pending": 10
+    "ok": 54,
+    "pending": 6
   }
 }

@@ -227,11 +227,11 @@ pub fn render_json(report: &VerifyReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugins::host::register_all;
+    use crate::plugins::host::register_all_for_verify;
 
     #[test]
     fn run_reports_eight_plugins() {
-        let reg = register_all().expect("registers");
+        let reg = register_all_for_verify().expect("registers");
         let report = run(&reg);
         assert_eq!(report.plugins.len(), 8);
         assert_eq!(report.summary.failed, 0, "no failures expected");
@@ -244,21 +244,21 @@ mod tests {
 
     #[test]
     fn exit_code_default_zero_with_pendings() {
-        let reg = register_all().expect("registers");
+        let reg = register_all_for_verify().expect("registers");
         let report = run(&reg);
         assert_eq!(exit_code(&report, false), 0);
     }
 
     #[test]
     fn exit_code_strict_nonzero_with_pendings() {
-        let reg = register_all().expect("registers");
+        let reg = register_all_for_verify().expect("registers");
         let report = run(&reg);
         assert_eq!(exit_code(&report, true), 69);
     }
 
     #[test]
     fn human_output_contains_every_plugin_and_summary() {
-        let reg = register_all().expect("registers");
+        let reg = register_all_for_verify().expect("registers");
         let report = run(&reg);
         let text = render_human(&report);
         for n in [
@@ -533,7 +533,7 @@ patch = 0
 
     #[test]
     fn json_output_round_trips() {
-        let reg = register_all().expect("registers");
+        let reg = register_all_for_verify().expect("registers");
         let report = run(&reg);
         let json = render_json(&report);
         let v: serde_json::Value = serde_json::from_str(&json).expect("valid json");
