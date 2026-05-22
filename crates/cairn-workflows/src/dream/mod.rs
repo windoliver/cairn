@@ -10,5 +10,5 @@ pub mod trigger;
 
 pub use handler::{DREAM_KIND, DreamHandler, render_dream_prompt};
 pub use payload::DreamPayload;
-pub use plan::{DreamPlanError, apply_dream_plan, build_dream_plan};
+pub use plan::{DreamPlanError, build_dream_plan};
 pub use trigger::{DreamEnqueueDecision, enqueue_tier, enqueue_tier_with_dedupe_token};

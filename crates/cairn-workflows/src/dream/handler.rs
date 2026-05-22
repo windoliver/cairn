@@ -16,6 +16,7 @@
 //! * Multi-mutation dream plans — the current planning seam emits one
 //!   autonomous upsert and applies it immediately.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use cairn_core::config::{DreamConfig, DreamTier, DreamTierConfig, DreamWorkerMode, ExtractBudget};
@@ -28,12 +29,13 @@ use cairn_core::contract::{
     AgentToolAllowlist, AgentWallClockBudget,
 };
 use cairn_core::domain::{
-    ScopeTuple,
+    RecordId, ScopeTuple,
     taxonomy::{MemoryClass, MemoryKind},
 };
 use tracing::{info, warn};
 
-use crate::dream::{DreamPayload, apply_dream_plan, build_dream_plan};
+use crate::dream::plan::apply_dream_plan;
+use crate::dream::{DreamPayload, build_dream_plan};
 use crate::scheduler::{HandlerOutcome, JobHandler};
 use crate::skillify::{SkillifyTrigger, enqueue_skillify};
 use crate::synthetic::{SyntheticRecordSpec, build_synthetic_record};
@@ -87,7 +89,6 @@ struct AgentDreamOutput {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AgentDreamEvidence {
-    tool: String,
     #[serde(default)]
     record_id: Option<String>,
     claim: String,
@@ -422,7 +423,7 @@ impl DreamHandler {
             payload.tier.as_str(),
             source_record_ids.len(),
         )?;
-        let outcome = apply_dream_plan(&self.store, plan).await?;
+        let outcome = apply_dream_plan(self.store.as_ref(), plan).await?;
 
         // Post-upsert source-liveness recheck (round-9 adversarial
         // review #1): the pre-upsert check above is racy — a
@@ -519,6 +520,11 @@ impl DreamHandler {
                 })
             }
             DreamWorkerMode::Agent => {
+                if payload.bound_scope.is_some() {
+                    return Err(Box::new(PermanentDreamError(
+                        "agent dream does not support scoped tool execution yet".to_owned(),
+                    )));
+                }
                 self.run_agent_dream_worker(payload, records, tier_config)
                     .await
             }
@@ -541,7 +547,7 @@ impl DreamHandler {
             scope: AgentScope::read_only(),
             tool_allowlist: AgentToolAllowlist::read_only_cairn(),
             cost_budget: AgentCostBudget {
-                max_turns: tier_config.max_tool_calls.max(1),
+                max_turns: tier_config.max_tool_calls.saturating_add(1).max(1),
                 max_tool_calls: tier_config.max_tool_calls,
                 max_cost_units: u64::from(tier_config.completion_token_budget),
             },
@@ -564,7 +570,7 @@ impl DreamHandler {
         }
         run.validate(&AgentOutputSchema::Json)
             .map_err(classify_agent_error)?;
-        parse_agent_dream_run(run)
+        parse_agent_dream_run(run, records)
     }
 
     async fn enqueue_skillify_after_deep_dream(
@@ -694,15 +700,18 @@ fn render_agent_dream_prompt(
     s.push_str(
         "\nReturn one JSON object only with exactly these top-level keys: \
          body, evidence. body must be a non-empty string. evidence must be a \
-         non-empty array of objects with exactly tool, record_id, and claim. \
+         non-empty array of objects with exactly record_id and claim. \
          record_id may be null when evidence is not tied to one source. \
-         Every claim must cite tool output or a source id.",
+         Every non-null record_id must cite one of the listed source records. \
+         Evidence claims and policy traces must summarize, not quote, source \
+         record bodies.",
     );
     s
 }
 
 fn parse_agent_dream_run(
     run: AgentRun,
+    records: &[cairn_core::domain::record::MemoryRecord],
 ) -> Result<DreamWorkerPlan, Box<dyn std::error::Error + Send + Sync>> {
     let AgentOutput::Json(value) = run.output else {
         return Err(classify_agent_error(AgentProviderError::InvalidOutput {
@@ -719,16 +728,12 @@ fn parse_agent_dream_run(
             message: "agent dream body must be non-empty".to_owned(),
         }));
     }
-    if parsed.evidence.is_empty()
-        || parsed
-            .evidence
-            .iter()
-            .any(|e| e.tool.trim().is_empty() || e.claim.trim().is_empty())
-    {
+    if parsed.evidence.is_empty() || parsed.evidence.iter().any(|e| e.claim.trim().is_empty()) {
         return Err(classify_agent_error(AgentProviderError::InvalidOutput {
-            message: "agent dream evidence must include non-empty tool and claim".to_owned(),
+            message: "agent dream evidence must include non-empty claim".to_owned(),
         }));
     }
+    validate_agent_dream_metadata(&parsed.evidence, &run.policy_trace, records)?;
     Ok(DreamWorkerPlan {
         body: parsed.body,
         evidence: serde_json::to_value(parsed.evidence).map_err(|source| {
@@ -744,6 +749,67 @@ fn parse_agent_dream_run(
         policy_trace: serde_json::json!(run.policy_trace),
         worker: "agent",
     })
+}
+
+fn validate_agent_dream_metadata(
+    evidence: &[AgentDreamEvidence],
+    policy_trace: &[String],
+    records: &[cairn_core::domain::record::MemoryRecord],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let source_ids: BTreeSet<String> = records.iter().map(|r| r.id.as_str().to_owned()).collect();
+    for item in evidence {
+        if let Some(record_id) = item.record_id.as_deref() {
+            if record_id.trim().is_empty() {
+                return Err(classify_agent_error(AgentProviderError::InvalidOutput {
+                    message: "agent dream evidence record_id must be non-empty when present"
+                        .to_owned(),
+                }));
+            }
+            let parsed = RecordId::parse(record_id.to_owned()).map_err(|source| {
+                classify_agent_error(AgentProviderError::InvalidOutput {
+                    message: format!("agent dream evidence record_id is invalid: {source}"),
+                })
+            })?;
+            if !source_ids.contains(parsed.as_str()) {
+                return Err(classify_agent_error(AgentProviderError::InvalidOutput {
+                    message: "agent dream evidence record_id must cite a source record".to_owned(),
+                }));
+            }
+        }
+        reject_source_excerpt("agent dream evidence claim", &item.claim, records)?;
+    }
+    for entry in policy_trace {
+        reject_source_excerpt("agent dream policy trace", entry, records)?;
+    }
+    Ok(())
+}
+
+fn reject_source_excerpt(
+    field: &str,
+    value: &str,
+    records: &[cairn_core::domain::record::MemoryRecord],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let value = normalize_for_excerpt_check(value);
+    if value.len() < 16 {
+        return Ok(());
+    }
+    for record in records {
+        let body = normalize_for_excerpt_check(&record.body);
+        if body.len() >= 16 && (value.contains(&body) || body.contains(&value)) {
+            return Err(classify_agent_error(AgentProviderError::InvalidOutput {
+                message: format!("{field} must not quote source record body"),
+            }));
+        }
+    }
+    Ok(())
+}
+
+fn normalize_for_excerpt_check(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
 }
 
 fn classify_agent_error(error: AgentProviderError) -> Box<dyn std::error::Error + Send + Sync> {
@@ -783,6 +849,18 @@ impl JobHandler for DreamHandler {
             );
             return HandlerOutcome::Permanent {
                 reason: "no agent provider configured".into(),
+                class: FailureClass::Validation,
+            };
+        }
+        if matches!(tier_config.worker, DreamWorkerMode::Agent) && payload.bound_scope.is_some() {
+            warn!(
+                key = %payload.key,
+                tier = %payload.tier,
+                "dream: agent worker requested for a scoped payload, but agent tools \
+                 cannot yet enforce read scope — declining permanently"
+            );
+            return HandlerOutcome::Permanent {
+                reason: "agent dream does not support scoped tool execution yet".into(),
                 class: FailureClass::Validation,
             };
         }

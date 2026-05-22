@@ -1,7 +1,6 @@
 //! FlushPlan seam for dream distillation output.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use cairn_core::contract::memory_store::{MemoryStore, StoreError, UpsertOutcome};
 use cairn_core::domain::flush_plan::{FlushMode, FlushPlan, PlanReason, PlannedMutation};
@@ -70,10 +69,11 @@ pub fn build_dream_plan(
 }
 
 /// Apply a dream FlushPlan after validating it contains exactly one upsert.
-pub async fn apply_dream_plan(
-    store: &Arc<dyn MemoryStore>,
+pub(crate) async fn apply_dream_plan(
+    store: &dyn MemoryStore,
     plan: FlushPlan,
 ) -> Result<UpsertOutcome, DreamPlanError> {
+    validate_dream_plan(&plan)?;
     let mut mutations = plan.mutations.into_iter();
     let Some(PlannedMutation::Upsert {
         record,
@@ -90,6 +90,40 @@ pub async fn apply_dream_plan(
         });
     }
     store.upsert(&record).await.map_err(DreamPlanError::Store)
+}
+
+fn validate_dream_plan(plan: &FlushPlan) -> Result<(), DreamPlanError> {
+    if !matches!(plan.mode, FlushMode::Autonomous) {
+        return Err(DreamPlanError::Invalid {
+            message: "dream plan must be autonomous".to_owned(),
+        });
+    }
+    if !matches!(&plan.reason, PlanReason::Dream { .. }) {
+        return Err(DreamPlanError::Invalid {
+            message: "dream plan must use PlanReason::Dream".to_owned(),
+        });
+    }
+    if plan.placeholder {
+        return Err(DreamPlanError::Invalid {
+            message: "dream plan must not be a placeholder".to_owned(),
+        });
+    }
+    if !plan.dependencies.is_empty() || !plan.source_events.is_empty() {
+        return Err(DreamPlanError::Invalid {
+            message: "dream plan must not carry dependencies or source events".to_owned(),
+        });
+    }
+    let expires_at = chrono::DateTime::parse_from_rfc3339(&plan.expires_at).map_err(|source| {
+        DreamPlanError::Invalid {
+            message: format!("dream plan expires_at is invalid: {source}"),
+        }
+    })?;
+    if expires_at.with_timezone(&chrono::Utc) <= chrono::Utc::now() {
+        return Err(DreamPlanError::Invalid {
+            message: "dream plan is expired".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn stable_plan_ulid(parts: &[&str]) -> Ulid {

@@ -16,7 +16,7 @@ use cairn_core::contract::{
     AgentProviderError, AgentRun, AgentRunStatus, AgentScope, AgentSpawnRequest,
     AgentToolAllowlist,
 };
-use cairn_core::domain::taxonomy::MemoryKind;
+use cairn_core::domain::{ScopeTuple, taxonomy::MemoryKind};
 use cairn_test_fixtures::{memstore, sample_record};
 use cairn_workflows::scheduler::{HandlerOutcome, JobHandler};
 use cairn_workflows::{DreamHandler, DreamPayload};
@@ -125,8 +125,7 @@ fn completed_agent_dream_run() -> AgentRun {
             "body": "agent synthesized dream body",
             "evidence": [
                 {
-                    "tool": "search",
-                    "record_id": "01HQZX9F5N0000000000000031",
+                    "record_id": "01HQZX9F5N000000000000001F",
                     "claim": "Seeded records support the synthesis."
                 }
             ]
@@ -138,6 +137,29 @@ fn completed_agent_dream_run() -> AgentRun {
         },
         tool_calls: Vec::new(),
         policy_trace: vec!["search allowed read-only".to_string()],
+    }
+}
+
+fn raw_evidence_agent_dream_run() -> AgentRun {
+    AgentRun {
+        status: AgentRunStatus::Completed,
+        abort_error: None,
+        output: AgentOutput::Json(serde_json::json!({
+            "body": "agent synthesized dream body",
+            "evidence": [
+                {
+                    "record_id": "01HQZX9F5N000000000000001F",
+                    "claim": "source excerpt alpha"
+                }
+            ]
+        })),
+        budget_consumed: AgentBudgetConsumed {
+            turns: 1,
+            tool_calls: 0,
+            cost_units: 1,
+        },
+        tool_calls: Vec::new(),
+        policy_trace: Vec::new(),
     }
 }
 
@@ -232,7 +254,7 @@ async fn agent_dream_outputs_evidence_and_budget_metadata() {
         AgentToolAllowlist::read_only_cairn()
     );
     assert_eq!(request.output_schema, AgentOutputSchema::Json);
-    assert_eq!(request.cost_budget.max_turns, 2);
+    assert_eq!(request.cost_budget.max_turns, 3);
     assert_eq!(request.cost_budget.max_tool_calls, 2);
     assert!(request.prompt.contains("01HQZX9F5N000000000000001F"));
     assert!(request.prompt.contains("01HQZX9F5N0000000000000020"));
@@ -257,7 +279,6 @@ async fn agent_dream_outputs_evidence_and_budget_metadata() {
         .get("dream")
         .expect("dream metadata");
     assert_eq!(dream_meta["worker"], "agent");
-    assert_eq!(dream_meta["evidence"][0]["tool"], "search");
     assert_eq!(
         dream_meta["evidence"][0]["claim"],
         "Seeded records support the synthesis."
@@ -269,6 +290,85 @@ async fn agent_dream_outputs_evidence_and_budget_metadata() {
     let metadata_wire = serde_json::to_string(dream_meta).expect("metadata json");
     assert!(!metadata_wire.contains("source excerpt alpha"));
     assert!(!metadata_wire.contains("source excerpt beta"));
+}
+
+#[tokio::test]
+async fn agent_dream_rejects_raw_source_evidence_metadata() {
+    let store = Arc::new(memstore().await);
+    let mut first = sample_record(31);
+    first.body = "source excerpt alpha".into();
+    store.upsert(&first).await.expect("seed first");
+
+    let agent = Arc::new(RecordingAgentProvider::new(raw_evidence_agent_dream_run()));
+    let dyn_store: Arc<dyn MemoryStore> = store.clone();
+    let handler = DreamHandler::new(
+        dyn_store,
+        DreamConfig {
+            enabled: true,
+            deep_dreaming: DreamTierConfig {
+                worker: DreamWorkerMode::Agent,
+                window_size_records: 4,
+                completion_token_budget: 256,
+                max_wall_ms: 1_000,
+                max_tool_calls: 1,
+                ..DreamTierConfig::deep_dreaming_default()
+            },
+            ..DreamConfig::default()
+        },
+        None,
+        Some(agent),
+    );
+    let payload = DreamPayload {
+        tier: DreamTier::DeepDreaming,
+        key: "sess-agent-raw-evidence".into(),
+        bound_scope: None,
+    };
+
+    let outcome = handler.handle(&payload.to_bytes().expect("encode")).await;
+
+    let HandlerOutcome::Permanent { reason, .. } = outcome else {
+        panic!("expected Permanent, got {outcome:?}");
+    };
+    assert!(reason.contains("must not quote source record body"));
+}
+
+#[tokio::test]
+async fn scoped_agent_dream_fails_closed_before_spawn() {
+    let store = Arc::new(memstore().await);
+    let agent = Arc::new(RecordingAgentProvider::new(completed_agent_dream_run()));
+    let requests = agent.requests();
+    let dyn_store: Arc<dyn MemoryStore> = store;
+    let handler = DreamHandler::new(
+        dyn_store,
+        DreamConfig {
+            enabled: true,
+            deep_dreaming: DreamTierConfig {
+                worker: DreamWorkerMode::Agent,
+                max_tool_calls: 1,
+                ..DreamTierConfig::deep_dreaming_default()
+            },
+            ..DreamConfig::default()
+        },
+        None,
+        Some(agent),
+    );
+    let payload = DreamPayload {
+        tier: DreamTier::DeepDreaming,
+        key: "sess-agent-scoped".into(),
+        bound_scope: Some(ScopeTuple {
+            tenant: Some("acme".into()),
+            workspace: Some("eng".into()),
+            ..ScopeTuple::default()
+        }),
+    };
+
+    let outcome = handler.handle(&payload.to_bytes().expect("encode")).await;
+
+    let HandlerOutcome::Permanent { reason, .. } = outcome else {
+        panic!("expected Permanent, got {outcome:?}");
+    };
+    assert!(reason.contains("scoped tool execution"));
+    assert_eq!(requests.lock().expect("requests lock").len(), 0);
 }
 
 #[tokio::test]
