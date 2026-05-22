@@ -467,6 +467,9 @@ const fn kind_wire(kind: ConsentKind) -> &'static str {
         ConsentKind::Grant => "grant",
         ConsentKind::Revoke => "revoke",
         ConsentKind::PromoteReceipt => "promote_receipt",
+        ConsentKind::FederationGrant => "federation_grant",
+        ConsentKind::FederationAccept => "federation_accept",
+        ConsentKind::FederationRevoke => "federation_revoke",
     }
 }
 
@@ -481,6 +484,9 @@ fn parse_kind(s: &str) -> Option<ConsentKind> {
         "grant" => ConsentKind::Grant,
         "revoke" => ConsentKind::Revoke,
         "promote_receipt" => ConsentKind::PromoteReceipt,
+        "federation_grant" => ConsentKind::FederationGrant,
+        "federation_accept" => ConsentKind::FederationAccept,
+        "federation_revoke" => ConsentKind::FederationRevoke,
         _ => return None,
     })
 }

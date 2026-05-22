@@ -361,6 +361,7 @@ fn read_since_rowid_surfaces_drift_on_null_kind() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // exhaustive coverage of all ConsentKind variants
 fn round_trip_preserves_every_kind() {
     let conn = open_in_memory().expect("open");
     let kinds: &[ConsentKind] = &[
@@ -373,6 +374,9 @@ fn round_trip_preserves_every_kind() {
         ConsentKind::Revoke,
         ConsentKind::PromoteReceipt,
         ConsentKind::SourceForget,
+        ConsentKind::FederationGrant,
+        ConsentKind::FederationAccept,
+        ConsentKind::FederationRevoke,
     ];
 
     for (i, kind) in kinds.iter().enumerate() {
@@ -439,6 +443,54 @@ fn round_trip_preserves_every_kind() {
                 e.kind = *kind;
                 e
             }
+            ConsentKind::FederationGrant => ConsentEvent {
+                consent_id: id.clone(),
+                kind: *kind,
+                actor: Identity::parse("hmn:tafeng").expect("id"),
+                subject: "share_link:rt-test".to_owned(),
+                scope: "team:platform".to_owned(),
+                op_id: Some(format!("op-{id}")),
+                sensor_id: None,
+                payload: ConsentPayload::FederationGrant {
+                    link_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                    grant_tier: MemoryVisibility::Team,
+                    peer_code: "loopback-node-a".to_owned(),
+                    grantee_id_hash: None,
+                },
+                decided_at: Rfc3339Timestamp::parse("2026-05-22T00:00:00Z").expect("ts"),
+                expires_at: None,
+            },
+            ConsentKind::FederationAccept => ConsentEvent {
+                consent_id: id.clone(),
+                kind: *kind,
+                actor: Identity::parse("hmn:tafeng").expect("id"),
+                subject: "share_link:rt-test".to_owned(),
+                scope: "team:platform".to_owned(),
+                op_id: Some(format!("op-{id}")),
+                sensor_id: None,
+                payload: ConsentPayload::FederationAccept {
+                    link_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                    grant_tier: MemoryVisibility::Team,
+                    applied_id_hashes: vec![h(0xfed_0001)],
+                },
+                decided_at: Rfc3339Timestamp::parse("2026-05-22T00:00:00Z").expect("ts"),
+                expires_at: None,
+            },
+            ConsentKind::FederationRevoke => ConsentEvent {
+                consent_id: id.clone(),
+                kind: *kind,
+                actor: Identity::parse("hmn:tafeng").expect("id"),
+                subject: "share_link:rt-test".to_owned(),
+                scope: "team:platform".to_owned(),
+                op_id: Some(format!("op-{id}")),
+                sensor_id: None,
+                payload: ConsentPayload::FederationRevoke {
+                    link_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                    reason_code: "issuer_revoked".to_owned(),
+                },
+                decided_at: Rfc3339Timestamp::parse("2026-05-22T00:00:00Z").expect("ts"),
+                expires_at: None,
+            },
         };
         append(&conn, &event).expect("append");
         let back = query_by_actor(&conn, &event.actor).expect("by actor");
