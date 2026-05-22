@@ -66,6 +66,11 @@ fn write_criterion_estimate(criterion_dir: &Path, bench: &str, estimate_ms: f64)
 }
 
 fn write_workflow_db(path: &Path, queued_age_ms: i64) {
+    let now_ms = now_epoch_ms();
+    write_workflow_db_with_times(path, now_ms - queued_age_ms, now_ms);
+}
+
+fn write_workflow_db_with_times(path: &Path, next_run_at: i64, updated_at: i64) {
     let conn = rusqlite::Connection::open(path).expect("open workflow db");
     conn.execute_batch(
         "CREATE TABLE workflow_jobs (
@@ -93,21 +98,25 @@ fn write_workflow_db(path: &Path, queued_age_ms: i64) {
         );",
     )
     .expect("create workflow_jobs");
-    let now_ms = 1_800_000_i64;
     conn.execute(
         "INSERT INTO workflow_jobs (
             job_id, kind, payload, state, attempts, delivery_count, max_attempts,
             base_backoff_ms, backoff_multiplier, max_backoff_ms, next_run_at,
             enqueued_at, updated_at
         ) VALUES (?1, ?2, x'', 'queued', 0, 0, 3, 1, 2, 60000, ?3, ?4, ?4)",
-        rusqlite::params![
-            "queued-migration",
-            "expire.tier",
-            now_ms - queued_age_ms,
-            now_ms
-        ],
+        rusqlite::params!["queued-migration", "expire.tier", next_run_at, updated_at],
     )
     .expect("insert workflow row");
+}
+
+fn now_epoch_ms() -> i64 {
+    i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_millis(),
+    )
+    .expect("epoch millis fit i64")
 }
 
 #[cfg(unix)]
@@ -426,8 +435,41 @@ fn workflow_db_backlog_over_slo_fails_migration_gate() {
     let report = read_report(out.path());
     let migration = check(&report, "migration_backlog");
     assert_eq!(migration["status"], "fail");
-    assert_eq!(migration["measured"], 900_000.0);
+    assert!(
+        migration["measured"].as_f64().expect("measured") >= 900_000.0,
+        "migration gate should measure from report time: {migration}"
+    );
     assert_eq!(migration["threshold"], 600_000.0);
+}
+
+#[test]
+fn workflow_db_backlog_uses_report_time_not_row_updated_at() {
+    let workflow = tempfile::tempdir().expect("workflow dir");
+    let workflow_db = workflow.path().join("workflow.sqlite");
+    let now_ms = now_epoch_ms();
+    write_workflow_db_with_times(&workflow_db, now_ms - 900_000, now_ms - 900_000);
+    let out = tempfile::tempdir().expect("out dir");
+
+    let output = cli()
+        .args([
+            "sre",
+            "--fixtures-only",
+            "--workflow-db",
+            workflow_db.to_str().expect("utf8"),
+            "--out-dir",
+            out.path().to_str().expect("utf8"),
+        ])
+        .output()
+        .expect("run sre gate");
+
+    assert_exit(output.status, 1);
+    let report = read_report(out.path());
+    let migration = check(&report, "migration_backlog");
+    assert_eq!(migration["status"], "fail");
+    assert!(
+        migration["measured"].as_f64().expect("measured") >= 850_000.0,
+        "migration gate should age queued work against report time: {migration}"
+    );
 }
 
 #[test]

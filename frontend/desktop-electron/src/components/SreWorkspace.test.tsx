@@ -100,6 +100,16 @@ describe("SreWorkspace", () => {
     expect(screen.queryByText(/SECRET_PRIVATE_TOKEN/)).not.toBeInTheDocument();
   });
 
+  it("uses overall health for the header badge", () => {
+    const mixedReport: DesktopSreReport = {
+      ...report,
+      gates: { status: "ok", gates: [] },
+    };
+    const { container } = render(<SreWorkspace report={mixedReport} />);
+
+    expect(container.querySelector(".sreHeader .sreStatusBadge")).toHaveTextContent("warning");
+  });
+
   it("shows loading state when report is absent", () => {
     render(<SreWorkspace report={null} />);
 

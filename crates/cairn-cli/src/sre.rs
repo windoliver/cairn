@@ -358,7 +358,7 @@ fn read_workflow_db_state(
     let mut stmt = conn
         .prepare(
             "SELECT kind, state, next_run_at, completed_at_ms, dead_letter_at_ms \
-                    , lease_started, lease_expires_at \
+                    , lease_expires_at \
              FROM workflow_jobs",
         )
         .map_err(|_err| ())?;
@@ -370,8 +370,7 @@ fn read_workflow_db_state(
         let next_run_at: i64 = row.get(2).map_err(|_err| ())?;
         let completed_at_ms: Option<i64> = row.get(3).map_err(|_err| ())?;
         let dead_letter_at_ms: Option<i64> = row.get(4).map_err(|_err| ())?;
-        let lease_started: Option<i64> = row.get(5).map_err(|_err| ())?;
-        let lease_expires_at: Option<i64> = row.get(6).map_err(|_err| ())?;
+        let lease_expires_at: Option<i64> = row.get(5).map_err(|_err| ())?;
         let entry = kinds.entry(kind).or_default();
         match state.as_str() {
             "queued" => {
@@ -385,10 +384,10 @@ fn read_workflow_db_state(
             }
             "leased" => {
                 entry.leased = entry.leased.saturating_add(1);
-                let held_ms = lease_started
-                    .or(lease_expires_at)
-                    .map(|lease_marker| captured_at_ms.saturating_sub(lease_marker).max(0));
-                if let Some(held_ms) = held_ms {
+                let overdue_ms = lease_expires_at
+                    .filter(|expires_at| *expires_at <= captured_at_ms)
+                    .map(|expires_at| captured_at_ms.saturating_sub(expires_at).max(0));
+                if let Some(held_ms) = overdue_ms {
                     entry.longest_held_lease_ms = Some(
                         entry
                             .longest_held_lease_ms

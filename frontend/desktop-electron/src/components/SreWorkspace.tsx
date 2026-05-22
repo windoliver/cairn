@@ -32,7 +32,7 @@ export function SreWorkspace({
           <h2>SRE</h2>
           <span>{report.vault.name}</span>
         </div>
-        <StatusBadge status={report.gates.status} />
+        <StatusBadge status={overallStatus(report)} />
       </header>
 
       <div className="sreSummaryStrip">
@@ -229,4 +229,27 @@ function formatMeasurement(value: number | null): string {
 
 function totalSearchFailures(report: DesktopSreReport): number {
   return report.search.modes.reduce((total, mode) => total + mode.failed, 0);
+}
+
+function overallStatus(report: DesktopSreReport): SreStatus {
+  return rollupStatus([
+    report.workflow.status,
+    report.rehydration.status,
+    report.projection.status,
+    report.search.status,
+    report.gates.status,
+  ]);
+}
+
+function rollupStatus(statuses: SreStatus[]): SreStatus {
+  if (statuses.includes("fail")) {
+    return "fail";
+  }
+  if (statuses.includes("warning")) {
+    return "warning";
+  }
+  if (statuses.includes("unknown")) {
+    return "unknown";
+  }
+  return "ok";
 }

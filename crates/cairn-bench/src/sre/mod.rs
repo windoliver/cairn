@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use cairn_core::domain::{
@@ -17,6 +18,7 @@ use crate::gates::thresholds::{SLO_COLD_REHYDRATE_MS, SLO_MIGRATION_BACKLOG_MS};
 
 const SCHEMA_VERSION: u32 = 1;
 const COLD_REHYDRATE_BENCH: &str = "cold_rehydrate_p95";
+const FIXTURE_WORKFLOW_REFERENCE_NOW_MS: i64 = 1_800_000;
 const FIXTURE_WORKFLOW_AGE_MS_I64: i64 = 120_000;
 const FIXTURE_LONGEST_HELD_LEASE_MS: i64 = 30_000;
 const FIXTURE_LAST_SUCCESS_AGE_MS: i64 = 60_000;
@@ -149,14 +151,14 @@ struct BenchSreDashboard {
 }
 
 fn workflow_measurement(args: &SreArgs) -> anyhow::Result<WorkflowMeasurement> {
-    let workflow_db = if let Some(path) = &args.workflow_db {
-        path.clone()
+    let (workflow_db, reference_now_ms) = if let Some(path) = &args.workflow_db {
+        (path.clone(), current_epoch_ms()?)
     } else {
         let path = args.out_dir.join("workflow-fixture.sqlite");
         write_fixture_workflow_db(&path)?;
-        path
+        (path, FIXTURE_WORKFLOW_REFERENCE_NOW_MS)
     };
-    read_workflow_measurement(&workflow_db)
+    read_workflow_measurement(&workflow_db, reference_now_ms)
         .with_context(|| format!("read workflow fixture {}", workflow_db.display()))
 }
 
@@ -169,15 +171,14 @@ fn write_fixture_workflow_db(path: &Path) -> anyhow::Result<()> {
     }
     let conn = rusqlite::Connection::open(path).context("open workflow fixture")?;
     create_workflow_jobs_table(&conn)?;
-    let now_ms = 1_800_000_i64;
     insert_workflow_job(
         &conn,
         WorkflowFixtureRow {
             job_id: "queued-migration",
             kind: "expire.tier",
             state: "queued",
-            next_run_at: now_ms - FIXTURE_WORKFLOW_AGE_MS_I64,
-            updated_at: now_ms,
+            next_run_at: FIXTURE_WORKFLOW_REFERENCE_NOW_MS - FIXTURE_WORKFLOW_AGE_MS_I64,
+            updated_at: FIXTURE_WORKFLOW_REFERENCE_NOW_MS,
             lease_started: None,
             lease_expires_at: None,
             completed_at_ms: None,
@@ -189,10 +190,12 @@ fn write_fixture_workflow_db(path: &Path) -> anyhow::Result<()> {
             job_id: "leased-migration",
             kind: "expire.tier",
             state: "leased",
-            next_run_at: now_ms,
-            updated_at: now_ms,
-            lease_started: Some(now_ms - FIXTURE_LONGEST_HELD_LEASE_MS),
-            lease_expires_at: Some(now_ms + FIXTURE_LONGEST_HELD_LEASE_MS),
+            next_run_at: FIXTURE_WORKFLOW_REFERENCE_NOW_MS,
+            updated_at: FIXTURE_WORKFLOW_REFERENCE_NOW_MS,
+            lease_started: Some(1),
+            lease_expires_at: Some(
+                FIXTURE_WORKFLOW_REFERENCE_NOW_MS - FIXTURE_LONGEST_HELD_LEASE_MS,
+            ),
             completed_at_ms: None,
         },
     )?;
@@ -202,19 +205,21 @@ fn write_fixture_workflow_db(path: &Path) -> anyhow::Result<()> {
             job_id: "done-migration",
             kind: "expire.tier",
             state: "done",
-            next_run_at: now_ms,
-            updated_at: now_ms,
+            next_run_at: FIXTURE_WORKFLOW_REFERENCE_NOW_MS,
+            updated_at: FIXTURE_WORKFLOW_REFERENCE_NOW_MS,
             lease_started: None,
             lease_expires_at: None,
-            completed_at_ms: Some(now_ms - FIXTURE_LAST_SUCCESS_AGE_MS),
+            completed_at_ms: Some(FIXTURE_WORKFLOW_REFERENCE_NOW_MS - FIXTURE_LAST_SUCCESS_AGE_MS),
         },
     )?;
     Ok(())
 }
 
-fn read_workflow_measurement(path: &Path) -> anyhow::Result<WorkflowMeasurement> {
+fn read_workflow_measurement(
+    path: &Path,
+    reference_now_ms: i64,
+) -> anyhow::Result<WorkflowMeasurement> {
     let conn = rusqlite::Connection::open(path).context("open workflow database")?;
-    let reference_now_ms = query_reference_now_ms(&conn)?;
     let oldest_next_run_at = conn
         .query_row(
             "SELECT MIN(next_run_at) FROM workflow_jobs WHERE state = 'queued'",
@@ -224,13 +229,13 @@ fn read_workflow_measurement(path: &Path) -> anyhow::Result<WorkflowMeasurement>
         .context("query queued workflow age")?;
     let longest_held_lease_ms = conn
         .query_row(
-            "SELECT MIN(lease_started) FROM workflow_jobs \
-             WHERE state = 'leased' AND lease_started IS NOT NULL",
-            [],
+            "SELECT MIN(lease_expires_at) FROM workflow_jobs \
+             WHERE state = 'leased' AND lease_expires_at <= ?1",
+            [reference_now_ms],
             |row| row.get::<_, Option<i64>>(0),
         )
         .context("query leased workflow age")?
-        .map(|lease_started| reference_now_ms.saturating_sub(lease_started).max(0));
+        .map(|lease_expires_at| reference_now_ms.saturating_sub(lease_expires_at).max(0));
     let last_completed_at = conn
         .query_row(
             "SELECT MAX(completed_at_ms) FROM workflow_jobs WHERE completed_at_ms IS NOT NULL",
@@ -248,12 +253,12 @@ fn read_workflow_measurement(path: &Path) -> anyhow::Result<WorkflowMeasurement>
     })
 }
 
-fn query_reference_now_ms(conn: &rusqlite::Connection) -> anyhow::Result<i64> {
-    conn.query_row("SELECT MAX(updated_at) FROM workflow_jobs", [], |row| {
-        row.get::<_, Option<i64>>(0)
-    })
-    .context("query workflow reference time")
-    .map(|now_ms| now_ms.unwrap_or(0))
+fn current_epoch_ms() -> anyhow::Result<i64> {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system time before unix epoch")?
+        .as_millis();
+    i64::try_from(millis).context("epoch milliseconds exceed i64")
 }
 
 fn create_workflow_jobs_table(conn: &rusqlite::Connection) -> anyhow::Result<()> {

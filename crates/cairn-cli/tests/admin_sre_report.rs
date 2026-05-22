@@ -811,6 +811,46 @@ fn admin_sre_report_prefers_db_workflow_current_state() {
 }
 
 #[test]
+fn admin_sre_report_does_not_treat_lease_started_marker_as_epoch_ms() {
+    let dir = bootstrap_vault();
+    let db_path = dir.path().join(".cairn/cairn.db");
+    let conn = rusqlite::Connection::open(&db_path).expect("open db");
+    create_workflow_jobs_table(&conn);
+    let now_ms = now_epoch_ms();
+    insert_workflow_row(
+        &conn,
+        "leased-but-current",
+        "dream.light",
+        "leased",
+        now_ms,
+        &[
+            ("lease_owner", &"worker"),
+            ("lease_nonce", &"nonce"),
+            ("lease_started", &1_i64),
+            ("lease_expires_at", &(now_ms + 60_000)),
+        ],
+    );
+
+    let output = cairn()
+        .current_dir(dir.path())
+        .args(["admin", "sre", "report", "--json"])
+        .output()
+        .expect("run sre report");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json = json_stdout(&output);
+    assert_eq!(json["workflow"]["status"], "ok");
+    assert_eq!(
+        json["workflow"]["longest_held_lease_ms"],
+        serde_json::Value::Null
+    );
+}
+
+#[test]
 fn admin_sre_report_fails_safely_when_workflow_db_unavailable() {
     let parent = tempfile::tempdir().expect("parent dir");
     let vault = parent
