@@ -122,3 +122,32 @@ pub fn forget_subcommand() -> clap::Command {
         .arg(clap::Arg::new("scope").long("scope").value_name("JSON"))
         .group(clap::ArgGroup::new("forget_target").required(true).multiple(false).arg("record_id").arg("session_id").arg("scope"))
 }
+
+/// `cairn propose_share` subcommand builder.
+#[must_use]
+pub fn propose_share_subcommand() -> clap::Command {
+    clap::Command::new("propose-share")
+        .about("cairn.mcp.v1 verb: propose-share")
+        .arg(clap::Arg::new("record_ids").long("record-ids").value_name("STRING").action(clap::ArgAction::Append).required(true))
+        .arg(clap::Arg::new("grantee").long("grantee").value_name("STRING"))
+        .arg(clap::Arg::new("scope").long("scope").value_name("JSON").required(true))
+        .arg(clap::Arg::new("grant_tier").long("grant-tier").value_name("ENUM").value_parser(["session", "project", "team", "org", "public"]).required(true))
+        .arg(clap::Arg::new("expires_at").long("expires-at").value_name("STRING").required(true))
+        .arg(clap::Arg::new("peer").long("peer").value_name("STRING"))
+}
+
+/// `cairn accept_share` subcommand builder.
+#[must_use]
+pub fn accept_share_subcommand() -> clap::Command {
+    clap::Command::new("accept-share")
+        .about("cairn.mcp.v1 verb: accept-share")
+        .arg(clap::Arg::new("envelope").long("envelope").value_name("JSON").required(true))
+}
+
+/// `cairn revoke_share` subcommand builder.
+#[must_use]
+pub fn revoke_share_subcommand() -> clap::Command {
+    clap::Command::new("revoke-share")
+        .about("cairn.mcp.v1 verb: revoke-share")
+        .arg(clap::Arg::new("link_id").long("link-id").value_name("STRING").required(true))
+}

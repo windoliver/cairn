@@ -36,7 +36,10 @@
       "verbs/assemble_hot.json",
       "verbs/capture_trace.json",
       "verbs/lint.json",
-      "verbs/forget.json"
+      "verbs/forget.json",
+      "verbs/propose_share.json",
+      "verbs/accept_share.json",
+      "verbs/revoke_share.json"
     ],
     "plugin": [
       "plugin/manifest.json"
@@ -50,6 +53,9 @@
     "assemble_hot",
     "capture_trace",
     "lint",
-    "forget"
+    "forget",
+    "propose_share",
+    "accept_share",
+    "revoke_share"
   ]
 }

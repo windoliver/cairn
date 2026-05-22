@@ -381,6 +381,68 @@ cairn forget --session SESSION_ID
 cairn forget --scope '{"user":"u"}'
 ```
 
+## `cairn propose_share`
+
+**Use when:**
+- use when the user wants to share one or more memory records with another peer or agent
+- use when the user says 'share this record', 'grant access', or 'federate these memories'
+
+**Do NOT use when:**
+- do NOT use to revoke a previously issued share — that belongs to revoke_share
+- do NOT use to accept an inbound share envelope — that belongs to accept_share
+
+**Exclusivity:** this is the sole outbound share-proposal surface; there is no other share-grant path
+
+**Example:**
+
+```bash
+cairn propose-share --record-ids 01H8XGJWBWBAQ4N1NQK1A8X9YZ --scope '{"tenant":"acme","workspace":"main"}' --grant-tier session --expires-at 2026-12-31T23:59:59Z
+```
+
+```bash
+cairn propose-share --record-ids 01H8XGJWBWBAQ4N1NQK1A8X9YZ --scope '{"tenant":"acme","workspace":"main"}' --grant-tier session --expires-at 2026-12-31T23:59:59Z --grantee hmn:alice
+```
+
+```bash
+cairn propose-share --record-ids 01H8XGJWBWBAQ4N1NQK1A8X9YZ --scope '{"tenant":"acme","workspace":"main"}' --grant-tier session --expires-at 2026-12-31T23:59:59Z --peer PEER
+```
+
+## `cairn accept_share`
+
+**Use when:**
+- use when the user receives an inbound federation envelope and wants to apply it locally
+- use when the user says 'accept this share', 'apply this federation envelope', or 'import shared memories'
+
+**Do NOT use when:**
+- do NOT use to propose a new share — that belongs to propose_share
+- do NOT use to revoke a share — that belongs to revoke_share
+
+**Exclusivity:** this is the sole inbound share-acceptance surface; there is no other import path
+
+**Example:**
+
+```bash
+cairn accept-share --envelope '{"kind":"propose","issuer_key_id":"hmn:alice"}'
+```
+
+## `cairn revoke_share`
+
+**Use when:**
+- use when the user wants to cancel a previously issued share link
+- use when the user says 'revoke this share', 'cancel access grant', or 'unshare these records'
+
+**Do NOT use when:**
+- do NOT use to propose a new share — that belongs to propose_share
+- do NOT use to accept an inbound share — that belongs to accept_share
+
+**Exclusivity:** this is the sole share-revocation surface; there is no other revoke path for federation links
+
+**Example:**
+
+```bash
+cairn revoke-share --link-id LINK_ID
+```
+
 ## Output format
 
 Every command supports `--json` for machine-readable output. Parse stdout as JSON; treat stderr as a human-readable error message.

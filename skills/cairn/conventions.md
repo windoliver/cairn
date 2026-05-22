@@ -11,6 +11,9 @@ Verb ids in the contract:
 - `capture_trace`
 - `lint`
 - `forget`
+- `propose_share`
+- `accept_share`
+- `revoke_share`
 
 ## Kind cheat-sheet (pick one — never invent new kinds)
 

@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/accept_share.json",
+  "title": "Cairn verb: accept_share",
+  "x-cairn-contract": "cairn.mcp.v1",
+  "x-cairn-verb-id": "accept_share",
+  "x-cairn-capability": "cairn.mcp.v1.extension.federation",
+  "x-cairn-auth": "signed_chain",
+  "x-cairn-extension": "cairn.federation.v1",
+  "x-cairn-cli": {
+    "command": "accept-share",
+    "flags": [
+      { "name": "envelope", "long": "envelope", "value_source": "json", "cli_exemplar": "{\"kind\":\"propose\",\"issuer_key_id\":\"hmn:alice\"}" }
+    ]
+  },
+  "x-cairn-skill-triggers": {
+    "positive_triggers": [
+      "use when the user receives an inbound federation envelope and wants to apply it locally",
+      "use when the user says 'accept this share', 'apply this federation envelope', or 'import shared memories'"
+    ],
+    "negative_triggers": [
+      "do NOT use to propose a new share — that belongs to propose_share",
+      "do NOT use to revoke a share — that belongs to revoke_share"
+    ],
+    "exclusivity_hints": "this is the sole inbound share-acceptance surface; there is no other import path"
+  },
+  "type": "object",
+  "$defs": {
+    "ScopeTuple": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Seven-dimensional scope tuple (brief §6). At least one field must be set.",
+      "properties": {
+        "tenant":     { "type": "string", "minLength": 1 },
+        "workspace":  { "type": "string", "minLength": 1 },
+        "project":    { "type": "string", "minLength": 1 },
+        "session_id": { "type": "string", "minLength": 1 },
+        "entity":     { "type": "string", "minLength": 1 },
+        "user":       { "type": "string", "minLength": 1 },
+        "agent":      { "type": "string", "minLength": 1 }
+      },
+      "anyOf": [
+        { "required": ["tenant"] },
+        { "required": ["workspace"] },
+        { "required": ["project"] },
+        { "required": ["session_id"] },
+        { "required": ["entity"] },
+        { "required": ["user"] },
+        { "required": ["agent"] }
+      ]
+    },
+    "ShareLinkPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Body-free payload for a signed share-link grant (brief §12.a).",
+      "required": ["operation_id", "nonce", "target_hash", "target_id_hashes", "scope", "grant_tier", "issuer", "issued_at", "expires_at", "key_version"],
+      "properties": {
+        "operation_id":      { "$ref": "../common/primitives.json#/$defs/Ulid" },
+        "nonce":             { "$ref": "../common/primitives.json#/$defs/Nonce16Base64" },
+        "target_hash":       { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "target_id_hashes":  { "type": "array", "minItems": 1, "maxItems": 64, "items": { "type": "string", "minLength": 1 } },
+        "scope":             { "$ref": "#/$defs/ScopeTuple" },
+        "grant_tier":        { "type": "string", "enum": ["session", "project", "team", "org", "public"] },
+        "grantee":           { "$ref": "../common/primitives.json#/$defs/Identity" },
+        "issuer":            { "$ref": "../common/primitives.json#/$defs/Identity" },
+        "issued_at":         { "type": "string", "format": "date-time", "minLength": 20 },
+        "expires_at":        { "type": "string", "format": "date-time", "minLength": 20 },
+        "key_version":       { "type": "integer", "minimum": 1 }
+      }
+    },
+    "SignedShareLink": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Signed share link authorizing a bounded grant (brief §12.a).",
+      "required": ["link_id", "payload", "signature"],
+      "properties": {
+        "link_id":   { "type": "string", "minLength": 1 },
+        "payload":   { "$ref": "#/$defs/ShareLinkPayload" },
+        "signature": { "$ref": "../common/primitives.json#/$defs/Ed25519Signature" }
+      }
+    },
+    "SignedRevocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Signed revocation record cancelling a previously issued share link (brief §12.a).",
+      "required": ["link_id", "revoked_at", "issuer", "key_version", "signature"],
+      "properties": {
+        "link_id":     { "type": "string", "minLength": 1 },
+        "revoked_at":  { "type": "string", "format": "date-time", "minLength": 20 },
+        "issuer":      { "$ref": "../common/primitives.json#/$defs/Identity" },
+        "key_version": { "type": "integer", "minimum": 1 },
+        "signature":   { "$ref": "../common/primitives.json#/$defs/Ed25519Signature" }
+      }
+    },
+    "MemoryRecordStub": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Minimal wire representation of a memory record included in a federation envelope manifest (brief §12.a).",
+      "required": ["record_id", "kind", "scope", "visibility"],
+      "properties": {
+        "record_id":   { "$ref": "../common/primitives.json#/$defs/Ulid" },
+        "kind":        { "type": "string", "minLength": 1 },
+        "scope":       { "$ref": "#/$defs/ScopeTuple" },
+        "visibility":  { "type": "string", "enum": ["private", "session", "project", "team", "org", "public"] },
+        "body":        { "type": "string" },
+        "tags":        { "type": "array", "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "FederationEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Transport envelope for federation operations. Carries either a share proposal or a revocation (brief §12.a).",
+      "required": ["kind", "issuer_key_id"],
+      "properties": {
+        "kind":         { "type": "string", "enum": ["propose", "revoke"] },
+        "issuer_key_id":{ "$ref": "../common/primitives.json#/$defs/Identity" },
+        "link":         { "$ref": "#/$defs/SignedShareLink" },
+        "revocation":   { "$ref": "#/$defs/SignedRevocation" },
+        "manifest":     { "type": "array", "items": { "$ref": "#/$defs/MemoryRecordStub" } }
+      }
+    },
+    "Args": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["envelope"],
+      "properties": {
+        "envelope": { "$ref": "#/$defs/FederationEnvelope" }
+      }
+    },
+    "Data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["outcome", "applied_records"],
+      "properties": {
+        "outcome":          { "type": "string", "enum": ["accepted", "duplicate"] },
+        "applied_records":  { "type": "array", "items": { "$ref": "../common/primitives.json#/$defs/Ulid" } }
+      }
+    }
+  }
+}
