@@ -6,7 +6,7 @@
 //! * **Propose envelopes** — verify the [`SignedShareLink`] shape +
 //!   signature + freshness; check the receiver's `ReBAC` `Write` relation
 //!   at `link.payload.grant_tier`; dedupe on
-//!   `(issuer_key_id, link_id, nonce)`; reject if the link was previously
+//!   `(issuer_key_id, link_id)`; reject if the link was previously
 //!   revoked; upsert each manifest record (with provenance pinned at the
 //!   share link, visibility capped at `grant_tier`) AND append
 //!   [`ConsentEvent::FederationAccept`] in one outbox transaction.
@@ -75,7 +75,7 @@ pub struct AcceptShareRequest {
 pub enum AcceptOutcome {
     /// Envelope applied for the first time.
     Accepted,
-    /// `(issuer_key_id, link_id, nonce)` already on disk — the original
+    /// `(issuer_key_id, link_id)` already on disk — the original
     /// `applied_records` is returned and no new consent row is appended.
     Duplicate,
 }

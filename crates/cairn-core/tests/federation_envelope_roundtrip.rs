@@ -17,13 +17,12 @@ fn propose_envelope_roundtrips_through_canonical_json() {
 }
 
 #[test]
-fn propose_envelope_dedup_key_uses_link_id_and_nonce() {
+fn propose_envelope_dedup_key_uses_issuer_and_link_id() {
     let fixture = include_str!("fixtures/federation/propose_envelope.json");
     let env: FederationEnvelope = serde_json::from_str(fixture).expect("parse");
     let key: DedupKey<'_> = env.dedup_key().expect("propose envelope has dedup key");
     assert_eq!(key.issuer_key_id, "hmn:alice");
     assert_eq!(key.link_id, "01HQZX9F5N0000000000000000");
-    assert_eq!(key.nonce, "AAAAAAAAAAAAAAAAAAAAAA==");
 }
 
 #[test]

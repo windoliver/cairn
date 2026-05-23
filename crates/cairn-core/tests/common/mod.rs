@@ -588,7 +588,7 @@ impl ConsentLookup for InMemoryConsentLookup {
             .accepts
             .lock()
             .expect("invariant: consent-lookup mutex poisoned only on prior test panic");
-        Ok(guard.get(&dedup_string(&dedup)).cloned())
+        Ok(guard.get(&dedup_key_string(&dedup)).cloned())
     }
 
     async fn is_link_revoked(&self, link_id: &str) -> Result<bool, ConsentLookupError> {
@@ -627,14 +627,13 @@ impl InMemoryConsentLookup {
         &self,
         issuer_key_id: &str,
         link_id: &str,
-        nonce: &str,
         record: FederationAcceptRecord,
     ) {
         let mut guard = self
             .accepts
             .lock()
             .expect("invariant: consent-lookup mutex poisoned only on prior test panic");
-        guard.insert(dedup_string_owned(issuer_key_id, link_id, nonce), record);
+        guard.insert(dedup_key_string_owned(issuer_key_id, link_id), record);
     }
 
     pub fn mark_revoked(&self, link_id: &str) {
@@ -669,12 +668,12 @@ impl InMemoryConsentLookup {
     }
 }
 
-fn dedup_string(d: &DedupKey<'_>) -> String {
-    dedup_string_owned(d.issuer_key_id, d.link_id, d.nonce)
+fn dedup_key_string(d: &DedupKey<'_>) -> String {
+    dedup_key_string_owned(d.issuer_key_id, d.link_id)
 }
 
-fn dedup_string_owned(issuer_key_id: &str, link_id: &str, nonce: &str) -> String {
-    format!("{issuer_key_id}|{link_id}|{nonce}")
+fn dedup_key_string_owned(issuer_key_id: &str, link_id: &str) -> String {
+    format!("{issuer_key_id}|{link_id}")
 }
 
 /// Receiver-side test context for [`accept_share`].
@@ -1030,7 +1029,6 @@ impl ReceiverCtx {
         self.consent_lookup.record_accept(
             envelope.issuer_key_id.0.as_str(),
             link.link_id.as_str(),
-            link.payload.nonce.0.as_str(),
             FederationAcceptRecord {
                 link_id: link.link_id.clone(),
                 applied_records,

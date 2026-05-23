@@ -120,9 +120,13 @@ pub trait ConsentLookup: Send + Sync {
     /// Idempotency lookup for `accept_share` (brief §12.a).
     ///
     /// Returns `Some(record)` when a [`crate::domain::ConsentKind::FederationAccept`]
-    /// row has already been committed for the
-    /// `(issuer_key_id, link_id, nonce)` tuple in `dedup`. Returns
-    /// `None` for a first-seen envelope.
+    /// row has already been committed for the `(issuer_key_id, link_id)`
+    /// tuple in `dedup`. Returns `None` for a first-seen envelope.
+    ///
+    /// The `link_id` is already nonce-bound (each propose mints a fresh
+    /// `link_id` + nonce together), so the nonce is not needed as a
+    /// separate dedup component. `FederationAccept` consent rows do not
+    /// persist the nonce, making nonce-based dedup unimplementable.
     ///
     /// The verb layer treats a hit as a duplicate Ack: it replies with
     /// the original `applied_records` and emits no new consent event.

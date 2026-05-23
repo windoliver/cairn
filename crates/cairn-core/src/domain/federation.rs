@@ -29,17 +29,20 @@ pub struct PeerEndpoint(pub String);
 
 /// Idempotency key for federation propose envelopes.
 ///
-/// Propose envelopes dedupe by `(issuer_key_id, link_id, nonce)`. Revoke
-/// envelopes dedupe by `link_id` alone (any sender can issue the revoke
-/// signal, but the receiver-side projection is unique per link).
+/// Propose envelopes dedupe by `(issuer_key_id, link_id)`. The `link_id`
+/// is already nonce-bound — each propose mints a fresh `link_id` together
+/// with a nonce — so dropping the nonce from the dedup key loses nothing.
+/// `FederationAccept` consent rows do not persist the nonce, making
+/// nonce-based dedup unimplementable at the storage layer.
+///
+/// Revoke envelopes dedupe by `link_id` alone (any sender can issue the
+/// revoke signal, but the receiver-side projection is unique per link).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DedupKey<'a> {
     /// Stable key identifier of the issuing principal.
     pub issuer_key_id: &'a str,
     /// Unique share-link identifier.
     pub link_id: &'a str,
-    /// One-time nonce from the share-link payload.
-    pub nonce: &'a str,
 }
 
 /// Extension trait adding helper methods to the codegenerated
@@ -57,7 +60,6 @@ impl FederationEnvelopeExt for FederationEnvelope {
         Some(DedupKey {
             issuer_key_id: self.issuer_key_id.0.as_str(),
             link_id: link.link_id.as_str(),
-            nonce: link.payload.nonce.0.as_str(),
         })
     }
 }
