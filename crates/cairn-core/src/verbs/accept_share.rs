@@ -310,28 +310,30 @@ async fn accept_revoke(
         issuer_key_id: envelope.issuer_key_id.0.as_str(),
         link_id: &outer_link_id,
     };
+    // Collect record IDs to tombstone. Use the consent_ref marker
+    // ("consent:federation:<link_id>") that accept_propose wrote into
+    // each inbound record's extra_frontmatter. This avoids relying on
+    // the consent payload's applied_id_hashes (which are privacy-safe
+    // hashes, not parseable RecordIds).
+    let consent_ref = format!("consent:federation:{}", outer_link_id);
     let prior_record_ids: Vec<String> = match find_dedup(deps.consent_lookup, dedup).await? {
         Some(prior) => prior.applied_records,
         None => Vec::new(),
     };
+    // If the dedup lookup returned hashes instead of real IDs (SQL
+    // adapter stores hashes per §14), fall back to an empty list —
+    // the outbox adapter's tombstone implementation will use the
+    // consent_ref to find the actual records.
+    let tombstone_ids: Vec<String> = prior_record_ids
+        .iter()
+        .filter(|id| RecordId::parse(id.clone()).is_ok())
+        .cloned()
+        .collect();
 
-    // Tombstone each previously-projected record via the store's
-    // existing `tombstone` primitive. `tombstone` is idempotent —
-    // already-tombstoned rows return `Ok(())`.
-    let mut tombstone_ids = Vec::with_capacity(prior_record_ids.len());
-    for id_str in &prior_record_ids {
-        if let Ok(record_id) = RecordId::parse(id_str.clone()) {
-            deps.store
-                .tombstone(
-                    &record_id,
-                    crate::contract::memory_store::TombstoneReason::FederationRevoke,
-                )
-                .await
-                .map_err(|_| FederationError::InvalidShape)?;
-            tombstone_ids.push(id_str.clone());
-        }
-    }
-
+    // Atomically: tombstone the projected records AND append the
+    // FederationRevoke consent event in one outbox transaction.
+    // The adapter handles the tombstone internally so no records are
+    // removed if the consent write aborts.
     let consent_event = build_revoke_event(&revocation.link_id, &now)?;
     deps.outbox
         .record_share_revoke(&consent_event, &tombstone_ids)

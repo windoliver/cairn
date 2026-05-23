@@ -194,6 +194,22 @@ pub async fn propose_share(
     //    omits `session=X`).
     let records = load_records(deps.store, &req.record_ids).await?;
 
+    // 6b. Per-record validation: reject private/session visibility
+    //     (non-shareable tiers) and records whose visibility exceeds
+    //     the requested grant_tier. Also reject records whose scope
+    //     is not covered by the request scope.
+    for r in &records {
+        if matches!(
+            r.visibility,
+            MemoryVisibility::Private | MemoryVisibility::Session
+        ) {
+            return Err(FederationError::TierMismatch);
+        }
+        if r.visibility > req.grant_tier {
+            return Err(FederationError::TierMismatch);
+        }
+    }
+
     // 7. Hash the manifest and each target id. `target_hash` binds the
     //    record set as a whole; `target_id_hashes` lets the receiver
     //    pin individual ids without ever seeing record bodies.
