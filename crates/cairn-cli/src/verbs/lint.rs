@@ -3101,6 +3101,7 @@ pub fn run(sub: &ArgMatches, vault_root: Option<&Path>) -> ExitCode {
                 tracking_issue: Some(83),
             };
             let degraded_data = cairn_core::generated::verbs::lint::LintData {
+                agent_worker_audit: None,
                 findings: vec![deferred],
                 report_path: None,
                 summary: cairn_core::generated::verbs::lint::LintDataSummary {
@@ -3394,6 +3395,7 @@ fn lint_data(report: EdgeLintReport) -> LintData {
     let total = usize_to_u64(report.findings.len());
     let summary = edge_summary(&report.findings, total, report.auto_resolved);
     LintData {
+        agent_worker_audit: None,
         findings: report.findings,
         report_path: None,
         summary,
@@ -4010,6 +4012,7 @@ mod tests {
         // - the summary aggregates (total / by_severity / by_kind)
         //   stay consistent so the json/markdown render is correct.
         let mut data = cairn_core::generated::verbs::lint::LintData {
+            agent_worker_audit: None,
             findings: Vec::new(),
             summary: cairn_core::generated::verbs::lint::LintDataSummary {
                 auto_resolved: None,

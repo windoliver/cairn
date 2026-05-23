@@ -11,9 +11,13 @@ use crate::contract::consent_lookup::ConsentLookup;
 use crate::contract::memory_store::{IndexStats, StoredRecord};
 use crate::contract::source_resolver::SourceResolver;
 use crate::domain::record::RecordId;
-use crate::domain::{Identity, SourceId};
+use crate::domain::{
+    AgentCanaryState, AgentWorkerAuditSummary, AgentWorkerKind, Identity, SourceId,
+};
 use crate::generated::verbs::lint::{
-    Finding, Kind, LintData, LintDataSummary, LintDataSummaryBySeverity, Severity, Target,
+    AgentWorkerAuditReport, AgentWorkerAuditReportRolloutState, AgentWorkerAuditWorker,
+    AgentWorkerAuditWorkerWorkerKind, Finding, Kind, LintData, LintDataSummary,
+    LintDataSummaryBySeverity, Severity, Target,
 };
 use crate::pipeline::lint::author_lifecycle::AuthorLifecycle;
 
@@ -365,7 +369,10 @@ pub async fn run_checks(inputs: &LintInputs<'_>) -> LintData {
     findings.extend(checks::workflow_health::run(inputs));
     findings.extend(checks::consent::run(inputs).await);
     let summary = summarize(&findings);
+    let agent_worker_audit =
+        agent_worker_audit_report(&AgentWorkerAuditSummary::from_records(&[]), None);
     LintData {
+        agent_worker_audit: Some(agent_worker_audit),
         findings,
         summary,
         report_path: None,
@@ -450,6 +457,64 @@ fn kind_key(k: Kind) -> String {
         Kind::SkillRollbackBroken => "skill_rollback_broken",
     }
     .to_owned()
+}
+
+/// Project a core agent-worker summary into the generated lint DTO.
+#[must_use]
+pub fn agent_worker_audit_report(
+    summary: &AgentWorkerAuditSummary,
+    rollout_state: Option<AgentCanaryState>,
+) -> AgentWorkerAuditReport {
+    let mut failure_modes = serde_json::Map::new();
+    for (mode, count) in &summary.failure_modes {
+        failure_modes.insert(
+            mode.as_str().to_owned(),
+            serde_json::Value::Number(serde_json::Number::from(*count)),
+        );
+    }
+
+    AgentWorkerAuditReport {
+        observed_records: !summary.is_empty(),
+        rollout_state: rollout_state.map(agent_rollout_state),
+        total_runs: summary.total_runs,
+        completed_runs: summary.completed_runs,
+        failed_runs: summary.failed_runs,
+        generated_candidates: summary.generated_candidates,
+        accepted_candidates: summary.accepted_candidates,
+        acceptance_rate: summary.acceptance_rate,
+        turns: summary.turns,
+        tool_calls: summary.tool_calls,
+        cost_units: summary.cost_units,
+        failure_modes: serde_json::Value::Object(failure_modes),
+        workers: summary
+            .workers
+            .iter()
+            .map(|worker| AgentWorkerAuditWorker {
+                worker_kind: agent_worker_kind(worker.worker_kind),
+                worker_name: worker.worker_name.clone(),
+                canary_label: worker.canary_label.clone(),
+                total_runs: worker.total_runs,
+                generated_candidates: worker.generated_candidates,
+                accepted_candidates: worker.accepted_candidates,
+            })
+            .collect(),
+    }
+}
+
+fn agent_rollout_state(state: AgentCanaryState) -> AgentWorkerAuditReportRolloutState {
+    match state {
+        AgentCanaryState::Paused => AgentWorkerAuditReportRolloutState::Paused,
+        AgentCanaryState::Canary => AgentWorkerAuditReportRolloutState::Canary,
+        AgentCanaryState::Enabled => AgentWorkerAuditReportRolloutState::Enabled,
+        AgentCanaryState::RolledBack => AgentWorkerAuditReportRolloutState::RolledBack,
+    }
+}
+
+fn agent_worker_kind(kind: AgentWorkerKind) -> AgentWorkerAuditWorkerWorkerKind {
+    match kind {
+        AgentWorkerKind::Extractor => AgentWorkerAuditWorkerWorkerKind::Extractor,
+        AgentWorkerKind::Dream => AgentWorkerAuditWorkerWorkerKind::Dream,
+    }
 }
 
 /// Construct a finding with no target / fix / tracking issue.
@@ -661,6 +726,64 @@ mod tests {
         assert_eq!(
             super::kind_key(Kind::SensorBudgetExceeded),
             "sensor_budget_exceeded"
+        );
+    }
+
+    #[test]
+    fn agent_worker_audit_report_projects_summary() {
+        use crate::domain::{
+            AgentCanaryState, AgentWorkerAuditSummary, AgentWorkerFailureMode,
+            AgentWorkerGroupSummary, AgentWorkerKind,
+        };
+
+        let mut failure_modes = std::collections::BTreeMap::new();
+        failure_modes.insert(AgentWorkerFailureMode::BudgetExceeded, 2);
+        let summary = AgentWorkerAuditSummary {
+            total_runs: 4,
+            completed_runs: 2,
+            failed_runs: 2,
+            generated_candidates: 10,
+            accepted_candidates: 5,
+            acceptance_rate: Some(0.5),
+            turns: 8,
+            tool_calls: 12,
+            cost_units: 200,
+            failure_modes,
+            workers: vec![AgentWorkerGroupSummary {
+                worker_kind: AgentWorkerKind::Extractor,
+                worker_name: "agent_extractor".to_owned(),
+                canary_label: Some("canary-05".to_owned()),
+                total_runs: 4,
+                accepted_candidates: 5,
+                generated_candidates: 10,
+            }],
+        };
+
+        let report = agent_worker_audit_report(&summary, Some(AgentCanaryState::Canary));
+
+        assert!(report.observed_records);
+        assert_eq!(
+            report.rollout_state,
+            Some(crate::generated::verbs::lint::AgentWorkerAuditReportRolloutState::Canary)
+        );
+        assert_eq!(report.total_runs, 4);
+        assert_eq!(report.completed_runs, 2);
+        assert_eq!(report.failed_runs, 2);
+        assert_eq!(report.generated_candidates, 10);
+        assert_eq!(report.accepted_candidates, 5);
+        assert_eq!(report.acceptance_rate, Some(0.5));
+        assert_eq!(report.turns, 8);
+        assert_eq!(report.tool_calls, 12);
+        assert_eq!(report.cost_units, 200);
+        assert_eq!(
+            report.failure_modes["budget_exceeded"],
+            serde_json::json!(2)
+        );
+        assert_eq!(report.workers.len(), 1);
+        assert_eq!(
+            serde_json::to_value(report.workers[0].worker_kind)
+                .expect("generated worker kind serializes"),
+            serde_json::json!("extractor")
         );
     }
 

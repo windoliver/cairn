@@ -6,7 +6,7 @@
 
 use std::fmt::Write as _;
 
-use crate::generated::verbs::lint::{Kind, LintData, Severity};
+use crate::generated::verbs::lint::{AgentWorkerAuditReportRolloutState, Kind, LintData, Severity};
 
 /// Render `data` as the canonical lint-report markdown body.
 ///
@@ -25,6 +25,29 @@ pub fn render(data: &LintData) -> String {
     let _ = writeln!(out, "- error: {}", data.summary.by_severity.error);
     let _ = writeln!(out, "- warning: {}", data.summary.by_severity.warning);
     let _ = writeln!(out, "- info: {}\n", data.summary.by_severity.info);
+
+    if let Some(agent) = &data.agent_worker_audit {
+        out.push_str("## Agent worker audit\n\n");
+        if agent.observed_records {
+            let state = agent
+                .rollout_state
+                .map_or("unconfigured", render_rollout_state);
+            let _ = writeln!(out, "- state: {state}");
+            let _ = writeln!(out, "- runs: {}", agent.total_runs);
+            let _ = writeln!(
+                out,
+                "- accepted candidates: {} / {}",
+                agent.accepted_candidates, agent.generated_candidates
+            );
+            let _ = writeln!(out, "- cost units: {}", agent.cost_units);
+            let _ = writeln!(out, "- tool calls: {}", agent.tool_calls);
+            let failures = render_failure_modes(&agent.failure_modes);
+            let _ = writeln!(out, "- failures: {failures}");
+            out.push('\n');
+        } else {
+            out.push_str("- no agent-worker audit records observed\n\n");
+        }
+    }
 
     let deferred = data
         .findings
@@ -74,6 +97,28 @@ pub fn render(data: &LintData) -> String {
     out
 }
 
+fn render_rollout_state(state: AgentWorkerAuditReportRolloutState) -> &'static str {
+    match state {
+        AgentWorkerAuditReportRolloutState::Paused => "paused",
+        AgentWorkerAuditReportRolloutState::Canary => "canary",
+        AgentWorkerAuditReportRolloutState::Enabled => "enabled",
+        AgentWorkerAuditReportRolloutState::RolledBack => "rolled_back",
+    }
+}
+
+fn render_failure_modes(value: &serde_json::Value) -> String {
+    let Some(map) = value.as_object() else {
+        return "none".to_owned();
+    };
+    if map.is_empty() {
+        return "none".to_owned();
+    }
+    map.iter()
+        .filter_map(|(key, value)| value.as_u64().map(|count| format!("{key}={count}")))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,6 +142,7 @@ mod tests {
     #[test]
     fn empty_data_renders_no_findings_block() {
         let data = LintData {
+            agent_worker_audit: None,
             findings: vec![],
             summary: empty_summary(),
             report_path: None,
@@ -127,6 +173,7 @@ mod tests {
         by_kind.insert("index_drift".into(), serde_json::Value::Number(1.into()));
         summary.by_kind = serde_json::Value::Object(by_kind);
         let data = LintData {
+            agent_worker_audit: None,
             findings: vec![f],
             summary,
             report_path: None,
@@ -154,11 +201,47 @@ mod tests {
         by_kind.insert("deferred_check".into(), serde_json::Value::Number(1.into()));
         summary.by_kind = serde_json::Value::Object(by_kind);
         let data = LintData {
+            agent_worker_audit: None,
             findings: vec![f],
             summary,
             report_path: None,
         };
         let s = render(&data);
         insta::assert_snapshot!(s);
+    }
+
+    #[test]
+    fn agent_worker_audit_section_renders_without_body_text() {
+        let data = LintData {
+            agent_worker_audit: Some(crate::generated::verbs::lint::AgentWorkerAuditReport {
+                rollout_state: Some(
+                    crate::generated::verbs::lint::AgentWorkerAuditReportRolloutState::Canary,
+                ),
+                failure_modes: serde_json::json!({"budget_exceeded": 2}),
+                workers: Vec::new(),
+                observed_records: true,
+                total_runs: 4,
+                completed_runs: 2,
+                failed_runs: 2,
+                generated_candidates: 10,
+                accepted_candidates: 5,
+                acceptance_rate: Some(0.5),
+                turns: 8,
+                tool_calls: 12,
+                cost_units: 200,
+            }),
+            findings: vec![],
+            summary: empty_summary(),
+            report_path: None,
+        };
+
+        let rendered = render(&data);
+
+        assert!(rendered.contains("## Agent worker audit"));
+        assert!(rendered.contains("- state: canary"));
+        assert!(rendered.contains("- accepted candidates: 5 / 10"));
+        assert!(rendered.contains("- failures: budget_exceeded=2"));
+        assert!(!rendered.contains("prompt"));
+        assert!(!rendered.contains("candidate body"));
     }
 }
