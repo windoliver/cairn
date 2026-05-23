@@ -1,5 +1,164 @@
 {
   "$defs": {
+    "AgentWorkerAuditReport": {
+      "additionalProperties": false,
+      "properties": {
+        "acceptance_rate": {
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
+        "accepted_candidates": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "completed_runs": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cost_units": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "failed_runs": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "failure_modes": {
+          "additionalProperties": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "object"
+        },
+        "generated_candidates": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "observed_records": {
+          "type": "boolean"
+        },
+        "rollout_state": {
+          "enum": [
+            "paused",
+            "canary",
+            "enabled",
+            "rolled_back"
+          ],
+          "type": "string"
+        },
+        "tool_calls": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total_runs": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "turns": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "workers": {
+          "items": {
+            "$ref": "#/$defs/AgentWorkerAuditWorker"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "observed_records",
+        "total_runs",
+        "completed_runs",
+        "failed_runs",
+        "generated_candidates",
+        "accepted_candidates",
+        "turns",
+        "tool_calls",
+        "cost_units",
+        "failure_modes",
+        "workers"
+      ],
+      "type": "object"
+    },
+    "AgentWorkerAuditWorker": {
+      "additionalProperties": false,
+      "properties": {
+        "acceptance_rate": {
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
+        "accepted_candidates": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "canary_label": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "completed_runs": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cost_units": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "failed_runs": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "failure_modes": {
+          "additionalProperties": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "object"
+        },
+        "generated_candidates": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tool_calls": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total_runs": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "turns": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "worker_kind": {
+          "enum": [
+            "extractor",
+            "dream"
+          ],
+          "type": "string"
+        },
+        "worker_name": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "worker_kind",
+        "worker_name",
+        "total_runs",
+        "completed_runs",
+        "failed_runs",
+        "generated_candidates",
+        "accepted_candidates",
+        "turns",
+        "tool_calls",
+        "cost_units",
+        "failure_modes"
+      ],
+      "type": "object"
+    },
     "Args": {
       "additionalProperties": false,
       "properties": {
@@ -28,6 +187,9 @@
     "Data": {
       "additionalProperties": false,
       "properties": {
+        "agent_worker_audit": {
+          "$ref": "#/$defs/AgentWorkerAuditReport"
+        },
         "findings": {
           "items": {
             "$ref": "#/$defs/Finding"

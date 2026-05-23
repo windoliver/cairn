@@ -5,6 +5,64 @@
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AgentWorkerAuditReportRolloutState {
+    Paused,
+    Canary,
+    Enabled,
+    RolledBack,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentWorkerAuditReport {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acceptance_rate: Option<f64>,
+    pub accepted_candidates: u64,
+    pub completed_runs: u64,
+    pub cost_units: u64,
+    pub failed_runs: u64,
+    pub failure_modes: serde_json::Value,
+    pub generated_candidates: u64,
+    pub observed_records: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollout_state: Option<AgentWorkerAuditReportRolloutState>,
+    pub tool_calls: u64,
+    pub total_runs: u64,
+    pub turns: u64,
+    pub workers: Vec<AgentWorkerAuditWorker>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AgentWorkerAuditWorkerWorkerKind {
+    Extractor,
+    Dream,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentWorkerAuditWorker {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acceptance_rate: Option<f64>,
+    pub accepted_candidates: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canary_label: Option<String>,
+    pub completed_runs: u64,
+    pub cost_units: u64,
+    pub failed_runs: u64,
+    pub failure_modes: serde_json::Value,
+    pub generated_candidates: u64,
+    pub tool_calls: u64,
+    pub total_runs: u64,
+    pub turns: u64,
+    pub worker_kind: AgentWorkerAuditWorkerWorkerKind,
+    pub worker_name: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Finding {
@@ -131,6 +189,8 @@ pub struct LintDataSummary {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LintData {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_worker_audit: Option<AgentWorkerAuditReport>,
     pub findings: Vec<Finding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report_path: Option<String>,

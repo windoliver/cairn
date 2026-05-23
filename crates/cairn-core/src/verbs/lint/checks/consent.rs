@@ -284,6 +284,8 @@ mod tests {
             source_resolver: crate::verbs::lint::empty_source_resolver(),
             consent_journal: crate::verbs::lint::empty_consent_journal(),
             workflow_jobs: None,
+            agent_worker_audit: None,
+            agent_canary_state: None,
             now_ms: 0,
         };
         let findings = run(&inputs).await;
@@ -313,6 +315,8 @@ mod tests {
             source_resolver: crate::verbs::lint::empty_source_resolver(),
             consent_journal: crate::verbs::lint::empty_consent_journal(),
             workflow_jobs: None,
+            agent_worker_audit: None,
+            agent_canary_state: None,
             now_ms: 0,
         };
         let f = run(&inputs).await;
@@ -343,6 +347,8 @@ mod tests {
             source_resolver: crate::verbs::lint::empty_source_resolver(),
             consent_journal: crate::verbs::lint::empty_consent_journal(),
             workflow_jobs: None,
+            agent_worker_audit: None,
+            agent_canary_state: None,
             now_ms: 0,
         };
         let f = run(&inputs).await;
@@ -386,6 +392,8 @@ mod tests {
             source_resolver: crate::verbs::lint::empty_source_resolver(),
             consent_journal: crate::verbs::lint::empty_consent_journal(),
             workflow_jobs: None,
+            agent_worker_audit: None,
+            agent_canary_state: None,
             now_ms: 0,
         };
         let f = run(&inputs).await;
@@ -439,6 +447,8 @@ mod tests {
             source_resolver: crate::verbs::lint::empty_source_resolver(),
             consent_journal: crate::verbs::lint::empty_consent_journal(),
             workflow_jobs: None,
+            agent_worker_audit: None,
+            agent_canary_state: None,
             now_ms: 0,
         };
         let f = run(&inputs).await;
@@ -495,6 +505,8 @@ mod tests {
             source_resolver: crate::verbs::lint::empty_source_resolver(),
             consent_journal: crate::verbs::lint::empty_consent_journal(),
             workflow_jobs: None,
+            agent_worker_audit: None,
+            agent_canary_state: None,
             now_ms: 0,
         };
         let f = run(&inputs).await;
@@ -544,6 +556,8 @@ mod tests {
             source_resolver: crate::verbs::lint::empty_source_resolver(),
             consent_journal: crate::verbs::lint::empty_consent_journal(),
             workflow_jobs: None,
+            agent_worker_audit: None,
+            agent_canary_state: None,
             now_ms: 0,
         };
         let f = run(&inputs).await;
@@ -596,6 +610,8 @@ mod tests {
             source_resolver: crate::verbs::lint::empty_source_resolver(),
             consent_journal: crate::verbs::lint::empty_consent_journal(),
             workflow_jobs: None,
+            agent_worker_audit: None,
+            agent_canary_state: None,
             now_ms: 0,
         };
         assert!(run(&inputs).await.is_empty());
@@ -619,6 +635,8 @@ mod tests {
             source_resolver: crate::verbs::lint::empty_source_resolver(),
             consent_journal: crate::verbs::lint::empty_consent_journal(),
             workflow_jobs: None,
+            agent_worker_audit: None,
+            agent_canary_state: None,
             now_ms: 0,
         };
         let f = run(&inputs).await;
@@ -652,6 +670,8 @@ mod tests {
             source_resolver: crate::verbs::lint::empty_source_resolver(),
             consent_journal: crate::verbs::lint::empty_consent_journal(),
             workflow_jobs: None,
+            agent_worker_audit: None,
+            agent_canary_state: None,
             now_ms: 0,
         };
         assert!(run(&inputs).await.is_empty());
