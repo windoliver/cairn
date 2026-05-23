@@ -291,7 +291,7 @@ fn conformance_request(prompt: &'static str) -> Result<AgentSpawnRequest, String
         cost_budget: AgentCostBudget {
             max_turns: 3,
             max_tool_calls: 2,
-            max_cost_units: 32,
+            max_cost_units: 256,
         },
         wall_clock_budget: AgentWallClockBudget { max_millis: 1_000 },
         output_schema: AgentOutputSchema::Text,

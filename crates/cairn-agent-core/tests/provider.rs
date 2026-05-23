@@ -569,6 +569,8 @@ async fn provider_kills_cli_subprocess_when_tool_exceeds_wall_clock_budget() {
         marker_path.display()
     )
     .expect("write script");
+    script.flush().expect("flush script");
+    drop(script);
     let mut perms = std::fs::metadata(&script_path)
         .expect("script metadata")
         .permissions();

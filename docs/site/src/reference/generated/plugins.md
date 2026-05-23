@@ -6,6 +6,7 @@ Generated from the bundled plugin registry.
 
 | Name | Contract | Version Range | Source | Capabilities |
 |---|---|---|---|---|
+| `cairn-agent-core` | `AgentProvider` | `[0.1.0, 0.2.0)` | `bundled:cairn-agent-core` | `{"cli_subprocess_tools":true,"honors_cost_budget":true,"mcp_tools":false,"scope_enforced":true}` |
 | `cairn-frontend-logseq` | `FrontendAdapter` | `[0.1.0, 0.2.0)` | `bundled:cairn-frontend-logseq` | `{"frontmatter":true,"graph_view":true,"live_plugin":true,"max_frontmatter_fields":14,"sidecar_files":true}` |
 | `cairn-frontend-obsidian` | `FrontendAdapter` | `[0.1.0, 0.2.0)` | `bundled:cairn-frontend-obsidian` | `{"frontmatter":true,"graph_view":true,"live_plugin":true,"max_frontmatter_fields":16,"sidecar_files":true}` |
 | `cairn-frontend-vscode` | `FrontendAdapter` | `[0.1.0, 0.2.0)` | `bundled:cairn-frontend-vscode` | `{"frontmatter":true,"graph_view":false,"live_plugin":true,"max_frontmatter_fields":12,"sidecar_files":true}` |
