@@ -113,10 +113,16 @@ fn render_failure_modes(value: &serde_json::Value) -> String {
     if map.is_empty() {
         return "none".to_owned();
     }
-    map.iter()
+    let rendered = map
+        .iter()
         .filter_map(|(key, value)| value.as_u64().map(|count| format!("{key}={count}")))
         .collect::<Vec<_>>()
-        .join(", ")
+        .join(", ");
+    if rendered.is_empty() {
+        "none".to_owned()
+    } else {
+        rendered
+    }
 }
 
 #[cfg(test)]
@@ -243,5 +249,14 @@ mod tests {
         assert!(rendered.contains("- failures: budget_exceeded=2"));
         assert!(!rendered.contains("prompt"));
         assert!(!rendered.contains("candidate body"));
+    }
+
+    #[test]
+    fn malformed_agent_failure_mode_counts_render_none() {
+        let rendered = render_failure_modes(&serde_json::json!({
+            "budget_exceeded": "2",
+        }));
+
+        assert_eq!(rendered, "none");
     }
 }
