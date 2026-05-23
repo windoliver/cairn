@@ -173,7 +173,7 @@ pub struct AgentCanaryDecisionCounters {
     /// `accepted_candidates / generated_candidates`, absent without generated candidates.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acceptance_rate: Option<f64>,
-    /// Integer cost units per accepted candidate, absent without accepted candidates.
+    /// Ceil-rounded cost units per accepted candidate, absent without accepted candidates.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_units_per_accepted_candidate: Option<u64>,
 }
@@ -205,7 +205,7 @@ impl AgentCanaryDecisionCounters {
             tool_calls: summary.tool_calls,
             cost_units: summary.cost_units,
             failure_rate: rate(summary.failed_runs, summary.total_runs),
-            acceptance_rate: summary.acceptance_rate,
+            acceptance_rate: rate(summary.accepted_candidates, summary.generated_candidates),
             cost_units_per_accepted_candidate: cost_per_accepted_candidate(
                 summary.cost_units,
                 summary.accepted_candidates,
@@ -257,6 +257,9 @@ pub enum AgentCanaryError {
     /// `min_runs` must be nonzero.
     #[error("agent canary min_runs must be nonzero")]
     ZeroMinRuns,
+    /// A populated audit summary was not pre-filtered to one canary cohort.
+    #[error("agent canary summary must be pre-filtered to the policy cohort")]
+    MixedCohortSummary,
     /// A rate field was outside 0.0 through 1.0.
     #[error("agent canary rate {field} must be between 0.0 and 1.0")]
     RateOutOfRange {
@@ -350,13 +353,20 @@ impl AgentCanaryPolicy {
 
     /// Evaluate aggregate canary metrics after worker audit records are summarized.
     ///
+    /// Callers must pass a summary already filtered to `self.cohort_label`.
+    /// Empty worker-group metadata is accepted for synthetic tests and no-data
+    /// reports. When worker groups are present, every group must carry the
+    /// policy cohort label so mixed-cohort aggregate misuse fails closed.
+    ///
     /// # Errors
-    /// Returns [`AgentCanaryError`] when the policy is invalid.
+    /// Returns [`AgentCanaryError`] when the policy is invalid or the summary
+    /// contains mixed or unlabeled worker cohorts.
     pub fn evaluate_summary(
         &self,
         summary: &AgentWorkerAuditSummary,
     ) -> Result<AgentCanaryDecision, AgentCanaryError> {
         self.validate()?;
+        self.validate_summary_cohort(summary)?;
         let counters = AgentCanaryDecisionCounters::from_summary(summary);
         if let Some(decision) = self.gated_summary_decision(counters) {
             return Ok(decision);
@@ -391,6 +401,25 @@ impl AgentCanaryPolicy {
             AgentCanaryReasonCode::ThresholdsPassed,
             counters,
         ))
+    }
+
+    fn validate_summary_cohort(
+        &self,
+        summary: &AgentWorkerAuditSummary,
+    ) -> Result<(), AgentCanaryError> {
+        if summary.workers.is_empty() {
+            return Ok(());
+        }
+
+        if summary
+            .workers
+            .iter()
+            .all(|worker| worker.canary_label.as_deref() == Some(self.cohort_label.as_str()))
+        {
+            return Ok(());
+        }
+
+        Err(AgentCanaryError::MixedCohortSummary)
     }
 
     fn gated_summary_decision(
@@ -516,7 +545,7 @@ fn cost_per_accepted_candidate(cost_units: u64, accepted_candidates: u64) -> Opt
     if accepted_candidates == 0 {
         return None;
     }
-    Some(cost_units / accepted_candidates)
+    Some(cost_units.div_ceil(accepted_candidates))
 }
 
 fn exceeds_cost_per_accepted_candidate(
@@ -525,7 +554,7 @@ fn exceeds_cost_per_accepted_candidate(
     max_cost_units_per_accepted_candidate: u64,
 ) -> bool {
     if accepted_candidates == 0 {
-        return true;
+        return cost_units > 0;
     }
 
     u128::from(cost_units)
@@ -535,6 +564,8 @@ fn exceeds_cost_per_accepted_candidate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::domain::{AgentWorkerGroupSummary, AgentWorkerKind};
 
     fn summary(
         total: u64,
@@ -572,6 +603,17 @@ mod tests {
             max_cost_units_per_accepted_candidate: Some(20),
             pause_requested: false,
             rollback_requested: false,
+        }
+    }
+
+    fn group(canary_label: Option<&str>, total_runs: u64) -> AgentWorkerGroupSummary {
+        AgentWorkerGroupSummary {
+            worker_kind: AgentWorkerKind::Extractor,
+            worker_name: "agent_extractor".to_owned(),
+            canary_label: canary_label.map(str::to_owned),
+            total_runs,
+            accepted_candidates: total_runs,
+            generated_candidates: total_runs,
         }
     }
 
@@ -653,6 +695,36 @@ mod tests {
     }
 
     #[test]
+    fn canary_recomputes_acceptance_rate_from_counts() {
+        let mut summary = summary(5, 0, 10, 1, 10);
+        summary.acceptance_rate = Some(1.0);
+
+        let decision = policy().evaluate_summary(&summary).expect("valid policy");
+
+        assert_eq!(
+            decision.kind,
+            AgentCanaryDecisionKind::RollbackThresholdFailed
+        );
+        assert_eq!(
+            decision.reason_code,
+            AgentCanaryReasonCode::AcceptanceRateTooLow
+        );
+        assert_eq!(decision.counters.acceptance_rate, Some(0.1));
+    }
+
+    #[test]
+    fn mixed_cohort_summary_is_rejected_before_thresholds() {
+        let mut summary = summary(5, 0, 10, 8, 80);
+        summary.workers = vec![group(Some("canary-05"), 3), group(Some("canary-10"), 2)];
+
+        let error = policy()
+            .evaluate_summary(&summary)
+            .expect_err("mixed cohort summaries must be rejected");
+
+        assert_eq!(error, AgentCanaryError::MixedCohortSummary);
+    }
+
+    #[test]
     fn canary_rolls_back_when_budget_cap_is_exceeded() {
         let policy = AgentCanaryPolicy {
             max_cost_units: Some(30),
@@ -679,12 +751,12 @@ mod tests {
     fn canary_rolls_back_when_cost_per_accepted_candidate_exceeds_threshold() {
         let policy = AgentCanaryPolicy {
             max_cost_units: None,
-            max_cost_units_per_accepted_candidate: Some(9),
+            max_cost_units_per_accepted_candidate: Some(10),
             ..policy()
         };
 
         let decision = policy
-            .evaluate_summary(&summary(5, 0, 10, 8, 80))
+            .evaluate_summary(&summary(5, 0, 10, 8, 81))
             .expect("valid policy");
 
         assert_eq!(
@@ -697,8 +769,49 @@ mod tests {
         );
         assert_eq!(
             decision.counters.cost_units_per_accepted_candidate,
-            Some(10)
+            Some(11)
         );
+    }
+
+    #[test]
+    fn zero_cost_with_zero_accepted_candidates_does_not_exceed_cost_ratio() {
+        let policy = AgentCanaryPolicy {
+            min_acceptance_rate: None,
+            max_cost_units: None,
+            max_cost_units_per_accepted_candidate: Some(10),
+            ..policy()
+        };
+
+        let decision = policy
+            .evaluate_summary(&summary(5, 0, 0, 0, 0))
+            .expect("valid policy");
+
+        assert_eq!(decision.kind, AgentCanaryDecisionKind::PromoteToEnabled);
+        assert_eq!(decision.counters.cost_units_per_accepted_candidate, None);
+    }
+
+    #[test]
+    fn positive_cost_with_zero_accepted_candidates_exceeds_cost_ratio() {
+        let policy = AgentCanaryPolicy {
+            min_acceptance_rate: None,
+            max_cost_units: None,
+            max_cost_units_per_accepted_candidate: Some(10),
+            ..policy()
+        };
+
+        let decision = policy
+            .evaluate_summary(&summary(5, 0, 0, 0, 1))
+            .expect("valid policy");
+
+        assert_eq!(
+            decision.kind,
+            AgentCanaryDecisionKind::RollbackThresholdFailed
+        );
+        assert_eq!(
+            decision.reason_code,
+            AgentCanaryReasonCode::CostPerAcceptedCandidateExceeded
+        );
+        assert_eq!(decision.counters.cost_units_per_accepted_candidate, None);
     }
 
     #[test]
