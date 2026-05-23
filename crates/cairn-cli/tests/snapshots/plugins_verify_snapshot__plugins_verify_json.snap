@@ -27,6 +27,52 @@ expression: json
           "tier": 1
         },
         {
+          "id": "allowlist_rejects_unlisted_tool",
+          "status": "ok",
+          "tier": 2
+        },
+        {
+          "id": "mutating_verb_requires_scope",
+          "status": "ok",
+          "tier": 2
+        },
+        {
+          "id": "budget_exhaustion_aborts_cleanly",
+          "status": "ok",
+          "tier": 2
+        },
+        {
+          "id": "writes_are_wal_routed",
+          "status": "ok",
+          "tier": 2
+        }
+      ],
+      "contract": "AgentProvider",
+      "name": "cairn-agent-core"
+    },
+    {
+      "cases": [
+        {
+          "id": "manifest_matches_host",
+          "status": "ok",
+          "tier": 1
+        },
+        {
+          "id": "arc_pointer_stable",
+          "status": "ok",
+          "tier": 1
+        },
+        {
+          "id": "capability_self_consistency_floor",
+          "status": "ok",
+          "tier": 1
+        },
+        {
+          "id": "manifest_features_match_capabilities",
+          "status": "ok",
+          "tier": 1
+        },
+        {
           "id": "rejects_immutable_field_edits",
           "status": "ok",
           "tier": 2
@@ -315,7 +361,7 @@ expression: json
   ],
   "summary": {
     "failed": 0,
-    "ok": 46,
+    "ok": 54,
     "pending": 6
   }
 }

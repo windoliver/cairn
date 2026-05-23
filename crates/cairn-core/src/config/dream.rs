@@ -47,6 +47,8 @@ pub enum DreamWorkerMode {
     Llm,
     /// `HybridDreamWorker`: deterministic prune, then bounded LLM call.
     Hybrid,
+    /// `AgentDreamWorker`: bounded agent runtime with read-only tools.
+    Agent,
 }
 
 /// Tier cadence descriptor from brief §10.1.
@@ -253,6 +255,12 @@ pub enum DreamConfigError {
         /// Actual tier.
         actual: DreamTier,
     },
+    /// Agent worker mode requires at least one tool call in its tier budget.
+    #[error("dream.{tier}.max_tool_calls must be >= 1 for agent worker")]
+    AgentToolBudgetZero {
+        /// Tier whose tool budget is invalid.
+        tier: DreamTier,
+    },
 }
 
 impl DreamConfig {
@@ -270,6 +278,14 @@ impl DreamConfig {
             DreamTier::RemSleep => self.rem_sleep,
             DreamTier::DeepDreaming => self.deep_dreaming,
         }
+    }
+
+    /// Returns true when any configured dream tier selects the agent worker.
+    #[must_use]
+    pub const fn requires_agent_provider(&self) -> bool {
+        matches!(self.light_sleep.worker, DreamWorkerMode::Agent)
+            || matches!(self.rem_sleep.worker, DreamWorkerMode::Agent)
+            || matches!(self.deep_dreaming.worker, DreamWorkerMode::Agent)
     }
 
     /// Validate semantic invariants the serde layer cannot express.
@@ -304,6 +320,9 @@ fn validate_tier_slot(
             actual: cfg.completion_token_budget,
             floor: DreamConfig::COMPLETION_BUDGET_FLOOR,
         });
+    }
+    if matches!(cfg.worker, DreamWorkerMode::Agent) && cfg.max_tool_calls == 0 {
+        return Err(DreamConfigError::AgentToolBudgetZero { tier: cfg.tier });
     }
     if !(0.0..=DreamConfig::TEMPERATURE_MAX).contains(&cfg.llm_temperature)
         || cfg.llm_temperature.is_nan()
@@ -358,6 +377,38 @@ mod tests {
             DreamOutputKind::PromotionsSkillsSynthesisAndLint
         );
         assert_eq!(cfg.deep_dreaming.worker, DreamWorkerMode::Hybrid);
+    }
+
+    #[test]
+    fn agent_worker_round_trips() {
+        let json = serde_json::to_string(&DreamWorkerMode::Agent).expect("serialize");
+        assert_eq!(json, "\"agent\"");
+        let back: DreamWorkerMode = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, DreamWorkerMode::Agent);
+    }
+
+    #[test]
+    fn agent_worker_requires_nonzero_tool_budget() {
+        let mut cfg = DreamConfig {
+            enabled: true,
+            ..DreamConfig::default()
+        };
+        cfg.deep_dreaming.worker = DreamWorkerMode::Agent;
+        cfg.deep_dreaming.max_tool_calls = 0;
+
+        let err = cfg.validate().expect_err("agent mode must budget tools");
+        assert!(matches!(err, DreamConfigError::AgentToolBudgetZero { tier }
+            if tier == DreamTier::DeepDreaming));
+    }
+
+    #[test]
+    fn requires_agent_provider_when_any_tier_uses_agent_worker() {
+        let mut cfg = DreamConfig::default();
+        assert!(!cfg.requires_agent_provider());
+
+        cfg.rem_sleep.worker = DreamWorkerMode::Agent;
+        cfg.rem_sleep.max_tool_calls = 1;
+        assert!(cfg.requires_agent_provider());
     }
 
     #[test]

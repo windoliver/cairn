@@ -227,41 +227,42 @@ pub fn render_json(report: &VerifyReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugins::host::register_all;
+    use crate::plugins::host::register_all_for_verify;
 
     #[test]
-    fn run_reports_seven_plugins() {
-        let reg = register_all().expect("registers");
+    fn run_reports_eight_plugins() {
+        let reg = register_all_for_verify().expect("registers");
         let report = run(&reg);
-        assert_eq!(report.plugins.len(), 7);
+        assert_eq!(report.plugins.len(), 8);
         assert_eq!(report.summary.failed, 0, "no failures expected");
-        // 7 plugins × 4 tier-1 cases (manifest_matches_host,
+        // 8 plugins × 4 tier-1 cases (manifest_matches_host,
         // arc_pointer_stable, capability_self_consistency_floor,
-        // manifest_features_match_capabilities) = 28 ok minimum.
-        assert!(report.summary.ok >= 28);
+        // manifest_features_match_capabilities) = 32 ok minimum.
+        assert!(report.summary.ok >= 32);
         assert!(report.summary.pending >= 4, "tier-2 stubs are pending");
     }
 
     #[test]
     fn exit_code_default_zero_with_pendings() {
-        let reg = register_all().expect("registers");
+        let reg = register_all_for_verify().expect("registers");
         let report = run(&reg);
         assert_eq!(exit_code(&report, false), 0);
     }
 
     #[test]
     fn exit_code_strict_nonzero_with_pendings() {
-        let reg = register_all().expect("registers");
+        let reg = register_all_for_verify().expect("registers");
         let report = run(&reg);
         assert_eq!(exit_code(&report, true), 69);
     }
 
     #[test]
     fn human_output_contains_every_plugin_and_summary() {
-        let reg = register_all().expect("registers");
+        let reg = register_all_for_verify().expect("registers");
         let report = run(&reg);
         let text = render_human(&report);
         for n in [
+            "cairn-agent-core",
             "cairn-mcp",
             "cairn-sensors-local",
             "cairn-store-sqlite",
@@ -532,11 +533,11 @@ patch = 0
 
     #[test]
     fn json_output_round_trips() {
-        let reg = register_all().expect("registers");
+        let reg = register_all_for_verify().expect("registers");
         let report = run(&reg);
         let json = render_json(&report);
         let v: serde_json::Value = serde_json::from_str(&json).expect("valid json");
-        assert_eq!(v["plugins"].as_array().unwrap().len(), 7);
+        assert_eq!(v["plugins"].as_array().unwrap().len(), 8);
         assert_eq!(v["summary"]["failed"], 0);
     }
 }

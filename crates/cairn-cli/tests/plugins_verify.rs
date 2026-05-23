@@ -28,8 +28,8 @@ fn plugins_verify_json_default_succeeds() {
     assert_eq!(v["summary"]["failed"], 0, "no tier-1 failures expected");
     assert_eq!(
         v["plugins"].as_array().expect("plugins array").len(),
-        7,
-        "all seven bundled plugins must be reported"
+        8,
+        "all eight bundled plugins must be reported"
     );
 }
 
@@ -85,6 +85,34 @@ fn plugins_verify_json_reports_mcp_stdio_runtime_e2e() {
         initialize["reason"],
         "stdio advertised, but core cannot exercise initialize/tools-list without the MCP adapter"
     );
+}
+
+#[test]
+fn plugins_verify_json_exercises_agent_provider_conformance_e2e() {
+    let output = Command::new(cairn_binary())
+        .args(["plugins", "verify", "--json"])
+        .output()
+        .expect("spawn cairn binary");
+
+    assert!(output.status.success(), "exit: {:?}", output.status);
+
+    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+    let plugins = v["plugins"].as_array().expect("plugins array");
+    let agent = plugins
+        .iter()
+        .find(|plugin| plugin["name"] == "cairn-agent-core")
+        .expect("cairn-agent-core plugin present");
+
+    assert_eq!(agent["contract"], "AgentProvider");
+    for case_id in [
+        "allowlist_rejects_unlisted_tool",
+        "mutating_verb_requires_scope",
+        "budget_exhaustion_aborts_cleanly",
+        "writes_are_wal_routed",
+    ] {
+        assert_case_status(agent, case_id, "ok");
+    }
 }
 
 #[test]

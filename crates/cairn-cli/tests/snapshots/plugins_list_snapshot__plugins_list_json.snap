@@ -6,6 +6,21 @@ expression: json
   "plugins": [
     {
       "capabilities": {
+        "cli_subprocess_tools": true,
+        "honors_cost_budget": true,
+        "mcp_tools": false,
+        "scope_enforced": true
+      },
+      "contract": "AgentProvider",
+      "contract_version_range": {
+        "max_exclusive": "0.2.0",
+        "min": "0.1.0"
+      },
+      "name": "cairn-agent-core",
+      "source": "bundled:cairn-agent-core"
+    },
+    {
+      "capabilities": {
         "frontmatter": true,
         "graph_view": true,
         "live_plugin": true,

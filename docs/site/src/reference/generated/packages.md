@@ -6,6 +6,7 @@ Generated from workspace package metadata and `docs-coverage.toml`.
 
 | Package | Audience | Human Page | Generated Reference |
 |---|---|---|---|
+| `cairn-agent-core` | `operator` | `usage/plugins.md` | `reference/generated/plugins.md` |
 | `cairn-bench` | `internal` | - | - |
 | `cairn-cli` | `user` | `usage/cli.md` | `reference/generated/cli.md` |
 | `cairn-core` | `sdk-author` | `reference/rust-api.md` | - |

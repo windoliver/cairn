@@ -16,7 +16,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use anyhow::Context as _;
-use cairn_core::config::{CairnConfig, EmbeddingModelKind, ScreenBackend};
+use cairn_core::config::{AgentProviderKind, CairnConfig, EmbeddingModelKind, ScreenBackend};
 use cairn_core::domain::identity::keys::VaultId;
 use cairn_core::domain::{BudgetObservation, LocalSensorName, SensorGateReason};
 use cairn_core::generated::common::Capabilities;
@@ -435,7 +435,8 @@ fn compute_capabilities(
         // Issue #91: dream/expiration/evaluation runtime readiness mirrors the
         // boot-path gating used for consolidation (config opt-in + single-tenant
         // mcp serve + bound principal).
-        let dream_runtime_ready = config.dream.enabled && single_tenant_ready;
+        let agent_configured = agent_runtime_configured(config);
+        let dream_runtime_ready = dream_runtime_ready_for_config(config, single_tenant_ready);
         let expiration_runtime_ready = config.expiration.enabled && single_tenant_ready;
         let evaluation_runtime_ready = config.evaluation.enabled && single_tenant_ready;
 
@@ -448,6 +449,7 @@ fn compute_capabilities(
             model_present,
             embedding_provider_ready,
             llm_configured: config.llm.provider.is_some(),
+            agent_configured,
             consolidation_runtime_ready,
             dream_runtime_ready,
             expiration_runtime_ready,
@@ -569,7 +571,8 @@ fn capabilities_for_config(config: &CairnConfig, model_present: bool) -> Vec<Cap
     let single_tenant_ready =
         config.mcp.stdio.single_tenant && config.mcp.stdio.principal.is_some();
     let consolidation_runtime_ready = config.consolidation.enabled && single_tenant_ready;
-    let dream_runtime_ready = config.dream.enabled && single_tenant_ready;
+    let agent_configured = agent_runtime_configured(config);
+    let dream_runtime_ready = dream_runtime_ready_for_config(config, single_tenant_ready);
     let expiration_runtime_ready = config.expiration.enabled && single_tenant_ready;
     let evaluation_runtime_ready = config.evaluation.enabled && single_tenant_ready;
     cairn_core::status::advertise(&cairn_core::status::CapabilityGates {
@@ -580,6 +583,7 @@ fn capabilities_for_config(config: &CairnConfig, model_present: bool) -> Vec<Cap
         model_present,
         embedding_provider_ready,
         llm_configured: config.llm.provider.is_some(),
+        agent_configured,
         consolidation_runtime_ready,
         dream_runtime_ready,
         expiration_runtime_ready,
@@ -599,6 +603,23 @@ fn compute_embedding_provider_ready(
     vault_root: Option<&Path>,
 ) -> bool {
     super::embedding_provider_ready(config, model_present, vault_root)
+}
+
+fn agent_runtime_configured(config: &CairnConfig) -> bool {
+    matches!(
+        config.agent_provider.kind,
+        Some(AgentProviderKind::CairnCore)
+    ) && config.llm.provider.is_some()
+}
+
+fn dream_runtime_ready_for_config(config: &CairnConfig, single_tenant_ready: bool) -> bool {
+    config.dream.enabled
+        && single_tenant_ready
+        && if config.dream.requires_agent_provider() {
+            agent_runtime_configured(config)
+        } else {
+            config.llm.provider.is_some()
+        }
 }
 
 fn map_local_sensor_status(
@@ -1403,6 +1424,52 @@ mod tests {
         assert!(
             caps.contains(&Capabilities::CairnMcpV1SummarizeNarrative),
             "summarize.narrative present once v0.2 CLI has an LLM provider configured; got {caps:?}"
+        );
+    }
+
+    #[test]
+    fn compute_capabilities_agent_dream_requires_agent_runtime() {
+        let mut config = CairnConfig::default();
+        config.llm.provider = Some(cairn_core::config::LlmProvider::OpenaiCompatible);
+        config.agent_provider.kind = Some(cairn_core::config::AgentProviderKind::CairnCore);
+        config.mcp.stdio.single_tenant = true;
+        config.mcp.stdio.principal = Some(cairn_core::domain::ScopeTuple {
+            tenant: Some("acme".into()),
+            ..cairn_core::domain::ScopeTuple::default()
+        });
+        config.dream.enabled = true;
+        config.dream.deep_dreaming.worker = cairn_core::config::DreamWorkerMode::Agent;
+        config.dream.deep_dreaming.max_tool_calls = 1;
+
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".cairn")).unwrap();
+        std::fs::write(
+            tmp.path().join(".cairn").join("vault.id"),
+            b"01HZZ0000000000000000000AB\n",
+        )
+        .unwrap();
+
+        let caps = compute_capabilities(Some(tmp.path()), Some(&config), true);
+        assert!(
+            caps.contains(&Capabilities::CairnWorkflowsV1Dream),
+            "agent dream is advertised once agent dispatch exists and the bundled runtime is configured; got {caps:?}"
+        );
+
+        config.llm.provider = None;
+        let caps = compute_capabilities(Some(tmp.path()), Some(&config), true);
+        assert!(
+            !caps.contains(&Capabilities::CairnWorkflowsV1Dream),
+            "agent dream must fail closed without the LLM backing the bundled runtime; got {caps:?}"
+        );
+
+        config.llm.provider = Some(cairn_core::config::LlmProvider::OpenaiCompatible);
+        config.agent_provider.kind = Some(cairn_core::config::AgentProviderKind::Custom(
+            "external-agent".to_string(),
+        ));
+        let caps = compute_capabilities(Some(tmp.path()), Some(&config), true);
+        assert!(
+            !caps.contains(&Capabilities::CairnWorkflowsV1Dream),
+            "custom agent providers must fail closed until actual provider resolution exists; got {caps:?}"
         );
     }
 

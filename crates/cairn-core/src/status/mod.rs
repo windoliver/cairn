@@ -132,6 +132,9 @@ pub struct CapabilityGates {
     /// True when an `LLMProvider` is configured. P0 default is `false`;
     /// reserved for future `cairn.mcp.v1.llm.*` capabilities.
     pub llm_configured: bool,
+    /// True when an agent provider is configured and wired for this runtime
+    /// surface. Defaults false until surfaces plumb the provider through.
+    pub agent_configured: bool,
     /// Contract-version phase the runtime is operating at.
     pub contract_phase: Phase,
     /// True when (a) `consolidation.enabled = true` in the active
@@ -281,7 +284,12 @@ pub fn advertise(gates: &CapabilityGates) -> Vec<Capabilities> {
     // violation, and `DreamHandler` short-circuits to `Permanent` when no
     // provider is wired. Hold the capability back in that case even when
     // `dream.enabled = true` in config.
-    if wiring::DREAM_WORKFLOW_WIRED && gates.dream_runtime_ready && gates.llm_configured {
+    let dream_provider_ready = if cfg.agent_dream {
+        gates.agent_configured
+    } else {
+        gates.llm_configured
+    };
+    if wiring::DREAM_WORKFLOW_WIRED && gates.dream_runtime_ready && dream_provider_ready {
         out.push(Capabilities::CairnWorkflowsV1Dream);
     }
     if wiring::EXPIRATION_WORKFLOW_WIRED && gates.expiration_runtime_ready {

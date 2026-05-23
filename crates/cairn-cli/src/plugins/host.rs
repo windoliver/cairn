@@ -7,6 +7,7 @@ use cairn_core::contract::registry::{PluginError, PluginRegistry};
 /// encountered (fail-closed).
 ///
 /// Bundled plugins (alphabetical):
+/// - `cairn-agent-core`       → `AgentProvider`
 /// - `cairn-frontend-logseq`  → `FrontendAdapter`
 /// - `cairn-frontend-obsidian`→ `FrontendAdapter`
 /// - `cairn-frontend-vscode`  → `FrontendAdapter`
@@ -21,6 +22,26 @@ use cairn_core::contract::registry::{PluginError, PluginRegistry};
 /// aborts startup.
 pub fn register_all() -> Result<PluginRegistry, PluginError> {
     let mut reg = PluginRegistry::new();
+    cairn_agent_core::register(&mut reg)?;
+    cairn_frontend_logseq::register(&mut reg)?;
+    cairn_frontend_obsidian::register(&mut reg)?;
+    cairn_frontend_vscode::register(&mut reg)?;
+    cairn_mcp::register(&mut reg)?;
+    cairn_sensors_local::register(&mut reg)?;
+    cairn_store_sqlite::register(&mut reg)?;
+    cairn_workflows::register(&mut reg)?;
+    Ok(reg)
+}
+
+/// Register bundled plugins for `cairn plugins verify`.
+///
+/// Most bundled plugins are static. `cairn-agent-core` normally registers an
+/// unconfigured placeholder because real execution needs a deployment LLM; the
+/// verify registry instead supplies the crate's deterministic conformance
+/// harness so `AgentProvider` tier-2 cases exercise the real provider loop.
+pub fn register_all_for_verify() -> Result<PluginRegistry, PluginError> {
+    let mut reg = PluginRegistry::new();
+    cairn_agent_core::register_conformance(&mut reg)?;
     cairn_frontend_logseq::register(&mut reg)?;
     cairn_frontend_obsidian::register(&mut reg)?;
     cairn_frontend_vscode::register(&mut reg)?;
@@ -37,10 +58,11 @@ mod tests {
     use cairn_core::contract::registry::PluginName;
 
     #[test]
-    fn register_all_succeeds_and_populates_seven_plugins() {
+    fn register_all_succeeds_and_populates_eight_plugins() {
         let reg = register_all().expect("bundled plugins register");
 
         for name in [
+            "cairn-agent-core",
             "cairn-frontend-logseq",
             "cairn-frontend-obsidian",
             "cairn-frontend-vscode",
@@ -68,6 +90,7 @@ mod tests {
         assert_eq!(
             sorted,
             vec![
+                "cairn-agent-core",
                 "cairn-frontend-logseq",
                 "cairn-frontend-obsidian",
                 "cairn-frontend-vscode",
