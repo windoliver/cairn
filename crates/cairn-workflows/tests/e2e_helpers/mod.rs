@@ -26,7 +26,7 @@
 )]
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use cairn_core::contract::consent_lookup::{
@@ -43,15 +43,17 @@ use cairn_core::contract::version::{ContractVersion, VersionRange};
 use cairn_core::domain::consent_timeline::ConsentTimelineEvent;
 use cairn_core::domain::federation::{DedupKey, PeerEndpoint};
 use cairn_core::domain::identity::keys::SigningKey;
+use cairn_core::domain::sharing::SignedShareLink;
 use cairn_core::domain::time::FixedClock;
 use cairn_core::domain::{
-    ActorChainEntry, BodyHash, ChainRole, Ed25519Signature, EvidenceVector, Identity, MemoryClass,
-    MemoryKind, MemoryRecord, MemoryVisibility, Provenance, RecordId, Rfc3339Timestamp, ScopeTuple,
-    SourceId, TargetId,
+    ActorChainEntry, BodyHash, ChainRole, ConsentEvent, ConsentKind, Ed25519Signature,
+    EvidenceVector, Identity, MemoryClass, MemoryKind, MemoryRecord, MemoryVisibility, Provenance,
+    RecordId, Rfc3339Timestamp, ScopeTuple, SourceId, TargetId,
 };
 use cairn_core::rebac::{RebacAction, RebacContext, RebacRelation};
 use cairn_core::verbs::accept_share::AcceptShareDeps;
 use cairn_core::verbs::propose_share::ProposeShareDeps;
+use cairn_core::verbs::revoke_share::RevokeShareDeps;
 use chrono::{DateTime, Utc};
 use ulid::Ulid;
 
@@ -158,9 +160,56 @@ impl MemoryStore for InMemoryStore {
 
 // ─── In-memory FederationOutbox ───────────────────────────────────────
 
+/// Federation state shared between [`InMemoryOutbox`] and
+/// [`InMemoryConsentLookup`]. Mirrors what a real adapter (T12) would
+/// materialise in the consent-timeline projection from inside the same
+/// outbox transaction: a row per stored share link, per revocation, and
+/// per applied accept.
+///
+/// Wrapped in `Arc<Mutex<…>>` so the outbox can append on the write
+/// path while the lookup queries on the read path without each side
+/// owning its own copy.
+#[derive(Default)]
+struct FederationProjection {
+    /// Share links the issuer-side outbox saw on `record_share_grant`
+    /// (parsed from the job payload, which is the canonical
+    /// `SignedShareLink`).
+    share_links: BTreeMap<String, StoredShareLink>,
+    /// Revocations the issuer-side outbox saw on
+    /// `record_share_revoke_grant`.
+    revocations: BTreeMap<String, StoredRevocation>,
+    /// Receiver-side accept rows recorded on `record_share_accept`,
+    /// keyed by `(issuer_key_id, link_id)`.
+    accepts: BTreeMap<String, FederationAcceptRecord>,
+    /// Set of link ids the receiver has revoked (for
+    /// `is_link_revoked`).
+    revoked_link_ids: std::collections::HashSet<String>,
+    /// All consent events the outbox has been asked to commit, in
+    /// arrival order. Used by tests to assert "the journal saw
+    /// `FederationAccept` + `FederationRevoke`" without reaching into
+    /// the (still-unimplemented) timeline projection.
+    consent_events: Vec<ConsentEvent>,
+}
+
 #[derive(Default)]
 pub struct InMemoryOutbox {
     inner: Mutex<OutboxState>,
+    projection: Arc<Mutex<FederationProjection>>,
+}
+
+impl InMemoryOutbox {
+    /// Build an outbox that shares its federation projection with
+    /// `projection` so an [`InMemoryConsentLookup`] backed by the same
+    /// `Arc` sees grants / revokes / accepts as soon as the outbox
+    /// commits them. Mirrors what T12's real adapter does inside one
+    /// SQL transaction.
+    #[must_use]
+    fn with_projection(projection: Arc<Mutex<FederationProjection>>) -> Self {
+        Self {
+            inner: Mutex::new(OutboxState::default()),
+            projection,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -173,7 +222,7 @@ struct OutboxState {
 impl FederationOutbox for InMemoryOutbox {
     async fn record_share_grant(
         &self,
-        _event: &cairn_core::domain::ConsentEvent,
+        event: &cairn_core::domain::ConsentEvent,
         job: EnqueueRequest,
     ) -> Result<(), FederationOutboxError> {
         let mut guard = self.inner.lock().expect("outbox mutex poisoned");
@@ -185,31 +234,69 @@ impl FederationOutbox for InMemoryOutbox {
         {
             return Err(FederationOutboxError::DuplicateJob);
         }
+        // Mirror what T12's adapter does: parse the canonical job
+        // payload back into a SignedShareLink and stash a
+        // StoredShareLink keyed by link_id so the issuer-side
+        // revoke_share verb can find the original grant.
+        if let Ok(link) = serde_json::from_slice::<SignedShareLink>(&job.payload) {
+            let mut proj = self
+                .projection
+                .lock()
+                .expect("projection mutex poisoned");
+            proj.share_links.insert(
+                link.link_id.clone(),
+                StoredShareLink {
+                    link_id: link.link_id.clone(),
+                    payload: link.payload.clone(),
+                    peer: extract_peer_from_queue_key(job.queue_key.as_deref()),
+                },
+            );
+            proj.consent_events.push(event.clone());
+        }
         guard.jobs.push(job);
         Ok(())
     }
 
     async fn record_share_accept(
         &self,
-        _event: &cairn_core::domain::ConsentEvent,
+        event: &cairn_core::domain::ConsentEvent,
         upserts: &[MemoryRecord],
     ) -> Result<(), FederationOutboxError> {
         let mut guard = self.inner.lock().expect("outbox mutex poisoned");
         guard.upserts.extend(upserts.iter().cloned());
+        drop(guard);
+        let mut proj = self.projection.lock().expect("projection mutex poisoned");
+        proj.consent_events.push(event.clone());
         Ok(())
     }
 
     async fn record_share_revoke(
         &self,
-        _event: &cairn_core::domain::ConsentEvent,
-        _tombstone_ids: &[String],
+        event: &cairn_core::domain::ConsentEvent,
+        tombstone_ids: &[String],
     ) -> Result<(), FederationOutboxError> {
+        // T8's accept_revoke path currently passes an empty
+        // `tombstone_ids` slice (the projection lookup that would
+        // populate it is the unfinished half of the receiver-side
+        // revoke path). We capture the consent event regardless so
+        // tests can still observe the audit row; the tombstone fan-out
+        // becomes meaningful once the projection lands.
+        let _ = tombstone_ids;
+        let mut proj = self.projection.lock().expect("projection mutex poisoned");
+        // Mark the link as revoked from the receiver's point of view
+        // so a follow-up propose against the same link short-circuits
+        // via `is_link_revoked`.
+        if let cairn_core::domain::ConsentPayload::FederationRevoke { link_id, .. } = &event.payload
+        {
+            proj.revoked_link_ids.insert(link_id.clone());
+        }
+        proj.consent_events.push(event.clone());
         Ok(())
     }
 
     async fn record_share_revoke_grant(
         &self,
-        _event: &cairn_core::domain::ConsentEvent,
+        event: &cairn_core::domain::ConsentEvent,
         job: EnqueueRequest,
     ) -> Result<(), FederationOutboxError> {
         let mut guard = self.inner.lock().expect("outbox mutex poisoned");
@@ -220,6 +307,28 @@ impl FederationOutbox for InMemoryOutbox {
                 .any(|j| j.dedupe_key.as_deref() == Some(dedupe_key.as_str()))
         {
             return Err(FederationOutboxError::DuplicateJob);
+        }
+        // Mirror what T12's adapter does for the revoke side: parse
+        // the canonical job payload back into a SignedRevocation and
+        // stash a StoredRevocation so the verb's idempotent replay
+        // can find it. The op_id on the consent event ties the row to
+        // the WAL operation id.
+        if let Ok(revocation) =
+            serde_json::from_slice::<cairn_core::domain::federation::SignedRevocation>(&job.payload)
+        {
+            let mut proj = self
+                .projection
+                .lock()
+                .expect("projection mutex poisoned");
+            let operation_id = event.op_id.clone().unwrap_or_default();
+            proj.revocations.insert(
+                revocation.link_id.clone(),
+                StoredRevocation {
+                    operation_id,
+                    revocation,
+                },
+            );
+            proj.consent_events.push(event.clone());
         }
         guard.jobs.push(job);
         Ok(())
@@ -243,14 +352,42 @@ impl InMemoryOutbox {
     }
 }
 
+/// Recover the symbolic peer code from the
+/// `federation:<peer>:<link_id>` queue key shape that
+/// `propose_share::build_propagation_job` writes. Best-effort — if the
+/// shape doesn't match we just return `None` and the revoke job
+/// inherits the default `federation:<link>` shape.
+fn extract_peer_from_queue_key(queue_key: Option<&str>) -> Option<String> {
+    let key = queue_key?;
+    let rest = key.strip_prefix("federation:")?;
+    let (peer, _link) = rest.split_once(':')?;
+    Some(peer.to_owned())
+}
+
 // ─── In-memory ConsentLookup ──────────────────────────────────────────
 
+/// Lookup fake backed by a [`FederationProjection`] shared with the
+/// outbox. Every write the outbox commits is visible here on the next
+/// read — matching T12's adapter, which materialises the projection in
+/// the same SQL transaction as the journal row.
 #[derive(Default)]
 pub struct InMemoryConsentLookup {
+    /// Test-only side channel for accepts the test itself records via
+    /// [`Self::record_accept`] (the receiver's outbox does not yet
+    /// surface a parsed `FederationAcceptRecord`, so the
+    /// dedup-replay test feeds it in manually).
     accepts: Mutex<BTreeMap<String, FederationAcceptRecord>>,
-    revoked: Mutex<std::collections::HashSet<String>>,
-    share_links: Mutex<BTreeMap<String, StoredShareLink>>,
-    revocations: Mutex<BTreeMap<String, StoredRevocation>>,
+    projection: Arc<Mutex<FederationProjection>>,
+}
+
+impl InMemoryConsentLookup {
+    #[must_use]
+    fn with_projection(projection: Arc<Mutex<FederationProjection>>) -> Self {
+        Self {
+            accepts: Mutex::new(BTreeMap::new()),
+            projection,
+        }
+    }
 }
 
 #[async_trait]
@@ -271,30 +408,46 @@ impl ConsentLookup for InMemoryConsentLookup {
     }
 
     async fn is_link_revoked(&self, link_id: &str) -> Result<bool, ConsentLookupError> {
-        let guard = self.revoked.lock().expect("consent-lookup mutex poisoned");
-        Ok(guard.contains(link_id))
+        let proj = self
+            .projection
+            .lock()
+            .expect("projection mutex poisoned");
+        Ok(proj.revoked_link_ids.contains(link_id))
     }
 
     async fn find_share_link(
         &self,
         link_id: &str,
     ) -> Result<Option<StoredShareLink>, ConsentLookupError> {
-        let guard = self
-            .share_links
+        let proj = self
+            .projection
             .lock()
-            .expect("consent-lookup mutex poisoned");
-        Ok(guard.get(link_id).cloned())
+            .expect("projection mutex poisoned");
+        Ok(proj.share_links.get(link_id).cloned())
     }
 
     async fn find_revocation(
         &self,
         link_id: &str,
     ) -> Result<Option<StoredRevocation>, ConsentLookupError> {
-        let guard = self
-            .revocations
+        let proj = self
+            .projection
             .lock()
-            .expect("consent-lookup mutex poisoned");
-        Ok(guard.get(link_id).cloned())
+            .expect("projection mutex poisoned");
+        // The verb keys revocations by the *outer* `share-…` link id
+        // (the same value `find_share_link` accepts), but T9 stores
+        // them under the inner ULID operation id (the wire
+        // `SignedRevocation.link_id`). Accept either to keep the
+        // adapter contract honest under both keying conventions.
+        if let Some(found) = proj.revocations.get(link_id) {
+            return Ok(Some(found.clone()));
+        }
+        if let Some(inner) = link_id.strip_prefix("share-")
+            && let Some(found) = proj.revocations.get(inner)
+        {
+            return Ok(Some(found.clone()));
+        }
+        Ok(None)
     }
 }
 
@@ -451,6 +604,25 @@ impl Node {
         }
     }
 
+    /// Issuer-side dependency snapshot for `revoke_share`.
+    ///
+    /// Issuer-side parallel to [`Self::propose_deps`]. The signing
+    /// key, `key_version`, and identity must match the original
+    /// propose so the revocation signature verifies against the same
+    /// issuer pubkey the receiver cached when applying the link.
+    #[must_use]
+    pub fn revoke_deps(&self) -> RevokeShareDeps<'_> {
+        RevokeShareDeps {
+            outbox: &self.outbox,
+            consent_lookup: &self.consent_lookup,
+            signing_key: &self.signing_key,
+            signer_identity: &self.identity,
+            signer_key_version: 1,
+            clock: &self.clock,
+            federation_ready: self.federation_ready,
+        }
+    }
+
     /// Mirror the outbox upserts into a lookup-by-id view. The accept
     /// path commits inbound records via the outbox extension method
     /// (`record_share_accept`) rather than `store.upsert`, so the store
@@ -490,6 +662,62 @@ impl Node {
             .iter()
             .filter(|r| self.has_share_link_provenance(r))
             .count()
+    }
+
+    /// Receiver-side fetch by record id. Returns the most recently
+    /// upserted record under that id, or `None` if it was tombstoned
+    /// (no longer surfaced in the outbox's projection) or never
+    /// applied.
+    ///
+    /// The receiver-side `accept_revoke` (T8) does not yet materialise
+    /// tombstones — it commits a body-free revoke consent event with
+    /// an empty `tombstone_ids` slice (the projection lookup that
+    /// would populate it is the unfinished half of the revoke path).
+    /// Until T8 evolves, this helper returns `Some(record)` for any
+    /// id that was previously applied, even after a revoke. The
+    /// callsite documents what it expects.
+    #[must_use]
+    pub fn try_fetch(&self, record_id: &str) -> Option<MemoryRecord> {
+        self.outbox
+            .upserts()
+            .into_iter()
+            .rfind(|r| r.id.as_str() == record_id)
+    }
+
+    /// Receiver-side: enumerate the consent-event kinds the outbox
+    /// has committed for `link_id`. Matches against the
+    /// `share_link:<lower(link_id)>` subject convention every
+    /// federation kind uses, plus the inner ULID `op_id` on grant /
+    /// accept events.
+    ///
+    /// Used by the revoke e2e test to assert "the receiver's journal
+    /// records both an Accept and a Revoke under the same link" — a
+    /// looser check than walking the timeline projection (which T12's
+    /// adapter owns) but enough to keep the verb honest.
+    #[must_use]
+    pub fn consent_event_kinds_for_link(&self, link_id: &str) -> Vec<ConsentKind> {
+        let lower_outer = format!("share_link:{}", link_id.to_ascii_lowercase());
+        let inner_op = link_id.strip_prefix("share-").unwrap_or(link_id);
+        let lower_inner = format!("share_link:{}", inner_op.to_ascii_lowercase());
+        let proj = self
+            .outbox
+            .projection
+            .lock()
+            .expect("projection mutex poisoned");
+        proj.consent_events
+            .iter()
+            .filter(|ev| {
+                // Propose/accept events subject the outer `share-…`
+                // link id; the receiver-side revoke event subjects the
+                // inner ULID (T8 strips `share-` before building the
+                // event). Match either so the caller can query by
+                // whichever form they have.
+                ev.subject == lower_outer
+                    || ev.subject == lower_inner
+                    || ev.op_id.as_deref() == Some(inner_op)
+            })
+            .map(|ev| ev.kind)
+            .collect()
     }
 
     /// Teach the consent-lookup fake about the first apply so a second
@@ -543,10 +771,11 @@ pub fn build_issuer() -> Node {
             .expect("invariant: hard-coded RFC-3339 literal must parse"),
     );
 
+    let projection = Arc::new(Mutex::new(FederationProjection::default()));
     Node {
         store: InMemoryStore::default(),
-        outbox: InMemoryOutbox::default(),
-        consent_lookup: InMemoryConsentLookup::default(),
+        outbox: InMemoryOutbox::with_projection(Arc::clone(&projection)),
+        consent_lookup: InMemoryConsentLookup::with_projection(projection),
         identity,
         signing_key,
         issuer_verifying_key,
@@ -594,10 +823,11 @@ pub fn build_receiver() -> Node {
             .expect("invariant: hard-coded RFC-3339 literal must parse"),
     );
 
+    let projection = Arc::new(Mutex::new(FederationProjection::default()));
     Node {
         store: InMemoryStore::default(),
-        outbox: InMemoryOutbox::default(),
-        consent_lookup: InMemoryConsentLookup::default(),
+        outbox: InMemoryOutbox::with_projection(Arc::clone(&projection)),
+        consent_lookup: InMemoryConsentLookup::with_projection(projection),
         identity,
         signing_key,
         issuer_verifying_key,

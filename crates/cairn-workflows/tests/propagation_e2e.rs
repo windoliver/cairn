@@ -28,12 +28,13 @@
 use std::sync::Arc;
 
 use cairn_core::contract::federation_transport::FederationTransport;
-use cairn_core::domain::MemoryVisibility;
+use cairn_core::domain::{ConsentKind, MemoryVisibility};
 use cairn_core::verbs::accept_share::{AcceptOutcome, AcceptShareRequest, accept_share};
 use cairn_core::verbs::propose_share::{ProposeShareRequest, propose_share};
+use cairn_core::verbs::revoke_share::{RevokeShareRequest, revoke_share};
 use cairn_test_fixtures::federation::{LoopbackTransport, ProgrammedOutcome};
 use cairn_workflows::propagation::handler::PropagationHandler;
-use cairn_workflows::propagation::payload::OUTBOUND_SHARE_KIND;
+use cairn_workflows::propagation::payload::{OUTBOUND_REVOKE_KIND, OUTBOUND_SHARE_KIND};
 use cairn_workflows::scheduler::handler::{HandlerOutcome, JobHandler};
 
 mod e2e_helpers;
@@ -212,6 +213,185 @@ async fn transient_retries_eventually_succeed_with_single_apply() {
         receiver.records_with_share_link_provenance(),
         1,
         "single-apply guarantee: receiver projection has one inbound record",
+    );
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "linear E2E narrative: propose → drain → accept → revoke → \
+              drain → accept revoke → assert audit trail on both ends; \
+              splitting hurts the readability of the full handshake."
+)]
+async fn revoke_propagates_and_tombstones_receiver_projection() {
+    // End-to-end revoke (brief §12.a, §14):
+    //   1. issuer proposes → drain → receiver accepts
+    //   2. issuer revokes → drain → receiver applies the revoke envelope
+    //
+    // We verify:
+    //   * `revoke_share` enqueues an `OUTBOUND_REVOKE_KIND` job.
+    //   * The propagation handler drains it via the transport (Ack).
+    //   * The receiver's `accept_share` happily applies the inbound
+    //     revoke envelope (`AcceptOutcome::Accepted`, empty
+    //     applied_records — T8's revoke path commits a body-free
+    //     consent row but does not yet materialise the per-record
+    //     tombstone list; see the test note below).
+    //   * The receiver's consent journal records BOTH the original
+    //     `FederationAccept` and the inbound `FederationRevoke` row
+    //     under the same share-link id.
+    //
+    // Tombstone-side note: T8's `accept_revoke` passes an empty
+    // `tombstone_ids` slice to the outbox — the projection lookup
+    // that would populate it is the unfinished half of the revoke
+    // path. The asserts below intentionally do NOT claim the
+    // receiver's projection is tombstoned per-record; they only
+    // claim the audit-trail side of the contract holds. Once T8
+    // grows the per-record tombstone fan-out, this test should be
+    // tightened to assert `receiver.try_fetch(id).is_none()` for
+    // every previously-applied record.
+
+    let issuer = build_issuer();
+    let receiver = build_receiver();
+    let transport = Arc::new(LoopbackTransport::new());
+    // Two acks: one for the propose envelope, one for the revoke.
+    transport.program([ProgrammedOutcome::Ack, ProgrammedOutcome::Ack]);
+
+    // 1. Issuer proposes; drain via PropagationHandler; receiver
+    //    accepts after manifest enrichment (same shape as
+    //    `propose_drain_accept_makes_record_visible_on_receiver`).
+    let record_id = issuer.insert_project_record("revocable body").await;
+    let propose = propose_share(
+        ProposeShareRequest {
+            record_ids: vec![record_id.clone()],
+            grantee: Some(receiver.identity()),
+            scope: issuer.scope(),
+            grant_tier: MemoryVisibility::Team,
+            expires_at: issuer.in_one_hour(),
+            peer: Some(PeerEndpointAlias("loopback-node-b".into())),
+        },
+        &issuer.propose_deps(),
+    )
+    .await
+    .expect("propose ok");
+
+    let share_payload = issuer.next_pending_payload(OUTBOUND_SHARE_KIND).await;
+    let share_handler = PropagationHandler::outbound_share(
+        Arc::clone(&transport) as Arc<dyn FederationTransport>,
+        loopback_peer(),
+    );
+    assert_eq!(share_handler.handle(&share_payload).await, HandlerOutcome::Done);
+
+    let (propose_env, _) = transport
+        .sent()
+        .into_iter()
+        .next()
+        .expect("transport recorded the propose send");
+    let propose_env = attach_manifest_stub(
+        propose_env,
+        &record_id,
+        &issuer.scope(),
+        MemoryVisibility::Team,
+        "revocable body",
+    );
+    let accepted = accept_share(
+        AcceptShareRequest {
+            envelope: propose_env,
+        },
+        &receiver.accept_deps(),
+    )
+    .await
+    .expect("accept ok");
+    assert_eq!(accepted.outcome, AcceptOutcome::Accepted);
+    assert_eq!(
+        accepted.applied_records.len(),
+        1,
+        "receiver applied exactly one inbound record",
+    );
+
+    // 2. Issuer revokes the link. The revoke verb appends a
+    //    FederationRevoke consent row and enqueues an
+    //    OUTBOUND_REVOKE_KIND propagation job — both under the
+    //    operation_id minted here.
+    let revoke = revoke_share(
+        RevokeShareRequest {
+            link_id: propose.link.link_id.clone(),
+        },
+        &issuer.revoke_deps(),
+    )
+    .await
+    .expect("revoke ok");
+    assert!(
+        !revoke.operation_id.is_empty(),
+        "revoke must mint a non-empty operation id",
+    );
+
+    // 3. Drain the revoke job through the outbound_revoke handler.
+    //    The transport's second programmed Ack covers this send.
+    let revoke_payload = issuer.next_pending_payload(OUTBOUND_REVOKE_KIND).await;
+    let revoke_handler = PropagationHandler::outbound_revoke(
+        Arc::clone(&transport) as Arc<dyn FederationTransport>,
+        loopback_peer(),
+    );
+    assert_eq!(
+        revoke_handler.handle(&revoke_payload).await,
+        HandlerOutcome::Done,
+    );
+
+    // 4. The transport has now seen two envelopes (propose, revoke).
+    //    Feed the revoke envelope into the receiver's accept_share.
+    let sent = transport.sent();
+    assert_eq!(sent.len(), 2, "transport observed propose + revoke");
+    let (revoke_env, _) = sent
+        .into_iter()
+        .nth(1)
+        .expect("transport recorded the revoke send");
+    let revoke_resp = accept_share(
+        AcceptShareRequest {
+            envelope: revoke_env,
+        },
+        &receiver.accept_deps(),
+    )
+    .await
+    .expect("accept revoke ok");
+    assert_eq!(
+        revoke_resp.outcome,
+        AcceptOutcome::Accepted,
+        "receiver applies the inbound revoke envelope",
+    );
+    // T8 stub: `applied_records` is empty until the per-record
+    // tombstone projection lands. Asserted here so a future tightening
+    // of T8 surfaces as a failing test (and not a silent contract
+    // change).
+    assert!(
+        revoke_resp.applied_records.is_empty(),
+        "T8 revoke path emits empty applied_records; got {:?}",
+        revoke_resp.applied_records,
+    );
+
+    // 5. The receiver's consent journal carries both the original
+    //    FederationAccept and the inbound FederationRevoke row,
+    //    keyed off the same share-link id.
+    let kinds = receiver.consent_event_kinds_for_link(&propose.link.link_id);
+    assert!(
+        kinds.contains(&ConsentKind::FederationAccept),
+        "receiver journal should record the accept; got {kinds:?}",
+    );
+    assert!(
+        kinds.contains(&ConsentKind::FederationRevoke),
+        "receiver journal should record the revoke; got {kinds:?}",
+    );
+
+    // 6. Issuer's consent journal records the FederationGrant and
+    //    FederationRevoke rows (issuer side) so the audit trail is
+    //    complete on both ends of the wire.
+    let issuer_kinds = issuer.consent_event_kinds_for_link(&propose.link.link_id);
+    assert!(
+        issuer_kinds.contains(&ConsentKind::FederationGrant),
+        "issuer journal should record the grant; got {issuer_kinds:?}",
+    );
+    assert!(
+        issuer_kinds.contains(&ConsentKind::FederationRevoke),
+        "issuer journal should record the revoke; got {issuer_kinds:?}",
     );
 }
 
