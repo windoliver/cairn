@@ -20,6 +20,7 @@
 pub mod actor_chain;
 pub mod admission;
 pub mod agent_audit;
+pub mod agent_canary;
 pub mod backup;
 pub mod body_hash;
 pub mod canonical;
@@ -62,6 +63,10 @@ pub use admission::{AdmissionError, SignedAdmission, WalActionKind};
 pub use agent_audit::{
     AgentWorkerAuditRecord, AgentWorkerAuditSummary, AgentWorkerFailureMode,
     AgentWorkerGroupSummary, AgentWorkerKind, AgentWorkerStatus,
+};
+pub use agent_canary::{
+    AgentCanaryDecision, AgentCanaryDecisionCounters, AgentCanaryDecisionKind, AgentCanaryError,
+    AgentCanaryPolicy, AgentCanaryReasonCode, AgentCanaryState,
 };
 pub use backup::{BackupRegistryEntry, RewritePlan, ShreddedBackupEntry};
 pub use body_hash::BodyHash;
