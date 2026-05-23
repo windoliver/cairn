@@ -412,7 +412,19 @@ impl ConsentLookup for InMemoryConsentLookup {
             .projection
             .lock()
             .expect("projection mutex poisoned");
-        Ok(proj.revoked_link_ids.contains(link_id))
+        // The `ConsentPayload::FederationRevoke.link_id` field stores the
+        // inner operation-id ULID (i.e. without the `"share-"` prefix),
+        // because `accept_share::build_revoke_event` strips it via
+        // `extract_operation_id`. Accept both the outer `"share-<ULID>"` form
+        // and the raw inner ULID so callers using either form hit the same
+        // bucket.
+        if proj.revoked_link_ids.contains(link_id) {
+            return Ok(true);
+        }
+        if let Some(inner) = link_id.strip_prefix("share-") {
+            return Ok(proj.revoked_link_ids.contains(inner));
+        }
+        Ok(false)
     }
 
     async fn find_share_link(
@@ -722,7 +734,7 @@ impl Node {
 
     /// Teach the consent-lookup fake about the first apply so a second
     /// `accept_share` call sees the dedup hit. In production the
-    /// adapter (T12) materialises this from the consent_timeline
+    /// adapter (T12) materialises this from the `consent_timeline`
     /// projection inside the same outbox transaction.
     pub fn record_accept_for_idempotency(
         &self,
