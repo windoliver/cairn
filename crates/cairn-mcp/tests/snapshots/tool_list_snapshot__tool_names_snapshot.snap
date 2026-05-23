@@ -10,3 +10,6 @@ assemble_hot
 capture_trace
 lint
 forget
+propose_share
+accept_share
+revoke_share

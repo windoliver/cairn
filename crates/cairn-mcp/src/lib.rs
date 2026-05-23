@@ -12,6 +12,8 @@
 
 pub mod coord_tools;
 pub mod error;
+pub mod federation_conv;
+pub mod federation_tools;
 pub mod generated;
 pub mod graph_tools;
 pub mod handler;
