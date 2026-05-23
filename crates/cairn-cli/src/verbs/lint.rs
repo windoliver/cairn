@@ -1387,6 +1387,8 @@ struct PersistedAgentWorkerAudit {
     canary_state: Option<cairn_core::domain::AgentCanaryState>,
 }
 
+const EVALUATION_HANDLER_PRODUCED_BY: &str = "cairn-workflows::EvaluationHandler";
+
 fn latest_agent_worker_audit(
     lint_records: &[cairn_core::verbs::lint::LintRecord],
 ) -> Option<PersistedAgentWorkerAudit> {
@@ -1403,20 +1405,17 @@ fn latest_agent_worker_audit(
 fn persisted_agent_worker_audit(
     record: &cairn_core::domain::record::MemoryRecord,
 ) -> Option<PersistedAgentWorkerAudit> {
-    let evaluation = record.extra_frontmatter.get("evaluation");
-    let summary_value = evaluation
-        .and_then(|value| value.get("agent_worker_audit"))
-        .or_else(|| record.extra_frontmatter.get("agent_worker_audit"))?;
+    let evaluation = record.extra_frontmatter.get("evaluation")?;
+    if evaluation
+        .get("produced_by")
+        .and_then(serde_json::Value::as_str)
+        != Some(EVALUATION_HANDLER_PRODUCED_BY)
+    {
+        return None;
+    }
+    let summary_value = evaluation.get("agent_worker_audit")?;
     let summary = serde_json::from_value(summary_value.clone()).ok()?;
-    let canary_state = evaluation
-        .and_then(agent_canary_state_from_object)
-        .or_else(|| {
-            record
-                .extra_frontmatter
-                .get("agent_canary_state")
-                .or_else(|| record.extra_frontmatter.get("rollout_state"))
-                .and_then(|value| serde_json::from_value(value.clone()).ok())
-        });
+    let canary_state = agent_canary_state_from_object(evaluation);
 
     Some(PersistedAgentWorkerAudit {
         summary,
@@ -3989,6 +3988,121 @@ mod tests {
             report.failure_modes["provider_unavailable"],
             serde_json::json!(1)
         );
+    }
+
+    #[tokio::test]
+    async fn lint_handler_ignores_untrusted_agent_worker_audit_frontmatter() {
+        use cairn_core::config::CairnConfig;
+        use cairn_core::contract::agent_provider::AgentBudgetConsumed;
+        use cairn_core::domain::{
+            AgentWorkerAuditRecord, AgentWorkerAuditSummary, AgentWorkerFailureMode,
+            AgentWorkerKind, AgentWorkerStatus, Rfc3339Timestamp, ScopeTuple,
+        };
+        use cairn_store_sqlite::SqliteIdentityRegistry;
+        use cairn_test_fixtures::sample_record as seeded_sample_record;
+        use cairn_test_fixtures::store::{FixtureStore, sample_record};
+
+        let store = FixtureStore::default();
+        let trusted_summary = AgentWorkerAuditSummary::from_records(&[AgentWorkerAuditRecord {
+            operation_id: "op-trusted".to_owned(),
+            worker_kind: AgentWorkerKind::Dream,
+            worker_name: "agent_dream".to_owned(),
+            agent_identity: "agt:cairn-dream:v1".to_owned(),
+            scope: Some(ScopeTuple {
+                tenant: Some("tenant-a".to_owned()),
+                agent: Some("agt:cairn-dream:v1".to_owned()),
+                ..ScopeTuple::default()
+            }),
+            status: AgentWorkerStatus::Aborted,
+            generated_candidates: 2,
+            accepted_candidates: 1,
+            budget_consumed: AgentBudgetConsumed {
+                turns: 3,
+                tool_calls: 4,
+                cost_units: 99,
+            },
+            failure_mode: Some(AgentWorkerFailureMode::ProviderUnavailable),
+            canary_label: Some("canary-05".to_owned()),
+        }]);
+        let spoofed_summary = AgentWorkerAuditSummary::from_records(&[AgentWorkerAuditRecord {
+            operation_id: "op-spoofed".to_owned(),
+            worker_kind: AgentWorkerKind::Extractor,
+            worker_name: "spoofed_agent".to_owned(),
+            agent_identity: "agt:spoofed:v1".to_owned(),
+            scope: None,
+            status: AgentWorkerStatus::Completed,
+            generated_candidates: 100,
+            accepted_candidates: 100,
+            budget_consumed: AgentBudgetConsumed {
+                turns: 1,
+                tool_calls: 1,
+                cost_units: 10_000,
+            },
+            failure_mode: None,
+            canary_label: Some("spoofed-canary".to_owned()),
+        }]);
+
+        let mut trusted = sample_record();
+        trusted.updated_at = Rfc3339Timestamp::parse("2026-05-23T10:00:00Z").expect("timestamp");
+        trusted.extra_frontmatter.insert(
+            "evaluation".to_owned(),
+            serde_json::json!({
+                "agent_worker_audit": trusted_summary,
+                "agent_canary_state": "canary",
+                "produced_by": "cairn-workflows::EvaluationHandler",
+            }),
+        );
+        store.upsert(&trusted).await.expect("trusted upsert");
+
+        let mut untrusted_evaluation = seeded_sample_record(2);
+        untrusted_evaluation.updated_at =
+            Rfc3339Timestamp::parse("2026-05-23T11:00:00Z").expect("timestamp");
+        untrusted_evaluation.extra_frontmatter.insert(
+            "evaluation".to_owned(),
+            serde_json::json!({
+                "agent_worker_audit": spoofed_summary,
+                "agent_canary_state": "rolled_back",
+                "produced_by": "user-editable-frontmatter",
+            }),
+        );
+        store
+            .upsert(&untrusted_evaluation)
+            .await
+            .expect("untrusted evaluation upsert");
+
+        let mut untrusted_top_level = seeded_sample_record(3);
+        untrusted_top_level.updated_at =
+            Rfc3339Timestamp::parse("2026-05-23T12:00:00Z").expect("timestamp");
+        untrusted_top_level.extra_frontmatter.insert(
+            "agent_worker_audit".to_owned(),
+            serde_json::json!(spoofed_summary),
+        );
+        untrusted_top_level
+            .extra_frontmatter
+            .insert("rollout_state".to_owned(), serde_json::json!("rolled_back"));
+        store
+            .upsert(&untrusted_top_level)
+            .await
+            .expect("untrusted top-level upsert");
+
+        let registry = SqliteIdentityRegistry::open_in_memory().expect("open registry");
+        let cfg = CairnConfig::default();
+        let vault = tempfile::tempdir().expect("tempdir");
+        let result = lint_handler(&store, &registry, None, &cfg, false, vault.path())
+            .await
+            .expect("handler");
+        let report = result
+            .data
+            .agent_worker_audit
+            .expect("lint data includes agent worker audit");
+
+        assert!(report.observed_records);
+        assert_eq!(report.cost_units, 99);
+        assert_eq!(
+            report.rollout_state,
+            Some(cairn_core::generated::verbs::lint::AgentWorkerAuditReportRolloutState::Canary)
+        );
+        assert_eq!(report.workers[0].worker_name, "agent_dream");
     }
 
     #[tokio::test]
