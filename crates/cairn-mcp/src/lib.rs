@@ -22,7 +22,7 @@ pub mod relay;
 pub mod verb_envelope;
 
 pub use error::TransportError;
-pub use handler::CairnMcpHandler;
+pub use handler::{CairnMcpHandler, FederationState};
 
 use std::{path::PathBuf, sync::Arc};
 

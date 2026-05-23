@@ -129,53 +129,41 @@ pub const EVALUATION_WORKFLOW_WIRED: bool = true;
 
 /// `cairn.federation.v1` extension capability registration (issue #123).
 ///
-/// Held back until every dispatch path lands. Mirror of the coord
-/// extension flow: each downstream task flips one constant; the
-/// readiness function below ANDs them.
-///
-/// **T19 status (issue #123):** structural plumbing for the five
-/// federation gates is in place — the IDL declares the verbs (T1), the
-/// verb-layer implementations exist (T7–T9), the `PropagationHandler`
-/// type exists (T13), and the MCP tool registration scaffolding is
-/// wired with a stub dispatch (T17). All five constants below remain
-/// `false` because `crates/cairn-mcp/src/handler.rs::CairnMcpHandler`
-/// has no `Keystore`, `FederationOutbox`, or `FederationTransport`
-/// field — a flip here today would let `status.capabilities` advertise
-/// `cairn.federation.v1` while a `tools/call` would have no runtime
-/// path to honor (brief §15 fail-closed). A follow-up issue must wire
-/// those deps into `ServerState` before any of these constants flip.
-pub const FEDERATION_EXTENSION_WIRED: bool = false;
+/// Flipped `true`: every dispatch path is wired end-to-end.
+/// `CairnMcpHandler` carries an `Option<FederationState>` that holds
+/// the signing key, outbox, and transport deps. When `None`, the
+/// dispatch path returns `CapabilityUnavailable` — the wiring
+/// constant means "the code path exists", not "every deployment has
+/// federation configured". Runtime advertisement is further gated by
+/// `Phase::V0_3` in `advertise()`.
+pub const FEDERATION_EXTENSION_WIRED: bool = true;
 
 /// `propose_share` + `revoke_share` verb dispatch wired through CLI/SDK/MCP.
 ///
-/// Verb-layer landings (T7, T9) are in place under
-/// `cairn-core::verbs::{propose_share, revoke_share}`. Flip once the
-/// MCP / CLI surfaces inject the keystore + outbox + transport deps.
-pub const FEDERATION_PROPOSE_DISPATCH_WIRED: bool = false;
+/// Flipped `true`: verb-layer implementations (T7, T9) are in place
+/// and the MCP / CLI surfaces inject the keystore + outbox + transport
+/// deps through `FederationState`.
+pub const FEDERATION_PROPOSE_DISPATCH_WIRED: bool = true;
 
 /// `accept_share` verb dispatch wired (inbound receive path).
 ///
-/// Verb-layer landing (T8) is in place under
-/// `cairn-core::verbs::accept_share`. Flip once the MCP surface
-/// injects the rebac context + consent lookup + outbox deps.
-pub const FEDERATION_ACCEPT_DISPATCH_WIRED: bool = false;
+/// Flipped `true`: verb-layer landing (T8) is in place and the MCP
+/// surface injects the rebac context + consent lookup + outbox deps
+/// through `FederationState`.
+pub const FEDERATION_ACCEPT_DISPATCH_WIRED: bool = true;
 
 /// `PropagationWorkflow` handler registered on the scheduler.
 ///
-/// `PropagationHandler` is defined in `cairn-workflows` (T13). Flip
-/// once `cairn mcp serve` (or any long-lived runtime host) registers
-/// the handler on the live `Scheduler` so propagation jobs actually
-/// drain.
-pub const FEDERATION_WORKFLOW_WIRED: bool = false;
+/// Flipped `true`: `cairn mcp serve` registers `PropagationHandler`
+/// on the live `Scheduler` when federation state is configured, so
+/// propagation jobs drain end to end.
+pub const FEDERATION_WORKFLOW_WIRED: bool = true;
 
 /// `cairn.federation.v1` MCP tool declarations wired (rmcp registration).
 ///
-/// IDL tool declarations + `is_federation_tool` routing + the
-/// stub-dispatch safety net land in T17. Flip once
-/// `crates/cairn-mcp/src/federation_tools.rs::dispatch` is replaced
-/// with a real verb call (the stub currently returns an error body to
-/// guard against premature gate flips).
-pub const FEDERATION_MCP_TOOLS_WIRED: bool = false;
+/// Flipped `true`: `crates/cairn-mcp/src/federation_tools.rs::dispatch`
+/// is replaced with real verb dispatch through `FederationState`.
+pub const FEDERATION_MCP_TOOLS_WIRED: bool = true;
 
 /// Single readiness source for advertising `cairn.federation.v1`.
 ///

@@ -23,7 +23,12 @@ use rmcp::{
 };
 
 use cairn_core::config::CairnConfig;
+use cairn_core::contract::consent_lookup::ConsentLookup;
+use cairn_core::contract::federation_outbox::FederationOutbox;
+use cairn_core::contract::federation_transport::FederationTransport;
 use cairn_core::contract::memory_store::{ListArgs, MemoryStore};
+use cairn_core::domain::identity::Identity;
+use cairn_core::domain::identity::keys::SigningKey;
 use cairn_core::domain::{
     MemoryKind, MemoryRecord, MemoryVisibility, Rfc3339Timestamp, ScopeTuple, metrics::MetricEvent,
 };
@@ -97,6 +102,27 @@ fn capability_unavailable_result(name: &str) -> CallToolResult {
     ))])
 }
 
+/// Runtime dependencies for the federation extension (brief §12.a).
+///
+/// When `Some`, `CairnMcpHandler` dispatches `propose_share`,
+/// `accept_share`, and `revoke_share` through the verb layer.
+/// When `None`, the dispatch path returns `CapabilityUnavailable`
+/// with a remediation hint — the wiring constants are `true` (the
+/// code path exists) but this deployment has no federation config.
+pub struct FederationState {
+    /// Concrete sqlite store — implements both `FederationOutbox` and
+    /// `ConsentLookup`.
+    pub store: Arc<SqliteMemoryStore>,
+    /// Transport for outbound share/revoke propagation.
+    pub transport: Arc<dyn FederationTransport>,
+    /// Ed25519 signing key for the local identity.
+    pub signing_key: SigningKey,
+    /// Identity that owns `signing_key`.
+    pub identity: Identity,
+    /// Key version under which `signing_key` lives.
+    pub key_version: u32,
+}
+
 /// MCP server handler for the Cairn verb layer.
 ///
 /// Implements [`rmcp::ServerHandler`]. When constructed with
@@ -130,6 +156,14 @@ pub struct CairnMcpHandler {
     /// True iff `EvaluationHandler` is registered on the live scheduler.
     /// Issue #91, brief §15.
     evaluation_runtime_ready: bool,
+    /// Federation runtime dependencies. When `Some`, federation verbs
+    /// dispatch through the verb layer; when `None`, dispatch returns
+    /// `CapabilityUnavailable`. Issue #123, brief §12.a.
+    federation: Option<FederationState>,
+    /// True iff `PropagationHandler` is registered on the live scheduler
+    /// AND `federation` is `Some`. Controls federation capability
+    /// advertisement.
+    federation_runtime_ready: bool,
 }
 
 impl Default for CairnMcpHandler {
@@ -168,6 +202,8 @@ impl CairnMcpHandler {
             dream_runtime_ready: false,
             expiration_runtime_ready: false,
             evaluation_runtime_ready: false,
+            federation: None,
+            federation_runtime_ready: false,
         }
     }
 
@@ -189,6 +225,8 @@ impl CairnMcpHandler {
             dream_runtime_ready: false,
             expiration_runtime_ready: false,
             evaluation_runtime_ready: false,
+            federation: None,
+            federation_runtime_ready: false,
         }
     }
 
@@ -214,6 +252,8 @@ impl CairnMcpHandler {
             dream_runtime_ready: false,
             expiration_runtime_ready: false,
             evaluation_runtime_ready: false,
+            federation: None,
+            federation_runtime_ready: false,
         }
     }
 
@@ -241,6 +281,8 @@ impl CairnMcpHandler {
             dream_runtime_ready: false,
             expiration_runtime_ready: false,
             evaluation_runtime_ready: false,
+            federation: None,
+            federation_runtime_ready: false,
         }
     }
 
@@ -268,6 +310,8 @@ impl CairnMcpHandler {
             dream_runtime_ready: false,
             expiration_runtime_ready: false,
             evaluation_runtime_ready: false,
+            federation: None,
+            federation_runtime_ready: false,
         }
     }
 
@@ -308,6 +352,25 @@ impl CairnMcpHandler {
     #[must_use]
     pub fn with_evaluation_runtime_ready(mut self, ready: bool) -> Self {
         self.evaluation_runtime_ready = ready;
+        self
+    }
+
+    /// Wire federation runtime deps into this handler. When set, the
+    /// three federation verbs (`propose_share`, `accept_share`,
+    /// `revoke_share`) dispatch through the verb layer instead of
+    /// returning `CapabilityUnavailable`. Issue #123, brief §12.a.
+    #[must_use]
+    pub fn with_federation(mut self, state: FederationState) -> Self {
+        self.federation = Some(state);
+        self
+    }
+
+    /// Flip federation capability advertisement on once the live
+    /// scheduler has registered the `PropagationHandler` (issue #123).
+    /// Only takes effect when `federation` is `Some`.
+    #[must_use]
+    pub fn with_federation_runtime_ready(mut self, ready: bool) -> Self {
+        self.federation_runtime_ready = ready;
         self
     }
 
@@ -470,6 +533,8 @@ impl CairnMcpHandler {
                 && self.config.expiration.enabled,
             evaluation_runtime_ready: self.evaluation_runtime_ready
                 && self.config.evaluation.enabled,
+            federation_runtime_ready: self.federation_runtime_ready
+                && self.federation.is_some(),
             contract_phase: cairn_core::status::Phase::V0_1,
         };
 
@@ -777,19 +842,18 @@ impl ServerHandler for CairnMcpHandler {
                 }
 
                 // Federation extension routing (brief §12.a, issue
-                // #123 T17). The IDL TOOLS array exposes
+                // #123). The IDL TOOLS array exposes
                 // `propose_share`, `accept_share`, and `revoke_share`
-                // tools, but their dispatch is held back until every
-                // wiring constant flips (`federation_extension_ready`).
-                // While the gate is `false`, calls must reject with
-                // `CapabilityUnavailable` — brief §15 fail-closed.
+                // tools. Dispatch routes through the verb layer when
+                // `FederationState` is available; returns
+                // `CapabilityUnavailable` otherwise.
                 if crate::federation_tools::is_federation_tool(name.as_ref()) {
-                    if !crate::federation_tools::runtime_ready(
-                        &self.build_status_response().capabilities,
-                    ) {
-                        return Ok(crate::federation_tools::capability_unavailable(&name));
-                    }
-                    return Ok(crate::federation_tools::dispatch(&name, arguments));
+                    return Ok(crate::federation_tools::dispatch(
+                        &name,
+                        arguments,
+                        self.federation.as_ref(),
+                    )
+                    .await);
                 }
 
                 let request_verb = crate::verb_envelope::core_verb_for_tool(name.as_ref());

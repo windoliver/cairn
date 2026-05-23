@@ -1,5 +1,5 @@
-//! MCP tool registration for the `cairn.federation.v1` extension
-//! (brief §12.a, issue #123 T17).
+//! MCP tool registration and dispatch for the `cairn.federation.v1`
+//! extension (brief §12.a, issue #123).
 //!
 //! The three federation verbs (`propose_share`, `accept_share`,
 //! `revoke_share`) ship as IDL-generated [`crate::generated::ToolDecl`]
@@ -19,19 +19,23 @@
 //!   constant with the live status capabilities slice. Returns `true`
 //!   only when the runtime advertises the federation capability AND the
 //!   build-time wiring constants agree.
-//! * [`dispatch`] — stub dispatcher used while
-//!   [`cairn_core::status::wiring::FEDERATION_MCP_TOOLS_WIRED`] is
-//!   `false`. T19 will replace the stub with real verb dispatch once
-//!   every dependency (keystore, outbox, `consent_lookup`, rebac) is
-//!   plumbed through the MCP runtime.
+//! * [`dispatch`] — real verb dispatcher that routes through the
+//!   verb layer when `FederationState` is available. Returns
+//!   `CapabilityUnavailable` when no federation state is configured.
 //!
 //! The hand-written [`From`] conversions between codegenerated args /
 //! data types and the verb-layer request / response types live in
 //! [`crate::federation_conv`] — keeping them out of this file lets the
 //! tool-registration surface stay focused on gating.
 
+use cairn_core::domain::time::SystemClock;
+use cairn_core::error::federation::FederationError;
 use cairn_core::generated::common::Capabilities;
+use cairn_core::generated::envelope::{ResponseData, ResponseVerb};
+use cairn_core::rebac::RebacContext;
 use rmcp::model::{CallToolResult, Content};
+
+use crate::handler::FederationState;
 
 /// IDL-generated MCP tool names that belong to the
 /// `cairn.mcp.v1.extension.federation` capability.
@@ -66,16 +70,16 @@ pub fn runtime_ready(capabilities: &[Capabilities]) -> bool {
 
 /// `true` when federation MCP calls have a real dispatcher available.
 ///
-/// Mirrors [`crate::coord_tools::dispatch_ready`]. T19 lands the real
-/// dispatcher in [`dispatch`]; this constant flips when every
-/// federation wiring constant is on.
+/// Mirrors [`crate::coord_tools::dispatch_ready`]. All five federation
+/// wiring constants are `true`, so this returns `true`.
 #[must_use]
 pub const fn dispatch_ready() -> bool {
     cairn_core::status::wiring::federation_extension_ready()
 }
 
 /// Build a `CapabilityUnavailable` `CallToolResult` for a federation
-/// tool that was called while the capability is unwired.
+/// tool that was called while the capability is unwired or no
+/// `FederationState` is configured.
 ///
 /// Mirrors `crate::handler::capability_unavailable_result` so the
 /// federation surface stays consistent with the rest of the MCP handler.
@@ -90,28 +94,209 @@ pub fn capability_unavailable(name: &str) -> CallToolResult {
     CallToolResult::error(vec![Content::text(text)])
 }
 
-/// Dispatch a federation MCP tool.
+/// Dispatch a federation MCP tool through the verb layer.
 ///
-/// Stub during T17: federation verbs need the keystore + outbox +
-/// `consent_lookup` + rebac context that the MCP runtime does not yet
-/// plumb through. T19 lands the full wiring and replaces this body
-/// with the verb call. The argument shape is intentionally already in
-/// the signature so the dispatch table in `handler::call_tool` does not
-/// need a follow-up rewrite when the real implementation arrives.
-///
-/// This branch is unreachable from production callers while
-/// [`dispatch_ready`] returns `false`: the `call_tool` dispatch path
-/// short-circuits with [`capability_unavailable`] before reaching
-/// here. The error body below is the defence-in-depth safety net for
-/// any caller that bypasses the gate during testing.
-#[must_use]
-pub fn dispatch(
+/// When `state` is `Some`, routes to the matching verb function and
+/// converts the result to a `CallToolResult`. When `None`, returns
+/// `CapabilityUnavailable` — the deployment has no federation config.
+pub async fn dispatch(
     name: &str,
-    _arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    state: Option<&FederationState>,
 ) -> CallToolResult {
-    CallToolResult::error(vec![Content::text(format!(
-        "federation tool dispatch is not implemented: {name}"
-    ))])
+    let Some(state) = state else {
+        return capability_unavailable(name);
+    };
+
+    let args_value = arguments
+        .map(serde_json::Value::Object)
+        .unwrap_or(serde_json::Value::Null);
+
+    match name {
+        "propose_share" => dispatch_propose_share(args_value, state).await,
+        "accept_share" => dispatch_accept_share(args_value, state).await,
+        "revoke_share" => dispatch_revoke_share(args_value, state).await,
+        _ => CallToolResult::error(vec![Content::text(format!(
+            "cairn federation: unknown tool: {name}"
+        ))]),
+    }
+}
+
+async fn dispatch_propose_share(
+    args_value: serde_json::Value,
+    state: &FederationState,
+) -> CallToolResult {
+    let args: cairn_core::generated::verbs::propose_share::ProposeShareArgs =
+        match serde_json::from_value(args_value) {
+            Ok(a) => a,
+            Err(e) => {
+                return federation_error_result(
+                    ResponseVerb::ProposeShare,
+                    &FederationError::InvalidShape,
+                    &format!("invalid propose_share arguments: {e}"),
+                );
+            }
+        };
+
+    let request = match crate::federation_conv::propose_share_request_from_args(args) {
+        Ok(r) => r,
+        Err(e) => return federation_error_result(ResponseVerb::ProposeShare, &e, ""),
+    };
+
+    let clock = SystemClock;
+    let rebac = RebacContext::default();
+    let deps = cairn_core::verbs::propose_share::ProposeShareDeps {
+        store: state.store.as_ref(),
+        outbox: state.store.as_ref(),
+        signing_key: &state.signing_key,
+        signer_identity: &state.identity,
+        signer_key_version: state.key_version,
+        rebac: &rebac,
+        clock: &clock,
+        federation_ready: true,
+    };
+
+    match cairn_core::verbs::propose_share::propose_share(request, &deps).await {
+        Ok(response) => {
+            match crate::federation_conv::propose_share_data_from_response(response) {
+                Ok(data) => {
+                    let response = crate::verb_envelope::committed(
+                        ResponseVerb::ProposeShare,
+                        ResponseData::ProposeShare(data),
+                        Vec::new(),
+                    );
+                    crate::verb_envelope::call_result_from_response(&response)
+                }
+                Err(e) => federation_error_result(ResponseVerb::ProposeShare, &e, ""),
+            }
+        }
+        Err(e) => federation_error_result(
+            ResponseVerb::ProposeShare,
+            &e,
+            &format!("propose_share: {e}"),
+        ),
+    }
+}
+
+async fn dispatch_accept_share(
+    args_value: serde_json::Value,
+    state: &FederationState,
+) -> CallToolResult {
+    let args: cairn_core::generated::verbs::accept_share::AcceptShareArgs =
+        match serde_json::from_value(args_value) {
+            Ok(a) => a,
+            Err(e) => {
+                return federation_error_result(
+                    ResponseVerb::AcceptShare,
+                    &FederationError::InvalidShape,
+                    &format!("invalid accept_share arguments: {e}"),
+                );
+            }
+        };
+
+    let request = crate::federation_conv::accept_share_request_from_args(args);
+
+    let clock = SystemClock;
+    let rebac = RebacContext::default();
+    let verifying_key = state.signing_key.verifying_key();
+    let inbound_sensor = state.identity.clone();
+    let deps = cairn_core::verbs::accept_share::AcceptShareDeps {
+        store: state.store.as_ref(),
+        outbox: state.store.as_ref(),
+        consent_lookup: state.store.as_ref(),
+        local_signing_key: &state.signing_key,
+        receiver_identity: &state.identity,
+        issuer_verifying_key: &verifying_key,
+        rebac: &rebac,
+        clock: &clock,
+        inbound_sensor: &inbound_sensor,
+        federation_ready: true,
+    };
+
+    match cairn_core::verbs::accept_share::accept_share(request, &deps).await {
+        Ok(response) => {
+            let data = crate::federation_conv::accept_share_data_from_response(response);
+            let response = crate::verb_envelope::committed(
+                ResponseVerb::AcceptShare,
+                ResponseData::AcceptShare(data),
+                Vec::new(),
+            );
+            crate::verb_envelope::call_result_from_response(&response)
+        }
+        Err(e) => federation_error_result(
+            ResponseVerb::AcceptShare,
+            &e,
+            &format!("accept_share: {e}"),
+        ),
+    }
+}
+
+async fn dispatch_revoke_share(
+    args_value: serde_json::Value,
+    state: &FederationState,
+) -> CallToolResult {
+    let args: cairn_core::generated::verbs::revoke_share::RevokeShareArgs =
+        match serde_json::from_value(args_value) {
+            Ok(a) => a,
+            Err(e) => {
+                return federation_error_result(
+                    ResponseVerb::RevokeShare,
+                    &FederationError::InvalidShape,
+                    &format!("invalid revoke_share arguments: {e}"),
+                );
+            }
+        };
+
+    let request = crate::federation_conv::revoke_share_request_from_args(args);
+
+    let clock = SystemClock;
+    let deps = cairn_core::verbs::revoke_share::RevokeShareDeps {
+        outbox: state.store.as_ref(),
+        consent_lookup: state.store.as_ref(),
+        signing_key: &state.signing_key,
+        signer_identity: &state.identity,
+        signer_key_version: state.key_version,
+        clock: &clock,
+        federation_ready: true,
+    };
+
+    match cairn_core::verbs::revoke_share::revoke_share(request, &deps).await {
+        Ok(response) => {
+            let data = crate::federation_conv::revoke_share_data_from_response(response);
+            let response = crate::verb_envelope::committed(
+                ResponseVerb::RevokeShare,
+                ResponseData::RevokeShare(data),
+                Vec::new(),
+            );
+            crate::verb_envelope::call_result_from_response(&response)
+        }
+        Err(e) => federation_error_result(
+            ResponseVerb::RevokeShare,
+            &e,
+            &format!("revoke_share: {e}"),
+        ),
+    }
+}
+
+/// Convert a [`FederationError`] into a `CallToolResult` with the
+/// matching envelope policy. `CapabilityDisabled` maps to the
+/// capability-unavailable result; everything else is an aborted
+/// internal error.
+fn federation_error_result(
+    verb: ResponseVerb,
+    err: &FederationError,
+    detail: &str,
+) -> CallToolResult {
+    if matches!(err, FederationError::CapabilityDisabled) {
+        return capability_unavailable("");
+    }
+    let msg = if detail.is_empty() {
+        format!("{err}")
+    } else {
+        detail.to_owned()
+    };
+    let response = crate::verb_envelope::aborted_internal(verb, &msg);
+    crate::verb_envelope::call_result_from_response(&response)
 }
 
 #[cfg(test)]
@@ -154,11 +339,37 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_ready_is_true() {
+        assert!(dispatch_ready());
+    }
+
+    #[test]
     fn runtime_ready_requires_both_dispatch_and_capability() {
         // No capability advertised → never ready.
         assert!(!runtime_ready(&[]));
-        // Capability advertised but dispatch unwired → not ready.
+        // Capability advertised AND dispatch wired → ready.
         let caps = [Capabilities::CairnMcpV1ExtensionFederation];
         assert_eq!(runtime_ready(&caps), dispatch_ready());
+    }
+
+    #[tokio::test]
+    async fn dispatch_returns_capability_unavailable_when_no_state() {
+        let result = dispatch("propose_share", None, None).await;
+        assert!(result.is_error.unwrap_or(false));
+        let text = result
+            .content
+            .first()
+            .and_then(|c| {
+                if let rmcp::model::RawContent::Text(t) = &**c {
+                    Some(t.text.as_str())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or("");
+        assert!(
+            text.contains("capability unavailable"),
+            "expected capability unavailable, got: {text}"
+        );
     }
 }

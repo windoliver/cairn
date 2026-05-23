@@ -1,11 +1,11 @@
-//! `cairn.federation.v1` MCP tool registration gates (issue #123 T17).
+//! `cairn.federation.v1` MCP tool registration gates (issue #123).
 //!
 //! These tests verify the three federation verb tools are gated on the
 //! `cairn.mcp.v1.extension.federation` capability AND on the
-//! `federation_extension_ready()` wiring constant. While T17 lays only
-//! the registration code (T19 flips the gates on), the tests follow the
-//! gate at runtime — they assert the negative path today and the
-//! positive path once T19 lands.
+//! `federation_extension_ready()` wiring constant. All five wiring
+//! constants are now `true`; the tests verify the positive path and
+//! the runtime-availability gate (no `FederationState` = capability
+//! unavailable at dispatch time).
 #![allow(missing_docs)]
 
 use cairn_core::generated::common::Capabilities;
@@ -37,25 +37,16 @@ fn federation_tool_names_round_trip_idl_tools() {
 
 #[test]
 fn federation_tools_hidden_without_capability() {
-    // Empty capability slice → must never be runtime-ready, even if a
-    // future bug flips the build-time wiring constant prematurely.
+    // Empty capability slice → must never be runtime-ready, even if
+    // dispatch_ready() is true (which it now is).
     assert!(!runtime_ready(&[]));
 }
 
 #[test]
 fn federation_tools_follow_runtime_readiness() {
     let caps = [Capabilities::CairnMcpV1ExtensionFederation];
-    if !dispatch_ready() {
-        assert!(
-            !runtime_ready(&caps),
-            "federation tools must stay hidden until the runtime is wired",
-        );
-        // T19 will flip `FEDERATION_MCP_TOOLS_WIRED` and the other
-        // federation wiring constants. Until then the dispatch stub
-        // documents itself as not-ready so this branch is the only one
-        // exercised in CI.
-        return;
-    }
+    // dispatch_ready() is now true (all 5 wiring constants flipped).
+    assert!(dispatch_ready());
     assert!(
         runtime_ready(&caps),
         "with the capability advertised AND every wiring constant true, runtime_ready must agree",
@@ -63,16 +54,10 @@ fn federation_tools_follow_runtime_readiness() {
 }
 
 #[test]
-fn federation_dispatch_stub_cannot_be_marked_ready() {
-    // T17 deliberately leaves `dispatch_ready()` returning false — the
-    // stub `dispatch()` body must be replaced with real verb dispatch
-    // before the wiring constants flip. If this test starts failing,
-    // remove the stub and add real non-error dispatch coverage before
-    // enabling federation readiness.
-    assert!(
-        !dispatch_ready(),
-        "remove federation_tools::dispatch stub and add real non-error dispatch coverage before enabling federation readiness",
-    );
+fn federation_dispatch_is_wired() {
+    // All five federation wiring constants are true. dispatch_ready()
+    // returns true, confirming the dispatch path is wired.
+    assert!(dispatch_ready());
 }
 
 #[test]
@@ -133,4 +118,28 @@ fn federation_tool_schemas_are_well_formed_objects() {
 fn federation_tool_names_snapshot() {
     let names: Vec<&str> = FEDERATION_TOOL_NAMES.to_vec();
     insta::assert_yaml_snapshot!(names);
+}
+
+#[tokio::test]
+async fn federation_dispatch_returns_capability_unavailable_when_no_state() {
+    use rmcp::model::Content;
+
+    let result =
+        cairn_mcp::federation_tools::dispatch("propose_share", None, None).await;
+    assert!(result.is_error.unwrap_or(false));
+    let text = result
+        .content
+        .first()
+        .and_then(|c| {
+            if let rmcp::model::RawContent::Text(t) = &**c {
+                Some(t.text.as_str())
+            } else {
+                None
+            }
+        })
+        .unwrap_or("");
+    assert!(
+        text.contains("capability unavailable"),
+        "expected capability unavailable, got: {text}"
+    );
 }

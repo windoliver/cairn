@@ -271,6 +271,7 @@ impl<T: Transport> Sdk<T> {
             dream_runtime_ready: false,
             expiration_runtime_ready: false,
             evaluation_runtime_ready: false,
+            federation_runtime_ready: false,
             contract_phase: cairn_core::status::Phase::V0_1,
         }
     }
