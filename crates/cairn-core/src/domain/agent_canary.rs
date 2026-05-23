@@ -354,9 +354,10 @@ impl AgentCanaryPolicy {
     /// Evaluate aggregate canary metrics after worker audit records are summarized.
     ///
     /// Callers must pass a summary already filtered to `self.cohort_label`.
-    /// Empty worker-group metadata is accepted for synthetic tests and no-data
-    /// reports. When worker groups are present, every group must carry the
-    /// policy cohort label so mixed-cohort aggregate misuse fails closed.
+    /// Empty worker-group metadata is accepted only for true no-data summaries.
+    /// When runs are present, every worker group must carry the policy cohort
+    /// label so mixed-cohort aggregate misuse fails closed. Explicit operator
+    /// pause and rollback requests are evaluated before this cohort check.
     ///
     /// # Errors
     /// Returns [`AgentCanaryError`] when the policy is invalid or the summary
@@ -366,11 +367,11 @@ impl AgentCanaryPolicy {
         summary: &AgentWorkerAuditSummary,
     ) -> Result<AgentCanaryDecision, AgentCanaryError> {
         self.validate()?;
-        self.validate_summary_cohort(summary)?;
         let counters = AgentCanaryDecisionCounters::from_summary(summary);
         if let Some(decision) = self.gated_summary_decision(counters) {
             return Ok(decision);
         }
+        self.validate_summary_cohort(summary)?;
         if self.state != AgentCanaryState::Canary {
             return Ok(self.decision(
                 AgentCanaryDecisionKind::DispatchAllowed,
@@ -408,7 +409,11 @@ impl AgentCanaryPolicy {
         summary: &AgentWorkerAuditSummary,
     ) -> Result<(), AgentCanaryError> {
         if summary.workers.is_empty() {
-            return Ok(());
+            return if summary.total_runs == 0 {
+                Ok(())
+            } else {
+                Err(AgentCanaryError::MixedCohortSummary)
+            };
         }
 
         if summary
@@ -585,7 +590,11 @@ mod tests {
             tool_calls: 3,
             cost_units,
             failure_modes: Default::default(),
-            workers: Vec::new(),
+            workers: if total == 0 {
+                Vec::new()
+            } else {
+                vec![group(Some("canary-05"), total)]
+            },
         }
     }
 
@@ -720,6 +729,56 @@ mod tests {
         let error = policy()
             .evaluate_summary(&summary)
             .expect_err("mixed cohort summaries must be rejected");
+
+        assert_eq!(error, AgentCanaryError::MixedCohortSummary);
+    }
+
+    #[test]
+    fn operator_gates_win_over_mixed_cohort_validation() {
+        let mut summary = summary(5, 0, 10, 8, 80);
+        summary.workers = vec![group(Some("canary-05"), 3), group(Some("canary-10"), 2)];
+
+        let rollback = AgentCanaryPolicy {
+            rollback_requested: true,
+            ..policy()
+        };
+        let rollback_decision = rollback
+            .evaluate_summary(&summary)
+            .expect("operator rollback must bypass cohort validation");
+        assert_eq!(
+            rollback_decision.kind,
+            AgentCanaryDecisionKind::RollbackRequested
+        );
+        assert_eq!(
+            rollback_decision.reason_code,
+            AgentCanaryReasonCode::OperatorRollbackRequested
+        );
+
+        let pause = AgentCanaryPolicy {
+            pause_requested: true,
+            ..policy()
+        };
+        let pause_decision = pause
+            .evaluate_summary(&summary)
+            .expect("operator pause must bypass cohort validation");
+        assert_eq!(
+            pause_decision.kind,
+            AgentCanaryDecisionKind::DispatchDeniedPaused
+        );
+        assert_eq!(
+            pause_decision.reason_code,
+            AgentCanaryReasonCode::OperatorPaused
+        );
+    }
+
+    #[test]
+    fn non_empty_summary_without_worker_metadata_is_rejected() {
+        let mut summary = summary(5, 0, 10, 8, 80);
+        summary.workers = Vec::new();
+
+        let error = policy()
+            .evaluate_summary(&summary)
+            .expect_err("non-empty summaries must include cohort metadata");
 
         assert_eq!(error, AgentCanaryError::MixedCohortSummary);
     }
