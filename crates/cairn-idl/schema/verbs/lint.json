@@ -118,7 +118,19 @@
     "AgentWorkerAuditWorker": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["worker_kind", "worker_name", "total_runs", "generated_candidates", "accepted_candidates"],
+      "required": [
+        "worker_kind",
+        "worker_name",
+        "total_runs",
+        "completed_runs",
+        "failed_runs",
+        "generated_candidates",
+        "accepted_candidates",
+        "turns",
+        "tool_calls",
+        "cost_units",
+        "failure_modes"
+      ],
       "properties": {
         "worker_kind": {
           "type": "string",
@@ -136,6 +148,14 @@
           "type": "integer",
           "minimum": 0
         },
+        "completed_runs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failed_runs": {
+          "type": "integer",
+          "minimum": 0
+        },
         "generated_candidates": {
           "type": "integer",
           "minimum": 0
@@ -143,6 +163,30 @@
         "accepted_candidates": {
           "type": "integer",
           "minimum": 0
+        },
+        "acceptance_rate": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "turns": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tool_calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cost_units": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failure_modes": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
         }
       }
     },

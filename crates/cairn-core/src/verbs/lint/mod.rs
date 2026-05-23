@@ -138,6 +138,13 @@ pub struct LintInputs<'a> {
     /// `None` keeps the `workflow_health` check on the no-op path so
     /// fixture-only tests of unrelated checks stay green.
     pub workflow_jobs: Option<&'a (dyn crate::contract::workflow_jobs::WorkflowJobsReader + 'a)>,
+    /// Optional body-free agent-worker audit aggregate to expose in
+    /// JSON and markdown lint reports. `None` means the caller had no
+    /// audit source to provide, not that agent-mode workers are healthy.
+    pub agent_worker_audit: Option<&'a AgentWorkerAuditSummary>,
+    /// Optional current rollout state associated with
+    /// `agent_worker_audit`.
+    pub agent_canary_state: Option<AgentCanaryState>,
     /// Wall-clock for time-based lint checks. The CLI passes
     /// `SystemClock::now_ms()`; tests pass a synthetic value.
     pub now_ms: i64,
@@ -159,6 +166,8 @@ impl std::fmt::Debug for LintInputs<'_> {
             .field("source_resolver", &"<dyn SourceResolver>")
             .field("consent_journal", &"<dyn ConsentJournalReader>")
             .field("workflow_jobs", &self.workflow_jobs.is_some())
+            .field("agent_worker_audit", &self.agent_worker_audit.is_some())
+            .field("agent_canary_state", &self.agent_canary_state)
             .field("now_ms", &self.now_ms)
             .finish()
     }
@@ -350,6 +359,8 @@ pub(crate) fn empty_lint_inputs_with_reader(
         source_resolver: empty_source_resolver(),
         consent_journal: empty_consent_journal(),
         workflow_jobs: Some(reader),
+        agent_worker_audit: None,
+        agent_canary_state: None,
         now_ms,
     }
 }
@@ -369,8 +380,13 @@ pub async fn run_checks(inputs: &LintInputs<'_>) -> LintData {
     findings.extend(checks::workflow_health::run(inputs));
     findings.extend(checks::consent::run(inputs).await);
     let summary = summarize(&findings);
-    let agent_worker_audit =
-        agent_worker_audit_report(&AgentWorkerAuditSummary::from_records(&[]), None);
+    let empty_agent_worker_audit = AgentWorkerAuditSummary::from_records(&[]);
+    let agent_worker_audit = agent_worker_audit_report(
+        inputs
+            .agent_worker_audit
+            .unwrap_or(&empty_agent_worker_audit),
+        inputs.agent_canary_state,
+    );
     LintData {
         agent_worker_audit: Some(agent_worker_audit),
         findings,
@@ -489,13 +505,30 @@ pub fn agent_worker_audit_report(
         workers: summary
             .workers
             .iter()
-            .map(|worker| AgentWorkerAuditWorker {
-                worker_kind: agent_worker_kind(worker.worker_kind),
-                worker_name: worker.worker_name.clone(),
-                canary_label: worker.canary_label.clone(),
-                total_runs: worker.total_runs,
-                generated_candidates: worker.generated_candidates,
-                accepted_candidates: worker.accepted_candidates,
+            .map(|worker| {
+                let mut worker_failure_modes = serde_json::Map::new();
+                for (mode, count) in &worker.failure_modes {
+                    worker_failure_modes.insert(
+                        mode.as_str().to_owned(),
+                        serde_json::Value::Number(serde_json::Number::from(*count)),
+                    );
+                }
+
+                AgentWorkerAuditWorker {
+                    worker_kind: agent_worker_kind(worker.worker_kind),
+                    worker_name: worker.worker_name.clone(),
+                    canary_label: worker.canary_label.clone(),
+                    total_runs: worker.total_runs,
+                    completed_runs: worker.completed_runs,
+                    failed_runs: worker.failed_runs,
+                    generated_candidates: worker.generated_candidates,
+                    accepted_candidates: worker.accepted_candidates,
+                    acceptance_rate: worker.acceptance_rate,
+                    turns: worker.turns,
+                    tool_calls: worker.tool_calls,
+                    cost_units: worker.cost_units,
+                    failure_modes: serde_json::Value::Object(worker_failure_modes),
+                }
             })
             .collect(),
     }
@@ -609,6 +642,8 @@ mod tests {
             source_resolver: crate::verbs::lint::empty_source_resolver(),
             consent_journal: crate::verbs::lint::empty_consent_journal(),
             workflow_jobs: None,
+            agent_worker_audit: None,
+            agent_canary_state: None,
             now_ms: 0,
         };
         let data = run_checks(&inputs).await;
@@ -680,6 +715,8 @@ mod tests {
             source_resolver: crate::verbs::lint::empty_source_resolver(),
             consent_journal: crate::verbs::lint::empty_consent_journal(),
             workflow_jobs: None,
+            agent_worker_audit: None,
+            agent_canary_state: None,
             now_ms: 0,
         };
         let inputs_rev = LintInputs {
@@ -696,6 +733,8 @@ mod tests {
             source_resolver: crate::verbs::lint::empty_source_resolver(),
             consent_journal: crate::verbs::lint::empty_consent_journal(),
             workflow_jobs: None,
+            agent_worker_audit: None,
+            agent_canary_state: None,
             now_ms: 0,
         };
 
@@ -748,14 +787,21 @@ mod tests {
             turns: 8,
             tool_calls: 12,
             cost_units: 200,
-            failure_modes,
+            failure_modes: failure_modes.clone(),
             workers: vec![AgentWorkerGroupSummary {
                 worker_kind: AgentWorkerKind::Extractor,
                 worker_name: "agent_extractor".to_owned(),
                 canary_label: Some("canary-05".to_owned()),
                 total_runs: 4,
+                completed_runs: 2,
+                failed_runs: 2,
                 accepted_candidates: 5,
                 generated_candidates: 10,
+                acceptance_rate: Some(0.5),
+                turns: 8,
+                tool_calls: 12,
+                cost_units: 200,
+                failure_modes: failure_modes.clone(),
             }],
         };
 
@@ -785,6 +831,90 @@ mod tests {
                 .expect("generated worker kind serializes"),
             serde_json::json!("extractor")
         );
+        assert_eq!(report.workers[0].completed_runs, 2);
+        assert_eq!(report.workers[0].failed_runs, 2);
+        assert_eq!(report.workers[0].acceptance_rate, Some(0.5));
+        assert_eq!(report.workers[0].turns, 8);
+        assert_eq!(report.workers[0].tool_calls, 12);
+        assert_eq!(report.workers[0].cost_units, 200);
+        assert_eq!(
+            report.workers[0].failure_modes["budget_exceeded"],
+            serde_json::json!(2)
+        );
+    }
+
+    #[tokio::test]
+    async fn run_checks_projects_agent_worker_audit_input() {
+        use crate::domain::{
+            AgentCanaryState, AgentWorkerAuditSummary, AgentWorkerFailureMode,
+            AgentWorkerGroupSummary, AgentWorkerKind,
+        };
+
+        let mut failure_modes = std::collections::BTreeMap::new();
+        failure_modes.insert(AgentWorkerFailureMode::Unknown, 1);
+        let summary = AgentWorkerAuditSummary {
+            total_runs: 1,
+            completed_runs: 0,
+            failed_runs: 1,
+            generated_candidates: 0,
+            accepted_candidates: 0,
+            acceptance_rate: None,
+            turns: 3,
+            tool_calls: 4,
+            cost_units: 5,
+            failure_modes: failure_modes.clone(),
+            workers: vec![AgentWorkerGroupSummary {
+                worker_kind: AgentWorkerKind::Dream,
+                worker_name: "agent_dream".to_owned(),
+                canary_label: Some("canary-05".to_owned()),
+                total_runs: 1,
+                completed_runs: 0,
+                failed_runs: 1,
+                accepted_candidates: 0,
+                generated_candidates: 0,
+                acceptance_rate: None,
+                turns: 3,
+                tool_calls: 4,
+                cost_units: 5,
+                failure_modes,
+            }],
+        };
+        let cfg = CairnConfig::default();
+        let inputs = LintInputs {
+            records: &[],
+            config: &cfg,
+            index_stats: IndexStats::new(0, 0),
+            author_states: crate::verbs::lint::empty_author_states(),
+            unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
+            consent_lookup: None,
+            source_artifacts: crate::verbs::lint::empty_source_artifacts(),
+            source_forgets: crate::verbs::lint::empty_source_forgets(),
+            vault_root: None,
+            hot_body_loader: None,
+            source_resolver: crate::verbs::lint::empty_source_resolver(),
+            consent_journal: crate::verbs::lint::empty_consent_journal(),
+            workflow_jobs: None,
+            agent_worker_audit: Some(&summary),
+            agent_canary_state: Some(AgentCanaryState::Canary),
+            now_ms: 0,
+        };
+
+        let data = run_checks(&inputs).await;
+        let report = data
+            .agent_worker_audit
+            .expect("lint data includes agent worker audit");
+
+        assert!(report.observed_records);
+        assert_eq!(
+            report.rollout_state,
+            Some(crate::generated::verbs::lint::AgentWorkerAuditReportRolloutState::Canary)
+        );
+        assert_eq!(report.total_runs, 1);
+        assert_eq!(report.failed_runs, 1);
+        assert_eq!(report.failure_modes["unknown"], serde_json::json!(1));
+        assert_eq!(report.workers[0].worker_name, "agent_dream");
+        assert_eq!(report.workers[0].failed_runs, 1);
+        assert_eq!(report.workers[0].tool_calls, 4);
     }
 
     #[tokio::test]
@@ -806,6 +936,8 @@ mod tests {
             source_resolver: crate::verbs::lint::empty_source_resolver(),
             consent_journal: crate::verbs::lint::empty_consent_journal(),
             workflow_jobs: None,
+            agent_worker_audit: None,
+            agent_canary_state: None,
             now_ms: 0,
         };
         let data = run_checks(&inputs).await;

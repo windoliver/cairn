@@ -1292,6 +1292,10 @@ pub async fn lint_handler(
         WorkflowJobsReaderOutcome::Ready(r) => Some(r),
         WorkflowJobsReaderOutcome::Absent | WorkflowJobsReaderOutcome::Unavailable(_) => None,
     };
+    let persisted_agent_worker_audit = latest_agent_worker_audit(&lint_records);
+    let persisted_agent_canary_state = persisted_agent_worker_audit
+        .as_ref()
+        .and_then(|audit| audit.canary_state);
     let now_ms = chrono::Utc::now().timestamp_millis();
     let inputs = LintInputs {
         records: &lint_records,
@@ -1308,6 +1312,10 @@ pub async fn lint_handler(
         consent_journal: &consent_journal,
         workflow_jobs: workflow_jobs_reader
             .map(|r| r as &dyn cairn_core::contract::workflow_jobs::WorkflowJobsReader),
+        agent_worker_audit: persisted_agent_worker_audit
+            .as_ref()
+            .map(|audit| &audit.summary),
+        agent_canary_state: persisted_agent_canary_state,
         now_ms,
     };
     let mut data = run_checks(&inputs).await;
@@ -1372,6 +1380,57 @@ pub async fn lint_handler(
         report_path,
         has_error,
     })
+}
+
+struct PersistedAgentWorkerAudit {
+    summary: cairn_core::domain::AgentWorkerAuditSummary,
+    canary_state: Option<cairn_core::domain::AgentCanaryState>,
+}
+
+fn latest_agent_worker_audit(
+    lint_records: &[cairn_core::verbs::lint::LintRecord],
+) -> Option<PersistedAgentWorkerAudit> {
+    lint_records
+        .iter()
+        .filter_map(|lint_record| {
+            persisted_agent_worker_audit(&lint_record.stored.record)
+                .map(|audit| (&lint_record.stored.record.updated_at, audit))
+        })
+        .max_by(|(left_ts, _), (right_ts, _)| left_ts.cmp_chronological(right_ts))
+        .map(|(_, audit)| audit)
+}
+
+fn persisted_agent_worker_audit(
+    record: &cairn_core::domain::record::MemoryRecord,
+) -> Option<PersistedAgentWorkerAudit> {
+    let evaluation = record.extra_frontmatter.get("evaluation");
+    let summary_value = evaluation
+        .and_then(|value| value.get("agent_worker_audit"))
+        .or_else(|| record.extra_frontmatter.get("agent_worker_audit"))?;
+    let summary = serde_json::from_value(summary_value.clone()).ok()?;
+    let canary_state = evaluation
+        .and_then(agent_canary_state_from_object)
+        .or_else(|| {
+            record
+                .extra_frontmatter
+                .get("agent_canary_state")
+                .or_else(|| record.extra_frontmatter.get("rollout_state"))
+                .and_then(|value| serde_json::from_value(value.clone()).ok())
+        });
+
+    Some(PersistedAgentWorkerAudit {
+        summary,
+        canary_state,
+    })
+}
+
+fn agent_canary_state_from_object(
+    value: &serde_json::Value,
+) -> Option<cairn_core::domain::AgentCanaryState> {
+    value
+        .get("agent_canary_state")
+        .or_else(|| value.get("rollout_state"))
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
 }
 
 async fn build_source_artifacts(
@@ -3859,6 +3918,77 @@ mod tests {
             .await
             .expect("read lint-report.md");
         assert!(body.contains("# Lint report"));
+    }
+
+    #[tokio::test]
+    async fn lint_handler_projects_persisted_agent_worker_audit() {
+        use cairn_core::config::CairnConfig;
+        use cairn_core::contract::agent_provider::AgentBudgetConsumed;
+        use cairn_core::domain::{
+            AgentWorkerAuditRecord, AgentWorkerAuditSummary, AgentWorkerFailureMode,
+            AgentWorkerKind, AgentWorkerStatus, ScopeTuple,
+        };
+        use cairn_store_sqlite::SqliteIdentityRegistry;
+        use cairn_test_fixtures::store::{FixtureStore, sample_record};
+
+        let store = FixtureStore::default();
+        let audit_summary = AgentWorkerAuditSummary::from_records(&[AgentWorkerAuditRecord {
+            operation_id: "op-agent-1".to_owned(),
+            worker_kind: AgentWorkerKind::Dream,
+            worker_name: "agent_dream".to_owned(),
+            agent_identity: "agt:cairn-dream:v1".to_owned(),
+            scope: Some(ScopeTuple {
+                tenant: Some("tenant-a".to_owned()),
+                agent: Some("agt:cairn-dream:v1".to_owned()),
+                ..ScopeTuple::default()
+            }),
+            status: AgentWorkerStatus::Aborted,
+            generated_candidates: 2,
+            accepted_candidates: 1,
+            budget_consumed: AgentBudgetConsumed {
+                turns: 3,
+                tool_calls: 4,
+                cost_units: 99,
+            },
+            failure_mode: Some(AgentWorkerFailureMode::ProviderUnavailable),
+            canary_label: Some("canary-05".to_owned()),
+        }]);
+        let mut record = sample_record();
+        record.extra_frontmatter.insert(
+            "evaluation".to_owned(),
+            serde_json::json!({
+                "agent_worker_audit": audit_summary,
+                "agent_canary_state": "canary",
+                "produced_by": "cairn-workflows::EvaluationHandler",
+            }),
+        );
+        store.upsert(&record).await.expect("upsert");
+
+        let registry = SqliteIdentityRegistry::open_in_memory().expect("open registry");
+        let cfg = CairnConfig::default();
+        let vault = tempfile::tempdir().expect("tempdir");
+        let result = lint_handler(&store, &registry, None, &cfg, false, vault.path())
+            .await
+            .expect("handler");
+        let report = result
+            .data
+            .agent_worker_audit
+            .expect("lint data includes agent worker audit");
+
+        assert!(report.observed_records);
+        assert_eq!(report.total_runs, 1);
+        assert_eq!(report.failed_runs, 1);
+        assert_eq!(report.cost_units, 99);
+        assert_eq!(
+            report.rollout_state,
+            Some(cairn_core::generated::verbs::lint::AgentWorkerAuditReportRolloutState::Canary)
+        );
+        assert_eq!(report.workers[0].worker_name, "agent_dream");
+        assert_eq!(report.workers[0].turns, 3);
+        assert_eq!(
+            report.failure_modes["provider_unavailable"],
+            serde_json::json!(1)
+        );
     }
 
     #[tokio::test]

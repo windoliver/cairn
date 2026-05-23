@@ -136,10 +136,85 @@ pub struct AgentWorkerGroupSummary {
     pub canary_label: Option<String>,
     /// Number of records in this group.
     pub total_runs: u64,
-    /// Accepted candidates in this group.
-    pub accepted_candidates: u64,
+    /// Runs with `Completed` status.
+    #[serde(default)]
+    pub completed_runs: u64,
+    /// Runs with rejected, aborted, or rolled-back status.
+    #[serde(default)]
+    pub failed_runs: u64,
     /// Generated candidates in this group.
     pub generated_candidates: u64,
+    /// Accepted candidates in this group.
+    pub accepted_candidates: u64,
+    /// `accepted_candidates / generated_candidates`, absent when no candidates were generated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acceptance_rate: Option<f64>,
+    /// Agent turns consumed in this group.
+    #[serde(default)]
+    pub turns: u64,
+    /// Agent tool calls consumed in this group.
+    #[serde(default)]
+    pub tool_calls: u64,
+    /// Provider-defined cost units consumed in this group.
+    #[serde(default)]
+    pub cost_units: u64,
+    /// Failure counts by stable failure category in this group.
+    #[serde(default)]
+    pub failure_modes: BTreeMap<AgentWorkerFailureMode, u64>,
+}
+
+impl AgentWorkerGroupSummary {
+    fn new(record: &AgentWorkerAuditRecord) -> Self {
+        Self {
+            worker_kind: record.worker_kind,
+            worker_name: record.worker_name.clone(),
+            canary_label: record.canary_label.clone(),
+            total_runs: 0,
+            completed_runs: 0,
+            failed_runs: 0,
+            generated_candidates: 0,
+            accepted_candidates: 0,
+            acceptance_rate: None,
+            turns: 0,
+            tool_calls: 0,
+            cost_units: 0,
+            failure_modes: BTreeMap::new(),
+        }
+    }
+
+    fn observe(
+        &mut self,
+        record: &AgentWorkerAuditRecord,
+        failure_mode: Option<AgentWorkerFailureMode>,
+    ) {
+        self.total_runs = self.total_runs.saturating_add(1);
+        if record.status == AgentWorkerStatus::Completed {
+            self.completed_runs = self.completed_runs.saturating_add(1);
+        }
+        if record.status.is_failure() {
+            self.failed_runs = self.failed_runs.saturating_add(1);
+        }
+        self.accepted_candidates = self
+            .accepted_candidates
+            .saturating_add(record.accepted_candidates);
+        self.generated_candidates = self
+            .generated_candidates
+            .saturating_add(record.generated_candidates);
+        self.acceptance_rate = acceptance_rate(self.accepted_candidates, self.generated_candidates);
+        self.turns = self
+            .turns
+            .saturating_add(u64::from(record.budget_consumed.turns));
+        self.tool_calls = self
+            .tool_calls
+            .saturating_add(u64::from(record.budget_consumed.tool_calls));
+        self.cost_units = self
+            .cost_units
+            .saturating_add(record.budget_consumed.cost_units);
+        if let Some(mode) = failure_mode {
+            let count = self.failure_modes.entry(mode).or_insert(0);
+            *count = count.saturating_add(1);
+        }
+    }
 }
 
 /// Body-free aggregate for operator reports and canary controls.
@@ -194,6 +269,15 @@ impl AgentWorkerAuditSummary {
             if record.status == AgentWorkerStatus::Completed {
                 completed_runs = completed_runs.saturating_add(1);
             }
+            let failure_mode = if record.status.is_failure() {
+                Some(
+                    record
+                        .failure_mode
+                        .unwrap_or(AgentWorkerFailureMode::Unknown),
+                )
+            } else {
+                None
+            };
             if record.status.is_failure() {
                 failed_runs = failed_runs.saturating_add(1);
             }
@@ -203,7 +287,7 @@ impl AgentWorkerAuditSummary {
             tool_calls = tool_calls.saturating_add(u64::from(record.budget_consumed.tool_calls));
             cost_units = cost_units.saturating_add(record.budget_consumed.cost_units);
 
-            if let Some(mode) = record.failure_mode {
+            if let Some(mode) = failure_mode {
                 let count = failure_modes.entry(mode).or_insert(0);
                 *count = count.saturating_add(1);
             }
@@ -213,23 +297,10 @@ impl AgentWorkerAuditSummary {
                 record.worker_name.clone(),
                 record.canary_label.clone(),
             );
-            let group = groups
+            groups
                 .entry(key)
-                .or_insert_with(|| AgentWorkerGroupSummary {
-                    worker_kind: record.worker_kind,
-                    worker_name: record.worker_name.clone(),
-                    canary_label: record.canary_label.clone(),
-                    total_runs: 0,
-                    accepted_candidates: 0,
-                    generated_candidates: 0,
-                });
-            group.total_runs = group.total_runs.saturating_add(1);
-            group.accepted_candidates = group
-                .accepted_candidates
-                .saturating_add(record.accepted_candidates);
-            group.generated_candidates = group
-                .generated_candidates
-                .saturating_add(record.generated_candidates);
+                .or_insert_with(|| AgentWorkerGroupSummary::new(record))
+                .observe(record, failure_mode);
         }
 
         let acceptance_rate = acceptance_rate(accepted_candidates, generated_candidates);
@@ -344,6 +415,54 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_tracks_worker_cost_failures_and_unknown_modes() {
+        let mut dream = record("op-2", AgentWorkerStatus::Aborted, 0, 0, 7, None);
+        dream.worker_kind = AgentWorkerKind::Dream;
+        dream.worker_name = "agent_dream".to_owned();
+        dream.agent_identity = "agt:cairn-dream:v1".to_owned();
+        dream.scope = Some(scope("agt:cairn-dream:v1"));
+        dream.canary_label = Some("canary-10".to_owned());
+        dream.budget_consumed = AgentBudgetConsumed {
+            turns: 5,
+            tool_calls: 9,
+            cost_units: 7,
+        };
+
+        let records = vec![
+            record("op-1", AgentWorkerStatus::Completed, 4, 1, 11, None),
+            dream,
+        ];
+
+        let summary = AgentWorkerAuditSummary::from_records(&records);
+
+        assert_eq!(
+            summary.failure_modes.get(&AgentWorkerFailureMode::Unknown),
+            Some(&1)
+        );
+
+        let dream = summary
+            .workers
+            .iter()
+            .find(|worker| worker.worker_name == "agent_dream")
+            .expect("dream worker group present");
+        assert_eq!(dream.worker_kind, AgentWorkerKind::Dream);
+        assert_eq!(dream.canary_label.as_deref(), Some("canary-10"));
+        assert_eq!(dream.total_runs, 1);
+        assert_eq!(dream.completed_runs, 0);
+        assert_eq!(dream.failed_runs, 1);
+        assert_eq!(dream.generated_candidates, 0);
+        assert_eq!(dream.accepted_candidates, 0);
+        assert_eq!(dream.acceptance_rate, None);
+        assert_eq!(dream.turns, 5);
+        assert_eq!(dream.tool_calls, 9);
+        assert_eq!(dream.cost_units, 7);
+        assert_eq!(
+            dream.failure_modes.get(&AgentWorkerFailureMode::Unknown),
+            Some(&1)
+        );
+    }
+
+    #[test]
     fn aggregate_reports_no_acceptance_rate_without_generated_candidates() {
         let records = vec![record("op-1", AgentWorkerStatus::Completed, 0, 0, 10, None)];
 
@@ -352,6 +471,39 @@ mod tests {
         assert_eq!(summary.generated_candidates, 0);
         assert_eq!(summary.accepted_candidates, 0);
         assert_eq!(summary.acceptance_rate, None);
+    }
+
+    #[test]
+    fn legacy_worker_groups_deserialize_with_new_metric_defaults() {
+        let value = serde_json::json!({
+            "total_runs": 1,
+            "completed_runs": 1,
+            "failed_runs": 0,
+            "generated_candidates": 2,
+            "accepted_candidates": 1,
+            "acceptance_rate": 0.5,
+            "turns": 3,
+            "tool_calls": 4,
+            "cost_units": 5,
+            "failure_modes": {},
+            "workers": [{
+                "worker_kind": "extractor",
+                "worker_name": "agent_extractor",
+                "canary_label": "canary-05",
+                "total_runs": 1,
+                "generated_candidates": 2,
+                "accepted_candidates": 1
+            }]
+        });
+
+        let summary: AgentWorkerAuditSummary =
+            serde_json::from_value(value).expect("legacy summary deserializes");
+
+        assert_eq!(summary.workers[0].completed_runs, 0);
+        assert_eq!(summary.workers[0].failed_runs, 0);
+        assert_eq!(summary.workers[0].acceptance_rate, None);
+        assert_eq!(summary.workers[0].turns, 0);
+        assert_eq!(summary.workers[0].failure_modes.len(), 0);
     }
 
     #[test]

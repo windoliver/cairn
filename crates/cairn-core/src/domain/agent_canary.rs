@@ -353,11 +353,12 @@ impl AgentCanaryPolicy {
 
     /// Evaluate aggregate canary metrics after worker audit records are summarized.
     ///
-    /// Callers must pass a summary already filtered to `self.cohort_label`.
-    /// Empty worker-group metadata is accepted only for true no-data summaries.
-    /// When runs are present, every worker group must carry the policy cohort
-    /// label so mixed-cohort aggregate misuse fails closed. Explicit operator
-    /// pause and rollback requests are evaluated before this cohort check.
+    /// Canary-state callers must pass a summary already filtered to
+    /// `self.cohort_label`. Empty worker-group metadata is accepted only for
+    /// true no-data summaries. When runs are present during canary evaluation,
+    /// every worker group must carry the policy cohort label so mixed-cohort
+    /// aggregate misuse fails closed. Explicit operator pause/rollback requests
+    /// and non-canary states are evaluated before this cohort check.
     ///
     /// # Errors
     /// Returns [`AgentCanaryError`] when the policy is invalid or the summary
@@ -371,7 +372,6 @@ impl AgentCanaryPolicy {
         if let Some(decision) = self.gated_summary_decision(counters) {
             return Ok(decision);
         }
-        self.validate_summary_cohort(summary)?;
         if self.state != AgentCanaryState::Canary {
             return Ok(self.decision(
                 AgentCanaryDecisionKind::DispatchAllowed,
@@ -380,6 +380,7 @@ impl AgentCanaryPolicy {
                 counters,
             ));
         }
+        self.validate_summary_cohort(summary)?;
         if summary.total_runs < self.min_runs {
             return Ok(self.decision(
                 AgentCanaryDecisionKind::RemainCanaryInsufficientData,
@@ -621,9 +622,34 @@ mod tests {
             worker_name: "agent_extractor".to_owned(),
             canary_label: canary_label.map(str::to_owned),
             total_runs,
-            accepted_candidates: total_runs,
+            completed_runs: total_runs,
+            failed_runs: 0,
             generated_candidates: total_runs,
+            accepted_candidates: total_runs,
+            acceptance_rate: rate(total_runs, total_runs),
+            turns: total_runs,
+            tool_calls: total_runs,
+            cost_units: total_runs,
+            failure_modes: Default::default(),
         }
+    }
+
+    #[test]
+    fn enabled_summary_bypasses_canary_cohort_validation() {
+        let mut summary = summary(5, 0, 10, 8, 80);
+        summary.workers = vec![group(Some("canary-05"), 3), group(None, 2)];
+        let policy = AgentCanaryPolicy {
+            state: AgentCanaryState::Enabled,
+            ..policy()
+        };
+
+        let decision = policy
+            .evaluate_summary(&summary)
+            .expect("enabled rollouts accept mixed historical summaries");
+
+        assert_eq!(decision.kind, AgentCanaryDecisionKind::DispatchAllowed);
+        assert_eq!(decision.next_state, AgentCanaryState::Enabled);
+        assert_eq!(decision.reason_code, AgentCanaryReasonCode::NonCanaryState);
     }
 
     #[test]

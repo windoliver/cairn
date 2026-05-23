@@ -222,6 +222,15 @@ async fn audit_state_changes_persisted_outcome_hash() {
         2,
         "audit state must participate in persisted outcome_hash"
     );
+
+    let audit_report = listed
+        .records
+        .iter()
+        .find(|r| r.body.contains("agent_dream"))
+        .expect("audit report body includes per-worker details");
+    assert!(audit_report.body.contains(
+        "- dream `agent_dream` (canary-05): runs 1 (completed 0, failed 1), accepted candidates 1 / 2 (rate 0.500), turns 1, cost units 99, tool calls 2, failures provider_unavailable=1"
+    ));
 }
 
 #[tokio::test]

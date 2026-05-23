@@ -6,7 +6,9 @@
 
 use std::fmt::Write as _;
 
-use crate::generated::verbs::lint::{AgentWorkerAuditReportRolloutState, Kind, LintData, Severity};
+use crate::generated::verbs::lint::{
+    AgentWorkerAuditReportRolloutState, AgentWorkerAuditWorkerWorkerKind, Kind, LintData, Severity,
+};
 
 /// Render `data` as the canonical lint-report markdown body.
 ///
@@ -43,6 +45,28 @@ pub fn render(data: &LintData) -> String {
             let _ = writeln!(out, "- tool calls: {}", agent.tool_calls);
             let failures = render_failure_modes(&agent.failure_modes);
             let _ = writeln!(out, "- failures: {failures}");
+            if !agent.workers.is_empty() {
+                out.push_str("- workers:\n");
+                for worker in &agent.workers {
+                    let canary_label = worker.canary_label.as_deref().unwrap_or("unlabeled");
+                    let failures = render_failure_modes(&worker.failure_modes);
+                    let acceptance_rate = render_rate(worker.acceptance_rate);
+                    let _ = writeln!(
+                        out,
+                        "  - {} `{}` ({canary_label}): runs {} (completed {}, failed {}), accepted candidates {} / {} (rate {acceptance_rate}), turns {}, cost units {}, tool calls {}, failures {failures}",
+                        render_worker_kind(worker.worker_kind),
+                        worker.worker_name,
+                        worker.total_runs,
+                        worker.completed_runs,
+                        worker.failed_runs,
+                        worker.accepted_candidates,
+                        worker.generated_candidates,
+                        worker.turns,
+                        worker.cost_units,
+                        worker.tool_calls,
+                    );
+                }
+            }
             out.push('\n');
         } else {
             out.push_str("- no agent-worker audit records observed\n\n");
@@ -104,6 +128,17 @@ fn render_rollout_state(state: AgentWorkerAuditReportRolloutState) -> &'static s
         AgentWorkerAuditReportRolloutState::Enabled => "enabled",
         AgentWorkerAuditReportRolloutState::RolledBack => "rolled_back",
     }
+}
+
+fn render_worker_kind(kind: AgentWorkerAuditWorkerWorkerKind) -> &'static str {
+    match kind {
+        AgentWorkerAuditWorkerWorkerKind::Extractor => "extractor",
+        AgentWorkerAuditWorkerWorkerKind::Dream => "dream",
+    }
+}
+
+fn render_rate(rate: Option<f64>) -> String {
+    rate.map_or_else(|| "n/a".to_owned(), |value| format!("{value:.3}"))
 }
 
 fn render_failure_modes(value: &serde_json::Value) -> String {
@@ -224,7 +259,22 @@ mod tests {
                     crate::generated::verbs::lint::AgentWorkerAuditReportRolloutState::Canary,
                 ),
                 failure_modes: serde_json::json!({"budget_exceeded": 2}),
-                workers: Vec::new(),
+                workers: vec![crate::generated::verbs::lint::AgentWorkerAuditWorker {
+                    worker_kind:
+                        crate::generated::verbs::lint::AgentWorkerAuditWorkerWorkerKind::Extractor,
+                    worker_name: "agent_extractor".to_owned(),
+                    canary_label: Some("canary-05".to_owned()),
+                    total_runs: 4,
+                    completed_runs: 2,
+                    failed_runs: 2,
+                    generated_candidates: 10,
+                    accepted_candidates: 5,
+                    acceptance_rate: Some(0.5),
+                    turns: 8,
+                    tool_calls: 12,
+                    cost_units: 200,
+                    failure_modes: serde_json::json!({"budget_exceeded": 2}),
+                }],
                 observed_records: true,
                 total_runs: 4,
                 completed_runs: 2,
@@ -247,6 +297,10 @@ mod tests {
         assert!(rendered.contains("- state: canary"));
         assert!(rendered.contains("- accepted candidates: 5 / 10"));
         assert!(rendered.contains("- failures: budget_exceeded=2"));
+        assert!(rendered.contains("- workers:"));
+        assert!(rendered.contains(
+            "- extractor `agent_extractor` (canary-05): runs 4 (completed 2, failed 2), accepted candidates 5 / 10 (rate 0.500), turns 8, cost units 200, tool calls 12, failures budget_exceeded=2"
+        ));
         assert!(!rendered.contains("prompt"));
         assert!(!rendered.contains("candidate body"));
     }

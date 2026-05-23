@@ -84,6 +84,11 @@
     "AgentWorkerAuditWorker": {
       "additionalProperties": false,
       "properties": {
+        "acceptance_rate": {
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
         "accepted_candidates": {
           "minimum": 0,
           "type": "integer"
@@ -92,11 +97,38 @@
           "minLength": 1,
           "type": "string"
         },
+        "completed_runs": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cost_units": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "failed_runs": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "failure_modes": {
+          "additionalProperties": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "object"
+        },
         "generated_candidates": {
           "minimum": 0,
           "type": "integer"
         },
+        "tool_calls": {
+          "minimum": 0,
+          "type": "integer"
+        },
         "total_runs": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "turns": {
           "minimum": 0,
           "type": "integer"
         },
@@ -116,8 +148,14 @@
         "worker_kind",
         "worker_name",
         "total_runs",
+        "completed_runs",
+        "failed_runs",
         "generated_candidates",
-        "accepted_candidates"
+        "accepted_candidates",
+        "turns",
+        "tool_calls",
+        "cost_units",
+        "failure_modes"
       ],
       "type": "object"
     },

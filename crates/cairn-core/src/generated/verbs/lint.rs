@@ -46,11 +46,19 @@ pub enum AgentWorkerAuditWorkerWorkerKind {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentWorkerAuditWorker {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acceptance_rate: Option<f64>,
     pub accepted_candidates: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canary_label: Option<String>,
+    pub completed_runs: u64,
+    pub cost_units: u64,
+    pub failed_runs: u64,
+    pub failure_modes: serde_json::Value,
     pub generated_candidates: u64,
+    pub tool_calls: u64,
     pub total_runs: u64,
+    pub turns: u64,
     pub worker_kind: AgentWorkerAuditWorkerWorkerKind,
     pub worker_name: String,
 }

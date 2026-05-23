@@ -573,6 +573,8 @@ async fn run_checks_emits_broken_actor_chain_warning_for_revoked_author() {
         source_resolver: &resolver,
         consent_journal: &journal,
         workflow_jobs: None,
+        agent_worker_audit: None,
+        agent_canary_state: None,
         now_ms: 0,
     };
 

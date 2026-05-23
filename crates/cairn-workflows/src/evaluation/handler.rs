@@ -3,6 +3,7 @@
 //! `MetricEvent::EvaluationCompleted` to the configured `MetricsSink`
 //! (issue #91, brief §15).
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use cairn_core::config::EvaluationConfig;
@@ -284,25 +285,7 @@ impl EvaluationHandler {
             }
             body.push('\n');
         }
-        body.push_str("\n## Agent worker audit\n\n");
-        if agent_worker_audit.is_empty() {
-            body.push_str("- no agent-worker audit records observed\n");
-        } else {
-            body.push_str("- runs: ");
-            body.push_str(&agent_worker_audit.total_runs.to_string());
-            body.push('\n');
-            body.push_str("- accepted candidates: ");
-            body.push_str(&agent_worker_audit.accepted_candidates.to_string());
-            body.push_str(" / ");
-            body.push_str(&agent_worker_audit.generated_candidates.to_string());
-            body.push('\n');
-            body.push_str("- cost units: ");
-            body.push_str(&agent_worker_audit.cost_units.to_string());
-            body.push('\n');
-            body.push_str("- tool calls: ");
-            body.push_str(&agent_worker_audit.tool_calls.to_string());
-            body.push('\n');
-        }
+        append_agent_worker_audit_section(&mut body, agent_worker_audit);
 
         let target_id = stable_target_id(target_key)?;
         let target_id_str = target_id.as_str().to_owned();
@@ -383,6 +366,72 @@ fn outcome_hash_basis(
     let audit_basis = serde_json::to_string(agent_worker_audit)
         .unwrap_or_else(|_| "agent_worker_audit_unserializable".to_owned());
     format!("{outcome_basis}|agent_worker_audit={audit_basis}")
+}
+
+fn append_agent_worker_audit_section(body: &mut String, audit: &AgentWorkerAuditSummary) {
+    body.push_str("\n## Agent worker audit\n\n");
+    if audit.is_empty() {
+        body.push_str("- no agent-worker audit records observed\n");
+        return;
+    }
+
+    let _ = writeln!(body, "- runs: {}", audit.total_runs);
+    let _ = writeln!(
+        body,
+        "- accepted candidates: {} / {}",
+        audit.accepted_candidates, audit.generated_candidates
+    );
+    let _ = writeln!(body, "- cost units: {}", audit.cost_units);
+    let _ = writeln!(body, "- tool calls: {}", audit.tool_calls);
+    if audit.workers.is_empty() {
+        return;
+    }
+
+    body.push_str("- workers:\n");
+    for worker in &audit.workers {
+        let canary_label = worker.canary_label.as_deref().unwrap_or("unlabeled");
+        let acceptance_rate = render_rate(worker.acceptance_rate);
+        let failures = render_failure_modes(&worker.failure_modes);
+        let _ = writeln!(
+            body,
+            "  - {} `{}` ({canary_label}): runs {} (completed {}, failed {}), accepted candidates {} / {} (rate {acceptance_rate}), turns {}, cost units {}, tool calls {}, failures {failures}",
+            render_worker_kind(worker.worker_kind),
+            worker.worker_name,
+            worker.total_runs,
+            worker.completed_runs,
+            worker.failed_runs,
+            worker.accepted_candidates,
+            worker.generated_candidates,
+            worker.turns,
+            worker.cost_units,
+            worker.tool_calls,
+        );
+    }
+}
+
+fn render_worker_kind(kind: cairn_core::domain::AgentWorkerKind) -> &'static str {
+    match kind {
+        cairn_core::domain::AgentWorkerKind::Extractor => "extractor",
+        cairn_core::domain::AgentWorkerKind::Dream => "dream",
+    }
+}
+
+fn render_rate(rate: Option<f64>) -> String {
+    rate.map_or_else(|| "n/a".to_owned(), |value| format!("{value:.3}"))
+}
+
+fn render_failure_modes(
+    modes: &std::collections::BTreeMap<cairn_core::domain::AgentWorkerFailureMode, u64>,
+) -> String {
+    if modes.is_empty() {
+        return "none".to_owned();
+    }
+
+    modes
+        .iter()
+        .map(|(mode, count)| format!("{}={count}", mode.as_str()))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[async_trait::async_trait]
