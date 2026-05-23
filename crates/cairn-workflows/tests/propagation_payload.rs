@@ -9,7 +9,8 @@
 //!   write (using `revoke_envelope.json` as a real fixture).
 
 use cairn_workflows::propagation::payload::{
-    OUTBOUND_REVOKE_KIND, OUTBOUND_SHARE_KIND, parse_outbound_revoke, parse_outbound_share,
+    ManifestEntry, OutboundSharePayload, OUTBOUND_REVOKE_KIND, OUTBOUND_SHARE_KIND,
+    parse_outbound_revoke, parse_outbound_share,
 };
 
 #[test]
@@ -21,27 +22,41 @@ fn kind_strings_match_published_constants() {
 #[test]
 fn outbound_share_payload_roundtrips() {
     // The fixture is a FederationEnvelope (generated wire type). The `link`
-    // field holds a `generated::common::SignedShareLink`. We serialize that to
-    // JSON and then deserialize it via `parse_outbound_share` (which targets
-    // the domain type `domain::sharing::SignedShareLink`). The two types have
-    // compatible JSON schemas so the round-trip exercises the real parse path
-    // that T13 will use.
+    // field holds a `generated::common::SignedShareLink`. We build an
+    // OutboundSharePayload wrapping the domain-typed link plus a manifest
+    // entry, serialize to JSON bytes, then deserialize via
+    // `parse_outbound_share` and verify the round-trip.
     let envelope: cairn_core::domain::federation::FederationEnvelope = serde_json::from_str(
         include_str!("../../cairn-core/tests/fixtures/federation/propose_envelope.json"),
     )
     .expect("parse propose_envelope.json");
 
     let wire_link = envelope.link.expect("propose envelope must have a link");
+    let domain_link =
+        cairn_core::domain::federation::signed_share_link_from_wire(&wire_link).expect("from_wire");
 
-    // Serialize the wire link to JSON bytes — this is the same encoding
-    // `canonical_bytes` produces (deterministic JSON), so `parse_outbound_share`
-    // must accept it.
-    let bytes = serde_json::to_vec(&wire_link).expect("serialize wire SignedShareLink");
+    let manifest = vec![ManifestEntry {
+        record_id: "01HQZX9F5N0000000000000099".to_owned(),
+        kind: "user".to_owned(),
+        body: "test body".to_owned(),
+        body_hash: format!("sha256:{}", "b".repeat(64)),
+        visibility: "team".to_owned(),
+        scope_wire: "project=test-project".to_owned(),
+        tags: vec!["tag-a".to_owned()],
+    }];
+    let payload = OutboundSharePayload {
+        link: domain_link,
+        manifest,
+    };
 
+    let bytes = serde_json::to_vec(&payload).expect("serialize OutboundSharePayload");
     let parsed = parse_outbound_share(&bytes).expect("parse_outbound_share must succeed");
 
     // Verify the stable link_id field round-trips correctly.
-    assert_eq!(parsed.link_id, wire_link.link_id);
+    assert_eq!(parsed.link.link_id, wire_link.link_id);
+    assert_eq!(parsed.manifest.len(), 1);
+    assert_eq!(parsed.manifest[0].record_id, "01HQZX9F5N0000000000000099");
+    assert_eq!(parsed.manifest[0].body, "test body");
 }
 
 #[test]

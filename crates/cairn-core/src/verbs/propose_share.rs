@@ -239,7 +239,7 @@ pub async fn propose_share(
     //     same operation id so the journal and queue tables stay in
     //     lockstep.
     let consent_event = build_consent_event(&link, req.peer.as_ref(), deps.clock)?;
-    let job = build_propagation_job(&link, &operation_id)?;
+    let job = build_propagation_job(&link, &records, &operation_id)?;
 
     // 12. Atomic write. The outbox guarantees both rows land together;
     //     a duplicate dedupe key is reported back as `InvalidShape`
@@ -422,15 +422,62 @@ fn build_consent_event(
     Ok(event)
 }
 
+/// Serialization-only struct that mirrors
+/// `cairn_workflows::propagation::payload::OutboundSharePayload`.
+///
+/// `cairn-core` cannot depend on `cairn-workflows`, so we define a
+/// private struct with the same JSON shape. The handler side
+/// deserializes via its own `OutboundSharePayload` type — both agree
+/// on the wire format (field names + JSON structure).
+#[derive(serde::Serialize)]
+struct OutboundSharePayloadWire<'a> {
+    link: &'a SignedShareLink,
+    manifest: Vec<ManifestEntryWire>,
+}
+
+/// Matches `cairn_workflows::propagation::payload::ManifestEntry`.
+#[derive(serde::Serialize)]
+struct ManifestEntryWire {
+    record_id: String,
+    kind: String,
+    body: String,
+    body_hash: String,
+    visibility: String,
+    scope_wire: String,
+    tags: Vec<String>,
+}
+
+/// Compute `sha256:<64 lowercase hex>` over a record body.
+///
+/// Matches the hash format that `accept_share::is_valid_body_hash`
+/// validates: `^sha256:[0-9a-f]{64}$`.
+fn compute_body_hash(body: &str) -> String {
+    let digest = Sha256::digest(body.as_bytes());
+    format!("sha256:{digest:x}")
+}
+
 fn build_propagation_job(
     link: &SignedShareLink,
+    records: &[MemoryRecord],
     operation_id: &str,
 ) -> Result<EnqueueRequest, FederationError> {
-    // Payload is the canonical JSON of the share link — the
-    // propagation handler (T13) deserialises and dispatches to the
-    // transport. Keeping the link verbatim avoids a second envelope
-    // shape this early in the issue's task sequence.
-    let payload = canonical_bytes(link).map_err(|_| FederationError::InvalidShape)?;
+    let manifest: Vec<ManifestEntryWire> = records
+        .iter()
+        .map(|r| ManifestEntryWire {
+            record_id: r.id.as_str().to_owned(),
+            kind: r.kind.as_str().to_owned(),
+            body: r.body.clone(),
+            body_hash: compute_body_hash(&r.body),
+            visibility: r.visibility.as_str().to_owned(),
+            scope_wire: r.scope.canonical_wire(),
+            tags: r.tags.clone(),
+        })
+        .collect();
+    let wire = OutboundSharePayloadWire {
+        link,
+        manifest,
+    };
+    let payload = serde_json::to_vec(&wire).map_err(|_| FederationError::InvalidShape)?;
     let job_id = JobId::new(format!("job-{operation_id}"));
     let kind = JobKind::new(PROPAGATION_OUTBOUND_KIND);
     Ok(EnqueueRequest {

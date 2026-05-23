@@ -19,9 +19,7 @@
 )]
 
 mod e2e_helpers;
-use e2e_helpers::{
-    PeerEndpointAlias, attach_manifest_stub, build_issuer, build_receiver, loopback_peer,
-};
+use e2e_helpers::{PeerEndpointAlias, build_issuer, build_receiver, loopback_peer};
 
 use std::sync::Arc;
 
@@ -93,22 +91,15 @@ proptest! {
 
             let mut outcomes = Vec::with_capacity(sent.len());
             for (env, _peer) in sent {
-                let enriched = attach_manifest_stub(
-                    env,
-                    &record_id,
-                    &issuer.scope(),
-                    MemoryVisibility::Team,
-                    &body,
-                );
                 let resp = accept_share(
-                    AcceptShareRequest { envelope: enriched.clone() },
+                    AcceptShareRequest { envelope: env.clone() },
                     &receiver.accept_deps(),
                 )
                 .await
                 .expect("accept_share must not error on replay");
 
                 if resp.outcome == AcceptOutcome::Accepted {
-                    receiver.record_accept_for_idempotency(&enriched, resp.applied_records.clone());
+                    receiver.record_accept_for_idempotency(&env, resp.applied_records.clone());
                 }
                 outcomes.push(resp.outcome);
             }
@@ -187,22 +178,15 @@ proptest! {
 
             let mut accepted = 0usize;
             for (env, _peer) in sent {
-                let enriched = attach_manifest_stub(
-                    env,
-                    &record_id,
-                    &issuer.scope(),
-                    MemoryVisibility::Team,
-                    &body,
-                );
                 let resp = accept_share(
-                    AcceptShareRequest { envelope: enriched.clone() },
+                    AcceptShareRequest { envelope: env.clone() },
                     &receiver.accept_deps(),
                 )
                 .await
                 .expect("accept_share must not error");
 
                 if resp.outcome == AcceptOutcome::Accepted {
-                    receiver.record_accept_for_idempotency(&enriched, resp.applied_records.clone());
+                    receiver.record_accept_for_idempotency(&env, resp.applied_records.clone());
                     accepted += 1;
                 }
             }
@@ -261,13 +245,6 @@ async fn propose_accept_revoke_ordering() {
         .into_iter()
         .next()
         .expect("transport recorded the propose send");
-    let propose_env = attach_manifest_stub(
-        propose_env,
-        &record_id,
-        &issuer.scope(),
-        MemoryVisibility::Team,
-        "revocable body",
-    );
     let accepted = accept_share(
         AcceptShareRequest {
             envelope: propose_env,
@@ -409,13 +386,6 @@ async fn propose_revoke_accept_rejects_after_revocation() {
     // receiver. Because `is_link_revoked` returns true the verb must
     // short-circuit with `FederationError::Revoked` before touching the
     // store.
-    let propose_env = attach_manifest_stub(
-        propose_env,
-        &record_id,
-        &issuer.scope(),
-        MemoryVisibility::Team,
-        "to-be-revoked",
-    );
     let err = accept_share(
         AcceptShareRequest {
             envelope: propose_env,

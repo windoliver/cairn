@@ -30,7 +30,10 @@ use cairn_core::contract::job_store::{FailureClass, JobKind, JobPayload};
 use cairn_core::domain::federation::{
     FederationEnvelope, FederationEnvelopeKind, PeerEndpoint, signed_share_link_to_wire,
 };
-use cairn_core::generated::common::Identity as WireIdentity;
+use cairn_core::generated::common::{
+    Identity as WireIdentity, MemoryRecordStub as WireStub,
+    MemoryRecordStubVisibility as WireStubVis, ScopeTuple as WireScope, Ulid as WireUlid,
+};
 use tracing::warn;
 
 use crate::propagation::payload::{
@@ -89,7 +92,7 @@ impl PropagationHandler {
     fn build_envelope(&self, payload: &JobPayload) -> Result<FederationEnvelope, HandlerOutcome> {
         match self.direction {
             Direction::Share => {
-                let link = parse_outbound_share(payload).map_err(|err| {
+                let share_payload = parse_outbound_share(payload).map_err(|err| {
                     warn!(
                         target: "cairn_workflows::propagation::handler",
                         ?err,
@@ -97,7 +100,7 @@ impl PropagationHandler {
                     );
                     HandlerOutcome::validation_permanent(format!("decode share payload: {err}"))
                 })?;
-                let wire_link = signed_share_link_to_wire(&link).map_err(|err| {
+                let wire_link = signed_share_link_to_wire(&share_payload.link).map_err(|err| {
                     warn!(
                         target: "cairn_workflows::propagation::handler",
                         ?err,
@@ -105,17 +108,38 @@ impl PropagationHandler {
                     );
                     HandlerOutcome::validation_permanent(format!("encode share wire: {err}"))
                 })?;
+                let manifest_stubs: Vec<WireStub> = share_payload
+                    .manifest
+                    .iter()
+                    .map(|entry| {
+                        let scope = parse_scope_wire(&entry.scope_wire);
+                        WireStub {
+                            record_id: WireUlid(entry.record_id.clone()),
+                            kind: entry.kind.clone(),
+                            body: Some(entry.body.clone()),
+                            body_hash: entry.body_hash.clone(),
+                            visibility: parse_visibility_wire(&entry.visibility),
+                            scope,
+                            tags: if entry.tags.is_empty() {
+                                None
+                            } else {
+                                Some(entry.tags.clone())
+                            },
+                        }
+                    })
+                    .collect();
                 Ok(FederationEnvelope {
                     kind: FederationEnvelopeKind::Propose,
-                    issuer_key_id: WireIdentity(link.payload.issuer.as_str().to_owned()),
+                    issuer_key_id: WireIdentity(
+                        share_payload.link.payload.issuer.as_str().to_owned(),
+                    ),
                     link: Some(wire_link),
                     revocation: None,
-                    // T13 leaves the manifest empty. The IDL schema only
-                    // requires `kind` + `issuer_key_id` (plus `link` for
-                    // `kind=propose`); `manifest` is optional. T14's e2e
-                    // tests will inject records via a richer build
-                    // pipeline.
-                    manifest: None,
+                    manifest: if manifest_stubs.is_empty() {
+                        None
+                    } else {
+                        Some(manifest_stubs)
+                    },
                 })
             }
             Direction::Revoke => {
@@ -171,6 +195,54 @@ impl JobHandler for PropagationHandler {
             )),
         }
     }
+}
+
+/// Parse a visibility wire string into the generated wire enum.
+/// Falls back to `Private` for unrecognised values — the receiver's
+/// `accept_share` will validate the stub independently.
+fn parse_visibility_wire(s: &str) -> WireStubVis {
+    match s {
+        "session" => WireStubVis::Session,
+        "project" => WireStubVis::Project,
+        "team" => WireStubVis::Team,
+        "org" => WireStubVis::Org,
+        "public" => WireStubVis::Public,
+        // "private" and any unrecognised value default to Private —
+        // the receiver's accept_share validates independently.
+        _ => WireStubVis::Private,
+    }
+}
+
+/// Parse a canonical-wire scope string back into a wire [`WireScope`].
+///
+/// The canonical wire form is `key=value,key=value` sorted
+/// alphabetically. We reconstruct the struct from its key-value pairs.
+fn parse_scope_wire(s: &str) -> WireScope {
+    let mut scope = WireScope {
+        agent: None,
+        entity: None,
+        project: None,
+        session_id: None,
+        tenant: None,
+        user: None,
+        workspace: None,
+    };
+    for pair in s.split(',') {
+        if let Some((key, value)) = pair.split_once('=') {
+            let v = Some(value.to_owned());
+            match key {
+                "agent" => scope.agent = v,
+                "entity" => scope.entity = v,
+                "project" => scope.project = v,
+                "session_id" => scope.session_id = v,
+                "tenant" => scope.tenant = v,
+                "user" => scope.user = v,
+                "workspace" => scope.workspace = v,
+                _ => {}
+            }
+        }
+    }
+    scope
 }
 
 #[cfg(test)]

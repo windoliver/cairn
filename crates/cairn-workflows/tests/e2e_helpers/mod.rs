@@ -43,7 +43,6 @@ use cairn_core::contract::version::{ContractVersion, VersionRange};
 use cairn_core::domain::consent_timeline::ConsentTimelineEvent;
 use cairn_core::domain::federation::{DedupKey, PeerEndpoint};
 use cairn_core::domain::identity::keys::SigningKey;
-use cairn_core::domain::sharing::SignedShareLink;
 use cairn_core::domain::time::FixedClock;
 use cairn_core::domain::{
     ActorChainEntry, BodyHash, ChainRole, ConsentEvent, ConsentKind, Ed25519Signature,
@@ -237,11 +236,13 @@ impl FederationOutbox for InMemoryOutbox {
         {
             return Err(FederationOutboxError::DuplicateJob);
         }
-        // Mirror what T12's adapter does: parse the canonical job
-        // payload back into a SignedShareLink and stash a
-        // StoredShareLink keyed by link_id so the issuer-side
+        // Mirror what T12's adapter does: parse the job payload
+        // (now an OutboundSharePayload wrapping link + manifest) and
+        // stash a StoredShareLink keyed by link_id so the issuer-side
         // revoke_share verb can find the original grant.
-        if let Ok(link) = serde_json::from_slice::<SignedShareLink>(&job.payload) {
+        if let Ok(osp) = serde_json::from_slice::<cairn_workflows::propagation::payload::OutboundSharePayload>(&job.payload)
+        {
+            let link = osp.link;
             let mut proj = self.projection.lock().expect("projection mutex poisoned");
             proj.share_links.insert(
                 link.link_id.clone(),
@@ -839,13 +840,11 @@ pub fn build_receiver() -> Node {
 
 // ─── Envelope enrichment helper ───────────────────────────────────────
 
-/// The `PropagationHandler` currently emits a propose envelope with
-/// `manifest: None` — its docs flag this as a T14 follow-up. The e2e
-/// tests still need to exercise the receiver's apply path, which
-/// requires at least one manifest stub matching the link's
-/// `target_id_hashes`. This helper builds a single stub for `record_id`
-/// (whose `target_id` is the same string) so the enriched envelope
-/// passes `validate_manifest` and the receiver applies the record.
+/// Convenience helper that replaces an envelope's manifest with a
+/// single-record stub. Now that the `PropagationHandler` populates the
+/// manifest itself, this is only needed for standalone handler-level
+/// tests that construct envelopes directly from fixtures.
+#[allow(dead_code, reason = "kept as a convenience for future test scenarios")]
 #[must_use]
 pub fn attach_manifest_stub(
     envelope: cairn_core::domain::federation::FederationEnvelope,

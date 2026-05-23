@@ -21,6 +21,7 @@
 use cairn_core::contract::job_store::JobPayload;
 use cairn_core::domain::federation::SignedRevocation;
 use cairn_core::domain::sharing::SignedShareLink;
+use serde::{Deserialize, Serialize};
 
 // ── Kind strings ──────────────────────────────────────────────────────────────
 
@@ -40,13 +41,44 @@ pub const OUTBOUND_REVOKE_KIND: &str = "federation.propagate.outbound_revoke";
 
 // ── Payload type aliases ───────────────────────────────────────────────────────
 
-/// Target deserialization type for `OUTBOUND_SHARE_KIND` job payloads.
+/// Outbound share job payload: the signed link *plus* the record bodies
+/// that form the envelope manifest.
 ///
-/// T7's `propose_share` verb serializes a bare
-/// [`cairn_core::domain::sharing::SignedShareLink`] with
-/// `canonical_bytes()` (serde-json canonical encoding). The handler
-/// deserializes the same type back via [`parse_outbound_share`].
-pub type OutboundSharePayload = SignedShareLink;
+/// T7's `propose_share` verb serializes this with `serde_json::to_vec`.
+/// The handler deserializes it back via [`parse_outbound_share`] and
+/// uses the manifest entries to populate `FederationEnvelope.manifest`
+/// so the receiver's `accept_share` can apply the records.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OutboundSharePayload {
+    /// The signed share link.
+    pub link: SignedShareLink,
+    /// Record bodies to include in the envelope manifest.
+    pub manifest: Vec<ManifestEntry>,
+}
+
+/// One record destined for the envelope manifest.
+///
+/// Carries just enough data to build a [`MemoryRecordStub`] on the
+/// handler side without reaching back into the store.
+///
+/// [`MemoryRecordStub`]: cairn_core::generated::common::MemoryRecordStub
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ManifestEntry {
+    /// ULID record id.
+    pub record_id: String,
+    /// Wire-form kind string (e.g. `"user"`).
+    pub kind: String,
+    /// Full record body text.
+    pub body: String,
+    /// `sha256:<64 lowercase hex>` hash of the body.
+    pub body_hash: String,
+    /// Wire-form visibility string (e.g. `"team"`).
+    pub visibility: String,
+    /// Scope tuple in canonical wire form.
+    pub scope_wire: String,
+    /// Record tags (may be empty).
+    pub tags: Vec<String>,
+}
 
 /// Target deserialization type for `OUTBOUND_REVOKE_KIND` job payloads.
 ///
@@ -83,10 +115,6 @@ pub fn parse_outbound_revoke(bytes: &[u8]) -> Result<OutboundRevokePayload, serd
 // ── Convenience serializers ───────────────────────────────────────────────────
 
 /// Serialize an [`OutboundSharePayload`] to `JobPayload` bytes.
-///
-/// Enqueuers should prefer using `cairn_core::domain::canonical::canonical_bytes`
-/// directly (matching T7 exactly), but this helper is provided for
-/// completeness and symmetric testing.
 ///
 /// # Errors
 ///

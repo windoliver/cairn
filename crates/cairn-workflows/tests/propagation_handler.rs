@@ -21,7 +21,9 @@ use cairn_core::domain::federation::{
 };
 use cairn_test_fixtures::federation::{LoopbackTransport, ProgrammedOutcome};
 use cairn_workflows::propagation::handler::PropagationHandler;
-use cairn_workflows::propagation::payload::{OUTBOUND_REVOKE_KIND, OUTBOUND_SHARE_KIND};
+use cairn_workflows::propagation::payload::{
+    ManifestEntry, OutboundSharePayload, OUTBOUND_REVOKE_KIND, OUTBOUND_SHARE_KIND,
+};
 use cairn_workflows::scheduler::handler::{HandlerOutcome, JobHandler};
 
 const PROPOSE_FIXTURE: &str =
@@ -34,7 +36,20 @@ fn share_payload_bytes() -> Vec<u8> {
         serde_json::from_str(PROPOSE_FIXTURE).expect("parse propose fixture");
     let wire_link = envelope.link.expect("propose has link");
     let domain_link = signed_share_link_from_wire(&wire_link).expect("from_wire");
-    serde_json::to_vec(&domain_link).expect("serialize domain link")
+    let manifest = vec![ManifestEntry {
+        record_id: "01HQZX9F5N0000000000000099".to_owned(),
+        kind: "user".to_owned(),
+        body: "fixture body".to_owned(),
+        body_hash: format!("sha256:{}", "a".repeat(64)),
+        visibility: "team".to_owned(),
+        scope_wire: "project=test-project".to_owned(),
+        tags: Vec::new(),
+    }];
+    let payload = OutboundSharePayload {
+        link: domain_link,
+        manifest,
+    };
+    serde_json::to_vec(&payload).expect("serialize OutboundSharePayload")
 }
 
 fn revoke_payload_bytes() -> Vec<u8> {
@@ -67,6 +82,10 @@ async fn outbound_share_ack_yields_done() {
     assert_eq!(env.kind, FederationEnvelopeKind::Propose);
     assert!(env.link.is_some(), "propose envelope must carry a link");
     assert!(env.revocation.is_none());
+    assert!(
+        env.manifest.is_some(),
+        "propose envelope must carry a manifest"
+    );
     assert_eq!(env.issuer_key_id.0, "hmn:alice");
     assert_eq!(addr, &peer());
 }

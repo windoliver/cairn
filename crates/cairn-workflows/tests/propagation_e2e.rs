@@ -5,8 +5,8 @@
 //!
 //! * **Happy path:** `propose_share` mints + enqueues; `PropagationHandler`
 //!   drains the queue and forwards via the transport; `accept_share`
-//!   applies the enriched envelope. The receiver projection carries the
-//!   share-link provenance and the tier cap.
+//!   applies the envelope (which now carries a populated manifest). The
+//!   receiver projection carries the share-link provenance and the tier cap.
 //! * **Transient retry:** the transport returns `Transient` twice, then
 //!   `Ack`. The handler surfaces `Retry`, `Retry`, `Done`. The receiver
 //!   applies the first envelope only — subsequent envelopes hit the
@@ -14,16 +14,6 @@
 //! * **Permanent failure:** the transport returns `Permanent`. The
 //!   handler surfaces `HandlerOutcome::Permanent` (which the scheduler
 //!   maps to a dead-letter row).
-//!
-//! ## Why a manifest is attached between transport and receiver
-//!
-//! `PropagationHandler::build_envelope` currently emits a propose
-//! envelope with `manifest: None` — its docs flag this as a T14 follow-up.
-//! The receiver's `accept_share` only applies records when the envelope
-//! carries a manifest, so each test enriches the captured envelope with
-//! a one-record manifest before calling `accept_share`. Once the handler
-//! grows a manifest-builder these helpers can drop the enrichment step;
-//! the rest of the e2e shape stays.
 
 use std::sync::Arc;
 
@@ -38,9 +28,7 @@ use cairn_workflows::propagation::payload::{OUTBOUND_REVOKE_KIND, OUTBOUND_SHARE
 use cairn_workflows::scheduler::handler::{HandlerOutcome, JobHandler};
 
 mod e2e_helpers;
-use e2e_helpers::{
-    PeerEndpointAlias, attach_manifest_stub, build_issuer, build_receiver, loopback_peer,
-};
+use e2e_helpers::{PeerEndpointAlias, build_issuer, build_receiver, loopback_peer};
 
 #[tokio::test]
 async fn propose_drain_accept_makes_record_visible_on_receiver() {
@@ -74,9 +62,9 @@ async fn propose_drain_accept_makes_record_visible_on_receiver() {
     let outcome = handler.handle(&payload).await;
     assert_eq!(outcome, HandlerOutcome::Done);
 
-    // 3. Capture the envelope the transport saw, enrich it with the
-    //    issuer's record stub (the handler ships `manifest: None` for
-    //    now — T14 follow-up), and feed it into the receiver.
+    // 3. Capture the envelope the transport saw — the handler now
+    //    populates the manifest from the job payload, so no enrichment
+    //    step is needed.
     let (envelope, _peer) = transport
         .sent()
         .into_iter()
@@ -87,12 +75,9 @@ async fn propose_drain_accept_makes_record_visible_on_receiver() {
         resp.link.link_id,
         "transport envelope link must match the minted link",
     );
-    let envelope = attach_manifest_stub(
-        envelope,
-        &record_id,
-        &issuer.scope(),
-        MemoryVisibility::Team,
-        "hello world",
+    assert!(
+        envelope.manifest.is_some(),
+        "handler must populate the manifest",
     );
 
     let accepted = accept_share(
@@ -169,13 +154,6 @@ async fn transient_retries_eventually_succeed_with_single_apply() {
 
     let mut outcomes = Vec::with_capacity(sent.len());
     for (env, _peer) in sent {
-        let env = attach_manifest_stub(
-            env,
-            &record_id,
-            &issuer.scope(),
-            MemoryVisibility::Team,
-            "idempotent",
-        );
         let resp = accept_share(
             AcceptShareRequest {
                 envelope: env.clone(),
@@ -289,13 +267,6 @@ async fn revoke_propagates_and_tombstones_receiver_projection() {
         .into_iter()
         .next()
         .expect("transport recorded the propose send");
-    let propose_env = attach_manifest_stub(
-        propose_env,
-        &record_id,
-        &issuer.scope(),
-        MemoryVisibility::Team,
-        "revocable body",
-    );
     let accepted = accept_share(
         AcceptShareRequest {
             envelope: propose_env.clone(),
