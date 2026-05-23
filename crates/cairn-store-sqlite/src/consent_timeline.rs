@@ -20,7 +20,7 @@
 //!
 //! ### Column mapping for federation kinds
 //!
-//! | consent_journal column | federation_grant | federation_accept | federation_revoke |
+//! | `consent_journal` column | `federation_grant` | `federation_accept` | `federation_revoke` |
 //! |------------------------|------------------|-------------------|-------------------|
 //! | `actor`                | issuer identity  | issuer identity   | `hmn:federation`  |
 //! | `subject`              | `share_link:<link_id>` | `share_link:<link_id>` | `share_link:<link_id>` |
@@ -493,11 +493,11 @@ mod tests {
         }
     }
 
-    /// Build a federation_revoke event.
+    /// Build a `federation_revoke` event.
     ///
     /// `link_id` is the full share-link id (e.g. `"share-<op_id>"`), used
     /// for the `subject`. `op_id_ulid` is the raw 26-char ULID (same as the
-    /// link's operation_id), used in the payload's `link_id` field which
+    /// link's `operation_id`), used in the payload's `link_id` field which
     /// the validator requires to be a 26-char Crockford base32 ULID.
     fn federation_revoke_event(
         consent_id: &str,
