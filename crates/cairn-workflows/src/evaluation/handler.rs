@@ -240,21 +240,7 @@ impl EvaluationHandler {
             .map(ScopeTuple::canonical_wire)
             .unwrap_or_default();
         let day = payload.ts_ms / 86_400_000;
-        // Outcome digest: stable serialization of pass/fail per
-        // check id. `CheckOutcome::Failed { details }` participates
-        // in the hash so a failure detail change also splits the
-        // target.
-        let outcome_basis: String = findings
-            .iter()
-            .map(|(id, outcome)| match outcome {
-                CheckOutcome::Passed => format!("{id}=P"),
-                CheckOutcome::Failed { details } => format!("{id}=F:{details}"),
-            })
-            .collect::<Vec<_>>()
-            .join("|");
-        let audit_basis = serde_json::to_string(agent_worker_audit)
-            .unwrap_or_else(|_| "agent_worker_audit_unserializable".to_owned());
-        let outcome_basis = format!("{outcome_basis}|agent_worker_audit={audit_basis}");
+        let outcome_basis = outcome_hash_basis(findings, agent_worker_audit);
         let outcome_hash = crate::synthetic::sha256_hex(outcome_basis.as_bytes());
         // Use only the first 16 hex chars of the digest to keep the
         // key short; collisions at that prefix are vanishingly
@@ -321,14 +307,7 @@ impl EvaluationHandler {
         let target_id = stable_target_id(target_key)?;
         let target_id_str = target_id.as_str().to_owned();
 
-        let outcome_basis: String = findings
-            .iter()
-            .map(|(id, outcome)| match outcome {
-                CheckOutcome::Passed => format!("{id}=P"),
-                CheckOutcome::Failed { details } => format!("{id}=F:{details}"),
-            })
-            .collect::<Vec<_>>()
-            .join("|");
+        let outcome_basis = outcome_hash_basis(findings, agent_worker_audit);
         let outcome_hash = crate::synthetic::sha256_hex(outcome_basis.as_bytes());
 
         let mut extras = std::collections::BTreeMap::new();
@@ -385,6 +364,25 @@ impl EvaluationHandler {
         }
         Ok(outcome.content_changed)
     }
+}
+
+fn outcome_hash_basis(
+    findings: &[(String, CheckOutcome)],
+    agent_worker_audit: &AgentWorkerAuditSummary,
+) -> String {
+    // Stable serialization of pass/fail per check id. `CheckOutcome::Failed { details }`
+    // participates in the hash so a failure detail change also splits the target.
+    let outcome_basis = findings
+        .iter()
+        .map(|(id, outcome)| match outcome {
+            CheckOutcome::Passed => format!("{id}=P"),
+            CheckOutcome::Failed { details } => format!("{id}=F:{details}"),
+        })
+        .collect::<Vec<_>>()
+        .join("|");
+    let audit_basis = serde_json::to_string(agent_worker_audit)
+        .unwrap_or_else(|_| "agent_worker_audit_unserializable".to_owned());
+    format!("{outcome_basis}|agent_worker_audit={audit_basis}")
 }
 
 #[async_trait::async_trait]

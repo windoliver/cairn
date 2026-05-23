@@ -6,10 +6,14 @@
 use std::sync::Arc;
 
 use cairn_core::config::EvaluationConfig;
+use cairn_core::contract::agent_provider::AgentBudgetConsumed;
 use cairn_core::contract::memory_store::{ListArgs, MemoryStore};
 use cairn_core::contract::metrics::{CapturingMetricsSink, MetricsSink};
 use cairn_core::domain::metrics::MetricEvent;
 use cairn_core::domain::taxonomy::MemoryKind;
+use cairn_core::domain::{
+    AgentWorkerAuditRecord, AgentWorkerFailureMode, AgentWorkerKind, AgentWorkerStatus, ScopeTuple,
+};
 use cairn_test_fixtures::{memstore, sample_record};
 use cairn_workflows::scheduler::{HandlerOutcome, JobHandler};
 use cairn_workflows::{EvaluationHandler, EvaluationPayload, default_golden_checks};
@@ -133,6 +137,90 @@ async fn replays_produce_byte_identical_report() {
         target_ids.len(),
         1,
         "both replays carry the same report_target_id so downstream can dedupe"
+    );
+}
+
+#[tokio::test]
+async fn audit_state_changes_persisted_outcome_hash() {
+    let store = Arc::new(memstore().await);
+    let sink = Arc::new(CapturingMetricsSink::new());
+    let dyn_store: Arc<dyn MemoryStore> = store.clone();
+    let payload = EvaluationPayload {
+        ts_ms: 1_700_000_000_000,
+        check_ids: vec![],
+        bound_scope: None,
+    };
+
+    let without_audit = EvaluationHandler::new(
+        dyn_store.clone(),
+        sink.clone() as Arc<dyn MetricsSink>,
+        default_golden_checks(),
+        EvaluationConfig {
+            enabled: true,
+            write_report_record: true,
+            ..EvaluationConfig::default()
+        },
+    );
+    let with_audit = EvaluationHandler::new(
+        dyn_store,
+        sink.clone() as Arc<dyn MetricsSink>,
+        default_golden_checks(),
+        EvaluationConfig {
+            enabled: true,
+            write_report_record: true,
+            ..EvaluationConfig::default()
+        },
+    )
+    .with_agent_worker_audit(vec![AgentWorkerAuditRecord {
+        operation_id: "op-agent-1".to_owned(),
+        worker_kind: AgentWorkerKind::Dream,
+        worker_name: "agent_dream".to_owned(),
+        agent_identity: "agt:cairn-dream:v1".to_owned(),
+        scope: Some(ScopeTuple {
+            tenant: Some("tenant-a".to_owned()),
+            agent: Some("agt:cairn-dream:v1".to_owned()),
+            ..ScopeTuple::default()
+        }),
+        status: AgentWorkerStatus::Aborted,
+        generated_candidates: 2,
+        accepted_candidates: 1,
+        budget_consumed: AgentBudgetConsumed {
+            turns: 1,
+            tool_calls: 2,
+            cost_units: 99,
+        },
+        failure_mode: Some(AgentWorkerFailureMode::ProviderUnavailable),
+        canary_label: Some("canary-05".to_owned()),
+    }]);
+
+    let a = without_audit.run_once(&payload).await.expect("first sweep");
+    let b = with_audit.run_once(&payload).await.expect("second sweep");
+    assert_ne!(a.report_target_id, b.report_target_id);
+
+    let listed = store
+        .list(&ListArgs {
+            limit: 100,
+            ..ListArgs::default()
+        })
+        .await
+        .expect("list");
+    let hashes: std::collections::BTreeSet<String> = listed
+        .records
+        .iter()
+        .filter(|r| r.kind == MemoryKind::Reasoning && r.body.starts_with("# Evaluation report"))
+        .filter_map(|r| {
+            r.extra_frontmatter
+                .get("evaluation")
+                .and_then(|v| v.get("outcome_hash"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
+
+    assert_eq!(
+        hashes.len(),
+        2,
+        "audit state must participate in persisted outcome_hash"
     );
 }
 
