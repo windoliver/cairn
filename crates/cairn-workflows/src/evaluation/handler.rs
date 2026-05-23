@@ -10,7 +10,7 @@ use cairn_core::contract::job_store::{FailureClass, JobKind, JobPayload};
 use cairn_core::contract::memory_store::MemoryStore;
 use cairn_core::contract::metrics::MetricsSink;
 use cairn_core::domain::{
-    ScopeTuple,
+    AgentWorkerAuditRecord, AgentWorkerAuditSummary, ScopeTuple,
     metrics::MetricEvent,
     taxonomy::{MemoryClass, MemoryKind},
 };
@@ -30,7 +30,7 @@ const EVAL_CONSENT_REF: &str = "consent:system:evaluation-workflow";
 
 /// Per-sweep summary surfaced to callers and tests so they can assert
 /// the workflow's behaviour without parsing the report record.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EvaluationReport {
     /// Total number of `GoldenCheck`s executed this sweep.
     pub checks_run: u32,
@@ -41,6 +41,8 @@ pub struct EvaluationReport {
     /// Stable `target_id` of the upserted report record (when
     /// `write_report_record = true`).
     pub report_target_id: Option<String>,
+    /// Body-free aggregate for agent-mode worker audit records observed by this sweep.
+    pub agent_worker_audit: AgentWorkerAuditSummary,
 }
 
 /// Minimum-path `EvaluationWorkflow` handler.
@@ -49,6 +51,7 @@ pub struct EvaluationHandler {
     metrics: Arc<dyn MetricsSink>,
     checks: Vec<Arc<dyn GoldenCheck>>,
     config: EvaluationConfig,
+    agent_worker_audit: Vec<AgentWorkerAuditRecord>,
 }
 
 impl EvaluationHandler {
@@ -67,7 +70,15 @@ impl EvaluationHandler {
             metrics,
             checks,
             config,
+            agent_worker_audit: Vec::new(),
         }
+    }
+
+    /// Attach body-free agent-worker audit records for this handler instance.
+    #[must_use]
+    pub fn with_agent_worker_audit(mut self, records: Vec<AgentWorkerAuditRecord>) -> Self {
+        self.agent_worker_audit = records;
+        self
     }
 
     /// Resolve the check allow-list against the registered set.
@@ -154,6 +165,7 @@ impl EvaluationHandler {
         // byte-stable replays.
         findings.sort_by(|a, b| a.0.cmp(&b.0));
 
+        let agent_worker_audit = AgentWorkerAuditSummary::from_records(&self.agent_worker_audit);
         let checks_run = u32::try_from(findings.len()).unwrap_or(u32::MAX);
 
         // Compute the stable `report_target_id` unconditionally so
@@ -162,13 +174,13 @@ impl EvaluationHandler {
         // unrelated no-report sweeps at the same `ts_ms` would
         // collapse in downstream `(report_target_id, ts_ms)`
         // queries (round-3 adversarial review #2).
-        let target_key = Self::report_target_key(payload, &findings);
+        let target_key = Self::report_target_key(payload, &findings, &agent_worker_audit);
         let target_id = stable_target_id(&target_key)
             .map_err(|e| Box::<dyn std::error::Error + Send + Sync>::from(e.to_string()))?;
         let report_target_id = target_id.as_str().to_owned();
 
         let _report_was_new = if self.config.write_report_record {
-            self.upsert_report_record(payload, &findings, &target_key)
+            self.upsert_report_record(payload, &findings, &target_key, &agent_worker_audit)
                 .await?
         } else {
             true
@@ -200,6 +212,7 @@ impl EvaluationHandler {
             passed,
             failed,
             report_target_id: Some(report_target_id),
+            agent_worker_audit,
         })
     }
 
@@ -214,6 +227,7 @@ impl EvaluationHandler {
     fn report_target_key(
         payload: &EvaluationPayload,
         findings: &[(String, CheckOutcome)],
+        agent_worker_audit: &AgentWorkerAuditSummary,
     ) -> String {
         let check_ids = findings
             .iter()
@@ -238,6 +252,9 @@ impl EvaluationHandler {
             })
             .collect::<Vec<_>>()
             .join("|");
+        let audit_basis = serde_json::to_string(agent_worker_audit)
+            .unwrap_or_else(|_| "agent_worker_audit_unserializable".to_owned());
+        let outcome_basis = format!("{outcome_basis}|agent_worker_audit={audit_basis}");
         let outcome_hash = crate::synthetic::sha256_hex(outcome_basis.as_bytes());
         // Use only the first 16 hex chars of the digest to keep the
         // key short; collisions at that prefix are vanishingly
@@ -261,6 +278,7 @@ impl EvaluationHandler {
         payload: &EvaluationPayload,
         findings: &[(String, CheckOutcome)],
         target_key: &str,
+        agent_worker_audit: &AgentWorkerAuditSummary,
     ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
         // Build a deterministic Markdown body. Same findings → same
         // bytes → same body hash → store dedupes on idempotent
@@ -278,6 +296,25 @@ impl EvaluationHandler {
                     body.push_str(details);
                 }
             }
+            body.push('\n');
+        }
+        body.push_str("\n## Agent worker audit\n\n");
+        if agent_worker_audit.is_empty() {
+            body.push_str("- no agent-worker audit records observed\n");
+        } else {
+            body.push_str("- runs: ");
+            body.push_str(&agent_worker_audit.total_runs.to_string());
+            body.push('\n');
+            body.push_str("- accepted candidates: ");
+            body.push_str(&agent_worker_audit.accepted_candidates.to_string());
+            body.push_str(" / ");
+            body.push_str(&agent_worker_audit.generated_candidates.to_string());
+            body.push('\n');
+            body.push_str("- cost units: ");
+            body.push_str(&agent_worker_audit.cost_units.to_string());
+            body.push('\n');
+            body.push_str("- tool calls: ");
+            body.push_str(&agent_worker_audit.tool_calls.to_string());
             body.push('\n');
         }
 
@@ -301,6 +338,7 @@ impl EvaluationHandler {
                 "checks": findings.iter().map(|(id, _)| id).collect::<Vec<_>>(),
                 "ts_ms":  payload.ts_ms,
                 "outcome_hash": outcome_hash,
+                "agent_worker_audit": agent_worker_audit,
                 "produced_by": "cairn-workflows::EvaluationHandler",
             }),
         );
@@ -466,5 +504,66 @@ mod tests {
             }
             _ => panic!("expected EvaluationCompleted"),
         }
+    }
+
+    #[tokio::test]
+    async fn evaluation_report_includes_agent_worker_audit_summary() {
+        use cairn_core::contract::agent_provider::AgentBudgetConsumed;
+        use cairn_core::domain::{
+            AgentWorkerAuditRecord, AgentWorkerFailureMode, AgentWorkerKind, AgentWorkerStatus,
+        };
+
+        let store: Arc<dyn MemoryStore> = Arc::new(NoopMemoryStore::default());
+        let sink = metrics();
+        let audit_records = vec![AgentWorkerAuditRecord {
+            operation_id: "op-agent-1".to_owned(),
+            worker_kind: AgentWorkerKind::Dream,
+            worker_name: "agent_dream".to_owned(),
+            agent_identity: "agt:cairn-dream:v1".to_owned(),
+            scope: Some(ScopeTuple {
+                tenant: Some("tenant-a".to_owned()),
+                agent: Some("agt:cairn-dream:v1".to_owned()),
+                ..ScopeTuple::default()
+            }),
+            status: AgentWorkerStatus::Aborted,
+            generated_candidates: 2,
+            accepted_candidates: 1,
+            budget_consumed: AgentBudgetConsumed {
+                turns: 1,
+                tool_calls: 2,
+                cost_units: 99,
+            },
+            failure_mode: Some(AgentWorkerFailureMode::ProviderUnavailable),
+            canary_label: Some("canary-05".to_owned()),
+        }];
+        let h = EvaluationHandler::new(
+            store,
+            sink.clone() as Arc<dyn MetricsSink>,
+            default_checks(),
+            EvaluationConfig {
+                enabled: true,
+                write_report_record: false,
+                ..EvaluationConfig::default()
+            },
+        )
+        .with_agent_worker_audit(audit_records);
+        let payload = EvaluationPayload {
+            ts_ms: 1_700_000_000_000,
+            check_ids: vec![],
+            bound_scope: None,
+        };
+
+        let report = h.run_once(&payload).await.expect("run_once");
+
+        assert_eq!(report.agent_worker_audit.total_runs, 1);
+        assert_eq!(report.agent_worker_audit.accepted_candidates, 1);
+        assert_eq!(report.agent_worker_audit.cost_units, 99);
+        assert_eq!(
+            report
+                .agent_worker_audit
+                .failure_modes
+                .get(&AgentWorkerFailureMode::ProviderUnavailable),
+            Some(&1)
+        );
     }
 }
