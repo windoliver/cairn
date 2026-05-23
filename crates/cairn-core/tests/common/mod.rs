@@ -113,7 +113,9 @@ impl MemoryStore for InMemoryStore {
         })
     }
 
-    async fn tombstone(&self, _id: &RecordId, _reason: TombstoneReason) -> Result<(), StoreError> {
+    async fn tombstone(&self, id: &RecordId, _reason: TombstoneReason) -> Result<(), StoreError> {
+        let mut guard = self.inner.lock().expect("test store mutex poisoned");
+        guard.remove(id.as_str());
         Ok(())
     }
 

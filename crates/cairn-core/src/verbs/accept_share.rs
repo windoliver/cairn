@@ -294,19 +294,45 @@ async fn accept_revoke(
     validate_revocation_shape(revocation)?;
     verify_revocation_signature(revocation, deps.issuer_verifying_key)?;
 
-    // Idempotency for revokes is keyed by `link_id` alone (any sender
-    // can issue the revoke; the receiver-side projection collapses
-    // duplicates). T12 will materialise the projection; for T8 we lean
-    // on the outbox's own ConsentRejected mapping if the timeline
-    // already recorded a revoke.
     let now = clock_to_rfc3339(deps.clock)?;
-    let consent_event = build_revoke_event(&revocation.link_id, &now)?;
 
-    // The receiver may or may not have prior records under this link;
-    // either way the apply succeeds. T12 lands the lookup that
-    // populates `tombstone_ids`; for T8 we pass an empty slice, which
-    // the outbox happily writes as a consent-only revoke.
-    let tombstone_ids: Vec<String> = Vec::new();
+    // Reconstruct the outer `share-<ULID>` link_id from the
+    // revocation's inner ULID. The dedup key the original accept used
+    // was `(issuer_key_id, share-<operation_id>)`.
+    let outer_link_id = format!("share-{}", revocation.link_id);
+
+    // Look up the original accept record to recover the record ids
+    // that were upserted under this link. If the consent lookup has
+    // no record (e.g. the link was never accepted, or the projection
+    // is not yet wired), the revoke still succeeds with an empty
+    // tombstone list — idempotent + tolerant of ordering.
+    let dedup = DedupKey {
+        issuer_key_id: envelope.issuer_key_id.0.as_str(),
+        link_id: &outer_link_id,
+    };
+    let prior_record_ids: Vec<String> = match find_dedup(deps.consent_lookup, dedup).await? {
+        Some(prior) => prior.applied_records,
+        None => Vec::new(),
+    };
+
+    // Tombstone each previously-projected record via the store's
+    // existing `tombstone` primitive. `tombstone` is idempotent —
+    // already-tombstoned rows return `Ok(())`.
+    let mut tombstone_ids = Vec::with_capacity(prior_record_ids.len());
+    for id_str in &prior_record_ids {
+        if let Ok(record_id) = RecordId::parse(id_str.clone()) {
+            deps.store
+                .tombstone(
+                    &record_id,
+                    crate::contract::memory_store::TombstoneReason::FederationRevoke,
+                )
+                .await
+                .map_err(|_| FederationError::InvalidShape)?;
+            tombstone_ids.push(id_str.clone());
+        }
+    }
+
+    let consent_event = build_revoke_event(&revocation.link_id, &now)?;
     deps.outbox
         .record_share_revoke(&consent_event, &tombstone_ids)
         .await

@@ -295,7 +295,7 @@ async fn revoke_propagates_and_tombstones_receiver_projection() {
     );
     let accepted = accept_share(
         AcceptShareRequest {
-            envelope: propose_env,
+            envelope: propose_env.clone(),
         },
         &receiver.accept_deps(),
     )
@@ -307,6 +307,11 @@ async fn revoke_propagates_and_tombstones_receiver_projection() {
         1,
         "receiver applied exactly one inbound record",
     );
+    // Mirror the apply into the consent-lookup projection so the
+    // revoke path's `find_federation_accept` lookup finds the
+    // original record ids. In production T12's adapter materialises
+    // this inside the same outbox transaction.
+    receiver.record_accept_for_idempotency(&propose_env, accepted.applied_records.clone());
 
     // 2. Issuer revokes the link. The revoke verb appends a
     //    FederationRevoke consent row and enqueues an
@@ -358,15 +363,19 @@ async fn revoke_propagates_and_tombstones_receiver_projection() {
         AcceptOutcome::Accepted,
         "receiver applies the inbound revoke envelope",
     );
-    // T8 stub: `applied_records` is empty until the per-record
-    // tombstone projection lands. Asserted here so a future tightening
-    // of T8 surfaces as a failing test (and not a silent contract
-    // change).
-    assert!(
-        revoke_resp.applied_records.is_empty(),
-        "T8 revoke path emits empty applied_records; got {:?}",
-        revoke_resp.applied_records,
+    // The revoke path now tombstones the receiver's projected records.
+    // `applied_records` carries the tombstoned record IDs.
+    assert_eq!(
+        revoke_resp.applied_records, accepted.applied_records,
+        "revoke must tombstone every record the original accept projected",
     );
+    // Every previously-applied record should be gone from the store.
+    for id in &revoke_resp.applied_records {
+        assert!(
+            receiver.try_fetch(id).is_none(),
+            "record {id} should be tombstoned after revoke",
+        );
+    }
 
     // 5. The receiver's consent journal carries both the original
     //    FederationAccept and the inbound FederationRevoke row,

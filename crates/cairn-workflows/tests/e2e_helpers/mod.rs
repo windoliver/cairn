@@ -113,7 +113,9 @@ impl MemoryStore for InMemoryStore {
         })
     }
 
-    async fn tombstone(&self, _id: &RecordId, _reason: TombstoneReason) -> Result<(), StoreError> {
+    async fn tombstone(&self, id: &RecordId, _reason: TombstoneReason) -> Result<(), StoreError> {
+        let mut guard = self.inner.lock().expect("store mutex poisoned");
+        guard.remove(id.as_str());
         Ok(())
     }
 
@@ -216,6 +218,7 @@ impl InMemoryOutbox {
 struct OutboxState {
     jobs: Vec<EnqueueRequest>,
     upserts: Vec<MemoryRecord>,
+    tombstoned_ids: std::collections::HashSet<String>,
 }
 
 #[async_trait]
@@ -275,13 +278,13 @@ impl FederationOutbox for InMemoryOutbox {
         event: &cairn_core::domain::ConsentEvent,
         tombstone_ids: &[String],
     ) -> Result<(), FederationOutboxError> {
-        // T8's accept_revoke path currently passes an empty
-        // `tombstone_ids` slice (the projection lookup that would
-        // populate it is the unfinished half of the receiver-side
-        // revoke path). We capture the consent event regardless so
-        // tests can still observe the audit row; the tombstone fan-out
-        // becomes meaningful once the projection lands.
-        let _ = tombstone_ids;
+        // Track tombstoned record IDs so `try_fetch` can filter them
+        // out after a revoke.
+        let mut guard = self.inner.lock().expect("outbox mutex poisoned");
+        guard
+            .tombstoned_ids
+            .extend(tombstone_ids.iter().cloned());
+        drop(guard);
         let mut proj = self.projection.lock().expect("projection mutex poisoned");
         // Mark the link as revoked from the receiver's point of view
         // so a follow-up propose against the same link short-circuits
@@ -349,6 +352,11 @@ impl InMemoryOutbox {
     pub fn upserts(&self) -> Vec<MemoryRecord> {
         let guard = self.inner.lock().expect("outbox mutex poisoned");
         guard.upserts.clone()
+    }
+
+    pub fn is_tombstoned(&self, record_id: &str) -> bool {
+        let guard = self.inner.lock().expect("outbox mutex poisoned");
+        guard.tombstoned_ids.contains(record_id)
     }
 }
 
@@ -678,18 +686,13 @@ impl Node {
 
     /// Receiver-side fetch by record id. Returns the most recently
     /// upserted record under that id, or `None` if it was tombstoned
-    /// (no longer surfaced in the outbox's projection) or never
-    /// applied.
-    ///
-    /// The receiver-side `accept_revoke` (T8) does not yet materialise
-    /// tombstones — it commits a body-free revoke consent event with
-    /// an empty `tombstone_ids` slice (the projection lookup that
-    /// would populate it is the unfinished half of the revoke path).
-    /// Until T8 evolves, this helper returns `Some(record)` for any
-    /// id that was previously applied, even after a revoke. The
-    /// callsite documents what it expects.
+    /// or never applied.
     #[must_use]
     pub fn try_fetch(&self, record_id: &str) -> Option<MemoryRecord> {
+        // Check if the record was tombstoned by the revoke path.
+        if self.outbox.is_tombstoned(record_id) {
+            return None;
+        }
         self.outbox
             .upserts()
             .into_iter()
