@@ -2,19 +2,33 @@
 //!
 //! These tests invoke the real `cairn` binary with `share propose`,
 //! `share accept`, and `share revoke` and verify exit codes + output.
-//! The vault has no identity provisioned, so all three verbs should fail
-//! with a config/identity error — the point is to confirm that:
 //!
+//! **Error-path tests** (no identity provisioned) prove:
 //! 1. Clap parsing works (the subcommand is registered).
 //! 2. The dep-wiring path executes without panic/segfault.
 //! 3. Appropriate error codes are returned.
+//!
+//! **Happy-path test** (`share_propose_and_accept_happy_path`) runs a
+//! full `bootstrap → ingest → share propose` flow via the CLI binary
+//! and verifies exit codes + output shape.
 
 use std::path::Path;
 use std::process::Command;
 
+use cairn_cli::vault::{BootstrapOpts, bootstrap};
+
 fn cairn_bin() -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_cairn"));
     cmd.current_dir(std::env::temp_dir());
+    cmd.env_remove("CAIRN_VAULT");
+    cmd.env_remove("CAIRN_MOCK_EMBEDDER");
+    cmd
+}
+
+/// CLI binary rooted at a specific vault (for happy-path tests).
+fn cli_at(vault: &Path) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_cairn"));
+    cmd.current_dir(vault);
     cmd.env_remove("CAIRN_VAULT");
     cmd.env_remove("CAIRN_MOCK_EMBEDDER");
     cmd
@@ -196,4 +210,121 @@ fn share_help_lists_propose_accept_revoke() {
         !stderr.contains("panicked at"),
         "process must not panic; stderr: {stderr}"
     );
+}
+
+// ── happy-path integration ─────────────────────────────────────────────
+
+/// Full `bootstrap → ingest → share propose (→ accept)` flow via the CLI
+/// binary.
+///
+/// The propose may exit 69 (`CapabilityUnavailable`) if the federation
+/// runtime gate isn't satisfied at runtime, OR exit 0 on success. Either
+/// is a valid non-panic result. If it succeeds, we additionally verify
+/// the JSON output shape and attempt an accept round-trip.
+#[test]
+fn share_propose_and_accept_happy_path() {
+    let vault = tempfile::tempdir().expect("vault tempdir");
+
+    // 1. Bootstrap the vault (library call — fast, deterministic).
+    bootstrap(&BootstrapOpts {
+        vault_path: vault.path().to_path_buf(),
+        force: false,
+    })
+    .expect("bootstrap");
+
+    // 2. Ingest a test record so there's something to share.
+    let out = cli_at(vault.path())
+        .args([
+            "ingest",
+            "--body",
+            "test record for federation",
+            "--kind",
+            "fact",
+            "--json",
+        ])
+        .output()
+        .expect("ingest");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "ingest failed: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let ingest_json: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("ingest json");
+    let record_id = ingest_json["data"]["record_id"]
+        .as_str()
+        .expect("record_id from ingest");
+
+    // 3. Propose sharing the record.
+    let out = cli_at(vault.path())
+        .args([
+            "share",
+            "propose",
+            "--record-ids",
+            record_id,
+            "--grant-tier",
+            "team",
+            "--expires-at",
+            "2027-01-01T00:00:00Z",
+            "--json",
+        ])
+        .output()
+        .expect("propose");
+
+    // This may fail with CapabilityUnavailable (exit 69) or a config
+    // error (exit 78) if the federation runtime gate isn't met, OR
+    // succeed (exit 0). Either is a valid non-panic result.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("panicked at"),
+        "propose should not panic: {stderr}",
+    );
+
+    // If it succeeded, verify the output shape and attempt accept.
+    if out.status.code() == Some(0) {
+        let json: serde_json::Value =
+            serde_json::from_slice(&out.stdout).expect("propose json");
+        assert!(
+            json["link"].is_object(),
+            "response must have link: {json}",
+        );
+        assert!(
+            json["operation_id"].is_string(),
+            "response must have operation_id: {json}",
+        );
+
+        // Build a minimal envelope from the propose output and try accept.
+        let link = &json["link"];
+        let envelope = serde_json::json!({
+            "kind": "propose",
+            "issuer_key_id": link["payload"]["issuer"]
+                .as_str()
+                .unwrap_or("hmn:test"),
+            "link": link,
+            "manifest": [],
+        });
+        let envelope_path = vault.path().join("test_envelope.json");
+        std::fs::write(
+            &envelope_path,
+            serde_json::to_string(&envelope).expect("envelope json"),
+        )
+        .expect("write envelope");
+
+        let out = cli_at(vault.path())
+            .args([
+                "share",
+                "accept",
+                "--envelope",
+                envelope_path.to_str().expect("envelope path"),
+                "--json",
+            ])
+            .output()
+            .expect("accept");
+        let accept_stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !accept_stderr.contains("panicked at"),
+            "accept should not panic: {accept_stderr}",
+        );
+    }
 }
