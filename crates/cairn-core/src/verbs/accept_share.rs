@@ -364,12 +364,26 @@ fn validate_manifest(
         if !is_valid_body_hash(&stub.body_hash) {
             return Err(FederationError::InvalidShape);
         }
+        // Verify body integrity: recompute sha256 of the body and compare
+        // to the declared body_hash. Rejects tampered bodies.
+        if let Some(body) = &stub.body {
+            let computed = compute_body_hash(body);
+            if computed != stub.body_hash {
+                return Err(FederationError::TargetMismatch);
+            }
+        }
         let id_hash = hash_record_id(&stub.record_id.0);
         if !link.payload.target_id_hashes.contains(&id_hash) {
             return Err(FederationError::TargetMismatch);
         }
     }
     Ok(())
+}
+
+fn compute_body_hash(body: &str) -> String {
+    use sha2::{Digest as _, Sha256};
+    let digest = Sha256::digest(body.as_bytes());
+    format!("sha256:{digest:x}")
 }
 
 fn is_valid_body_hash(value: &str) -> bool {

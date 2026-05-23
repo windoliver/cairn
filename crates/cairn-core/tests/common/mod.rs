@@ -936,7 +936,11 @@ impl ReceiverCtx {
         };
         let stub = WireStub {
             body: Some("inbound body".to_owned()),
-            body_hash: format!("sha256:{}", "1".repeat(64)),
+            body_hash: {
+                use sha2::{Digest as _, Sha256};
+                let digest = Sha256::digest(b"inbound body");
+                format!("sha256:{digest:x}")
+            },
             kind: "user".to_owned(),
             record_id: WireUlid(record_id_str.clone()),
             scope: WireScope {

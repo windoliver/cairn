@@ -310,13 +310,12 @@ fn build_revoke_job(
         kind,
         payload,
         queue_key: Some(queue_key),
-        // Dedupe on the original link's operation_id so two parallel
-        // revoke attempts against the same link collapse into one
-        // queued job. The verb's own `find_revocation` short-circuit
-        // already handles the common replay path; this is a belt-and-
-        // braces line against a race between the lookup and the
-        // write.
-        dedupe_key: Some(format!("revoke:{}", stored.payload.operation_id)),
+        // Dedupe on the revoke's own operation_id so the consent
+        // journal's op_id and the job's dedupe_key are the same value.
+        // This lets `find_revocation` JOIN consent_journal.op_id =
+        // workflow_jobs.dedupe_key to recover the SignedRevocation
+        // payload for idempotent replay.
+        dedupe_key: Some(operation_id.to_owned()),
         // Eligible immediately — the scheduler's clock authority owns
         // the actual epoch, matching propose_share.
         not_before_ms: 0,

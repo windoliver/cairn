@@ -271,10 +271,21 @@ impl ConsentLookup for SqliteMemoryStore {
             let Some((cj_payload_json, wj_payload)) = result else {
                 return Ok::<_, tokio_rusqlite::Error>(None);
             };
-            // Parse the SignedShareLink from the workflow_jobs payload blob.
-            let link: cairn_core::domain::sharing::SignedShareLink =
-                serde_json::from_slice(&wj_payload)
+            // Parse the outbound share payload wrapper (link + manifest)
+            // from the workflow_jobs payload blob. The verb serializes
+            // `{ "link": SignedShareLink, "manifest": [...] }`.
+            let link: cairn_core::domain::sharing::SignedShareLink = {
+                let wrapper: serde_json::Value = serde_json::from_slice(&wj_payload)
                     .map_err(|e| tokio_rusqlite::Error::Other(e.into()))?;
+                if let Some(link_val) = wrapper.get("link") {
+                    serde_json::from_value(link_val.clone())
+                        .map_err(|e| tokio_rusqlite::Error::Other(e.into()))?
+                } else {
+                    // Fallback: try parsing as bare SignedShareLink (legacy payloads).
+                    serde_json::from_value(wrapper)
+                        .map_err(|e| tokio_rusqlite::Error::Other(e.into()))?
+                }
+            };
             // Extract the peer_code from the consent_journal payload.
             let cj_v: serde_json::Value = serde_json::from_str(&cj_payload_json)
                 .map_err(|e| tokio_rusqlite::Error::Other(e.into()))?;
