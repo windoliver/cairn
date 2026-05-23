@@ -138,6 +138,9 @@ const M0066_TRACE_CANVAS_PROJECTION: &str = include_str!("sql/0066_trace_canvas_
 const M0067_PROJECTION_LEDGER: &str = include_str!("sql/0067_projection_ledger.sql");
 // Issue #123 — extend consent_journal_kind_domain trigger for federation kinds.
 const M0068_FEDERATION_CONSENT_KINDS: &str = include_str!("sql/0068_federation_consent_kinds.sql");
+// Issue #123 — composite lookup indexes for the four ConsentLookup queries added in T12.
+const M0069_FEDERATION_CONSENT_INDEXES: &str =
+    include_str!("sql/0069_federation_consent_indexes.sql");
 
 /// Canonical SQL for migration 0020 (`workflow_jobs`). Re-exported so
 /// downstream crates (notably `cairn-workflows`, which hashes the
@@ -343,6 +346,11 @@ pub(crate) const MIGRATION_SOURCES: &[(i64, &str, &str)] = &[
         "0068_federation_consent_kinds",
         M0068_FEDERATION_CONSENT_KINDS,
     ),
+    (
+        69,
+        "0069_federation_consent_indexes",
+        M0069_FEDERATION_CONSENT_INDEXES,
+    ),
 ];
 
 /// All migrations, in order. Returns a fresh `Migrations` set on every call
@@ -412,5 +420,6 @@ pub fn migrations() -> Migrations<'static> {
         M::up(M0066_TRACE_CANVAS_PROJECTION),
         M::up(M0067_PROJECTION_LEDGER),
         M::up(M0068_FEDERATION_CONSENT_KINDS),
+        M::up(M0069_FEDERATION_CONSENT_INDEXES),
     ])
 }

@@ -940,6 +940,7 @@ dependencies = [
  "insta",
  "memchr",
  "pretty_assertions",
+ "rand_core 0.6.4",
  "rmcp",
  "rstest",
  "schemars",

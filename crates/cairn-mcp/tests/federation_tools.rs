@@ -120,10 +120,97 @@ fn federation_tool_names_snapshot() {
     insta::assert_yaml_snapshot!(names);
 }
 
+/// Build a minimal [`FederationState`] backed by an in-memory SQLite store
+/// and a loopback transport. Shared by the two dispatch integration tests
+/// below.
+async fn make_federation_state() -> cairn_mcp::handler::FederationState {
+    use std::sync::Arc;
+
+    use cairn_core::domain::identity::Identity;
+    use cairn_core::domain::identity::keys::SigningKey;
+    use cairn_store_sqlite::open_in_memory;
+    use cairn_test_fixtures::federation::LoopbackTransport;
+    use rand_core::OsRng;
+
+    let store = Arc::new(open_in_memory().await.expect("in-memory store"));
+    let transport = Arc::new(LoopbackTransport::new());
+    let signing_key = SigningKey::generate(&mut OsRng);
+    let identity = Identity::parse("hmn:test-issuer").expect("valid identity prefix");
+
+    cairn_mcp::handler::FederationState {
+        store,
+        transport: transport
+            as Arc<dyn cairn_core::contract::federation_transport::FederationTransport>,
+        signing_key,
+        identity,
+        key_version: 1,
+    }
+}
+
+/// `propose_share` with a non-existent record ID must return a well-formed
+/// error `CallToolResult` — never panic and never return an empty content
+/// slice.
+#[tokio::test]
+async fn dispatch_propose_share_with_state_returns_typed_response() {
+    let state = make_federation_state().await;
+
+    // Minimal valid-shaped args. The ULID exists syntactically but there are
+    // no records in the store, so the verb must fail with an error result.
+    let args = serde_json::json!({
+        "record_ids": ["01HQZX9F5N0000000000000000"],
+        "scope": { "agent": "agt:test" },
+        "grant_tier": "team",
+        "expires_at": "2027-01-01T00:00:00Z"
+    });
+
+    let result = cairn_mcp::federation_tools::dispatch(
+        "propose_share",
+        Some(args.as_object().expect("args is object").clone()),
+        Some(&state),
+    )
+    .await;
+
+    // The verb must produce an error result (no records found), never panic.
+    assert!(
+        result.is_error.unwrap_or(false),
+        "propose_share with nonexistent records should be an error"
+    );
+    assert!(
+        !result.content.is_empty(),
+        "error response must carry at least one content item"
+    );
+}
+
+/// `revoke_share` with an unknown link ID must return a well-formed error
+/// `CallToolResult` — never panic and never return an empty content slice.
+#[tokio::test]
+async fn dispatch_revoke_share_with_state_returns_typed_response() {
+    let state = make_federation_state().await;
+
+    let args = serde_json::json!({
+        "link_id": "01HQZX9F5N0000000000000000"
+    });
+
+    let result = cairn_mcp::federation_tools::dispatch(
+        "revoke_share",
+        Some(args.as_object().expect("args is object").clone()),
+        Some(&state),
+    )
+    .await;
+
+    // Must fail with UnknownLink or similar, never panic.
+    assert!(
+        result.is_error.unwrap_or(false),
+        "revoke_share with nonexistent link should be an error"
+    );
+    assert!(
+        !result.content.is_empty(),
+        "error response must carry at least one content item"
+    );
+}
+
 #[tokio::test]
 async fn federation_dispatch_returns_capability_unavailable_when_no_state() {
-    use rmcp::model::Content;
-
     let result = cairn_mcp::federation_tools::dispatch("propose_share", None, None).await;
     assert!(result.is_error.unwrap_or(false));
     let text = result

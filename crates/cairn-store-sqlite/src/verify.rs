@@ -308,6 +308,10 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     // 0067_projection_ledger (issue #105): authoritative sidecar rebuild ledger.
     ("table", "projection_ledger"),
     ("index", "projection_ledger_state_idx"),
+    // 0069_federation_consent_indexes (issue #123): composite lookup indexes
+    // for the four ConsentLookup queries added in T12.
+    ("index", "consent_journal_federation_kind_subject_idx"),
+    ("index", "workflow_jobs_dedupe_key_idx"),
 ];
 
 /// Identity registry objects share `cairn.db` but are owned by
