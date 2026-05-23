@@ -1,0 +1,15 @@
+---
+source: crates/cairn-core/src/verbs/lint/checks/federation.rs
+expression: findings
+---
+[
+  {
+    "kind": "federation_dead_propagation",
+    "message": "federation propagation job 01JFEDPROP00000SNAPSHOT (federation.propagate.share) failed after 3 attempt(s): remote hub returned 503 Service Unavailable",
+    "severity": "error",
+    "suggested_fix": "inspect the remote hub logs for the matching operation_id; re-enqueue via `cairn federation retry` once the root cause is resolved",
+    "target": {
+      "operation_id": "01JFEDPROP00000SNAPSHOT"
+    }
+  }
+]

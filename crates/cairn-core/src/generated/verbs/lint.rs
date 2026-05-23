@@ -31,6 +31,7 @@ pub enum Kind {
     Contradiction,
     DataGap,
     DeferredCheck,
+    FederationDeadPropagation,
     AmbiguousEdge,
     HotMemoryOverBudget,
     IndexDrift,
