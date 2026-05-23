@@ -16,6 +16,6 @@ pub mod payload;
 pub use handler::PropagationHandler;
 pub use payload::{
     ManifestEntry, OUTBOUND_REVOKE_KIND, OUTBOUND_SHARE_KIND, OutboundRevokePayload,
-    OutboundSharePayload, outbound_revoke_to_bytes, outbound_share_to_bytes,
-    parse_outbound_revoke, parse_outbound_share,
+    OutboundSharePayload, outbound_revoke_to_bytes, outbound_share_to_bytes, parse_outbound_revoke,
+    parse_outbound_share,
 };

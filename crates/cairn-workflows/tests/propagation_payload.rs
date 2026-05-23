@@ -9,7 +9,7 @@
 //!   write (using `revoke_envelope.json` as a real fixture).
 
 use cairn_workflows::propagation::payload::{
-    ManifestEntry, OutboundSharePayload, OUTBOUND_REVOKE_KIND, OUTBOUND_SHARE_KIND,
+    ManifestEntry, OUTBOUND_REVOKE_KIND, OUTBOUND_SHARE_KIND, OutboundSharePayload,
     parse_outbound_revoke, parse_outbound_share,
 };
 

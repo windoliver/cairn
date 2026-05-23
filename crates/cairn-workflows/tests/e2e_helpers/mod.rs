@@ -240,7 +240,9 @@ impl FederationOutbox for InMemoryOutbox {
         // (now an OutboundSharePayload wrapping link + manifest) and
         // stash a StoredShareLink keyed by link_id so the issuer-side
         // revoke_share verb can find the original grant.
-        if let Ok(osp) = serde_json::from_slice::<cairn_workflows::propagation::payload::OutboundSharePayload>(&job.payload)
+        if let Ok(osp) = serde_json::from_slice::<
+            cairn_workflows::propagation::payload::OutboundSharePayload,
+        >(&job.payload)
         {
             let link = osp.link;
             let mut proj = self.projection.lock().expect("projection mutex poisoned");

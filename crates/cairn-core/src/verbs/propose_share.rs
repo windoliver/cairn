@@ -473,10 +473,7 @@ fn build_propagation_job(
             tags: r.tags.clone(),
         })
         .collect();
-    let wire = OutboundSharePayloadWire {
-        link,
-        manifest,
-    };
+    let wire = OutboundSharePayloadWire { link, manifest };
     let payload = serde_json::to_vec(&wire).map_err(|_| FederationError::InvalidShape)?;
     let job_id = JobId::new(format!("job-{operation_id}"));
     let kind = JobKind::new(PROPAGATION_OUTBOUND_KIND);

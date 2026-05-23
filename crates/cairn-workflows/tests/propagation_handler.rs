@@ -22,7 +22,7 @@ use cairn_core::domain::federation::{
 use cairn_test_fixtures::federation::{LoopbackTransport, ProgrammedOutcome};
 use cairn_workflows::propagation::handler::PropagationHandler;
 use cairn_workflows::propagation::payload::{
-    ManifestEntry, OutboundSharePayload, OUTBOUND_REVOKE_KIND, OUTBOUND_SHARE_KIND,
+    ManifestEntry, OUTBOUND_REVOKE_KIND, OUTBOUND_SHARE_KIND, OutboundSharePayload,
 };
 use cairn_workflows::scheduler::handler::{HandlerOutcome, JobHandler};
 
