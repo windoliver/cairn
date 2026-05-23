@@ -634,6 +634,72 @@ fn federation_capability_omitted_when_unwired() {
 }
 
 #[test]
+fn federation_extension_ready_tracks_named_constants() {
+    // T19: pin the structural relationship — `federation_extension_ready()`
+    // is the conjunction of exactly the five named constants. A future
+    // refactor that adds or drops a gate without re-evaluating the AND
+    // chain trips this assertion. The constants are all `false` today so
+    // the conjunction collapses to `false`; the predicate below mirrors
+    // the readiness fn's body so the relationship is verified explicitly
+    // rather than implicitly via the off-by-default test alone.
+    use crate::status::wiring::{
+        FEDERATION_ACCEPT_DISPATCH_WIRED, FEDERATION_EXTENSION_WIRED, FEDERATION_MCP_TOOLS_WIRED,
+        FEDERATION_PROPOSE_DISPATCH_WIRED, FEDERATION_WORKFLOW_WIRED, federation_extension_ready,
+    };
+    let expected = FEDERATION_EXTENSION_WIRED
+        && FEDERATION_PROPOSE_DISPATCH_WIRED
+        && FEDERATION_ACCEPT_DISPATCH_WIRED
+        && FEDERATION_WORKFLOW_WIRED
+        && FEDERATION_MCP_TOOLS_WIRED;
+    assert_eq!(
+        federation_extension_ready(),
+        expected,
+        "federation_extension_ready() must be the AND of the five named constants",
+    );
+}
+
+#[test]
+fn federation_capability_advertise_arm_is_phase_v0_3_and_readiness() {
+    // T19: this test locks in the *shape* of the advertise() decision
+    // arm for the federation extension (status/mod.rs):
+    //
+    //     if phase >= Phase::V0_3 && wiring::federation_extension_ready() {
+    //         out.push(Capabilities::CairnMcpV1ExtensionFederation);
+    //     }
+    //
+    // We can't `const`-mutate `federation_extension_ready()` from the
+    // test, so the predicate is verified indirectly: (1) at V0_3 with
+    // vault bound, the capability appears iff `federation_extension_ready()`
+    // returns true; (2) for any phase below V0_3, the capability never
+    // appears even if readiness flips. Combined with
+    // `federation_extension_ready_tracks_named_constants`, this proves
+    // the wiring chain is contiguous from named constant → readiness fn
+    // → advertise() decision arm.
+    for phase in [Phase::V0_1, Phase::V0_2] {
+        let mut g = gates(true, false, None);
+        g.contract_phase = phase;
+        let caps = advertise(&g);
+        assert!(
+            !caps.contains(&Capabilities::CairnMcpV1ExtensionFederation),
+            "federation capability must never appear below v0.3 (phase {phase:?}); got {caps:?}",
+        );
+    }
+    // At V0_3, advertisement mirrors `federation_extension_ready()`.
+    // The readiness fn is `false` today; if a future PR flips it without
+    // updating `advertise()`, this assertion catches the drift.
+    let mut g = gates(true, false, None);
+    g.contract_phase = Phase::V0_3;
+    let caps = advertise(&g);
+    assert_eq!(
+        caps.contains(&Capabilities::CairnMcpV1ExtensionFederation),
+        crate::status::wiring::federation_extension_ready(),
+        "at v0.3 with vault bound, federation capability advertisement must equal \
+         federation_extension_ready(); divergence means the decision arm in advertise() \
+         has drifted from the readiness function",
+    );
+}
+
+#[test]
 fn extension_namespaces_follow_advertised_extension_capabilities() {
     let extensions = extension_namespaces(&[
         Capabilities::CairnMcpV1SearchKeyword,
