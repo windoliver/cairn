@@ -269,7 +269,9 @@ async fn propose_accept_revoke_ordering() {
         "revocable body",
     );
     let accepted = accept_share(
-        AcceptShareRequest { envelope: propose_env },
+        AcceptShareRequest {
+            envelope: propose_env,
+        },
         &receiver.accept_deps(),
     )
     .await
@@ -282,7 +284,9 @@ async fn propose_accept_revoke_ordering() {
 
     // Issuer now revokes → drain → receiver applies the revoke envelope.
     let _ = revoke_share(
-        RevokeShareRequest { link_id: propose.link.link_id.clone() },
+        RevokeShareRequest {
+            link_id: propose.link.link_id.clone(),
+        },
         &issuer.revoke_deps(),
     )
     .await
@@ -301,7 +305,9 @@ async fn propose_accept_revoke_ordering() {
         .nth(1)
         .expect("transport recorded the revoke send");
     let revoke_resp = accept_share(
-        AcceptShareRequest { envelope: revoke_env },
+        AcceptShareRequest {
+            envelope: revoke_env,
+        },
         &receiver.accept_deps(),
     )
     .await
@@ -371,7 +377,9 @@ async fn propose_revoke_accept_rejects_after_revocation() {
     // Drain + apply the revoke envelope so the receiver's projection
     // marks the link as revoked.
     let _ = revoke_share(
-        RevokeShareRequest { link_id: propose.link.link_id.clone() },
+        RevokeShareRequest {
+            link_id: propose.link.link_id.clone(),
+        },
         &issuer.revoke_deps(),
     )
     .await
@@ -389,7 +397,9 @@ async fn propose_revoke_accept_rejects_after_revocation() {
         .nth(1)
         .expect("transport recorded the revoke send");
     let _ = accept_share(
-        AcceptShareRequest { envelope: revoke_env },
+        AcceptShareRequest {
+            envelope: revoke_env,
+        },
         &receiver.accept_deps(),
     )
     .await
@@ -407,7 +417,9 @@ async fn propose_revoke_accept_rejects_after_revocation() {
         "to-be-revoked",
     );
     let err = accept_share(
-        AcceptShareRequest { envelope: propose_env },
+        AcceptShareRequest {
+            envelope: propose_env,
+        },
         &receiver.accept_deps(),
     )
     .await

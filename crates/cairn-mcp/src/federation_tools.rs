@@ -157,19 +157,17 @@ async fn dispatch_propose_share(
     };
 
     match cairn_core::verbs::propose_share::propose_share(request, &deps).await {
-        Ok(response) => {
-            match crate::federation_conv::propose_share_data_from_response(response) {
-                Ok(data) => {
-                    let response = crate::verb_envelope::committed(
-                        ResponseVerb::ProposeShare,
-                        ResponseData::ProposeShare(data),
-                        Vec::new(),
-                    );
-                    crate::verb_envelope::call_result_from_response(&response)
-                }
-                Err(e) => federation_error_result(ResponseVerb::ProposeShare, &e, ""),
+        Ok(response) => match crate::federation_conv::propose_share_data_from_response(response) {
+            Ok(data) => {
+                let response = crate::verb_envelope::committed(
+                    ResponseVerb::ProposeShare,
+                    ResponseData::ProposeShare(data),
+                    Vec::new(),
+                );
+                crate::verb_envelope::call_result_from_response(&response)
             }
-        }
+            Err(e) => federation_error_result(ResponseVerb::ProposeShare, &e, ""),
+        },
         Err(e) => federation_error_result(
             ResponseVerb::ProposeShare,
             &e,
@@ -223,11 +221,9 @@ async fn dispatch_accept_share(
             );
             crate::verb_envelope::call_result_from_response(&response)
         }
-        Err(e) => federation_error_result(
-            ResponseVerb::AcceptShare,
-            &e,
-            &format!("accept_share: {e}"),
-        ),
+        Err(e) => {
+            federation_error_result(ResponseVerb::AcceptShare, &e, &format!("accept_share: {e}"))
+        }
     }
 }
 
@@ -270,11 +266,9 @@ async fn dispatch_revoke_share(
             );
             crate::verb_envelope::call_result_from_response(&response)
         }
-        Err(e) => federation_error_result(
-            ResponseVerb::RevokeShare,
-            &e,
-            &format!("revoke_share: {e}"),
-        ),
+        Err(e) => {
+            federation_error_result(ResponseVerb::RevokeShare, &e, &format!("revoke_share: {e}"))
+        }
     }
 }
 

@@ -121,10 +121,7 @@ mod tests {
     #[test]
     fn two_failed_jobs_emit_two_findings() {
         let reader = MockWorkflowJobsReader::default()
-            .with_failed_federation_job(sample_job(
-                "federation.propagate.share",
-                "err-1",
-            ))
+            .with_failed_federation_job(sample_job("federation.propagate.share", "err-1"))
             .with_failed_federation_job(FailedFederationJob {
                 job_id: JobId::new("01JFEDPROPFAILED0000002"),
                 kind: crate::contract::job_store::JobKind::new("federation.propagate.revoke"),
@@ -142,15 +139,14 @@ mod tests {
         // A failed `dream.light` job must NOT produce a
         // `FederationDeadPropagation` finding — only jobs whose kind
         // starts with `"federation.propagate."` are in scope.
-        let reader = MockWorkflowJobsReader::default().with_failed_federation_job(
-            FailedFederationJob {
+        let reader =
+            MockWorkflowJobsReader::default().with_failed_federation_job(FailedFederationJob {
                 job_id: JobId::new("01JOTHERJOB00000000001"),
                 kind: crate::contract::job_store::JobKind::new("dream.light"),
                 attempts: 5,
                 last_error: "out of memory".to_owned(),
                 failed_at_ms: None,
-            },
-        );
+            });
         let inputs = empty_lint_inputs_with_reader(&reader, 1_000_000);
         let findings = run(&inputs);
         // The mock `failed_federation_jobs` impl filters by prefix; the

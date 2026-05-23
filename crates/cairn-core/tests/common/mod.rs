@@ -534,12 +534,11 @@ impl TestCtx {
             .expect("invariant: propose_share happy path must succeed in mint_propose_share");
         // Mirror the propose row into the consent-lookup projection so
         // `revoke_share::find_share_link` resolves it back.
-        self.consent_lookup
-            .record_share_link(StoredShareLink {
-                link_id: resp.link.link_id.clone(),
-                payload: resp.link.payload.clone(),
-                peer: Some(self.peer_endpoint().0.clone()),
-            });
+        self.consent_lookup.record_share_link(StoredShareLink {
+            link_id: resp.link.link_id.clone(),
+            payload: resp.link.payload.clone(),
+            peer: Some(self.peer_endpoint().0.clone()),
+        });
         ProposeOutcome {
             link: resp.link,
             operation_id: resp.operation_id,

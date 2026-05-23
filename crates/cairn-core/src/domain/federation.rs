@@ -20,10 +20,10 @@ pub use crate::generated::common::{
 use crate::domain::sharing::{ShareLinkPayload, SignedShareLink};
 use crate::domain::{DomainError, Ed25519Signature, Identity, MemoryVisibility, Rfc3339Timestamp};
 use crate::generated::common::{
-    Ed25519Signature as WireEd25519Signature, Identity as WireIdentity,
-    Nonce16Base64 as WireNonce, ScopeTuple as WireScopeTuple,
-    ShareLinkPayload as WireShareLinkPayload, ShareLinkPayloadGrantTier as WireGrantTier,
-    SignedShareLink as WireSignedShareLink, Ulid as WireUlid,
+    Ed25519Signature as WireEd25519Signature, Identity as WireIdentity, Nonce16Base64 as WireNonce,
+    ScopeTuple as WireScopeTuple, ShareLinkPayload as WireShareLinkPayload,
+    ShareLinkPayloadGrantTier as WireGrantTier, SignedShareLink as WireSignedShareLink,
+    Ulid as WireUlid,
 };
 
 /// Pluggable peer address. The `FederationTransport` interprets this;
@@ -201,7 +201,10 @@ pub fn signed_share_link_to_wire(
     let wire_payload = WireShareLinkPayload {
         expires_at: payload.expires_at.as_str().to_owned(),
         grant_tier: grant_tier_from_domain(payload.grant_tier)?,
-        grantee: payload.grantee.as_ref().map(|g| WireIdentity(g.as_str().to_owned())),
+        grantee: payload
+            .grantee
+            .as_ref()
+            .map(|g| WireIdentity(g.as_str().to_owned())),
         issued_at: payload.issued_at.as_str().to_owned(),
         issuer: WireIdentity(payload.issuer.as_str().to_owned()),
         key_version: i64::from(payload.key_version),

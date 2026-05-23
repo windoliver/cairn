@@ -95,10 +95,7 @@ async fn record_share_grant_is_atomic() {
     let event = federation_grant_event("cg-1", LINK_ULID);
     let job = sample_enqueue_request("job-grant-1", Some("dedupe-grant-1"));
 
-    store
-        .record_share_grant(&event, job)
-        .await
-        .expect("grant");
+    store.record_share_grant(&event, job).await.expect("grant");
 
     // Both consent row and job row exist.
     let conn = store.read_conn().expect("conn");

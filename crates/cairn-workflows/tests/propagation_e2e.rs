@@ -279,7 +279,10 @@ async fn revoke_propagates_and_tombstones_receiver_projection() {
         Arc::clone(&transport) as Arc<dyn FederationTransport>,
         loopback_peer(),
     );
-    assert_eq!(share_handler.handle(&share_payload).await, HandlerOutcome::Done);
+    assert_eq!(
+        share_handler.handle(&share_payload).await,
+        HandlerOutcome::Done
+    );
 
     let (propose_env, _) = transport
         .sent()

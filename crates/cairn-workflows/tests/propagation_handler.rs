@@ -123,7 +123,10 @@ async fn outbound_revoke_ack_yields_done() {
     let (env, _addr) = &sent[0];
     assert_eq!(env.kind, FederationEnvelopeKind::Revoke);
     assert!(env.link.is_none());
-    assert!(env.revocation.is_some(), "revoke envelope must carry revocation");
+    assert!(
+        env.revocation.is_some(),
+        "revoke envelope must carry revocation"
+    );
     assert_eq!(env.issuer_key_id.0, "hmn:alice");
 }
 

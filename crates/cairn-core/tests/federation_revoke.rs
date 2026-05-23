@@ -3,9 +3,7 @@
 use cairn_core::contract::consent_lookup::StoredRevocation;
 use cairn_core::domain::consent::ConsentKind;
 use cairn_core::error::federation::FederationError;
-use cairn_core::verbs::revoke_share::{
-    REVOKE_OUTBOUND_KIND, RevokeShareRequest, revoke_share,
-};
+use cairn_core::verbs::revoke_share::{REVOKE_OUTBOUND_KIND, RevokeShareRequest, revoke_share};
 
 mod common;
 use common::TestCtx;

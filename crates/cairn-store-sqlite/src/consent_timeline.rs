@@ -264,10 +264,7 @@ impl ConsentLookup for SqliteMemoryStore {
                       LIMIT 1",
                 )?;
                 stmt.query_row(params![subject], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, Vec<u8>>(1)?,
-                    ))
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
                 })
                 .optional()?
             };
@@ -329,10 +326,7 @@ impl ConsentLookup for SqliteMemoryStore {
                       LIMIT 1",
                 )?;
                 stmt.query_row(params![subject], |row| {
-                    Ok((
-                        row.get::<_, Option<String>>(0)?,
-                        row.get::<_, Vec<u8>>(1)?,
-                    ))
+                    Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Vec<u8>>(1)?))
                 })
                 .optional()?
             };
@@ -583,7 +577,10 @@ mod tests {
             .await
             .expect("lookup must not error on empty store");
 
-        assert!(result.is_none(), "expected None before any event is written");
+        assert!(
+            result.is_none(),
+            "expected None before any event is written"
+        );
     }
 
     #[tokio::test]
@@ -593,16 +590,14 @@ mod tests {
         let lk_id = link_id(OP_11);
         let actor = "hmn:alice";
         let applied = vec![
-            "sha256:aabbccdd00000000000000000000000000000000000000000000000000000011"
-                .to_owned(),
+            "sha256:aabbccdd00000000000000000000000000000000000000000000000000000011".to_owned(),
         ];
 
         let conn = store
             .require_conn("test.seed")
             .expect("invariant: connected store")
             .clone();
-        let event =
-            federation_accept_event("cid-accept-11", actor, &lk_id, OP_11, applied.clone());
+        let event = federation_accept_event("cid-accept-11", actor, &lk_id, OP_11, applied.clone());
         conn.call(move |c| {
             crate::consent::append(c, &event)
                 .map_err(|e| tokio_rusqlite::Error::Other(e.into()))?;
@@ -705,8 +700,7 @@ mod tests {
             .require_conn("test.seed")
             .expect("invariant: connected store")
             .clone();
-        let grant_event =
-            federation_grant_event("cid-grant-13", actor, &lk_id, OP_13, peer_code);
+        let grant_event = federation_grant_event("cid-grant-13", actor, &lk_id, OP_13, peer_code);
         let job_payload_clone = job_payload.clone();
         conn.call(move |c| {
             crate::consent::append(c, &grant_event)
@@ -761,8 +755,7 @@ mod tests {
             revoked_at: "2026-05-21T12:05:00Z".to_owned(),
             signature: WireEd25519Signature(format!("ed25519:{}", "0".repeat(128))),
         };
-        let job_payload =
-            serde_json::to_vec(&revocation).expect("invariant: serialize revocation");
+        let job_payload = serde_json::to_vec(&revocation).expect("invariant: serialize revocation");
 
         let conn = store
             .require_conn("test.seed")

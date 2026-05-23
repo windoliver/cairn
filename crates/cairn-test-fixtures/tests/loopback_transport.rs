@@ -25,8 +25,14 @@ async fn returns_programmed_outcomes_in_order() {
     let env = envelope();
     let peer = PeerEndpoint("loopback".into());
 
-    assert!(matches!(t.send(&env, &peer).await, SendOutcome::Transient(_)));
-    assert!(matches!(t.send(&env, &peer).await, SendOutcome::Transient(_)));
+    assert!(matches!(
+        t.send(&env, &peer).await,
+        SendOutcome::Transient(_)
+    ));
+    assert!(matches!(
+        t.send(&env, &peer).await,
+        SendOutcome::Transient(_)
+    ));
     assert_eq!(t.send(&env, &peer).await, SendOutcome::Ack);
     assert_eq!(t.remaining(), 0);
 }

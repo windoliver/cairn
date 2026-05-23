@@ -124,8 +124,7 @@ fn federation_tool_names_snapshot() {
 async fn federation_dispatch_returns_capability_unavailable_when_no_state() {
     use rmcp::model::Content;
 
-    let result =
-        cairn_mcp::federation_tools::dispatch("propose_share", None, None).await;
+    let result = cairn_mcp::federation_tools::dispatch("propose_share", None, None).await;
     assert!(result.is_error.unwrap_or(false));
     let text = result
         .content

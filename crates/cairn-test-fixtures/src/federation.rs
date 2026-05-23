@@ -56,7 +56,11 @@ impl LoopbackTransport {
     // Mutex poisoning is a programmer error — `expect` is correct here.
     #[allow(clippy::expect_used)]
     pub fn sent(&self) -> Vec<(FederationEnvelope, PeerEndpoint)> {
-        self.inner.lock().expect("loopback lock poisoned").sent.clone()
+        self.inner
+            .lock()
+            .expect("loopback lock poisoned")
+            .sent
+            .clone()
     }
 
     /// Programmed outcomes still queued (not yet consumed by `send`).
@@ -64,7 +68,11 @@ impl LoopbackTransport {
     // Mutex poisoning is a programmer error — `expect` is correct here.
     #[allow(clippy::expect_used)]
     pub fn remaining(&self) -> usize {
-        self.inner.lock().expect("loopback lock poisoned").queued.len()
+        self.inner
+            .lock()
+            .expect("loopback lock poisoned")
+            .queued
+            .len()
     }
 }
 

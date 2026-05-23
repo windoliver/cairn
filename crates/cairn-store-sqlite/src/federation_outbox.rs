@@ -78,12 +78,11 @@ impl FederationOutbox for SqliteMemoryStore {
         self.with_tx(move |tx| {
             tx.append_consent_event(&event)?;
             for id_str in &tombstone_ids {
-                let id =
-                    cairn_core::domain::RecordId::parse(id_str.clone()).map_err(|err| {
-                        crate::error::StoreError::Invariant {
-                            what: format!("invalid record id in tombstone_ids: {err}"),
-                        }
-                    })?;
+                let id = cairn_core::domain::RecordId::parse(id_str.clone()).map_err(|err| {
+                    crate::error::StoreError::Invariant {
+                        what: format!("invalid record id in tombstone_ids: {err}"),
+                    }
+                })?;
                 tx.tombstone(&id, TombstoneReason::FederationRevoke)?;
             }
             Ok(())

@@ -533,8 +533,7 @@ impl CairnMcpHandler {
                 && self.config.expiration.enabled,
             evaluation_runtime_ready: self.evaluation_runtime_ready
                 && self.config.evaluation.enabled,
-            federation_runtime_ready: self.federation_runtime_ready
-                && self.federation.is_some(),
+            federation_runtime_ready: self.federation_runtime_ready && self.federation.is_some(),
             contract_phase: cairn_core::status::Phase::V0_1,
         };
 

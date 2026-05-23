@@ -26,11 +26,10 @@ fn outbound_share_payload_roundtrips() {
     // the domain type `domain::sharing::SignedShareLink`). The two types have
     // compatible JSON schemas so the round-trip exercises the real parse path
     // that T13 will use.
-    let envelope: cairn_core::domain::federation::FederationEnvelope =
-        serde_json::from_str(include_str!(
-            "../../cairn-core/tests/fixtures/federation/propose_envelope.json"
-        ))
-        .expect("parse propose_envelope.json");
+    let envelope: cairn_core::domain::federation::FederationEnvelope = serde_json::from_str(
+        include_str!("../../cairn-core/tests/fixtures/federation/propose_envelope.json"),
+    )
+    .expect("parse propose_envelope.json");
 
     let wire_link = envelope.link.expect("propose envelope must have a link");
 
@@ -50,11 +49,10 @@ fn outbound_revoke_payload_roundtrips() {
     // The fixture is a FederationEnvelope. The `revocation` field holds a
     // `generated::common::SignedRevocation` which is the same type the
     // `domain::federation::SignedRevocation` re-exports.
-    let envelope: cairn_core::domain::federation::FederationEnvelope =
-        serde_json::from_str(include_str!(
-            "../../cairn-core/tests/fixtures/federation/revoke_envelope.json"
-        ))
-        .expect("parse revoke_envelope.json");
+    let envelope: cairn_core::domain::federation::FederationEnvelope = serde_json::from_str(
+        include_str!("../../cairn-core/tests/fixtures/federation/revoke_envelope.json"),
+    )
+    .expect("parse revoke_envelope.json");
 
     let revocation = envelope
         .revocation

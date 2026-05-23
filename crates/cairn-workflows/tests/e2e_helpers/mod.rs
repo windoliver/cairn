@@ -242,10 +242,7 @@ impl FederationOutbox for InMemoryOutbox {
         // StoredShareLink keyed by link_id so the issuer-side
         // revoke_share verb can find the original grant.
         if let Ok(link) = serde_json::from_slice::<SignedShareLink>(&job.payload) {
-            let mut proj = self
-                .projection
-                .lock()
-                .expect("projection mutex poisoned");
+            let mut proj = self.projection.lock().expect("projection mutex poisoned");
             proj.share_links.insert(
                 link.link_id.clone(),
                 StoredShareLink {
@@ -281,9 +278,7 @@ impl FederationOutbox for InMemoryOutbox {
         // Track tombstoned record IDs so `try_fetch` can filter them
         // out after a revoke.
         let mut guard = self.inner.lock().expect("outbox mutex poisoned");
-        guard
-            .tombstoned_ids
-            .extend(tombstone_ids.iter().cloned());
+        guard.tombstoned_ids.extend(tombstone_ids.iter().cloned());
         drop(guard);
         let mut proj = self.projection.lock().expect("projection mutex poisoned");
         // Mark the link as revoked from the receiver's point of view
@@ -319,10 +314,7 @@ impl FederationOutbox for InMemoryOutbox {
         if let Ok(revocation) =
             serde_json::from_slice::<cairn_core::domain::federation::SignedRevocation>(&job.payload)
         {
-            let mut proj = self
-                .projection
-                .lock()
-                .expect("projection mutex poisoned");
+            let mut proj = self.projection.lock().expect("projection mutex poisoned");
             let operation_id = event.op_id.clone().unwrap_or_default();
             proj.revocations.insert(
                 revocation.link_id.clone(),
@@ -416,10 +408,7 @@ impl ConsentLookup for InMemoryConsentLookup {
     }
 
     async fn is_link_revoked(&self, link_id: &str) -> Result<bool, ConsentLookupError> {
-        let proj = self
-            .projection
-            .lock()
-            .expect("projection mutex poisoned");
+        let proj = self.projection.lock().expect("projection mutex poisoned");
         // The `ConsentPayload::FederationRevoke.link_id` field stores the
         // inner operation-id ULID (i.e. without the `"share-"` prefix),
         // because `accept_share::build_revoke_event` strips it via
@@ -439,10 +428,7 @@ impl ConsentLookup for InMemoryConsentLookup {
         &self,
         link_id: &str,
     ) -> Result<Option<StoredShareLink>, ConsentLookupError> {
-        let proj = self
-            .projection
-            .lock()
-            .expect("projection mutex poisoned");
+        let proj = self.projection.lock().expect("projection mutex poisoned");
         Ok(proj.share_links.get(link_id).cloned())
     }
 
@@ -450,10 +436,7 @@ impl ConsentLookup for InMemoryConsentLookup {
         &self,
         link_id: &str,
     ) -> Result<Option<StoredRevocation>, ConsentLookupError> {
-        let proj = self
-            .projection
-            .lock()
-            .expect("projection mutex poisoned");
+        let proj = self.projection.lock().expect("projection mutex poisoned");
         // The verb keys revocations by the *outer* `share-…` link id
         // (the same value `find_share_link` accepts), but T9 stores
         // them under the inner ULID operation id (the wire

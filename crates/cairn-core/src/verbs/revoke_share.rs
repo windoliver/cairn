@@ -190,12 +190,7 @@ pub async fn revoke_share(
     //    same operation_id + dedupe_key so the journal and queue tables
     //    stay in lockstep, and a second call collapses to the same
     //    dedup hit.
-    let consent_event = build_consent_event(
-        &stored,
-        &revocation,
-        &operation_id,
-        &revoked_at,
-    )?;
+    let consent_event = build_consent_event(&stored, &revocation, &operation_id, &revoked_at)?;
     let job = build_revoke_job(&req.link_id, &revocation, &stored, &operation_id)?;
 
     // 8. Atomic write. The outbox guarantees both rows land together —
