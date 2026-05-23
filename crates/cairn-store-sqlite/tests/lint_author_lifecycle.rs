@@ -43,10 +43,13 @@ use cairn_core::domain::identity::receipts::{ReceiptOpKind, ReceiptPayload, Revo
 use cairn_core::domain::identity::records::{
     IdentityKeyEntry, ProvisioningState, PublicIdentityRecord, ReceiptId,
 };
-use cairn_core::domain::{ChainRole, Identity, IdentityKind, MemoryRecord, RecordId, TargetId};
+use cairn_core::domain::{
+    ChainRole, Identity, IdentityKind, MemoryRecord, RecordId, SourceId, TargetId,
+};
 use cairn_core::pipeline::lint::author_lifecycle::{
     AuthorLifecycle, AuthorLifecycleFinding, AuthorState, ChainStatus, check_author_lifecycle,
 };
+use cairn_core::verbs::lint::{LintRecord, SourceArtifact, SourceArtifactState};
 use cairn_store_sqlite::{SqliteIdentityRegistry, SqliteMemoryStore, open_in_memory};
 
 /// Open a store + registry pair that share no state. Production wires
@@ -503,14 +506,38 @@ async fn prefetch_author_states(
     map
 }
 
+fn source_artifacts_for_records(lint_records: &[LintRecord]) -> HashMap<SourceId, SourceArtifact> {
+    lint_records
+        .iter()
+        .flat_map(|record| {
+            record
+                .stored
+                .record
+                .provenance
+                .source_ids
+                .iter()
+                .cloned()
+                .map(move |source_id| {
+                    (
+                        source_id,
+                        SourceArtifact {
+                            path: "sources/test/sample.txt".to_owned(),
+                            state: SourceArtifactState::Present {
+                                sha256: record.stored.record.provenance.source_hash.clone(),
+                            },
+                        },
+                    )
+                })
+        })
+        .collect()
+}
+
 #[tokio::test]
 async fn run_checks_emits_broken_actor_chain_warning_for_revoked_author() {
     use cairn_core::config::CairnConfig;
     use cairn_core::contract::memory_store::IndexStats;
     use cairn_core::generated::verbs::lint::{Kind, Severity};
-    use cairn_core::verbs::lint::{
-        ConsentModel, LintInputs, LintRecord, SourceArtifact, SourceArtifactState, run_checks,
-    };
+    use cairn_core::verbs::lint::{ConsentModel, LintInputs, run_checks};
 
     let (store, registry, _dir) = setup().await;
 
@@ -535,29 +562,7 @@ async fn run_checks_emits_broken_actor_chain_warning_for_revoked_author() {
     let cfg = CairnConfig::default();
     let resolver = stub_resolver::EmptySourceResolver;
     let journal = stub_resolver::EmptyConsentJournal;
-    let source_artifacts: HashMap<_, _> = lint_records
-        .iter()
-        .flat_map(|record| {
-            record
-                .stored
-                .record
-                .provenance
-                .source_ids
-                .iter()
-                .cloned()
-                .map(move |source_id| {
-                    (
-                        source_id,
-                        SourceArtifact {
-                            path: "sources/test/sample.txt".to_owned(),
-                            state: SourceArtifactState::Present {
-                                sha256: record.stored.record.provenance.source_hash.clone(),
-                            },
-                        },
-                    )
-                })
-        })
-        .collect();
+    let source_artifacts = source_artifacts_for_records(&lint_records);
     let source_forgets = HashMap::new();
     let inputs = LintInputs {
         records: &lint_records,

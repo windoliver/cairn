@@ -569,6 +569,8 @@ fn exceeds_cost_per_accepted_candidate(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
 
     use crate::domain::{AgentWorkerGroupSummary, AgentWorkerKind};
@@ -590,7 +592,7 @@ mod tests {
             turns: 2,
             tool_calls: 3,
             cost_units,
-            failure_modes: Default::default(),
+            failure_modes: BTreeMap::default(),
             workers: if total == 0 {
                 Vec::new()
             } else {
@@ -630,7 +632,7 @@ mod tests {
             turns: total_runs,
             tool_calls: total_runs,
             cost_units: total_runs,
-            failure_modes: Default::default(),
+            failure_modes: BTreeMap::default(),
         }
     }
 

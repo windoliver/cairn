@@ -3802,6 +3802,56 @@ fn require_existing_vault(json: bool, vault_root: &Path, db_path: &Path) -> Opti
 mod tests {
     use super::*;
 
+    use cairn_core::contract::agent_provider::AgentBudgetConsumed;
+    use cairn_core::domain::{
+        AgentWorkerAuditRecord, AgentWorkerAuditSummary, AgentWorkerFailureMode, AgentWorkerKind,
+        AgentWorkerStatus, ScopeTuple,
+    };
+
+    fn trusted_agent_worker_audit_summary() -> AgentWorkerAuditSummary {
+        AgentWorkerAuditSummary::from_records(&[AgentWorkerAuditRecord {
+            operation_id: "op-trusted".to_owned(),
+            worker_kind: AgentWorkerKind::Dream,
+            worker_name: "agent_dream".to_owned(),
+            agent_identity: "agt:cairn-dream:v1".to_owned(),
+            scope: Some(ScopeTuple {
+                tenant: Some("tenant-a".to_owned()),
+                agent: Some("agt:cairn-dream:v1".to_owned()),
+                ..ScopeTuple::default()
+            }),
+            status: AgentWorkerStatus::Aborted,
+            generated_candidates: 2,
+            accepted_candidates: 1,
+            budget_consumed: AgentBudgetConsumed {
+                turns: 3,
+                tool_calls: 4,
+                cost_units: 99,
+            },
+            failure_mode: Some(AgentWorkerFailureMode::ProviderUnavailable),
+            canary_label: Some("canary-05".to_owned()),
+        }])
+    }
+
+    fn spoofed_agent_worker_audit_summary() -> AgentWorkerAuditSummary {
+        AgentWorkerAuditSummary::from_records(&[AgentWorkerAuditRecord {
+            operation_id: "op-spoofed".to_owned(),
+            worker_kind: AgentWorkerKind::Extractor,
+            worker_name: "spoofed_agent".to_owned(),
+            agent_identity: "agt:spoofed:v1".to_owned(),
+            scope: None,
+            status: AgentWorkerStatus::Completed,
+            generated_candidates: 100,
+            accepted_candidates: 100,
+            budget_consumed: AgentBudgetConsumed {
+                turns: 1,
+                tool_calls: 1,
+                cost_units: 10_000,
+            },
+            failure_mode: None,
+            canary_label: Some("spoofed-canary".to_owned()),
+        }])
+    }
+
     #[test]
     fn fix_markdown_result_counts_written_and_current() {
         // written=2 means 2 files were written/updated
@@ -3922,36 +3972,11 @@ mod tests {
     #[tokio::test]
     async fn lint_handler_projects_persisted_agent_worker_audit() {
         use cairn_core::config::CairnConfig;
-        use cairn_core::contract::agent_provider::AgentBudgetConsumed;
-        use cairn_core::domain::{
-            AgentWorkerAuditRecord, AgentWorkerAuditSummary, AgentWorkerFailureMode,
-            AgentWorkerKind, AgentWorkerStatus, ScopeTuple,
-        };
         use cairn_store_sqlite::SqliteIdentityRegistry;
         use cairn_test_fixtures::store::{FixtureStore, sample_record};
 
         let store = FixtureStore::default();
-        let audit_summary = AgentWorkerAuditSummary::from_records(&[AgentWorkerAuditRecord {
-            operation_id: "op-agent-1".to_owned(),
-            worker_kind: AgentWorkerKind::Dream,
-            worker_name: "agent_dream".to_owned(),
-            agent_identity: "agt:cairn-dream:v1".to_owned(),
-            scope: Some(ScopeTuple {
-                tenant: Some("tenant-a".to_owned()),
-                agent: Some("agt:cairn-dream:v1".to_owned()),
-                ..ScopeTuple::default()
-            }),
-            status: AgentWorkerStatus::Aborted,
-            generated_candidates: 2,
-            accepted_candidates: 1,
-            budget_consumed: AgentBudgetConsumed {
-                turns: 3,
-                tool_calls: 4,
-                cost_units: 99,
-            },
-            failure_mode: Some(AgentWorkerFailureMode::ProviderUnavailable),
-            canary_label: Some("canary-05".to_owned()),
-        }]);
+        let audit_summary = trusted_agent_worker_audit_summary();
         let mut record = sample_record();
         record.extra_frontmatter.insert(
             "evaluation".to_owned(),
@@ -3993,54 +4018,14 @@ mod tests {
     #[tokio::test]
     async fn lint_handler_ignores_untrusted_agent_worker_audit_frontmatter() {
         use cairn_core::config::CairnConfig;
-        use cairn_core::contract::agent_provider::AgentBudgetConsumed;
-        use cairn_core::domain::{
-            AgentWorkerAuditRecord, AgentWorkerAuditSummary, AgentWorkerFailureMode,
-            AgentWorkerKind, AgentWorkerStatus, Rfc3339Timestamp, ScopeTuple,
-        };
+        use cairn_core::domain::Rfc3339Timestamp;
         use cairn_store_sqlite::SqliteIdentityRegistry;
         use cairn_test_fixtures::sample_record as seeded_sample_record;
         use cairn_test_fixtures::store::{FixtureStore, sample_record};
 
         let store = FixtureStore::default();
-        let trusted_summary = AgentWorkerAuditSummary::from_records(&[AgentWorkerAuditRecord {
-            operation_id: "op-trusted".to_owned(),
-            worker_kind: AgentWorkerKind::Dream,
-            worker_name: "agent_dream".to_owned(),
-            agent_identity: "agt:cairn-dream:v1".to_owned(),
-            scope: Some(ScopeTuple {
-                tenant: Some("tenant-a".to_owned()),
-                agent: Some("agt:cairn-dream:v1".to_owned()),
-                ..ScopeTuple::default()
-            }),
-            status: AgentWorkerStatus::Aborted,
-            generated_candidates: 2,
-            accepted_candidates: 1,
-            budget_consumed: AgentBudgetConsumed {
-                turns: 3,
-                tool_calls: 4,
-                cost_units: 99,
-            },
-            failure_mode: Some(AgentWorkerFailureMode::ProviderUnavailable),
-            canary_label: Some("canary-05".to_owned()),
-        }]);
-        let spoofed_summary = AgentWorkerAuditSummary::from_records(&[AgentWorkerAuditRecord {
-            operation_id: "op-spoofed".to_owned(),
-            worker_kind: AgentWorkerKind::Extractor,
-            worker_name: "spoofed_agent".to_owned(),
-            agent_identity: "agt:spoofed:v1".to_owned(),
-            scope: None,
-            status: AgentWorkerStatus::Completed,
-            generated_candidates: 100,
-            accepted_candidates: 100,
-            budget_consumed: AgentBudgetConsumed {
-                turns: 1,
-                tool_calls: 1,
-                cost_units: 10_000,
-            },
-            failure_mode: None,
-            canary_label: Some("spoofed-canary".to_owned()),
-        }]);
+        let trusted_summary = trusted_agent_worker_audit_summary();
+        let spoofed_summary = spoofed_agent_worker_audit_summary();
 
         let mut trusted = sample_record();
         trusted.updated_at = Rfc3339Timestamp::parse("2026-05-23T10:00:00Z").expect("timestamp");
