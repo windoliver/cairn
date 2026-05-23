@@ -108,9 +108,7 @@ pub async fn dispatch(
         return capability_unavailable(name);
     };
 
-    let args_value = arguments
-        .map(serde_json::Value::Object)
-        .unwrap_or(serde_json::Value::Null);
+    let args_value = arguments.map_or(serde_json::Value::Null, serde_json::Value::Object);
 
     match name {
         "propose_share" => dispatch_propose_share(args_value, state).await,

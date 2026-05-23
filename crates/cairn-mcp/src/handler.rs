@@ -23,8 +23,6 @@ use rmcp::{
 };
 
 use cairn_core::config::CairnConfig;
-use cairn_core::contract::consent_lookup::ConsentLookup;
-use cairn_core::contract::federation_outbox::FederationOutbox;
 use cairn_core::contract::federation_transport::FederationTransport;
 use cairn_core::contract::memory_store::{ListArgs, MemoryStore};
 use cairn_core::domain::identity::Identity;
