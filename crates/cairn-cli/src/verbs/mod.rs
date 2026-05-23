@@ -33,6 +33,7 @@ pub mod screen;
 pub mod search;
 pub mod sensor;
 pub mod session;
+pub mod share;
 pub mod signed;
 pub mod status;
 pub mod summarize;
