@@ -62,7 +62,7 @@ pub enum AgentWorkerFailureMode {
 }
 
 impl AgentWorkerFailureMode {
-    /// Map an AgentProvider failure to the reportable audit category.
+    /// Map an `AgentProvider` failure to the reportable audit category.
     #[must_use]
     pub fn from_provider_error(error: &AgentProviderError) -> Self {
         match error {
@@ -113,7 +113,7 @@ pub struct AgentWorkerAuditRecord {
     pub generated_candidates: u64,
     /// Number of generated candidates accepted by the host pipeline.
     pub accepted_candidates: u64,
-    /// AgentProvider budget consumed by the run.
+    /// `AgentProvider` budget consumed by the run.
     pub budget_consumed: AgentBudgetConsumed,
     /// Compact failure mode when the worker failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -232,11 +232,7 @@ impl AgentWorkerAuditSummary {
                 .saturating_add(record.generated_candidates);
         }
 
-        let acceptance_rate = if generated_candidates == 0 {
-            None
-        } else {
-            Some(accepted_candidates as f64 / generated_candidates as f64)
-        };
+        let acceptance_rate = acceptance_rate(accepted_candidates, generated_candidates);
 
         Self {
             total_runs,
@@ -258,6 +254,17 @@ impl AgentWorkerAuditSummary {
     pub const fn is_empty(&self) -> bool {
         self.total_runs == 0
     }
+}
+
+fn acceptance_rate(accepted_candidates: u64, generated_candidates: u64) -> Option<f64> {
+    if generated_candidates == 0 {
+        return None;
+    }
+
+    // Operator-facing ratio; exact integer counts remain in the same summary.
+    #[allow(clippy::cast_precision_loss)]
+    let rate = accepted_candidates as f64 / generated_candidates as f64;
+    Some(rate)
 }
 
 #[cfg(test)]
@@ -388,5 +395,35 @@ mod tests {
             ),
             AgentWorkerFailureMode::MutatingVerbNotScoped
         );
+    }
+
+    #[test]
+    fn failure_modes_render_stable_snake_case_labels() {
+        let labels = [
+            (AgentWorkerFailureMode::BudgetExceeded, "budget_exceeded"),
+            (
+                AgentWorkerFailureMode::WallClockExceeded,
+                "wall_clock_exceeded",
+            ),
+            (AgentWorkerFailureMode::ToolNotAllowed, "tool_not_allowed"),
+            (
+                AgentWorkerFailureMode::MutatingVerbNotScoped,
+                "mutating_verb_not_scoped",
+            ),
+            (AgentWorkerFailureMode::InvalidOutput, "invalid_output"),
+            (
+                AgentWorkerFailureMode::ProviderUnavailable,
+                "provider_unavailable",
+            ),
+            (
+                AgentWorkerFailureMode::HostRejectedCandidates,
+                "host_rejected_candidates",
+            ),
+            (AgentWorkerFailureMode::Unknown, "unknown"),
+        ];
+
+        for (mode, label) in labels {
+            assert_eq!(mode.as_str(), label);
+        }
     }
 }
