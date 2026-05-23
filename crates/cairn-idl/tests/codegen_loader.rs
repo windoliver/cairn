@@ -43,11 +43,11 @@ fn write_json(path: &std::path::Path, value: &serde_json::Value) {
 #[test]
 fn loads_real_schema_root() {
     let doc: RawDocument = load(&schema_dir()).expect("real schema must load");
-    // Manifest pins eight verbs.
+    // Manifest pins eleven verbs (8 core + 3 federation).
     assert_eq!(
         doc.verbs.len(),
-        8,
-        "expected 8 verbs, got {}",
+        11,
+        "expected 11 verbs, got {}",
         doc.verbs.len()
     );
     // Two preludes (status, handshake).
