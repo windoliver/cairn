@@ -176,40 +176,51 @@ impl GateRunner for SkillContractRunner {
             );
         };
 
+        // Round 9 hardening: validate each required field is present at the
+        // top level AND has a non-empty value. Scalar fields (lane, uses,
+        // files_to) must be non-empty strings; triggers must be a non-empty
+        // list. Without these checks an empty `triggers:` or a key nested
+        // under another mapping could pass the gate.
         let mut missing = Vec::new();
-        for field in ["lane", "triggers", "uses", "files_to"] {
-            if !frontmatter_has_key(frontmatter, field) {
-                missing.push(field);
+        for field in ["lane", "uses", "files_to"] {
+            match top_level_scalar(frontmatter, field) {
+                Some(v) if !v.is_empty() => {}
+                _ => missing.push(field),
             }
         }
+        // Triggers must be present and non-empty (inline `[a, b]` or block
+        // list `- a\n  - b`).
+        if top_level_list(frontmatter, "triggers").is_none_or(|v| v.is_empty()) {
+            missing.push("triggers");
+        }
 
-        if missing.is_empty() {
-            // Cross-check that the frontmatter agrees with the authored
-            // fields the rest of the pipeline uses. A mismatch means the
-            // contract markdown doesn't describe the actual artifacts.
-            if let Some(lane_in_md) = frontmatter_scalar(frontmatter, "lane")
-                && lane_in_md != ctx.authored.lane
-            {
-                return GateRunResult::failed(
-                    self.artifact_kind(),
-                    format!(
-                        "skill contract lane `{lane_in_md}` does not match authored lane `{}`",
-                        ctx.authored.lane
-                    ),
-                    timer.elapsed_ms(),
-                );
-            }
-            GateRunResult::passed(self.artifact_kind(), timer.elapsed_ms())
-        } else {
-            GateRunResult::failed(
+        if !missing.is_empty() {
+            return GateRunResult::failed(
                 self.artifact_kind(),
                 format!(
-                    "skill contract frontmatter missing required fields: {}",
+                    "skill contract frontmatter missing or empty required fields: {}",
                     missing.join(", ")
                 ),
                 timer.elapsed_ms(),
-            )
+            );
         }
+
+        // Cross-check that the frontmatter agrees with the authored fields
+        // the rest of the pipeline uses. A mismatch means the contract
+        // markdown doesn't describe the actual artifacts.
+        if let Some(lane_in_md) = top_level_scalar(frontmatter, "lane")
+            && lane_in_md != ctx.authored.lane
+        {
+            return GateRunResult::failed(
+                self.artifact_kind(),
+                format!(
+                    "skill contract lane `{lane_in_md}` does not match authored lane `{}`",
+                    ctx.authored.lane
+                ),
+                timer.elapsed_ms(),
+            );
+        }
+        GateRunResult::passed(self.artifact_kind(), timer.elapsed_ms())
     }
 }
 
@@ -222,24 +233,75 @@ fn extract_frontmatter(body: &str) -> Option<&str> {
     Some(&rest[..end])
 }
 
-/// Returns true if the frontmatter declares `key:` at the start of any line.
-fn frontmatter_has_key(fm: &str, key: &str) -> bool {
-    let needle = format!("{key}:");
-    fm.lines().any(|l| l.trim_start().starts_with(&needle))
-}
-
-/// Returns the scalar value for `key:` if it's a simple inline value.
-fn frontmatter_scalar(fm: &str, key: &str) -> Option<String> {
+/// Returns the scalar value for a TOP-LEVEL `key:` (no leading indent), or
+/// `None` if absent, empty, list-shaped, or only present nested under
+/// another mapping. Stricter than the legacy substring check so a nested or
+/// commented-out key cannot satisfy the gate.
+fn top_level_scalar(fm: &str, key: &str) -> Option<String> {
     let needle = format!("{key}:");
     for line in fm.lines() {
-        let trimmed = line.trim_start();
-        if let Some(rest) = trimmed.strip_prefix(&needle) {
+        // Require zero leading whitespace — nested keys (under another
+        // mapping) are not top-level and don't count.
+        if line.starts_with(&needle) {
+            let rest = &line[needle.len()..];
             let value = rest.trim().trim_matches('"').trim_matches('\'');
-            if value.is_empty() || value.starts_with('[') {
+            if value.is_empty() || value.starts_with('[') || value.starts_with('{') {
                 return None;
             }
             return Some(value.to_owned());
         }
+    }
+    None
+}
+
+/// Returns the list value for a TOP-LEVEL `key:`, either inline
+/// (`triggers: ["a", "b"]`) or block-list. Returns `None` when the key is
+/// absent or non-list; an empty list returns `Some(vec![])`.
+fn top_level_list(fm: &str, key: &str) -> Option<Vec<String>> {
+    let needle = format!("{key}:");
+    let lines: Vec<&str> = fm.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        if !line.starts_with(&needle) {
+            i += 1;
+            continue;
+        }
+        let rest = &line[needle.len()..];
+        let inline = rest.trim();
+        if !inline.is_empty() {
+            // Inline list `[a, b]`.
+            if let Some(arr) = inline.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+                let mut out = Vec::new();
+                for item in arr.split(',') {
+                    let v = item.trim().trim_matches('"').trim_matches('\'');
+                    if !v.is_empty() {
+                        out.push(v.to_owned());
+                    }
+                }
+                return Some(out);
+            }
+            // Inline scalar or mapping — not a list.
+            return None;
+        }
+        // Block list: subsequent indented lines starting with `- `.
+        let mut out = Vec::new();
+        let mut j = i + 1;
+        while j < lines.len() {
+            let next = lines[j];
+            if let Some(item) = next.trim_start().strip_prefix("- ") {
+                let v = item.trim().trim_matches('"').trim_matches('\'');
+                if !v.is_empty() {
+                    out.push(v.to_owned());
+                }
+                j += 1;
+            } else if next.trim().is_empty() {
+                j += 1;
+            } else {
+                break;
+            }
+        }
+        return Some(out);
     }
     None
 }

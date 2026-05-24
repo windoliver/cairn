@@ -282,9 +282,70 @@ impl SkillPackBuilder {
         let manifest_json = serde_json::to_vec_pretty(&manifest)?;
         append_bytes(&mut tar, "manifest.json", &manifest_json, 0o644)?;
 
-        for cid in &self.candidate_ids {
+        // Round 9 hardening: archive ONLY files on a per-candidate
+        // allowlist (manifest.json, gate-report.json, every declared
+        // artifact). Previously `append_dir_recursive` packed the whole
+        // candidate directory, so a script that wrote scratch files into
+        // its bundle dir could leak them into shipped archives. Symlinks
+        // are rejected explicitly via symlink_metadata.
+        for (entry_idx, cid) in self.candidate_ids.iter().enumerate() {
             let cand_dir = vault_root.join(".cairn/evolution/skillify").join(cid);
-            append_dir_recursive(&mut tar, &cand_dir, &format!("skills/{cid}"))?;
+            let entry = &manifest.skills[entry_idx];
+
+            // Per-candidate allowlist mirrors the install-time strip set
+            // so what the packer ships is exactly what install will keep.
+            let mut allowed: std::collections::BTreeSet<std::path::PathBuf> =
+                std::collections::BTreeSet::new();
+            allowed.insert(std::path::PathBuf::from("manifest.json"));
+            allowed.insert(std::path::PathBuf::from("gate-report.json"));
+            // Each declared artifact path from the candidate's bundle.
+            let cand_manifest: SkillArtifactBundle =
+                serde_json::from_slice(&fs::read(cand_dir.join("manifest.json"))?)?;
+            for artifact in &cand_manifest.artifacts {
+                allowed.insert(std::path::PathBuf::from(&artifact.path));
+            }
+
+            // Reject symlinks anywhere in the candidate tree before we
+            // touch them. tar's append_file would dereference, and a
+            // symlink under bundle/scripts could exfiltrate sensitive
+            // content into the archive.
+            let mut walk: Vec<std::path::PathBuf> = vec![cand_dir.clone()];
+            while let Some(dir) = walk.pop() {
+                for entry_res in fs::read_dir(&dir)? {
+                    let dir_entry = entry_res?;
+                    let path = dir_entry.path();
+                    let meta = fs::symlink_metadata(&path)?;
+                    if meta.file_type().is_symlink() {
+                        return Err(SkillPackBuildError::Pack(
+                            SkillPackError::IntegrityFailure {
+                                expected: "no symlinks in candidate tree".to_owned(),
+                                actual: format!("symlink at {}", path.display()),
+                            },
+                        ));
+                    }
+                    if path.is_dir() {
+                        walk.push(path);
+                    }
+                }
+            }
+
+            // Append only allowlisted files. Use rel-path lookups so the
+            // archive tree mirrors the candidate dir under skills/<cid>/.
+            for allowed_rel in &allowed {
+                let src_path = cand_dir.join(allowed_rel);
+                if !src_path.is_file() {
+                    // gate-report.json is always present (materialize_bundle
+                    // wrote it); other allowlist entries must exist too if
+                    // gates passed. Skip silently if absent so empty
+                    // optional metadata doesn't break the archive.
+                    continue;
+                }
+                let data = fs::read(&src_path)?;
+                let mode = file_mode(&src_path);
+                let archive_path =
+                    format!("skills/{}/{}", entry.candidate_id, allowed_rel.display());
+                append_bytes(&mut tar, &archive_path, &data, mode)?;
+            }
         }
 
         let enc = tar.into_inner()?;
@@ -678,19 +739,6 @@ fn rollback_install(log: &[SwapAction]) {
     }
 }
 
-/// Restore destination directories from their backup names after a failed
-/// swap. Retained for compatibility; new code uses [`rollback_install`].
-#[allow(dead_code)]
-fn rollback_swaps(backups: &[(std::path::PathBuf, std::path::PathBuf)]) {
-    for (dst, backup) in backups.iter().rev() {
-        // If dst now contains the (broken) new content, remove it first.
-        if dst.exists() {
-            let _ = fs::remove_dir_all(dst);
-        }
-        let _ = fs::rename(backup, dst);
-    }
-}
-
 /// Resource limits for archive extraction. Without these, a malicious
 /// `.cairnpack` could fill the vault filesystem before any manifest
 /// validation runs.
@@ -958,26 +1006,8 @@ fn file_mode(path: &Path) -> u32 {
     0o644
 }
 
-fn append_dir_recursive<W: std::io::Write>(
-    tar: &mut tar::Builder<W>,
-    dir: &Path,
-    prefix: &str,
-) -> Result<(), std::io::Error> {
-    if !dir.exists() {
-        return Ok(());
-    }
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().to_string();
-        let archive_path = format!("{prefix}/{name}");
-        if path.is_dir() {
-            append_dir_recursive(tar, &path, &archive_path)?;
-        } else {
-            let data = fs::read(&path)?;
-            let mode = file_mode(&path);
-            append_bytes(tar, &archive_path, &data, mode)?;
-        }
-    }
-    Ok(())
-}
+// `append_dir_recursive` was replaced by the per-candidate allowlist loop
+// in `SkillPackBuilder::build`. The new loop only archives files we've
+// integrity-hashed (manifest.json, gate-report.json, each declared
+// artifact path) so scripts cannot leak side-channel files into shipped
+// packs. Removed at round 9.

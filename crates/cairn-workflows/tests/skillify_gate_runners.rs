@@ -935,3 +935,65 @@ async fn unit_test_runner_works_with_relative_candidate_dir() {
         result.message
     );
 }
+
+#[tokio::test]
+async fn skill_contract_fails_when_triggers_empty_list() {
+    let temp = TempDir::new().unwrap();
+    let mut a = authored("deploy-hotfix");
+    a.skill_markdown = "---\nname: x\nlane: deploy.hotfix\ntriggers: []\nuses: scripts/x.sh\nfiles_to: wiki/x/\n---\nBody.".to_owned();
+    let b = bundle("deploy-hotfix");
+    let ctx = GateRunContext {
+        vault_root: temp.path(),
+        candidate_id: "skc_test",
+        candidate_dir: temp.path().to_path_buf(),
+        bundle: &b,
+        authored: &a,
+        llm: None,
+        snapshot: &empty_snapshot(),
+    };
+    let result = SkillContractRunner.run(&ctx).await;
+    assert_eq!(result.status, SkillifyGateStatus::Failed);
+    assert!(result.message.unwrap().contains("triggers"));
+}
+
+#[tokio::test]
+async fn skill_contract_fails_when_lane_only_nested_not_top_level() {
+    let temp = TempDir::new().unwrap();
+    let mut a = authored("deploy-hotfix");
+    // Nested `lane:` under another mapping is NOT a top-level frontmatter key.
+    a.skill_markdown = "---\nname: x\nmeta:\n  lane: nested.deploy\ntriggers:\n  - x\nuses: scripts/x.sh\nfiles_to: wiki/x/\n---\nBody.".to_owned();
+    let b = bundle("deploy-hotfix");
+    let ctx = GateRunContext {
+        vault_root: temp.path(),
+        candidate_id: "skc_test",
+        candidate_dir: temp.path().to_path_buf(),
+        bundle: &b,
+        authored: &a,
+        llm: None,
+        snapshot: &empty_snapshot(),
+    };
+    let result = SkillContractRunner.run(&ctx).await;
+    assert_eq!(result.status, SkillifyGateStatus::Failed);
+    assert!(result.message.unwrap().contains("lane"));
+}
+
+#[tokio::test]
+async fn skill_contract_fails_when_lane_in_body_only() {
+    let temp = TempDir::new().unwrap();
+    let mut a = authored("deploy-hotfix");
+    // Body mentions `lane:` but frontmatter doesn't include it.
+    a.skill_markdown = "---\nname: x\ntriggers:\n  - x\nuses: scripts/x.sh\nfiles_to: wiki/x/\n---\nThis skill manages a `lane:` reference in body prose.".to_owned();
+    let b = bundle("deploy-hotfix");
+    let ctx = GateRunContext {
+        vault_root: temp.path(),
+        candidate_id: "skc_test",
+        candidate_dir: temp.path().to_path_buf(),
+        bundle: &b,
+        authored: &a,
+        llm: None,
+        snapshot: &empty_snapshot(),
+    };
+    let result = SkillContractRunner.run(&ctx).await;
+    assert_eq!(result.status, SkillifyGateStatus::Failed);
+    assert!(result.message.unwrap().contains("lane"));
+}
