@@ -249,6 +249,34 @@ impl ConnectorRegistry {
         Ok(())
     }
 
+    /// **Test-only.** Triggers one poll cycle without waiting for the
+    /// scheduler interval. Real production use happens via the scheduler
+    /// spawned by `enable`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConnectorError::Fatal`] if the connector name is not
+    /// registered, or if any event fails to pass validation / consent / emit.
+    #[cfg(any(test, feature = "fixture"))]
+    pub async fn poll_now(&self, name: &str) -> Result<(), ConnectorError> {
+        let entry = self
+            .entries
+            .get(name)
+            .ok_or_else(|| ConnectorError::fatal_msg(format!("unknown connector {name}")))?;
+
+        let cx = crate::connector::PollContext {
+            credentials: Arc::new(crate::credential::CredentialHandle::empty()),
+            last_cursor: None,
+            budget_remaining_items: u32::MAX,
+        };
+        let outcome = entry.connector.poll(&cx).await?;
+        for event in outcome.events {
+            process_event(event, &entry.connector, &entry.state, &self.consent, &self.emit)
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Cancel the poll scheduler and drain all running tasks.
     ///
     /// Consumes `self` so the registry cannot be reused after shutdown.

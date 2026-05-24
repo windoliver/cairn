@@ -13,9 +13,17 @@ description = "External-connector substrate: trait, OAuth/webhook payload contra
 workspace = true
 
 [features]
-default = []
-## Compile FixtureConnector for downstream test crates.
+default = ["fixture"]
+## Compile FixtureConnector and AcceptAllConsent for downstream test crates.
+## Promoted to a default feature so that integration tests in this crate
+## (and early downstream consumers) can access `cairn_connectors_core::fixture`
+## without `--features fixture` flag gymnastics. Downstream production binaries
+## that wish to strip the fixture code should set `default-features = false`.
 fixture = []
+
+[dev-dependencies]
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [dependencies]
 cairn-core = { workspace = true }
