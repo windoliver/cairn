@@ -333,13 +333,36 @@ impl SkillPackBuilder {
             // archive tree mirrors the candidate dir under skills/<cid>/.
             for allowed_rel in &allowed {
                 let src_path = cand_dir.join(allowed_rel);
-                if !src_path.is_file() {
-                    // gate-report.json is always present (materialize_bundle
-                    // wrote it); other allowlist entries must exist too if
-                    // gates passed. Skip silently if absent so empty
-                    // optional metadata doesn't break the archive.
+
+                // Round 10 hardening: re-check symlink_metadata right
+                // before the read. The earlier candidate-tree scan can be
+                // raced by a concurrent writer (or a backgrounded script
+                // descendant the timeout-kill missed) that swaps an
+                // allowlisted file to a symlink between scan and read.
+                // `fs::read` follows symlinks; `symlink_metadata` does
+                // not. If the metadata says symlink → fail loudly.
+                let meta = match fs::symlink_metadata(&src_path) {
+                    Ok(m) => m,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        // gate-report.json is always present; other
+                        // allowlist entries may be absent for partially-
+                        // populated candidates. Skip silently.
+                        continue;
+                    }
+                    Err(e) => return Err(SkillPackBuildError::Io(e)),
+                };
+                if meta.file_type().is_symlink() {
+                    return Err(SkillPackBuildError::Pack(
+                        SkillPackError::IntegrityFailure {
+                            expected: format!("regular file at {}", src_path.display()),
+                            actual: "symlink (TOCTOU after scan)".to_owned(),
+                        },
+                    ));
+                }
+                if !meta.is_file() {
                     continue;
                 }
+
                 let data = fs::read(&src_path)?;
                 let mode = file_mode(&src_path);
                 let archive_path =

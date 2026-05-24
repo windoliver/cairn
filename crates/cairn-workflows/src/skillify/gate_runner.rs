@@ -225,12 +225,36 @@ impl GateRunner for SkillContractRunner {
 }
 
 /// Extract YAML frontmatter (`---\n…\n---`) from the start of a markdown body.
+///
+/// The closing delimiter MUST be a line containing exactly `---` (with
+/// optional trailing whitespace). Round 10 hardening: the previous
+/// `rest.find("\n---")` accepted `---suffix` as a valid close, letting a
+/// contract ending with `---not-a-delimiter` satisfy the gate while
+/// downstream YAML readers would not parse it.
 fn extract_frontmatter(body: &str) -> Option<&str> {
     let rest = body
         .strip_prefix("---\n")
         .or_else(|| body.strip_prefix("---\r\n"))?;
-    let end = rest.find("\n---")?;
-    Some(&rest[..end])
+    // Walk lines, tracking byte offset, until we find a line that is
+    // exactly `---` (after trimming a trailing CR / whitespace).
+    let mut offset: usize = 0;
+    for line in rest.split_inclusive('\n') {
+        let trimmed = line.trim_end_matches(['\r', '\n']).trim_end();
+        if trimmed == "---" {
+            // `&rest[..offset]` excludes the closing delimiter line.
+            // The trailing newline of the line before is preserved.
+            // Drop the final `\n` if present so the inner content is
+            // exactly what's between the delimiters.
+            let body_end = if offset > 0 && rest.as_bytes()[offset - 1] == b'\n' {
+                offset - 1
+            } else {
+                offset
+            };
+            return Some(&rest[..body_end]);
+        }
+        offset += line.len();
+    }
+    None
 }
 
 /// Returns the scalar value for a TOP-LEVEL `key:` (no leading indent), or

@@ -997,3 +997,32 @@ async fn skill_contract_fails_when_lane_in_body_only() {
     assert_eq!(result.status, SkillifyGateStatus::Failed);
     assert!(result.message.unwrap().contains("lane"));
 }
+
+#[tokio::test]
+async fn skill_contract_fails_when_frontmatter_close_is_not_a_delimiter_line() {
+    // Round 10 regression: `---suffix` must NOT count as the closing
+    // delimiter. Previously `find("\n---")` matched it and the gate
+    // accepted malformed frontmatter that downstream YAML readers reject.
+    let temp = TempDir::new().unwrap();
+    let mut a = authored("deploy-hotfix");
+    // No real closing `---` line; only `---not-a-delimiter` near the end.
+    a.skill_markdown =
+        "---\nlane: deploy.hotfix\ntriggers:\n  - x\nuses: scripts/x.sh\nfiles_to: wiki/x/\n---suffix\nBody.".to_owned();
+    let b = bundle("deploy-hotfix");
+    let ctx = GateRunContext {
+        vault_root: temp.path(),
+        candidate_id: "skc_test",
+        candidate_dir: temp.path().to_path_buf(),
+        bundle: &b,
+        authored: &a,
+        llm: None,
+        snapshot: &empty_snapshot(),
+    };
+    let result = SkillContractRunner.run(&ctx).await;
+    assert_eq!(result.status, SkillifyGateStatus::Failed);
+    let msg = result.message.unwrap_or_default();
+    assert!(
+        msg.contains("frontmatter"),
+        "expected frontmatter error, got: {msg}"
+    );
+}
