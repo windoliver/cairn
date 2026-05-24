@@ -6,6 +6,7 @@ pub mod artifact;
 pub mod candidate;
 pub mod gate;
 pub mod lint;
+pub mod spec;
 
 pub use artifact::{SkillArtifact, SkillArtifactBundle, SkillArtifactError, SkillArtifactKind};
 pub use candidate::{
@@ -16,3 +17,4 @@ pub use gate::{SkillifyGate, SkillifyGateReport, SkillifyGateStatus};
 pub use lint::{
     SkillLintIssue, SkillLintIssueKind, SkillLintSkill, SkillLintSnapshot, lint_skill_snapshot,
 };
+pub use spec::{SkillSpecDraft, SkillSpecError};
