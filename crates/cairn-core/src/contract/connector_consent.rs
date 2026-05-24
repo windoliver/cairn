@@ -43,7 +43,11 @@ impl std::fmt::Display for ConsentGrantId {
 ///
 /// `Revoked` is the closed-fail default: if the journal has no live
 /// grant for `(connector, scope_key)` the framework rejects the emit.
+///
+/// `#[non_exhaustive]` ensures that adding future variants (e.g. `Expired`,
+/// `GrantPending`) is wire-compatible without breaking downstream match arms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ConnectorConsentLookup {
     /// A live consent grant exists for the queried connector + scope.
     Granted,

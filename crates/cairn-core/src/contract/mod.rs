@@ -22,6 +22,9 @@
 //!   [`CapturingMetricsSink`], [`NoopMetricsSink`].
 //! - Federation transport contract (§12.a, issue #123): [`FederationTransport`] /
 //!   [`SendOutcome`] / [`TransportReason`].
+//! - Connector consent journal (§14 + §19 v0.3, issue #130):
+//!   [`ConnectorConsentJournal`] / [`ConsentGrant`] / [`ConsentGrantId`] /
+//!   [`ConnectorConsentLookup`].
 
 pub mod agent_provider;
 pub mod conformance;
