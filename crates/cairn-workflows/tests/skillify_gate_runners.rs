@@ -749,3 +749,49 @@ async fn unit_test_runner_kills_descendant_on_timeout() {
         "descendant PID {pid} should be dead after timeout but is still running"
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unit_test_runner_times_out_when_script_ignores_large_stdin() {
+    // Round 3 regression: script never reads stdin, and the input is much
+    // larger than the typical pipe buffer (64KB on Linux, 16KB on macOS).
+    // The old run_script wrote stdin BEFORE the timeout future and would
+    // deadlock here. With the fix, the outer timeout must trip.
+    let temp = TempDir::new().unwrap();
+    materialize_script(temp.path(), "noinput", "#!/usr/bin/env bash\nsleep 30\n");
+
+    let big_input: String = "x".repeat(256 * 1024); // 256 KB
+    let mut a = authored("noinput");
+    a.unit_tests = serde_json::json!({
+        "cases": [{"input": big_input, "expected_stdout": "x\n", "timeout_ms": 300}]
+    });
+    let b = bundle("noinput");
+    let ctx = GateRunContext {
+        vault_root: temp.path(),
+        candidate_id: "skc_test",
+        candidate_dir: temp.path().to_path_buf(),
+        bundle: &b,
+        authored: &a,
+        llm: None,
+        snapshot: &empty_snapshot(),
+    };
+
+    let start = std::time::Instant::now();
+    let result = UnitTestRunner.run(&ctx).await;
+    let elapsed = start.elapsed();
+
+    assert_eq!(result.status, SkillifyGateStatus::Failed);
+    assert!(
+        result
+            .message
+            .as_deref()
+            .unwrap_or("")
+            .contains("timed out"),
+        "expected timeout message, got: {:?}",
+        result.message
+    );
+    assert!(
+        elapsed.as_secs() < 5,
+        "should time out promptly even with large unread stdin, took {elapsed:?}"
+    );
+}

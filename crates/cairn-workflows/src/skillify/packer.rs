@@ -4,7 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use cairn_core::pipeline::skillify::{
-    SkillArtifactBundle, SkillPackEntry, SkillPackError, SkillPackManifest, SkillifyGateReport,
+    SkillArtifactBundle, SkillArtifactKind, SkillPackEntry, SkillPackError, SkillPackManifest,
+    SkillifyGate, SkillifyGateReport, SkillifyGateStatus,
 };
 use sha2::{Digest, Sha256};
 
@@ -78,6 +79,34 @@ impl SkillPackBuilder {
     /// Returns when a candidate is missing, has failing gates, or archive
     /// creation fails.
     pub fn build(self, vault_root: &Path) -> Result<SkillPackArchive, SkillPackBuildError> {
+        // Validate name BEFORE deriving any filesystem path from it. Without
+        // this check a caller passing `--name ../target` (or similar) would
+        // truncate a file outside the vault root before any manifest
+        // validation would reject the name.
+        let probe_manifest = SkillPackManifest {
+            pack_id: String::from("skp_probe"),
+            name: self.name.clone(),
+            version: self.version.clone(),
+            cairn_compat: self.cairn_compat.clone(),
+            description: self.description.clone(),
+            skills: Vec::new(),
+            requires: Vec::new(),
+            provides: Vec::new(),
+            content_sha256: String::new(),
+        };
+        // Use the same name validator (reject empty, separators, etc.) that
+        // the install-time validator uses. cairn_compat / deps are checked
+        // later against the actual entries; for now we only need the name
+        // check before touching the filesystem.
+        if let Err(e) = probe_manifest.validate(env!("CARGO_PKG_VERSION")) {
+            // Forward only the InvalidName error; ignore other unrelated
+            // validation failures (compat etc.) that the full validate call
+            // happens to surface against the empty-entries probe.
+            if matches!(e, SkillPackError::InvalidName { .. }) {
+                return Err(SkillPackBuildError::Pack(e));
+            }
+        }
+
         let mut entries = Vec::new();
         let mut all_provides = Vec::new();
 
@@ -352,6 +381,19 @@ pub fn unpack_archive(
         // updating the candidate manifest.
         let bundle: SkillArtifactBundle =
             serde_json::from_slice(&fs::read(&candidate_manifest_path)?)?;
+
+        // The candidate manifest's candidate_id must match the pack
+        // manifest's claimed id — catches an attacker swapping a bundle
+        // that lies about its identity.
+        if bundle.candidate_id != entry.candidate_id {
+            return Err(SkillPackBuildError::Pack(
+                SkillPackError::IntegrityFailure {
+                    expected: format!("candidate_id={}", entry.candidate_id),
+                    actual: format!("candidate_id={}", bundle.candidate_id),
+                },
+            ));
+        }
+
         for artifact in &bundle.artifacts {
             // Reject artifact paths that escape the candidate dir.
             let rel_path = std::path::Path::new(&artifact.path);
@@ -383,6 +425,16 @@ pub fn unpack_archive(
                 ));
             }
         }
+
+        // Force-regenerate gate-report.json with all gates Blocked, even if
+        // the archive contained a forged "passed" report. This ensures the
+        // handler's replay guard (candidate_ready) does not short-circuit
+        // re-gating after install. Round 3 hardening.
+        let blocked_report = make_blocked_report(&entry.candidate_id);
+        fs::write(
+            src.join("gate-report.json"),
+            serde_json::to_vec_pretty(&blocked_report)?,
+        )?;
     }
 
     // ATOMIC SWAP: now that every source is validated, move each skill into
@@ -433,6 +485,23 @@ fn rollback_swaps(backups: &[(std::path::PathBuf, std::path::PathBuf)]) {
             let _ = fs::remove_dir_all(dst);
         }
         let _ = fs::rename(backup, dst);
+    }
+}
+
+/// Build a fresh "all gates Blocked" gate-report for a candidate. Used at
+/// install time to overwrite whatever gate-report the archive contained, so
+/// the installed candidate is forced to re-gate locally.
+fn make_blocked_report(candidate_id: &str) -> SkillifyGateReport {
+    SkillifyGateReport {
+        candidate_id: candidate_id.to_owned(),
+        gates: SkillArtifactKind::required()
+            .iter()
+            .map(|kind| SkillifyGate {
+                name: kind.as_str().to_owned(),
+                status: SkillifyGateStatus::Blocked,
+                message: Some("installed via skillpack — re-gate required".to_owned()),
+            })
+            .collect(),
     }
 }
 

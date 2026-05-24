@@ -877,21 +877,31 @@ async fn run_script(
     let child_pgid: Option<i32> = None;
     let mut stdout = child.stdout.take().ok_or("missing stdout handle")?;
     let mut stderr = child.stderr.take().ok_or("missing stderr handle")?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(input.as_bytes())
-            .await
-            .map_err(|e| format!("stdin write: {e}"))?;
-        // Drop stdin to send EOF; scripts reading stdin would otherwise block.
-        drop(stdin);
-    }
+    let mut stdin_handle = child.stdin.take();
+    let input_bytes = input.as_bytes().to_vec();
 
     let timeout = tokio::time::Duration::from_millis(timeout_ms);
+
+    // Wrap stdin write + stdout/stderr drain + wait() in ONE timeout. The
+    // earlier design wrote stdin BEFORE the timeout, which deadlocked if
+    // the script never read its stdin AND the input exceeded the pipe
+    // buffer (Round 3 finding). Driving stdin write concurrently with the
+    // reads/wait inside the timeout window means a misbehaving script
+    // hitting the deadline always reaches the kill path.
     let wait = async {
+        let stdin_task = async move {
+            if let Some(mut stdin) = stdin_handle.take() {
+                // Best-effort; if the script never reads stdin this may
+                // block forever, but the outer timeout will kill the
+                // process group and abort us.
+                let _ = stdin.write_all(&input_bytes).await;
+                drop(stdin); // EOF
+            }
+        };
         let mut out = Vec::new();
         let mut err = Vec::new();
-        let (r_out, r_err, status) = tokio::join!(
+        let (_stdin, r_out, r_err, status) = tokio::join!(
+            stdin_task,
             stdout.read_to_end(&mut out),
             stderr.read_to_end(&mut err),
             child.wait(),

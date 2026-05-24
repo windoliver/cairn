@@ -105,6 +105,15 @@ impl SkillifyPipeline {
 
         let spec = match self.extract(llm, &payload).await {
             Ok(spec) => spec,
+            // Transient LLM outages must propagate as a retriable error,
+            // not be absorbed into a permanent "failed candidate". Without
+            // this special case, a brief network blip during STAGE 1 burns
+            // the candidate as Failed and the scheduler never retries.
+            Err(SkillifyPipelineError::Llm(
+                e @ cairn_core::contract::llm_provider::LlmError::ProviderUnreachable { .. },
+            )) => {
+                return Err(SkillifyPipelineError::Llm(e));
+            }
             Err(e) => {
                 errors.push(e.to_string());
                 let _ = state.fail(e.to_string());
@@ -122,6 +131,13 @@ impl SkillifyPipeline {
         // STAGE 2: Author
         let authored = match self.author(llm, &spec).await {
             Ok(a) => a,
+            // Same transient-error handling as STAGE 1: a brief LLM outage
+            // during authoring must trigger a retry, not a permanent failure.
+            Err(SkillifyPipelineError::Llm(
+                e @ cairn_core::contract::llm_provider::LlmError::ProviderUnreachable { .. },
+            )) => {
+                return Err(SkillifyPipelineError::Llm(e));
+            }
             Err(e) => {
                 errors.push(e.to_string());
                 let _ = state.fail(e.to_string());
