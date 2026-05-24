@@ -43,6 +43,7 @@ use crate::domain::{
 /// to the upstream object that originated the connector event.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct SourceRef {
     /// Object type in the source system (e.g., `"issue"`, `"pr"`, `"message"`).
     pub kind: String,
@@ -754,10 +755,15 @@ impl CapturePayload {
                 require_non_empty("rationale", rationale)?;
             }
             Self::External {
-                connector, mime, ..
+                connector,
+                mime,
+                source_ref,
+                ..
             } => {
                 require_non_empty("connector", connector)?;
                 require_non_empty("mime", mime)?;
+                require_non_empty("source_ref.kind", &source_ref.kind)?;
+                require_non_empty("source_ref.system_id", &source_ref.system_id)?;
             }
         }
         Ok(())

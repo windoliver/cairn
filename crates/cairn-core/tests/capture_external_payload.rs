@@ -41,3 +41,39 @@ fn external_source_family_serializes_as_external_string() {
     let serialized = serde_json::to_string(&SourceFamily::External).expect("serialize");
     assert_eq!(serialized, "\"external\"");
 }
+
+#[test]
+fn external_payload_rejects_empty_connector() {
+    let p = CapturePayload::External {
+        connector: String::new(),
+        source_ref: SourceRef::new("issue", "gh:1", None),
+        labels: BTreeSet::new(),
+        mime: "application/json".into(),
+        redacted_spans: vec![],
+    };
+    assert!(p.validate().is_err());
+}
+
+#[test]
+fn external_payload_rejects_empty_source_ref_system_id() {
+    let p = CapturePayload::External {
+        connector: "fixture".into(),
+        source_ref: SourceRef::new("issue", "", None),
+        labels: BTreeSet::new(),
+        mime: "application/json".into(),
+        redacted_spans: vec![],
+    };
+    assert!(p.validate().is_err());
+}
+
+#[test]
+fn external_payload_well_formed_validates_ok() {
+    let p = CapturePayload::External {
+        connector: "fixture".into(),
+        source_ref: SourceRef::new("issue", "gh:1", None),
+        labels: BTreeSet::new(),
+        mime: "application/json".into(),
+        redacted_spans: vec![],
+    };
+    assert!(p.validate().is_ok());
+}
