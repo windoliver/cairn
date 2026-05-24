@@ -154,17 +154,17 @@ pub struct ReplayRecord {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MetricCategory {
-    /// Long-horizon recall — retrieve_session, retrieve_turn, assemble_hot,
-    /// capture_trace, record_present(true).
+    /// Long-horizon recall — `retrieve_session`, `retrieve_turn`,
+    /// `assemble_hot`, `capture_trace`, `record_present(true)`.
     RecallPrecision,
     /// Stale-context avoidance — search actions with a non-empty
     /// `stale_record_ids` set.
     StaleAvoidance,
-    /// Summary quality — summarize actions matching the expected record set.
+    /// Summary quality — `summarize` actions matching the expected record set.
     SummaryQuality,
     /// Search relevance — search actions whose top-1 hit matches expected.
     SearchUsefulness,
-    /// Forget completeness — forget_record actions whose follow-up search
+    /// Forget completeness — `forget_record` actions whose follow-up search
     /// excludes the tombstoned record.
     ForgetCompleteness,
 }
