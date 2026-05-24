@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-05-24T00:00:00Z",
+  "cairn_version": "0.0.0",
+  "git_sha": "placeholder",
+  "metrics": {
+    "recall_precision":    { "score": 0.90, "passed": 0, "total": 0 },
+    "stale_avoidance":     { "score": 0.95, "passed": 0, "total": 0 },
+    "summary_quality":     { "score": 0.85, "passed": 0, "total": 0 },
+    "search_usefulness":   { "score": 0.85, "passed": 0, "total": 0 },
+    "forget_completeness": { "score": 1.00, "passed": 0, "total": 0 }
+  }
+}

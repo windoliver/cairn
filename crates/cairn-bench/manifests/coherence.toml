@@ -1,0 +1,33 @@
+# Coherence release gate thresholds (issue #137).
+# See docs/design/2026-05-24-coherence-benchmarks-design.md §6.
+#
+# Floors below are seed values. Adjust upward only after the trend file
+# shows several runs comfortably above them. Lowering a floor requires
+# explicit reviewer sign-off in the PR description.
+
+schema_version = 1
+
+[recall_precision]
+beta_min   = 0.90
+rc_min     = 0.95
+max_drop_pct = 2.0
+
+[stale_avoidance]
+beta_min   = 0.95
+rc_min     = 0.98
+max_drop_pct = 2.0
+
+[summary_quality]
+beta_min   = 0.85
+rc_min     = 0.90
+max_drop_pct = 2.0
+
+[search_usefulness]
+beta_min   = 0.85
+rc_min     = 0.90
+max_drop_pct = 2.0
+
+[forget_completeness]
+beta_min   = 1.00
+rc_min     = 1.00
+max_drop_pct = 0.0
