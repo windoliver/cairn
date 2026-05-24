@@ -208,6 +208,9 @@ pub async fn propose_share(
         if r.visibility > req.grant_tier {
             return Err(FederationError::TierMismatch);
         }
+        if !scope_covers(&req.scope, &r.scope) {
+            return Err(FederationError::ScopeMismatch);
+        }
     }
 
     // 7. Hash the manifest and each target id. `target_hash` binds the
@@ -567,6 +570,26 @@ fn peer_endpoint_to_code(peer: Option<&PeerEndpoint>) -> String {
         return "unspecified".to_owned();
     }
     trimmed.chars().take(64).collect()
+}
+
+/// Returns `true` if every non-None dimension of `record_scope` is
+/// present in `grant_scope`. A grant scope with `None` in a dimension
+/// wildcards that dimension (covers any value).
+fn scope_covers(grant_scope: &ScopeTuple, record_scope: &ScopeTuple) -> bool {
+    let check = |grant: &Option<String>, record: &Option<String>| -> bool {
+        match (grant, record) {
+            (_, None) => true,
+            (None, Some(_)) => true,
+            (Some(g), Some(r)) => g == r,
+        }
+    };
+    check(&grant_scope.agent, &record_scope.agent)
+        && check(&grant_scope.entity, &record_scope.entity)
+        && check(&grant_scope.project, &record_scope.project)
+        && check(&grant_scope.session_id, &record_scope.session_id)
+        && check(&grant_scope.tenant, &record_scope.tenant)
+        && check(&grant_scope.user, &record_scope.user)
+        && check(&grant_scope.workspace, &record_scope.workspace)
 }
 
 fn hash_identity(identity: &Identity) -> String {

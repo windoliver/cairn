@@ -206,7 +206,7 @@ async fn record_share_revoke_tombstones_and_consents_atomically() {
 
     let event = federation_revoke_event("cr-1", LINK_ULID);
     store
-        .record_share_revoke(&event, &[record.id.as_str().to_owned()])
+        .record_share_revoke(&event, &[record.id.as_str().to_owned()], None)
         .await
         .expect("revoke");
 
@@ -246,7 +246,7 @@ async fn record_share_revoke_with_empty_tombstone_ids() {
 
     // Empty tombstone_ids is valid — the consent event still lands.
     store
-        .record_share_revoke(&event, &[])
+        .record_share_revoke(&event, &[], None)
         .await
         .expect("revoke empty");
 

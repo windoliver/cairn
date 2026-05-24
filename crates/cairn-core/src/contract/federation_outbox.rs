@@ -119,10 +119,16 @@ pub trait FederationOutbox: Send + Sync {
     ///   event fails adapter-side validation.
     /// * [`FederationOutboxError::Backend`] for opaque adapter I/O
     ///   failures.
+    /// `consent_ref` is the provenance marker (`"consent:federation:<link_id>"`)
+    /// that `accept_propose` wrote into each inbound record's extra_frontmatter.
+    /// When `tombstone_ids` is empty (e.g. the SQL adapter returns hashes
+    /// instead of real IDs), the adapter SHOULD query records by `consent_ref`
+    /// and tombstone those instead.
     async fn record_share_revoke(
         &self,
         event: &ConsentEvent,
         tombstone_ids: &[String],
+        consent_ref: Option<&str>,
     ) -> Result<(), FederationOutboxError>;
 
     /// Atomically append `event` to the consent journal AND enqueue an

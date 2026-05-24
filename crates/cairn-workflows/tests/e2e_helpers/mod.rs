@@ -277,6 +277,7 @@ impl FederationOutbox for InMemoryOutbox {
         &self,
         event: &cairn_core::domain::ConsentEvent,
         tombstone_ids: &[String],
+        _consent_ref: Option<&str>,
     ) -> Result<(), FederationOutboxError> {
         // Track tombstoned record IDs so `try_fetch` can filter them
         // out after a revoke.

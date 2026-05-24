@@ -72,11 +72,14 @@ impl FederationOutbox for SqliteMemoryStore {
         &self,
         event: &ConsentEvent,
         tombstone_ids: &[String],
+        consent_ref: Option<&str>,
     ) -> Result<(), FederationOutboxError> {
         let event = event.clone();
         let tombstone_ids = tombstone_ids.to_vec();
+        let consent_ref = consent_ref.map(ToOwned::to_owned);
         self.with_tx(move |tx| {
             tx.append_consent_event(&event)?;
+            // Tombstone by explicit IDs first.
             for id_str in &tombstone_ids {
                 let id = cairn_core::domain::RecordId::parse(id_str.clone()).map_err(|err| {
                     crate::error::StoreError::Invariant {
@@ -84,6 +87,27 @@ impl FederationOutbox for SqliteMemoryStore {
                     }
                 })?;
                 tx.tombstone(&id, TombstoneReason::FederationRevoke)?;
+            }
+            // If no explicit IDs were provided but a consent_ref was,
+            // query records by the consent_ref provenance marker and
+            // tombstone those. This handles the case where the consent
+            // payload stores hashes (per §14) instead of raw IDs.
+            if tombstone_ids.is_empty() {
+                if let Some(ref cref) = consent_ref {
+                    let mut stmt = tx.tx.prepare(
+                        "SELECT id FROM records \
+                         WHERE json_extract(extra_frontmatter, '$.consent_ref') = ?1 \
+                           AND tombstoned = 0",
+                    )?;
+                    let ids: Vec<String> = stmt
+                        .query_map(rusqlite::params![cref], |row| row.get::<_, String>(0))?
+                        .collect::<Result<_, _>>()?;
+                    for id_str in ids {
+                        if let Ok(id) = cairn_core::domain::RecordId::parse(id_str) {
+                            tx.tombstone(&id, TombstoneReason::FederationRevoke)?;
+                        }
+                    }
+                }
             }
             Ok(())
         })

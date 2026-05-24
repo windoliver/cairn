@@ -221,6 +221,7 @@ impl FederationOutbox for InMemoryOutbox {
         &self,
         event: &ConsentEvent,
         tombstone_ids: &[String],
+        _consent_ref: Option<&str>,
     ) -> Result<(), FederationOutboxError> {
         let mut guard = self
             .inner

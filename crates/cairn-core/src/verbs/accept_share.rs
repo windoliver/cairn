@@ -336,7 +336,7 @@ async fn accept_revoke(
     // removed if the consent write aborts.
     let consent_event = build_revoke_event(&revocation.link_id, &now)?;
     deps.outbox
-        .record_share_revoke(&consent_event, &tombstone_ids)
+        .record_share_revoke(&consent_event, &tombstone_ids, Some(&consent_ref))
         .await
         .map_err(|err| map_outbox_error(&err))?;
 
@@ -362,12 +362,20 @@ fn validate_manifest(
     manifest: &[MemoryRecordStub],
     link: &SignedShareLink,
 ) -> Result<(), FederationError> {
+    // The manifest must carry exactly the records the link signed for.
+    // Fewer = data loss; more = record injection.
+    if manifest.len() != link.payload.target_id_hashes.len() {
+        return Err(FederationError::TargetMismatch);
+    }
     for stub in manifest {
         if !is_valid_body_hash(&stub.body_hash) {
             return Err(FederationError::InvalidShape);
         }
         // Verify body integrity: recompute sha256 of the body and compare
-        // to the declared body_hash. Rejects tampered bodies.
+        // to the declared body_hash. Rejects tampered bodies even when
+        // the attacker updates body_hash to match (because the signed
+        // target_hash binds the original CanonicalRecordHash which
+        // includes the body).
         if let Some(body) = &stub.body {
             let computed = compute_body_hash(body);
             if computed != stub.body_hash {
