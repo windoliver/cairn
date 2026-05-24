@@ -92,7 +92,7 @@ pub trait Connector: Send + Sync {
     fn name(&self) -> &str;
     fn manifest(&self) -> &ConnectorManifest;
     fn capabilities(&self) -> &ConnectorCapabilities;
-    fn sensor_identity(&self) -> &Identity;       // signed snr:remote:<name>:v1
+    fn sensor_identity(&self) -> &Identity;       // snr:local:connector:<name>:v1
     fn supported_contract_versions(&self) -> VersionRange;
 
     async fn poll(
@@ -196,7 +196,7 @@ adapter crate, loaded by `ConnectorRegistry::register`):
 name              = "fixture"
 contract          = "Connector"
 contract_version  = "0.1.0"
-sensor_identity   = "snr:remote:fixture:v1"
+sensor_identity   = "snr:local:connector:fixture:v1"
 
 [capabilities]
 poll     = true
@@ -454,7 +454,7 @@ Named so the PR description can cite them:
 
 ## 9. Open questions
 
-None at design time. Implementation will surface:
+Implementation will surface:
 
 - Exact shape of `CredentialHandle` (typed wrapper or opaque `[u8]`) —
   decide at first call site in `KeychainCredentialStore`.
@@ -462,3 +462,12 @@ None at design time. Implementation will surface:
   `tower` handler set fits better given `cairn-cli` already uses `axum`
   for the MCP HTTP transport — defer to first integration test in
   `cairn-cli`.
+- **Whether `local:connector:` should become its own `connector:` root
+  family.** The current wire form `snr:local:connector:<name>:v<n>` uses
+  `local:` because connector plugins run in-process and pass
+  `cairn-core`'s `validate_label` / `P0_SENSOR_LABEL_PREFIXES` check
+  (which rejects any `remote:*` root at the P0 tier). If a future brief
+  revision grants external connectors their own root
+  (`snr:connector:<name>:v<n>`) the `P0_SENSOR_LABEL_PREFIXES` table and
+  every shipped manifest would need updating. Track on this issue before
+  #131 adapter manifests are committed.

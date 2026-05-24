@@ -49,7 +49,17 @@ pub struct ConnectorMeta {
     pub contract: String,
     /// Semver string for the version of the connector implementation.
     pub contract_version: String,
-    /// Sensor identity token (`snr:remote:<name>:<version>`).
+    /// Sensor identity token in the canonical wire form `snr:local:connector:<name>:v<n>`.
+    ///
+    /// The `local:connector:` root is used because external connectors run
+    /// inside the same process as `cairn-core` (loaded via `ConnectorPlugin`)
+    /// and therefore occupy the `local:` family in `cairn-core`'s
+    /// `P0_SENSOR_LABEL_PREFIXES` (brief §4.2 + §19 v0.3).  Example:
+    /// `"snr:local:connector:github:v1"`.
+    ///
+    /// Note: the `local:` root is provisional pending a brief-level decision
+    /// on whether external connectors should warrant their own `connector:`
+    /// root family — see issue #130 spec §9.
     pub sensor_identity: String,
 }
 
@@ -239,7 +249,7 @@ mod tests {
 name = "fixture"
 contract = "Connector"
 contract_version = "0.1.0"
-sensor_identity = "snr:remote:fixture:v1"
+sensor_identity = "snr:local:connector:fixture:v1"
 
 [capabilities]
 poll = true
@@ -310,5 +320,21 @@ max_depth = 12
     fn rejects_wrong_contract_kind() {
         let bad = VALID.replace(r#"contract = "Connector""#, r#"contract = "MemoryStore""#);
         assert!(ConnectorManifest::parse_toml(&bad).is_err());
+    }
+
+    /// Round-trip a manifest whose `sensor_identity` uses the canonical
+    /// `snr:local:connector:<name>:v<n>` wire form (brief §4.2 + §19 v0.3,
+    /// aligned with `cairn-core::domain::capture_manifest::P0_SENSOR_LABEL_PREFIXES`).
+    #[test]
+    fn parses_manifest_with_local_connector_identity() {
+        let m = ConnectorManifest::parse_toml(VALID).expect("parse");
+        assert_eq!(
+            m.connector.sensor_identity,
+            "snr:local:connector:fixture:v1",
+        );
+        // Verify the value survives a TOML serialize → deserialize round-trip.
+        let serialized = toml::to_string(&m).expect("serialize");
+        let reparsed = ConnectorManifest::parse_toml(&serialized).expect("reparse");
+        assert_eq!(reparsed.connector.sensor_identity, m.connector.sensor_identity);
     }
 }
