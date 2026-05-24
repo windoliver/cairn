@@ -169,6 +169,12 @@ pub async fn revoke_share(
         .map_err(|_| FederationError::InvalidShape)?
         .ok_or(FederationError::UnknownLink)?;
 
+    // 4b. Verify the caller is the original issuer. A revoke by a
+    //     different identity would breach the grant's trust chain.
+    if deps.signer_identity.as_str() != stored.payload.issuer.as_str() {
+        return Err(FederationError::NotHuman);
+    }
+
     // 5. Mint the operation id + RFC-3339 `revoked_at`. The id is the
     //    sole minting site so the WAL row, the propagation job, and any
     //    future replay all share one identifier.
