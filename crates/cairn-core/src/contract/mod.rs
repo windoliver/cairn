@@ -25,6 +25,7 @@
 
 pub mod agent_provider;
 pub mod conformance;
+pub mod connector_consent;
 pub mod consent_journal;
 pub mod consent_lookup;
 pub mod federation_outbox;
@@ -62,6 +63,9 @@ pub use agent_provider::{
     AgentRunMeter, AgentRunStatus, AgentScope, AgentSpawnRequest, AgentToolAllowlist,
     AgentToolAttempt, AgentToolCall, AgentToolPolicyOutcome, AgentWallClockBudget, CairnVerb,
     evaluate_tool_policy, validate_output,
+};
+pub use connector_consent::{
+    ConsentGrant, ConsentGrantId, ConnectorConsentJournal, ConnectorConsentLookup,
 };
 pub use consent_journal::{
     ConsentJournalReader, MalformedSourceForget, MalformedSourceForgetReason, SourceForget,
