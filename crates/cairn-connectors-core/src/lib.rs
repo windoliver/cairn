@@ -15,6 +15,9 @@
 pub mod error;
 pub use error::ConnectorError;
 
+pub mod manifest;
+pub use manifest::ConnectorManifest;
+
 pub mod event;
 pub use event::{
     ConnectorEvent, ConnectorEventId, ConnectorPayload, ConnectorScope, DeliveryMode, SourceRef,
