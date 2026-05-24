@@ -50,7 +50,7 @@ fn version_bounds_are_u16_compatible() {
 }
 
 #[test]
-fn contract_enum_lists_all_seven_kinds() {
+fn contract_enum_lists_all_eight_kinds() {
     let schema: Value = serde_json::from_str(SCHEMA_SRC).expect("schema is valid JSON");
     let enum_arr = schema
         .pointer("/properties/contract/enum")
@@ -60,6 +60,7 @@ fn contract_enum_lists_all_seven_kinds() {
     names.sort_unstable();
     let mut expected = vec![
         "AgentProvider",
+        "Connector",
         "FrontendAdapter",
         "LLMProvider",
         "MCPServer",

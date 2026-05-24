@@ -136,6 +136,20 @@ pub fn run_conformance_for_plugin(
                     .to_string(),
             },
         }],
+        // `Connector` conformance runner lives in `cairn-connectors-core` (brief
+        // §9.1, §19 v0.3). Return a pending sentinel until that crate exposes
+        // a conformance entry-point callable from here.
+        ContractKind::Connector => vec![CaseOutcome {
+            id: "no_conformance_runner",
+            tier: Tier::One,
+            status: CaseStatus::Failed {
+                message: "no conformance runner registered for contract Connector; \
+                         add a per-contract `run` module under \
+                         `cairn-core::contract::conformance` once \
+                         cairn-connectors-core stabilises (#130)"
+                    .to_string(),
+            },
+        }],
     }
 }
 

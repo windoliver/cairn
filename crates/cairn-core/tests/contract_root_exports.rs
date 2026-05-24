@@ -134,8 +134,9 @@ fn manifest_kinds_are_complete() {
         ContractKind::MCPServer,
         ContractKind::FrontendAdapter,
         ContractKind::AgentProvider,
+        ContractKind::Connector,
     ];
-    assert_eq!(kinds.len(), 7);
+    assert_eq!(kinds.len(), 8);
 }
 
 #[test]
