@@ -5,6 +5,7 @@ pub mod gate_runner;
 pub mod handler;
 pub mod materialize;
 pub mod payload;
+pub mod pipeline;
 pub mod planner;
 pub mod trigger;
 
