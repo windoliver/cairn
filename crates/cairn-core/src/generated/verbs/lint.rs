@@ -123,6 +123,7 @@ pub enum Kind {
     Stale,
     StaleProfileLine,
     StaleSchema,
+    FederationDeadPropagation,
     WorkflowDeadLetter,
     WorkflowOverdue,
     WorkflowStaleSummary,

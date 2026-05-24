@@ -1,0 +1,61 @@
+---
+source: crates/cairn-idl/tests/wire_compat_v1.rs
+expression: body
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/propose_share.json",
+  "title": "Cairn verb: propose_share",
+  "x-cairn-contract": "cairn.mcp.v1",
+  "x-cairn-verb-id": "propose_share",
+  "x-cairn-capability": "cairn.mcp.v1.extension.federation",
+  "x-cairn-auth": "signed_chain",
+  "x-cairn-extension": "cairn.federation.v1",
+  "x-cairn-cli": {
+    "command": "propose-share",
+    "flags": [
+      { "name": "record_ids",   "long": "record-ids",   "value_source": "list<string>", "cli_exemplar": "01H8XGJWBWBAQ4N1NQK1A8X9YZ" },
+      { "name": "grantee",      "long": "grantee",       "value_source": "string" },
+      { "name": "scope",        "long": "scope",         "value_source": "json",   "cli_exemplar": "{\"tenant\":\"acme\",\"workspace\":\"main\"}" },
+      { "name": "grant_tier",   "long": "grant-tier",    "value_source": "enum(session,project,team,org,public)" },
+      { "name": "expires_at",   "long": "expires-at",    "value_source": "string",  "cli_exemplar": "2026-12-31T23:59:59Z" },
+      { "name": "peer",         "long": "peer",          "value_source": "string" }
+    ]
+  },
+  "x-cairn-skill-triggers": {
+    "positive_triggers": [
+      "use when the user wants to share one or more memory records with another peer or agent",
+      "use when the user says 'share this record', 'grant access', or 'federate these memories'"
+    ],
+    "negative_triggers": [
+      "do NOT use to revoke a previously issued share — that belongs to revoke_share",
+      "do NOT use to accept an inbound share envelope — that belongs to accept_share"
+    ],
+    "exclusivity_hints": "this is the sole outbound share-proposal surface; there is no other share-grant path"
+  },
+  "type": "object",
+  "$defs": {
+    "Args": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["record_ids", "scope", "grant_tier", "expires_at"],
+      "properties": {
+        "record_ids":  { "type": "array", "items": { "$ref": "../common/primitives.json#/$defs/Ulid" }, "minItems": 1, "maxItems": 64 },
+        "grantee":     { "$ref": "../common/primitives.json#/$defs/Identity" },
+        "scope":       { "$ref": "../common/sharing.json#/$defs/ScopeTuple" },
+        "grant_tier":  { "type": "string", "enum": ["session", "project", "team", "org", "public"] },
+        "expires_at":  { "type": "string", "format": "date-time", "minLength": 20 },
+        "peer":        { "type": "string", "minLength": 1 }
+      }
+    },
+    "Data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["link", "operation_id"],
+      "properties": {
+        "link":         { "$ref": "../common/sharing.json#/$defs/SignedShareLink" },
+        "operation_id": { "$ref": "../common/primitives.json#/$defs/Ulid" }
+      }
+    }
+  }
+}

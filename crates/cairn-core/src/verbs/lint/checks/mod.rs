@@ -2,6 +2,7 @@
 
 pub mod actor_chain;
 pub mod consent;
+pub mod federation;
 pub mod hot_memory;
 pub mod hot_memory_walker;
 pub mod index_drift;

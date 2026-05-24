@@ -667,6 +667,9 @@ pub enum TombstoneReason {
     Forget,
     /// Hard purge (rare, after retention boundaries).
     Purge,
+    /// Receiver-side federation revoke: the issuer revoked the share
+    /// link that projected these records (brief §12.a).
+    FederationRevoke,
 }
 
 impl TombstoneReason {
@@ -678,6 +681,7 @@ impl TombstoneReason {
             Self::Expire => "expire",
             Self::Forget => "forget",
             Self::Purge => "purge",
+            Self::FederationRevoke => "federation_revoke",
         }
     }
 
@@ -691,6 +695,7 @@ impl TombstoneReason {
             "expire" => Some(Self::Expire),
             "forget" => Some(Self::Forget),
             "purge" => Some(Self::Purge),
+            "federation_revoke" => Some(Self::FederationRevoke),
             _ => None,
         }
     }

@@ -14,6 +14,7 @@ pub mod consent_reader;
 pub mod consent_timeline;
 pub mod entity_graph;
 pub mod error;
+pub mod federation_outbox;
 pub mod hot_prefix;
 mod identity;
 pub mod lint;

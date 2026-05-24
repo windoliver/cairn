@@ -5,8 +5,46 @@
 //! Sync trait — the `lint` verb is sync today. The `SQLite` adapter
 //! implements it with small read-only queries against `workflow_jobs`;
 //! the `workflow_health` lint check (§4.10) consumes the surface.
+//!
+//! Issue #123: `failed_federation_jobs` surfaces `state = 'Failed'`
+//! rows whose `kind` starts with the supplied prefix (e.g.
+//! `"federation.propagate."`). Used by the
+//! `federation_dead_propagation` lint check.
 
 use crate::contract::job_store::{FailureClass, JobId, JobKind};
+
+/// One `state = 'Failed'` federation propagation job row surfaced to
+/// the `federation_dead_propagation` lint check (issue #123).
+///
+/// Dead-propagation rows differ from the main dead-letter queue in
+/// that they may have been terminal-failed by a permanent error
+/// (e.g. rejected by the remote hub) rather than by exhausting retry
+/// attempts. The lint check surfaces them regardless of
+/// `dead_letter_at_ms` — a `Failed` federation job is always
+/// actionable because propagation is idempotent and a manual retry is
+/// always safe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailedFederationJob {
+    /// The job identifier.
+    pub job_id: JobId,
+    /// Workflow kind starting with `"federation.propagate."`.
+    pub kind: JobKind,
+    /// Number of attempts when the row reached `Failed`.
+    pub attempts: u32,
+    /// Last error string persisted on the row by `JobStore::fail`.
+    /// Included verbatim in the finding message so operators can
+    /// diagnose the root cause without inspecting the DB directly.
+    ///
+    /// Privacy: `last_error` is set by the propagation worker itself
+    /// and MUST NOT contain record bodies. Workers must only include
+    /// the remote hub's error code/message and local metadata
+    /// (`operation_id`, `kind`) in this field.
+    pub last_error: String,
+    /// Wall-clock (epoch ms) of the final `fail` call that set
+    /// `state = 'Failed'`. `None` when the adapter cannot determine
+    /// the exact timestamp (e.g. pre-migration rows).
+    pub failed_at_ms: Option<i64>,
+}
 
 /// One dead-letter row surfaced to lint.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +94,27 @@ pub trait WorkflowJobsReader: Send + Sync {
 
     /// Up to `limit` dead-letter rows ordered by `dead_letter_at_ms` desc.
     fn dead_letter_rows(&self, limit: usize) -> Vec<DeadLetterRow>;
+
+    /// All `state = 'Failed'` rows whose `kind` starts with `kind_prefix`
+    /// (e.g. `"federation.propagate."`), ordered by `failed_at_ms` desc
+    /// (or insertion order when the timestamp is unavailable).
+    ///
+    /// The query is the SQL equivalent of:
+    ///
+    /// ```sql
+    /// SELECT job_id, kind, attempts, last_error, failed_at_ms
+    ///   FROM workflow_jobs
+    ///  WHERE kind LIKE '<prefix>%'
+    ///    AND state = 'Failed'
+    ///  ORDER BY failed_at_ms DESC NULLS LAST;
+    /// ```
+    ///
+    /// Default implementation returns an empty `Vec` so adapters that
+    /// pre-date issue #123 stay compilable without change.
+    fn failed_federation_jobs(&self, kind_prefix: &str) -> Vec<FailedFederationJob> {
+        let _ = kind_prefix;
+        Vec::new()
+    }
 
     /// Drain the most recent runtime failure observed by any of the
     /// other trait methods. `None` means every method that ran since

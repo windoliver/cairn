@@ -1,0 +1,207 @@
+{
+  "$defs": {
+    "ScopeTuple": {
+      "additionalProperties": false,
+      "anyOf": [
+        {
+          "required": [
+            "tenant"
+          ]
+        },
+        {
+          "required": [
+            "workspace"
+          ]
+        },
+        {
+          "required": [
+            "project"
+          ]
+        },
+        {
+          "required": [
+            "session_id"
+          ]
+        },
+        {
+          "required": [
+            "entity"
+          ]
+        },
+        {
+          "required": [
+            "user"
+          ]
+        },
+        {
+          "required": [
+            "agent"
+          ]
+        }
+      ],
+      "description": "Seven-dimensional scope tuple (brief §6). At least one field must be set.",
+      "properties": {
+        "agent": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "entity": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "project": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "session_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "tenant": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "user": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "workspace": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "ShareLinkPayload": {
+      "additionalProperties": false,
+      "description": "Body-free payload for a signed share-link grant (brief §12.a). Matches domain::sharing::ShareLinkPayload.",
+      "properties": {
+        "expires_at": {
+          "format": "date-time",
+          "minLength": 20,
+          "type": "string"
+        },
+        "grant_tier": {
+          "enum": [
+            "session",
+            "project",
+            "team",
+            "org",
+            "public"
+          ],
+          "type": "string"
+        },
+        "grantee": {
+          "$ref": "./primitives.json#/$defs/Identity"
+        },
+        "issued_at": {
+          "format": "date-time",
+          "minLength": 20,
+          "type": "string"
+        },
+        "issuer": {
+          "$ref": "./primitives.json#/$defs/Identity"
+        },
+        "key_version": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "nonce": {
+          "$ref": "./primitives.json#/$defs/Nonce16Base64"
+        },
+        "operation_id": {
+          "$ref": "./primitives.json#/$defs/Ulid"
+        },
+        "scope": {
+          "$ref": "#/$defs/ScopeTuple"
+        },
+        "target_hash": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "target_id_hashes": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "operation_id",
+        "nonce",
+        "target_hash",
+        "target_id_hashes",
+        "scope",
+        "grant_tier",
+        "issuer",
+        "issued_at",
+        "expires_at",
+        "key_version"
+      ],
+      "type": "object"
+    },
+    "SignedRevocation": {
+      "additionalProperties": false,
+      "description": "Signed revocation record cancelling a previously issued share link (brief §12.a).",
+      "properties": {
+        "issuer": {
+          "$ref": "./primitives.json#/$defs/Identity"
+        },
+        "key_version": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "link_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "revoked_at": {
+          "format": "date-time",
+          "minLength": 20,
+          "type": "string"
+        },
+        "signature": {
+          "$ref": "./primitives.json#/$defs/Ed25519Signature"
+        }
+      },
+      "required": [
+        "link_id",
+        "revoked_at",
+        "issuer",
+        "key_version",
+        "signature"
+      ],
+      "type": "object"
+    },
+    "SignedShareLink": {
+      "additionalProperties": false,
+      "description": "Signed share link authorizing a bounded grant (brief §12.a). Matches domain::sharing::SignedShareLink.",
+      "properties": {
+        "link_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/ShareLinkPayload"
+        },
+        "signature": {
+          "$ref": "./primitives.json#/$defs/Ed25519Signature"
+        }
+      },
+      "required": [
+        "link_id",
+        "payload",
+        "signature"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/common/sharing.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Canonical definitions for share-link and revocation wire types used by propose_share, accept_share, and revoke_share verbs (brief §12.a). Keeping these in one place ensures the issuer and receiver operate on identical structures.",
+  "title": "Cairn federation sharing types",
+  "x-cairn-contract": "cairn.mcp.v1"
+}

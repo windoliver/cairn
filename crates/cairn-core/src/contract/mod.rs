@@ -20,11 +20,15 @@
 //! - Forward stubs (P1/P2, hidden until #113 / #124): `FrontendAdapter`, `AgentProvider`.
 //! - Metrics contract (§15): [`MetricsSink`] / [`MetricsError`],
 //!   [`CapturingMetricsSink`], [`NoopMetricsSink`].
+//! - Federation transport contract (§12.a, issue #123): [`FederationTransport`] /
+//!   [`SendOutcome`] / [`TransportReason`].
 
 pub mod agent_provider;
 pub mod conformance;
 pub mod consent_journal;
 pub mod consent_lookup;
+pub mod federation_outbox;
+pub mod federation_transport;
 pub mod frontend_adapter;
 pub mod hot_prefix_cache;
 pub mod identity_registry;
@@ -63,7 +67,9 @@ pub use consent_journal::{
     ConsentJournalReader, MalformedSourceForget, MalformedSourceForgetReason, SourceForget,
     TargetReplayKey,
 };
-pub use consent_lookup::{ConsentLookup, ConsentLookupError};
+pub use consent_lookup::{ConsentLookup, ConsentLookupError, FederationAcceptRecord};
+pub use federation_outbox::{FederationOutbox, FederationOutboxError};
+pub use federation_transport::{FederationTransport, SendOutcome, TransportReason};
 pub use frontend_adapter::{
     FrontendAdapter, FrontendAdapterCapabilities, FrontendAdapterError, FrontendAdapterPlugin,
     FrontendBackendState, FrontendEdit, FrontendEventStream, FrontendFieldClass,

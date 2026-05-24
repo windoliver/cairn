@@ -15,6 +15,9 @@ const EXPECTED_VERBS: &[&str] = &[
     "capture_trace",
     "lint",
     "forget",
+    "propose_share",
+    "accept_share",
+    "revoke_share",
 ];
 
 fn doc() -> ir::Document {

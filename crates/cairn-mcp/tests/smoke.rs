@@ -110,11 +110,22 @@ fn handler_get_info_experimental_carries_cairn_status() {
 }
 
 #[test]
-fn list_tools_returns_eight_verbs() {
-    // TOOLS has 8 entries (one per verb).  The conversion logic in
-    // `list_tools` iterates TOOLS, so verifying the count here is
-    // sufficient without needing a live RequestContext.
-    assert_eq!(TOOLS.len(), 8, "TOOLS must contain exactly 8 verbs");
+fn list_tools_returns_eight_core_verbs() {
+    // The IDL TOOLS array contains the 8 brief §8 core verbs plus the
+    // federation extension verbs (`propose_share`, `accept_share`,
+    // `revoke_share`) gated on `cairn.mcp.v1.extension.federation`.
+    // Count the core surface explicitly so a future extension verb
+    // landing in the IDL does not silently inflate the "core" count.
+    let core: Vec<&str> = TOOLS
+        .iter()
+        .filter(|d| !cairn_mcp::federation_tools::is_federation_tool(d.name))
+        .map(|d| d.name)
+        .collect();
+    assert_eq!(
+        core.len(),
+        8,
+        "TOOLS must contain exactly 8 core verbs (federation extension verbs are gated)",
+    );
 }
 
 #[test]
@@ -427,6 +438,16 @@ async fn wire_tools_list_descriptions_match_generated_output() {
         .expect("result.tools must be a JSON array");
 
     for decl in TOOLS {
+        // Federation extension verbs are gated on the
+        // `cairn.mcp.v1.extension.federation` capability and stay
+        // hidden from `tools/list` while the runtime is unwired
+        // (brief §15 fail-closed, issue #123 T17). The default handler
+        // used in this test does not advertise the federation
+        // capability, so iterating the full IDL TOOLS array would
+        // wrongly expect federation verbs in the response.
+        if cairn_mcp::federation_tools::is_federation_tool(decl.name) {
+            continue;
+        }
         let advertised = tools
             .iter()
             .find(|tool| tool.get("name").and_then(serde_json::Value::as_str) == Some(decl.name))

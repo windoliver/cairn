@@ -1,0 +1,70 @@
+{
+  "$defs": {
+    "Args": {
+      "additionalProperties": false,
+      "properties": {
+        "envelope": {
+          "$ref": "../common/federation_envelope.json#/$defs/FederationEnvelope"
+        }
+      },
+      "required": [
+        "envelope"
+      ],
+      "type": "object"
+    },
+    "Data": {
+      "additionalProperties": false,
+      "properties": {
+        "applied_records": {
+          "items": {
+            "$ref": "../common/primitives.json#/$defs/Ulid"
+          },
+          "type": "array"
+        },
+        "outcome": {
+          "enum": [
+            "accepted",
+            "duplicate"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "outcome",
+        "applied_records"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/accept_share.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Cairn verb: accept_share",
+  "type": "object",
+  "x-cairn-auth": "signed_chain",
+  "x-cairn-capability": "cairn.mcp.v1.extension.federation",
+  "x-cairn-cli": {
+    "command": "accept-share",
+    "flags": [
+      {
+        "cli_exemplar": "{\"kind\":\"revoke\",\"issuer_key_id\":\"hmn:alice\",\"revocation\":{\"link_id\":\"link-abc\",\"revoked_at\":\"2026-05-22T00:00:00Z\",\"issuer\":\"hmn:alice\",\"key_version\":1,\"signature\":\"ed25519:aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899\"}}",
+        "long": "envelope",
+        "name": "envelope",
+        "value_source": "json"
+      }
+    ]
+  },
+  "x-cairn-contract": "cairn.mcp.v1",
+  "x-cairn-extension": "cairn.federation.v1",
+  "x-cairn-skill-triggers": {
+    "exclusivity_hints": "this is the sole inbound share-acceptance surface; there is no other import path",
+    "negative_triggers": [
+      "do NOT use to propose a new share — that belongs to propose_share",
+      "do NOT use to revoke a share — that belongs to revoke_share"
+    ],
+    "positive_triggers": [
+      "use when the user receives an inbound federation envelope and wants to apply it locally",
+      "use when the user says 'accept this share', 'apply this federation envelope', or 'import shared memories'"
+    ]
+  },
+  "x-cairn-verb-id": "accept_share"
+}

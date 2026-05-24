@@ -454,6 +454,7 @@ fn compute_capabilities(
             dream_runtime_ready,
             expiration_runtime_ready,
             evaluation_runtime_ready,
+            federation_runtime_ready: false,
             contract_phase: CLI_CONTRACT_PHASE,
         })
     } else {
@@ -588,6 +589,7 @@ fn capabilities_for_config(config: &CairnConfig, model_present: bool) -> Vec<Cap
         dream_runtime_ready,
         expiration_runtime_ready,
         evaluation_runtime_ready,
+        federation_runtime_ready: false,
         contract_phase: CLI_CONTRACT_PHASE,
     })
 }

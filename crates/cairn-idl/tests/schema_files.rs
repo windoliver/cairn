@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-const EXPECTED_VERB_IDS: [&str; 8] = [
+const EXPECTED_VERB_IDS: [&str; 11] = [
     "ingest",
     "search",
     "retrieve",
@@ -16,6 +16,9 @@ const EXPECTED_VERB_IDS: [&str; 8] = [
     "capture_trace",
     "lint",
     "forget",
+    "propose_share",
+    "accept_share",
+    "revoke_share",
 ];
 
 const EXPECTED_CONTRACT: &str = "cairn.mcp.v1";
@@ -645,6 +648,15 @@ fn every_typed_field_asserts_bounds_or_is_allowlisted() {
         // JSON-mode narrative generation is available. A minLength: 1
         // would break the documented offline fallback for issue #312.
         ("verbs/summarize.json", "/$defs/Data/properties/narrative"),
+        // MemoryRecordStub.body is the optional full record body
+        // included in a federation envelope (brief §12.a). It is
+        // intentionally unconstrained: an empty string is valid when
+        // the stub carries only metadata (body_hash present, body
+        // omitted or empty). A minLength would break minimal stubs.
+        (
+            "common/federation_envelope.json",
+            "/$defs/MemoryRecordStub/properties/body",
+        ),
     ]
     .iter()
     .map(|(f, p)| (f.to_string(), p.to_string()))

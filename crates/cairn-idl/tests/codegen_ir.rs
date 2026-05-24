@@ -325,7 +325,7 @@ fn build_real_document() {
     let raw = loader::load(std::path::Path::new(cairn_idl::SCHEMA_DIR)).unwrap();
     let doc = build(&raw).unwrap();
     assert_eq!(doc.contract, "cairn.mcp.v1");
-    assert_eq!(doc.verbs.len(), 8);
+    assert_eq!(doc.verbs.len(), 11);
     assert_eq!(doc.preludes.len(), 2);
     assert!(doc.common.contains_key(&TypeName::new("Ulid")));
     assert!(!doc.error_codes.is_empty());

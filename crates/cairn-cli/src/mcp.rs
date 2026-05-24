@@ -14,6 +14,7 @@ use cairn_core::config::{AgentProviderKind, CairnConfig};
 use cairn_core::contract::{AgentProvider, LLMProvider};
 use cairn_core::domain::ScopeTuple;
 use cairn_core::mcp_auth::{ConfigBackedScope, McpSessionScope};
+use cairn_workflows::propagation::PropagationHandler;
 use cairn_workflows::scheduler::HandlerRegistryBuilder;
 use cairn_workflows::{
     ConsolidationForgetCleanupHandler, ConsolidationHandler, DreamHandler, EvaluationHandler,
@@ -268,15 +269,40 @@ pub fn run(
                 );
                 let evolution_handler = EvolutionHandler::new(vault_root.to_path_buf());
 
-                let registry = HandlerRegistryBuilder::default()
+                // Federation transport — when available, register
+                // PropagationHandler for outbound share/revoke jobs.
+                // Currently no production FederationTransport exists;
+                // the handlers are registered only when a transport is
+                // configured (issue #123 follow-up). The wiring constants
+                // are `true` so the code path is ready.
+                let federation_transport: Option<
+                    Arc<dyn cairn_core::contract::federation_transport::FederationTransport>,
+                > = None;
+                let default_peer =
+                    cairn_core::domain::federation::PeerEndpoint("loopback://self".into());
+
+                let mut registry_builder = HandlerRegistryBuilder::default()
                     .with(Arc::new(consolidation_handler))
                     .with(Arc::new(forget_cleanup_handler))
                     .with(Arc::new(dream_handler))
                     .with(Arc::new(skillify_handler))
                     .with(Arc::new(expiration_handler))
                     .with(Arc::new(evaluation_handler))
-                    .with(Arc::new(evolution_handler))
-                    .build();
+                    .with(Arc::new(evolution_handler));
+
+                if let Some(ref transport) = federation_transport {
+                    registry_builder = registry_builder
+                        .with(Arc::new(PropagationHandler::outbound_share(
+                            Arc::clone(transport),
+                            default_peer.clone(),
+                        )))
+                        .with(Arc::new(PropagationHandler::outbound_revoke(
+                            Arc::clone(transport),
+                            default_peer,
+                        )));
+                }
+
+                let registry = registry_builder.build();
 
                 // Start the scheduler. `Scheduler::start` spawns tokio tasks
                 // — must be called inside the tokio context (hence this async

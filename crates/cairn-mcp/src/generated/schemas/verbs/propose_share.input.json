@@ -1,0 +1,70 @@
+{
+  "$defs": {
+    "Args": {
+      "additionalProperties": false,
+      "properties": {
+        "expires_at": {
+          "format": "date-time",
+          "minLength": 20,
+          "type": "string"
+        },
+        "grant_tier": {
+          "enum": [
+            "session",
+            "project",
+            "team",
+            "org",
+            "public"
+          ],
+          "type": "string"
+        },
+        "grantee": {
+          "$ref": "../common/primitives.json#/$defs/Identity"
+        },
+        "peer": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "record_ids": {
+          "items": {
+            "$ref": "../common/primitives.json#/$defs/Ulid"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "type": "array"
+        },
+        "scope": {
+          "$ref": "../common/sharing.json#/$defs/ScopeTuple"
+        }
+      },
+      "required": [
+        "record_ids",
+        "scope",
+        "grant_tier",
+        "expires_at"
+      ],
+      "type": "object"
+    },
+    "Data": {
+      "additionalProperties": false,
+      "properties": {
+        "link": {
+          "$ref": "../common/sharing.json#/$defs/SignedShareLink"
+        },
+        "operation_id": {
+          "$ref": "../common/primitives.json#/$defs/Ulid"
+        }
+      },
+      "required": [
+        "link",
+        "operation_id"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/propose_share.input.json",
+  "$ref": "#/$defs/Args",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Cairn verb input: propose_share",
+  "x-cairn-contract": "cairn.mcp.v1"
+}

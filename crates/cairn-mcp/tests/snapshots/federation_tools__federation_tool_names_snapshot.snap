@@ -1,0 +1,7 @@
+---
+source: crates/cairn-mcp/tests/federation_tools.rs
+expression: names
+---
+- propose_share
+- accept_share
+- revoke_share

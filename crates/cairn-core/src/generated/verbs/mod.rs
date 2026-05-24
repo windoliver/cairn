@@ -11,6 +11,9 @@ pub mod assemble_hot;
 pub mod capture_trace;
 pub mod lint;
 pub mod forget;
+pub mod propose_share;
+pub mod accept_share;
+pub mod revoke_share;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -23,6 +26,9 @@ pub enum VerbId {
     CaptureTrace,
     Lint,
     Forget,
+    ProposeShare,
+    AcceptShare,
+    RevokeShare,
 }
 
 impl VerbId {
@@ -37,6 +43,9 @@ impl VerbId {
             Self::CaptureTrace => "capture_trace",
             Self::Lint => "lint",
             Self::Forget => "forget",
+            Self::ProposeShare => "propose_share",
+            Self::AcceptShare => "accept_share",
+            Self::RevokeShare => "revoke_share",
         }
     }
 
@@ -51,6 +60,9 @@ impl VerbId {
             Self::CaptureTrace => None,
             Self::Lint => None,
             Self::Forget => None,
+            Self::ProposeShare => Some("cairn.mcp.v1.extension.federation"),
+            Self::AcceptShare => Some("cairn.mcp.v1.extension.federation"),
+            Self::RevokeShare => Some("cairn.mcp.v1.extension.federation"),
         }
     }
 
@@ -65,6 +77,9 @@ impl VerbId {
             Self::CaptureTrace => "signed_chain",
             Self::Lint => "read_only",
             Self::Forget => "forget_capability",
+            Self::ProposeShare => "signed_chain",
+            Self::AcceptShare => "signed_chain",
+            Self::RevokeShare => "signed_chain",
         }
     }
 }

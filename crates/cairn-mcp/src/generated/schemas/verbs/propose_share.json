@@ -1,0 +1,123 @@
+{
+  "$defs": {
+    "Args": {
+      "additionalProperties": false,
+      "properties": {
+        "expires_at": {
+          "format": "date-time",
+          "minLength": 20,
+          "type": "string"
+        },
+        "grant_tier": {
+          "enum": [
+            "session",
+            "project",
+            "team",
+            "org",
+            "public"
+          ],
+          "type": "string"
+        },
+        "grantee": {
+          "$ref": "../common/primitives.json#/$defs/Identity"
+        },
+        "peer": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "record_ids": {
+          "items": {
+            "$ref": "../common/primitives.json#/$defs/Ulid"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "type": "array"
+        },
+        "scope": {
+          "$ref": "../common/sharing.json#/$defs/ScopeTuple"
+        }
+      },
+      "required": [
+        "record_ids",
+        "scope",
+        "grant_tier",
+        "expires_at"
+      ],
+      "type": "object"
+    },
+    "Data": {
+      "additionalProperties": false,
+      "properties": {
+        "link": {
+          "$ref": "../common/sharing.json#/$defs/SignedShareLink"
+        },
+        "operation_id": {
+          "$ref": "../common/primitives.json#/$defs/Ulid"
+        }
+      },
+      "required": [
+        "link",
+        "operation_id"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/propose_share.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Cairn verb: propose_share",
+  "type": "object",
+  "x-cairn-auth": "signed_chain",
+  "x-cairn-capability": "cairn.mcp.v1.extension.federation",
+  "x-cairn-cli": {
+    "command": "propose-share",
+    "flags": [
+      {
+        "cli_exemplar": "01H8XGJWBWBAQ4N1NQK1A8X9YZ",
+        "long": "record-ids",
+        "name": "record_ids",
+        "value_source": "list<string>"
+      },
+      {
+        "long": "grantee",
+        "name": "grantee",
+        "value_source": "string"
+      },
+      {
+        "cli_exemplar": "{\"tenant\":\"acme\",\"workspace\":\"main\"}",
+        "long": "scope",
+        "name": "scope",
+        "value_source": "json"
+      },
+      {
+        "long": "grant-tier",
+        "name": "grant_tier",
+        "value_source": "enum(session,project,team,org,public)"
+      },
+      {
+        "cli_exemplar": "2026-12-31T23:59:59Z",
+        "long": "expires-at",
+        "name": "expires_at",
+        "value_source": "string"
+      },
+      {
+        "long": "peer",
+        "name": "peer",
+        "value_source": "string"
+      }
+    ]
+  },
+  "x-cairn-contract": "cairn.mcp.v1",
+  "x-cairn-extension": "cairn.federation.v1",
+  "x-cairn-skill-triggers": {
+    "exclusivity_hints": "this is the sole outbound share-proposal surface; there is no other share-grant path",
+    "negative_triggers": [
+      "do NOT use to revoke a previously issued share — that belongs to revoke_share",
+      "do NOT use to accept an inbound share envelope — that belongs to accept_share"
+    ],
+    "positive_triggers": [
+      "use when the user wants to share one or more memory records with another peer or agent",
+      "use when the user says 'share this record', 'grant access', or 'federate these memories'"
+    ]
+  },
+  "x-cairn-verb-id": "propose_share"
+}

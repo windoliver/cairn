@@ -1,0 +1,44 @@
+{
+  "$defs": {
+    "Args": {
+      "additionalProperties": false,
+      "properties": {
+        "envelope": {
+          "$ref": "../common/federation_envelope.json#/$defs/FederationEnvelope"
+        }
+      },
+      "required": [
+        "envelope"
+      ],
+      "type": "object"
+    },
+    "Data": {
+      "additionalProperties": false,
+      "properties": {
+        "applied_records": {
+          "items": {
+            "$ref": "../common/primitives.json#/$defs/Ulid"
+          },
+          "type": "array"
+        },
+        "outcome": {
+          "enum": [
+            "accepted",
+            "duplicate"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "outcome",
+        "applied_records"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/accept_share.input.json",
+  "$ref": "#/$defs/Args",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Cairn verb input: accept_share",
+  "x-cairn-contract": "cairn.mcp.v1"
+}

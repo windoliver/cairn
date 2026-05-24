@@ -35,6 +35,7 @@ fn gates(bound: bool, model_present: bool, store: Option<StoreCaps>) -> Capabili
         dream_runtime_ready: false,
         expiration_runtime_ready: false,
         evaluation_runtime_ready: false,
+        federation_runtime_ready: false,
         contract_phase: Phase::V0_1,
     }
 }
@@ -463,6 +464,7 @@ mod remediation_tests {
             dream_runtime_ready: false,
             expiration_runtime_ready: false,
             evaluation_runtime_ready: false,
+            federation_runtime_ready: false,
         };
 
         for cap in advertise(&gates) {
@@ -553,6 +555,7 @@ mod prop_tests {
                     dream_runtime_ready: false,
                     expiration_runtime_ready: false,
                     evaluation_runtime_ready: false,
+                    federation_runtime_ready: false,
                     contract_phase: phase,
                 }
             })
@@ -632,6 +635,7 @@ fn openai_provider_without_key_drops_semantic_and_hybrid() {
         dream_runtime_ready: false,
         expiration_runtime_ready: false,
         evaluation_runtime_ready: false,
+        federation_runtime_ready: false,
         contract_phase: Phase::V0_1,
     };
     let caps = advertise(&g);
@@ -647,6 +651,88 @@ fn openai_provider_without_key_drops_semantic_and_hybrid() {
     assert!(
         caps.contains(&Capabilities::CairnMcpV1SearchKeyword),
         "keyword must still be advertised; got {caps:?}"
+    );
+}
+
+#[test]
+fn federation_extension_ready_is_true() {
+    assert!(crate::status::wiring::federation_extension_ready());
+}
+
+#[test]
+fn federation_capability_omitted_when_runtime_not_ready() {
+    // Build a fully-bound V0_3 gate with federation_runtime_ready=false.
+    // Even though all wiring constants are true, the capability MUST be
+    // absent when federation_runtime_ready is false.
+    let mut g = gates(true, false, None);
+    g.contract_phase = Phase::V0_3;
+    // g.federation_runtime_ready is false by default from gates()
+    let caps = advertise(&g);
+    assert!(
+        !caps.contains(&Capabilities::CairnMcpV1ExtensionFederation),
+        "federation capability advertised while federation_runtime_ready is false; got {caps:?}"
+    );
+}
+
+#[test]
+fn federation_extension_ready_tracks_named_constants() {
+    // Pin the structural relationship — `federation_extension_ready()`
+    // is the conjunction of exactly the five named constants. All five
+    // are now `true`, so the conjunction is `true`.
+    use crate::status::wiring::{
+        FEDERATION_ACCEPT_DISPATCH_WIRED, FEDERATION_EXTENSION_WIRED, FEDERATION_MCP_TOOLS_WIRED,
+        FEDERATION_PROPOSE_DISPATCH_WIRED, FEDERATION_WORKFLOW_WIRED, federation_extension_ready,
+    };
+    let expected = FEDERATION_EXTENSION_WIRED
+        && FEDERATION_PROPOSE_DISPATCH_WIRED
+        && FEDERATION_ACCEPT_DISPATCH_WIRED
+        && FEDERATION_WORKFLOW_WIRED
+        && FEDERATION_MCP_TOOLS_WIRED;
+    assert_eq!(
+        federation_extension_ready(),
+        expected,
+        "federation_extension_ready() must be the AND of the five named constants",
+    );
+    assert!(expected, "all five named constants must be true");
+}
+
+#[test]
+fn federation_capability_advertise_arm_is_phase_v0_3_and_readiness() {
+    // Locks in the shape of the advertise() decision arm for the
+    // federation extension: phase >= V0_3 AND wiring ready AND
+    // federation_runtime_ready. Below V0_3, the capability never
+    // appears even with runtime_ready=true.
+    for phase in [Phase::V0_1, Phase::V0_2] {
+        let mut g = gates(true, false, None);
+        g.contract_phase = phase;
+        g.federation_runtime_ready = true;
+        let caps = advertise(&g);
+        assert!(
+            !caps.contains(&Capabilities::CairnMcpV1ExtensionFederation),
+            "federation capability must never appear below v0.3 (phase {phase:?}); got {caps:?}",
+        );
+    }
+    // At V0_3 with federation_runtime_ready=true, the capability IS
+    // advertised (since federation_extension_ready() is now true).
+    let mut g = gates(true, false, None);
+    g.contract_phase = Phase::V0_3;
+    g.federation_runtime_ready = true;
+    let caps = advertise(&g);
+    assert!(
+        caps.contains(&Capabilities::CairnMcpV1ExtensionFederation),
+        "at v0.3 with federation_runtime_ready=true, federation capability must be advertised; \
+         got {caps:?}",
+    );
+    // At V0_3 with federation_runtime_ready=false, the capability is NOT
+    // advertised even though wiring constants are true.
+    let mut g = gates(true, false, None);
+    g.contract_phase = Phase::V0_3;
+    g.federation_runtime_ready = false;
+    let caps = advertise(&g);
+    assert!(
+        !caps.contains(&Capabilities::CairnMcpV1ExtensionFederation),
+        "at v0.3 with federation_runtime_ready=false, federation capability must NOT be \
+         advertised; got {caps:?}",
     );
 }
 

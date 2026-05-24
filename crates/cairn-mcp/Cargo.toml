@@ -29,6 +29,7 @@ cairn-test-fixtures = { workspace = true }
 include_dir = { workspace = true }
 insta = { workspace = true }
 pretty_assertions = { workspace = true }
+rand_core = { workspace = true }
 rstest = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }

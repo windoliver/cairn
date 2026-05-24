@@ -84,6 +84,12 @@ pub enum ConsentKind {
     Revoke,
     /// Promotion across visibility tiers (P2 surface, journal row P0).
     PromoteReceipt,
+    /// Federation: outbound share offer minted.
+    FederationGrant,
+    /// Federation: inbound share applied.
+    FederationAccept,
+    /// Federation: share revoked (issuer side or receiver side).
+    FederationRevoke,
 }
 
 /// Body-free metadata payload. Each variant is constrained so the union
@@ -137,6 +143,35 @@ pub enum ConsentPayload {
         to_tier: MemoryVisibility,
         /// Cryptographic receipt id (signature ref). Verified upstream.
         receipt_id: String,
+    },
+    /// Federation grant — issuer minted a `SignedShareLink`, ready for outbound.
+    FederationGrant {
+        /// Stable share-link id (ULID-shaped).
+        link_id: String,
+        /// Tier the link grants.
+        grant_tier: MemoryVisibility,
+        /// Symbolic peer endpoint code (`"loopback-node-a"`, `"hub-team-x"`).
+        /// Never raw URL with auth params.
+        peer_code: String,
+        /// Optional salted hash of grantee identity (when grantee is named).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        grantee_id_hash: Option<String>,
+    },
+    /// Federation accept — receiver applied an inbound share envelope.
+    FederationAccept {
+        /// Stable share-link id (ULID-shaped).
+        link_id: String,
+        /// Tier the link granted; receiver applied at this tier.
+        grant_tier: MemoryVisibility,
+        /// Salted hashes of the record ids that were applied.
+        applied_id_hashes: Vec<String>,
+    },
+    /// Federation revoke — issuer or receiver acknowledged a link revocation.
+    FederationRevoke {
+        /// Stable share-link id (ULID-shaped).
+        link_id: String,
+        /// Short reason code (`"issuer_revoked"`, `"receiver_revoked"`).
+        reason_code: String,
     },
 }
 
@@ -201,19 +236,24 @@ impl ConsentEvent {
 
     /// JSON field names any nested payload variant is permitted to emit.
     pub const ALLOWED_PAYLOAD_FIELDS: &'static [&'static str] = &[
-        "shape",
-        "sensor_label",
-        "reason_code",
-        "key",
+        "applied_id_hashes",
         "from_code",
-        "to_code",
-        "target_id_hash",
-        "scope_tier",
-        "subject_code",
-        "policy_code",
         "from_tier",
-        "to_tier",
+        "grant_tier",
+        "grantee_id_hash",
+        "key",
+        "link_id",
+        "peer_code",
+        "policy_code",
+        "reason_code",
         "receipt_id",
+        "scope_tier",
+        "sensor_label",
+        "shape",
+        "subject_code",
+        "target_id_hash",
+        "to_code",
+        "to_tier",
     ];
 
     /// Field names that must never appear anywhere in the wire form —
@@ -266,6 +306,9 @@ const fn expected_payload_variant(kind: ConsentKind) -> &'static str {
         }
         ConsentKind::Grant | ConsentKind::Revoke => "decision",
         ConsentKind::PromoteReceipt => "promote_receipt",
+        ConsentKind::FederationGrant => "federation_grant",
+        ConsentKind::FederationAccept => "federation_accept",
+        ConsentKind::FederationRevoke => "federation_revoke",
     }
 }
 
@@ -276,6 +319,9 @@ const fn payload_variant_name(payload: &ConsentPayload) -> &'static str {
         ConsentPayload::IntentReceipt { .. } => "intent_receipt",
         ConsentPayload::Decision { .. } => "decision",
         ConsentPayload::PromoteReceipt { .. } => "promote_receipt",
+        ConsentPayload::FederationGrant { .. } => "federation_grant",
+        ConsentPayload::FederationAccept { .. } => "federation_accept",
+        ConsentPayload::FederationRevoke { .. } => "federation_revoke",
     }
 }
 
@@ -359,6 +405,73 @@ fn validate_payload_for_kind(event: &ConsentEvent) -> Result<(), ConsentEventErr
             validate_hash("target_id_hash", target_id_hash)?;
             validate_receipt_id(receipt_id)?;
             validate_hash("subject", &event.subject)
+        }
+        (kind, payload) if is_federation_kind(kind) => {
+            validate_federation_payload(event.subject.as_str(), kind, payload)
+        }
+        (kind, payload) => Err(ConsentEventError::KindPayloadMismatch {
+            kind,
+            expected: expected_payload_variant(kind),
+            actual: payload_variant_name(payload),
+        }),
+    }
+}
+
+const fn is_federation_kind(kind: ConsentKind) -> bool {
+    matches!(
+        kind,
+        ConsentKind::FederationGrant
+            | ConsentKind::FederationAccept
+            | ConsentKind::FederationRevoke
+    )
+}
+
+fn validate_federation_payload(
+    subject: &str,
+    kind: ConsentKind,
+    payload: &ConsentPayload,
+) -> Result<(), ConsentEventError> {
+    match (kind, payload) {
+        (
+            ConsentKind::FederationGrant,
+            ConsentPayload::FederationGrant {
+                link_id,
+                peer_code,
+                grantee_id_hash,
+                ..
+            },
+        ) => {
+            validate_link_id(link_id)?;
+            validate_code("peer_code", peer_code)?;
+            if let Some(h) = grantee_id_hash {
+                validate_hash("grantee_id_hash", h)?;
+            }
+            validate_subject_code("subject", subject)
+        }
+        (
+            ConsentKind::FederationAccept,
+            ConsentPayload::FederationAccept {
+                link_id,
+                applied_id_hashes,
+                ..
+            },
+        ) => {
+            validate_link_id(link_id)?;
+            for h in applied_id_hashes {
+                validate_hash("applied_id_hashes", h)?;
+            }
+            validate_subject_code("subject", subject)
+        }
+        (
+            ConsentKind::FederationRevoke,
+            ConsentPayload::FederationRevoke {
+                link_id,
+                reason_code,
+            },
+        ) => {
+            validate_link_id(link_id)?;
+            validate_code("reason_code", reason_code)?;
+            validate_subject_code("subject", subject)
         }
         (kind, payload) => Err(ConsentEventError::KindPayloadMismatch {
             kind,
@@ -633,6 +746,39 @@ fn validate_sensor_subject(value: &str) -> Result<(), ConsentEventError> {
         return Err(ConsentEventError::InvalidCode {
             field: "subject",
             message: "sensor body chars must be in [A-Za-z0-9._:-]".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// Share-link id slot — expects a 26-char uppercase Crockford base32 ULID.
+/// ULIDs are `[0-7][0-9A-HJKMNP-TV-Z]{25}`, first char bounded to 0..7 for
+/// 128-bit overflow safety. This matches the shape produced by the `ulid`
+/// crate and the same ULID validation used elsewhere in `cairn-core`.
+fn validate_link_id(value: &str) -> Result<(), ConsentEventError> {
+    if value.len() != 26 {
+        return Err(ConsentEventError::InvalidCode {
+            field: "link_id",
+            message: "must be a 26-char ULID".to_owned(),
+        });
+    }
+    let bytes = value.as_bytes();
+    if !matches!(bytes[0], b'0'..=b'7') {
+        return Err(ConsentEventError::InvalidCode {
+            field: "link_id",
+            message: "first char must be 0..=7".to_owned(),
+        });
+    }
+    let is_crockford = |b: u8| -> bool {
+        matches!(
+            b,
+            b'0'..=b'9' | b'A'..=b'H' | b'J' | b'K' | b'M' | b'N' | b'P'..=b'T' | b'V'..=b'Z'
+        )
+    };
+    if !bytes[1..].iter().copied().all(is_crockford) {
+        return Err(ConsentEventError::InvalidCode {
+            field: "link_id",
+            message: "must be uppercase Crockford base32".to_owned(),
         });
     }
     Ok(())
@@ -1014,5 +1160,92 @@ mod tests {
     fn validate_scope_still_rejects_quotes_and_whitespace() {
         assert!(super::validate_scope("\"a\"=b").is_err());
         assert!(super::validate_scope("a=b ").is_err());
+    }
+
+    #[test]
+    fn federation_grant_validates() {
+        let event = ConsentEvent {
+            consent_id: "01HQZX9F5N0000000000000000".into(),
+            kind: ConsentKind::FederationGrant,
+            actor: Identity::parse("hmn:alice").expect("valid identity"),
+            subject: "share_link:lk-1".into(),
+            scope: "team:platform".into(),
+            op_id: Some("01HQZX9F5N0000000000000001".into()),
+            sensor_id: None,
+            payload: ConsentPayload::FederationGrant {
+                link_id: "01HQZX9F5N0000000000000002".into(),
+                grant_tier: MemoryVisibility::Team,
+                peer_code: "loopback-node-b".into(),
+                grantee_id_hash: None,
+            },
+            decided_at: Rfc3339Timestamp::parse("2026-05-22T00:00:00Z").expect("valid ts"),
+            expires_at: None,
+        };
+        event.validate().expect("federation_grant should validate");
+    }
+
+    #[test]
+    fn federation_accept_validates() {
+        let event = ConsentEvent {
+            consent_id: "01HQZX9F5N0000000000000003".into(),
+            kind: ConsentKind::FederationAccept,
+            actor: Identity::parse("hmn:bob").expect("valid identity"),
+            subject: "share_link:lk-1".into(),
+            scope: "team:platform".into(),
+            op_id: Some("01HQZX9F5N0000000000000004".into()),
+            sensor_id: None,
+            payload: ConsentPayload::FederationAccept {
+                link_id: "01HQZX9F5N0000000000000002".into(),
+                grant_tier: MemoryVisibility::Team,
+                applied_id_hashes: vec![
+                    "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                        .into(),
+                ],
+            },
+            decided_at: Rfc3339Timestamp::parse("2026-05-22T00:00:00Z").expect("valid ts"),
+            expires_at: None,
+        };
+        event.validate().expect("federation_accept should validate");
+    }
+
+    #[test]
+    fn federation_revoke_validates() {
+        let event = ConsentEvent {
+            consent_id: "01HQZX9F5N0000000000000005".into(),
+            kind: ConsentKind::FederationRevoke,
+            actor: Identity::parse("hmn:alice").expect("valid identity"),
+            subject: "share_link:lk-1".into(),
+            scope: "team:platform".into(),
+            op_id: Some("01HQZX9F5N0000000000000006".into()),
+            sensor_id: None,
+            payload: ConsentPayload::FederationRevoke {
+                link_id: "01HQZX9F5N0000000000000002".into(),
+                reason_code: "issuer_revoked".into(),
+            },
+            decided_at: Rfc3339Timestamp::parse("2026-05-22T00:00:00Z").expect("valid ts"),
+            expires_at: None,
+        };
+        event.validate().expect("federation_revoke should validate");
+    }
+
+    #[test]
+    fn federation_kind_payload_mismatch_rejected() {
+        // FederationGrant with FederationRevoke payload should fail.
+        let event = ConsentEvent {
+            consent_id: "01HQZX9F5N0000000000000007".into(),
+            kind: ConsentKind::FederationGrant,
+            actor: Identity::parse("hmn:alice").expect("valid identity"),
+            subject: "share_link:lk-1".into(),
+            scope: "team:platform".into(),
+            op_id: None,
+            sensor_id: None,
+            payload: ConsentPayload::FederationRevoke {
+                link_id: "01HQZX9F5N0000000000000002".into(),
+                reason_code: "issuer_revoked".into(),
+            },
+            decided_at: Rfc3339Timestamp::parse("2026-05-22T00:00:00Z").expect("valid ts"),
+            expires_at: None,
+        };
+        assert!(event.validate().is_err());
     }
 }

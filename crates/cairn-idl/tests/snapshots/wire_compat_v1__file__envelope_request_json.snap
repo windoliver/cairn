@@ -22,7 +22,10 @@ expression: body
         "assemble_hot",
         "capture_trace",
         "lint",
-        "forget"
+        "forget",
+        "propose_share",
+        "accept_share",
+        "revoke_share"
       ]
     },
     "signed_intent": { "$ref": "signed_intent.json" },
@@ -39,6 +42,9 @@ expression: body
     { "if": { "properties": { "verb": { "const": "assemble_hot" } } },   "then": { "properties": { "args": { "$ref": "../verbs/assemble_hot.json#/$defs/Args" } } } },
     { "if": { "properties": { "verb": { "const": "capture_trace" } } },  "then": { "properties": { "args": { "$ref": "../verbs/capture_trace.json#/$defs/Args" } } } },
     { "if": { "properties": { "verb": { "const": "lint" } } },           "then": { "properties": { "args": { "$ref": "../verbs/lint.json#/$defs/Args" } } } },
-    { "if": { "properties": { "verb": { "const": "forget" } } },         "then": { "properties": { "args": { "$ref": "../verbs/forget.json#/$defs/Args" } } } }
+    { "if": { "properties": { "verb": { "const": "forget" } } },         "then": { "properties": { "args": { "$ref": "../verbs/forget.json#/$defs/Args" } } } },
+    { "if": { "properties": { "verb": { "const": "propose_share" } } }, "then": { "properties": { "args": { "$ref": "../verbs/propose_share.json#/$defs/Args" } } } },
+    { "if": { "properties": { "verb": { "const": "accept_share" } } },  "then": { "properties": { "args": { "$ref": "../verbs/accept_share.json#/$defs/Args" } } } },
+    { "if": { "properties": { "verb": { "const": "revoke_share" } } },  "then": { "properties": { "args": { "$ref": "../verbs/revoke_share.json#/$defs/Args" } } } }
   ]
 }

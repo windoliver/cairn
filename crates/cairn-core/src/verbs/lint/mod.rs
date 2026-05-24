@@ -267,7 +267,8 @@ pub(crate) fn empty_source_forgets() -> &'static HashMap<String, SourceForgetLed
 }
 
 /// In-process fake of [`crate::contract::workflow_jobs::WorkflowJobsReader`]
-/// for unit tests of the `workflow_health` check (issue #92, spec §4.10).
+/// for unit tests of the `workflow_health` check (issue #92, spec §4.10)
+/// and the `federation_dead_propagation` check (issue #123).
 ///
 /// Builder-style helpers seed the relevant slice of state; unset fields
 /// return the trait's "empty" sentinel.
@@ -278,6 +279,9 @@ pub(crate) struct MockWorkflowJobsReader {
     pub oldest_queued_age: Option<i64>,
     pub longest_lease: Option<i64>,
     pub last_success: std::collections::HashMap<String, i64>,
+    /// Issue #123: pre-staged failed federation jobs for the
+    /// `federation_dead_propagation` check tests.
+    pub failed_federation: Vec<crate::contract::workflow_jobs::FailedFederationJob>,
     /// Issue #92 round-7 finding 7.2: pre-staged reader-degraded
     /// reason. When set, the next `take_last_error` call returns
     /// `Some(reason)` and then clears the slot (drain semantics).
@@ -305,6 +309,16 @@ impl MockWorkflowJobsReader {
         *self.last_error.lock().expect("mock last_error lock") = Some(reason.to_string());
         self
     }
+
+    /// Issue #123: seed a failed federation job for the
+    /// `federation_dead_propagation` check tests.
+    pub fn with_failed_federation_job(
+        mut self,
+        job: crate::contract::workflow_jobs::FailedFederationJob,
+    ) -> Self {
+        self.failed_federation.push(job);
+        self
+    }
 }
 
 #[cfg(test)]
@@ -327,6 +341,16 @@ impl crate::contract::workflow_jobs::WorkflowJobsReader for MockWorkflowJobsRead
     }
     fn dead_letter_rows(&self, limit: usize) -> Vec<crate::contract::workflow_jobs::DeadLetterRow> {
         self.dead_letter.iter().take(limit).cloned().collect()
+    }
+    fn failed_federation_jobs(
+        &self,
+        kind_prefix: &str,
+    ) -> Vec<crate::contract::workflow_jobs::FailedFederationJob> {
+        self.failed_federation
+            .iter()
+            .filter(|j| j.kind.as_str().starts_with(kind_prefix))
+            .cloned()
+            .collect()
     }
     fn take_last_error(&self) -> Option<String> {
         self.last_error.lock().ok().and_then(|mut slot| slot.take())
@@ -378,6 +402,7 @@ pub async fn run_checks(inputs: &LintInputs<'_>) -> LintData {
     findings.extend(checks::hot_memory::run(inputs));
     findings.extend(checks::index_drift::run(inputs));
     findings.extend(checks::workflow_health::run(inputs));
+    findings.extend(checks::federation::run(inputs));
     findings.extend(checks::consent::run(inputs).await);
     let summary = summarize(&findings);
     let empty_agent_worker_audit = AgentWorkerAuditSummary::from_records(&[]);
@@ -433,6 +458,7 @@ fn kind_key(k: Kind) -> String {
         Kind::MissingConcept => "missing_concept",
         Kind::AmbiguousEdge => "ambiguous_edge",
         Kind::DataGap => "data_gap",
+        Kind::FederationDeadPropagation => "federation_dead_propagation",
         Kind::MalformedRecord => "malformed_record",
         Kind::MisclassifiedProfile => "misclassified_profile",
         Kind::BrokenActorChain => "broken_actor_chain",

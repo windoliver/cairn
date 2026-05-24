@@ -17,6 +17,9 @@ pub enum RequestVerb {
     CaptureTrace,
     Lint,
     Forget,
+    ProposeShare,
+    AcceptShare,
+    RevokeShare,
 }
 
 /// Per-verb request payload, dispatched on `Request.verb` at deserialize time.
@@ -32,6 +35,9 @@ pub enum RequestArgs {
     CaptureTrace(crate::generated::verbs::capture_trace::CaptureTraceArgs),
     Lint(crate::generated::verbs::lint::LintArgs),
     Forget(crate::generated::verbs::forget::ForgetArgs),
+    ProposeShare(crate::generated::verbs::propose_share::ProposeShareArgs),
+    AcceptShare(crate::generated::verbs::accept_share::AcceptShareArgs),
+    RevokeShare(crate::generated::verbs::revoke_share::RevokeShareArgs),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -84,6 +90,15 @@ impl<'de> ::serde::Deserialize<'de> for Request {
             ),
             RequestVerb::Forget => RequestArgs::Forget(
                 <crate::generated::verbs::forget::ForgetArgs as ::serde::Deserialize>::deserialize(raw.args).map_err(::serde::de::Error::custom)?
+            ),
+            RequestVerb::ProposeShare => RequestArgs::ProposeShare(
+                <crate::generated::verbs::propose_share::ProposeShareArgs as ::serde::Deserialize>::deserialize(raw.args).map_err(::serde::de::Error::custom)?
+            ),
+            RequestVerb::AcceptShare => RequestArgs::AcceptShare(
+                <crate::generated::verbs::accept_share::AcceptShareArgs as ::serde::Deserialize>::deserialize(raw.args).map_err(::serde::de::Error::custom)?
+            ),
+            RequestVerb::RevokeShare => RequestArgs::RevokeShare(
+                <crate::generated::verbs::revoke_share::RevokeShareArgs as ::serde::Deserialize>::deserialize(raw.args).map_err(::serde::de::Error::custom)?
             ),
         };
         Ok(Self {
@@ -147,6 +162,9 @@ pub enum ResponseVerb {
     CaptureTrace,
     Lint,
     Forget,
+    ProposeShare,
+    AcceptShare,
+    RevokeShare,
     Unknown,
 }
 
@@ -178,6 +196,9 @@ pub enum ResponseData {
     CaptureTrace(crate::generated::verbs::capture_trace::CaptureTraceData),
     Lint(crate::generated::verbs::lint::LintData),
     Forget(crate::generated::verbs::forget::ForgetData),
+    ProposeShare(crate::generated::verbs::propose_share::ProposeShareData),
+    AcceptShare(crate::generated::verbs::accept_share::AcceptShareData),
+    RevokeShare(crate::generated::verbs::revoke_share::RevokeShareData),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -314,6 +335,15 @@ impl<'de> ::serde::Deserialize<'de> for Response {
                 ),
                 ResponseVerb::Forget => ResponseData::Forget(
                     <crate::generated::verbs::forget::ForgetData as ::serde::Deserialize>::deserialize(payload).map_err(::serde::de::Error::custom)?
+                ),
+                ResponseVerb::ProposeShare => ResponseData::ProposeShare(
+                    <crate::generated::verbs::propose_share::ProposeShareData as ::serde::Deserialize>::deserialize(payload).map_err(::serde::de::Error::custom)?
+                ),
+                ResponseVerb::AcceptShare => ResponseData::AcceptShare(
+                    <crate::generated::verbs::accept_share::AcceptShareData as ::serde::Deserialize>::deserialize(payload).map_err(::serde::de::Error::custom)?
+                ),
+                ResponseVerb::RevokeShare => ResponseData::RevokeShare(
+                    <crate::generated::verbs::revoke_share::RevokeShareData as ::serde::Deserialize>::deserialize(payload).map_err(::serde::de::Error::custom)?
                 ),
                 ResponseVerb::Unknown => return Err(::serde::de::Error::custom("verb=unknown is rejected-only and cannot carry data")),
             })

@@ -14,3 +14,6 @@ Generated from `cairn.mcp.v1` IDL schema files.
 | `capture_trace` | `signed_chain` | `-` | `capture_trace` | `$defs.Args` | `$defs.Data` |
 | `lint` | `read_only` | `-` | `lint` | `$defs.Args` | `$defs.Data` |
 | `forget` | `forget_capability` | `-` | `forget` | `$defs.Args` | `$defs.Data` |
+| `propose_share` | `signed_chain` | `cairn.mcp.v1.extension.federation` | `propose-share` | `$defs.Args` | `$defs.Data` |
+| `accept_share` | `signed_chain` | `cairn.mcp.v1.extension.federation` | `accept-share` | `$defs.Args` | `$defs.Data` |
+| `revoke_share` | `signed_chain` | `cairn.mcp.v1.extension.federation` | `revoke-share` | `$defs.Args` | `$defs.Data` |

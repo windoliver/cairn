@@ -34,6 +34,11 @@ tracing = { workspace = true }
 [dev-dependencies]
 cairn-store-sqlite = { workspace = true, features = ["test-helpers"] }
 cairn-test-fixtures = { workspace = true }
+# `e2e_helpers` caches the issuer's `VerifyingKey` so the receiver can
+# verify inbound envelopes without round-tripping through the keystore.
+# Pulled in only as a dev-dep — production code in this crate never
+# touches ed25519 directly.
+ed25519-dalek = { workspace = true }
 proptest = { workspace = true }
 rstest = { workspace = true }
 tempfile = { workspace = true }

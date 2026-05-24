@@ -41,6 +41,7 @@ fn full_gates(phase: Phase) -> CapabilityGates {
         dream_runtime_ready: false,
         expiration_runtime_ready: false,
         evaluation_runtime_ready: false,
+        federation_runtime_ready: false,
     }
 }
 
@@ -127,6 +128,45 @@ fn coord_extension_capability_is_v0_3_and_hidden_until_wired() {
         assert!(
             !cap_strings.contains(&serde_json::json!("cairn.mcp.v1.extension.coord")),
             "coord extension must stay hidden until runtime dispatch is wired; got {caps:?}"
+        );
+    }
+}
+
+#[test]
+fn federation_extension_capability_is_v0_3_and_hidden_until_wired() {
+    // Brief §8.0.a / §12.a / §15 fail-closed: the `cairn.federation.v1`
+    // extension is a v0.3 capability. It must:
+    //
+    // 1. Round-trip through the generated `Capabilities` enum (so an IDL
+    //    rename surfaces here as a compile-time deserialization failure).
+    // 2. Stay hidden at v0.1 and v0.2 regardless of wiring.
+    // 3. Stay hidden at v0.3 while *any* of the five federation wiring
+    //    constants (`FEDERATION_EXTENSION_WIRED`,
+    //    `FEDERATION_PROPOSE_DISPATCH_WIRED`,
+    //    `FEDERATION_ACCEPT_DISPATCH_WIRED`,
+    //    `FEDERATION_WORKFLOW_WIRED`, `FEDERATION_MCP_TOOLS_WIRED`)
+    //    remains `false` — i.e. the MCP runtime cannot honor a
+    //    propose / accept / revoke call end-to-end (no `Keystore`,
+    //    `FederationOutbox`, or `FederationTransport` wired into the
+    //    handler today).
+    //
+    // Mirror of `coord_extension_capability_is_v0_3_and_hidden_until_wired`.
+    let cap: Capabilities = serde_json::from_str("\"cairn.mcp.v1.extension.federation\"")
+        .expect("federation extension capability must be part of the generated enum");
+    assert_eq!(
+        serde_json::to_value(cap).expect("capability serializes"),
+        serde_json::json!("cairn.mcp.v1.extension.federation")
+    );
+
+    for phase in [Phase::V0_1, Phase::V0_2, Phase::V0_3] {
+        let caps = advertise(&full_gates(phase));
+        let cap_strings: Vec<_> = caps
+            .iter()
+            .map(|cap| serde_json::to_value(cap).expect("capability serializes"))
+            .collect();
+        assert!(
+            !cap_strings.contains(&serde_json::json!("cairn.mcp.v1.extension.federation")),
+            "federation extension must stay hidden until runtime dispatch is wired; got {caps:?}"
         );
     }
 }
