@@ -782,6 +782,7 @@ dependencies = [
  "cairn-core",
  "hex",
  "hmac",
+ "proptest",
  "serde",
  "serde_json",
  "sha2",
