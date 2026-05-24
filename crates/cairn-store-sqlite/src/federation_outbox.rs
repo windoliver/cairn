@@ -92,7 +92,9 @@ impl FederationOutbox for SqliteMemoryStore {
             // query records by the consent_ref provenance marker and
             // tombstone those. This handles the case where the consent
             // payload stores hashes (per §14) instead of raw IDs.
-            if tombstone_ids.is_empty() && let Some(ref cref) = consent_ref {
+            if tombstone_ids.is_empty()
+                && let Some(ref cref) = consent_ref
+            {
                 let mut stmt = tx.tx.prepare(
                     "SELECT id FROM records \
                      WHERE json_extract(extra_frontmatter, '$.consent_ref') = ?1 \
