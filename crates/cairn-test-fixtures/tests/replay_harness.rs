@@ -92,6 +92,7 @@ async fn search_replay_hides_reasoning_by_default() {
             query: "rolling summary p0 session covers".to_owned(),
             limit: 5,
             expected: ReplayExpectation::Hits { record_ids: vec![] },
+            metric_category: None,
         }));
 
     let report = cairn_test_fixtures::replay::run_scenario(&scenario)

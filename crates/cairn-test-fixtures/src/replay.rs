@@ -147,6 +147,28 @@ pub struct ReplayRecord {
     pub parent_event_id: Option<String>,
 }
 
+/// Coherence metric category assigned to a replay action.
+///
+/// `cairn-bench coherence` aggregates per-category pass rates. An action
+/// without a `metric_category` is excluded from coherence scoring.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MetricCategory {
+    /// Long-horizon recall — retrieve_session, retrieve_turn, assemble_hot,
+    /// capture_trace, record_present(true).
+    RecallPrecision,
+    /// Stale-context avoidance — search actions with a non-empty
+    /// `stale_record_ids` set.
+    StaleAvoidance,
+    /// Summary quality — summarize actions matching the expected record set.
+    SummaryQuality,
+    /// Search relevance — search actions whose top-1 hit matches expected.
+    SearchUsefulness,
+    /// Forget completeness — forget_record actions whose follow-up search
+    /// excludes the tombstoned record.
+    ForgetCompleteness,
+}
+
 /// Ordered replay action.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "verb", rename_all = "snake_case", deny_unknown_fields)]
@@ -159,6 +181,10 @@ pub enum ReplayAction {
         story: String,
         /// Expected record ids included in the hot-memory debug trace.
         expected_record_ids: Vec<String>,
+        /// Coherence metric category. `None` excludes the action from
+        /// `cairn-bench coherence` scoring.
+        #[serde(default)]
+        metric_category: Option<MetricCategory>,
     },
     /// Capture-trace-shaped session event expectation.
     CaptureTrace {
@@ -168,6 +194,10 @@ pub enum ReplayAction {
         session_id: String,
         /// Expected trace events in sequence order.
         expected_trace_events: Vec<String>,
+        /// Coherence metric category. `None` excludes the action from
+        /// `cairn-bench coherence` scoring.
+        #[serde(default)]
+        metric_category: Option<MetricCategory>,
     },
     /// Summary replay expectation.
     Summarize {
@@ -177,6 +207,10 @@ pub enum ReplayAction {
         session_id: String,
         /// Expected summary record ids.
         expected_record_ids: Vec<String>,
+        /// Coherence metric category. `None` excludes the action from
+        /// `cairn-bench coherence` scoring.
+        #[serde(default)]
+        metric_category: Option<MetricCategory>,
     },
     /// Lint replay expectation.
     Lint {
@@ -184,6 +218,10 @@ pub enum ReplayAction {
         story: String,
         /// Expected lint status.
         expected_status: String,
+        /// Coherence metric category. `None` excludes the action from
+        /// `cairn-bench coherence` scoring.
+        #[serde(default)]
+        metric_category: Option<MetricCategory>,
     },
     /// Session replay expectation.
     RetrieveSession {
@@ -195,6 +233,10 @@ pub enum ReplayAction {
         expected_turn_ids: Vec<String>,
         /// Expected trace events in sequence order.
         expected_trace_events: Vec<String>,
+        /// Coherence metric category. `None` excludes the action from
+        /// `cairn-bench coherence` scoring.
+        #[serde(default)]
+        metric_category: Option<MetricCategory>,
     },
     /// Single-turn replay expectation.
     RetrieveTurn {
@@ -206,6 +248,10 @@ pub enum ReplayAction {
         turn_id: String,
         /// Expected trace events in sequence order.
         expected_trace_events: Vec<String>,
+        /// Coherence metric category. `None` excludes the action from
+        /// `cairn-bench coherence` scoring.
+        #[serde(default)]
+        metric_category: Option<MetricCategory>,
     },
     /// Direct record presence check.
     RecordPresent {
@@ -215,6 +261,10 @@ pub enum ReplayAction {
         record_id: String,
         /// Expected presence.
         expected_present: bool,
+        /// Coherence metric category. `None` excludes the action from
+        /// `cairn-bench coherence` scoring.
+        #[serde(default)]
+        metric_category: Option<MetricCategory>,
     },
     /// Record-level forget expectation.
     ForgetRecord {
@@ -226,6 +276,10 @@ pub enum ReplayAction {
         followup_query: String,
         /// Whether the record must be absent from follow-up search.
         expected_absent_from_search: bool,
+        /// Coherence metric category. `None` excludes the action from
+        /// `cairn-bench coherence` scoring.
+        #[serde(default)]
+        metric_category: Option<MetricCategory>,
     },
 }
 
@@ -253,6 +307,10 @@ pub struct ReplaySearchAction {
     pub limit: usize,
     /// Expected outcome.
     pub expected: ReplayExpectation,
+    /// Coherence metric category. `None` excludes this action from coherence
+    /// scoring.
+    #[serde(default)]
+    pub metric_category: Option<MetricCategory>,
 }
 
 /// Search mode in scenario manifests.
@@ -513,11 +571,13 @@ async fn run_action(
         ReplayAction::AssembleHot {
             story,
             expected_record_ids,
+            ..
         } => run_assemble_hot_action(store, scenario, story, expected_record_ids).await,
         ReplayAction::CaptureTrace {
             story,
             session_id,
             expected_trace_events,
+            ..
         } => {
             run_capture_trace_action(store, scenario, story, session_id, expected_trace_events)
                 .await
@@ -526,16 +586,19 @@ async fn run_action(
             story,
             session_id,
             expected_record_ids,
+            ..
         } => run_summarize_action(store, scenario, story, session_id, expected_record_ids).await,
         ReplayAction::Lint {
             story,
             expected_status,
+            ..
         } => run_lint_action(store, scenario, story, expected_status).await,
         ReplayAction::RetrieveSession {
             story,
             session_id,
             expected_turn_ids,
             expected_trace_events,
+            ..
         } => {
             run_retrieve_session_action(
                 store,
@@ -552,6 +615,7 @@ async fn run_action(
             session_id,
             turn_id,
             expected_trace_events,
+            ..
         } => {
             run_retrieve_turn_action(
                 store,
@@ -567,12 +631,14 @@ async fn run_action(
             story,
             record_id,
             expected_present,
+            ..
         } => run_record_present_action(store, scenario, story, record_id, *expected_present).await,
         ReplayAction::ForgetRecord {
             story,
             record_id,
             followup_query,
             expected_absent_from_search,
+            ..
         } => {
             run_forget_record_action(
                 store,
@@ -1171,6 +1237,7 @@ async fn forget_record(
         query: followup_query.to_owned(),
         limit: 10,
         expected: ReplayExpectation::Hits { record_ids: vec![] },
+        metric_category: None,
     };
     let search_actual = run_search(store, scenario, &action).await;
     if search_actual.get("status").and_then(Value::as_str) != Some("hits") {
@@ -1229,6 +1296,41 @@ fn error_value(error: &ReplayError) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metric_category_round_trips_through_serde() {
+        let raw = serde_json::json!({
+            "verb": "summarize",
+            "story": "RESEARCH_SUMMARY_GOLDEN",
+            "session_id": "research-literature",
+            "expected_record_ids": ["01HQZX9F5N00000000000000R4"],
+            "metric_category": "summary_quality"
+        });
+        let action: ReplayAction = serde_json::from_value(raw).expect("parse action");
+        match action {
+            ReplayAction::Summarize { metric_category, .. } => {
+                assert_eq!(metric_category, Some(MetricCategory::SummaryQuality));
+            }
+            other => panic!("expected Summarize, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn metric_category_absent_parses_as_none() {
+        let raw = serde_json::json!({
+            "verb": "summarize",
+            "story": "RESEARCH_SUMMARY_GOLDEN",
+            "session_id": "research-literature",
+            "expected_record_ids": ["01HQZX9F5N00000000000000R4"]
+        });
+        let action: ReplayAction = serde_json::from_value(raw).expect("parse action");
+        match action {
+            ReplayAction::Summarize { metric_category, .. } => {
+                assert_eq!(metric_category, None);
+            }
+            other => panic!("expected Summarize, got {other:?}"),
+        }
+    }
 
     fn trace_seed() -> ReplayRecord {
         ReplayRecord {
