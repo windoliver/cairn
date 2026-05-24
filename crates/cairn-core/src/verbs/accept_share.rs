@@ -315,7 +315,7 @@ async fn accept_revoke(
     // each inbound record's extra_frontmatter. This avoids relying on
     // the consent payload's applied_id_hashes (which are privacy-safe
     // hashes, not parseable RecordIds).
-    let consent_ref = format!("consent:federation:{}", outer_link_id);
+    let consent_ref = format!("consent:federation:{outer_link_id}");
     let prior_record_ids: Vec<String> = match find_dedup(deps.consent_lookup, dedup).await? {
         Some(prior) => prior.applied_records,
         None => Vec::new(),

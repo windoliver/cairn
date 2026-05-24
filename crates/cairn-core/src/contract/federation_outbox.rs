@@ -120,7 +120,7 @@ pub trait FederationOutbox: Send + Sync {
     /// * [`FederationOutboxError::Backend`] for opaque adapter I/O
     ///   failures.
     /// `consent_ref` is the provenance marker (`"consent:federation:<link_id>"`)
-    /// that `accept_propose` wrote into each inbound record's extra_frontmatter.
+    /// that `accept_propose` wrote into each inbound record's `extra_frontmatter`.
     /// When `tombstone_ids` is empty (e.g. the SQL adapter returns hashes
     /// instead of real IDs), the adapter SHOULD query records by `consent_ref`
     /// and tombstone those instead.
