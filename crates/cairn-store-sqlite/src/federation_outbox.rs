@@ -92,20 +92,18 @@ impl FederationOutbox for SqliteMemoryStore {
             // query records by the consent_ref provenance marker and
             // tombstone those. This handles the case where the consent
             // payload stores hashes (per §14) instead of raw IDs.
-            if tombstone_ids.is_empty() {
-                if let Some(ref cref) = consent_ref {
-                    let mut stmt = tx.tx.prepare(
-                        "SELECT id FROM records \
-                         WHERE json_extract(extra_frontmatter, '$.consent_ref') = ?1 \
-                           AND tombstoned = 0",
-                    )?;
-                    let ids: Vec<String> = stmt
-                        .query_map(rusqlite::params![cref], |row| row.get::<_, String>(0))?
-                        .collect::<Result<_, _>>()?;
-                    for id_str in ids {
-                        if let Ok(id) = cairn_core::domain::RecordId::parse(id_str) {
-                            tx.tombstone(&id, TombstoneReason::FederationRevoke)?;
-                        }
+            if tombstone_ids.is_empty() && let Some(ref cref) = consent_ref {
+                let mut stmt = tx.tx.prepare(
+                    "SELECT id FROM records \
+                     WHERE json_extract(extra_frontmatter, '$.consent_ref') = ?1 \
+                       AND tombstoned = 0",
+                )?;
+                let ids: Vec<String> = stmt
+                    .query_map(rusqlite::params![cref], |row| row.get::<_, String>(0))?
+                    .collect::<Result<_, _>>()?;
+                for id_str in ids {
+                    if let Ok(id) = cairn_core::domain::RecordId::parse(id_str) {
+                        tx.tombstone(&id, TombstoneReason::FederationRevoke)?;
                     }
                 }
             }
