@@ -39,6 +39,7 @@ must be updated in the same PR.
 | `codegen / no drift` (`ci.yml`) | ✅ required | Runs `cargo run -p cairn-idl --bin cairn-codegen -- --check`; fails when generated CLI/MCP/SDK/skill artefacts disagree with the IDL. |
 | `contract-drift / wire-compat + capability matrix (§8.0.a, §15, #98)` (`ci.yml`) | ✅ required | Aggregates IDL→code drift, IDL→docs drift, `cairn.mcp.v1` wire fixtures (`wire_compat_v1`), and v0.1 capability matrix (`capability_matrix_v1`). |
 | `gates / latency + memory + privacy` (`ci.yml`) | ✅ required | Brief §15 SLO (subprocess proxy: 300 ms p95) + per-metric regression budget, §19 working-set budget (164 / 200 MB binary+model), §14 leakage fixtures. Linux uses `CAIRN_KEYSTORE=file`; macOS uses the OS Keychain. **Regression budget is currently 25% per metric** (committed in `crates/cairn-bench/baselines/latency.<linux\|macos>.json` `regression_pct` overrides) — wider than the brief §15 default 2% to absorb the subprocess driver's run-to-run noise. The 2% default reapplies once the SDK ships an in-process driver (issue #193) and the overrides are removed. Reports land in the `bench-reports-<runner>` artifact. |
+| `gates / coherence (§15, §18 #5, #137)` (`ci.yml`) | ✅ required | Brief §15 multi-session coherence gate. Five-metric scoring of extended replay cassettes against `crates/cairn-bench/manifests/coherence.toml`; per-metric floor + 2 % regression delta from `crates/cairn-bench/baselines/coherence.json`. PR + main → `--gate beta`; `release/*` → `--gate rc`. Exit 69 on regression. Trend lines appended to `crates/cairn-bench/baselines/coherence-trend.jsonl` and uploaded as the `coherence-report` artifact. |
 | `plugins / cairn plugins verify` (`ci.yml`) | ✅ required | Runs the bundled-plugin conformance suite (`cairn plugins verify`) and uploads the JSON report as a build artifact. |
 | `docs / generated reference` (`docs.yml`) | ✅ required | Runs `cargo run -p cairn-cli --bin cairn-docgen -- --check`; fails when committed usage/reference docs disagree with CLI/config/plugin/IDL/MCP/package surfaces. |
 | `docs / mdbook build` (`docs.yml`) | ✅ required | Builds `docs/site` with mdBook; fails on broken book structure or missing pages. |
@@ -86,6 +87,9 @@ cargo run -p cairn-bench --release --locked -- all
 cargo run -p cairn-bench --release --locked -- latency
 cargo run -p cairn-bench --release --locked -- memory
 cargo run -p cairn-bench --release --locked -- privacy
+
+# gates — coherence (5 metrics × 3 extended cassettes, §15, #137)
+cargo run -p cairn-bench --release --locked -- coherence run --gate beta
 
 # docs generated-reference drift — fails if committed docs disagree with
 # runtime CLI/config/plugin/IDL/MCP/package surfaces. To regenerate, use --write.
