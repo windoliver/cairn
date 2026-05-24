@@ -16,6 +16,7 @@ pub mod credential;
 pub mod error;
 pub mod event;
 pub mod manifest;
+pub mod poll;
 pub mod rate_limit;
 pub mod redact;
 pub mod webhook;
@@ -30,6 +31,7 @@ pub use event::{
     ConnectorEvent, ConnectorEventId, ConnectorPayload, ConnectorScope, DeliveryMode, SourceRef,
 };
 pub use manifest::ConnectorManifest;
+pub use poll::{PollScheduler, PollTick};
 pub use rate_limit::RateLimit;
 pub use redact::{Redacted, RedactionPipeline};
 pub use webhook::{WebhookRequest, WebhookRouter};
