@@ -1,12 +1,17 @@
 #![allow(missing_docs)]
 
+use cairn_core::contract::llm_provider::{
+    CompletionOutput, CompletionRequest, LLMProvider, LLMProviderCapabilities, LlmError,
+};
+use cairn_core::contract::version::{ContractVersion, VersionRange};
 use cairn_core::pipeline::skillify::{
     SkillArtifact, SkillArtifactBundle, SkillArtifactKind, SkillLintSkill, SkillLintSnapshot,
     SkillifyGateStatus,
 };
 use cairn_workflows::skillify::gate_runner::{
-    CheckResolvableAndDryRunner, DeterministicScriptRunner, FilingRulesRunner, GateRunContext,
-    GateRunner, ResolverTriggerRunner, SkillContractRunner,
+    CheckResolvableAndDryRunner, DeterministicScriptRunner, E2eSmokeRunner, FilingRulesRunner,
+    GateRunContext, GateRunner, IntegrationTestRunner, LlmEvalRunner, ResolverEvalRunner,
+    ResolverTriggerRunner, SkillContractRunner, UnitTestRunner,
 };
 use cairn_workflows::skillify::materialize::AuthoredSkillBundle;
 use serde_json::json;
@@ -251,4 +256,300 @@ async fn check_resolvable_passes_no_conflicts() {
     };
     let result = CheckResolvableAndDryRunner.run(&ctx).await;
     assert_eq!(result.status, SkillifyGateStatus::Passed);
+}
+
+// -- UnitTestRunner --
+
+#[tokio::test]
+async fn unit_test_runner_passes_matching_output() {
+    let temp = TempDir::new().unwrap();
+    materialize_script(temp.path(), "deploy-hotfix", "#!/usr/bin/env bash\necho deploy-hotfix\n");
+    let a = authored("deploy-hotfix");
+    let b = bundle("deploy-hotfix");
+    let ctx = GateRunContext {
+        vault_root: temp.path(),
+        candidate_id: "skc_test",
+        candidate_dir: temp.path().to_path_buf(),
+        bundle: &b,
+        authored: &a,
+        llm: None,
+        snapshot: &empty_snapshot(),
+    };
+    let result = UnitTestRunner.run(&ctx).await;
+    assert_eq!(result.status, SkillifyGateStatus::Passed, "{:?}", result.message);
+}
+
+#[tokio::test]
+async fn unit_test_runner_fails_on_stdout_mismatch() {
+    let temp = TempDir::new().unwrap();
+    materialize_script(temp.path(), "deploy-hotfix", "#!/usr/bin/env bash\necho wrong\n");
+    let a = authored("deploy-hotfix");
+    let b = bundle("deploy-hotfix");
+    let ctx = GateRunContext {
+        vault_root: temp.path(),
+        candidate_id: "skc_test",
+        candidate_dir: temp.path().to_path_buf(),
+        bundle: &b,
+        authored: &a,
+        llm: None,
+        snapshot: &empty_snapshot(),
+    };
+    let result = UnitTestRunner.run(&ctx).await;
+    assert_eq!(result.status, SkillifyGateStatus::Failed);
+}
+
+#[tokio::test]
+async fn unit_test_runner_blocked_when_cases_missing() {
+    let temp = TempDir::new().unwrap();
+    materialize_script(temp.path(), "deploy-hotfix", "#!/usr/bin/env bash\necho ok\n");
+    let mut a = authored("deploy-hotfix");
+    a.unit_tests = serde_json::json!({});
+    let b = bundle("deploy-hotfix");
+    let ctx = GateRunContext {
+        vault_root: temp.path(),
+        candidate_id: "skc_test",
+        candidate_dir: temp.path().to_path_buf(),
+        bundle: &b,
+        authored: &a,
+        llm: None,
+        snapshot: &empty_snapshot(),
+    };
+    let result = UnitTestRunner.run(&ctx).await;
+    assert_eq!(result.status, SkillifyGateStatus::Blocked);
+}
+
+// -- IntegrationTestRunner --
+
+#[tokio::test]
+async fn integration_test_runner_passes_matching_output() {
+    let temp = TempDir::new().unwrap();
+    materialize_script(temp.path(), "deploy-hotfix", "#!/usr/bin/env bash\necho deploy-hotfix\n");
+    let a = authored("deploy-hotfix");
+    let b = bundle("deploy-hotfix");
+    let ctx = GateRunContext {
+        vault_root: temp.path(),
+        candidate_id: "skc_test",
+        candidate_dir: temp.path().to_path_buf(),
+        bundle: &b,
+        authored: &a,
+        llm: None,
+        snapshot: &empty_snapshot(),
+    };
+    let result = IntegrationTestRunner.run(&ctx).await;
+    assert_eq!(result.status, SkillifyGateStatus::Passed, "{:?}", result.message);
+}
+
+#[tokio::test]
+async fn integration_test_runner_sees_cairn_integration_env() {
+    // Script echoes value of CAIRN_INTEGRATION env var; expects "1"
+    let temp = TempDir::new().unwrap();
+    materialize_script(
+        temp.path(),
+        "deploy-hotfix",
+        "#!/usr/bin/env bash\necho ${CAIRN_INTEGRATION:-unset}\n",
+    );
+    let mut a = authored("deploy-hotfix");
+    a.integration_tests = serde_json::json!({
+        "cases": [{"input": "", "expected_stdout": "1\n", "timeout_ms": 5000}]
+    });
+    let b = bundle("deploy-hotfix");
+    let ctx = GateRunContext {
+        vault_root: temp.path(),
+        candidate_id: "skc_test",
+        candidate_dir: temp.path().to_path_buf(),
+        bundle: &b,
+        authored: &a,
+        llm: None,
+        snapshot: &empty_snapshot(),
+    };
+    let result = IntegrationTestRunner.run(&ctx).await;
+    assert_eq!(result.status, SkillifyGateStatus::Passed, "{:?}", result.message);
+}
+
+// -- LlmEvalRunner --
+
+struct PassLlm;
+struct FailLlm;
+
+#[async_trait::async_trait]
+impl LLMProvider for PassLlm {
+    fn name(&self) -> &'static str {
+        "pass-llm"
+    }
+    fn capabilities(&self) -> &LLMProviderCapabilities {
+        static CAPS: LLMProviderCapabilities = LLMProviderCapabilities {
+            json_mode: true,
+            streaming: false,
+            tool_calls: false,
+        };
+        &CAPS
+    }
+    fn supported_contract_versions(&self) -> VersionRange {
+        VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+    }
+    async fn complete(&self, _req: &CompletionRequest) -> Result<CompletionOutput, LlmError> {
+        Ok(CompletionOutput::Json(serde_json::json!({"pass": true, "reason": "ok"})))
+    }
+}
+
+#[async_trait::async_trait]
+impl LLMProvider for FailLlm {
+    fn name(&self) -> &'static str {
+        "fail-llm"
+    }
+    fn capabilities(&self) -> &LLMProviderCapabilities {
+        static CAPS: LLMProviderCapabilities = LLMProviderCapabilities {
+            json_mode: true,
+            streaming: false,
+            tool_calls: false,
+        };
+        &CAPS
+    }
+    fn supported_contract_versions(&self) -> VersionRange {
+        VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+    }
+    async fn complete(&self, _req: &CompletionRequest) -> Result<CompletionOutput, LlmError> {
+        Ok(CompletionOutput::Json(serde_json::json!({"pass": false, "reason": "bad"})))
+    }
+}
+
+#[tokio::test]
+async fn llm_eval_runner_passes_when_judge_returns_pass() {
+    let temp = TempDir::new().unwrap();
+    let a = authored("deploy-hotfix");
+    let b = bundle("deploy-hotfix");
+    let llm = PassLlm;
+    let ctx = GateRunContext {
+        vault_root: temp.path(),
+        candidate_id: "skc_test",
+        candidate_dir: temp.path().to_path_buf(),
+        bundle: &b,
+        authored: &a,
+        llm: Some(&llm),
+        snapshot: &empty_snapshot(),
+    };
+    let result = LlmEvalRunner.run(&ctx).await;
+    assert_eq!(result.status, SkillifyGateStatus::Passed, "{:?}", result.message);
+}
+
+#[tokio::test]
+async fn llm_eval_runner_fails_when_judge_returns_fail() {
+    let temp = TempDir::new().unwrap();
+    let a = authored("deploy-hotfix");
+    let b = bundle("deploy-hotfix");
+    let llm = FailLlm;
+    let ctx = GateRunContext {
+        vault_root: temp.path(),
+        candidate_id: "skc_test",
+        candidate_dir: temp.path().to_path_buf(),
+        bundle: &b,
+        authored: &a,
+        llm: Some(&llm),
+        snapshot: &empty_snapshot(),
+    };
+    let result = LlmEvalRunner.run(&ctx).await;
+    assert_eq!(result.status, SkillifyGateStatus::Failed);
+}
+
+#[tokio::test]
+async fn llm_eval_runner_blocked_without_llm() {
+    let temp = TempDir::new().unwrap();
+    let a = authored("deploy-hotfix");
+    let b = bundle("deploy-hotfix");
+    let ctx = GateRunContext {
+        vault_root: temp.path(),
+        candidate_id: "skc_test",
+        candidate_dir: temp.path().to_path_buf(),
+        bundle: &b,
+        authored: &a,
+        llm: None,
+        snapshot: &empty_snapshot(),
+    };
+    let result = LlmEvalRunner.run(&ctx).await;
+    assert_eq!(result.status, SkillifyGateStatus::Blocked);
+}
+
+// -- ResolverEvalRunner --
+
+#[tokio::test]
+async fn resolver_eval_passes_with_matching_intents() {
+    let temp = TempDir::new().unwrap();
+    let a = authored("deploy-hotfix");
+    let b = bundle("deploy-hotfix");
+    let ctx = GateRunContext {
+        vault_root: temp.path(),
+        candidate_id: "skc_test",
+        candidate_dir: temp.path().to_path_buf(),
+        bundle: &b,
+        authored: &a,
+        llm: None,
+        snapshot: &empty_snapshot(),
+    };
+    let result = ResolverEvalRunner.run(&ctx).await;
+    assert_eq!(result.status, SkillifyGateStatus::Passed, "{:?}", result.message);
+}
+
+#[tokio::test]
+async fn resolver_eval_fails_when_recall_too_low() {
+    let temp = TempDir::new().unwrap();
+    let mut a = authored("deploy-hotfix");
+    // Intents that don't match any trigger
+    a.resolver_eval = serde_json::json!({
+        "intents": [
+            {"intent": "completely unrelated phrase xyz", "expected_lane": "deploy.hotfix"},
+            {"intent": "another unrelated phrase abc", "expected_lane": "deploy.hotfix"},
+        ]
+    });
+    let b = bundle("deploy-hotfix");
+    let ctx = GateRunContext {
+        vault_root: temp.path(),
+        candidate_id: "skc_test",
+        candidate_dir: temp.path().to_path_buf(),
+        bundle: &b,
+        authored: &a,
+        llm: None,
+        snapshot: &empty_snapshot(),
+    };
+    let result = ResolverEvalRunner.run(&ctx).await;
+    assert_eq!(result.status, SkillifyGateStatus::Failed);
+}
+
+// -- E2eSmokeRunner --
+
+#[tokio::test]
+async fn e2e_smoke_runner_passes_when_script_output_matches() {
+    let temp = TempDir::new().unwrap();
+    materialize_script(temp.path(), "deploy-hotfix", "#!/usr/bin/env bash\necho deploy-hotfix\n");
+    let a = authored("deploy-hotfix");
+    let b = bundle("deploy-hotfix");
+    let ctx = GateRunContext {
+        vault_root: temp.path(),
+        candidate_id: "skc_test",
+        candidate_dir: temp.path().to_path_buf(),
+        bundle: &b,
+        authored: &a,
+        llm: None,
+        snapshot: &empty_snapshot(),
+    };
+    let result = E2eSmokeRunner.run(&ctx).await;
+    assert_eq!(result.status, SkillifyGateStatus::Passed, "{:?}", result.message);
+}
+
+#[tokio::test]
+async fn e2e_smoke_runner_fails_on_output_mismatch() {
+    let temp = TempDir::new().unwrap();
+    materialize_script(temp.path(), "deploy-hotfix", "#!/usr/bin/env bash\necho wrong-output\n");
+    let a = authored("deploy-hotfix");
+    let b = bundle("deploy-hotfix");
+    let ctx = GateRunContext {
+        vault_root: temp.path(),
+        candidate_id: "skc_test",
+        candidate_dir: temp.path().to_path_buf(),
+        bundle: &b,
+        authored: &a,
+        llm: None,
+        snapshot: &empty_snapshot(),
+    };
+    let result = E2eSmokeRunner.run(&ctx).await;
+    assert_eq!(result.status, SkillifyGateStatus::Failed);
 }
