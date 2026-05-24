@@ -161,3 +161,49 @@ fn unpack_rejects_incompatible_version() {
     let err = unpack_archive(&archive.archive_path, install_temp.path(), "0.1.0").unwrap_err();
     assert!(err.to_string().contains("Cairn"));
 }
+
+// NOTE: path-traversal entries (`../escape`) cannot be constructed via
+// `tar::Builder::append_data` — the library rejects them at write time. The
+// runtime check in `extract_archive_safely` still rejects them on the read
+// side (defense-in-depth against hand-crafted tar bytes); the symlink test
+// below exercises the same code path through a different unsafe entry type.
+
+#[cfg(unix)]
+#[test]
+fn unpack_rejects_archive_with_symlink_entry() {
+    use std::io::Write as _;
+    let temp = TempDir::new().unwrap();
+    let archive_path = temp.path().join("symlink.cairnpack");
+    let file = std::fs::File::create(&archive_path).unwrap();
+    let enc = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+    let mut tar = tar::Builder::new(enc);
+
+    let manifest_json = b"{\"pack_id\":\"skp_x\",\"name\":\"x\",\"version\":\"0.1.0\",\"cairn_compat\":\">=0.1.0\",\"description\":\"x\",\"skills\":[],\"requires\":[],\"provides\":[],\"content_sha256\":\"\"}";
+    let mut h = tar::Header::new_gnu();
+    h.set_size(manifest_json.len() as u64);
+    h.set_mode(0o644);
+    h.set_cksum();
+    tar.append_data(&mut h, "manifest.json", &manifest_json[..])
+        .unwrap();
+
+    // Hostile entry: symlink.
+    let mut h2 = tar::Header::new_gnu();
+    h2.set_entry_type(tar::EntryType::Symlink);
+    h2.set_size(0);
+    h2.set_link_name("/etc/passwd").unwrap();
+    h2.set_mode(0o644);
+    h2.set_cksum();
+    tar.append_data(&mut h2, "evil-link", std::io::empty())
+        .unwrap();
+
+    let inner = tar.into_inner().unwrap();
+    inner.finish().unwrap().flush().unwrap();
+
+    let install = TempDir::new().unwrap();
+    let err = unpack_archive(&archive_path, install.path(), "0.1.0").unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("regular file") || msg.contains("Symlink") || msg.contains("integrity"),
+        "expected symlink rejection, got: {msg}"
+    );
+}

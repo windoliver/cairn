@@ -313,7 +313,7 @@ pub fn unpack_archive(
     // Use a guard so the temp dir is always cleaned up, even on error paths.
     let _cleanup = TempDirGuard(extract_dir.clone());
 
-    archive.unpack(&extract_dir)?;
+    extract_archive_safely(&mut archive, &extract_dir)?;
 
     let manifest: SkillPackManifest =
         serde_json::from_slice(&fs::read(extract_dir.join("manifest.json"))?)?;
@@ -486,6 +486,126 @@ fn rollback_swaps(backups: &[(std::path::PathBuf, std::path::PathBuf)]) {
         }
         let _ = fs::rename(backup, dst);
     }
+}
+
+/// Resource limits for archive extraction. Without these, a malicious
+/// `.cairnpack` could fill the vault filesystem before any manifest
+/// validation runs.
+const MAX_ARCHIVE_ENTRIES: usize = 10_000;
+const MAX_ARCHIVE_FILE_BYTES: u64 = 64 * 1024 * 1024; // 64 MiB per file
+const MAX_ARCHIVE_TOTAL_BYTES: u64 = 512 * 1024 * 1024; // 512 MiB cumulative
+
+/// Stream-extract a tar archive into `extract_dir` rejecting unsafe entries
+/// and enforcing resource limits.
+///
+/// Each entry is checked before any bytes are written:
+/// - reject absolute paths and parent-component (`..`) segments;
+/// - reject symlinks, hardlinks, FIFOs, devices, sockets;
+/// - enforce per-file and cumulative size caps;
+/// - enforce an entry count cap;
+/// - reject empty paths.
+///
+/// On any rejection or limit breach, the partially-extracted directory is
+/// removed and the call returns an error before the install proceeds.
+fn extract_archive_safely<R: std::io::Read>(
+    archive: &mut tar::Archive<R>,
+    extract_dir: &Path,
+) -> Result<(), SkillPackBuildError> {
+    let entries = archive.entries()?;
+    let mut count: usize = 0;
+    let mut total_bytes: u64 = 0;
+
+    for entry_result in entries {
+        let mut entry = entry_result?;
+        count += 1;
+        if count > MAX_ARCHIVE_ENTRIES {
+            return Err(SkillPackBuildError::Pack(
+                SkillPackError::IntegrityFailure {
+                    expected: format!("≤{MAX_ARCHIVE_ENTRIES} entries"),
+                    actual: format!("{count}+ entries"),
+                },
+            ));
+        }
+
+        let header = entry.header().clone();
+        let entry_type = header.entry_type();
+        if !(entry_type.is_file() || entry_type.is_dir()) {
+            return Err(SkillPackBuildError::Pack(
+                SkillPackError::IntegrityFailure {
+                    expected: "regular file or directory".to_owned(),
+                    actual: format!("entry type {entry_type:?}"),
+                },
+            ));
+        }
+
+        let entry_path = entry.path()?.into_owned();
+        let path_str = entry_path.to_string_lossy();
+        if path_str.is_empty() {
+            return Err(SkillPackBuildError::Pack(
+                SkillPackError::IntegrityFailure {
+                    expected: "non-empty path".to_owned(),
+                    actual: "empty entry path".to_owned(),
+                },
+            ));
+        }
+        if entry_path.is_absolute() {
+            return Err(SkillPackBuildError::Pack(
+                SkillPackError::IntegrityFailure {
+                    expected: "relative path".to_owned(),
+                    actual: path_str.to_string(),
+                },
+            ));
+        }
+        if entry_path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(SkillPackBuildError::Pack(
+                SkillPackError::IntegrityFailure {
+                    expected: "no parent components".to_owned(),
+                    actual: path_str.to_string(),
+                },
+            ));
+        }
+
+        let entry_size = header.size().unwrap_or(0);
+        if entry_size > MAX_ARCHIVE_FILE_BYTES {
+            return Err(SkillPackBuildError::Pack(
+                SkillPackError::IntegrityFailure {
+                    expected: format!("≤{MAX_ARCHIVE_FILE_BYTES} bytes per file"),
+                    actual: format!("{entry_size} bytes in `{path_str}`"),
+                },
+            ));
+        }
+        total_bytes = total_bytes.saturating_add(entry_size);
+        if total_bytes > MAX_ARCHIVE_TOTAL_BYTES {
+            return Err(SkillPackBuildError::Pack(
+                SkillPackError::IntegrityFailure {
+                    expected: format!("≤{MAX_ARCHIVE_TOTAL_BYTES} cumulative bytes"),
+                    actual: format!("≥{total_bytes} bytes after `{path_str}`"),
+                },
+            ));
+        }
+
+        // Compute the canonical destination and assert it stays under
+        // `extract_dir`. `unpack_in` performs the rooted unpack but we
+        // already validated the path above; the extra check guards against
+        // tar implementations that allow surprising path resolution.
+        let target = extract_dir.join(&entry_path);
+        if !target.starts_with(extract_dir) {
+            return Err(SkillPackBuildError::Pack(
+                SkillPackError::IntegrityFailure {
+                    expected: format!("path under {}", extract_dir.display()),
+                    actual: target.display().to_string(),
+                },
+            ));
+        }
+        // `unpack_in` writes the entry into the rooted directory and
+        // enforces a second path-escape check internally.
+        entry.unpack_in(extract_dir)?;
+    }
+
+    Ok(())
 }
 
 /// Build a fresh "all gates Blocked" gate-report for a candidate. Used at

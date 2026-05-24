@@ -795,3 +795,68 @@ async fn unit_test_runner_times_out_when_script_ignores_large_stdin() {
         "should time out promptly even with large unread stdin, took {elapsed:?}"
     );
 }
+
+#[tokio::test]
+async fn resolver_eval_fails_when_broad_trigger_has_low_precision() {
+    // Round 4 regression: a broad trigger that matches lots of unrelated
+    // intents but covers positives at recall ≥ 0.8 must still fail because
+    // precision < 0.9. With recall-only check, this would have passed.
+    let temp = TempDir::new().unwrap();
+    let mut a = authored("deploy-hotfix");
+    a.resolver_triggers = json!(["deploy"]);
+    a.resolver_eval = json!({
+        "intents": [
+            // One positive that matches (1/1 recall).
+            {"intent": "deploy hotfix", "expected_lane": "deploy.hotfix"},
+            // Three negatives that also match the broad "deploy" trigger.
+            {"intent": "deploy database", "expected_lane": "ops.db"},
+            {"intent": "deploy frontend", "expected_lane": "ui.deploy"},
+            {"intent": "deploy monitoring", "expected_lane": "ops.metrics"},
+        ]
+    });
+    let b = bundle("deploy-hotfix");
+    let ctx = GateRunContext {
+        vault_root: temp.path(),
+        candidate_id: "skc_test",
+        candidate_dir: temp.path().to_path_buf(),
+        bundle: &b,
+        authored: &a,
+        llm: None,
+        snapshot: &empty_snapshot(),
+    };
+    let result = ResolverEvalRunner.run(&ctx).await;
+    assert_eq!(result.status, SkillifyGateStatus::Failed);
+    let msg = result.message.unwrap_or_default();
+    assert!(
+        msg.contains("precision"),
+        "expected precision-related failure message, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn resolver_eval_passes_when_precise_trigger_only_matches_positives() {
+    // Companion to the broad-trigger test: a precise trigger should pass
+    // with both perfect recall and perfect precision.
+    let temp = TempDir::new().unwrap();
+    let mut a = authored("deploy-hotfix");
+    a.resolver_triggers = json!(["deploy hotfix"]);
+    a.resolver_eval = json!({
+        "intents": [
+            {"intent": "deploy hotfix", "expected_lane": "deploy.hotfix"},
+            {"intent": "deploy database", "expected_lane": "ops.db"},
+            {"intent": "deploy frontend", "expected_lane": "ui.deploy"},
+        ]
+    });
+    let b = bundle("deploy-hotfix");
+    let ctx = GateRunContext {
+        vault_root: temp.path(),
+        candidate_id: "skc_test",
+        candidate_dir: temp.path().to_path_buf(),
+        bundle: &b,
+        authored: &a,
+        llm: None,
+        snapshot: &empty_snapshot(),
+    };
+    let result = ResolverEvalRunner.run(&ctx).await;
+    assert_eq!(result.status, SkillifyGateStatus::Passed);
+}

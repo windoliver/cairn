@@ -7,8 +7,7 @@ use cairn_core::contract::llm_provider::{
     CompletionOutput, CompletionRequest, LLMProvider, LlmError,
 };
 use cairn_core::pipeline::skillify::{
-    SkillLintSnapshot, SkillSpecDraft, SkillifyGateReport, SkillifyGateStatus,
-    SkillifyPipelineState, SkillifyStage,
+    SkillSpecDraft, SkillifyGateReport, SkillifyGateStatus, SkillifyPipelineState, SkillifyStage,
 };
 
 use super::SkillifyPayload;
@@ -166,8 +165,21 @@ impl SkillifyPipeline {
         // (ResolverTrigger, CheckResolvableAndDry) see existing live skills
         // and other materialized candidates. Exclude the current candidate
         // from the snapshot so it does not collide with itself.
-        let snapshot = build_vault_snapshot(&self.vault_root, Some(&candidate_id))
-            .unwrap_or_else(|_| SkillLintSnapshot { skills: Vec::new() });
+        //
+        // Round 4 hardening: fail closed if the snapshot cannot be built.
+        // Silently substituting an empty snapshot would let a candidate with
+        // a colliding lane/trigger pass gates whenever `.cairn/...` is
+        // temporarily unreadable, then route future intents to the wrong
+        // skill.
+        let snapshot = match build_vault_snapshot(&self.vault_root, Some(&candidate_id)) {
+            Ok(s) => s,
+            Err(e) => {
+                let msg = format!("vault snapshot build failed: {e}");
+                errors.push(msg.clone());
+                let _ = state.fail(msg);
+                return Ok(Self::build_result(&state, errors, start));
+            }
+        };
         let ctx = GateRunContext {
             vault_root: &self.vault_root,
             candidate_id: &candidate_id,

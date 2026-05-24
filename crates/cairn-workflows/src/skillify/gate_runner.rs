@@ -612,8 +612,15 @@ impl GateRunner for ResolverEvalRunner {
             })
             .unwrap_or_default();
 
-        let mut total = 0u32;
-        let mut hits = 0u32;
+        // Compute confusion-matrix metrics over the labelled intents so
+        // the gate enforces both recall (don't miss positives) and
+        // precision (don't fire on negatives). Round 4 hardening — the
+        // previous recall-only check let a broad trigger pass whenever
+        // positives kept recall ≥ 0.8, regardless of false positives.
+        let mut positives = 0u32; // expected_lane == candidate lane
+        let mut negatives = 0u32; // expected_lane != candidate lane
+        let mut true_positives = 0u32;
+        let mut false_positives = 0u32;
 
         for intent_obj in intents {
             let intent = intent_obj
@@ -625,16 +632,24 @@ impl GateRunner for ResolverEvalRunner {
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("");
 
-            total += 1;
             let matched = triggers
                 .iter()
                 .any(|t| intent.to_lowercase().contains(&t.to_lowercase()));
-            if matched && expected_lane == ctx.authored.lane {
-                hits += 1;
+            let is_positive = expected_lane == ctx.authored.lane;
+            if is_positive {
+                positives += 1;
+                if matched {
+                    true_positives += 1;
+                }
+            } else {
+                negatives += 1;
+                if matched {
+                    false_positives += 1;
+                }
             }
         }
 
-        if total == 0 {
+        if positives + negatives == 0 {
             return GateRunResult::failed(
                 self.artifact_kind(),
                 "no intents to evaluate".to_owned(),
@@ -642,11 +657,37 @@ impl GateRunner for ResolverEvalRunner {
             );
         }
 
-        let recall = f64::from(hits) / f64::from(total);
+        let recall = if positives == 0 {
+            1.0
+        } else {
+            f64::from(true_positives) / f64::from(positives)
+        };
         if recall < 0.8 {
             return GateRunResult::failed(
                 self.artifact_kind(),
-                format!("recall {recall:.2} < 0.8 threshold ({hits}/{total} matched)"),
+                format!(
+                    "recall {recall:.2} < 0.8 ({true_positives}/{positives} positives matched)"
+                ),
+                timer.elapsed_ms(),
+            );
+        }
+
+        // Precision: among intents the trigger fired on, what fraction were
+        // the candidate's positives? If the trigger never fires we treat
+        // precision as 1.0 (no false positives is fine; recall caught any
+        // missed positives above).
+        let predicted_positive = true_positives + false_positives;
+        let precision = if predicted_positive == 0 {
+            1.0
+        } else {
+            f64::from(true_positives) / f64::from(predicted_positive)
+        };
+        if precision < 0.9 {
+            return GateRunResult::failed(
+                self.artifact_kind(),
+                format!(
+                    "precision {precision:.2} < 0.9 ({true_positives}/{predicted_positive} fires were correct; {false_positives} false positives over {negatives} negatives)"
+                ),
                 timer.elapsed_ms(),
             );
         }
