@@ -264,6 +264,7 @@ fn parse_source_forget_row(
         .map_or_else(|| subject.unwrap_or_default(), ToOwned::to_owned);
     let source_bytes_hash = payload
         .get("source_bytes_hash")
+        .or_else(|| payload.get("target_id_hash"))
         .and_then(serde_json::Value::as_str)
         .map(ToOwned::to_owned);
 

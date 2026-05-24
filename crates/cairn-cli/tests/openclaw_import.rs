@@ -173,6 +173,13 @@ fn openclaw_import_plan_applies_to_search_retrieve_lint_and_forget() {
         hit_record_ids(vault.path(), "quartz").is_empty(),
         "forgotten import should leave keyword search"
     );
+
+    let lint_after_forget_out = run_in_vault(vault.path(), &["lint", "--json"]);
+    let lint_after_forget = json_output(&lint_after_forget_out, &["lint", "--json"]);
+    assert_eq!(
+        lint_after_forget["data"]["summary"]["by_severity"]["error"], 0,
+        "forgetting OpenClaw imports should not leave malformed source_forget rows: {lint_after_forget}"
+    );
 }
 
 #[test]

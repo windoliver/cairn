@@ -102,3 +102,40 @@ fn snapshot_reader_parses_source_forget_rows_and_surfaces_malformed_versions() {
                 ))
     );
 }
+
+#[test]
+fn snapshot_reader_accepts_source_forget_intent_receipt_payloads() {
+    let conn = Connection::open_in_memory().expect("open");
+    conn.execute_batch(
+        "CREATE TABLE consent_journal (
+            rowid INTEGER PRIMARY KEY,
+            kind TEXT NOT NULL,
+            op_id TEXT,
+            subject TEXT NOT NULL,
+            payload_json TEXT
+        );",
+    )
+    .expect("schema");
+    conn.execute(
+        "INSERT INTO consent_journal (kind, op_id, subject, payload_json)
+         VALUES (?1, ?2, ?3, ?4)",
+        (
+            "source_forget",
+            "forget-op-receipt",
+            "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            r#"{"shape":"intent_receipt","target_id_hash":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","scope_tier":"private","reason_code":"record_forget"}"#,
+        ),
+    )
+    .expect("insert valid");
+
+    let reader = SqliteConsentJournalReader::from_connection(&conn).expect("snapshot");
+    let source_forgets = reader.forgotten_source_forgets();
+
+    assert_eq!(source_forgets.len(), 1);
+    assert_eq!(source_forgets[0].op_id, "forget-op-receipt");
+    assert_eq!(
+        source_forgets[0].source_bytes_hash,
+        "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    );
+    assert!(reader.malformed_source_forget_rows().is_empty());
+}
