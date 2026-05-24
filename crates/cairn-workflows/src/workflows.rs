@@ -70,3 +70,8 @@ workflow_type!(
     "reflect",
     "Reflection workflow class: emits candidate-record `FlushPlan` batches from repeated recent patterns."
 );
+workflow_type!(
+    EvolutionWorkflow,
+    "evolve",
+    "Evolution workflow class: emits gated `FlushPlan` batches for proposal, canary, and promotion decisions."
+);

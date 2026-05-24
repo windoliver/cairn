@@ -25,5 +25,6 @@ pub use fsm::{
 pub use idempotency::{OperationId, OperationIdError, StepKey, StepLog, StepLogError};
 pub use recover::{MAX_STEP_ATTEMPTS, OpSnapshot, RecoveryDecision, StepRow, decide_recovery};
 pub use step_graph::{
-    EXPIRE_STEPS, FORGET_RECORD_STEPS, StepDef, StepGraph, UPSERT_STEPS, WalKind, graph_for,
+    EVOLVE_STEPS, EXPIRE_STEPS, FORGET_RECORD_STEPS, StepDef, StepGraph, UPSERT_STEPS, WalKind,
+    graph_for,
 };
