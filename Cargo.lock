@@ -698,6 +698,7 @@ dependencies = [
  "fs4",
  "insta",
  "jsonschema",
+ "proptest",
  "rusqlite",
  "serde",
  "serde_json",
