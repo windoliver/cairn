@@ -767,6 +767,8 @@ name = "cairn-connectors-core"
 version = "0.0.1"
 dependencies = [
  "cairn-core",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
 ]
 

@@ -15,6 +15,11 @@
 pub mod error;
 pub use error::ConnectorError;
 
+pub mod event;
+pub use event::{
+    ConnectorEvent, ConnectorEventId, ConnectorPayload, ConnectorScope, DeliveryMode, SourceRef,
+};
+
 use cairn_core::contract::version::ContractVersion;
 
 /// Contract version for the `Connector` trait surface.
