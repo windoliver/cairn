@@ -151,7 +151,7 @@ pub struct ReplayRecord {
 ///
 /// `cairn-bench coherence` aggregates per-category pass rates. An action
 /// without a `metric_category` is excluded from coherence scoring.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MetricCategory {
     /// Long-horizon recall — `retrieve_session`, `retrieve_turn`,
