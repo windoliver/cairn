@@ -29,7 +29,10 @@ fn authored(slug: &str) -> AuthoredSkillBundle {
         integration_tests: json!({"cases": [{"input": "", "expected_stdout": format!("{slug}\n"), "timeout_ms": 10000}]}),
         llm_evals: json!({"rubric": [{"prompt": "deploy hotfix", "expected_behavior": "calls the script", "scoring_criteria": "script invoked"}]}),
         resolver_triggers: json!(["deploy hotfix"]),
-        resolver_eval: json!({"intents": [{"intent": "deploy hotfix", "expected_lane": "deploy.hotfix"}]}),
+        resolver_eval: json!({"intents": [
+            {"intent": "deploy hotfix", "expected_lane": "deploy.hotfix"},
+            {"intent": "restart api server", "expected_lane": "ops.restart"},
+        ]}),
         smoke: json!({"cases": [{"trigger_phrase": "deploy hotfix", "expected_output": format!("{slug}\n")}]}),
         filing_rules: json!({"files_to": "wiki/summaries/"}),
     }
@@ -859,4 +862,36 @@ async fn resolver_eval_passes_when_precise_trigger_only_matches_positives() {
     };
     let result = ResolverEvalRunner.run(&ctx).await;
     assert_eq!(result.status, SkillifyGateStatus::Passed);
+}
+
+#[tokio::test]
+async fn resolver_eval_fails_when_no_negative_intents_provided() {
+    // Round 5 regression: precision is trivially 1.0 when there are no
+    // negatives, so the gate must require at least one negative example
+    // to validate precision meaningfully.
+    let temp = TempDir::new().unwrap();
+    let mut a = authored("deploy-hotfix");
+    a.resolver_eval = json!({
+        "intents": [
+            {"intent": "deploy hotfix", "expected_lane": "deploy.hotfix"},
+            {"intent": "deploy hotfix urgent", "expected_lane": "deploy.hotfix"},
+        ]
+    });
+    let b = bundle("deploy-hotfix");
+    let ctx = GateRunContext {
+        vault_root: temp.path(),
+        candidate_id: "skc_test",
+        candidate_dir: temp.path().to_path_buf(),
+        bundle: &b,
+        authored: &a,
+        llm: None,
+        snapshot: &empty_snapshot(),
+    };
+    let result = ResolverEvalRunner.run(&ctx).await;
+    assert_eq!(result.status, SkillifyGateStatus::Failed);
+    let msg = result.message.unwrap_or_default();
+    assert!(
+        msg.contains("negative"),
+        "expected negative-examples failure, got: {msg}"
+    );
 }

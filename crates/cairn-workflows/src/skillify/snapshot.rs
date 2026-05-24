@@ -38,9 +38,12 @@ pub fn build_vault_snapshot(
             if path.extension().and_then(std::ffi::OsStr::to_str) != Some("md") {
                 continue;
             }
-            if let Some(skill) = read_live_skill(vault_root, &path) {
-                skills.push(skill);
-            }
+            // Round 5 hardening: per-skill failures (unreadable file,
+            // missing frontmatter, missing required field) propagate as
+            // errors instead of being silently dropped. A malformed live
+            // skill could otherwise vanish from collision checks and let a
+            // duplicate-lane candidate promote.
+            skills.push(read_live_skill(vault_root, &path)?);
         }
     }
 
@@ -60,7 +63,9 @@ pub fn build_vault_snapshot(
             if exclude_candidate_id == Some(candidate_id) {
                 continue;
             }
-            // Skip the unpack scratch directory created by `unpack_archive`.
+            // Skip hidden directories (e.g. the `.unpack-tmp-*` scratch
+            // directory created by `unpack_archive`, the install `.lock`
+            // file's surrounding entries).
             if candidate_id.starts_with('.') {
                 continue;
             }
@@ -74,9 +79,7 @@ pub fn build_vault_snapshot(
                 if path.extension().and_then(std::ffi::OsStr::to_str) != Some("md") {
                     continue;
                 }
-                if let Some(skill) = read_candidate_skill(vault_root, candidate_id, &path) {
-                    skills.push(skill);
-                }
+                skills.push(read_candidate_skill(vault_root, candidate_id, &path)?);
             }
         }
     }
@@ -84,23 +87,42 @@ pub fn build_vault_snapshot(
     Ok(SkillLintSnapshot { skills })
 }
 
-fn read_live_skill(vault_root: &Path, path: &Path) -> Option<SkillLintSkill> {
-    let body = std::fs::read_to_string(path).ok()?;
-    let fm = frontmatter(&body)?;
+fn read_live_skill(vault_root: &Path, path: &Path) -> std::io::Result<SkillLintSkill> {
+    let body = std::fs::read_to_string(path)?;
+    let fm = frontmatter(&body).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("skill `{}` has no YAML frontmatter", path.display()),
+        )
+    })?;
     let skill_id = scalar(fm, "name").unwrap_or_else(|| {
         path.file_stem()
             .and_then(std::ffi::OsStr::to_str)
             .unwrap_or("unknown")
             .to_owned()
     });
-    let lane = scalar(fm, "lane").unwrap_or_default();
+    let lane = scalar(fm, "lane").ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("skill `{}` missing required `lane` field", path.display()),
+        )
+    })?;
     let uses = scalar(fm, "uses");
     let files_to = scalar(fm, "files_to");
     let resolver_triggers = inline_or_list(fm, "triggers");
+    if resolver_triggers.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "skill `{}` missing or empty `triggers` field",
+                path.display()
+            ),
+        ));
+    }
     let rel_path = rel(vault_root, path);
     let existing_paths = vec![rel_path.clone()];
 
-    Some(SkillLintSkill {
+    Ok(SkillLintSkill {
         skill_id,
         lane,
         path: rel_path,
@@ -120,18 +142,43 @@ fn read_candidate_skill(
     vault_root: &Path,
     candidate_id: &str,
     path: &Path,
-) -> Option<SkillLintSkill> {
-    let body = std::fs::read_to_string(path).ok()?;
-    let fm = frontmatter(&body)?;
+) -> std::io::Result<SkillLintSkill> {
+    let body = std::fs::read_to_string(path)?;
+    let fm = frontmatter(&body).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "candidate `{candidate_id}` skill `{}` has no YAML frontmatter",
+                path.display()
+            ),
+        )
+    })?;
     let skill_id = candidate_id.to_owned();
-    let lane = scalar(fm, "lane").unwrap_or_default();
+    let lane = scalar(fm, "lane").ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "candidate `{candidate_id}` skill `{}` missing required `lane` field",
+                path.display()
+            ),
+        )
+    })?;
     let uses = scalar(fm, "uses");
     let files_to = scalar(fm, "files_to");
     let resolver_triggers = inline_or_list(fm, "triggers");
+    if resolver_triggers.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "candidate `{candidate_id}` skill `{}` missing or empty `triggers` field",
+                path.display()
+            ),
+        ));
+    }
     let rel_path = rel(vault_root, path);
     let existing_paths = vec![rel_path.clone()];
 
-    Some(SkillLintSkill {
+    Ok(SkillLintSkill {
         skill_id,
         lane,
         path: rel_path,
@@ -245,6 +292,31 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let snap = build_vault_snapshot(temp.path(), None).unwrap();
         assert!(snap.skills.is_empty());
+    }
+
+    #[test]
+    fn malformed_live_skill_fails_closed() {
+        let temp = TempDir::new().unwrap();
+        write_md(&temp.path().join("skills/bad.md"), "no frontmatter here");
+        let err = build_vault_snapshot(temp.path(), None).unwrap_err();
+        assert!(
+            err.to_string().contains("frontmatter"),
+            "expected frontmatter error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn live_skill_missing_lane_fails_closed() {
+        let temp = TempDir::new().unwrap();
+        write_md(
+            &temp.path().join("skills/no-lane.md"),
+            "---\nname: no-lane\ntriggers:\n  - x\nuses: scripts/x.sh\nfiles_to: wiki/x/\n---\nBody.",
+        );
+        let err = build_vault_snapshot(temp.path(), None).unwrap_err();
+        assert!(
+            err.to_string().contains("lane"),
+            "expected lane-missing error, got: {err}"
+        );
     }
 
     #[test]

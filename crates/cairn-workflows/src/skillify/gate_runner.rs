@@ -585,6 +585,10 @@ impl GateRunner for ResolverEvalRunner {
         SkillArtifactKind::ResolverEval
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "linear confusion-matrix computation; splitting into helpers would obscure the precision/recall thresholds"
+    )]
     async fn run(&self, ctx: &GateRunContext<'_>) -> GateRunResult {
         let timer = GateTimer::start();
         let Some(intents) = ctx
@@ -653,6 +657,28 @@ impl GateRunner for ResolverEvalRunner {
             return GateRunResult::failed(
                 self.artifact_kind(),
                 "no intents to evaluate".to_owned(),
+                timer.elapsed_ms(),
+            );
+        }
+
+        // Require BOTH positive and negative coverage. Without negatives,
+        // precision is trivially 1.0 (no false positives possible) and the
+        // round 4 precision guard provides no protection against overbroad
+        // routing — an LLM that authors only positive intents would
+        // self-certify a broad trigger. Round 5 hardening.
+        if positives == 0 {
+            return GateRunResult::failed(
+                self.artifact_kind(),
+                "resolver_eval intents contain no positives for the candidate lane".to_owned(),
+                timer.elapsed_ms(),
+            );
+        }
+        if negatives == 0 {
+            return GateRunResult::failed(
+                self.artifact_kind(),
+                "resolver_eval intents contain no negative examples — \
+                 add intents for other lanes so precision can be evaluated"
+                    .to_owned(),
                 timer.elapsed_ms(),
             );
         }
@@ -878,9 +904,22 @@ impl GateRunner for FilingRulesRunner {
 
 /// Execute a script via subprocess with optional stdin and env vars.
 ///
-/// On timeout, the subprocess is explicitly killed and reaped before this
-/// function returns. `kill_on_drop(true)` provides belt-and-suspenders if the
-/// task itself is cancelled mid-wait.
+/// Containment (round 5 hardening — LLM-authored scripts must not run with
+/// host privileges):
+/// - environment is cleared and an allowlist re-populated (PATH, HOME=tmp,
+///   plus caller-provided keys);
+/// - working directory is an isolated tempdir created per call;
+/// - on timeout, the subprocess and its entire process group are killed and
+///   reaped via `kill -KILL -<pgid>` (Unix) plus `kill_on_drop(true)` as a
+///   belt-and-suspenders;
+/// - the script bundle is not made writable here — gates that need to
+///   mutate the bundle (e.g. installing fixtures) are the integration test
+///   runner's responsibility, not the LLM author's.
+///
+/// This is a meaningful step toward sandboxing but is NOT a full container
+/// boundary. A motivated authored script can still exfiltrate via DNS,
+/// HTTP, or anything PATH-reachable. Full isolation (firejail/bubblewrap/
+/// nsjail) is tracked separately.
 async fn run_script(
     script_path: &Path,
     input: &str,
@@ -890,12 +929,38 @@ async fn run_script(
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::process::Command;
 
+    // Sandbox-lite: per-call temp working directory so scripts cannot
+    // mutate the vault or the bundle under test (the bundle is referenced
+    // by absolute path via script_path; relative I/O goes to scratch).
+    let scratch = match tempfile::Builder::new()
+        .prefix("cairn-skillify-script-")
+        .tempdir()
+    {
+        Ok(dir) => dir,
+        Err(e) => return Err(format!("scratch dir: {e}")),
+    };
+
     let mut cmd = Command::new("bash");
     cmd.arg(script_path);
     cmd.stdin(std::process::Stdio::piped());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
     cmd.kill_on_drop(true);
+
+    // Environment isolation: clear the inherited env and re-populate only
+    // an allowlist. Without this an LLM-authored script could read
+    // AWS_*, GITHUB_TOKEN, OPENAI_API_KEY, etc. from the worker process.
+    cmd.env_clear();
+    // PATH is required to find bash itself on most distros; copy a minimal
+    // safe value from the running process so /usr/bin/bash etc. resolve.
+    if let Ok(path) = std::env::var("PATH") {
+        cmd.env("PATH", path);
+    } else {
+        cmd.env("PATH", "/usr/local/bin:/usr/bin:/bin");
+    }
+    cmd.env("HOME", scratch.path());
+    cmd.env("TMPDIR", scratch.path());
+    cmd.current_dir(scratch.path());
 
     // On Unix, put the script in its own process group (PGID == child PID)
     // so timeout kill can signal the whole group, catching descendants the

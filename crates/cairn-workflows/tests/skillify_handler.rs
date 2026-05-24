@@ -71,7 +71,10 @@ impl JsonLlm {
             "integration_tests": {"cases": [{"input": "", "expected_stdout": format!("{slug}\n"), "timeout_ms": 10000}]},
             "llm_evals": {"rubric": [{"prompt": "deploy hotfix", "expected_behavior": "calls script", "scoring_criteria": "invoked"}]},
             "resolver_triggers": ["deploy hotfix"],
-            "resolver_eval": {"intents": [{"intent": "deploy hotfix", "expected_lane": "deploy.hotfix"}]},
+            "resolver_eval": {"intents": [
+                {"intent": "deploy hotfix", "expected_lane": "deploy.hotfix"},
+                {"intent": "restart api", "expected_lane": "ops.restart"}
+            ]},
             "smoke": {"cases": [{"trigger_phrase": "deploy hotfix", "expected_output": format!("{slug}\n")}]},
             "filing_rules": {"files_to": "wiki/summaries/"}
         })
