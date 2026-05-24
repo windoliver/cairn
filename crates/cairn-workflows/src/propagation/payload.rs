@@ -54,6 +54,12 @@ pub struct OutboundSharePayload {
     pub link: SignedShareLink,
     /// Record bodies to include in the envelope manifest.
     pub manifest: Vec<ManifestEntry>,
+    /// Optional per-job peer endpoint override.  When present the handler
+    /// sends to this peer instead of `default_peer`.  Absent in payloads
+    /// written before the peer-routing fix — the handler falls back to
+    /// `default_peer` for backwards compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer: Option<String>,
 }
 
 /// One record destined for the envelope manifest.

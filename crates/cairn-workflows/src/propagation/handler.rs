@@ -53,12 +53,12 @@ enum Direction {
 /// `JobHandler` that turns an outbound propagation job into a
 /// [`FederationTransport::send`] call.
 ///
-/// The handler is parameterised over a default [`PeerEndpoint`]: T7/T9
-/// enqueue the peer code into the consent journal, not into the job
-/// payload itself, so the dispatcher only knows the "home peer" for now.
-/// The default endpoint will become a per-job override when issue #123
-/// lands its multi-peer follow-up (T14+). For the loopback transport
-/// used in tests the value is ignored, so any well-formed string works.
+/// The handler carries a `default_peer` that is used as the fallback when
+/// no per-job peer is present.  `propose_share` (T7) serializes
+/// `req.peer` into the `OutboundSharePayload.peer` field; the handler
+/// reads it back and sends to that peer, falling back to `default_peer`
+/// when the field is absent (e.g. payloads written before the peer-
+/// routing fix, or when the caller omitted `--peer`).
 pub struct PropagationHandler {
     transport: Arc<dyn FederationTransport>,
     default_peer: PeerEndpoint,
@@ -87,6 +87,17 @@ impl PropagationHandler {
             direction: Direction::Revoke,
             kind: JobKind::new(OUTBOUND_REVOKE_KIND),
         }
+    }
+
+    /// Try to extract a per-job `peer` override from the payload JSON.
+    /// Returns `None` for revoke payloads and for share payloads written
+    /// before the peer-routing fix (missing field → `serde(default)`).
+    fn extract_peer_override(&self, payload: &JobPayload) -> Option<PeerEndpoint> {
+        if self.direction != Direction::Share {
+            return None;
+        }
+        let parsed = parse_outbound_share(payload).ok()?;
+        parsed.peer.map(PeerEndpoint)
     }
 
     fn build_envelope(&self, payload: &JobPayload) -> Result<FederationEnvelope, HandlerOutcome> {
@@ -171,12 +182,18 @@ impl JobHandler for PropagationHandler {
     }
 
     async fn handle(&self, payload: &JobPayload) -> HandlerOutcome {
+        // Extract the per-job peer override (if any) before building the
+        // envelope.  For share payloads the peer rides in the JSON; revoke
+        // payloads do not carry one yet.
+        let peer_override = self.extract_peer_override(payload);
+        let target_peer = peer_override.as_ref().unwrap_or(&self.default_peer);
+
         let envelope = match self.build_envelope(payload) {
             Ok(env) => env,
             Err(outcome) => return outcome,
         };
 
-        match self.transport.send(&envelope, &self.default_peer).await {
+        match self.transport.send(&envelope, target_peer).await {
             SendOutcome::Ack => HandlerOutcome::Done,
             SendOutcome::Transient(reason) => HandlerOutcome::Retry {
                 reason: reason.0,

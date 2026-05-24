@@ -89,6 +89,17 @@ fn propose_subcommand() -> clap::Command {
                 .value_name("ENDPOINT")
                 .help("Optional outbound peer endpoint (e.g. loopback://node-b)"),
         )
+        .arg(
+            clap::Arg::new("scope")
+                .long("scope")
+                .value_name("KEY=VAL,...")
+                .required(true)
+                .help(
+                    "Scope tuple in canonical wire format (e.g. \
+                     agent=claude,project=my-proj,workspace=default). \
+                     At least one dimension must be set.",
+                ),
+        )
         .arg(json_arg())
 }
 
@@ -208,13 +219,26 @@ fn run_propose(sub: &clap::ArgMatches, vault_root: &Path, _config: &CairnConfig)
         }
     };
 
+    let scope = match sub.get_one::<String>("scope") {
+        Some(s) => match parse_scope_wire(s) {
+            Ok(sc) => sc,
+            Err(msg) => {
+                eprintln!("cairn share propose: {msg}");
+                return ExitCode::from(64);
+            }
+        },
+        None => {
+            eprintln!("cairn share propose: --scope is required");
+            return ExitCode::from(64);
+        }
+    };
+
     rt.block_on(async {
         let deps = match open_federation_deps(vault_root).await {
             Ok(d) => d,
             Err(code) => return code,
         };
 
-        let scope = ScopeTuple::default();
         let rebac = RebacContext::for_scope(
             deps.identity.clone(),
             &scope,
@@ -336,7 +360,11 @@ fn run_accept(sub: &clap::ArgMatches, vault_root: &Path, _config: &CairnConfig) 
         };
 
         let clock = SystemClock;
-        let rebac = RebacContext::default();
+        // TODO(federation-P2): `issuer_verifying_key` below uses the
+        // local signing key's verifying half.  Correct for single-vault /
+        // loopback testing; real cross-party federation requires resolving
+        // `issuer_key_id` via a trust store (P2 follow-up).
+        let rebac = RebacContext::for_principal(deps.identity.clone());
         let verifying_key = deps.signing_key.verifying_key();
         let inbound_sensor = deps.identity.clone();
 
@@ -580,4 +608,41 @@ fn federation_error_exit(err: &FederationError, verb: &str, json: bool) -> ExitC
     }
 
     ExitCode::from(code)
+}
+
+// ── scope parser ───────────────────────────────────────────────────────
+
+/// Parse a canonical-wire scope string (`key=val,key=val,...`) into a
+/// [`ScopeTuple`].  Returns an error message suitable for display when
+/// the input is empty, contains unknown keys, or has malformed pairs.
+fn parse_scope_wire(input: &str) -> Result<ScopeTuple, String> {
+    let mut scope = ScopeTuple::default();
+    let mut count = 0usize;
+    for pair in input.split(',') {
+        let pair = pair.trim();
+        if pair.is_empty() {
+            continue;
+        }
+        let (key, value) = pair
+            .split_once('=')
+            .ok_or_else(|| format!("--scope: malformed pair (missing '='): {pair}"))?;
+        if value.is_empty() {
+            return Err(format!("--scope: empty value for key '{key}'"));
+        }
+        match key {
+            "agent" => scope.agent = Some(value.to_owned()),
+            "entity" => scope.entity = Some(value.to_owned()),
+            "project" => scope.project = Some(value.to_owned()),
+            "session_id" => scope.session_id = Some(value.to_owned()),
+            "tenant" => scope.tenant = Some(value.to_owned()),
+            "user" => scope.user = Some(value.to_owned()),
+            "workspace" => scope.workspace = Some(value.to_owned()),
+            _ => return Err(format!("--scope: unknown dimension '{key}'")),
+        }
+        count += 1;
+    }
+    if count == 0 {
+        return Err("--scope: at least one dimension must be set".to_owned());
+    }
+    Ok(scope)
 }

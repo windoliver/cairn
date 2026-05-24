@@ -47,6 +47,7 @@ fn outbound_share_payload_roundtrips() {
     let payload = OutboundSharePayload {
         link: domain_link,
         manifest,
+        peer: None,
     };
 
     let bytes = serde_json::to_vec(&payload).expect("serialize OutboundSharePayload");

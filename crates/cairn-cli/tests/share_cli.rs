@@ -72,6 +72,8 @@ fn share_propose_without_identity_exits_with_config_error() {
             "team",
             "--expires-at",
             "2027-01-01T00:00:00Z",
+            "--scope",
+            "project=test",
             "--json",
         ])
         .output()
@@ -267,6 +269,8 @@ fn share_propose_and_accept_happy_path() {
             "team",
             "--expires-at",
             "2027-01-01T00:00:00Z",
+            "--scope",
+            "project=test",
             "--json",
         ])
         .output()

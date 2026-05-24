@@ -48,6 +48,7 @@ fn share_payload_bytes() -> Vec<u8> {
     let payload = OutboundSharePayload {
         link: domain_link,
         manifest,
+        peer: None,
     };
     serde_json::to_vec(&payload).expect("serialize OutboundSharePayload")
 }

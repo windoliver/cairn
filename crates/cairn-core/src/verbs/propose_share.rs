@@ -258,7 +258,7 @@ pub async fn propose_share(
     //     same operation id so the journal and queue tables stay in
     //     lockstep.
     let consent_event = build_consent_event(&link, req.peer.as_ref(), deps.clock)?;
-    let job = build_propagation_job(&link, &records, &operation_id)?;
+    let job = build_propagation_job(&link, &records, &operation_id, req.peer.as_ref())?;
 
     // 12. Atomic write. The outbox guarantees both rows land together;
     //     a duplicate dedupe key is reported back as `InvalidShape`
@@ -307,7 +307,11 @@ fn compute_target_id_hashes(records: &[MemoryRecord]) -> Vec<String> {
     let mut out = Vec::with_capacity(records.len());
     for record in records {
         let mut hasher = Sha256::new();
-        hasher.update(record.target_id.as_str().as_bytes());
+        // Hash `record.id` (not `record.target_id`) so the receiver's
+        // `accept_share::validate_manifest` — which hashes `stub.record_id`
+        // — produces the same values.  For fresh records `id == target_id`,
+        // but versioned records diverge.
+        hasher.update(record.id.as_str().as_bytes());
         out.push(format!("sha256:{:x}", hasher.finalize()));
     }
     out
@@ -452,6 +456,11 @@ fn build_consent_event(
 struct OutboundSharePayloadWire<'a> {
     link: &'a SignedShareLink,
     manifest: Vec<ManifestEntryWire>,
+    /// Per-job peer endpoint so the handler sends to the requested peer
+    /// rather than its `default_peer`.  Omitted when `None` for backwards
+    /// compat with older handler builds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    peer: Option<String>,
 }
 
 /// Matches `cairn_workflows::propagation::payload::ManifestEntry`.
@@ -479,6 +488,7 @@ fn build_propagation_job(
     link: &SignedShareLink,
     records: &[MemoryRecord],
     operation_id: &str,
+    peer: Option<&PeerEndpoint>,
 ) -> Result<EnqueueRequest, FederationError> {
     let manifest: Vec<ManifestEntryWire> = records
         .iter()
@@ -492,7 +502,11 @@ fn build_propagation_job(
             tags: r.tags.clone(),
         })
         .collect();
-    let wire = OutboundSharePayloadWire { link, manifest };
+    let wire = OutboundSharePayloadWire {
+        link,
+        manifest,
+        peer: peer.map(|p| p.0.clone()),
+    };
     let payload = serde_json::to_vec(&wire).map_err(|_| FederationError::InvalidShape)?;
     let job_id = JobId::new(format!("job-{operation_id}"));
     let kind = JobKind::new(PROPAGATION_OUTBOUND_KIND);

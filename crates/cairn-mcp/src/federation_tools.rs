@@ -142,7 +142,12 @@ async fn dispatch_propose_share(
     };
 
     let clock = SystemClock;
-    let rebac = RebacContext::default();
+    let rebac = RebacContext::for_scope(
+        state.identity.clone(),
+        &request.scope,
+        cairn_core::rebac::RebacAction::Write,
+        request.grant_tier,
+    );
     let deps = cairn_core::verbs::propose_share::ProposeShareDeps {
         store: state.store.as_ref(),
         outbox: state.store.as_ref(),
@@ -193,7 +198,14 @@ async fn dispatch_accept_share(
     let request = crate::federation_conv::accept_share_request_from_args(args);
 
     let clock = SystemClock;
-    let rebac = RebacContext::default();
+    // TODO(federation-P2): `issuer_verifying_key` currently uses the
+    // local signing key's verifying half.  This is correct for
+    // single-vault / loopback testing where both sides share one
+    // identity, but real cross-party federation requires resolving
+    // `issuer_key_id` through a trust store or identity registry.
+    // Tracked as a P2 follow-up (no cross-party key resolution
+    // without a trust store).
+    let rebac = RebacContext::for_principal(state.identity.clone());
     let verifying_key = state.signing_key.verifying_key();
     let inbound_sensor = state.identity.clone();
     let deps = cairn_core::verbs::accept_share::AcceptShareDeps {
