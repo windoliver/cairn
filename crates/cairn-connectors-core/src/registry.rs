@@ -66,8 +66,10 @@ enum ConnectorState {
 struct Entry {
     /// Shared reference to the connector implementation.
     connector: Arc<dyn Connector>,
-    /// Current lifecycle state. Reads are lock-free; writes use [`ArcSwap::store`].
-    state: ArcSwap<ConnectorState>,
+    /// Current lifecycle state wrapped in an `Arc` so the poll-task closure can
+    /// hold a clone without going through `&Entry`. Reads are lock-free;
+    /// writes use [`ArcSwap::store`].
+    state: Arc<ArcSwap<ConnectorState>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -94,6 +96,11 @@ struct Entry {
 #[derive(Builder)]
 pub struct ConnectorRegistry {
     /// Credential store used to fetch OAuth tokens for poll calls.
+    ///
+    /// Real credential lookup is wired in #131; the field is retained now so
+    /// the builder API is stable and callers do not need to change when #131
+    /// lands.
+    #[allow(dead_code)] // wired in #131 (real credential lookup)
     credentials: Arc<dyn CredentialStore>,
     /// Consent journal used to persist, lookup, and revoke grants.
     consent: Arc<dyn ConnectorConsentJournal>,
@@ -140,7 +147,7 @@ impl ConnectorRegistry {
             name,
             Entry {
                 connector: Arc::new(plugin),
-                state: ArcSwap::from_pointee(ConnectorState::Disabled),
+                state: Arc::new(ArcSwap::from_pointee(ConnectorState::Disabled)),
             },
         );
         Ok(())
@@ -184,13 +191,15 @@ impl ConnectorRegistry {
             let connector = entry.connector.clone();
             let emit = self.emit.clone();
             let consent = self.consent.clone();
-            let _credentials = self.credentials.clone();
+            // Clone the Arc so the closure shares the *real* state, not a dummy.
+            let state = Arc::clone(&entry.state);
             let name_owned = name.to_owned();
 
             sched.spawn(name_owned, move |cursor| {
                 let connector = connector.clone();
                 let emit = emit.clone();
                 let consent = consent.clone();
+                let state = Arc::clone(&state);
                 async move {
                     let cx = PollContext {
                         credentials: Arc::new(CredentialHandle::empty()),
@@ -200,15 +209,7 @@ impl ConnectorRegistry {
                     let outcome = connector.poll(&cx).await?;
                     let next_cursor = outcome.next_cursor.clone();
                     for event in outcome.events {
-                        // Build a temporary Entry reference so process_event can
-                        // access the connector's manifest and state.
-                        let temp_entry = Entry {
-                            connector: connector.clone(),
-                            state: ArcSwap::from_pointee(ConnectorState::Enabled {
-                                grant_id: ConsentGrantId::new("poll-task"),
-                            }),
-                        };
-                        process_event(event, &temp_entry, &consent, &emit).await?;
+                        process_event(event, &connector, &state, &consent, &emit).await?;
                     }
                     Ok(PollTick::done(next_cursor))
                 }
@@ -272,10 +273,15 @@ impl ConnectorRegistry {
 ///
 /// # Steps
 ///
-/// 1. Verify the entry's state is `Enabled`; return [`ConnectorError::Fatal`]
-///    if it is `Disabled`.
+/// 0. **Integrity check:** verify `event.connector == connector.name()`.
+///    Return [`ConnectorError::Fatal`] if the names differ — a misbehaving
+///    connector must not be able to spoof another connector's name to bypass
+///    consent checks.
+/// 1. Verify `state` is `Enabled`; return [`ConnectorError::Fatal`] if it
+///    is `Disabled`. This uses the *real* `ArcSwap<ConnectorState>` shared
+///    with the registry, so a `disable()` call propagates immediately.
 /// 2. Check every label in `event.labels` against
-///    `entry.connector.manifest().allowed_label(label)`; return
+///    `connector.manifest().allowed_label(label)`; return
 ///    [`ConnectorError::UndeclaredLabel`] on the first violation.
 /// 3. Call `consent.lookup(connector, scope_key)` to enforce the live-grant
 ///    requirement; return [`ConnectorError::ConsentRevoked`] if the journal
@@ -288,13 +294,26 @@ impl ConnectorRegistry {
 /// [`ConnectorEvent`]: crate::event::ConnectorEvent
 async fn process_event(
     event: crate::event::ConnectorEvent,
-    entry: &Entry,
+    connector: &Arc<dyn Connector>,
+    state: &Arc<ArcSwap<ConnectorState>>,
     consent: &Arc<dyn ConnectorConsentJournal>,
     emit: &Arc<dyn PipelineEmit>,
 ) -> Result<(), ConnectorError> {
-    // 1. Fail fast if the entry is not currently enabled.
-    let state = (**entry.state.load()).clone();
-    if matches!(state, ConnectorState::Disabled) {
+    // 0. Connector-name integrity: a misbehaving connector must not be able
+    //    to forge another connector's name and bypass the consent gate.
+    if event.connector != connector.name() {
+        return Err(ConnectorError::fatal_msg(format!(
+            "connector {} cannot emit events claiming to come from {}",
+            connector.name(),
+            event.connector,
+        )));
+    }
+
+    // 1. Fail fast if the connector is not currently enabled.
+    //    We read from the shared ArcSwap (not a stale snapshot) so a
+    //    concurrent `disable()` call is visible immediately.
+    let current_state = (**state.load()).clone();
+    if matches!(current_state, ConnectorState::Disabled) {
         return Err(ConnectorError::fatal_msg(format!(
             "connector {} is Disabled; cannot process events",
             event.connector
@@ -303,7 +322,7 @@ async fn process_event(
 
     // 2. Label allow-list check (brief §9.1 / manifest constraint).
     for label in &event.labels {
-        if !entry.connector.manifest().allowed_label(label) {
+        if !connector.manifest().allowed_label(label) {
             return Err(ConnectorError::UndeclaredLabel {
                 label: label.clone(),
             });
@@ -339,7 +358,7 @@ async fn process_event(
 
     let captured = build_capture_event(
         &redacted.event,
-        entry.connector.sensor_identity(),
+        connector.sensor_identity(),
         redacted.spans,
         &placeholder_ref,
         placeholder_hash,
@@ -370,6 +389,9 @@ mod tests {
     };
     use crate::credential::InMemoryCredentialStore;
     use crate::emit::PipelineEmit;
+    use crate::event::{
+        ConnectorEvent, ConnectorEventId, ConnectorPayload, ConnectorScope, DeliveryMode, SourceRef,
+    };
     use crate::manifest::ConnectorManifest;
     use crate::webhook::WebhookRequest;
 
@@ -649,6 +671,78 @@ max_depth = 10
         assert!(
             matches!(err, ConnectorError::Fatal(_)),
             "expected Fatal, got {err:?}"
+        );
+    }
+
+    /// Build a minimal valid `ConnectorEvent` for the stub connector.
+    fn stub_event() -> ConnectorEvent {
+        ConnectorEvent::new(
+            ConnectorEventId::new("01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+            "stub",
+            SourceRef::new("issue", "gh:owner/repo#1", None),
+            1_700_000_000,
+            BTreeSet::from(["note".to_string()]),
+            ConnectorScope::project("owner/repo"),
+            ConnectorPayload::Text {
+                mime: "text/plain".into(),
+                body: "hello".into(),
+            },
+            DeliveryMode::Poll { cursor: None },
+        )
+    }
+
+    /// `process_event` must return `Fatal` when the connector's state is
+    /// `Disabled`, even if the event itself is well-formed.
+    ///
+    /// This covers the path that the poll-task closure takes on every tick
+    /// after `disable()` has been called (the closure holds the real
+    /// `Arc<ArcSwap<ConnectorState>>` and will observe the state change).
+    #[tokio::test]
+    async fn disabled_connector_poll_returns_fatal() {
+        let consent: Arc<dyn ConnectorConsentJournal> = Arc::new(AcceptAllConsent::default());
+        let emit: Arc<dyn PipelineEmit> = Arc::new(NoopEmit::default());
+        let connector: Arc<dyn Connector> = Arc::new(StubConnector::new());
+
+        // Start as Disabled (the default after register, before enable).
+        let state: Arc<ArcSwap<ConnectorState>> =
+            Arc::new(ArcSwap::from_pointee(ConnectorState::Disabled));
+
+        let err = process_event(stub_event(), &connector, &state, &consent, &emit)
+            .await
+            .expect_err("process_event must fail when state is Disabled");
+
+        assert!(
+            matches!(err, ConnectorError::Fatal(_)),
+            "expected Fatal, got {err:?}"
+        );
+    }
+
+    /// `process_event` must return `Fatal` when `event.connector` does not
+    /// match `connector.name()`, preventing a misbehaving connector from
+    /// spoofing another's name to bypass consent checks.
+    #[tokio::test]
+    async fn connector_name_mismatch_returns_fatal() {
+        let consent: Arc<dyn ConnectorConsentJournal> = Arc::new(AcceptAllConsent::default());
+        let emit: Arc<dyn PipelineEmit> = Arc::new(NoopEmit::default());
+        let connector: Arc<dyn Connector> = Arc::new(StubConnector::new()); // name == "stub"
+
+        // The connector is enabled so state is not the failure cause.
+        let state: Arc<ArcSwap<ConnectorState>> =
+            Arc::new(ArcSwap::from_pointee(ConnectorState::Enabled {
+                grant_id: ConsentGrantId::new("gnt:stub:test"),
+            }));
+
+        // Build an event that claims to come from a *different* connector.
+        let mut spoofed = stub_event();
+        spoofed.connector = "connector_b".to_owned();
+
+        let err = process_event(spoofed, &connector, &state, &consent, &emit)
+            .await
+            .expect_err("process_event must fail on connector-name mismatch");
+
+        assert!(
+            matches!(err, ConnectorError::Fatal(_)),
+            "expected Fatal on name mismatch, got {err:?}"
         );
     }
 }
