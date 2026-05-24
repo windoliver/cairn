@@ -16,6 +16,7 @@ pub mod credential;
 pub mod error;
 pub mod event;
 pub mod manifest;
+pub mod redact;
 
 pub use connector::{
     Connector, ConnectorCapabilities, ConnectorPlugin, PollContext, PollOutcome, WebhookContext,
@@ -27,3 +28,4 @@ pub use event::{
     ConnectorEvent, ConnectorEventId, ConnectorPayload, ConnectorScope, DeliveryMode, SourceRef,
 };
 pub use manifest::ConnectorManifest;
+pub use redact::{Redacted, RedactionPipeline};
