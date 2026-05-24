@@ -87,27 +87,31 @@
       "verb": "capture_trace",
       "story": "SUPPORT_CAPTURE_LONG_HORIZON",
       "session_id": "support-acme-outage",
-      "expected_trace_events": ["user_message", "agent_message", "user_message", "agent_message", "turn_summary"]
+      "expected_trace_events": ["user_message", "agent_message", "user_message", "agent_message", "turn_summary"],
+      "metric_category": "recall_precision"
     },
     {
       "verb": "retrieve_session",
       "story": "SUPPORT_MULTI_SESSION_COHERENCE",
       "session_id": "support-acme-outage",
       "expected_turn_ids": ["1", "2"],
-      "expected_trace_events": ["user_message", "agent_message", "user_message", "agent_message", "turn_summary"]
+      "expected_trace_events": ["user_message", "agent_message", "user_message", "agent_message", "turn_summary"],
+      "metric_category": "recall_precision"
     },
     {
       "verb": "retrieve_turn",
       "story": "SUPPORT_RETRIEVE_LATER_TURN",
       "session_id": "support-acme-outage",
       "turn_id": "2",
-      "expected_trace_events": ["user_message", "agent_message"]
+      "expected_trace_events": ["user_message", "agent_message"],
+      "metric_category": "recall_precision"
     },
     {
       "verb": "summarize",
       "story": "SUPPORT_SUMMARY_GOLDEN",
       "session_id": "support-acme-outage",
-      "expected_record_ids": ["01HQZX9F5N00000000000000S4"]
+      "expected_record_ids": ["01HQZX9F5N00000000000000S4"],
+      "metric_category": "summary_quality"
     },
     {
       "verb": "search",
@@ -118,14 +122,28 @@
       "expected": {
         "status": "hits",
         "record_ids": ["01HQZX9F5N00000000000000S5"]
-      }
+      },
+      "metric_category": "search_usefulness"
+    },
+    {
+      "verb": "search",
+      "story": "SUPPORT_STALE_AVOIDANCE",
+      "mode": "keyword",
+      "query": "invoice webhook queue",
+      "limit": 1,
+      "expected": {
+        "status": "hits",
+        "record_ids": ["01HQZX9F5N00000000000000S5"]
+      },
+      "stale_record_ids": ["01HQZX9F5N00000000000000S7"]
     },
     {
       "verb": "forget_record",
       "story": "SUPPORT_PRIVACY_FORGET",
       "record_id": "01HQZX9F5N00000000000000S6",
       "followup_query": "sensitive support contact violet pager",
-      "expected_absent_from_search": true
+      "expected_absent_from_search": true,
+      "metric_category": "forget_completeness"
     }
   ]
 }
