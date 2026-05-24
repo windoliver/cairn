@@ -223,6 +223,8 @@ pub async fn serve_stdio_with_store_consolidation_ready(
 pub struct WorkflowReadiness {
     /// `cairn.workflows.v1.consolidation` advertised.
     pub consolidation: bool,
+    /// Runtime `AgentProvider` wired for agent-mode workflows.
+    pub agent_runtime: bool,
     /// `cairn.workflows.v1.dream` advertised (issue #91).
     pub dream: bool,
     /// `cairn.workflows.v1.expiration` advertised (issue #91).
@@ -371,6 +373,7 @@ where
         CairnMcpHandler::with_store_scope_and_sqlite(store, sqlite_store, scope, config, principal)
     }
     .with_consolidation_runtime_ready(readiness.consolidation)
+    .with_agent_runtime_ready(readiness.agent_runtime)
     .with_dream_runtime_ready(readiness.dream)
     .with_expiration_runtime_ready(readiness.expiration)
     .with_evaluation_runtime_ready(readiness.evaluation);

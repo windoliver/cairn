@@ -144,6 +144,9 @@ pub struct CairnMcpHandler {
     /// `false` keeps the legacy stdio path from over-advertising
     /// (round-9 adversarial review #3).
     consolidation_runtime_ready: bool,
+    /// True iff a concrete `AgentProvider` runtime is wired for agent-mode
+    /// workflows. Default `false` keeps status fail-closed.
+    agent_runtime_ready: bool,
     /// True iff `DreamHandler` is registered on the live scheduler.
     /// Issue #91, brief §10.1. Default `false` so the legacy stdio path
     /// does not over-advertise.
@@ -197,6 +200,7 @@ impl CairnMcpHandler {
             principal: ScopeTuple::default(),
             transport: McpTransport::Stdio,
             consolidation_runtime_ready: false,
+            agent_runtime_ready: false,
             dream_runtime_ready: false,
             expiration_runtime_ready: false,
             evaluation_runtime_ready: false,
@@ -220,6 +224,7 @@ impl CairnMcpHandler {
             principal: ScopeTuple::default(),
             transport: McpTransport::Stdio,
             consolidation_runtime_ready: false,
+            agent_runtime_ready: false,
             dream_runtime_ready: false,
             expiration_runtime_ready: false,
             evaluation_runtime_ready: false,
@@ -247,6 +252,7 @@ impl CairnMcpHandler {
             principal,
             transport: McpTransport::Stdio,
             consolidation_runtime_ready: false,
+            agent_runtime_ready: false,
             dream_runtime_ready: false,
             expiration_runtime_ready: false,
             evaluation_runtime_ready: false,
@@ -276,6 +282,7 @@ impl CairnMcpHandler {
             principal,
             transport: McpTransport::Stdio,
             consolidation_runtime_ready: false,
+            agent_runtime_ready: false,
             dream_runtime_ready: false,
             expiration_runtime_ready: false,
             evaluation_runtime_ready: false,
@@ -305,6 +312,7 @@ impl CairnMcpHandler {
             principal,
             transport: McpTransport::Stdio,
             consolidation_runtime_ready: false,
+            agent_runtime_ready: false,
             dream_runtime_ready: false,
             expiration_runtime_ready: false,
             evaluation_runtime_ready: false,
@@ -321,6 +329,14 @@ impl CairnMcpHandler {
     #[must_use]
     pub fn with_consolidation_runtime_ready(mut self, ready: bool) -> Self {
         self.consolidation_runtime_ready = ready;
+        self
+    }
+
+    /// Flip agent runtime readiness once the embedding process has wired a
+    /// concrete [`AgentProvider`](cairn_core::contract::AgentProvider).
+    #[must_use]
+    pub fn with_agent_runtime_ready(mut self, ready: bool) -> Self {
+        self.agent_runtime_ready = ready;
         self
     }
 
@@ -518,6 +534,7 @@ impl CairnMcpHandler {
             model_present,
             embedding_provider_ready,
             llm_configured: self.config.llm.provider.is_some(),
+            agent_configured: self.agent_runtime_ready,
             // Tie advertisement to BOTH the scheduler-runtime flag AND
             // the config opt-in. The scheduler can be alive while
             // consolidation.enabled=false (the trigger short-circuits

@@ -3,31 +3,40 @@
 //! The `llm` mode reads up to the tier's configured
 //! `window_size_records` recent records bound by the payload's scope.
 //! The `hybrid` mode first prunes duplicate bodies, then uses the same
-//! bounded LLM distillation call. Both modes upsert a deterministic
-//! `reasoning` record carrying tier, worker, budget, and source
-//! evidence metadata. When no `LLMProvider` is wired the handler returns
+//! bounded LLM distillation call. The `agent` mode delegates synthesis
+//! to a read-only `AgentProvider` worker. All modes upsert a
+//! deterministic `reasoning` record carrying tier, worker, budget, and
+//! source evidence metadata. When the configured worker runtime is not
+//! wired the handler returns
 //! [`HandlerOutcome::Permanent`](crate::scheduler::HandlerOutcome) so
 //! the scheduler stops retrying — the capability gate in `status`
 //! mirrors this by holding back `cairn.workflows.v1.dream`.
 //!
 //! Out of scope (deferred to follow-ups, brief §10.1):
-//! * `AgentDreamWorker` / P2 tool-loop workers.
-//! * WAL `FlushPlan` integration — the minimum path upserts directly via
-//!   `MemoryStore::upsert` like the existing consolidation handler.
+//! * Multi-mutation dream plans — the current planning seam emits one
+//!   autonomous upsert and applies it immediately.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use cairn_core::config::{DreamConfig, DreamTier, DreamTierConfig, DreamWorkerMode, ExtractBudget};
 use cairn_core::contract::job_store::{FailureClass, JobKind, JobPayload, JobStore};
 use cairn_core::contract::llm_provider::{CompletionOutput, CompletionRequest, LLMProvider};
 use cairn_core::contract::memory_store::{ListArgs, MemoryStore, TombstoneReason};
+use cairn_core::contract::{
+    AgentCostBudget, AgentIdentity, AgentOutput, AgentOutputSchema, AgentProvider,
+    AgentProviderError, AgentRun, AgentRunStatus, AgentScope, AgentSpawnRequest,
+    AgentToolAllowlist, AgentWallClockBudget,
+};
 use cairn_core::domain::{
-    ScopeTuple,
+    RecordId, ScopeTuple,
     taxonomy::{MemoryClass, MemoryKind},
 };
 use tracing::{info, warn};
 
-use crate::dream::DreamPayload;
+use crate::dream::plan::apply_dream_plan;
+use crate::dream::{DreamPayload, build_dream_plan};
 use crate::scheduler::{HandlerOutcome, JobHandler};
 use crate::skillify::{SkillifyTrigger, enqueue_skillify};
 use crate::synthetic::{SyntheticRecordSpec, build_synthetic_record};
@@ -36,6 +45,7 @@ use crate::synthetic::{SyntheticRecordSpec, build_synthetic_record};
 pub const DREAM_KIND: &str = "dream.distill_window";
 
 const DREAM_AGENT_ID: &str = "agt:cairn-workflows:dream-handler:v1";
+const DREAM_WORKER_AGENT_ID: &str = "agt:cairn-librarian:v2";
 const DREAM_SENSOR_ID: &str = "snr:cairn-workflows:dream:v1";
 const DREAM_CONSENT_REF: &str = "consent:system:dream-workflow";
 
@@ -47,7 +57,42 @@ pub struct DreamHandler {
     store: Arc<dyn MemoryStore>,
     config: DreamConfig,
     llm: Option<Arc<dyn LLMProvider>>,
+    agent: Option<Arc<dyn AgentProvider>>,
     skillify_jobs: Option<Arc<dyn JobStore>>,
+}
+
+#[derive(Debug)]
+struct PermanentDreamError(String);
+
+impl std::fmt::Display for PermanentDreamError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for PermanentDreamError {}
+
+struct DreamWorkerPlan {
+    body: String,
+    evidence: serde_json::Value,
+    budget_consumed: serde_json::Value,
+    policy_trace: serde_json::Value,
+    worker: &'static str,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentDreamOutput {
+    body: String,
+    evidence: Vec<AgentDreamEvidence>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentDreamEvidence {
+    #[serde(default)]
+    record_id: Option<String>,
+    claim: String,
 }
 
 impl DreamHandler {
@@ -60,11 +105,13 @@ impl DreamHandler {
         store: Arc<dyn MemoryStore>,
         config: DreamConfig,
         llm: Option<Arc<dyn LLMProvider>>,
+        agent: Option<Arc<dyn AgentProvider>>,
     ) -> Self {
         Self {
             store,
             config,
             llm,
+            agent,
             skillify_jobs: None,
         }
     }
@@ -91,13 +138,6 @@ impl DreamHandler {
         // `DREAM_FETCH_PAGE_CAP` pages before bailing — keeps a
         // dream-heavy vault from monopolising the worker.
         const DREAM_FETCH_PAGE_CAP: usize = 64;
-
-        let Some(llm) = self.llm.as_ref() else {
-            // The Permanent branch above is what the scheduler sees;
-            // this Err path is for callers that drive `run_once`
-            // directly (e.g. integration tests).
-            return Err("no llm provider configured".into());
-        };
 
         let tier_config = self.config.tier_config(payload.tier);
 
@@ -283,23 +323,10 @@ impl DreamHandler {
             }
         }
 
-        let prompt = render_dream_prompt(&payload.key, &filtered, &tier_config);
-        let req = CompletionRequest::builder()
-            .prompt(prompt)
-            .budget(ExtractBudget {
-                max_tokens: Some(tier_config.completion_token_budget),
-                max_wall_ms: Some(tier_config.max_wall_ms),
-                max_turns: None,
-            })
-            .build();
-        let body = match llm.complete(&req).await? {
-            CompletionOutput::Text(s) => s,
-            CompletionOutput::Json(v) => serde_json::to_string(&v).unwrap_or_default(),
-            // `CompletionOutput` is `#[non_exhaustive]`; future
-            // variants drop into a deterministic fallback rather than
-            // crashing the workflow.
-            other => format!("{other:?}"),
-        };
+        let worker_plan = self
+            .run_dream_worker(&payload, &filtered, &tier_config)
+            .await?;
+        let body = worker_plan.body;
         let body_budget = tier_config.completion_token_budget as usize * 4;
         if body.len() > body_budget {
             return Err(format!(
@@ -318,10 +345,7 @@ impl DreamHandler {
                 "source_record_ids": source_record_ids,
                 "window_size":        filtered.len(),
                 "tier":               payload.tier.as_str(),
-                "worker":             match tier_config.worker {
-                    DreamWorkerMode::Llm => "llm",
-                    DreamWorkerMode::Hybrid => "hybrid",
-                },
+                "worker":             worker_plan.worker,
                 "cadence":            tier_config.cadence,
                 "input_window":       tier_config.input_window,
                 "output_kind":        tier_config.output_kind,
@@ -330,6 +354,9 @@ impl DreamHandler {
                     "max_wall_ms":    tier_config.max_wall_ms,
                     "max_tool_calls": tier_config.max_tool_calls,
                 },
+                "evidence":           worker_plan.evidence,
+                "budget_consumed":    worker_plan.budget_consumed,
+                "policy_trace":       worker_plan.policy_trace,
                 "produced_by":        "cairn-workflows::DreamHandler",
             }),
         );
@@ -390,7 +417,14 @@ impl DreamHandler {
             record_id_override: None,
         })?;
 
-        let outcome = self.store.upsert(&record).await?;
+        let plan = build_dream_plan(
+            record,
+            DREAM_AGENT_ID,
+            scope_for(&payload),
+            payload.tier.as_str(),
+            source_record_ids.len(),
+        )?;
+        let outcome = apply_dream_plan(self.store.as_ref(), plan).await?;
 
         // Post-upsert source-liveness recheck (round-9 adversarial
         // review #1): the pre-upsert check above is racy — a
@@ -441,6 +475,115 @@ impl DreamHandler {
             info!(key = %payload.key, "dream: idempotent replay (same body hash)");
         }
         Ok(())
+    }
+
+    async fn run_dream_worker(
+        &self,
+        payload: &DreamPayload,
+        records: &[cairn_core::domain::record::MemoryRecord],
+        tier_config: &DreamTierConfig,
+    ) -> Result<DreamWorkerPlan, Box<dyn std::error::Error + Send + Sync>> {
+        match tier_config.worker {
+            DreamWorkerMode::Llm | DreamWorkerMode::Hybrid => {
+                let Some(llm) = self.llm.as_ref() else {
+                    return Err(Box::new(PermanentDreamError(
+                        "no llm provider configured".to_owned(),
+                    )));
+                };
+                let prompt = render_dream_prompt(&payload.key, records, tier_config);
+                let req = CompletionRequest::builder()
+                    .prompt(prompt)
+                    .budget(ExtractBudget {
+                        max_tokens: Some(tier_config.completion_token_budget),
+                        max_wall_ms: Some(tier_config.max_wall_ms),
+                        max_turns: None,
+                    })
+                    .build();
+                let body = match llm.complete(&req).await? {
+                    CompletionOutput::Text(s) => s,
+                    CompletionOutput::Json(v) => serde_json::to_string(&v).unwrap_or_default(),
+                    // `CompletionOutput` is `#[non_exhaustive]`; future
+                    // variants drop into a deterministic fallback rather than
+                    // crashing the workflow.
+                    other => format!("{other:?}"),
+                };
+                Ok(DreamWorkerPlan {
+                    body,
+                    evidence: serde_json::json!(
+                        records
+                            .iter()
+                            .map(|r| serde_json::json!({ "record_id": r.id.as_str() }))
+                            .collect::<Vec<_>>()
+                    ),
+                    budget_consumed: serde_json::json!({ "tool_calls": 0 }),
+                    policy_trace: serde_json::json!([]),
+                    worker: worker_label(tier_config.worker),
+                })
+            }
+            DreamWorkerMode::Agent => {
+                if payload.bound_scope.is_some() {
+                    return Err(Box::new(PermanentDreamError(
+                        "agent dream does not support scoped tool execution yet".to_owned(),
+                    )));
+                }
+                self.run_agent_dream_worker(payload, records, tier_config)
+                    .await
+            }
+        }
+    }
+
+    async fn run_agent_dream_worker(
+        &self,
+        payload: &DreamPayload,
+        records: &[cairn_core::domain::record::MemoryRecord],
+        tier_config: &DreamTierConfig,
+    ) -> Result<DreamWorkerPlan, Box<dyn std::error::Error + Send + Sync>> {
+        let Some(agent) = self.agent.as_ref() else {
+            return Err(Box::new(PermanentDreamError(
+                "no agent provider configured".to_owned(),
+            )));
+        };
+        let request = AgentSpawnRequest {
+            identity: AgentIdentity::new(DREAM_WORKER_AGENT_ID.to_owned())?,
+            scope: AgentScope::read_only(),
+            tool_allowlist: AgentToolAllowlist::read_only_cairn(),
+            cost_budget: AgentCostBudget {
+                max_turns: tier_config.max_tool_calls.saturating_add(1).max(1),
+                max_tool_calls: tier_config.max_tool_calls,
+                max_cost_units: u64::from(tier_config.completion_token_budget),
+            },
+            wall_clock_budget: AgentWallClockBudget {
+                max_millis: u64::from(tier_config.max_wall_ms),
+            },
+            output_schema: AgentOutputSchema::Json,
+            prompt: render_agent_dream_prompt(&payload.key, records, tier_config),
+        };
+
+        let run = match tokio::time::timeout(
+            Duration::from_millis(u64::from(tier_config.max_wall_ms)),
+            agent.spawn(request),
+        )
+        .await
+        {
+            Ok(result) => result.map_err(classify_agent_error)?,
+            Err(_elapsed) => {
+                return Err(classify_agent_error(AgentProviderError::BudgetExceeded {
+                    limit: "wall_clock".to_owned(),
+                }));
+            }
+        };
+        if run.status == AgentRunStatus::Aborted {
+            let err =
+                run.abort_error
+                    .clone()
+                    .unwrap_or_else(|| AgentProviderError::InvalidRequest {
+                        message: "aborted agent dream run missing abort_error".to_owned(),
+                    });
+            return Err(classify_agent_error(err));
+        }
+        run.validate(&AgentOutputSchema::Json)
+            .map_err(classify_agent_error)?;
+        parse_agent_dream_run(run, records)
     }
 
     async fn enqueue_skillify_after_deep_dream(
@@ -500,6 +643,14 @@ fn scope_for(payload: &DreamPayload) -> ScopeTuple {
     }
 }
 
+const fn worker_label(worker: DreamWorkerMode) -> &'static str {
+    match worker {
+        DreamWorkerMode::Llm => "llm",
+        DreamWorkerMode::Hybrid => "hybrid",
+        DreamWorkerMode::Agent => "agent",
+    }
+}
+
 /// Render the LLM prompt for a dream window. Pure: identical record set
 /// produces identical bytes, so replays are deterministic when the
 /// configured `llm_temperature` is `0.0`.
@@ -515,10 +666,7 @@ pub fn render_dream_prompt(
     s.push_str(tier_config.tier.as_str());
     s.push('\n');
     s.push_str("Worker: ");
-    s.push_str(match tier_config.worker {
-        DreamWorkerMode::Llm => "llm",
-        DreamWorkerMode::Hybrid => "hybrid",
-    });
+    s.push_str(worker_label(tier_config.worker));
     s.push('\n');
     s.push_str("Key: ");
     s.push_str(key);
@@ -540,6 +688,189 @@ pub fn render_dream_prompt(
     s
 }
 
+#[must_use]
+fn render_agent_dream_prompt(
+    key: &str,
+    records: &[cairn_core::domain::record::MemoryRecord],
+    tier_config: &DreamTierConfig,
+) -> String {
+    let mut s = String::with_capacity(512 + records.len() * 160);
+    s.push_str("# Agent dream planning\n\n");
+    s.push_str("Tier: ");
+    s.push_str(tier_config.tier.as_str());
+    s.push('\n');
+    s.push_str("Key: ");
+    s.push_str(key);
+    s.push_str("\nSource records:\n");
+    for r in records {
+        s.push_str("- id: ");
+        s.push_str(r.id.as_str());
+        s.push_str("\n  excerpt: ");
+        let trimmed = r.body.chars().take(512).collect::<String>();
+        s.push_str(&trimmed);
+        s.push('\n');
+    }
+    s.push_str(
+        "\nReturn one JSON object only with exactly these top-level keys: \
+         body, evidence. body must be a non-empty string. evidence must be a \
+         non-empty array of objects with exactly record_id and claim. \
+         record_id may be null when evidence is not tied to one source. \
+         Every non-null record_id must cite one of the listed source records. \
+         Evidence claims and policy traces must summarize, not quote, source \
+         record bodies.",
+    );
+    s
+}
+
+fn parse_agent_dream_run(
+    run: AgentRun,
+    records: &[cairn_core::domain::record::MemoryRecord],
+) -> Result<DreamWorkerPlan, Box<dyn std::error::Error + Send + Sync>> {
+    let AgentOutput::Json(value) = run.output else {
+        return Err(classify_agent_error(AgentProviderError::InvalidOutput {
+            message: "agent dream requires json output".to_owned(),
+        }));
+    };
+    let parsed: AgentDreamOutput = serde_json::from_value(value).map_err(|source| {
+        classify_agent_error(AgentProviderError::InvalidOutput {
+            message: source.to_string(),
+        })
+    })?;
+    if parsed.body.trim().is_empty() {
+        return Err(classify_agent_error(AgentProviderError::InvalidOutput {
+            message: "agent dream body must be non-empty".to_owned(),
+        }));
+    }
+    if parsed.evidence.is_empty() || parsed.evidence.iter().any(|e| e.claim.trim().is_empty()) {
+        return Err(classify_agent_error(AgentProviderError::InvalidOutput {
+            message: "agent dream evidence must include non-empty claim".to_owned(),
+        }));
+    }
+    validate_agent_dream_metadata(&parsed.evidence, &run.policy_trace, records)?;
+    Ok(DreamWorkerPlan {
+        body: parsed.body,
+        evidence: serde_json::to_value(parsed.evidence).map_err(|source| {
+            classify_agent_error(AgentProviderError::InvalidOutput {
+                message: source.to_string(),
+            })
+        })?,
+        budget_consumed: serde_json::to_value(run.budget_consumed).map_err(|source| {
+            classify_agent_error(AgentProviderError::InvalidOutput {
+                message: source.to_string(),
+            })
+        })?,
+        policy_trace: serde_json::json!(run.policy_trace),
+        worker: "agent",
+    })
+}
+
+fn validate_agent_dream_metadata(
+    evidence: &[AgentDreamEvidence],
+    policy_trace: &[String],
+    records: &[cairn_core::domain::record::MemoryRecord],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let source_ids: BTreeSet<String> = records.iter().map(|r| r.id.as_str().to_owned()).collect();
+    for item in evidence {
+        if let Some(record_id) = item.record_id.as_deref() {
+            if record_id.trim().is_empty() {
+                return Err(classify_agent_error(AgentProviderError::InvalidOutput {
+                    message: "agent dream evidence record_id must be non-empty when present"
+                        .to_owned(),
+                }));
+            }
+            let parsed = RecordId::parse(record_id.to_owned()).map_err(|source| {
+                classify_agent_error(AgentProviderError::InvalidOutput {
+                    message: format!("agent dream evidence record_id is invalid: {source}"),
+                })
+            })?;
+            if !source_ids.contains(parsed.as_str()) {
+                return Err(classify_agent_error(AgentProviderError::InvalidOutput {
+                    message: "agent dream evidence record_id must cite a source record".to_owned(),
+                }));
+            }
+        }
+        reject_source_excerpt("agent dream evidence claim", &item.claim, records)?;
+    }
+    for entry in policy_trace {
+        reject_source_excerpt("agent dream policy trace", entry, records)?;
+    }
+    Ok(())
+}
+
+fn reject_source_excerpt(
+    field: &str,
+    value: &str,
+    records: &[cairn_core::domain::record::MemoryRecord],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let value = normalize_for_excerpt_check(value);
+    if value.len() < 16 {
+        return Ok(());
+    }
+    let value_tokens = tokenize_for_excerpt_check(&value);
+    for record in records {
+        let body = normalize_for_excerpt_check(&record.body);
+        let body_tokens = tokenize_for_excerpt_check(&body);
+        if body.len() >= 16
+            && (value.contains(&body)
+                || body.contains(&value)
+                || has_shared_source_excerpt_window(&body_tokens, &value_tokens))
+        {
+            return Err(classify_agent_error(AgentProviderError::InvalidOutput {
+                message: format!("{field} must not quote source record body"),
+            }));
+        }
+    }
+    Ok(())
+}
+
+fn normalize_for_excerpt_check(value: &str) -> String {
+    tokenize_for_excerpt_check(value).join(" ")
+}
+
+fn tokenize_for_excerpt_check(value: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    for ch in value.chars() {
+        if ch.is_alphanumeric() {
+            current.extend(ch.to_lowercase());
+        } else if !current.is_empty() {
+            tokens.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
+fn has_shared_source_excerpt_window(body_tokens: &[String], value_tokens: &[String]) -> bool {
+    const MIN_QUOTED_WORDS: usize = 5;
+    const MIN_QUOTED_CHARS: usize = 24;
+
+    if body_tokens.len() < MIN_QUOTED_WORDS || value_tokens.len() < MIN_QUOTED_WORDS {
+        return false;
+    }
+    body_tokens.windows(MIN_QUOTED_WORDS).any(|body_window| {
+        excerpt_window_chars(body_window) >= MIN_QUOTED_CHARS
+            && value_tokens
+                .windows(MIN_QUOTED_WORDS)
+                .any(|value_window| value_window == body_window)
+    })
+}
+
+fn excerpt_window_chars(window: &[String]) -> usize {
+    window.iter().map(String::len).sum::<usize>() + window.len().saturating_sub(1)
+}
+
+fn classify_agent_error(error: AgentProviderError) -> Box<dyn std::error::Error + Send + Sync> {
+    match error {
+        AgentProviderError::ProviderUnavailable { message } => Box::new(std::io::Error::other(
+            format!("agent provider unavailable: {message}"),
+        )),
+        other => Box::new(PermanentDreamError(other.to_string())),
+    }
+}
+
 #[async_trait::async_trait]
 impl JobHandler for DreamHandler {
     fn kind(&self) -> JobKind {
@@ -557,7 +888,34 @@ impl JobHandler for DreamHandler {
             }
         };
 
-        if self.llm.is_none() {
+        let tier_config = self.config.tier_config(payload.tier);
+        if matches!(tier_config.worker, DreamWorkerMode::Agent) && self.agent.is_none() {
+            warn!(
+                key = %payload.key,
+                tier = %payload.tier,
+                "dream: no AgentProvider wired — declining permanently \
+                 (the capability gate in status hides agent dream \
+                 until an agent runtime is configured)"
+            );
+            return HandlerOutcome::Permanent {
+                reason: "no agent provider configured".into(),
+                class: FailureClass::Validation,
+            };
+        }
+        if matches!(tier_config.worker, DreamWorkerMode::Agent) && payload.bound_scope.is_some() {
+            warn!(
+                key = %payload.key,
+                tier = %payload.tier,
+                "dream: agent worker requested for a scoped payload, but agent tools \
+                 cannot yet enforce read scope — declining permanently"
+            );
+            return HandlerOutcome::Permanent {
+                reason: "agent dream does not support scoped tool execution yet".into(),
+                class: FailureClass::Validation,
+            };
+        }
+
+        if !matches!(tier_config.worker, DreamWorkerMode::Agent) && self.llm.is_none() {
             warn!(
                 key = %payload.key,
                 "dream: no LLMProvider wired — declining permanently \
@@ -579,10 +937,19 @@ impl JobHandler for DreamHandler {
 
         match self.run_once(payload).await {
             Ok(()) => HandlerOutcome::Done,
-            Err(e) => HandlerOutcome::Retry {
-                reason: e.to_string(),
-                class: FailureClass::Transient,
-            },
+            Err(e) => {
+                if e.downcast_ref::<PermanentDreamError>().is_some() {
+                    HandlerOutcome::Permanent {
+                        reason: e.to_string(),
+                        class: FailureClass::Validation,
+                    }
+                } else {
+                    HandlerOutcome::Retry {
+                        reason: e.to_string(),
+                        class: FailureClass::Transient,
+                    }
+                }
+            }
         }
     }
 }
@@ -603,6 +970,7 @@ mod tests {
                 ..DreamConfig::default()
             },
             None,
+            None,
         );
         let p = DreamPayload {
             tier: DreamTier::LightSleep,
@@ -617,7 +985,7 @@ mod tests {
     #[tokio::test]
     async fn handle_returns_permanent_when_decode_fails() {
         let store: Arc<dyn MemoryStore> = Arc::new(NoopMemoryStore::default());
-        let h = DreamHandler::new(store, DreamConfig::default(), None);
+        let h = DreamHandler::new(store, DreamConfig::default(), None, None);
         let outcome = h.handle(&b"{not json".to_vec()).await;
         assert!(matches!(outcome, HandlerOutcome::Permanent { .. }));
     }

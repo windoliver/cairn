@@ -2,6 +2,16 @@
 source: crates/cairn-cli/tests/plugins_verify_snapshot.rs
 expression: text
 ---
+cairn-agent-core (AgentProvider)
+  tier-1 manifest_matches_host                    ok
+  tier-1 arc_pointer_stable                       ok
+  tier-1 capability_self_consistency_floor        ok
+  tier-1 manifest_features_match_capabilities     ok
+  tier-2 allowlist_rejects_unlisted_tool          ok
+  tier-2 mutating_verb_requires_scope             ok
+  tier-2 budget_exhaustion_aborts_cleanly         ok
+  tier-2 writes_are_wal_routed                    ok
+
 cairn-frontend-logseq (FrontendAdapter)
   tier-1 manifest_matches_host                    ok
   tier-1 arc_pointer_stable                       ok
@@ -68,4 +78,4 @@ cairn-workflows (WorkflowOrchestrator)
   tier-1 manifest_features_match_capabilities     ok
   tier-2 enqueue_then_complete                    pending (real impl pending)
 
-Summary: 7 plugins, 46 ok, 6 pending, 0 failed
+Summary: 8 plugins, 54 ok, 6 pending, 0 failed

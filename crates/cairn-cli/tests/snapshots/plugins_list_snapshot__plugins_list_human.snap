@@ -3,6 +3,7 @@ source: crates/cairn-cli/tests/plugins_list_snapshot.rs
 expression: text
 ---
 NAME                     CONTRACT              VERSION-RANGE     SOURCE
+cairn-agent-core         AgentProvider         [0.1.0, 0.2.0)    bundled:cairn-agent-core
 cairn-frontend-logseq    FrontendAdapter       [0.1.0, 0.2.0)    bundled:cairn-frontend-logseq
 cairn-frontend-obsidian  FrontendAdapter       [0.1.0, 0.2.0)    bundled:cairn-frontend-obsidian
 cairn-frontend-vscode    FrontendAdapter       [0.1.0, 0.2.0)    bundled:cairn-frontend-vscode

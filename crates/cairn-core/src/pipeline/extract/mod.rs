@@ -9,17 +9,21 @@
 
 // Submodules land in subsequent tasks.
 
+pub mod agent;
 pub mod body;
+pub mod build;
 pub mod chain;
 pub mod draft;
 pub mod intent;
 pub mod llm;
 pub mod regex;
 
+pub use agent::AgentExtractor;
 pub use body::{
     BodyResolution, BodyResolutionError, BodySource, ResolvedBody, UserIngestPayloadKind,
     is_user_utterance_hook,
 };
+pub use build::{ExtractBuildError, ExtractProviders, build_extract_chain};
 pub use chain::{ChainResult, ChainRunError, ExtractChain, ExtractChainBuildError, WorkerFailure};
 pub use draft::{Confidence, ConfidenceError, KindHint, MemoryDraft, TextSpan};
 pub use intent::{ForgetIntent, ForgetMatchStrategy};
@@ -119,6 +123,17 @@ impl ExtractBudget {
             max_drafts: 16,
             max_prompt_bytes: Some(64 * 1024),
             max_response_tokens: Some(1500),
+        }
+    }
+
+    /// Default budget for `AgentExtractor`.
+    #[must_use]
+    pub const fn agent_default() -> Self {
+        Self {
+            max_wall_ms: 30_000,
+            max_drafts: 16,
+            max_prompt_bytes: Some(64 * 1024),
+            max_response_tokens: Some(4096),
         }
     }
 }
@@ -285,6 +300,17 @@ pub enum ExtractError {
         /// Underlying provider error.
         #[source]
         source: crate::contract::llm_provider::LlmError,
+    },
+    /// Agent provider returned an error the extractor cannot recover from.
+    /// The chain runner captures these into `ChainResult.failures` for
+    /// augmenting workers.
+    #[error("agent provider failure in extractor `{worker}`: {source}")]
+    AgentProvider {
+        /// Which extractor surfaced the error.
+        worker: &'static str,
+        /// Underlying agent provider error.
+        #[source]
+        source: crate::contract::agent_provider::AgentProviderError,
     },
     /// Model emitted only items the parser had to drop — out-of-range
     /// `region_id`, `text_excerpt` not present in the named region, or

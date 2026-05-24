@@ -11,6 +11,10 @@
 //!
 //! Each iteration spawns a fresh `cairn assemble_hot --json` subprocess so
 //! no in-process cache is warm — that's the "cold" in cold-rehydrate.
+//!
+//! `cargo test --all-targets` runs bench targets in the debug test profile.
+//! That path uses a smoke-sized workload so workspace verification does not
+//! spend minutes in Criterion; `cargo bench` keeps the release SLO workload.
 
 #![allow(missing_docs)] // criterion_group!/main! generate undocumented items
 
@@ -20,6 +24,16 @@ use std::time::Duration;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use tempfile::TempDir;
+
+#[cfg(debug_assertions)]
+const SEED_RECORDS: u32 = 10;
+#[cfg(not(debug_assertions))]
+const SEED_RECORDS: u32 = 200;
+
+#[cfg(debug_assertions)]
+const BODY_BYTES: usize = 1_000;
+#[cfg(not(debug_assertions))]
+const BODY_BYTES: usize = 50_000;
 
 /// Path to the `cairn` binary, baked at build time via build.rs (same env
 /// var the latency benches use).
@@ -44,11 +58,11 @@ impl LargeSeededVault {
         // Seed identity.
         ingest(&bin, &path, "reference", "identity seed")?;
 
-        // 200 × ~50 KB = ~10 MB total body content. The hot-prefix assembler
+        // Release profile: 200 × ~50 KB = ~10 MB total body content. The hot-prefix assembler
         // tops out at 25 KB so the bench measures selection cost over real
         // record material, not just empty walks.
-        let body = "x".repeat(50_000);
-        for i in 0..200_u32 {
+        let body = "x".repeat(BODY_BYTES);
+        for i in 0..SEED_RECORDS {
             ingest(&bin, &path, "reference", &format!("doc-{i}: {body}"))?;
         }
 
@@ -105,9 +119,25 @@ fn bench_cold_rehydrate(c: &mut Criterion) {
 criterion_group! {
     name = lifecycle;
     config = Criterion::default()
-        .measurement_time(Duration::from_secs(30))
+        .measurement_time(measurement_time())
         .sample_size(10)
-        .warm_up_time(Duration::from_secs(3));
+        .warm_up_time(warm_up_time());
     targets = bench_cold_rehydrate
 }
 criterion_main!(lifecycle);
+
+fn measurement_time() -> Duration {
+    if cfg!(debug_assertions) {
+        Duration::from_secs(1)
+    } else {
+        Duration::from_secs(30)
+    }
+}
+
+fn warm_up_time() -> Duration {
+    if cfg!(debug_assertions) {
+        Duration::from_millis(100)
+    } else {
+        Duration::from_secs(3)
+    }
+}

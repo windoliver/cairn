@@ -9,8 +9,9 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use cairn_core::config::CairnConfig;
-use cairn_core::contract::LLMProvider;
+use cairn_agent_core::{CairnAgentProvider, CairnCliToolExecutor};
+use cairn_core::config::{AgentProviderKind, CairnConfig};
+use cairn_core::contract::{AgentProvider, LLMProvider};
 use cairn_core::domain::ScopeTuple;
 use cairn_core::mcp_auth::{ConfigBackedScope, McpSessionScope};
 use cairn_workflows::propagation::PropagationHandler;
@@ -65,6 +66,22 @@ fn workflow_llm_provider(config: &CairnConfig) -> Option<Arc<dyn LLMProvider>> {
             None
         }
     }
+}
+
+fn workflow_agent_provider(
+    config: &CairnConfig,
+    llm: Option<Arc<dyn LLMProvider>>,
+) -> Option<Arc<dyn AgentProvider>> {
+    match config.agent_provider.kind.as_ref()? {
+        AgentProviderKind::CairnCore => {}
+        _ => return None,
+    }
+    let llm = llm?;
+    let tools = Arc::new(CairnCliToolExecutor::new(
+        config.agent_provider.command.clone(),
+    ));
+    let provider: Arc<dyn AgentProvider> = Arc::new(CairnAgentProvider::new(llm, tools));
+    Some(provider)
 }
 
 /// Run the MCP stdio server.
@@ -213,9 +230,14 @@ pub fn run(
                     sqlite_store.clone();
 
                 let llm_provider = workflow_llm_provider(config);
-                let dream_handler =
-                    DreamHandler::new(store_dyn.clone(), config.dream, llm_provider.clone())
-                        .with_skillify_jobs(job_store.clone());
+                let agent_provider = workflow_agent_provider(config, llm_provider.clone());
+                let dream_handler = DreamHandler::new(
+                    store_dyn.clone(),
+                    config.dream,
+                    llm_provider.clone(),
+                    agent_provider.clone(),
+                )
+                .with_skillify_jobs(job_store.clone());
                 let skillify_handler =
                     SkillifyHandler::new(vault_root.to_path_buf(), llm_provider.clone());
 
@@ -343,9 +365,13 @@ pub fn run(
                     sqlite_store.clone();
                 let readiness = cairn_mcp::WorkflowReadiness {
                     consolidation: true,
-                    // Brief §15 fail-closed: advertise dream only when the
-                    // workflow handlers have a concrete LLM provider.
-                    dream: config.dream.enabled && llm_provider.is_some(),
+                    agent_runtime: agent_provider.is_some(),
+                    dream: config.dream.enabled
+                        && if config.dream.requires_agent_provider() {
+                            agent_provider.is_some()
+                        } else {
+                            llm_provider.is_some()
+                        },
                     expiration: config.expiration.enabled,
                     evaluation: config.evaluation.enabled,
                 };
@@ -437,5 +463,46 @@ mod tests {
         let provider = workflow_llm_provider(&cfg).expect("provider");
         assert_eq!(provider.name(), "openai-compatible");
         assert!(provider.capabilities().json_mode);
+    }
+
+    #[test]
+    fn workflow_agent_provider_is_absent_without_agent_provider_config() {
+        let mut cfg = CairnConfig::default();
+        cfg.llm.provider = Some(LlmProvider::OpenaiCompatible);
+        let llm = workflow_llm_provider(&cfg);
+
+        assert!(workflow_agent_provider(&cfg, llm).is_none());
+    }
+
+    #[test]
+    fn workflow_agent_provider_is_absent_without_llm_provider() {
+        let mut cfg = CairnConfig::default();
+        cfg.agent_provider.kind = Some(AgentProviderKind::CairnCore);
+
+        assert!(workflow_agent_provider(&cfg, None).is_none());
+    }
+
+    #[test]
+    fn workflow_agent_provider_is_absent_for_custom_provider_kind() {
+        let mut cfg = CairnConfig::default();
+        cfg.llm.provider = Some(LlmProvider::OpenaiCompatible);
+        cfg.agent_provider.kind = Some(AgentProviderKind::Custom("external-agent".to_string()));
+        let llm = workflow_llm_provider(&cfg);
+
+        assert!(workflow_agent_provider(&cfg, llm).is_none());
+    }
+
+    #[test]
+    fn workflow_agent_provider_uses_configured_provider() {
+        let mut cfg = CairnConfig::default();
+        cfg.llm.provider = Some(LlmProvider::OpenaiCompatible);
+        cfg.agent_provider.kind = Some(AgentProviderKind::CairnCore);
+        let llm = workflow_llm_provider(&cfg);
+
+        let provider = workflow_agent_provider(&cfg, llm).expect("agent provider");
+        assert_eq!(provider.name(), "cairn-agent-core");
+        assert!(provider.capabilities().honors_cost_budget);
+        assert!(provider.capabilities().scope_enforced);
+        assert!(provider.capabilities().cli_subprocess_tools);
     }
 }

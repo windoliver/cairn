@@ -428,6 +428,13 @@ pub enum PlanReason {
         /// Number of passing gates recorded in the gate report.
         gate_count: u32,
     },
+    /// Triggered by the dream distillation workflow.
+    Dream {
+        /// Dream tier that produced the plan.
+        tier: String,
+        /// Number of evidence/source records consulted.
+        evidence_count: u32,
+    },
 }
 
 impl PlanReason {
@@ -442,7 +449,8 @@ impl PlanReason {
             | Self::Expire { .. }
             | Self::Forget { .. }
             | Self::Evolve { .. }
-            | Self::Reflect { .. } => PersistedPlan::BASE_SCHEMA_VERSION,
+            | Self::Reflect { .. }
+            | Self::Dream { .. } => PersistedPlan::BASE_SCHEMA_VERSION,
         }
     }
 }

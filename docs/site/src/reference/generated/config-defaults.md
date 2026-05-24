@@ -66,6 +66,9 @@ llm:
   base_url: null
   model: null
   api_key: null
+agent_provider:
+  kind: null
+  command: cairn
 search:
   local_embeddings: true
   embedding_model: bge-small-en-v1.5

@@ -196,6 +196,7 @@ async fn deep_dream_strategy_success_enqueues_skillify() {
             ..DreamConfig::default()
         },
         Some(Arc::new(FakeLlm)),
+        None,
     )
     .with_skillify_jobs(jobs.clone());
     let payload = DreamPayload {

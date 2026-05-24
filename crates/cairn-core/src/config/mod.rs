@@ -143,6 +143,18 @@ pub enum ConfigError {
     /// The pipeline chain contains an `llm` worker but no `llm.provider` is set.
     #[error("pipeline chain has llm worker but llm.provider is not configured")]
     LlmExtractorWithoutProvider,
+    /// An agent worker mode is configured but no agent provider is selected.
+    #[error("{field} uses agent mode but agent_provider.kind is not configured")]
+    AgentModeWithoutProvider {
+        /// The config field selecting agent mode.
+        field: &'static str,
+    },
+    /// The bundled agent provider runtime is selected but no LLM provider is set.
+    #[error("{field} uses agent mode but llm.provider is not configured")]
+    AgentModeWithoutLlmProvider {
+        /// The config field selecting agent mode.
+        field: &'static str,
+    },
     /// A `${VAR}` placeholder in the YAML file references an unset env var.
     #[error("unresolved env var in config: ${{{0}}}")]
     UnresolvedEnvVar(String),
@@ -397,6 +409,16 @@ string_enum! {
     unknown_msg: "expected regex | llm | agent | custom:<name>",
 }
 
+string_enum! {
+    /// Which bundled or named agent provider is active.
+    #[non_exhaustive]
+    pub enum AgentProviderKind {
+        /// Bundled bounded provider runtime.
+        CairnCore => "cairn-core",
+    }
+    unknown_msg: "expected cairn-core | custom:<name>",
+}
+
 // ── Search ────────────────────────────────────────────────────────────────
 
 /// Embedding model selection for local semantic search (brief §3.0).
@@ -577,6 +599,8 @@ pub struct CairnConfig {
     pub store: StoreConfig,
     /// LLM provider configuration.
     pub llm: LlmConfig,
+    /// Agent provider configuration.
+    pub agent_provider: AgentProviderConfig,
     /// Search and embedding availability.
     pub search: SearchConfig,
     /// Source-file forget/redaction policy.
@@ -1263,6 +1287,25 @@ pub struct LlmConfig {
     pub api_key: Option<String>,
 }
 
+/// Agent provider configuration (§4.1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AgentProviderConfig {
+    /// Which agent provider runtime is active.
+    pub kind: Option<AgentProviderKind>,
+    /// Executable used to launch the provider.
+    pub command: String,
+}
+
+impl Default for AgentProviderConfig {
+    fn default() -> Self {
+        Self {
+            kind: None,
+            command: "cairn".to_owned(),
+        }
+    }
+}
+
 // ── Sensors ───────────────────────────────────────────────────────────────
 
 /// Reference-consumer behavior toggles.
@@ -1674,6 +1717,8 @@ pub struct CapabilitySet {
     pub llm_extract: bool,
     /// True iff the pipeline chain contains an `agent` worker.
     pub agent_extract: bool,
+    /// True iff a dream tier uses an agent worker and an agent provider is configured.
+    pub agent_dream: bool,
     /// True iff config explicitly enables screen capture.
     pub screen_capture_enabled: bool,
     /// False for `sqlite` (P0). P1+ stores may advertise this.
@@ -1870,6 +1915,39 @@ impl CairnConfig {
             return Err(ConfigError::LlmExtractorWithoutProvider);
         }
 
+        let agent_configured = self.agent_provider.kind.is_some();
+        let bundled_agent_configured =
+            matches!(self.agent_provider.kind, Some(AgentProviderKind::CairnCore));
+        let llm_configured = self.llm.provider.is_some();
+        for entry in &self.pipeline.extract.chain {
+            if matches!(entry.worker, ExtractorWorkerKind::Agent) {
+                if !agent_configured {
+                    return Err(ConfigError::AgentModeWithoutProvider {
+                        field: "pipeline.extract.chain[].worker",
+                    });
+                }
+                if bundled_agent_configured && !llm_configured {
+                    return Err(ConfigError::AgentModeWithoutLlmProvider {
+                        field: "pipeline.extract.chain[].worker",
+                    });
+                }
+            }
+        }
+        for (field, tier) in [
+            ("dream.light_sleep.worker", self.dream.light_sleep),
+            ("dream.rem_sleep.worker", self.dream.rem_sleep),
+            ("dream.deep_dreaming.worker", self.dream.deep_dreaming),
+        ] {
+            if matches!(tier.worker, DreamWorkerMode::Agent) {
+                if !agent_configured {
+                    return Err(ConfigError::AgentModeWithoutProvider { field });
+                }
+                if bundled_agent_configured && !llm_configured {
+                    return Err(ConfigError::AgentModeWithoutLlmProvider { field });
+                }
+            }
+        }
+
         // 6. Retention key glob patterns: `*` only in the filename position
         for key in self.vault.retention.keys() {
             if key.contains('\0') {
@@ -1939,6 +2017,15 @@ impl CairnConfig {
             .chain
             .iter()
             .any(|e| matches!(e.worker, ExtractorWorkerKind::Agent));
+        let agent_configured = self.agent_provider.kind.is_some();
+        let agent_dream = agent_configured
+            && [
+                self.dream.light_sleep,
+                self.dream.rem_sleep,
+                self.dream.deep_dreaming,
+            ]
+            .into_iter()
+            .any(|tier| matches!(tier.worker, DreamWorkerMode::Agent));
 
         CapabilitySet {
             keyword_search: true,
@@ -1954,6 +2041,7 @@ impl CairnConfig {
             hybrid_search: semantic,
             llm_extract: llm_on,
             agent_extract,
+            agent_dream,
             screen_capture_enabled: self.sensors.screen.enabled,
             graph_edges: !matches!(self.store.kind, StoreKind::Sqlite), // P0: sqlite always false; P1+ gates on store capability
             // P0 always advertises policy_trace; a future config knob
@@ -2699,6 +2787,123 @@ mod tests {
     }
 
     #[test]
+    fn agent_extractor_requires_agent_provider_config() {
+        let mut config = CairnConfig::default();
+        config.pipeline.extract.chain.push(ExtractorEntry {
+            worker: ExtractorWorkerKind::Agent,
+            kinds: vec![],
+            trigger: None,
+            budget: ExtractBudget {
+                max_tokens: Some(2048),
+                max_wall_ms: Some(30_000),
+                max_turns: Some(4),
+            },
+        });
+
+        let err = config
+            .validate()
+            .expect_err("agent extractor needs provider");
+        assert!(
+            matches!(err, ConfigError::AgentModeWithoutProvider { field }
+            if field == "pipeline.extract.chain[].worker")
+        );
+    }
+
+    #[test]
+    fn agent_dream_requires_provider_and_tool_budget() {
+        let mut config = CairnConfig::default();
+        config.llm.provider = Some(LlmProvider::OpenaiCompatible);
+        config.dream.enabled = true;
+        config.dream.deep_dreaming.worker = DreamWorkerMode::Agent;
+        config.dream.deep_dreaming.max_tool_calls = 0;
+
+        let err = config
+            .validate()
+            .expect_err("agent dream needs provider first");
+        assert!(
+            matches!(err, ConfigError::AgentModeWithoutProvider { field }
+            if field == "dream.deep_dreaming.worker")
+        );
+
+        config.agent_provider.kind = Some(AgentProviderKind::CairnCore);
+        let err = config
+            .validate()
+            .expect_err("agent dream needs tool budget");
+        assert!(matches!(err, ConfigError::InvalidDream { .. }));
+    }
+
+    #[test]
+    fn agent_modes_require_llm_provider_for_bundled_runtime() {
+        let mut config = CairnConfig::default();
+        config.agent_provider.kind = Some(AgentProviderKind::CairnCore);
+        config.pipeline.extract.chain.push(ExtractorEntry {
+            worker: ExtractorWorkerKind::Agent,
+            kinds: vec![],
+            trigger: None,
+            budget: ExtractBudget::default(),
+        });
+
+        let err = config
+            .validate()
+            .expect_err("bundled agent runtime needs llm provider");
+        assert!(
+            matches!(err, ConfigError::AgentModeWithoutLlmProvider { field }
+            if field == "pipeline.extract.chain[].worker")
+        );
+
+        config.pipeline.extract.chain.clear();
+        config.dream.enabled = true;
+        config.dream.deep_dreaming.worker = DreamWorkerMode::Agent;
+        config.dream.deep_dreaming.max_tool_calls = 1;
+
+        let err = config
+            .validate()
+            .expect_err("agent dream runtime needs llm provider");
+        assert!(
+            matches!(err, ConfigError::AgentModeWithoutLlmProvider { field }
+            if field == "dream.deep_dreaming.worker")
+        );
+    }
+
+    #[test]
+    fn custom_agent_provider_does_not_require_bundled_llm_provider() {
+        let mut config = CairnConfig::default();
+        config.agent_provider.kind = Some(AgentProviderKind::Custom("external-agent".to_string()));
+        config.pipeline.extract.chain.push(ExtractorEntry {
+            worker: ExtractorWorkerKind::Agent,
+            kinds: vec![],
+            trigger: None,
+            budget: ExtractBudget {
+                max_tokens: Some(2048),
+                max_wall_ms: Some(30_000),
+                max_turns: Some(4),
+            },
+        });
+        config
+            .validate()
+            .expect("custom provider config should not inherit bundled runtime LLM requirement");
+
+        config.pipeline.extract.chain.clear();
+        config.dream.enabled = true;
+        config.dream.deep_dreaming.worker = DreamWorkerMode::Agent;
+        config.dream.deep_dreaming.max_tool_calls = 1;
+        config
+            .validate()
+            .expect("custom agent dream should not inherit bundled runtime LLM requirement");
+    }
+
+    #[test]
+    fn agent_provider_config_round_trips() {
+        let json = r#"{"kind":"cairn-core","command":"cairn"}"#;
+        let cfg: AgentProviderConfig = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(cfg.kind, Some(AgentProviderKind::CairnCore));
+        assert_eq!(
+            serde_json::to_value(&cfg).expect("serialize")["command"],
+            "cairn"
+        );
+    }
+
+    #[test]
     fn validate_rejects_invalid_custom_store_name() {
         let mut config = CairnConfig::default();
         config.store.kind = StoreKind::Custom("BAD NAME WITH SPACES".into());
@@ -2935,6 +3140,10 @@ mod tests {
         assert!(!caps.llm_extract, "no LLM → no llm_extract");
         assert!(!caps.agent_extract, "default chain has no agent worker");
         assert!(
+            !caps.agent_dream,
+            "default dream config has no agent worker"
+        );
+        assert!(
             !caps.screen_capture_enabled,
             "screen capture is off by default"
         );
@@ -2970,6 +3179,7 @@ mod tests {
         );
         assert!(caps.llm_extract);
         assert!(!caps.agent_extract);
+        assert!(!caps.agent_dream);
     }
 
     #[test]
@@ -2983,6 +3193,15 @@ mod tests {
         });
         let caps = config.capabilities(false);
         assert!(caps.agent_extract);
+    }
+
+    #[test]
+    fn capabilities_agent_dream_when_tier_has_agent_provider() {
+        let mut config = CairnConfig::default();
+        config.agent_provider.kind = Some(AgentProviderKind::CairnCore);
+        config.dream.deep_dreaming.worker = DreamWorkerMode::Agent;
+        let caps = config.capabilities(false);
+        assert!(caps.agent_dream);
     }
 
     #[test]

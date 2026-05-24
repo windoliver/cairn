@@ -667,6 +667,8 @@ mod tests {
             source_resolver: resolver,
             consent_journal: journal,
             workflow_jobs: None,
+            agent_worker_audit: None,
+            agent_canary_state: None,
             now_ms: 0,
         }
     }

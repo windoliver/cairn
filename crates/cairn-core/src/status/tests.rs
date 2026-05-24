@@ -10,6 +10,7 @@ fn cap_set_default(model: bool, embed_on: bool) -> CapabilitySet {
         hybrid_search: model && embed_on,
         llm_extract: false,
         agent_extract: false,
+        agent_dream: false,
         screen_capture_enabled: false,
         graph_edges: false,
         policy_trace: true,
@@ -29,6 +30,7 @@ fn gates(bound: bool, model_present: bool, store: Option<StoreCaps>) -> Capabili
         // cloud-provider decoupling construct gates directly (see below).
         embedding_provider_ready: model_present,
         llm_configured: false,
+        agent_configured: false,
         consolidation_runtime_ready: false,
         dream_runtime_ready: false,
         expiration_runtime_ready: false,
@@ -247,6 +249,35 @@ fn dream_capability_requires_wiring_runtime_ready_and_llm_provider() {
 }
 
 #[test]
+fn dream_capability_allows_agent_dream_without_llm_provider() {
+    let mut g = gates(true, true, None);
+    g.dream_runtime_ready = true;
+    g.llm_configured = false;
+    g.config.agent_dream = true;
+    g.agent_configured = false;
+    let caps = advertise(&g);
+    assert!(
+        !caps.contains(&Capabilities::CairnWorkflowsV1Dream),
+        "agent dream intent alone must not advertise without runtime agent provider"
+    );
+
+    g.llm_configured = true;
+    let caps = advertise(&g);
+    assert!(
+        !caps.contains(&Capabilities::CairnWorkflowsV1Dream),
+        "agent dream must not fall back to LLMProvider when runtime agent provider is absent"
+    );
+
+    g.agent_configured = true;
+    let caps = advertise(&g);
+    assert_eq!(
+        caps.contains(&Capabilities::CairnWorkflowsV1Dream),
+        wiring::DREAM_WORKFLOW_WIRED,
+        "agent dream uses the configured agent provider, not LLMProvider"
+    );
+}
+
+#[test]
 fn expiration_capability_requires_wiring_and_runtime_ready() {
     let mut g = gates(true, true, None);
     g.expiration_runtime_ready = false;
@@ -410,6 +441,7 @@ mod remediation_tests {
             hybrid_search: true,
             llm_extract: false,
             agent_extract: false,
+            agent_dream: false,
             screen_capture_enabled: false,
             graph_edges: false,
             policy_trace: true,
@@ -426,6 +458,7 @@ mod remediation_tests {
             model_present: true,
             embedding_provider_ready: true,
             llm_configured: true,
+            agent_configured: false,
             contract_phase: Phase::V0_1,
             consolidation_runtime_ready: false,
             dream_runtime_ready: false,
@@ -489,6 +522,7 @@ mod prop_tests {
                 hybrid_search: hyb,
                 llm_extract: false,
                 agent_extract: false,
+                agent_dream: false,
                 screen_capture_enabled: false,
                 graph_edges: false,
                 policy_trace: pt,
@@ -516,6 +550,7 @@ mod prop_tests {
                     model_present: model,
                     embedding_provider_ready: embed_ready,
                     llm_configured: llm,
+                    agent_configured: false,
                     consolidation_runtime_ready: false,
                     dream_runtime_ready: false,
                     expiration_runtime_ready: false,
@@ -595,6 +630,7 @@ fn openai_provider_without_key_drops_semantic_and_hybrid() {
         // Cloud provider not ready (feature flag off or API key missing)
         embedding_provider_ready: false,
         llm_configured: false,
+        agent_configured: false,
         consolidation_runtime_ready: false,
         dream_runtime_ready: false,
         expiration_runtime_ready: false,

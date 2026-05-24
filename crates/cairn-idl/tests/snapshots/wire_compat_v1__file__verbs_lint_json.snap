@@ -1,5 +1,6 @@
 ---
 source: crates/cairn-idl/tests/wire_compat_v1.rs
+assertion_line: 95
 expression: body
 ---
 {
@@ -120,6 +121,157 @@ expression: body
         "path":         { "type": "string", "minLength": 1 }
       }
     },
+    "AgentWorkerAuditWorker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "worker_kind",
+        "worker_name",
+        "total_runs",
+        "completed_runs",
+        "failed_runs",
+        "generated_candidates",
+        "accepted_candidates",
+        "turns",
+        "tool_calls",
+        "cost_units",
+        "failure_modes"
+      ],
+      "properties": {
+        "worker_kind": {
+          "type": "string",
+          "enum": ["extractor", "dream"]
+        },
+        "worker_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "canary_label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "total_runs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "completed_runs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failed_runs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "generated_candidates": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "accepted_candidates": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "acceptance_rate": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "turns": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tool_calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cost_units": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failure_modes": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "AgentWorkerAuditReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observed_records",
+        "total_runs",
+        "completed_runs",
+        "failed_runs",
+        "generated_candidates",
+        "accepted_candidates",
+        "turns",
+        "tool_calls",
+        "cost_units",
+        "failure_modes",
+        "workers"
+      ],
+      "properties": {
+        "observed_records": {
+          "type": "boolean"
+        },
+        "rollout_state": {
+          "type": "string",
+          "enum": ["paused", "canary", "enabled", "rolled_back"]
+        },
+        "total_runs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "completed_runs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failed_runs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "generated_candidates": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "accepted_candidates": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "acceptance_rate": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "turns": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tool_calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cost_units": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failure_modes": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "workers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AgentWorkerAuditWorker"
+          }
+        }
+      }
+    },
     "Finding": {
       "type": "object",
       "additionalProperties": false,
@@ -169,7 +321,10 @@ expression: body
           "type": "array",
           "items": { "$ref": "#/$defs/Finding" }
         },
-        "report_path": { "type": "string", "minLength": 1 }
+        "report_path": { "type": "string", "minLength": 1 },
+        "agent_worker_audit": {
+          "$ref": "#/$defs/AgentWorkerAuditReport"
+        }
       }
     }
   }
