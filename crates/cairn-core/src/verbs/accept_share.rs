@@ -529,6 +529,10 @@ fn inbound_frontmatter(link_id: &str, issuer: &Identity) -> BTreeMap<String, ser
         "trust_status".to_owned(),
         serde_json::Value::String("inbound_shared".to_owned()),
     );
+    map.insert(
+        "consent_ref".to_owned(),
+        serde_json::Value::String(format!("consent:federation:{link_id}")),
+    );
     map
 }
 

@@ -593,7 +593,10 @@ fn scope_covers(grant_scope: &ScopeTuple, record_scope: &ScopeTuple) -> bool {
     let check = |grant: &Option<String>, record: &Option<String>| -> bool {
         match (grant, record) {
             (_, None) => true,
-            (None, Some(_)) => true,
+            // Record has a dimension the grant omits — over-broadcast.
+            // Reject: every non-None record dimension must be present in
+            // the grant scope for strict containment.
+            (None, Some(_)) => false,
             (Some(g), Some(r)) => g == r,
         }
     };
