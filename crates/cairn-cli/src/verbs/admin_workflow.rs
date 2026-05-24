@@ -31,7 +31,7 @@
 //! row. The `JsonlMetricsSink` wiring matches `cairn mcp`.
 //! Hidden from default `--help`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -41,9 +41,11 @@ use cairn_core::contract::job_store::{
 };
 use cairn_core::contract::metrics::{MetricsSink, NoopMetricsSink};
 use cairn_core::domain::metrics::MetricEvent;
-use cairn_workflows::SqliteJobStore;
 use cairn_workflows::scheduler::{
     Clock, ReaperConfig, Scheduler, SchedulerConfig, SystemClock, WorkerConfig,
+};
+use cairn_workflows::{
+    EvolutionHandler, EvolutionPayload, MaterializedEvolutionDecision, SqliteJobStore,
 };
 use clap::ArgMatches;
 use rusqlite::Connection;
@@ -940,6 +942,61 @@ pub fn run_succeeding(sub: &ArgMatches, vault_root: &Path) -> ExitCode {
         println!("job_id={job_id_str}");
         ExitCode::SUCCESS
     })
+}
+
+/// `cairn admin workflow run-evolution` — decode one `EvolutionPayload`
+/// JSON file, run the workflow handler, and report the terminal decision.
+#[must_use]
+pub fn run_evolution(sub: &ArgMatches, vault_root: &Path) -> ExitCode {
+    let Some(payload_path) = sub.get_one::<PathBuf>("payload") else {
+        eprintln!("cairn admin workflow run-evolution: missing --payload");
+        return ExitCode::from(64);
+    };
+
+    let bytes = match std::fs::read(payload_path) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            eprintln!(
+                "cairn admin workflow run-evolution: read {}: {e}",
+                payload_path.display()
+            );
+            return ExitCode::from(69);
+        }
+    };
+    let payload: EvolutionPayload = match serde_json::from_slice(&bytes) {
+        Ok(payload) => payload,
+        Err(e) => {
+            eprintln!(
+                "cairn admin workflow run-evolution: parse {}: {e}",
+                payload_path.display()
+            );
+            return ExitCode::from(69);
+        }
+    };
+    let proposal_id = payload.proposal_id.clone();
+
+    let handler = EvolutionHandler::new(vault_root.to_path_buf());
+    match handler.run_once(payload) {
+        Ok(decision) => {
+            println!(
+                "evolution: proposal_id={proposal_id} decision={}",
+                materialized_evolution_decision(decision)
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("cairn admin workflow run-evolution: {e}");
+            ExitCode::from(69)
+        }
+    }
+}
+
+fn materialized_evolution_decision(decision: MaterializedEvolutionDecision) -> &'static str {
+    match decision {
+        MaterializedEvolutionDecision::Promoted => "promoted",
+        MaterializedEvolutionDecision::RolledBack => "rolled_back",
+        MaterializedEvolutionDecision::Rejected => "rejected",
+    }
 }
 
 #[cfg(test)]

@@ -636,6 +636,18 @@ fn admin_workflow_subcommand() -> clap::Command {
                         .help("Polling deadline before reporting a timeout (default: 15)"),
                 ),
         )
+        .subcommand(
+            clap::Command::new("run-evolution")
+                .about("Run one evolution workflow payload and materialize its audit files")
+                .arg(
+                    clap::Arg::new("payload")
+                        .long("payload")
+                        .required(true)
+                        .value_name("PATH")
+                        .value_parser(clap::value_parser!(std::path::PathBuf))
+                        .help("Path to an EvolutionPayload JSON file"),
+                ),
+        )
         .subcommand(clap::Command::new("recover").about(
             "Boot Scheduler with worker_count=0 so the startup reap runs once; \
                      reports how many leased rows were reclaimed.",

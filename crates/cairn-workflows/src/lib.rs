@@ -13,6 +13,7 @@ pub mod consolidation;
 pub mod drainer;
 pub mod dream;
 pub mod evaluation;
+pub mod evolution;
 pub mod expiration;
 pub mod planners;
 pub mod propagation;
@@ -46,6 +47,9 @@ pub use evaluation::{
     CheckOutcome, EVALUATION_KIND, EvaluationHandler, EvaluationPayload, EvaluationReport,
     GoldenCheck, OrphanCheck, TombstoneConsistencyCheck, default_checks as default_golden_checks,
 };
+pub use evolution::{
+    EVOLUTION_KIND, EvolutionHandler, EvolutionPayload, MaterializedEvolutionDecision,
+};
 pub use expiration::{
     EXPIRATION_KIND, ExpirationHandler, ExpirationPayload, ExpirationSweepReport,
 };
@@ -64,7 +68,8 @@ pub use trace_canvas::{
     TraceCanvasPayload, TraceCanvasProjection, enqueue_trace_canvas_step,
 };
 pub use workflows::{
-    ConsolidateWorkflow, ExpireWorkflow, PromoteWorkflow, ReflectionWorkflow, WorkflowPlanSource,
+    ConsolidateWorkflow, EvolutionWorkflow, ExpireWorkflow, PromoteWorkflow, ReflectionWorkflow,
+    WorkflowPlanSource,
 };
 
 use cairn_core::contract::version::{ContractVersion, VersionRange};

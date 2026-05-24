@@ -4,9 +4,9 @@
 //! `wal_steps.step_kind` and are wire-stable: renaming a step requires a
 //! schema migration to map old names forward.
 
-/// P0 mutation kinds whose step graphs this module defines. Marked
-/// `#[non_exhaustive]` so `Promote`, `ForgetSession`, `Evolve`, and the
-/// graph kinds can be added later without breaking matchers.
+/// P0/P2 mutation kinds whose step graphs this module defines. Marked
+/// `#[non_exhaustive]` so `Promote`, `ForgetSession`, and the graph kinds can
+/// be added later without breaking matchers.
 ///
 /// The existing `lint_repair` kind (in
 /// `cairn-store-sqlite/src/wal/lint_repair.rs`) is intentionally not part
@@ -20,6 +20,8 @@ pub enum WalKind {
     ForgetRecord,
     /// `expire` — soft-expire (brief §5.6 row 5).
     Expire,
+    /// `evolve` — gated proposal/eval/canary promotion (brief §11.3).
+    Evolve,
 }
 
 impl WalKind {
@@ -30,6 +32,7 @@ impl WalKind {
             Self::Upsert => "upsert",
             Self::ForgetRecord => "forget_record",
             Self::Expire => "expire",
+            Self::Evolve => "evolve",
         }
     }
 }
@@ -203,6 +206,49 @@ const EXPIRE_GRAPH: StepGraph = StepGraph {
     steps: EXPIRE_STEPS,
 };
 
+/// Step graph for `evolve` — brief §5.6 row 6 and §11.3 canary rollout.
+///
+/// Rollback is handled by compensation against the staged proposal/canary
+/// steps. The final `artifact.promote` step is the linearization point for
+/// non-canary readers.
+pub const EVOLVE_STEPS: &[StepDef] = &[
+    StepDef {
+        ord: 0,
+        name: "proposal.stage",
+        idempotent: false,
+    },
+    StepDef {
+        ord: 1,
+        name: "eval.run",
+        idempotent: true,
+    },
+    StepDef {
+        ord: 2,
+        name: "gates.verify",
+        idempotent: true,
+    },
+    StepDef {
+        ord: 3,
+        name: "canary.start",
+        idempotent: true,
+    },
+    StepDef {
+        ord: 4,
+        name: "canary.observe",
+        idempotent: true,
+    },
+    StepDef {
+        ord: 5,
+        name: "artifact.promote",
+        idempotent: true,
+    },
+];
+
+const EVOLVE_GRAPH: StepGraph = StepGraph {
+    kind: WalKind::Evolve,
+    steps: EVOLVE_STEPS,
+};
+
 /// Resolves a [`WalKind`] to its static step graph.
 #[must_use]
 pub fn graph_for(kind: WalKind) -> &'static StepGraph {
@@ -210,6 +256,7 @@ pub fn graph_for(kind: WalKind) -> &'static StepGraph {
         WalKind::Upsert => &UPSERT_GRAPH,
         WalKind::ForgetRecord => &FORGET_RECORD_GRAPH,
         WalKind::Expire => &EXPIRE_GRAPH,
+        WalKind::Evolve => &EVOLVE_GRAPH,
     }
 }
 
@@ -219,7 +266,12 @@ mod tests {
 
     #[test]
     fn step_ords_match_slice_indices() {
-        for graph in [&UPSERT_GRAPH, &FORGET_RECORD_GRAPH, &EXPIRE_GRAPH] {
+        for graph in [
+            &UPSERT_GRAPH,
+            &FORGET_RECORD_GRAPH,
+            &EXPIRE_GRAPH,
+            &EVOLVE_GRAPH,
+        ] {
             for (idx, step) in graph.steps.iter().enumerate() {
                 assert_eq!(
                     step.ord as usize, idx,
@@ -232,7 +284,12 @@ mod tests {
 
     #[test]
     fn step_names_unique_within_graph() {
-        for graph in [&UPSERT_GRAPH, &FORGET_RECORD_GRAPH, &EXPIRE_GRAPH] {
+        for graph in [
+            &UPSERT_GRAPH,
+            &FORGET_RECORD_GRAPH,
+            &EXPIRE_GRAPH,
+            &EVOLVE_GRAPH,
+        ] {
             let mut seen: Vec<&str> = Vec::with_capacity(graph.steps.len());
             for step in graph.steps {
                 assert!(
@@ -251,6 +308,7 @@ mod tests {
         assert_eq!(graph_for(WalKind::Upsert).kind, WalKind::Upsert);
         assert_eq!(graph_for(WalKind::ForgetRecord).kind, WalKind::ForgetRecord);
         assert_eq!(graph_for(WalKind::Expire).kind, WalKind::Expire);
+        assert_eq!(graph_for(WalKind::Evolve).kind, WalKind::Evolve);
     }
 
     #[test]

@@ -18,8 +18,8 @@ use cairn_workflows::propagation::PropagationHandler;
 use cairn_workflows::scheduler::HandlerRegistryBuilder;
 use cairn_workflows::{
     ConsolidationForgetCleanupHandler, ConsolidationHandler, DreamHandler, EvaluationHandler,
-    ExpirationHandler, Scheduler, SchedulerConfig, SkillifyHandler, SqliteJobStore, SystemClock,
-    default_golden_checks,
+    EvolutionHandler, ExpirationHandler, Scheduler, SchedulerConfig, SkillifyHandler,
+    SqliteJobStore, SystemClock, default_golden_checks,
 };
 
 /// Outcome of resolving the `[mcp.stdio]` block into runtime components.
@@ -267,6 +267,7 @@ pub fn run(
                     default_golden_checks(),
                     config.evaluation.clone(),
                 );
+                let evolution_handler = EvolutionHandler::new(vault_root.to_path_buf());
 
                 // Federation transport — when available, register
                 // PropagationHandler for outbound share/revoke jobs.
@@ -286,7 +287,8 @@ pub fn run(
                     .with(Arc::new(dream_handler))
                     .with(Arc::new(skillify_handler))
                     .with(Arc::new(expiration_handler))
-                    .with(Arc::new(evaluation_handler));
+                    .with(Arc::new(evaluation_handler))
+                    .with(Arc::new(evolution_handler));
 
                 if let Some(ref transport) = federation_transport {
                     registry_builder = registry_builder
