@@ -78,6 +78,10 @@ impl SkillPackBuilder {
     /// # Errors
     /// Returns when a candidate is missing, has failing gates, or archive
     /// creation fails.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "linear pack-build flow: name validation, per-candidate read+hash+spec lookup, manifest assembly, tar emission. Splitting obscures the ordering."
+    )]
     pub fn build(self, vault_root: &Path) -> Result<SkillPackArchive, SkillPackBuildError> {
         // Validate name BEFORE deriving any filesystem path from it. Without
         // this check a caller passing `--name ../target` (or similar) would
@@ -108,7 +112,10 @@ impl SkillPackBuilder {
         }
 
         let mut entries = Vec::new();
-        let mut all_provides = Vec::new();
+        let mut all_provides: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        let mut all_requires: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
 
         for cid in &self.candidate_ids {
             let cand_dir = vault_root.join(".cairn/evolution/skillify").join(cid);
@@ -155,6 +162,26 @@ impl SkillPackBuilder {
 
             let lane = find_lane_from_bundle(&cand_dir, &slug)?;
 
+            // Round 6 hardening: populate provides/requires from the
+            // candidate's persisted spec draft (when present) so the
+            // manifest's dependency closure check actually means something.
+            // Without this, every pack shipped with `requires: []` and the
+            // SkillPackManifest::validate dependency-closure check was a no-op.
+            all_provides.insert(lane.clone());
+            let spec_path = cand_dir.join("skill-spec.draft.json");
+            if let Ok(spec_bytes) = fs::read(&spec_path)
+                && let Ok(spec) = serde_json::from_slice::<
+                    cairn_core::pipeline::skillify::SkillSpecDraft,
+                >(&spec_bytes)
+            {
+                for cap in spec.provides {
+                    all_provides.insert(cap);
+                }
+                for dep in spec.requires {
+                    all_requires.insert(dep);
+                }
+            }
+
             entries.push(SkillPackEntry {
                 candidate_id: cid.clone(),
                 lane: lane.clone(),
@@ -162,13 +189,14 @@ impl SkillPackBuilder {
                 bundle_version: bundle.version,
                 artifact_sha256: artifact_hash,
             });
-
-            all_provides.push(lane);
         }
 
         let candidate_ids_refs: Vec<&str> = self.candidate_ids.iter().map(String::as_str).collect();
         let pack_id =
             SkillPackManifest::derive_pack_id(&self.name, &self.version, &candidate_ids_refs);
+
+        let provides_vec: Vec<String> = all_provides.into_iter().collect();
+        let requires_vec: Vec<String> = all_requires.into_iter().collect();
 
         let mut manifest = SkillPackManifest {
             pack_id,
@@ -177,10 +205,34 @@ impl SkillPackBuilder {
             cairn_compat: self.cairn_compat.clone(),
             description: self.description.clone(),
             skills: entries,
-            requires: Vec::new(),
-            provides: all_provides,
+            requires: requires_vec,
+            provides: provides_vec,
             content_sha256: String::new(),
         };
+
+        // With requires/provides populated, validate dependency closure
+        // and lane uniqueness at pack-build time so a candidate whose
+        // `requires` isn't satisfied by any skill in this pack fails fast.
+        // We deliberately skip the `cairn_compat` check here — a pack can
+        // be built for a future Cairn version that the build host does not
+        // run; that check belongs at install time.
+        let provided_set: std::collections::BTreeSet<&str> =
+            manifest.provides.iter().map(String::as_str).collect();
+        for dep in &manifest.requires {
+            if !provided_set.contains(dep.as_str()) {
+                return Err(SkillPackBuildError::Pack(
+                    SkillPackError::DependencyMissing { dep: dep.clone() },
+                ));
+            }
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for entry in &manifest.skills {
+            if !seen.insert(entry.lane.clone()) {
+                return Err(SkillPackBuildError::Pack(SkillPackError::DuplicateLane {
+                    lane: entry.lane.clone(),
+                }));
+            }
+        }
 
         // Compute a deterministic content digest BEFORE serializing the
         // manifest into the tarball. The digest covers the manifest metadata
@@ -445,7 +497,11 @@ pub fn unpack_archive(
     // the operator can re-run install.
     // `parent_dir` (computed above for the install lock) is reused so we do
     // not race against another caller creating it concurrently.
-    let mut swapped_backups: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
+    // Track every swap so rollback can restore the previous state of the
+    // vault on any later failure. `Replaced` means the destination already
+    // existed and is preserved as a backup. `Created` means we installed
+    // into a previously-empty slot — rollback must remove the new copy.
+    let mut swap_log: Vec<SwapAction> = Vec::new();
     for entry in &manifest.skills {
         let src = extract_dir.join(format!("skills/{}", entry.candidate_id));
         let dst = parent_dir.join(&entry.candidate_id);
@@ -454,30 +510,75 @@ pub fn unpack_archive(
             entry.candidate_id,
             std::process::id()
         ));
-        if dst.exists() {
+        let preexisting = dst.exists();
+        if preexisting {
             // Rename existing → backup first; rename new → dst; delete backup last.
             if let Err(e) = fs::rename(&dst, &backup) {
-                // Restore any prior swaps we already performed.
-                rollback_swaps(&swapped_backups);
+                rollback_install(&swap_log);
                 return Err(SkillPackBuildError::Io(e));
             }
-            swapped_backups.push((dst.clone(), backup.clone()));
         }
         if let Err(e) = fs::rename(&src, &dst) {
-            rollback_swaps(&swapped_backups);
+            rollback_install(&swap_log);
+            // The dst-to-backup rename above (if it happened) needs to be
+            // undone here — restore the backup since the new dst rename
+            // failed. We push the action first so rollback can find it.
+            if preexisting {
+                let _ = fs::rename(&backup, &dst);
+            }
             return Err(SkillPackBuildError::Io(e));
+        }
+        if preexisting {
+            swap_log.push(SwapAction::Replaced {
+                dst: dst.clone(),
+                backup: backup.clone(),
+            });
+        } else {
+            swap_log.push(SwapAction::Created { dst: dst.clone() });
         }
     }
 
-    // All swaps succeeded — remove backups.
-    for (_dst, backup) in &swapped_backups {
-        let _ = fs::remove_dir_all(backup);
+    // All swaps succeeded — remove backups (created entries have no backup).
+    for action in &swap_log {
+        if let SwapAction::Replaced { backup, .. } = action {
+            let _ = fs::remove_dir_all(backup);
+        }
     }
 
     Ok(manifest)
 }
 
-/// Restore destination directories from their backup names after a failed swap.
+/// One install rename, recorded for rollback.
+enum SwapAction {
+    /// Destination did not exist; we wrote the new copy.
+    Created { dst: std::path::PathBuf },
+    /// Destination existed; we backed it up then wrote the new copy.
+    Replaced {
+        dst: std::path::PathBuf,
+        backup: std::path::PathBuf,
+    },
+}
+
+/// Undo every recorded swap, leaving the vault as it was before install.
+/// Called when a later rename fails mid-install so a partial pack does not
+/// pollute snapshots/gates.
+fn rollback_install(log: &[SwapAction]) {
+    for action in log.iter().rev() {
+        match action {
+            SwapAction::Created { dst } => {
+                let _ = fs::remove_dir_all(dst);
+            }
+            SwapAction::Replaced { dst, backup } => {
+                let _ = fs::remove_dir_all(dst);
+                let _ = fs::rename(backup, dst);
+            }
+        }
+    }
+}
+
+/// Restore destination directories from their backup names after a failed
+/// swap. Retained for compatibility; new code uses [`rollback_install`].
+#[allow(dead_code)]
 fn rollback_swaps(backups: &[(std::path::PathBuf, std::path::PathBuf)]) {
     for (dst, backup) in backups.iter().rev() {
         // If dst now contains the (broken) new content, remove it first.

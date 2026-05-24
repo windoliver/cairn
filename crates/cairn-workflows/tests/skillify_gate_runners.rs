@@ -895,3 +895,43 @@ async fn resolver_eval_fails_when_no_negative_intents_provided() {
         "expected negative-examples failure, got: {msg}"
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unit_test_runner_works_with_relative_candidate_dir() {
+    // Round 6 regression: when the handler is constructed with a relative
+    // vault root (--vault . or relative CAIRN_VAULT), candidate_dir and the
+    // script path are relative. The sandbox-lite cwd switch to a scratch
+    // dir would make bash look for the script under scratch, not the
+    // original cwd. The fix canonicalizes script_path before spawning.
+    let temp = TempDir::new().unwrap();
+    let abs_root = temp.path();
+    materialize_script(abs_root, "relpath", "#!/usr/bin/env bash\necho ok\n");
+
+    // Build a RELATIVE candidate_dir by combining cwd-relative pieces.
+    let saved_cwd = std::env::current_dir().unwrap();
+    std::env::set_current_dir(temp.path().parent().unwrap()).unwrap();
+    let rel_root = std::path::PathBuf::from(temp.path().file_name().unwrap());
+    let mut a = authored("relpath");
+    a.unit_tests = serde_json::json!({
+        "cases": [{"input": "", "expected_stdout": "ok\n", "timeout_ms": 5000}]
+    });
+    let b = bundle("relpath");
+    let ctx = GateRunContext {
+        vault_root: &rel_root,
+        candidate_id: "skc_test",
+        candidate_dir: rel_root.clone(),
+        bundle: &b,
+        authored: &a,
+        llm: None,
+        snapshot: &empty_snapshot(),
+    };
+    let result = UnitTestRunner.run(&ctx).await;
+    std::env::set_current_dir(saved_cwd).unwrap();
+    assert_eq!(
+        result.status,
+        SkillifyGateStatus::Passed,
+        "relative vault root should work, got: {:?}",
+        result.message
+    );
+}

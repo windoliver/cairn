@@ -940,8 +940,23 @@ async fn run_script(
         Err(e) => return Err(format!("scratch dir: {e}")),
     };
 
+    // Canonicalize the script path BEFORE we change the subprocess's cwd to
+    // the scratch directory. If the caller passed a relative vault root
+    // (e.g. --vault . or relative CAIRN_VAULT), `script_path` is also
+    // relative; without canonicalization, bash would look for the script
+    // under scratch and every script gate would fail with "not found".
+    let resolved_script = match script_path.canonicalize() {
+        Ok(p) => p,
+        Err(e) => {
+            return Err(format!(
+                "script path canonicalize: {e} (for {})",
+                script_path.display()
+            ));
+        }
+    };
+
     let mut cmd = Command::new("bash");
-    cmd.arg(script_path);
+    cmd.arg(&resolved_script);
     cmd.stdin(std::process::Stdio::piped());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
