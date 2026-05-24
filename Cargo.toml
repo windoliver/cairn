@@ -99,6 +99,11 @@ smallvec = "1"
 cpal = "0.17.3"
 sherpa-onnx = { version = "1.13.1", default-features = false, features = ["static"] }
 xcap = "0.9.4"
+# Connector-framework deps (cairn-connectors-core, issue #130)
+arc-swap = "1"
+hmac = { version = "0.12", default-features = false }
+subtle = { version = "2", default-features = false }
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
 
 # Path + version on intra-workspace deps so `cargo publish` can rewrite the
 # path to a registry version without losing the constraint. The version
@@ -119,6 +124,7 @@ cairn-embeddings-openai = { path = "crates/cairn-embeddings-openai", version = "
 cairn-frontend-obsidian = { path = "crates/cairn-frontend-obsidian", version = "0.0.1" }
 cairn-frontend-vscode = { path = "crates/cairn-frontend-vscode", version = "0.0.1" }
 cairn-frontend-logseq = { path = "crates/cairn-frontend-logseq", version = "0.0.1" }
+cairn-connectors-core = { path = "crates/cairn-connectors-core", version = "0.0.1" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

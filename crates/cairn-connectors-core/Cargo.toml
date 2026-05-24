@@ -1,0 +1,47 @@
+[package]
+name = "cairn-connectors-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "External-connector substrate: trait, OAuth/webhook payload contracts, redaction, registry."
+
+[lints]
+workspace = true
+
+[features]
+default = []
+## Compile FixtureConnector for downstream test crates.
+fixture = []
+
+[dependencies]
+cairn-core = { workspace = true }
+arc-swap = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true }
+bon = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+subtle = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
+tokio-util = { workspace = true, features = ["rt"] }
+toml = { workspace = true }
+tracing = { workspace = true }
+ulid = { workspace = true }
+hex = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+cairn-test-fixtures = { workspace = true }
+insta = { workspace = true }
+proptest = { workspace = true }
+rstest = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
