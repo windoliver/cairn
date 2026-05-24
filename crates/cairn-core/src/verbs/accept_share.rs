@@ -326,7 +326,7 @@ async fn accept_revoke(
     // consent_ref to find the actual records.
     let tombstone_ids: Vec<String> = prior_record_ids
         .iter()
-        .filter(|id| RecordId::parse(id.clone()).is_ok())
+        .filter(|id| RecordId::parse((*id).clone()).is_ok())
         .cloned()
         .collect();
 

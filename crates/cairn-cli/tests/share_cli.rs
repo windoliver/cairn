@@ -252,8 +252,7 @@ fn share_propose_and_accept_happy_path() {
         "ingest failed: {}",
         String::from_utf8_lossy(&out.stderr),
     );
-    let ingest_json: serde_json::Value =
-        serde_json::from_slice(&out.stdout).expect("ingest json");
+    let ingest_json: serde_json::Value = serde_json::from_slice(&out.stdout).expect("ingest json");
     let record_id = ingest_json["data"]["record_id"]
         .as_str()
         .expect("record_id from ingest");
@@ -287,12 +286,8 @@ fn share_propose_and_accept_happy_path() {
 
     // If it succeeded, verify the output shape and attempt accept.
     if out.status.code() == Some(0) {
-        let json: serde_json::Value =
-            serde_json::from_slice(&out.stdout).expect("propose json");
-        assert!(
-            json["link"].is_object(),
-            "response must have link: {json}",
-        );
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout).expect("propose json");
+        assert!(json["link"].is_object(), "response must have link: {json}",);
         assert!(
             json["operation_id"].is_string(),
             "response must have operation_id: {json}",
