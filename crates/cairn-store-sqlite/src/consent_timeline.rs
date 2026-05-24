@@ -14,7 +14,7 @@
 //! - [`SqliteMemoryStore::is_link_revoked`] — fast revocation check.
 //! - [`SqliteMemoryStore::find_share_link`] — issuer-side grant lookup,
 //!   joins `consent_journal` to `workflow_jobs` to recover the
-//!   [`SignedShareLink`] payload the propagation job carries.
+//!   `SignedShareLink` payload the propagation job carries.
 //! - [`SqliteMemoryStore::find_revocation`] — idempotency lookup for
 //!   `revoke_share`, same join pattern as `find_share_link`.
 //!
@@ -233,7 +233,7 @@ impl ConsentLookup for SqliteMemoryStore {
     /// Joins `consent_journal` (`federation_grant`) to `workflow_jobs`
     /// (`federation.propagate.outbound_share`) via
     /// `consent_journal.op_id = workflow_jobs.dedupe_key` to recover the
-    /// full [`SignedShareLink`] payload the propagation job carries.
+    /// full `SignedShareLink` payload the propagation job carries.
     ///
     /// The `peer_code` field from `payload_json` is exposed as
     /// `StoredShareLink::peer` so the revocation propagation job routes the
@@ -310,7 +310,7 @@ impl ConsentLookup for SqliteMemoryStore {
     /// Joins `consent_journal` (`federation_revoke`) to `workflow_jobs`
     /// (`federation.propagate.outbound_revoke`) via
     /// `consent_journal.op_id = workflow_jobs.dedupe_key` to recover the
-    /// [`SignedRevocation`] payload the propagation job carries.
+    /// `SignedRevocation` payload the propagation job carries.
     ///
     /// # Errors
     /// Returns [`ConsentLookupError::Backend`] on adapter I/O failure.

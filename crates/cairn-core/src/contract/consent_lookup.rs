@@ -73,7 +73,7 @@ pub struct StoredShareLink {
 /// `operation_id` + signed revocation back to the caller so retries are
 /// byte-for-byte idempotent.
 ///
-/// `Eq` is intentionally not derived: the inner [`SignedRevocation`] is
+/// `Eq` is intentionally not derived: the inner `SignedRevocation` is
 /// a codegenerated `PartialEq`-only wire type (it carries a `String`
 /// signature; structural `Eq` over the wire form is not part of the
 /// contract).
@@ -188,7 +188,7 @@ pub trait ConsentLookup: Send + Sync {
     /// Returns `Some(record)` when a prior call already committed a
     /// [`crate::domain::ConsentKind::FederationRevoke`] row for
     /// `link_id`. The verb replays the original `operation_id` and
-    /// [`SignedRevocation`] so retries are byte-for-byte stable.
+    /// `SignedRevocation` so retries are byte-for-byte stable.
     ///
     /// The default impl returns `None` for the same wiring reason as
     /// [`Self::find_share_link`].

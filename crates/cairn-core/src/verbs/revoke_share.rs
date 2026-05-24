@@ -1,12 +1,12 @@
 //! `revoke_share` verb (brief §12.a, §14).
 //!
 //! Issuer-side counterpart to [`crate::verbs::propose_share`]. Cancels a
-//! previously minted [`SignedShareLink`] by:
+//! previously minted `SignedShareLink` by:
 //!
 //! 1. Looking the link up in the consent timeline projection.
-//! 2. Signing a body-free [`SignedRevocation`] carrying only
+//! 2. Signing a body-free `SignedRevocation` carrying only
 //!    `(issuer, key_version, link_id, revoked_at, signature)`.
-//! 3. Atomically appending [`ConsentEvent::FederationRevoke`] *and*
+//! 3. Atomically appending `ConsentKind::FederationRevoke` *and*
 //!    enqueueing an outbound revoke propagation job in one outbox
 //!    transaction — mirroring the grant pair the propose verb writes.
 //!
@@ -23,7 +23,7 @@
 //! ## Idempotency
 //!
 //! Replaying a revoke against a link that already has a
-//! [`ConsentKind::FederationRevoke`] row returns the original
+//! `ConsentKind::FederationRevoke` row returns the original
 //! `operation_id` and signed revocation byte-for-byte. The verb never
 //! appends a second consent row or a second propagation job for the
 //! same link.
@@ -65,7 +65,7 @@ pub struct RevokeShareRequest {
 
 /// Successful outcome of [`revoke_share`].
 ///
-/// `Eq` is intentionally omitted because [`SignedRevocation`] is a
+/// `Eq` is intentionally omitted because `SignedRevocation` is a
 /// codegenerated wire type that only derives `PartialEq`; structural
 /// equality over its `String`-typed signature slot is not part of the
 /// contract.

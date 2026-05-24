@@ -8,7 +8,7 @@
 //! The consent insert delegates to [`crate::consent::append_in_tx`].
 //! Job insertion uses inline SQL against the `workflow_jobs` schema
 //! (migration 0020). Record upsert delegates to
-//! [`crate::store::upsert::upsert_in_tx`]. Tombstone uses the
+//! `upsert_in_tx`. Tombstone uses the
 //! `StoreTx::tombstone` helper.
 
 use async_trait::async_trait;

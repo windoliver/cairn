@@ -9,7 +9,7 @@ Mint a signed share link over a record set
 ```text
 Mint a signed share link over a record set
 
-Usage: cairn share propose [OPTIONS] --record-ids <ID,...> --grant-tier <TIER> --expires-at <RFC3339>
+Usage: cairn share propose [OPTIONS] --record-ids <ID,...> --grant-tier <TIER> --expires-at <RFC3339> --scope <KEY=VAL,...>
 
 Options:
       --record-ids <ID,...>   Comma-separated ULID record ids to bundle in the share link
@@ -21,6 +21,9 @@ Options:
       --grantee <IDENTITY>    Optional explicit grantee identity (e.g. hmn:bob). Omit for bearer
                               link
       --peer <ENDPOINT>       Optional outbound peer endpoint (e.g. loopback://node-b)
+      --scope <KEY=VAL,...>   Scope tuple in canonical wire format (e.g.
+                              agent=claude,project=my-proj,workspace=default). At least one
+                              dimension must be set.
       --json                  Emit machine-readable JSON response envelope to stdout
   -h, --help                  Print help
 ```

@@ -3,7 +3,7 @@
 //! Mints a signed `SignedShareLink` over a caller-supplied record set,
 //! checks the issuer's `ReBAC` `Write` relation at the requested
 //! `grant_tier`, and atomically writes the corresponding
-//! [`ConsentEvent::FederationGrant`] consent journal row alongside an
+//! `ConsentKind::FederationGrant` consent journal row alongside an
 //! outbound propagation job. The propagation job itself is dispatched
 //! later by the federation `PropagationWorkflow` handler (issue #123 T13).
 //!

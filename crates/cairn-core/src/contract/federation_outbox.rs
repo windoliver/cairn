@@ -88,7 +88,7 @@ pub trait FederationOutbox: Send + Sync {
     /// inbound record in `upserts` (receiver-side apply path).
     ///
     /// Implementations MUST treat all writes as a single transaction —
-    /// the upserts and the [`ConsentEvent::FederationAccept`] row land
+    /// the upserts and the `ConsentKind::FederationAccept` row land
     /// together or not at all. A partial apply would orphan inbound
     /// records without an audit trail, exactly the failure mode the
     /// brief's WAL invariant forbids.

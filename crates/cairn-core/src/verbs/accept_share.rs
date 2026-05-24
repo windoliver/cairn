@@ -3,16 +3,16 @@
 //! Receiver-side counterpart to [`crate::verbs::propose_share`]. Takes a
 //! [`FederationEnvelope`] off the transport and atomically:
 //!
-//! * **Propose envelopes** — verify the [`SignedShareLink`] shape +
+//! * **Propose envelopes** — verify the `SignedShareLink` shape +
 //!   signature + freshness; check the receiver's `ReBAC` `Write` relation
 //!   at `link.payload.grant_tier`; dedupe on
 //!   `(issuer_key_id, link_id)`; reject if the link was previously
 //!   revoked; upsert each manifest record (with provenance pinned at the
 //!   share link, visibility capped at `grant_tier`) AND append
-//!   [`ConsentEvent::FederationAccept`] in one outbox transaction.
+//!   `ConsentKind::FederationAccept` in one outbox transaction.
 //! * **Revoke envelopes** — verify the [`SignedRevocation`] shape +
 //!   signature; tombstone any local records previously upserted under
-//!   `link_id` AND append [`ConsentEvent::FederationRevoke`] in one
+//!   `link_id` AND append `ConsentKind::FederationRevoke` in one
 //!   outbox transaction. A revoke with no prior records succeeds
 //!   idempotently with an empty `applied_records` vector.
 //!

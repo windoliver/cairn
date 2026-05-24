@@ -2,10 +2,10 @@
 //!
 //! Three children:
 //!
-//! * `cairn share propose` — mint and sign a [`SignedShareLink`] over a
+//! * `cairn share propose` — mint and sign a `SignedShareLink` over a
 //!   record set, append a `FederationGrant` consent row, and enqueue an
 //!   outbound propagation job.
-//! * `cairn share accept` — receive a [`FederationEnvelope`] from stdin
+//! * `cairn share accept` — receive a `FederationEnvelope` from stdin
 //!   or a file, verify its signature, and atomically upsert or tombstone
 //!   the enclosed records.
 //! * `cairn share revoke` — cancel a previously minted share link,

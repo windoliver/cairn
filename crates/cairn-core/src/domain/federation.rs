@@ -1,7 +1,7 @@
 //! Federation envelope domain helpers (brief §12.a).
 //!
 //! The wire types ([`FederationEnvelope`], [`FederationEnvelopeKind`],
-//! [`SignedRevocation`], [`MemoryRecordStub`]) are codegenerated from
+//! `SignedRevocation`, [`MemoryRecordStub`]) are codegenerated from
 //! the `cairn.federation.v1` IDL and re-exported here so downstream
 //! code imports them from a stable `domain::federation::*` path.
 //!
@@ -70,7 +70,7 @@ impl FederationEnvelopeExt for FederationEnvelope {
 }
 
 /// Convert a wire-form [`WireSignedShareLink`] (generated from the IDL)
-/// into the hand-written [`SignedShareLink`] domain type so the verb
+/// into the hand-written `SignedShareLink` domain type so the verb
 /// layer can call `validate_shape` / `verify_signature` directly.
 ///
 /// Both shapes serialize identically; this conversion threads the
@@ -169,7 +169,7 @@ fn grant_tier_from_domain(tier: MemoryVisibility) -> Result<WireGrantTier, Domai
     }
 }
 
-/// Convert the hand-written [`SignedShareLink`] domain type back into the
+/// Convert the hand-written `SignedShareLink` domain type back into the
 /// wire-form [`WireSignedShareLink`] (generated from the IDL) so the
 /// propagation handler can embed it inside a [`FederationEnvelope`].
 ///
