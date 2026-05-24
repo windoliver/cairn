@@ -1,9 +1,14 @@
 //! Integration coverage for the dev-only replay harness.
 
+use std::collections::HashSet;
+
 use cairn_test_fixtures::replay::{
     ReplayAction, ReplayExpectation, ReplaySearchAction, ReplaySearchMode, load_named_scenario,
     run_named_scenario,
 };
+
+const EXTENDED_DOMAIN_SUITES: [&str; 3] =
+    ["research_domain", "engineering_domain", "support_domain"];
 
 #[tokio::test(flavor = "multi_thread")]
 async fn p0_stories_replay_passes_end_to_end() {
@@ -142,9 +147,9 @@ fn replay_manifests_deserialize() {
         "p0_stories",
         "p0_keyword_only",
         "codex_consumer",
-        "research_domain",
-        "engineering_domain",
-        "support_domain",
+        EXTENDED_DOMAIN_SUITES[0],
+        EXTENDED_DOMAIN_SUITES[1],
+        EXTENDED_DOMAIN_SUITES[2],
     ] {
         let scenario = load_named_scenario(name).expect("load scenario");
         assert_eq!(scenario.id, name);
@@ -176,6 +181,77 @@ fn extended_domain_replay_suites_document_goals_and_golden_expectations() {
     }
 }
 
+#[test]
+fn extended_domain_replay_suites_have_resolvable_goldens_and_private_forget_queries() {
+    for name in EXTENDED_DOMAIN_SUITES {
+        let scenario = load_named_scenario(name).expect("load scenario");
+        let record_ids: HashSet<_> = scenario
+            .records
+            .iter()
+            .map(|record| record.id.as_str())
+            .collect();
+        assert_eq!(
+            record_ids.len(),
+            scenario.records.len(),
+            "{name} has duplicate record ids"
+        );
+
+        for action in &scenario.actions {
+            match action {
+                ReplayAction::Search(search) => {
+                    assert_eq!(
+                        search.mode,
+                        ReplaySearchMode::Keyword,
+                        "{name} must stay keyword-only for no-network replay"
+                    );
+                    if let ReplayExpectation::Hits {
+                        record_ids: expected,
+                    } = &search.expected
+                    {
+                        for id in expected {
+                            assert!(record_ids.contains(id.as_str()), "{name} missing {id}");
+                        }
+                    }
+                }
+                ReplayAction::Summarize {
+                    expected_record_ids,
+                    ..
+                }
+                | ReplayAction::AssembleHot {
+                    expected_record_ids,
+                    ..
+                } => {
+                    for id in expected_record_ids {
+                        assert!(record_ids.contains(id.as_str()), "{name} missing {id}");
+                    }
+                }
+                ReplayAction::ForgetRecord {
+                    record_id,
+                    followup_query,
+                    ..
+                } => {
+                    assert!(
+                        record_ids.contains(record_id.as_str()),
+                        "{name} forget target {record_id} missing"
+                    );
+                    let matching_records = scenario
+                        .records
+                        .iter()
+                        .filter(|record| record.body.contains(followup_query))
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        matching_records.len(),
+                        1,
+                        "{name} forget follow-up query must uniquely identify its target"
+                    );
+                    assert_eq!(matching_records[0].id, *record_id);
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn codex_consumer_replay_passes_end_to_end() {
     let report = run_named_scenario("codex_consumer")
@@ -202,7 +278,7 @@ async fn codex_consumer_replay_passes_end_to_end() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn extended_domain_replay_suites_pass_end_to_end_without_network_or_llm() {
-    for name in ["research_domain", "engineering_domain", "support_domain"] {
+    for name in EXTENDED_DOMAIN_SUITES {
         let scenario = load_named_scenario(name).expect("load scenario");
         assert!(
             !scenario.config.local_embeddings,
