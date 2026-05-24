@@ -19,6 +19,7 @@ fixture = []
 
 [dependencies]
 cairn-core = { workspace = true }
+async-trait = { workspace = true }
 hex = { workspace = true }
 sha2 = { workspace = true }
 serde = { workspace = true }

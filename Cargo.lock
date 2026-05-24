@@ -766,6 +766,7 @@ dependencies = [
 name = "cairn-connectors-core"
 version = "0.0.1"
 dependencies = [
+ "async-trait",
  "cairn-core",
  "hex",
  "serde",

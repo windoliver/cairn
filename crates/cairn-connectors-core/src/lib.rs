@@ -5,27 +5,23 @@
 //! Issue #130, brief §9.1 source sensors, §19 v0.3.
 //!
 //! # Status
-//! Scaffold only. Modules and re-exports are added task-by-task (T5–T16).
-//! `CONTRACT_VERSION` is a placeholder; T8 moves it into `connector.rs`
-//! and replaces this with `pub use connector::CONTRACT_VERSION`.
+//! Scaffold with T5–T8 modules landed. Remaining modules (T9–T16) are added
+//! task-by-task; their re-exports are uncommented as each task lands.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod connector;
 pub mod error;
-pub use error::ConnectorError;
-
-pub mod manifest;
-pub use manifest::ConnectorManifest;
-
 pub mod event;
+pub mod manifest;
+
+pub use connector::{
+    Connector, ConnectorCapabilities, ConnectorPlugin, PollContext, PollOutcome, WebhookContext,
+    CONTRACT_VERSION,
+};
+pub use error::ConnectorError;
 pub use event::{
     ConnectorEvent, ConnectorEventId, ConnectorPayload, ConnectorScope, DeliveryMode, SourceRef,
 };
-
-use cairn_core::contract::version::ContractVersion;
-
-/// Contract version for the `Connector` trait surface.
-/// Placeholder for this scaffold; replaced by `pub use connector::CONTRACT_VERSION`
-/// when T8 lands `cairn-connectors-core/src/connector.rs`.
-pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 1, 0);
+pub use manifest::ConnectorManifest;
