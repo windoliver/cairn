@@ -12,6 +12,7 @@
 #![warn(missing_docs)]
 
 pub mod connector;
+pub mod credential;
 pub mod error;
 pub mod event;
 pub mod manifest;
@@ -20,6 +21,7 @@ pub use connector::{
     Connector, ConnectorCapabilities, ConnectorPlugin, PollContext, PollOutcome, WebhookContext,
     CONTRACT_VERSION,
 };
+pub use credential::{CredentialHandle, CredentialStore, InMemoryCredentialStore};
 pub use error::ConnectorError;
 pub use event::{
     ConnectorEvent, ConnectorEventId, ConnectorPayload, ConnectorScope, DeliveryMode, SourceRef,

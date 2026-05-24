@@ -17,14 +17,10 @@ use std::sync::Arc;
 use cairn_core::contract::version::{ContractVersion, VersionRange};
 use cairn_core::domain::Identity;
 
+use crate::credential::CredentialHandle;
 use crate::error::ConnectorError;
 use crate::event::ConnectorEvent;
 use crate::manifest::ConnectorManifest;
-
-/// Placeholder for the credential handle passed in poll/webhook contexts.
-/// Replaced by `credential::CredentialHandle` in T9.
-/* placeholder; replaced by credential::CredentialHandle in T9 */
-pub struct CredentialHandle;
 
 /// Placeholder for an inbound webhook HTTP request.
 /// Replaced by `webhook::WebhookRequest` in T13.
