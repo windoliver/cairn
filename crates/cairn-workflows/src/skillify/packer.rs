@@ -141,7 +141,7 @@ impl SkillPackBuilder {
         let pack_id =
             SkillPackManifest::derive_pack_id(&self.name, &self.version, &candidate_ids_refs);
 
-        let manifest = SkillPackManifest {
+        let mut manifest = SkillPackManifest {
             pack_id,
             name: self.name.clone(),
             version: self.version.clone(),
@@ -153,7 +153,16 @@ impl SkillPackBuilder {
             content_sha256: String::new(),
         };
 
-        // Build the tar.gz archive in a temporary file then rename.
+        // Compute a deterministic content digest BEFORE serializing the
+        // manifest into the tarball. The digest covers the manifest metadata
+        // (with `content_sha256` empty) plus the sorted list of per-skill
+        // artifact hashes. This is verifiable at install time without the
+        // chicken-and-egg problem of hashing the archive that contains the
+        // hash field.
+        let content_hash = compute_manifest_digest(&manifest);
+        manifest.content_sha256 = content_hash;
+
+        // Build the tar.gz archive.
         let archive_path = vault_root.join(format!("{}.cairnpack", self.name));
         let file = fs::File::create(&archive_path)?;
         let enc = flate2::write::GzEncoder::new(file, flate2::Compression::default());
@@ -167,20 +176,69 @@ impl SkillPackBuilder {
             append_dir_recursive(&mut tar, &cand_dir, &format!("skills/{cid}"))?;
         }
 
-        // Flush and finish the archive.
         let enc = tar.into_inner()?;
         enc.finish()?;
 
-        // Recompute content hash after archive is complete.
-        let content_hash = sha256_file(&archive_path)?;
-        let mut final_manifest = manifest;
-        final_manifest.content_sha256 = content_hash;
-
         Ok(SkillPackArchive {
-            manifest: final_manifest,
+            manifest,
             archive_path,
         })
     }
+}
+
+/// Compute a deterministic digest over manifest metadata + sorted artifact
+/// hashes. The `content_sha256` field is excluded so the digest can be
+/// embedded in the manifest itself (verified by recomputing with the field
+/// cleared at install time).
+fn compute_manifest_digest(manifest: &SkillPackManifest) -> String {
+    let mut hasher = Sha256::new();
+    let h = &mut hasher;
+    update_field(h, "pack_id", &manifest.pack_id);
+    update_field(h, "name", &manifest.name);
+    update_field(h, "version", &manifest.version);
+    update_field(h, "cairn_compat", &manifest.cairn_compat);
+    update_field(h, "description", &manifest.description);
+
+    // Sort skills by candidate_id for determinism.
+    let mut skills: Vec<&cairn_core::pipeline::skillify::SkillPackEntry> =
+        manifest.skills.iter().collect();
+    skills.sort_by(|a, b| a.candidate_id.cmp(&b.candidate_id));
+    hasher.update(b"skills:");
+    hasher.update(skills.len().to_le_bytes());
+    for entry in skills {
+        update_field(&mut hasher, "  candidate_id", &entry.candidate_id);
+        update_field(&mut hasher, "  lane", &entry.lane);
+        update_field(&mut hasher, "  slug", &entry.slug);
+        hasher.update(b"  bundle_version:");
+        hasher.update(entry.bundle_version.to_le_bytes());
+        update_field(&mut hasher, "  artifact_sha256", &entry.artifact_sha256);
+    }
+
+    let mut requires = manifest.requires.clone();
+    requires.sort();
+    hasher.update(b"requires:");
+    hasher.update(requires.len().to_le_bytes());
+    for v in requires {
+        update_field(&mut hasher, "  requires_item", &v);
+    }
+
+    let mut provides = manifest.provides.clone();
+    provides.sort();
+    hasher.update(b"provides:");
+    hasher.update(provides.len().to_le_bytes());
+    for v in provides {
+        update_field(&mut hasher, "  provides_item", &v);
+    }
+
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+fn update_field(hasher: &mut Sha256, label: &str, value: &str) {
+    hasher.update(label.as_bytes());
+    hasher.update(b":");
+    hasher.update(value.len().to_le_bytes());
+    hasher.update(value.as_bytes());
+    hasher.update(b"\0");
 }
 
 /// Unpack a `.cairnpack` archive into a vault.
@@ -199,36 +257,128 @@ pub fn unpack_archive(
     let dec = flate2::read::GzDecoder::new(file);
     let mut archive = tar::Archive::new(dec);
 
-    let extract_dir = vault_root.join(".cairn/evolution/skillify/.unpack-tmp");
+    // Use a per-call temp directory to avoid colliding with concurrent installs.
+    let extract_dir = vault_root.join(format!(
+        ".cairn/evolution/skillify/.unpack-tmp-{}",
+        std::process::id()
+    ));
+    if extract_dir.exists() {
+        fs::remove_dir_all(&extract_dir)?;
+    }
     fs::create_dir_all(&extract_dir)?;
+
+    // Use a guard so the temp dir is always cleaned up, even on error paths.
+    let _cleanup = TempDirGuard(extract_dir.clone());
+
     archive.unpack(&extract_dir)?;
 
     let manifest: SkillPackManifest =
         serde_json::from_slice(&fs::read(extract_dir.join("manifest.json"))?)?;
 
-    // Validate compat before moving any files.
+    // Validate manifest fields and Cairn-version compat before touching the vault.
     manifest
         .validate(cairn_version)
         .map_err(SkillPackBuildError::Pack)?;
 
-    // Move skill directories into their final locations.
-    for entry in &manifest.skills {
-        let src = extract_dir.join(format!("skills/{}", entry.candidate_id));
-        let dst = vault_root
-            .join(".cairn/evolution/skillify")
-            .join(&entry.candidate_id);
-        if src.exists() {
-            if dst.exists() {
-                fs::remove_dir_all(&dst)?;
-            }
-            fs::rename(&src, &dst)?;
+    // Verify integrity digest. Recompute the digest with the field cleared
+    // and compare against the claimed value. A mismatch means the manifest
+    // has been tampered with (or the pack was built by a version with a
+    // different digest algorithm — operator must rebuild).
+    let claimed = manifest.content_sha256.clone();
+    if !claimed.is_empty() {
+        let mut for_digest = manifest.clone();
+        for_digest.content_sha256 = String::new();
+        let actual = compute_manifest_digest(&for_digest);
+        if actual != claimed {
+            return Err(SkillPackBuildError::Pack(
+                SkillPackError::IntegrityFailure {
+                    expected: claimed,
+                    actual,
+                },
+            ));
         }
     }
 
-    // Clean up temporary extraction directory.
-    let _ = fs::remove_dir_all(&extract_dir);
+    // PRE-FLIGHT: every manifest entry must have a complete bundle in the
+    // extracted temp dir. Reject the whole install if any skill is missing —
+    // we will not delete a valid installed candidate just to replace it with
+    // an incomplete one. This is the rollback guarantee Codex review #128
+    // flagged.
+    for entry in &manifest.skills {
+        let src = extract_dir.join(format!("skills/{}", entry.candidate_id));
+        if !src.is_dir() {
+            return Err(SkillPackBuildError::Pack(SkillPackError::MissingSkill {
+                candidate_id: entry.candidate_id.clone(),
+            }));
+        }
+        // Require a manifest.json and bundle/ inside the candidate; this is
+        // the minimum proof that the source is a complete bundle, not a stub.
+        if !src.join("manifest.json").is_file() || !src.join("bundle").is_dir() {
+            return Err(SkillPackBuildError::Pack(SkillPackError::MissingSkill {
+                candidate_id: entry.candidate_id.clone(),
+            }));
+        }
+    }
+
+    // ATOMIC SWAP: now that every source is validated, move each skill into
+    // place. For pre-existing destinations, swap-then-delete keeps the old
+    // copy until the new one is in place; on any io error the old copy is
+    // restored where possible. Errors mid-install leave the vault in a
+    // partially-installed state — that is logged via the returned error so
+    // the operator can re-run install.
+    let parent = vault_root.join(".cairn/evolution/skillify");
+    fs::create_dir_all(&parent)?;
+    let mut swapped_backups: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
+    for entry in &manifest.skills {
+        let src = extract_dir.join(format!("skills/{}", entry.candidate_id));
+        let dst = parent.join(&entry.candidate_id);
+        let backup = parent.join(format!(
+            ".bak-{}-{}",
+            entry.candidate_id,
+            std::process::id()
+        ));
+        if dst.exists() {
+            // Rename existing → backup first; rename new → dst; delete backup last.
+            if let Err(e) = fs::rename(&dst, &backup) {
+                // Restore any prior swaps we already performed.
+                rollback_swaps(&swapped_backups);
+                return Err(SkillPackBuildError::Io(e));
+            }
+            swapped_backups.push((dst.clone(), backup.clone()));
+        }
+        if let Err(e) = fs::rename(&src, &dst) {
+            rollback_swaps(&swapped_backups);
+            return Err(SkillPackBuildError::Io(e));
+        }
+    }
+
+    // All swaps succeeded — remove backups.
+    for (_dst, backup) in &swapped_backups {
+        let _ = fs::remove_dir_all(backup);
+    }
 
     Ok(manifest)
+}
+
+/// Restore destination directories from their backup names after a failed swap.
+fn rollback_swaps(backups: &[(std::path::PathBuf, std::path::PathBuf)]) {
+    for (dst, backup) in backups.iter().rev() {
+        // If dst now contains the (broken) new content, remove it first.
+        if dst.exists() {
+            let _ = fs::remove_dir_all(dst);
+        }
+        let _ = fs::rename(backup, dst);
+    }
+}
+
+/// RAII guard that removes its tracked directory when dropped. Ensures the
+/// unpack temp directory is cleaned up on every code path, including panics.
+struct TempDirGuard(std::path::PathBuf);
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
 }
 
 // -- Internal helpers -------------------------------------------------------

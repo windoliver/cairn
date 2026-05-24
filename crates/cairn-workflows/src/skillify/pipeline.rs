@@ -18,6 +18,8 @@ use super::materialize::{
     AuthoredSkillBundle, SkillifyMaterializeError, materialize_blocked_candidate,
     materialize_bundle,
 };
+use super::planner::{SkillifyPlanSource, SkillifyPromotionInput};
+use super::snapshot::build_vault_snapshot;
 
 /// Pipeline orchestration error.
 #[derive(Debug, thiserror::Error)]
@@ -123,11 +125,12 @@ impl SkillifyPipeline {
             }
         };
 
+        let payload_source_refs = payload.source_record_ids.clone();
         let bundle = materialize_bundle(
             &self.vault_root,
             &candidate_id,
             &authored,
-            &payload.source_record_ids,
+            &payload_source_refs,
         )?;
 
         // Write the spec draft alongside the materialized bundle (informational).
@@ -139,7 +142,12 @@ impl SkillifyPipeline {
         let _ = state.advance_to_gate(bundle.clone());
 
         // STAGE 3: Gate
-        let snapshot = SkillLintSnapshot { skills: vec![] };
+        // Build the real vault snapshot so collision-detection gates
+        // (ResolverTrigger, CheckResolvableAndDry) see existing live skills
+        // and other materialized candidates. Exclude the current candidate
+        // from the snapshot so it does not collide with itself.
+        let snapshot = build_vault_snapshot(&self.vault_root, Some(&candidate_id))
+            .unwrap_or_else(|_| SkillLintSnapshot { skills: Vec::new() });
         let ctx = GateRunContext {
             vault_root: &self.vault_root,
             candidate_id: &candidate_id,
@@ -181,7 +189,26 @@ impl SkillifyPipeline {
             return Ok(Self::build_result(&state, errors, start));
         }
 
-        // STAGE 4: Promote
+        // STAGE 4: Promote — build a durable FlushPlan and write it before
+        // marking the candidate as promoted. The plan goes to a human-review
+        // queue per design brief §11 (autonomous evolution requires a review
+        // gate before merging skill changes into the live `skills/` set).
+        let promotion_input = SkillifyPromotionInput {
+            candidate_id: candidate_id.clone(),
+            skill_target_id: derive_skill_target_id(&candidate_id),
+            evidence_refs: payload_source_refs.clone(),
+            gate_count: u32::try_from(results.len()).unwrap_or(u32::MAX),
+        };
+        let plan = SkillifyPlanSource::plan_promotion(&promotion_input).map_err(|e| {
+            SkillifyPipelineError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("plan promotion: {e}"),
+            ))
+        })?;
+        std::fs::write(
+            candidate_dir.join("promotion-plan.json"),
+            serde_json::to_vec_pretty(&plan)?,
+        )?;
         let _ = state.advance_to_promote();
 
         Ok(Self::build_result(&state, errors, start))
@@ -264,4 +291,19 @@ impl SkillifyPipeline {
             duration_ms: start.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
         }
     }
+}
+
+/// Derive a stable 26-char Crockford-base32 ULID for a brand-new skill
+/// target, so the `FlushPlan` has a valid `TargetId` even when promoting a
+/// candidate with no pre-existing target. Hex digits (0-9, A-F) are all valid
+/// Crockford characters, so the SHA-256-derived suffix is safe to use
+/// directly without remapping.
+fn derive_skill_target_id(candidate_id: &str) -> String {
+    let hex = crate::synthetic::sha256_hex(candidate_id.as_bytes());
+    let suffix = hex
+        .chars()
+        .take(15)
+        .collect::<String>()
+        .to_ascii_uppercase();
+    format!("01HQZX9F5N1{suffix}")
 }

@@ -1,0 +1,310 @@
+//! Minimal vault snapshot builder for Skillify gate collision checks.
+//!
+//! Walks `.cairn/evolution/skillify/*/bundle/skills/skill_*.md` (materialized
+//! candidates) and `skills/*.md` (promoted live skills), reading minimal YAML
+//! frontmatter to build [`SkillLintSnapshot`] entries for collision detection.
+//!
+//! Not a replacement for `cairn-cli`'s full lint snapshot — this is a
+//! workflow-local view scoped to what gate runners need: lane, triggers,
+//! `files_to`, and the `uses` path. The cairn-cli snapshot includes
+//! additional validation (gate-report freshness, rollback metadata) that
+//! isn't required at gate-run time.
+
+use std::path::Path;
+
+use cairn_core::pipeline::skillify::{SkillLintSkill, SkillLintSnapshot};
+
+/// Build a [`SkillLintSnapshot`] from the vault filesystem.
+///
+/// If `exclude_candidate_id` is `Some`, that candidate's entry is omitted from
+/// the snapshot — useful when a candidate is being gated against the rest of
+/// the vault (the candidate must not collide with itself).
+///
+/// # Errors
+/// Returns an [`std::io::Error`] when a required directory cannot be read.
+/// Individual unparseable skill files are skipped (best-effort snapshot).
+pub fn build_vault_snapshot(
+    vault_root: &Path,
+    exclude_candidate_id: Option<&str>,
+) -> std::io::Result<SkillLintSnapshot> {
+    let mut skills = Vec::new();
+
+    // Promoted live skills in `skills/`.
+    let live_dir = vault_root.join("skills");
+    if live_dir.is_dir() {
+        for entry in std::fs::read_dir(&live_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(std::ffi::OsStr::to_str) != Some("md") {
+                continue;
+            }
+            if let Some(skill) = read_live_skill(vault_root, &path) {
+                skills.push(skill);
+            }
+        }
+    }
+
+    // Materialized candidates.
+    let candidates_root = vault_root.join(".cairn/evolution/skillify");
+    if candidates_root.is_dir() {
+        for entry in std::fs::read_dir(&candidates_root)? {
+            let entry = entry?;
+            let candidate_dir = entry.path();
+            if !candidate_dir.is_dir() {
+                continue;
+            }
+            let Some(candidate_id) = candidate_dir.file_name().and_then(std::ffi::OsStr::to_str)
+            else {
+                continue;
+            };
+            if exclude_candidate_id == Some(candidate_id) {
+                continue;
+            }
+            // Skip the unpack scratch directory created by `unpack_archive`.
+            if candidate_id.starts_with('.') {
+                continue;
+            }
+            let skills_dir = candidate_dir.join("bundle/skills");
+            if !skills_dir.is_dir() {
+                continue;
+            }
+            for skill_entry in std::fs::read_dir(&skills_dir)? {
+                let skill_entry = skill_entry?;
+                let path = skill_entry.path();
+                if path.extension().and_then(std::ffi::OsStr::to_str) != Some("md") {
+                    continue;
+                }
+                if let Some(skill) = read_candidate_skill(vault_root, candidate_id, &path) {
+                    skills.push(skill);
+                }
+            }
+        }
+    }
+
+    Ok(SkillLintSnapshot { skills })
+}
+
+fn read_live_skill(vault_root: &Path, path: &Path) -> Option<SkillLintSkill> {
+    let body = std::fs::read_to_string(path).ok()?;
+    let fm = frontmatter(&body)?;
+    let skill_id = scalar(fm, "name").unwrap_or_else(|| {
+        path.file_stem()
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or("unknown")
+            .to_owned()
+    });
+    let lane = scalar(fm, "lane").unwrap_or_default();
+    let uses = scalar(fm, "uses");
+    let files_to = scalar(fm, "files_to");
+    let resolver_triggers = inline_or_list(fm, "triggers");
+    let rel_path = rel(vault_root, path);
+    let existing_paths = vec![rel_path.clone()];
+
+    Some(SkillLintSkill {
+        skill_id,
+        lane,
+        path: rel_path,
+        uses,
+        resolver_triggers,
+        files_to,
+        // Live skills are assumed to have passed gates at promotion time;
+        // we don't re-check here. The pipeline only needs this snapshot for
+        // collision detection.
+        gate_report_passed: true,
+        rollback_version_count: 1,
+        existing_paths,
+    })
+}
+
+fn read_candidate_skill(
+    vault_root: &Path,
+    candidate_id: &str,
+    path: &Path,
+) -> Option<SkillLintSkill> {
+    let body = std::fs::read_to_string(path).ok()?;
+    let fm = frontmatter(&body)?;
+    let skill_id = candidate_id.to_owned();
+    let lane = scalar(fm, "lane").unwrap_or_default();
+    let uses = scalar(fm, "uses");
+    let files_to = scalar(fm, "files_to");
+    let resolver_triggers = inline_or_list(fm, "triggers");
+    let rel_path = rel(vault_root, path);
+    let existing_paths = vec![rel_path.clone()];
+
+    Some(SkillLintSkill {
+        skill_id,
+        lane,
+        path: rel_path,
+        uses,
+        resolver_triggers,
+        files_to,
+        gate_report_passed: true,
+        rollback_version_count: 1,
+        existing_paths,
+    })
+}
+
+fn frontmatter(body: &str) -> Option<&str> {
+    let rest = body
+        .strip_prefix("---\n")
+        .or_else(|| body.strip_prefix("---\r\n"))?;
+    let end = rest.find("\n---")?;
+    Some(&rest[..end])
+}
+
+fn scalar(fm: &str, key: &str) -> Option<String> {
+    for line in fm.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix(&format!("{key}:")) {
+            let value = rest.trim().trim_matches('"').trim_matches('\'');
+            if value.is_empty() || value.starts_with('[') {
+                return None;
+            }
+            return Some(value.to_owned());
+        }
+    }
+    None
+}
+
+/// Parse a YAML value that may be inline (`triggers: ["a", "b"]`) or a
+/// block list:
+/// ```text
+/// triggers:
+///   - a
+///   - b
+/// ```
+fn inline_or_list(fm: &str, key: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let lines: Vec<&str> = fm.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let trimmed = lines[i].trim_start();
+        if let Some(rest) = trimmed.strip_prefix(&format!("{key}:")) {
+            let inline = rest.trim();
+            if !inline.is_empty() {
+                if let Some(arr) = inline.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+                    for item in arr.split(',') {
+                        let v = item.trim().trim_matches('"').trim_matches('\'');
+                        if !v.is_empty() {
+                            out.push(v.to_owned());
+                        }
+                    }
+                    return out;
+                }
+                // Inline scalar — single trigger.
+                let v = inline.trim_matches('"').trim_matches('\'');
+                if !v.is_empty() {
+                    out.push(v.to_owned());
+                }
+                return out;
+            }
+            // Block-list form: read subsequent lines that start with `-`.
+            let mut j = i + 1;
+            while j < lines.len() {
+                let next = lines[j];
+                if let Some(item) = next.trim_start().strip_prefix("- ") {
+                    let v = item.trim().trim_matches('"').trim_matches('\'');
+                    if !v.is_empty() {
+                        out.push(v.to_owned());
+                    }
+                    j += 1;
+                } else if next.trim().is_empty() {
+                    j += 1;
+                } else {
+                    break;
+                }
+            }
+            return out;
+        }
+        i += 1;
+    }
+    out
+}
+
+fn rel(vault_root: &Path, path: &Path) -> String {
+    path.strip_prefix(vault_root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn write_md(path: &Path, body: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, body).unwrap();
+    }
+
+    #[test]
+    fn empty_vault_returns_empty_snapshot() {
+        let temp = TempDir::new().unwrap();
+        let snap = build_vault_snapshot(temp.path(), None).unwrap();
+        assert!(snap.skills.is_empty());
+    }
+
+    #[test]
+    fn live_skill_is_picked_up() {
+        let temp = TempDir::new().unwrap();
+        write_md(
+            &temp.path().join("skills/foo.md"),
+            "---\nname: foo\nlane: ops.foo\ntriggers:\n  - run foo\nuses: scripts/foo.sh\nfiles_to: wiki/foo/\n---\nBody.",
+        );
+        let snap = build_vault_snapshot(temp.path(), None).unwrap();
+        assert_eq!(snap.skills.len(), 1);
+        assert_eq!(snap.skills[0].lane, "ops.foo");
+        assert_eq!(snap.skills[0].resolver_triggers, vec!["run foo".to_owned()]);
+    }
+
+    #[test]
+    fn candidate_skill_is_picked_up() {
+        let temp = TempDir::new().unwrap();
+        write_md(
+            &temp
+                .path()
+                .join(".cairn/evolution/skillify/skc_a/bundle/skills/skill_a.md"),
+            "---\nname: a\nlane: test.a\ntriggers: [\"trig a\"]\nuses: scripts/a.sh\nfiles_to: wiki/a/\n---\nBody.",
+        );
+        let snap = build_vault_snapshot(temp.path(), None).unwrap();
+        assert_eq!(snap.skills.len(), 1);
+        assert_eq!(snap.skills[0].lane, "test.a");
+        assert_eq!(snap.skills[0].resolver_triggers, vec!["trig a".to_owned()]);
+    }
+
+    #[test]
+    fn exclude_candidate_omits_self() {
+        let temp = TempDir::new().unwrap();
+        write_md(
+            &temp
+                .path()
+                .join(".cairn/evolution/skillify/skc_self/bundle/skills/skill_self.md"),
+            "---\nname: self\nlane: test.self\ntriggers: [\"x\"]\nuses: scripts/s.sh\nfiles_to: wiki/s/\n---\nBody.",
+        );
+        write_md(
+            &temp
+                .path()
+                .join(".cairn/evolution/skillify/skc_other/bundle/skills/skill_other.md"),
+            "---\nname: other\nlane: test.other\ntriggers: [\"y\"]\nuses: scripts/o.sh\nfiles_to: wiki/o/\n---\nBody.",
+        );
+        let snap = build_vault_snapshot(temp.path(), Some("skc_self")).unwrap();
+        assert_eq!(snap.skills.len(), 1);
+        assert_eq!(snap.skills[0].lane, "test.other");
+    }
+
+    #[test]
+    fn unpack_temp_dirs_are_ignored() {
+        let temp = TempDir::new().unwrap();
+        write_md(
+            &temp
+                .path()
+                .join(".cairn/evolution/skillify/.unpack-tmp-123/bundle/skills/skill_bad.md"),
+            "---\nname: bad\nlane: should.not.appear\ntriggers: [\"x\"]\nuses: scripts/b.sh\nfiles_to: wiki/b/\n---\nBody.",
+        );
+        let snap = build_vault_snapshot(temp.path(), None).unwrap();
+        assert!(snap.skills.is_empty());
+    }
+}

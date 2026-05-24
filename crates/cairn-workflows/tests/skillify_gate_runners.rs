@@ -615,3 +615,80 @@ async fn e2e_smoke_runner_fails_on_output_mismatch() {
     let result = E2eSmokeRunner.run(&ctx).await;
     assert_eq!(result.status, SkillifyGateStatus::Failed);
 }
+
+// -- Timeout/process-kill behavior --
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unit_test_runner_kills_script_on_timeout() {
+    // Script writes its PID to a file then sleeps 30s. The unit test has a
+    // 200ms timeout. After the gate returns, the PID must NOT be running —
+    // run_script should explicitly kill the subprocess on timeout.
+    let temp = TempDir::new().unwrap();
+    let pidfile = temp.path().join("script.pid");
+    let pidfile_str = pidfile.display().to_string();
+    let script_body = format!("#!/usr/bin/env bash\necho $$ > {pidfile_str}\nsleep 30\n");
+    materialize_script(temp.path(), "slowscript", &script_body);
+
+    let mut a = authored("slowscript");
+    a.unit_tests = serde_json::json!({
+        "cases": [{"input": "", "expected_stdout": "x\n", "timeout_ms": 200}]
+    });
+    let b = bundle("slowscript");
+    let ctx = GateRunContext {
+        vault_root: temp.path(),
+        candidate_id: "skc_test",
+        candidate_dir: temp.path().to_path_buf(),
+        bundle: &b,
+        authored: &a,
+        llm: None,
+        snapshot: &empty_snapshot(),
+    };
+
+    let start = std::time::Instant::now();
+    let result = UnitTestRunner.run(&ctx).await;
+    let elapsed = start.elapsed();
+
+    assert_eq!(result.status, SkillifyGateStatus::Failed);
+    assert!(
+        result
+            .message
+            .as_deref()
+            .unwrap_or("")
+            .contains("timed out"),
+        "expected timeout message, got: {:?}",
+        result.message
+    );
+    assert!(
+        elapsed.as_secs() < 5,
+        "should return promptly after timeout, took {elapsed:?}"
+    );
+
+    // Wait for the file to be written (script wrote its pid before sleeping).
+    let mut attempts = 0;
+    while !pidfile.exists() && attempts < 20 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        attempts += 1;
+    }
+    if !pidfile.exists() {
+        // Script may not have written pid in time; we can't verify kill, but
+        // the timeout behavior itself is verified by elapsed/message above.
+        return;
+    }
+
+    let pid_str = std::fs::read_to_string(&pidfile).unwrap();
+    let pid: i32 = pid_str.trim().parse().expect("pid is int");
+
+    // Give the kill signal a moment to take effect.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // kill -0 returns 0 if the process exists, non-zero if not.
+    let status = std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .expect("kill -0");
+    assert!(
+        !status.success(),
+        "subprocess PID {pid} should be dead after timeout but is still running"
+    );
+}

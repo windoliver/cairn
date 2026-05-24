@@ -801,13 +801,17 @@ impl GateRunner for FilingRulesRunner {
 }
 
 /// Execute a script via subprocess with optional stdin and env vars.
+///
+/// On timeout, the subprocess is explicitly killed and reaped before this
+/// function returns. `kill_on_drop(true)` provides belt-and-suspenders if the
+/// task itself is cancelled mid-wait.
 async fn run_script(
     script_path: &Path,
     input: &str,
     timeout_ms: u64,
     env: &[(&str, &str)],
 ) -> Result<String, String> {
-    use tokio::io::AsyncWriteExt as _;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::process::Command;
 
     let mut cmd = Command::new("bash");
@@ -815,32 +819,58 @@ async fn run_script(
     cmd.stdin(std::process::Stdio::piped());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
+    cmd.kill_on_drop(true);
 
     for (k, v) in env {
         cmd.env(k, v);
     }
 
     let mut child = cmd.spawn().map_err(|e| format!("spawn failed: {e}"))?;
+    let mut stdout = child.stdout.take().ok_or("missing stdout handle")?;
+    let mut stderr = child.stderr.take().ok_or("missing stderr handle")?;
 
     if let Some(mut stdin) = child.stdin.take() {
         stdin
             .write_all(input.as_bytes())
             .await
             .map_err(|e| format!("stdin write: {e}"))?;
+        // Drop stdin to send EOF; scripts reading stdin would otherwise block.
+        drop(stdin);
     }
 
     let timeout = tokio::time::Duration::from_millis(timeout_ms);
-    let result = tokio::time::timeout(timeout, child.wait_with_output()).await;
-    match result {
-        Ok(Ok(output)) => {
-            if output.status.success() {
-                Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    let wait = async {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let (r_out, r_err, status) = tokio::join!(
+            stdout.read_to_end(&mut out),
+            stderr.read_to_end(&mut err),
+            child.wait(),
+        );
+        r_out.map_err(|e| format!("stdout read: {e}"))?;
+        r_err.map_err(|e| format!("stderr read: {e}"))?;
+        let status = status.map_err(|e| format!("wait failed: {e}"))?;
+        Ok::<_, String>((out, err, status))
+    };
+
+    match tokio::time::timeout(timeout, wait).await {
+        Ok(Ok((out, err, status))) => {
+            if status.success() {
+                Ok(String::from_utf8_lossy(&out).to_string())
             } else {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                Err(format!("script exited {}: {stderr}", output.status))
+                let stderr = String::from_utf8_lossy(&err);
+                Err(format!("script exited {status}: {stderr}"))
             }
         }
-        Ok(Err(e)) => Err(format!("wait failed: {e}")),
-        Err(_) => Err("script timed out".to_owned()),
+        Ok(Err(e)) => Err(e),
+        Err(_) => {
+            // Timeout: explicitly kill and reap to avoid leaving an orphan
+            // process running. `kill_on_drop` would handle this if `child`
+            // were dropped here, but doing it explicitly makes the cleanup
+            // ordering visible and lets us surface kill failures.
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            Err("script timed out".to_owned())
+        }
     }
 }
