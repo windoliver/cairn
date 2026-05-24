@@ -200,7 +200,10 @@ pub struct CoherenceRunArgs {
     #[arg(long, default_value = "crates/cairn-bench/baselines/coherence.json")]
     pub baseline: PathBuf,
     /// Trend file path.
-    #[arg(long, default_value = "crates/cairn-bench/baselines/coherence-trend.jsonl")]
+    #[arg(
+        long,
+        default_value = "crates/cairn-bench/baselines/coherence-trend.jsonl"
+    )]
     pub trend: PathBuf,
     /// Overwrite the baseline with this run's scores.
     #[arg(long)]
@@ -302,10 +305,11 @@ fn load_baseline(path: &std::path::Path) -> Result<Baseline, GateError> {
 
 fn write_baseline(path: &std::path::Path, baseline: &Baseline) -> Result<(), GateError> {
     let tmp = path.with_extension("json.tmp");
-    let body = serde_json::to_string_pretty(baseline).map_err(|source| GateError::BaselineJson {
-        path: path.display().to_string(),
-        source,
-    })?;
+    let body =
+        serde_json::to_string_pretty(baseline).map_err(|source| GateError::BaselineJson {
+            path: path.display().to_string(),
+            source,
+        })?;
     std::fs::write(&tmp, body).map_err(|source| GateError::BaselineIo {
         path: tmp.display().to_string(),
         source,

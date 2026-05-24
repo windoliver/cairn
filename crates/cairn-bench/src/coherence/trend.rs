@@ -109,14 +109,13 @@ pub fn load(path: &Path) -> Result<Vec<TrendEntry>, TrendError> {
             line: idx + 1,
             source,
         })?;
-        let version =
-            value
-                .get("schema_version")
-                .and_then(Value::as_u64)
-                .ok_or_else(|| TrendError::MissingSchemaVersion {
-                    path: path.display().to_string(),
-                    line: idx + 1,
-                })?;
+        let version = value
+            .get("schema_version")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| TrendError::MissingSchemaVersion {
+                path: path.display().to_string(),
+                line: idx + 1,
+            })?;
         let entry = match version {
             1 => from_v1(value).map_err(|source| TrendError::Json {
                 path: path.display().to_string(),

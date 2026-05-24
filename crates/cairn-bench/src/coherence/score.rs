@@ -121,14 +121,30 @@ pub fn classify(action: &ReplayAction) -> Option<MetricCategory> {
 fn explicit_category(action: &ReplayAction) -> Option<MetricCategory> {
     match action {
         ReplayAction::Search(search) => search.metric_category,
-        ReplayAction::AssembleHot { metric_category, .. }
-        | ReplayAction::CaptureTrace { metric_category, .. }
-        | ReplayAction::Summarize { metric_category, .. }
-        | ReplayAction::Lint { metric_category, .. }
-        | ReplayAction::RetrieveSession { metric_category, .. }
-        | ReplayAction::RetrieveTurn { metric_category, .. }
-        | ReplayAction::RecordPresent { metric_category, .. }
-        | ReplayAction::ForgetRecord { metric_category, .. } => *metric_category,
+        ReplayAction::AssembleHot {
+            metric_category, ..
+        }
+        | ReplayAction::CaptureTrace {
+            metric_category, ..
+        }
+        | ReplayAction::Summarize {
+            metric_category, ..
+        }
+        | ReplayAction::Lint {
+            metric_category, ..
+        }
+        | ReplayAction::RetrieveSession {
+            metric_category, ..
+        }
+        | ReplayAction::RetrieveTurn {
+            metric_category, ..
+        }
+        | ReplayAction::RecordPresent {
+            metric_category, ..
+        }
+        | ReplayAction::ForgetRecord {
+            metric_category, ..
+        } => *metric_category,
     }
 }
 

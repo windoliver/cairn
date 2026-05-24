@@ -62,10 +62,8 @@ async fn extended_cassettes_pass_beta_gate() {
 
 #[tokio::test]
 async fn untagged_actions_excluded_from_scoring() {
-    let scenario = load_scenario_file(
-        &workspace_root().join("fixtures/v0/replay/p0_stories.json"),
-    )
-    .expect("load p0_stories");
+    let scenario = load_scenario_file(&workspace_root().join("fixtures/v0/replay/p0_stories.json"))
+        .expect("load p0_stories");
     let report = run_scenario(&scenario).await.expect("run p0_stories");
     let scores = aggregate(&scenario.actions, &report.checks).expect("aggregate");
     for category in ALL_CATEGORIES {

@@ -202,7 +202,9 @@ pub fn evaluate(
             .copied()
             .unwrap_or_else(CategoryScore::empty);
         let threshold = manifest.for_category(category);
-        let previous = baseline.and_then(|b| b.score_for(category)).map(|s| s.score);
+        let previous = baseline
+            .and_then(|b| b.score_for(category))
+            .map(|s| s.score);
         let delta = previous.map(|prev| score.score - prev);
         let outcome = evaluate_one(mode, score.score, threshold, previous);
         out.insert(

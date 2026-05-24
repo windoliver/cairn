@@ -66,10 +66,7 @@ mod tests {
     #[test]
     fn display_matches_as_str() {
         for category in ALL {
-            assert_eq!(
-                format!("{}", DisplayCategory(category)),
-                as_str(category)
-            );
+            assert_eq!(format!("{}", DisplayCategory(category)), as_str(category));
         }
     }
 }

@@ -1313,7 +1313,9 @@ mod tests {
         });
         let action: ReplayAction = serde_json::from_value(raw).expect("parse action");
         match action {
-            ReplayAction::Summarize { metric_category, .. } => {
+            ReplayAction::Summarize {
+                metric_category, ..
+            } => {
                 assert_eq!(metric_category, Some(MetricCategory::SummaryQuality));
             }
             other => panic!("expected Summarize, got {other:?}"),
@@ -1330,7 +1332,9 @@ mod tests {
         });
         let action: ReplayAction = serde_json::from_value(raw).expect("parse action");
         match action {
-            ReplayAction::Summarize { metric_category, .. } => {
+            ReplayAction::Summarize {
+                metric_category, ..
+            } => {
                 assert_eq!(metric_category, None);
             }
             other => panic!("expected Summarize, got {other:?}"),
@@ -1385,7 +1389,10 @@ mod tests {
         let ReplayAction::Search(search) = action else {
             panic!("expected Search variant");
         };
-        assert_eq!(search.stale_record_ids, vec!["01HQZX9F5N00000000000000R7".to_owned()]);
+        assert_eq!(
+            search.stale_record_ids,
+            vec!["01HQZX9F5N00000000000000R7".to_owned()]
+        );
     }
 
     #[test]
