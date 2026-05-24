@@ -17,7 +17,7 @@
 //! handler's `FederationState` construction in `cairn-mcp`.
 
 use std::io::Read as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -140,11 +140,11 @@ fn json_arg() -> clap::Arg {
 
 /// Run the `cairn share` subcommand.
 #[must_use]
-pub fn run(sub: &clap::ArgMatches, vault_root: PathBuf, config: CairnConfig) -> ExitCode {
+pub fn run(sub: &clap::ArgMatches, vault_root: &Path, config: &CairnConfig) -> ExitCode {
     match sub.subcommand() {
-        Some(("propose", args)) => run_propose(args, &vault_root, &config),
-        Some(("accept", args)) => run_accept(args, &vault_root, &config),
-        Some(("revoke", args)) => run_revoke(args, &vault_root, &config),
+        Some(("propose", args)) => run_propose(args, vault_root, config),
+        Some(("accept", args)) => run_accept(args, vault_root, config),
+        Some(("revoke", args)) => run_revoke(args, vault_root, config),
         _ => {
             // clap's subcommand_required(true) prevents this.
             eprintln!("cairn share: unknown subcommand");
@@ -155,10 +155,19 @@ pub fn run(sub: &clap::ArgMatches, vault_root: PathBuf, config: CairnConfig) -> 
 
 // ── propose ─────────────────────────────────────────────────────────────
 
-fn run_propose(sub: &clap::ArgMatches, vault_root: &Path, _config: &CairnConfig) -> ExitCode {
-    let json = sub.get_flag("json");
+/// Parsed arguments for `cairn share propose`.
+struct ProposeArgs {
+    record_ids: Vec<String>,
+    grant_tier: MemoryVisibility,
+    expires_at: Rfc3339Timestamp,
+    grantee: Option<Identity>,
+    peer: Option<cairn_core::domain::federation::PeerEndpoint>,
+    scope: ScopeTuple,
+}
 
-    // Parse CLI args into the verb request.
+/// Parse all CLI arguments for `cairn share propose`, returning early via
+/// exit code on any validation failure.
+fn parse_propose_args(sub: &clap::ArgMatches) -> Result<ProposeArgs, ExitCode> {
     let record_ids: Vec<String> = sub
         .get_many::<String>("record-ids")
         .map(|vals| vals.cloned().collect())
@@ -172,42 +181,61 @@ fn run_propose(sub: &clap::ArgMatches, vault_root: &Path, _config: &CairnConfig)
         Some("public") => MemoryVisibility::Public,
         _ => {
             eprintln!("cairn share propose: invalid --grant-tier");
-            return ExitCode::from(64);
+            return Err(ExitCode::from(64));
         }
     };
 
-    let expires_at_str = match sub.get_one::<String>("expires-at") {
-        Some(s) => s.clone(),
-        None => {
-            eprintln!("cairn share propose: --expires-at is required");
-            return ExitCode::from(64);
-        }
+    let Some(expires_at_str) = sub.get_one::<String>("expires-at") else {
+        eprintln!("cairn share propose: --expires-at is required");
+        return Err(ExitCode::from(64));
     };
+    let expires_at = Rfc3339Timestamp::parse(expires_at_str.clone()).map_err(|_| {
+        eprintln!("cairn share propose: --expires-at must be a valid RFC 3339 timestamp");
+        ExitCode::from(64)
+    })?;
 
-    let expires_at = match Rfc3339Timestamp::parse(expires_at_str) {
-        Ok(ts) => ts,
-        Err(_) => {
-            eprintln!("cairn share propose: --expires-at must be a valid RFC 3339 timestamp");
-            return ExitCode::from(64);
-        }
-    };
-
-    let grantee = match sub.get_one::<String>("grantee") {
-        Some(g) => match Identity::parse(g.clone()) {
-            Ok(id) => Some(id),
-            Err(_) => {
-                eprintln!("cairn share propose: --grantee must be a valid identity (e.g. hmn:bob)");
-                return ExitCode::from(64);
-            }
-        },
-        None => None,
+    let grantee = if let Some(g) = sub.get_one::<String>("grantee") {
+        let id = Identity::parse(g.clone()).map_err(|_| {
+            eprintln!("cairn share propose: --grantee must be a valid identity (e.g. hmn:bob)");
+            ExitCode::from(64)
+        })?;
+        Some(id)
+    } else {
+        None
     };
 
     let peer = sub
         .get_one::<String>("peer")
         .map(|p| cairn_core::domain::federation::PeerEndpoint(p.clone()));
 
-    // Build a tokio runtime for the async verb call.
+    let scope = if let Some(s) = sub.get_one::<String>("scope") {
+        parse_scope_wire(s).map_err(|msg| {
+            eprintln!("cairn share propose: {msg}");
+            ExitCode::from(64)
+        })?
+    } else {
+        eprintln!("cairn share propose: --scope is required");
+        return Err(ExitCode::from(64));
+    };
+
+    Ok(ProposeArgs {
+        record_ids,
+        grant_tier,
+        expires_at,
+        grantee,
+        peer,
+        scope,
+    })
+}
+
+fn run_propose(sub: &clap::ArgMatches, vault_root: &Path, _config: &CairnConfig) -> ExitCode {
+    let json = sub.get_flag("json");
+
+    let args = match parse_propose_args(sub) {
+        Ok(a) => a,
+        Err(code) => return code,
+    };
+
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -219,20 +247,6 @@ fn run_propose(sub: &clap::ArgMatches, vault_root: &Path, _config: &CairnConfig)
         }
     };
 
-    let scope = match sub.get_one::<String>("scope") {
-        Some(s) => match parse_scope_wire(s) {
-            Ok(sc) => sc,
-            Err(msg) => {
-                eprintln!("cairn share propose: {msg}");
-                return ExitCode::from(64);
-            }
-        },
-        None => {
-            eprintln!("cairn share propose: --scope is required");
-            return ExitCode::from(64);
-        }
-    };
-
     rt.block_on(async {
         let deps = match open_federation_deps(vault_root).await {
             Ok(d) => d,
@@ -241,19 +255,19 @@ fn run_propose(sub: &clap::ArgMatches, vault_root: &Path, _config: &CairnConfig)
 
         let rebac = RebacContext::for_scope(
             deps.identity.clone(),
-            &scope,
+            &args.scope,
             cairn_core::rebac::RebacAction::Write,
-            grant_tier,
+            args.grant_tier,
         );
         let clock = SystemClock;
 
         let request = cairn_core::verbs::propose_share::ProposeShareRequest {
-            record_ids,
-            grantee,
-            scope,
-            grant_tier,
-            expires_at,
-            peer,
+            record_ids: args.record_ids,
+            grantee: args.grantee,
+            scope: args.scope,
+            grant_tier: args.grant_tier,
+            expires_at: args.expires_at,
+            peer: args.peer,
         };
 
         let verb_deps = cairn_core::verbs::propose_share::ProposeShareDeps {
@@ -307,12 +321,9 @@ fn run_propose(sub: &clap::ArgMatches, vault_root: &Path, _config: &CairnConfig)
 fn run_accept(sub: &clap::ArgMatches, vault_root: &Path, _config: &CairnConfig) -> ExitCode {
     let json = sub.get_flag("json");
 
-    let envelope_arg = match sub.get_one::<String>("envelope") {
-        Some(s) => s.clone(),
-        None => {
-            eprintln!("cairn share accept: --envelope is required");
-            return ExitCode::from(64);
-        }
+    let Some(envelope_arg) = sub.get_one::<String>("envelope").cloned() else {
+        eprintln!("cairn share accept: --envelope is required");
+        return ExitCode::from(64);
     };
 
     // Read the envelope JSON from file or stdin.
@@ -418,12 +429,9 @@ fn run_accept(sub: &clap::ArgMatches, vault_root: &Path, _config: &CairnConfig) 
 fn run_revoke(sub: &clap::ArgMatches, vault_root: &Path, _config: &CairnConfig) -> ExitCode {
     let json = sub.get_flag("json");
 
-    let link_id = match sub.get_one::<String>("link-id") {
-        Some(s) => s.clone(),
-        None => {
-            eprintln!("cairn share revoke: --link-id is required");
-            return ExitCode::from(64);
-        }
+    let Some(link_id) = sub.get_one::<String>("link-id").cloned() else {
+        eprintln!("cairn share revoke: --link-id is required");
+        return ExitCode::from(64);
     };
 
     let rt = match tokio::runtime::Builder::new_current_thread()
@@ -469,7 +477,7 @@ fn run_revoke(sub: &clap::ArgMatches, vault_root: &Path, _config: &CairnConfig) 
                         serde_json::to_string_pretty(&envelope).unwrap_or_default()
                     );
                 } else {
-                    println!("share link revoked: operation_id={}", response.operation_id,);
+                    println!("share link revoked: operation_id={}", response.operation_id);
                 }
                 ExitCode::SUCCESS
             }

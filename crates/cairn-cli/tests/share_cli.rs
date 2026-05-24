@@ -12,6 +12,7 @@
 //! full `bootstrap → ingest → share propose` flow via the CLI binary
 //! and verifies exit codes + output shape.
 
+use std::io::Write as _;
 use std::path::Path;
 use std::process::Command;
 
@@ -52,7 +53,7 @@ fn write_minimal_config(root: &Path) {
 }
 
 /// `cairn share propose` without a provisioned identity should fail with
-/// exit code 1 (generic failure) or 78 (EX_CONFIG). This proves clap arg
+/// exit code 1 (generic failure) or 78 (`EX_CONFIG`). This proves clap arg
 /// parsing works and the dep-wiring path executes.
 #[test]
 fn share_propose_without_identity_exits_with_config_error() {
@@ -162,7 +163,6 @@ fn share_accept_from_stdin_with_invalid_json_exits_with_error() {
     // Feed invalid JSON to stdin.
     {
         let stdin = child.stdin.as_mut().unwrap();
-        use std::io::Write;
         stdin.write_all(b"not valid json\n").unwrap();
     }
 
@@ -287,7 +287,7 @@ fn share_propose_and_accept_happy_path() {
     // If it succeeded, verify the output shape and attempt accept.
     if out.status.code() == Some(0) {
         let json: serde_json::Value = serde_json::from_slice(&out.stdout).expect("propose json");
-        assert!(json["link"].is_object(), "response must have link: {json}",);
+        assert!(json["link"].is_object(), "response must have link: {json}");
         assert!(
             json["operation_id"].is_string(),
             "response must have operation_id: {json}",

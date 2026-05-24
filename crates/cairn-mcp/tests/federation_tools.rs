@@ -120,7 +120,7 @@ fn federation_tool_names_snapshot() {
     insta::assert_yaml_snapshot!(names);
 }
 
-/// Build a minimal [`FederationState`] backed by an in-memory SQLite store
+/// Build a minimal [`FederationState`] backed by an in-memory `SQLite` store
 /// and a loopback transport. Shared by the two dispatch integration tests
 /// below.
 async fn make_federation_state() -> cairn_mcp::handler::FederationState {

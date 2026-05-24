@@ -1,13 +1,13 @@
 //! Migration coexistence test for migrations 0068+0069 (issue #123).
 //!
-//! Verifies that a vault with pre-existing consent_journal rows (e.g.
+//! Verifies that a vault with pre-existing `consent_journal` rows (e.g.
 //! `sensor_enable` events from before federation) can co-exist with the
 //! new `federation_grant`/`federation_accept`/`federation_revoke` kinds
 //! introduced by migration 0068.
 //!
 //! The test opens an in-memory store (which runs all migrations including
-//! 0068+0069), inserts a pre-existing sensor_enable event, then inserts a
-//! federation_grant event, and verifies both rows coexist without
+//! 0068+0069), inserts a pre-existing `sensor_enable` event, then inserts a
+//! `federation_grant` event, and verifies both rows coexist without
 //! corruption.
 
 use cairn_core::contract::consent_lookup::ConsentLookup;

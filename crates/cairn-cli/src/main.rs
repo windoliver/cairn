@@ -503,7 +503,7 @@ fn main() -> ExitCode {
             }
         },
         Some(("share", sub)) => match resolve_vault_and_config(explicit_vault.as_deref()) {
-            Ok((vault_root, _source, config)) => verbs::share::run(sub, vault_root, config),
+            Ok((vault_root, _source, config)) => verbs::share::run(sub, &vault_root, &config),
             Err(code) => code,
         },
         Some(("sensor", sub)) => match resolve_vault_and_config(explicit_vault.as_deref()) {
