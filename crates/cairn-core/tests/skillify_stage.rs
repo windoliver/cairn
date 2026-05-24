@@ -107,7 +107,11 @@ fn promote_fails_with_failing_gate() {
 
 #[test]
 fn fail_from_any_non_terminal() {
-    for start_stage in [SkillifyStage::Extract, SkillifyStage::Author, SkillifyStage::Gate] {
+    for start_stage in [
+        SkillifyStage::Extract,
+        SkillifyStage::Author,
+        SkillifyStage::Gate,
+    ] {
         let mut state = SkillifyPipelineState::new("skc_test".to_owned());
         match start_stage {
             SkillifyStage::Author => {

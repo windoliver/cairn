@@ -91,6 +91,41 @@ fn pack_and_unpack_round_trip() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn pack_preserves_script_executable_bit() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = TempDir::new().unwrap();
+    setup_candidate(&temp, "skc_exec", "exec");
+
+    // Mark the source script executable.
+    let src_script = temp
+        .path()
+        .join(".cairn/evolution/skillify/skc_exec/bundle/scripts/exec.sh");
+    std::fs::set_permissions(&src_script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let archive = SkillPackBuilder::new("exec-pack", "0.1.0", ">=0.1.0", "Exec pack")
+        .add_candidate("skc_exec")
+        .build(temp.path())
+        .unwrap();
+
+    let install_temp = TempDir::new().unwrap();
+    unpack_archive(&archive.archive_path, install_temp.path(), "0.1.0").unwrap();
+
+    let installed_script = install_temp
+        .path()
+        .join(".cairn/evolution/skillify/skc_exec/bundle/scripts/exec.sh");
+    let mode = std::fs::metadata(&installed_script)
+        .unwrap()
+        .permissions()
+        .mode();
+    assert!(
+        mode & 0o100 != 0,
+        "installed script should retain owner-execute bit, got mode {mode:o}"
+    );
+}
+
 #[test]
 fn pack_rejects_candidate_with_failing_gates() {
     let temp = TempDir::new().unwrap();

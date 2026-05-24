@@ -87,9 +87,7 @@ fn run_pack(args: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
                         .unwrap_or(result.archive_path.as_os_str()),
                 );
                 if let Err(e) = std::fs::rename(&result.archive_path, &target) {
-                    eprintln!(
-                        "cairn skillpack pack: move archive to output dir: {e}"
-                    );
+                    eprintln!("cairn skillpack pack: move archive to output dir: {e}");
                     return ExitCode::from(73); // EX_CANTCREAT
                 }
                 target
@@ -138,7 +136,10 @@ fn run_install(args: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
             println!("pack_id:         {}", manifest.pack_id);
             println!("skills installed:");
             for entry in &manifest.skills {
-                println!("  - {} (lane: {}, slug: {})", entry.candidate_id, entry.lane, entry.slug);
+                println!(
+                    "  - {} (lane: {}, slug: {})",
+                    entry.candidate_id, entry.lane, entry.slug
+                );
             }
             println!("vault:           {}", vault_root.display());
             ExitCode::SUCCESS
@@ -164,7 +165,10 @@ fn run_inspect(args: &ArgMatches) -> ExitCode {
     let file = match std::fs::File::open(archive_path) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("cairn skillpack inspect: open {}: {e}", archive_path.display());
+            eprintln!(
+                "cairn skillpack inspect: open {}: {e}",
+                archive_path.display()
+            );
             return ExitCode::from(66); // EX_NOINPUT
         }
     };
@@ -181,7 +185,7 @@ fn run_inspect(args: &ArgMatches) -> ExitCode {
     };
 
     let mut manifest_bytes: Option<Vec<u8>> = None;
-    let mut skill_count = 0usize;
+    let mut candidate_dirs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
     for entry in entries {
         let mut entry = match entry {
@@ -203,15 +207,16 @@ fn run_inspect(args: &ArgMatches) -> ExitCode {
                 return ExitCode::from(66);
             }
             manifest_bytes = Some(buf);
-        } else if path_str.starts_with("skills/") && !path_str.ends_with('/') {
-            // Count unique skill directories (first path component after skills/).
-            // Every file under skills/<candidate_id>/ counts the candidate once.
-            let parts: Vec<&str> = path_str.splitn(3, '/').collect();
-            if parts.len() >= 2 && !parts[1].is_empty() {
-                skill_count += 1;
+        } else if let Some(rest) = path_str.strip_prefix("skills/") {
+            // Record the unique candidate-id directory (first path segment).
+            if let Some((cand, _)) = rest.split_once('/')
+                && !cand.is_empty()
+            {
+                candidate_dirs.insert(cand.to_owned());
             }
         }
     }
+    let skill_count = candidate_dirs.len();
 
     let Some(bytes) = manifest_bytes else {
         eprintln!("cairn skillpack inspect: manifest.json not found in archive");
@@ -232,17 +237,26 @@ fn run_inspect(args: &ArgMatches) -> ExitCode {
     println!("cairn_compat: {}", manifest.cairn_compat);
     println!("description:  {}", manifest.description);
     println!("pack_id:      {}", manifest.pack_id);
-    println!("skill count:  {} (manifest: {})", skill_count, manifest.skills.len());
+    println!(
+        "skill count:  {} (manifest: {})",
+        skill_count,
+        manifest.skills.len()
+    );
     if !manifest.requires.is_empty() {
         println!("requires:     {}", manifest.requires.join(", "));
     }
     if !manifest.provides.is_empty() {
         println!("provides:     {}", manifest.provides.join(", "));
     }
-    println!("sha256:       {}", manifest.content_sha256);
+    if !manifest.content_sha256.is_empty() {
+        println!("sha256:       {}", manifest.content_sha256);
+    }
     println!("skills:");
     for entry in &manifest.skills {
-        println!("  - {} lane={} slug={}", entry.candidate_id, entry.lane, entry.slug);
+        println!(
+            "  - {} lane={} slug={}",
+            entry.candidate_id, entry.lane, entry.slug
+        );
     }
 
     ExitCode::SUCCESS

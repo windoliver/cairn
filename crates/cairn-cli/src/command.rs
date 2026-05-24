@@ -274,9 +274,7 @@ fn skillpack_subcommand() -> clap::Command {
                         .long("cairn-compat")
                         .value_name("COMPAT")
                         .required(true)
-                        .help(
-                            "Minimum Cairn version requirement (e.g. >=0.1.0)",
-                        ),
+                        .help("Minimum Cairn version requirement (e.g. >=0.1.0)"),
                 )
                 .arg(
                     clap::Arg::new("description")

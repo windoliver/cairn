@@ -11,12 +11,13 @@ use cairn_core::pipeline::skillify::{
     SkillifyPipelineState, SkillifyStage,
 };
 
+use super::SkillifyPayload;
 use super::gate_registry::GateRunnerRegistry;
 use super::gate_runner::GateRunContext;
 use super::materialize::{
-    AuthoredSkillBundle, SkillifyMaterializeError, materialize_blocked_candidate, materialize_bundle,
+    AuthoredSkillBundle, SkillifyMaterializeError, materialize_blocked_candidate,
+    materialize_bundle,
 };
-use super::SkillifyPayload;
 
 /// Pipeline orchestration error.
 #[derive(Debug, thiserror::Error)]
@@ -154,15 +155,21 @@ impl SkillifyPipeline {
             state.record_gate(result.clone().into_gate());
         }
 
+        // Always persist the authoritative gate-report — failures must be
+        // visible on disk so lint, the handler, and human reviewers can see
+        // what failed and why. The initial "all blocked" marker from
+        // materialize_bundle is replaced with the actual gate results.
+        let gate_report = state.gate_report().clone();
+        std::fs::write(
+            candidate_dir.join("gate-report.json"),
+            serde_json::to_vec_pretty(&gate_report)?,
+        )?;
+
         let any_not_passed = results
             .iter()
             .any(|r| r.status != SkillifyGateStatus::Passed);
 
         if any_not_passed {
-            // Do not overwrite the initial gate-report (all blocked) written by
-            // materialize_bundle when gates are not all passing. This preserves
-            // the "not yet evaluated / not ready" state visible to lint and the
-            // handler. The gate-report is only updated when all gates pass.
             let blocked_or_failed: Vec<String> = results
                 .iter()
                 .filter(|r| r.status != SkillifyGateStatus::Passed)
@@ -173,13 +180,6 @@ impl SkillifyPipeline {
             let _ = state.fail(msg);
             return Ok(Self::build_result(&state, errors, start));
         }
-
-        // All gates passed — persist the authoritative gate-report.
-        let gate_report = state.gate_report().clone();
-        std::fs::write(
-            candidate_dir.join("gate-report.json"),
-            serde_json::to_vec_pretty(&gate_report)?,
-        )?;
 
         // STAGE 4: Promote
         let _ = state.advance_to_promote();
@@ -209,32 +209,9 @@ impl SkillifyPipeline {
             return Err(SkillifyPipelineError::NoLlm);
         };
 
-        // Try strict parse first; fall back to synthesizing a spec from available
-        // fields when the LLM returns a payload that matches a different schema
-        // (e.g. the author bundle format). This preserves backward compatibility
-        // with provider stubs that return a single response for all calls.
-        let spec: SkillSpecDraft = serde_json::from_value(value.clone()).unwrap_or_else(|_| {
-            let lane = value
-                .get("lane")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown")
-                .to_owned();
-            let slug = value
-                .get("slug")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&payload.key)
-                .to_owned();
-            SkillSpecDraft {
-                lane,
-                slug,
-                decision_tree: serde_json::Value::Null,
-                triggers: vec![payload.key.clone()],
-                success_criteria: vec![],
-                source_refs: payload.source_record_ids.clone(),
-                requires: vec![],
-                provides: vec![],
-            }
-        });
+        // Strict parse — if the LLM returns wrong-schema JSON, fail loudly
+        // rather than silently synthesizing a degraded spec.
+        let spec: SkillSpecDraft = serde_json::from_value(value)?;
         spec.validate().map_err(|e| {
             SkillifyPipelineError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,

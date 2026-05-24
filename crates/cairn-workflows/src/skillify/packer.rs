@@ -82,9 +82,7 @@ impl SkillPackBuilder {
         let mut all_provides = Vec::new();
 
         for cid in &self.candidate_ids {
-            let cand_dir = vault_root
-                .join(".cairn/evolution/skillify")
-                .join(cid);
+            let cand_dir = vault_root.join(".cairn/evolution/skillify").join(cid);
 
             let manifest_path = cand_dir.join("manifest.json");
             if !manifest_path.exists() {
@@ -93,12 +91,10 @@ impl SkillPackBuilder {
                 });
             }
 
-            let bundle: SkillArtifactBundle =
-                serde_json::from_slice(&fs::read(&manifest_path)?)?;
+            let bundle: SkillArtifactBundle = serde_json::from_slice(&fs::read(&manifest_path)?)?;
 
             let report_path = cand_dir.join("gate-report.json");
-            let report: SkillifyGateReport =
-                serde_json::from_slice(&fs::read(&report_path)?)?;
+            let report: SkillifyGateReport = serde_json::from_slice(&fs::read(&report_path)?)?;
 
             if !report.ready_for_promotion() {
                 return Err(SkillPackBuildError::GateNotPassing {
@@ -141,8 +137,7 @@ impl SkillPackBuilder {
             all_provides.push(lane);
         }
 
-        let candidate_ids_refs: Vec<&str> =
-            self.candidate_ids.iter().map(String::as_str).collect();
+        let candidate_ids_refs: Vec<&str> = self.candidate_ids.iter().map(String::as_str).collect();
         let pack_id =
             SkillPackManifest::derive_pack_id(&self.name, &self.version, &candidate_ids_refs);
 
@@ -165,12 +160,10 @@ impl SkillPackBuilder {
         let mut tar = tar::Builder::new(enc);
 
         let manifest_json = serde_json::to_vec_pretty(&manifest)?;
-        append_bytes(&mut tar, "manifest.json", &manifest_json)?;
+        append_bytes(&mut tar, "manifest.json", &manifest_json, 0o644)?;
 
         for cid in &self.candidate_ids {
-            let cand_dir = vault_root
-                .join(".cairn/evolution/skillify")
-                .join(cid);
+            let cand_dir = vault_root.join(".cairn/evolution/skillify").join(cid);
             append_dir_recursive(&mut tar, &cand_dir, &format!("skills/{cid}"))?;
         }
 
@@ -210,9 +203,8 @@ pub fn unpack_archive(
     fs::create_dir_all(&extract_dir)?;
     archive.unpack(&extract_dir)?;
 
-    let manifest: SkillPackManifest = serde_json::from_slice(&fs::read(
-        extract_dir.join("manifest.json"),
-    )?)?;
+    let manifest: SkillPackManifest =
+        serde_json::from_slice(&fs::read(extract_dir.join("manifest.json"))?)?;
 
     // Validate compat before moving any files.
     manifest
@@ -249,10 +241,7 @@ fn sha256_file(path: &Path) -> Result<String, std::io::Error> {
 }
 
 /// Read the `lane:` value from the skill contract markdown in the candidate bundle.
-fn find_lane_from_bundle(
-    cand_dir: &Path,
-    slug: &str,
-) -> Result<String, SkillPackBuildError> {
+fn find_lane_from_bundle(cand_dir: &Path, slug: &str) -> Result<String, SkillPackBuildError> {
     let skill_path = cand_dir.join(format!("bundle/skills/skill_{slug}.md"));
     if skill_path.exists() {
         let content = fs::read_to_string(&skill_path)?;
@@ -288,13 +277,34 @@ fn append_bytes<W: std::io::Write>(
     tar: &mut tar::Builder<W>,
     path: &str,
     data: &[u8],
+    mode: u32,
 ) -> Result<(), std::io::Error> {
     let mut header = tar::Header::new_gnu();
     header.set_size(data.len() as u64);
-    header.set_mode(0o644);
+    header.set_mode(mode);
     header.set_cksum();
     tar.append_data(&mut header, path, data)?;
     Ok(())
+}
+
+/// Return 0o755 if the file is executable by owner (Unix), else 0o644.
+/// On non-Unix, returns 0o644.
+fn file_mode(path: &Path) -> u32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = fs::metadata(path) {
+            let perm_mode = meta.permissions().mode();
+            if perm_mode & 0o100 != 0 {
+                return 0o755;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    0o644
 }
 
 fn append_dir_recursive<W: std::io::Write>(
@@ -314,7 +324,8 @@ fn append_dir_recursive<W: std::io::Write>(
             append_dir_recursive(tar, &path, &archive_path)?;
         } else {
             let data = fs::read(&path)?;
-            append_bytes(tar, &archive_path, &data)?;
+            let mode = file_mode(&path);
+            append_bytes(tar, &archive_path, &data, mode)?;
         }
     }
     Ok(())

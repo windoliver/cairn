@@ -246,7 +246,10 @@ impl GateRunner for UnitTestRunner {
             .join(format!("bundle/scripts/{}.sh", ctx.authored.slug));
 
         for (i, case) in cases.iter().enumerate() {
-            let input = case.get("input").and_then(serde_json::Value::as_str).unwrap_or("");
+            let input = case
+                .get("input")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
             let Some(expected) = case
                 .get("expected_stdout")
                 .and_then(serde_json::Value::as_str)
@@ -314,7 +317,10 @@ impl GateRunner for IntegrationTestRunner {
             .join(format!("bundle/scripts/{}.sh", ctx.authored.slug));
 
         for (i, case) in cases.iter().enumerate() {
-            let input = case.get("input").and_then(serde_json::Value::as_str).unwrap_or("");
+            let input = case
+                .get("input")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
             let Some(expected) = case
                 .get("expected_stdout")
                 .and_then(serde_json::Value::as_str)
@@ -429,7 +435,11 @@ impl GateRunner for LlmEvalRunner {
 
             match llm.complete(&req).await {
                 Ok(cairn_core::contract::llm_provider::CompletionOutput::Json(v)) => {
-                    if !v.get("pass").and_then(serde_json::Value::as_bool).unwrap_or(false) {
+                    if !v
+                        .get("pass")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false)
+                    {
                         let reason = v
                             .get("reason")
                             .and_then(serde_json::Value::as_str)
@@ -518,9 +528,7 @@ impl GateRunner for ResolverTriggerRunner {
                             self.artifact_kind(),
                             format!(
                                 "trigger {:?} collides with skill {} (lane {})",
-                                candidate_trigger,
-                                existing_skill.skill_id,
-                                existing_skill.lane
+                                candidate_trigger, existing_skill.skill_id, existing_skill.lane
                             ),
                             timer.elapsed_ms(),
                         );

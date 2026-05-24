@@ -56,9 +56,8 @@ impl HealthCheckRunner {
             .join(".cairn/evolution/skillify")
             .join(candidate_id);
 
-        let bundle: SkillArtifactBundle = serde_json::from_slice(
-            &std::fs::read(candidate_dir.join("manifest.json"))?,
-        )?;
+        let bundle: SkillArtifactBundle =
+            serde_json::from_slice(&std::fs::read(candidate_dir.join("manifest.json"))?)?;
 
         let authored = reconstruct_authored(&candidate_dir, &bundle)?;
         let snapshot = SkillLintSnapshot { skills: vec![] };
@@ -114,10 +113,7 @@ fn reconstruct_authored(
             .iter()
             .find(|a| a.kind == kind)
             .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    format!("missing {kind}"),
-                )
+                std::io::Error::new(std::io::ErrorKind::NotFound, format!("missing {kind}"))
             })?;
         std::fs::read_to_string(candidate_dir.join(&artifact.path))
     };
