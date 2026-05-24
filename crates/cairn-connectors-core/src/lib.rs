@@ -16,6 +16,7 @@ pub mod credential;
 pub mod error;
 pub mod event;
 pub mod manifest;
+pub mod rate_limit;
 pub mod redact;
 
 pub use connector::{
@@ -28,4 +29,5 @@ pub use event::{
     ConnectorEvent, ConnectorEventId, ConnectorPayload, ConnectorScope, DeliveryMode, SourceRef,
 };
 pub use manifest::ConnectorManifest;
+pub use rate_limit::RateLimit;
 pub use redact::{Redacted, RedactionPipeline};
