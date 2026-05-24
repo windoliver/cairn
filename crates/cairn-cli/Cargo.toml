@@ -45,6 +45,8 @@ cairn-store-sqlite = { workspace = true }
 cairn-sensors-local = { workspace = true }
 cairn-workflows = { workspace = true }
 cairn-llm-openai-compat = { workspace = true }
+flate2 = { workspace = true }
+tar = { workspace = true }
 tokio_rusqlite = { workspace = true }
 anyhow = { workspace = true }
 jsonschema = { workspace = true }

@@ -148,6 +148,7 @@ fn subcommand_needs_vault_guard(subcommand: Option<(&str, &ArgMatches)>) -> bool
             | "screen"
             | "sensor"
             | "repair"
+            | "skillpack"
     )
 }
 
@@ -562,6 +563,7 @@ fn main() -> ExitCode {
         }
         Some(("vault", sub)) => run_vault(sub),
         Some(("skill", sub)) => run_skill(sub),
+        Some(("skillpack", sub)) => verbs::skillpack::run(sub, explicit_vault.as_deref()),
         Some(("setup", sub)) => run_setup(sub, explicit_vault.as_deref()),
         Some(("admin", sub)) => run_admin(sub, explicit_vault.as_deref()),
         Some(("backup", sub)) => run_backup(sub, explicit_vault.as_deref()),

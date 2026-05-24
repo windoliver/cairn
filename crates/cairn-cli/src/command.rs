@@ -60,6 +60,7 @@ pub fn build_command() -> clap::Command {
         .subcommand(mcp_subcommand())
         .subcommand(vault_subcommand())
         .subcommand(skill_subcommand())
+        .subcommand(skillpack_subcommand())
         .subcommand(admin_subcommand())
         .subcommand(backup_subcommand())
         .subcommand(llm_subcommand())
@@ -244,6 +245,83 @@ fn mcp_subcommand() -> clap::Command {
              dispatches to the eight cairn verbs, writes responses to \
              stdout. Blocks until stdin closes.",
     )
+}
+
+fn skillpack_subcommand() -> clap::Command {
+    clap::Command::new("skillpack")
+        .about("Manage `.cairnpack` skill archives (issue #128)")
+        .subcommand_required(true)
+        .arg_required_else_help(true)
+        .subcommand(
+            clap::Command::new("pack")
+                .about("Build a `.cairnpack` archive from passing skill candidates")
+                .arg(
+                    clap::Arg::new("name")
+                        .long("name")
+                        .value_name("NAME")
+                        .required(true)
+                        .help("Human-readable pack name"),
+                )
+                .arg(
+                    clap::Arg::new("version")
+                        .long("version")
+                        .value_name("VERSION")
+                        .required(true)
+                        .help("Semver pack version (e.g. 0.1.0)"),
+                )
+                .arg(
+                    clap::Arg::new("cairn-compat")
+                        .long("cairn-compat")
+                        .value_name("COMPAT")
+                        .required(true)
+                        .help(
+                            "Minimum Cairn version requirement (e.g. >=0.1.0)",
+                        ),
+                )
+                .arg(
+                    clap::Arg::new("description")
+                        .long("description")
+                        .value_name("DESC")
+                        .required(true)
+                        .help("Pack description"),
+                )
+                .arg(
+                    clap::Arg::new("candidates")
+                        .long("candidates")
+                        .value_name("ID1,ID2,...")
+                        .required(true)
+                        .help("Comma-separated list of candidate ids to include"),
+                )
+                .arg(
+                    clap::Arg::new("output")
+                        .long("output")
+                        .value_name("DIR")
+                        .value_parser(clap::value_parser!(std::path::PathBuf))
+                        .help("Directory to write the archive (default: vault root)"),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("install")
+                .about("Install a `.cairnpack` archive into the vault")
+                .arg(
+                    clap::Arg::new("path")
+                        .value_name("PATH")
+                        .required(true)
+                        .value_parser(clap::value_parser!(std::path::PathBuf))
+                        .help("Path to the `.cairnpack` archive"),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("inspect")
+                .about("Print the manifest summary from a `.cairnpack` archive")
+                .arg(
+                    clap::Arg::new("path")
+                        .value_name("PATH")
+                        .required(true)
+                        .value_parser(clap::value_parser!(std::path::PathBuf))
+                        .help("Path to the `.cairnpack` archive"),
+                ),
+        )
 }
 
 fn skill_subcommand() -> clap::Command {

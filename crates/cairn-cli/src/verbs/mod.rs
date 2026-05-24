@@ -34,6 +34,7 @@ pub mod search;
 pub mod sensor;
 pub mod session;
 pub mod signed;
+pub mod skillpack;
 pub mod status;
 pub mod summarize;
 
