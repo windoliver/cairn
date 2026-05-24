@@ -18,6 +18,7 @@ pub mod event;
 pub mod manifest;
 pub mod rate_limit;
 pub mod redact;
+pub mod webhook;
 
 pub use connector::{
     Connector, ConnectorCapabilities, ConnectorPlugin, PollContext, PollOutcome, WebhookContext,
@@ -31,3 +32,4 @@ pub use event::{
 pub use manifest::ConnectorManifest;
 pub use rate_limit::RateLimit;
 pub use redact::{Redacted, RedactionPipeline};
+pub use webhook::{WebhookRequest, WebhookRouter};

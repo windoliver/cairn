@@ -4,13 +4,6 @@
 //! `Connector` surface. It is re-exported from `crate` root, replacing the
 //! scaffold placeholder.
 
-// Placeholder types — replaced in later tasks:
-//   - `CredentialHandle`: replaced by `credential::CredentialHandle` in T9.
-//     T9 creates `src/credential.rs`, moves this struct there, and
-//     `connector.rs` switches to `use crate::credential::CredentialHandle`.
-//   - `WebhookRequest`: replaced by `webhook::WebhookRequest` in T13.
-//     T13 creates `src/webhook.rs`, moves this struct there, and
-//     `connector.rs` switches to `use crate::webhook::WebhookRequest`.
 
 use std::sync::Arc;
 
@@ -21,11 +14,7 @@ use crate::credential::CredentialHandle;
 use crate::error::ConnectorError;
 use crate::event::ConnectorEvent;
 use crate::manifest::ConnectorManifest;
-
-/// Placeholder for an inbound webhook HTTP request.
-/// Replaced by `webhook::WebhookRequest` in T13.
-/* placeholder; replaced by webhook::WebhookRequest in T13 */
-pub struct WebhookRequest;
+use crate::webhook::WebhookRequest;
 
 /// Contract version for the `Connector` trait surface.
 /// Bumped when the trait API changes in a breaking way.
