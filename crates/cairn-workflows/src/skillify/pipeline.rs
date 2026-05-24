@@ -250,6 +250,41 @@ impl SkillifyPipeline {
             return Ok(Self::build_result(&state, errors, start));
         }
 
+        // Round 8 hardening: re-verify every declared artifact's bytes
+        // against its content_sha256 BEFORE promoting. Authored scripts
+        // run in a (lightly) sandboxed subprocess but still have write
+        // access to their own bundle directory via $0/dirname-$0. Without
+        // this re-hash, a script could rewrite its own source after the
+        // SkillContract/script-shape gates ran, leaving the manifest and
+        // on-disk bytes out of sync at promotion. Fail closed on drift.
+        for artifact in &bundle.artifacts {
+            let artifact_path = candidate_dir.join(&artifact.path);
+            let bytes = match std::fs::read(&artifact_path) {
+                Ok(b) => b,
+                Err(e) => {
+                    let msg = format!("post-gate verify: missing artifact {}: {e}", artifact.path);
+                    errors.push(msg.clone());
+                    let _ = state.fail(msg);
+                    return Ok(Self::build_result(&state, errors, start));
+                }
+            };
+            let actual = {
+                use sha2::Digest as _;
+                let mut h = sha2::Sha256::new();
+                h.update(&bytes);
+                format!("sha256:{:x}", h.finalize())
+            };
+            if actual != artifact.content_sha256 {
+                let msg = format!(
+                    "post-gate verify: {} hash drifted (expected {}, got {actual})",
+                    artifact.path, artifact.content_sha256
+                );
+                errors.push(msg.clone());
+                let _ = state.fail(msg);
+                return Ok(Self::build_result(&state, errors, start));
+            }
+        }
+
         // STAGE 4: Promote — build a durable FlushPlan and write it before
         // marking the candidate as promoted. The plan goes to a human-review
         // queue per design brief §11 (autonomous evolution requires a review

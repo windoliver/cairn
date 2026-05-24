@@ -163,34 +163,85 @@ impl GateRunner for SkillContractRunner {
     async fn run(&self, ctx: &GateRunContext<'_>) -> GateRunResult {
         let timer = GateTimer::start();
         let md = &ctx.authored.skill_markdown;
-        let mut missing = Vec::new();
 
-        if !md.contains("lane:") {
-            missing.push("lane");
-        }
-        if !md.contains("triggers:") {
-            missing.push("triggers");
-        }
-        if !md.contains("uses:") {
-            missing.push("uses");
-        }
-        if !md.contains("files_to:") {
-            missing.push("files_to");
+        // Round 8 hardening: parse YAML frontmatter and require fields
+        // to appear THERE, not anywhere in the body. The previous
+        // substring check would pass `lane:` written inside the body
+        // prose as a real frontmatter declaration.
+        let Some(frontmatter) = extract_frontmatter(md) else {
+            return GateRunResult::failed(
+                self.artifact_kind(),
+                "skill contract has no YAML frontmatter (--- ... ---)".to_owned(),
+                timer.elapsed_ms(),
+            );
+        };
+
+        let mut missing = Vec::new();
+        for field in ["lane", "triggers", "uses", "files_to"] {
+            if !frontmatter_has_key(frontmatter, field) {
+                missing.push(field);
+            }
         }
 
         if missing.is_empty() {
+            // Cross-check that the frontmatter agrees with the authored
+            // fields the rest of the pipeline uses. A mismatch means the
+            // contract markdown doesn't describe the actual artifacts.
+            if let Some(lane_in_md) = frontmatter_scalar(frontmatter, "lane")
+                && lane_in_md != ctx.authored.lane
+            {
+                return GateRunResult::failed(
+                    self.artifact_kind(),
+                    format!(
+                        "skill contract lane `{lane_in_md}` does not match authored lane `{}`",
+                        ctx.authored.lane
+                    ),
+                    timer.elapsed_ms(),
+                );
+            }
             GateRunResult::passed(self.artifact_kind(), timer.elapsed_ms())
         } else {
             GateRunResult::failed(
                 self.artifact_kind(),
                 format!(
-                    "skill contract missing required fields: {}",
+                    "skill contract frontmatter missing required fields: {}",
                     missing.join(", ")
                 ),
                 timer.elapsed_ms(),
             )
         }
     }
+}
+
+/// Extract YAML frontmatter (`---\n…\n---`) from the start of a markdown body.
+fn extract_frontmatter(body: &str) -> Option<&str> {
+    let rest = body
+        .strip_prefix("---\n")
+        .or_else(|| body.strip_prefix("---\r\n"))?;
+    let end = rest.find("\n---")?;
+    Some(&rest[..end])
+}
+
+/// Returns true if the frontmatter declares `key:` at the start of any line.
+fn frontmatter_has_key(fm: &str, key: &str) -> bool {
+    let needle = format!("{key}:");
+    fm.lines().any(|l| l.trim_start().starts_with(&needle))
+}
+
+/// Returns the scalar value for `key:` if it's a simple inline value.
+fn frontmatter_scalar(fm: &str, key: &str) -> Option<String> {
+    let needle = format!("{key}:");
+    for line in fm.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix(&needle) {
+            let value = rest.trim().trim_matches('"').trim_matches('\'');
+            if value.is_empty() || value.starts_with('[') {
+                return None;
+            }
+            return Some(value.to_owned());
+        }
+    }
+    None
 }
 
 /// Gate 2: Validates deterministic script exists and has a shebang.
