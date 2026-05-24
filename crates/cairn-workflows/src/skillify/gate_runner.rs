@@ -42,6 +42,11 @@ pub struct GateRunResult {
     pub evidence_refs: Vec<String>,
     /// Wall-clock duration in milliseconds.
     pub duration_ms: u64,
+    /// When `Some`, a transient dependency error caused this gate to fail
+    /// (e.g. LLM provider unreachable). The pipeline propagates this as a
+    /// `SkillifyPipelineError::Llm` so the scheduler retries instead of
+    /// recording a permanent gate failure.
+    pub transient_error_detail: Option<String>,
 }
 
 impl GateRunResult {
@@ -64,6 +69,7 @@ impl GateRunResult {
             message: None,
             evidence_refs: Vec::new(),
             duration_ms,
+            transient_error_detail: None,
         }
     }
 
@@ -76,6 +82,7 @@ impl GateRunResult {
             message: Some(message),
             evidence_refs: Vec::new(),
             duration_ms,
+            transient_error_detail: None,
         }
     }
 
@@ -88,6 +95,21 @@ impl GateRunResult {
             message: Some(message),
             evidence_refs: Vec::new(),
             duration_ms: 0,
+            transient_error_detail: None,
+        }
+    }
+
+    /// Create a transient-error result. The pipeline propagates this as a
+    /// retriable LLM error rather than a permanent gate failure.
+    #[must_use]
+    pub fn transient(kind: SkillArtifactKind, detail: String, duration_ms: u64) -> Self {
+        Self {
+            kind,
+            status: SkillifyGateStatus::Blocked,
+            message: Some(format!("transient dependency error: {detail}")),
+            evidence_refs: Vec::new(),
+            duration_ms,
+            transient_error_detail: Some(detail),
         }
     }
 }
@@ -459,6 +481,19 @@ impl GateRunner for LlmEvalRunner {
                     );
                 }
                 Err(e) => {
+                    // Transient provider outages must be propagated as a
+                    // retriable error so the scheduler retries instead of
+                    // burning the candidate as permanently failed.
+                    if matches!(
+                        e,
+                        cairn_core::contract::llm_provider::LlmError::ProviderUnreachable { .. }
+                    ) {
+                        return GateRunResult::transient(
+                            self.artifact_kind(),
+                            format!("rubric item {i}: LLM unreachable: {e}"),
+                            timer.elapsed_ms(),
+                        );
+                    }
                     return GateRunResult::failed(
                         self.artifact_kind(),
                         format!("rubric item {i}: LLM error: {e}"),
@@ -821,11 +856,25 @@ async fn run_script(
     cmd.stderr(std::process::Stdio::piped());
     cmd.kill_on_drop(true);
 
+    // On Unix, put the script in its own process group (PGID == child PID)
+    // so timeout kill can signal the whole group, catching descendants the
+    // script may have spawned. `process_group(0)` is stable since Rust
+    // 1.64 and avoids `unsafe` (`pre_exec` would require it).
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        cmd.as_std_mut().process_group(0);
+    }
+
     for (k, v) in env {
         cmd.env(k, v);
     }
 
     let mut child = cmd.spawn().map_err(|e| format!("spawn failed: {e}"))?;
+    #[cfg(unix)]
+    let child_pgid: Option<i32> = child.id().and_then(|id| i32::try_from(id).ok());
+    #[cfg(not(unix))]
+    let child_pgid: Option<i32> = None;
     let mut stdout = child.stdout.take().ok_or("missing stdout handle")?;
     let mut stderr = child.stderr.take().ok_or("missing stderr handle")?;
 
@@ -864,10 +913,18 @@ async fn run_script(
         }
         Ok(Err(e)) => Err(e),
         Err(_) => {
-            // Timeout: explicitly kill and reap to avoid leaving an orphan
-            // process running. `kill_on_drop` would handle this if `child`
-            // were dropped here, but doing it explicitly makes the cleanup
-            // ordering visible and lets us surface kill failures.
+            // Timeout: kill the entire process group on Unix so descendants
+            // the script may have spawned are reaped too. Use the `kill`
+            // utility with a negative PID to signal the whole group — this
+            // avoids `unsafe` (the workspace forbids it) while still
+            // providing the necessary cleanup. `start_kill` falls through
+            // for the bash parent and on non-Unix.
+            #[cfg(unix)]
+            if let Some(pgid) = child_pgid {
+                let _ = std::process::Command::new("kill")
+                    .args(["-KILL", &format!("-{pgid}")])
+                    .status();
+            }
             let _ = child.start_kill();
             let _ = child.wait().await;
             Err("script timed out".to_owned())

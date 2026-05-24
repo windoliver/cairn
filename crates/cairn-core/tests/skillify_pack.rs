@@ -101,3 +101,35 @@ fn higher_cairn_version_passes() {
     let manifest = valid_manifest();
     assert!(manifest.validate("1.0.0").is_ok());
 }
+
+#[test]
+fn entry_with_path_traversal_rejected() {
+    let mut manifest = valid_manifest();
+    manifest.skills[0].candidate_id = "../evil".to_owned();
+    let err = manifest.validate("0.1.0").unwrap_err();
+    assert!(matches!(err, SkillPackError::InvalidName { .. }));
+}
+
+#[test]
+fn entry_with_slash_in_slug_rejected() {
+    let mut manifest = valid_manifest();
+    manifest.skills[0].slug = "evil/slug".to_owned();
+    let err = manifest.validate("0.1.0").unwrap_err();
+    assert!(matches!(err, SkillPackError::InvalidName { .. }));
+}
+
+#[test]
+fn entry_with_dot_candidate_id_rejected() {
+    let mut manifest = valid_manifest();
+    manifest.skills[0].candidate_id = ".".to_owned();
+    let err = manifest.validate("0.1.0").unwrap_err();
+    assert!(matches!(err, SkillPackError::InvalidName { .. }));
+}
+
+#[test]
+fn entry_with_backslash_rejected() {
+    let mut manifest = valid_manifest();
+    manifest.skills[0].candidate_id = "evil\\path".to_owned();
+    let err = manifest.validate("0.1.0").unwrap_err();
+    assert!(matches!(err, SkillPackError::InvalidName { .. }));
+}

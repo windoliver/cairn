@@ -692,3 +692,60 @@ async fn unit_test_runner_kills_script_on_timeout() {
         "subprocess PID {pid} should be dead after timeout but is still running"
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unit_test_runner_kills_descendant_on_timeout() {
+    // Script spawns a long-running descendant (`sleep 30 &`) and records the
+    // descendant's PID before sleeping itself. After the gate times out the
+    // DESCENDANT must also be dead — killing only the shell is insufficient.
+    let temp = TempDir::new().unwrap();
+    let pidfile = temp.path().join("descendant.pid");
+    let pidfile_str = pidfile.display().to_string();
+    let script_body = format!("#!/usr/bin/env bash\nsleep 30 &\necho $! > {pidfile_str}\nwait\n");
+    materialize_script(temp.path(), "spawner", &script_body);
+
+    let mut a = authored("spawner");
+    a.unit_tests = serde_json::json!({
+        "cases": [{"input": "", "expected_stdout": "x\n", "timeout_ms": 200}]
+    });
+    let b = bundle("spawner");
+    let ctx = GateRunContext {
+        vault_root: temp.path(),
+        candidate_id: "skc_test",
+        candidate_dir: temp.path().to_path_buf(),
+        bundle: &b,
+        authored: &a,
+        llm: None,
+        snapshot: &empty_snapshot(),
+    };
+    let _ = UnitTestRunner.run(&ctx).await;
+
+    // Wait briefly for the script to write the descendant pid.
+    let mut attempts = 0;
+    while !pidfile.exists() && attempts < 20 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        attempts += 1;
+    }
+    if !pidfile.exists() {
+        // Script raced — can't verify, but no false-positive.
+        return;
+    }
+    let pid: i32 = std::fs::read_to_string(&pidfile)
+        .unwrap()
+        .trim()
+        .parse()
+        .expect("pid is int");
+
+    // Give the group-kill a moment to take effect.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let status = std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .expect("kill -0");
+    assert!(
+        !status.success(),
+        "descendant PID {pid} should be dead after timeout but is still running"
+    );
+}

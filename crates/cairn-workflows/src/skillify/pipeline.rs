@@ -79,6 +79,10 @@ impl SkillifyPipeline {
     /// # Errors
     /// Returns on fatal I/O or serialization failures. Gate failures and
     /// LLM unavailability are captured in the result, not as errors.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "linear 5-stage flow; each stage is documented in-line and splitting obscures the state transitions"
+    )]
     pub async fn run(
         &self,
         payload: SkillifyPayload,
@@ -159,6 +163,22 @@ impl SkillifyPipeline {
         };
 
         let results = self.gate_registry.run_all(&ctx).await;
+
+        // Transient errors (e.g. LLM provider unreachable) must propagate as
+        // a retriable error rather than a permanent gate failure. Surface
+        // them BEFORE writing the gate report or advancing state so the
+        // scheduler retries cleanly on the next tick.
+        if let Some(transient) = results
+            .iter()
+            .find_map(|r| r.transient_error_detail.clone())
+        {
+            return Err(SkillifyPipelineError::Llm(
+                cairn_core::contract::llm_provider::LlmError::ProviderUnreachable {
+                    detail: transient,
+                },
+            ));
+        }
+
         for result in &results {
             state.record_gate(result.clone().into_gate());
         }
@@ -193,6 +213,17 @@ impl SkillifyPipeline {
         // marking the candidate as promoted. The plan goes to a human-review
         // queue per design brief §11 (autonomous evolution requires a review
         // gate before merging skill changes into the live `skills/` set).
+        //
+        // The planner emits a `diff_ref` pointing at
+        // `versions/v1/manifest.json` under the candidate dir. We materialize
+        // that file here (copy of the candidate manifest) so the FlushPlan
+        // references an artifact that actually exists on disk — without
+        // this, the human-review apply step would fail to load the diff.
+        let versions_dir = candidate_dir.join("versions/v1");
+        std::fs::create_dir_all(&versions_dir)?;
+        let bundle_manifest_json = serde_json::to_vec_pretty(&bundle)?;
+        std::fs::write(versions_dir.join("manifest.json"), &bundle_manifest_json)?;
+
         let promotion_input = SkillifyPromotionInput {
             candidate_id: candidate_id.clone(),
             skill_target_id: derive_skill_target_id(&candidate_id),

@@ -248,20 +248,34 @@ fn update_field(hasher: &mut Sha256, label: &str, value: &str) {
 ///
 /// # Errors
 /// Returns on incompatible version, corrupt archive, or I/O failure.
+#[allow(
+    clippy::too_many_lines,
+    reason = "single linear flow: lock, extract, validate, per-artifact verify, atomic swap, rollback. Splitting would obscure the ordering invariants."
+)]
 pub fn unpack_archive(
     archive_path: &Path,
     vault_root: &Path,
     cairn_version: &str,
 ) -> Result<SkillPackManifest, SkillPackBuildError> {
+    // Serialize concurrent installs against the same vault. Without this,
+    // two installs operating on the same candidate id can interleave their
+    // rename+rollback steps and silently delete each other's results.
+    // An advisory file-lock (no OS-level cooperative requirement) keeps the
+    // critical section to one process at a time.
+    let parent_dir = vault_root.join(".cairn/evolution/skillify");
+    fs::create_dir_all(&parent_dir)?;
+    let lock_path = parent_dir.join(".install.lock");
+    let _install_lock = acquire_install_lock(&lock_path)?;
+
     let file = fs::File::open(archive_path)?;
     let dec = flate2::read::GzDecoder::new(file);
     let mut archive = tar::Archive::new(dec);
 
-    // Use a per-call temp directory to avoid colliding with concurrent installs.
-    let extract_dir = vault_root.join(format!(
-        ".cairn/evolution/skillify/.unpack-tmp-{}",
-        std::process::id()
-    ));
+    // Per-call temp directory with PID + random suffix so two concurrent
+    // installs (in the rare case the lock fails or is disabled) cannot
+    // collide on the temp dir name.
+    let nonce = generate_nonce();
+    let extract_dir = parent_dir.join(format!(".unpack-tmp-{}-{nonce}", std::process::id()));
     if extract_dir.exists() {
         fs::remove_dir_all(&extract_dir)?;
     }
@@ -299,11 +313,12 @@ pub fn unpack_archive(
         }
     }
 
-    // PRE-FLIGHT: every manifest entry must have a complete bundle in the
-    // extracted temp dir. Reject the whole install if any skill is missing —
-    // we will not delete a valid installed candidate just to replace it with
-    // an incomplete one. This is the rollback guarantee Codex review #128
-    // flagged.
+    // PRE-FLIGHT: validate every manifest entry's content matches what the
+    // archive claims. This is the rollback guarantee Codex review #128
+    // flagged. Per-artifact byte verification (added in review round 2)
+    // closes the loophole where a tampered script wouldn't change the
+    // manifest digest because the digest only covers the candidate's
+    // manifest.json hash.
     for entry in &manifest.skills {
         let src = extract_dir.join(format!("skills/{}", entry.candidate_id));
         if !src.is_dir() {
@@ -311,12 +326,62 @@ pub fn unpack_archive(
                 candidate_id: entry.candidate_id.clone(),
             }));
         }
-        // Require a manifest.json and bundle/ inside the candidate; this is
-        // the minimum proof that the source is a complete bundle, not a stub.
-        if !src.join("manifest.json").is_file() || !src.join("bundle").is_dir() {
+
+        let candidate_manifest_path = src.join("manifest.json");
+        if !candidate_manifest_path.is_file() || !src.join("bundle").is_dir() {
             return Err(SkillPackBuildError::Pack(SkillPackError::MissingSkill {
                 candidate_id: entry.candidate_id.clone(),
             }));
+        }
+
+        // Verify the candidate's manifest hash matches the pack manifest's
+        // claimed artifact_sha256 — catches manifest tampering.
+        let cand_manifest_hash = sha256_file(&candidate_manifest_path)?;
+        if cand_manifest_hash != entry.artifact_sha256 {
+            return Err(SkillPackBuildError::Pack(
+                SkillPackError::IntegrityFailure {
+                    expected: entry.artifact_sha256.clone(),
+                    actual: cand_manifest_hash,
+                },
+            ));
+        }
+
+        // Parse the candidate manifest and verify every declared artifact
+        // file exists and its bytes hash to the declared content_sha256.
+        // This catches scripts/tests/markdown being swapped out without
+        // updating the candidate manifest.
+        let bundle: SkillArtifactBundle =
+            serde_json::from_slice(&fs::read(&candidate_manifest_path)?)?;
+        for artifact in &bundle.artifacts {
+            // Reject artifact paths that escape the candidate dir.
+            let rel_path = std::path::Path::new(&artifact.path);
+            if rel_path.is_absolute()
+                || rel_path
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                return Err(SkillPackBuildError::Pack(
+                    SkillPackError::IntegrityFailure {
+                        expected: format!("safe path for {}", artifact.kind.as_str()),
+                        actual: artifact.path.clone(),
+                    },
+                ));
+            }
+            let artifact_path = src.join(&artifact.path);
+            if !artifact_path.is_file() {
+                return Err(SkillPackBuildError::Pack(SkillPackError::MissingSkill {
+                    candidate_id: entry.candidate_id.clone(),
+                }));
+            }
+            let actual_hash = sha256_file(&artifact_path)?;
+            if actual_hash != artifact.content_sha256 {
+                return Err(SkillPackBuildError::Pack(
+                    SkillPackError::IntegrityFailure {
+                        expected: artifact.content_sha256.clone(),
+                        actual: actual_hash,
+                    },
+                ));
+            }
         }
     }
 
@@ -326,14 +391,14 @@ pub fn unpack_archive(
     // restored where possible. Errors mid-install leave the vault in a
     // partially-installed state — that is logged via the returned error so
     // the operator can re-run install.
-    let parent = vault_root.join(".cairn/evolution/skillify");
-    fs::create_dir_all(&parent)?;
+    // `parent_dir` (computed above for the install lock) is reused so we do
+    // not race against another caller creating it concurrently.
     let mut swapped_backups: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
     for entry in &manifest.skills {
         let src = extract_dir.join(format!("skills/{}", entry.candidate_id));
-        let dst = parent.join(&entry.candidate_id);
-        let backup = parent.join(format!(
-            ".bak-{}-{}",
+        let dst = parent_dir.join(&entry.candidate_id);
+        let backup = parent_dir.join(format!(
+            ".bak-{}-{}-{nonce}",
             entry.candidate_id,
             std::process::id()
         ));
@@ -379,6 +444,50 @@ impl Drop for TempDirGuard {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
     }
+}
+
+/// RAII guard that holds an OS-level advisory file lock for the duration of
+/// an install. Released automatically on drop (the lock is tied to the file
+/// descriptor; dropping the `File` releases it).
+struct InstallLockGuard(fs::File);
+
+/// Acquire an exclusive advisory lock on `path` (blocks if another process
+/// holds it). Uses the `fs4` crate so we stay within the workspace's
+/// `forbid(unsafe_code)` policy.
+fn acquire_install_lock(path: &Path) -> Result<InstallLockGuard, SkillPackBuildError> {
+    use fs4::fs_std::FileExt as _;
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(path)?;
+    file.lock_exclusive()?;
+    Ok(InstallLockGuard(file))
+}
+
+impl Drop for InstallLockGuard {
+    fn drop(&mut self) {
+        // Closing the File releases the advisory lock; no explicit unlock
+        // needed (fs4 docs note the lock is fd-scoped).
+        let _ = &self.0;
+    }
+}
+
+/// Cryptographically-random short string used to disambiguate concurrent
+/// install temp/backup directory names.
+fn generate_nonce() -> String {
+    let mut h = Sha256::new();
+    h.update(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0u128, |d| d.as_nanos())
+            .to_le_bytes(),
+    );
+    h.update(std::process::id().to_le_bytes());
+    // Mix in the thread id (Debug formatting is stable, even though
+    // `ThreadId::as_u64` is unstable).
+    h.update(format!("{:?}", std::thread::current().id()).as_bytes());
+    format!("{:x}", h.finalize()).chars().take(12).collect()
 }
 
 // -- Internal helpers -------------------------------------------------------

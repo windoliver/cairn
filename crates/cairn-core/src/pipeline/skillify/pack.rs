@@ -113,9 +113,34 @@ impl SkillPackManifest {
     /// Returns [`SkillPackError`] on validation failure.
     pub fn validate(&self, cairn_version: &str) -> Result<(), SkillPackError> {
         self.validate_name()?;
+        self.validate_entry_path_tokens()?;
         self.validate_no_duplicate_lanes()?;
         self.validate_cairn_compat(cairn_version)?;
         self.validate_dependencies()?;
+        Ok(())
+    }
+
+    /// Reject manifest entries whose `candidate_id` or `slug` contain path
+    /// separators, parent components, or non-token characters. Without this
+    /// check, an archive can craft `candidate_id = "../evil"` and escape the
+    /// `.cairn/evolution/skillify/` install root.
+    fn validate_entry_path_tokens(&self) -> Result<(), SkillPackError> {
+        for entry in &self.skills {
+            if !is_safe_path_token(&entry.candidate_id) {
+                return Err(SkillPackError::InvalidName {
+                    reason: format!(
+                        "candidate_id `{}` is not a safe path token \
+                         (alphanumeric, hyphens, underscores only; no separators or dot components)",
+                        entry.candidate_id
+                    ),
+                });
+            }
+            if !is_safe_path_token(&entry.slug) {
+                return Err(SkillPackError::InvalidName {
+                    reason: format!("slug `{}` is not a safe path token", entry.slug),
+                });
+            }
+        }
         Ok(())
     }
 
@@ -175,6 +200,21 @@ impl SkillPackManifest {
         }
         Ok(())
     }
+}
+
+/// Path-token validator matching the rules used by [`SkillSpecDraft`] and
+/// candidate id derivation. A token is safe iff it is non-empty, not `.` or
+/// `..`, contains no path separators, and consists only of ASCII
+/// alphanumerics, hyphens, and underscores.
+fn is_safe_path_token(value: &str) -> bool {
+    !value.is_empty()
+        && value != "."
+        && value != ".."
+        && !value.contains('/')
+        && !value.contains('\\')
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
 }
 
 fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
