@@ -23,6 +23,15 @@ pub mod redact;
 pub mod registry;
 pub mod webhook;
 
+/// In-tree fixture connector and helpers for framework tests.
+///
+/// Available in `#[cfg(test)]` and when compiled with `features = ["fixture"]`.
+/// Never a runtime dependency — do not re-export items from this module at
+/// the crate root; downstream tests import via the full path
+/// `cairn_connectors_core::fixture::FixtureConnector`.
+#[cfg(any(test, feature = "fixture"))]
+pub mod fixture;
+
 pub use connector::{
     CONTRACT_VERSION, Connector, ConnectorCapabilities, ConnectorPlugin, PollContext, PollOutcome,
     WebhookContext,
