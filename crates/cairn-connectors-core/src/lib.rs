@@ -13,6 +13,7 @@
 
 pub mod connector;
 pub mod credential;
+pub mod emit;
 pub mod error;
 pub mod event;
 pub mod manifest;
@@ -22,10 +23,11 @@ pub mod redact;
 pub mod webhook;
 
 pub use connector::{
-    Connector, ConnectorCapabilities, ConnectorPlugin, PollContext, PollOutcome, WebhookContext,
-    CONTRACT_VERSION,
+    CONTRACT_VERSION, Connector, ConnectorCapabilities, ConnectorPlugin, PollContext, PollOutcome,
+    WebhookContext,
 };
 pub use credential::{CredentialHandle, CredentialStore, InMemoryCredentialStore};
+pub use emit::{PipelineEmit, build_capture_event};
 pub use error::ConnectorError;
 pub use event::{
     ConnectorEvent, ConnectorEventId, ConnectorPayload, ConnectorScope, DeliveryMode, SourceRef,

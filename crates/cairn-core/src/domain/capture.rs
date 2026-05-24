@@ -1249,7 +1249,11 @@ const fn mode_allows_family(mode: CaptureMode, family: SourceFamily) -> bool {
                 | SourceFamily::Clipboard
                 | SourceFamily::Voice
                 | SourceFamily::Screen
-                | SourceFamily::RecordingBatch,
+                | SourceFamily::RecordingBatch
+                // External connector events are sensor-driven (Mode A);
+                // the connector sensor identity authors its own raw events
+                // exactly as a local sensor does (brief §9.1, §19 v0.3).
+                | SourceFamily::External,
         ) | (
             CaptureMode::Explicit,
             SourceFamily::Cli | SourceFamily::Mcp | SourceFamily::RecordingBatch,
@@ -1295,6 +1299,11 @@ fn family_for_label(label: &SensorLabel) -> Option<SourceFamily> {
         Some(SourceFamily::Mcp)
     } else if s.starts_with("local:proactive:") {
         Some(SourceFamily::Proactive)
+    } else if s.starts_with("local:connector:") {
+        // External connector sensors (brief §9.1, §19 v0.3).
+        // Each adapter registers a `local:connector:<name>:v<n>` identity
+        // and emits `CapturePayload::External` events in `CaptureMode::Auto`.
+        Some(SourceFamily::External)
     } else {
         None
     }

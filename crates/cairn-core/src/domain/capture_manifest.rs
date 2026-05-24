@@ -45,6 +45,9 @@ pub const P0_SENSOR_FAMILIES: &[&str] = &[
     "cli",
     "mcp",
     "proactive",
+    // External connector sensors (brief §9.1, §19 v0.3). Each connector
+    // adapter registers a `local:connector:<name>:v<n>` sensor identity.
+    "connector",
 ];
 
 /// `local:<family>:` prefixes derived from [`P0_SENSOR_FAMILIES`].
@@ -63,6 +66,7 @@ pub const P0_SENSOR_LABEL_PREFIXES: &[&str] = &[
     "local:cli:",
     "local:mcp:",
     "local:proactive:",
+    "local:connector:",
 ];
 
 /// Closed allowlist of full sensor labels accepted by P0 without any
