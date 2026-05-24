@@ -991,6 +991,7 @@ fn run_admin(matches: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
         Some(("workflow", sub)) => match sub.subcommand() {
             Some(("run-failing", s)) => verbs::admin_workflow::run_failing(s, &vault_root),
             Some(("run-succeeding", s)) => verbs::admin_workflow::run_succeeding(s, &vault_root),
+            Some(("run-evolution", s)) => verbs::admin_workflow::run_evolution(s, &vault_root),
             Some(("simulate-crash", s)) => verbs::admin_workflow::simulate_crash(s, &vault_root),
             Some(("recover", s)) => verbs::admin_workflow::recover(s, &vault_root),
             _ => unreachable!(
