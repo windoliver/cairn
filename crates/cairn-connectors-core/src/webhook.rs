@@ -74,6 +74,13 @@ pub fn verify_hmac_sha256(
     // Rejection path 2: bad hex.
     let provided = hex::decode(sig_hex).map_err(|_| ConnectorError::SignatureMismatch)?;
 
+    // SHA-256 output is always 32 bytes; any other length is treated as
+    // bad hex. Pre-checking keeps the constant-time path on the byte loop,
+    // not on the length field of GenericArray vs Vec<u8>.
+    if provided.len() != 32 {
+        return Err(ConnectorError::SignatureMismatch);
+    }
+
     // Rejection path 3: MAC keying failure (unreachable in practice — only
     // fails if the key length overflows usize, which cannot happen here, but
     // we map it to SignatureMismatch per the single-rejection-reason rule).
