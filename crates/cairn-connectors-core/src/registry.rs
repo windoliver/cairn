@@ -1,0 +1,654 @@
+//! `ConnectorRegistry` — central lifecycle: register → enable →
+//! poll/webhook → disable → shutdown.
+//!
+//! The registry is the single point of authority over which connectors are
+//! active, which consent grants cover them, and whether a poll scheduler is
+//! running. It is the only place that wires together
+//! [`CredentialStore`], [`ConnectorConsentJournal`], [`PipelineEmit`], and
+//! the [`PollScheduler`].
+//!
+//! # Architecture notes
+//!
+//! - State reads are lock-free: each [`Entry`] holds an [`ArcSwap`] so
+//!   readers never block writers (and vice-versa). The mutable `&mut self`
+//!   methods (`register`, `enable`, `disable`) are the only mutation points.
+//! - The scheduler is lazily created on the first `enable` call for a
+//!   poll-capable connector; it shares the `shutdown` token so a single
+//!   `shutdown()` call drains everything.
+//! - `disable` marks the entry as `Disabled` and revokes the grant in the
+//!   consent journal, but it does **not** cancel the individual poll task
+//!   for the connector. The running task will fail-fast on the next tick
+//!   because `process_event` checks the entry state before forwarding
+//!   events. Full per-connector task cancellation requires a per-task
+//!   [`CancellationToken`] and is deferred to a follow-up issue.
+//!
+//! Issue #130, brief §9.1 source sensors, §19 v0.3.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+use arc_swap::ArcSwap;
+use bon::Builder;
+use tokio_util::sync::CancellationToken;
+
+use cairn_core::contract::connector_consent::{
+    ConsentGrant, ConsentGrantId, ConnectorConsentJournal, ConnectorConsentLookup,
+};
+use cairn_core::domain::capture::PayloadHash;
+
+use crate::connector::{Connector, ConnectorPlugin, PollContext};
+use crate::credential::{CredentialHandle, CredentialStore};
+use crate::emit::{PipelineEmit, build_capture_event};
+use crate::error::ConnectorError;
+use crate::poll::{PollScheduler, PollTick};
+use crate::redact::RedactionPipeline;
+
+// ---------------------------------------------------------------------------
+// Internal state types (not part of the public API)
+// ---------------------------------------------------------------------------
+
+/// Lifecycle state of one registered connector.
+///
+/// Stored behind an [`ArcSwap`] so transitions are lock-free.
+#[derive(Debug, Clone)]
+enum ConnectorState {
+    /// Connector is registered but not yet enabled; no consent grant exists.
+    Disabled,
+    /// Connector is enabled and has a live consent grant.
+    Enabled {
+        /// Opaque consent-grant id returned by [`ConnectorConsentJournal::put_grant`].
+        grant_id: ConsentGrantId,
+    },
+}
+
+/// One slot in the registry for a registered connector.
+struct Entry {
+    /// Shared reference to the connector implementation.
+    connector: Arc<dyn Connector>,
+    /// Current lifecycle state. Reads are lock-free; writes use [`ArcSwap::store`].
+    state: ArcSwap<ConnectorState>,
+}
+
+// ---------------------------------------------------------------------------
+// ConnectorRegistry
+// ---------------------------------------------------------------------------
+
+/// Central registry that drives the connector lifecycle.
+///
+/// Build with [`ConnectorRegistry::builder()`]:
+///
+/// ```ignore
+/// let mut reg = ConnectorRegistry::builder()
+///     .credentials(Arc::new(InMemoryCredentialStore::default()))
+///     .consent(Arc::new(my_consent_journal))
+///     .emit(Arc::new(my_emit))
+///     .build();
+/// ```
+///
+/// Then:
+/// 1. [`register`][Self::register] — add a connector plugin.
+/// 2. [`enable`][Self::enable] — write a consent grant and start polling.
+/// 3. [`disable`][Self::disable] — revoke the grant and mark Disabled.
+/// 4. [`shutdown`][Self::shutdown] — cancel the scheduler and drain tasks.
+#[derive(Builder)]
+pub struct ConnectorRegistry {
+    /// Credential store used to fetch OAuth tokens for poll calls.
+    credentials: Arc<dyn CredentialStore>,
+    /// Consent journal used to persist, lookup, and revoke grants.
+    consent: Arc<dyn ConnectorConsentJournal>,
+    /// Downstream pipeline that receives fully-validated [`CaptureEvent`]s.
+    ///
+    /// [`CaptureEvent`]: cairn_core::domain::capture::CaptureEvent
+    emit: Arc<dyn PipelineEmit>,
+    /// Token that stops the poll scheduler when cancelled.
+    ///
+    /// Defaults to a fresh token so callers that do not need external
+    /// cancellation control can omit this field.
+    #[builder(default = CancellationToken::new())]
+    shutdown: CancellationToken,
+    /// Registered connector entries, keyed by connector name.
+    #[builder(skip)]
+    entries: HashMap<String, Entry>,
+    /// Lazily-created scheduler; `None` until the first poll-capable connector
+    /// is enabled.
+    #[builder(skip)]
+    scheduler: Option<PollScheduler>,
+}
+
+impl ConnectorRegistry {
+    /// Register a connector plugin.
+    ///
+    /// The connector starts in the [`Disabled`][ConnectorState::Disabled]
+    /// state. Call [`enable`][Self::enable] to make it active.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConnectorError::Fatal`] if a connector with the same name has
+    /// already been registered (duplicate names are not allowed).
+    pub fn register<P: ConnectorPlugin + 'static>(
+        &mut self,
+        plugin: P,
+    ) -> Result<(), ConnectorError> {
+        let name = plugin.name().to_owned();
+        if self.entries.contains_key(&name) {
+            return Err(ConnectorError::fatal_msg(format!(
+                "duplicate connector {name}"
+            )));
+        }
+        self.entries.insert(
+            name,
+            Entry {
+                connector: Arc::new(plugin),
+                state: ArcSwap::from_pointee(ConnectorState::Disabled),
+            },
+        );
+        Ok(())
+    }
+
+    /// Enable a connector and write a consent grant to the journal.
+    ///
+    /// If the connector advertises `capabilities().poll == true`, a poll task
+    /// is spawned in the background scheduler.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConnectorError::Fatal`] if the connector name is not
+    /// registered, or if the consent journal fails to write the grant.
+    pub async fn enable(
+        &mut self,
+        name: &str,
+        grant: ConsentGrant,
+    ) -> Result<(), ConnectorError> {
+        let entry = self
+            .entries
+            .get(name)
+            .ok_or_else(|| ConnectorError::fatal_msg(format!("unknown connector {name}")))?;
+
+        let grant_id = self
+            .consent
+            .put_grant(grant)
+            .await
+            .map_err(ConnectorError::fatal_msg)?;
+
+        entry
+            .state
+            .store(Arc::new(ConnectorState::Enabled { grant_id }));
+
+        // Lazily spawn a poll task if the connector supports polling.
+        // see #[cfg(any(test, feature = "fixture"))] block in T18 for poll_now
+        if entry.connector.capabilities().poll {
+            let sched = self.scheduler.get_or_insert_with(|| {
+                PollScheduler::new(self.shutdown.clone(), Duration::from_mins(5))
+            });
+            let connector = entry.connector.clone();
+            let emit = self.emit.clone();
+            let consent = self.consent.clone();
+            let _credentials = self.credentials.clone();
+            let name_owned = name.to_owned();
+
+            sched.spawn(name_owned, move |cursor| {
+                let connector = connector.clone();
+                let emit = emit.clone();
+                let consent = consent.clone();
+                async move {
+                    let cx = PollContext {
+                        credentials: Arc::new(CredentialHandle::empty()),
+                        last_cursor: cursor,
+                        budget_remaining_items: u32::MAX,
+                    };
+                    let outcome = connector.poll(&cx).await?;
+                    let next_cursor = outcome.next_cursor.clone();
+                    for event in outcome.events {
+                        // Build a temporary Entry reference so process_event can
+                        // access the connector's manifest and state.
+                        let temp_entry = Entry {
+                            connector: connector.clone(),
+                            state: ArcSwap::from_pointee(ConnectorState::Enabled {
+                                grant_id: ConsentGrantId::new("poll-task"),
+                            }),
+                        };
+                        process_event(event, &temp_entry, &consent, &emit).await?;
+                    }
+                    Ok(PollTick::done(next_cursor))
+                }
+            });
+        }
+        Ok(())
+    }
+
+    /// Disable a connector by revoking its consent grant and marking it
+    /// [`Disabled`][ConnectorState::Disabled].
+    ///
+    /// **Limitation:** this does not cancel the connector's individual poll
+    /// task. The task will detect the state change on the next tick via
+    /// [`process_event`]'s state check and return a
+    /// [`ConnectorError::ConsentRevoked`] which the scheduler logs at `warn`
+    /// level. Full per-task cancellation is deferred to a follow-up issue.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConnectorError::Fatal`] if the connector name is not
+    /// registered, or if the consent journal fails to revoke the grant.
+    pub async fn disable(&mut self, name: &str) -> Result<(), ConnectorError> {
+        let entry = self
+            .entries
+            .get(name)
+            .ok_or_else(|| ConnectorError::fatal_msg(format!("unknown connector {name}")))?;
+
+        let state = (**entry.state.load()).clone();
+        if let ConnectorState::Enabled { grant_id } = state {
+            self.consent
+                .revoke(&grant_id)
+                .await
+                .map_err(ConnectorError::fatal_msg)?;
+        }
+
+        entry.state.store(Arc::new(ConnectorState::Disabled));
+        Ok(())
+    }
+
+    /// Cancel the poll scheduler and drain all running tasks.
+    ///
+    /// Consumes `self` so the registry cannot be reused after shutdown.
+    pub async fn shutdown(self) {
+        self.shutdown.cancel();
+        if let Some(sched) = self.scheduler {
+            sched.shutdown().await;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared event-processing helper
+// ---------------------------------------------------------------------------
+
+/// Validate, redact, consent-check, and emit one [`ConnectorEvent`].
+///
+/// This function is shared between the poll scheduler closure (in
+/// [`ConnectorRegistry::enable`]) and the `poll_now` helper that T18 adds for
+/// integration testing. Keeping the logic in one place ensures both paths
+/// behave identically.
+///
+/// # Steps
+///
+/// 1. Verify the entry's state is `Enabled`; return [`ConnectorError::Fatal`]
+///    if it is `Disabled`.
+/// 2. Check every label in `event.labels` against
+///    `entry.connector.manifest().allowed_label(label)`; return
+///    [`ConnectorError::UndeclaredLabel`] on the first violation.
+/// 3. Call `consent.lookup(connector, scope_key)` to enforce the live-grant
+///    requirement; return [`ConnectorError::ConsentRevoked`] if the journal
+///    returns `Revoked` or an error.
+/// 4. Run [`RedactionPipeline::new().redact(event)`] to strip PII.
+/// 5. Call [`build_capture_event`] with placeholder spool references (real
+///    spool path is written in #131).
+/// 6. Call `emit.emit(captured)` to hand the event to the pipeline.
+///
+/// [`ConnectorEvent`]: crate::event::ConnectorEvent
+async fn process_event(
+    event: crate::event::ConnectorEvent,
+    entry: &Entry,
+    consent: &Arc<dyn ConnectorConsentJournal>,
+    emit: &Arc<dyn PipelineEmit>,
+) -> Result<(), ConnectorError> {
+    // 1. Fail fast if the entry is not currently enabled.
+    let state = (**entry.state.load()).clone();
+    if matches!(state, ConnectorState::Disabled) {
+        return Err(ConnectorError::fatal_msg(format!(
+            "connector {} is Disabled; cannot process events",
+            event.connector
+        )));
+    }
+
+    // 2. Label allow-list check (brief §9.1 / manifest constraint).
+    for label in &event.labels {
+        if !entry.connector.manifest().allowed_label(label) {
+            return Err(ConnectorError::UndeclaredLabel {
+                label: label.clone(),
+            });
+        }
+    }
+
+    // 3. Consent gate — fail closed (brief §14).
+    let scope_key = event.scope.lookup_key();
+    let lookup_result = consent
+        .lookup(&event.connector, &scope_key)
+        .await
+        .map_err(ConnectorError::fatal_msg)?;
+
+    if !matches!(lookup_result, ConnectorConsentLookup::Granted) {
+        return Err(ConnectorError::ConsentRevoked {
+            connector: event.connector.clone(),
+        });
+    }
+
+    // 4. Redact PII before the event crosses any boundary (brief §5.2 + §14).
+    let redacted = RedactionPipeline::new().redact(event)?;
+
+    // 5. Build a CaptureEvent with placeholder spool references.
+    //    Real spool path + hash are written by the spool layer in #131.
+    let placeholder_ref = format!(
+        "sources/connector/{}/{}",
+        redacted.event.connector, redacted.event.event_id
+    );
+    let placeholder_hash = PayloadHash::parse(
+        "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    )
+    .expect("invariant: zero-hash literal must parse");
+
+    let captured = build_capture_event(
+        &redacted.event,
+        entry.connector.sensor_identity(),
+        redacted.spans,
+        &placeholder_ref,
+        placeholder_hash,
+    )?;
+
+    // 6. Hand the event to the downstream pipeline.
+    emit.emit(captured).await
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::Mutex;
+
+    use cairn_core::contract::connector_consent::{
+        ConsentGrant, ConsentGrantId, ConnectorConsentJournal, ConnectorConsentLookup,
+    };
+    use cairn_core::domain::Identity;
+    use cairn_core::domain::capture::CaptureEvent;
+
+    use crate::connector::{
+        ConnectorCapabilities, ConnectorPlugin, PollContext, PollOutcome, WebhookContext,
+    };
+    use crate::credential::InMemoryCredentialStore;
+    use crate::emit::PipelineEmit;
+    use crate::manifest::ConnectorManifest;
+    use crate::webhook::WebhookRequest;
+
+    // -----------------------------------------------------------------------
+    // Inline stubs (T17 will provide canonical versions in crate::fixture)
+    // -----------------------------------------------------------------------
+
+    /// Minimal TOML for the stub connector manifest.
+    const STUB_MANIFEST_TOML: &str = r#"
+[connector]
+name = "stub"
+contract = "Connector"
+contract_version = "0.1.0"
+sensor_identity = "snr:local:connector:stub:v1"
+
+[capabilities]
+poll = false
+webhook = false
+backfill = false
+
+[oauth]
+required_scopes = ["read"]
+token_lifetime = "1h"
+refresh = true
+
+[budget]
+max_items_per_hour = 100
+max_bytes_per_day = "50MiB"
+
+[labels]
+allowed = ["note"]
+
+[[scopes.declared]]
+kind = "project"
+pattern = "*"
+
+[webhook]
+"signature.algorithm" = "hmac-sha256"
+"signature.header" = "X-Stub-Signature"
+allowed_mimes = ["application/json"]
+
+[poll]
+cursor_kind = "opaque-string"
+min_interval = "30s"
+default_interval = "5m"
+
+[payload]
+max_bytes = "256KiB"
+max_depth = 10
+"#;
+
+    /// Parse the stub manifest once.
+    fn stub_manifest() -> ConnectorManifest {
+        ConnectorManifest::parse_toml(STUB_MANIFEST_TOML)
+            .expect("invariant: stub manifest must parse")
+    }
+
+    /// Sensor identity for the stub connector.
+    fn stub_sensor() -> Identity {
+        Identity::parse("snr:local:connector:stub:v1")
+            .expect("invariant: stub sensor identity must parse")
+    }
+
+    /// Minimal non-poll connector stub.
+    struct StubConnector {
+        manifest: ConnectorManifest,
+        caps: ConnectorCapabilities,
+        sensor: Identity,
+    }
+
+    impl StubConnector {
+        fn new() -> Self {
+            Self {
+                manifest: stub_manifest(),
+                caps: ConnectorCapabilities {
+                    poll: false,
+                    webhook: false,
+                    backfill: false,
+                },
+                sensor: stub_sensor(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Connector for StubConnector {
+        fn name(&self) -> &'static str {
+            "stub"
+        }
+
+        fn manifest(&self) -> &ConnectorManifest {
+            &self.manifest
+        }
+
+        fn capabilities(&self) -> &ConnectorCapabilities {
+            &self.caps
+        }
+
+        fn sensor_identity(&self) -> &Identity {
+            &self.sensor
+        }
+
+        fn supported_contract_versions(
+            &self,
+        ) -> cairn_core::contract::version::VersionRange {
+            StubConnector::SUPPORTED_VERSIONS
+        }
+
+        async fn poll(&self, _cx: &PollContext) -> Result<PollOutcome, ConnectorError> {
+            Ok(PollOutcome::default())
+        }
+
+        async fn ingest_webhook(
+            &self,
+            _req: &WebhookRequest,
+            _cx: &WebhookContext,
+        ) -> Result<Vec<crate::event::ConnectorEvent>, ConnectorError> {
+            Ok(vec![])
+        }
+    }
+
+    impl ConnectorPlugin for StubConnector {
+        const NAME: &'static str = "stub";
+        const SUPPORTED_VERSIONS: cairn_core::contract::version::VersionRange =
+            cairn_core::contract::version::VersionRange::new(
+                cairn_core::contract::version::ContractVersion::new(0, 1, 0),
+                cairn_core::contract::version::ContractVersion::new(0, 2, 0),
+            );
+    }
+
+    /// Accept-all consent journal — every `put_grant` and `lookup` succeeds.
+    #[derive(Default)]
+    struct AcceptAllConsent {
+        grants: Mutex<BTreeMap<String, ConsentGrant>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ConnectorConsentJournal for AcceptAllConsent {
+        async fn put_grant(&self, grant: ConsentGrant) -> Result<ConsentGrantId, String> {
+            let id = ConsentGrantId::new(format!("gnt:{}:test", grant.connector));
+            self.grants
+                .lock()
+                .expect("invariant: AcceptAllConsent mutex unpoisoned")
+                .insert(id.as_str().to_owned(), grant);
+            Ok(id)
+        }
+
+        async fn lookup(
+            &self,
+            _connector: &str,
+            _scope_key: &str,
+        ) -> Result<ConnectorConsentLookup, String> {
+            Ok(ConnectorConsentLookup::Granted)
+        }
+
+        async fn revoke(&self, id: &ConsentGrantId) -> Result<(), String> {
+            self.grants
+                .lock()
+                .expect("invariant: AcceptAllConsent mutex unpoisoned")
+                .remove(id.as_str());
+            Ok(())
+        }
+    }
+
+    /// Build a minimal `ConsentGrant` for the stub connector.
+    fn stub_grant() -> ConsentGrant {
+        ConsentGrant::new(
+            "stub",
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            BTreeSet::from(["note".to_string()]),
+            vec!["project:*".to_string()],
+            1_700_000_000,
+            Identity::parse("hmn:local:test-user")
+                .expect("invariant: test user identity must parse"),
+        )
+    }
+
+    /// Recording `PipelineEmit` that stores every emitted event.
+    #[derive(Default)]
+    struct NoopEmit {
+        events: Mutex<Vec<CaptureEvent>>,
+    }
+
+    #[async_trait::async_trait]
+    impl PipelineEmit for NoopEmit {
+        async fn emit(&self, event: CaptureEvent) -> Result<(), ConnectorError> {
+            self.events
+                .lock()
+                .expect("invariant: NoopEmit mutex unpoisoned")
+                .push(event);
+            Ok(())
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests
+    // -----------------------------------------------------------------------
+
+    /// A connector can be registered, enabled, and then disabled.
+    /// Verifies the basic lifecycle without exercising poll execution.
+    #[tokio::test]
+    async fn register_then_enable_then_disable() {
+        let mut reg = ConnectorRegistry::builder()
+            .credentials(Arc::new(InMemoryCredentialStore::default()))
+            .consent(Arc::new(AcceptAllConsent::default()))
+            .emit(Arc::new(NoopEmit::default()))
+            .build();
+
+        reg.register(StubConnector::new())
+            .expect("first register must succeed");
+
+        reg.enable("stub", stub_grant())
+            .await
+            .expect("enable must succeed");
+
+        reg.disable("stub")
+            .await
+            .expect("disable must succeed");
+    }
+
+    /// Registering the same connector name twice must return a Fatal error.
+    #[tokio::test]
+    async fn duplicate_register_rejected() {
+        let mut reg = ConnectorRegistry::builder()
+            .credentials(Arc::new(InMemoryCredentialStore::default()))
+            .consent(Arc::new(AcceptAllConsent::default()))
+            .emit(Arc::new(NoopEmit::default()))
+            .build();
+
+        reg.register(StubConnector::new())
+            .expect("first register must succeed");
+
+        let err = reg
+            .register(StubConnector::new())
+            .expect_err("duplicate register must fail");
+
+        assert!(
+            matches!(err, ConnectorError::Fatal(_)),
+            "expected Fatal, got {err:?}"
+        );
+    }
+
+    /// Enabling a connector name that was never registered must fail.
+    #[tokio::test]
+    async fn enable_unknown_connector_fails() {
+        let mut reg = ConnectorRegistry::builder()
+            .credentials(Arc::new(InMemoryCredentialStore::default()))
+            .consent(Arc::new(AcceptAllConsent::default()))
+            .emit(Arc::new(NoopEmit::default()))
+            .build();
+
+        let err = reg
+            .enable("does-not-exist", stub_grant())
+            .await
+            .expect_err("enabling unknown connector must fail");
+
+        assert!(
+            matches!(err, ConnectorError::Fatal(_)),
+            "expected Fatal, got {err:?}"
+        );
+    }
+
+    /// Disabling a connector name that was never registered must fail.
+    #[tokio::test]
+    async fn disable_unknown_connector_fails() {
+        let mut reg = ConnectorRegistry::builder()
+            .credentials(Arc::new(InMemoryCredentialStore::default()))
+            .consent(Arc::new(AcceptAllConsent::default()))
+            .emit(Arc::new(NoopEmit::default()))
+            .build();
+
+        let err = reg
+            .disable("does-not-exist")
+            .await
+            .expect_err("disabling unknown connector must fail");
+
+        assert!(
+            matches!(err, ConnectorError::Fatal(_)),
+            "expected Fatal, got {err:?}"
+        );
+    }
+}

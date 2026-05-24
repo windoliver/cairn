@@ -19,7 +19,9 @@ fixture = []
 
 [dependencies]
 cairn-core = { workspace = true }
+arc-swap = { workspace = true }
 async-trait = { workspace = true }
+bon = { workspace = true }
 axum = { workspace = true }
 hex = { workspace = true }
 hmac = { workspace = true }

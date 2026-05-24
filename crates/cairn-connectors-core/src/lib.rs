@@ -20,6 +20,7 @@ pub mod manifest;
 pub mod poll;
 pub mod rate_limit;
 pub mod redact;
+pub mod registry;
 pub mod webhook;
 
 pub use connector::{
@@ -36,4 +37,5 @@ pub use manifest::ConnectorManifest;
 pub use poll::{PollScheduler, PollTick};
 pub use rate_limit::RateLimit;
 pub use redact::{Redacted, RedactionPipeline};
+pub use registry::ConnectorRegistry;
 pub use webhook::{WebhookRequest, WebhookRouter};
