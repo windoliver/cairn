@@ -138,11 +138,41 @@ fn p0_replay_manifest_uses_canonical_trace_event_names() {
 
 #[test]
 fn replay_manifests_deserialize() {
-    for name in ["p0_stories", "p0_keyword_only", "codex_consumer"] {
+    for name in [
+        "p0_stories",
+        "p0_keyword_only",
+        "codex_consumer",
+        "research_domain",
+        "engineering_domain",
+        "support_domain",
+    ] {
         let scenario = load_named_scenario(name).expect("load scenario");
         assert_eq!(scenario.id, name);
         assert!(!scenario.records.is_empty());
         assert!(!scenario.actions.is_empty());
+    }
+}
+
+#[test]
+fn extended_domain_replay_suites_document_goals_and_golden_expectations() {
+    let readme_path = cairn_test_fixtures::fixture_v0_dir().join("replay/README.md");
+    let readme = std::fs::read_to_string(&readme_path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", readme_path.display()));
+    for needle in [
+        "research_domain",
+        "engineering_domain",
+        "support_domain",
+        "long-horizon memory",
+        "multi-session coherence",
+        "privacy/forget",
+        "search relevance",
+        "Golden expectations",
+    ] {
+        assert!(
+            readme.contains(needle),
+            "missing {needle:?} in {}",
+            readme_path.display()
+        );
     }
 }
 
@@ -167,5 +197,35 @@ async fn codex_consumer_replay_passes_end_to_end() {
             report.checks.iter().any(|check| check.verb == verb),
             "missing check for {verb}: {report:#?}"
         );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn extended_domain_replay_suites_pass_end_to_end_without_network_or_llm() {
+    for name in ["research_domain", "engineering_domain", "support_domain"] {
+        let scenario = load_named_scenario(name).expect("load scenario");
+        assert!(
+            !scenario.config.local_embeddings,
+            "{name} must use deterministic keyword-only replay"
+        );
+
+        let report = cairn_test_fixtures::replay::run_scenario(&scenario)
+            .await
+            .unwrap_or_else(|e| panic!("run {name}: {e}"));
+        assert!(report.passed(), "{report:#?}");
+
+        for verb in [
+            "capture_trace",
+            "forget_record",
+            "retrieve_session",
+            "retrieve_turn",
+            "search",
+            "summarize",
+        ] {
+            assert!(
+                report.checks.iter().any(|check| check.verb == verb),
+                "{name} missing check for {verb}: {report:#?}"
+            );
+        }
     }
 }

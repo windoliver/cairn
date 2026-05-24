@@ -1,0 +1,131 @@
+{
+  "id": "support_domain",
+  "description": "Extended support replay covering long-horizon customer memory, multi-session escalation coherence, search relevance, and privacy/forget.",
+  "config": {
+    "local_embeddings": false
+  },
+  "records": [
+    {
+      "id": "01HQZX9F5N00000000000000S0",
+      "kind": "trace",
+      "class": "episodic",
+      "visibility": "private",
+      "body": "support session one user captured acme billing outage intake",
+      "session_id": "support-acme-outage",
+      "turn_id": "1",
+      "sequence": 1,
+      "trace_event": "user_message"
+    },
+    {
+      "id": "01HQZX9F5N00000000000000S1",
+      "kind": "trace",
+      "class": "episodic",
+      "visibility": "private",
+      "body": "agent triaged acme billing outage to invoice webhook delay",
+      "session_id": "support-acme-outage",
+      "turn_id": "1",
+      "sequence": 2,
+      "trace_event": "agent_message"
+    },
+    {
+      "id": "01HQZX9F5N00000000000000S2",
+      "kind": "trace",
+      "class": "episodic",
+      "visibility": "private",
+      "body": "support session two user requested escalation update",
+      "session_id": "support-acme-outage",
+      "turn_id": "2",
+      "sequence": 3,
+      "trace_event": "user_message"
+    },
+    {
+      "id": "01HQZX9F5N00000000000000S3",
+      "kind": "trace",
+      "class": "episodic",
+      "visibility": "private",
+      "body": "agent resolved acme billing outage with webhook replay remediation",
+      "session_id": "support-acme-outage",
+      "turn_id": "2",
+      "sequence": 4,
+      "trace_event": "agent_message"
+    },
+    {
+      "id": "01HQZX9F5N00000000000000S4",
+      "kind": "reasoning",
+      "class": "semantic",
+      "visibility": "private",
+      "body": "support summary preserves acme billing outage intake escalation and webhook replay remediation",
+      "session_id": "support-acme-outage",
+      "turn_id": "summary",
+      "sequence": 5,
+      "trace_event": "turn_summary"
+    },
+    {
+      "id": "01HQZX9F5N00000000000000S5",
+      "kind": "playbook",
+      "class": "procedural",
+      "visibility": "private",
+      "body": "support playbook acme billing outage remediation replay invoice webhook queue"
+    },
+    {
+      "id": "01HQZX9F5N00000000000000S6",
+      "kind": "fact",
+      "class": "semantic",
+      "visibility": "private",
+      "body": "sensitive support contact violet pager should be forgotten"
+    },
+    {
+      "id": "01HQZX9F5N00000000000000S7",
+      "kind": "fact",
+      "class": "semantic",
+      "visibility": "private",
+      "body": "support unrelated note update canned response"
+    }
+  ],
+  "actions": [
+    {
+      "verb": "capture_trace",
+      "story": "SUPPORT_CAPTURE_LONG_HORIZON",
+      "session_id": "support-acme-outage",
+      "expected_trace_events": ["user_message", "agent_message", "user_message", "agent_message", "turn_summary"]
+    },
+    {
+      "verb": "retrieve_session",
+      "story": "SUPPORT_MULTI_SESSION_COHERENCE",
+      "session_id": "support-acme-outage",
+      "expected_turn_ids": ["1", "2"],
+      "expected_trace_events": ["user_message", "agent_message", "user_message", "agent_message", "turn_summary"]
+    },
+    {
+      "verb": "retrieve_turn",
+      "story": "SUPPORT_RETRIEVE_LATER_TURN",
+      "session_id": "support-acme-outage",
+      "turn_id": "2",
+      "expected_trace_events": ["user_message", "agent_message"]
+    },
+    {
+      "verb": "summarize",
+      "story": "SUPPORT_SUMMARY_GOLDEN",
+      "session_id": "support-acme-outage",
+      "expected_record_ids": ["01HQZX9F5N00000000000000S4"]
+    },
+    {
+      "verb": "search",
+      "story": "SUPPORT_SEARCH_RELEVANCE",
+      "mode": "keyword",
+      "query": "acme billing outage remediation webhook",
+      "limit": 1,
+      "expected": {
+        "status": "hits",
+        "record_ids": ["01HQZX9F5N00000000000000S5"]
+      }
+    },
+    {
+      "verb": "forget_record",
+      "story": "SUPPORT_PRIVACY_FORGET",
+      "record_id": "01HQZX9F5N00000000000000S6",
+      "followup_query": "sensitive support contact violet pager",
+      "expected_absent_from_search": true
+    }
+  ]
+}
