@@ -16,8 +16,8 @@ use cairn_core::mcp_auth::{ConfigBackedScope, McpSessionScope};
 use cairn_workflows::scheduler::HandlerRegistryBuilder;
 use cairn_workflows::{
     ConsolidationForgetCleanupHandler, ConsolidationHandler, DreamHandler, EvaluationHandler,
-    ExpirationHandler, Scheduler, SchedulerConfig, SkillifyHandler, SqliteJobStore, SystemClock,
-    default_golden_checks,
+    EvolutionHandler, ExpirationHandler, Scheduler, SchedulerConfig, SkillifyHandler,
+    SqliteJobStore, SystemClock, default_golden_checks,
 };
 
 /// Outcome of resolving the `[mcp.stdio]` block into runtime components.
@@ -244,6 +244,7 @@ pub fn run(
                     default_golden_checks(),
                     config.evaluation.clone(),
                 );
+                let evolution_handler = EvolutionHandler::new(vault_root.to_path_buf());
 
                 let registry = HandlerRegistryBuilder::default()
                     .with(Arc::new(consolidation_handler))
@@ -252,6 +253,7 @@ pub fn run(
                     .with(Arc::new(skillify_handler))
                     .with(Arc::new(expiration_handler))
                     .with(Arc::new(evaluation_handler))
+                    .with(Arc::new(evolution_handler))
                     .build();
 
                 // Start the scheduler. `Scheduler::start` spawns tokio tasks

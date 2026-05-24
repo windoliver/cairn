@@ -5,8 +5,12 @@
 //! in-process handler.
 
 use assert_cmd::Command;
+use cairn_core::contract::job_store::{EnqueueRequest, JobId, JobKind, JobStore, RetryPolicy};
+use cairn_workflows::{EVOLUTION_KIND, SqliteJobStore};
 use serde_json::json;
 use std::path::Path;
+use std::process::{Command as ProcessCommand, Stdio};
+use std::time::{Duration, Instant};
 
 fn bootstrap_vault(vault: &Path) {
     cairn_cli::vault::bootstrap(&cairn_cli::vault::BootstrapOpts {
@@ -14,6 +18,18 @@ fn bootstrap_vault(vault: &Path) {
         force: false,
     })
     .expect("bootstrap vault");
+}
+
+fn enable_mcp_single_tenant(vault: &Path) {
+    let config_path = vault.join(".cairn/config.yaml");
+    let mut cfg = std::fs::read_to_string(&config_path).expect("read config");
+    if let Some(idx) = cfg.find("\nmcp:") {
+        cfg.truncate(idx);
+    }
+    cfg.push_str(
+        "\nmcp:\n  stdio:\n    single_tenant: true\n    principal:\n      tenant: evolution-e2e\n",
+    );
+    std::fs::write(&config_path, cfg).expect("write config");
 }
 
 fn artifact(version: u32, digest_byte: char) -> serde_json::Value {
@@ -73,6 +89,68 @@ fn run_evolution(vault: &Path, payload_path: &Path) -> std::process::Output {
         ])
         .output()
         .expect("run cli")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_scheduler_drains_queued_evolution_job() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    bootstrap_vault(temp.path());
+    enable_mcp_single_tenant(temp.path());
+
+    let db_path = temp.path().join(".cairn/cairn.db");
+    let jobs_conn = cairn_store_sqlite::open_sync(&db_path).expect("open jobs db");
+    let jobs = SqliteJobStore::new(jobs_conn).expect("jobs");
+    jobs.enqueue(EnqueueRequest {
+        job_id: JobId::new("evo-cli-mcp-scheduler"),
+        kind: JobKind::new(EVOLUTION_KIND),
+        payload: serde_json::to_vec(&passing_payload("evo_cli_mcp_scheduler"))
+            .expect("payload json"),
+        queue_key: None,
+        dedupe_key: None,
+        not_before_ms: 0,
+        retry: RetryPolicy::DEFAULT,
+    })
+    .await
+    .expect("enqueue evolution job");
+
+    let mut child = ProcessCommand::new(env!("CARGO_BIN_EXE_cairn"))
+        .arg("--vault")
+        .arg(temp.path())
+        .arg("mcp")
+        .env_remove("CAIRN_VAULT")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn cairn mcp");
+    let child_stdin = child.stdin.take().expect("stdin pipe");
+
+    let state_path = temp
+        .path()
+        .join(".cairn/evolution/evolve/evo_cli_mcp_scheduler/state.json");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline && !state_path.exists() {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    drop(child_stdin);
+    let shutdown_deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < shutdown_deadline {
+        match child.try_wait() {
+            Ok(None) => tokio::time::sleep(Duration::from_millis(50)).await,
+            Ok(Some(_)) | Err(_) => break,
+        }
+    }
+    if child.try_wait().expect("try wait").is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("cairn mcp did not exit after stdin EOF");
+    }
+
+    let state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_path).expect("state materialized"))
+            .expect("state json");
+    assert_eq!(state["state"], "promoted");
 }
 
 #[test]

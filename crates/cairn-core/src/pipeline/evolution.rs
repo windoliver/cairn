@@ -149,6 +149,18 @@ impl EvolutionGateReport {
             }
         }
 
+        for gate in &self.gates {
+            if Self::REQUIRED_FOR_PROMOTION.contains(&gate.kind) {
+                continue;
+            }
+            if matches!(
+                gate.status,
+                EvolutionGateStatus::Failed | EvolutionGateStatus::Blocked
+            ) {
+                failed.push(gate.kind);
+            }
+        }
+
         (missing, failed)
     }
 

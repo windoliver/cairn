@@ -144,6 +144,46 @@ fn promoted_lineage_links_old_proposal_eval_and_promoted_artifacts() {
 }
 
 #[test]
+fn failed_configured_optional_gate_blocks_promotion() {
+    let mut run = EvolutionRun::new(
+        "evo_proposal_4",
+        previous_skill(),
+        candidate_skill(),
+        rollback_plan(),
+    )
+    .expect("valid run");
+    let report = EvolutionGateReport {
+        gates: vec![
+            passing_gate(EvolutionGateKind::Eval, "eval:main"),
+            passing_gate(EvolutionGateKind::Privacy, "privacy:trace"),
+            passing_gate(EvolutionGateKind::Version, "version:compat"),
+            passing_gate(EvolutionGateKind::RollbackPlan, "rollback:dry-run"),
+            passing_gate(EvolutionGateKind::Canary, "canary:24h-pass"),
+            EvolutionGateResult {
+                kind: EvolutionGateKind::Review,
+                status: EvolutionGateStatus::Failed,
+                message: Some("human review rejected the candidate".to_owned()),
+                evidence_refs: vec!["review:reject".to_owned()],
+            },
+        ],
+    };
+    run.extend_gates(report);
+
+    let err = run
+        .promote("hmn:reviewer:v1", "decision:approve")
+        .expect_err("failed configured review gate must block promotion");
+
+    match err {
+        EvolutionTransitionError::PromotionBlocked { missing, failed } => {
+            assert!(missing.is_empty());
+            assert_eq!(failed, vec![EvolutionGateKind::Review]);
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+    assert_eq!(run.state(), EvolutionState::Proposed);
+}
+
+#[test]
 fn evolve_wal_graph_has_gated_canary_promotion_steps() {
     let graph = graph_for(WalKind::Evolve);
     let names: Vec<&str> = graph.steps.iter().map(|step| step.name).collect();
