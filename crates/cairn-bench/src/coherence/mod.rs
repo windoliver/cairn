@@ -164,6 +164,131 @@ pub async fn run_coherence_gate(opts: GateOptions) -> Result<GateOutcome, GateEr
     })
 }
 
+use clap::{Args, ValueEnum};
+
+/// CLI args block for the `coherence` subcommand.
+#[derive(Debug, Args)]
+pub struct CoherenceArgs {
+    /// Subcommand selector.
+    #[command(subcommand)]
+    pub cmd: CoherenceCmd,
+}
+
+/// `cairn-bench coherence <subcommand>` variants.
+#[derive(Debug, clap::Subcommand)]
+pub enum CoherenceCmd {
+    /// Run the coherence gate over the configured cassettes.
+    Run(CoherenceRunArgs),
+}
+
+/// Arguments for `cairn-bench coherence run`.
+#[derive(Debug, Args)]
+pub struct CoherenceRunArgs {
+    /// Gate mode.
+    #[arg(long, value_enum, default_value_t = CliGate::Beta)]
+    pub gate: CliGate,
+    /// Cassettes directory.
+    #[arg(long, default_value = "fixtures/v0/replay")]
+    pub cassettes: PathBuf,
+    /// Cassettes to include (default: extended #136 cassettes).
+    #[arg(long = "include", num_args = 1.., default_values_t = default_includes())]
+    pub include: Vec<String>,
+    /// Threshold manifest path.
+    #[arg(long, default_value = "crates/cairn-bench/manifests/coherence.toml")]
+    pub manifest: PathBuf,
+    /// Baseline path.
+    #[arg(long, default_value = "crates/cairn-bench/baselines/coherence.json")]
+    pub baseline: PathBuf,
+    /// Trend file path.
+    #[arg(long, default_value = "crates/cairn-bench/baselines/coherence-trend.jsonl")]
+    pub trend: PathBuf,
+    /// Overwrite the baseline with this run's scores.
+    #[arg(long)]
+    pub update_baseline: bool,
+    /// Skip appending to the trend file.
+    #[arg(long)]
+    pub no_trend_write: bool,
+    /// Machine-readable output on stdout.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// `clap` value-enum for `--gate`.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum CliGate {
+    /// Beta gate (uses `beta_min`).
+    Beta,
+    /// Release-candidate gate (uses `rc_min`).
+    Rc,
+    /// Record only, never fail.
+    None,
+}
+
+impl From<CliGate> for GateMode {
+    fn from(v: CliGate) -> Self {
+        match v {
+            CliGate::Beta => Self::Beta,
+            CliGate::Rc => Self::Rc,
+            CliGate::None => Self::None,
+        }
+    }
+}
+
+fn default_includes() -> Vec<String> {
+    vec![
+        "research_domain".to_owned(),
+        "engineering_domain".to_owned(),
+        "support_domain".to_owned(),
+    ]
+}
+
+/// Dispatch the `coherence` subcommand. Returns the process exit code.
+///
+/// # Errors
+/// Returns any orchestrator error (replay, score, threshold, trend, baseline I/O).
+pub async fn dispatch(args: CoherenceArgs) -> Result<u8, GateError> {
+    match args.cmd {
+        CoherenceCmd::Run(run) => dispatch_run(run).await,
+    }
+}
+
+async fn dispatch_run(run: CoherenceRunArgs) -> Result<u8, GateError> {
+    let trend_path = run.trend.clone();
+    let opts = GateOptions {
+        mode: run.gate.into(),
+        cassettes_dir: run.cassettes,
+        include: run.include,
+        manifest_path: run.manifest,
+        baseline_path: Some(run.baseline),
+        trend_path: run.trend,
+        update_baseline: run.update_baseline,
+        write_trend: !run.no_trend_write,
+        cairn_version: env!("CARGO_PKG_VERSION").to_owned(),
+        git_sha: std::env::var("GIT_SHA").unwrap_or_else(|_| "unknown".to_owned()),
+        now: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        run_id: ulid_like(),
+    };
+    let run_id = opts.run_id.clone();
+    let outcome = run_coherence_gate(opts).await?;
+    if run.json {
+        let value = render_json(&outcome.report, &trend_path.display().to_string(), &run_id);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&value).unwrap_or_default()
+        );
+    } else {
+        print!("{}", outcome.human);
+    }
+    Ok(if outcome.gate_passed { 0 } else { 69 })
+}
+
+fn ulid_like() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    format!("run-{nanos:032x}")
+}
+
 fn load_baseline(path: &std::path::Path) -> Result<Baseline, GateError> {
     let raw = std::fs::read_to_string(path).map_err(|source| GateError::BaselineIo {
         path: path.display().to_string(),
