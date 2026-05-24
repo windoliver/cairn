@@ -311,6 +311,10 @@ pub struct ReplaySearchAction {
     /// scoring.
     #[serde(default)]
     pub metric_category: Option<MetricCategory>,
+    /// Records that must NOT appear in the result. When non-empty, coherence
+    /// scoring auto-classifies the action as `StaleAvoidance`.
+    #[serde(default)]
+    pub stale_record_ids: Vec<String>,
 }
 
 /// Search mode in scenario manifests.
@@ -1238,6 +1242,7 @@ async fn forget_record(
         limit: 10,
         expected: ReplayExpectation::Hits { record_ids: vec![] },
         metric_category: None,
+        stale_record_ids: vec![],
     };
     let search_actual = run_search(store, scenario, &action).await;
     if search_actual.get("status").and_then(Value::as_str) != Some("hits") {
@@ -1363,6 +1368,41 @@ mod tests {
         record.extra_frontmatter = trace_frontmatter(&trace_seed());
 
         assert_eq!(trace_projection(&record, Some("session-a"), None), None);
+    }
+
+    #[test]
+    fn stale_record_ids_round_trip() {
+        let raw = serde_json::json!({
+            "verb": "search",
+            "story": "RESEARCH_STALE_AVOIDANCE",
+            "mode": "keyword",
+            "query": "lattice biology",
+            "limit": 5,
+            "expected": { "status": "hits", "record_ids": ["01HQZX9F5N00000000000000R5"] },
+            "stale_record_ids": ["01HQZX9F5N00000000000000R7"]
+        });
+        let action: ReplayAction = serde_json::from_value(raw).expect("parse action");
+        let ReplayAction::Search(search) = action else {
+            panic!("expected Search variant");
+        };
+        assert_eq!(search.stale_record_ids, vec!["01HQZX9F5N00000000000000R7".to_owned()]);
+    }
+
+    #[test]
+    fn stale_record_ids_absent_defaults_to_empty() {
+        let raw = serde_json::json!({
+            "verb": "search",
+            "story": "RESEARCH_SEARCH_RELEVANCE",
+            "mode": "keyword",
+            "query": "lattice biology drift marker",
+            "limit": 1,
+            "expected": { "status": "hits", "record_ids": ["01HQZX9F5N00000000000000R5"] }
+        });
+        let action: ReplayAction = serde_json::from_value(raw).expect("parse action");
+        let ReplayAction::Search(search) = action else {
+            panic!("expected Search variant");
+        };
+        assert!(search.stale_record_ids.is_empty());
     }
 
     #[test]

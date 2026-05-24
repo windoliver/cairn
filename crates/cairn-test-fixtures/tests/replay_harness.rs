@@ -93,6 +93,7 @@ async fn search_replay_hides_reasoning_by_default() {
             limit: 5,
             expected: ReplayExpectation::Hits { record_ids: vec![] },
             metric_category: None,
+            stale_record_ids: vec![],
         }));
 
     let report = cairn_test_fixtures::replay::run_scenario(&scenario)
