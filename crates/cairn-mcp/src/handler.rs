@@ -160,7 +160,7 @@ pub struct CairnMcpHandler {
     /// Federation runtime dependencies. When `Some`, federation verbs
     /// dispatch through the verb layer; when `None`, dispatch returns
     /// `CapabilityUnavailable`. Issue #123, brief §12.a.
-    federation: Option<FederationState>,
+    federation: Option<Box<FederationState>>,
     /// True iff `PropagationHandler` is registered on the live scheduler
     /// AND `federation` is `Some`. Controls federation capability
     /// advertisement.
@@ -375,7 +375,7 @@ impl CairnMcpHandler {
     /// returning `CapabilityUnavailable`. Issue #123, brief §12.a.
     #[must_use]
     pub fn with_federation(mut self, state: FederationState) -> Self {
-        self.federation = Some(state);
+        self.federation = Some(Box::new(state));
         self
     }
 
@@ -865,7 +865,7 @@ impl ServerHandler for CairnMcpHandler {
                     return Ok(crate::federation_tools::dispatch(
                         &name,
                         arguments,
-                        self.federation.as_ref(),
+                        self.federation.as_deref(),
                     )
                     .await);
                 }

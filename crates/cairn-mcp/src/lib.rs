@@ -109,8 +109,7 @@ register_plugin!(MCPServer, CairnMcpServer, "cairn-mcp", MANIFEST_TOML);
 pub async fn serve_stdio() -> Result<(), TransportError> {
     let handler = CairnMcpHandler::new();
     let transport = rmcp::transport::io::stdio();
-    let service = handler
-        .serve(transport)
+    let service = Box::pin(handler.serve(transport))
         .await
         .map_err(|e| TransportError::Service(e.to_string()))?;
     service
