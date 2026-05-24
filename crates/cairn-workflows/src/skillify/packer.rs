@@ -168,18 +168,48 @@ impl SkillPackBuilder {
             // Without this, every pack shipped with `requires: []` and the
             // SkillPackManifest::validate dependency-closure check was a no-op.
             all_provides.insert(lane.clone());
+            // Round 7 hardening: spec.draft.json is REQUIRED for pack
+            // build. Without a parseable spec we cannot populate
+            // requires/provides, so the dependency-closure check becomes a
+            // no-op and a pack can install with missing capabilities.
             let spec_path = cand_dir.join("skill-spec.draft.json");
-            if let Ok(spec_bytes) = fs::read(&spec_path)
-                && let Ok(spec) = serde_json::from_slice::<
-                    cairn_core::pipeline::skillify::SkillSpecDraft,
-                >(&spec_bytes)
-            {
-                for cap in spec.provides {
-                    all_provides.insert(cap);
-                }
-                for dep in spec.requires {
-                    all_requires.insert(dep);
-                }
+            let spec_bytes = fs::read(&spec_path).map_err(|e| {
+                SkillPackBuildError::Pack(SkillPackError::IntegrityFailure {
+                    expected: format!("readable skill-spec.draft.json for {cid}"),
+                    actual: format!("read failed: {e}"),
+                })
+            })?;
+            let spec: cairn_core::pipeline::skillify::SkillSpecDraft =
+                serde_json::from_slice(&spec_bytes).map_err(|e| {
+                    SkillPackBuildError::Pack(SkillPackError::IntegrityFailure {
+                        expected: format!("valid SkillSpecDraft JSON for {cid}"),
+                        actual: format!("parse failed: {e}"),
+                    })
+                })?;
+            // Sanity check: the spec's lane/slug should agree with the
+            // bundle's frontmatter-derived lane and slug. A mismatch
+            // suggests a stale or swapped spec file.
+            if spec.lane != lane {
+                return Err(SkillPackBuildError::Pack(
+                    SkillPackError::IntegrityFailure {
+                        expected: format!("spec.lane={lane}"),
+                        actual: format!("spec.lane={}", spec.lane),
+                    },
+                ));
+            }
+            if spec.slug != slug {
+                return Err(SkillPackBuildError::Pack(
+                    SkillPackError::IntegrityFailure {
+                        expected: format!("spec.slug={slug}"),
+                        actual: format!("spec.slug={}", spec.slug),
+                    },
+                ));
+            }
+            for cap in spec.provides {
+                all_provides.insert(cap);
+            }
+            for dep in spec.requires {
+                all_requires.insert(dep);
             }
 
             entries.push(SkillPackEntry {
@@ -487,6 +517,52 @@ pub fn unpack_archive(
             src.join("gate-report.json"),
             serde_json::to_vec_pretty(&blocked_report)?,
         )?;
+
+        // Round 7 hardening: reject any file in the extracted candidate
+        // tree that is NOT in the per-candidate allowlist. The allowlist
+        // is: manifest.json, gate-report.json, and every declared
+        // artifact path. Without this check, the install rename moves
+        // the entire extracted directory into the vault — letting a
+        // crafted archive smuggle unreviewed scripts, data files, or
+        // other content into .cairn/evolution/skillify/<id>/.
+        let mut allowed: std::collections::BTreeSet<std::path::PathBuf> =
+            std::collections::BTreeSet::new();
+        allowed.insert(std::path::PathBuf::from("manifest.json"));
+        allowed.insert(std::path::PathBuf::from("gate-report.json"));
+        // skill-spec.draft.json is the source spec the LLM produced;
+        // promotion-plan.json is the FlushPlan written at Promote stage.
+        // Both are produced by the pipeline and are legitimate members of
+        // the candidate dir, so they're on the allowlist (their content is
+        // not separately hashed by the manifest but is bounded by the
+        // archive's overall content_sha256 digest).
+        allowed.insert(std::path::PathBuf::from("skill-spec.draft.json"));
+        allowed.insert(std::path::PathBuf::from("promotion-plan.json"));
+        // The Promote stage also writes versions/v1/manifest.json (the
+        // diff_ref target the FlushPlan points at).
+        allowed.insert(std::path::PathBuf::from("versions/v1/manifest.json"));
+        for artifact in &bundle.artifacts {
+            allowed.insert(std::path::PathBuf::from(&artifact.path));
+        }
+        let mut stack: Vec<std::path::PathBuf> = vec![src.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry_res in fs::read_dir(&dir)? {
+                let entry = entry_res?;
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let rel = path.strip_prefix(&src).unwrap_or(&path).to_path_buf();
+                if !allowed.contains(&rel) {
+                    return Err(SkillPackBuildError::Pack(
+                        SkillPackError::IntegrityFailure {
+                            expected: "only declared artifacts in candidate tree".to_owned(),
+                            actual: format!("undeclared file: {}", rel.display()),
+                        },
+                    ));
+                }
+            }
+        }
     }
 
     // ATOMIC SWAP: now that every source is validated, move each skill into

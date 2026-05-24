@@ -263,6 +263,18 @@ impl GateRunner for UnitTestRunner {
             );
         };
 
+        // Round 7 hardening: coverage gates must actually exercise the
+        // script. An empty `cases` array structurally satisfies the JSON
+        // shape but trivially passes the gate, leaving promotion gated by
+        // a no-op.
+        if cases.is_empty() {
+            return GateRunResult::failed(
+                self.artifact_kind(),
+                "unit_tests cases array is empty — gate requires at least one case".to_owned(),
+                timer.elapsed_ms(),
+            );
+        }
+
         let script_path = ctx
             .candidate_dir
             .join(format!("bundle/scripts/{}.sh", ctx.authored.slug));
@@ -334,6 +346,15 @@ impl GateRunner for IntegrationTestRunner {
             );
         };
 
+        if cases.is_empty() {
+            return GateRunResult::failed(
+                self.artifact_kind(),
+                "integration_tests cases array is empty — gate requires at least one case"
+                    .to_owned(),
+                timer.elapsed_ms(),
+            );
+        }
+
         let script_path = ctx
             .candidate_dir
             .join(format!("bundle/scripts/{}.sh", ctx.authored.slug));
@@ -397,6 +418,10 @@ impl GateRunner for LlmEvalRunner {
         SkillArtifactKind::LlmEvals
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "linear rubric loop with structured error handling for each LLM response variant; splitting helpers would obscure the transient/permanent distinction"
+    )]
     async fn run(&self, ctx: &GateRunContext<'_>) -> GateRunResult {
         let timer = GateTimer::start();
         let Some(llm) = ctx.llm else {
@@ -418,6 +443,15 @@ impl GateRunner for LlmEvalRunner {
                     .to_owned(),
             );
         };
+
+        if rubric.is_empty() {
+            return GateRunResult::failed(
+                self.artifact_kind(),
+                "llm_evals rubric array is empty — gate requires at least one rubric item"
+                    .to_owned(),
+                timer.elapsed_ms(),
+            );
+        }
 
         for (i, item) in rubric.iter().enumerate() {
             let prompt = item
@@ -812,6 +846,14 @@ impl GateRunner for E2eSmokeRunner {
                     .to_owned(),
             );
         };
+
+        if cases.is_empty() {
+            return GateRunResult::failed(
+                self.artifact_kind(),
+                "smoke cases array is empty — gate requires at least one case".to_owned(),
+                timer.elapsed_ms(),
+            );
+        }
 
         let script_path = ctx
             .candidate_dir

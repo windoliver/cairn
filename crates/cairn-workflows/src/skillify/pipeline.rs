@@ -145,6 +145,19 @@ impl SkillifyPipeline {
         };
 
         let payload_source_refs = payload.source_record_ids.clone();
+
+        // Round 7 hardening: if a previous run left a candidate directory
+        // with a non-passing gate report, purge it before materializing the
+        // newly authored bundle. Otherwise `materialize_bundle` returns the
+        // existing (stale) on-disk bundle and the new gates would run
+        // against the OLD scripts/tests, leaving the candidate permanently
+        // stuck or — worse — promoting a spec that doesn't describe the
+        // actual installed artifacts. `candidate_ready` returned false at
+        // the handler's replay guard so we know the on-disk copy is stale.
+        if candidate_dir.exists() {
+            std::fs::remove_dir_all(&candidate_dir)?;
+        }
+
         let bundle = materialize_bundle(
             &self.vault_root,
             &candidate_id,

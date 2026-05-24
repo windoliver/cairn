@@ -55,6 +55,24 @@ fn setup_candidate(temp: &TempDir, candidate_id: &str, slug: &str) {
         serde_json::to_vec_pretty(&report).unwrap(),
     )
     .unwrap();
+
+    // Round 7: pack-build now requires a parseable skill-spec.draft.json
+    // whose lane/slug match the bundle. Write one for each setup candidate.
+    let spec = cairn_core::pipeline::skillify::SkillSpecDraft {
+        lane: format!("test.{slug}"),
+        slug: slug.to_owned(),
+        decision_tree: serde_json::json!({"root": "x"}),
+        triggers: vec![slug.to_owned()],
+        success_criteria: vec!["passes".to_owned()],
+        source_refs: vec!["01HQZX9F5N0000000000000001".to_owned()],
+        requires: vec![],
+        provides: vec![format!("test.{slug}")],
+    };
+    std::fs::write(
+        root.join("skill-spec.draft.json"),
+        serde_json::to_vec_pretty(&spec).unwrap(),
+    )
+    .unwrap();
 }
 
 #[test]
