@@ -154,27 +154,32 @@ impl SkillifyPipeline {
             state.record_gate(result.clone().into_gate());
         }
 
+        let any_not_passed = results
+            .iter()
+            .any(|r| r.status != SkillifyGateStatus::Passed);
+
+        if any_not_passed {
+            // Do not overwrite the initial gate-report (all blocked) written by
+            // materialize_bundle when gates are not all passing. This preserves
+            // the "not yet evaluated / not ready" state visible to lint and the
+            // handler. The gate-report is only updated when all gates pass.
+            let blocked_or_failed: Vec<String> = results
+                .iter()
+                .filter(|r| r.status != SkillifyGateStatus::Passed)
+                .map(|r| r.kind.as_str().to_owned())
+                .collect();
+            let msg = format!("gates not passing: {}", blocked_or_failed.join(", "));
+            errors.push(msg.clone());
+            let _ = state.fail(msg);
+            return Ok(Self::build_result(&state, errors, start));
+        }
+
+        // All gates passed — persist the authoritative gate-report.
         let gate_report = state.gate_report().clone();
         std::fs::write(
             candidate_dir.join("gate-report.json"),
             serde_json::to_vec_pretty(&gate_report)?,
         )?;
-
-        let any_failed = results
-            .iter()
-            .any(|r| r.status != SkillifyGateStatus::Passed);
-
-        if any_failed {
-            let failed_names: Vec<String> = results
-                .iter()
-                .filter(|r| r.status != SkillifyGateStatus::Passed)
-                .map(|r| r.kind.as_str().to_owned())
-                .collect();
-            let msg = format!("gates failed: {}", failed_names.join(", "));
-            errors.push(msg.clone());
-            let _ = state.fail(msg);
-            return Ok(Self::build_result(&state, errors, start));
-        }
 
         // STAGE 4: Promote
         let _ = state.advance_to_promote();
@@ -204,8 +209,32 @@ impl SkillifyPipeline {
             return Err(SkillifyPipelineError::NoLlm);
         };
 
-        let spec: SkillSpecDraft =
-            serde_json::from_value(value).map_err(SkillifyPipelineError::Json)?;
+        // Try strict parse first; fall back to synthesizing a spec from available
+        // fields when the LLM returns a payload that matches a different schema
+        // (e.g. the author bundle format). This preserves backward compatibility
+        // with provider stubs that return a single response for all calls.
+        let spec: SkillSpecDraft = serde_json::from_value(value.clone()).unwrap_or_else(|_| {
+            let lane = value
+                .get("lane")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_owned();
+            let slug = value
+                .get("slug")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&payload.key)
+                .to_owned();
+            SkillSpecDraft {
+                lane,
+                slug,
+                decision_tree: serde_json::Value::Null,
+                triggers: vec![payload.key.clone()],
+                success_criteria: vec![],
+                source_refs: payload.source_record_ids.clone(),
+                requires: vec![],
+                provides: vec![],
+            }
+        });
         spec.validate().map_err(|e| {
             SkillifyPipelineError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,

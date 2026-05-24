@@ -234,10 +234,10 @@ impl GateRunner for UnitTestRunner {
             .get("cases")
             .and_then(serde_json::Value::as_array)
         else {
-            return GateRunResult::failed(
+            return GateRunResult::blocked(
                 self.artifact_kind(),
-                "unit_tests missing 'cases' array".to_owned(),
-                timer.elapsed_ms(),
+                "unit_tests missing 'cases' array — gate blocked pending correct artifact format"
+                    .to_owned(),
             );
         };
 
@@ -302,10 +302,10 @@ impl GateRunner for IntegrationTestRunner {
             .get("cases")
             .and_then(serde_json::Value::as_array)
         else {
-            return GateRunResult::failed(
+            return GateRunResult::blocked(
                 self.artifact_kind(),
-                "integration_tests missing 'cases' array".to_owned(),
-                timer.elapsed_ms(),
+                "integration_tests missing 'cases' array — gate blocked pending correct artifact format"
+                    .to_owned(),
             );
         };
 
@@ -372,10 +372,9 @@ impl GateRunner for LlmEvalRunner {
     async fn run(&self, ctx: &GateRunContext<'_>) -> GateRunResult {
         let timer = GateTimer::start();
         let Some(llm) = ctx.llm else {
-            return GateRunResult::failed(
+            return GateRunResult::blocked(
                 self.artifact_kind(),
-                "LLM provider required for eval gate".to_owned(),
-                timer.elapsed_ms(),
+                "LLM provider required for eval gate — gate blocked without LLM".to_owned(),
             );
         };
 
@@ -385,10 +384,10 @@ impl GateRunner for LlmEvalRunner {
             .get("rubric")
             .and_then(serde_json::Value::as_array)
         else {
-            return GateRunResult::failed(
+            return GateRunResult::blocked(
                 self.artifact_kind(),
-                "llm_evals missing 'rubric' array".to_owned(),
-                timer.elapsed_ms(),
+                "llm_evals missing 'rubric' array — gate blocked pending correct artifact format"
+                    .to_owned(),
             );
         };
 
@@ -551,10 +550,10 @@ impl GateRunner for ResolverEvalRunner {
             .get("intents")
             .and_then(serde_json::Value::as_array)
         else {
-            return GateRunResult::failed(
+            return GateRunResult::blocked(
                 self.artifact_kind(),
-                "resolver_eval missing 'intents' array".to_owned(),
-                timer.elapsed_ms(),
+                "resolver_eval missing 'intents' array — gate blocked pending correct artifact format"
+                    .to_owned(),
             );
         };
 
@@ -697,10 +696,10 @@ impl GateRunner for E2eSmokeRunner {
             .get("cases")
             .and_then(serde_json::Value::as_array)
         else {
-            return GateRunResult::failed(
+            return GateRunResult::blocked(
                 self.artifact_kind(),
-                "smoke missing 'cases' array".to_owned(),
-                timer.elapsed_ms(),
+                "smoke missing 'cases' array — gate blocked pending correct artifact format"
+                    .to_owned(),
             );
         };
 

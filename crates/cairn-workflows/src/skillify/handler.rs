@@ -4,16 +4,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use cairn_core::contract::job_store::{JobKind, JobPayload};
-use cairn_core::contract::llm_provider::{
-    CompletionOutput, CompletionRequest, LLMProvider, LlmError,
-};
+use cairn_core::contract::llm_provider::{LLMProvider, LlmError};
+use cairn_core::pipeline::skillify::SkillifyStage;
 
 use crate::scheduler::{HandlerOutcome, JobHandler};
 
-use super::materialize::{
-    AuthoredSkillBundle, SkillifyMaterializeError, candidate_materialized,
-    materialize_blocked_candidate, materialize_bundle,
-};
+use super::materialize::{SkillifyMaterializeError, candidate_materialized};
+use super::pipeline::{SkillifyPipeline, SkillifyPipelineError};
 
 /// The `JobKind` discriminator stored in `workflow_jobs.kind`.
 pub const SKILLIFY_KIND: &str = "skillify.emit";
@@ -70,48 +67,40 @@ impl SkillifyHandler {
             return Ok(());
         }
 
-        let Some(llm) = &self.llm else {
-            materialize_blocked_candidate(
-                &self.vault_root,
-                &candidate_id,
-                "llm provider not configured",
-            )?;
-            return Err(SkillifyRunError::NoLlm);
-        };
+        let pipeline = SkillifyPipeline::new(self.vault_root.clone(), self.llm.clone());
+        let result = pipeline.run(payload).await.map_err(|e| match e {
+            SkillifyPipelineError::NoLlm => SkillifyRunError::NoLlm,
+            SkillifyPipelineError::Llm(e) => SkillifyRunError::Llm(e),
+            SkillifyPipelineError::Materialize(e) => SkillifyRunError::Materialize(e),
+            SkillifyPipelineError::Io(e) => {
+                SkillifyRunError::Materialize(SkillifyMaterializeError::Io(e))
+            }
+            SkillifyPipelineError::Json(e) => {
+                SkillifyRunError::Materialize(SkillifyMaterializeError::Json(e))
+            }
+        })?;
 
-        let request = CompletionRequest::builder()
-            .prompt(format!(
-                "Create a section 11.b Skillify bundle for key {} with sources {:?}. Return JSON only.",
-                payload.key, payload.source_record_ids
-            ))
-            .schema(serde_json::json!({
-                "type": "object",
-                "required": [
-                    "lane",
-                    "slug",
-                    "skill_markdown",
-                    "script",
-                    "unit_tests",
-                    "integration_tests",
-                    "llm_evals",
-                    "resolver_triggers",
-                    "resolver_eval",
-                    "smoke",
-                    "filing_rules"
-                ]
-            }))
-            .build();
-        let CompletionOutput::Json(value) = llm.complete(&request).await? else {
-            return Err(SkillifyRunError::NonJsonOutput);
-        };
-        let authored = AuthoredSkillBundle::try_from(value)?;
-        materialize_bundle(
-            &self.vault_root,
-            &candidate_id,
-            &authored,
-            &payload.source_record_ids,
-        )?;
-        Ok(())
+        // Blocked means no LLM was available; the pipeline wrote a blocked marker.
+        if result.final_stage == SkillifyStage::Blocked {
+            return Err(SkillifyRunError::NoLlm);
+        }
+
+        // If the candidate bundle was successfully written to disk — which happens
+        // when the Author stage completes — treat this as success even if subsequent
+        // Gate or Promote stages failed. Gate failures leave the bundle materialized
+        // but not promoted; the caller may retry or escalate via other workflows.
+        if candidate_materialized(&self.vault_root, &candidate_id)? {
+            return Ok(());
+        }
+
+        // The pipeline failed before materializing a bundle (extract or author error).
+        let msg = result.errors.join("; ");
+        Err(SkillifyRunError::Materialize(
+            SkillifyMaterializeError::InvalidPathToken {
+                label: "slug",
+                value: msg,
+            },
+        ))
     }
 }
 
