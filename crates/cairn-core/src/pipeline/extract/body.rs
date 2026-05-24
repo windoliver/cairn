@@ -247,6 +247,7 @@ fn payload_variant_name(p: &CapturePayload) -> &'static str {
         CapturePayload::Clipboard { .. } => "CapturePayload::Clipboard",
         CapturePayload::Proactive { .. } => "CapturePayload::Proactive",
         CapturePayload::RecordingBatch { .. } => "CapturePayload::RecordingBatch",
+        CapturePayload::External { .. } => "CapturePayload::External",
     }
 }
 

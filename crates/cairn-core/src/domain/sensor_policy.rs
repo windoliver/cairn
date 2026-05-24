@@ -92,7 +92,10 @@ impl LocalSensorName {
             SourceFamily::Voice => Some(Self::Voice),
             SourceFamily::Screen => Some(Self::Screen),
             SourceFamily::RecordingBatch => Some(Self::Recording),
-            SourceFamily::Cli | SourceFamily::Mcp | SourceFamily::Proactive => None,
+            SourceFamily::Cli
+            | SourceFamily::Mcp
+            | SourceFamily::Proactive
+            | SourceFamily::External => None,
         }
     }
 

@@ -22,11 +22,52 @@
 //!   [`super::capture_attribution`]. Both are re-exported from the crate
 //!   root for convenience.
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{
     ActorChainEntry, ChainRole, DomainError, Identity, IdentityKind, Rfc3339Timestamp,
 };
+
+/// Stable upstream-system reference for a [`CapturePayload::External`] event
+/// (brief §9.1 source sensors, §19 v0.3).
+///
+/// `kind` names the object type in the source system (e.g., `"issue"`, `"pr"`,
+/// `"message"`, `"page"`, `"file"`); `system_id` is the upstream stable
+/// identifier; `sub_id` is an optional secondary locator within the object
+/// (e.g., a comment ID within an issue).
+///
+/// This type is intentionally distinct from [`crate::domain::SourceRef`],
+/// which is a provenance link to local vault bytes. This type is a link
+/// to the upstream object that originated the connector event.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceRef {
+    /// Object type in the source system (e.g., `"issue"`, `"pr"`, `"message"`).
+    pub kind: String,
+    /// Upstream stable identifier (e.g., `"gh:owner/repo#42"`).
+    pub system_id: String,
+    /// Optional secondary locator within the object (e.g., a comment ID).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub_id: Option<String>,
+}
+
+impl SourceRef {
+    /// Construct a connector source reference.
+    #[must_use]
+    pub fn new(
+        kind: impl Into<String>,
+        system_id: impl Into<String>,
+        sub_id: Option<String>,
+    ) -> Self {
+        Self {
+            kind: kind.into(),
+            system_id: system_id.into(),
+            sub_id,
+        }
+    }
+}
 
 /// ULID identifier for a single `CaptureEvent` (Crockford base32, 26 chars).
 ///
@@ -312,6 +353,9 @@ pub enum SourceFamily {
     Mcp,
     /// Proactive agent emission (Mode C) — no external sensor channel.
     Proactive,
+    /// External connector (brief §9.1 source sensors, §19 v0.3).
+    /// Emitted by adapter crates via `cairn-connectors-core`.
+    External,
 }
 
 impl SourceFamily {
@@ -329,6 +373,7 @@ impl SourceFamily {
             Self::Cli => "cli",
             Self::Mcp => "mcp",
             Self::Proactive => "proactive",
+            Self::External => "external",
         }
     }
 
@@ -346,6 +391,7 @@ impl SourceFamily {
             "cli" => Ok(Self::Cli),
             "mcp" => Ok(Self::Mcp),
             "proactive" => Ok(Self::Proactive),
+            "external" => Ok(Self::External),
             other => Err(DomainError::UnsupportedSourceFamily {
                 value: other.to_owned(),
             }),
@@ -516,6 +562,25 @@ pub enum CapturePayload {
         /// Short rationale string the agent attached to the emission.
         rationale: String,
     },
+    /// Payload emitted by an external connector (brief §9.1, §19 v0.3).
+    ///
+    /// Bytes have already been redacted before this value is constructed;
+    /// `redacted_spans` records what was removed so downstream consumers
+    /// can reason about coverage without re-running the redactor.
+    #[serde(rename = "external")]
+    External {
+        /// Name of the connector that produced the event (matches
+        /// `ConnectorManifest.name`).
+        connector: String,
+        /// Stable upstream-system reference to the originating object.
+        source_ref: SourceRef,
+        /// Labels declared by the connector manifest and applied to this event.
+        labels: BTreeSet<String>,
+        /// MIME type of the original payload before redaction.
+        mime: String,
+        /// Spans that were redacted from the payload body before capture.
+        redacted_spans: Vec<crate::pipeline::filter::redact::RedactionSpan>,
+    },
 }
 
 impl std::fmt::Debug for CapturePayload {
@@ -579,6 +644,19 @@ impl std::fmt::Debug for CapturePayload {
                 .debug_struct("CapturePayload::Proactive")
                 .field("kind", kind)
                 .finish_non_exhaustive(),
+            Self::External {
+                connector,
+                mime,
+                labels,
+                redacted_spans,
+                ..
+            } => f
+                .debug_struct("CapturePayload::External")
+                .field("connector", connector)
+                .field("mime", mime)
+                .field("label_count", &labels.len())
+                .field("redacted_span_count", &redacted_spans.len())
+                .finish_non_exhaustive(),
         }
     }
 }
@@ -598,6 +676,7 @@ impl CapturePayload {
             Self::Cli { .. } => SourceFamily::Cli,
             Self::Mcp { .. } => SourceFamily::Mcp,
             Self::Proactive { .. } => SourceFamily::Proactive,
+            Self::External { .. } => SourceFamily::External,
         }
     }
 
@@ -673,6 +752,12 @@ impl CapturePayload {
             Self::Proactive { kind, rationale } => {
                 require_non_empty("kind", kind)?;
                 require_non_empty("rationale", rationale)?;
+            }
+            Self::External {
+                connector, mime, ..
+            } => {
+                require_non_empty("connector", connector)?;
+                require_non_empty("mime", mime)?;
             }
         }
         Ok(())
