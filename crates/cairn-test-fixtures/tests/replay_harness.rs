@@ -1,9 +1,14 @@
 //! Integration coverage for the dev-only replay harness.
 
+use std::collections::HashSet;
+
 use cairn_test_fixtures::replay::{
     ReplayAction, ReplayExpectation, ReplaySearchAction, ReplaySearchMode, load_named_scenario,
     run_named_scenario,
 };
+
+const EXTENDED_DOMAIN_SUITES: [&str; 3] =
+    ["research_domain", "engineering_domain", "support_domain"];
 
 #[tokio::test(flavor = "multi_thread")]
 async fn p0_stories_replay_passes_end_to_end() {
@@ -138,11 +143,112 @@ fn p0_replay_manifest_uses_canonical_trace_event_names() {
 
 #[test]
 fn replay_manifests_deserialize() {
-    for name in ["p0_stories", "p0_keyword_only", "codex_consumer"] {
+    for name in [
+        "p0_stories",
+        "p0_keyword_only",
+        "codex_consumer",
+        EXTENDED_DOMAIN_SUITES[0],
+        EXTENDED_DOMAIN_SUITES[1],
+        EXTENDED_DOMAIN_SUITES[2],
+    ] {
         let scenario = load_named_scenario(name).expect("load scenario");
         assert_eq!(scenario.id, name);
         assert!(!scenario.records.is_empty());
         assert!(!scenario.actions.is_empty());
+    }
+}
+
+#[test]
+fn extended_domain_replay_suites_document_goals_and_golden_expectations() {
+    let readme_path = cairn_test_fixtures::fixture_v0_dir().join("replay/README.md");
+    let readme = std::fs::read_to_string(&readme_path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", readme_path.display()));
+    for needle in [
+        "research_domain",
+        "engineering_domain",
+        "support_domain",
+        "long-horizon memory",
+        "multi-session coherence",
+        "privacy/forget",
+        "search relevance",
+        "Golden expectations",
+    ] {
+        assert!(
+            readme.contains(needle),
+            "missing {needle:?} in {}",
+            readme_path.display()
+        );
+    }
+}
+
+#[test]
+fn extended_domain_replay_suites_have_resolvable_goldens_and_private_forget_queries() {
+    for name in EXTENDED_DOMAIN_SUITES {
+        let scenario = load_named_scenario(name).expect("load scenario");
+        let record_ids: HashSet<_> = scenario
+            .records
+            .iter()
+            .map(|record| record.id.as_str())
+            .collect();
+        assert_eq!(
+            record_ids.len(),
+            scenario.records.len(),
+            "{name} has duplicate record ids"
+        );
+
+        for action in &scenario.actions {
+            match action {
+                ReplayAction::Search(search) => {
+                    assert_eq!(
+                        search.mode,
+                        ReplaySearchMode::Keyword,
+                        "{name} must stay keyword-only for no-network replay"
+                    );
+                    if let ReplayExpectation::Hits {
+                        record_ids: expected,
+                    } = &search.expected
+                    {
+                        for id in expected {
+                            assert!(record_ids.contains(id.as_str()), "{name} missing {id}");
+                        }
+                    }
+                }
+                ReplayAction::Summarize {
+                    expected_record_ids,
+                    ..
+                }
+                | ReplayAction::AssembleHot {
+                    expected_record_ids,
+                    ..
+                } => {
+                    for id in expected_record_ids {
+                        assert!(record_ids.contains(id.as_str()), "{name} missing {id}");
+                    }
+                }
+                ReplayAction::ForgetRecord {
+                    record_id,
+                    followup_query,
+                    ..
+                } => {
+                    assert!(
+                        record_ids.contains(record_id.as_str()),
+                        "{name} forget target {record_id} missing"
+                    );
+                    let matching_records = scenario
+                        .records
+                        .iter()
+                        .filter(|record| record.body.contains(followup_query))
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        matching_records.len(),
+                        1,
+                        "{name} forget follow-up query must uniquely identify its target"
+                    );
+                    assert_eq!(matching_records[0].id, *record_id);
+                }
+                _ => {}
+            }
+        }
     }
 }
 
@@ -167,5 +273,35 @@ async fn codex_consumer_replay_passes_end_to_end() {
             report.checks.iter().any(|check| check.verb == verb),
             "missing check for {verb}: {report:#?}"
         );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn extended_domain_replay_suites_pass_end_to_end_without_network_or_llm() {
+    for name in EXTENDED_DOMAIN_SUITES {
+        let scenario = load_named_scenario(name).expect("load scenario");
+        assert!(
+            !scenario.config.local_embeddings,
+            "{name} must use deterministic keyword-only replay"
+        );
+
+        let report = cairn_test_fixtures::replay::run_scenario(&scenario)
+            .await
+            .unwrap_or_else(|e| panic!("run {name}: {e}"));
+        assert!(report.passed(), "{report:#?}");
+
+        for verb in [
+            "capture_trace",
+            "forget_record",
+            "retrieve_session",
+            "retrieve_turn",
+            "search",
+            "summarize",
+        ] {
+            assert!(
+                report.checks.iter().any(|check| check.verb == verb),
+                "{name} missing check for {verb}: {report:#?}"
+            );
+        }
     }
 }

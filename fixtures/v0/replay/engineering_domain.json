@@ -1,0 +1,131 @@
+{
+  "id": "engineering_domain",
+  "description": "Extended engineering replay covering long-horizon debugging memory, multi-session verification, search relevance, and privacy/forget.",
+  "config": {
+    "local_embeddings": false
+  },
+  "records": [
+    {
+      "id": "01HQZX9F5N00000000000000E0",
+      "kind": "trace",
+      "class": "episodic",
+      "visibility": "private",
+      "body": "engineering session one user reported wal deadlock investigation",
+      "session_id": "engineering-deadlock",
+      "turn_id": "1",
+      "sequence": 1,
+      "trace_event": "user_message"
+    },
+    {
+      "id": "01HQZX9F5N00000000000000E1",
+      "kind": "trace",
+      "class": "episodic",
+      "visibility": "private",
+      "body": "agent identified replay ledger lock inversion root cause",
+      "session_id": "engineering-deadlock",
+      "turn_id": "1",
+      "sequence": 2,
+      "trace_event": "agent_message"
+    },
+    {
+      "id": "01HQZX9F5N00000000000000E2",
+      "kind": "trace",
+      "class": "episodic",
+      "visibility": "private",
+      "body": "engineering session two user asked for retry stress verification",
+      "session_id": "engineering-deadlock",
+      "turn_id": "2",
+      "sequence": 3,
+      "trace_event": "user_message"
+    },
+    {
+      "id": "01HQZX9F5N00000000000000E3",
+      "kind": "trace",
+      "class": "episodic",
+      "visibility": "private",
+      "body": "agent confirmed lock inversion fix passed retry stress verification",
+      "session_id": "engineering-deadlock",
+      "turn_id": "2",
+      "sequence": 4,
+      "trace_event": "agent_message"
+    },
+    {
+      "id": "01HQZX9F5N00000000000000E4",
+      "kind": "reasoning",
+      "class": "semantic",
+      "visibility": "private",
+      "body": "engineering summary preserves wal deadlock lock inversion and retry verification",
+      "session_id": "engineering-deadlock",
+      "turn_id": "summary",
+      "sequence": 5,
+      "trace_event": "turn_summary"
+    },
+    {
+      "id": "01HQZX9F5N00000000000000E5",
+      "kind": "playbook",
+      "class": "procedural",
+      "visibility": "private",
+      "body": "engineering playbook acquire replay ledger lock before wal writer lock"
+    },
+    {
+      "id": "01HQZX9F5N00000000000000E6",
+      "kind": "fact",
+      "class": "semantic",
+      "visibility": "private",
+      "body": "temporary debug credential amber key should be forgotten"
+    },
+    {
+      "id": "01HQZX9F5N00000000000000E7",
+      "kind": "fact",
+      "class": "semantic",
+      "visibility": "private",
+      "body": "engineering unrelated note update changelog template"
+    }
+  ],
+  "actions": [
+    {
+      "verb": "capture_trace",
+      "story": "ENGINEERING_CAPTURE_LONG_HORIZON",
+      "session_id": "engineering-deadlock",
+      "expected_trace_events": ["user_message", "agent_message", "user_message", "agent_message", "turn_summary"]
+    },
+    {
+      "verb": "retrieve_session",
+      "story": "ENGINEERING_MULTI_SESSION_COHERENCE",
+      "session_id": "engineering-deadlock",
+      "expected_turn_ids": ["1", "2"],
+      "expected_trace_events": ["user_message", "agent_message", "user_message", "agent_message", "turn_summary"]
+    },
+    {
+      "verb": "retrieve_turn",
+      "story": "ENGINEERING_RETRIEVE_LATER_TURN",
+      "session_id": "engineering-deadlock",
+      "turn_id": "2",
+      "expected_trace_events": ["user_message", "agent_message"]
+    },
+    {
+      "verb": "summarize",
+      "story": "ENGINEERING_SUMMARY_GOLDEN",
+      "session_id": "engineering-deadlock",
+      "expected_record_ids": ["01HQZX9F5N00000000000000E4"]
+    },
+    {
+      "verb": "search",
+      "story": "ENGINEERING_SEARCH_RELEVANCE",
+      "mode": "keyword",
+      "query": "replay ledger lock before wal writer",
+      "limit": 1,
+      "expected": {
+        "status": "hits",
+        "record_ids": ["01HQZX9F5N00000000000000E5"]
+      }
+    },
+    {
+      "verb": "forget_record",
+      "story": "ENGINEERING_PRIVACY_FORGET",
+      "record_id": "01HQZX9F5N00000000000000E6",
+      "followup_query": "temporary debug credential amber key",
+      "expected_absent_from_search": true
+    }
+  ]
+}
