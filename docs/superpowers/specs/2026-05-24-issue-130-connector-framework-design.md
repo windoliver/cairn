@@ -428,6 +428,16 @@ commits the result.
 
 Named so the PR description can cite them:
 
+- **`KeychainCredentialStore` (persistent default `CredentialStore` impl)** —
+  deferred. The existing `cairn-keychain::Keystore` trait is purpose-built
+  for identity-keypairs (`HandleAccount::Identity`) and the per-vault
+  witness slot (`HandleAccount::Witness`), not a generic `(scope, value)`
+  secret store. Adding a generic path would require extending the
+  `Keystore` contract in `cairn-core` (a brief-level change, not a
+  PR-level one). The substrate's `InMemoryCredentialStore` is sufficient
+  for every #130 acceptance test; the first real adapter in #131 will
+  decide whether to extend `Keystore` or roll its own
+  `FileBackedCredentialStore` inside the adapter crate.
 - Real adapter crates (GitHub, IMAP, Drive, OneDrive, Notion, web clipper)
   — #131.
 - Slack connector — #181.
