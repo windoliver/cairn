@@ -1,6 +1,7 @@
 //! Skillify workflow support (brief sections 5.0.b and 11.b).
 
 pub mod gate_registry;
+pub mod packer;
 pub mod gate_runner;
 pub mod handler;
 pub mod materialize;
