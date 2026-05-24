@@ -7,13 +7,13 @@
 use std::collections::BTreeMap;
 
 use cairn_test_fixtures::replay::{MetricCategory, ReplayAction, ReplayCheckReport};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::category::ALL as ALL_CATEGORIES;
 
 /// One category's aggregated result over a run.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct CategoryScore {
     /// Number of actions tagged into this category whose coherence-pass
     /// condition held.

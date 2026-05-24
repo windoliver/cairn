@@ -5,6 +5,11 @@
 
 pub mod category;
 pub mod score;
+pub mod threshold;
 
 pub use category::{ALL as ALL_CATEGORIES, DisplayCategory, MetricCategory, as_str};
 pub use score::{CategoryScore, CategoryScores, ScoreError, aggregate, classify};
+pub use threshold::{
+    Baseline, CategoryThreshold, GateMode, MetricOutcome, MetricResult, ThresholdError,
+    ThresholdManifest, all_pass, evaluate, load_manifest,
+};
