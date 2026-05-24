@@ -141,15 +141,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
-name = "arc-swap"
-version = "1.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a3a1fd6f75306b68087b831f025c712524bcb19aad54e557b1129cfa0a2b207"
-dependencies = [
- "rustversion",
-]
-
-[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -775,29 +766,8 @@ dependencies = [
 name = "cairn-connectors-core"
 version = "0.0.1"
 dependencies = [
- "anyhow",
- "arc-swap",
- "async-trait",
- "axum",
- "bon",
  "cairn-core",
- "cairn-test-fixtures",
- "hex",
- "hmac",
- "insta",
- "proptest",
- "rstest",
- "serde",
- "serde_json",
- "sha2",
- "subtle",
- "tempfile",
  "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "toml 0.8.23",
- "tracing",
- "ulid",
 ]
 
 [[package]]
@@ -1849,7 +1819,6 @@ checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer",
  "crypto-common",
- "subtle",
 ]
 
 [[package]]
@@ -2757,15 +2726,6 @@ dependencies = [
  "tokio",
  "ureq 3.3.0",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "hmac"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
-dependencies = [
- "digest",
 ]
 
 [[package]]

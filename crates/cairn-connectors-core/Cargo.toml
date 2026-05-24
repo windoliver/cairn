@@ -19,3 +19,4 @@ fixture = []
 
 [dependencies]
 cairn-core = { workspace = true }
+thiserror = { workspace = true }
