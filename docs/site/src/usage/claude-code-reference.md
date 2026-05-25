@@ -111,3 +111,5 @@ and remove the five Cairn hook matcher groups from `.claude/settings.local.json`
 Leave unrelated Claude Code hooks and MCP servers in place. Re-run
 `cairn doctor claude-code --project-dir . --json`; it should fail at the removed
 stage with remediation instead of mutating any config.
+
+See the [capability matrix](../reference/capability-matrix.md) for what ships in each release.

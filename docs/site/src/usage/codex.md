@@ -44,3 +44,5 @@ Remove only the Cairn server entry:
 ```bash
 cairn setup codex --vault work remove
 ```
+
+See the [capability matrix](../reference/capability-matrix.md) for what ships in each release.
